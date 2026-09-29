@@ -176,3 +176,37 @@ fn the_file_pick_label_golden_table() {
         );
     }
 }
+
+/// A worker's prompt opens with the window's own briefing (t-14869): the
+/// words a search looks for are the task's, after the briefing hands over —
+/// the same boilerplate every time found the same few files, and a pane's
+/// candidates held a file its turn edited 0 times in 7. Words that look like
+/// code — a name with `_` or an inner capital — are looked for first.
+#[test]
+fn a_search_looks_for_the_tasks_own_words_and_names_that_look_like_code_first() {
+    let briefing = crate::orchestration::worker_briefing("t-1", "the parser crash");
+    let prompt = format!(
+        "{briefing}Please fix the crash when an empty line reaches lexer_state in ParserTable"
+    );
+    let terms = search_terms(&prompt);
+    assert_eq!(
+        terms,
+        [
+            "lexer_state",
+            "parsertable",
+            "crash",
+            "empty",
+            "line",
+            "reaches"
+        ],
+        "{terms:?}"
+    );
+    // Pasted as a block, the frame around it is no word of the task's.
+    let pasted = format!("<pasted_content id=\"8a76\">\n{prompt}\n</pasted_content id=\"8a76\">");
+    assert_eq!(search_terms(&pasted), terms);
+    // A person's own words, with no briefing, are all the task there is.
+    assert_eq!(
+        search_terms("fix the crash in lexer_state"),
+        ["lexer_state", "crash"]
+    );
+}

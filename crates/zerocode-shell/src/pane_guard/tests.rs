@@ -1064,6 +1064,33 @@ fn a_panes_turn_is_counted_and_its_file_pick_label_says_how_long_it_looked() {
     }
 }
 
+/// A pane's search finds files, not lines (t-14869): a file that names the
+/// term on every line does not crowd out the rest, and a file that names
+/// more of the request's words comes first — its path counts as its words.
+#[test]
+fn a_panes_search_ranks_files_by_how_many_of_the_words_they_name() {
+    let project = tempfile::tempdir().expect("a project");
+    let noisy = "alpha\n".repeat(300);
+    for name in ["a_noise.rs", "b_noise.rs", "c_noise.rs"] {
+        std::fs::write(project.path().join(name), &noisy).expect("a noisy file");
+    }
+    std::fs::write(project.path().join("z_target.rs"), "alpha\nbeta_gamma\n").expect("the target");
+    std::fs::write(project.path().join("delta_state.rs"), "nothing here\n")
+        .expect("named by its path");
+    std::fs::write(project.path().join("m_silent.rs"), "nothing here\n").expect("a silent file");
+    let terms = ["alpha", "beta_gamma", "delta_state"].map(str::to_string);
+    let found = searched(project.path(), &terms);
+    assert_eq!(
+        found.first().map(String::as_str),
+        Some("z_target.rs"),
+        "{found:?}"
+    );
+    for name in ["a_noise.rs", "b_noise.rs", "c_noise.rs", "delta_state.rs"] {
+        assert!(found.iter().any(|path| path == name), "{name} in {found:?}");
+    }
+    assert!(!found.iter().any(|path| path == "m_silent.rs"), "{found:?}");
+}
+
 /// A question that is not a code task asks the file pick seat nothing, and a
 /// seat left off asks nothing whatever the moments.
 #[test]
