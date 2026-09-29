@@ -26,7 +26,8 @@
 use std::collections::VecDeque;
 use std::io::Write;
 
-use super::ansi::{write_plain, write_spans, Line, RESET};
+use super::ansi::{write_plain, write_spans, Line, StyleWriter, RESET};
+use super::rowdiff::{self, RowCells, Run};
 use super::wrap::wrap_line;
 
 /// 프레임 동기화 시작/끝 — 캡처는 프레임마다 이 짝을 낸다.
@@ -43,6 +44,34 @@ const SCROLL_REGION_RESET: &str = "\u{1b}[r";
 /// 뷰포트가 살아 있으려면 화면에 최소한 이만큼은 있어야 한다 — 위쪽에 삽입
 /// 영역이 한 줄도 없으면 히스토리를 밀어 넣을 자리가 없다.
 pub const MIN_ROWS: u16 = 4;
+
+/// 화면 한 행에 대해 painter 가 아는 것.
+#[derive(Debug, Clone)]
+struct Row {
+    /// 마지막으로 방출한 행 페이로드. NUL 하나면 "아직 안 그림"이다 — 빈 문자열이면
+    /// **빈 줄을 그렸다**와 구별되지 않는다. 실제 페이로드는 언제나 `ESC[0m ESC[K` 로
+    /// 시작하므로 NUL 하나면 족하다.
+    payload: String,
+    /// 그 행이 화면에서 만드는 칸들. `None` 이면 칸으로 나눌 수 없거나 모른다 —
+    /// 다음에 바뀌면 통째로 쓴다.
+    cells: Option<RowCells>,
+}
+
+impl Row {
+    fn unknown() -> Self {
+        Self { payload: String::from('\u{0}'), cells: None }
+    }
+}
+
+/// 터미널이 커서의 모양과 보임을 어떻게 갖고 있다고 아는가.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caret {
+    /// 모른다 — 처음이거나 화면을 통째로 지운 뒤. 다음 프레임이 내보낸다.
+    Unknown,
+    /// 기본 모양으로 보인다(`ESC[0 q ESC[?25h`).
+    Shown,
+    Hidden,
+}
 
 /// 인라인 뷰포트 painter.
 #[derive(Debug)]
@@ -68,12 +97,28 @@ pub struct Painter<W: Write> {
     /// 그래서 행을 옮기는 연산은 캐시를 **밀어야** 한다: [`Self::scroll_band`]
     /// 의 영역 스크롤은 머리 위만 위로, [`Self::insert_history`] 의 머리 밀기는
     /// 아래로, [`Self::scroll_screen`] 은 화면 전체를 위로.
-    rendered: Vec<String>,
-    /// 한 행의 페이로드를 조립하는 자리. 프레임마다·행마다 새로 만들지 않고
-    /// 이 버퍼를 비워 다시 쓴다 — 32ms 틱은 아무것도 안 바뀌어도 돌고, 그
+    rendered: Vec<Row>,
+    /// 뷰포트 행들의 페이로드를 조립하는 자리. 프레임마다·행마다 새로 만들지 않고
+    /// 이 버퍼들을 비워 다시 쓴다 — 32ms 틱은 아무것도 안 바뀌어도 돌고, 그
     /// 프레임은 뷰포트 행 수만큼 페이로드를 만들어 **전부 버린다**(캐시가
     /// 스킵하므로). 실측: 40행 화면·뷰포트 16 에서 2,479 ns/프레임.
-    scratch: String,
+    payloads: Vec<String>,
+    /// 바뀐 행의 새 칸들을 만드는 자리 — 캐시 칸과 맞바꿔 할당을 재사용한다.
+    cells_scratch: RowCells,
+    /// 행 하나에서 다시 써야 할 구간들, 그리고 그것을 시험 삼아 써 보는 자리.
+    runs_scratch: Vec<Run>,
+    trial: String,
+    /// 이 프레임에서 터미널이 켜 둔 스타일. 프레임의 바이트는 모두 리셋으로 끝나므로
+    /// 프레임은 기본 스타일로 시작하고, 바뀐 칸만 쓰면 그 스타일이 프레임 끝까지
+    /// 이어진다 — [`Self::end`] 가 필요할 때만 끈다.
+    sgr: StyleWriter,
+    /// 터미널의 커서가 있다고 아는 자리 `(열, 행)`. 모르면 `None`. [`Self::paint`] 가
+    /// 채우고, [`Self::painted_len`] 이 맞을 때만 믿는다.
+    at: Option<(u16, u16)>,
+    /// [`Self::paint`] 가 이 프레임의 마지막 쓰기였다면 그때 프레임의 길이. 그 뒤
+    /// 다른 무엇이 바이트를 더했거나 프레임이 끝났으면 `at` 는 낡았다.
+    painted_len: Option<usize>,
+    caret: Caret,
     frame: String,
     /// 마지막으로 놓은 커서. 프레임이 아무것도 바꾸지 않았고 커서도 그대로면
     /// 한 바이트도 내보내지 않는다 — 32ms 틱이 유휴에서도 도는데, 매번 동기화
@@ -189,8 +234,15 @@ impl<W: Write> Painter<W> {
             // 화면 한 장 크기로 열어 둔다. 캐시가 절대 행 색인이므로 길이는
             // 뷰포트가 아니라 **화면**을 따른다 — 예전에는 `set_height` 의
             // resize 가 키워 줬는데, 이제 거기서 자리를 늘리지 않는다.
-            rendered: vec![String::from('\u{0}'); rows as usize],
-            scratch: String::new(),
+            rendered: vec![Row::unknown(); rows as usize],
+            payloads: Vec::new(),
+            cells_scratch: RowCells::default(),
+            runs_scratch: Vec::new(),
+            trial: String::new(),
+            sgr: StyleWriter::new(),
+            at: None,
+            painted_len: None,
+            caret: Caret::Unknown,
             frame: String::new(),
             last_cursor: None,
             failed: false,
@@ -240,6 +292,7 @@ impl<W: Write> Painter<W> {
     /// 프레임을 닫고 흘려보낸다. `cursor` 가 `None` 이면 커서를 숨긴다
     /// (다이얼로그가 떠 있을 때 — 캡처의 신뢰 다이얼로그 프레임이 그렇다).
     pub fn end(&mut self, cursor: Option<(u16, u16)>) {
+        let painted_len = self.painted_len.take();
         if (self.frame.is_empty() || self.frame.as_str() == SYNC_BEGIN)
             && cursor == self.last_cursor
         {
@@ -248,14 +301,32 @@ impl<W: Write> Painter<W> {
         }
         self.open();
         self.last_cursor = cursor;
-        self.frame.push_str(RESET);
+        // 터미널이 이미 아는 것은 다시 보내지 않는다. 스타일은 켜 둔 것이 있을 때만
+        // 끄고, 커서의 모양·보임은 지난 프레임이 놓은 그대로면 두며, 커서 자리는
+        // 마지막에 쓴 글자가 이미 거기서 끝났으면 다시 찾아가지 않는다.
+        let placed = painted_len.filter(|len| *len == self.frame.len()).and(self.at);
+        if !self.sgr.is_plain() {
+            self.frame.push_str(RESET);
+            self.sgr.reset();
+        }
         match cursor {
             Some((col, row)) => {
-                self.frame.push_str(CURSOR_SHOW);
-                cup(&mut self.frame, col, row);
+                if self.caret != Caret::Shown {
+                    self.frame.push_str(CURSOR_SHOW);
+                    self.caret = Caret::Shown;
+                }
+                if placed != Some((col, row)) {
+                    cup(&mut self.frame, col, row);
+                }
             }
-            None => self.frame.push_str(CURSOR_HIDE),
+            None => {
+                if self.caret != Caret::Hidden {
+                    self.frame.push_str(CURSOR_HIDE);
+                    self.caret = Caret::Hidden;
+                }
+            }
         }
+        self.at = cursor;
         self.frame.push_str(SYNC_END);
         let payload = std::mem::take(&mut self.frame);
         self.write(&payload);
@@ -266,6 +337,10 @@ impl<W: Write> Painter<W> {
     /// 테스트 이음매다 — 캡처 대조는 터미널에 실제로 쓰지 않고 **한 프레임의
     /// 바이트**를 봐야 하는데, `end` 는 그걸 쓰고 버린다.
     pub fn take_frame(&mut self) -> String {
+        // The bytes are not going to the terminal: what the pen and the caret were
+        // is what they were before them, and this painter no longer knows it.
+        self.sgr.reset();
+        self.painted_len = None;
         std::mem::take(&mut self.frame)
     }
 
@@ -623,10 +698,9 @@ impl<W: Write> Painter<W> {
             .resize(self.rows as usize, Self::unknown_row());
     }
 
-    /// "아직 안 그림" 표식. 빈 문자열이면 **빈 줄을 그렸다**와 구별되지 않는다 —
-    /// 실제 페이로드는 언제나 `ESC[0m ESC[K` 로 시작하므로 NUL 하나면 족하다.
-    fn unknown_row() -> String {
-        String::from('\u{0}')
+    /// "아직 안 그림" 표식 — [`Row::unknown`].
+    fn unknown_row() -> Row {
+        Row::unknown()
     }
 
     /// 캐시를 화면 절대 좌표로 `delta` 행만큼 민다(양수면 아래로). 밀려 들어온
@@ -944,41 +1018,117 @@ impl<W: Write> Painter<W> {
 
     /// 뷰포트를 그린다. `rows` 길이는 [`Painter::set_height`] 로 맞춰 둔 높이여야
     /// 한다 — 넘치면 잘리고 모자라면 빈 줄로 채운다.
+    ///
+    /// 바뀐 행만 쓴다. 바뀐 행은 직전에 쓴 행과 칸 단위로 견주어 다른 구간만 쓴다
+    /// (`rowdiff`) — 칸으로 나눌 수 없거나 직전 모습을 모르는 행, 그리고 그 편이 더 짧은
+    /// 행만 통째로 쓴다.
     pub fn paint(&mut self, rows: &[Line]) {
+        // 이 프레임에 아무도 쓰지 않았다면 커서는 지난 프레임이 놓은 자리에 있다.
+        self.at = if self.frame.is_empty() { self.last_cursor } else { None };
         self.open();
+        // 프레임이 내는 바이트는 모두 리셋으로 끝나므로 스타일은 기본으로 시작한다.
+        self.sgr.reset();
+        let height = usize::from(self.height);
+        // 버퍼들을 self 에서 빌려 나온다 — 안에서 `self.rendered` 를 함께
+        // 빌려야 하므로, 소유를 잠시 옮기는 쪽이 분리 빌림보다 읽기 쉽다.
+        let mut payloads = std::mem::take(&mut self.payloads);
+        payloads.resize_with(height, String::new);
         // 루프 밖에 한 번. 안에 두면 행마다 새로 세운다.
         let blank = Line::empty();
-        // 버퍼를 self 에서 빌려 나온다 — 안에서 `self.rendered` 를 함께
-        // 빌려야 하므로, 소유를 잠시 옮기는 쪽이 분리 빌림보다 읽기 쉽다.
-        let mut payload = std::mem::take(&mut self.scratch);
-        for index in 0..self.height as usize {
+        for (index, payload) in payloads.iter_mut().enumerate() {
             let line = rows.get(index).unwrap_or(&blank);
             payload.clear();
             payload.push_str("\u{1b}[0m\u{1b}[K");
             if self.color {
-                write_spans(line, &mut payload);
+                write_spans(line, payload);
             } else {
-                write_plain(line, &mut payload);
+                write_plain(line, payload);
             }
             payload.push_str(RESET);
+        }
+        // 이 호출에서 `ESC[0m` 이 나갔는가 — 처음 칸을 쓰는 바이트 앞에 한 번 둔다.
+        // 밖에서 누가 스타일을 켜 둔 채 두었더라도 고쳐 주는 보험이다.
+        let mut reset_sent = false;
+        for (index, payload) in payloads.iter().enumerate() {
             // 캐시는 화면 절대 행으로 본다 — 뷰포트 안에서 인덱스가 밀렸을
             // 뿐인 행은 화면의 같은 자리에 이미 옳게 그려져 있다.
-            let row = self.top as usize + index;
-            let skipped = self.rendered.get(row).is_some_and(|old| *old == payload);
-            probe_paint(index, skipped, &payload);
+            let row = usize::from(self.top) + index;
+            let skipped = self.rendered.get(row).is_some_and(|old| old.payload == *payload);
+            probe_paint(index, skipped, payload);
             if skipped {
                 continue;
             }
+            let line = rows.get(index).unwrap_or(&blank);
             #[allow(clippy::cast_possible_truncation)] // height 는 u16 이다.
-            cup(&mut self.frame, 0, self.top + index as u16);
-            self.frame.push_str(&payload);
-            if let Some(slot) = self.rendered.get_mut(row) {
-                // 슬롯의 할당도 재사용한다 — 대입은 버리고 새로 잡는다.
-                slot.clear();
-                slot.push_str(&payload);
+            let screen_row = self.top + index as u16;
+            self.write_row(row, screen_row, line, payload, &mut reset_sent);
+        }
+        self.payloads = payloads;
+        self.painted_len = Some(self.frame.len());
+    }
+
+    /// 화면 행 `row`(캐시 색인) 에서 바뀐 것을 쓴다. 옛 모습을 칸으로 알고 새 행도 칸으로
+    /// 나뉘면 다른 구간만 쓰고, 그 편이 통째로 쓰는 것보다 짧을 때만 그렇게 한다.
+    fn write_row(
+        &mut self,
+        row: usize,
+        screen_row: u16,
+        line: &Line,
+        payload: &str,
+        reset_sent: &mut bool,
+    ) {
+        let cols = usize::from(self.cols);
+        let Self { frame, sgr, at, rendered, cells_scratch, runs_scratch, trial, color, .. } = self;
+        let mut cells = std::mem::take(cells_scratch);
+        let modeled = cells.fill(line, cols, *color);
+        let old = rendered
+            .get(row)
+            .and_then(|slot| slot.cells.as_ref())
+            .filter(|old| modeled && old.width() == cols);
+        if let Some(old) = old {
+            trial.clear();
+            let mut pen = sgr.clone();
+            let mut place = *at;
+            if !*reset_sent {
+                trial.push_str(RESET);
+                pen.reset();
+            }
+            rowdiff::write_diff(trial, &mut pen, &mut place, screen_row, old, &cells, runs_scratch);
+            if trial.len() < payload.len() + cup_len(0, screen_row) {
+                frame.push_str(trial);
+                *sgr = pen;
+                *at = place;
+                *reset_sent = true;
+                if let Some(slot) = rendered.get_mut(row) {
+                    slot.payload.clear();
+                    slot.payload.push_str(payload);
+                    if let Some(existing) = slot.cells.as_mut() {
+                        std::mem::swap(existing, &mut cells);
+                    }
+                }
+                *cells_scratch = cells;
+                return;
             }
         }
-        self.scratch = payload;
+        cup(frame, 0, screen_row);
+        frame.push_str(payload);
+        // 페이로드는 리셋으로 시작해 리셋으로 끝난다.
+        sgr.reset();
+        *at = None;
+        *reset_sent = true;
+        if let Some(slot) = rendered.get_mut(row) {
+            slot.payload.clear();
+            slot.payload.push_str(payload);
+            if modeled {
+                match slot.cells.as_mut() {
+                    Some(existing) => std::mem::swap(existing, &mut cells),
+                    None => slot.cells = Some(std::mem::take(&mut cells)),
+                }
+            } else {
+                slot.cells = None;
+            }
+        }
+        *cells_scratch = cells;
     }
 
     /// 뷰포트 안 `(col, row)` 상대 좌표를 화면 절대 좌표로.
@@ -1001,8 +1151,12 @@ impl<W: Write> Painter<W> {
         self.gap = self.top - 1;
         self.reached = false;
         self.slack = 0;
-        self.rendered.fill(String::from('\u{0}'));
+        self.rendered.fill(Self::unknown_row());
         self.last_cursor = None;
+        self.sgr.reset();
+        self.caret = Caret::Unknown;
+        self.at = None;
+        self.painted_len = None;
         self.popup = None;
         self.history_tail.clear();
         self.last_ring_origin = None;
@@ -1062,9 +1216,16 @@ fn probe_paint(index: usize, skipped: bool, payload: &str) {
 }
 
 /// `ESC[{row+1};{col+1}H` — 0 기준 좌표를 1 기준 CUP 로.
-fn cup(out: &mut String, col: u16, row: u16) {
+pub(super) fn cup(out: &mut String, col: u16, row: u16) {
     use std::fmt::Write as _;
     let _ = write!(out, "\u{1b}[{};{}H", row + 1, col + 1);
+}
+
+/// [`cup`] 이 내는 바이트 수.
+fn cup_len(col: u16, row: u16) -> usize {
+    let digits = |value: u16| value.checked_ilog10().map_or(1, |log| log as usize + 1);
+    // ESC [ <row> ; <col> H
+    4 + digits(row + 1) + digits(col + 1)
 }
 
 /// `ESC[{top};{bottom}r` — codex `SetScrollRegion(Range)` 과 같은 표기다
@@ -1155,7 +1316,7 @@ mod tests {
         assert!(painter.popup.is_none());
         assert!(painter.history_tail.is_empty());
         assert_eq!(painter.known_above, 0);
-        assert!(painter.rendered.iter().all(|row| row == "\u{0}"));
+        assert!(painter.rendered.iter().all(|row| row.payload == "\u{0}" && row.cells.is_none()));
     }
 
     /// A height change that does not move the viewport's head keeps the rows
