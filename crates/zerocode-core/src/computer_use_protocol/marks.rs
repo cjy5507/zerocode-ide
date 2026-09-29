@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::frame::{SPACE_KEY, ShotFrame};
+use super::pointer::is_pointer_picture;
 use super::render::{self, Rect, RenderNode, RenderedRecord, fully_covered};
 use super::{ProviderError, error_code};
 use crate::computer_use::{
@@ -351,11 +352,14 @@ impl DesktopWindow {
         })
     }
 
-    /// Whether the window hides what is under it: seen at all, and not an
-    /// overlay.
+    /// Whether the window hides what is under it: seen at all, not an
+    /// overlay, and not the pointer's own picture ([`is_pointer_picture`]) —
+    /// a press lands through the pointer where it points.
     #[must_use]
     pub fn covers(&self) -> bool {
-        self.alpha > 0.0 && !self.overlay
+        self.alpha > 0.0
+            && !self.overlay
+            && !is_pointer_picture(self.layer, &self.app, self.rect.width, self.rect.height)
     }
 }
 
@@ -375,10 +379,11 @@ pub fn desktop_target(windows: &[DesktopWindow], picture: Rect) -> Option<usize>
 }
 
 /// What covers the target: every window in front of it that hides what is
-/// under it — a menu, a panel, ZeroCode's own; not an overlay. The one
-/// answer to "what stands over this window", window by window: the marks
-/// leave out what it hides ([`occluders`]) and a press that finds its place
-/// hidden reads who hides it (`super::cover`, t-12979).
+/// under it — a menu, a panel, ZeroCode's own; not an overlay, nor the
+/// pointer's own picture. The one answer to "what stands over this window",
+/// window by window: the marks leave out what it hides ([`occluders`]) and a
+/// press that finds its place hidden reads who hides it (`super::cover`,
+/// t-12979).
 pub fn in_front(windows: &[DesktopWindow], target: usize) -> impl Iterator<Item = &DesktopWindow> {
     windows[..target.min(windows.len())]
         .iter()
