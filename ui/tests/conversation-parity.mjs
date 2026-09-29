@@ -1711,7 +1711,9 @@ async function installStepsProbe(page) {
       for (let node = walker.nextNode(); node; node = walker.nextNode()) found.push(node);
       return found;
     };
-    const list = () => document.querySelector("#worker-view .helper-turns");
+    // The wire's page and a helper's stand in `#worker-view`; a pane's conversation
+    // stands in its own slot (`.pane-chat`).
+    const list = () => document.querySelector("#worker-view .helper-turns") ?? document.querySelector(".pane-chat .helper-turns");
     const rows = () => [...(list()?.querySelectorAll(":scope > .helper-turn") ?? [])];
     window.__STEPS__ = {
       list,
@@ -1762,7 +1764,7 @@ async function openPaneConversation(page, turns) {
     await pollHelperPages();
     await window.__PAINTED__();
   }, turns);
-  await page.waitForSelector("#worker-view .helper-turns .helper-turn");
+  await page.waitForSelector(".pane-chat .helper-turns .helper-turn");
 }
 
 /* What the engine's accessibility tree says of the node a selector names. */
@@ -2308,7 +2310,7 @@ async function stepsAcrossPages(browser, origin, ok) {
       else await openPaneConversation(page, stepsFixture());
       await installStepsProbe(page);
       seen[kind] = await page.evaluate(async () => {
-        const { rows, lineOf, wordsOf, settle } = window.__STEPS__;
+        const { list, rows, lineOf, wordsOf, settle } = window.__STEPS__;
         await settle();
         return {
           rows: rows().map((row) => [
@@ -2316,7 +2318,7 @@ async function stepsAcrossPages(browser, origin, ok) {
             [...row.classList].filter((name) => name !== "is-live").sort().join("."),
             wordsOf(row.matches(".is-user, .is-assistant") ? row : lineOf(row)),
           ].join("|")),
-          report: document.querySelector("#worker-view .helper-report") !== null,
+          report: list().querySelector(":scope > .helper-report") !== null,
         };
       });
       faulted.push(...faults);
