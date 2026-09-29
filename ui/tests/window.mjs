@@ -75,7 +75,7 @@ import { testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testWorkers } from "./workers.mjs";
 import { testSidebarAgents } from "./sidebar-agents.mjs";
-import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease } from "./conversation-parity.mjs";
+import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -264,6 +264,10 @@ suite("conversation-images", ({ browser, origin, ok }) => testConversationImages
 suite("conversation-copies", ({ browser, origin, ok }) => testConversationCopies(browser, origin, ok));
 suite("conversation-shelf", ({ browser, origin, ok }) => testConversationShelf(browser, origin, ok));
 suite("conversation-release", ({ browser, origin, ok }) => testConversationRelease(browser, origin, ok));
+/* 걸음 — 한 일이 한 줄로 서고, 같은 종류는 한 행으로 접히고, 생각은 한 줄이고,
+ * 발밑 줄은 지금 나간 걸음을 말하고, 끝난 헬퍼의 페이지는 보고로 열린다
+ * (t-15682). */
+suite("conversation-steps", ({ browser, origin, ok }) => testConversationSteps(browser, origin, ok));
 /* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
  * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
  * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs
