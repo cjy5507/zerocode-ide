@@ -1630,7 +1630,7 @@ fn a_member_finishing_starts_the_collection_window_again() {
     window.progressed();
     assert!(window.deadline >= first, "the window never moves back");
     assert!(
-        window.deadline >= std::time::Instant::now() + quiet - std::time::Duration::from_secs(5),
+        window.deadline + std::time::Duration::from_secs(5) >= std::time::Instant::now() + quiet,
         "a completion restarts the window from now"
     );
     assert_eq!(window.extended, 0, "a completion is not a look that found a member working");
@@ -1964,7 +1964,7 @@ fn final_drain_keeps_waiting_for_a_busy_agent_however_many_looks_it_has_had() {
         &mut window,
     );
     let elapsed = start.elapsed();
-    let published = publisher.join().expect("publisher thread");
+    let delivered = publisher.join().expect("publisher thread");
 
     assert_eq!(
         manifest_status_on_disk(&dir, &busy),
@@ -1978,7 +1978,7 @@ fn final_drain_keeps_waiting_for_a_busy_agent_however_many_looks_it_has_had() {
         completions[0].status, "completed",
         "the agent's own answer is collected, not a synthetic stop"
     );
-    assert!(published, "the agent's own completion reached the store");
+    assert!(delivered, "the agent's own completion reached the store");
     assert!(
         elapsed < std::time::Duration::from_secs(5),
         "the wait returns on the completion, not after the whole step: {elapsed:?}"
