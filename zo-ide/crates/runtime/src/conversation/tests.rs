@@ -19859,20 +19859,20 @@ fn runtime_that_kept(
         session_id: runtime.session.session_id.clone(),
         category: category.map(str::to_string),
         messages: now.checked_add_signed(messages_from_now).expect("a message count"),
-        compaction: a_compaction_that_did_not_clear_it(),
+        compaction: Some(a_compaction_that_did_not_clear_it()),
         renewed: false,
     });
     runtime
 }
 
 /// The compaction the ladder made for a decline that was surfaced anyway.
-fn a_compaction_that_did_not_clear_it() -> Option<crate::turn_trace::RefusalCompaction> {
-    Some(crate::turn_trace::RefusalCompaction {
+fn a_compaction_that_did_not_clear_it() -> crate::turn_trace::RefusalCompaction {
+    crate::turn_trace::RefusalCompaction {
         removed_messages: 6,
         tokens_before: 52_943,
         tokens_after: 49_126,
         resolved: false,
-    })
+    }
 }
 
 /// A decline the provider routes nowhere that the session kept — for the same
@@ -20007,7 +20007,7 @@ fn a_compaction_a_decline_survived_is_not_made_twice_but_one_never_made_is() {
     };
 
     // The compaction was made, and the decline survived it: nothing is left.
-    let mut runtime = long_runtime(a_compaction_that_did_not_clear_it());
+    let mut runtime = long_runtime(Some(a_compaction_that_did_not_clear_it()));
     assert!(matches!(
         runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
         RefusalDecision::Standing

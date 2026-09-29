@@ -60,9 +60,15 @@ static INSTALL: Once = Once::new();
 /// observation unless it is off.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// The lock a test holds for its length, wrapped so that holding it across the
+/// test's awaits is the intent and not a lint.
+struct PersonsCatalog {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
 /// Install the person's catalog and say what it makes of the decline.
-fn the_persons_catalog() -> std::sync::MutexGuard<'static, ()> {
-    let guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+fn the_persons_catalog() -> PersonsCatalog {
+    let lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::set_var("ZO_SHARED_RATE_COORD", "0");
     INSTALL.call_once(|| api::refresh_model_registry_from_json(PUBLISHED_OPUS_ALIASES));
     assert!(!api::refusal_route_candidates("claude-opus-5-5", Some("bio")).is_empty());
@@ -70,7 +76,7 @@ fn the_persons_catalog() -> std::sync::MutexGuard<'static, ()> {
         api::refusal_route_candidates("claude-opus-5-5", Some("cyber")).is_empty(),
         "the premise: on these rows the provider routes `cyber` on Opus 5.5 nowhere, and `bio` somewhere"
     );
-    guard
+    PersonsCatalog { _lock: lock }
 }
 
 /// Sync client that must never be called: the async seam is installed.
