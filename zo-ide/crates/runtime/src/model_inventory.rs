@@ -1127,7 +1127,7 @@ mod model_catalog_overlay_tests {
 /// class and is untouched by Phase 8.
 #[cfg(test)]
 mod golden_parity_tests {
-    use super::{class_for_model, effort_ceiling_for_model, family_for_model, release_rank_for_model, tiers_for_model};
+    use super::{class_for_model, effort_ceiling_for_model, family_for_model, release_rank_for_model, tiers_for_model_under};
     use crate::model_router::{EffortCeiling, ModelTier};
 
     struct Expected {
@@ -1139,9 +1139,12 @@ mod golden_parity_tests {
         tiers: &'static [ModelTier],
     }
 
-    /// The tiers the table holds each row to, as the classifier gives them.
+    /// The tiers the table holds each row to, as the classifier gives them
+    /// under the shipped size/family/flagship words, handed in. The words in
+    /// force live in one store for the whole process, and a test beside this
+    /// one publishes others for a moment.
     fn golden_tiers(id: &str) -> Vec<ModelTier> {
-        tiers_for_model(id).0
+        tiers_for_model_under(id, api::shipped_router_priors()).0
     }
 
     #[test]
