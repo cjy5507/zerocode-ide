@@ -36072,7 +36072,7 @@ const thoughtRows = await page.evaluate(async () => {
     turns: [
       { role: "user", text: "check the flow" },
       { role: "thinking", text: "**Checking the flow**\n\nThe flag gates the call, so read the SQL first." },
-      { role: "tool", text: "Read · proc.sql" },
+      { role: "tool", text: "Read · proc.sql", tool: { name: "Read", kind: "read" } },
       { role: "assistant", text: "The flag gates it." },
     ],
   });
@@ -36157,7 +36157,7 @@ const chatFace = await page.evaluate(async () => {
       { role: "user", text: `briefing line one\n${dump}` },
       { role: "assistant", text: "short answer" },
       { role: "tool", text: dump },
-      { role: "tool", text: "Read · one line" },
+      { role: "tool", text: "Read · one line", tool: { name: "Read", kind: "read" } },
     ],
   });
   await openHelperPage(
@@ -36405,8 +36405,8 @@ const helperGrammar = await page.evaluate(async () => {
     turns: [
       { role: "user", text: "map the cells" },
       { role: "assistant", text: "이제 `CellStyle`과 **다른** 파일들을 읽겠습니다.\n\n- 하나\n- 둘" },
-      { role: "tool", text: "read_file · /repo/ui/tokens.css:1-200" },
-      { role: "tool", text: "grep_search · makeTermView in /repo/ui" },
+      { role: "tool", text: "read_file · /repo/ui/tokens.css:1-200", tool: { name: "read_file", kind: "read" } },
+      { role: "tool", text: "grep_search · makeTermView in /repo/ui", tool: { name: "grep_search", kind: "grep" } },
       { role: "assistant", text: "완벽합니다." },
     ],
   });
@@ -36550,12 +36550,12 @@ const toolStates = await page.evaluate(async () => {
     turns: [
       { role: "user", text: "네 번 읽어라" },
       { role: "assistant", text: "읽겠습니다." },
-      { role: "tool", text: "Read · /repo/a.rs" },
-      { role: "tool", text: "Grep · needle in /repo" },
-      { role: "tool", text: "Edit · /repo/b.rs" },
-      { role: "tool", text: "Bash · cargo test" },
+      { role: "tool", text: "Read · /repo/a.rs", tool: { name: "Read", kind: "read" } },
+      { role: "tool", text: "Grep · needle in /repo", tool: { name: "Grep", kind: "grep" } },
+      { role: "tool", text: "Edit · /repo/b.rs", tool: { name: "Edit", kind: "edit" } },
+      { role: "tool", text: "Bash · cargo test", tool: { name: "Bash", kind: "bash" } },
       { role: "assistant", text: "하나 더." },
-      { role: "tool", text: "Read · /repo/c.rs", tool: { call_id: "c", name: "Read", input: '{\n  "file_path": "/repo/c.rs"\n}', is_error: false } },
+      { role: "tool", text: "Read · /repo/c.rs", tool: { call_id: "c", name: "Read", kind: "read", input: '{\n  "file_path": "/repo/c.rs"\n}', is_error: false } },
     ],
   });
   await openHelperPage(
@@ -36629,7 +36629,7 @@ const toolStates = await page.evaluate(async () => {
     more?.querySelector(".helper-tool-input")?.textContent.includes('"file_path": "/repo/c.rs"');
   // A failing call: its mark and its result words in the halt ink.
   holdHelperTurns(tab.worker.helper, [
-    { role: "tool", text: "Bash · false", tool: { call_id: "d", name: "Bash", input: "false", is_error: false } },
+    { role: "tool", text: "Bash · false", tool: { call_id: "d", name: "Bash", kind: "bash", input: "false", is_error: false } },
     { role: "tool_result", text: "exit 1", tool: { call_id: "d", is_error: true } },
   ]);
   paintWorkerView(tab);
@@ -36648,7 +36648,7 @@ const toolStates = await page.evaluate(async () => {
   // ceiling counted, and no input well — the diff is the input. It stands in
   // the row's body, so the row is opened first.
   holdHelperTurns(tab.worker.helper, [
-    { role: "tool", text: "Edit · /repo/d.rs", tool: { call_id: "e", name: "Edit", is_error: false,
+    { role: "tool", text: "Edit · /repo/d.rs", tool: { call_id: "e", name: "Edit", kind: "edit", is_error: false,
       input: '{\n  "file_path": "/repo/d.rs",\n  "old_string": "let x = 1;",\n  "new_string": "let x = 2;"\n}',
       edits: [{ path: "/repo/d.rs", truncated: 3, lines: [
         { kind: "ctx", text: "fn a() {", old: null, new: null },
@@ -36674,7 +36674,7 @@ const toolStates = await page.evaluate(async () => {
   seen.diffMono = diff ? /mono/i.test(getComputedStyle(diff).fontFamily) : false;
   // Two files in one call name each file over its rows.
   holdHelperTurns(tab.worker.helper, [
-    { role: "tool", text: "apply_patch", tool: { call_id: "f", name: "apply_patch", is_error: false, input: "*** Begin Patch",
+    { role: "tool", text: "apply_patch", tool: { call_id: "f", name: "apply_patch", kind: "edit", is_error: false, input: "*** Begin Patch",
       edits: [
         { path: "src/a.rs", lines: [{ kind: "add", text: "one", old: null, new: 1 }] },
         { path: "src/b.rs", lines: [{ kind: "meta", text: "*** Delete File: src/b.rs", old: null, new: null }] },
@@ -36891,8 +36891,8 @@ const helperWide = await page.evaluate(async () => {
       { role: "user", text: "열 폭을 재라" },
       { role: "assistant", text: "읽는 폭은 눈보다 짧아야 합니다." },
       ...Array.from({ length: 30 }, (_, i) => ({ role: "assistant", text: `문단 ${i}` })),
-      { role: "tool", text: "grep_search · a in /repo" },
-      { role: "tool", text: "grep_search · b in /repo" },
+      { role: "tool", text: "grep_search · a in /repo", tool: { name: "grep_search", kind: "grep" } },
+      { role: "tool", text: "grep_search · b in /repo", tool: { name: "grep_search", kind: "grep" } },
     ],
   });
   await openHelperPage(
@@ -36950,7 +36950,7 @@ const helperWide = await page.evaluate(async () => {
   const toolsBefore = [...face.querySelectorAll(".helper-turn.is-tool")];
   seen.countBefore = `×${toolsBefore.length}`;
   list.scrollTop = list.scrollHeight;
-  holdHelperTurns(tab.worker.helper, [{ role: "tool", text: "grep_search · c in /repo" }]);
+  holdHelperTurns(tab.worker.helper, [{ role: "tool", text: "grep_search · c in /repo", tool: { name: "grep_search", kind: "grep" } }]);
   paintWorkerView(tab);
   const toolsAfter = [...face.querySelectorAll(".helper-turn.is-tool")];
   seen.sameNode = toolsAfter[0] === toolsBefore[0] && toolsAfter[1] === toolsBefore[1];
@@ -37170,7 +37170,7 @@ const flatTranscript = await page.evaluate(async () => {
   for (let at = 1; at < 396; at += 1) {
     turns.push(
       at % 3 === 0
-        ? { role: "tool", text: `Read · /repo/file-${at}.rs` }
+        ? { role: "tool", text: `Read · /repo/file-${at}.rs`, tool: { name: "Read", kind: "read" } }
         : at % 3 === 1
           ? { role: "assistant", text: `에이전트의 말 ${at} — 흐르는 본문이다.` }
           : { role: "user", text: `사람의 말 ${at}` },
@@ -37180,9 +37180,9 @@ const flatTranscript = await page.evaluate(async () => {
   // 묶음 하나로 접히지 않도록 말 한 턴을 사이에 둔다 — 묶임 자체는 폭·
   // 활동 검사가 따로 잰다.
   turns.push({ role: "assistant", text: "긴 실행을 시작한다." });
-  turns.push({ role: "tool", text: `Bash · cargo test --workspace\n${dump}` });
+  turns.push({ role: "tool", text: `Bash · cargo test --workspace\n${dump}`, tool: { name: "Bash", kind: "bash" } });
   turns.push({ role: "assistant", text: "긴 실행을 마치고 정리한다." });
-  turns.push({ role: "tool", text: "Grep · helper-turn" });
+  turns.push({ role: "tool", text: "Grep · helper-turn", tool: { name: "Grep", kind: "grep" } });
   let logAsked = 0;
   window.__ANSWER__.subagent_log = (args) => {
     logAsked += 1;
@@ -37327,7 +37327,7 @@ const flatTranscript = await page.evaluate(async () => {
     next: 4010,
     turns: [
       { role: "assistant", text: "새로 온 말" },
-      { role: "tool", text: "Edit · ui/shell.js" },
+      { role: "tool", text: "Edit · ui/shell.js", tool: { name: "Edit", kind: "edit" } },
     ],
   });
   list.scrollTop = list.scrollHeight;
@@ -55697,7 +55697,7 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       // never stopped (t-9741).
       const transcript = [
         { role: "user", text: "Wallet 결제 레시피 만들어줘" },
-        { role: "tool", text: "Bash · zerocode-browser open http://admin.internal.example/login" },
+        { role: "tool", text: "Bash · zerocode-browser open http://admin.internal.example/login", tool: { name: "Bash", kind: "bash" } },
         { role: "assistant", text: "저장했습니다." },
       ];
       window.__ANSWER__.pane_log = (args) => ({
@@ -55976,13 +55976,13 @@ suite("focus-view", async ({ browser, origin, ok }) => {
         next: 8,
         turns: [
           { role: "user", text: "둘을 읽고 하나를 고쳐라" },
-          { role: "tool", text: "Read · /repo/a.rs", tool: { call_id: "a", name: "Read", is_error: false } },
+          { role: "tool", text: "Read · /repo/a.rs", tool: { call_id: "a", name: "Read", kind: "read", is_error: false } },
           { role: "tool_result", text: "12 lines", tool: { call_id: "a", is_error: false } },
-          { role: "tool", text: "Grep · needle in /repo", tool: { call_id: "b", name: "Grep", is_error: false } },
+          { role: "tool", text: "Grep · needle in /repo", tool: { call_id: "b", name: "Grep", kind: "grep", is_error: false } },
           { role: "tool_result", text: "no match", tool: { call_id: "b", is_error: true } },
           { role: "thinking", text: "**계획**\n먼저 고친다." },
           { role: "assistant", text: "고치겠습니다." },
-          { role: "tool", text: "Edit · /repo/b.rs", tool: { call_id: "c", name: "Edit", is_error: false } },
+          { role: "tool", text: "Edit · /repo/b.rs", tool: { call_id: "c", name: "Edit", kind: "edit", is_error: false } },
         ],
       });
       await openHelperPage(
@@ -56069,8 +56069,8 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       // (d) 폴로 도구 턴이 더 오면 **같은 노드**가 제 수를 갈아입는다.
       const secondNode = standing[1];
       holdHelperTurns(tab.worker.helper, [
-        { role: "tool", text: "Bash · cargo test", tool: { call_id: "d", name: "Bash", is_error: false } },
-        { role: "tool", text: "Read · /repo/c.rs", tool: { call_id: "e", name: "Read", is_error: false } },
+        { role: "tool", text: "Bash · cargo test", tool: { call_id: "d", name: "Bash", kind: "bash", is_error: false } },
+        { role: "tool", text: "Read · /repo/c.rs", tool: { call_id: "e", name: "Read", kind: "read", is_error: false } },
       ]);
       paintWorkerView(tab);
       seen.grewSameNode = groups()[1] === secondNode;
@@ -56099,7 +56099,7 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       // (e) 답이 오면 묶음이 닫히고, 다음 도구 턴은 새 묶음이다.
       holdHelperTurns(tab.worker.helper, [
         { role: "assistant", text: "끝났습니다." },
-        { role: "tool", text: "Read · /repo/d.rs", tool: { call_id: "f", name: "Read", is_error: false } },
+        { role: "tool", text: "Read · /repo/d.rs", tool: { call_id: "f", name: "Read", kind: "read", is_error: false } },
       ]);
       paintWorkerView(tab);
       seen.afterAnswerGroups = groups().length;
@@ -56110,7 +56110,7 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       const flood = [];
       for (let at = 0; at < 420; at += 1) {
         flood.push({ role: "tool", text: `Read · /repo/${at}.rs`,
-          tool: { call_id: `x${at}`, name: "Read", is_error: false } });
+          tool: { call_id: `x${at}`, name: "Read", kind: "read", is_error: false } });
         flood.push({ role: "tool_result", text: "ok", tool: { call_id: `x${at}`, is_error: false } });
       }
       holdHelperTurns(tab.worker.helper, flood);
@@ -56260,7 +56260,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
         turns: [
           { role: "user", text: "probe.txt를 만들어" },
           { role: "tool", text: "shell · printf hello > probe.txt",
-            tool: { call_id: "c1", name: "shell", input: "printf hello > probe.txt", is_error: false, edits: [] } },
+            tool: { call_id: "c1", name: "shell", kind: "bash", input: "printf hello > probe.txt", is_error: false, edits: [] } },
         ],
         asks: [{
           id: 3, kind: "approval", method: "item/commandExecution/requestApproval", tool: "shell",
@@ -56298,7 +56298,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       log = {
         ...log, status: "idle", asks: [],
         turns: [...log.turns,
-          { role: "tool_result", text: "", tool: { call_id: "c1", name: "shell", input: "", is_error: false } },
+          { role: "tool_result", text: "", tool: { call_id: "c1", name: "shell", kind: "bash", input: "", is_error: false } },
           { role: "assistant", text: "done" }],
       };
       await pollHelperPages();

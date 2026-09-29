@@ -16,8 +16,8 @@ export async function testAgentConversation(browser, origin, ok) {
         data: btoa('<svg xmlns="http://www.w3.org/2000/svg" width="180" height="60"><rect width="180" height="60" fill="seagreen"/><text x="12" y="36" fill="white">Verified</text></svg>') });
       window.__ANSWER__.subagent_log = () => ({ found: true, next: 1, turns: [
         { role: "user", text: "실행 결과를 확인하고 보고서를 만들어줘." },
-        { role: "tool", text: "Bash · node first.js", tool: { call_id: "a", name: "Bash", input: "node first.js\nprintf done", is_error: false } },
-        { role: "tool", text: "Bash · node second.js", tool: { call_id: "b", name: "Bash", input: "node second.js", is_error: false } },
+        { role: "tool", text: "Bash · node first.js", tool: { call_id: "a", name: "Bash", kind: "bash", input: "node first.js\nprintf done", is_error: false } },
+        { role: "tool", text: "Bash · node second.js", tool: { call_id: "b", name: "Bash", kind: "bash", input: "node second.js", is_error: false } },
       ] });
       await openHelperPage({ term, tab: owner, worktree: owner.worktree, agent: "claude" }, { id: "conversation-test", name: "검증 도우미", state: "working" });
       window.__CHAT_TAB__ = activeHelperPage();

@@ -62,7 +62,7 @@ export async function testConversationFont(browser, origin, ok) {
       { role: "user", text: "대화 뷰가 느려요 — why is it slow?" },
       { role: "assistant", text: "원인은 paint가 폴마다 목록을 다시 세운 것입니다 — the list was rebuilt on every poll." },
       // A tool the window has no word for stands under its own name — all Latin.
-      { role: "tool", text: "Lookup · ui/shell.js", tool: { call_id: "r1", name: "Lookup", input: "ui/shell.js", is_error: false } },
+      { role: "tool", text: "Lookup · ui/shell.js", tool: { call_id: "r1", name: "Lookup", kind: "Lookup", input: "ui/shell.js", is_error: false } },
     ]);
     await page.evaluate(async () => {
       const list = document.querySelector("#worker-view .helper-turns");
@@ -153,18 +153,18 @@ export async function testConversationFolds(browser, origin, ok) {
     await openConversation(page, [
       { role: "user", text: lines(40, "브리핑") },
       { role: "user", text: "짧은 부탁" },
-      { role: "tool", text: "Bash · cargo test", tool: { call_id: "b1", name: "Bash", input: "cargo test", is_error: false } },
+      { role: "tool", text: "Bash · cargo test", tool: { call_id: "b1", name: "Bash", kind: "bash", input: "cargo test", is_error: false } },
       { role: "tool_result", text: lines(200, "test"), tool: { call_id: "b1", is_error: false } },
       // A word between keeps steps of one kind from folding into one row.
       { role: "assistant", text: "이어서 봅니다." },
-      { role: "tool", text: "Bash · ls", tool: { call_id: "b2", name: "Bash", input: "ls", is_error: false } },
+      { role: "tool", text: "Bash · ls", tool: { call_id: "b2", name: "Bash", kind: "bash", input: "ls", is_error: false } },
       { role: "tool_result", text: "a.rs\nb.rs", tool: { call_id: "b2", is_error: false } },
       { role: "assistant", text: "고칩니다." },
-      { role: "tool", text: "Edit · src/big.rs", tool: { call_id: "e1", name: "Edit", input: "{}", is_error: false,
+      { role: "tool", text: "Edit · src/big.rs", tool: { call_id: "e1", name: "Edit", kind: "edit", input: "{}", is_error: false,
         edits: [{ path: "src/big.rs", lines: diff(120) }] } },
       { role: "tool_result", text: "updated", tool: { call_id: "e1", is_error: false } },
       { role: "assistant", text: "하나 더." },
-      { role: "tool", text: "Edit · src/small.rs", tool: { call_id: "e2", name: "Edit", input: "{}", is_error: false,
+      { role: "tool", text: "Edit · src/small.rs", tool: { call_id: "e2", name: "Edit", kind: "edit", input: "{}", is_error: false,
         edits: [{ path: "src/small.rs", lines: diff(5) }] } },
       { role: "tool_result", text: "updated", tool: { call_id: "e2", is_error: false } },
       { role: "assistant", text: "끝났습니다." },
@@ -317,15 +317,15 @@ export async function testConversationPaths(browser, origin, ok) {
       };
     });
     await openConversation(page, [
-      { role: "tool", text: `Read · ${root}/src/app.rs`, tool: { call_id: "r1", name: "Read", is_error: false,
+      { role: "tool", text: `Read · ${root}/src/app.rs`, tool: { call_id: "r1", name: "Read", kind: "read", is_error: false,
         input: JSON.stringify({ file_path: `${root}/src/app.rs`, offset: 11, limit: 50 }, null, 2),
         file: { path: `${root}/src/app.rs`, offset: 11, limit: 50 } } },
       { role: "tool_result", text: "    11→line 11", tool: { call_id: "r1", is_error: false } },
-      { role: "tool", text: `Edit · ${root}/src/edit.rs`, tool: { call_id: "e1", name: "Edit", is_error: false,
+      { role: "tool", text: `Edit · ${root}/src/edit.rs`, tool: { call_id: "e1", name: "Edit", kind: "edit", is_error: false,
         input: "{}", file: { path: `${root}/src/edit.rs`, search: "let fixed = true;" },
         edits: [{ path: `${root}/src/edit.rs`, lines: [{ kind: "add", text: "let fixed = true;", old: null, new: null }] }] } },
       { role: "tool_result", text: "updated", tool: { call_id: "e1", is_error: false } },
-      { role: "tool", text: "Grep · needle", tool: { call_id: "g1", name: "Grep", is_error: false, input: "{}" } },
+      { role: "tool", text: "Grep · needle", tool: { call_id: "g1", name: "Grep", kind: "grep", is_error: false, input: "{}" } },
       { role: "tool_result", text: "3 matches", tool: { call_id: "g1", is_error: false } },
       { role: "assistant", text: "보세요: [app](src/app.rs:12), [범위](src/lib.rs#L20-L30), 그리고 ui/shell.js:42 에 있습니다." },
     ]);
@@ -1003,7 +1003,7 @@ export async function testConversationAgents(browser, origin, ok) {
   try {
     await openConversation(page, [
       { role: "user", text: "시작" },
-      { role: "tool", text: "Agent · count md files", tool: { call_id: "toolu_1", name: "Agent", input: "{\"description\":\"count md files\"}", is_error: false } },
+      { role: "tool", text: "Agent · count md files", tool: { call_id: "toolu_1", name: "Agent", kind: "task", input: "{\"description\":\"count md files\"}", is_error: false } },
     ], { status: "working" });
     const seen = await page.evaluate(async () => {
       const seen = {};
@@ -1091,27 +1091,27 @@ export async function testConversationTodos(browser, origin, ok) {
     const todos = (states) => JSON.stringify({
       todos: states.map((status, at) => ({ content: `할 일 ${at + 1}`, status, activeForm: `하는 중 ${at + 1}` })),
     }, null, 2);
-    const call = (id, states) => ({ role: "tool", text: "TodoWrite", tool: { call_id: id, name: "TodoWrite", input: todos(states), is_error: false } });
-    const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", input: "", is_error: false } });
+    const call = (id, states) => ({ role: "tool", text: "TodoWrite", tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: todos(states), is_error: false } });
+    const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: "", is_error: false } });
     await openConversation(page, [
       { role: "user", text: "시작" },
       call("t1", ["in_progress", "pending", "pending"]),
       result("t1"),
-      { role: "tool", text: "Read · a.rs", tool: { call_id: "r1", name: "Read", input: "a.rs", is_error: false } },
-      { role: "tool_result", text: "fn a() {}", tool: { call_id: "r1", name: "Read", input: "", is_error: false } },
+      { role: "tool", text: "Read · a.rs", tool: { call_id: "r1", name: "Read", kind: "read", input: "a.rs", is_error: false } },
+      { role: "tool_result", text: "fn a() {}", tool: { call_id: "r1", name: "Read", kind: "read", input: "", is_error: false } },
       call("t2", ["completed", "in_progress", "pending"]),
       result("t2"),
-      { role: "tool", text: "Read · b.rs", tool: { call_id: "r2", name: "Read", input: "b.rs", is_error: false } },
-      { role: "tool_result", text: "fn b() {}", tool: { call_id: "r2", name: "Read", input: "", is_error: false } },
+      { role: "tool", text: "Read · b.rs", tool: { call_id: "r2", name: "Read", kind: "read", input: "b.rs", is_error: false } },
+      { role: "tool_result", text: "fn b() {}", tool: { call_id: "r2", name: "Read", kind: "read", input: "", is_error: false } },
       { role: "assistant", text: "진행 중입니다." },
     ]);
     const seen = await page.evaluate(async () => {
       const seen = {};
       const call = (id, states) => ({
         role: "tool", text: "TodoWrite",
-        tool: { call_id: id, name: "TodoWrite", input: JSON.stringify({ todos: states.map((status, at) => ({ content: `할 일 ${at + 1}`, status })) }), is_error: false },
+        tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: JSON.stringify({ todos: states.map((status, at) => ({ content: `할 일 ${at + 1}`, status })) }), is_error: false },
       });
-      const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", input: "", is_error: false } });
+      const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: "", is_error: false } });
       const face = document.querySelector("#worker-view");
       const settle = async () => {
         await pollHelperPages();
@@ -1176,7 +1176,7 @@ export async function testConversationTodos(browser, origin, ok) {
       await settle();
       seen.afterFailure = standing();
       // A call that empties the list is a head alone, and nothing stands.
-      log.turns.push({ role: "tool", text: "TodoWrite", tool: { call_id: "t5", name: "TodoWrite", input: JSON.stringify({ todos: [] }), is_error: false } }, result("t5"));
+      log.turns.push({ role: "tool", text: "TodoWrite", tool: { call_id: "t5", name: "TodoWrite", kind: "TodoWrite", input: JSON.stringify({ todos: [] }), is_error: false } }, result("t5"));
       await settle();
       seen.emptied = standing();
       seen.emptyHead = todoRows().at(-1)?.querySelector(".helper-todos") === null;
@@ -1235,8 +1235,8 @@ export async function testConversationImages(browser, origin, ok) {
     for (let at = 0; at < 30; at += 1) {
       history.push({ role: "assistant", text: `답 ${at}: ${"긴 문장이 이어진다. ".repeat(8)}` });
     }
-    history.push({ role: "tool", text: "mcp__computer-use__screenshot", tool: { call_id: "s1", name: "mcp__computer-use__screenshot", input: "{}", is_error: false } });
-    history.push({ role: "tool_result", text: "screenshot taken", tool: { call_id: "s1", name: "mcp__computer-use__screenshot", input: "", is_error: false }, images: [{ media_type: "image/png", at: "wire:2" }] });
+    history.push({ role: "tool", text: "mcp__computer-use__screenshot", tool: { call_id: "s1", name: "mcp__computer-use__screenshot", kind: "mcp__computer-use__screenshot", input: "{}", is_error: false } });
+    history.push({ role: "tool_result", text: "screenshot taken", tool: { call_id: "s1", name: "mcp__computer-use__screenshot", kind: "mcp__computer-use__screenshot", input: "", is_error: false }, images: [{ media_type: "image/png", at: "wire:2" }] });
     await openConversation(page, history);
     const seen = await page.evaluate(async () => {
       const seen = {};
@@ -1261,8 +1261,8 @@ export async function testConversationImages(browser, origin, ok) {
       // A result that is a picture alone says it on the line and with the
       // pill, not 「출력 없음」.
       window.__CONVERSATION__.turns.push(
-        { role: "tool", text: "mcp__computer-use__zoom", tool: { call_id: "z1", name: "mcp__computer-use__zoom", input: "{}", is_error: false } },
-        { role: "tool_result", text: "", tool: { call_id: "z1", name: "mcp__computer-use__zoom", input: "", is_error: false }, images: [{ media_type: "image/png", at: "wire:4" }] },
+        { role: "tool", text: "mcp__computer-use__zoom", tool: { call_id: "z1", name: "mcp__computer-use__zoom", kind: "mcp__computer-use__zoom", input: "{}", is_error: false } },
+        { role: "tool_result", text: "", tool: { call_id: "z1", name: "mcp__computer-use__zoom", kind: "mcp__computer-use__zoom", input: "", is_error: false }, images: [{ media_type: "image/png", at: "wire:4" }] },
       );
       await pollHelperPages();
       await frames(2);

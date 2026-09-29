@@ -214,7 +214,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       window.__ANSWER__.subagent_log = () => ({
         found: true,
         next: 2,
-        turns: [{ role: "assistant", text: "done here" }, { role: "tool", text: "read_file · /a.rs" }],
+        turns: [{ role: "assistant", text: "done here" }, { role: "tool", text: "read_file · /a.rs", tool: { name: "read_file", kind: "read" } }],
       });
       await openHelperPage(
         { term, agent: "zo", worktree: owner.worktree, tab: owner },

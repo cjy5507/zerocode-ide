@@ -116,7 +116,7 @@ export function conversationFixture({ blocks = 20 } = {}) {
       const count = tool % 6 === 0 ? 120 : 24;
       turns.push({
         role: "tool", text: `Edit · src/module_${tool}.rs`, at_ms: stamp(),
-        tool: { call_id: id, name: "Edit", input: JSON.stringify({ file_path: `src/module_${tool}.rs` }), is_error: false,
+        tool: { call_id: id, name: "Edit", kind: "edit", input: JSON.stringify({ file_path: `src/module_${tool}.rs` }), is_error: false,
           edits: [{ path: `src/module_${tool}.rs`, lines: diffLines(tool, count) }] },
       });
       turns.push({ role: "tool_result", text: `The file src/module_${tool}.rs has been updated.`, at_ms: stamp(),
@@ -124,7 +124,7 @@ export function conversationFixture({ blocks = 20 } = {}) {
     } else if (kind === 3 || kind === 7) {
       turns.push({
         role: "tool", text: `Bash · cargo test -p module_${tool}`, at_ms: stamp(),
-        tool: { call_id: id, name: "Bash", input: `cargo test -p module_${tool}`, is_error: false },
+        tool: { call_id: id, name: "Bash", kind: "bash", input: `cargo test -p module_${tool}`, is_error: false },
       });
       turns.push({ role: "tool_result", text: longOutput(tool), at_ms: stamp(),
         tool: { call_id: id, name: "", input: "", is_error: tool % 20 === 7 } });
@@ -132,16 +132,16 @@ export function conversationFixture({ blocks = 20 } = {}) {
       // A screenshot came back — the Computer Use shape: a picture and a line.
       turns.push({
         role: "tool", text: `mcp__computer-use__screenshot · display ${tool}`, at_ms: stamp(),
-        tool: { call_id: id, name: "mcp__computer-use__screenshot", input: "{}", is_error: false },
+        tool: { call_id: id, name: "mcp__computer-use__screenshot", kind: "mcp__computer-use__screenshot", input: "{}", is_error: false },
       });
       turns.push({ role: "tool_result", text: "screenshot taken", at_ms: stamp(),
         tool: { call_id: id, name: "", input: "", is_error: false },
         images: [{ media_type: "image/png", at: `wire:${tool}` }] });
     } else {
-      const name = ["Read", "Grep", "Glob"][tool % 3];
+      const [name, reduced] = [["Read", "read"], ["Grep", "grep"], ["Glob", "grep"]][tool % 3];
       turns.push({
         role: "tool", text: `${name} · src/module_${tool}.rs`, at_ms: stamp(),
-        tool: { call_id: id, name, input: JSON.stringify({ file_path: `src/module_${tool}.rs`, offset: 10 + tool }), is_error: false },
+        tool: { call_id: id, name, kind: reduced, input: JSON.stringify({ file_path: `src/module_${tool}.rs`, offset: 10 + tool }), is_error: false },
       });
       turns.push({ role: "tool_result", text: `${40 + tool} lines\nfn main() {}\n// …`, at_ms: stamp(),
         tool: { call_id: id, name: "", input: "", is_error: false } });
