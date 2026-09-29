@@ -24,7 +24,7 @@ use super::{
     normalize_empty_assistant_stream,
     parallel_waves, pre_hook_denial_outcome, ConcurrentDispatchFn,
     overload_demotion_warn, quota_fallback_swap_warn, quota_wait_hold_warn,
-    refusal_surfaced_message,
+    refusal_surfaced_message, surfaced_refusal_notice,
     sleep_tool_cut_short, sleep_tool_execution_input,
     agent_notification_text, steering_message, tool_execution_input,
     take_truncation_continuation, tool_preview_from,
@@ -41,7 +41,7 @@ use super::{
     EMPTY_STREAM_EXHAUSTED_FALLBACK_TEXT, EMPTY_STREAM_RETRY_REMINDER,
     EMPTY_STREAM_RETRY_REMINDER_PREFIX, EMPTY_STREAM_TRUNCATION_RETRY_REMINDER,
     MAX_EMPTY_STREAM_RETRIES, MAX_PARALLEL_SAFE_TOOL_DISPATCHES,
-    REFUSAL_CONTEXT_CLEANED_WARN, REFUSAL_SURFACED_NOTICE, STEERING_ECHO_PREFIX,
+    REFUSAL_CONTEXT_CLEANED_WARN, STEERING_ECHO_PREFIX,
     TRUNCATION_CONTINUATION_REMINDER,
 };
 use crate::message_stream::types::WireModel;
@@ -2083,6 +2083,7 @@ where
                         Some((SystemLevel::Info, REFUSAL_CONTEXT_CLEANED_WARN.to_string()))
                     }
                     RefusalDecision::Surface
+                    | RefusalDecision::Standing
                     | RefusalDecision::Proceed
                     | RefusalDecision::Ask { .. }
                     | RefusalDecision::RetryCompacted(_) => None,
@@ -2096,6 +2097,7 @@ where
                         .await;
                     continue 'outer;
                 }
+                let standing = matches!(decision, RefusalDecision::Standing);
                 match decision {
                     RefusalDecision::Retry
                     | RefusalDecision::RetrySameModel
@@ -2103,7 +2105,7 @@ where
                     | RefusalDecision::RetryCleaned
                     | RefusalDecision::RetryCompacted(_)
                     | RefusalDecision::Ask { .. } => unreachable!("handled above"),
-                    RefusalDecision::Surface => {
+                    RefusalDecision::Surface | RefusalDecision::Standing => {
                         if let Some(usage) = refused_usage {
                             self.usage_tracker.record(usage);
                         }
@@ -2111,13 +2113,13 @@ where
                             .send(RenderBlock::System {
                                 id: id_gen.next(),
                                 level: SystemLevel::Warn,
-                                text: REFUSAL_SURFACED_NOTICE.to_string(),
+                                text: surfaced_refusal_notice(standing).to_string(),
                             })
                             .await;
                         // What stands beside it (t-10956): a compacted retry
                         // that was declined too, and the pictures from earlier
                         // in the conversation that ride every request.
-                        for text in self.settle_surfaced_refusal() {
+                        for text in self.settle_surfaced_refusal(category) {
                             let _ = render_tx
                                 .send(RenderBlock::System {
                                     id: id_gen.next(),
@@ -2153,7 +2155,7 @@ where
                                 })
                                 .await;
                         }
-                        let assistant_message = refusal_surfaced_message();
+                        let assistant_message = refusal_surfaced_message(standing);
                         self.record_assistant_iteration(iterations, &assistant_message, 0);
                         self.session
                             .push_message(assistant_message)

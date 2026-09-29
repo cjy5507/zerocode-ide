@@ -598,6 +598,20 @@ pub fn refusal_compaction_notice(model: &str) -> String {
 pub const REFUSAL_COMPACTED_RETRY_DECLINED: &str =
     "The compacted conversation was declined too — nothing more is tried on its own.";
 
+/// What a surfaced decline says when it is one this conversation already had
+/// surfaced (t-15890): the provider routes the category nowhere, every
+/// automatic step was spent on it last turn, and the conversation has not
+/// changed materially since — so this turn asked once, with the person's words
+/// as they wrote them, and stopped. Shown in the place of the ordinary
+/// surfaced notice and recorded as the turn's answer, so it says what is true
+/// of the person's next `continue`, and what helps instead.
+pub const REFUSAL_STANDING_NOTICE: &str =
+    "The safety classifier declined this again. The last turn's decline in this conversation \
+     stood after every automatic step, and the conversation has not changed materially since, \
+     so this turn asked once and stopped — no second retry, no second compaction. Sending the \
+     same request again — a bare \"continue\" — will be declined again. What helps: narrow or \
+     rephrase the request, /model to another provider, or a fresh session (/new).";
+
 /// What stands beside a surfaced decline while pictures from earlier in the
 /// conversation are still in it (t-10956): each rides every request, the
 /// declined ones too — the declines of 2026-09-27 carried a screenshot from
@@ -1044,5 +1058,26 @@ mod tests {
         // No model → the generic constant, which names no lineup.
         assert!(refusal_prearm_warn(None, 2, std::time::Duration::from_secs(90)).contains("2 consecutive turns — continuing this session on the refusal fallback for ~2m"));
         assert!(!refusal_prearm_warn(None, 2, std::time::Duration::from_secs(60)).contains("Fable"));
+    }
+
+    /// The words of a decline that stands (t-15890) say what the person's next
+    /// `continue` will meet and what helps instead — and are the one place
+    /// they are written.
+    #[test]
+    fn a_standing_decline_says_what_a_bare_continue_will_meet_and_what_helps() {
+        use super::{REFUSAL_COMPACTED_RETRY_DECLINED, REFUSAL_STANDING_NOTICE};
+        for said in [
+            "declined this again",
+            "\"continue\" — will be declined again",
+            "narrow or rephrase the request",
+            "/model to another provider",
+            "a fresh session (/new)",
+        ] {
+            assert!(REFUSAL_STANDING_NOTICE.contains(said), "{said:?} is in: {REFUSAL_STANDING_NOTICE}");
+        }
+        // It is not the notice of a first surfaced decline, and does not
+        // send the person to a `/compact` the ladder already made for them.
+        assert!(!REFUSAL_STANDING_NOTICE.contains("/compact"));
+        assert_ne!(REFUSAL_STANDING_NOTICE, REFUSAL_COMPACTED_RETRY_DECLINED);
     }
 }

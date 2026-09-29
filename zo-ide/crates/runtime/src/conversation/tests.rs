@@ -19719,6 +19719,11 @@ fn a_standing_decline_says_that_continue_alone_will_be_declined_again() {
         .iter()
         .find(|line| line.contains("will be declined again"))
         .unwrap_or_else(|| panic!("turn two says its words will be declined again: {lines:?}"));
+    assert_eq!(
+        words.as_str(),
+        core_types::retry_signal::REFUSAL_STANDING_NOTICE,
+        "the words are the retry table's, not a copy"
+    );
     for what_helps in ["narrow or rephrase", "/model", "fresh session"] {
         assert!(words.contains(what_helps), "{what_helps:?} is in: {words}");
     }
@@ -19822,8 +19827,393 @@ fn a_routed_category_walks_the_ladder_as_today_and_arms_the_cooldown() {
         "two consecutive routed turns arm the session cooldown"
     );
     assert!(
+        runtime.surfaced_decline.is_none(),
+        "a routed decline is not kept as one that stands"
+    );
+    assert!(
         second.len() >= first.len(),
         "the routed turn is not cut short: {first:?} then {second:?}"
     );
     let _ = fs::remove_dir_all(&cwd);
+}
+
+// The rule itself, at the decision: what a surfaced decline stands on.
+
+/// A runtime the ladder has nothing to fold on — a short conversation on Opus
+/// 5.5 — with `memory` as the decline its session kept.
+fn runtime_that_kept(
+    category: Option<&str>,
+    messages_from_now: isize,
+    compaction: Option<crate::turn_trace::RefusalCompaction>,
+) -> ConversationRuntime<NoopApiClient, StaticToolExecutor> {
+    let mut runtime = refusal_dry_test_runtime("claude-opus-5-5");
+    // Room to drift downwards from: the conversation holds thirty messages.
+    Arc::make_mut(&mut runtime.session.messages)
+        .extend((0..30).map(|n| ConversationMessage::user_text(format!("filler {n}"))));
+    // The public turn that follows the notice: what the person types.
+    begin_public_refusal_test_turn(&mut runtime, "continue");
+    let now = runtime.session.messages.len();
+    runtime.surfaced_decline = Some(super::fallback::SurfacedDecline {
+        session_id: runtime.session.session_id.clone(),
+        category: category.map(str::to_string),
+        messages: now.checked_add_signed(messages_from_now).expect("a message count"),
+        compaction,
+        renewed: false,
+    });
+    runtime
+}
+
+/// The compaction the ladder made for a decline that was surfaced anyway.
+fn a_compaction_that_did_not_clear_it() -> Option<crate::turn_trace::RefusalCompaction> {
+    Some(crate::turn_trace::RefusalCompaction {
+        removed_messages: 6,
+        tokens_before: 52_943,
+        tokens_after: 49_126,
+        resolved: false,
+    })
+}
+
+/// A decline the provider routes nowhere that the session kept — for the same
+/// category, in a conversation within the table's drift — is surfaced after the
+/// one request the turn made: the same-model retry is not asked again.
+#[test]
+fn a_surfaced_decline_stands_for_its_category_within_the_tables_drift() {
+    use super::fallback::STANDING_REFUSAL;
+    use super::RefusalDecision;
+    let drift = isize::try_from(STANDING_REFUSAL.message_drift).expect("a small number");
+
+    for (label, messages_from_now) in [
+        ("as it was", 0),
+        ("grown by one less than the drift", drift - 1),
+        ("cut down by one less than the drift", -(drift - 1)),
+    ] {
+        let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), messages_from_now, None);
+        assert!(
+            matches!(
+                runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
+                RefusalDecision::Standing
+            ),
+            "{label}: it stands"
+        );
+        assert!(
+            !runtime.refusal_same_model_retry_used,
+            "{label}: and no same-model retry was spent on it"
+        );
+    }
+
+    // A conversation that changed by the drift, either way, is not the one
+    // that was declined: the ladder starts from the same model once.
+    for (label, messages_from_now) in [("grown", drift), ("cut down", -drift)] {
+        let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), messages_from_now, None);
+        assert!(
+            matches!(
+                runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
+                RefusalDecision::RetrySameModel
+            ),
+            "{label} by the drift: the ladder runs as it always has"
+        );
+    }
+}
+
+/// What stood stands for one category, read as the catalog reads it: another
+/// category — or none — is another decline, and so is another session.
+#[test]
+fn a_surfaced_decline_stands_only_for_its_own_category_and_session() {
+    use super::RefusalDecision;
+
+    // Spelled by the classifier with a capital and a space: the same category.
+    let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), 0, None);
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("  Reasoning_Extraction ")),
+        RefusalDecision::Standing
+    ));
+
+    // A decline naming no category after one that named one, and the other way.
+    let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), 0, None);
+    assert!(matches!(
+        runtime.decide_refusal_fallback(None),
+        RefusalDecision::RetrySameModel
+    ));
+    let mut runtime = runtime_that_kept(None, 0, None);
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
+        RefusalDecision::RetrySameModel
+    ));
+    let mut runtime = runtime_that_kept(None, 0, None);
+    assert!(matches!(runtime.decide_refusal_fallback(None), RefusalDecision::Standing));
+
+    // Another session is another conversation, whatever its length.
+    let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), 0, None);
+    runtime.session.session_id = "another-session".to_string();
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
+        RefusalDecision::RetrySameModel
+    ));
+}
+
+/// A routed category is not this case, and is never kept as one: the provider
+/// sends it somewhere, so every turn walks to the route and counts toward the
+/// streak, exactly as before — whatever the session had kept.
+#[test]
+fn a_routed_category_is_never_kept_and_never_stands() {
+    use super::RefusalDecision;
+
+    let mut runtime = refusal_dry_test_runtime("claude-opus-5-5");
+    begin_public_refusal_test_turn(&mut runtime, "turn one");
+    decline_to_the_route(&mut runtime);
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::Surface
+    ));
+    runtime.settle_surfaced_refusal(Some("cyber"));
+    assert!(runtime.surfaced_decline.is_none(), "a routed decline is not kept");
+
+    // And a kept decline of the same category does not hold it back.
+    let mut runtime = runtime_that_kept(Some("cyber"), 0, None);
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::RetrySameModel
+    ));
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::Retry
+    ));
+    assert_eq!(runtime.effective_request_model(), Some(CYBER_ROUTE));
+}
+
+/// Whether the compaction cleared it decides whether the ladder folds again:
+/// one that did not is not made twice for a conversation that stayed as it
+/// was; a decline surfaced with nothing to fold has had no compaction, and the
+/// conversation may have become foldable since.
+#[test]
+fn a_compaction_a_decline_survived_is_not_made_twice_but_one_never_made_is() {
+    use super::RefusalDecision;
+
+    let long_runtime = |compaction| {
+        let mut runtime = refusal_dry_test_runtime("claude-opus-5-5");
+        runtime.session.messages = Arc::new(long_declined_conversation(false));
+        begin_public_refusal_test_turn(&mut runtime, "continue");
+        let now = runtime.session.messages.len();
+        runtime.surfaced_decline = Some(super::fallback::SurfacedDecline {
+            session_id: runtime.session.session_id.clone(),
+            category: Some(UNROUTED_CATEGORY.to_string()),
+            messages: now,
+            compaction,
+            renewed: false,
+        });
+        runtime
+    };
+
+    // The compaction was made, and the decline survived it: nothing is left.
+    let mut runtime = long_runtime(a_compaction_that_did_not_clear_it());
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
+        RefusalDecision::Standing
+    ));
+
+    // It never was: the same model is not asked again, but the conversation
+    // is folded once, and a decline after that is surfaced in the ordinary
+    // words — it did run a compaction, and must not say it did not.
+    let mut runtime = long_runtime(None);
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
+        RefusalDecision::RetryCompacted(_)
+    ));
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
+        RefusalDecision::Surface
+    ));
+}
+
+/// A surfaced decline lives on only while public turns keep surfacing it: a
+/// turn that ended any other way — answered — ended it; one that surfaced it
+/// again renewed it; a new model world and a conversation without its
+/// pictures are not the one that stood.
+#[test]
+fn a_surfaced_decline_ends_when_a_turn_does_not_surface_it_again() {
+    use super::RefusalDecision;
+
+    // Surfaced in turn one; turn two comes and is answered; turn three finds
+    // nothing kept.
+    let mut runtime = refusal_dry_test_runtime("claude-opus-5-5");
+    begin_public_refusal_test_turn(&mut runtime, "turn one");
+    assert!(matches!(
+        runtime.decide_refusal_fallback(None),
+        RefusalDecision::RetrySameModel
+    ));
+    assert!(matches!(runtime.decide_refusal_fallback(None), RefusalDecision::Surface));
+    runtime.settle_surfaced_refusal(None);
+    begin_public_refusal_test_turn(&mut runtime, "turn two");
+    assert!(runtime.surfaced_decline.is_some(), "the turn right after keeps it");
+    begin_public_refusal_test_turn(&mut runtime, "turn three");
+    assert!(runtime.surfaced_decline.is_none(), "turn two was not declined: it ended");
+
+    // Surfaced in turn one and again in turn two: kept for turn three, and
+    // turn three stands.
+    let mut runtime = refusal_dry_test_runtime("claude-opus-5-5");
+    begin_public_refusal_test_turn(&mut runtime, "turn one");
+    assert!(matches!(
+        runtime.decide_refusal_fallback(None),
+        RefusalDecision::RetrySameModel
+    ));
+    assert!(matches!(runtime.decide_refusal_fallback(None), RefusalDecision::Surface));
+    runtime.settle_surfaced_refusal(None);
+    begin_public_refusal_test_turn(&mut runtime, "turn two");
+    assert!(matches!(runtime.decide_refusal_fallback(None), RefusalDecision::Standing));
+    runtime.settle_surfaced_refusal(None);
+    begin_public_refusal_test_turn(&mut runtime, "turn three");
+    assert!(matches!(runtime.decide_refusal_fallback(None), RefusalDecision::Standing));
+
+    // Another model world answers its own refusals; the same value re-applied
+    // at a turn entry changes nothing.
+    let mut runtime = runtime_that_kept(None, 0, None);
+    runtime.set_context_model("claude-opus-5-5");
+    assert!(runtime.surfaced_decline.is_some(), "the model did not change");
+    runtime.set_context_model("claude-opus-5");
+    assert!(runtime.surfaced_decline.is_none(), "another model");
+
+    // The person let the declined pictures go: the classifier reads another
+    // conversation now.
+    let mut runtime = runtime_that_kept(None, 0, None);
+    Arc::make_mut(&mut runtime.session.messages).push(ConversationMessage::user_with_images(
+        "a screenshot",
+        vec![("image/png".to_string(), "c2NyZWVuc2hvdA==".to_string())],
+    ));
+    assert_eq!(runtime.withhold_declined_request_images(), 1);
+    assert!(runtime.surfaced_decline.is_none());
+}
+
+/// The classifier judges the person's new words: a standing decline asks once,
+/// and if that request is answered the turn goes on as any other — the words
+/// that got through are the way out the notice names.
+#[test]
+fn words_the_classifier_lets_through_after_a_standing_decline_go_through() {
+    let _todo_store = HermeticTodoStore::pin();
+    let cwd = temp_workspace("refusal-standing-lets-through");
+    fs::create_dir_all(&cwd).expect("cwd");
+    // Turn one: the request, the same-model retry and the retry after the
+    // compaction are declined; the fourth turn request is answered.
+    let provider = Arc::new(DecliningProvider::new(3).naming(UNROUTED_CATEGORY));
+    let mut runtime = declined_long_runtime(&provider, &cwd);
+
+    let (ended, _, _) = declined_turn(&mut runtime, DECLINED_LAST_WORDS);
+    ended.expect("turn one surfaces its decline");
+    let sent = provider.requests().len();
+
+    let (ended, blocks, _) = declined_turn(&mut runtime, "the same board, in the terms of a client brief");
+    let summary = ended.expect("turn two is answered");
+    assert_eq!(request_kinds(&provider, sent), vec![false], "one request, and it was answered");
+    let answer = summary
+        .assistant_messages
+        .last()
+        .and_then(|message| message.blocks.first())
+        .and_then(|block| match block {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        });
+    assert_eq!(answer.as_deref(), Some("here is a bolder board"));
+    let lines = system_lines(&blocks);
+    assert!(
+        !lines.iter().any(|line| line.contains("will be declined again")),
+        "an answered turn has nothing to say about a decline: {lines:?}"
+    );
+
+    // And the next turn finds nothing kept: a decline now is a new decline.
+    runtime.begin_turn_once("after the answer".to_string(), false).expect("a turn begins");
+    assert!(runtime.surfaced_decline.is_none());
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+/// The headless loop's provider: declines every turn request naming
+/// `category`, answers a compaction's summary, and keeps what it was sent.
+struct DecliningSyncClient {
+    category: Option<&'static str>,
+    requests: Arc<Mutex<Vec<ApiRequest>>>,
+}
+
+impl ApiClient for DecliningSyncClient {
+    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        let summary = is_summary_request(&request);
+        self.requests.lock().expect("requests").push(request);
+        if summary {
+            return Ok(vec![
+                AssistantEvent::TextDelta(
+                    "<summary>\n- Current state: redesigning the board.\n</summary>".to_string(),
+                ),
+                AssistantEvent::MessageStop,
+            ]);
+        }
+        let mut declined = vec![AssistantEvent::StopReason("refusal".to_string())];
+        if let Some(category) = self.category {
+            declined.push(AssistantEvent::RefusalCategory(category.to_string()));
+        }
+        declined.push(AssistantEvent::MessageStop);
+        Ok(declined)
+    }
+}
+
+/// The headless loop walks the same ladder and keeps the same memory: turn two
+/// of a `zo -p`-style session asks once, and the answer it records — the
+/// headless result — is the words of a standing decline.
+#[test]
+fn the_sync_loop_surfaces_a_standing_decline_at_once_too() {
+    let _todo_store = HermeticTodoStore::pin();
+    let cwd = temp_workspace("refusal-standing-sync");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        DecliningSyncClient {
+            category: Some(UNROUTED_CATEGORY),
+            requests: Arc::clone(&requests),
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    runtime.session.messages = Arc::new(long_declined_conversation(false));
+    runtime.set_context_model("claude-opus-5-5");
+    runtime.set_workspace_cwd(cwd.clone());
+    let kinds = |from: usize| -> Vec<bool> {
+        requests.lock().expect("requests")[from..].iter().map(is_summary_request).collect()
+    };
+    let last_text = |runtime: &ConversationRuntime<DecliningSyncClient, StaticToolExecutor>| {
+        runtime.session.messages.last().and_then(|message| match message.blocks.first() {
+            Some(ContentBlock::Text { text }) => Some(text.clone()),
+            _ => None,
+        })
+    };
+
+    runtime.run_turn(DECLINED_LAST_WORDS, None).expect("turn one surfaces its decline");
+    assert_eq!(kinds(0), vec![false, false, true, false]);
+    assert_eq!(
+        last_text(&runtime).as_deref(),
+        Some(super::fallback::REFUSAL_SURFACED_NOTICE),
+        "the first surfaced decline keeps the ordinary notice"
+    );
+    let sent = requests.lock().expect("requests").len();
+
+    runtime.run_turn(CONTINUE_WORDS, None).expect("turn two surfaces its decline");
+    assert_eq!(kinds(sent), vec![false], "asked once");
+    assert_eq!(
+        last_text(&runtime).as_deref(),
+        Some(core_types::retry_signal::REFUSAL_STANDING_NOTICE),
+        "and the headless result says that a bare continue will be declined again"
+    );
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+/// The words of a standing decline are written once, in `core-types`' retry
+/// table: nothing in the ladder's own files holds a copy of them.
+#[test]
+fn the_words_of_a_standing_decline_are_written_only_in_the_retry_table() {
+    for (file, source) in [
+        ("fallback.rs", include_str!("fallback.rs")),
+        ("mod.rs", include_str!("mod.rs")),
+        ("streaming_turn.rs", include_str!("streaming_turn.rs")),
+    ] {
+        for phrase in ["will be declined again", "narrow or rephrase", "a bare \"continue\""] {
+            assert!(!source.contains(phrase), "{file} holds {phrase:?}, which belongs to the retry table");
+        }
+    }
 }

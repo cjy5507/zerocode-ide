@@ -971,6 +971,7 @@ where
         // A new model world answers its own refusals: what the person agreed
         // to, and which category cooled the old one, were about that model.
         self.refusal_dry_category = None;
+        self.surfaced_decline = None;
         self.refusal_switch_consented_for_session = false;
         self.context_policy = ContextPolicy::for_model(Some(model))
             .with_full_compaction_override(self.full_compaction_override_percent);

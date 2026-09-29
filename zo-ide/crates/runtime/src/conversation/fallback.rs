@@ -32,6 +32,12 @@ fn refusal_route_for(model: &str, category: Option<&str>) -> Option<String> {
         .into_iter()
         .find(|candidate| api::detect_provider_kind(candidate) == provider && candidate != model)
 }
+
+/// A category as the catalog reads it — case and space aside — so two
+/// declines spelled differently by the classifier are the same category.
+fn refusal_category_key(category: Option<&str>) -> Option<String> {
+    category.map(|word| word.trim().to_ascii_lowercase())
+}
 /// The receipt for a turn the ladder moved off the chosen model — which model
 /// it left, which it continues on, why, and for how long. Wraps the shared
 /// vocabulary in [`core_types::retry_signal`] so every notice lives in one place.
@@ -132,6 +138,56 @@ const REFUSAL_DRY_TURN_THRESHOLD: u8 = 2;
 /// request per turn in a long classifier-sticky session while still probing
 /// Fable again automatically. Process memory only, like the quota cooldown.
 const REFUSAL_DRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// A decline surfaced with nowhere to go (t-15890), and what the session keeps
+/// of it so that the same decline coming back on the next turn is not walked
+/// from the first rung again.
+///
+/// 09-29 22:57: Opus 5.5 declined a long conversation in a category the
+/// provider routes nowhere. The ladder spent itself — the same model once, one
+/// compaction (369 messages folded), one retry after it — and surfaced the
+/// decline. The person typed 「계속」 and it ran again from the start, down to
+/// a second compaction of the conversation it had just compacted (6 messages
+/// folded, 52.9k → 49.1k tokens). Nothing but the person's words differed
+/// between the two turns, and those go out in the first request of the next
+/// turn — the classifier itself says whether they changed the request — so
+/// this keeps only which decline stood, on which conversation, and what the
+/// ladder had already done to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SurfacedDecline {
+    /// The session it stood in: a new or a resumed session is another
+    /// conversation.
+    pub(super) session_id: String,
+    /// The category the classifier named, as [`refusal_category_key`] reads it;
+    /// `None` when it named none.
+    pub(super) category: Option<String>,
+    /// How many messages the conversation held when the decline was surfaced —
+    /// after the compaction the ladder made for it, if it made one.
+    pub(super) messages: usize,
+    /// The compaction the ladder made for this decline, and whether it cleared
+    /// it: a decline that was surfaced was not cleared, so `resolved` reads
+    /// `false`. `None` when the conversation was too short to fold.
+    pub(super) compaction: Option<crate::turn_trace::RefusalCompaction>,
+    /// Whether the latest public turn surfaced it (again): a public turn that
+    /// ended any other way ended what stood.
+    pub(super) renewed: bool,
+}
+
+/// When a surfaced decline still stands — the one table of the rule
+/// (t-15890).
+pub(super) struct StandingRule {
+    /// Twelve: four turns of nothing but `continue`, which add about three
+    /// messages each (the person's words, a reminder, the notice: turn 8 to 9
+    /// of the 09-29 record). The conversation may hold that many messages more,
+    /// or fewer, than when the decline was surfaced and still be the one that
+    /// was declined; beyond it is work the classifier has not read, or a
+    /// conversation cut down since (`/compact`, a rewind), and the ladder runs
+    /// as it always has.
+    pub(super) message_drift: usize,
+}
+
+/// The rule for a [`SurfacedDecline`].
+pub(super) const STANDING_REFUSAL: StandingRule = StandingRule { message_drift: 12 };
 
 /// Session-scoped cooldown applied after a quota fallback fires when the
 /// provider gave no `retry_after` hint. Fifteen minutes: long enough to ride
@@ -320,14 +376,41 @@ pub(super) enum RefusalDecision {
     Ask { to: String },
     /// Cannot retry (every avenue spent). Surface a notice and end the turn.
     Surface,
+    /// Surface it — a decline this conversation already had surfaced has come
+    /// back and the ladder has nothing new to try (t-15890): the category is
+    /// routed nowhere, every automatic step was spent on it last turn, and the
+    /// conversation has not changed materially since. The turn asked once —
+    /// the person's words as they wrote them — so the same-model retry and the
+    /// compaction are not run a second time; the notice says what the person's
+    /// next `continue` will meet.
+    Standing,
+}
+
+/// The words a surfaced decline is told in: the ordinary notice, or — when the
+/// decline is one this conversation already had surfaced and the ladder found
+/// nothing new to try (`standing`, t-15890) — the words that say what the
+/// person's next `continue` will meet. One choice for the screen, the recorded
+/// message and the headless result, so they cannot drift apart.
+pub(super) fn surfaced_refusal_notice(standing: bool) -> &'static str {
+    if standing {
+        core_types::retry_signal::REFUSAL_STANDING_NOTICE
+    } else {
+        REFUSAL_SURFACED_NOTICE
+    }
+}
+
+/// Whether `text` is one of the notices a surfaced decline is recorded as —
+/// what marks an exchange in history as a declined one.
+fn is_surfaced_refusal_notice(text: &str) -> bool {
+    text == REFUSAL_SURFACED_NOTICE || text == core_types::retry_signal::REFUSAL_STANDING_NOTICE
 }
 
 /// The synthetic assistant message recorded when a refusal is surfaced (rather
 /// than retried), so the turn is well-formed — a user turn is never left with no
 /// assistant response — and the notice is visible on the headless path.
-pub(super) fn refusal_surfaced_message() -> ConversationMessage {
+pub(super) fn refusal_surfaced_message(standing: bool) -> ConversationMessage {
     ConversationMessage::assistant(vec![ContentBlock::Text {
-        text: REFUSAL_SURFACED_NOTICE.to_string(),
+        text: surfaced_refusal_notice(standing).to_string(),
     }])
 }
 /// Drive an [`AsyncApiClient`] to completion from a synchronous context and
@@ -674,7 +757,18 @@ where
     ///    when the category routes to it → [`RefusalDecision::CrossProvider`].
     /// 4. [`RefusalRung::Cleaned`] — a routed category with an earlier declined
     ///    exchange still in history → [`RefusalDecision::RetryCleaned`].
-    /// 5. Everything spent, or a category routed nowhere → [`RefusalDecision::Surface`].
+    /// 5. [`RefusalRung::Compacted`] — the conversation folded and the same
+    ///    model asked once more → [`RefusalDecision::RetryCompacted`].
+    /// 6. Everything spent, or a category routed nowhere → [`RefusalDecision::Surface`].
+    ///
+    /// A decline the provider routes nowhere that this conversation already had
+    /// surfaced — the same category, the conversation within [`STANDING_REFUSAL`]
+    /// of what it was — is not walked from the first rung again (t-15890): rungs
+    /// 1 and 5 are the ones it already lost, and after the one request the turn
+    /// made the answer is [`RefusalDecision::Standing`]. Whether the same-model
+    /// retry pays after a surfaced decline is not in this machine's records
+    /// (only the compaction's outcome is, two declined of two), so it is not
+    /// kept.
     ///
     /// Anthropic-only: a non-Anthropic active model (including a refusal already
     /// handed to a cross-provider client) yields [`RefusalDecision::Proceed`] so
@@ -689,11 +783,28 @@ where
             return RefusalDecision::Proceed;
         }
         let routes = api::refusal_route_candidates(&model, category);
+        // A decline the provider routes nowhere that this conversation had
+        // surfaced on an earlier turn, and that nothing about it has changed
+        // since: the rungs it already lost are not walked again — the same
+        // model once, and the compaction it survived. The first request of the
+        // turn has gone out with the person's words as written; that is the
+        // one the classifier judges anew.
+        let (stands, compaction_spent) = match routes
+            .is_empty()
+            .then(|| self.standing_decline(category))
+            .flatten()
+        {
+            Some(declined) => (
+                true,
+                declined.compaction.is_some_and(|compaction| !compaction.resolved),
+            ),
+            None => (false, false),
+        };
         for rung in REFUSAL_LADDER {
             let fresh = self.refusal_fallback_model.is_none() && !self.cross_fallback_active();
             match rung {
                 RefusalRung::SameModel => {
-                    if fresh && !self.refusal_same_model_retry_used {
+                    if fresh && !self.refusal_same_model_retry_used && !stands {
                         self.refusal_same_model_retry_used = true;
                         return RefusalDecision::RetrySameModel;
                     }
@@ -756,7 +867,7 @@ where
                     }
                 }
                 RefusalRung::Compacted => {
-                    if !self.refusal_compaction_used {
+                    if !self.refusal_compaction_used && !compaction_spent {
                         if let Some(config) = self.compaction_config_if_possible() {
                             self.refusal_compaction_used = true;
                             return RefusalDecision::RetryCompacted(config);
@@ -765,7 +876,11 @@ where
                 }
             }
         }
-        RefusalDecision::Surface
+        if stands && !self.refusal_same_model_retry_used && !self.refusal_compaction_used {
+            RefusalDecision::Standing
+        } else {
+            RefusalDecision::Surface
+        }
     }
 
     /// Whether a rung may leave the model the person chose (t-6747): never
@@ -874,6 +989,9 @@ where
         }
         if withheld > 0 {
             self.session.mark_transcript_dirty();
+            // The classifier reads another conversation now: what stood for
+            // the one with the pictures does not stand for it (t-15890).
+            self.surfaced_decline = None;
         }
         withheld
     }
@@ -894,7 +1012,7 @@ where
     /// stand beside it: a compacted retry this turn made was declined too —
     /// its turn record says so — and the pictures still in the conversation
     /// ride every request, which is what a person can do something about.
-    pub(super) fn settle_surfaced_refusal(&mut self) -> Vec<String> {
+    pub(super) fn settle_surfaced_refusal(&mut self, category: Option<&str>) -> Vec<String> {
         let mut lines = Vec::new();
         if let Some(compaction) = self.refusal_compaction.as_mut() {
             compaction.resolved = false;
@@ -904,7 +1022,37 @@ where
         if pictures > 0 {
             lines.push(core_types::retry_signal::refusal_pictures_ride_notice(pictures));
         }
+        self.remember_surfaced_decline(category);
         lines
+    }
+
+    /// Keep what a decline surfaced with nowhere to go leaves behind
+    /// (t-15890), for the next turn to find — or forget the last one when this
+    /// decline has somewhere to go. The provider's answer decides which: a
+    /// category it routes to some model is walked to its route each turn and
+    /// counted by the streak, exactly as before.
+    fn remember_surfaced_decline(&mut self, category: Option<&str>) {
+        let unrouted = self
+            .effective_request_model()
+            .is_some_and(|model| api::refusal_route_candidates(model, category).is_empty());
+        self.surfaced_decline = unrouted.then(|| SurfacedDecline {
+            session_id: self.session.session_id.clone(),
+            category: refusal_category_key(category),
+            messages: self.session.messages.len(),
+            compaction: self.refusal_compaction,
+            renewed: true,
+        });
+    }
+
+    /// The surfaced decline that still stands for `category` on this
+    /// conversation, if the session kept one: the same session, the same
+    /// category, and a conversation within [`STANDING_REFUSAL`] of the one that
+    /// was declined.
+    fn standing_decline(&self, category: Option<&str>) -> Option<&SurfacedDecline> {
+        let declined = self.surfaced_decline.as_ref()?;
+        let unchanged = declined.session_id == self.session.session_id
+            && self.session.messages.len().abs_diff(declined.messages) < STANDING_REFUSAL.message_drift;
+        (unchanged && declined.category == refusal_category_key(category)).then_some(declined)
     }
 
     /// Fold this refused public turn into the consecutive-refusal streak and,
@@ -946,7 +1094,7 @@ where
         messages.iter().enumerate().rev().find_map(|(idx, message)| {
             let is_surfaced = message.role == crate::session::MessageRole::Assistant
                 && message.blocks.iter().any(|block| {
-                    matches!(block, ContentBlock::Text { text } if text == REFUSAL_SURFACED_NOTICE)
+                    matches!(block, ContentBlock::Text { text } if is_surfaced_refusal_notice(text))
                 });
             (is_surfaced
                 && idx > 0
@@ -982,6 +1130,13 @@ where
             self.refusal_consecutive_turns = 0;
         }
         self.refusal_turn_hit = false;
+        // What a surfaced decline left standing lives on only while the public
+        // turns keep surfacing it: one that ended any other way — answered,
+        // cut short — ended it (t-15890).
+        match self.surfaced_decline.as_mut() {
+            Some(declined) if declined.renewed => declined.renewed = false,
+            _ => self.surfaced_decline = None,
+        }
     }
 
     /// Turn-start refusal-cooldown management, called after the ordinary
