@@ -3822,6 +3822,25 @@ fn pane_turns() -> &'static Mutex<std::collections::HashMap<u32, PaneTurn>> {
     TURNS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+/// When each pane's LEAD came to rest, and whether a person's interrupt
+/// ended that turn, for as long as it stays there (t-15313) — on the pane's
+/// own clock.
+///
+/// Beside [`pane_turns`] rather than inside [`PaneTurn::Ended`], whose shape a
+/// restart's note keeps on disk. Written by every rest — the one a finished
+/// turn reports and the one a `Stop` held back by work the lead left running
+/// reports ([`pane_lead_rested`]) — and struck by the next turn's first word
+/// and by the terminal going. The beat reads it to tell the ledger which
+/// leads are at rest ([`notify_idle_workers`]); nothing that ends, releases
+/// or cleans up a worker reads it, because a lead at rest beside a running
+/// build is not a finished worker (t-11233).
+type PaneRests = std::collections::HashMap<u32, (i64, bool)>;
+
+fn pane_rests() -> &'static Mutex<PaneRests> {
+    static RESTS: OnceLock<Mutex<PaneRests>> = OnceLock::new();
+    RESTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 /// How many waits of one kind each `(run, address)` has out right now.
 type AddressCounts = Mutex<std::collections::HashMap<(String, String), usize>>;
 
@@ -4476,6 +4495,39 @@ fn garnish_agent_wait(verb: Option<&str>, reply: &mut zerocode_hookd::TeamAnswer
     reply.stdout = format!("{answer}\n");
 }
 
+/// Lay `idleSinceMs` over a worker-observation answer (t-15313): when the
+/// worker's lead came to rest, or `null` while it is at work — the pane's
+/// fact ([`pane_rests`]), beside the `unreadMail` the ledger answered. The
+/// two together are the idle notice's facts, readable before any notice
+/// is due; a worker whose pane has no terminal here is left without the
+/// field, because nothing here measured it.
+fn garnish_idle_since(verb: Option<&str>, reply: &mut zerocode_hookd::TeamAnswer) {
+    if reply.exit_code != 0 || !matches!(verb, Some("worker-show") | Some("worker-list")) {
+        return;
+    }
+    let Ok(mut answer) = serde_json::from_str::<serde_json::Value>(&reply.stdout) else {
+        return;
+    };
+    let rests = pane_rests()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clone();
+    let garnish = |worker: &mut serde_json::Value| {
+        let Some(term) = worker["term"]
+            .as_u64()
+            .and_then(|term| u32::try_from(term).ok())
+        else {
+            return;
+        };
+        worker["idleSinceMs"] = serde_json::json!(rests.get(&term).map(|(since, _)| since));
+    };
+    match answer["workers"].as_array_mut() {
+        Some(workers) => workers.iter_mut().for_each(garnish),
+        None => garnish(&mut answer),
+    }
+    reply.stdout = format!("{answer}\n");
+}
+
 /// Terminals already reported taken, so the hot key path pays one set probe
 /// after the first report instead of an actor round trip per keystroke.
 /// Cleared with the terminal (`agent_teams::forget_term` calls back here):
@@ -4975,6 +5027,10 @@ pub(crate) fn pane_turn_began(term: u32, began_ms: i64) {
                 heard: crate::standing_clock::now(),
             },
         );
+    pane_rests()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .remove(&term);
     // A hold on the pane's own question stands: the wait is this window's
     // fact, and a report from inside the same turn does not end it.
     pointed()
@@ -5005,6 +5061,16 @@ pub(crate) fn pane_lead_rested(term: u32, turn_ended_ms: i64, interrupted: bool)
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .insert(term, PaneTurn::Ended { interrupted });
+    /* The rest the beat reports to the ledger (t-15313) — both rests,
+     * because a lead back at its prompt beside its own `check --wait` loop
+     * is exactly the worker nobody was told about on 2026-09-29. A turn the
+     * person cut short is kept too, and marked: it is theirs, and it counts
+     * only for a worker they have taken over, whose unread mail nothing
+     * else will ever tell. */
+    pane_rests()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(term, (turn_ended_ms, interrupted));
 }
 
 /// A pane's turn ended. Tell the ledger, in case that pane is a worker's.
@@ -5178,6 +5244,10 @@ pub(crate) fn terminal_gone_with_archive(term: u32, screen: Option<String>, now_
      * this number is a different terminal that has said nothing yet, and
      * absence is exactly how [`pane_turns`] spells that. */
     pane_turns()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .remove(&term);
+    pane_rests()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .remove(&term);
@@ -5436,6 +5506,88 @@ struct Stalled {
 /// the quota wall? Two witnesses (the agent's words, the provider's number)
 /// make it `quota_walled` news instead of a `went_quiet` one; anything less
 /// is the silence it always was.
+/// Hand the ledger every worker this window seats whose LEAD is at rest,
+/// and whether it sleeps in its own `check --wait` (t-15313).
+///
+/// The stall sweep cannot see these: it trusts a hook that says `working`,
+/// and a lead that ended its turn beside work it left running says exactly
+/// that for as long as the work runs (t-11233). On 2026-09-29 that work was
+/// the worker's own wait for its coordinator's go-ahead — already in its
+/// inbox — and nobody was told for seven minutes. The rest is the window's
+/// fact ([`pane_rests`]) and the wait is the window's too
+/// ([`address_waiters`]); the mail, the episode and whether any of it is
+/// news are the ledger's, so this hands both facts over and decides
+/// nothing. Asked every beat and answered once per episode; a notice and
+/// nothing else — idle is not done.
+fn notify_idle_workers(now_ms: i64) {
+    let Some(held) = runtime() else {
+        return;
+    };
+    let Ok(image) = held.actor.view() else {
+        return;
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return;
+    };
+    let teams = crate::agent_teams::teams();
+    let seats = index_team_seats(&teams);
+    drop(teams);
+    let rests: PaneRests = pane_rests()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clone();
+    let waiting: std::collections::HashSet<(String, String)> = address_waiters()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .keys()
+        .cloned()
+        .collect();
+    let idle: Vec<zerocode_core::orchestration::IdleWorker> = ledger
+        .runs()
+        .iter()
+        .flat_map(|run| {
+            run.workers.iter().filter_map(|worker| {
+                if !worker.state.is_live() || !worker.state.may_occupy_pane() {
+                    return None;
+                }
+                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+                if !dispatch.is_open()
+                    || run
+                        .worker_in_pane(&worker.team, &worker.pane)
+                        .is_none_or(|current| current.id != worker.id)
+                {
+                    return None;
+                }
+                let term = seats
+                    .get(worker.team.as_str())?
+                    .get(worker.pane.as_str())
+                    .copied()?;
+                // A person's interrupt is their hand on the pane: a rest
+                // only for a worker they have taken over (its unread mail
+                // is told, and nothing is typed there), never news about a
+                // worker at work on its own.
+                let (rested_ms, interrupted) = *rests.get(&term)?;
+                if interrupted && !worker.taken_over {
+                    return None;
+                }
+                let address = zerocode_core::orchestration::worker_address(&worker.id);
+                Some(zerocode_core::orchestration::IdleWorker {
+                    worker: worker.id.clone(),
+                    rested_ms,
+                    waiting_on_mail: waiting.contains(&(run.id.clone(), address)),
+                })
+            })
+        })
+        .collect();
+    drop(ledger);
+    drop(image);
+    for workers in idle.chunks(zerocode_core::orchestration::MAX_LIST) {
+        if let Ok((told, _)) = held.actor.idle_sweep(workers.to_vec(), now_ms) {
+            rang(told);
+        }
+    }
+}
+
 fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
     let Some(held) = runtime() else {
         return;
@@ -6397,8 +6549,11 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // sweep below reads their rows (t-4537).
     settle_resumes(now_ms);
     // A turn ending is only a row. The existing beat revisits it after the
-    // grace interval and is the sole producer of quiet notifications.
+    // grace interval, and the stall sweep and the idle sweep beside it are
+    // the only producers of quiet notifications — one per episode between
+    // them.
     notify_stalled_workers(host, now_ms);
+    notify_idle_workers(now_ms);
     // The letters the coordinators this window seats can still be handed are
     // put to the mail triage, and what they did next is written as its
     // labels — recorded only, on a ledger that moved (t-9471).
@@ -6828,12 +6983,20 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                 if waiting.contains(&key) {
                     continue;
                 }
-                /* The watermark before the walk. `newest_pending` is a lookup
-                 * and `pointer_wanted` walks the whole run's mail, so an
+                /* The watermark before the walk. `newest_unread` is a lookup
+                 * and `unread_wanted` walks the whole run's mail, so an
                  * unattended pane already named for this mail turns back
                  * here — one walk per message rather than one per beat, which
-                 * is the cost that walk was written to avoid. */
-                let Some(newest) = run.newest_pending(&address).map(str::to_owned) else {
+                 * is the cost that walk was written to avoid.
+                 *
+                 * UNREAD, not pending, because this pane's turn is over
+                 * (t-15313): a batch it was handed and never acknowledged is
+                 * mail its model may never have seen — a `check --ack <d>
+                 * >/dev/null` leases the next batch into /dev/null — and its
+                 * next `check` replays it. The running branch above still
+                 * counts only the queue: mid-turn the holder may be reading
+                 * that batch right now. */
+                let Some(newest) = run.newest_unread(&address).map(str::to_owned) else {
                     marks.remove(&key);
                     continue;
                 };
@@ -6907,7 +7070,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     );
                     continue;
                 }
-                let Some(count) = run.pointer_wanted(&address, Some(&seat)) else {
+                let Some(count) = run.unread_wanted(&address, Some(&seat)) else {
                     marks.remove(&key);
                     continue;
                 };
@@ -8328,6 +8491,7 @@ fn run_seated(
     // carries.
     garnish_seats(host, argv.first().map(String::as_str), &mut answered);
     garnish_agent_wait(argv.first().map(String::as_str), &mut answered);
+    garnish_idle_since(argv.first().map(String::as_str), &mut answered);
     garnish_federation_help(argv.first().map(String::as_str), &mut answered);
     garnish_artifacts(argv.first().map(String::as_str), &mut answered);
     note_worker_report(argv, team_id, pane, &answered, now_ms);

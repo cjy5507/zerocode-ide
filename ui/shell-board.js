@@ -412,6 +412,8 @@ const DESK_QUIET_REASONS = Object.freeze({
   pane_missing: { key: "board.desk.quietPaneMissing", word: "판이 보이지 않음" },
   never_spoke: { key: "board.desk.quietNeverSpoke", word: "한 번도 보고하지 않음" },
   judged: { key: "board.desk.quietJudged", word: "멈춘 까닭을 따로 판정함" },
+  unread_mail: { key: "board.desk.quietUnreadMail", word: "안 읽은 편지를 둔 채 쉬고 있음" },
+  waiting_on_mail: { key: "board.desk.quietWaitingOnMail", word: "제 check --wait에서 편지를 기다리며 쉬고 있음" },
 });
 
 /* 받은편지함의 세 상태: 행의 첫 줄에 서는 짧은 낱말과, 그 낱말의 팁이 되는 문장. */
