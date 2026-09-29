@@ -79,18 +79,26 @@ pub const FILE_PICK_ABOUT_SCAN_LINES: usize = 40;
 pub const FILE_PICK_SEARCH_STOP_WORDS: &[&str] = &[
     "about",
     "after",
+    "and",
+    "are",
     "before",
     "bug",
+    "but",
+    "can",
     "code",
     "codebase",
     "could",
     "error",
     "file",
     "files",
+    "for",
     "from",
     "have",
+    "how",
     "into",
     "issue",
+    "its",
+    "not",
     "path",
     "paths",
     "please",
@@ -101,6 +109,10 @@ pub const FILE_PICK_SEARCH_STOP_WORDS: &[&str] = &[
     "src",
     "task",
     "that",
+    "the",
+    "then",
+    "there",
+    "they",
     "this",
     "want",
     "what",
@@ -109,6 +121,8 @@ pub const FILE_PICK_SEARCH_STOP_WORDS: &[&str] = &[
     "which",
     "with",
     "would",
+    "you",
+    "your",
 ];
 /// What a label says it was settled by, and why one carries no mark.
 pub const FILE_PICK_LABEL_HINDSIGHT: &str = "edited_files";
@@ -405,28 +419,53 @@ pub struct CandidateBatch {
     pub graph_candidates: usize,
 }
 
-/// The words of a request a search looks for: each word of at least
-/// [`FILE_PICK_SEARCH_TERM_CHARS`], neither an intent word nor a stop word,
-/// once, at most [`FILE_PICK_SEARCH_TERM_CAP`] of them.
+/// The words of a request a search looks for: of the task's own words
+/// (`task_words`), each word of at least [`FILE_PICK_SEARCH_TERM_CHARS`],
+/// neither an intent word nor a stop word, once — the ones that look like
+/// code first (`looks_like_code`), each kind in the order it came — at most
+/// [`FILE_PICK_SEARCH_TERM_CAP`] of them.
 #[must_use]
 pub fn search_terms(request: &str) -> Vec<String> {
-    let mut terms = Vec::new();
-    for word in request.split(|character: char| !(character.is_alphanumeric() || character == '_'))
-    {
+    let words = task_words(request);
+    let (mut coded, mut plain) = (Vec::new(), Vec::new());
+    for word in words.split(|character: char| !(character.is_alphanumeric() || character == '_')) {
         let normalized = word.to_lowercase();
         if normalized.chars().count() < FILE_PICK_SEARCH_TERM_CHARS
             || is_code_edit_intent(&normalized)
             || FILE_PICK_SEARCH_STOP_WORDS.contains(&normalized.as_str())
-            || terms.iter().any(|known| known == &normalized)
+            || coded.iter().chain(&plain).any(|known| known == &normalized)
         {
             continue;
         }
-        terms.push(normalized);
-        if terms.len() == FILE_PICK_SEARCH_TERM_CAP {
-            break;
+        if looks_like_code(word) {
+            coded.push(normalized);
+        } else {
+            plain.push(normalized);
         }
     }
-    terms
+    coded
+        .into_iter()
+        .chain(plain)
+        .take(FILE_PICK_SEARCH_TERM_CAP)
+        .collect()
+}
+
+/// The words of a request that are the task's own (t-14869): the frame a CLI
+/// puts around a pasted block dropped ([`crate::transcript::without_pasted_frames`]),
+/// and — in a worker's prompt — only what follows the window's briefing
+/// ([`crate::orchestration::BRIEFING_HANDS_OVER`]), whose words are the same
+/// in every prompt.
+fn task_words(request: &str) -> String {
+    let unframed = crate::transcript::without_pasted_frames(request);
+    unframed
+        .split_once(crate::orchestration::BRIEFING_HANDS_OVER)
+        .map_or_else(|| unframed.to_string(), |(_, task)| task.to_string())
+}
+
+/// Whether a word looks like a name in code: it joins words with `_`, or has
+/// a capital past its first letter.
+fn looks_like_code(word: &str) -> bool {
+    word.contains('_') || word.chars().skip(1).any(char::is_uppercase)
 }
 
 /// Every source's paths taken in turn — the first of each, then the second

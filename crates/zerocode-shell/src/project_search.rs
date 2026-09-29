@@ -136,6 +136,77 @@ pub(crate) fn search(
     Ok(hits)
 }
 
+/// Project-relative files that name any of `terms` — in their text or their
+/// path, case aside — each once, the ones that name more of them first, then
+/// in the order the walk met them, at most `cap` (t-14869). A file is read
+/// until it has named every term, never counted by its lines: one file that
+/// names a term on every line does not crowd out the rest. Under the
+/// search's own deadline, past which it answers what it found.
+pub(crate) fn files_naming(
+    root: &Path,
+    terms: &[String],
+    cap: usize,
+    policy: &ExplorerPolicy,
+) -> Vec<String> {
+    let alternatives: Vec<String> = terms
+        .iter()
+        .filter(|term| !term.is_empty())
+        .map(|term| regex::escape(term))
+        .collect();
+    if alternatives.is_empty() {
+        return Vec::new();
+    }
+    let Ok(matcher) = RegexBuilder::new(&alternatives.join("|"))
+        .case_insensitive(true)
+        .size_limit(policy.regex_size_limit)
+        .build()
+    else {
+        return Vec::new();
+    };
+    let deadline = Instant::now() + Duration::from_millis(policy.search_timeout_ms);
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for entry in project_files(root, Some(deadline)) {
+        if check_deadline(Some(deadline)).is_err() {
+            break;
+        }
+        if entry
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(u64::MAX)
+            > policy.max_file_bytes
+        {
+            continue;
+        }
+        let Some(relative) = relative_path(root, entry.path()) else {
+            continue;
+        };
+        let Ok(contents) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        if contents.contains('\0') {
+            continue;
+        }
+        let mut named: Vec<String> = Vec::new();
+        for text in [relative.as_str(), contents.as_str()] {
+            for hit in matcher.find_iter(text) {
+                let word = hit.as_str().to_lowercase();
+                if !named.contains(&word) {
+                    named.push(word);
+                }
+                if named.len() == alternatives.len() {
+                    break;
+                }
+            }
+        }
+        if !named.is_empty() {
+            found.push((named.len(), relative));
+        }
+    }
+    // A stable sort keeps the walk's order among files that name as many.
+    found.sort_by_key(|(named, _)| std::cmp::Reverse(*named));
+    found.into_iter().take(cap).map(|(_, path)| path).collect()
+}
+
 fn check_deadline(deadline: Option<Instant>) -> Result<(), String> {
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         Err("file.searchTimeout".into())
