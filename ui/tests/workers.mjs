@@ -2347,6 +2347,29 @@ async function testHelperPage(page, ok) {
     seen.lastChildIsFoot = p.foot !== null && p.host?.lastElementChild === p.foot;
     seen.says = words(p.foot?.querySelector(".helper-foot-says"));
     seen.buttons = [...(p.foot?.querySelectorAll("button") ?? [])].map((one) => words(one));
+    // A place for the road a catalog row may name one day (t-16031 gives zo one):
+    // one group of controls in the footer, its first the speaking button, and a
+    // second control laid in beside it sits on the same row, clear of it.
+    const group = p.foot?.querySelector(".helper-foot-actions") ?? null;
+    const speaking = p.foot?.querySelector(".helper-foot-speak") ?? null;
+    seen.place = {
+      stands: group !== null && group.parentElement === p.foot,
+      holds: group !== null && speaking !== null && speaking.parentElement === group,
+      flex: group !== null && getComputedStyle(group).display === "flex",
+      beside: false,
+    };
+    if (group && speaking) {
+      const spare = document.createElement("button");
+      spare.type = "button";
+      spare.className = speaking.className;
+      spare.textContent = speaking.textContent;
+      group.appendChild(spare);
+      const first = speaking.getBoundingClientRect();
+      const second = spare.getBoundingClientRect();
+      seen.place.beside = Math.abs(first.top - second.top) <= 2 && second.left >= first.right - 1 &&
+        group.getBoundingClientRect().right <= p.foot.getBoundingClientRect().right + 1;
+      spare.remove();
+    }
     seen.composerParts = p.host?.querySelectorAll(
       ".chat-dock, .worker-composer, .worker-composer-box, textarea, .worker-composer-door, button.worker-where, .worker-composer-agent, .worker-composer-mode",
     ).length ?? null;
@@ -2379,10 +2402,11 @@ async function testHelperPage(page, ok) {
     return seen;
   });
   ok(
-    "the footer stands where the composer stood, says which conversation directs the helper, holds one button that speaks to that parent, and nothing on the page reads the parent's model or offers a stop",
+    "the footer stands where the composer stood, says which conversation directs the helper, holds one button that speaks to that parent in a group with room beside it for one more, and nothing on the page reads the parent's model or offers a stop",
     footer.lastChildIsFoot === true &&
       footer.says.includes(footer.parentLabel) &&
       footer.buttons.length === 1 && footer.buttons[0].length > 0 &&
+      footer.place.stands && footer.place.holds && footer.place.flex && footer.place.beside &&
       footer.composerParts === 0 &&
       footer.parentModelShown === false &&
       footer.stopWords === false,
@@ -2429,10 +2453,13 @@ async function testHelperPage(page, ok) {
     const at = await scene([]);
     const shape = (root) => root === null ? null : [root, ...root.querySelectorAll("*")]
       .map((node) => `${node.tagName.toLowerCase()}.${[...node.classList].sort().join(".")}`).join(" ");
-    const seen = { shapes: {}, marks: {}, voice: {}, labels: {}, names: {}, footButtons: {}, stopLike: {}, composerParts: {} };
+    const seen = { shapes: {}, marks: {}, voice: {}, labels: {}, names: {}, footButtons: {}, stopLike: {}, composerParts: {}, withRoad: [] };
     for (const id of ids) {
       const sub = { id: `h-${id}`, name: "@one", state: "running", model: "model-s", requestedModel: "sonnet", tool_calls: 2 };
       const p = await open(at, sub, { agent: id, brief });
+      // A catalog row that names a road to stop one helper (`helper_stop`) is the one
+      // case where a stop button may stand; this page draws none, and says so below.
+      if (installedAgents().find((row) => row.id === id)?.helper_stop) seen.withRoad.push(id);
       seen.shapes[id] = ["head", "card", "foot"].map((key) => shape(p[key])).join(" | ");
       const mark = p.head?.querySelector(".worker-mark") ?? null;
       seen.marks[id] = mark?.textContent ?? null;
@@ -2462,12 +2489,12 @@ async function testHelperPage(page, ok) {
     JSON.stringify({ agents: Object.keys(everyAgent.shapes).length, distinct: distinctShapes.size, wornOff, first: [...distinctShapes][0]?.slice(0, 240) }),
   );
   ok(
-    "no agent in the catalog has a road to stop one helper, so no agent's page has a stop button: the footer holds the one speaking button, and nothing else on the page reads as a stop or wears a composer",
+    "an agent whose catalog row names no road to stop one helper has no stop button on its helper's page: the footer holds the one speaking button, and nothing else on the page reads as a stop or wears a composer",
     Object.keys(everyAgent.footButtons).length === catalogIds.length + 1 &&
-      Object.values(everyAgent.footButtons).every((count) => count === 1) &&
-      Object.values(everyAgent.stopLike).every((count) => count === 0) &&
+      Object.entries(everyAgent.footButtons).every(([id, count]) => everyAgent.withRoad.includes(id) || count === 1) &&
+      Object.entries(everyAgent.stopLike).every(([id, count]) => everyAgent.withRoad.includes(id) || count === 0) &&
       Object.values(everyAgent.composerParts).every((count) => count === 0),
-    JSON.stringify({ footButtons: everyAgent.footButtons, stopLike: everyAgent.stopLike }).slice(0, 600),
+    JSON.stringify({ withRoad: everyAgent.withRoad, footButtons: everyAgent.footButtons, stopLike: everyAgent.stopLike }).slice(0, 600),
   );
   const bodyOf = (name) => {
     const start = shellSource.search(new RegExp(`^(?:async )?function ${name}\\(`, "m"));
