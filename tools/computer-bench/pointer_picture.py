@@ -13,11 +13,13 @@ POINTER_PICTURE_MAX_SIDE_PT = 160
 
 def is_pointer_picture(row):
     """Whether a listed window row is the pointer's own picture."""
-    return False
+    return (row.get("layer") == CURSOR_WINDOW_LAYER and (row.get("app") or {}).get("name") == WINDOW_SERVER_OWNER
+            and row["width"] <= POINTER_PICTURE_MAX_SIDE_PT and row["height"] <= POINTER_PICTURE_MAX_SIDE_PT)
 
 
 def front_at(windows, x, y):
     """The window a press at (x, y) lands on: the frontmost that is seen,
-    not an overlay, and holds the point; None when none does."""
-    return next((w for w in windows if not w.get("overlay") and w.get("alpha", 1) > 0 and w["x"] <= x < w["x"] + w["width"]
-                 and w["y"] <= y < w["y"] + w["height"]), None)
+    neither an overlay nor the pointer's own picture, and holds the point;
+    None when none does."""
+    return next((w for w in windows if not w.get("overlay") and not is_pointer_picture(w) and w.get("alpha", 1) > 0
+                 and w["x"] <= x < w["x"] + w["width"] and w["y"] <= y < w["y"] + w["height"]), None)
