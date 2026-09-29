@@ -1792,6 +1792,11 @@ export async function testConversationSteps(browser, origin, ok) {
   await stepsAcrossPages(browser, origin, ok);
   await stepsByKind(browser, origin, ok);
   await stepsThoughtLine(browser, origin, ok);
+  await stepsThoughtHandOver(browser, origin, ok);
+  await stepsThoughtWrites(browser, origin, ok);
+  await stepsFocusKeepsOpen(browser, origin, ok);
+  await stepsSpaceOnALine(browser, origin, ok);
+  await stepsSpaceBesideTheGraph(browser, origin, ok);
 }
 
 /* C1–C4, C9 — the rows the fixture comes to, closed, then pressed. */
@@ -2536,6 +2541,386 @@ async function stepsThoughtLine(browser, origin, ok) {
       JSON.stringify({ wide: seen.wide, capped: seen.capped.map((line) => line?.length), cap: seen.cap }),
     );
     ok("C12: the thought lines raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C13 — a thought being read does not close under the reader. The words that
+ * streamed into an open line close into their turn; the row that stands for
+ * the turn, in the streaming row's place, is open the way that one was and
+ * holds the keyboard on its line where that one held it. A thought nobody
+ * opened closes into a closed row and takes nothing. */
+async function stepsThoughtHandOver(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, stepsFixture(), { status: "working" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async ({ at }) => {
+      const { list, lineOf, shown, settle } = window.__STEPS__;
+      const streaming = () => list().querySelector(":scope > .is-streaming.is-thinking");
+      const settled = () => [...list().querySelectorAll(":scope > .is-thinking:not(.is-streaming)")];
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+      const stream = async (text) => {
+        window.__CONVERSATION__.live = [{ role: "thinking", text }];
+        await pollHelperPages();
+        await settle();
+      };
+      // The poll that brings the turn brings the empty live list with it.
+      const close = async (text, when) => {
+        window.__CONVERSATION__.turns.push({ role: "thinking", text, at_ms: when });
+        window.__CONVERSATION__.live = [];
+        await pollHelperPages();
+        await settle();
+      };
+      const FIRST = "Every cell remounts on each scroll tick because its key is an index.";
+      const NEWEST = "Keying the cells by id should keep them.";
+      const SECOND = "One more look at the cell before the edit.";
+      const seen = {};
+      const thoughts = settled().length;
+      await stream(`${FIRST} ${NEWEST}`);
+      const going = streaming();
+      lineOf(going).click();
+      await wait(60);
+      await settle();
+      lineOf(going).focus();
+      seen.read = { open: going.open === true, held: document.activeElement === lineOf(going), words: shown(going, FIRST) };
+      await close(`${FIRST} ${NEWEST}`, at);
+      const row = settled().at(-1);
+      seen.turn = {
+        added: settled().length === thoughts + 1,
+        gone: streaming() === null,
+        open: row?.open === true,
+        words: row ? shown(row, FIRST) : false,
+        held: row ? document.activeElement === lineOf(row) : false,
+      };
+      await stream(SECOND);
+      const idle = streaming();
+      seen.idle = { open: idle?.open === true, held: idle ? document.activeElement === lineOf(idle) : false };
+      await close(SECOND, at + 3000);
+      const closed = settled().at(-1);
+      seen.after = {
+        added: settled().length === thoughts + 2,
+        open: closed?.open === true,
+        held: closed ? document.activeElement === lineOf(closed) : false,
+      };
+      return seen;
+    }, { at: CLOCK + 200_000 });
+    ok(
+      "C13: a thought being read does not close under the reader — when its words close into their turn the row that stands for the turn is open, with the whole thought in it, and holds the keyboard on its line where the streaming row held it",
+      seen.read.open && seen.read.held && seen.read.words && seen.turn.added && seen.turn.gone && seen.turn.open &&
+        seen.turn.words && seen.turn.held,
+      JSON.stringify(seen),
+    );
+    ok(
+      "C13: a thought nobody opened closes into a closed row and takes no keyboard — the hand-over is for a reader who asked",
+      !seen.idle.open && !seen.idle.held && seen.after.added && !seen.after.open && !seen.after.held,
+      JSON.stringify(seen),
+    );
+    ok("C13: the thought's hand-over raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C14 — a streaming thought's open body is written once a frame, as a
+ * streaming answer is, and never under a selection: deltas that arrive faster
+ * than the frame come to one write of the newest words, and words a person
+ * chose in the body stay chosen — the frame that would collapse them waits. */
+async function stepsThoughtWrites(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, stepsFixture(), { status: "working" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async () => {
+      const { list, lineOf, settle } = window.__STEPS__;
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+      const run = list().__run;
+      // One delta of the thought that is going, as the wire's poll brings it.
+      const bring = (text) => {
+        window.__CONVERSATION__.live = [{ role: "thinking", text }];
+        run.wireLog = { ...run.wireLog, live: window.__CONVERSATION__.live };
+        syncStreamingTurns(list(), run);
+      };
+      const seen = {};
+      let text = "First words of the thought.";
+      bring(text);
+      const going = list().querySelector(":scope > .is-streaming.is-thinking");
+      lineOf(going).click();
+      await wait(60);
+      await settle();
+      const body = going.querySelector(":scope > .helper-thought-body");
+      seen.opened = going.open === true && body.textContent === text;
+      const watch = new MutationObserver(() => {});
+      watch.observe(body, { childList: true, characterData: true, subtree: true });
+      for (let delta = 0; delta < 20; delta += 1) {
+        text += ` Sentence ${delta} of the thought, one more delta.`;
+        bring(text);
+      }
+      seen.inTheFrame = watch.takeRecords().length;
+      await settle();
+      seen.byTheFrame = watch.takeRecords().length;
+      seen.newest = body.textContent === text;
+      // Words a person chose in the body.
+      const node = body.firstChild;
+      const selection = getSelection();
+      selection.setBaseAndExtent(node, 6, node, 20);
+      const chosen = selection.toString();
+      watch.takeRecords();
+      text += " A newer sentence arrives while these words are chosen.";
+      bring(text);
+      await settle();
+      seen.chosen = chosen;
+      seen.kept = chosen !== "" && selection.toString() === chosen && body.contains(selection.anchorNode);
+      seen.rewrittenUnderIt = watch.takeRecords().length;
+      // Let go of them: the next delta brings the newest words in.
+      selection.removeAllRanges();
+      text += " And a last one, once they are let go.";
+      bring(text);
+      await settle();
+      seen.caughtUp = body.textContent === text;
+      return seen;
+    });
+    ok(
+      "C14: twenty deltas that arrive inside one frame are one write of the open body of a thought that is going — not twenty — and the body holds the newest words",
+      seen.opened && seen.inTheFrame + seen.byTheFrame <= 2 && seen.newest,
+      JSON.stringify(seen),
+    );
+    ok(
+      "C14: words a person chose in that body stay chosen when a newer delta arrives — the frame that would collapse the selection is skipped, and the next delta after they are let go brings the newest words in",
+      seen.kept && seen.rewrittenUnderIt === 0 && seen.caughtUp,
+      JSON.stringify(seen),
+    );
+    ok("C14: the streaming thought raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C15 — turning the Focus view on keeps what a person had open. The Focus
+ * view keeps its rows single, so a row of steps gives its members back as
+ * rows of their own: the member that was open comes back open, the others
+ * closed, and the keyboard, where it was on the row or on that member, is held
+ * by what stands for it — the row's line, or the head of the fold that now
+ * covers it. */
+async function stepsFocusKeepsOpen(browser, origin, ok) {
+  const seen = {};
+  const faulted = [];
+  for (const scenario of ["member", "run"]) {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await openConversation(page, stepsFixture(), { status: "idle" });
+      await installStepsProbe(page);
+      seen[scenario] = await page.evaluate(async ({ scenario, file }) => {
+        const { list, rows, lineOf, shown, settle } = window.__STEPS__;
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+        const out = {};
+        const run = rows().find((row) => row.classList.contains("is-run"));
+        out.hasRun = run !== undefined;
+        lineOf(run).click();
+        await wait(60);
+        await settle();
+        const members = [...run.querySelectorAll(":scope > .helper-run-body > .helper-turn")];
+        out.members = members.length;
+        const seqs = members.map((member) => member.dataset.turn);
+        if (scenario === "member") {
+          lineOf(members[2]).click();
+          await wait(60);
+          await settle();
+          lineOf(members[2]).focus();
+        } else {
+          lineOf(run).focus();
+        }
+        out.before = {
+          run: run.open,
+          open: members.map((member) => member.open),
+          held: document.activeElement === lineOf(scenario === "member" ? members[2] : run),
+        };
+        document.querySelector("#worker-view .worker-focus").click();
+        await wait(60);
+        await settle();
+        const row = (seq) => list().querySelector(`:scope > [data-turn="${seq}"]`);
+        // What stands for a row on screen: its line, or — when the Focus view
+        // has folded it under a head — the head.
+        const standing = (seq) => {
+          const one = row(seq);
+          return one === null ? null : one.hidden ? one.__group?.firstElementChild ?? null : lineOf(one);
+        };
+        const stands = standing(scenario === "member" ? seqs[2] : seqs[0]);
+        out.after = {
+          runs: list().querySelectorAll(":scope > .is-run").length,
+          singles: seqs.map((seq) => row(seq) !== null),
+          open: seqs.map((seq) => row(seq)?.open === true),
+          held: stands !== null && document.activeElement === stands,
+          active: document.activeElement?.tagName ?? null,
+        };
+        if (scenario === "member") {
+          // The fold opened, the member is open in it with its file.
+          row(seqs[2])?.__group?.firstElementChild?.click();
+          await wait(60);
+          await settle();
+          out.shown = row(seqs[2]) !== null && shown(row(seqs[2]), `MARK_TWO ${file}`);
+        }
+        return out;
+      }, { scenario, file: READ_FIRST[2] });
+      faulted.push(...faults);
+    } finally {
+      await page.close();
+    }
+  }
+  const only = (open, at) => JSON.stringify(open) === JSON.stringify([0, 1, 2, 3, 4, 5].map((one) => one === at));
+  ok(
+    "C15: the Focus view gives a row of steps back as single rows, and the member a person had open comes back open — the others closed — with its file in it when the fold that covers it is pressed",
+    seen.member.hasRun && seen.member.members === 6 && seen.member.before.open[2] === true && seen.member.after.runs === 0 &&
+      seen.member.after.singles.every(Boolean) && only(seen.member.after.open, 2) && seen.member.shown === true,
+    JSON.stringify(seen.member),
+  );
+  ok(
+    "C15: the keyboard, on the line of the member that was open, is held by what stands for it when the Focus view comes on — not dropped to the body",
+    seen.member.before.held && seen.member.after.held,
+    JSON.stringify(seen.member),
+  );
+  ok(
+    "C15: the keyboard on a row of steps itself is held by what stands for that row when the Focus view comes on — the first of its members, or the fold's head — and no member is opened that was not",
+    seen.run.hasRun && seen.run.before.held && seen.run.after.singles.every(Boolean) && only(seen.run.after.open, -1) &&
+      seen.run.after.held,
+    JSON.stringify(seen.run),
+  );
+  ok("C15: the Focus view raised no page errors", faulted.length === 0, faulted.join("\n"));
+}
+
+/* Enough turns before the fixture's own that the list scrolls. */
+function paddedFixture() {
+  const filler = Array.from({ length: 30 }, (_, at) => ({
+    role: at % 2 === 0 ? "user" : "assistant",
+    text: `이전 대화 ${at} — ${"길게 이어지는 문장이 목록을 스크롤할 만큼 쌓인다. ".repeat(3)}`,
+  }));
+  return [...filler, ...stepsFixture()];
+}
+
+/* C17 — a Space on a step's line is the line's own. It opens or closes the
+ * row; it is not a wish to go towards the foot (the list's Space) nor to leave
+ * it (Shift+Space), so a reader a little above the foot stays there and a list
+ * that follows its foot goes on following it. */
+async function stepsSpaceOnALine(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, paddedFixture(), { status: "idle" });
+    await installStepsProbe(page);
+    const before = await page.evaluate(async () => {
+      const { list, steps, lineOf, settle } = window.__STEPS__;
+      const box = list();
+      // The reader a little above the foot, the keyboard on the last step's line.
+      box.scrollTop = box.scrollHeight - box.clientHeight - 30;
+      await settle();
+      lineOf(steps().at(-1)).focus({ preventScroll: true });
+      return {
+        tall: box.scrollHeight > box.clientHeight + 200,
+        away: chatAway(box),
+        gap: Math.round(box.scrollHeight - box.scrollTop - box.clientHeight),
+        held: document.activeElement === lineOf(steps().at(-1)),
+      };
+    });
+    await page.keyboard.press(" ");
+    await page.evaluate(() => window.__STEPS__.settle());
+    const after = await page.evaluate(() => {
+      const { list, steps } = window.__STEPS__;
+      return { away: chatAway(list()), open: steps().at(-1).open === true };
+    });
+    // The list at its foot and following it, the keyboard on another step's line.
+    const following = await page.evaluate(async () => {
+      const { list, steps, lineOf, settle } = window.__STEPS__;
+      const box = list();
+      box.scrollTop = box.scrollHeight;
+      await settle();
+      lineOf(steps()[2]).focus({ preventScroll: true });
+      return { away: chatAway(box), held: document.activeElement === lineOf(steps()[2]) };
+    });
+    await page.keyboard.down("Shift");
+    await page.keyboard.press(" ");
+    await page.keyboard.up("Shift");
+    await page.evaluate(() => window.__STEPS__.settle());
+    const shifted = await page.evaluate(() => ({ away: chatAway(window.__STEPS__.list()) }));
+    ok(
+      "C17: a Space on a step's line opens its row and does not count as a wish to go towards the foot — the reader a little above it is still away from it",
+      before.tall && before.away && before.gap < 50 && before.held && after.open && after.away,
+      JSON.stringify({ before, after }),
+    );
+    ok(
+      "C17: Shift+Space on a step's line does not count as leaving the foot — a list that follows its foot goes on following it",
+      following.held && !following.away && !shifted.away,
+      JSON.stringify({ following, shifted }),
+    );
+    ok("C17: the keys on the step's line raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C18 — with the agent graph on screen in another leaf, a Space on a step's
+ * line still opens its row. The graph takes the Space of its own view (its
+ * hand tool) — holding it still holds the tool with nothing focused — but not
+ * the Space of a line, a button or a keyboard owner on another surface. */
+async function stepsSpaceBesideTheGraph(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, stepsFixture(), { status: "idle" });
+    await installStepsProbe(page);
+    const stood = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+      window.__ANSWER__.board_snapshot = () => ({
+        columns: [{ bucket: "working", cards: [{
+          pane: "term:3", agent: "codex", state: "working", heading: "Held snapshot",
+          task: "Held snapshot", project: "/fixture", worktree: "main", at: 1, changed_at: 1,
+        }] }], attention_count: 0, total_count: 1,
+      });
+      agentBoardMode = "graph";
+      const home = focusedPane;
+      const group = nextGroupId;
+      nextGroupId += 1;
+      setStageTree(splitStageLeaf(stageTree(), home, group, "horizontal", "second"));
+      focusedPane = group;
+      openBoard();
+      await paintBoardView(boardTab(), { force: true });
+      await wait(300);
+      const view = visibleAgentGraphView();
+      const list = document.querySelector("#worker-view .helper-turns");
+      const { steps, lineOf } = window.__STEPS__;
+      lineOf(steps()[3]).focus({ preventScroll: true });
+      return {
+        graph: view !== null,
+        page: list?.checkVisibility() === true,
+        apart: view !== null && list !== null && !view.contains(list) && !list.contains(view),
+        held: document.activeElement === lineOf(steps()[3]),
+        open: steps()[3].open === true,
+      };
+    });
+    await page.keyboard.press(" ");
+    await page.evaluate(() => window.__STEPS__.settle());
+    const after = await page.evaluate(() => ({ open: window.__STEPS__.steps()[3].open === true }));
+    // The hand tool is the graph's own: with nothing focused, holding Space
+    // holds it and letting go lets go.
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.down(" ");
+    const held = await page.evaluate(() => agentGraphSpaceHeld);
+    await page.keyboard.up(" ");
+    const released = await page.evaluate(() => agentGraphSpaceHeld);
+    ok(
+      "C18: the agent graph and a conversation page can be on screen together — a board drawing the graph in one leaf, the page in another",
+      stood.graph && stood.page && stood.apart && stood.held && !stood.open,
+      JSON.stringify(stood),
+    );
+    ok(
+      "C18: with the graph on screen beside it, a Space on a step's line opens the row — the graph does not take a Space that is the line's own",
+      after.open,
+      JSON.stringify({ stood, after }),
+    );
+    ok(
+      "C18: the hand tool is still the graph's own — with nothing focused, holding Space holds it and letting go lets go",
+      held === true && released === false,
+      JSON.stringify({ held, released }),
+    );
+    ok("C18: the graph beside the page raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }
