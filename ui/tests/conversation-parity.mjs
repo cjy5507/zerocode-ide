@@ -1274,6 +1274,11 @@ export async function testConversationImages(browser, origin, ok) {
         ? [zoomLine === t("worker.stepImages", "이미지 {{n}}장", { n: 1 }) && !zoom.textContent.includes(t("worker.noOutput", "출력 없음")),
           zoom.querySelector(".helper-images .helper-image") !== null]
         : null;
+      // A row opens where it stands, as a thought's does, so the body of the
+      // last row grows below the fold: a person scrolls down to what they
+      // pressed, and only then is its picture in view.
+      list.scrollTop = list.scrollHeight;
+      await frames(4);
       // At the foot: the tool's picture is in view, and so is the picture on
       // the person's row that stands stuck at the list's top (the sticky
       // header); the earlier person's row, stuck under it, is covered — in
