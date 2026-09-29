@@ -11251,6 +11251,10 @@ const TERM_WITHHELD = Object.freeze({
     withheld: { key: "term.withheld.launchRefused", word: "터미널 {{term}}의 zo가 정확 실행 계약을 거부해 브리핑을 넣지 않았습니다." },
     tip: { key: "term.withheld.launchRefusedTip", word: "이 터미널의 zo가 정확 실행 계약을 거부했습니다 — 실행하지 않을 프로그램에 브리핑을 치지 않고 보류했습니다." },
   },
+  not_taken: {
+    left: { key: "term.withheld.notTakenLeft", word: "터미널 {{term}}의 에이전트가 메시지를 받았다는 신호가 없어 입력란에 남겨 두었습니다. 남아 있으면 Enter를 눌러 보내 주세요." },
+    tip: { key: "term.withheld.notTakenTip", word: "메시지를 넣고 Enter를 두 번 눌렀지만 에이전트가 받았다고 알려 오지 않았습니다 — 두 번 보내지 않도록 글은 다시 치지 않았습니다." },
+  },
 });
 
 /* A refusal the table has no sentence for in the way it arrived: said

@@ -1220,7 +1220,7 @@ impl agent_teams::Host for TeamWindow {
                 (
                     waiting,
                     submitted,
-                    started + timeout + zerocode_pty::ready::SUBMIT_ACK_TIMEOUT,
+                    started + timeout + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
                     restoring,
                 )
             });
@@ -1378,25 +1378,13 @@ impl agent_teams::Host for TeamWindow {
             .waiting
             .recv_timeout(pending.deadline.saturating_duration_since(Instant::now()));
         let terminal_is_live = state.terminals().contains_key(&term);
-        let accepted = if delivered == Ok(DeliveryOutcome::Delivered) && terminal_is_live {
-            await_prompt_submission(
-                pending.submitted.as_ref(),
-                pending.deadline,
-                zerocode_pty::ready::QUIET,
-                || {
-                    let retried = state
-                        .terminals()
-                        .handle(term)
-                        .is_some_and(|held| lock_pty(&held).write_input(b"\r").is_ok());
-                    if retried {
-                        state.cadence().wake();
-                    }
-                    retried
-                },
-            )
-        } else {
-            false
-        };
+        // The delivery pressed its Enter again itself when the report was
+        // late (t-14037); a briefing it entered twice unanswered may still
+        // be heard by the deadline.
+        let entered = delivered.is_ok_and(DeliveryOutcome::entered);
+        let accepted = entered
+            && terminal_is_live
+            && await_prompt_submission(pending.submitted.as_ref(), pending.deadline);
         if accepted && state.terminals().contains_key(&term) {
             state.worker_readiness().remove(&term);
             return Ok(());
@@ -1431,9 +1419,9 @@ impl agent_teams::Host for TeamWindow {
             }
         }
 
-        let reason = if delivered == Ok(DeliveryOutcome::Delivered) && terminal_is_live {
+        let reason = if entered && terminal_is_live {
             "the worker TUI never acknowledged the submitted briefing".to_string()
-        } else if delivered == Ok(DeliveryOutcome::Delivered) {
+        } else if entered {
             "the worker exited while accepting its briefing".to_string()
         } else {
             // Asked while the delivery still waits, before the teardown below
@@ -1498,8 +1486,14 @@ impl agent_teams::Host for TeamWindow {
         ) else {
             return false;
         };
-        waiting.recv_timeout(zerocode_pty::ready::TIMEOUT + zerocode_pty::ready::SUBMIT_ACK_TIMEOUT)
-            == Ok(DeliveryOutcome::Delivered)
+        // Its wait covers the delivery's own for the pane's receipt
+        // (t-14037). Words entered twice at a pane that never answered are
+        // on its line, told to the person, and not the run's to type again.
+        waiting
+            .recv_timeout(
+                zerocode_pty::ready::TIMEOUT + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
+            )
+            .is_ok_and(DeliveryOutcome::entered)
     }
 
     /// The integration record's verdict on this pane's zo, as the one sentence
@@ -4218,8 +4212,9 @@ pub(super) async fn ssh_agent_open(
 ///
 /// The delivery machine has its own readiness budget; this is the outer fence
 /// so a wedged pane cannot hold a caller's verb open forever. One second past
-/// the readiness timeout and its submission window, which is the longest the
-/// two of them can honestly take.
+/// the readiness timeout and the wait for the pane's receipt
+/// ([`zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE`]), which is the longest
+/// the two of them can honestly take.
 const SSH_SEND_PATIENCE: Duration = Duration::from_secs(1);
 
 /// What one `zerocode-ssh send` actually achieved.
@@ -4395,7 +4390,9 @@ pub(super) async fn ssh_agent_send(
         },
         DeliveryOutcome::Unsubmitted(why) => SendReceipt {
             pasted: true,
-            enter_sent: false,
+            // Pressed, and pressed again, at a pane that never said it took
+            // them (t-14037) — every other refusal withheld the Enter.
+            enter_sent: outcome.entered(),
             acknowledged: None,
             withheld: Some(why),
         },
@@ -4538,7 +4535,9 @@ fn ssh_register_delivery(
 async fn ssh_await_delivery(
     waiting: std::sync::mpsc::Receiver<DeliveryOutcome>,
 ) -> Result<DeliveryOutcome, String> {
-    let deadline = zerocode_pty::ready::TIMEOUT + SSH_SEND_PATIENCE;
+    let deadline = zerocode_pty::ready::TIMEOUT
+        + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE
+        + SSH_SEND_PATIENCE;
     tokio::task::spawn_blocking(move || {
         waiting
             .recv_timeout(deadline)

@@ -36,8 +36,30 @@ pub(super) fn line_facts(state: &AppState, term: TermId) -> Line {
     Line {
         parked: pane_is_parked(state, term),
         launch: crate::cmd::terminal::launch_of(state, term),
+        taken: reports_what_it_takes(state, term).then(|| crate::human_input::taken(term)),
+        busy: pane_is_busy(state, term),
         ..Line::default()
     }
+}
+
+/// Whether the pane's program says which prompts it takes (t-14037) — its
+/// agent row's `submit_ack`, the one table every delivery reads — so that a
+/// delivery's Enter there waits for that word before it is called a send.
+fn reports_what_it_takes(state: &AppState, term: TermId) -> bool {
+    state
+        .agent_terms()
+        .get(&term)
+        .and_then(|agent| zerocode_core::AgentKind::from_slug(agent))
+        .is_some_and(zerocode_core::AgentKind::reports_prompt_submit)
+}
+
+/// Whether the pane's program says it is mid-turn — the hook road's word,
+/// the same one the board's 「작업 중」 reads.
+fn pane_is_busy(state: &AppState, term: TermId) -> bool {
+    state
+        .pane_states()
+        .get(&term)
+        .is_some_and(|held| held.state == zerocode_core::hook::HookState::Working)
 }
 
 /// Read the hand while holding the same terminal lock as `human_write`.
@@ -844,5 +866,247 @@ mod tests {
             start,
         );
         assert!(bench.deliveries.is_empty());
+    }
+
+    /* ---- a restart's words reach a real program once (t-14037) --------- */
+
+    /// How a fake agent CLI treats what it is given — the shapes a restart
+    /// meets at the panes it brings back, measured on Claude Code 2.1.284.
+    #[cfg(unix)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Takes {
+        /// At rest: the Enter is a send.
+        AtRest,
+        /// Still booting: the first Enter is swallowed and the words stay in
+        /// the composer — 07:09 on 2026-09-29, two restored workers.
+        Booting,
+        /// Booting, and it takes the Enter late: the receipt comes after the
+        /// window, when the Enter pressed again finds an empty composer.
+        Late,
+        /// Mid-turn: the words wait in its own queue and are taken, and
+        /// reported, when the turn ends.
+        Busy,
+    }
+
+    /// A pane's program as a shell script on a cooked line: `read` returns a
+    /// line at each Enter. It records each send in `$FAKE_SENT`, one line a
+    /// send, and an empty Enter sends nothing — as Claude Code, Codex and zo
+    /// all do.
+    #[cfg(unix)]
+    const FAKE_AGENT: &str = r#"#!/bin/sh
+printf '\033[?2004h'
+printf '\342\235\257 \033[?25h'
+held=""
+enters=0
+while IFS= read -r line; do
+  enters=$((enters + 1))
+  words="$held$line"
+  held=""
+  case "$FAKE_TAKES" in
+    booting) if [ "$enters" -eq 1 ]; then held="$words"; continue; fi ;;
+  esac
+  [ -z "$words" ] && continue
+  case "$FAKE_TAKES" in
+    late|busy) ( sleep "$FAKE_LATER"; printf '%s\n' "$words" >> "$FAKE_SENT" ) & ;;
+    *) printf '%s\n' "$words" >> "$FAKE_SENT" ;;
+  esac
+  printf '\342\235\257 \033[?25h'
+done
+"#;
+
+    /// One restart's words through the pump's own seam at a fake program:
+    /// every delivery in `words` registered as the window registers a
+    /// continuation (at rest, beside a draft), the receipt fed back the way
+    /// the hook road feeds it ([`crate::human_input::submitted`]), and what
+    /// the program sent, in order.
+    #[cfg(unix)]
+    fn restart_at(term: TermId, takes: Takes, words: &[&str]) -> Restart {
+        use std::os::unix::fs::PermissionsExt;
+        const WINDOW: Duration = Duration::from_millis(300);
+        const PATIENCE: Duration = Duration::from_millis(1_500);
+        const DEADLINE: Duration = Duration::from_secs(10);
+
+        crate::human_input::forget_term(term);
+        let root = tempfile::tempdir().expect("a fake agent's home");
+        let program = root.path().join("claude");
+        std::fs::write(&program, FAKE_AGENT).expect("the fake agent");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("an executable fake agent");
+        let sent = root.path().join("sent");
+        let mode = match takes {
+            Takes::AtRest => "rest",
+            Takes::Booting => "booting",
+            Takes::Late => "late",
+            Takes::Busy => "busy",
+        };
+        let later = WINDOW + WINDOW / 2;
+        let env = vec![
+            ("FAKE_TAKES".to_string(), mode.to_string()),
+            ("FAKE_SENT".to_string(), sent.to_string_lossy().into_owned()),
+            ("FAKE_LATER".to_string(), format!("{}", later.as_secs_f64())),
+        ];
+        let mut pty = PtyLane::spawn(
+            &program.to_string_lossy(),
+            &[],
+            Some(root.path()),
+            &env,
+            24,
+            80,
+        )
+        .expect("spawn the fake agent");
+        let start = Instant::now();
+        let mut bench = Bench::default();
+        let mut first = words.iter();
+        let delivery = |text: &str, now: Instant| {
+            crate::cmd::terminal::prompt_delivery_for(
+                text.to_string(),
+                true,
+                Some("claude"),
+                crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+                None,
+                now,
+            )
+            .receipt_clock(WINDOW, PATIENCE)
+        };
+        let (settled, _outcome) = std::sync::mpsc::sync_channel(1);
+        bench.deliveries.insert(
+            term,
+            delivery(first.next().expect("one word at least"), start),
+        );
+        bench.waiters.insert(term, settled);
+        // Parked behind the first the way the window parks a second door's
+        // words (`type_prompt_at_term`): the same resting signal and guard.
+        for rest in first {
+            let (completion, _receipt) = std::sync::mpsc::sync_channel(1);
+            bench
+                .queue
+                .entry(term)
+                .or_default()
+                .push_back(QueuedPrompt {
+                    text: (*rest).to_string(),
+                    submit: true,
+                    signal: ReadySignal::Rest(ready_signal_for(Some("claude")).marker()),
+                    clearing: false,
+                    guard: Guard::for_somebody_elses_line(None),
+                    completion,
+                });
+        }
+        let mut heard = 0;
+        let mut enters = 0;
+        let mut settled_as = Vec::new();
+        loop {
+            let pumped = pty.pump();
+            let marker = bench.deliveries.get(&term).and_then(PromptDelivery::marker);
+            let seen = {
+                let grid = pty.terminal_mut().grid_mut();
+                let drawn = grid.take_glyph_drawn(marker);
+                Observed {
+                    wrote: pumped.bytes > 0,
+                    bracketed_paste: grid.bracketed_paste(),
+                    cursor_shows: grid.cursor_shows(),
+                    marker_written: drawn.anywhere,
+                    marker_in_alt: drawn.in_alt_screen,
+                    alt_screen: grid.alt_screen(),
+                }
+            };
+            // The program's word about what it took — the hook road's.
+            let count = std::fs::read_to_string(&sent).map_or(0, |text| text.lines().count());
+            while heard < count {
+                crate::human_input::submitted(term);
+                heard += 1;
+            }
+            let line = Line {
+                taken: Some(crate::human_input::taken(term)),
+                busy: takes == Takes::Busy && heard < words.len(),
+                ..line_facts_without_a_window(term)
+            };
+            if let Some(delivery) = bench.deliveries.get_mut(&term) {
+                let wrote = turn(term, delivery, seen, line, Instant::now(), |bytes| {
+                    pty.write_input(bytes).is_ok()
+                });
+                enters += usize::from(wrote == Turned::Entered);
+                if let Turned::Settled(outcome) = wrote {
+                    settled_as.push(outcome);
+                    settle(
+                        term,
+                        outcome,
+                        &mut bench.deliveries,
+                        &mut bench.waiters,
+                        &mut bench.queue,
+                        Instant::now(),
+                    );
+                }
+            } else if heard >= words.len() || start.elapsed() > PATIENCE * 2 + later {
+                break;
+            }
+            assert!(
+                start.elapsed() < DEADLINE,
+                "{takes:?}: the restart never settled"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Long enough for a queued or late send to land, and for a second
+        // copy to show if one went.
+        std::thread::sleep(later * 2);
+        pty.kill().expect("stop the fake agent");
+        crate::human_input::forget_term(term);
+        let sent = std::fs::read_to_string(&sent)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| line.replace("\u{1b}[200~", "").replace("\u{1b}[201~", ""))
+            .collect();
+        Restart {
+            sent,
+            enters,
+            settled_as,
+        }
+    }
+
+    /// What one restart at a fake program came to: what it sent, how many
+    /// Enters the pump wrote, and how each delivery settled.
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct Restart {
+        sent: Vec<String>,
+        enters: usize,
+        settled_as: Vec<DeliveryOutcome>,
+    }
+
+    /// t-14037, the acceptance count: each shape a restart meets, brought
+    /// back three times — the words are sent, by the program itself, exactly
+    /// once, and two deliveries queued on one pane each go once, in order.
+    /// Before the receipt was the witness, a program still booting kept the
+    /// words in its composer every time (0/3): the Enter was written and the
+    /// delivery called it delivered.
+    #[cfg(unix)]
+    #[test]
+    fn a_restarts_words_are_sent_once_whatever_the_program_is_doing() {
+        const RUNS: usize = 3;
+        let words = "The window restarted and cut your last turn short.";
+        for (base, takes) in [
+            (8_400, Takes::AtRest),
+            (8_410, Takes::Booting),
+            (8_420, Takes::Late),
+            (8_430, Takes::Busy),
+        ] {
+            let runs: Vec<Restart> = (0..RUNS)
+                .map(|run| restart_at(base + run as TermId, takes, &[words]))
+                .collect();
+            let once = runs.iter().filter(|run| run.sent == [words]).count();
+            assert_eq!(
+                once, RUNS,
+                "{takes:?}: the words were sent exactly once in {once}/{RUNS} restarts: {runs:?}"
+            );
+        }
+        let queued = ["the continuation", "You have 1 orchestration message."];
+        let runs: Vec<Restart> = (0..RUNS)
+            .map(|run| restart_at(8_440 + run as TermId, Takes::Booting, &queued))
+            .collect();
+        let both = runs.iter().filter(|run| run.sent == queued).count();
+        assert_eq!(
+            both, RUNS,
+            "two deliveries on one booting pane went each once, in order, in {both}/{RUNS}: \
+             {runs:?}"
+        );
     }
 }

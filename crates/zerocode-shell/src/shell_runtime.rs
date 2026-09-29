@@ -1160,6 +1160,10 @@ pub(super) fn note_zo_session_frame(app: &AppHandle, session: &str, frame: &serd
     if let Some(report) = zo_channel_report(frame) {
         for term in terms {
             if report.acknowledges_prompt {
+                // The channel's turn start is zo's word that it took a
+                // prompt — the receipt a delivery's Enter waits for
+                // (t-14037), beside the launch's own one-shot.
+                crate::human_input::took(term);
                 acknowledge_zo_worker_prompt(app, term);
             }
             note_zo_pane_state(
