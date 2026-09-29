@@ -4275,7 +4275,7 @@ listen("summon-lineup:changed", (event) => {
       { models, agent: agents.join("·") }));
   }
   if (folded.size) {
-    toast(t("summon.lineup.folded", "{{models}}은(는) 이제 고르지 않습니다 — 새 판이 나왔거나 목록에서 빠졌습니다.",
+    toast(t("summon.lineup.folded", "{{models}}은(는) 이제 고르지 않습니다 — 새 버전이 나왔거나 목록에서 빠졌습니다.",
       { models: [...folded].join(", ") }));
   }
 });
