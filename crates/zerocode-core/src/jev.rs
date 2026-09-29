@@ -1406,7 +1406,7 @@ pub const BROWSER: JevUse = JevUse {
     // its presses (t-13091).
     auto_starts: promote::Stand::Applying,
     abstain: Abstain::Lacks(
-        "type_target 머리에 기권 선택지 없음(action 머리는 give_up, 관찰 머리 셋은 none); 다른 행동이 골라지면 읽기만 하고 쓰지 않음(screen_action.rs). 넣자: none",
+        "the type_target head offers none (the action head has give_up, the three observation heads have none); when another action is chosen the head is read and not used",
     ),
 };
 
@@ -1461,7 +1461,7 @@ pub const DESKTOP: JevUse = JevUse {
     // its presses (t-13091).
     auto_starts: promote::Stand::Applying,
     abstain: Abstain::Lacks(
-        "type_target 머리에 기권 선택지 없음(action 머리는 give_up, 관찰 머리 셋은 none); 다른 행동이 골라지면 읽기만 하고 쓰지 않음(screen_action.rs). 넣자: none",
+        "the type_target head offers none (the action head has give_up, the three observation heads have none); when another action is chosen the head is read and not used",
     ),
 };
 
@@ -1513,7 +1513,7 @@ pub const EMULATOR: JevUse = JevUse {
     // its presses (t-13091).
     auto_starts: promote::Stand::Applying,
     abstain: Abstain::Lacks(
-        "type_target 머리에 기권 선택지 없음(action 머리는 give_up, 관찰 머리 셋은 none); 다른 행동이 골라지면 읽기만 하고 쓰지 않음(screen_action.rs). 넣자: none",
+        "the type_target head offers none (the action head has give_up, the three observation heads have none); when another action is chosen the head is read and not used",
     ),
 };
 
@@ -1761,7 +1761,7 @@ pub const PLACEMENT: JevUse = JevUse {
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
     abstain: Abstain::Lacks(
-        "방 고르기(tab·split·background)에 기권 선택지 없음, 까닭 못 찾음. 넣자: 없음 뒷길이 먼저",
+        "the room choice (tab, split, background) offers none; no reason was found in the code",
     ),
 };
 
@@ -1890,7 +1890,7 @@ pub const SUMMON: JevUse = JevUse {
     // (t-11989).
     auto_starts: promote::Stand::Applying,
     abstain: Abstain::Lacks(
-        "에이전트 고르기에 기권 선택지 없음, 까닭 못 찾음(선택지 2 미만이면 묻지 않음). 넣자: 뒷길이 먼저",
+        "the agent choice offers none; no reason was found in the code (under two agents the question is not asked)",
     ),
 };
 
@@ -1934,7 +1934,7 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     // only from answers that were carried out (t-11989).
     auto_starts: promote::Stand::Applying,
     abstain: Abstain::Lacks(
-        "low·mid·high에 기권 선택지 없음, 까닭 못 찾음(지시문은 가장 낮은 알맞은 단계)",
+        "low, mid and high offer none; no reason was found in the code (the instructions ask for the lowest rung that fits)",
     ),
 };
 
@@ -2013,7 +2013,9 @@ pub const STEP_EFFORT: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Lacks("move의 hold는 제자리이지 모름이 아님, 기권 선택지 없음 까닭 못 찾음"),
+    abstain: Abstain::Lacks(
+        "the move choice offers none — hold means stay, not unknown; no reason was found in the code",
+    ),
 };
 
 /// Characters of the task a skill ranking reads — what the turn is about, in
@@ -2384,7 +2386,7 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
     abstain: Abstain::Lacks(
-        "complexity·risk는 순서 단계로 기권 선택지 없음, 까닭 못 찾음(intent만 other). 넣자: Score로 옮기기",
+        "complexity and risk are ordered rungs asked as choices and offer none (only intent has other); no reason was found in the code",
     ),
 };
 
@@ -2572,7 +2574,7 @@ pub const COMPACTION: JevUse = JevUse {
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
     abstain: Abstain::Lacks(
-        "keep·drop에 기권 선택지 없음, 까닭 못 찾음(버리기는 별도 확신 선이 막음)",
+        "keep and drop offer none; no reason was found in the code (a drop is held by its own confidence line)",
     ),
 };
 
@@ -2683,7 +2685,7 @@ pub const AGENT_TOOL: JevUse = JevUse {
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
     abstain: Abstain::Lacks(
-        "choose는 호출자가 쓴 선택지뿐이라 호출자가 넣지 않으면 기권 없음; ask의 no가 근거 부족을 흡수(v2 주석)",
+        "choose offers only what its caller wrote, so none unless the caller adds one; the no of ask takes a lack of grounds",
     ),
 };
 
@@ -2874,7 +2876,7 @@ pub const BROWSER_READ: JevUse = JevUse {
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
     abstain: Abstain::Lacks(
-        "content·chrome에 기권 선택지 없음; content 문구가 가를 수 없는 경우를 흡수",
+        "content and chrome offer none; the wording of content takes a block that cannot be told apart",
     ),
 };
 
@@ -3057,7 +3059,7 @@ pub const NOTIFY: JevUse = JevUse {
     regrade: Regrade::NotifyFacts,
     auto_starts: promote::Stand::Recording,
     abstain: Abstain::Lacks(
-        "interrupt·batch·ignore에 기권 선택지 없음; ignore는 알리지 않는 결정이지 모름이 아님",
+        "interrupt, batch and ignore offer none — ignore is a decision not to ring, not unknown",
     ),
 };
 
@@ -3199,7 +3201,7 @@ pub const MENTION_RERANK: JevUse = JevUse {
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
     abstain: Abstain::Lacks(
-        "후보 고르기에 기권 선택지 없음, 까닭 못 찾음(not_offered는 행에 남는 표시)",
+        "the candidate choice offers none; no reason was found in the code (not_offered is a mark on the row, not an option)",
     ),
 };
 
@@ -3387,7 +3389,9 @@ pub const BRANCHING: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Lacks("후보 고르기(best)에 기권 선택지 없음, 까닭 못 찾음"),
+    abstain: Abstain::Lacks(
+        "the best-candidate choice offers none; no reason was found in the code",
+    ),
 };
 
 /// The judgment cache: a memo in front of the wire that answers a screen
@@ -3546,7 +3550,7 @@ pub const MAIL_TRIAGE: JevUse = JevUse {
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
     abstain: Abstain::Lacks(
-        "answer_now·can_wait·no_need에 기권 선택지 없음; no_need는 진짜 답이지 모름이 아님, 까닭 못 찾음",
+        "answer_now, can_wait and no_need offer none — no_need is an answer, not unknown; no reason was found in the code",
     ),
 };
 
@@ -4411,7 +4415,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
     abstain: Abstain::Lacks(
-        "continue·pause·replan에 기권 선택지 없음; pause는 안전 정지이지 모름이 아님, 까닭 못 찾음",
+        "continue, pause and replan offer none — pause is the safe stop, not unknown; no reason was found in the code",
     ),
 };
 
