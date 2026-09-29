@@ -762,20 +762,27 @@ mod release_rank_tests {
 
 #[cfg(test)]
 mod capability_table_tests {
-    use super::{capabilities_for_model, is_small_model, tiers_for_model as tiers_for_model_with_provenance};
+    use super::{capabilities_for_model, is_small_model, tiers_for_model as tiers_for_model_with_provenance, tiers_for_model_under};
     use crate::model_router::{ModelCapability, ModelTier};
 
     /// Test-only convenience: most existing assertions only care about the
     /// tier set, not the [`crate::model_router::TiersProvenance`] marker.
+    /// The shipped words are handed in, so the publish
+    /// `prior_tables_come_from_the_catalog` makes cannot reach a test beside
+    /// it — `grok-4-fast` lost Fast in 196 of 200 runs next to it (t-15568);
+    /// that test asks the store itself.
     fn tiers_for_model(id: &str) -> Vec<ModelTier> {
-        tiers_for_model_with_provenance(id).0
+        tiers_for_model_under(id, api::shipped_router_priors()).0
     }
 
     /// The size/family/flagship words are catalog data, not literals: an
     /// override that publishes a `priors` field changes the router's answer
     /// without a rebuild, and a publish that declares none restores the
     /// shipped words. Serialized with the env-lock because the api registry
-    /// is process-global.
+    /// is process-global. This is the binary's one publish of other words,
+    /// so it also holds the golden table's classification to the shipped
+    /// ones inside it: a parallel run once put that table here and failed
+    /// "gpt-5.3-codex-spark missing expected tier Fast" (t-15568).
     #[test]
     fn prior_tables_come_from_the_catalog() {
         let _lock = crate::test_env_lock();
@@ -787,12 +794,17 @@ mod capability_table_tests {
         assert!(is_small_model("acme-tiny-1"), "the published word is read");
         assert!(!is_small_model("claude-haiku-4-5"), "the field was replaced, not extended");
         assert!(
-            tiers_for_model("acme-tiny-1").contains(&ModelTier::Fast),
+            tiers_for_model_with_provenance("acme-tiny-1").0.contains(&ModelTier::Fast),
             "and the tier follows the word"
         );
+        let golden_spark = super::golden_parity_tests::golden_tiers("gpt-5.3-codex-spark");
         api::refresh_model_registry_from_json(r#"{"models":[],"aliases":[]}"#);
         assert!(is_small_model("claude-haiku-4-5"), "shipped words are back");
         assert!(!is_small_model("acme-tiny-1"));
+        assert!(
+            golden_spark.contains(&ModelTier::Fast),
+            "the published size words reached the golden table: spark is {golden_spark:?}"
+        );
     }
 
     /// C4 (t-6248): a shipped model its provider's list no longer names is
@@ -1141,9 +1153,10 @@ mod golden_parity_tests {
 
     /// The tiers the table holds each row to, as the classifier gives them
     /// under the shipped size/family/flagship words, handed in. The words in
-    /// force live in one store for the whole process, and a test beside this
-    /// one publishes others for a moment.
-    fn golden_tiers(id: &str) -> Vec<ModelTier> {
+    /// force live in one store for the whole process, and
+    /// `prior_tables_come_from_the_catalog` publishes others for a moment,
+    /// asking this inside it.
+    pub(super) fn golden_tiers(id: &str) -> Vec<ModelTier> {
         tiers_for_model_under(id, api::shipped_router_priors()).0
     }
 
@@ -1232,25 +1245,5 @@ mod golden_parity_tests {
                 expected.tiers
             );
         }
-    }
-
-    /// The table's tiers hold while other size words are published: the
-    /// moment `prior_tables_come_from_the_catalog` makes beside this table in
-    /// a parallel run, made here on purpose under the env lock. Read from the
-    /// store in that moment, spark lost its `spark` size word and a parallel
-    /// gate failed "gpt-5.3-codex-spark missing expected tier Fast"
-    /// (t-15568).
-    #[test]
-    fn the_golden_table_keeps_spark_fast_while_other_size_words_are_published() {
-        let _lock = crate::test_env_lock();
-        api::refresh_model_registry_from_json(
-            r#"{"models":[],"aliases":[],"priors":{"small_tokens":["tiny"]}}"#,
-        );
-        let tiers = golden_tiers("gpt-5.3-codex-spark");
-        api::refresh_model_registry_from_json(r#"{"models":[],"aliases":[]}"#);
-        assert!(
-            tiers.contains(&ModelTier::Fast),
-            "the published size words reached the golden table: spark is {tiers:?}"
-        );
     }
 }
