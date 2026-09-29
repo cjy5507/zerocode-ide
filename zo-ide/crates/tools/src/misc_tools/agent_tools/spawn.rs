@@ -542,7 +542,10 @@ fn run_from_manifest(stored: &AgentOutput, output_tokens: u64) -> HelperRun {
     }
 }
 
-fn reconcile_completion_with_manifest(manifest: &AgentOutput, completion: &mut AgentCompletion) {
+pub(super) fn reconcile_completion_with_manifest(
+    manifest: &AgentOutput,
+    completion: &mut AgentCompletion,
+) {
     let Some(stored) = super::manifest::load_agent_manifest_from_scanned_path(
         std::path::Path::new(&manifest.manifest_file),
     )
@@ -551,6 +554,16 @@ fn reconcile_completion_with_manifest(manifest: &AgentOutput, completion: &mut A
         return;
     };
     reconcile_completion_terminal_status(completion, &stored.status, stored.error.as_deref());
+    // A person's stop is written on the manifest the moment it wins, and the
+    // worker that unwinds after the abort knows only the runtime's own "agent
+    // cancelled". The parent reads what the record says: the words of the
+    // stop, and the work the helper had streamed so far.
+    if let Some(reason) = super::recorded_person_stop(&stored) {
+        completion.error = Some(reason.words().to_string());
+        if completion.result.as_deref().is_none_or(|result| result.trim().is_empty()) {
+            completion.result = super::agent_partial_result(&manifest.manifest_file);
+        }
+    }
     // The cost the worker measured in memory (output tokens) meets the cost
     // only the manifest kept (tools started, wall clock) — one place, so every
     // surface that spells `Done (…)` reads the same three numbers.

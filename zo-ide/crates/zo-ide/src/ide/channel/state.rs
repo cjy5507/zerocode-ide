@@ -105,6 +105,19 @@ pub type ChildFanout = Arc<dyn Fn(&serde_json::Value) + Send + Sync>;
 /// session has no MCP servers, in which case the method fails by name.
 pub type McpBridge = Arc<dyn Fn(&str, &serde_json::Value) -> Result<String, String> + Send + Sync>;
 
+/// The helpers a `helper.stop` may name: the registry that lists them and the
+/// session id their manifests are stamped with (t-16031). The front-end that
+/// owns the roster installs it when it starts relaying the roster and retires
+/// it when that relay ends, so an id is always resolved against the roster the
+/// window is looking at — across `/new` and `/resume` too.
+#[derive(Clone)]
+pub struct HelperOwner {
+    /// The session's agent registry.
+    pub registry: Arc<tools::AgentRegistry>,
+    /// The session id its helpers' manifests carry.
+    pub session_id: String,
+}
+
 /// `session.info` / `session_status` 프레임이 읽는 한 장.
 ///
 /// 프런트엔드가 밀어 넣는다 — 세션을 잠그지 않고도 소켓이 답할 수 있도록.
@@ -234,6 +247,8 @@ pub struct ChannelState {
     child_fanout: Mutex<Option<ChildFanout>>,
     /// Where `mcp.call` is answered, when this session has MCP servers.
     mcp_bridge: Mutex<Option<McpBridge>>,
+    /// Whose helpers `helper.stop` may stop, once the roster relay is up.
+    helper_owner: Mutex<Option<HelperOwner>>,
 }
 
 impl ChannelState {
@@ -260,6 +275,7 @@ impl ChannelState {
             idle_steer: std::sync::atomic::AtomicBool::new(false),
             child_fanout: Mutex::new(None),
             mcp_bridge: Mutex::new(None),
+            helper_owner: Mutex::new(None),
         }
     }
 
@@ -301,6 +317,30 @@ impl ChannelState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Install whose helpers `helper.stop` may stop.
+    pub fn set_helper_owner(&self, owner: Option<HelperOwner>) {
+        *self.helper_owner.lock().unwrap_or_else(PoisonError::into_inner) = owner;
+    }
+
+    /// The installed owner, if any.
+    #[must_use]
+    pub fn helper_owner(&self) -> Option<HelperOwner> {
+        self.helper_owner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Retire the owner installed for `registry` — that one only. A session
+    /// switch starts the next roster relay before the last one is dropped, and
+    /// the next one's owner must survive it.
+    pub fn retire_helper_owner_of(&self, registry: &Arc<tools::AgentRegistry>) {
+        let mut slot = self.helper_owner.lock().unwrap_or_else(PoisonError::into_inner);
+        if slot.as_ref().is_some_and(|owner| Arc::ptr_eq(&owner.registry, registry)) {
+            *slot = None;
+        }
     }
 
     /// One `session.capabilities` answer went out.

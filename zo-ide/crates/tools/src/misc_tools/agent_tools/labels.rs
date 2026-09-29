@@ -34,12 +34,40 @@ pub fn agent_store_dir() -> Result<std::path::PathBuf, String> {
     Ok(runtime::zo_project_state_dir(&cwd).join(AGENT_STORE_DIR_NAME))
 }
 
+/// A fresh agent id, `agent-<digits>`: the clock's reading in nanoseconds, made
+/// unique by [`issue`].
 pub(super) fn make_agent_id() -> String {
+    use std::sync::atomic::AtomicU64;
+
+    static LAST_ISSUED: AtomicU64 = AtomicU64::new(0);
+    format!("agent-{}", issue(&LAST_ISSUED, clock_nanos()))
+}
+
+fn clock_nanos() -> u64 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("agent-{nanos}")
+    u64::try_from(nanos).unwrap_or(u64::MAX)
+}
+
+/// The number an id is made of, given the clock's reading `nanos` and the last
+/// number issued (`last`, which this records): the reading, or one past the
+/// last number when the clock has not moved on. The `Agent` calls of one message
+/// start side by side, and the clock alone hands two of them the same reading
+/// whenever it counts whole microseconds (macOS) — the second spawn would die on
+/// the manifest the first created.
+fn issue(last: &std::sync::atomic::AtomicU64, nanos: u64) -> u64 {
+    use std::sync::atomic::Ordering;
+
+    // The closure always answers, so `fetch_update` hands back the value it
+    // replaced; the number issued is the one it stored.
+    let replaced = last
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |issued| {
+            Some(nanos.max(issued.saturating_add(1)))
+        })
+        .unwrap_or_else(|issued| issued);
+    nanos.max(replaced.saturating_add(1))
 }
 
 pub(super) fn slugify_agent_name(description: &str) -> String {
@@ -96,8 +124,9 @@ fn truncate_agent_label(label: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_store_dir, AGENT_STORE_DIR_NAME, AGENT_STORE_ENV};
+    use super::{agent_store_dir, issue, AGENT_STORE_DIR_NAME, AGENT_STORE_ENV};
     use std::path::Path;
+    use std::sync::atomic::AtomicU64;
 
     /// Restore an env var to its prior value (or unset) on drop, so a test that
     /// mutates process-global env never leaks into a sibling test.
@@ -184,5 +213,61 @@ mod tests {
             dir.display(),
         );
         assert!(dir.ends_with(AGENT_STORE_DIR_NAME));
+    }
+
+    /// The `Agent` calls of one message start side by side, and each mints its
+    /// id from the clock. A clock that reads whole microseconds hands two of
+    /// them the same reading, and the second spawn then dies on the manifest
+    /// the first created ("File exists", os error 17). The same reading, put in
+    /// twice, must make two ids that differ and only grow — whatever the clock
+    /// does next.
+    #[test]
+    fn one_clock_reading_makes_ids_that_differ_and_only_grow() {
+        let last = AtomicU64::new(0);
+        let first = issue(&last, 5_000);
+        let second = issue(&last, 5_000);
+        assert_eq!(first, 5_000, "the clock's own reading while it is ahead");
+        assert!(second > first, "the same reading twice made {first} and {second}");
+        let stepped_back = issue(&last, 1_000);
+        assert!(stepped_back > second, "a reading behind the last id made {stepped_back}");
+        let moved_on = issue(&last, 9_000_000);
+        assert_eq!(moved_on, 9_000_000, "the id follows the clock again once it is ahead");
+    }
+
+    /// The same reading arriving on many threads at once — the spawn wave —
+    /// makes only distinct ids.
+    #[test]
+    fn the_same_reading_on_many_threads_makes_only_distinct_ids() {
+        use std::collections::HashSet;
+
+        let last = AtomicU64::new(0);
+        let ids: Vec<u64> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| (0..2_000).map(|_| issue(&last, 42)).collect::<Vec<_>>()))
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("a minting thread"))
+                .collect()
+        });
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len(), "two threads minted one id");
+    }
+
+    /// On the real clock, a thread that mints faster than the clock ticks makes
+    /// no twins, and every id keeps the `agent-<digits>` shape the callers and
+    /// the path guard expect.
+    #[test]
+    fn agent_ids_minted_on_the_real_clock_are_distinct_and_keep_their_shape() {
+        use std::collections::HashSet;
+
+        let ids: Vec<String> = (0..20_000).map(|_| super::make_agent_id()).collect();
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len(), "one thread minted an id twice");
+        for id in &ids {
+            assert!(
+                id.strip_prefix("agent-")
+                    .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())),
+                "not an agent-<digits> id: {id}"
+            );
+        }
     }
 }

@@ -32,6 +32,20 @@
 //! | the last message answers that `Agent` call | a reply that ends on "I'll …" |
 //! | the last message is the turn-end gate's | the poll the 2026-09-27 main ran: `bash` sleeping [`TALK_POLL_SECS`] |
 //!
+//! And the t-16031 stop — two background helpers beside one piece of the main's
+//! own work, one helper the person stops by id while the other runs on. Read
+//! from the FIRST message for a helper's own requests, and from the last for
+//! the main's:
+//!
+//! | the request | the answer |
+//! |---|---|
+//! | the first helper's (first message names [`HSTOP_ALPHA`]) | its prose ([`HSTOP_ALPHA_PARTIAL`]) and one long `bash` step; [`HSTOP_ALPHA_DONE`] only if that step ever returns |
+//! | the second helper's (first message names [`HSTOP_BETA`]) | one short `bash` step, then [`HSTOP_BETA_DONE`] |
+//! | the last message carries a helper's notice | [`HSTOP_NOTED`] |
+//! | the last message answers the main's own step | [`HSTOP_MAIN_DONE`] |
+//! | the last message answers the two spawns | one foreground `bash` of a few seconds — the main's own work, which keeps its turn open |
+//! | the last message says [`HSTOP_GO`] | two background `Agent`s |
+//!
 //! `latency_ms` holds every answer that long — the model's own latency, the
 //! part of a reply no harness can take away.
 //!
@@ -94,6 +108,47 @@ pub const TALK_POLL_SECS: u64 = 60;
 const TALK_POLL_STEP_SECS: u64 = 2;
 const TALK_SPAWN_ID: &str = "toolu_talk_spawn";
 const TALK_WAIT_ID: &str = "toolu_talk_wait";
+
+/// The person hands the main two helpers to run beside each other, and asks
+/// for one piece of work of its own while they run (t-16031).
+pub const HSTOP_GO: &str = "HSTOP_GO";
+/// What the first helper is told — and how its requests are known. It works a
+/// little, then takes one long step that nobody lets it finish.
+pub const HSTOP_ALPHA: &str = "HSTOP_ALPHA";
+/// What the second helper is told. It takes a short step and finishes on its
+/// own.
+pub const HSTOP_BETA: &str = "HSTOP_BETA";
+/// The first helper's prose before its long step: what it has done when the
+/// person stops it.
+pub const HSTOP_ALPHA_PARTIAL: &str = "HSTOP_ALPHA_PARTIAL";
+/// The first helper's final words, which only a helper nobody stopped reaches.
+pub const HSTOP_ALPHA_DONE: &str = "HSTOP_ALPHA_DONE";
+/// The second helper's final words.
+pub const HSTOP_BETA_DONE: &str = "HSTOP_BETA_DONE";
+/// The main's words once a helper's notice has reached it.
+pub const HSTOP_NOTED: &str = "HSTOP_NOTED";
+/// The main's closing words after its own step.
+pub const HSTOP_MAIN_DONE: &str = "HSTOP_MAIN_DONE";
+/// What the main's own step prints, so its result is known by content.
+const HSTOP_MAIN_WORK_OUTPUT: &str = "hstop main work";
+/// Seconds of the main's own step: long enough to stop a helper while it runs,
+/// short enough that no test waits on it.
+const HSTOP_MAIN_WORK_SECS: u64 = 10;
+/// Seconds of the second helper's step.
+const HSTOP_BETA_STEP_SECS: u64 = 2;
+/// Seconds of the first helper's long step — never waited for: the stop kills
+/// it, and a run where the stop failed fails on the assertion, not on this.
+/// Under the minute a poll is put in the background at
+/// (`bash_redirect::WAIT_SLEEP_SECS`): a longer step would come back at once as
+/// a background task, and the helper would finish before anyone could stop it.
+const HSTOP_ALPHA_STEP_SECS: u64 = 45;
+const HSTOP_ALPHA_SPAWN_ID: &str = "toolu_hstop_alpha";
+const HSTOP_BETA_SPAWN_ID: &str = "toolu_hstop_beta";
+const HSTOP_MAIN_STEP_ID: &str = "toolu_hstop_main";
+/// The first words of the header a helper's notice opens with
+/// (`background_agent_notification_header`) — how the main's request that
+/// carries a notice is known.
+pub const HELPER_NOTICE_HEAD: &str = "[task notification";
 
 /// What this server should do with a turn request.
 #[derive(Debug, Clone, Copy)]
@@ -332,6 +387,19 @@ enum Answer {
     TalkReply(Vec<String>, bool),
     TalkNoted,
     TalkSlow,
+    /// The two background helpers of the t-16031 stop.
+    HstopSpawn,
+    /// The main's own foreground step, which keeps its turn open.
+    HstopMainWork,
+    HstopMainDone,
+    /// A helper's notice reached the main.
+    HstopNoted,
+    /// The first helper: its prose, then one long step.
+    HstopAlphaStep,
+    HstopAlphaDone,
+    /// The second helper: one short step, then its words.
+    HstopBetaStep,
+    HstopBetaDone,
 }
 
 impl Answer {
@@ -359,6 +427,40 @@ impl Answer {
                 input_tokens,
             ),
             Self::TalkSlow => talk_bash_sse("toolu_talk_slow", TALK_SLOW_COMMAND, 20_000, input_tokens),
+            Self::HstopSpawn => hstop_spawn_sse(input_tokens),
+            Self::HstopMainWork => talk_bash_sse(
+                HSTOP_MAIN_STEP_ID,
+                &format!("sleep {HSTOP_MAIN_WORK_SECS} && printf '{HSTOP_MAIN_WORK_OUTPUT}'"),
+                60_000,
+                input_tokens,
+            ),
+            Self::HstopMainDone => text_sse(
+                "msg_hstop_main_done",
+                &format!("### Main\n\n- {HSTOP_MAIN_DONE}\n"),
+                input_tokens,
+            ),
+            Self::HstopNoted => text_sse(
+                "msg_hstop_noted",
+                &format!("### Notice\n\n- {HSTOP_NOTED}\n"),
+                input_tokens,
+            ),
+            Self::HstopAlphaStep => hstop_alpha_step_sse(input_tokens),
+            Self::HstopAlphaDone => text_sse(
+                "msg_hstop_alpha_done",
+                &format!("### Done\n\n- {HSTOP_ALPHA_DONE}\n"),
+                input_tokens,
+            ),
+            Self::HstopBetaStep => talk_bash_sse(
+                "toolu_hstop_beta_step",
+                &format!("sleep {HSTOP_BETA_STEP_SECS} && printf 'hstop beta step'"),
+                60_000,
+                input_tokens,
+            ),
+            Self::HstopBetaDone => text_sse(
+                "msg_hstop_beta_done",
+                &format!("### Done\n\n- {HSTOP_BETA_DONE}\n"),
+                input_tokens,
+            ),
             Self::TalkChildSays => talk_says_sse(input_tokens),
             Self::TalkHeard(noted) => text_sse(
                 "msg_talk_heard",
@@ -429,6 +531,9 @@ fn answer_for(body: &str, plan: Plan) -> Answer {
     else {
         return Answer::Text;
     };
+    if let Some(stop) = hstop_answer(&value, last) {
+        return stop;
+    }
     if let Some(talk) = talk_answer(&value, last, plan) {
         return talk;
     }
@@ -619,6 +724,127 @@ fn talk_answer(value: &Value, last: &Value, plan: Plan) -> Option<Answer> {
     }
     if text.contains("[zo:turn-end-gate]") && first.contains(TALK_DELEGATE) {
         return Some(Answer::TalkPoll);
+    }
+    None
+}
+
+/// The two background `Agent`s the main hands its work to in one message: the
+/// first is the one the person will stop, the second the one that runs on.
+fn hstop_spawn_sse(input_tokens: u32) -> String {
+    let mut body = message_start("msg_hstop_spawn", input_tokens);
+    for (index, (id, description, marker)) in [
+        (HSTOP_ALPHA_SPAWN_ID, "hstop alpha", HSTOP_ALPHA),
+        (HSTOP_BETA_SPAWN_ID, "hstop beta", HSTOP_BETA),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        append_tool_use(
+            &mut body,
+            index,
+            id,
+            "Agent",
+            &json!({
+                "description": description,
+                "subagent_type": "general-purpose",
+                "background": true,
+                "prompt": format!("{marker}: take your step and report"),
+            })
+            .to_string(),
+        );
+    }
+    finish_tool_message(&mut body, input_tokens);
+    body
+}
+
+/// The first helper's request: prose first (the work it has done), then one
+/// long `bash` step in the same message — the state a stop finds it in.
+fn hstop_alpha_step_sse(input_tokens: u32) -> String {
+    let mut body = message_start("msg_hstop_alpha_step", input_tokens);
+    append_sse(
+        &mut body,
+        "content_block_start",
+        &json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""}
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_delta",
+        &json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "text_delta",
+                "text": format!("{HSTOP_ALPHA_PARTIAL}: read the first two files, now running the long check.\n")
+            }
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_stop",
+        &json!({"type": "content_block_stop", "index": 0}),
+    );
+    append_tool_use(
+        &mut body,
+        1,
+        "toolu_hstop_alpha_step",
+        "bash",
+        &json!({
+            "command": format!("sleep {HSTOP_ALPHA_STEP_SECS} && printf 'hstop alpha long step'"),
+            "timeout": (HSTOP_ALPHA_STEP_SECS + 30) * 1000,
+        })
+        .to_string(),
+    );
+    finish_tool_message(&mut body, input_tokens);
+    body
+}
+
+/// How many tool results a request's conversation already carries — how far
+/// along a helper is.
+fn tool_results_in(messages: &[Value]) -> usize {
+    messages
+        .iter()
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .count()
+}
+
+/// The t-16031 stop's answer to this request, when it is part of it.
+fn hstop_answer(value: &Value, last: &Value) -> Option<Answer> {
+    let messages = value.get("messages").and_then(Value::as_array)?;
+    let first = messages.first().map(Value::to_string).unwrap_or_default();
+    // A helper's own conversation opens with the brief it was handed; the
+    // main's opens with the person's words, which name neither helper.
+    if !first.contains(HSTOP_GO) {
+        for (marker, step, done) in [
+            (HSTOP_ALPHA, Answer::HstopAlphaStep, Answer::HstopAlphaDone),
+            (HSTOP_BETA, Answer::HstopBetaStep, Answer::HstopBetaDone),
+        ] {
+            if first.contains(marker) {
+                return Some(if tool_results_in(messages) == 0 { step } else { done });
+            }
+        }
+        return None;
+    }
+    let text = last.to_string();
+    if text.contains(COMPACTION_MARKER) {
+        return None;
+    }
+    if text.contains(HSTOP_MAIN_WORK_OUTPUT) {
+        return Some(Answer::HstopMainDone);
+    }
+    if text.contains(HELPER_NOTICE_HEAD) {
+        return Some(Answer::HstopNoted);
+    }
+    if text.contains(HSTOP_ALPHA_SPAWN_ID) && text.contains(HSTOP_BETA_SPAWN_ID) {
+        return Some(Answer::HstopMainWork);
+    }
+    if text.contains(HSTOP_GO) {
+        return Some(Answer::HstopSpawn);
     }
     None
 }

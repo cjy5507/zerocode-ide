@@ -127,7 +127,7 @@ pub use agent_tools::{
     reap_orphaned_agents, register_agent_completion_channel,
     stop_agent_for_session, stop_running_agents_since,
     stop_running_agents_since_for_session, stop_running_agents_since_for_strict_session,
-    wait_for_agent_completions, AgentCompletion, AgentStopOutcome, AGENT_MESSAGE_STATUS,
+    wait_for_agent_completions, AgentCompletion, AgentStopOutcome, StopReason, AGENT_MESSAGE_STATUS,
     AGENT_STARVED_STATUS,
 };
 pub(crate) use audit::run_audit;
@@ -505,21 +505,19 @@ pub(crate) fn run_stop_agent(
     };
 
     let outcome = agent_tools::stop_agent_for_session(registry, agent_id, session_id, reason);
-    let (status, detail) = match outcome {
-        agent_tools::AgentStopOutcome::Stopped { name } => ("stopped", name),
-        agent_tools::AgentStopOutcome::Closed { name } => ("closed", name),
+    let status = outcome.status();
+    let detail = match outcome {
+        agent_tools::AgentStopOutcome::Stopped { name }
+        | agent_tools::AgentStopOutcome::Closed { name }
+        | agent_tools::AgentStopOutcome::NotOwned { name }
+        | agent_tools::AgentStopOutcome::Unreachable { name } => name,
         agent_tools::AgentStopOutcome::AlreadyFinished { name, status } => {
-            ("already_finished", format!("{name} ({status})"))
+            format!("{name} ({status})")
         }
-        agent_tools::AgentStopOutcome::NotFound => (
-            "not_found",
-            "no agent with that id belongs to this session".to_string(),
-        ),
-        agent_tools::AgentStopOutcome::NotOwned { name } => ("not_owned", name),
-        agent_tools::AgentStopOutcome::Unreachable { name } => ("unreachable", name),
-        agent_tools::AgentStopOutcome::Failed { name, error } => {
-            ("failed", format!("{name}: {error}"))
+        agent_tools::AgentStopOutcome::NotFound => {
+            "no agent with that id belongs to this session".to_string()
         }
+        agent_tools::AgentStopOutcome::Failed { name, error } => format!("{name}: {error}"),
     };
     to_pretty_json(json!({
         "status": status,

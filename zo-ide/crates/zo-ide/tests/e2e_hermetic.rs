@@ -2753,6 +2753,384 @@ async fn e2e_esc_on_a_blocking_agent_call_keeps_the_helper_working_and_its_resul
     );
 }
 
+/// The channel method the window stops ONE helper by id with (t-16031), as zo's
+/// catalog row spells it (`AgentVoice::helper_stop`).
+const HELPER_STOP: &str = "helper.stop";
+/// The key an answer names the words of a person's stop by.
+const STOPPED_BY_PERSON: &str = "stopped_by_person";
+/// The words that key stands for — what the stop leaves in the record and what
+/// the parent's notice says — read from the table
+/// (`tools::StopReason::StoppedByPerson`), not copied out of it.
+const STOPPED_BY_PERSON_WORDS: &str = tools::StopReason::StoppedByPerson.words();
+
+/// The token the two-helper sessions' channel is opened with: an interactive
+/// session generates one of its own when none is given, and refuses a caller
+/// without it.
+const HELPER_STOP_TOKEN: &str = "helper-stop-token";
+
+/// The frames one connection to the channel has seen, newest last.
+type Frames = std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+/// Follow the channel's frames on a connection of their own, so the caller's
+/// requests never queue behind a stream.
+async fn watch_frames(
+    address: &std::path::Path,
+    session: &str,
+) -> (Frames, tokio::task::JoinHandle<()>) {
+    let frames = Frames::default();
+    let sink = Frames::clone(&frames);
+    let mut watcher = connect_to_addr_file(address, HELPER_STOP_TOKEN).await;
+    watcher.subscribe(session, true).await.expect("subscribe the watcher");
+    let reader = tokio::spawn(async move {
+        while let Ok(Some(incoming)) = watcher.next_incoming().await {
+            if let zerocode_harness::Incoming::Frame(frame) = incoming {
+                sink.lock().unwrap().push(frame);
+            }
+        }
+    });
+    (frames, reader)
+}
+
+/// The id of the helper whose label carries `word`, read off any roster the
+/// channel has published: a short helper may already have left the newest one
+/// by the time the caller looks.
+fn helper_named(frames: &Frames, word: &str) -> Option<String> {
+    let frames = frames.lock().unwrap();
+    frames
+        .iter()
+        .filter(|frame| frame["type"] == "subagents")
+        .flat_map(|frame| frame["running"].as_array().into_iter().flatten())
+        .find(|row| row["label"].as_str().is_some_and(|label| label.contains(word)))
+        .and_then(|row| row["id"].as_str().map(str::to_string))
+}
+
+/// The turn the parent has open now: the newest `turn` frame is a start.
+fn open_turn(frames: &Frames) -> Option<u64> {
+    let frames = frames.lock().unwrap();
+    let newest = frames.iter().rev().find(|frame| frame["type"] == "turn")?;
+    (newest["phase"] == "start").then(|| newest["turn_id"].as_u64()).flatten()
+}
+
+/// How a turn ended, once it has: the outcome its `end` frame carries.
+fn turn_outcome(frames: &Frames, turn_id: u64) -> Option<String> {
+    let frames = frames.lock().unwrap();
+    frames
+        .iter()
+        .find(|frame| {
+            frame["type"] == "turn" && frame["turn_id"] == turn_id && frame["phase"] == "end"
+        })
+        .and_then(|frame| frame["outcome"].as_str().map(str::to_string))
+}
+
+/// Every turn any frame says was cancelled.
+fn cancelled_turns(frames: &Frames) -> Vec<u64> {
+    frames
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|frame| frame["type"] == "turn" && frame["outcome"] == "cancelled")
+        .filter_map(|frame| frame["turn_id"].as_u64())
+        .collect()
+}
+
+/// Both helpers seen on a roster and a turn open — the moment the scenario
+/// stands ready: `(first helper's id, second helper's id, the open turn)`.
+fn scenario_ready(frames: &Frames) -> Option<(String, String, u64)> {
+    let alpha = helper_named(frames, "alpha")?;
+    let beta = helper_named(frames, "beta")?;
+    Some((alpha, beta, open_turn(frames)?))
+}
+
+/// What the channel, the provider and the screen have shown so far, for the
+/// message of a wait that ran out: without it a scenario that never started
+/// and one that started and went wrong read the same.
+async fn describe_scenario(
+    stopping: &StopSession,
+    service: &e2e::measure::MeasureService,
+) -> String {
+    let (turns, rosters) = {
+        let frames = stopping.frames.lock().unwrap();
+        let turns: Vec<String> = frames
+            .iter()
+            .filter(|frame| frame["type"] == "turn")
+            .map(|frame| format!("{}#{} {}", frame["phase"], frame["turn_id"], frame["outcome"]))
+            .collect();
+        let rosters: Vec<String> = frames
+            .iter()
+            .filter(|frame| frame["type"] == "subagents")
+            .map(|frame| {
+                frame["running"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| row["label"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("+")
+            })
+            .collect();
+        (turns, rosters)
+    };
+    let recorded = service.recorded().await;
+    let asked: Vec<String> = recorded
+        .iter()
+        .map(|row| {
+            let last: String = last_message(row).chars().take(90).collect();
+            format!("[{} messages] {last}", row.message_count())
+        })
+        .collect();
+    let mut screen = Screen::new(40);
+    screen.feed(&stopping.run.snapshot_output());
+    let visible: Vec<String> = screen.visible().into_iter().filter(|row| !row.trim().is_empty()).collect();
+    format!("turn frames {turns:?}; roster frames {rosters:?}; the provider saw {} request(s) {asked:#?}; the screen: {visible:#?}", recorded.len())
+}
+
+/// Poll `probe` until it finds something, or fail describing the scenario.
+async fn wait_for_state<T>(
+    what: &str,
+    timeout: Duration,
+    stopping: &StopSession,
+    service: &e2e::measure::MeasureService,
+    mut probe: impl FnMut() -> Option<T>,
+) -> T {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(found) = probe() {
+            return found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what} was not seen within {timeout:?}: {}",
+            describe_scenario(stopping, service).await
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The main's conversation as of its newest request (a helper's own requests
+/// open with its brief, not with the person's words).
+fn main_conversation(recorded: &[e2e::measure::Recorded]) -> Option<String> {
+    recorded
+        .iter()
+        .rev()
+        .find(|row| {
+            !row.opens_with(e2e::measure::HSTOP_ALPHA) && !row.opens_with(e2e::measure::HSTOP_BETA)
+        })
+        .map(e2e::measure::Recorded::messages_json)
+}
+
+/// How many requests one helper has sent the provider.
+fn helper_requests(recorded: &[e2e::measure::Recorded], marker: &str) -> usize {
+    recorded.iter().filter(|row| row.opens_with(marker)).count()
+}
+
+/// A session with the events channel open, on the two-helper provider.
+struct StopSession {
+    run: PtyRun,
+    client: Client,
+    session: String,
+    frames: Frames,
+    watcher: tokio::task::JoinHandle<()>,
+}
+
+async fn stop_session(layout: &Layout, base_url: &str) -> StopSession {
+    let address = layout.root.path().join("helper-stop.addr");
+    let address_text = address.to_string_lossy().into_owned();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        base_url,
+        &interactive_args(),
+        &[("ZO_EVENTS_ADDR_FILE", &address_text), ("ZO_SERVE_TOKEN", HELPER_STOP_TOKEN)],
+    )
+    .expect("spawn zo in PTY");
+    run.wait_for("directory:", TEST_TIMEOUT);
+    let mut client = connect_to_addr_file(&address, HELPER_STOP_TOKEN).await;
+    let info = client.call(method::INFO, serde_json::json!({})).await.expect("session.info");
+    let session = info["id"].as_str().expect("the channel names its session").to_string();
+    let (frames, watcher) = watch_frames(&address, &session).await;
+    StopSession { run, client, session, frames, watcher }
+}
+
+/// The person stops ONE inline helper by id over the channel (t-16031): the
+/// helper stops and its work so far reaches the main under the words of a
+/// person's stop; the other helper runs on and finishes; the main's own turn
+/// is never cancelled. The answer names the outcome and the key of the words
+/// it left in the record. The window's button builds on exactly this.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // one ordered scenario: two helpers, one stop, the main's whole conversation — split, it loses its order
+async fn e2e_the_person_stops_one_helper_by_id_and_the_parent_and_the_other_helper_go_on() {
+    use zerocode_harness::HarnessError;
+
+    let layout = Layout::new();
+    layout.model_led();
+    let service = e2e::measure::MeasureService::start(e2e::measure::Plan::default())
+        .await
+        .expect("start the two-helper provider");
+    let mut stopping = stop_session(&layout, service.base_url()).await;
+    // The person asks for the delegation in words: a small task handed to a
+    // helper without that is refused and done inline (`small_spawn_is_wasteful`).
+    stopping
+        .run
+        .send(
+            format!(
+                "{} delegate two checks to two helpers and do a step of your own meanwhile\r",
+                e2e::measure::HSTOP_GO
+            )
+            .as_bytes(),
+        )
+        .expect("send the task");
+
+    // Both helpers have been running, and the main is busy with its own step.
+    let (alpha, beta, turn) = wait_for_state(
+        "both helpers on the roster under an open turn",
+        Duration::from_secs(30),
+        &stopping,
+        &service,
+        || scenario_ready(&stopping.frames),
+    )
+    .await;
+    let session = stopping.session.clone();
+
+    // Another session's id is refused, and stops nothing.
+    let refused = stopping
+        .client
+        .call(HELPER_STOP, serde_json::json!({"id": "someone-elses-session", "agent_id": alpha}))
+        .await
+        .expect_err("a stop that names another session");
+    assert!(matches!(refused, HarnessError::Rpc { code: -32000, .. }), "{refused}");
+
+    // The person's stop of the first helper: its answer is the whole contract.
+    let stopped = stopping
+        .client
+        .call(HELPER_STOP, serde_json::json!({"id": session, "agent_id": alpha}))
+        .await
+        .expect("helper.stop of the first helper");
+    assert_eq!(
+        stopped,
+        serde_json::json!({"status": "stopped", "agent_id": alpha, "record_key": STOPPED_BY_PERSON}),
+        "the wrong-session call stopped nothing, and this one answers the contract"
+    );
+    assert_eq!(
+        open_turn(&stopping.frames),
+        Some(turn),
+        "the stop left the main's own turn open"
+    );
+
+    // The main's turn finishes on its own, the second helper finishes, and both
+    // notices reach the main.
+    let outcome = wait_for_state(
+        "the main's turn to end",
+        Duration::from_secs(60),
+        &stopping,
+        &service,
+        || turn_outcome(&stopping.frames, turn),
+    )
+    .await;
+    assert_eq!(outcome, "completed", "the stop cancelled the main's turn");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let conversation = loop {
+        let conversation = main_conversation(&service.recorded().await).unwrap_or_default();
+        if conversation.contains(e2e::measure::HSTOP_BETA_DONE)
+            && conversation.contains(STOPPED_BY_PERSON_WORDS)
+        {
+            break conversation;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the main never received both notices: {conversation}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(conversation.contains(&alpha), "the notice names the stopped helper: {conversation}");
+    assert!(
+        conversation.contains(e2e::measure::HSTOP_ALPHA_PARTIAL),
+        "the stopped helper's work so far did not reach the main: {conversation}"
+    );
+    assert!(
+        !conversation.contains(e2e::measure::HSTOP_ALPHA_DONE),
+        "the stopped helper went on to finish: {conversation}"
+    );
+    let recorded = service.recorded().await;
+    assert_eq!(
+        helper_requests(&recorded, e2e::measure::HSTOP_ALPHA),
+        1,
+        "the stopped helper asked the provider again after it was stopped"
+    );
+    assert_eq!(
+        helper_requests(&recorded, e2e::measure::HSTOP_BETA),
+        2,
+        "the other helper did not take its step and finish"
+    );
+    assert!(cancelled_turns(&stopping.frames).is_empty(), "a turn was cancelled");
+
+    // A helper that has finished, or was already stopped, answers
+    // `already_finished`, records nothing, and sends the main nothing more.
+    let before = recorded.len();
+    for finished in [&alpha, &beta] {
+        let again = stopping
+            .client
+            .call(HELPER_STOP, serde_json::json!({"id": session, "agent_id": finished}))
+            .await
+            .expect("helper.stop of a finished helper");
+        assert_eq!(
+            again,
+            serde_json::json!({"status": "already_finished", "agent_id": finished, "record_key": null}),
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        service.recorded().await.len(),
+        before,
+        "a repeated stop reached the provider or the main"
+    );
+    stopping.watcher.abort();
+    let _ = stopping.run.finish();
+}
+
+/// The refusals of `helper.stop` (t-16031), on a session with nothing running:
+/// another session's id is refused by name, a call without a helper is an
+/// invalid request, and an id nobody owns answers `not_found` with nothing
+/// recorded. None of them touches the session's turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_helper_stop_refuses_another_session_and_names_a_helper_nobody_owns() {
+    use zerocode_harness::HarnessError;
+
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("nothing is running")
+        .await
+        .expect("start the script");
+    let mut stopping = stop_session(&layout, service.base_url()).await;
+    let session = stopping.session.clone();
+
+    let stranger = stopping
+        .client
+        .call(HELPER_STOP, serde_json::json!({"id": "someone-elses-session", "agent_id": "agent-1"}))
+        .await
+        .expect_err("a stop that names another session");
+    assert!(matches!(stranger, HarnessError::Rpc { code: -32000, .. }), "{stranger}");
+    let bare = stopping
+        .client
+        .call(HELPER_STOP, serde_json::json!({"id": session}))
+        .await
+        .expect_err("a stop that names no helper");
+    assert!(matches!(bare, HarnessError::Rpc { code: -32602, .. }), "{bare}");
+    let unknown = stopping
+        .client
+        .call(HELPER_STOP, serde_json::json!({"id": session, "agent_id": "agent-nobody-owns"}))
+        .await
+        .expect("helper.stop of an id nobody owns");
+    assert_eq!(
+        unknown,
+        serde_json::json!({"status": "not_found", "agent_id": "agent-nobody-owns", "record_key": null}),
+    );
+    assert!(cancelled_turns(&stopping.frames).is_empty(), "a refusal cancelled a turn");
+    assert!(open_turn(&stopping.frames).is_none(), "a refusal opened a turn");
+    stopping.watcher.abort();
+    let _ = stopping.run.finish();
+}
+
 /// The number the brief asks for: from the moment the person types to the
 /// moment the main's answer is on screen, p50 and p95 over fresh sessions,
 /// against a model that takes `TALK_LATENCY_MS` to answer. Run against any

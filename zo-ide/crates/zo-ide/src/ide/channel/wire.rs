@@ -60,6 +60,14 @@ pub mod method {
     /// runtime (t-2513 §2.1) — the same road an inline child's passthrough
     /// takes, with a socket in the middle.
     pub const MCP_CALL: &str = runtime::subagent_panes::channel_method::MCP_CALL;
+    /// The window stops ONE inline helper by id (t-16031) — the road that ends a
+    /// single helper without ending its parent's turn (`session.cancel_turn`)
+    /// and without a channel of the helper's own (`teammate.close`). Params:
+    /// the session `id` (checked as `session.steer` checks it) and the helper's
+    /// `agent_id`. The window learns this spelling from the catalog row
+    /// (`AgentVoice::helper_stop`), not from the harness — the test below
+    /// pins the two.
+    pub const HELPER_STOP: &str = "helper.stop";
 }
 
 #[cfg(test)]
@@ -75,6 +83,17 @@ mod method_tests {
         assert_eq!(super::method::AUTH_RELOAD, channel_method::AUTH_RELOAD);
         assert_eq!(super::method::TEAMMATE_CLOSE, "teammate.close");
         assert_eq!(super::method::MCP_CALL, "mcp.call");
+    }
+
+    /// The window reads the road's spelling off zo's catalog row and calls it
+    /// as spelled; this channel must answer that very name (t-16031).
+    #[test]
+    fn the_helper_stop_method_is_the_one_the_catalog_names_for_zo() {
+        assert_eq!(
+            Some(super::method::HELPER_STOP),
+            zerocode_core::agent::agent_voice("zo").helper_stop
+        );
+        assert_eq!(super::method::HELPER_STOP, "helper.stop");
     }
 }
 
