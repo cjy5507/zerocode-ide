@@ -261,6 +261,7 @@ fn dispatch(
         // `session_matches` 를 거치지 않는다.
         method::AUTH_RELOAD => auth_reload(state, params, id),
         method::TEAMMATE_CLOSE => teammate_close(state, params, id),
+        method::HELPER_STOP => helper_stop(state, params, id),
         method::MCP_CALL => mcp_call(state, params, id),
         other => RpcResponse::err(
             id,
@@ -326,6 +327,65 @@ fn teammate_close(state: &ChannelState, params: &Value, id: u64) -> RpcResponse 
         .to_string();
     state.push_command(Command::Close { reason });
     RpcResponse::ok(id, json!({ "closing": true, "turn_id": state.turn() }))
+}
+
+/// `helper.stop` — the window stops ONE inline helper by id (t-16031).
+///
+/// It goes through `tools::stop_agent_for_session`, the stop the model's own
+/// tool and the agents panel already use, with the session that owns the
+/// helpers: an id that session does not own, or never was a helper, is refused
+/// there, and no other helper and no turn is touched. The stop is recorded as
+/// the person's ([`tools::StopReason::StoppedByPerson`]), so the record and the
+/// completion the parent reads both say so. The answer carries the outcome:
+/// the window reads no later frame.
+///
+/// It runs on this connection's task, as `mcp.call` does. A stop is a
+/// manifest write and a signal to the worker, bounded by its own I/O, and asks
+/// nothing of the session loop — so there is no loop to wait on, and no bound
+/// to wait for it within.
+fn helper_stop(state: &ChannelState, params: &Value, id: u64) -> RpcResponse {
+    if let Err(response) = session_matches(state, params, id) {
+        return response;
+    }
+    let Some(agent_id) = params
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|agent_id| !agent_id.is_empty())
+    else {
+        return RpcResponse::err(id, CODE_INVALID_PARAMS, "helper.stop needs agent_id");
+    };
+    let Some(owner) = state.helper_owner() else {
+        return RpcResponse::err(
+            id,
+            CODE_METHOD_NOT_FOUND,
+            "this session has no helper roster to stop a helper through",
+        );
+    };
+    let reason = tools::StopReason::StoppedByPerson;
+    let outcome =
+        tools::stop_agent_for_session(&owner.registry, agent_id, &owner.session_id, reason.words());
+    RpcResponse::ok(id, stop_answer(agent_id, reason, &outcome))
+}
+
+/// The answer's one shape, agreed with the window's builder: `status` is the
+/// stop tool's word for the outcome, `agent_id` the id asked about, `record_key`
+/// the key of the words the stop left in the record — `null` unless it left any
+/// — and `detail` only on a `failed` answer.
+fn stop_answer(
+    agent_id: &str,
+    reason: tools::StopReason,
+    outcome: &tools::AgentStopOutcome,
+) -> Value {
+    let mut answer = json!({
+        "status": outcome.status(),
+        "agent_id": agent_id,
+        "record_key": outcome.recorded_a_reason().then_some(reason.as_str()),
+    });
+    if let tools::AgentStopOutcome::Failed { name, error } = outcome {
+        answer["detail"] = json!(format!("{name}: {error}"));
+    }
+    answer
 }
 
 /// `mcp.call` — a pane child's MCP tool call, answered by this session's MCP
@@ -502,7 +562,7 @@ fn steer(state: &ChannelState, params: &Value, id: u64) -> RpcResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ide::channel::state::PromptKind;
+    use crate::ide::channel::state::{HelperOwner, PromptKind};
     use runtime::message_stream::PermissionDecision;
 
     fn request(method: &str, params: Value) -> RpcRequest {
@@ -674,6 +734,95 @@ mod tests {
             vec![Command::Close {
                 reason: "closed_by_parent".to_string()
             }]
+        );
+    }
+
+    /// `helper.stop` is answered where a roster is installed; it refuses another
+    /// session and a call with no helper by name, answers an id nobody owns as
+    /// `not_found`, and never touches the turn or its commands (t-16031).
+    #[test]
+    fn helper_stop_refuses_what_it_should_and_leaves_the_turn_alone() {
+        let state = ChannelState::new("s".to_string());
+        let mut subscribed = None;
+        let none = dispatch(
+            &state,
+            &request(method::HELPER_STOP, json!({"id": "s", "agent_id": "agent-1"})),
+            &mut subscribed,
+        );
+        assert_eq!(code_of(&none), Some(CODE_METHOD_NOT_FOUND), "no roster relay is up yet");
+
+        let root = tempfile::tempdir().expect("registry root");
+        state.set_helper_owner(Some(HelperOwner {
+            registry: tools::AgentRegistry::at_root_for_tests("s", root.path()),
+            session_id: "s".to_string(),
+        }));
+        let stranger = dispatch(
+            &state,
+            &request(method::HELPER_STOP, json!({"id": "someone-elses", "agent_id": "agent-1"})),
+            &mut subscribed,
+        );
+        assert_eq!(code_of(&stranger), Some(CODE_NO_SUCH_SESSION));
+        for bare in [
+            json!({"id": "s"}),
+            json!({"id": "s", "agent_id": "  "}),
+            json!({"id": "s", "agent_id": 7}),
+        ] {
+            let refused = dispatch(&state, &request(method::HELPER_STOP, bare.clone()), &mut subscribed);
+            assert_eq!(code_of(&refused), Some(CODE_INVALID_PARAMS), "{bare}");
+        }
+        let unknown = dispatch(
+            &state,
+            &request(method::HELPER_STOP, json!({"id": "s", "agent_id": "agent-nobody"})),
+            &mut subscribed,
+        );
+        assert_eq!(
+            unknown.result,
+            Some(json!({"status": "not_found", "agent_id": "agent-nobody", "record_key": null})),
+            "{unknown:?}"
+        );
+        assert!(state.take_commands().is_empty(), "a helper stop pushed a command at the turn");
+    }
+
+    /// The answer is one shape whatever the outcome: `status` the stop tool's
+    /// word, `agent_id` the id asked about, `record_key` the key of the words
+    /// the stop left in the record — null unless it left any — and `detail`
+    /// only on `failed` (t-16031).
+    #[test]
+    fn a_helper_stop_answer_is_one_shape_for_every_outcome() {
+        use tools::AgentStopOutcome as Outcome;
+        let name = || "helper".to_string();
+        let reason = tools::StopReason::StoppedByPerson;
+        for (outcome, status, key) in [
+            (Outcome::Stopped { name: name() }, "stopped", Some("stopped_by_person")),
+            (Outcome::Closed { name: name() }, "closed", Some("stopped_by_person")),
+            (
+                Outcome::AlreadyFinished { name: name(), status: "completed".to_string() },
+                "already_finished",
+                None,
+            ),
+            (Outcome::NotFound, "not_found", None),
+            (Outcome::NotOwned { name: name() }, "not_owned", None),
+            (Outcome::Unreachable { name: name() }, "unreachable", None),
+        ] {
+            assert_eq!(
+                stop_answer("agent-7", reason, &outcome),
+                json!({"status": status, "agent_id": "agent-7", "record_key": key}),
+                "{status}"
+            );
+        }
+        let failed = stop_answer(
+            "agent-7",
+            reason,
+            &Outcome::Failed { name: name(), error: "disk full".to_string() },
+        );
+        assert_eq!(
+            failed,
+            json!({
+                "status": "failed",
+                "agent_id": "agent-7",
+                "record_key": null,
+                "detail": "helper: disk full"
+            })
         );
     }
 

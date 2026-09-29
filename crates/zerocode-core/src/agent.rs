@@ -1562,6 +1562,9 @@ pub struct AgentPresence {
     pub spinner_verbs: &'static [&'static str],
     /// The CLI's todo tool ([`AgentVoice::todo_tool`]).
     pub todo_tool: Option<&'static str>,
+    /// The channel method that stops ONE helper by id
+    /// ([`AgentVoice::helper_stop`]) — the row the window's helper page reads.
+    pub helper_stop: Option<&'static str>,
 }
 
 /// How far a permission mode lets the agent act before it asks — the one
@@ -1698,6 +1701,15 @@ pub struct AgentVoice {
     /// list, as the extension draws `TodoWrite` (2.1.280 `qD1`). `None`
     /// where the CLI has none or its shape was not read.
     pub todo_tool: Option<&'static str>,
+    /// The method a CLI's own channel stops ONE of its running helpers by id
+    /// with (`helper.stop` on zo's IDE channel). Called with the session id
+    /// and the helper's `agent_id`, it ends that helper alone: the parent's
+    /// turn and every other helper run on, and the helper's work so far
+    /// reaches its parent. The helper page draws its stop button only where a
+    /// method is named, and the window never spells one a CLI did not — so
+    /// `None` where the CLI has no such road, not a stop that would end the
+    /// parent's whole turn instead.
+    pub helper_stop: Option<&'static str>,
 }
 
 /// Claude Code's spinner verbs — the words its own screen and its panel say
@@ -1876,6 +1888,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             spinner_verbs: CLAUDE_SPINNER_VERBS,
             // The extension's own name for it (`XN="TodoWrite"`).
             todo_tool: Some("TodoWrite"),
+            helper_stop: None,
         },
     ),
     (
@@ -1914,6 +1927,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             interrupt_key: None,
             spinner_verbs: &[],
             todo_tool: None,
+            helper_stop: None,
         },
     ),
     (
@@ -1945,6 +1959,10 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // zo-ide's `TodoWrite` (tools/task_tools.rs) takes the same
             // `todos: [{content, status, activeForm}]`.
             todo_tool: Some("TodoWrite"),
+            // zo's IDE channel answers it (`zo-ide/crates/zo-ide/src/ide/channel/
+            // wire.rs` pins the same spelling): the person's stop of one helper
+            // by id, the rest of the session untouched.
+            helper_stop: Some("helper.stop"),
         },
     ),
     (
@@ -1974,6 +1992,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             interrupt_key: None,
             spinner_verbs: &[],
             todo_tool: None,
+            helper_stop: None,
         },
     ),
 ];
@@ -1994,6 +2013,7 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     interrupt_key: None,
     spinner_verbs: &[],
     todo_tool: None,
+    helper_stop: None,
 };
 
 /// One agent's console, or the silent one for an agent the table does not
@@ -2092,6 +2112,7 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                 interrupt_key: agent_voice(spec.id).interrupt_key,
                 spinner_verbs: agent_voice(spec.id).spinner_verbs,
                 todo_tool: agent_voice(spec.id).todo_tool,
+                helper_stop: agent_voice(spec.id).helper_stop,
             }
         })
         .collect()
@@ -2335,6 +2356,63 @@ mod tests {
         assert_eq!(super::agent_voice("zo").todo_tool, Some("TodoWrite"));
         assert!(super::agent_voice("codex").todo_tool.is_none());
         assert!(super::SILENT_CONSOLE.todo_tool.is_none());
+    }
+
+    /// The channel method a CLI stops ONE helper by id with (t-16031): zo's IDE
+    /// channel answers `helper.stop`, and every other row stays empty until its
+    /// CLI has such a road — the window draws the stop button only where a
+    /// method is named, and never spells one a CLI did not. Read as the window
+    /// reads it: off the serialized row, in both places a row is served from
+    /// (the voice, and the `list_agents` presence that carries the voice's
+    /// fields to the page).
+    #[test]
+    fn only_zos_row_names_the_road_that_stops_one_helper_by_id() {
+        let road = |row: &serde_json::Value| row["helper_stop"].clone();
+        for spec in super::AGENT_SPECS.iter() {
+            let voice =
+                serde_json::to_value(super::agent_voice(spec.id)).expect("a voice serializes");
+            if spec.id == "zo" {
+                assert_eq!(road(&voice), serde_json::json!("helper.stop"), "zo's voice");
+            } else {
+                assert!(
+                    road(&voice).is_null(),
+                    "{} has no such road yet: {voice}",
+                    spec.id
+                );
+            }
+        }
+        let silent =
+            serde_json::to_value(super::SILENT_CONSOLE).expect("the silent voice serializes");
+        assert!(
+            road(&silent).is_null(),
+            "the silent console names no road: {silent}"
+        );
+        let unvoiced = serde_json::to_value(super::agent_voice("nobody")).expect("serializes");
+        assert!(
+            road(&unvoiced).is_null(),
+            "an agent the table does not name: {unvoiced}"
+        );
+        assert_eq!(super::agent_voice("zo").helper_stop, Some("helper.stop"));
+        for id in ["claude", "codex", "antigravity", "nobody"] {
+            assert!(super::agent_voice(id).helper_stop.is_none(), "{id}");
+        }
+        assert!(super::SILENT_CONSOLE.helper_stop.is_none());
+        for presence in super::agent_presence(None, "macos") {
+            let row = serde_json::to_value(&presence).expect("a presence row serializes");
+            if presence.id == "zo" {
+                assert_eq!(
+                    road(&row),
+                    serde_json::json!("helper.stop"),
+                    "zo's list_agents row"
+                );
+            } else {
+                assert!(
+                    road(&row).is_null(),
+                    "{}'s list_agents row: {row}",
+                    presence.id
+                );
+            }
+        }
     }
 
     use super::*;
