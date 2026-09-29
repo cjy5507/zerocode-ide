@@ -2533,6 +2533,231 @@ fn overload_demotion_does_not_leak_into_the_next_turn() {
     assert!(!runtime.overload_demoted_this_turn);
 }
 
+/// A 5xx that outlives its retry ladder is the provider dropping the request, so it
+/// takes the escape a 529 takes: one tier down the same provider, once per turn — and
+/// a lighter tier that is dropped too hands the turn to the cross-provider fallback.
+///
+/// The texts are what the two roads hand up once their ladder is spent (t-15565). A
+/// 5xx is no capacity wall, so `api` classes both roads `Transient`, and the stream
+/// road's text has no status in it at all: an SSE `error` frame rides an HTTP 200
+/// (2026-09-22: five "retrying in 1/1/2/5/5s", then "turn ended: … transport error",
+/// twice in a row, with the account at 7 % and a Claude Code worker answered in the
+/// same minute).
+#[test]
+fn a_5xx_that_outlives_the_ladder_demotes_one_tier_then_escalates_like_a_529() {
+    let spent_ladders = [
+        // The stream road: the frame's own `type` is the only evidence there is.
+        "runtime: provider stream: transport error: api stream error (api_error): Internal server error",
+        // The establish road: the provider client wraps the last status it saw.
+        "provider transport: api failed after 6 attempts: api returned 500 Internal Server Error (api_error): Internal server error",
+        "provider transport: api failed after 6 attempts: api returned 502 Bad Gateway: <html>bad gateway</html>",
+        "provider transport: api failed after 6 attempts: api returned 503 Service Unavailable: upstream connect error",
+        "provider transport: api failed after 6 attempts: api returned 520 <unknown status code>: error code: 520",
+    ];
+    let runtime_on_opus = || {
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            NoopApiClient,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+        runtime.set_context_model("claude-opus-5");
+        runtime
+    };
+    for text in spent_ladders {
+        let dropped =
+            || RuntimeError::with_provider_error_class(text, api::ProviderErrorClass::Transient);
+
+        // No cross-provider client installed: the demotion is the only recovery.
+        let mut runtime = runtime_on_opus();
+        let QuotaEscape::Lighter(lighter) =
+            runtime.decide_quota_escape_with_gate(&dropped(), |_| false)
+        else {
+            panic!("a spent 5xx ladder must continue the turn one tier down: {text}");
+        };
+        assert!(lighter.contains("sonnet"), "{text}: demoted onto {lighter}");
+        assert_eq!(
+            runtime.bound_client_model_override().as_deref(),
+            Some(lighter.as_str()),
+            "{text}: the demotion rides the turn's requests"
+        );
+        assert!(
+            runtime.quota_dry_until.is_none() && !runtime.quota_waited_this_turn,
+            "{text}: a demotion arms no session cooldown and spends no account-window wait"
+        );
+        // One per turn: a lighter tier that is dropped too has nowhere left to go.
+        assert!(
+            matches!(
+                runtime.decide_quota_escape_with_gate(&dropped(), |_| false),
+                QuotaEscape::None
+            ),
+            "{text}"
+        );
+
+        // With a fallback client installed the second drop changes provider, as a 529's does.
+        let mut with_fallback = runtime_on_opus();
+        with_fallback.set_quota_fallback_client(Some((
+            Arc::new(NoopAsyncApiClient),
+            "gpt-5.6-sol".to_string(),
+        )));
+        assert!(
+            matches!(
+                with_fallback.decide_quota_escape_with_gate(&dropped(), |_| false),
+                QuotaEscape::Lighter(_)
+            ),
+            "{text}"
+        );
+        assert!(
+            matches!(
+                with_fallback.decide_quota_escape_with_gate(&dropped(), |_| false),
+                QuotaEscape::Fallback(ref model) if model == "gpt-5.6-sol"
+            ),
+            "{text}: the tier is spent, so the next drop changes provider"
+        );
+    }
+}
+
+/// What a spent ladder must NOT demote for: a lighter tier answers a provider that
+/// dropped this request, and nothing the request or the wire did.
+///
+/// * A 4xx is the request's own fault, so the lighter tier is refused for the same
+///   reason — and 408 / 409, which `api` classes `Transient`, say nothing about the
+///   tier either.
+/// * A silent stream and a dropped connection are the wire's. The network road ("wait
+///   for the link, then re-run the call") answers those, and a demotion in front of
+///   it would change the model for an outage no model can answer.
+/// * Digits prove nothing: a token count, an idle budget or a port can spell 500.
+///
+/// These fail the turn exactly as they did before.
+#[test]
+fn a_4xx_a_silent_stream_or_a_dropped_connection_is_not_demoted() {
+    use api::ProviderErrorClass::{NonRetryable, Transient};
+
+    let refused = [
+        (
+            "provider transport: api returned 400 Bad Request (invalid_request_error): messages.3.content: invalid",
+            NonRetryable,
+        ),
+        (
+            "provider transport: api returned 400 Bad Request (invalid_request_error): prompt has 5000 tokens over the limit",
+            NonRetryable,
+        ),
+        (
+            "provider transport: api returned 403 Forbidden (permission_error): not allowed",
+            NonRetryable,
+        ),
+        (
+            "provider transport: api returned 404 Not Found (not_found_error): model: claude-nope",
+            NonRetryable,
+        ),
+        (
+            "provider transport: api failed after 6 attempts: api returned 408 Request Timeout: upstream timed out",
+            Transient,
+        ),
+        (
+            "provider transport: api failed after 6 attempts: api returned 409 Conflict: try again",
+            Transient,
+        ),
+        (
+            "runtime: provider stream: transport error: api stream error (stream_idle_timeout): no stream data for 500s; backend went silent",
+            Transient,
+        ),
+        (
+            "provider transport: http error: error sending request for url (https://api.example.com:5003/v1/messages)",
+            Transient,
+        ),
+    ];
+    for (text, class) in refused {
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            NoopApiClient,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+        runtime.set_context_model("claude-opus-5");
+        // A fallback client and an open gate, so `None` cannot be blamed on either.
+        runtime.set_quota_fallback_client(Some((
+            Arc::new(NoopAsyncApiClient),
+            "gpt-5.6-sol".to_string(),
+        )));
+        let error = RuntimeError::with_provider_error_class(text, class);
+        assert!(
+            matches!(
+                runtime.decide_quota_escape_with_gate(&error, |_| true),
+                QuotaEscape::None
+            ),
+            "{text}: this is not a provider dropping the request"
+        );
+        assert!(
+            runtime.overload_demotion_model.is_none()
+                && !runtime.overload_demoted_this_turn
+                && runtime.active_cross_fallback.is_none(),
+            "{text}: no escape may be armed"
+        );
+    }
+
+    // The class is `api`'s own reading of the error. A text that names a 5xx but
+    // carries none is left to fail: no layer above may guess it from digits.
+    let mut unclassified = ConversationRuntime::new(
+        Session::new(),
+        NoopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    unclassified.set_context_model("claude-opus-5");
+    assert!(matches!(
+        unclassified.decide_quota_escape_with_gate(
+            &RuntimeError::new("api returned 500 Internal Server Error"),
+            |_| true,
+        ),
+        QuotaEscape::None
+    ));
+    assert!(unclassified.overload_demotion_model.is_none());
+}
+
+/// The 5xx demotion is scoped to the turn that needed it, as a 529's is: the next turn
+/// starts on the model the person chose, and may demote again if its own ladder is spent.
+#[test]
+fn a_5xx_demotion_does_not_leak_into_the_next_turn() {
+    let dropped = || {
+        RuntimeError::with_provider_error_class(
+            "runtime: provider stream: transport error: api stream error (api_error): Internal server error",
+            api::ProviderErrorClass::Transient,
+        )
+    };
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        NoopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    runtime.set_context_model("claude-opus-5");
+    assert!(matches!(
+        runtime.decide_quota_escape_with_gate(&dropped(), |_| false),
+        QuotaEscape::Lighter(_)
+    ));
+    assert!(runtime.bound_client_model_override().is_some());
+
+    runtime.begin_turn_quota_fallback_with_gate(|_| true);
+    assert_eq!(
+        runtime.bound_client_model_override(),
+        None,
+        "a new turn must not silently run on last turn's lighter tier"
+    );
+    assert!(!runtime.overload_demoted_this_turn);
+    assert!(
+        matches!(
+            runtime.decide_quota_escape_with_gate(&dropped(), |_| false),
+            QuotaEscape::Lighter(_)
+        ),
+        "the new turn has its own one demotion"
+    );
+}
+
 /// Inert async client for escape-decision tests: the decision never dispatches.
 struct NoopAsyncApiClient;
 

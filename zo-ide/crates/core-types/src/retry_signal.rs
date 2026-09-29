@@ -318,6 +318,57 @@ pub fn is_transient_text(lower: &str) -> bool {
         || lower.contains("backend reported a terminal stream failure")
 }
 
+/// True when the lowercased error text says **the provider's own server** failed
+/// the request: an HTTP 5xx answer (`api returned 502 Bad Gateway: …`) or Anthropic's
+/// `api_error` stream frame (`api stream error (api_error): …`). Not this account's
+/// window ([`is_account_rate_limit_text`]), not the provider's capacity
+/// ([`is_overloaded_text`]), and not the wire between the two — a dropped
+/// connection, a silent stream or a timeout, which [`is_transient_text`] also
+/// counts as retryable.
+///
+/// It answers a different question than [`is_transient_text`]. That one decides
+/// whether to *retry*, so a loose match on "500" anywhere costs at most one more
+/// attempt. This one decides whether to *change the model* once the retries are
+/// spent — a lighter tier answers a server that dropped this request and nothing
+/// else — so it is anchored on the two shapes `api::ApiError` displays. An HTTP
+/// answer reads `api returned <status>`; an SSE `error` event rides an HTTP 200
+/// and so has no status to read, and its own `api_error` type is the evidence. A
+/// token count ("5000 tokens"), an idle budget ("no stream data for 500s") or a
+/// port ("…:5003") must not read as a server fault. A capacity signal wins, as it
+/// does everywhere in this module.
+///
+/// `lower` MUST already be ASCII-lowercased by the caller; a raw message goes
+/// through [`is_server_fault`].
+#[must_use]
+pub fn is_server_fault_text(lower: &str) -> bool {
+    !is_capacity_text(lower)
+        && (lower.contains("api stream error (api_error)") || answers_with_server_status(lower))
+}
+
+/// `api returned 5xx` — the status `ApiError::Api` displays, three digits and no
+/// more (`api returned 5000` is somebody's count, not a status).
+fn answers_with_server_status(lower: &str) -> bool {
+    const ANSWER: &str = "api returned 5";
+    lower.match_indices(ANSWER).any(|(at, answer)| {
+        let mut rest = lower[at + answer.len()..].bytes();
+        matches!(
+            (rest.next(), rest.next(), rest.next()),
+            (Some(tens), Some(ones), after)
+                if tens.is_ascii_digit()
+                    && ones.is_ascii_digit()
+                    && !after.is_some_and(|byte| byte.is_ascii_digit())
+        )
+    })
+}
+
+/// [`is_server_fault_text`] for a raw provider error: classifies the machine-readable
+/// head only ([`machine_readable_head`]) — a hint is prose written for a person and
+/// carries vocabulary of its own — and lowercases once.
+#[must_use]
+pub fn is_server_fault(error_message: &str) -> bool {
+    is_server_fault_text(&machine_readable_head(error_message).to_ascii_lowercase())
+}
+
 /// Marker that separates the machine-readable head of an error string from the
 /// human-facing recovery hint appended after it: a blank line plus a two-space
 /// indent.
@@ -773,6 +824,60 @@ mod tests {
                 "{msg:?} must be a transient signal"
             );
         }
+    }
+
+    /// The provider's own server failing the request is told from a capacity wall, from
+    /// the request being at fault, and from the wire failing — by the shapes `api`
+    /// displays, not by digits, because this answer changes the model.
+    #[test]
+    fn a_server_fault_is_told_from_a_capacity_wall_the_request_and_the_wire() {
+        use super::{is_server_fault, is_server_fault_text, HINT_SEPARATOR};
+
+        for fault in [
+            "runtime: provider stream: transport error: api stream error (api_error): Internal server error",
+            "api returned 500 Internal Server Error (api_error): Internal server error",
+            "provider transport: api failed after 6 attempts: api returned 502 Bad Gateway: <html>bad gateway</html>",
+            "api returned 503 Service Unavailable: upstream connect error",
+            "api returned 504 Gateway Timeout: upstream request timeout",
+            "api returned 520 <unknown status code>: error code: 520",
+            "api returned 500",
+        ] {
+            assert!(
+                is_server_fault_text(&fault.to_ascii_lowercase()),
+                "{fault:?} is the provider's server failing"
+            );
+            assert!(is_server_fault(fault), "{fault:?}");
+        }
+
+        for other in [
+            // Capacity — the provider's, or this account's — has its own signal and wins.
+            "api stream error (overloaded_error): Overloaded",
+            "api returned 529 <unknown status code> (overloaded_error): Overloaded",
+            "api returned 429 Too Many Requests (rate_limit_error): slow down",
+            "api returned 503 Service Unavailable: upstream overloaded",
+            // The request's own fault; and digits that are somebody's count, not a status.
+            "api returned 400 Bad Request (invalid_request_error): prompt has 5000 tokens over the limit",
+            "api returned 408 Request Timeout: upstream timed out",
+            "api returned 5000 Whatever",
+            // The wire's: a silent stream, a dropped connection, a timeout, a port.
+            "api stream error (stream_idle_timeout): no stream data for 500s; backend went silent",
+            "http error: error sending request for url (https://api.example.com:5003/v1/messages)",
+            "connection reset by peer",
+            "request timed out",
+            "api stream error: backend reported a terminal stream failure",
+            // Neither a status nor a frame type: nothing to anchor on.
+            "internal server error",
+        ] {
+            assert!(!is_server_fault(other), "{other:?} is not the provider's server failing");
+        }
+
+        // A hint is prose for a person: it neither makes a fault nor hides one.
+        assert!(!is_server_fault(&format!(
+            "api returned 400 Bad Request (invalid_request_error): nope{HINT_SEPARATOR}The docs list api returned 500."
+        )));
+        assert!(is_server_fault(&format!(
+            "api returned 500 Internal Server Error (api_error): boom{HINT_SEPARATOR}Try again."
+        )));
     }
 
     #[test]
