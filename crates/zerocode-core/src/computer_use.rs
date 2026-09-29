@@ -919,6 +919,14 @@ pub const REFLEX_APPLY_MAX_AGE_MS: u64 = 2 * REFLEX_COLLECT_MS;
 /// hands the run to a new plan rather than ending it (§2.2): the plan no
 /// longer finds anything on this screen, which a rewritten plan may.
 pub const REFLEX_REPLAN_AFTER_UNKNOWN_PASSES: u32 = 3;
+/// How much of the place a reflex run watches another window must hide, per
+/// thousand, before the autopilot stops the run to uncover it (t-12979): a
+/// tenth. Under it the hand goes on — its perception already refuses a cell a
+/// window hides, one reading at a time — and a sliver over the window's edge
+/// (the Dock bar's frame three points over it, as the q8 bench measured) is
+/// not a cover to end a run for. The covered rounds' partial covers hide
+/// three tenths and more (bench.json's cover_scene).
+pub const REFLEX_COVER_STOP_PERMILLE: u16 = 100;
 /// How many reflex decisions running may go unanswered or come back unusable
 /// — stale, another epoch's, another plan's — while the decision is being
 /// carried out before the run ends `escalated` and the person is told

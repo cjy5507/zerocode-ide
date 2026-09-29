@@ -340,6 +340,9 @@ pub fn ladder(read: &CoverRead, line: Option<u16>) -> Ladder {
 pub struct Outcome {
     pub tried: Vec<Move>,
     pub cleared_by: Option<Move>,
+    /// The moves tried that the helper would not make — a window it cannot
+    /// raise or move.
+    pub not_made: Vec<Move>,
 }
 
 /// The mark one move put first earns from what followed: a move that was
@@ -425,6 +428,7 @@ pub fn label_row(
         (REQUEST_AT.canonical): request_at,
         "tried": outcome.tried.iter().map(|each| each.word()).collect::<Vec<_>>(),
         "clearedBy": outcome.cleared_by.map(Move::word),
+        "notMade": outcome.not_made.iter().map(|each| each.word()).collect::<Vec<_>>(),
     });
     match marks {
         Ok((agreed, baseline)) => {

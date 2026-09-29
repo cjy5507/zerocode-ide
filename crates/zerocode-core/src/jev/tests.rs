@@ -3173,6 +3173,7 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
                 cover::ask(&Cover {
                     target: 5,
                     app: "Notes".to_string(),
+                    pid: 10,
                     layer: 0,
                     window: Rect::new(0.0, 0.0, 300.0, 200.0),
                     spot: Rect::new(10.0, 10.0, 40.0, 20.0),

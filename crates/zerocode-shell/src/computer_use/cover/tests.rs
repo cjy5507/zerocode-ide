@@ -22,6 +22,9 @@ const OVER: u64 = 7;
 struct Desk {
     windows: Vec<Value>,
     acted: Vec<(String, Value)>,
+    /// Whether the target's app publishes its windows to accessibility: a
+    /// non-activating panel does not, and the helper refuses to move it.
+    unpublished: bool,
 }
 
 fn row(id: u64, pid: i64, app: &str, layer: i64, rect: (f64, f64, f64, f64)) -> Value {
@@ -48,6 +51,7 @@ impl Desk {
                 row(TARGET, 10, "Target", 0, (100.0, 100.0, 400.0, 300.0)),
             ],
             acted: Vec::new(),
+            unpublished: false,
         }
     }
 
@@ -57,6 +61,32 @@ impl Desk {
             "displays" => Ok(json!({ "displays": [
                 { "index": 0, "bounds": { "x": 0.0, "y": 0.0, "width": 1440.0, "height": 900.0 } }
             ] })),
+            "windowAction" if self.unpublished => Err(ComputerUseError::new(
+                zerocode_core::computer_use_protocol::error_code::WINDOW_NOT_FOUND,
+                "the window has no accessibility element",
+            )),
+            // The app brought forward whole: its windows come to the front of
+            // their own layer.
+            "activateApp" => {
+                let pid = params["app"]
+                    .as_str()
+                    .and_then(|app| app.strip_prefix("pid:"))
+                    .and_then(|pid| pid.parse::<i64>().ok())
+                    .expect("an app by its pid");
+                let id = self
+                    .windows
+                    .iter()
+                    .find(|window| window["app"]["pid"] == pid)
+                    .and_then(|window| window["id"].as_u64())
+                    .expect("a window of the app");
+                let unpublished = std::mem::replace(&mut self.unpublished, false);
+                let raised =
+                    self.call("windowAction", json!({ "action": "focus", "windowId": id }));
+                self.unpublished = unpublished;
+                raised?;
+                self.acted.last_mut().expect("the focus").1["action"] = json!("activate");
+                Ok(json!({ "active": true }))
+            }
             "windowAction" => {
                 self.acted.push((method.to_string(), params.clone()));
                 let id = params["windowId"].as_u64().unwrap_or_default();
@@ -739,6 +769,7 @@ fn the_hand_holds_its_lines_on_scenes_drawn_from_seeds() {
         let mut desk = Desk {
             windows,
             acted: Vec::new(),
+            unpublished: false,
         };
         let before = cover_of(&listed(&desk), TARGET, Some(local)).expect("listed");
         let theirs = before
@@ -802,4 +833,77 @@ fn length_of(points: u64) -> f64 {
     #[allow(clippy::cast_precision_loss)]
     let length = points as f64;
     length
+}
+
+/// The target's app publishes no accessibility window — a non-activating
+/// panel, as the reflex bench's fixture is — and another app's ordinary
+/// window covers it: the helper refuses to raise the window, so the hand
+/// brings the app forward instead, and the place shows.
+#[test]
+fn a_window_the_helper_cannot_raise_comes_forward_with_its_app() {
+    let mut desk = Desk::with_over(0);
+    desk.unpublished = true;
+    let mut seat = Seat::at(JevMode::Off, false, Err("off".into()));
+    let (ended, shown) = run(&mut desk, &mut seat, Decision::Refused, None);
+    assert!(ended.is_ok(), "{ended:?}");
+    assert_eq!(
+        ended.expect("listed"),
+        Uncovered::Clear {
+            moves: vec![Move::RaiseTarget],
+            by_person: false
+        }
+    );
+    assert!(shown.is_empty());
+    assert_eq!(desk.moved(), [(TARGET, "activate".to_string())]);
+}
+
+/// A move the helper refuses is a move not made: the hand goes on to the
+/// next, and what none cleared is the person's in one line — never an error
+/// that ends the hand's errand.
+#[test]
+fn a_move_the_helper_refuses_is_not_made_and_the_rest_goes_on() {
+    let mut desk = Desk::owned_over(10, "Target", 3);
+    desk.unpublished = true;
+    let mut seat = Seat::at(JevMode::Off, false, Err("off".into()));
+    let (ended, shown) = run(&mut desk, &mut seat, Decision::Refused, None);
+    assert!(ended.is_ok(), "{ended:?}");
+    assert_eq!(
+        ended.expect("listed"),
+        Uncovered::Held {
+            held: Held::NothingCleared,
+            over: "Target".into()
+        }
+    );
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].key, "computer.cover.stuck");
+}
+
+/// A move the helper refused is written down as not made — the label keeps
+/// which moves were tried and which of them the helper would not make.
+#[test]
+fn a_refused_move_is_written_down_as_not_made() {
+    let mut desk = Desk::owned_over(10, "Target", 3);
+    desk.unpublished = true;
+    let mut seat = Seat::at(
+        JevMode::Shadow,
+        false,
+        body(
+            "panel",
+            &[
+                ("move_target", 0.6),
+                ("raise_target", 0.3),
+                ("look_again", 0.05),
+                ("ask_person", 0.05),
+            ],
+        ),
+    );
+    let (ended, _) = run(&mut desk, &mut seat, Decision::Refused, None);
+    assert!(ended.is_ok(), "{ended:?}");
+    let label = seat.rows.last().expect("a label");
+    assert_eq!(
+        label["tried"],
+        json!(["raise_target", "move_target"]),
+        "{label}"
+    );
+    assert_eq!(label["notMade"], json!(["move_target"]), "{label}");
 }

@@ -37,18 +37,19 @@ use super::marks::{PinnedClick, desktop_windows};
 use crate::systemone::{self, Wire};
 
 /// What a place must be to press: its centre showing (a press lands on one
-/// point), or all of it (a hand that watches a region).
+/// point), or less than a share of it hidden, per thousand (a hand that
+/// watches a region and refuses what is hidden in it cell by cell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Needs {
     Centre,
-    Whole,
+    Under(u16),
 }
 
 impl Needs {
-    fn met(self, cover: &Cover) -> bool {
+    pub(crate) fn met(self, cover: &Cover) -> bool {
         match self {
             Self::Centre => !cover.blocks_a_press(),
-            Self::Whole => !cover.hides_any(),
+            Self::Under(share) => cover.hidden_permille < share,
         }
     }
 }
@@ -220,6 +221,11 @@ pub(crate) fn uncover(
                 };
                 outcome.tried.push(next);
                 let looked = make(next, standing, hand)
+                    .map(|made| {
+                        if !made {
+                            outcome.not_made.push(next);
+                        }
+                    })
                     .and_then(|()| desktop_windows(hand.call))
                     .map(|listed| cover_of(&listed, place.window, place.local));
                 match looked {
@@ -266,33 +272,57 @@ pub(crate) fn uncover(
     Ok(ended)
 }
 
-/// One move of the target's own window.
-fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<(), ComputerUseError> {
+/// One move of the target's own window. A window its app does not publish
+/// to accessibility (a non-activating panel) cannot be raised or moved by
+/// the helper: it is brought forward with its whole app instead, and a move
+/// the helper refuses is a move not made — the look after it says what
+/// stands, and the next move, or the person, follows. Anything else the
+/// helper says is an error. True when the move was made (or had nothing to
+/// make), false when the helper would not make it.
+fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<bool, ComputerUseError> {
     match next {
-        Move::RaiseTarget => (hand.call)(
+        Move::RaiseTarget => match (hand.call)(
             "windowAction",
             json!({ "action": "focus", "windowId": cover.target }),
-        )
-        .map(drop),
+        ) {
+            Err(refusal) if not_its_to_move(&refusal) => not_made((hand.call)(
+                "activateApp",
+                json!({ "app": format!("pid:{}", cover.pid) }),
+            )),
+            raised => raised.map(|_| true),
+        },
         Move::MoveTarget => {
             let displays = (hand.call)("displays", json!({}))?;
             let screens = screens_of(&displays);
             match clear_place(cover, &screens) {
-                Some([x, y]) => (hand.call)(
+                Some([x, y]) => not_made((hand.call)(
                     "windowAction",
                     json!({ "action": "move", "windowId": cover.target, "x": x, "y": y }),
-                )
-                .map(drop),
+                )),
                 // No place on any screen clears it: the move is made of
                 // nothing, and the look after it says so.
-                None => Ok(()),
+                None => Ok(true),
             }
         }
         Move::LookAgain => {
             (hand.pause)(Duration::from_millis(COVER_LOOK_AGAIN_MS));
-            Ok(())
+            Ok(true)
         }
-        Move::AskPerson => Ok(()),
+        Move::AskPerson => Ok(true),
+    }
+}
+
+/// Whether the helper refused a window move because the window is not one it
+/// can move: gone from its app's accessibility windows, or refused by them.
+fn not_its_to_move(refusal: &ComputerUseError) -> bool {
+    refusal.code == error_code::WINDOW_NOT_FOUND || refusal.code == error_code::ACCESSIBILITY_ERROR
+}
+
+/// A move's answer: made, or — the helper refusing to make it — not made.
+fn not_made(answer: Result<Value, ComputerUseError>) -> Result<bool, ComputerUseError> {
+    match answer {
+        Err(refusal) if not_its_to_move(&refusal) => Ok(false),
+        answer => answer.map(|_| true),
     }
 }
 

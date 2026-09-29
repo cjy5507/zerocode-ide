@@ -54,6 +54,8 @@ MODEL = "model"
 ON_REQUEST = "request"
 # The autopilot's own end when its decision stopped answering usably.
 ESCALATED = "escalated"
+# The cover seat's word in a zo settings file (`zerocode_core::jev::COVER`).
+COVER_SETTING = "jevCover"
 # The reflex decision's rows that were questions, and the one road that asks.
 ASKED_OUTCOME = "answered"
 JEV_ROAD = "jev"
@@ -718,13 +720,25 @@ def keys_for(values, generator, read):
     return {name: key for name, key in env.items() if key}, None
 
 
-def bench_home(run):
+def run_name(seed, cover=None, cover_mode=None):
+    """A run's folder name: its round's seed, and the covered scene and the
+    cover seat's word it ran under — one folder a run, never reused."""
+    if cover is None:
+        return seed
+    return f"{seed}-cover-{cover['seed']}" + (f"-{cover_mode}" if cover_mode else "")
+
+
+def bench_home(run, cover_mode=None):
     """The run's own zo home: its settings consent the run's folder (the
     evidence folder the autopilot's questions come from) and nothing else,
-    and every ledger the driver writes lands under it."""
+    and every ledger the driver writes lands under it. `cover_mode` is the
+    cover seat's word there (t-12979), unwritten when None."""
     home = run / "home"
     home.mkdir(mode=0o700)
-    write_atomic(home / "settings.json", {"smart": {"jev": {"workspaces": [str(run)]}}})
+    smart = {"jev": {"workspaces": [str(run)]}}
+    if cover_mode is not None:
+        smart[COVER_SETTING] = cover_mode
+    write_atomic(home / "settings.json", {"smart": smart})
     return home
 
 
@@ -950,7 +964,7 @@ class Desk:
         return {"folder": str(run), "frames": fixture.get("frames"), "events": fixture.get("events"),
                 "frame_ms": spread(spans), "shown": sorted({name for frame in frames for name in frame["shown"]})[:12]}
 
-    def run(self, seed, driver, helper_app, rules=None, autopilot=None, cover=None):
+    def run(self, seed, driver, helper_app, rules=None, autopilot=None, cover=None, cover_mode=None):
         """One run: announce, re-check, the goal, the driver, the supervision,
         the verdict. `autopilot` ({"generator", "words"}) gives the driver
         bench.json's goal in place of a plan; `cover` (a cover_scenes scene)
@@ -971,8 +985,10 @@ class Desk:
         print(f"reflex bench: the pointer will move on the fixture in {safety['announce_s']} s for "
               f"{self.values['reflex_round']['run_s']} s — any keyboard or mouse input stops it", flush=True)
         time.sleep(safety["announce_s"])
-        run = self.run_folder(seed if cover is None else f"{seed}-cover-{cover['seed']}")
-        ready = self.launch(run, seed, cover)
+        run = self.run_folder(run_name(seed, cover, cover_mode))
+        # A run with no cover calls launch as it always has, so a harness
+        # that overrides launch(run, seed) keeps working (t-12979).
+        ready = self.launch(run, seed) if cover is None else self.launch(run, seed, cover)
         many = rules or self.values["reflex_plan"]["rules_per_colour"]
         config = CONFIG if many == self.values["reflex_plan"]["rules_per_colour"] else f"{CONFIG}+rules{many}"
         if autopilot is not None:
@@ -999,7 +1015,7 @@ class Desk:
                    if name not in (goal["keys"]["jev"], generator_key_name())}
             env.update({FOLDER_ENV: str(run), HELPER_ENV: helper_app})
             if autopilot is not None:
-                home = bench_home(run)
+                home = bench_home(run, cover_mode)
                 request.update(goal=autopilot["words"], generator=autopilot["generator"], l1=autopilot["l1"],
                                home=str(home))
                 env.update({HOME_ENV: str(home), **keys})
@@ -1142,6 +1158,8 @@ def main(argv=None):
                         help="run --autopilot: the reflex decision's forced word (default: bench.json's reflex_goal)")
     parser.add_argument("--cover-seed", type=int,
                         help="run: put the scene this seed draws over the fixture (cover_scenes.py, t-12979)")
+    parser.add_argument("--cover-mode", choices=["auto", "shadow", "off"],
+                        help="run --autopilot: the cover seat's word in the bench's own zo home (t-12979)")
     args = parser.parse_args(argv)
     values, table_limits = tally.table(), limits()
     signals = Signals().install()
@@ -1166,7 +1184,7 @@ def main(argv=None):
                 import cover_scenes
                 scene = None if args.cover_seed is None else cover_scenes.draw(args.cover_seed, values)
                 result = desk.run(args.seed, args.driver, helper_app, rules=args.rules, autopilot=autopilot,
-                                  cover=scene)
+                                  cover=scene, cover_mode=args.cover_mode)
         print(json.dumps(result, indent=2))
         return 0
     except Refused as why:

@@ -32,9 +32,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use zerocode_core::computer_use::{
-    REFLEX_AUTO_L1, REFLEX_COLLECT_MS, REFLEX_ESCALATE_AFTER, REFLEX_LABEL_WINDOW_MS,
-    REFLEX_MISSED_OUTCOMES, REFLEX_PLAN_LABEL_MS, REFLEX_PLAN_LEDGER, REFLEX_PRESSED_OUTCOME,
-    REFLEX_REPLAN_AFTER_UNKNOWN_PASSES, REFLEX_REPLAN_COMPARE_MS,
+    REFLEX_AUTO_L1, REFLEX_COLLECT_MS, REFLEX_COVER_STOP_PERMILLE, REFLEX_ESCALATE_AFTER,
+    REFLEX_LABEL_WINDOW_MS, REFLEX_MISSED_OUTCOMES, REFLEX_PLAN_LABEL_MS, REFLEX_PLAN_LEDGER,
+    REFLEX_PRESSED_OUTCOME, REFLEX_REPLAN_AFTER_UNKNOWN_PASSES, REFLEX_REPLAN_COMPARE_MS,
 };
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::computer_use_protocol::reflex::{ReflexPlan, Scope, Surface, ValidatedPlan};
@@ -1035,7 +1035,8 @@ impl Autopilot {
     }
 
     /// The run standing now, whose place in the app's window another window
-    /// hides (t-12979): the hand is stopped before it presses again, the
+    /// hides — at least [`REFLEX_COVER_STOP_PERMILLE`] of it (t-12979): the
+    /// hand is stopped before it presses again, the
     /// window is uncovered — to the front, moved clear, or by the person —
     /// and a plan is written for where it stands now; or the autopilot ends
     /// for the person, the hand still. A window list that does not read, or
@@ -1051,10 +1052,11 @@ impl Autopilot {
             return;
         }
         let local = acting_place(&run.plan, &self.stage);
+        let needs = Needs::Under(REFLEX_COVER_STOP_PERMILLE);
         let covered = crate::computer_use::marks::desktop_windows(world.call)
             .ok()
             .and_then(|listed| cover_of(&listed, window, local))
-            .is_some_and(|cover| cover.hides_any());
+            .is_some_and(|cover| !needs.met(&cover));
         if !covered {
             return;
         }
@@ -1071,7 +1073,7 @@ impl Autopilot {
             Place {
                 window,
                 local,
-                needs: Needs::Whole,
+                needs,
             },
             &mut Hand {
                 call: &mut *world.call,

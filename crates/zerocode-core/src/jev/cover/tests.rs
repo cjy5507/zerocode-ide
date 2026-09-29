@@ -9,6 +9,7 @@ fn scene(owner: Owner, layer: i64) -> Cover {
     Cover {
         target: 5,
         app: "Target".to_string(),
+        pid: 10,
         layer: 0,
         window: Rect::new(100.0, 100.0, 300.0, 200.0),
         spot: Rect::new(150.0, 150.0, 40.0, 20.0),
@@ -204,6 +205,7 @@ fn the_marks_say_no_when_the_first_move_left_it_covered() {
     let cleared_by = |tried: &[Move], by: Option<Move>| Outcome {
         tried: tried.to_vec(),
         cleared_by: by,
+        not_made: Vec::new(),
     };
     assert_eq!(
         marks(

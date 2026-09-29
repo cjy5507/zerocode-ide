@@ -110,6 +110,10 @@ def grade(record, scene, cover):
     from the cover's arrival to the first hit under it, how often the person
     was asked (`cover`, the bench's account of the cover it put up: when it
     stood and what it heard), and the score."""
+    if not record.get("started"):
+        # The hand never began (its plan was refused, or the driver was):
+        # nothing to grade, and it says why.
+        return {"kind": scene["kind"], "aborted": reflex.aborted(record), "score": None}
     start, deadline = reflex.acting(record)
     came = max(reflex.at_ns(record, scene["appearMs"]), start)
     under = [target for target in record["schedule"]["targets"]
@@ -211,8 +215,13 @@ def account(scene, run, own_sheet_from_fixture=True):
     else:
         fixture = run / "fixture.json"
         state = (json.loads(fixture.read_text()) if fixture.exists() else {}).get("cover") or {}
+    # A hold the seat was never asked about (it was off) still ends the
+    # autopilot `covered`, for the person: that is the run's one ask.
+    ended = run / "ended.json"
+    piloted = (json.loads(ended.read_text()) if ended.exists() else {}).get("autopilot") or {}
+    ended_covered = (piloted.get("ended") or {}).get("reason") == COVERED
     return {"scene": scene, "shownNs": state.get("shownNs"), "downs": state.get("downs", 0),
-            "asked": held_for_the_person(run)}
+            "asked": held_for_the_person(run) or int(ended_covered)}
 
 
 def press_grade(presses, scene, cover):

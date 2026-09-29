@@ -142,6 +142,42 @@ class PutUpTest(unittest.TestCase):
             self.assertEqual(cover.account(other, run), {"scene": other, "shownNs": 9, "downs": 2, "asked": 1})
 
 
+class MeasuredRunTest(unittest.TestCase):
+    """What a measured covered round writes before and after it."""
+
+    def test_the_bench_home_carries_the_cover_seats_word_only_when_named(self):
+        with tempfile.TemporaryDirectory() as folder:
+            named = pathlib.Path(folder) / "named"
+            named.mkdir()
+            home = reflex.bench_home(named, "auto")
+            smart = json.loads((home / "settings.json").read_text())["smart"]
+            self.assertEqual(smart[reflex.COVER_SETTING], "auto")
+            self.assertEqual(smart["jev"], {"workspaces": [str(named)]})
+            plain = pathlib.Path(folder) / "plain"
+            plain.mkdir()
+            smart = json.loads((reflex.bench_home(plain) / "settings.json").read_text())["smart"]
+            self.assertNotIn(reflex.COVER_SETTING, smart)
+
+    def test_a_scene_run_under_each_word_has_a_folder_of_its_own(self):
+        scene = {"seed": 9}
+        self.assertEqual(reflex.run_name(11), 11)
+        self.assertEqual(reflex.run_name(11, scene), "11-cover-9")
+        self.assertEqual({reflex.run_name(11, scene, mode) for mode in ("auto", "off")},
+                         {"11-cover-9-auto", "11-cover-9-off"})
+
+    def test_an_autopilot_that_ended_covered_asked_the_person_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            run = pathlib.Path(folder)
+            (run / cover.FOLDER).mkdir()
+            (run / cover.FOLDER / "fixture.json").write_text(json.dumps({"downs": 0, "shownNs": 1}))
+            (run / "ended.json").write_text(json.dumps(
+                {"autopilot": {"ended": {"reason": cover.COVERED, "said": "…"}}}))
+            modal = {"kind": cover.MODAL, "seed": 5}
+            self.assertEqual(cover.account(modal, run)["asked"], 1)
+            (run / "ended.json").write_text(json.dumps({"autopilot": {"ended": {"reason": "deadline"}}}))
+            self.assertEqual(cover.account(modal, run)["asked"], 0)
+
+
 class PressGradeTest(unittest.TestCase):
     """Presses by number on a covered fixture (fixture_apm.py covered): the
     grade reads the oracle, the cover's count and the press's own answer."""
@@ -204,6 +240,44 @@ class PressGradeTest(unittest.TestCase):
             "Amber": {"x": 50, "y": 153, "width": 190, "height": 72},
             "Blue": {"x": 295, "y": 153, "width": 190, "height": 72},
         })
+
+
+class ByHandTest(unittest.TestCase):
+    """The person's baseline: the cover comes up, nothing is pressed for
+    them, and the fixture's oracle times their presses from the cover."""
+
+    def test_the_oracle_times_the_persons_presses_from_the_covers_arrival(self):
+        from unittest import mock
+
+        import fixture_apm
+        with tempfile.TemporaryDirectory() as folder:
+            desk_folder = pathlib.Path(folder)
+            (desk_folder / "session.json").write_text(json.dumps(
+                {"owner": "o", "mode": "alternate", "watch_hid_since_ns": 1, "rounds": []}))
+            desk = fixture_apm.Desk(desk_folder)
+            events = [{"label": label, "correct": True, "uptime_ns": 1_000_000_000 + n * 500_000_000}
+                      for n, label in enumerate(("Amber", "Blue"))]
+            states = iter([
+                {"count": 0, "errors": 0, "events": []},
+                {"count": 2, "errors": 0, "events": events},
+            ])
+
+            def put_up(scene, session_folder, run, ready, t0_ns, own_sheet_from_fixture=True):
+                (run / cover.FOLDER).mkdir()
+                (run / cover.FOLDER / "fixture.json").write_text(json.dumps({"shownNs": 800_000_000, "downs": 0}))
+                return None
+
+            scene = {"seed": 4, "kind": "other_window", "rect": {}, "appearMs": 0}
+            with mock.patch.object(desk, "guard"), mock.patch.object(desk, "shown"), \
+                    mock.patch.object(desk, "scene_over_buttons", return_value=("pid:1", {}, {}, scene)), \
+                    mock.patch.object(desk, "snapshot", side_effect=lambda: next(states)), \
+                    mock.patch.object(desk, "shim") as shim, \
+                    mock.patch.object(cover, "put_up", side_effect=put_up), mock.patch("time.sleep"):
+                report = desk.by_hand(4, 2)
+            shim.assert_not_called()
+            self.assertEqual((report["correct"], report["errors"], report["done"]), (2, 0, True))
+            self.assertEqual((report["firstHitMs"], report["allMs"]), (200.0, 700.0))
+            self.assertNotIn("watch_hid_since_ns", json.loads((desk_folder / "session.json").read_text()))
 
 
 if __name__ == "__main__":
