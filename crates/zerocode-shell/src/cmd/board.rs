@@ -1449,6 +1449,7 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
                     road,
                     text: words,
                     launch: window.launch_of(term),
+                    hand: crate::human_input::line_of(term).1,
                     owed: restart_nudge_runtime::Owed {
                         root: data_root,
                         worker,

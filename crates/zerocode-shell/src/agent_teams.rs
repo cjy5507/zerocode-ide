@@ -844,6 +844,15 @@ pub trait Host {
     fn paste(&self, term: u32, text: &str) -> bool {
         self.send(term, text)
     }
+    /// Paste a restored worker's continuation and submit it (t-17037): a
+    /// [`Host::paste`] whose words, left on the line with their Enter never
+    /// taken, are still owed that Enter — once, alone, at the composer's
+    /// next ready, and never over a person's hand. The window's real host
+    /// hands them to the restart's own receipt watch; the default is the
+    /// plain paste, for hosts that watch nothing.
+    fn paste_continuation(&self, term: u32, text: &str) -> bool {
+        self.paste(term, text)
+    }
     /// Why this pane refuses ledger deliveries right now, when it does: the
     /// exact launch contract its zo refused (t-2773), in one sentence. The
     /// window answers from its integration record and, the first time, says

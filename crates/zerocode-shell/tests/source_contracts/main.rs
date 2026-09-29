@@ -35822,8 +35822,13 @@ mod tests {
             .split_once("fn pane_exists(")
             .expect("the next host method")
             .0;
+        // The dispatch host's paste — and a restored worker's continuation
+        // beside it (t-17037) — types through its one helper.
+        let pasted = block_after(backend, "fn pasted(&self, term: TermId, text: &str)");
         assert!(
-            sending.contains("type_prompt_at_term(") && paste.contains("type_prompt_at_term("),
+            sending.contains("type_prompt_at_term(")
+                && paste.contains("self.pasted(term, text)")
+                && pasted.contains("type_prompt_at_term("),
             "send and dispatch stopped sharing the typed-prompt function"
         );
         assert_eq!(
@@ -35860,12 +35865,18 @@ mod tests {
                 && backend.contains("Duration::from_millis(RESUME_NUDGE_RECEIPT_MS)"),
             "the receipt duration left its one named constant:\n{constants}"
         );
-        let logging = block_after(backend, "fn log_line(");
+        // The line's head is shared with the fallback's own line (t-17037).
+        let logging = format!(
+            "{}{}",
+            block_after(backend, "fn log_line("),
+            block_after(backend, "fn resumed_head(")
+        );
         for words in [
             "term {term} resumed",
             "nudge={road}",
             "receipt={receipt}",
             "working@{}s",
+            "resumed_head(term, agent, session_id, road)",
         ] {
             assert!(
                 logging.contains(words),
