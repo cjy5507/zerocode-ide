@@ -242,10 +242,14 @@ fn class_for_model(id: &str) -> &'static str {
 /// provider's small model is recognized uniformly — an Anthropic-primary
 /// inventory's `haiku`, an OpenAI one's `mini`/`-fast`, a Gemini one's `flash`.
 fn is_small_model(id: &str) -> bool {
+    is_small_model_under(id, api::router_priors())
+}
+
+/// [`is_small_model`] by the words `priors` names — see [`tiers_for_model_under`].
+fn is_small_model_under(id: &str, priors: &api::RouterPriors) -> bool {
     // 서빙 티어 브래킷(`[fast]`)은 사이즈 신호가 아니다 — class_for_model과
     // 같은 이유로 벗기고 판정한다.
     let id = strip_service_tier_suffix(id);
-    let priors = api::router_priors();
     has_any_token(id, &priors.small_tokens)
         || largest_parameter_billion(id)
             .is_some_and(|size| size < priors.small_parameter_billion_below)
@@ -298,7 +302,12 @@ fn largest_parameter_billion(id: &str) -> Option<u32> {
 /// tier decision and a GPT- or Gemini-primary inventory is as first-class as an
 /// Anthropic one.
 fn is_frontier_family(id: &str) -> bool {
-    has_any_token(id, &api::router_priors().frontier_family_tokens)
+    is_frontier_family_under(id, api::router_priors())
+}
+
+/// [`is_frontier_family`] by the words `priors` names — see [`tiers_for_model_under`].
+fn is_frontier_family_under(id: &str, priors: &api::RouterPriors) -> bool {
+    has_any_token(id, &priors.frontier_family_tokens)
 }
 
 /// The heaviest reasoning lines across providers — they carry the Deep tier that
@@ -313,8 +322,8 @@ fn is_frontier_family(id: &str) -> bool {
 /// with `TiersProvenance::Fallback` wherever it fires; a model whose
 /// `effort_ceiling` is `Ultra` is promoted to Deep by that stronger signal
 /// before this name-token guess is ever consulted.
-fn is_deep_flagship(id: &str) -> bool {
-    has_any_token(id, &api::router_priors().deep_flagship_tokens)
+fn is_deep_flagship(id: &str, priors: &api::RouterPriors) -> bool {
+    has_any_token(id, &priors.deep_flagship_tokens)
 }
 
 /// `ModelCapability::Fast` grant predicate: true for a small/cheap-token
@@ -472,11 +481,20 @@ fn declared_tiers_for_model(id: &str) -> Option<(Vec<ModelTier>, TiersProvenance
 /// Tier assignment plus its [`TiersProvenance`] audit marker (Phase 7 consumes
 /// the marker; today it is recorded on every descriptor for observability).
 fn tiers_for_model(id: &str) -> (Vec<ModelTier>, TiersProvenance) {
+    tiers_for_model_under(id, api::router_priors())
+}
+
+/// [`tiers_for_model`] by the name-token priors handed in rather than the ones
+/// in force. `api::router_priors()` is one store for the whole process and a
+/// publish swaps it whole, so a caller that must not move with a publish
+/// (the golden table of the shipped catalog) passes
+/// [`api::shipped_router_priors`], and one assignment reads one table.
+fn tiers_for_model_under(id: &str, priors: &api::RouterPriors) -> (Vec<ModelTier>, TiersProvenance) {
     if let Some(declared) = declared_tiers_for_model(id) {
         return declared;
     }
     let lower = id.to_ascii_lowercase();
-    if is_small_model(&lower) {
+    if is_small_model_under(&lower, priors) {
         // Cheap tier: Fast role + balanced work. Checked first so a `-fast`/`flash`
         // variant of a flagship line is never promoted to Strong/Deep.
         return (vec![ModelTier::Fast, ModelTier::Balanced], TiersProvenance::Fallback);
@@ -491,10 +509,10 @@ fn tiers_for_model(id: &str) -> (Vec<ModelTier>, TiersProvenance) {
     if !ultra_deep_promotion_disabled() && effort_ceiling_for_model(id) == EffortCeiling::Ultra {
         return (vec![ModelTier::Deep, ModelTier::Strong], TiersProvenance::ColdStartPrior);
     }
-    if is_deep_flagship(&lower) {
+    if is_deep_flagship(&lower, priors) {
         return (vec![ModelTier::Deep, ModelTier::Strong], TiersProvenance::Fallback);
     }
-    if is_frontier_family(&lower) {
+    if is_frontier_family_under(&lower, priors) {
         // Any other frontier flagship (claude-fable/sonnet, gpt, codex, grok,
         // deepseek-chat): Balanced + Strong. Generalized from the previous
         // hardcoded `sonnet||gpt||codex||deepseek||grok` set, which dropped
@@ -1109,7 +1127,7 @@ mod model_catalog_overlay_tests {
 /// class and is untouched by Phase 8.
 #[cfg(test)]
 mod golden_parity_tests {
-    use super::{class_for_model, effort_ceiling_for_model, family_for_model, release_rank_for_model, tiers_for_model};
+    use super::{class_for_model, effort_ceiling_for_model, family_for_model, release_rank_for_model, tiers_for_model_under};
     use crate::model_router::{EffortCeiling, ModelTier};
 
     struct Expected {
@@ -1185,6 +1203,14 @@ mod golden_parity_tests {
             "golden table is out of sync with api::provider_catalog(); update both together"
         );
 
+        // The shipped size/family/flagship words, handed in: the words in force
+        // live in one store for the whole process, and
+        // `prior_tables_come_from_the_catalog` publishes `small_tokens:
+        // ["tiny"]` for a moment while it runs beside this table. Read from
+        // the store, spark lost its `spark` size word in that moment and a
+        // parallel gate failed "gpt-5.3-codex-spark missing expected tier
+        // Fast" (t-15568).
+        let shipped = api::shipped_router_priors();
         for expected in &table {
             let id = expected.id;
             assert_eq!(family_for_model(id), expected.family, "family drifted for {id}");
@@ -1195,7 +1221,7 @@ mod golden_parity_tests {
                 expected.ceiling,
                 "effort ceiling drifted for {id}"
             );
-            let (tiers, _provenance) = tiers_for_model(id);
+            let (tiers, _provenance) = tiers_for_model_under(id, shipped);
             for tier in expected.tiers {
                 assert!(tiers.contains(tier), "{id} missing expected tier {tier:?}");
             }
@@ -1206,5 +1232,20 @@ mod golden_parity_tests {
                 expected.tiers
             );
         }
+    }
+
+    /// The table's isolation holds only while the classifier reads the table
+    /// it is handed: one that went back to the process store would pass here
+    /// alone and fail again only beside a publish. Handed the words
+    /// `prior_tables_come_from_the_catalog` publishes, spark leaves the Fast
+    /// tier; handed the shipped ones, it keeps it — whatever the store names.
+    #[test]
+    fn the_golden_tiers_are_read_from_the_priors_handed_in() {
+        use ModelTier::Fast;
+
+        let shipped = api::shipped_router_priors();
+        let published = api::RouterPriors { small_tokens: vec!["tiny".to_string()], ..shipped.clone() };
+        assert!(tiers_for_model_under("gpt-5.3-codex-spark", shipped).0.contains(&Fast));
+        assert!(!tiers_for_model_under("gpt-5.3-codex-spark", &published).0.contains(&Fast));
     }
 }

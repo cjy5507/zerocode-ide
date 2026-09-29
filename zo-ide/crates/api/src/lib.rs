@@ -119,6 +119,7 @@ pub use providers::{
     known_effort_ceiling, latest_anthropic_family_model, latest_anthropic_model,
     latest_family_model, latest_model_for_provider, model_accepts_effort, model_display_name,
     model_family, model_has_capability, parse_effort_level, plan_priors, router_priors,
+    shipped_router_priors,
     maker_for_provider, max_request_bytes_for_model, max_supported_effort, max_tokens_for_model,
     model_supports_xhigh,
     non_claude_adapters_enabled, openai_fast_tier_enabled, openai_fast_variant_pair,
