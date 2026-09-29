@@ -1020,13 +1020,12 @@ async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
     );
     assert_eq!(summary.iterations, 2);
 
-    // The retry budget is per PUBLIC turn, not per session: a second turn on
-    // the same runtime gets its own same-model retry (this pinned a real bug —
-    // the streaming entry point forgot the reset, so a session spent its one
-    // retry on the first refusal ever and surfaced every later one). A refusal
-    // naming no category takes no context-cleaning retry (t-6747): only a
-    // category the provider routes is walked past its first answer. So turn
-    // two is two calls.
+    // The decline came back for the same conversation in the same category
+    // (none) after every step of the ladder was spent on it last turn
+    // (t-15890): turn two asks once, with the person's words as written, and
+    // says so — the same-model retry is not asked a second time. (A refusal
+    // naming no category takes no context-cleaning retry either, t-6747: only
+    // a category the provider routes is walked past its first answer.)
     let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
     let drain = drain_task(rx);
     let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
@@ -1034,14 +1033,61 @@ async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
         .run_turn_streaming("hi again", tx, prompter)
         .await
         .expect("the second turn's refusal should also surface, not error");
-    let _ = drain.await.expect("drain");
+    let blocks = drain.await.expect("drain");
     let seen = client.seen_overrides.lock().expect("lock").clone();
     assert_eq!(
         seen.len(),
-        4,
-        "turn two: the declined request and its same-model retry; got {seen:?}"
+        3,
+        "turn two: the declined request only; got {seen:?}"
     );
-    assert_eq!(summary.iterations, 2);
+    assert_eq!(summary.iterations, 1);
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::System { text, .. } if text.contains("will be declined again")
+        )),
+        "and says what a bare continue will meet, got {blocks:?}"
+    );
+
+    // The retry budget is still per PUBLIC turn, not per session (this pinned
+    // a real bug — the streaming entry point forgot the reset, so a session
+    // spent its one retry on the first refusal ever and surfaced every later
+    // one): once the conversation has changed since, a decline is a new
+    // decline and walks the ladder from its first rung. A dozen exchanges of
+    // work in between is far past what the ladder counts as the same
+    // conversation.
+    let earlier_work = (0..24).map(|n| {
+        if n % 2 == 0 {
+            runtime::ConversationMessage::user_text(format!("earlier work {n}"))
+        } else {
+            runtime::ConversationMessage::assistant(vec![runtime::ContentBlock::Text {
+                text: format!("earlier answer {n}"),
+            }])
+        }
+    });
+    Arc::make_mut(&mut runtime.session_mut().messages).extend(earlier_work);
+    let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
+    let drain = drain_task(rx);
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
+    let summary = runtime
+        .run_turn_streaming("hi once more", tx, prompter)
+        .await
+        .expect("the third turn's refusal should also surface, not error");
+    let _ = drain.await.expect("drain");
+    let seen = client.seen_overrides.lock().expect("lock").clone();
+    // The ladder as it always ran: the request, its same-model retry, and — the
+    // conversation being long enough to fold now — the compaction (its summary
+    // is a call this client declines too) and the retry after it: four calls.
+    assert_eq!(
+        seen.len(),
+        7,
+        "turn three: the ladder from the first rung, four calls; got {seen:?}"
+    );
+    assert!(
+        summary.iterations >= 2,
+        "the request and its same-model retry ran again: {}",
+        summary.iterations
+    );
 }
 
 #[tokio::test]
