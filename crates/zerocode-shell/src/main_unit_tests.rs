@@ -11930,6 +11930,61 @@ fn a_pane_that_refuses_the_reload_does_not_fail_the_switch() {
     assert_eq!(taken, 1);
 }
 
+/// The helper page's stop (t-16943): the webview names an agent, never a
+/// method. An agent whose catalog row names no road to stop one helper is
+/// refused before anything goes near a channel.
+#[test]
+fn a_helper_stop_for_an_agent_with_no_road_is_refused_before_any_channel_is_touched() {
+    let roadless: Vec<&str> = zerocode_core::AGENT_SPECS
+        .iter()
+        .map(|spec| spec.id)
+        .filter(|id| zerocode_core::agent::agent_voice(id).helper_stop.is_none())
+        .chain(["not-in-the-catalog"])
+        .collect();
+    assert!(roadless.len() > 1, "the catalog walk found no roadless row");
+    for agent in roadless {
+        let mut called = 0;
+        let answer = cmd::session::stop_helper_through(agent, "s-1", "h-1", |_, _| {
+            called += 1;
+            Ok(serde_json::json!({}))
+        });
+        assert!(answer.is_err(), "{agent}: a stop with no road was not refused");
+        assert_eq!(called, 0, "{agent}: the channel was called");
+    }
+}
+
+/// A row with a road sends that row's method, once, with exactly the session
+/// and the helper's id — and the channel's answer reaches the window as the
+/// channel gave it.
+#[test]
+fn a_helper_stop_carries_the_rows_method_the_session_and_the_helper_and_hands_back_the_answer() {
+    let roads: Vec<(&str, &str)> = zerocode_core::AGENT_SPECS
+        .iter()
+        .filter_map(|spec| Some((spec.id, zerocode_core::agent::agent_voice(spec.id).helper_stop?)))
+        .collect();
+    assert!(!roads.is_empty(), "no catalog row names a road");
+    let reply = serde_json::json!({
+        "status": "failed",
+        "agent_id": "h-7",
+        "record_key": null,
+        "detail": "@auditor: worker gone",
+        "unknown_later_field": [1, 2],
+    });
+    for (agent, road) in roads {
+        let mut sent: Vec<(String, serde_json::Value)> = Vec::new();
+        let answer = cmd::session::stop_helper_through(agent, "s-9", "h-7", |method, params| {
+            sent.push((method.to_string(), params));
+            Ok(reply.clone())
+        });
+        assert_eq!(
+            sent,
+            vec![(road.to_string(), serde_json::json!({ "id": "s-9", "agent_id": "h-7" }))],
+            "{agent}"
+        );
+        assert_eq!(answer, Ok(reply.clone()), "{agent}: the answer was changed on the way");
+    }
+}
+
 #[test]
 fn zo_launches_with_both_selected_account_homes_and_claude_and_codex_regressions_hold() {
     let config = tempfile::tempdir().expect("config root");
