@@ -958,6 +958,12 @@ const STOP_VERB: &str = "stop";
 /// worth naming on the row, and inventing a category for it would be this
 /// table pretending to know something it does not.
 ///
+/// It is the only table of tool names the window keeps (t-15682): the guard's
+/// text sources, the sidebar's activity rows and — through
+/// `TranscriptTool::kind` — every step line the conversation page draws read
+/// this word, and the page holds no list of vendor names beside it. A name that
+/// only a second list knew was a call two parts of the window drew two ways.
+///
 /// Serialized as a **plain string**, not as a tagged enum: the webview draws a
 /// word per verb and falls through to the raw name for everything else, and
 /// `{"other":"…"}` would make the window unwrap a shape to learn what it
@@ -970,7 +976,12 @@ pub enum Tool {
     Bash,
     Grep,
     Task,
+    /// A page fetched.
     Web,
+    /// The web searched — told from [`Tool::Web`] because a step line words
+    /// the two differently, and a search's answer is as much the web's text as
+    /// a page is.
+    WebSearch,
     Other(String),
 }
 
@@ -986,6 +997,7 @@ impl Tool {
             Tool::Grep => "grep",
             Tool::Task => "task",
             Tool::Web => "web",
+            Tool::WebSearch => "websearch",
             Tool::Other(name) => name,
         }
     }
@@ -995,22 +1007,24 @@ impl Tool {
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
         let known = match normalized_event(name).as_str() {
-            "read" | "readfile" | "readmanyfiles" | "view" | "viewfile" | "opendocument" => {
-                Some(Tool::Read)
-            }
+            "read" | "readfile" | "readmanyfiles" | "view" | "viewfile" | "opendocument"
+            | "cat" | "notebookread" => Some(Tool::Read),
             "edit" | "editfile" | "multiedit" | "strreplace" | "strreplaceeditor"
             | "applypatch" | "patch" | "replace" | "notebookedit" => Some(Tool::Edit),
             "write" | "writefile" | "createfile" | "savefile" | "newfile" => Some(Tool::Write),
             "bash" | "shell" | "localshell" | "runshellcommand" | "runcommand"
             | "runterminalcommand" | "shellcommand" | "terminal" | "exec" | "execute"
-            | "executecommand" => Some(Tool::Bash),
+            | "executecommand" | "execcommand" | "bashoutput" => Some(Tool::Bash),
             "grep" | "glob" | "search" | "searchfiles" | "findfiles" | "ripgrep"
-            | "codebasesearch" | "filesearch" | "grepsearch" => Some(Tool::Grep),
+            | "codebasesearch" | "filesearch" | "grepsearch" | "ls" | "listdir" | "listfiles"
+            | "find" | "codesearch" | "searchfilecontent" => Some(Tool::Grep),
             "task" | "agent" | "subagent" | "spawnagent" | "dispatchagent" | "delegate" => {
                 Some(Tool::Task)
             }
-            "websearch" | "webfetch" | "fetch" | "browse" | "browser" | "urlfetch"
-            | "googlewebsearch" | "webread" | "openurl" => Some(Tool::Web),
+            "websearch" | "googlewebsearch" => Some(Tool::WebSearch),
+            "webfetch" | "fetch" | "browse" | "browser" | "urlfetch" | "webread" | "openurl" => {
+                Some(Tool::Web)
+            }
             _ => None,
         };
         known.or_else(|| activity_text(name).map(Tool::Other))

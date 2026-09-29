@@ -1240,44 +1240,42 @@ function askShelfAgain(list) {
  * before it may join. The Focus view folds by turn instead and keeps its rows
  * single (`applyFocusView`). */
 
-/* The kind a tool's name says, by the names the catalogs' CLIs give their
- * tools; a name not here is a kind of its own, worded as the CLI wrote it. */
-const STEP_NAMES = new Map(Object.entries({
-  read: "read", read_file: "read", readfile: "read", view: "read", cat: "read", notebookread: "read", read_many_files: "read",
-  edit: "edit", multiedit: "edit", notebookedit: "edit", str_replace_editor: "edit", apply_patch: "edit", replace: "edit",
-  write: "write", write_file: "write", create_file: "write",
-  bash: "shell", shell: "shell", run_command: "shell", run_shell_command: "shell", exec: "shell", exec_command: "shell",
-  execute: "shell", bashoutput: "shell", terminal: "shell",
-  grep: "search", glob: "search", search: "search", find: "search", ls: "search", list_dir: "search", list_files: "search",
-  search_file_content: "search", codesearch: "search",
-  webfetch: "web", web_fetch: "web", fetch: "web",
-  websearch: "websearch", web_search: "websearch",
-  task: "task", agent: "task", spawn_agent: "task", delegate: "task",
-}));
-
-/* A kind's mark (the window's own sprite) and its words. */
-const STEP_LOOKS = Object.freeze({
+/* A kind's mark (the window's own sprite) and its words, keyed by the words
+ * the core reduces a tool's name to (`hook::Tool::as_str`): a turn carries its
+ * call's as `tool.kind`, and the page keeps no list of vendor names to read the
+ * name by — one table, the core's. A tool the core has no word for travels as its
+ * own name. */
+const STEP_LOOKS = new Map(Object.entries({
   read: { icon: "file", word: () => t("worker.stepRead", "파일 읽기") },
   edit: { icon: "pencil", word: () => t("worker.stepEdit", "파일 수정") },
   write: { icon: "pencil", word: () => t("worker.stepWrite", "파일 쓰기") },
-  shell: { icon: "terminal", word: () => t("worker.stepShell", "셸 실행") },
-  search: { icon: "search", word: () => t("worker.stepSearch", "검색") },
+  bash: { icon: "terminal", word: () => t("worker.stepShell", "셸 실행") },
+  grep: { icon: "search", word: () => t("worker.stepSearch", "검색") },
   web: { icon: "globe", word: () => t("worker.stepWeb", "웹 읽기") },
   websearch: { icon: "globe", word: () => t("worker.stepWebSearch", "웹 검색") },
   task: { icon: "bot", word: () => t("worker.stepTask", "헬퍼 호출") },
+}));
+
+/* The two rows that are not a call the core has a word for: a todo list (the
+ * catalog's own `todo_tool`) and a thought. */
+const STEP_OWN_LOOKS = new Map(Object.entries({
   todo: { icon: "list-todo", word: () => t("worker.todoHead", "할 일 갱신") },
   thought: { icon: "brain", word: () => "" },
-});
+}));
 
+/* The kind a step is drawn by: the catalog's todo tool; else the word the core
+ * reduced the call's tool to. A kind the page has no look for — a tool the core
+ * has no word for, or a call written before turns carried a kind — is a kind of
+ * its own, worded as the tool's own name (`tool:<name>`). */
 function stepKindOf(turn, run) {
   const todo = agentVoice(run.agent).todo_tool;
   if (todo && turn.tool?.name === todo) return "todo";
-  const name = toolWords(turn).name;
-  return STEP_NAMES.get(name.toLowerCase()) ?? `tool:${name}`;
+  const kind = turn.tool?.kind;
+  return STEP_LOOKS.has(kind) ? kind : `tool:${toolWords(turn).name}`;
 }
 
 function stepLook(kind) {
-  return STEP_LOOKS[kind] ?? { icon: "wrench", word: () => kind.slice(5) };
+  return STEP_LOOKS.get(kind) ?? STEP_OWN_LOOKS.get(kind) ?? { icon: "wrench", word: () => kind.slice(5) };
 }
 
 /* A target as the line says it: an address without its scheme, a long path
@@ -1326,11 +1324,11 @@ function stepResultWords(kind, turn, output, failed, row) {
   switch (kind) {
     case "read":
       return output === "" ? "" : t("worker.stepLines", "{{n}}줄", { n: stepLineCount(output) });
-    case "search": {
+    case "grep": {
       const found = output.trim() === "" ? 0 : stepLineCount(output.trim());
       return found > 0 ? t("worker.stepFound", "{{n}}줄 찾음", { n: found }) : t("worker.stepNoMatch", "찾은 것 없음");
     }
-    case "shell":
+    case "bash":
       return t("worker.stepPrinted", "{{n}}줄 출력", { n: stepLineCount(output) });
     case "web":
       return output === "" ? "" : bytesLabel(output.length);
@@ -1577,11 +1575,15 @@ function regroupSteps(list, run) {
 /* ---- a thought is one line (t-15682) -----------------------------------------
  *
  * The line is what the thought was about — the terminal's own rule for what
- * a thought is doing (`live_heading`, t-5872): a `**heading**` that opens a
- * line wins; without one, the newest complete sentence (a run ended by a
- * newline, by a stop followed by white space — so `src/app.rs` and `v1.2` end
- * nothing, nor does the `1.` of a list — or by a full-width stop). A finished
- * thought counts its unfinished tail, so it always has a line. */
+ * a thought is doing (`live_heading`, t-5872, held to its test cases by
+ * `testConversationSteps`): a `**heading**` that opens a line wins; without one,
+ * the newest complete sentence (a run ended by a newline, by a stop followed by
+ * white space — so `src/app.rs` and `v1.2` end nothing, nor does the `1.` of a
+ * list — or by a full-width stop). A thought still going says nothing until a
+ * sentence has closed (`null`: the row keeps the word it has, and a half-written
+ * sentence never flashes on it); one that is over (`finished`) counts its
+ * unfinished tail, so it always has a line. The terminal cuts at 48 columns; the
+ * page's line is cut only at THOUGHT_LINE_MAX characters. */
 const THOUGHT_LINE_MAX = 160;
 
 function thoughtLeadingBold(text) {
@@ -1608,30 +1610,33 @@ function thoughtClean(segment) {
   return rest.replaceAll("**", "").replaceAll("`", "").trim();
 }
 
-function thoughtHeading(text) {
-  const bold = thoughtLeadingBold(text);
-  let line = null;
-  if (bold !== null) {
-    line = thoughtClean(bold);
-  } else {
-    let last = null;
-    let start = 0;
-    for (let at = 0; at < text.length; at += 1) {
-      const mark = text[at];
-      let ends = mark === "\n" || mark === "。" || mark === "！" || mark === "？";
-      if (mark === "." || mark === "!" || mark === "?") {
-        const run = text.slice(start, at).trimStart();
-        ends = (at + 1 === text.length || /\s/.test(text[at + 1])) && run !== "" && !/^\d+$/.test(run);
-      }
-      if (!ends) continue;
-      const segment = text.slice(start, at).trim();
-      if (segment !== "") last = segment;
-      start = at + 1;
-    }
-    line = thoughtClean(last ?? "");
-    if (line === "") line = thoughtClean(text.slice(start));
-  }
+function thoughtFit(line) {
   return line.length > THOUGHT_LINE_MAX ? `${line.slice(0, THOUGHT_LINE_MAX - 1)}…` : line;
+}
+
+function thoughtHeading(text, finished = false) {
+  const bold = thoughtLeadingBold(text);
+  if (bold !== null) return thoughtFit(thoughtClean(bold));
+  let last = null;
+  let start = 0;
+  for (let at = 0; at < text.length; at += 1) {
+    const mark = text[at];
+    let ends = mark === "\n" || mark === "。" || mark === "！" || mark === "？";
+    if (mark === "." || mark === "!" || mark === "?") {
+      const run = text.slice(start, at).trimStart();
+      ends = (at + 1 === text.length || /\s/.test(text[at + 1])) && run !== "" && !/^\d+$/.test(run);
+    }
+    if (!ends) continue;
+    const segment = text.slice(start, at).trim();
+    if (segment !== "") last = segment;
+    start = at + 1;
+  }
+  if (last !== null) {
+    const line = thoughtClean(last);
+    if (line !== "") return thoughtFit(line);
+  }
+  const open = thoughtClean(text.slice(start));
+  return finished || open.length > THOUGHT_LINE_MAX ? thoughtFit(open) : null;
 }
 
 /* A thought's row — closed, one line, the body painted the first time it
@@ -1640,7 +1645,7 @@ function thoughtHeading(text) {
 function thoughtRowNode(className, run) {
   const row = document.createElement("details");
   row.className = className;
-  row.appendChild(stepLineNode(STEP_LOOKS.thought));
+  row.appendChild(stepLineNode(STEP_OWN_LOOKS.get("thought")));
   const body = document.createElement("div");
   body.className = "helper-thought-body";
   row.appendChild(body);

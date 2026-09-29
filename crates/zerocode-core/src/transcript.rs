@@ -936,6 +936,28 @@ pub struct TranscriptFile {
 /// How much of an edit's new text the page searches its file for.
 pub const FILE_SEARCH_CHARS: usize = 400;
 
+/// What kind of call a tool call is — the word [`TranscriptTool::kind`]
+/// carries: the vendor's name reduced by the one table the window keeps
+/// ([`crate::hook::Tool::named`]), a tool that table has no word for keeping
+/// its own name, and empty for a call that names nothing. zo hands its deferred
+/// tools through one wrapper whose input names the tool it stands for
+/// (`CapabilityInvoke {"name": "WebSearch", …}`); the call is that tool.
+#[must_use]
+pub fn tool_kind(name: &str, input: Option<&serde_json::Value>) -> String {
+    let wrapped = if name == "CapabilityInvoke" || name.starts_with("CapabilityInvoke ") {
+        tool_input(input).and_then(|map| {
+            map.get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+    } else {
+        None
+    };
+    crate::hook::Tool::named(wrapped.as_deref().unwrap_or(name))
+        .map(|tool| tool.as_str().to_string())
+        .unwrap_or_default()
+}
+
 /// The file a tool call names, when the call is a read, an edit or a write
 /// (`hook::Tool::named` — the tool's reduced name, never its vendor): a
 /// search names a directory to look in and a command a line to run, and
@@ -1552,7 +1574,7 @@ fn transcript_tool(part: &serde_json::Value, result: bool, detail: Detail) -> Tr
             .unwrap_or_default()
             .to_string(),
         name: name.to_string(),
-        kind: String::new(),
+        kind: tool_kind(name, part.get("input").or_else(|| part.get("arguments"))),
         input: detail.kept(&input),
         edits: if result {
             Vec::new()

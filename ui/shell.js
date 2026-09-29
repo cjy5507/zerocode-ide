@@ -538,7 +538,7 @@ const AGENT_GRAPH_ACTIVITY_KEEP = 3;
  * 다른 모양으로 말한다. 이름 없는 도구(이 창이 모르는 MCP)는 「읽기」가 아니라
  * 제 몫의 「그 밖」이다 — 모르는 것을 아는 것으로 적지 않는다. */
 const AGENT_ACTIVITY_KINDS = new Map([
-  ["read", "read"], ["grep", "read"], ["web", "read"],
+  ["read", "read"], ["grep", "read"], ["web", "read"], ["websearch", "read"],
   ["edit", "edit"], ["write", "edit"],
   ["bash", "run"],
   ["task", "report"], ["stop", "report"],
@@ -9110,6 +9110,8 @@ function activityWord(verb) {
       return t("activity.task", "맡기기");
     case "web":
       return t("activity.web", "웹");
+    case "websearch":
+      return t("activity.websearch", "웹 검색");
     case "prompt":
       return t("activity.prompt", "물음");
     case "stop":
@@ -12551,7 +12553,7 @@ function thoughtTurnNode(run, turn) {
   const row = thoughtRowNode("helper-turn is-thinking", run);
   row.dataset.turn = String(turn.seq);
   row.__turn = turn;
-  writeTextContent(row.querySelector(".helper-step-target"), thoughtHeading(turn.text));
+  writeTextContent(row.querySelector(".helper-step-target"), thoughtHeading(turn.text, true));
   dressThoughtRow(row, turn);
   return row;
 }
@@ -13324,7 +13326,9 @@ function syncStreamingTurns(list, run) {
     if (row.__text === piece.text) return;
     row.__text = piece.text;
     if (piece.role === "thinking") {
-      writeTextContent(row.querySelector(".helper-step-target"), thoughtHeading(piece.text));
+      // Nothing to say until a sentence has closed: the row keeps its word.
+      const heading = thoughtHeading(piece.text);
+      if (heading !== null) writeTextContent(row.querySelector(".helper-step-target"), heading);
       if (row.open) writeTextContent(row.querySelector(":scope > .helper-thought-body"), piece.text);
     } else {
       paintLiveAnswer(row, piece.text, run);

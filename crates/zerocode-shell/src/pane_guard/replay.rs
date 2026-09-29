@@ -1250,7 +1250,7 @@ fn this_machines_panes_ask_at_this_rate() {
                             }
                         }
                     }
-                    Some(Tool::Read | Tool::Web) => texts += 1,
+                    Some(Tool::Read | Tool::Web | Tool::WebSearch) => texts += 1,
                     _ if name.starts_with(MCP_TOOL_PREFIX) => texts += 1,
                     _ => {}
                 }

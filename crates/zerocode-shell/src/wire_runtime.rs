@@ -391,11 +391,11 @@ impl WireState {
             format!("{name} · {}", zerocode_core::transcript::clamp(target))
         };
         // The file the call names, read off its input the way a transcript's
-        // call is (`file_in`): Codex's and ACP's calls say it in fields too.
-        let file = zerocode_core::transcript::file_in(
-            name,
-            Some(&serde_json::Value::String(input.clone())),
-        );
+        // call is (`file_in`): Codex's and ACP's calls say it in fields too —
+        // and the kind the page draws it by, from the same one table.
+        let said = serde_json::Value::String(input.clone());
+        let file = zerocode_core::transcript::file_in(name, Some(&said));
+        let kind = zerocode_core::transcript::tool_kind(name, Some(&said));
         self.push(TranscriptTurn {
             role: "tool".to_string(),
             text,
@@ -403,7 +403,7 @@ impl WireState {
             tool: Some(TranscriptTool {
                 call_id: call_id.to_string(),
                 name: name.to_string(),
-                kind: String::new(),
+                kind,
                 input,
                 is_error: false,
                 edits,
@@ -428,7 +428,7 @@ impl WireState {
             tool: Some(TranscriptTool {
                 call_id: call_id.to_string(),
                 name: name.to_string(),
-                kind: String::new(),
+                kind: zerocode_core::transcript::tool_kind(name, None),
                 input: String::new(),
                 is_error,
                 edits,
