@@ -16166,6 +16166,47 @@ const TUNABLE: &[(&str, &str, Option<EffortRide>, &str)] = &[
     ("cursor", "--model", None, ""),
 ];
 
+/// One model turn's facts, as [`dials_why`] reads them.
+type ModelTurn = (
+    Option<crate::summon_model::ModelAsk>,
+    Option<serde_json::Value>,
+    Option<crate::summon_difficulty::lineup::Candidate>,
+    crate::summon_model::Facts,
+);
+
+/// `dials.why` (t-14437): the chosen model's band, what set its effort
+/// (`jev` when the seat's pair ran, else the row's rule), how many of its
+/// summonses here have ended, and the seat's confidence when its answer ran.
+fn dials_why(
+    turn: Option<&ModelTurn>,
+    pick: Option<&(String, String, &str)>,
+    row: Option<&crate::summon_difficulty::lineup::Row>,
+) -> serde_json::Value {
+    let model = pick
+        .map(|(model, _, _)| model.as_str())
+        .or_else(|| row.map(|row| row.model.as_str()));
+    let facts = turn.map(|(_, _, _, facts)| facts);
+    let band = model
+        .and_then(|model| facts?.lineup.find(model)?.band)
+        .or_else(|| row.and_then(|row| row.band));
+    let jev = pick.is_some_and(|(_, _, from)| *from == DIALS_FROM_JEV);
+    serde_json::json!({
+        "band": band,
+        "effortRule": if jev {
+            serde_json::json!(DIALS_FROM_JEV)
+        } else {
+            serde_json::json!(row.map(|row| row.effort_rule))
+        },
+        "samples": model
+            .and_then(|model| facts?.records.get(model))
+            .map_or(0, |record| record.ended),
+        "confidence": turn
+            .and_then(|(_, receipt, _, _)| receipt.as_ref())
+            .filter(|_| jev)
+            .map(|receipt| receipt["confidence"].clone()),
+    })
+}
+
 /// `dials.difficultyFrom`: the difficulty seat's applied answer chose it.
 const DIALS_FROM_JEV: &str = "jev";
 /// `dials.difficultyFrom`: nobody chose; the ladder's middle stood.
@@ -19583,24 +19624,26 @@ fn plan_inner(
                             crate::summon_model::challenger(row, &facts.records, summonses)
                         })
                         .cloned();
-                    (asked, receipt, challenge)
+                    (asked, receipt, challenge, facts)
                 })
             } else {
                 None
             };
             let model_pick: Option<(String, String, &str)> = match &model_turn {
-                Some((_, _, Some(challenge))) => Some((
+                Some((_, _, Some(challenge), _)) => Some((
                     challenge.model.clone(),
                     challenge.effort.clone(),
                     DIALS_FROM_CHALLENGE,
                 )),
-                Some((_, Some(receipt), None)) if receipt["applied"] == true => receipt["chosen"]
-                    .as_str()
-                    .zip(receipt[crate::summon_model::EFFORT_KEY].as_str())
-                    .filter(|(chosen, _)| runs_model(&agent, chosen))
-                    .map(|(chosen, effort)| {
-                        (chosen.to_string(), effort.to_string(), DIALS_FROM_JEV)
-                    }),
+                Some((_, Some(receipt), None, _)) if receipt["applied"] == true => {
+                    receipt["chosen"]
+                        .as_str()
+                        .zip(receipt[crate::summon_model::EFFORT_KEY].as_str())
+                        .filter(|(chosen, _)| runs_model(&agent, chosen))
+                        .map(|(chosen, effort)| {
+                            (chosen.to_string(), effort.to_string(), DIALS_FROM_JEV)
+                        })
+                }
                 _ => None,
             };
             // What the reply says about the dials the coordinator left open:
@@ -19620,22 +19663,29 @@ fn plan_inner(
                     },
                     "effortClamped": profile.as_ref().and_then(|row| row.effort_clamped.clone()),
                     "candidates": profile.as_ref().map_or_else(Vec::new, |row| row.candidates.clone()),
+                    // Why this pair, in the facts a person asks for: where the
+                    // model stands, what set its effort, how much finished
+                    // work here stands behind it, and the seat's confidence
+                    // when its answer ran (t-14437).
+                    "why": dials_why(model_turn.as_ref(), model_pick.as_ref(), profile.as_ref()),
                 })
             });
-            let model_shadow = model_turn.as_ref().and_then(|(asked, receipt, challenge)| {
-                let receipt = receipt.clone().map(|mut receipt| {
-                    if challenge.is_some() {
-                        // Asked, and recorded — but a challenger's turn ran.
-                        receipt["applied"] = serde_json::json!(false);
-                    }
-                    receipt
+            let model_shadow = model_turn
+                .as_ref()
+                .and_then(|(asked, receipt, challenge, _)| {
+                    let receipt = receipt.clone().map(|mut receipt| {
+                        if challenge.is_some() {
+                            // Asked, and recorded — but a challenger's turn ran.
+                            receipt["applied"] = serde_json::json!(false);
+                        }
+                        receipt
+                    });
+                    Some(crate::summon_model::Shadow {
+                        ask: asked.clone()?,
+                        receipt,
+                        challenge: challenge.is_some(),
+                    })
                 });
-                Some(crate::summon_model::Shadow {
-                    ask: asked.clone()?,
-                    receipt,
-                    challenge: challenge.is_some(),
-                })
-            });
             let effort = effort.or_else(|| {
                 model_pick
                     .as_ref()

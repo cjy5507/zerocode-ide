@@ -48,16 +48,22 @@ fn wire(home: &tempfile::TempDir, endpoint: &Endpoint, mode: &str) -> Wire {
     Wire::at(&endpoint.base(), "test-key", Some(settings))
 }
 
+/// The pair `model` at the ladder's easy effort — the one effort a model
+/// that names none is offered at.
+fn pair(model: &str) -> String {
+    model::option_word(model, LADDER[0].2)
+}
+
 fn answer(word: &str) -> String {
-    let words = ["model-a", "model-b", "model-c", model::ABSTAIN];
+    let words = [
+        pair("model-a"),
+        pair("model-b"),
+        pair("model-c"),
+        model::ABSTAIN.to_string(),
+    ];
     let probabilities: serde_json::Map<String, Value> = words
         .iter()
-        .map(|each| {
-            (
-                (*each).to_string(),
-                json!(if *each == word { 0.85 } else { 0.05 }),
-            )
-        })
+        .map(|each| (each.clone(), json!(if each == word { 0.85 } else { 0.05 })))
         .collect();
     json!({"model": "jev-1.13.0", "answers": {model::QUESTION: {
         "type": "choice", "choice": word, "probabilities": probabilities, "confidence": 0.85,
@@ -69,12 +75,12 @@ fn answer(word: &str) -> String {
 fn only_a_seat_that_applies_asks_on_the_launchs_path_and_abstain_never_acts() {
     let key = ["model-team", "%1", "model-request"];
     for (mode, word, receipt, applied) in [
-        ("shadow", "model-b", false, false),
-        ("on", "model-b", true, true),
-        ("on", model::ABSTAIN, true, false),
+        ("shadow", pair("model-b"), false, false),
+        ("on", pair("model-b"), true, true),
+        ("on", model::ABSTAIN.to_string(), true, false),
     ] {
         let home = tempfile::tempdir().unwrap();
-        let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(word), 0);
+        let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(&word), 0);
         let wire = wire(&home, &endpoint, mode);
         let guard = super::super::summon_difficulty::origin_with_for_tests(
             key,
@@ -90,7 +96,8 @@ fn only_a_seat_that_applies_asks_on_the_launchs_path_and_abstain_never_acts() {
         );
         assert_eq!(endpoint.asked().len(), usize::from(receipt));
         if let Some(row) = row {
-            assert_eq!(row["chosen"], word);
+            let named = if applied { "model-b" } else { word.as_str() };
+            assert_eq!(row["chosen"], named);
             assert_eq!(row["applied"], applied, "{word}");
             assert_eq!(
                 row[model::EFFORT_KEY],
@@ -179,7 +186,7 @@ fn a_challengers_turn_is_recorded_off_the_beat_and_marked() {
     );
     let prepared = prepared.unwrap();
     let home = tempfile::tempdir().unwrap();
-    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer("model-b"), 0);
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(&pair("model-b")), 0);
     let host =
         super::super::summon_difficulty::tests::Deferred::on(&wire(&home, &endpoint, "shadow"));
     record(&host, &prepared, home.path().to_str(), 3);

@@ -130,6 +130,45 @@ impl LiveModel {
         at
     }
 
+    /// The highest effort the model says it accepts; `None` when unknown.
+    #[must_use]
+    pub fn highest_effort(&self) -> Option<&str> {
+        self.efforts
+            .as_ref()?
+            .iter()
+            .filter_map(|effort| {
+                Some((
+                    EFFORT_SCALE.iter().position(|known| known == effort)?,
+                    effort,
+                ))
+            })
+            .max()
+            .map(|(_, effort)| effort.as_str())
+    }
+
+    /// The effort this model runs at `difficulty` and the rule that set it:
+    /// at easy and ordinary work ([`CHALLENGED`]) the highest it accepts — a
+    /// model a tier down at its top effort before a tier up at a low one, the
+    /// person's first judgment (2026-09-29) until finished work says
+    /// otherwise — and elsewhere the agent's ladder effort brought inside
+    /// what it accepts.
+    fn effort_at(&self, difficulty: &str, ladder: &str) -> (String, EffortRule, Option<Clamp>) {
+        if CHALLENGED.contains(&difficulty)
+            && let Some(highest) = self.highest_effort()
+        {
+            return (highest.to_string(), EffortRule::Highest, None);
+        }
+        let clamped = self.clamp(ladder);
+        (
+            clamped.clone().unwrap_or_else(|| ladder.to_string()),
+            EffortRule::Ladder,
+            clamped.map(|to| Clamp {
+                from: ladder.to_string(),
+                to,
+            }),
+        )
+    }
+
     /// `wanted` brought inside what the model accepts.
     #[must_use]
     pub fn effort_for(&self, wanted: &str) -> String {
@@ -395,6 +434,20 @@ pub enum Source {
     Table,
 }
 
+/// Why a row runs at its effort — the line a person reads beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortRule {
+    /// The agent's ladder effort for the difficulty, inside the model's range.
+    Ladder,
+    /// The highest effort the model accepts: easy and ordinary work.
+    Highest,
+    /// The person wrote it.
+    Written,
+    /// The shipped table's word.
+    Table,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Clamp {
     pub from: String,
@@ -418,6 +471,11 @@ pub struct Row {
     pub model: String,
     pub effort: String,
     pub from: Source,
+    /// Where the provider's classifier ranks the row's model, when the
+    /// lineup lists it — half of why this model runs here.
+    pub band: Option<Band>,
+    /// And why it runs at this effort.
+    pub effort_rule: EffortRule,
     /// The ladder's effort, brought inside what the model accepts; for a
     /// person's row the value stands and this only says it is outside.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -529,7 +587,7 @@ fn build(
         // The agent's own ladder effort: the measured launch table's word
         // for this difficulty, ceiling included.
         let ladder = crate::orchestration::difficulty_effort(agent, difficulty);
-        let (model, effort, from, effort_clamped) = if let Some(person) = person {
+        let (model, effort, from, effort_rule, effort_clamped) = if let Some(person) = person {
             super::launchable(agent, &person)?;
             let clamped = lineup
                 .and_then(|held| held.find(&person.model))
@@ -538,7 +596,13 @@ fn build(
                     from: person.effort.clone(),
                     to,
                 });
-            (person.model, person.effort, Source::Person, clamped)
+            (
+                person.model,
+                person.effort,
+                Source::Person,
+                EffortRule::Written,
+                clamped,
+            )
         } else if let Some((pick, ladder)) = lineup.zip(ladder).and_then(|(held, ladder)| {
             let rung = Rung::of(difficulty)?;
             let by_rung = held
@@ -557,17 +621,8 @@ fn build(
             })?;
             Some((pick, ladder))
         }) {
-            let clamped = pick.clamp(ladder);
-            let effort = clamped.clone().unwrap_or_else(|| ladder.to_string());
-            (
-                pick.id.clone(),
-                effort,
-                Source::Lineup,
-                clamped.map(|to| Clamp {
-                    from: ladder.to_string(),
-                    to,
-                }),
-            )
+            let (effort, rule, clamped) = pick.effort_at(difficulty, ladder);
+            (pick.id.clone(), effort, Source::Lineup, rule, clamped)
         } else if let Some(table) =
             shipped.filter(|row| lineup.is_none_or(|held| held.live(&row.model)))
         {
@@ -579,6 +634,7 @@ fn build(
                 table.model,
                 effort,
                 Source::Table,
+                EffortRule::Table,
                 clamped.map(|to| Clamp {
                     from: table.effort,
                     to,
@@ -592,9 +648,7 @@ fn build(
                 .filter(|candidate| candidate.id != held.canonical(&model))
                 .map(|candidate| Candidate {
                     model: candidate.id.clone(),
-                    effort: candidate
-                        .clamp(ladder)
-                        .unwrap_or_else(|| ladder.to_string()),
+                    effort: candidate.effort_at(difficulty, ladder).0,
                     fresh: seen.is_some_and(|seen| seen.fresh(agent, &candidate.id, now_ms)),
                 })
                 .collect(),
@@ -602,9 +656,13 @@ fn build(
         };
         rows.push(Row {
             difficulty,
+            band: lineup
+                .and_then(|held| held.find(&model))
+                .and_then(|held| held.band),
             model,
             effort,
             from,
+            effort_rule,
             effort_clamped,
             candidates,
         });
@@ -838,6 +896,49 @@ mod tests {
             offered(&rows, "model-a").is_empty(),
             "a row's own model is no candidate"
         );
+    }
+
+    /// The person's first judgment (2026-09-29): easy and ordinary work runs a
+    /// model a tier down at the highest effort it takes, and the row says so;
+    /// hard work keeps the ladder's effort.
+    #[test]
+    fn easy_and_ordinary_work_runs_a_tier_down_at_its_highest_effort() {
+        let mut easy = m("model-b", "rest", &["easy", "medium"]);
+        easy.efforts = Some(&["low", "medium", "high", "xhigh", "max"]);
+        let mut hard = m("model-a", "second", &["hard"]);
+        hard.efforts = Some(&["low", "medium", "high", "xhigh", "max"]);
+        let mut other = m("model-c", "rest", &[]);
+        other.efforts = Some(&["high", "low"]);
+        let rows = read(&Value::Null, Some(&lineup(&[easy, hard, other])), None);
+        for difficulty in [LOW, MID] {
+            let at = row(&rows, difficulty);
+            assert_eq!(
+                (at.model.as_str(), at.effort.as_str()),
+                ("model-b", "max"),
+                "{difficulty}"
+            );
+            assert_eq!(at.effort_rule, EffortRule::Highest);
+            assert_eq!(
+                at.band,
+                Some(Band::Rest),
+                "the row says where its model stands"
+            );
+        }
+        assert_eq!(
+            row(&rows, LOW)
+                .candidates
+                .iter()
+                .find(|c| c.model == "model-c")
+                .map(|c| c.effort.as_str()),
+            Some("high"),
+            "a candidate at its own highest"
+        );
+        let high = row(&rows, HIGH);
+        assert_eq!(
+            (high.model.as_str(), high.effort.as_str()),
+            ("model-a", LADDER[2].2)
+        );
+        assert_eq!(high.effort_rule, EffortRule::Ladder);
     }
 
     #[test]

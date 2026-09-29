@@ -6514,9 +6514,12 @@ function paintSummonProfiles(state) {
 /* One difficulty's line under its fields: who decided it, and the newly
  * arrived models it could run instead. */
 function summonRowNote(row) {
+  const auto = t("settings.typesafe.rowAuto", "자동 — 지금은 {{model}} · {{effort}}로 뜹니다.", { model: row.model, effort: row.effort });
   const said = row.from === "person"
     ? t("settings.typesafe.rowWritten", "직접 적은 모델입니다. 비우면 자동으로 돌아갑니다.")
-    : t("settings.typesafe.rowAuto", "자동 — 지금은 {{model}} · {{effort}}로 뜹니다.", { model: row.model, effort: row.effort });
+    : row.effortRule === "highest"
+      ? `${auto} ${t("settings.typesafe.rowHighest", "쉬운 일과 보통 일은 한 등급 아래 모델을 그 모델의 가장 높은 사고 깊이로 씁니다.")}`
+      : auto;
   const fresh = (row.candidates ?? []).filter((candidate) => candidate.fresh).map((candidate) => candidate.model);
   return fresh.length
     ? `${said} ${t("settings.typesafe.rowFresh", "새로 들어온 모델: {{models}}", { models: fresh.join(", ") })}`

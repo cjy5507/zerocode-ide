@@ -9,11 +9,12 @@
 //! at, whether it is new, how much of its quota is spent, and what this
 //! ledger saw it do — plus `abstain`, which leaves the ladder's default.
 //!
-//! The effort is not a second question: the difficulty seat's answer names
-//! the ladder's effort, and the chosen model takes it inside what it
-//! accepts. Code filters the answer, never the judge: a model outside the
-//! offered set is refused by the reader, and an agent that cannot run it
-//! never had it offered.
+//! What it picks is a pair, a model and the effort it runs at, each option
+//! one of the efforts that model says it accepts (the person, 2026-09-29: a
+//! model a tier down at its top effort can beat a tier up at a low one, so
+//! the two are judged together). Code filters the answer, never the judge: a
+//! pair outside the offered set is refused by the reader, and an agent that
+//! cannot run a model never had it offered.
 //!
 //! A model this ledger has no record of cannot be chosen on evidence, so a
 //! share of easy and ordinary summonses tries one first ([`challenger`]); the
@@ -36,20 +37,23 @@ pub const RUBRIC_VERSION: u32 = 1;
 /// The fewest models that make a choice: one model beside `abstain` is a
 /// yes-or-no about a default, not a pick.
 pub const FEWEST_MODELS: usize = 2;
+/// What joins a model and an effort into one option's word.
+pub const PAIR_SEP: &str = "|";
 /// The row key a receipt names the chosen effort under.
 pub const EFFORT_KEY: &str = "chosenEffort";
 /// The row key that marks a summons a challenger's turn launched.
 pub const CHALLENGE_KEY: &str = "challenge";
 
-const INSTRUCTIONS: &str = "A worker is about to be summoned to carry out the work in `title` and `spec` (the first 400 characters). Choose the model it runs on. `models` holds every model this agent's command line accepts today, each under the `id` its option names: where its provider's own classifier ranks it (`band`: `top` plans and verifies, `second` takes hard implementation, `rest` ordinary and easy work; `rungs` the implementation work it serves; both null when unranked), the `effort` it would run at, whether it arrived recently (`new`), how much of its provider's quota is spent (`quotaSpentPercent` of its `quotaWindow`, both null when unread), and this ledger's record of the summonses it carried here: how many (`summoned`), how many have `ended`, how many of those passed on the first attempt (`passedFirstTry`), and the median rework rounds and tokens of the ended ones (`medianReworkRounds`, `medianTokens`). A record built on a handful of summonses is weak evidence, and a model with none has not been shown either way. `attempt` counts earlier summonses of this task, `failures` its consecutive failures, and `retryOf` says whether this summons replaces an ended attempt. Choose the least costly model that will carry this work well on the first attempt. Choose `abstain` when nothing here tells the models apart for this work.";
-const OPTION_MEANS: &str = "The worker runs on {model}; its facts are its entry in `models`.";
+const INSTRUCTIONS: &str = "A worker is about to be summoned to carry out the work in `title` and `spec` (the first 400 characters). Choose the model it runs on and the effort it runs at: each option names one model and one effort that model accepts, as `model|effort`. `models` holds every model this agent's command line accepts today, each under its `id`: where its provider's own classifier ranks it (`band`: `top` plans and verifies, `second` takes hard implementation, `rest` ordinary and easy work; `rungs` the implementation work it serves; both null when unranked), the `efforts` it accepts from lowest to highest, whether it arrived recently (`new`), how much of its provider's quota is spent (`quotaSpentPercent` of its `quotaWindow`, both null when unread), and this ledger's record of the summonses it carried here: how many (`summoned`), how many have `ended`, how many of those passed on the first attempt (`passedFirstTry`), and the median rework rounds, tokens and minutes of the ended ones (`medianReworkRounds`, `medianTokens`, `medianMinutes`). A record built on a handful of summonses is weak evidence, and a model with none has not been shown either way. `attempt` counts earlier summonses of this task, `failures` its consecutive failures, and `retryOf` says whether this summons replaces an ended attempt. Choose the least costly pair that will carry this work well on the first attempt. Choose `abstain` when nothing here tells the models apart for this work.";
+const OPTION_MEANS: &str =
+    "The worker runs on {model} at {effort} effort; the model's facts are its entry in `models`.";
 const ABSTAIN_MEANS: &str = "Nothing here tells the models apart for this work; the ladder's default for its difficulty runs.";
 const STATE_KEYS: [&str; 6] = ["title", "spec", "attempt", "failures", "retryOf", "models"];
-const MODEL_KEYS: [&str; 12] = [
+const MODEL_KEYS: [&str; 13] = [
     "id",
     "band",
     "rungs",
-    "effort",
+    "efforts",
     "new",
     "quotaSpentPercent",
     "quotaWindow",
@@ -58,6 +62,7 @@ const MODEL_KEYS: [&str; 12] = [
     "passedFirstTry",
     "medianReworkRounds",
     "medianTokens",
+    "medianMinutes",
 ];
 
 /// What this ledger saw one model do: every summons that ran on it and the
@@ -71,6 +76,7 @@ pub struct ModelRecord {
     pub passed_first_try: usize,
     pub median_rework_rounds: Option<u64>,
     pub median_tokens: Option<u64>,
+    pub median_minutes: Option<u64>,
 }
 
 /// `agent`'s records by model, folded from outcome rows (`executionModel`
@@ -98,6 +104,7 @@ pub fn records<'a>(
     let mut records: BTreeMap<String, ModelRecord> = BTreeMap::new();
     let mut rework: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut tokens: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut minutes: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     for row in by_summons.into_values() {
         let Some(model) = row["executionModel"].as_str().map(&canonical) else {
             continue;
@@ -112,6 +119,12 @@ pub fn records<'a>(
         record.passed_first_try += usize::from(first);
         if let Some(rounds) = outcome["reworkRounds"].as_u64() {
             rework.entry(model.clone()).or_default().push(rounds);
+        }
+        if let Some(wall) = outcome["wallMs"].as_u64() {
+            minutes
+                .entry(model.clone())
+                .or_default()
+                .push(wall / MS_A_MINUTE);
         }
         if let Some(spent) = outcome["tokens"].as_u64() {
             tokens.entry(model).or_default().push(spent);
@@ -129,8 +142,17 @@ pub fn records<'a>(
             record.median_tokens = crate::jev::summary::percentile(&held, 0.50);
         }
     }
+    for (model, mut held) in minutes {
+        held.sort_unstable();
+        if let Some(record) = records.get_mut(&model) {
+            record.median_minutes = crate::jev::summary::percentile(&held, 0.50);
+        }
+    }
     records
 }
+
+/// Milliseconds in the minute a record's wall time is said in.
+const MS_A_MINUTE: u64 = 60_000;
 
 /// One model offered, with every fact its entry carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,15 +160,17 @@ pub struct ModelOption {
     pub id: String,
     pub band: Option<lineup::Band>,
     pub rungs: BTreeSet<lineup::Rung>,
-    pub effort: String,
+    /// The efforts it accepts, lowest first — one option each.
+    pub efforts: Vec<String>,
     pub fresh: bool,
     pub quota_spent_percent: Option<u8>,
     pub quota_window: Option<&'static str>,
     pub record: ModelRecord,
 }
 
-/// Every live model of `lineup`, each at `ladder` effort brought inside what
-/// it accepts; `quota` reads a model's gauge the way the quota gate does.
+/// Every live model of `lineup` with the efforts it accepts — `ladder` alone
+/// for a model that names none; `quota` reads a model's gauge the way the
+/// quota gate does.
 #[must_use]
 pub fn options(
     agent: &str,
@@ -167,7 +191,11 @@ pub fn options(
                 id: model.id.clone(),
                 band: model.band,
                 rungs: model.rungs.clone(),
-                effort: model.effort_for(ladder),
+                efforts: model
+                    .efforts
+                    .clone()
+                    .filter(|efforts| !efforts.is_empty())
+                    .unwrap_or_else(|| vec![ladder.to_string()]),
                 fresh: seen.is_some_and(|seen| seen.fresh(agent, &model.id, now_ms)),
                 quota_spent_percent: spent,
                 quota_window: window,
@@ -224,11 +252,19 @@ pub fn ask(look: &Look, options: &[ModelOption]) -> Option<ModelAsk> {
     }
     let mut criteria = Map::new();
     let mut models = Vec::new();
+    let mut offered = Vec::new();
     for option in options {
-        criteria.insert(
-            option.id.clone(),
-            Value::from(OPTION_MEANS.replace("{model}", &option.id)),
-        );
+        for effort in &option.efforts {
+            criteria.insert(
+                option_word(&option.id, effort),
+                Value::from(
+                    OPTION_MEANS
+                        .replace("{model}", &option.id)
+                        .replace("{effort}", effort),
+                ),
+            );
+            offered.push((option.id.clone(), effort.clone()));
+        }
         let record = &option.record;
         models.push(Value::Object(Map::from_iter(
             MODEL_KEYS.map(String::from).into_iter().zip([
@@ -239,7 +275,7 @@ pub fn ask(look: &Look, options: &[ModelOption]) -> Option<ModelAsk> {
                 } else {
                     Value::Null
                 },
-                Value::from(option.effort.as_str()),
+                Value::from(option.efforts.clone()),
                 Value::from(option.fresh),
                 Value::from(option.quota_window.and(option.quota_spent_percent)),
                 Value::from(option.quota_spent_percent.and(option.quota_window)),
@@ -248,6 +284,7 @@ pub fn ask(look: &Look, options: &[ModelOption]) -> Option<ModelAsk> {
                 Value::from(record.passed_first_try),
                 Value::from(record.median_rework_rounds),
                 Value::from(record.median_tokens),
+                Value::from(record.median_minutes),
             ]),
         )));
     }
@@ -265,10 +302,7 @@ pub fn ask(look: &Look, options: &[ModelOption]) -> Option<ModelAsk> {
     Some(ModelAsk {
         state,
         questions: choice::asked(QUESTION, INSTRUCTIONS, criteria),
-        offered: options
-            .iter()
-            .map(|option| (option.id.clone(), option.effort.clone()))
-            .collect(),
+        offered,
     })
 }
 
@@ -281,7 +315,7 @@ impl ModelAsk {
         let words: BTreeSet<String> = self
             .offered
             .iter()
-            .map(|(model, _)| model.clone())
+            .map(|(model, effort)| option_word(model, effort))
             .chain([ABSTAIN.to_string()])
             .collect();
         let read = choice::read(answers, QUESTION, &words)?;
@@ -289,7 +323,7 @@ impl ModelAsk {
             chosen: self
                 .offered
                 .iter()
-                .find(|(model, _)| *model == read.chosen)
+                .find(|(model, effort)| option_word(model, effort) == read.chosen)
                 .cloned(),
             probabilities: read.probabilities,
             confidence: read.confidence,
@@ -301,6 +335,12 @@ impl ModelAsk {
     pub fn offered(&self) -> &[(String, String)] {
         &self.offered
     }
+}
+
+/// One option's word: the model and the effort it runs at.
+#[must_use]
+pub fn option_word(model: &str, effort: &str) -> String {
+    format!("{model}{PAIR_SEP}{effort}")
 }
 
 /// The words that define the question, for the version's fingerprint.
@@ -416,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn every_live_model_is_offered_at_the_ladders_effort_inside_what_it_accepts() {
+    fn every_live_model_is_offered_with_every_effort_it_accepts() {
         let mut seen = Seen::default();
         seen.observe("claude", &lineup(), NOW);
         let options = options(
@@ -436,8 +476,9 @@ mod tests {
         );
         let b = &options[1];
         assert_eq!(
-            b.effort, "high",
-            "max is not accepted; the nearest below is"
+            b.efforts,
+            ["low", "medium", "high"],
+            "what it accepts, no more"
         );
         assert!(b.fresh, "a discovered model is new");
         assert_eq!(
@@ -460,7 +501,12 @@ mod tests {
         );
         let asked = ask(&look(), &options).expect("two models make a choice");
         let criteria = asked.questions[QUESTION]["criteria"].as_object().unwrap();
-        assert_eq!(criteria.len(), options.len() + 1);
+        let pairs: usize = options.iter().map(|option| option.efforts.len()).sum();
+        assert_eq!(
+            criteria.len(),
+            pairs + 1,
+            "every model at every effort it takes, and abstain"
+        );
         assert!(criteria.contains_key(ABSTAIN));
         assert_eq!(
             asked.state["spec"].as_str().unwrap().chars().count(),
@@ -474,29 +520,33 @@ mod tests {
             for key in criteria.keys() {
                 probabilities.insert(
                     key.clone(),
-                    json!(if key == word { 0.9 } else { 0.1 / 2.0 }),
+                    json!(if key == word {
+                        0.9
+                    } else {
+                        0.1 / f64::from(u16::try_from(criteria.len() - 1).unwrap())
+                    }),
                 );
             }
             json!({QUESTION: {
                 "type": "choice", "choice": word, "probabilities": probabilities, "confidence": 0.9,
             }})
         };
-        let pick = asked.read(&answer("model-b")).unwrap();
+        let pick = asked.read(&answer(&option_word("model-b", "low"))).unwrap();
         assert_eq!(
             pick.chosen,
-            Some(("model-b".to_string(), LADDER[1].2.to_string())),
-            "the model and the effort it runs at"
+            Some(("model-b".to_string(), "low".to_string())),
+            "the model and the effort the pair names"
         );
         assert_eq!(
             asked.read(&answer(ABSTAIN)).unwrap().chosen,
             None,
             "abstain is the default"
         );
-        let mut outside = answer("model-b");
-        outside[QUESTION]["choice"] = json!("model-z");
+        let mut outside = answer(&option_word("model-b", "low"));
+        outside[QUESTION]["choice"] = json!(option_word("model-b", "max"));
         assert!(
             asked.read(&outside).is_err(),
-            "a model outside the offer is refused"
+            "an effort the model does not take is no option"
         );
         assert!(
             ask(&look(), &options[..1]).is_none(),
@@ -509,7 +559,7 @@ mod tests {
         assert_eq!(RUBRIC_VERSION, 1);
         assert_eq!(
             crate::jev::rubric_fingerprint(rubric_words),
-            "5980c9992eeabb71"
+            "29fa93424248ad8b"
         );
     }
 
@@ -520,6 +570,8 @@ mod tests {
             model: "model-a".into(),
             effort: "medium".into(),
             from: Source::Lineup,
+            band: None,
+            effort_rule: lineup::EffortRule::Ladder,
             effort_clamped: None,
             candidates: vec![
                 Candidate {

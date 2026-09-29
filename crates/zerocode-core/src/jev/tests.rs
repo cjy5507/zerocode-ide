@@ -3071,7 +3071,7 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
                 id: id.to_string(),
                 band: None,
                 rungs: std::collections::BTreeSet::new(),
-                effort: "high".to_string(),
+                efforts: vec!["high".to_string()],
                 fresh: false,
                 quota_spent_percent: None,
                 quota_window: None,
