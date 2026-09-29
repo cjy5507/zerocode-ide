@@ -5215,6 +5215,7 @@ mod tests {
 
     #[test]
     fn starvation_demotion_uses_current_catalog_targets() {
+        let _lock = crate::test_env_lock();
         assert_eq!(starvation_demotion_model("opus").as_deref(), Some("claude-sonnet-5"));
         assert_eq!(
             starvation_demotion_model("gpt-5.5-fast").as_deref(),
@@ -6602,6 +6603,7 @@ mod tests {
 
     #[test]
     fn resolves_claude_aliases_and_normalizes_dotted_versions() {
+        let _lock = crate::test_env_lock();
         // Anthropic is always enabled, so these hold regardless of the gate.
         assert_eq!(resolve_model_alias("fable"), "claude-fable-5-1");
         assert_eq!(resolve_model_alias("claude-fable"), "claude-fable-5-1");
@@ -6802,6 +6804,7 @@ mod tests {
 
     #[test]
     fn catalog_entries_derive_metadata_from_their_provider() {
+        let _lock = crate::test_env_lock();
         for entry in provider_catalog() {
             assert_eq!(entry.metadata(), entry.provider.metadata());
             assert_eq!(entry.metadata().provider, entry.provider);
@@ -6932,6 +6935,7 @@ mod tests {
 
     #[test]
     fn resolve_model_alias_static_registry_wins_over_custom_collision() {
+        let _lock = crate::test_env_lock();
         // Built-in aliases are matched before the custom catalog, so a custom
         // provider can never shadow them. `opus` (Anthropic, always enabled)
         // demonstrates this without any adapter-gate setup.
