@@ -66,6 +66,17 @@ impl Scratch {
         std::fs::write(&path, document.to_string()).expect("opt the project in");
     }
 
+    /// A project `remove` as it was before it edited the record: the server
+    /// leaves the settings document and its name stays trusted.
+    fn leave_a_trusted_name_behind(&self, name: &str) {
+        self.run(&["add", name, "--project", "--trust", "--", "npx"])
+            .expect("add trusted");
+        assert_eq!(
+            runtime::remove_mcp_server(&self.project_settings(), name).expect("old remove"),
+            McpEdit::Removed
+        );
+    }
+
     /// `--json` goes where a person would put it — before any `--`, which
     /// hands the rest of the line to the server.
     fn json(&self, line: &[&str]) -> Value {
@@ -808,5 +819,73 @@ fn a_project_remove_that_cannot_edit_the_record_says_the_server_is_already_gone(
     assert_eq!(
         std::fs::read_to_string(scratch.trust_record()).expect("trust record"),
         broken
+    );
+}
+
+/// A name an older `remove` left in the record has no server to go with, and
+/// it would run whatever is added under it next. `remove --project` is the
+/// door that takes it out.
+#[test]
+fn a_project_remove_takes_out_a_name_left_in_the_record_after_its_server_was_gone() {
+    let scratch = Scratch::new();
+    scratch.leave_a_trusted_name_behind("repo");
+    scratch
+        .run(&["add", "kept", "--project", "--trust", "--", "npx"])
+        .expect("add trusted");
+
+    let report = scratch.json(&["remove", "repo", "--project", "--json"]);
+
+    let record: Value = serde_json::from_str(
+        &std::fs::read_to_string(scratch.trust_record()).expect("trust record"),
+    )
+    .expect("the record is JSON");
+    assert_eq!(record, json!(["kept"]));
+    assert_eq!(report["edit"], "absent");
+    assert_eq!(report["trustEdit"], "removed");
+    assert_eq!(
+        report["trustPath"],
+        json!(scratch.trust_record().display().to_string())
+    );
+    let again = scratch.json(&["add", "repo", "--project", "--json", "--", "uvx", "other"]);
+    assert_eq!(again["gated"], json!(true));
+}
+
+/// What a person reads then: the server was already gone, and the name came
+/// out of the record.
+#[test]
+fn a_project_remove_of_a_name_only_the_record_held_says_so_in_words() {
+    let scratch = Scratch::new();
+    scratch.leave_a_trusted_name_behind("repo");
+
+    let printed = scratch
+        .run(&["remove", "repo", "--project"])
+        .expect("remove project");
+
+    assert_eq!(
+        printed,
+        format!(
+            "repo was already gone from {}\nno longer trusted in {}",
+            scratch.project_settings().display(),
+            scratch.trust_record().display()
+        )
+    );
+}
+
+/// A name in neither document is still a typo, refused, and the record the
+/// person holds is left byte for byte.
+#[test]
+fn a_project_remove_of_a_name_in_neither_the_settings_nor_the_record_is_still_refused() {
+    let scratch = Scratch::new();
+    scratch.leave_a_trusted_name_behind("repo");
+    let before = std::fs::read_to_string(scratch.trust_record()).expect("trust record");
+
+    let error = scratch
+        .run(&["remove", "rpeo", "--project"])
+        .expect_err("refusal");
+
+    assert!(error.contains("no MCP server named 'rpeo'"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(scratch.trust_record()).expect("trust record"),
+        before
     );
 }
