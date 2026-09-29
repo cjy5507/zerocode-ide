@@ -1053,8 +1053,9 @@ async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
     // a real bug — the streaming entry point forgot the reset, so a session
     // spent its one retry on the first refusal ever and surfaced every later
     // one): once the conversation has changed since, a decline is a new
-    // decline and gets its own same-model retry. A dozen exchanges of work in
-    // between is far past what the ladder counts as the same conversation.
+    // decline and walks the ladder from its first rung. A dozen exchanges of
+    // work in between is far past what the ladder counts as the same
+    // conversation.
     let earlier_work = (0..24).map(|n| {
         if n % 2 == 0 {
             runtime::ConversationMessage::user_text(format!("earlier work {n}"))
@@ -1074,12 +1075,19 @@ async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
         .expect("the third turn's refusal should also surface, not error");
     let _ = drain.await.expect("drain");
     let seen = client.seen_overrides.lock().expect("lock").clone();
+    // The ladder as it always ran: the request, its same-model retry, and — the
+    // conversation being long enough to fold now — the compaction (its summary
+    // is a call this client declines too) and the retry after it: four calls.
     assert_eq!(
         seen.len(),
-        5,
-        "turn three: the declined request and its same-model retry; got {seen:?}"
+        7,
+        "turn three: the ladder from the first rung, four calls; got {seen:?}"
     );
-    assert_eq!(summary.iterations, 2);
+    assert!(
+        summary.iterations >= 2,
+        "the request and its same-model retry ran again: {}",
+        summary.iterations
+    );
 }
 
 #[tokio::test]

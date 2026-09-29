@@ -19839,12 +19839,14 @@ fn a_routed_category_walks_the_ladder_as_today_and_arms_the_cooldown() {
 
 // The rule itself, at the decision: what a surfaced decline stands on.
 
-/// A runtime the ladder has nothing to fold on — a short conversation on Opus
-/// 5.5 — with `memory` as the decline its session kept.
+/// A runtime on Opus 5.5 whose session kept a decline in `category` — the
+/// compaction the ladder made for it did not clear it — as the conversation
+/// stands now, `messages_from_now` messages off. The conversation is long
+/// enough to fold, so that what the compaction rung would do is not hidden by
+/// there being nothing to fold.
 fn runtime_that_kept(
     category: Option<&str>,
     messages_from_now: isize,
-    compaction: Option<crate::turn_trace::RefusalCompaction>,
 ) -> ConversationRuntime<NoopApiClient, StaticToolExecutor> {
     let mut runtime = refusal_dry_test_runtime("claude-opus-5-5");
     // Room to drift downwards from: the conversation holds thirty messages.
@@ -19857,7 +19859,7 @@ fn runtime_that_kept(
         session_id: runtime.session.session_id.clone(),
         category: category.map(str::to_string),
         messages: now.checked_add_signed(messages_from_now).expect("a message count"),
-        compaction,
+        compaction: a_compaction_that_did_not_clear_it(),
         renewed: false,
     });
     runtime
@@ -19887,7 +19889,7 @@ fn a_surfaced_decline_stands_for_its_category_within_the_tables_drift() {
         ("grown by one less than the drift", drift - 1),
         ("cut down by one less than the drift", -(drift - 1)),
     ] {
-        let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), messages_from_now, None);
+        let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), messages_from_now);
         assert!(
             matches!(
                 runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
@@ -19904,7 +19906,7 @@ fn a_surfaced_decline_stands_for_its_category_within_the_tables_drift() {
     // A conversation that changed by the drift, either way, is not the one
     // that was declined: the ladder starts from the same model once.
     for (label, messages_from_now) in [("grown", drift), ("cut down", -drift)] {
-        let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), messages_from_now, None);
+        let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), messages_from_now);
         assert!(
             matches!(
                 runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
@@ -19922,28 +19924,28 @@ fn a_surfaced_decline_stands_only_for_its_own_category_and_session() {
     use super::RefusalDecision;
 
     // Spelled by the classifier with a capital and a space: the same category.
-    let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), 0, None);
+    let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), 0);
     assert!(matches!(
         runtime.decide_refusal_fallback(Some("  Reasoning_Extraction ")),
         RefusalDecision::Standing
     ));
 
     // A decline naming no category after one that named one, and the other way.
-    let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), 0, None);
+    let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), 0);
     assert!(matches!(
         runtime.decide_refusal_fallback(None),
         RefusalDecision::RetrySameModel
     ));
-    let mut runtime = runtime_that_kept(None, 0, None);
+    let mut runtime = runtime_that_kept(None, 0);
     assert!(matches!(
         runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
         RefusalDecision::RetrySameModel
     ));
-    let mut runtime = runtime_that_kept(None, 0, None);
+    let mut runtime = runtime_that_kept(None, 0);
     assert!(matches!(runtime.decide_refusal_fallback(None), RefusalDecision::Standing));
 
     // Another session is another conversation, whatever its length.
-    let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), 0, None);
+    let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), 0);
     runtime.session.session_id = "another-session".to_string();
     assert!(matches!(
         runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
@@ -19969,7 +19971,7 @@ fn a_routed_category_is_never_kept_and_never_stands() {
     assert!(runtime.surfaced_decline.is_none(), "a routed decline is not kept");
 
     // And a kept decline of the same category does not hold it back.
-    let mut runtime = runtime_that_kept(Some("cyber"), 0, None);
+    let mut runtime = runtime_that_kept(Some("cyber"), 0);
     assert!(matches!(
         runtime.decide_refusal_fallback(Some("cyber")),
         RefusalDecision::RetrySameModel
@@ -20066,7 +20068,7 @@ fn a_surfaced_decline_ends_when_a_turn_does_not_surface_it_again() {
 
     // Another model world answers its own refusals; the same value re-applied
     // at a turn entry changes nothing.
-    let mut runtime = runtime_that_kept(None, 0, None);
+    let mut runtime = runtime_that_kept(None, 0);
     runtime.set_context_model("claude-opus-5-5");
     assert!(runtime.surfaced_decline.is_some(), "the model did not change");
     runtime.set_context_model("claude-opus-5");
@@ -20074,7 +20076,7 @@ fn a_surfaced_decline_ends_when_a_turn_does_not_surface_it_again() {
 
     // The person let the declined pictures go: the classifier reads another
     // conversation now.
-    let mut runtime = runtime_that_kept(None, 0, None);
+    let mut runtime = runtime_that_kept(None, 0);
     Arc::make_mut(&mut runtime.session.messages).push(ConversationMessage::user_with_images(
         "a screenshot",
         vec![("image/png".to_string(), "c2NyZWVuc2hvdA==".to_string())],
