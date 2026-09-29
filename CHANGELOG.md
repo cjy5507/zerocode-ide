@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.1.41] — 2026-09-29
+
+_since v1.1.40 (24 commits)_
+
+### feat
+- feat(bench): a measured covered round names the cover seat's word, counts an autopilot's end for the person, and times a person's own run (t-12979)
+
+### fix
+- fix(computer-use): a move the helper refused is written down as not made (t-12979)
+- fix(bench): a run with no cover launches its fixture as before, and a round the hand never began is graded as that (t-12979)
+- fix(computer-use): a window the helper cannot move is raised with its app, and a refused move goes on to the next (t-12979)
+- fix(pty): an Enter is a send only when the pane says it took it — pressed once more when it does not, never retyped, one road for every door (t-14037)
+- fix(restart): the panes that were open come back where they stood, in every workspace (t-14036)
+- fix(window): a reported checkout takes the reclaim's one judgment, and one road at a time holds a checkout (t-12773)
+- fix(bench): a covered scene run under each cover word has a folder of its own (t-12979)
+- fix(reflex): an autopilot stops a run for a cover only from a tenth of its place hidden (t-12979)
+
+### test
+- test(window): the restart harness holds each delivery to its Enter and the one pressed again (t-14037)
+- test(window): the restart harness parks a second door's words the way the window does, and says how each restart went (t-14037)
+- test(computer-use): a move the helper refused is written down as not made (t-12979, red)
+- test(computer-use): a window the helper cannot move is raised with its app, and a refused move is not the end (t-12979, red)
+- test(pty): an Enter is a send only when the pane says it took it — red (t-14037)
+- test(restart): a restart opens the panes that were open, where they stood, in every workspace — red (t-14036)
+- test(window): a reported checkout takes the reclaim's one judgment, one road at a time (t-12773, red)
+- test(reflex): a sliver over the window's edge leaves a covered-window run standing (t-12979, red)
+
+### other
+- Merge branch 'wt/t-12979/computer-use' (4b07c5ee) — a covered window the helper cannot move is handed to the person, not ended in an error, and a sliver over the edge does not stop a run.
+- Merge branch 'wt/t-14036' (71b15e2b) — a restart opens the panes that were open, where they stood, in every workspace.
+- Merge branch 'wt/t-14037' (1501f1a2) — a message typed into a pane is sent only when the pane says it took it: Enter is pressed once more when it does not, and the words are never typed twice.
+- Merge remote-tracking branch 'origin/main' into wt/t-14037
+- Merge origin/main (12fdfc71) into wt/t-14036
+- Merge branch 'wt/t-12773/worktree-reclaim' (2c644574) — a finished worker's checkout now takes the same one judgment as the reclaim sweep, and only one road at a time may judge or remove a checkout.
+- Merge remote-tracking branch 'origin/main' into wt/t-12979/computer-use
+
 ## [1.1.40] — 2026-09-29
 
 _since v1.1.39 (25 commits)_
