@@ -3,6 +3,7 @@
 //! The contract tests pin subscription, mid-turn, idle, exactly-once, and
 //! shutdown boundaries independently of the TUI event loop.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,7 +13,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tools::AgentCompletion;
 
-use super::subagent_progress::{SubagentProgress, POLL_INTERVAL};
+use super::pulse::Pulse;
+use super::subagent_progress::SubagentProgress;
 
 /// Keep a useful head and tail without allowing a full worker transcript to
 /// consume the parent model's remaining context.
@@ -76,6 +78,9 @@ pub(crate) struct AgentCompletionPump {
     task: Option<JoinHandle<()>>,
     /// The stall watch ([`Self::watch_stalls`]), once a host starts one.
     stall_watch: Option<JoinHandle<()>>,
+    /// Looks the stall watch has begun: what a test reads to see that it does
+    /// not look while nothing of the session runs.
+    stall_looks: Arc<AtomicUsize>,
 }
 
 impl AgentCompletionPump {
@@ -99,23 +104,31 @@ impl AgentCompletionPump {
             followup_rx,
             task: Some(task),
             stall_watch: None,
+            stall_looks: Arc::default(),
         }
     }
 
     /// Tell the main conversation, once per run, about a background helper of
-    /// this session that may be stuck (t-11354): every [`POLL_INTERVAL`]
-    /// while any background helper is out, read the session's helpers and
-    /// route what the [`StallBell`] rings the way a completion goes — into
-    /// the running turn, or as a follow-up turn when none runs.
+    /// this session that may be stuck (t-11354): on every beat of the session's
+    /// [`Pulse`] while any background helper is out, read the session's
+    /// helpers and route what the [`StallBell`] rings the way a completion
+    /// goes — into the running turn, or as a follow-up turn when none runs.
+    /// The watch is parked while nothing of the session runs: it was a timer
+    /// of one second that looked at an empty set (t-17057).
     pub(crate) fn watch_stalls(&mut self, registry: Arc<tools::AgentRegistry>) {
+        self.watch_stalls_on(registry, Pulse::new());
+    }
+
+    /// [`Self::watch_stalls`] on a beat of the caller's: a test's.
+    fn watch_stalls_on(&mut self, registry: Arc<tools::AgentRegistry>, mut pulse: Pulse) {
         let route = Arc::clone(&self.route);
         let followup_tx = self.followup_tx.clone();
+        let looks = Arc::clone(&self.stall_looks);
         self.stall_watch = Some(tokio::spawn(async move {
             let mut bell = StallBell::default();
-            let mut interval = tokio::time::interval(POLL_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                pulse.next(None).await;
+                looks.fetch_add(1, Ordering::Relaxed);
                 if tools::background_agent_ids_snapshot().is_empty() {
                     continue;
                 }
@@ -913,5 +926,52 @@ mod tests {
                 .is_err(),
             "a completion could still enter the dead session's consumer"
         );
+    }
+
+    /// The stall watch looks while a helper runs and not otherwise (t-17057):
+    /// it was a timer of one second that looked at an empty set of background
+    /// helpers, one of the three that woke an idle zo 3.2 times a second.
+    #[tokio::test(start_paused = true)]
+    async fn the_stall_watch_looks_while_something_runs_and_not_while_nothing_does() {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut pump = AgentCompletionPump::spawn(rx, "session-a".to_string());
+        let store = tempfile::tempdir().expect("store");
+        let registry = Arc::new(tools::AgentRegistry::at_root_for_tests("session-a", store.path()));
+        let activity = runtime::helper_activity::Activity::new();
+        pump.watch_stalls_on(registry, super::Pulse::over(activity.watch()));
+        let looks = |pump: &AgentCompletionPump| pump.stall_looks.load(std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(looks(&pump), 0, "the stall watch looked in an hour of a session that ran nothing");
+
+        activity.set(runtime::helper_activity::Count::Background, 1);
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(looks(&pump), 1, "the start of a background helper was not looked at at once");
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert!(looks(&pump) >= 5, "a running helper was looked at {} times in five seconds", looks(&pump));
+
+        activity.set(runtime::helper_activity::Count::Background, 0);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        let ended = looks(&pump);
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(looks(&pump), ended, "the stall watch went on looking after everything had ended");
     }
 }

@@ -86,6 +86,7 @@ use crate::session::plain_session::{LaunchFlags, OpenOptions, PlainSession, Repl
 use crate::session::route_fact::{RouteFact, RouteFactReceiver};
 use crate::session::file_search::{FileSearchManager, FileSearchResult};
 use tools::{MentionAnswer, MentionAsk, MentionCandidate, MentionRerank, MentionSurface};
+use crate::session::pulse::Pulse;
 use crate::session::subagent_progress::{SubagentProgress, SubagentProgressWatcher};
 use crate::session::turn_scaffold::TurnScaffold;
 use crate::session::{AgentCompletionPump, AgentFollowup};
@@ -103,10 +104,19 @@ use crate::slash::Slash;
 /// 밀린다.
 const FRAME_TICK: Duration = Duration::from_millis(32);
 
-/// How often an idle zo asks the pty for its size (see [`Ui::reconcile_size`]).
-/// One `TIOCGWINSZ` a second is nothing; a viewport parked mid-screen for an
-/// hour because a resize signal never arrived is what it prevents.
+/// How often zo asks the pty for its size and whose it is while a turn or a
+/// compaction runs (see [`Ui::reconcile_size`]). One `TIOCGWINSZ` a second is
+/// nothing; a viewport parked mid-screen for an hour because a resize signal
+/// never arrived is what it prevents. The loops that own this poll have their
+/// 32 ms frame tick awake anyway.
 const SIZE_POLL: Duration = Duration::from_secs(1);
+/// 유휴 zo 가 아무것도 돌지 않을 때 터미널(크기·전경)을 다시 살피는 간격의
+/// 상한. 돌고 있는 것이 있으면 세션의 박동([`Pulse`])이 초당 한 번 살피게 하고,
+/// 깨어날 때마다([`Ui::tend_terminal`] 을 부르는 반복 머리) 그 자리에서도
+/// 살핀다. 이 간격은 **아무 사건도 없을 때**의 상한이다 — SIGWINCH 가 끝내
+/// 안 온 리사이즈나, 유휴 중에 전경 그룹을 가로챈 프로세스가 이 안에 바로잡힌다.
+/// 초당 한 번이던 것이 깨움만 3.2/s 를 만들었다(t-17057).
+const IDLE_TEND: Duration = Duration::from_secs(10);
 /// Ignore quit-shaped control noise while a freshly rendered pane settles.
 ///
 /// The window can finish a pointer-driven launch while terminal protocol
@@ -1214,10 +1224,13 @@ impl Ui {
         super::paint_probe::frame(self.paint_probe.as_mut(), sample, sized, committed);
     }
 
-    /// The once-a-second look at the terminal ([`SIZE_POLL`]): its size, and
-    /// whose it is. A foreground group that is not zo's means no key ever
-    /// arrives — see [`tty`]. `true` when the screen was resized; the caller
-    /// draws.
+    /// The look at the terminal: its size, and whose it is. A foreground group
+    /// that is not zo's means no key ever arrives — see [`tty`]. The idle loop
+    /// makes it at the head of every wake — a turn's end, a followup, a
+    /// completion — and, when nothing wakes it, on the session's beat while
+    /// something runs and every [`IDLE_TEND`] otherwise; a turn and a
+    /// compaction make it once a second ([`SIZE_POLL`]). `true` when the screen
+    /// was resized; the caller draws.
     fn tend_terminal(&mut self) -> bool {
         tty::reclaim_foreground();
         self.reconcile_size()
@@ -1237,10 +1250,11 @@ impl Ui {
     /// a taller terminal than the pane had become were clamped onto its last
     /// row and overwrote each other. In the hermetic harness a delivered
     /// `SIGWINCH` repaints correctly, so this is the path for the signal that
-    /// never came. Called from [`Self::draw`] like codex, plus once a second
-    /// while idle ([`SIZE_POLL`]) — the one extension over codex, whose idle
-    /// screen waits for the next event to notice. `true` when the screen was
-    /// resized; the caller draws.
+    /// never came. Called from [`Self::draw`] like codex, plus from
+    /// [`Self::tend_terminal`] while idle (at most [`IDLE_TEND`] apart, once a
+    /// second while something of the session runs) — the one extension over
+    /// codex, whose idle screen waits for the next event to notice. `true`
+    /// when the screen was resized; the caller draws.
     fn reconcile_size(&mut self) -> bool {
         let Ok((cols, rows)) = tty::size() else {
             return false;
@@ -4520,8 +4534,9 @@ impl App {
         let mut events = TerminalEvents::new();
         let mut ticker = tokio::time::interval(FRAME_TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut size_poll = tokio::time::interval(SIZE_POLL);
-        size_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // 유휴의 터미널 살핌은 타이머가 아니라 박동을 기다린다 — 돌고 있는 것이
+        // 없으면 [`IDLE_TEND`] 뒤에 한 번, 있으면 초당 한 번.
+        let mut pulse = Pulse::new();
 
         let reason = loop {
             if let Some(reason) = self.ui.exit.take() {
@@ -4529,6 +4544,12 @@ impl App {
             }
             if self.ui.painter.failed() {
                 break ExitReason::OutputClosed;
+            }
+            // 깨어날 때마다 터미널의 크기와 전경을 살핀다 — 턴이 끝난 자리에서도
+            // 같은 길이라, 도구가 전경 그룹을 가로채고 간 뒤에도 다음 키를
+            // 기다리는 유휴 루프가 터미널을 되찾은 채로 든다.
+            if self.ui.tend_terminal() {
+                self.ui.draw();
             }
             // What the catalog layer learned before there was a screen to say
             // it on — an alias that moved, a settings pin. Once each.
@@ -4600,8 +4621,10 @@ impl App {
                 // 바이트는 그대로다.
                 _ = ticker.tick(), if self.ui.animating() => self.ui.draw(),
                 // 유휴에는 프레임이 없으니 리사이즈 신호가 빠지면 아무도 모른다 —
-                // 초당 한 번 pty 에 직접 묻는다([`Ui::reconcile_size`]).
-                _ = size_poll.tick() => if self.ui.tend_terminal() { self.ui.draw(); },
+                // 돌고 있는 것이 있으면 초당 한 번, 없으면 [`IDLE_TEND`] 마다 pty 에
+                // 직접 묻는다([`Ui::reconcile_size`]). 이 팔의 몸은 비어 있다: 깨어난
+                // 반복의 머리가 [`Ui::tend_terminal`] 을 부른다.
+                () = pulse.next(Some(IDLE_TEND)) => {}
             }
         };
 
@@ -4766,8 +4789,9 @@ impl App {
         // The first tick of an interval is immediate; the parent was there a
         // moment ago, so the first look waits a whole period.
         liveness.tick().await;
-        let mut size_poll = tokio::time::interval(SIZE_POLL);
-        size_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // 부모를 기다리는 동안의 터미널 살핌도 박동에 건다: 이 판에는 돌고 있는
+        // 것이 없으니 [`IDLE_TEND`] 마다 한 번이다.
+        let mut pulse = Pulse::new();
         let idle_deadline = tokio::time::Instant::from_std(idle.deadline());
         loop {
             tokio::select! {
@@ -4834,7 +4858,7 @@ impl App {
                 () = tokio::time::sleep_until(idle_deadline) => {
                     return IdleOutcome::Close(CloseReason::IdleBudget);
                 }
-                _ = size_poll.tick() => if self.ui.tend_terminal() { self.ui.draw(); },
+                () = pulse.next(Some(IDLE_TEND)) => if self.ui.tend_terminal() { self.ui.draw(); },
             }
         }
     }

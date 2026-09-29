@@ -2814,6 +2814,8 @@ fn register_agent_cancel_signal(
 ) {
     if let Ok(mut signals) = agent_cancel_signals().lock() {
         signals.insert((agent_id, generation), signal);
+        // Told from under the lock, so two changes cannot arrive out of order.
+        runtime::helper_activity::set(runtime::helper_activity::Count::Workers, signals.len());
     }
 }
 
@@ -2960,12 +2962,14 @@ fn abort_and_unregister_agent_cancel_signal(agent_id: &str, generation: u64) -> 
     };
     signal.abort();
     signals.remove(&key);
+    runtime::helper_activity::set(runtime::helper_activity::Count::Workers, signals.len());
     true
 }
 
 pub(super) fn unregister_agent_cancel_signal(agent_id: &str, generation: u64) {
     if let Ok(mut signals) = agent_cancel_signals().lock() {
         signals.remove(&(agent_id.to_string(), generation));
+        runtime::helper_activity::set(runtime::helper_activity::Count::Workers, signals.len());
     }
 }
 
