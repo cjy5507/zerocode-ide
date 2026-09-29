@@ -603,24 +603,22 @@ fn file(
                         Said::Nothing
                     },
                 });
-            if asks_pick {
-                if !book.picks.iter().any(|pick| pick.judged == judged) {
-                    shelve(
-                        &mut book.picks,
-                        PickWaiting {
-                            judged,
-                            asked: None,
-                            edited: None,
-                            looked: None,
-                        },
-                    );
-                    questions.push(Question::FilePick {
+            if asks_pick && !book.picks.iter().any(|pick| pick.judged == judged) {
+                shelve(
+                    &mut book.picks,
+                    PickWaiting {
                         judged,
-                        attempt,
-                        request: words.clone(),
-                        edited: book.edited.clone(),
-                    });
-                }
+                        asked: None,
+                        edited: None,
+                        looked: None,
+                    },
+                );
+                questions.push(Question::FilePick {
+                    judged,
+                    attempt,
+                    request: words.clone(),
+                    edited: book.edited.clone(),
+                });
             }
             book.task = task_line_of(&words);
             book.persons = squeezed(&words);
