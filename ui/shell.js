@@ -12298,13 +12298,16 @@ function chatFolds(text) {
  * 헬퍼의 브리핑, 긴 도구 덤프, 중첩 실행의 exec 카드와 결과가 전부 이
  * 하나를 입는다 — 접는 자가 넷이어도 접힘의 문법은 한 벌이다(Orca의
  * 실행 뷰가 명령과 긴 답을 접는 바로 그 문법). <details>라서 키보드가
- * 그냥 닿는다 — summary는 제 발로 초점을 받고 Enter로 여닫힌다. */
+ * 그냥 닿는다 — summary는 제 발로 초점을 받고 Enter로 여닫힌다. 그 키를
+ * 창의 키 싱크(`rearmKeySink`)가 터미널 것으로 가져가지 못하게 키보드의
+ * 주인으로 적어 둔다. */
 function foldCardNode(kind, cap, body, open = false) {
   const fold = document.createElement("details");
   fold.className = kind;
   fold.open = open;
   const lid = document.createElement("summary");
   lid.className = "helper-cap";
+  lid.dataset.keyboardOwner = "true";
   lid.append(...cap);
   fold.append(lid, body);
   return fold;
@@ -12415,7 +12418,7 @@ function cleanseAssistantText(text) {
  * (person or agent): a call after it with no result yet is still out. */
 function helperTurnRowNode(run, turn, spoken, cold = false) {
   if (turn.role === "thinking") return thoughtTurnNode(run, turn);
-  if (turn.role === "tool" || turn.role === "tool_result") return toolTurnNode(run, turn, spoken, cold);
+  if (turn.role === "tool" || turn.role === "tool_result") return stepRowNode(run, turn, spoken);
   const briefing = turn.role === "user" && turn.seq === 0;
   const row = document.createElement("article");
   const said = document.createElement("div");
@@ -12462,32 +12465,6 @@ function paintAnswerProse(said, turn, run) {
   paintHelperProse(said, clean || turn.text, helperBase(run));
 }
 
-/* `● Read ui/shell.js` / `└ 256 lines` — the extension's tool row. The name
- * and the target's first line on the call line; the first line of what came
- * back under it, born when it comes (`dressToolTurn`); anything longer than
- * an eye — a multi-line input, the rest of an output — behind one fold that
- * never widens the page. The dot in the gutter is the row's `::before`, and
- * its state is the row's class: live (out, on the accent), done (green),
- * failed (halt). */
-function toolTurnNode(run, turn, spoken, cold = false) {
-  const row = document.createElement("article");
-  row.className = "helper-turn is-tool is-step";
-  const call = document.createElement("p");
-  call.className = "helper-tool-call";
-  const name = document.createElement("span");
-  name.className = "helper-tool-name";
-  const arg = document.createElement("span");
-  arg.className = "helper-tool-arg";
-  call.append(name, arg);
-  row.appendChild(call);
-  row.dataset.turn = String(turn.seq);
-  row.__turn = turn;
-  // A call born far from view waits for its body (B1).
-  if (cold) shelveBorn(row);
-  dressToolTurn(row, turn, run, spoken);
-  return row;
-}
-
 /* The extension's inline diff under `● Edit path` / `● Write path`: the rows
  * the backend cut from the call's own input (`tool.edits` — an Edit's old and
  * new strings, a Write's whole content, a Codex patch), drawn with the review
@@ -12527,96 +12504,37 @@ function writeHidden(node, hidden) {
   if (node.hidden !== hidden) node.hidden = hidden;
 }
 
-/* Dress a tool row from its turn — at birth and again when its result joins
+/* Dress a step's row from its turn — at birth and again when its result joins
  * (`holdHelperTurns` writes the result onto the call's own turn) or the run's
  * state turns. Every write is guarded, so a quiet poll costs no mutation. */
 function dressToolTurn(row, turn, run, spoken) {
   const words = toolWords(turn);
   // A todo call is its list under the extension's head (A7): nothing beside
-  // the head, no result line, no generic body.
+  // the head, and the list in the row's body.
   const todo = dressTodoRow(row, turn, run);
-  writeTextContent(row.querySelector(".helper-tool-name"), todo ? t("worker.todoHead", "할 일 갱신") : words.name);
-  writeTextContent(row.querySelector(".helper-tool-arg"), todo ? "" : words.arg);
   // A tool row is announced by the tool it ran (2.1.272) — the CLI's own
-  // name for it, which the row already shows. Guarded like every other
+  // name for it, which the line words as a kind. Guarded like every other
   // write here: a quiet poll costs no mutation.
   writeAttribute(row, "aria-label", t("worker.toolRow", "{{name}} 도구", { name: words.name }));
-  // The file the call read or wrote is a door to the file tab (A2).
-  dressToolFile(row, turn, run);
-  // What the call took, once its result is in — the CLI feeds say it beside
-  // the call (Hermes: `┊ 💻 terminal  ls -la  (0.3s)`), and so does this row.
-  if (turn.outputAt !== undefined && turn.at !== undefined && !row.querySelector(".helper-tool-took")) {
-    const took = document.createElement("span");
-    took.className = "helper-tool-took";
-    took.textContent = t("worker.elapsedShort", "{{s}}초", { s: (Math.max(0, turn.outputAt - turn.at) / 1000).toFixed(1) });
-    row.querySelector(".helper-tool-call").appendChild(took);
-  }
   const output = turn.role === "tool_result" ? turn.text : turn.output;
   const failed = turn.role === "tool_result" ? turn.tool?.is_error === true : turn.outputError === true;
-  writeClass(row, "is-live", output === undefined && run.status === "running" && turn.seq > spoken);
+  const live = output === undefined && run.status === "running" && turn.seq > spoken;
+  writeClass(row, "is-live", live);
   writeClass(row, "is-done", output !== undefined && !failed);
   writeClass(row, "is-failed", failed);
-  // What came back as pictures alone says itself as pills (A8), not as
-  // 「출력 없음」 over them.
-  const pictured = (turn.role === "tool_result" ? turn.images : turn.outputImages)?.length > 0;
-  if (output !== undefined && !todo && !(pictured && output.trim() === "")) {
-    let result = row.querySelector(":scope > .helper-tool-result");
-    if (!result) {
-      result = document.createElement("p");
-      result.className = "helper-tool-result";
-      row.querySelector(".helper-tool-call").after(result);
-    }
-    writeTextContent(result, output.split("\n", 1)[0] || t("worker.noOutput", "출력 없음"));
-  }
-  // The row's body — unless it stands far from view with its body given up
-  // (B1); it is dressed again when it comes back.
-  if (!row.__shelved) dressToolParts(row, turn, run);
+  dressStepLine(row, turn, words, { todo, output, failed, live });
+  // A body the person opened follows the row from then on: a result that
+  // joined after it opened comes into it.
+  if (row.__opened) dressStepBody(row, turn, run);
 }
 
-/* A tool row's body: the pictures its result handed back, its edit's diff,
- * and its IN/OUT box — each built once, when the row first has it. */
-function dressToolParts(row, turn, run) {
-  const words = toolWords(turn);
-  const output = turn.role === "tool_result" ? turn.text : turn.output;
-  // The pictures the result handed back, under the line that says it (A8).
-  const images = turn.role === "tool_result" ? turn.images : turn.outputImages;
-  if (images?.length > 0 && !row.querySelector(":scope > .helper-images")) {
-    const pills = imagePillsNode(run, images);
-    const after = row.querySelector(":scope > .helper-tool-result") ?? row.querySelector(":scope > .helper-tool-call");
-    after.after(pills);
-    if (row.parentElement) watchImagePills(row.parentElement, pills);
-  }
-  // The edit under its row, once. The diff IS the input — the well would
-  // only repeat it as JSON — so an edit row's body carries its output alone.
-  const edits = turn.tool?.edits ?? [];
-  if (edits.length > 0 && !row.querySelector(":scope > .helper-tool-diff")) {
-    row.appendChild(toolDiffNode(edits, words.arg));
-  }
-  // What the call line and the result line do not already say stands in the
-  // row's body — the extension's box, each side cut at its clip with its
-  // door (`dressToolBody`), never behind a fold a person must press first.
-  if (row.__todos) return;
-  dressToolBody(
-    row,
-    edits.length === 0 && chatFolds(words.input) ? words.input : "",
-    output !== undefined && chatFolds(output) ? output : "",
-  );
-}
+/* A thought is one closed line: what it was about (`thoughtHeading`) and how
+ * long it lasted — the extension's 「Thought for 3s」 — opening in place to
+ * everything it thought, painted the first time the row opens: a long run
+ * thinks often, and a page that rendered every thought up front would pay for
+ * words nobody unfolded. */
 
-/* The model's reasoning, folded behind its own heading (the bold first line
- * the summary opens with, or its first words) — the extension's collapsed
- * thought. The body is prose a shade quieter than an answer, painted the
- * first time the fold opens: a long run thinks often, and a page that
- * rendered every thought up front would pay for words nobody unfolded. */
-function thoughtTitle(text) {
-  const first = text.split("\n", 1)[0].trim();
-  const bold = first.startsWith("**") && first.length > 4 && first.indexOf("**", 2) > 2
-    ? first.slice(2, first.indexOf("**", 2)).trim()
-    : first;
-  return bold.length > CHAT_FOLD_LIMIT ? `${bold.slice(0, CHAT_FOLD_LIMIT - 1)}…` : bold;
-}
-
-/* The fold's label: 「3초 동안 생각」 once the next thing happened (the
+/* The line's label: 「3초 동안 생각」 once the next thing happened (the
  * extension's 「Thought for 3s」), the bare word until then. */
 function thoughtLabel(turn) {
   if (turn.thoughtMs !== undefined) {
@@ -12626,19 +12544,15 @@ function thoughtLabel(turn) {
 }
 
 function dressThoughtRow(row, turn) {
-  writeTextContent(row.querySelector(":scope > .helper-cap > .helper-who"), thoughtLabel(turn));
+  writeTextContent(row.querySelector(":scope > .helper-step-line > .helper-step-res"), thoughtLabel(turn));
 }
 
 function thoughtTurnNode(run, turn) {
-  const body = document.createElement("div");
-  body.className = "helper-thought-body";
-  const row = foldCardNode("helper-turn is-thinking is-step",
-    [foldWhoNode(thoughtLabel(turn)), foldCueNode(thoughtTitle(turn.text))], body);
+  const row = thoughtRowNode("helper-turn is-thinking", run);
   row.dataset.turn = String(turn.seq);
   row.__turn = turn;
-  row.addEventListener("toggle", () => {
-    if (row.open && !body.hasChildNodes()) paintHelperProse(body, turn.text, helperBase(run));
-  });
+  writeTextContent(row.querySelector(".helper-step-target"), thoughtHeading(turn.text));
+  dressThoughtRow(row, turn);
   return row;
 }
 
@@ -12656,14 +12570,15 @@ function agentMarkNode(className, glyph) {
 function helperStatusNode(run) {
   const line = document.createElement("p");
   line.className = "helper-status";
+  const ring = agentMarkNode("helper-status-ring", "");
   const mark = agentMarkNode("helper-status-mark", "");
   const word = agentMarkNode("helper-status-word", "");
-  // The turning glyph and the turning verb are for the eye; the list is a
-  // log a screen reader reads out, so it hears the CLI's one word instead,
-  // once (the extension's own "Claude is working").
-  mark.setAttribute("aria-hidden", "true");
-  word.setAttribute("aria-hidden", "true");
-  line.append(mark, word, agentMarkNode("helper-status-said sr", ""));
+  const now = agentMarkNode("helper-status-now", "");
+  // The turning ring, glyph and verb, and the words of what is going on, are
+  // for the eye; the list is a log a screen reader reads out, so it hears one
+  // sentence instead, once (the extension's own "Claude is working").
+  for (const node of [ring, mark, word, now]) node.setAttribute("aria-hidden", "true");
+  line.append(ring, mark, word, now, agentMarkNode("helper-status-said sr", ""));
   updateHelperStatus(line, run);
   return line;
 }
@@ -12680,18 +12595,26 @@ function updateHelperStatus(line, run) {
   // does (`[data-permission-mode]` on its container).
   wearReach(line, composerReachOf(run));
   const mark = line.querySelector(".helper-status-mark");
-  writeTextContent(line.querySelector(".helper-status-said"), voice.busy_word);
+  // What is going on now, in the words its row wears (t-15682): the step that
+  // is out, else the thought that is going. With nothing to name the line
+  // keeps the CLI's own verb, which holds still for a person who asked for
+  // less motion.
+  const naming = shown ? nowWordsOf(line.parentElement) : "";
+  writeClass(line, "is-naming", naming !== "");
+  writeTextContent(line.querySelector(".helper-status-now"), naming === "" ? "" : `${t("worker.now", "지금")} · ${naming}`);
+  writeTextContent(line.querySelector(".helper-status-said"), naming === "" ? voice.busy_word : naming);
+  const turning = shown && naming === "" && !motionReduced();
   // A CLI with verbs turns through them while the turn is out (t-6323 A4);
   // the rest say their one word.
   const word = line.querySelector(".helper-status-word");
-  if (shown && voice.spinner_verbs.length > 0) {
+  if (turning && voice.spinner_verbs.length > 0) {
     turnStatusVerb(word, voice.spinner_verbs);
   } else {
     stopStatusVerb(word);
     writeTextContent(word, voice.busy_word);
   }
   // Forward and back, as the CLI plays it; a console with one mark keeps it.
-  const cycle = shown && voice.glyph_cycle.length > 1
+  const cycle = turning && voice.glyph_cycle.length > 1
     ? [...voice.glyph_cycle, ...[...voice.glyph_cycle].reverse()]
     : [];
   const key = cycle.join("");
@@ -13145,8 +13068,8 @@ function paintFocusGroupLive(group) {
   const row = group.__live > 0 ? liveFocusMember(group) : null;
   writeHidden(live, row === null);
   if (!row) return;
-  writeTextContent(live.querySelector(".helper-tool-name"), row.querySelector(".helper-tool-name")?.textContent ?? "");
-  writeTextContent(live.querySelector(".helper-tool-arg"), row.querySelector(".helper-tool-arg")?.textContent ?? "");
+  writeTextContent(live.querySelector(".helper-tool-name"), row.querySelector(".helper-step-kind")?.textContent ?? "");
+  writeTextContent(live.querySelector(".helper-tool-arg"), row.querySelector(".helper-step-target")?.textContent ?? "");
 }
 
 /* 계수에서 말과 클래스와 live 표시를 — 바뀔 때만 쓴다. 조용한 폴은
@@ -13209,8 +13132,13 @@ function clearFocusGroups(list) {
  * 조용하다. */
 function applyFocusView(list, on) {
   if (list.__focus === on) return;
+  const was = list.__focus;
   clearFocusGroups(list);
   list.__focus = on;
+  // Steps of one kind stand as one row unless the page folds by turn: a group
+  // counts calls, so it counts single rows (t-15682).
+  if (on) dissolveSteps(list, list.__run);
+  else if (was === true) regroupSteps(list, list.__run);
   if (on) {
     for (const row of [...list.children]) {
       // 묶음 머리·스트리밍 행·상태 행은 턴이 아니다.
@@ -13248,6 +13176,7 @@ function syncHelperTurns(list, run) {
     list.__lastAnswer = null;
     syncHelperTasks(list, run);
     syncStreamingTurns(list, run);
+    syncHelperReport(list, run);
     return;
   }
   const first = held[0].seq;
@@ -13264,7 +13193,7 @@ function syncHelperTurns(list, run) {
   while (front) {
     const next = front.nextElementSibling;
     if (front.dataset.turn === undefined) {
-      if (!front.classList.contains("helper-group")) break;
+      if (!front.classList.contains("helper-group") && !front.classList.contains("helper-report")) break;
       front = next;
       continue;
     }
@@ -13293,6 +13222,19 @@ function syncHelperTurns(list, run) {
   let cold = held.reduce((count, turn) => count + (turn.seq > drawn ? 1 : 0), 0) - CHAT_SHELF.warm;
   for (const turn of held) {
     if (turn.seq <= drawn) continue;
+    // A step that came back whole joins the steps of its kind right above it
+    // (t-15682): one row for them, drawn once, its members when it opens. The
+    // Focus view folds by turn and keeps its rows single.
+    if (!focus && turn.role === "tool") {
+      const tail = streaming ?? helperListTail(list);
+      const above = tail ? tail.previousElementSibling : list.lastElementChild;
+      if (stepJoins(above, turn, stepKindOf(turn, run))) {
+        absorbStep(run, above, turn);
+        cold -= 1;
+        settlePaneLive(run, turn.role);
+        continue;
+      }
+    }
     const row = helperTurnRowNode(run, turn, spoken, cold > 0);
     cold -= 1;
     list.insertBefore(row, streaming ?? helperListTail(list));
@@ -13324,6 +13266,7 @@ function syncHelperTurns(list, run) {
   let touched = null;
   for (const row of list.querySelectorAll(":scope > .is-tool.is-live")) {
     dressToolTurn(row, row.__turn, run, spoken);
+    if (!focus) foldSettledStep(row, run);
     const group = row.__group;
     if (!group) continue;
     accountFocusMember(group, row);
@@ -13340,12 +13283,14 @@ function syncHelperTurns(list, run) {
   askShelfAgain(list);
   syncHelperTasks(list, run);
   syncStreamingTurns(list, run);
+  // A finished helper's page opens on its report, at the top (t-15682).
+  const reported = syncHelperReport(list, run);
   // What the person said is cut at the clip when it stands taller — measured
   // once for every new row of this paint, and on the list's first frame when
   // it was built before the page took it in (a detached row has no height).
   if (people.length && list.isConnected) clipPersonRows(people);
   else if (people.length) requestAnimationFrame(() => clipPersonRows(people.filter((row) => row.isConnected)));
-  if (follow) scrollHelperToBottom(list);
+  if (follow && !reported) scrollHelperToBottom(list);
 }
 
 /* The words the agent is saying right now, under the last turn — the rows
@@ -13379,8 +13324,8 @@ function syncStreamingTurns(list, run) {
     if (row.__text === piece.text) return;
     row.__text = piece.text;
     if (piece.role === "thinking") {
-      writeTextContent(row.querySelector(".helper-cue"), thoughtTitle(piece.text));
-      writeTextContent(row.querySelector(".helper-thought-body"), piece.text);
+      writeTextContent(row.querySelector(".helper-step-target"), thoughtHeading(piece.text));
+      if (row.open) writeTextContent(row.querySelector(":scope > .helper-thought-body"), piece.text);
     } else {
       paintLiveAnswer(row, piece.text, run);
     }
@@ -13456,14 +13401,13 @@ function paintLiveAnswerNow(row, text, run) {
 }
 
 /* The row a voice streams into: an answer's row before it closes (the same
- * rail and dot as the answer it becomes), or a thought's fold, open while it
- * is being thought and closed by the turn that replaces it. */
+ * rail and dot as the answer it becomes), or a thought's line — closed like
+ * every thought, its newest sentence as the words come, opening in place to
+ * what has been thought so far — until the turn that replaces it. */
 function streamingTurnNode(role) {
   if (role === "thinking") {
-    const body = document.createElement("div");
-    body.className = "helper-thought-body";
-    const row = foldCardNode("helper-turn is-thinking is-step is-streaming",
-      [foldWhoNode(t("worker.thinking", "생각 중…")), foldCueNode("")], body, true);
+    const row = thoughtRowNode("helper-turn is-thinking is-streaming");
+    writeTextContent(row.querySelector(".helper-step-res"), t("worker.thinking", "생각 중…"));
     row.dataset.role = role;
     return row;
   }
@@ -13954,6 +13898,7 @@ function paintHelperPage(host, tab) {
   // and stands under the last of them.
   const status = helperStatusNode(run);
   turns.appendChild(status);
+  updateHelperStatus(status, run);
   host.append(head, turns, chatFootDoorNode(turns));
   // 문맥은 입력줄의 알약이 말한다. 부모가 없으면 입력줄도 없으므로 그 사실
   // 한 줄만 남는다 — 선 위의 세션은 부모 없이도 제 입력줄을 가진다(보내기가

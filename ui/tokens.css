@@ -2446,6 +2446,15 @@
   --chat-status-mark-w: 1.5em;
   --chat-status-mark-size: 1.5em;
   --chat-status-in: 300ms;
+  /* A step is one line (t-15682): a 30px row whose mark is a 22px box with
+   * the glyph 4px inside it, its opened body indented to stand under the
+   * words, and the foot line's spinner ring 12px across, 2px thick. */
+  --chat-step-h: 30px;
+  --chat-step-icon: 22px;
+  --chat-step-icon-pad: 4px;
+  --chat-step-body-indent: 38px;
+  --chat-status-ring: 12px;
+  --chat-status-ring-stroke: 2px;
   --chat-actions-h: 16px;
   --chat-actions-gap: 2px;
   --chat-copy-size: 20px;

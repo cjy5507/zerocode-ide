@@ -13640,7 +13640,7 @@ details.worker-command {
 
 /* A line off the rail — a system word — is the extension's meta message
  * (`metaMessage`): italic, in the secondary ink, a little faded. */
-.helper-turn:not(.is-step):not(.is-user) {
+.helper-turn:not(.is-step):not(.is-user):not(.is-tool):not(.is-thinking) {
   margin: var(--chat-meta-gap) 0;
   padding: var(--chat-meta-pad);
   color: var(--chat-work-ink);
@@ -13960,31 +13960,19 @@ details.worker-command {
   color: var(--ink-mist);
 }
 
-/* `● Read ui/shell.js` — the tool row. The dot's state is the row's class:
- * out on the accent with a halo (live), green when the result is in (done),
- * the halt ink when the call failed. */
-.helper-turn.is-tool {
-  min-width: 0;
-  border: 0;
-  background: none;
-  font-size: var(--chat-prose-size);
-  color: var(--chat-work-ink);
-}
-
-.helper-turn.is-tool.is-done::before,
+/* A Focus group's head stands on the rail like an answer does, and wears its
+ * state as the dot: green when its calls are in, the halt ink when one
+ * failed, the agent's accent with its halo while one is out — the extension's
+ * beat (`dotProgress`: 1s, linear), which a helper at work wears too
+ * (t-6323 A6). */
 .helper-group.is-done::before {
   background: var(--chat-dot-done);
 }
 
-.helper-turn.is-tool.is-failed::before,
 .helper-group.is-failed::before {
   background: var(--chat-dot-failed);
 }
 
-/* A call still out: the agent's accent with its halo, blinking at the
- * extension's beat (`dotProgress`: 1s, linear) — and a helper at work
- * wears the same dot (t-6323 A6). */
-.helper-turn.is-tool.is-live::before,
 .helper-group.is-live::before,
 .helper-agent-dot {
   background: var(--chat-accent);
@@ -14049,29 +14037,12 @@ details.worker-command {
   color: var(--chat-work-ink);
 }
 
-/* What came back, in one line under the call — the extension's secondary
- * line (`secondaryLine`): the window's type in the quieter ink. */
-.helper-tool-result {
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-ui);
-  font-size: var(--chat-prose-size);
-  line-height: var(--chat-prose-leading);
-  color: var(--chat-work-ink);
-}
-
-.helper-turn.is-tool.is-failed .helper-tool-result {
-  color: var(--signal-halt-ink);
-}
-
-/* The rest — an input past its first line, an output past its first line —
- * in the extension's tool body (`toolBody`), standing under the call with no
- * fold to press first: one bordered box, a row per side, each with its label
- * (`IN` / `OUT`) in a mono column at the left. A side that is long by the
- * extension's test stops at the clip, its last lines fading out, with its
- * door after it (t-6323 A1); opened, it is the well it always was. */
+/* The input and the output, the extension's tool body (`toolBody`), standing
+ * in the step's body once the step is opened: one bordered box, a row per
+ * side, each with its label (`IN` / `OUT`) in a mono column at the left and
+ * its copy over its corner. A side that is long by the extension's test stops
+ * at the clip, its last lines fading out, with its door after it (t-6323 A1);
+ * opened, it is the well it always was. */
 .helper-tool-body {
   display: grid;
   gap: 0;
@@ -14088,6 +14059,11 @@ details.worker-command {
 .helper-tool-well {
   position: relative;
   min-width: 0;
+}
+
+.helper-tool-well:hover > .helper-code-copy,
+.helper-tool-well:focus-within > .helper-code-copy {
+  opacity: 1;
 }
 
 .helper-tool-well[hidden] {
@@ -14235,61 +14211,24 @@ details.worker-command {
   width: 4ch;
 }
 
-/* A thought: the extension's fold (`thinkingV2`) — 「생각 중…」 while it is
- * thought, 「3초 동안 생각」 once the next thing happened, the chevron right
- * after the label turning down when open, the thought's own first line as
- * the cue, and the body in the quieter ink. */
-.helper-turn.is-thinking {
-  font-size: var(--chat-prose-size);
-  color: var(--chat-work-ink);
-}
-
-.helper-turn.is-thinking > .helper-cap {
-  display: inline-flex;
-  gap: var(--space-1);
-  opacity: 0.8;
-}
-
-.helper-turn.is-thinking[open] > .helper-cap,
-.helper-turn.is-thinking > .helper-cap:hover {
-  opacity: 1;
-}
-
-.helper-turn.is-thinking > .helper-cap .helper-who {
-  font-size: var(--chat-prose-size);
-  font-weight: 400;
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--chat-work-ink);
-}
-
-/* Label, chevron, then the thought's own first line. */
-.helper-turn.is-thinking > .helper-cap .helper-cue {
-  order: 2;
+/* A thought is one line, like a step: its mark, what it was about — the
+ * heading the model wrote, or its newest sentence — in the quiet italic, and
+ * how long it lasted (the extension's 「Thought for 3s」) where a step says
+ * what came of it. Pressed, it opens in place to everything it thought. */
+.helper-turn.is-thinking > .helper-step-line .helper-step-target {
   font-family: var(--font-ui);
-  color: var(--ink-label);
-}
-
-.helper-turn.is-thinking > .helper-cap::after {
-  content: "›";
-  order: 1;
-  margin-left: 0;
-  color: var(--chat-work-ink);
-}
-
-.helper-turn.is-thinking[open] > .helper-cap::after {
-  transform: rotate(90deg);
+  font-size: 1em;
+  font-style: italic;
 }
 
 .helper-thought-body {
-  margin: var(--space-1) 0 0;
   color: var(--chat-work-ink);
   font-size: var(--chat-prose-size);
   line-height: var(--chat-prose-leading);
 }
 
-/* The row a thought streams into (`syncStreamingTurns`): open while it is
- * thought, its words as they come. */
+/* The row a thought streams into (`syncStreamingTurns`): closed like every
+ * thought, its words as they come once it is opened. */
 .helper-turn.is-thinking.is-streaming > .helper-thought-body {
   white-space: pre-wrap;
 }
@@ -14304,12 +14243,6 @@ details.worker-command {
 .helper-said-settled > :last-child,
 .helper-said-tail > :last-child {
   margin-bottom: 0;
-}
-
-.helper-tool-took {
-  margin-left: var(--space-2);
-  color: var(--chat-work-ink);
-  font-size: var(--text-xs);
 }
 
 /* `✻ Pondering…` — under the transcript, above the composer, while the run
@@ -14337,6 +14270,292 @@ details.worker-command {
 }
 
 .helper-status[hidden] {
+  display: none;
+}
+
+/* ---- Steps (t-15682) ----
+ *
+ * What the agent did stands as steps a person takes in at a glance: one
+ * closed line each — a mark for the kind of thing it was, the kind in words
+ * and what it touched, what came of it, how long it took — and everything
+ * else one press away. A step is a `<details>`, so its line is a summary the
+ * keyboard reaches by itself and the engine announces closed or open; the
+ * body is built by the press (`paintStepBody`). The row is off the rail —
+ * that is the answer's, and the Focus group's — and its state is worn on the
+ * mark: quiet once it is in, the agent's accent on the extension's beat while
+ * it is out, the halt ink when it failed. */
+.helper-turn:is(.is-tool, .is-thinking) {
+  min-width: 0;
+  margin: 1px 0;
+  border: var(--rule-width) solid transparent;
+  border-radius: var(--radius-md);
+  font-size: var(--chat-prose-size);
+  line-height: var(--chat-prose-leading);
+  color: var(--chat-work-ink);
+}
+
+.helper-turn:is(.is-tool, .is-thinking)[open] {
+  border-color: var(--edge-rule);
+  background: var(--chat-tool-bg);
+}
+
+.helper-step-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--chat-step-h);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  list-style: none;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-step-line::-webkit-details-marker {
+  display: none;
+}
+
+.helper-step-line:hover {
+  background: var(--chat-tool-bg);
+}
+
+/* The chevron says the line opens, and turns down when it has. */
+.helper-step-line::after {
+  content: "›";
+  flex: none;
+  color: var(--ink-mist);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+details[open] > .helper-step-line::after {
+  transform: rotate(90deg);
+}
+
+.helper-step-line > .helper-step-icon {
+  flex: none;
+  box-sizing: border-box;
+  width: var(--chat-step-icon);
+  height: var(--chat-step-icon);
+  padding: var(--chat-step-icon-pad);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--ink-mist);
+}
+
+.helper-turn.is-tool.is-live > .helper-step-line > .helper-step-icon {
+  color: var(--chat-accent);
+  animation: helper-live-pulse 1s linear infinite;
+}
+
+.helper-turn.is-tool.is-failed > .helper-step-line > .helper-step-icon {
+  background: color-mix(in srgb, var(--signal-halt) 14%, transparent);
+  color: var(--signal-halt-ink);
+}
+
+/* What it was and what it touched: one line, cut with an ellipsis where the
+ * address or the path is longer than the pane — the file's name is the end of
+ * it, which the words already keep (`stepTargetWords`), and the whole of it
+ * stands in the opened row. */
+.helper-step-what {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.helper-step-kind {
+  font-weight: 600;
+  color: var(--ink-chalk);
+}
+
+.helper-step-target {
+  font-family: var(--font-mono);
+  font-size: var(--chat-mono-size);
+  color: var(--ink-mist);
+}
+
+/* What came of it, and how long it took. */
+.helper-step-res,
+.helper-step-meta {
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--ink-mist);
+  white-space: nowrap;
+}
+
+.helper-step-res {
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.helper-step-meta {
+  font-variant-numeric: tabular-nums;
+}
+
+.helper-step-res:empty,
+.helper-step-meta:empty {
+  display: none;
+}
+
+/* A step that failed says how in its own line, in the failure ink, and is
+ * given more of the line to say it in. */
+.helper-turn.is-tool.is-failed > .helper-step-line > .helper-step-res {
+  max-width: 60%;
+  color: var(--signal-halt-ink);
+}
+
+/* The body of an opened step, of a row of steps (its members, one closed
+ * line each) and of a thought: under the words, not under the mark. */
+.helper-step-body,
+.helper-run-body,
+.helper-thought-body {
+  min-width: 0;
+  margin: 0;
+  padding: 0 var(--space-2) var(--space-2) var(--chat-step-body-indent);
+}
+
+.helper-step-body {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.helper-run-body {
+  padding: 0 var(--space-1) var(--space-1) var(--space-3);
+}
+
+/* The file the call touched is a door at the top of its body. */
+.helper-step-file {
+  min-width: 0;
+}
+
+/* The foot line says what is going on (t-15682): while a step is out, or a
+ * thought is going, the ring and the words of that step — the row's own
+ * words, after 「지금」 — take the place of the CLI's turning glyph and verb,
+ * on a band of the agent's own colour; with nothing to name it is the CLI's
+ * line as it was. The ring turns; asked for less motion, it is a still ring
+ * and the words hold. */
+.helper-status-ring,
+.helper-status-now {
+  display: none;
+}
+
+.helper-status.is-naming > :is(.helper-status-ring, .helper-status-now) {
+  display: block;
+}
+
+.helper-status.is-naming > :is(.helper-status-mark, .helper-status-word) {
+  display: none;
+}
+
+.helper-status.is-naming {
+  height: auto;
+  min-height: var(--chat-status-h);
+  margin-top: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  gap: var(--space-2);
+  border: var(--rule-width) solid color-mix(in srgb, var(--chat-reach, var(--chat-accent)) 28%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--chat-reach, var(--chat-accent)) 6%, transparent);
+}
+
+.helper-status-ring {
+  flex: none;
+  box-sizing: border-box;
+  width: var(--chat-status-ring);
+  height: var(--chat-status-ring);
+  border: var(--chat-status-ring-stroke) solid color-mix(in srgb, var(--chat-reach, var(--chat-accent)) 30%, transparent);
+  border-top-color: var(--chat-reach, var(--chat-accent));
+  border-radius: 50%;
+  animation: helper-status-spin 0.9s linear infinite;
+}
+
+@keyframes helper-status-spin {
+  to { transform: rotate(360deg); }
+}
+
+.helper-status-now {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--ink-chalk);
+}
+
+/* A finished helper opens on its report (t-15682): the answer it ended on,
+ * whole, at the top of the list, and what it did folded under one door — the
+ * list wears `is-reported` while the report stands and `is-unfolded` while
+ * the door is open, so no row is written to fold it. The answer's own row
+ * stays where the helper said it, and is not said twice. */
+.helper-turns.is-reported:not(.is-unfolded) > :is(.helper-turn:not(.is-user), .helper-group),
+.helper-turns.is-reported > .helper-turn.is-said-above {
+  display: none;
+}
+
+.helper-report {
+  flex: none;
+  min-width: 0;
+  margin: var(--chat-bubble-gap) 0 var(--space-3);
+  padding: var(--space-3);
+  border: var(--rule-width) solid color-mix(in srgb, var(--signal-ready) 30%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--chat-tool-bg);
+  font-family: var(--font-ui);
+  color: var(--ink-chalk);
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.helper-report-label {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mist);
+}
+
+.helper-report-said {
+  white-space: normal;
+  font-size: var(--chat-prose-size);
+  line-height: var(--chat-prose-leading);
+}
+
+.helper-report-said > :last-child {
+  margin-bottom: 0;
+}
+
+.helper-report:hover .helper-actions,
+.helper-report:focus-within .helper-actions {
+  opacity: 1;
+}
+
+.helper-report-door {
+  display: inline-flex;
+  align-items: center;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--chat-radius-small);
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-report-door:hover {
+  color: var(--ink-chalk);
+  background: var(--chat-pill-bg);
+}
+
+.helper-report-door[hidden] {
   display: none;
 }
 
@@ -15563,7 +15782,7 @@ button.worker-composer-pill:hover {
 /* 이 페이지의 키보드 초점 — 플랫폼 계약의 잉크 외곽선. 입력 상자만 전역
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`). */
 .worker-view
-  :is(.helper-cap, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
+  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -15576,6 +15795,9 @@ button.worker-composer-pill:hover {
 @media (prefers-reduced-motion: reduce) {
   .helper-cap,
   .helper-cap::after,
+  .helper-step-line,
+  .helper-step-line::after,
+  .helper-report-door,
   .helper-group-cap,
   .worker-focus,
   button.worker-where.is-door,
@@ -15588,11 +15810,17 @@ button.worker-composer-pill:hover {
     transition: none;
   }
 
-  .helper-turn.is-tool.is-live::before,
+  .helper-turn.is-tool.is-live > .helper-step-line > .helper-step-icon,
   .helper-group.is-live::before,
   .helper-agent-dot,
-  .helper-status-mark {
+  .helper-status,
+  .helper-status-mark,
+  .helper-status-ring {
     animation: none;
+  }
+
+  .helper-status-ring {
+    border-color: var(--chat-reach, var(--chat-accent));
   }
 }
 
