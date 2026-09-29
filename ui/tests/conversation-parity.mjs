@@ -61,7 +61,8 @@ export async function testConversationFont(browser, origin, ok) {
     await openConversation(page, [
       { role: "user", text: "대화 뷰가 느려요 — why is it slow?" },
       { role: "assistant", text: "원인은 paint가 폴마다 목록을 다시 세운 것입니다 — the list was rebuilt on every poll." },
-      { role: "tool", text: "Read · ui/shell.js", tool: { call_id: "r1", name: "Read", input: "ui/shell.js", is_error: false } },
+      // A tool the window has no word for stands under its own name — all Latin.
+      { role: "tool", text: "Lookup · ui/shell.js", tool: { call_id: "r1", name: "Lookup", input: "ui/shell.js", is_error: false } },
     ]);
     await page.evaluate(async () => {
       const list = document.querySelector("#worker-view .helper-turns");
@@ -73,7 +74,7 @@ export async function testConversationFont(browser, origin, ok) {
         const control = document.createElement("span");
         control.id = id;
         control.style.fontFamily = face;
-        control.textContent = "Read";
+        control.textContent = "Lookup";
         list.prepend(control);
       }
       // The engine answers for text it has laid out: a frame first.
@@ -98,16 +99,17 @@ export async function testConversationFont(browser, origin, ok) {
         return {
           choice: document.documentElement.style.getPropertyValue("--font-ui-choice"),
           prose: getComputedStyle(prose).fontFamily,
-          tool: getComputedStyle(document.querySelector("#worker-view .helper-tool-name")).fontFamily,
+          tool: getComputedStyle(document.querySelector("#worker-view .helper-step-kind")).fontFamily,
         };
       }, choice);
       const drawn = {
         prose: await drawnFaces(cdp, "#worker-view .helper-turn.is-assistant .helper-said p"),
-        tool: await drawnFaces(cdp, "#worker-view .helper-tool-name"),
+        tool: await drawnFaces(cdp, "#worker-view .helper-step-kind"),
         user: await drawnFaces(cdp, "#worker-view .helper-turn.is-user .helper-said"),
       };
-      // The Latin words stand in the platform's sans: the tool's name is all
-      // Latin, and the prose and the person's words carry Latin beside Hangul.
+      // The Latin words stand in the platform's sans: the unknown tool's name
+      // is all Latin, and the prose and the person's words carry Latin beside
+      // Hangul.
       const latinInSans = drawn.tool?.join() === system?.join() &&
         [drawn.prose, drawn.user].every((faces) => faces?.includes(system?.[0]) === true);
       const fellToEngine = engine?.[0] !== system?.[0] &&
@@ -153,11 +155,15 @@ export async function testConversationFolds(browser, origin, ok) {
       { role: "user", text: "짧은 부탁" },
       { role: "tool", text: "Bash · cargo test", tool: { call_id: "b1", name: "Bash", input: "cargo test", is_error: false } },
       { role: "tool_result", text: lines(200, "test"), tool: { call_id: "b1", is_error: false } },
+      // A word between keeps steps of one kind from folding into one row.
+      { role: "assistant", text: "이어서 봅니다." },
       { role: "tool", text: "Bash · ls", tool: { call_id: "b2", name: "Bash", input: "ls", is_error: false } },
       { role: "tool_result", text: "a.rs\nb.rs", tool: { call_id: "b2", is_error: false } },
+      { role: "assistant", text: "고칩니다." },
       { role: "tool", text: "Edit · src/big.rs", tool: { call_id: "e1", name: "Edit", input: "{}", is_error: false,
         edits: [{ path: "src/big.rs", lines: diff(120) }] } },
       { role: "tool_result", text: "updated", tool: { call_id: "e1", is_error: false } },
+      { role: "assistant", text: "하나 더." },
       { role: "tool", text: "Edit · src/small.rs", tool: { call_id: "e2", name: "Edit", input: "{}", is_error: false,
         edits: [{ path: "src/small.rs", lines: diff(5) }] } },
       { role: "tool_result", text: "updated", tool: { call_id: "e2", is_error: false } },
@@ -197,10 +203,17 @@ export async function testConversationFolds(browser, origin, ok) {
       await window.__PAINTED__();
       seen.userClosedAgain = !long.classList.contains("is-open") && Math.round(content(long)) === seen.userHeight;
       seen.shortUser = !users[1].querySelector(".helper-said").classList.contains("is-clipped") && expandOf(users[1]) === null;
-      // A long output: the body stands (no closed fold to press first), its
-      // OUT row stops at the clip and says it has more.
+      // A long output: the step is one closed line; pressed, its body stands
+      // and its OUT row stops at the clip and says it has more.
       const [bash, ls, big, small] = tools;
+      const openRow = async (row) => {
+        row.open = true;
+        await window.__PAINTED__();
+      };
       seen.oldFold = list.querySelectorAll("details.helper-tool-more").length;
+      seen.closedFirst = tools.length === 4 &&
+        tools.every((row) => row.tagName === "DETAILS" && row.open === false && row.querySelector(".helper-step-body") === null);
+      await openRow(bash);
       const out = bash.querySelector(".helper-tool-output");
       seen.bodyShown = out !== null && out.checkVisibility();
       seen.outClipped = out?.classList.contains("is-clipped") === true;
@@ -214,9 +227,11 @@ export async function testConversationFolds(browser, origin, ok) {
       bash.querySelector(".helper-expand")?.click();
       await window.__PAINTED__();
       // A short output stands whole, with no door.
+      await openRow(ls);
       const lsOut = ls.querySelector(".helper-tool-output");
       seen.shortOut = (lsOut === null || !lsOut.classList.contains("is-clipped")) && ls.querySelector(".helper-expand") === null;
       // A long diff: 200px, only the rows the clip shows are built, the door.
+      await openRow(big);
       const bigRows = big.querySelector(".helper-tool-diff-rows");
       seen.diffClipped = bigRows?.classList.contains("is-clipped") === true;
       // The extension's diff BOX is 200px tall — edge and padding included.
@@ -232,6 +247,7 @@ export async function testConversationFolds(browser, origin, ok) {
       big.querySelector(".helper-expand")?.click();
       await window.__PAINTED__();
       seen.diffClosedAgain = bigRows ? Math.round(height(bigRows)) === seen.diffHeight : false;
+      await openRow(small);
       const smallRows = small.querySelector(".helper-tool-diff-rows");
       seen.smallDiff = !smallRows?.classList.contains("is-clipped") && smallRows?.querySelectorAll(".diff-line").length === 5 &&
         small.querySelector(".helper-expand") === null;
@@ -255,13 +271,13 @@ export async function testConversationFolds(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A1: a long tool output stands in its body without a fold to press first — the OUT row stops at the extension's 60px (a token) with 「더 보기」 and opens into its own scrolling well — while a short output stands whole with no door",
-      seen.tokens.tool === 60 && seen.oldFold === 0 && seen.bodyShown && seen.outClipped &&
+      "A1: a long tool output waits one press away — the step is one closed line, and opened its OUT row stops at the extension's 60px (a token) with 「더 보기」 and opens into its own scrolling well — while a short output stands whole with no door",
+      seen.tokens.tool === 60 && seen.oldFold === 0 && seen.closedFirst && seen.bodyShown && seen.outClipped &&
         near(seen.outHeight, seen.tokens.tool) && seen.outDoor === seen.more && seen.outOpen && seen.shortOut,
       JSON.stringify(seen),
     );
     ok(
-      "A1: a long diff's box stops at the extension's 200px (a token) with only the rows that clip shows built, 「더 보기」 builds the rest and opens it into its own scrolling well, 「접기」 closes it back — a short diff stands whole — and a quiet poll writes nothing",
+      "A1: in an opened step a long diff's box stops at the extension's 200px (a token) with only the rows that clip shows built, 「더 보기」 builds the rest and opens it into its own scrolling well, 「접기」 closes it back — a short diff stands whole — and a quiet poll writes nothing",
       seen.tokens.diff === 200 && seen.diffClipped && near(seen.diffHeight, seen.tokens.diff) &&
         seen.diffBuilt > 0 && seen.diffBuilt < 20 && seen.diffDoor === seen.more &&
         seen.diffOpenBuilt === 120 && seen.diffOpenHeight > seen.tokens.diff && seen.diffOpenScrolls && seen.diffDoorOpen === seen.less &&
@@ -329,6 +345,11 @@ export async function testConversationPaths(browser, origin, ok) {
         };
       };
       const [read, edit, grep] = tools;
+      // A step is one closed line: the file's door stands at the top of its
+      // body, which the press that opens the row brings.
+      seen.closedNoDoor = tools.every((row) => doorOf(row) === null);
+      for (const row of tools) row.open = true;
+      await window.__PAINTED__();
       seen.readDoor = doorOf(read) !== null;
       seen.readWhere = read.querySelector(".helper-tool-where")?.textContent ?? "";
       seen.wantReadWhere = t("worker.readLines", "({{from}}–{{to}}행)", { from: 11, to: 60 });
@@ -353,8 +374,8 @@ export async function testConversationPaths(browser, origin, ok) {
       return seen;
     });
     ok(
-      "A2: a Read row's file is a door that says the lines it read and opens the file tab at the first of them — the CLI's own count — an Edit row's opens where its new text stands, and a Grep row names no file and links nothing",
-      seen.readDoor && seen.readWhere === seen.wantReadWhere && seen.grepDoor &&
+      "A2: a Read step's file is a door in its opened row that says the lines it read and opens the file tab at the first of them — the CLI's own count — an Edit step's opens where its new text stands, and a Grep step names no file and links nothing",
+      seen.closedNoDoor && seen.readDoor && seen.readWhere === seen.wantReadWhere && seen.grepDoor &&
         seen.read.tab === `file:${root}/src/app.rs` && seen.read.line === 11 &&
         seen.edit.tab === `file:${root}/src/edit.rs` && seen.edit.line === 41,
       JSON.stringify(seen),
@@ -1111,13 +1132,22 @@ export async function testConversationTodos(browser, origin, ok) {
       });
       const rows = todoRows();
       seen.rows = rows.length;
-      seen.second = rows[1] ? items(rows[1]) : null;
-      seen.heads = rows.map((row) => row.querySelector(".helper-tool-name")?.textContent);
+      // A todo call is one closed line — the head and how many are done — and
+      // its list is one press away.
+      seen.heads = rows.map((row) => row.querySelector(".helper-step-kind")?.textContent);
       seen.wantHead = t("worker.todoHead", "할 일 갱신");
+      seen.tallies = rows.map((row) => row.querySelector(".helper-step-res")?.textContent);
+      seen.wantTallies = [0, 1].map((done) => t("worker.stepTodoDone", "{{done}}/{{total}} 완료", { done, total: 3 }));
+      seen.closedFirst = rows.every((row) => row.open === false && row.querySelector(".helper-todos") === null);
+      for (const row of rows) row.open = true;
+      await settle();
+      seen.second = rows[1] ? items(rows[1]) : null;
       seen.named = rows.map((row) => row.getAttribute("aria-label"));
       seen.noActiveForm = !face.textContent.includes("하는 중");
-      seen.noGeneric = rows.every((row) => row.querySelector(".helper-tool-body, .helper-tool-result") === null);
-      seen.argEmpty = rows.every((row) => row.querySelector(".helper-tool-arg")?.textContent === "");
+      seen.noGeneric = rows.every((row) => row.querySelector(".helper-tool-body, .helper-tool-input, .helper-tool-output") === null);
+      seen.argEmpty = rows.every((row) => row.querySelector(".helper-step-target")?.textContent === "");
+      for (const row of rows) row.open = false;
+      await settle();
       // The Focus view: the newest list stands out of its fold.
       face.querySelector(".worker-focus").click();
       await settle();
@@ -1125,6 +1155,7 @@ export async function testConversationTodos(browser, origin, ok) {
       const standing = () => todoRows().map(shown);
       seen.focusFirst = shown(rows[0]);
       seen.focusLatest = shown(rows[1]);
+      seen.focusListStands = rows[1]?.open === true && rows[1].querySelector(".helper-todos") !== null && rows[0]?.open === false;
       seen.readsFolded = [...face.querySelectorAll(".helper-turn.is-tool:not(.is-todo)")].every((row) => row.hidden);
       // A newer list takes its place, and the one before goes back in.
       const log = window.__CONVERSATION__;
@@ -1155,8 +1186,9 @@ export async function testConversationTodos(browser, origin, ok) {
       return seen;
     });
     ok(
-      "A7: a todo call draws its list under the extension's head — a disabled box ticked when done, mixed (`✽`) under way, empty waiting, a done item struck through — with no activeForm, no result line, no generic body and nothing beside the head, while the row is still named for its tool",
-      seen?.rows === 2 && JSON.stringify(seen.second?.map((item) => [item.text, item.state, item.disabled, item.struck])) ===
+      "A7: a todo call is one closed line — the extension's head and how many items are done — that opens to its list: a disabled box ticked when done, mixed (`✽`) under way, empty waiting, a done item struck through — with no activeForm, no generic body and no target beside the head, while the row is still named for its tool",
+      seen?.rows === 2 && seen.closedFirst && JSON.stringify(seen.tallies) === JSON.stringify(seen.wantTallies) &&
+        JSON.stringify(seen.second?.map((item) => [item.text, item.state, item.disabled, item.struck])) ===
         JSON.stringify([["할 일 1", "checked", true, true], ["할 일 2", "mixed", true, false], ["할 일 3", "empty", true, false]]) &&
         seen.second?.[0].mark === "\"✓\"" && seen.second?.[1].mark === "\"✽\"" &&
         seen.heads.every((head) => head === seen.wantHead) && seen.named.every((name) => name.includes("TodoWrite")) &&
@@ -1164,8 +1196,8 @@ export async function testConversationTodos(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A7: in the Focus view the newest list stands out of its fold while the older ones and the reads stay folded — a call still out stands at once, a failed one gives way to the one before it, a call that emptied the list leaves none standing — and off again every list stands",
-      seen?.focusFirst === false && seen.focusLatest === true && seen.readsFolded &&
+      "A7: in the Focus view the newest list stands out of its fold, open, while the older ones and the reads stay folded — a call still out stands at once, a failed one gives way to the one before it, a call that emptied the list leaves none standing — and off again every list stands",
+      seen?.focusFirst === false && seen.focusLatest === true && seen.focusListStands && seen.readsFolded &&
         JSON.stringify(seen.afterThird) === JSON.stringify([false, false, true]) &&
         JSON.stringify(seen.whileOut) === JSON.stringify([false, false, false, true]) && seen.outIsLive === true &&
         JSON.stringify(seen.afterFailure) === JSON.stringify([false, false, true, false]) &&
@@ -1214,14 +1246,20 @@ export async function testConversationImages(browser, origin, ok) {
         for (let beat = 0; beat < n; beat += 1) await window.__PAINTED__();
       };
       await frames(6);
+      // A step is one closed line: the pictures it handed back come with the
+      // press that opens its row.
+      seen.toolClosed = face.querySelector(".helper-turn.is-tool .helper-image") === null;
+      for (const row of face.querySelectorAll(".helper-turn.is-tool")) row.open = true;
+      await frames(6);
       const pills = [...face.querySelectorAll(".helper-image")];
       seen.pills = pills.length;
       const people = [...face.querySelectorAll(".helper-turn.is-user")];
       seen.personPillFirst = people[0]?.firstElementChild?.classList.contains("helper-images") ?? false;
       seen.onlyPicture = people[1] ? [people[1].querySelector(".helper-images") !== null, people[1].querySelector(".helper-said")?.hidden] : null;
       seen.names = pills.map((pill) => pill.querySelector(".helper-image-name")?.textContent);
-      seen.toolPillAfterResult = face.querySelector(".helper-turn.is-tool .helper-tool-result + .helper-images") !== null;
-      // A result that is a picture alone says it with the pill, not 「출력 없음」.
+      seen.toolPillInBody = face.querySelector(".helper-turn.is-tool > .helper-step-body > .helper-images .helper-image") !== null;
+      // A result that is a picture alone says it on the line and with the
+      // pill, not 「출력 없음」.
       window.__CONVERSATION__.turns.push(
         { role: "tool", text: "mcp__computer-use__zoom", tool: { call_id: "z1", name: "mcp__computer-use__zoom", input: "{}", is_error: false } },
         { role: "tool_result", text: "", tool: { call_id: "z1", name: "mcp__computer-use__zoom", input: "", is_error: false }, images: [{ media_type: "image/png", at: "wire:4" }] },
@@ -1229,7 +1267,13 @@ export async function testConversationImages(browser, origin, ok) {
       await pollHelperPages();
       await frames(2);
       const zoom = [...face.querySelectorAll(".helper-turn.is-tool")].at(-1);
-      seen.pictureAlone = zoom ? [zoom.querySelector(".helper-tool-result") === null, zoom.querySelector(".helper-images .helper-image") !== null] : null;
+      const zoomLine = zoom?.querySelector(".helper-step-res")?.textContent;
+      if (zoom) zoom.open = true;
+      await frames(6);
+      seen.pictureAlone = zoom
+        ? [zoomLine === t("worker.stepImages", "이미지 {{n}}장", { n: 1 }) && !zoom.textContent.includes(t("worker.noOutput", "출력 없음")),
+          zoom.querySelector(".helper-images .helper-image") !== null]
+        : null;
       // At the foot: the tool's picture is in view, and so is the picture on
       // the person's row that stands stuck at the list's top (the sticky
       // header); the earlier person's row, stuck under it, is covered — in
@@ -1294,9 +1338,9 @@ export async function testConversationImages(browser, origin, ok) {
       return seen;
     });
     ok(
-      "A8: an image stands as the extension's pill — a 12px thumbnail in a 24px pill, `image.<kind>` and its size once loaded — above the person's words (a picture sent alone stands with no empty bubble) and under the line a tool handed it back with",
-      seen.pills === 3 && seen.personPillFirst && JSON.stringify(seen.onlyPicture) === JSON.stringify([true, true]) &&
-        JSON.stringify(seen.names) === JSON.stringify(["image.png", "image.jpeg", "image.png"]) && seen.toolPillAfterResult &&
+      "A8: an image stands as the extension's pill — a 12px thumbnail in a 24px pill, `image.<kind>` and its size once loaded — above the person's words (a picture sent alone stands with no empty bubble) and in the opened row of the step that handed it back, which says so on its closed line",
+      seen.toolClosed && seen.pills === 3 && seen.personPillFirst && JSON.stringify(seen.onlyPicture) === JSON.stringify([true, true]) &&
+        JSON.stringify(seen.names) === JSON.stringify(["image.png", "image.jpeg", "image.png"]) && seen.toolPillInBody &&
         JSON.stringify(seen.pictureAlone) === JSON.stringify([true, true]) &&
         JSON.stringify(seen.thumbBox) === JSON.stringify([12, 12]) && seen.pillHeight === 24 && seen.size === "1×1",
       JSON.stringify(seen),
@@ -1389,13 +1433,14 @@ export async function testConversationCopies(browser, origin, ok) {
 
 /* B1 — a row far from view keeps its height, not its body. The 400-turn
  * page (B0's fixture) builds whole only the rows at its foot — the rest are
- * born without their bodies — and stands bodies (answers' prose, calls' diffs
- * and IN/OUT boxes, pictures) only within two screens of the view; a row that
- * leaves reach keeps the height it stood at. Scrolling brings bodies back
- * before they are seen and the reader's row never moves, even as rows born
- * without their bodies take them above it; once every row has stood whole,
- * the list is as tall at the top as back at the foot. A row the person
- * opened, or holds a selection in, keeps its body; a quiet poll still writes
+ * born without their bodies — and stands bodies (answers' prose) only within
+ * two screens of the view; a row that leaves reach keeps the height it stood
+ * at. Scrolling brings bodies back before they are seen and the reader's row
+ * never moves, even as rows born without their bodies take them above it;
+ * once every row has stood whole, the list is as tall at the top as back at
+ * the foot. A step is one closed line and has no body to give up: the one a
+ * person opened keeps the body its press built. A row that holds a selection
+ * or the keyboard's focus keeps its body; a quiet poll still writes
  * nothing. */
 export async function testConversationShelf(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
@@ -1420,8 +1465,7 @@ export async function testConversationShelf(browser, origin, ok) {
           return box.bottom >= view.top - margin && box.top <= view.bottom + margin;
         };
       };
-      const bodyOf = (row) => row.querySelector(":scope > .helper-tool-diff, :scope > .helper-tool-body, :scope > .helper-images") !== null ||
-        (row.classList.contains("is-assistant") && row.querySelector(":scope > .helper-said")?.childElementCount > 0);
+      const bodyOf = (row) => row.classList.contains("is-assistant") && row.querySelector(":scope > .helper-said")?.childElementCount > 0;
       const judge = () => {
         const near = reach();
         let farBuilt = 0;
@@ -1481,10 +1525,10 @@ export async function testConversationShelf(browser, origin, ok) {
       seen.heightAtFoot = list.scrollHeight;
       list.scrollTop = 0;
       await frames(3);
-      // A row the person opened keeps its body far from view.
-      const bigDiff = rows().find((row) => row.querySelector(":scope > .helper-tool-diff .helper-expand"));
-      bigDiff?.querySelector(".helper-expand")?.click();
-      await frames(1);
+      // A step the person opened keeps the body its press built, far from view.
+      const bigDiff = rows().find((row) => row.classList.contains("is-tool") && !row.classList.contains("is-run") && row.__turn?.tool?.edits?.length > 0);
+      if (bigDiff) bigDiff.open = true;
+      await frames(2);
       // A row holding the person's selection keeps its body too.
       const answer = rows().find((row) => row.classList.contains("is-assistant") && row !== bigDiff && reach()(row) && row.querySelector(".helper-said p"));
       const range = document.createRange();
@@ -1494,16 +1538,16 @@ export async function testConversationShelf(browser, origin, ok) {
       list.scrollTop = list.scrollHeight;
       await frames(4);
       await new Promise((done) => setTimeout(done, 50));
-      seen.openedKept = bigDiff ? !bigDiff.__shelved && bigDiff.querySelector(":scope > .helper-tool-diff") !== null : null;
+      seen.openedKept = bigDiff ? !bigDiff.__shelved && bigDiff.open && bigDiff.querySelector(":scope > .helper-step-body > .helper-tool-diff") !== null : null;
       seen.selectionKept = !answer.__shelved && answer.querySelector(".helper-said p") !== null;
       getSelection().removeAllRanges();
-      // A row holding the keyboard's focus keeps its body too: the door the
+      // A row holding the keyboard's focus keeps its body too: the control the
       // person stands on is not taken from under them by a wheel.
       list.scrollTop = 0;
       await frames(4);
       await new Promise((done) => setTimeout(done, 50));
-      const focused = rows().find((row) => row !== bigDiff && reach()(row) && row.querySelector(":scope > .helper-tool-body .helper-expand"));
-      const door = focused?.querySelector(":scope > .helper-tool-body .helper-expand") ?? null;
+      const focused = rows().find((row) => row.classList.contains("is-assistant") && reach()(row) && row.querySelector(":scope > .helper-actions .helper-copy"));
+      const door = focused?.querySelector(":scope > .helper-actions .helper-copy") ?? null;
       door?.focus();
       list.scrollTop = list.scrollHeight;
       await frames(4);
@@ -1521,8 +1565,8 @@ export async function testConversationShelf(browser, origin, ok) {
       return seen;
     });
     ok(
-      "B1: a 400-turn page opens with only the rows within two screens of its foot standing their bodies — the rows beyond were born without theirs — and a row that gave its body up keeps the height it stood at",
-      seen.atFoot.shelved > 250 && seen.atFoot.born > 250 && seen.atFoot.farBuilt === 0 && seen.atFoot.nearShelved === 0 && seen.atFoot.heightsKept,
+      "B1: a 400-turn page opens with only the answers within two screens of its foot standing their prose — the answers beyond were born without theirs — and a row that gave its body up keeps the height it stood at",
+      seen.atFoot.shelved > 60 && seen.atFoot.born > 60 && seen.atFoot.farBuilt === 0 && seen.atFoot.nearShelved === 0 && seen.atFoot.heightsKept,
       JSON.stringify(seen),
     );
     ok(
@@ -1533,7 +1577,7 @@ export async function testConversationShelf(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "B1: a row whose door the person opened, a row holding the person's selection and a row holding the keyboard's focus keep their bodies far from view; a quiet poll writes nothing",
+      "B1: a step the person opened, an answer holding the person's selection and an answer holding the keyboard's focus keep their bodies far from view; a quiet poll writes nothing",
       seen.openedKept === true && seen.selectionKept && seen.focusKept === true && seen.quiet === 0,
       JSON.stringify(seen),
     );

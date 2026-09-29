@@ -18113,6 +18113,14 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "status-mark-w",
         "status-mark-size",
         "status-in",
+        // A step is one line (t-15682): the row, its mark and its body's
+        // indent, and the foot line's ring.
+        "step-h",
+        "step-icon",
+        "step-icon-pad",
+        "step-body-indent",
+        "status-ring",
+        "status-ring-stroke",
         "actions-h",
         "actions-gap",
         "copy-size",
@@ -18160,9 +18168,18 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ".chat-dock {",
         ".helper-actions {",
         ".helper-status-mark {",
-        ".helper-turn.is-tool {",
+        // A step is one line (t-15682): the row, its line and its parts, the
+        // foot line's ring, and the report a finished helper opens on.
+        ".helper-turn:is(.is-tool, .is-thinking) {",
+        ".helper-step-line {",
+        ".helper-step-what {",
+        ".helper-step-body {",
+        ".helper-status.is-naming {",
+        ".helper-status-ring {",
+        ".helper-report {",
+        ".helper-report-label {",
+        ".helper-report-door {",
         ".helper-tool-call {",
-        ".helper-tool-result {",
         ".helper-tool-body {",
         ".helper-tool-diff-rows {",
         // What a row folds (t-6323): the cut, the fade, the door.

@@ -128,7 +128,15 @@ export async function testPaneConversation(browser, origin, ok) {
       say({ type: "text_delta", id: 2, text: "원인은 ", done: false });
       await frame();
       seen.rowsAfterFirst = rows().join(",");
-      seen.thoughtShown = flat(list.querySelector('.is-streaming[data-role="thinking"] .helper-thought-body')?.textContent ?? "") === "먼저 파일을 읽고 고친다.";
+      // A thought that is going is one closed line — its newest sentence —
+      // and what has been thought so far is one press away.
+      const thinking = list.querySelector('.is-streaming[data-role="thinking"]');
+      seen.thoughtLine = thinking?.open === false &&
+        thinking.querySelector(".helper-step-target")?.textContent === "먼저 파일을 읽고 고친다";
+      if (thinking) thinking.open = true;
+      await frame();
+      await frame();
+      seen.thoughtShown = flat(thinking?.querySelector(".helper-thought-body")?.textContent ?? "") === "먼저 파일을 읽고 고친다.";
       say({ type: "text_delta", id: 2, text: "폴백이 끈적한 것", done: false });
       say({ type: "text_delta", id: 2, text: "입니다.", done: true });
       await frame();
@@ -156,7 +164,7 @@ export async function testPaneConversation(browser, origin, ok) {
       return seen;
     });
     ok("a zo pane streams what its channel says — a thought and then the answer stand under the last turn by the next frame, a finished piece stays until the transcript's turn carries its words and leaves in that paint, the status row keeps the list's tail, and a new turn's start clears what was left",
-      streamed.rowsAfterFirst === "thinking,assistant" && streamed.thoughtShown &&
+      streamed.rowsAfterFirst === "thinking,assistant" && streamed.thoughtLine && streamed.thoughtShown &&
       streamed.answerByNextFrame && streamed.doneStays && streamed.tailBeforeStatus &&
       streamed.settled && streamed.leftover === 1 && streamed.clearedOnTurnStart,
       JSON.stringify(streamed));

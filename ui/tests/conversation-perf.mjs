@@ -7,7 +7,9 @@
  *
  * 픽스처(`conversationFixture`)는 결정적이다 — 사람의 말 40·답 100·생각 60·
  * 도구 200(그중 diff 60, 긴 출력 40), 그리고 그림 10(사람이 붙인 것 5, 도구가
- * 돌려준 스크린숏 5). 도구 결과는 제 호출 행에 합류하므로 행은 정확히 400이다.
+ * 돌려준 스크린숏 5). 도구 결과는 제 호출 행에 합류하므로 턴은 정확히 400이다.
+ * 같은 종류의 끝난 걸음이 이어 서면 한 행으로 접히므로(t-15682) 목록의 행은
+ * 그보다 적을 수 있다 — 접힌 행은 제 걸음들을 `__members`로 든다.
  *
  * 다섯 수:
  *   1. DOM 노드 — 목록 안의 요소 수와 문서 전체의 요소 수, 그리고 CDP
@@ -288,6 +290,7 @@ export async function measureConversation(page, { engine = "chromium", before = 
     const list = document.querySelector("#worker-view .helper-turns");
     return {
       rows: list?.querySelectorAll(":scope > [data-turn]").length ?? 0,
+      turns: [...(list?.querySelectorAll(":scope > [data-turn]") ?? [])].reduce((sum, row) => sum + (row.__members?.length ?? 1), 0),
       listElements: list?.getElementsByTagName("*").length ?? 0,
       documentElements: document.getElementsByTagName("*").length,
       diffRows: list?.querySelectorAll(".diff-line").length ?? 0,
@@ -357,6 +360,7 @@ export async function measureConversation(page, { engine = "chromium", before = 
   return {
     engine,
     rows: dom.rows,
+    turns: dom.turns,
     listElements: dom.listElements,
     documentElements: dom.documentElements,
     diffRows: dom.diffRows,
@@ -431,7 +435,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const { summary, taken } = await measureRounds({ engine, rounds });
   const mb = (bytes) => (bytes === null ? "—" : `${(bytes / 1024 / 1024).toFixed(1)} MB`);
   console.log(`engine ${summary.engine}, ${summary.rounds} rounds (medians)`);
-  console.log(`  rows ${summary.rows} · list elements ${summary.listElements} · document elements ${summary.documentElements} · diff rows ${summary.diffRows}`);
+  console.log(`  rows ${summary.rows} of ${summary.turns} turns · list elements ${summary.listElements} · document elements ${summary.documentElements} · diff rows ${summary.diffRows}`);
   console.log(`  nodes (DOM counters) ${summary.nodes ?? "—"} · listeners ${summary.listeners ?? "—"}`);
   console.log(`  JS heap ${mb(summary.heapBytes)} · embedder (DOM) heap ${mb(summary.embedderBytes)} · renderer RSS ${mb(summary.rssBytes)} (the conversation's share ${mb(summary.rssConversationBytes)}, the window before it ${mb(summary.rssBeforeBytes)})`);
   console.log(`  delta paint p50 ${summary.paintP50.toFixed(2)} ms · p95 ${summary.paintP95.toFixed(2)} ms (${summary.paints} paints)`);
