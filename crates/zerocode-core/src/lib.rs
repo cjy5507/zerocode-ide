@@ -103,6 +103,7 @@ pub mod stats_events;
 pub mod step_effort;
 pub mod summon_choice;
 pub mod summon_difficulty;
+pub mod summon_model;
 pub mod supply_chain;
 pub mod task;
 pub mod transcript;

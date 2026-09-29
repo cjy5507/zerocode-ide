@@ -29,6 +29,16 @@ use crate::jev::SMART_SETTINGS_KEY;
 
 /// How long a model counts as newly arrived after this window first saw it.
 pub const NEW_FOR_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// One summons in this many, at a difficulty that takes a turn, tries a
+/// model this ledger has too little record of — how a new release earns the
+/// evidence the model seat reads (`crate::summon_model`).
+pub const CHALLENGE_ONE_IN: usize = 4;
+/// A model with this many ended summonses here has a record; it no longer
+/// takes a challenger's turn.
+pub const CHALLENGE_MIN_SAMPLES: usize = 5;
+/// The difficulties whose summonses take a challenger's turn: the easy and
+/// the ordinary, where a model that falls short costs a retry, not a design.
+pub const CHALLENGED: [&str; 2] = [LADDER[0].0, LADDER[1].0];
 /// The effort words, lowest first — the order a clamp walks down.
 pub const EFFORT_SCALE: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
 
@@ -115,6 +125,12 @@ impl LiveModel {
             _ => {}
         }
         at
+    }
+
+    /// `wanted` brought inside what the model accepts.
+    #[must_use]
+    pub fn effort_for(&self, wanted: &str) -> String {
+        self.clamp(wanted).unwrap_or_else(|| wanted.to_string())
     }
 
     /// `wanted`, or the nearest effort below it the model accepts (the
