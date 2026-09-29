@@ -964,6 +964,21 @@ pub(crate) fn brief_for(
     None
 }
 
+/* ---- zerocode-find (t-14869) ------------------------------------------------------ */
+
+/// Answer one `zerocode-find` from `ask`'s pane.
+///
+/// # Errors
+/// When neither the pane nor the shell says which folder to look in.
+pub(crate) fn find_in(
+    guards: &'static Mutex<Guards>,
+    wire: &Wire,
+    ask: &zerocode_core::file_find::FindAsk,
+) -> Result<String, String> {
+    let _ = (guards, wire, ask);
+    Ok(String::new())
+}
+
 /* ---- the questions --------------------------------------------------------------- */
 
 /// Ask one question and file what came of it.

@@ -397,7 +397,7 @@ pub fn hint(paths: &[String]) -> Option<FilePickHint> {
 
 /// One bounded list of candidates and where they came from: a host's
 /// search, this session's recent edits, and a code graph where it has one.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CandidateBatch {
     pub files: Vec<FilePickCandidate>,
     pub recent_paths: Vec<String>,
@@ -551,6 +551,11 @@ pub struct FilePickRow {
     /// The folder the words came from, by its last name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
+    /// When the seat was asked, where it was not the turn's start: `asked`
+    /// for the agent calling it itself ([`crate::file_find::ASKED`],
+    /// t-14869).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moment: Option<String>,
 }
 
 /// One hindsight mark. File names remain local and are reduced to fingerprints.
@@ -636,6 +641,7 @@ impl FilePickRow {
             rejected: None,
             from: None,
             pane: None,
+            moment: None,
         }
     }
 }

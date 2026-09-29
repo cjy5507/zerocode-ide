@@ -1279,6 +1279,160 @@ fn a_brief_says_nothing_in_the_persons_pane_or_while_the_seat_records() {
     }
 }
 
+/* ---- zerocode-find (t-14869) ------------------------------------------------------ */
+
+/// The agent's own words, as `zerocode-find` hands them over from pane 7.
+fn find_ask(request: &str) -> zerocode_core::file_find::FindAsk {
+    zerocode_core::file_find::FindAsk {
+        request: request.to_string(),
+        cwd: None,
+        pane: Some(crate::hooks::pane_key_of(7)),
+    }
+}
+
+/// A pane whose hooks the books have heard: a prompt that asks no pick.
+fn heard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane) {
+    join(note(
+        guards,
+        wire,
+        pane,
+        Asking::of([&FILE_PICK]),
+        vec![Moment::Prompt("hello".to_string())],
+        1,
+    ));
+}
+
+/// While the seat records, `zerocode-find` answers at once in today's
+/// order — each file with its first line — and the pick is asked beside the
+/// answer: its row names the agent and the moment, carries no path or word,
+/// and is graded on the turn's edits like a turn's own.
+#[test]
+fn zerocode_find_answers_in_todays_order_while_the_seat_records_and_is_graded_as_asked() {
+    let endpoint = judging();
+    let project = parser_project();
+    let (_home, wire) = home_with(&endpoint, project.path(), &[&FILE_PICK], JevMode::Shadow);
+    let guards = fresh_guards();
+    let codex = pane(AgentKind::Codex, project.path());
+    heard(guards, &wire, &codex);
+    let said = find_in(
+        guards,
+        &wire,
+        &find_ask("the parser crash on an empty line"),
+    )
+    .expect("an answer");
+    for part in [
+        "src/parser.rs  //! The parser, which turns a line into tokens.",
+        "src/lexer.rs  //! Splits a line for the parser.",
+        zerocode_core::file_find::LISTING_NOTE,
+    ] {
+        assert!(said.contains(part), "{part} in {said}");
+    }
+    let held = project_rows(&wire, &FILE_PICK, project.path(), 1);
+    let asked = requests(&held);
+    assert_eq!(asked.len(), 1, "{held:?}");
+    assert_eq!(
+        (&asked[0]["from"], &asked[0]["moment"], &asked[0]["applied"]),
+        (
+            &json!("codex"),
+            &json!(zerocode_core::file_find::ASKED),
+            &json!(false)
+        ),
+        "{held:?}"
+    );
+    let edited = project.path().join("src/parser.rs");
+    join(note(
+        guards,
+        &wire,
+        &codex,
+        Asking::of([&FILE_PICK]),
+        vec![
+            Moment::Started {
+                call_id: Some("call-1".to_string()),
+                tool: "apply_patch".to_string(),
+                words: None,
+                paths: vec![edited.to_string_lossy().into_owned()],
+            },
+            Moment::TurnEnded {
+                stopped: false,
+                said: None,
+            },
+        ],
+        2,
+    ));
+    let held = project_rows(&wire, &FILE_PICK, project.path(), 2);
+    let label = labels(&held);
+    assert_eq!(label.len(), 1, "{held:?}");
+    assert_eq!(label[0]["label"], asked[0]["judged"].to_string());
+    assert_eq!(label[0]["agreed"], json!(true), "{held:?}");
+    let written = std::fs::read_to_string(
+        systemone::project_ledger_of(
+            &wire,
+            &FILE_PICK,
+            &project.path().canonicalize().expect("the project"),
+        )
+        .expect("the ledger"),
+    )
+    .expect("the ledger");
+    for words in ["parser", "lexer", "empty line", "src/"] {
+        assert!(!written.contains(words), "{words} in {written}");
+    }
+}
+
+/// In a summoned worker's pane, while the seat acts, `zerocode-find` answers
+/// with the files the seat selected, and its row says so; with the seat off
+/// it still answers from the search, asking nothing and writing nothing.
+#[test]
+fn zerocode_find_answers_with_the_seats_pick_where_it_acts_and_with_the_search_where_it_is_off() {
+    let endpoint = judging();
+    let project = parser_project();
+    let (_home, wire) = home_with(&endpoint, project.path(), &[&FILE_PICK], JevMode::On);
+    let guards = fresh_guards();
+    let worker = Pane {
+        worker: true,
+        ..pane(AgentKind::Claude, project.path())
+    };
+    heard(guards, &wire, &worker);
+    let said = find_in(
+        guards,
+        &wire,
+        &find_ask("the parser crash on an empty line"),
+    )
+    .expect("an answer");
+    assert!(said.contains("src/parser.rs"), "{said}");
+    assert!(!said.contains("src/lexer.rs"), "{said}");
+    let held = project_rows(&wire, &FILE_PICK, project.path(), 1);
+    assert_eq!(requests(&held)[0]["applied"], json!(true), "{held:?}");
+    assert_eq!(endpoint.asked().len(), 1);
+
+    let quiet = judging();
+    let (_off, wire_off) = home_with(&quiet, project.path(), &[&FILE_PICK], JevMode::Off);
+    let guards = fresh_guards();
+    heard(guards, &wire_off, &worker);
+    let said = find_in(
+        guards,
+        &wire_off,
+        &find_ask("the parser crash on an empty line"),
+    )
+    .expect("an answer");
+    assert!(
+        said.contains("src/parser.rs") && said.contains("src/lexer.rs"),
+        "{said}"
+    );
+    assert!(quiet.asked().is_empty());
+    assert!(project_rows(&wire_off, &FILE_PICK, project.path(), 0).is_empty());
+    // A shell no pane speaks for is answered from its own folder.
+    let loose = zerocode_core::file_find::FindAsk {
+        request: "the parser".to_string(),
+        cwd: Some(project.path().to_string_lossy().into_owned()),
+        pane: None,
+    };
+    assert!(
+        find_in(guards, &wire_off, &loose)
+            .expect("an answer")
+            .contains("src/parser.rs")
+    );
+}
+
 /// A question that is not a code task asks the file pick seat nothing, and a
 /// seat left off asks nothing whatever the moments.
 #[test]
