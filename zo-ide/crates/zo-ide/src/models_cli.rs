@@ -549,6 +549,53 @@ mod tests {
         );
     }
 
+    /// t-14437: every row carries what zo's tier classifier made of it over
+    /// the whole catalog, and the efforts it accepts — the facts the window's
+    /// summons reads instead of keeping a model table of its own.
+    #[test]
+    fn every_row_carries_its_band_rungs_and_accepted_efforts() {
+        use runtime::model_catalog::ModelCatalog;
+        use runtime::model_discovery::{DiscoveredCatalog, Overlay, UpdatePolicy};
+        let home = tempfile::tempdir().expect("an overlay home");
+        let user = ModelCatalog::load_from_home(home.path()).expect("an empty overlay");
+        let rows = user.rows(&super::ALL_PROVIDERS, false);
+        let catalog = DiscoveredCatalog::default();
+        let overlay = Overlay::default();
+        let report = super::Report {
+            policy: UpdatePolicy::Auto,
+            catalog: &catalog,
+            user: &user,
+            rows: &rows,
+            overlay: &overlay,
+            merged: None,
+            now: 1_790_121_060,
+        };
+        let json: serde_json::Value = serde_json::from_str(&report.json().expect("json")).unwrap();
+        let tiers = runtime::catalog_tier_assignments();
+        let words = ["top", "second", "rest", "superseded"];
+        let mut banded = 0;
+        for row in json["models"].as_array().unwrap() {
+            let id = row["id"].as_str().unwrap();
+            let Some(tier) = tiers.iter().find(|tier| tier.id.eq_ignore_ascii_case(id)) else {
+                assert!(row["band"].is_null(), "{id}: no band the classifier did not give");
+                continue;
+            };
+            banded += 1;
+            assert_eq!(row["band"], tier.band.key(), "{id}");
+            assert!(words.contains(&row["band"].as_str().unwrap()), "{id}");
+            let rungs: Vec<&str> = tier.rungs.iter().map(|rung| rung.key()).collect();
+            assert_eq!(row["rungs"], serde_json::json!(rungs), "{id}");
+            match api::accepted_efforts(id) {
+                Some(levels) => {
+                    let words: Vec<&str> = levels.iter().map(|level| level.key()).collect();
+                    assert_eq!(row["efforts"], serde_json::json!(words), "{id}");
+                }
+                None => assert!(row["efforts"].is_null(), "{id}"),
+            }
+        }
+        assert!(banded > 0, "the shipped rows are classified");
+    }
+
     #[test]
     fn ages_read_like_a_person_would_say_them() {
         assert_eq!(describe_age(0, 10), "never fetched");

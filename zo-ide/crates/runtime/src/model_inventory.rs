@@ -43,6 +43,22 @@ pub fn connected_model_inventory(default_model: &str) -> ModelInventory {
     )
 }
 
+/// Every catalog model's place in its provider's ladder: the tier classifier
+/// run over the whole published catalog — shipped rows and the ones discovery
+/// added — one assignment per canonical id (t-14437). `zo models --json`
+/// prints it beside each row, so a launcher outside zo (the window's
+/// summons) reads the classifier's own answer instead of keeping a second.
+#[must_use]
+pub fn catalog_tier_assignments() -> Vec<crate::model_router::ModelTierAssignment> {
+    let mut named = std::collections::HashSet::new();
+    let descriptors: Vec<ModelDescriptor> = api::provider_catalog()
+        .iter()
+        .filter(|entry| named.insert(entry.canonical_model_id))
+        .map(descriptor_for_catalog_entry)
+        .collect();
+    crate::model_router::classify_model_tiers(&descriptors)
+}
+
 #[must_use]
 pub fn model_inventory_from_authorized_providers(
     default_model: &str,

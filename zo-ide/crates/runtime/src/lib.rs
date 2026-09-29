@@ -240,7 +240,9 @@ pub use mcp_stdio::{
     UnsupportedMcpServer,
 };
 pub use mcp_ws::{connect_mcp_ws, McpWsProcess};
-pub use model_inventory::{connected_model_inventory, model_inventory_from_authorized_providers};
+pub use model_inventory::{
+    catalog_tier_assignments, connected_model_inventory, model_inventory_from_authorized_providers,
+};
 pub use model_router::{
     agent_preference_adjustment, agent_stats_for_route, completion_ceiling_for, completion_loop_step,
     spawn_attempt_key, turn_attempt_key,
