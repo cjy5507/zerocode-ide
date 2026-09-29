@@ -160,16 +160,16 @@ pub struct ModelOption {
     pub record: ModelRecord,
 }
 
-/// Every live model of `lineup` with the efforts it accepts — `ladder` alone
-/// for a model that names none; `quota` reads a model's gauge the way the
-/// quota gate does.
+/// Every live model of `lineup` with the efforts it accepts — each of
+/// `ladder`'s for a model that names none; `quota` reads a model's gauge the
+/// way the quota gate does.
 #[must_use]
 pub fn options(
     agent: &str,
     lineup: &Lineup,
     seen: Option<&Seen>,
     records: &BTreeMap<String, ModelRecord>,
-    ladder: &str,
+    ladder: &[&str],
     quota: impl Fn(&str) -> Option<(u8, &'static str)>,
     now_ms: i64,
 ) -> Vec<ModelOption> {
@@ -187,7 +187,7 @@ pub fn options(
                     .efforts
                     .clone()
                     .filter(|efforts| !efforts.is_empty())
-                    .unwrap_or_else(|| vec![ladder.to_string()]),
+                    .unwrap_or_else(|| ladder.iter().map(|effort| (*effort).to_string()).collect()),
                 fresh: seen.is_some_and(|seen| seen.fresh(agent, &model.id, now_ms)),
                 quota_spent_percent: spent,
                 quota_window: window,
@@ -456,7 +456,7 @@ mod tests {
             &lineup(),
             Some(&seen),
             &BTreeMap::new(),
-            LADDER[2].2,
+            &[LADDER[2].2],
             |model| (model == "model-b").then_some((40, "weekly")),
             NOW,
         );
@@ -487,7 +487,7 @@ mod tests {
             &lineup(),
             None,
             &BTreeMap::new(),
-            LADDER[1].2,
+            &[LADDER[1].2],
             |_| None,
             NOW,
         );
