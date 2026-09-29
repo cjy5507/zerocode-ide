@@ -12027,9 +12027,13 @@ fn a_report_that_lands_behind_an_unacknowledged_lease_is_still_pointed_at() {
 
     super::pane_turn_ended(LEADER, 81, false, clock());
     super::tick(&host, &[], clock());
+    // Two, not one (t-15313): the batch the holder took and never
+    // acknowledged is unread too, and a pane at rest is counted it beside
+    // the report queued behind it — its next `check` replays that batch
+    // first.
     assert_eq!(
         typed(&host).get(quiet),
-        Some(&(LEADER, zerocode_core::orchestration::pointer_text(1))),
+        Some(&(LEADER, zerocode_core::orchestration::pointer_text(2))),
         "a worker finished and the coordinator was told nothing: the mail \
              is queued behind a lease the holder cannot ack and `check` will \
              not hand over"
@@ -14084,18 +14088,25 @@ fn the_native_pointer_fast_path_carries_no_mail_or_provider_policy() {
         .expect("the end of the pointer pass")
         .0;
 
-    /* Twice, and the two are the pass's two mutually exclusive branches:
-     * the pane is mid-turn and the pointer is parked for its own hook, or
-     * the turn is over and the pointer is composed for a road that types.
-     * One beat takes one of them, so the ledger is still asked once per
-     * address — and both ask with the SEAT, which is what keeps the
-     * pointer counting exactly the mail that seat's own `check` would be
-     * handed. */
+    /* Once on each of the pass's two mutually exclusive branches: the pane
+     * is mid-turn and the pointer is parked for its own hook — the queue
+     * alone, because the holder may be reading its open batch right now —
+     * or the turn is over and the pointer is composed for a road that
+     * types, counting the unacknowledged batch too (t-15313). One beat
+     * takes one of them, so the ledger is still asked once per address —
+     * and both ask with the SEAT, which is what keeps the pointer counting
+     * exactly the mail that seat's own `check` would be handed. */
     assert_eq!(
         pointer
             .matches("run.pointer_wanted(&address, Some(&seat))")
             .count(),
-        2
+        1
+    );
+    assert_eq!(
+        pointer
+            .matches("run.unread_wanted(&address, Some(&seat))")
+            .count(),
+        1
     );
     assert_eq!(pointer.matches("PointerNotice::new(").count(), 2);
     assert_eq!(
