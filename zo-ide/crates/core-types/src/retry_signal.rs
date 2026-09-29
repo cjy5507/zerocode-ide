@@ -608,7 +608,7 @@ pub const REFUSAL_COMPACTED_RETRY_DECLINED: &str =
 pub const REFUSAL_STANDING_NOTICE: &str =
     "The safety classifier declined this again. The last turn's decline in this conversation \
      stood after every automatic step, and the conversation has not changed materially since, \
-     so this turn asked once and stopped — no second retry, no second compaction. Sending the \
+     so this turn asked once and stopped instead of running those steps again. Sending the \
      same request again — a bare \"continue\" — will be declined again. What helps: narrow or \
      rephrase the request, /model to another provider, or a fresh session (/new).";
 

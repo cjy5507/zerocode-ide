@@ -79,7 +79,8 @@ pub(super) const REFUSAL_SAME_MODEL_RETRY_WARN: &str =
 /// head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RefusalRung {
-    /// The same model, once.
+    /// The same model, once — not again for a decline that stands
+    /// ([`SurfacedDecline`], t-15890).
     SameModel,
     /// The model the catalog routes the refusal's category to on the same
     /// provider, for this turn — as [`ClassifierFallback`] says.
@@ -94,7 +95,8 @@ pub(super) enum RefusalRung {
     /// into a summary — and the same model asked once more with the person's
     /// last words as they wrote them (t-10956). Last, and once a turn: what
     /// the surfaced notice told the person to do on a long session, done for
-    /// them. A conversation too short to fold skips it.
+    /// them. A conversation too short to fold skips it, and so does one whose
+    /// compaction this decline already survived (t-15890).
     Compacted,
 }
 
