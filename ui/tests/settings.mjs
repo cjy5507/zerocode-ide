@@ -110,6 +110,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "placement", setting: "workerPlacement", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "summon", setting: "summonChoice", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "summon_difficulty", setting: "summonDifficulty", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "summon_model", setting: "summonModel", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "effort", setting: "stepEffort", modes: "off shadow on auto", recommended: "off" }),
   Object.freeze({ id: "step_effort", setting: "zoStepEffort", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "compaction", setting: "jevCompaction", modes: "off shadow on auto", recommended: "auto" }),

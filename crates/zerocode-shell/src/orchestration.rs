@@ -34,6 +34,7 @@ mod stall_cause;
 mod step_effort;
 mod summon_choice;
 mod summon_difficulty;
+mod summon_model;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -2239,12 +2240,15 @@ pub(crate) fn refresh_board_ledger() {
             )),
         };
         let outcomes = summon_difficulty::observations(ledger, &mut costs);
+        let model_outcomes = summon_model::observations(ledger, &mut costs);
         costs.end();
-        (next, outcomes)
+        (next, (outcomes, model_outcomes))
     }) else {
         return;
     };
+    let (outcomes, model_outcomes) = outcomes;
     summon_difficulty::record_observations(outcomes, crate::now_epoch_ms());
+    summon_model::record_observations(model_outcomes, crate::now_epoch_ms());
     // Build, allocate and drop old rows outside the publication lock. The
     // main-thread reader holds it only long enough to clone an Arc.
     let next = Arc::new(next);
@@ -2993,6 +2997,22 @@ impl Launcher for LiveCatalog {
         agent: &str,
     ) -> Option<Vec<zerocode_core::summon_difficulty::lineup::Row>> {
         summon_difficulty::rows(agent)
+    }
+
+    fn model_facts(
+        &self,
+        agent: &str,
+        origin: [&str; 3],
+    ) -> Option<zerocode_core::summon_model::Facts> {
+        summon_difficulty::model_facts(agent, origin)
+    }
+
+    fn choose_model(
+        &self,
+        asked: &zerocode_core::summon_model::ModelAsk,
+        origin: [&str; 3],
+    ) -> Option<serde_json::Value> {
+        summon_model::choose(asked, origin)
     }
 
     fn choose_difficulty(
@@ -9077,6 +9097,7 @@ fn carried(
                     if let Some(prepared) = decided.prepared_worker_start.as_ref() {
                         summon_choice::record(host, prepared, seated.as_deref(), now_ms);
                         summon_difficulty::record(host, prepared, seated.as_deref(), now_ms);
+                        summon_model::record(host, prepared, seated.as_deref(), now_ms);
                     }
                     /* The seat report lands beside the receipt, best-effort:
                      * the pane is open and the answer below stands whatever

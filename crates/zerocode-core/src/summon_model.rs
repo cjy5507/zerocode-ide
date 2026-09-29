@@ -79,11 +79,57 @@ pub struct ModelRecord {
 /// A summons two seats both labeled counts once.
 #[must_use]
 pub fn records<'a>(
-    _rows: impl IntoIterator<Item = &'a Value>,
-    _agent: &str,
-    _canonical: impl Fn(&str) -> String,
+    rows: impl IntoIterator<Item = &'a Value>,
+    agent: &str,
+    canonical: impl Fn(&str) -> String,
 ) -> BTreeMap<String, ModelRecord> {
-    BTreeMap::new()
+    use crate::summon_difficulty::outcomes::KEY;
+    // One outcome per summons: the newest row either seat wrote for it.
+    let mut by_summons: BTreeMap<(&str, &str), &Value> = BTreeMap::new();
+    for row in rows {
+        if row["agent"].as_str() != Some(agent) || row.get(KEY).is_none() {
+            continue;
+        }
+        let (Some(run), Some(dispatch)) = (row["run"].as_str(), row["dispatch"].as_str()) else {
+            continue;
+        };
+        by_summons.insert((run, dispatch), row);
+    }
+    let mut records: BTreeMap<String, ModelRecord> = BTreeMap::new();
+    let mut rework: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut tokens: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for row in by_summons.into_values() {
+        let Some(model) = row["executionModel"].as_str().map(&canonical) else {
+            continue;
+        };
+        let outcome = &row[KEY];
+        let record = records.entry(model.clone()).or_default();
+        record.summoned += 1;
+        let Some(first) = outcome["firstAttemptSuccess"].as_bool() else {
+            continue;
+        };
+        record.ended += 1;
+        record.passed_first_try += usize::from(first);
+        if let Some(rounds) = outcome["reworkRounds"].as_u64() {
+            rework.entry(model.clone()).or_default().push(rounds);
+        }
+        if let Some(spent) = outcome["tokens"].as_u64() {
+            tokens.entry(model).or_default().push(spent);
+        }
+    }
+    for (model, mut held) in rework {
+        held.sort_unstable();
+        if let Some(record) = records.get_mut(&model) {
+            record.median_rework_rounds = crate::jev::summary::percentile(&held, 0.50);
+        }
+    }
+    for (model, mut held) in tokens {
+        held.sort_unstable();
+        if let Some(record) = records.get_mut(&model) {
+            record.median_tokens = crate::jev::summary::percentile(&held, 0.50);
+        }
+    }
+    records
 }
 
 /// One model offered, with every fact its entry carries.
@@ -103,19 +149,58 @@ pub struct ModelOption {
 /// it accepts; `quota` reads a model's gauge the way the quota gate does.
 #[must_use]
 pub fn options(
-    _agent: &str,
-    _lineup: &Lineup,
-    _seen: Option<&Seen>,
-    _records: &BTreeMap<String, ModelRecord>,
-    _ladder: &str,
-    _quota: impl Fn(&str) -> Option<(u8, &'static str)>,
-    _now_ms: i64,
+    agent: &str,
+    lineup: &Lineup,
+    seen: Option<&Seen>,
+    records: &BTreeMap<String, ModelRecord>,
+    ladder: &str,
+    quota: impl Fn(&str) -> Option<(u8, &'static str)>,
+    now_ms: i64,
 ) -> Vec<ModelOption> {
-    Vec::new()
+    lineup
+        .models
+        .iter()
+        .filter(|model| !model.folded())
+        .map(|model| {
+            let (spent, window) = quota(&model.id).unzip();
+            ModelOption {
+                id: model.id.clone(),
+                band: model.band,
+                rungs: model.rungs.clone(),
+                effort: model.effort_for(ladder),
+                fresh: seen.is_some_and(|seen| seen.fresh(agent, &model.id, now_ms)),
+                quota_spent_percent: spent,
+                quota_window: window,
+                record: records.get(&model.id).cloned().unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+/// What the window holds for one agent's model question — today's lineup,
+/// the book of models seen, and this ledger's records — peeked, never
+/// fetched.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Facts {
+    pub lineup: Lineup,
+    pub seen: Seen,
+    pub records: BTreeMap<String, ModelRecord>,
+}
+
+/// The model question's ledger half, recorded after the summons opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shadow {
+    /// The question, for a seat that only records to ask off the beat.
+    pub ask: ModelAsk,
+    /// An acting request's receipt; its presence prevents a second request.
+    pub receipt: Option<Value>,
+    /// A challenger's turn launched the summons: the answer is recorded, not
+    /// carried out, and its outcome grades no answer.
+    pub challenge: bool,
 }
 
 /// One question and the models its answer is judged against.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelAsk {
     pub state: Value,
     pub questions: Value,
@@ -133,8 +218,58 @@ pub struct ModelPick {
 
 /// The question for `look` over `options`; `None` under [`FEWEST_MODELS`].
 #[must_use]
-pub fn ask(_look: &Look, _options: &[ModelOption]) -> Option<ModelAsk> {
-    None
+pub fn ask(look: &Look, options: &[ModelOption]) -> Option<ModelAsk> {
+    if options.len() < FEWEST_MODELS {
+        return None;
+    }
+    let mut criteria = Map::new();
+    let mut models = Vec::new();
+    for option in options {
+        criteria.insert(
+            option.id.clone(),
+            Value::from(OPTION_MEANS.replace("{model}", &option.id)),
+        );
+        let record = &option.record;
+        models.push(Value::Object(Map::from_iter(
+            MODEL_KEYS.map(String::from).into_iter().zip([
+                Value::from(option.id.as_str()),
+                serde_json::to_value(option.band).unwrap_or_default(),
+                if option.band.is_some() {
+                    serde_json::to_value(&option.rungs).unwrap_or_default()
+                } else {
+                    Value::Null
+                },
+                Value::from(option.effort.as_str()),
+                Value::from(option.fresh),
+                Value::from(option.quota_window.and(option.quota_spent_percent)),
+                Value::from(option.quota_spent_percent.and(option.quota_window)),
+                Value::from(record.summoned),
+                Value::from(record.ended),
+                Value::from(record.passed_first_try),
+                Value::from(record.median_rework_rounds),
+                Value::from(record.median_tokens),
+            ]),
+        )));
+    }
+    criteria.insert(ABSTAIN.to_string(), Value::from(ABSTAIN_MEANS));
+    let state = Value::Object(Map::from_iter(
+        STATE_KEYS.map(String::from).into_iter().zip([
+            Value::from(crate::jev::brief_shape(&look.title, Cap::Chars(TITLE_CHAR_CAP)).0),
+            Value::from(crate::jev::brief_shape(&look.spec, Cap::Chars(SPEC_CHAR_CAP)).0),
+            Value::from(look.attempt),
+            Value::from(look.failures),
+            Value::from(look.retry_of),
+            Value::Array(models),
+        ]),
+    ));
+    Some(ModelAsk {
+        state,
+        questions: choice::asked(QUESTION, INSTRUCTIONS, criteria),
+        offered: options
+            .iter()
+            .map(|option| (option.id.clone(), option.effort.clone()))
+            .collect(),
+    })
 }
 
 impl ModelAsk {
@@ -142,8 +277,29 @@ impl ModelAsk {
     ///
     /// # Errors
     /// The first rule the answer broke.
-    pub fn read(&self, _answers: &Value) -> Result<ModelPick, choice::ChoiceRefusal> {
-        Err(choice::ChoiceRefusal::NoAnswer)
+    pub fn read(&self, answers: &Value) -> Result<ModelPick, choice::ChoiceRefusal> {
+        let words: BTreeSet<String> = self
+            .offered
+            .iter()
+            .map(|(model, _)| model.clone())
+            .chain([ABSTAIN.to_string()])
+            .collect();
+        let read = choice::read(answers, QUESTION, &words)?;
+        Ok(ModelPick {
+            chosen: self
+                .offered
+                .iter()
+                .find(|(model, _)| *model == read.chosen)
+                .cloned(),
+            probabilities: read.probabilities,
+            confidence: read.confidence,
+        })
+    }
+
+    /// The models this question offered, each at its effort.
+    #[must_use]
+    pub fn offered(&self) -> &[(String, String)] {
+        &self.offered
     }
 }
 
@@ -167,11 +323,18 @@ pub fn rubric_words() -> String {
 /// tried first. Only [`lineup::CHALLENGED`] difficulties take a turn.
 #[must_use]
 pub fn challenger<'a>(
-    _row: &'a lineup::Row,
-    _records: &BTreeMap<String, ModelRecord>,
-    _summonses: usize,
+    row: &'a lineup::Row,
+    records: &BTreeMap<String, ModelRecord>,
+    summonses: usize,
 ) -> Option<&'a Candidate> {
-    None
+    if summonses % lineup::CHALLENGE_ONE_IN != 0 || !lineup::CHALLENGED.contains(&row.difficulty) {
+        return None;
+    }
+    let ended = |model: &str| records.get(model).map_or(0, |record| record.ended);
+    row.candidates
+        .iter()
+        .filter(|candidate| ended(&candidate.model) < lineup::CHALLENGE_MIN_SAMPLES)
+        .min_by_key(|candidate| ended(&candidate.model))
 }
 
 #[cfg(test)]
@@ -237,7 +400,9 @@ mod tests {
         let records = records(rows.iter(), "claude", |model| {
             held.canonical(model).to_string()
         });
-        let a = &records["model-a"];
+        let a = records.get("model-a");
+        assert!(a.is_some(), "the release's record: {records:?}");
+        let a = a.unwrap();
         assert_eq!(
             a.summoned, 3,
             "an alias is its release; one summons counted once"

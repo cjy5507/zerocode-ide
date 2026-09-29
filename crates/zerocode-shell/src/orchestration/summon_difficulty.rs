@@ -188,6 +188,43 @@ pub(super) fn profile(
     )
 }
 
+/// What the model seat reads for `agent` under a fresh summons's origin —
+/// its lineup and book as the origin held them, and this ledger's record of
+/// each model folded from both summons seats' outcome rows (t-14437).
+pub(super) fn model_facts(
+    agent: &str,
+    origin: [&str; 3],
+) -> Option<zerocode_core::summon_model::Facts> {
+    let (lineup, seen) = {
+        let held = origins()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let origin = held
+            .get(&origin.map(str::to_string))
+            .filter(|origin| origin.fresh)?;
+        (
+            origin.lineup.lineups.get(agent)?.clone(),
+            origin.lineup.seen.clone(),
+        )
+    };
+    let wire = Wire::of_this_machine();
+    let rows: Vec<Value> = [&SUMMON_DIFFICULTY, &zerocode_core::jev::SUMMON_MODEL]
+        .into_iter()
+        .filter_map(|seat| crate::systemone::ledger_of(&wire, seat))
+        .flat_map(|path| crate::systemone::read_rows(&path))
+        .collect();
+    let records = zerocode_core::summon_model::records(
+        difficulty::outcomes::latest(rows.iter()),
+        agent,
+        |model| lineup.canonical(model).to_string(),
+    );
+    Some(zerocode_core::summon_model::Facts {
+        lineup,
+        seen,
+        records,
+    })
+}
+
 /// Every difficulty's launch row for `agent` as the window reads today —
 /// `agent-list`'s peek (t-14437). `None` while no lineup has been read at
 /// all, which is "nobody looked" and not "no choices".
@@ -302,23 +339,44 @@ pub(super) fn observations(
     ledger: &zerocode_core::orchestration::Ledger,
     costs: &mut super::cost_book::CostBook,
 ) -> Option<(std::path::PathBuf, Vec<Value>)> {
+    observations_of(&SUMMON_DIFFICULTY, ledger, costs)
+}
+
+/// [`observations`] of either summons seat that is graded by the work its
+/// answers launched — difficulty, or the model (t-14437).
+pub(super) fn observations_of(
+    seat: &zerocode_core::jev::JevUse,
+    ledger: &zerocode_core::orchestration::Ledger,
+    costs: &mut super::cost_book::CostBook,
+) -> Option<(std::path::PathBuf, Vec<Value>)> {
     let wire = Wire::of_this_machine();
-    let path = crate::systemone::ledger_of(&wire, &SUMMON_DIFFICULTY)?;
-    observations_at(path, ledger, costs)
+    let path = crate::systemone::ledger_of(&wire, seat)?;
+    observations_in(path, seat.rubric_version, ledger, costs)
 }
 
 /// [`observations`] of the seat's ledger at `path`.
+#[cfg(test)]
 fn observations_at(
     path: std::path::PathBuf,
+    ledger: &zerocode_core::orchestration::Ledger,
+    costs: &mut super::cost_book::CostBook,
+) -> Option<(std::path::PathBuf, Vec<Value>)> {
+    observations_in(path, difficulty::RUBRIC_VERSION, ledger, costs)
+}
+
+fn observations_in(
+    path: std::path::PathBuf,
+    rubric: u32,
     ledger: &zerocode_core::orchestration::Ledger,
     costs: &mut super::cost_book::CostBook,
 ) -> Option<(std::path::PathBuf, Vec<Value>)> {
     let rows = crate::systemone::read_rows(&path);
     let latest = difficulty::outcomes::latest(rows.iter());
     let mut changed = Vec::new();
-    for request in rows.iter().filter(|row| {
-        row["outcome"] == "answered" && row["rubricVersion"] == difficulty::RUBRIC_VERSION
-    }) {
+    for request in rows
+        .iter()
+        .filter(|row| row["outcome"] == "answered" && row["rubricVersion"] == rubric)
+    {
         let Some(run) = request["run"].as_str().and_then(|id| ledger.run(id)) else {
             continue;
         };
@@ -357,10 +415,16 @@ fn observations_at(
             "applied",
             "attempt",
             "retryOf",
+            zerocode_core::summon_model::CHALLENGE_KEY,
         ] {
             row[key] = request[key].clone();
         }
-        if request["applied"] == true {
+        if request[zerocode_core::summon_model::CHALLENGE_KEY] == true {
+            // A challenger's turn ran another model than any answer named:
+            // its outcome is the model's record, and grades no answer.
+            row[zerocode_core::jev::summary::NOT_COMPARED.canonical] =
+                json!(zerocode_core::summon_model::CHALLENGE_KEY);
+        } else if request["applied"] == true {
             if let Some(success) = row[difficulty::outcomes::KEY]["firstAttemptSuccess"].as_bool() {
                 row[zerocode_core::jev::summary::AGREED.canonical] = json!(success);
             }
@@ -375,6 +439,15 @@ fn observations_at(
 }
 
 pub(super) fn record_observations(
+    observations: Option<(std::path::PathBuf, Vec<Value>)>,
+    now_ms: i64,
+) {
+    record_observations_of(&SUMMON_DIFFICULTY, observations, now_ms);
+}
+
+/// [`record_observations`] into `seat`'s own ledger.
+pub(super) fn record_observations_of(
+    seat: &'static zerocode_core::jev::JevUse,
     observations: Option<(std::path::PathBuf, Vec<Value>)>,
     now_ms: i64,
 ) {
@@ -399,7 +472,7 @@ pub(super) fn record_observations(
         for row in &mut rows {
             row["at"] = json!(now_ms);
         }
-        crate::systemone::record_rows(&SUMMON_DIFFICULTY, &path, &rows, now_ms);
+        crate::systemone::record_rows(seat, &path, &rows, now_ms);
     }
 }
 

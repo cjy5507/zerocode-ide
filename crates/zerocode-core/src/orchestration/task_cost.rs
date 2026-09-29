@@ -63,11 +63,12 @@ pub const TASK_STAMP: &str = "task";
 /// step's effort moved, a coordinator's letter triaged (t-9471). Each writes
 /// the run, worker, attempt and task beside its answer; a seat that does not
 /// is not counted toward any task.
-pub const TASK_STAMPED: [&JevUse; 6] = [
+pub const TASK_STAMPED: [&JevUse; 7] = [
     &jev::STALL,
     &jev::PLACEMENT,
     &jev::SUMMON,
     &jev::SUMMON_DIFFICULTY,
+    &jev::SUMMON_MODEL,
     &jev::STEP_EFFORT,
     &jev::MAIL_TRIAGE,
 ];

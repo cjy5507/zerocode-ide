@@ -3189,6 +3189,7 @@ fn a_seat_that_fills_what_its_caller_left_open_starts_acting() {
     let acting_from_the_start = [
         crate::jev::SUMMON.id,
         crate::jev::SUMMON_DIFFICULTY.id,
+        crate::jev::SUMMON_MODEL.id,
         crate::jev::BROWSER.id,
         crate::jev::DESKTOP.id,
         crate::jev::EMULATOR.id,

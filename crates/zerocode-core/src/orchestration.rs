@@ -7939,6 +7939,7 @@ impl Ledger {
             // person already has on their screen.
             summon_shadow: None,
             difficulty_shadow: None,
+            model_shadow: None,
             placement_shadow: None,
             prior_binding,
             prior_binding_revision,
@@ -13591,6 +13592,23 @@ pub trait Launcher {
         None
     }
 
+    /// What the model question reads for `agent` under this summons's origin
+    /// — lineup, book and records — or `None` when the host holds no lineup
+    /// or the launch was sealed (t-14437).
+    fn model_facts(&self, _agent: &str, _origin: [&str; 3]) -> Option<crate::summon_model::Facts> {
+        None
+    }
+
+    /// Ask the model seat `asked`: the receipt row, `applied` true only when
+    /// its answer is to run. `None` while the seat is off.
+    fn choose_model(
+        &self,
+        _asked: &crate::summon_model::ModelAsk,
+        _origin: [&str; 3],
+    ) -> Option<serde_json::Value> {
+        None
+    }
+
     /// What this machine actually has, one row per agent the catalog knows.
     ///
     /// The ledger cannot look for itself — it reads no `PATH` and stats no
@@ -16154,6 +16172,9 @@ const DIALS_FROM_JEV: &str = "jev";
 const DIALS_FROM_FALLBACK: &str = "fallback";
 /// `dials.modelFrom`: the summons named its own `--model`.
 const DIALS_FROM_REQUEST: &str = "request";
+/// `dials.modelFrom`: a challenger's turn tried a model with too little
+/// record here (`summon_model::challenger`).
+const DIALS_FROM_CHALLENGE: &str = "challenge";
 
 /// Translate the difficulty ladder through the measured launch table.
 /// Its last column is the highest effort this summons ladder may use.
@@ -16867,6 +16888,8 @@ pub struct PreparedWorkerStart {
     pub placement_shadow: Option<PlacementShadow>,
     /// Difficulty evidence, recorded after this reservation really opens.
     pub difficulty_shadow: Option<crate::summon_difficulty::Shadow>,
+    /// The model question's receipt, recorded the same way (t-14437).
+    pub model_shadow: Option<crate::summon_model::Shadow>,
     prior_binding: Option<String>,
     prior_binding_revision: Option<u64>,
     binding_revision: u64,
@@ -19492,6 +19515,73 @@ fn plan_inner(
             } else {
                 None
             };
+            // The model dial nobody filled — no `--model`, no row the person
+            // wrote — is the model seat's (t-14437): asked over today's
+            // lineup whenever it can be; a challenger's turn tries a model
+            // with too little record first, and the seat's applied answer
+            // runs otherwise. The ladder's row is the road back.
+            let model_turn = if model.is_none()
+                && words.value("--on").is_none()
+                && !difficulty_look.spec.is_empty()
+                && profile
+                    .as_ref()
+                    .is_some_and(|row| row.from != crate::summon_difficulty::lineup::Source::Person)
+            {
+                launcher.model_facts(&agent, summons_origin).map(|facts| {
+                    let ladder = difficulty_effort(
+                        &agent,
+                        chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
+                    )
+                    .unwrap_or_default();
+                    let options = crate::summon_model::options(
+                        &agent,
+                        &facts.lineup,
+                        Some(&facts.seen),
+                        &facts.records,
+                        ladder,
+                        |offered| {
+                            launcher
+                                .provider_headroom(&agent, Some(offered))
+                                .map(|held| (held.used_percent, held.window.as_str()))
+                        },
+                        now_ms,
+                    );
+                    let asked = crate::summon_model::ask(&difficulty_look, &options);
+                    let receipt = asked
+                        .as_ref()
+                        .and_then(|asked| launcher.choose_model(asked, summons_origin));
+                    let summonses = ledger
+                        .runs()
+                        .iter()
+                        .flat_map(|run| run.workers.iter())
+                        .filter(|held| held.agent == agent)
+                        .count();
+                    let challenge = profile
+                        .as_ref()
+                        .and_then(|row| {
+                            crate::summon_model::challenger(row, &facts.records, summonses)
+                        })
+                        .cloned();
+                    (asked, receipt, challenge)
+                })
+            } else {
+                None
+            };
+            let model_pick: Option<(String, String, &str)> = match &model_turn {
+                Some((_, _, Some(challenge))) => Some((
+                    challenge.model.clone(),
+                    challenge.effort.clone(),
+                    DIALS_FROM_CHALLENGE,
+                )),
+                Some((_, Some(receipt), None)) if receipt["applied"] == true => receipt["chosen"]
+                    .as_str()
+                    .zip(receipt[crate::summon_model::EFFORT_KEY].as_str())
+                    .filter(|(chosen, _)| native_agent(chosen).is_none_or(|native| native == agent))
+                    .map(|(chosen, effort)| {
+                        (chosen.to_string(), effort.to_string(), DIALS_FROM_JEV)
+                    }),
+                _ => None,
+            };
             // What the reply says about the dials the coordinator left open:
             // the difficulty and who chose it, where the model came from, and
             // what else today's lineup offers at that difficulty (t-14437).
@@ -19499,15 +19589,37 @@ fn plan_inner(
                 serde_json::json!({
                     "difficulty": chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
                     "difficultyFrom": if chosen.is_some() { DIALS_FROM_JEV } else { DIALS_FROM_FALLBACK },
-                    "modelFrom": match (&model, &profile) {
-                        (Some(_), _) => serde_json::json!(DIALS_FROM_REQUEST),
-                        (None, Some(row)) => serde_json::json!(row.from),
-                        (None, None) => serde_json::Value::Null,
+                    "modelFrom": match (&model, &model_pick, &profile) {
+                        (Some(_), _, _) => serde_json::json!(DIALS_FROM_REQUEST),
+                        (None, Some((_, _, from)), _) => serde_json::json!(from),
+                        (None, None, Some(row)) => serde_json::json!(row.from),
+                        (None, None, None) => serde_json::Value::Null,
                     },
                     "effortClamped": profile.as_ref().and_then(|row| row.effort_clamped.clone()),
                     "candidates": profile.as_ref().map_or_else(Vec::new, |row| row.candidates.clone()),
                 })
             });
+            let model_shadow = model_turn.as_ref().and_then(|(asked, receipt, challenge)| {
+                let receipt = receipt.clone().map(|mut receipt| {
+                    if challenge.is_some() {
+                        // Asked, and recorded — but a challenger's turn ran.
+                        receipt["applied"] = serde_json::json!(false);
+                    }
+                    receipt
+                });
+                Some(crate::summon_model::Shadow {
+                    ask: asked.clone()?,
+                    receipt,
+                    challenge: challenge.is_some(),
+                })
+            });
+            let effort = effort.or_else(|| {
+                model_pick
+                    .as_ref()
+                    .filter(|_| model.is_none())
+                    .map(|(_, effort, _)| effort.clone())
+            });
+            let model = model.or_else(|| model_pick.as_ref().map(|(picked, _, _)| picked.clone()));
             let model = model.or_else(|| profile.as_ref().map(|p| p.model.clone()));
             let effort = effort
                 .or_else(|| profile.as_ref().map(|p| p.effort.clone()))
@@ -19783,6 +19895,7 @@ fn plan_inner(
                     model.as_deref() == Some(profile.model.as_str())
                         && effort.as_deref() == Some(profile.effort.as_str())
                 });
+            prepared_worker_start.model_shadow = said.and(model_shadow);
             prepared_worker_start.difficulty_shadow =
                 said.map(|_| crate::summon_difficulty::Shadow {
                     look: difficulty_look,
