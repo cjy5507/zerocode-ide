@@ -166,9 +166,11 @@ pub(super) struct SurfacedDecline {
     /// How many messages the conversation held when the decline was surfaced —
     /// after the compaction the ladder made for it, if it made one.
     pub(super) messages: usize,
-    /// The compaction the ladder made for this decline, and whether it cleared
-    /// it: a decline that was surfaced was not cleared, so `resolved` reads
-    /// `false`. `None` when the conversation was too short to fold.
+    /// The compaction the ladder made for this decline — on the turn that
+    /// first surfaced it, and carried by every turn it has stood on since
+    /// (t-16786) — and whether it cleared it: a decline that was surfaced was
+    /// not cleared, so `resolved` reads `false`. `None` when the conversation
+    /// was too short to fold.
     pub(super) compaction: Option<crate::turn_trace::RefusalCompaction>,
     /// Whether the latest public turn surfaced it (again): a public turn that
     /// ended any other way ended what stood.
@@ -1037,11 +1039,19 @@ where
         let unrouted = self
             .effective_request_model()
             .is_some_and(|model| api::refusal_route_candidates(model, category).is_empty());
+        // A turn that folded nothing has no compaction of its own: the turn
+        // start clears it. When the decline it surfaces is the one that stood,
+        // that decline survived the compaction the kept one carries; kept as
+        // none, it would read as a compaction never made, and the next
+        // `continue` would fold the conversation again (t-16786).
+        let compaction = self
+            .refusal_compaction
+            .or_else(|| self.standing_decline(category).and_then(|declined| declined.compaction));
         self.surfaced_decline = unrouted.then(|| SurfacedDecline {
             session_id: self.session.session_id.clone(),
             category: refusal_category_key(category),
             messages: self.session.messages.len(),
-            compaction: self.refusal_compaction,
+            compaction,
             renewed: true,
         });
     }
