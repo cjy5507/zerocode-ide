@@ -1,45 +1,39 @@
-//! One model request per summons that leaves `--model` open (t-14437) — the
-//! difficulty seat's shape: asked while the summons is planned, under the
-//! same two-second wall, and its row recorded once the pane really opens.
+//! The model question of a summons that leaves `--model` open (t-14437),
+//! riding the assign moment's one request beside the difficulty's
+//! (`summon_assign`, t-15554), its row recorded once the pane really opens.
 //! The question itself, and which answer runs, are the core's
 //! (`zerocode_core::summon_model`, the worker-start plan); this is the wire.
-use crate::agent_teams::Host;
-use crate::systemone::{Wire, request_body};
+use crate::systemone::Wire;
 use serde_json::{Value, json};
 use std::path::Path;
-use std::time::{Duration, Instant};
 use zerocode_core::jev::SUMMON_MODEL;
-use zerocode_core::orchestration::PreparedWorkerStart;
 use zerocode_core::summon_model::{self as model, ModelAsk};
 
-fn ask(wire: &Wire, asked: &ModelAsk, checkout: Option<&Path>) -> Value {
-    // The task's own attempt history, as the difficulty seat's rows carry
-    // it: what the judge reads to count one sample per task.
-    let mut row = json!({
+/// The seat's row before any answer: the task's own attempt history, as the
+/// difficulty seat's rows carry it — what the judge reads to count one
+/// sample per task — and the models it chose among.
+pub(super) fn head(asked: &ModelAsk) -> Value {
+    json!({
         "rubricVersion": model::RUBRIC_VERSION,
         "attempt": asked.state["attempt"],
         "failures": asked.state["failures"],
         "retryOf": asked.state["retryOf"],
         "options": asked.offered().iter().map(|(offered, _)| offered).collect::<Vec<_>>(),
         "applied": false,
-    });
-    let began = Instant::now();
-    let answer = wire.ask(
-        &SUMMON_MODEL,
-        checkout,
-        request_body(&asked.state, &asked.questions),
-        Duration::from_millis(zerocode_core::summon_difficulty::APPLY_DEADLINE_MS),
-    );
-    row["elapsedMs"] = json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
-    row["requestBytes"] = json!(answer.request_bytes);
-    answer.spent.stamp(&mut row);
-    let read = answer.answer.and_then(|body| {
-        let parsed: Value =
-            serde_json::from_str(&body).map_err(|_| crate::systemone::SCHEMA.to_string())?;
-        asked
-            .read(&parsed["answers"])
-            .map_err(|err| err.token().to_string())
-    });
+    })
+}
+
+/// What the seat's question got back — `answers`, or the word nothing came
+/// back with — written onto its `row`: the pair, and whether it runs.
+pub(super) fn answered(
+    wire: &Wire,
+    asked: &ModelAsk,
+    row: &mut Value,
+    answers: Result<&Value, &str>,
+) {
+    let read = answers
+        .map_err(str::to_string)
+        .and_then(|answers| asked.read(answers).map_err(|err| err.token().to_string()));
     match read {
         Ok(pick) => {
             row["outcome"] = json!("answered");
@@ -63,80 +57,53 @@ fn ask(wire: &Wire, asked: &ModelAsk, checkout: Option<&Path>) -> Value {
         }
         Err(token) => row["outcome"] = json!(token),
     }
-    row
 }
 
-/// The seat's receipt for a fresh summons under `origin` — asked on the
-/// launch's own path only while the seat applies; a seat that only records
-/// asks after the pane opens ([`record`]), so a summons never waits on an
-/// answer nothing will act on.
-pub(super) fn choose(asked: &ModelAsk, origin: [&str; 3]) -> Option<Value> {
-    choose_with(&Wire::of_this_machine(), asked, origin)
-}
-
+/// The seat's receipt on a summons's own path, asked alone — how its own
+/// tests ask it.
+#[cfg(test)]
 fn choose_with(wire: &Wire, asked: &ModelAsk, origin: [&str; 3]) -> Option<Value> {
-    if !crate::systemone::applies(wire, &SUMMON_MODEL) {
-        return None;
-    }
-    let checkout = super::summon_difficulty::fresh_checkout(origin)?;
-    Some(ask(wire, asked, checkout.as_deref()))
+    super::summon_assign::choose_with(
+        wire,
+        &zerocode_core::summon_assign::AssignAsk {
+            difficulty: None,
+            model: Some(asked.clone()),
+        },
+        origin,
+    )
+    .model
 }
 
-/// The request's row, beside what the summons launched — off the beat.
-pub(super) fn record(
-    host: &dyn Host,
-    prepared: &PreparedWorkerStart,
+/// The row the window writes for a summons: `row` — the path's receipt, or
+/// the answer asked after the pane opened — beside what was launched. A
+/// challenger's turn ran another model than any answer named: its row is
+/// marked, and says nothing was carried out.
+pub(super) fn write(
+    mut row: Value,
+    shadow: &model::Shadow,
+    launched: &super::summon_assign::Launched,
+    mode: zerocode_core::jev::JevMode,
+    ledger: &Path,
+    now_ms: i64,
+) {
+    if shadow.challenge {
+        row["applied"] = json!(false);
+        row[model::CHALLENGE_KEY] = json!(true);
+    }
+    launched.stamp(&mut row, mode, now_ms);
+    crate::systemone::record_rows(&SUMMON_MODEL, ledger, &[row], now_ms);
+}
+
+/// The seats' rows beside what the summons launched, off the beat — how
+/// this seat's own tests record one.
+#[cfg(test)]
+fn record(
+    host: &dyn crate::agent_teams::Host,
+    prepared: &zerocode_core::orchestration::PreparedWorkerStart,
     checkout: Option<&str>,
     now_ms: i64,
 ) {
-    let Some(shadow) = prepared.model_shadow.clone() else {
-        return;
-    };
-    let Some(wire) = host.jev_wire() else { return };
-    let mode = SUMMON_MODEL.mode_in(&wire.settings_root());
-    let Some(ledger) = crate::systemone::ledger_of(&wire, &SUMMON_MODEL).filter(|_| mode.asks())
-    else {
-        return;
-    };
-    let run = prepared.run.clone();
-    let worker = prepared.worker.clone();
-    let dispatch = prepared.dispatch.clone();
-    let task = prepared.task.clone();
-    let agent = prepared.agent.clone();
-    let execution_model = prepared
-        .summon_shadow
-        .as_ref()
-        .and_then(|shadow| shadow.pinned.model.clone());
-    let executed_effort = prepared
-        .summon_shadow
-        .as_ref()
-        .and_then(|shadow| shadow.pinned.effort.clone());
-    let checkout = checkout.map(std::path::PathBuf::from);
-    host.off_the_beat(Box::new(move || {
-        let mut row = shadow.receipt.unwrap_or_else(|| {
-            let mut row = ask(&wire, &shadow.ask, checkout.as_deref());
-            // A background answer was never used for this launch.
-            row["applied"] = json!(false);
-            row
-        });
-        if shadow.challenge {
-            row["applied"] = json!(false);
-            row[model::CHALLENGE_KEY] = json!(true);
-        }
-        row["at"] = json!(now_ms);
-        row["requestAt"] = json!(now_ms);
-        row["run"] = json!(run);
-        row["worker"] = json!(worker);
-        // Taskless summonses have a stable worker identity instead of a null
-        // request name, as the difficulty seat's rows do.
-        row["dispatch"] = json!(dispatch.unwrap_or(worker));
-        row["task"] = json!(task);
-        row["mode"] = json!(mode.key());
-        row["agent"] = json!(agent);
-        row["executionModel"] = json!(execution_model);
-        row["effort"] = json!(executed_effort);
-        crate::systemone::record_rows(&SUMMON_MODEL, &ledger, &[row], now_ms);
-    }));
+    super::summon_assign::record(host, prepared, checkout, now_ms);
 }
 
 /// Label the seat's answered rows by the work they launched — the
