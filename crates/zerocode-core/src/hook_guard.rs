@@ -57,16 +57,21 @@ pub enum Unseen {
     NoPromptEvent,
     /// Neither a call's nor a turn's end says the person stopped it.
     NoStopFlag,
+    /// Its hooks come, but no answer of theirs was measured to carry context
+    /// to the model at a turn's start (t-14869): a seat that speaks then is
+    /// recorded for its panes, never said.
+    NoContextRoad,
 }
 
 impl Unseen {
     /// Every reason, in the order a reader lists them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::OwnRuntime,
         Self::NoHooks,
         Self::NoEventBefore,
         Self::NoPromptEvent,
         Self::NoStopFlag,
+        Self::NoContextRoad,
     ];
 
     /// The word a row names this reason by.
@@ -78,6 +83,7 @@ impl Unseen {
             Self::NoEventBefore => "no_event_before",
             Self::NoPromptEvent => "no_prompt_event",
             Self::NoStopFlag => "no_stop_flag",
+            Self::NoContextRoad => "no_context_road",
         }
     }
 
@@ -227,6 +233,17 @@ pub const fn sight(agent: AgentKind) -> Sight {
             ..NO_STOP
         },
     }
+}
+
+/// Whether a seat that speaks at a turn's start reaches `agent`'s model
+/// (t-14869): where the catalog measured its prompt hook to take context
+/// ([`AgentKind::hook_additional_context`]) — else why not: its row's own
+/// reason where the window asks it nothing, [`Unseen::NoContextRoad`] where
+/// its hooks come but carry no context there.
+#[must_use]
+pub const fn turn_start_road(agent: AgentKind) -> Sees {
+    let _ = agent;
+    Sees::Yes
 }
 
 /// Every agent with its row, in the catalog's order — what a dashboard lists.
