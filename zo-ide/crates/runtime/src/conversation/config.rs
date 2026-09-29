@@ -128,7 +128,7 @@ where
                     });
                 }
             }
-            self.session.mark_transcript_dirty();
+            self.publish_folded_tail();
             return Ok(());
         }
         let mut text = String::new();
@@ -141,6 +141,23 @@ where
         self.session
             .push_user_text(text)
             .map_err(|error| RuntimeError::new(error.to_string()))
+    }
+
+    /// Put a fold into the settled tail on disk before the model reads it.
+    ///
+    /// Every mid-turn fold — steering, a background agent's result, a stall
+    /// notice, the batching nudge — edits the tool-result message whose line
+    /// `push_message` already appended, so the append stream never carries it.
+    /// Only a full snapshot does, and waiting for the turn-end one left the
+    /// person's words in memory alone for the rest of the turn: a process that
+    /// died before the turn ended resumed without them (t-11457). Each fold is
+    /// published here, as that same guarded snapshot.
+    ///
+    /// A failed write does not stop the turn — the model already has the words
+    /// in memory — and it leaves the transcript marked dirty, so the host's
+    /// turn-end persist tries again and reports it.
+    pub(super) fn publish_folded_tail(&self) {
+        let _ = self.session.publish_transcript_rewrite();
     }
 
     /// Cloneable handle to the mid-turn agent-notification inbox. The host's

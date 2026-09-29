@@ -1546,6 +1546,69 @@ fn appended_turn_reload_matches_forced_full_snapshot() {
     let _ = fs::remove_file(super::lock_sibling_path(&path));
 }
 
+/// A fold onto a message already on disk is published at once, as one record
+/// (t-11457): the tool-result line is rewritten to carry the folded words, the
+/// append stream then continues after it, and the words are on disk exactly
+/// once — never a second copy from the append stream, never zero until the
+/// turn ends.
+#[test]
+fn a_rewrite_of_a_persisted_message_is_published_at_once_as_one_record() {
+    const FOLDED: &str = "t11457-folded-words";
+    let path = temp_session_path("publish-rewrite").with_extension("jsonl");
+    let mut session = Session::new().with_persistence_path(path.clone());
+    session.push_user_text("run it").expect("append user");
+    session
+        .push_message(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "tool-1".to_string(),
+            name: "wait".to_string(),
+            input: "{}".to_string(),
+        }]))
+        .expect("append assistant");
+    session
+        .push_message(ConversationMessage::tool_result("tool-1", "wait", "done", false))
+        .expect("append tool result");
+    if let Some(last) = std::sync::Arc::make_mut(&mut session.messages).last_mut() {
+        last.blocks.push(ContentBlock::Text {
+            text: FOLDED.to_string(),
+        });
+    }
+    session
+        .publish_transcript_rewrite()
+        .expect("the rewrite is published");
+
+    let on_disk = fs::read_to_string(&path).expect("read the transcript");
+    assert_eq!(on_disk.matches(FOLDED).count(), 1, "{on_disk}");
+    let reloaded = Session::load_from_path(&path).expect("reload");
+    assert_eq!(reloaded.messages, session.messages);
+
+    session
+        .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "after the fold".to_string(),
+        }]))
+        .expect("the append stream continues after the snapshot");
+    let on_disk = fs::read_to_string(&path).expect("read the transcript");
+    assert_eq!(on_disk.matches(FOLDED).count(), 1, "{on_disk}");
+    let reloaded = Session::load_from_path(&path).expect("reload");
+    assert_eq!(reloaded.messages, session.messages);
+    let appended = fs::read(&path).expect("read");
+    session
+        .persist_appended_state_to_path(&path)
+        .expect("turn-end persist");
+    assert_eq!(
+        fs::read(&path).expect("read"),
+        appended,
+        "a published rewrite leaves nothing for the turn-end persist to heal"
+    );
+
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(super::lock_sibling_path(&path));
+
+    let unbound = Session::new();
+    unbound
+        .publish_transcript_rewrite()
+        .expect("an unbound session has nothing to publish");
+}
+
 #[test]
 fn rejects_jsonl_record_without_type() {
     // given

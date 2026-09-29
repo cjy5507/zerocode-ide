@@ -705,6 +705,27 @@ impl Session {
         }
     }
 
+    /// Publish an in-place edit of an already-persisted message NOW, instead of
+    /// leaving it to the turn-end heal [`Self::mark_transcript_dirty`] waits
+    /// for. A turn folds what arrived during a tool batch — the person's
+    /// steering, a background agent's result, a stall notice — onto the
+    /// tool-result message whose line is already on disk. The model reads it on
+    /// the very next request; left for the turn end, it lived only in memory
+    /// for the rest of a turn that can run for an hour, and a process that died
+    /// in between resumed without it (t-11457).
+    ///
+    /// The write is the same guarded full snapshot the turn-end persist would
+    /// make, so each message keeps one record. An unbound session has nothing
+    /// to publish. On an error the dirty mark stays, so the turn-end persist
+    /// tries again and reports what still fails.
+    pub fn publish_transcript_rewrite(&self) -> Result<(), SessionError> {
+        self.mark_transcript_dirty();
+        let Some(path) = self.persistence_path().map(Path::to_path_buf) else {
+            return Ok(());
+        };
+        self.persist_appended_state_to_path(path)
+    }
+
     fn save_to_secure_path(&self, path: &Path) -> Result<(), SessionError> {
         let snapshot = self.render_jsonl_snapshot()?;
         if self.is_bound_path(path) {

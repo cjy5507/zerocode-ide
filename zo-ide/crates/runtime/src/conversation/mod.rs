@@ -3223,7 +3223,7 @@ where
                             text: steering_message(&steer),
                         });
                     }
-                    self.session.mark_transcript_dirty();
+                    self.publish_folded_tail();
                 }
             }
             // Mid-turn agent-notification boundary — mirrors the streaming
@@ -3239,7 +3239,7 @@ where
                             text: agent_notification_text(&notification),
                         });
                     }
-                    self.session.mark_transcript_dirty();
+                    self.publish_folded_tail();
                 }
             }
             // Re-anchor the live plan after this tool batch so the next model

@@ -2986,7 +2986,7 @@ where
                             text: steering_message(&steer),
                         });
                     }
-                    self.session.mark_transcript_dirty();
+                    self.publish_folded_tail();
                 }
             }
             // Mid-turn agent-notification boundary (CC's task-notification
@@ -3015,7 +3015,7 @@ where
                             text: agent_notification_text(&notification),
                         });
                     }
-                    self.session.mark_transcript_dirty();
+                    self.publish_folded_tail();
                 }
             }
             // Re-anchor the live plan after this tool batch (mirrors the sync
