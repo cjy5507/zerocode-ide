@@ -19609,9 +19609,6 @@ fn plan_inner(
                         now_ms,
                     );
                     let asked = crate::summon_model::ask(&difficulty_look, &options);
-                    let receipt = asked
-                        .as_ref()
-                        .and_then(|asked| launcher.choose_model(asked, summons_origin));
                     let summonses = ledger
                         .runs()
                         .iter()
@@ -19624,6 +19621,13 @@ fn plan_inner(
                             crate::summon_model::challenger(row, &facts.records, summonses)
                         })
                         .cloned();
+                    // A challenger's turn runs whatever the seat would say,
+                    // so the launch does not wait for it to say it: the
+                    // question is kept, and asked once the pane is open.
+                    let receipt = asked
+                        .as_ref()
+                        .filter(|_| challenge.is_none())
+                        .and_then(|asked| launcher.choose_model(asked, summons_origin));
                     (asked, receipt, challenge, facts)
                 })
             } else {
@@ -19673,16 +19677,9 @@ fn plan_inner(
             let model_shadow = model_turn
                 .as_ref()
                 .and_then(|(asked, receipt, challenge, _)| {
-                    let receipt = receipt.clone().map(|mut receipt| {
-                        if challenge.is_some() {
-                            // Asked, and recorded — but a challenger's turn ran.
-                            receipt["applied"] = serde_json::json!(false);
-                        }
-                        receipt
-                    });
                     Some(crate::summon_model::Shadow {
                         ask: asked.clone()?,
-                        receipt,
+                        receipt: receipt.clone(),
                         challenge: challenge.is_some(),
                     })
                 });
