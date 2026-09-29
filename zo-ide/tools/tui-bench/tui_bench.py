@@ -25,6 +25,15 @@ States, in the order one run passes through them:
                 transcript is long ("after N turns")
   streaming@N   the same long reply and typing again, on the long transcript
   idle@N        5 s at the prompt again
+  loaded        the same reply and typing once more, while `--load` processes
+                (`yes > /dev/null`, one per logical core, default priority) use
+                the CPU: keystroke-to-echo on a machine that is busy
+  pager         (zo) Ctrl+T opens the transcript over the long conversation and
+                the up arrow moves it one line, 40 keys a second: what a held
+                arrow key costs in bytes
+  draft         a 20 KB draft pasted into the composer (bracketed paste), the
+                caret sent to its start with Ctrl-A, then one unique letter every
+                250 ms: keystroke-to-echo with a long draft
 
 What is measured per state: CPU time of the CLI's own processes (user+sys; a
 shell a tool ran and everything under it is the tool's, the same for every CLI,
@@ -34,6 +43,12 @@ per run: cold start to first byte and to the ready composer, and the resident
 memory after each warm-up turn. `--frames` adds zo's own draw times by phase
 (`ZO_PROBE_FRAMES`); `--sample N` runs `sample` on each state for attribution
 (`attribute.py` reads those files) and makes that run's timings meaningless.
+`--attribute` keeps every byte a CLI writes and, for the waiting, streaming and
+tool states, splits each frame by what its bytes are for (the frame's fixed
+cost, the rows written, the cells that really changed, the rows a scroll would
+have kept) with the screen before and after it; `--screens` keeps the screen at
+the end of each state, and `screens A.jsonl B.jsonl` says whether two runs
+ended on the same one; `--only` runs some states alone.
 
 zo's agent store is seeded with `--seed-agents` finished helpers of other
 sessions (432 by default — the person's zerocode project store on 2026-09-28):
@@ -52,6 +67,7 @@ signalled: each CLI leads its own session, and its group is what is ended.
 from __future__ import annotations
 
 import argparse
+import bisect
 import ctypes
 import json
 import os
@@ -92,7 +108,14 @@ def end_warm(turn: int) -> str:
     return f"zqx-end-warm-{turn}"
 
 
-def long_reply() -> str:
+def end_long(turn: int = 0) -> str:
+    """The long reply's last line. A later long reply ends on a marker of its own:
+    the earlier one may still be on the screen, and a driver that waits for a word
+    on the screen would take it for the end of the new reply."""
+    return END_LONG if turn == 0 else f"{END_LONG}-{turn}"
+
+
+def long_reply(turn: int = 0) -> str:
     """About 7 KB of markdown, ASCII only (the typed letters must be unique)."""
     parts = [
         "# Streaming benchmark reply\n\n",
@@ -129,7 +152,7 @@ def long_reply() -> str:
             "says one thing: what moved, why it moved, and what was measured "
             "before and after the move. Nothing here is decorative.\n\n"
         )
-    parts.append(f"{END_LONG}\n")
+    parts.append(f"{end_long(turn)}\n")
     return "".join(parts)
 
 
@@ -422,7 +445,7 @@ class Handler(BaseHTTPRequestHandler):
     def script(self, plan: Plan) -> tuple[str, str | None]:
         """(text, shell command or None) for a plan."""
         if plan.kind == "long":
-            return long_reply(), None
+            return long_reply(plan.turn), None
         if plan.kind == "wait":
             return WAIT_REPLY, None
         if plan.kind == "tool":
@@ -780,6 +803,7 @@ QUERIES = [
 ]
 COLOURS = {b"0": b"rgb:d8d8/d8d8/d8d8", b"1": b"rgb:1c1c/1c1c/1c1c"}
 SYNC_BEGIN = b"\x1b[?2026h"
+SYNC_END = b"\x1b[?2026l"
 # Keyboard-protocol modes (kitty push/pop, modifyOtherKeys): no picture of
 # their own, and pyte would print their parameters as text.
 KEYBOARD_MODES = re.compile(rb"\x1b\[[<>=][0-9;]*[a-zA-Z]")
@@ -830,6 +854,10 @@ class Terminal:
         self.exited: int | None = None
         self.output_total = 0
         self.watch: list[tuple[str, list[int]]] = []
+        # Attribution runs keep every byte the CLI wrote, with the time it was
+        # read: `attribute_windows` replays them into a screen of its own.
+        self.keep_raw = False
+        self.raw: list[tuple[int, bytes]] = []
 
     # -- plumbing ----------------------------------------------------------
 
@@ -869,6 +897,8 @@ class Terminal:
             self.first_byte = now
         self.chunks.append(Chunk(now, len(data)))
         self.output_total += len(data)
+        if self.keep_raw:
+            self.raw.append((now, data))
         start = 0
         while True:
             index = data.find(SYNC_BEGIN, start)
@@ -990,6 +1020,15 @@ class Terminal:
         self.pending_echo.append(key)
         self.write(char.encode())
 
+    def paste(self, text: str) -> None:
+        """Bracketed paste, in pieces: a CLI that paints while it reads stops
+        reading when its output is not drained, and a write that waits for it
+        would wait for ever. Between pieces the terminal is read."""
+        data = b"\x1b[200~" + text.encode() + b"\x1b[201~"
+        for index in range(0, len(data), 1024):
+            self.write(data[index:index + 1024])
+            self.pump(0.002)
+
     def close(self, quit_keys: list[bytes]) -> None:
         for keys in quit_keys:
             if self.exited is not None:
@@ -1065,10 +1104,271 @@ class Terminal:
 
 
 # ---------------------------------------------------------------------------
+# Where the bytes go: each frame of a state, split by what its bytes are for.
+# ---------------------------------------------------------------------------
+#
+# The pty stream is replayed into a screen of its own, frame by frame (a frame
+# is a DEC 2026 pair; a CLI without the pair gets one frame per burst). Each
+# frame's bytes are sorted by what they do:
+#
+#   sync       the `?2026` pair
+#   cursor     what puts the cursor back: its visibility and shape, and the
+#              closing move to where the caret goes
+#   tail_sgr   the reset that closes a frame
+#   addr       moves to a row or a column that a write starts from
+#   erase      erase-in-line and the other edits that write no glyph
+#   sgr        colour and attribute changes
+#   text       the glyphs
+#   scroll     scroll regions, reverse index, line feeds (history rows)
+#   other      the rest (window title, notifications, modes)
+#
+# and, from the screen before and after the frame: the rows the frame wrote,
+# the rows and cells that really differ, and how many of the rewritten rows
+# only repeat a row that was on screen a few rows away (a scroll would have
+# saved them). `by_row` is what a viewport row cost in the frames that did not
+# scroll: the number of times it was written, its bytes and the cells that
+# changed in it.
+
+KINDS = ("sync", "cursor", "tail_sgr", "addr", "erase", "sgr", "text", "scroll", "other")
+TOKEN = re.compile(
+    rb"\x1b\[(?P<param>[0-?]*)(?P<inter>[ -/]*)(?P<final>[@-~])"
+    rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    rb"|\x1b[ -/]*[0-~]"
+    rb"|[\r\n]"
+    rb"|[^\x1b\r\n]+"
+)
+BURST_GAP_NS = 4_000_000
+SHIFT_REACH = 3
+
+
+class ShadowScreen(pyte.Screen if pyte else object):  # type: ignore[misc]
+    """pyte, plus the rows that a frame wrote a glyph or an erase to."""
+
+    def __init__(self, columns: int, lines: int) -> None:
+        super().__init__(columns, lines)
+        self.written: set[int] = set()
+
+    def draw(self, data: str) -> None:
+        self.written.add(self.cursor.y)
+        super().draw(data)
+        self.written.add(self.cursor.y)
+
+    def erase_in_line(self, how: int = 0, private: bool = False) -> None:
+        self.written.add(self.cursor.y)
+        super().erase_in_line(how, private)
+
+    def select_graphic_rendition(self, *attrs, private: bool = False) -> None:
+        if not private:
+            super().select_graphic_rendition(*attrs)
+
+
+def tokenize(piece: bytes) -> list[tuple[str, int, int | None]]:
+    """(kind, bytes, row) for each escape sequence, line motion and run of text;
+    `row` is the 0-based row of a cursor-position sequence."""
+    tokens: list[tuple[str, int, int | None]] = []
+    position = 0
+    while position < len(piece):
+        match = TOKEN.match(piece, position)
+        if match is None:  # a lone ESC at the end of a cut chunk
+            tokens.append(("other", 1, None))
+            position += 1
+            continue
+        text = match.group(0)
+        position = match.end()
+        row: int | None = None
+        if text.startswith(b"\x1b["):
+            param, inter, final = match.group("param"), match.group("inter"), match.group("final")
+            if final in (b"h", b"l") and param.startswith(b"?"):
+                kind = "sync" if param == b"?2026" else "cursor" if param == b"?25" else "other"
+            elif final == b"q" and inter == b" ":
+                kind = "cursor"
+            elif final == b"m":
+                kind = "reset" if param in (b"", b"0") else "sgr"
+            elif final in (b"H", b"f"):
+                kind = "addr"
+                first = param.split(b";")[0]
+                row = (int(first) if first.isdigit() else 1) - 1
+            elif final in b"ABCDEGIZ`ade":
+                kind = "addr"
+            elif final in b"KJXLMP@":
+                kind = "erase"
+            elif final in b"rST":
+                kind = "scroll"
+            else:
+                kind = "other"
+        elif text.startswith(b"\x1b]"):
+            kind = "other"
+        elif text.startswith(b"\x1b"):
+            kind = "scroll" if text[-1:] in (b"M", b"D", b"E") else \
+                "cursor" if text[-1:] in (b"7", b"8") else "other"
+        elif text in (b"\r", b"\n"):
+            kind = "scroll"
+        else:
+            kind = "text"
+        tokens.append((kind, len(text), row))
+    # The tail of a frame: whatever follows its last glyph or erase is not a
+    # row's. A move there puts the caret back; the reset closes the last row.
+    last = max((index for index, token in enumerate(tokens) if token[0] in ("text", "erase")),
+               default=-1)
+    for index in range(last + 1, len(tokens)):
+        kind, size, row = tokens[index]
+        if kind == "addr":
+            tokens[index] = ("cursor", size, row)
+        elif kind == "reset":
+            tokens[index] = ("tail_sgr", size, row)
+    return [("sgr" if kind == "reset" else kind, size, row) for kind, size, row in tokens]
+
+
+def snapshot(screen) -> list[tuple]:
+    return [tuple(screen.buffer[y][x] for x in range(screen.columns)) for y in range(screen.lines)]
+
+
+def new_attribution() -> dict:
+    return {"frames": 0, "bytes": 0, "by_kind": {kind: 0 for kind in KINDS}, "rows_written": 0,
+            "rows_changed": 0, "cells_changed": 0, "shift_rows": 0, "shift_bytes": 0,
+            "scroll_frames": 0, "scroll_frame_bytes": 0, "silent_frames": 0, "by_row": {}}
+
+
+def account(entry: dict, piece: bytes, before: list[tuple], after: list[tuple],
+            written: set[int], blank: tuple) -> None:
+    tokens = tokenize(piece)
+    entry["frames"] += 1
+    entry["bytes"] += len(piece)
+    for kind, size, _row in tokens:
+        entry["by_kind"][kind] += size
+    scrolls = any(kind == "scroll" for kind, _size, _row in tokens)
+    # Row by row: the bytes from a move to a row up to the next move.
+    row_bytes: dict[int, int] = {}
+    row: int | None = None
+    if scrolls:
+        entry["scroll_frames"] += 1
+        entry["scroll_frame_bytes"] += len(piece)
+    else:
+        for kind, size, target in tokens:
+            if kind == "addr" and target is not None:
+                row = target
+            if row is not None and kind in ("addr", "erase", "sgr", "text"):
+                row_bytes[row] = row_bytes.get(row, 0) + size
+    changed_rows = [y for y in range(len(after)) if after[y] != before[y]]
+    entry["rows_written"] += len(written)
+    entry["rows_changed"] += len(changed_rows)
+    if not changed_rows:
+        entry["silent_frames"] += 1
+    for y in changed_rows:
+        cells = sum(1 for a, b in zip(before[y], after[y]) if a != b)
+        entry["cells_changed"] += cells
+        if y in row_bytes:
+            slot = entry["by_row"].setdefault(str(y), {"writes": 0, "bytes": 0, "cells": 0})
+            slot["cells"] += cells
+        # A row that was written and only repeats a row a few rows away.
+        if y in written and after[y] != blank:
+            for shift in range(-SHIFT_REACH, SHIFT_REACH + 1):
+                other = y + shift
+                if shift and 0 <= other < len(before) and after[y] == before[other]:
+                    entry["shift_rows"] += 1
+                    entry["shift_bytes"] += row_bytes.get(y, 0)
+                    break
+    for y, size in row_bytes.items():
+        slot = entry["by_row"].setdefault(str(y), {"writes": 0, "bytes": 0, "cells": 0})
+        slot["writes"] += 1
+        slot["bytes"] += size
+
+
+def frame_spans(blob: bytes, starts: list[int], times: list[int]) -> list[tuple[int, int]]:
+    """Frames of a stream: DEC 2026 pairs, and what lies between them cut into
+    bursts where the CLI wrote in pieces more than 4 ms apart."""
+    spans: list[tuple[int, int]] = []
+    position = 0
+
+    def loose(begin: int, end: int) -> None:
+        first = max(0, bisect.bisect_right(starts, begin) - 1)
+        run_start, previous = begin, None
+        for index in range(first, len(starts)):
+            if starts[index] >= end:
+                break
+            if previous is not None and times[index] - times[previous] > BURST_GAP_NS:
+                cut = max(starts[index], begin)
+                if cut > run_start:
+                    spans.append((run_start, cut))
+                    run_start = cut
+            previous = index
+        if end > run_start:
+            spans.append((run_start, end))
+
+    while position < len(blob):
+        opened = blob.find(SYNC_BEGIN, position)
+        if opened < 0:
+            loose(position, len(blob))
+            break
+        if opened > position:
+            loose(position, opened)
+        closed = blob.find(SYNC_END, opened)
+        end = len(blob) if closed < 0 else closed + len(SYNC_END)
+        spans.append((opened, end))
+        position = end
+    return spans
+
+
+def attribute_windows(raw: list[tuple[int, bytes]], windows: dict[str, tuple[int, int]],
+                      cols: int, rows: int) -> dict[str, dict]:
+    """Replay a run's bytes and attribute the frames that start inside each window
+    (`state -> (start_ns, end_ns)`)."""
+    if pyte is None or not raw:
+        return {}
+    blob = b"".join(data for _, data in raw)
+    starts: list[int] = []
+    position = 0
+    for _, data in raw:
+        starts.append(position)
+        position += len(data)
+    times = [t for t, _ in raw]
+    screen = ShadowScreen(cols, rows)
+    stream = pyte.ByteStream(screen)
+    blank = tuple(screen.default_char for _ in range(cols))
+    found = {state: new_attribution() for state in windows}
+    previous: list[tuple] | None = None
+    for begin, end in frame_spans(blob, starts, times):
+        moment = times[max(0, bisect.bisect_right(starts, begin) - 1)]
+        state = next((name for name, (low, high) in windows.items() if low <= moment < high), None)
+        piece = blob[begin:end]
+        if state is None:
+            stream.feed(KEYBOARD_MODES.sub(b"", piece))
+            previous = None
+            continue
+        before = previous if previous is not None else snapshot(screen)
+        screen.written.clear()
+        stream.feed(KEYBOARD_MODES.sub(b"", piece))
+        after = snapshot(screen)
+        account(found[state], piece, before, after, set(screen.written), blank)
+        previous = after
+    for state, (low, high) in windows.items():
+        entry = found[state]
+        seconds = max(1e-9, (high - low) / 1e9)
+        frames = max(1, entry["frames"])
+        kinds = entry["by_kind"]
+        overhead = kinds["sync"] + kinds["cursor"] + kinds["tail_sgr"]
+        entry.update({
+            "seconds": round(seconds, 3),
+            "bytes_per_s": round(entry["bytes"] / seconds, 1),
+            "bytes_per_frame": round(entry["bytes"] / frames, 1),
+            "frame_overhead_bytes": round(overhead / frames, 1),
+            "frame_overhead_pct": round(100 * overhead / max(1, entry["bytes"]), 1),
+            "rows_written_per_frame": round(entry["rows_written"] / frames, 2),
+            "rows_changed_per_frame": round(entry["rows_changed"] / frames, 2),
+            "cells_changed_per_frame": round(entry["cells_changed"] / frames, 2),
+            "bytes_per_changed_cell": (round(entry["bytes"] / entry["cells_changed"], 1)
+                                       if entry["cells_changed"] else None),
+        })
+        for slot in entry["by_row"].values():
+            slot["bytes_per_write"] = round(slot["bytes"] / max(1, slot["writes"]), 1)
+    return found
+
+
+# ---------------------------------------------------------------------------
 # The CLIs.
 # ---------------------------------------------------------------------------
 
-TYPED = "абвгдежзийклмнопрстуфхцчшщыэюя"  # letters nothing else on screen uses
+TYPED ="абвгдежзийклмнопрстуфхцчшщыэюя"  # letters nothing else on screen uses
 
 
 @dataclass
@@ -1082,6 +1382,9 @@ class Cli:
     quit_keys: list[bytes] = field(default_factory=lambda: [b"\x03", b"\x03", b"\x04"])
     version: str = ""
     kind: str = ""
+    # Open, scroll one line back, close: the keys of the CLI's transcript pager,
+    # or None where the bench does not know them.
+    pager: tuple[bytes, bytes, bytes] | None = None
 
 
 @dataclass
@@ -1134,7 +1437,9 @@ def zo_cli(binary: str, label: str, seed_agents: int) -> Cli:
         store.mkdir(parents=True, exist_ok=True)
         seed_agent_store(store, seed_agents)
 
-    return Cli(label, binary, argv, env, prepare, re.compile(r"›"), kind="zo")
+    # Ctrl+T opens the transcript, the up arrow moves it one line, Esc closes it.
+    return Cli(label, binary, argv, env, prepare, re.compile(r"›"), kind="zo",
+               pager=(b"\x14", b"\x1b[A", b"\x1b"))
 
 
 def seed_agent_store(store: Path, count: int) -> None:
@@ -1396,12 +1701,9 @@ def turn(term: Terminal, log: ServiceLog, prompt: str, kind: str, marker: str,
     }
 
 
-# The turns one run takes, in order: `frame_times` reads zo's frame marks
-# (`ZO_PROBE_FRAMES`) turn by turn and files them under the state each turn is.
-TURN_STATES = ["waiting", "streaming", "tool"]
-
-
-def frame_times(path: Path, result: dict) -> None:
+def frame_times(path: Path, result: dict, states: list[str]) -> None:
+    """`states` is the state of each turn the run took, in order: zo's frame marks
+    (`ZO_PROBE_FRAMES`) are read turn by turn and filed under the state of the turn."""
     turns: list[list[dict]] = []
     if not path.exists():
         return
@@ -1411,7 +1713,6 @@ def frame_times(path: Path, result: dict) -> None:
             turns.append([])
         elif mark.get("mark") == "frame" and turns:
             turns[-1].append(mark)
-    states = TURN_STATES + ["warm"] * (len(turns) - len(TURN_STATES) - 1) + ["streaming_at_n"]
     for state, frames in zip(states, turns):
         holder = result.get(state)
         if not isinstance(holder, dict) or not frames:
@@ -1425,17 +1726,80 @@ def frame_times(path: Path, result: dict) -> None:
         holder["draws"] = len(frames)
 
 
+def nearest_rank(values: list[float], percentile: float) -> float:
+    """The value at rank ceil(n * q / 100) of the sorted list — how the final
+    tables of t-11961 read a run's own keystrokes."""
+    ordered = sorted(values)
+    rank = max(1, -(-len(ordered) * percentile // 100))
+    return ordered[int(rank) - 1]
+
+
 def echo_stats(keys: list[Keystroke]) -> dict:
     latencies = [(key.echoed - key.sent) / 1e6 for key in keys if key.echoed is not None]
     missing = sum(1 for key in keys if key.echoed is None)
     result = {"keys": len(keys), "echo_missing": missing,
               "echo_ms": [round(latency, 2) for latency in latencies]}
     if latencies:
-        latencies.sort()
-        result["echo_p50_ms"] = round(statistics.median(latencies), 1)
-        result["echo_p99_ms"] = round(latencies[min(len(latencies) - 1, int(len(latencies) * 0.99))], 1)
-        result["echo_max_ms"] = round(latencies[-1], 1)
+        for percentile in (50, 95, 99):
+            result[f"echo_p{percentile}_ms"] = round(nearest_rank(latencies, percentile), 2)
+        result["echo_max_ms"] = round(max(latencies), 2)
     return result
+
+
+ALL_STATES = ("idle", "waiting", "streaming", "tool", "warm", "streaming_at_n", "idle_at_n",
+              "loaded", "pager", "draft")
+
+PAGER_PRESSES = 60
+
+DRAFT_BYTES = 20 * 1024
+
+
+def draft_text(size: int = DRAFT_BYTES) -> str:
+    """About `size` bytes of ASCII in short lines, none of them a letter that is
+    typed later or a word the service reads: a long draft that a person pasted."""
+    lines: list[str] = []
+    total = 0
+    number = 0
+    while total < size:
+        number += 1
+        line = (f"draft line {number:03d}: the quick brown fox jumps over the lazy dog while "
+                f"the notes for step {number} are written down in plain words")
+        lines.append(line)
+        total += len(line) + 1
+    return "\n".join(lines)
+
+
+class Busy:
+    """`count` processes that only use the CPU (`yes > /dev/null`), at the default
+    priority, each in a session of its own. Only these pids are ever signalled."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        self.processes: list[subprocess.Popen] = []
+
+    def __enter__(self) -> "Busy":
+        for _ in range(self.count):
+            self.processes.append(subprocess.Popen(
+                ["/usr/bin/yes"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True))
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        for process in self.processes:
+            process.kill()
+        for process in self.processes:
+            process.wait()
+        self.processes.clear()
+
+
+DURATION = re.compile(r"\b\d+(?:\.\d+)?(?:ms|s|m|h)\b(?: \d+(?:\.\d+)?(?:ms|s|m))*")
+
+
+def normalize_screen(lines: list[str]) -> str:
+    """A screen without what differs between two runs of the same script: line ends,
+    trailing blank rows and every elapsed time."""
+    text = "\n".join(line.rstrip() for line in lines).rstrip("\n")
+    return DURATION.sub("<t>", text)
 
 
 def run_once(cli: Cli, run: int, args: argparse.Namespace, url: str, log: ServiceLog,
@@ -1448,10 +1812,19 @@ def run_once(cli: Cli, run: int, args: argparse.Namespace, url: str, log: Servic
     if args.frames and cli.kind == "zo":
         env["ZO_PROBE_FRAMES"] = str(frames)
     term = Terminal(cli.argv(dirs), env, dirs.project)
+    term.keep_raw = bool(args.attribute or args.raw_dir)
     sampler = Sampler(args.sample, Path(args.out_dir))
+    wanted = set(ALL_STATES) if not args.only else {name.strip() for name in args.only.split(",")}
+    windows: dict[str, tuple[int, int]] = {}
+    screens: dict[str, list[str]] = {}
+    order: list[str] = []  # the state of each turn, in the order the turns were taken
 
     def sample(state: str) -> Callable[[], None]:
         return lambda: sampler.start(term.pid, f"{cli.name}-{run}-{state}")
+
+    def keep_screen(state: str) -> None:
+        if args.screens:
+            screens[state] = [line.rstrip() for line in term.screen.display]
 
     try:
         ready = term.wait_screen(cli.ready, 90)
@@ -1467,61 +1840,150 @@ def run_once(cli: Cli, run: int, args: argparse.Namespace, url: str, log: Servic
         if args.startup_only:
             return result
         term.wait_quiet(1.0, 10)
-        t0 = mono_ns()
-        sample("idle")()
-        term.pump(5.0)
-        result["idle"] = term.window(t0, mono_ns())
+        if "idle" in wanted:
+            t0 = mono_ns()
+            sample("idle")()
+            term.pump(5.0)
+            result["idle"] = term.window(t0, mono_ns())
 
-        waited = turn(term, log, "bench:wait", "wait", END_WAIT, 60, on_state=sample("waiting"))
-        if waited["request"] and waited["first_delta"]:
-            result["waiting"] = term.window(waited["request"] + 200_000_000, waited["first_delta"])
+        if "waiting" in wanted:
+            order.append("waiting")
+            waited = turn(term, log, "bench:wait", "wait", END_WAIT, 60, on_state=sample("waiting"))
+            if waited["request"] and waited["first_delta"]:
+                windows["waiting"] = (waited["request"] + 200_000_000, waited["first_delta"])
+                result["waiting"] = term.window(*windows["waiting"])
+            keep_screen("waiting")
 
-        def streaming(label: str) -> None:
-            streamed = turn(term, log, "bench:long", "long", END_LONG, 120, typing=True,
+        def streaming(label: str, number: int = 0) -> None:
+            load_start = os.getloadavg()[0]
+            order.append(label)
+            prompt = f"bench:long {number}" if number else "bench:long"
+            streamed = turn(term, log, prompt, "long", end_long(number), 120, typing=True,
                             on_state=sample(label))
             if streamed["first_delta"] and streamed["end_seen"]:
+                windows[label] = (streamed["first_delta"], streamed["end_seen"])
                 window = term.window(streamed["first_delta"], streamed["end_seen"], streamed["deltas"])
                 window.update(echo_stats(streamed["typed"]))
-                window["tail_ms"] = round((streamed["end_seen"] - streamed["last_delta"]) / 1e6, 1)
+                if streamed["last_delta"]:
+                    window["tail_ms"] = round((streamed["end_seen"] - streamed["last_delta"]) / 1e6, 1)
+                window["load1_start"], window["load1_end"] = load_start, os.getloadavg()[0]
                 result[label] = window
             else:
                 result.setdefault("errors", []).append(f"{label}: the reply never finished on screen")
                 result[f"{label}_screen"] = term.screen_text()
+            keep_screen(label)
 
-        streaming("streaming")
-        if term.exited is not None:
-            result["error"] = "the CLI exited during the scenario"
-            result["screen"] = term.screen_text()
-            return result
+        if "streaming" in wanted:
+            streaming("streaming")
+            if term.exited is not None:
+                result["error"] = "the CLI exited during the scenario"
+                result["screen"] = term.screen_text()
+                return result
 
-        tooled = turn(term, log, "bench:tool", "tool", END_TOOL, 60, on_state=sample("tool"))
-        log.poll()
-        tool_done = log.find("done", "tool", after=tooled["submitted"])
-        tool_back = log.find("req", "tool-done", after=tooled["submitted"])
-        if tool_done and tool_back:
-            result["tool"] = term.window(tool_done["t"], tool_back["t"])
+        if "tool" in wanted:
+            order.append("tool")
+            tooled = turn(term, log, "bench:tool", "tool", END_TOOL, 60, on_state=sample("tool"))
+            log.poll()
+            tool_done = log.find("done", "tool", after=tooled["submitted"])
+            tool_back = log.find("req", "tool-done", after=tooled["submitted"])
+            if tool_done and tool_back:
+                windows["tool"] = (tool_done["t"], tool_back["t"])
+                result["tool"] = term.window(*windows["tool"])
+            keep_screen("tool")
 
-        rss_by_turn = []
-        for number in range(1, args.turns + 1):
-            warm = turn(term, log, f"bench:warm {number}", "warm", end_warm(number), 60)
-            if warm["end_seen"] is None:
-                result.setdefault("errors", []).append(f"warm-up {number} never finished")
-                break
-            if term.samples:
-                rss_by_turn.append(round(term.samples[-1].cli_rss / 2**20, 1))
-        result["rss_by_turn_mb"] = rss_by_turn
-        result["turns"] = args.turns
-        streaming("streaming_at_n")
-        term.wait_quiet(1.0, 10)
-        t1 = mono_ns()
-        sample("idle_at_n")()
-        term.pump(5.0)
-        result["idle_at_n"] = term.window(t1, mono_ns())
+        if "warm" in wanted:
+            rss_by_turn = []
+            for number in range(1, args.turns + 1):
+                order.append("warm")
+                warm = turn(term, log, f"bench:warm {number}", "warm", end_warm(number), 60)
+                if warm["end_seen"] is None:
+                    result.setdefault("errors", []).append(f"warm-up {number} never finished")
+                    break
+                if term.samples:
+                    rss_by_turn.append(round(term.samples[-1].cli_rss / 2**20, 1))
+            result["rss_by_turn_mb"] = rss_by_turn
+            result["turns"] = args.turns
+        if "streaming_at_n" in wanted:
+            streaming("streaming_at_n", 2)
+        if "idle_at_n" in wanted:
+            term.wait_quiet(1.0, 10)
+            t1 = mono_ns()
+            sample("idle_at_n")()
+            term.pump(5.0)
+            result["idle_at_n"] = term.window(t1, mono_ns())
+
+        # Keystrokes on a machine that is busy: the same streaming turn and the
+        # same typing as `streaming_at_n`, with `--load` processes using every core.
+        if "loaded" in wanted and args.load:
+            with Busy(args.load):
+                term.pump(1.0)  # the scheduler settles before the first keystroke
+                streaming("streaming_loaded", 3)
+            if isinstance(result.get("streaming_loaded"), dict):
+                result["streaming_loaded"]["busy_processes"] = args.load
+            term.wait_quiet(1.0, 10)
+
+        # A transcript that scrolls: the pager opened over the long conversation
+        # and moved one line at a time, 40 keys a second, the way a held arrow
+        # key moves it. Every key shifts the whole screen by one row.
+        if "pager" in wanted and cli.pager:
+            open_keys, scroll_key, close_keys = cli.pager
+            term.wait_quiet(1.0, 10)
+            term.write(open_keys)
+            term.wait_quiet(0.6, 10)
+            first = mono_ns()
+            for _ in range(PAGER_PRESSES):
+                term.write(scroll_key)
+                term.pump(0.025)
+            term.pump(0.4)
+            windows["pager"] = (first, mono_ns())
+            window = term.window(*windows["pager"])
+            window["presses"] = PAGER_PRESSES
+            window["bytes_per_press"] = round(window["bytes"] / PAGER_PRESSES, 1)
+            result["pager"] = window
+            keep_screen("pager")
+            term.write(close_keys)
+            term.wait_quiet(0.6, 10)
+
+        # Keystrokes with a long draft in the composer: pasted (bracketed), the caret
+        # sent to the start of it with Ctrl-A so the typed letters stand on a row that
+        # is on screen, then one unique letter every 250 ms.
+        if "draft" in wanted:
+            text = draft_text()
+            term.wait_quiet(1.0, 10)
+            pasted = mono_ns()
+            term.paste(text)
+            term.wait_quiet(0.6, 30)
+            settled = mono_ns()
+            term.write(b"\x01")
+            term.wait_quiet(0.4, 10)
+            first = mono_ns()
+            typed: list[Keystroke] = []
+            for letter in TYPED:
+                term.keystroke(letter)
+                typed.append(term.keys[-1])
+                term.pump(0.25)
+            term.pump(0.5)
+            windows["draft"] = (first, mono_ns())
+            window = term.window(*windows["draft"])
+            window.update(echo_stats(typed))
+            window["draft_bytes"] = len(text.encode())
+            window["paste_settle_ms"] = round((settled - pasted) / 1e6, 1)
+            result["draft"] = window
+            keep_screen("draft")
+
         if args.frames and cli.kind == "zo":
-            frame_times(frames, result)
+            frame_times(frames, result, order)
         peak = max((taken.cli_rss for taken in term.samples), default=0)
         result["peak_rss_mb"] = round(peak / 2**20, 1)
         result["output_total_kb"] = round(term.output_total / 1024, 1)
+        if args.screens:
+            result["screens"] = screens
+        if args.attribute:
+            for state, entry in attribute_windows(term.raw, windows, COLS, ROWS).items():
+                if isinstance(result.get(state), dict):
+                    result[state]["attr"] = entry
+        if args.raw_dir:
+            save_raw(Path(args.raw_dir), cli.name, run, term.raw, windows)
     finally:
         sampler.finish()
         # A start-up run ends at once: a CLI may ignore quit keys for its
@@ -1530,6 +1992,57 @@ def run_once(cli: Cli, run: int, args: argparse.Namespace, url: str, log: Servic
         if not args.keep:
             shutil.rmtree(dirs.root, ignore_errors=True)
     return result
+
+
+def save_raw(directory: Path, name: str, run: int, raw: list[tuple[int, bytes]],
+             windows: dict[str, tuple[int, int]]) -> None:
+    """The bytes a CLI wrote in one run, and when each piece was read, so that a
+    state can be replayed without running the CLI again."""
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = directory / f"{name}-{run}"
+    stem.with_suffix(".bin").write_bytes(b"".join(data for _, data in raw))
+    position, chunks = 0, []
+    for moment, data in raw:
+        chunks.append([moment, position, len(data)])
+        position += len(data)
+    stem.with_suffix(".json").write_text(json.dumps({"chunks": chunks, "windows": windows}))
+
+
+def load_runs(path: str, name: str) -> list[dict]:
+    runs = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    return [run for run in runs if run.get("cli") == name and isinstance(run.get("screens"), dict)]
+
+
+def compare_screens(args: argparse.Namespace) -> int:
+    """Run k of the first file against run k of the second, state by state. Two
+    screens are the same when they read alike once the elapsed times are masked
+    (`normalize_screen`); a difference is printed line by line."""
+    import difflib
+
+    before = load_runs(args.before, args.cli)
+    after = load_runs(args.after, args.cli_after or args.cli)
+    if not before or not after:
+        print("no runs with screens in one of the files (were they run with --screens?)",
+              file=sys.stderr)
+        return 2
+    different = 0
+    for index, (one, two) in enumerate(zip(before, after), start=1):
+        for state in ALL_STATES:
+            if state not in one["screens"] or state not in two["screens"]:
+                continue
+            left = normalize_screen(one["screens"][state])
+            right = normalize_screen(two["screens"][state])
+            verdict = "same" if left == right else "DIFFERENT"
+            print(f"run {index} · {state}: {verdict}")
+            if left != right:
+                different += 1
+                for line in difflib.unified_diff(left.splitlines(), right.splitlines(),
+                                                 "before", "after", lineterm="", n=1):
+                    print("    " + line)
+            elif args.show:
+                print("\n".join("    | " + line for line in left.splitlines()))
+    print(f"{different} state(s) differ")
+    return 1 if different else 0
 
 
 def uptime() -> str:
@@ -1570,6 +2083,7 @@ ROWS_OF_TABLE = [
     ("streaming", "bytes_per_delta", "pty bytes per delta"),
     ("streaming", "bursts_per_s", "frames streaming (/s)"),
     ("streaming", "echo_p50_ms", "keystroke→echo p50 streaming (ms)"),
+    ("streaming", "echo_p95_ms", "keystroke→echo p95 streaming (ms)"),
     ("streaming", "echo_p99_ms", "keystroke→echo p99 streaming (ms)"),
     ("streaming", "echo_max_ms", "keystroke→echo max streaming (ms)"),
     ("streaming", "tail_ms", "last delta → on screen (ms)"),
@@ -1583,22 +2097,73 @@ ROWS_OF_TABLE = [
     ("streaming_at_n", "cli_cpu_pct", "CPU streaming after N turns (%)"),
     ("streaming_at_n", "bytes_per_delta", "pty bytes per delta after N turns"),
     ("streaming_at_n", "echo_p50_ms", "keystroke→echo p50 after N turns (ms)"),
+    ("streaming_at_n", "echo_p95_ms", "keystroke→echo p95 after N turns (ms)"),
     ("streaming_at_n", "echo_p99_ms", "keystroke→echo p99 after N turns (ms)"),
     ("streaming_at_n", "echo_max_ms", "keystroke→echo max after N turns (ms)"),
+    ("streaming_loaded", "cli_cpu_pct", "CPU streaming under load (%)"),
+    ("streaming_loaded", "echo_p50_ms", "keystroke→echo p50 under load (ms)"),
+    ("streaming_loaded", "echo_p95_ms", "keystroke→echo p95 under load (ms)"),
+    ("streaming_loaded", "echo_p99_ms", "keystroke→echo p99 under load (ms)"),
+    ("streaming_loaded", "echo_max_ms", "keystroke→echo max under load (ms)"),
+    ("streaming_loaded", "echo_missing", "keystrokes never echoed under load"),
+    ("pager", "bytes_per_press", "pager: bytes per scroll key"),
+    ("pager", "bytes_per_s", "pager: pty bytes (/s)"),
+    ("pager", "cli_cpu_pct", "pager: CPU (%)"),
+    ("draft", "echo_p50_ms", "keystroke→echo p50, 20 KB draft (ms)"),
+    ("draft", "echo_p95_ms", "keystroke→echo p95, 20 KB draft (ms)"),
+    ("draft", "echo_p99_ms", "keystroke→echo p99, 20 KB draft (ms)"),
+    ("draft", "echo_max_ms", "keystroke→echo max, 20 KB draft (ms)"),
+    ("draft", "echo_missing", "keystrokes never echoed, 20 KB draft"),
     ("idle_at_n", "cli_rss_mb", "RSS idle after N turns (MB)"),
     ("idle_at_n", "cli_cpu_pct", "CPU idle after N turns (%)"),
     ("idle_at_n", "wakeups_per_s", "wakeups idle after N turns (/s)"),
     (None, "peak_rss_mb", "RSS peak (MB)"),
 ]
 
+# What a state's bytes are for (`--attribute`): the frame's fixed cost, the rows it
+# rewrites, and the cells that really changed.
+ATTRIBUTION_ROWS = [
+    ("waiting", "attr.frames", "waiting: frames"),
+    ("waiting", "attr.bytes_per_frame", "waiting: bytes per frame"),
+    ("waiting", "attr.frame_overhead_bytes", "waiting: sync + cursor + reset bytes per frame"),
+    ("waiting", "attr.rows_written_per_frame", "waiting: rows written per frame"),
+    ("waiting", "attr.cells_changed_per_frame", "waiting: cells that changed per frame"),
+    ("waiting", "attr.bytes_per_changed_cell", "waiting: bytes per changed cell"),
+    ("tool", "attr.frames", "tool: frames"),
+    ("tool", "attr.bytes_per_frame", "tool: bytes per frame"),
+    ("tool", "attr.frame_overhead_bytes", "tool: sync + cursor + reset bytes per frame"),
+    ("tool", "attr.rows_written_per_frame", "tool: rows written per frame"),
+    ("tool", "attr.cells_changed_per_frame", "tool: cells that changed per frame"),
+    ("tool", "attr.bytes_per_changed_cell", "tool: bytes per changed cell"),
+    ("tool", "attr.shift_rows", "tool: rows rewritten that a scroll would have kept"),
+    ("pager", "attr.frames", "pager: frames"),
+    ("pager", "attr.rows_written_per_frame", "pager: rows written per frame"),
+    ("pager", "attr.shift_rows", "pager: rows rewritten that a scroll would have kept"),
+    ("pager", "attr.shift_bytes", "pager: bytes of those rows"),
+    ("streaming", "attr.bytes_per_frame", "streaming: bytes per frame"),
+    ("streaming", "attr.rows_written_per_frame", "streaming: rows written per frame"),
+    ("streaming", "attr.cells_changed_per_frame", "streaming: cells that changed per frame"),
+    ("streaming", "attr.shift_rows", "streaming: rows rewritten that a scroll would have kept"),
+    ("streaming", "attr.shift_bytes", "streaming: bytes of those rows"),
+]
+
+
+def dig(holder, key: str):
+    """`holder[a][b]` for the key `a.b`."""
+    for part in key.split("."):
+        if not isinstance(holder, dict):
+            return None
+        holder = holder.get(part)
+    return holder
+
 
 def median_of(results: list[dict], state: str | None, key: str) -> float | None:
     values = []
     for result in results:
-        holder = result if state is None else result.get(state)
-        if isinstance(holder, dict) and isinstance(holder.get(key), (int, float)):
-            values.append(holder[key])
-    return round(statistics.median(values), 1) if values else None
+        value = dig(result if state is None else result.get(state), key)
+        if isinstance(value, (int, float)):
+            values.append(value)
+    return round(statistics.median(values), 2) if values else None
 
 
 def pooled(results: list[dict], state: str, percentile: float) -> float | None:
@@ -1608,13 +2173,18 @@ def pooled(results: list[dict], state: str, percentile: float) -> float | None:
                     for value in result[state].get("echo_ms", []))
     if not values:
         return None
-    return round(values[min(len(values) - 1, int(len(values) * percentile / 100))], 1)
+    return round(nearest_rank(values, percentile), 2)
 
 
 POOLED_ROWS = [
     ("streaming", 50, "keystroke→echo p50 streaming, all runs pooled (ms)"),
     ("streaming", 99, "keystroke→echo p99 streaming, all runs pooled (ms)"),
     ("streaming_at_n", 99, "keystroke→echo p99 after N turns, all runs pooled (ms)"),
+    ("streaming_loaded", 50, "keystroke→echo p50 under load, all runs pooled (ms)"),
+    ("streaming_loaded", 95, "keystroke→echo p95 under load, all runs pooled (ms)"),
+    ("streaming_loaded", 99, "keystroke→echo p99 under load, all runs pooled (ms)"),
+    ("draft", 50, "keystroke→echo p50, 20 KB draft, all runs pooled (ms)"),
+    ("draft", 99, "keystroke→echo p99, 20 KB draft, all runs pooled (ms)"),
 ]
 
 
@@ -1622,11 +2192,18 @@ def table(by_cli: dict[str, list[dict]]) -> str:
     names = list(by_cli)
     lines = ["| metric (median of runs) | " + " | ".join(names) + " |",
              "|---|" + "---|" * len(names)]
-    for state, key, label in ROWS_OF_TABLE:
+    rows = list(ROWS_OF_TABLE)
+    if any(dig(result.get(state), "attr")
+           for results in by_cli.values() for result in results
+           for state in ("waiting", "tool", "streaming", "pager")):
+        rows += ATTRIBUTION_ROWS
+    for state, key, label in rows:
         cells = []
         for name in names:
             value = median_of(by_cli[name], state, key)
             cells.append("—" if value is None else f"{value:g}")
+        if all(cell == "—" for cell in cells):
+            continue
         lines.append(f"| {label} | " + " | ".join(cells) + " |")
     for state, percentile, label in POOLED_ROWS:
         cells = []
@@ -1674,6 +2251,13 @@ def main() -> int:
     serve_parser.add_argument("--delta-chars", type=int, default=10)
     table_parser = sub.add_parser("table", help="print the table of saved runs (runs.jsonl files)")
     table_parser.add_argument("runs", nargs="+")
+    screens_parser = sub.add_parser(
+        "screens", help="compare the screens two saved runs ended each state on (--screens)")
+    screens_parser.add_argument("before")
+    screens_parser.add_argument("after")
+    screens_parser.add_argument("--cli", default="zo", help="the CLI name in the first file")
+    screens_parser.add_argument("--cli-after", default="", help="the CLI name in the second file")
+    screens_parser.add_argument("--show", action="store_true", help="print each screen too")
     parser.add_argument("--clis", default="zo,claude,codex,gemini",
                         help="which CLIs, in order (zo,claude,codex,gemini)")
     parser.add_argument("--zo", default="target/release/zo", help="the zo binary to measure")
@@ -1704,12 +2288,28 @@ def main() -> int:
     parser.add_argument("--frames", action="store_true",
                         help="zo only: record each draw's time by phase (ZO_PROBE_FRAMES); a draw-time "
                              "run, since the probe writes a line per frame")
+    parser.add_argument("--only", default="",
+                        help="run only these states, comma separated: " + ",".join(ALL_STATES) +
+                             " (waiting, streaming and tool each run their own turn)")
+    parser.add_argument("--load", type=int, default=os.cpu_count() or 1,
+                        help="busy processes (`yes > /dev/null`, default priority) that run during the "
+                             "`loaded` state; default the number of logical cores, 0 skips the state")
+    parser.add_argument("--attribute", action="store_true",
+                        help="keep every byte a CLI writes and split the frames of the waiting, "
+                             "streaming and tool states by what the bytes are for (rows written, cells "
+                             "that changed, rows a scroll would have kept)")
+    parser.add_argument("--screens", action="store_true",
+                        help="keep the pyte screen at the end of every state, for `screens`")
+    parser.add_argument("--raw-dir", default="",
+                        help="save each run's pty bytes and their times here (implies keeping them)")
     parser.add_argument("--sample", type=int, default=0,
                         help="seconds of `sample <pid>` at the start of each state (attribution runs; "
                              "the sampler pauses the process, so these runs are not timings)")
     args = parser.parse_args()
     if args.command == "serve":
         return serve(args)
+    if args.command == "screens":
+        return compare_screens(args)
     if args.command == "table":
         by_cli: dict[str, list[dict]] = {}
         for path in args.runs:
