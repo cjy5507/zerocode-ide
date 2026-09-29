@@ -37136,17 +37136,18 @@ const paneDock = await page.evaluate(async () => {
   const narrowList = list.getBoundingClientRect();
   seen.narrowWidth = Math.round(narrowList.width);
   seen.composerInside = box ? box.getBoundingClientRect().right <= narrowList.right + 1 : false;
+  seen.composerOn = composerForm ? composerForm.getBoundingClientRect().bottom <= innerHeight + 1 : false;
   face.style.flex = "";
   face.style.width = "";
   return leave();
 });
 ok(
-  "the pane's own conversation floats its composer in the extension's centered dock — inset from the pane's edges, no wider than the token, the composer as wide as the dock, and inside the pane when it narrows — the measure a helper's page stood before it got a footer",
+  "the pane's own conversation floats its composer in the extension's centered dock — inset from the pane's edges, no wider than the token, the composer as wide as the dock, and inside the pane and on screen when it narrows — the measure a helper's page stood before it got a footer",
   paneDock.stands && paneDock.paneWidth === 1200 &&
     paneDock.dockWidth === paneDock.wantDockWidth && paneDock.dockWidth > 0 &&
     paneDock.dockWidth < paneDock.columnWidth &&
     paneDock.dockCentered && paneDock.composerOnAxis &&
-    paneDock.narrowWidth === 420 && paneDock.composerInside,
+    paneDock.narrowWidth === 420 && paneDock.composerInside && paneDock.composerOn,
   JSON.stringify(paneDock),
 );
 ok(
