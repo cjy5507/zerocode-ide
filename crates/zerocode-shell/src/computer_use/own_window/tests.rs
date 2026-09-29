@@ -119,3 +119,35 @@ fn what_is_not_zerocodes_window_under_the_point_is_left_to_the_helper() {
         "no list"
     );
 }
+
+/// The verbs read for their points are the helper's own (`pointedMethods`
+/// in its dispatch), entry for entry: a verb the helper starts reading a
+/// point of, or a point it renames, fails here before the window's check and
+/// the helper's part ways.
+#[test]
+fn the_verbs_pressed_at_points_are_the_helpers_own() {
+    let main = include_str!(
+        "../../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOS/main.swift"
+    );
+    let table = &main[main
+        .find("static let pointedMethods")
+        .expect("the helper's table")..];
+    let table = &table[..table.find("\n    ]").expect("its end")];
+    let helpers: Vec<&str> = table
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('"'))
+        .map(|line| line.trim_end_matches(','))
+        .collect();
+    let ours: Vec<String> = zerocode_core::computer_use_protocol::marks::POINTED_METHODS
+        .iter()
+        .map(|(method, points)| {
+            let points: Vec<String> = points
+                .iter()
+                .map(|(x, y)| format!("(\"{x}\", \"{y}\")"))
+                .collect();
+            format!("\"{method}\": [{}]", points.join(", "))
+        })
+        .collect();
+    assert_eq!(helpers, ours);
+}
