@@ -172,6 +172,20 @@ pub fn remember(params: &Map<String, Value>, answer: &Value, png: Vec<u8>) {
     keep(frame_key(params), png, placement(answer));
 }
 
+/// The most a look's line in the session's `looks.jsonl` may weigh: its
+/// numbers come to about 250 bytes (t-15517); a line past this is not
+/// written.
+pub(crate) const LOOK_LINE_MAX_BYTES: usize = 512;
+/// The longest word a look's line keeps — which road the look took; every
+/// other field is a number.
+pub(crate) const LOOK_LINE_WORD_MAX: usize = 16;
+
+/// The lines the looks on this thread left, taken out.
+#[cfg(test)]
+fn drain_looks() -> Vec<String> {
+    Vec::new()
+}
+
 /// One look, through the helper.
 pub fn observe(params: &Map<String, Value>) -> Result<Value, ComputerUseError> {
     observe_with(
@@ -538,5 +552,438 @@ mod tests {
             "no last frame, no diff"
         );
         assert!(changes(Some(b"not png"), &after, frame((0.0, 0.0), 1.0)).is_none());
+    }
+
+    // t-15517: a look that answers "nothing changed" when the act did change
+    // the screen. Synthetic frames only — `Drawn` is a display these tests
+    // paint, `desk` a helper that answers from it, `act` what the window
+    // notes when an act is answered.
+
+    /// Two pixels a point: a Retina display at its own resolution.
+    const FULL_SCALE: f64 = 2.0;
+    /// The built-in display's width in points: its look is these points
+    /// brought to the ladder's first rung, about 0.85 pixels a point.
+    const BUILT_IN_POINTS_WIDE: f64 = 1512.0;
+
+    /// A display drawn at its own resolution before and after an act, and
+    /// the picture a desktop look answers at its size.
+    struct Drawn {
+        full: [Vec<[u8; 4]>; 2],
+        full_size: (u32, u32),
+        look: [Vec<u8>; 2],
+        look_size: (u32, u32),
+        look_scale: f64,
+        /// Where the act repainted, in points: the eye's repaint rect.
+        repainted: [f64; 4],
+    }
+
+    fn drawn(
+        points: (u32, u32),
+        paint: impl Fn(bool, u32, u32) -> [u8; 4],
+        repainted: [f64; 4],
+    ) -> Drawn {
+        let look_scale =
+            zerocode_core::computer_use_protocol::SCREENSHOT_RESIZE_START_PX / BUILT_IN_POINTS_WIDE;
+        let sized = |scale: f64| {
+            (
+                (f64::from(points.0) * scale).round() as u32,
+                (f64::from(points.1) * scale).round() as u32,
+            )
+        };
+        let (full_size, look_size) = (sized(FULL_SCALE), sized(look_scale));
+        let full = [false, true].map(|after| {
+            (0..full_size.1)
+                .flat_map(|y| (0..full_size.0).map(move |x| (x, y)))
+                .map(|(x, y)| paint(after, x, y))
+                .collect::<Vec<_>>()
+        });
+        let look =
+            [0_usize, 1].map(|at| encoded(&shrink(&full[at], full_size, look_size), look_size));
+        Drawn {
+            full,
+            full_size,
+            look,
+            look_size,
+            look_scale,
+            repainted,
+        }
+    }
+
+    fn encoded(pixels: &[[u8; 4]], (width, height): (u32, u32)) -> Vec<u8> {
+        RgbaImage::new(width, height, pixels.iter().flatten().copied().collect())
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
+
+    /// `pixels` brought down to `to` by averaging what each output pixel
+    /// covers: how a downscale spreads a thin change over its neighbours.
+    fn shrink(pixels: &[[u8; 4]], from: (u32, u32), to: (u32, u32)) -> Vec<[u8; 4]> {
+        let (sx, sy) = (
+            f64::from(from.0) / f64::from(to.0),
+            f64::from(from.1) / f64::from(to.1),
+        );
+        let mut out = Vec::with_capacity(to.0 as usize * to.1 as usize);
+        for oy in 0..to.1 {
+            let (y0, y1) = (f64::from(oy) * sy, f64::from(oy + 1) * sy);
+            for ox in 0..to.0 {
+                let (x0, x1) = (f64::from(ox) * sx, f64::from(ox + 1) * sx);
+                let (mut sum, mut area) = ([0.0_f64; 4], 0.0);
+                for y in (y0.floor() as u32)..(y1.ceil() as u32).min(from.1) {
+                    let dy = f64::from(y + 1).min(y1) - f64::from(y).max(y0);
+                    for x in (x0.floor() as u32)..(x1.ceil() as u32).min(from.0) {
+                        let dx = f64::from(x + 1).min(x1) - f64::from(x).max(x0);
+                        let pixel = pixels[(y * from.0 + x) as usize];
+                        for (total, channel) in sum.iter_mut().zip(pixel) {
+                            *total += f64::from(channel) * dx * dy;
+                        }
+                        area += dx * dy;
+                    }
+                }
+                out.push(sum.map(|total| (total / area).round() as u8));
+            }
+        }
+        out
+    }
+
+    /// The part of a drawn display a region asks for, at its own resolution.
+    fn cut(
+        pixels: &[[u8; 4]],
+        size: (u32, u32),
+        [x, y, width, height]: [f64; 4],
+    ) -> (Vec<[u8; 4]>, (u32, u32)) {
+        let at = |points: f64, most: u32| ((points * FULL_SCALE).round() as u32).min(most);
+        let (left, top) = (at(x, size.0), at(y, size.1));
+        let (right, bottom) = (at(x + width, size.0), at(y + height, size.1));
+        let kept = (top..bottom)
+            .flat_map(|row| {
+                (left..right).map(move |column| pixels[(row * size.0 + column) as usize])
+            })
+            .collect();
+        (kept, (right - left, bottom - top))
+    }
+
+    /// A picture as the helper answers one: at `origin`, `scale` pixels a point.
+    fn answered(png: &[u8], (width, height): (u32, u32), origin: (f64, f64), scale: f64) -> Value {
+        use base64::Engine as _;
+        serde_json::json!({
+            "screenshot": {
+                "data": base64::engine::general_purpose::STANDARD.encode(png),
+                "width": width,
+                "height": height,
+                "scale": scale,
+            },
+            "origin": { "x": origin.0, "y": origin.1 },
+        })
+    }
+
+    /// A helper over `drawn`: the eye's newest frame (`eyeFrame` — still the
+    /// one before the act while `eye_behind`, its repaint not delivered yet),
+    /// a capture at the look's size (`screenshotDesktop`) or at the display's
+    /// own resolution (`fullRes`, or a region), and the eye's account
+    /// (`eyeChanges`: the act's mark, and where the act repainted once the
+    /// eye has it).
+    fn desk<'d>(
+        drawn: &'d Drawn,
+        acted: &'d std::cell::Cell<bool>,
+        eye_behind: bool,
+    ) -> impl FnMut(&str, Value) -> Result<Value, ComputerUseError> + 'd {
+        move |method: &str, params: Value| {
+            let now = usize::from(acted.get());
+            let seen = if eye_behind { 0 } else { now };
+            match method {
+                "eyeFrame" => {
+                    let mut frame = answered(
+                        &drawn.look[seen],
+                        drawn.look_size,
+                        (0.0, 0.0),
+                        drawn.look_scale,
+                    );
+                    frame["seq"] = (seen + 1).into();
+                    Ok(frame)
+                }
+                "screenshotDesktop" => {
+                    let region = params.get("region").and_then(|region| {
+                        Some([
+                            region.get("x")?.as_f64()?,
+                            region.get("y")?.as_f64()?,
+                            region.get("width")?.as_f64()?,
+                            region.get("height")?.as_f64()?,
+                        ])
+                    });
+                    Ok(if let Some(asked) = region {
+                        let (piece, size) = cut(&drawn.full[now], drawn.full_size, asked);
+                        answered(
+                            &encoded(&piece, size),
+                            size,
+                            (asked[0], asked[1]),
+                            FULL_SCALE,
+                        )
+                    } else if params.get("fullRes").and_then(Value::as_bool) == Some(true) {
+                        let png = encoded(&drawn.full[now], drawn.full_size);
+                        answered(&png, drawn.full_size, (0.0, 0.0), FULL_SCALE)
+                    } else {
+                        answered(
+                            &drawn.look[now],
+                            drawn.look_size,
+                            (0.0, 0.0),
+                            drawn.look_scale,
+                        )
+                    })
+                }
+                "eyeChanges" => {
+                    let act = acted
+                        .get()
+                        .then(|| serde_json::json!({ "seq": 1, "atMs": 1_000 }));
+                    let changes = if seen == 1 {
+                        serde_json::json!([{ "seq": 2, "atMs": 1_050, "rects": [drawn.repainted] }])
+                    } else {
+                        serde_json::json!([])
+                    };
+                    Ok(serde_json::json!({
+                        "streaming": true,
+                        "streamId": "drawn",
+                        "whole": true,
+                        "seq": seen + 1,
+                        "nowMs": 2_000,
+                        "act": act,
+                        "changes": changes,
+                    }))
+                }
+                "listAllWindows" => Ok(serde_json::json!({ "windows": [] })),
+                other => Err(ComputerUseError::new(
+                    error_code::UNSUPPORTED_CAPABILITY,
+                    format!("the drawn desk does not answer {other}"),
+                )),
+            }
+        }
+    }
+
+    /// An act answered, noted where the window notes one, and the drawn
+    /// screen turned to its after.
+    fn act(acted: &std::cell::Cell<bool>) {
+        let now = crate::now_epoch_ms();
+        super::super::guard::note_action("mouse-click", now);
+        super::super::state::note_action(
+            "mouse-click",
+            &["mouse-click".to_string()],
+            true,
+            None,
+            now,
+            None,
+        );
+        acted.set(true);
+    }
+
+    fn diff_look(viewer: &str) -> Map<String, Value> {
+        let mut params = Map::new();
+        params.insert("viewer".into(), viewer.into());
+        params.insert("diff".into(), true.into());
+        params
+    }
+
+    /// A 12 x 12-point square at (20, 12) that turns from dark to white.
+    fn square(after: bool, x: u32, y: u32) -> [u8; 4] {
+        if after && (40..64).contains(&x) && (24..48).contains(&y) {
+            [255, 255, 255, 255]
+        } else {
+            [40, 40, 40, 255]
+        }
+    }
+
+    fn says_changed(answer: &Value) -> bool {
+        answer["changed"]
+            .as_array()
+            .is_some_and(|changed| !changed.is_empty())
+    }
+
+    /// A: the eye's newest frame is still the one before the act — its
+    /// repaint not delivered yet — and a desktop look answers from it, so the
+    /// look after the act compares two frames from before it.
+    #[test]
+    fn a_look_after_an_act_does_not_answer_from_a_frame_taken_before_it() {
+        let drawn = drawn((64, 40), square, [20.0, 12.0, 12.0, 12.0]);
+        let acted = std::cell::Cell::new(false);
+        let mut call = desk(&drawn, &acted, true);
+        let memory = super::super::eye::Memory::new();
+        let params = diff_look("t-15517-a");
+        observe_with(&params, &memory, &mut call, &mut |_| {}).unwrap();
+        act(&acted);
+        let answer = observe_with(&params, &memory, &mut call, &mut |_| {}).unwrap();
+        assert!(
+            says_changed(&answer),
+            "the look after the act answered from the eye's frame before it: changed {}",
+            answer["changed"]
+        );
+    }
+
+    /// B: a 12 x 12-point box whose one-pixel border darkens by 11 — past
+    /// the diff's drift at the display's own resolution, under it once the
+    /// look averages about 2.4 display pixels into one of its own.
+    #[test]
+    fn a_small_change_a_retina_display_shows_is_not_nothing_at_the_looks_size() {
+        let border = |after: bool, x: u32, y: u32| {
+            let on_box = (40..64).contains(&x) && (24..48).contains(&y);
+            let edge = x == 40 || x == 63 || y == 24 || y == 47;
+            if after && on_box && edge {
+                [189, 189, 189, 255]
+            } else {
+                [200, 200, 200, 255]
+            }
+        };
+        let drawn = drawn((64, 40), border, [20.0, 12.0, 12.0, 12.0]);
+        let full = |at: usize| encoded(&drawn.full[at], drawn.full_size);
+        let seen = changes(
+            Some(&full(0)),
+            &full(1),
+            ShotFrame::new((0.0, 0.0), FULL_SCALE).unwrap(),
+        );
+        assert!(
+            seen.is_some_and(|(regions, _)| !regions.is_empty()),
+            "the drawn change is past the drift at the display's own resolution"
+        );
+        let acted = std::cell::Cell::new(false);
+        let mut call = desk(&drawn, &acted, false);
+        let memory = super::super::eye::Memory::new();
+        let params = diff_look("t-15517-b");
+        observe_with(&params, &memory, &mut call, &mut |_| {}).unwrap();
+        act(&acted);
+        let answer = observe_with(&params, &memory, &mut call, &mut |_| {}).unwrap();
+        let changed = answer["changed"].as_array().cloned().unwrap_or_default();
+        assert!(
+            changed.iter().any(|rect| {
+                let at = |key: &str| rect[key].as_f64().unwrap_or(f64::NAN);
+                (at("x")..=at("x") + at("width")).contains(&26.0)
+                    && (at("y")..=at("y") + at("height")).contains(&18.0)
+            }),
+            "a 12 x 12-point change at {:.2} px a point was answered as {}",
+            drawn.look_scale,
+            answer["changed"]
+        );
+    }
+
+    /// C: a desktop screenshot between the act and the diff becomes the
+    /// viewer's last frame (`remember`), so the diff compares after with
+    /// after. The act's own baseline is the look before it.
+    #[test]
+    fn a_screenshot_between_the_act_and_the_diff_does_not_hide_what_the_act_changed() {
+        let drawn = drawn((64, 40), square, [20.0, 12.0, 12.0, 12.0]);
+        let acted = std::cell::Cell::new(false);
+        let mut call = desk(&drawn, &acted, false);
+        let memory = super::super::eye::Memory::new();
+        let params = diff_look("t-15517-c");
+        observe_with(&params, &memory, &mut call, &mut |_| {}).unwrap();
+        act(&acted);
+        // The agent's own desktop screenshot of the same place, after the act.
+        let mut shot = Map::new();
+        shot.insert("viewer".into(), "t-15517-c".into());
+        let screenshot = call("eyeFrame", Value::Object(Map::new())).unwrap();
+        remember(&shot, &screenshot, drawn.look[1].clone());
+        let answer = observe_with(&params, &memory, &mut call, &mut |_| {}).unwrap();
+        assert!(
+            says_changed(&answer),
+            "a screenshot after the act made the diff compare after with after: changed {}",
+            answer["changed"]
+        );
+    }
+
+    /// D: a look that cannot be compared — another scale, another window —
+    /// answers `changed: null`, unknown; it is not counted as a look that saw
+    /// nothing change.
+    #[test]
+    fn a_look_that_cannot_be_compared_answers_unknown_not_nothing() {
+        let pictures = [
+            (png(8, 8, |_, _| [9, 9, 9, 255]), (8, 8), 1.0),
+            (png(16, 16, |_, _| [9, 9, 9, 255]), (16, 16), 2.0),
+        ];
+        let mut looks = 0;
+        let mut call = |method: &str, _: Value| -> Result<Value, ComputerUseError> {
+            match method {
+                "eyeFrame" => {
+                    let (png, size, scale) = &pictures[looks.min(1)];
+                    looks += 1;
+                    Ok(answered(png, *size, (0.0, 0.0), *scale))
+                }
+                other => Err(ComputerUseError::new(
+                    error_code::UNSUPPORTED_CAPABILITY,
+                    format!("not asked here: {other}"),
+                )),
+            }
+        };
+        let memory = super::super::eye::Memory::new();
+        let params = diff_look("t-15517-d");
+        observe_with(&params, &memory, &mut call, &mut |_| {}).unwrap();
+        let answer = observe_with(&params, &memory, &mut call, &mut |_| {}).unwrap();
+        assert!(answer["changed"].is_null(), "{}", answer["changed"]);
+        assert!(answer["changedShare"].is_null());
+        assert!(
+            answer.get("stuck").is_none(),
+            "an unknown look is not counted as one that saw nothing change"
+        );
+    }
+
+    /// The measurement: every look leaves one line of numbers — how many
+    /// rectangles changed and what share, the frame's and the last act's
+    /// stamps, the picture's size and scale — and nothing it saw: no
+    /// picture, no text, no window's name.
+    #[test]
+    fn a_look_leaves_its_numbers_and_nothing_it_saw() {
+        let drawn = drawn((64, 40), square, [20.0, 12.0, 12.0, 12.0]);
+        let acted = std::cell::Cell::new(false);
+        let mut call = desk(&drawn, &acted, false);
+        let memory = super::super::eye::Memory::new();
+        let params = diff_look("t-15517-m");
+        drain_looks();
+        observe_with(&params, &memory, &mut call, &mut |_| {}).unwrap();
+        act(&acted);
+        observe_with(&params, &memory, &mut call, &mut |_| {}).unwrap();
+        let lines = drain_looks();
+        assert_eq!(lines.len(), 2, "a look leaves one line: {lines:?}");
+        let read = |line: &String| serde_json::from_str::<Map<String, Value>>(line).unwrap();
+        let (first, after) = (read(&lines[0]), read(&lines[1]));
+        for (line, fields) in lines.iter().zip([&first, &after]) {
+            assert!(line.len() <= LOOK_LINE_MAX_BYTES, "{} bytes", line.len());
+            for (key, value) in fields {
+                assert!(
+                    ![
+                        "screenshot",
+                        "data",
+                        "text",
+                        "tree",
+                        "title",
+                        "app",
+                        "window"
+                    ]
+                    .contains(&key.as_str()),
+                    "a look's line keeps no {key}"
+                );
+                assert!(
+                    value
+                        .as_str()
+                        .is_none_or(|word| word.len() <= LOOK_LINE_WORD_MAX),
+                    "a look's line keeps numbers and short words only: {key} = {value}"
+                );
+            }
+        }
+        assert!(first["changed"].is_null(), "no earlier look: unknown");
+        assert!(
+            after["n"].as_u64() > first["n"].as_u64(),
+            "looks are numbered"
+        );
+        assert!(after["changed"].as_u64().is_some_and(|rects| rects > 0));
+        assert!(
+            after["changedShare"]
+                .as_f64()
+                .is_some_and(|share| share > 0.0)
+        );
+        assert_eq!(after["width"], drawn.look_size.0);
+        assert_eq!(after["height"], drawn.look_size.1);
+        assert_eq!(after["scale"], drawn.look_scale);
+        assert_eq!(after["frameSeq"], 2, "the eye's frame after the act");
+        assert_eq!(after["actSeq"], 1, "the helper's mark of the act");
+        assert!(
+            after["lastActEpochMs"].as_i64().is_some_and(|at| at > 0),
+            "the last act's time, to join the step log"
+        );
     }
 }
