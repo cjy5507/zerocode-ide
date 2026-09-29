@@ -30,6 +30,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -58,6 +59,20 @@ pub const FAST_ROLE: &str = "fast";
 /// the model only inside the JSON the seat already rendered.
 pub const PROMPT_HEAD: &str = "You are the second reader of a closed choice that a screen walk's first reader could not decide with confidence. Read the state and the question below exactly as the first reader did.";
 pub const ANSWER_CONTRACT: &str = "Answer with ONE line of JSON and nothing else, of the shape {\"choice\":\"<one of the options>\",\"confidence\":<a number from 0 to 1>}. The choice must be one of the options listed; do not explain.";
+
+/// How many answer files this process has named.
+static ANSWERS_NAMED: AtomicU64 = AtomicU64::new(0);
+
+/// The file one question's reader is told to write its answer to: the
+/// process and the question's turn in it, so two questions asked at one
+/// moment — two walks, two panes — never name the same file.
+fn answer_file() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "zerocode-team-answer-{}-{}.txt",
+        std::process::id(),
+        ANSWERS_NAMED.fetch_add(1, Ordering::Relaxed)
+    ))
+}
 
 /// The second reader over zo, headless.
 pub struct TeamJudge {
@@ -191,11 +206,7 @@ impl TeamJudge {
     /// stdin, the answer read from the file it was told to write, the reader
     /// killed if it outlives the wall.
     fn run(&self, prompt: &str, deadline: Duration) -> Result<String, String> {
-        let last_message = std::env::temp_dir().join(format!(
-            "zerocode-team-answer-{}-{}.txt",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
+        let last_message = answer_file();
         let _ = std::fs::remove_file(&last_message);
         let mut command = crate::proc::quiet_command(&self.program);
         command
