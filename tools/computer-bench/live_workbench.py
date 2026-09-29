@@ -16,6 +16,7 @@ import subprocess
 import time
 
 from bench import Bench, Stopped
+from pointer_picture import front_at
 
 NAVIGATION = {"작업 상황판", "워크스페이스 보드", "지식 그래프", "아티팩트"}
 
@@ -73,8 +74,7 @@ def main():
     windows = call("list-all-windows", "--all-layers")["windows"]
     if any("layer" not in w for w in windows):
         raise RuntimeError("the provider did not return every-layer window geometry")
-    at_point = next((w for w in windows if not w.get("overlay") and w.get("alpha", 1) > 0 and w["x"] <= x < w["x"] + w["width"] and
-                     w["y"] <= y < w["y"] + w["height"]), None)
+    at_point = front_at(windows, x, y)
     if not at_point or at_point["id"] != window["id"] or at_point["app"]["pid"] != args.pid:
         raise Stopped("another window covers the navigation control")
     guard()
