@@ -698,8 +698,7 @@ impl PlainSession {
     /// that ended on "when they land" would wait for something that never
     /// lands.
     fn background_work_probe(&self) -> Option<runtime::BackgroundWorkProbe> {
-        let completions_come_back = !self.headless && self.agent_completion_receiver.is_none();
-        if !completions_come_back {
+        if !self.completions_come_back() {
             return None;
         }
         let registry = Arc::clone(&self.registry);
@@ -712,6 +711,28 @@ impl PlainSession {
                 .count();
             agents + processes.load()
         }))
+    }
+
+    /// Whether a pump brings this session's background results back as
+    /// messages: an interactive session whose front end took the completion
+    /// receiver into one.
+    fn completions_come_back(&self) -> bool {
+        !self.headless && self.agent_completion_receiver.is_none()
+    }
+
+    /// Hand the turn about to run its stop, so a blocking `Agent` call lets
+    /// its helper go on in the background when the turn stops (t-11460) —
+    /// only where a pump brings that helper's result back; elsewhere the call
+    /// waits as it did. Every turn, because a model or permission switch
+    /// rebuilds the runtime with a fresh tool context.
+    fn install_turn_stop(&self, stop: &HookAbortSignal) {
+        if let Some(inner) = self.runtime.runtime.as_ref() {
+            inner
+                .tool_executor()
+                .tool_registry()
+                .context()
+                .set_turn_stop(self.completions_come_back().then(|| stop.clone()));
+        }
     }
 
     /// Current runtime's mid-turn completion inbox. Model/permission rebuilds
@@ -780,6 +801,7 @@ impl PlainSession {
     ) -> Result<runtime::TurnSummary, String> {
         self.runtime
             .set_hook_abort_signal(hook_abort_signal.clone());
+        self.install_turn_stop(&hook_abort_signal);
         if let Some(mcp_state) = self.runtime.mcp_state.as_ref() {
             discover_pending_mcp_tools_in_background(
                 mcp_state,

@@ -2607,6 +2607,152 @@ async fn e2e_esc_sends_the_words_now_and_leaves_the_background_agent_running() {
     );
 }
 
+/// The text of the tool result `tool_use_id` in one request's last message —
+/// what the model was told its call came to.
+fn tool_result_text(row: &e2e::measure::Recorded, tool_use_id: &str) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_str(&row.body).ok()?;
+    let last = body.get("messages")?.as_array()?.last()?;
+    let block = last.get("content")?.as_array()?.iter().find(|block| {
+        block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+            && block.get("tool_use_id").and_then(serde_json::Value::as_str) == Some(tool_use_id)
+    })?;
+    Some(match block.get("content")? {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_string(),
+    })
+}
+
+/// The main's requests whose last message carries `needle` — what reached it.
+fn main_took(recorded: &[e2e::measure::Recorded], needle: &str) -> Vec<String> {
+    recorded
+        .iter()
+        .filter(|row| !row.opens_with(e2e::measure::TALK_CHILD))
+        .map(last_message)
+        .filter(|last| last.contains(needle))
+        .collect()
+}
+
+/// A helper's words to the main while it works (t-11459). Until now the pump
+/// dropped them and the helper was told they were delivered. Here the main
+/// hands a task to a background agent and goes idle; halfway through, the
+/// agent sends it words and is told they were delivered — and the main takes
+/// them exactly once, as a follow-up, before the agent's result lands once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_helpers_words_to_the_main_land_once_and_the_helper_is_told_so() {
+    let plan = e2e::measure::Plan {
+        latency_ms: TALK_LATENCY_MS,
+        child_steps: 2,
+        child_sleep_secs: 1,
+        child_says_at: Some(1),
+        ..e2e::measure::Plan::default()
+    };
+    let layout = Layout::new();
+    layout.model_led();
+    let service = e2e::measure::MeasureService::start(plan)
+        .await
+        .expect("start the talk provider");
+    let (mut run, promised) = talk_session(&layout, &service);
+    run.wait_for_after(e2e::measure::TALK_NOTED, promised, Duration::from_secs(60));
+    let recorded = service.recorded().await;
+    let _ = run.finish();
+
+    let told = recorded
+        .iter()
+        .filter(|row| row.opens_with(e2e::measure::TALK_CHILD))
+        .find_map(|row| tool_result_text(row, e2e::measure::TALK_SAYS_ID))
+        .expect("the helper heard back from its SendMessage");
+    assert!(
+        told.contains("\"delivered\": true") || told.contains("\"delivered\":true"),
+        "the helper was not told its words were delivered: {told}"
+    );
+    // What the main ended with is its whole conversation: the words are in it
+    // exactly once, ahead of the result. (Not "in some request's last
+    // message": the host may put a reminder of its own after the words that
+    // opened a turn.)
+    let conversation = recorded
+        .iter()
+        .rev()
+        .find(|row| !row.opens_with(e2e::measure::TALK_CHILD))
+        .map(e2e::measure::Recorded::messages_json)
+        .expect("the main sent requests");
+    assert_eq!(
+        conversation.matches(e2e::measure::TALK_CHILD_SAYS).count(),
+        1,
+        "the main took the helper's words once: {conversation}"
+    );
+    assert_eq!(
+        conversation.matches(e2e::measure::TALK_CHILD_DONE).count(),
+        1,
+        "the helper's result reached the main once: {conversation}"
+    );
+    let said = conversation.find(e2e::measure::TALK_CHILD_SAYS).unwrap_or(usize::MAX);
+    let ended = conversation.find(e2e::measure::TALK_CHILD_DONE).unwrap_or(usize::MAX);
+    assert!(said < ended, "the words reached the main after the result: {conversation}");
+}
+
+/// Esc on a blocking `Agent` call (t-11460). The call ends with the turn and
+/// the helper keeps working — but its result never reached the main, because
+/// only a wait that ran out its 20-minute window handed the helper over to
+/// the background. Here the person stops the turn while the helper works: it
+/// takes every step in one run, and its result lands in the main exactly once
+/// as soon as it ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_esc_on_a_blocking_agent_call_keeps_the_helper_working_and_its_result_lands_once() {
+    let plan = e2e::measure::Plan {
+        latency_ms: TALK_LATENCY_MS,
+        child_steps: 3,
+        child_sleep_secs: 2,
+        ..e2e::measure::Plan::default()
+    };
+    let layout = Layout::new();
+    layout.model_led();
+    let service = e2e::measure::MeasureService::start(plan)
+        .await
+        .expect("start the talk provider");
+    let mut run = pty(&layout, service.base_url(), &interactive_args());
+    let ready = run.wait_for("directory:", TEST_TIMEOUT);
+    // The person asks for the delegation in words: a small task handed to a
+    // helper without that is refused and done inline.
+    run.send(format!("{} delegate the board and wait for it\r", e2e::measure::TALK_WAIT).as_bytes())
+        .expect("send the task");
+    let asked = Instant::now();
+    while !service
+        .recorded()
+        .await
+        .iter()
+        .any(|row| row.opens_with(e2e::measure::TALK_CHILD))
+    {
+        assert!(asked.elapsed() < TEST_TIMEOUT, "the blocking helper never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    run.send(b"\x1b").expect("Esc while the helper works");
+    let stopped = run.wait_for_after("interrupted", ready, TEST_TIMEOUT);
+    run.wait_for_after(e2e::measure::TALK_NOTED, stopped, Duration::from_secs(30));
+    let recorded = service.recorded().await;
+    let _ = run.finish();
+
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|row| row.opens_with(e2e::measure::TALK_CHILD))
+            .count(),
+        plan.child_steps + 1,
+        "Esc ended the call only — the helper took every step in one run"
+    );
+    let delivered = main_took(&recorded, e2e::measure::TALK_CHILD_DONE);
+    assert_eq!(delivered.len(), 1, "the helper's result reached the main once: {delivered:#?}");
+    assert_eq!(
+        delivered[0].matches(e2e::measure::TALK_CHILD_DONE).count(),
+        1,
+        "and once within that message"
+    );
+}
+
 /// The number the brief asks for: from the moment the person types to the
 /// moment the main's answer is on screen, p50 and p95 over fresh sessions,
 /// against a model that takes `TALK_LATENCY_MS` to answer. Run against any
