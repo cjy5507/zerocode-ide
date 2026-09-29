@@ -2691,6 +2691,134 @@ mod tests {
             .any(|line| line == "kill-pane -t %9"));
     }
 
+    /// How many times the multiplexer was asked which panes stand: one process
+    /// spawn each.
+    fn pane_asks(directory: &Path) -> usize {
+        tmux_log(directory)
+            .iter()
+            .filter(|line| line.starts_with("list-panes"))
+            .count()
+    }
+
+    /// A pane child at work costs its parent no process spawns (t-17057).
+    ///
+    /// The wait spawned `tmux list-panes` at every 250 ms look — four spawns a
+    /// second for each child for as long as it worked, twelve `__posix_spawn`
+    /// samples in three seconds in the person's own pane (t-11961 cause 5). A
+    /// child that is working is not something to look at: its answer arrives by
+    /// itself, and so would its death.
+    #[test]
+    fn a_pane_child_at_work_costs_the_parent_no_tmux_spawns() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-20");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let outcome = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                wait_for_result(
+                    &tmux,
+                    &child,
+                    "%9",
+                    PaneBudget::Wall(Duration::from_secs(60)),
+                    &|| false,
+                )
+            });
+            std::thread::sleep(Duration::from_millis(1400));
+            TeammateResult::new("agent-20", Exit::Ok)
+                .write(&child)
+                .expect("write result");
+            waiting.join().expect("the wait")
+        });
+        assert!(matches!(outcome, PaneOutcome::Finished(_)), "{outcome:?}");
+        let asked = pane_asks(directory.path());
+        assert!(
+            asked <= 1,
+            "the parent asked tmux {asked} times while its child worked for 1.4 s: {:?}",
+            tmux_log(directory.path())
+        );
+    }
+
+    /// An answer is heard as it lands, not at the next look (t-17057).
+    ///
+    /// A wait that looks every quarter second hears a child that answered just
+    /// after a look a quarter second late. The answer is landed here the moment
+    /// after tmux was asked for the second time, which is a look that has just
+    /// been made; a wait that asks tmux once is given the same time to settle.
+    #[test]
+    fn a_result_is_heard_as_it_lands_and_not_at_the_next_look() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-21");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let (outcome, lag) = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                let outcome = wait_for_result(
+                    &tmux,
+                    &child,
+                    "%9",
+                    PaneBudget::Wall(Duration::from_secs(60)),
+                    &|| false,
+                );
+                (outcome, std::time::Instant::now())
+            });
+            let settle_until = std::time::Instant::now() + Duration::from_millis(1200);
+            while std::time::Instant::now() < settle_until && pane_asks(directory.path()) < 2 {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let landed = std::time::Instant::now();
+            TeammateResult::new("agent-21", Exit::Ok)
+                .write(&child)
+                .expect("write result");
+            let (outcome, heard) = waiting.join().expect("the wait");
+            (outcome, heard.duration_since(landed))
+        });
+        assert!(matches!(outcome, PaneOutcome::Finished(_)), "{outcome:?}");
+        assert!(
+            lag < Duration::from_millis(100),
+            "the answer was heard {lag:?} after it landed"
+        );
+    }
+
+    /// A parent's cancel is answered promptly while its child works (t-17057).
+    ///
+    /// The cancel flag is the caller's own closure, so the wait can only look at
+    /// it; how often is what this pins. It was every 250 ms, and a wait that
+    /// stops asking the world every quarter second must not stop asking this.
+    #[test]
+    fn a_cancel_raised_while_the_child_works_ends_the_pane_within_two_looks() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-23");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let raised = std::sync::atomic::AtomicBool::new(false);
+        let (outcome, lag) = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                let outcome = wait_for_result(
+                    &tmux,
+                    &child,
+                    "%9",
+                    PaneBudget::Wall(Duration::from_secs(60)),
+                    &|| raised.load(std::sync::atomic::Ordering::SeqCst),
+                );
+                (outcome, std::time::Instant::now())
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            let cancelled_at = std::time::Instant::now();
+            raised.store(true, std::sync::atomic::Ordering::SeqCst);
+            let (outcome, heard) = waiting.join().expect("the wait");
+            (outcome, heard.duration_since(cancelled_at))
+        });
+        assert_eq!(outcome, PaneOutcome::Cancelled);
+        assert!(
+            lag < Duration::from_millis(2500),
+            "a cancel took {lag:?} to end the pane"
+        );
+        assert!(
+            tmux_log(directory.path()).iter().any(|line| line == "kill-pane -t %9"),
+            "the cancelled child's pane was left standing"
+        );
+    }
+
     /// A clock that stands still until the wait rests, and then moves on by
     /// `step` — after which `on_rest` runs, the child's side of that step.
     struct SteppedClock<'a> {
@@ -2725,6 +2853,41 @@ mod tests {
             self.at.set(self.at.get() + self.step);
             (self.on_rest)(self.elapsed());
         }
+    }
+
+    /// The multiplexer is asked as the wait needs it, not at every look
+    /// (t-17057): a child that answers after twenty looks a second apart used
+    /// to cost twenty spawns.
+    #[test]
+    fn tmux_is_asked_every_few_seconds_and_not_at_every_look() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-22");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let agent = |elapsed: Duration| {
+            if elapsed >= Duration::from_secs(20) {
+                TeammateResult::new("agent-22", Exit::Ok)
+                    .write(&child)
+                    .expect("write result");
+            }
+        };
+        let clock = SteppedClock::new(Duration::from_secs(1), &agent);
+        let outcome = wait_for_turn_result_on(
+            &clock,
+            &tmux,
+            &child,
+            "%9",
+            1,
+            PaneBudget::Wall(Duration::from_secs(600)),
+            &|| false,
+            &|| {},
+        );
+        assert!(matches!(outcome, PaneOutcome::Finished(_)), "{outcome:?}");
+        let asked = pane_asks(directory.path());
+        assert!(
+            asked <= 6,
+            "twenty looks, a second apart, asked tmux {asked} times"
+        );
     }
 
     /// The child's transcript, named where a pane child names it, with one
@@ -3097,5 +3260,150 @@ mod tests {
         std::fs::write(directory.path().join(RESULT_FILE), br#"{"version": 1, "agen"#)
             .expect("write");
         assert!(TeammateResult::read(directory.path()).is_none());
+    }
+
+    /// A child's channel as its parent meets it: it takes connections and says
+    /// nothing unasked. Each connection is read to its end on a thread of its
+    /// own, so one that is held open blocks nobody.
+    fn stand_silent_channel(child: &Path) {
+        use std::io::Read as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        ChannelCoordinates {
+            addr: listener.local_addr().expect("addr").to_string(),
+            token: None,
+            session_id: "child-session".to_string(),
+        }
+        .write(&child.join(CHANNEL_FILE))
+        .expect("write channel file");
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut sink = [0_u8; 64];
+                    while stream.read(&mut sink).is_ok_and(|read| read > 0) {}
+                });
+            }
+        });
+    }
+
+    /// A measurement, not a check: what three helpers working in panes cost
+    /// their parent, and how soon their answers are heard (t-17057).
+    /// `tools/tui-bench/pane_probe.py` runs it before and after a change to the
+    /// wait and reads the CPU of this process between the two markers it prints.
+    ///
+    /// `PANE_PROBE_DIR` is where the fake tmux keeps its log,
+    /// `PANE_PROBE_SECONDS` how long the children work (default 20),
+    /// `PANE_PROBE_ROUNDS` how many times an answer is landed at another phase
+    /// of a quarter second (default 8), and `PANE_PROBE_CHANNELS=1` gives each
+    /// child a channel, as a child of this zo has one.
+    #[test]
+    #[ignore = "a measurement: run by tools/tui-bench/pane_probe.py"]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )] // a percentile index over a few dozen samples
+    fn pane_probe_three_helpers_at_work() {
+        let Some(base) = std::env::var_os("PANE_PROBE_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let number = |name: &str, default: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(default)
+        };
+        let seconds = number("PANE_PROBE_SECONDS", 20);
+        let rounds = number("PANE_PROBE_ROUNDS", 8);
+        let channels = std::env::var("PANE_PROBE_CHANNELS").is_ok_and(|value| value == "1");
+        std::fs::create_dir_all(&base).expect("mkdir");
+        let tmux = Tmux::at(fake_tmux(&base, "'%1' '%2' '%3'"));
+        let tmux = &tmux;
+        let say = |tag: &str, fields: &serde_json::Value| {
+            println!("PANE_PROBE {tag} {fields}");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        };
+        let stand = |name: String| {
+            let child = base.join(name);
+            std::fs::create_dir_all(&child).expect("mkdir child");
+            if channels {
+                stand_silent_channel(&child);
+            }
+            child
+        };
+        let hour = PaneBudget::Wall(Duration::from_secs(3600));
+
+        let children: Vec<PathBuf> = (0..3).map(|n| stand(format!("work-{n}"))).collect();
+        let asked_before = pane_asks(&base);
+        say(
+            "work_start",
+            &serde_json::json!({ "children": 3, "seconds": seconds, "channels": channels }),
+        );
+        let started = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            let waits: Vec<_> = children
+                .iter()
+                .enumerate()
+                .map(|(n, child)| {
+                    scope.spawn(move || wait_for_result(tmux, child, &format!("%{}", n + 1), hour, &|| false))
+                })
+                .collect();
+            std::thread::sleep(Duration::from_secs(seconds));
+            say(
+                "work_end",
+                &serde_json::json!({
+                    "tmux_asks": pane_asks(&base) - asked_before,
+                    "seconds": started.elapsed().as_secs_f64(),
+                }),
+            );
+            for child in &children {
+                TeammateResult::new("probe", Exit::Ok).write(child).expect("write result");
+            }
+            for wait in waits {
+                assert!(matches!(wait.join().expect("the wait"), PaneOutcome::Finished(_)));
+            }
+        });
+
+        let mut lags: Vec<f64> = Vec::new();
+        for round in 0..rounds {
+            let dirs: Vec<PathBuf> = (0..3).map(|n| stand(format!("round-{round}-{n}"))).collect();
+            std::thread::scope(|scope| {
+                let waits: Vec<_> = dirs
+                    .iter()
+                    .enumerate()
+                    .map(|(n, child)| {
+                        scope.spawn(move || {
+                            let outcome = wait_for_result(tmux, child, &format!("%{}", n + 1), hour, &|| false);
+                            (outcome, std::time::Instant::now())
+                        })
+                    })
+                    .collect();
+                std::thread::sleep(Duration::from_millis(300 + (round * 83) % 250));
+                let landed: Vec<std::time::Instant> = dirs
+                    .iter()
+                    .map(|child| {
+                        let at = std::time::Instant::now();
+                        TeammateResult::new("probe", Exit::Ok).write(child).expect("write result");
+                        at
+                    })
+                    .collect();
+                for (wait, at) in waits.into_iter().zip(landed) {
+                    let (outcome, heard) = wait.join().expect("the wait");
+                    assert!(matches!(outcome, PaneOutcome::Finished(_)), "{outcome:?}");
+                    lags.push(heard.duration_since(at).as_secs_f64() * 1000.0);
+                }
+            });
+        }
+        lags.sort_by(f64::total_cmp);
+        let at = |share: f64| lags[(((lags.len() - 1) as f64) * share).round() as usize];
+        say(
+            "latency",
+            &serde_json::json!({
+                "samples": lags.len(),
+                "p50_ms": at(0.5),
+                "p90_ms": at(0.9),
+                "max_ms": at(1.0),
+            }),
+        );
     }
 }
