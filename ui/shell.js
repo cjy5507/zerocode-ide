@@ -13373,7 +13373,7 @@ function syncStreamingTurns(list, run) {
       // Nothing to say until a sentence has closed: the row keeps its word.
       const heading = thoughtHeading(piece.text);
       if (heading !== null) writeTextContent(row.querySelector(".helper-step-target"), heading);
-      if (row.open) writeTextContent(row.querySelector(":scope > .helper-thought-body"), piece.text);
+      if (row.open) paintLiveThought(row);
     } else {
       paintLiveAnswer(row, piece.text, run);
     }

@@ -1151,11 +1151,16 @@ function forgetShelf(list, row) {
   list.__shelf?.unobserve(row);
 }
 
+/* Whether words in `node` are chosen — a write into it would collapse them. */
+function wordsChosenIn(node) {
+  const selection = document.getSelection();
+  return Boolean(selection && selection.rangeCount > 0 && !selection.isCollapsed && selection.containsNode(node, true));
+}
+
 /* Whether `row` may give up its body now. */
 function mayShelve(row) {
   if (row.classList.contains("is-live") || row.querySelector(".is-open") || row.contains(document.activeElement)) return false;
-  const selection = document.getSelection();
-  return !(selection && selection.rangeCount > 0 && !selection.isCollapsed && selection.containsNode(row, true));
+  return !wordsChosenIn(row);
 }
 
 /* One answer of the watcher: rows that left reach give up their bodies at the
@@ -1686,6 +1691,21 @@ function paintThoughtBody(row, run) {
   const body = row.querySelector(":scope > .helper-thought-body");
   if (row.classList.contains("is-streaming")) writeTextContent(body, row.__text ?? "");
   else if (!body.hasChildNodes()) paintHelperProse(body, row.__turn.text, helperBase(run));
+}
+
+/* The open body of a thought that is going, written once a frame with its
+ * newest words — thirty deltas a second arrive, as into an answer
+ * (`paintLiveAnswer`) — and not by a frame that finds words in it chosen: a
+ * write would collapse them. The next delta after they are let go brings the
+ * newest words in. */
+function paintLiveThought(row) {
+  if (row.__bodyFrame !== undefined) return;
+  row.__bodyFrame = requestAnimationFrame(() => {
+    row.__bodyFrame = undefined;
+    if (!row.isConnected || !row.open) return;
+    const body = row.querySelector(":scope > .helper-thought-body");
+    if (!wordsChosenIn(body)) writeTextContent(body, row.__text ?? "");
+  });
 }
 
 /* The words a streaming thought was saying are this turn: the row that will
