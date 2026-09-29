@@ -15922,7 +15922,7 @@ button.helper-sib:hover {
 /* 이 페이지의 키보드 초점 — 플랫폼 계약의 잉크 외곽선. 입력 상자만 전역
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`). */
 .worker-view
-  :is(.helper-cap, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
+  :is(.helper-cap, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -15953,9 +15953,9 @@ button.helper-sib:hover {
 
   .helper-turn.is-tool.is-live::before,
   .helper-group.is-live::before,
+  .helper-state-dot,
   .helper-agent-dot,
-  .helper-status-mark,
-  .helper-state-dot {
+  .helper-status-mark {
     animation: none;
   }
 }
