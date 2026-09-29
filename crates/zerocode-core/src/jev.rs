@@ -1099,7 +1099,7 @@ pub const ROUTING: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Offered,
 };
 
 /// The wall zo's routing waits for a judgment when the seat acts: the batch
@@ -1280,7 +1280,7 @@ pub const RECALL: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::NotAChoice,
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -1405,7 +1405,9 @@ pub const BROWSER: JevUse = JevUse {
     // A goal walk fills what its caller left open and is marked only on
     // its presses (t-13091).
     auto_starts: promote::Stand::Applying,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "type_target 머리에 기권 선택지 없음(action 머리는 give_up, 관찰 머리 셋은 none); 다른 행동이 골라지면 읽기만 하고 쓰지 않음(screen_action.rs). 넣자: none",
+    ),
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -1458,7 +1460,9 @@ pub const DESKTOP: JevUse = JevUse {
     // A goal walk fills what its caller left open and is marked only on
     // its presses (t-13091).
     auto_starts: promote::Stand::Applying,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "type_target 머리에 기권 선택지 없음(action 머리는 give_up, 관찰 머리 셋은 none); 다른 행동이 골라지면 읽기만 하고 쓰지 않음(screen_action.rs). 넣자: none",
+    ),
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
@@ -1508,7 +1512,9 @@ pub const EMULATOR: JevUse = JevUse {
     // A goal walk fills what its caller left open and is marked only on
     // its presses (t-13091).
     auto_starts: promote::Stand::Applying,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "type_target 머리에 기권 선택지 없음(action 머리는 give_up, 관찰 머리 셋은 none); 다른 행동이 골라지면 읽기만 하고 쓰지 않음(screen_action.rs). 넣자: none",
+    ),
 };
 
 /// How many windows over one place a cover question describes, front first:
@@ -1590,7 +1596,7 @@ pub const COVER: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Applying,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Offered,
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -1640,7 +1646,7 @@ pub const STALL: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Offered,
 };
 
 /// What the placement seat's answers must bound above before `auto` rises to
@@ -1754,7 +1760,9 @@ pub const PLACEMENT: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "방 고르기(tab·split·background)에 기권 선택지 없음, 까닭 못 찾음. 넣자: 없음 뒷길이 먼저",
+    ),
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -1881,7 +1889,9 @@ pub const SUMMON: JevUse = JevUse {
     // It acts only on `--agent auto`, where recording refused the summons
     // (t-11989).
     auto_starts: promote::Stand::Applying,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "에이전트 고르기에 기권 선택지 없음, 까닭 못 찾음(선택지 2 미만이면 묻지 않음). 넣자: 뒷길이 먼저",
+    ),
 };
 
 /// Difficulty of new work, graded by completed executions at the same difficulty.
@@ -1923,7 +1933,9 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     // It acts only on a dial the coordinator left open, and its marks come
     // only from answers that were carried out (t-11989).
     auto_starts: promote::Stand::Applying,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "low·mid·high에 기권 선택지 없음, 까닭 못 찾음(지시문은 가장 낮은 알맞은 단계)",
+    ),
 };
 
 /// Characters of the repeated tool call one step-effort question carries —
@@ -2001,7 +2013,7 @@ pub const STEP_EFFORT: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks("move의 hold는 제자리이지 모름이 아님, 기권 선택지 없음 까닭 못 찾음"),
 };
 
 /// Characters of the task a skill ranking reads — what the turn is about, in
@@ -2233,7 +2245,7 @@ pub const SKILLS: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::NotAChoice,
 };
 
 /// zo's turn-start skill suggestion (t-6347): the two-stage question asked
@@ -2285,7 +2297,7 @@ pub const SKILL_SUGGESTION: JevUse = JevUse {
     follows: Some(SKILLS.setting),
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Offered,
 };
 
 /// The wall zo's step effort governor holds a step judgment to, in
@@ -2371,7 +2383,9 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "complexity·risk는 순서 단계로 기권 선택지 없음, 까닭 못 찾음(intent만 other). 넣자: Score로 옮기기",
+    ),
 };
 
 /// Characters of the person's last request one compaction judgment reads
@@ -2557,7 +2571,9 @@ pub const COMPACTION: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "keep·drop에 기권 선택지 없음, 까닭 못 찾음(버리기는 별도 확신 선이 막음)",
+    ),
 };
 
 /// Characters of one text an agent's own question carries — the question,
@@ -2666,7 +2682,9 @@ pub const AGENT_TOOL: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "choose는 호출자가 쓴 선택지뿐이라 호출자가 넣지 않으면 기권 없음; ask의 no가 근거 부족을 흡수(v2 주석)",
+    ),
 };
 
 /// Characters of a page's title one browser-read question carries — the head
@@ -2855,7 +2873,9 @@ pub const BROWSER_READ: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "content·chrome에 기권 선택지 없음; content 문구가 가를 수 없는 경우를 흡수",
+    ),
 };
 
 /// The closed answer every notify question offers, spelled once: ring now,
@@ -3036,7 +3056,9 @@ pub const NOTIFY: JevUse = JevUse {
     follows: None,
     regrade: Regrade::NotifyFacts,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "interrupt·batch·ignore에 기권 선택지 없음; ignore는 알리지 않는 결정이지 모름이 아님",
+    ),
 };
 
 /// Characters of the sentence a person is writing that one mention
@@ -3176,7 +3198,9 @@ pub const MENTION_RERANK: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "후보 고르기에 기권 선택지 없음, 까닭 못 찾음(not_offered는 행에 남는 표시)",
+    ),
 };
 
 /// How many of the emulator seat's candidates a forked phone step tries
@@ -3363,7 +3387,7 @@ pub const BRANCHING: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks("후보 고르기(best)에 기권 선택지 없음, 까닭 못 찾음"),
 };
 
 /// The judgment cache: a memo in front of the wire that answers a screen
@@ -3428,7 +3452,7 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::NotAChoice,
 };
 
 /// The wall one mail triage question waits for its answer, in milliseconds —
@@ -3521,7 +3545,9 @@ pub const MAIL_TRIAGE: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "answer_now·can_wait·no_need에 기권 선택지 없음; no_need는 진짜 답이지 모름이 아님, 까닭 못 찾음",
+    ),
 };
 
 /// How many of a role's eligible attempts try the model nobody has evidence
@@ -3682,7 +3708,7 @@ pub const CHALLENGER: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Offered,
 };
 
 /// Characters of the person's words one patch review reads as the task the
@@ -3873,7 +3899,7 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::NotAChoice,
 };
 
 /// One turn's completion claims put beside the tool output that can support
@@ -3943,7 +3969,7 @@ pub const CLAIM: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Offered,
 };
 
 /// The vault pair seat only suggests relations for a person's weekly review.
@@ -4021,7 +4047,7 @@ pub const VAULT_PAIRS: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::NotAChoice,
 };
 
 /// Re-rank likely files for a code task, with one Noul for each candidate.
@@ -4079,7 +4105,7 @@ pub const FILE_PICK: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::NotAChoice,
 };
 
 /// Characters of a shell command one command-guard question carries (t-6348).
@@ -4200,7 +4226,7 @@ pub const COMMAND_GUARD: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::NotAChoice,
 };
 
 /// Characters of a tool block's head one tool-text question carries
@@ -4294,7 +4320,7 @@ pub const TOOL_TEXT_GUARD: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::NotAChoice,
 };
 
 /// The wall one reflex decision waits for its answer, in milliseconds: one
@@ -4384,7 +4410,9 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
     follows: None,
     regrade: Regrade::AsWritten,
     auto_starts: promote::Stand::Recording,
-    abstain: Abstain::Unaudited,
+    abstain: Abstain::Lacks(
+        "continue·pause·replan에 기권 선택지 없음; pause는 안전 정지이지 모름이 아님, 까닭 못 찾음",
+    ),
 };
 
 /// Every place this product asks Jev something.
