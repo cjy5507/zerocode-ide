@@ -6006,6 +6006,12 @@ fn no_label_reaches_the_window_hardcoded() {
         // UI language (docs/design/composer-attachments.md §3) — the attach
         // harness pins the literal while the window speaks `en`.
         "const ATTACH_HEADER = \"첨부:\";",
+        // A reader, not a label: `HELPER_CONDITION_MARKERS` finds a condition
+        // in the words the parent wrote to its helper, in the language they
+        // were written in, so the window's language never changes it — the
+        // Korean row of that table quotes the instruction, it never speaks to
+        // the person (t-15683).
+        r"/지\s?마(?:세요|십시오|라|요)?|지\s?말(?:고|라|것|아)|말\s?것|금지|읽기\s?전용|안\s?됩니다|하면\s?안|않도록/,",
     ];
 
     // The catalog-bearing part is exactly one file. The byte range used
@@ -7963,9 +7969,10 @@ fn a_helpers_line_counts_its_tool_uses_whoever_counted_them() {
     );
     assert_eq!(
         window.matches("toolUsesWords(").count(),
-        5,
+        6,
         "the count's word grew a second speller — the definition, the row \
-         builder, the re-dress's fit, the page head and the conversation's \
+         builder, the re-dress's fit, the page head, the helper page's own \
+         head (`updateHelperPageHead`, t-15683) and the conversation's \
          helpers at work (`helperSpent`, t-6323 A6) are its only mentions"
     );
     for language in ["en", "ja", "zh", "es"] {
