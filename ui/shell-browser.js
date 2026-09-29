@@ -4183,18 +4183,21 @@ async function deliverAnnotations(host, tab) {
   if (held.length === 0) return;
   if (browserGrab !== null && browserGrab.label === tab.label) stopBrowserGrab(true);
   const button = host.querySelector(".browser-annotate");
+  // 어디에 단 주석인지는 전달 전에 한 번 정한다 — 초안이 말하는 페이지와 기록이
+  // 적는 발행물이 같은 판정에서 나온다(t-14586).
+  const place = await artifactFeedbackPlace(tab);
   // 아티팩트의 판에 단 주석은 만든 판이 받을 곳의 기본이고(첫 줄, 초점), 초안은
   // 사람이 쓰던 입력 뒤에 붙여 넣는다 — 지우는 키도 Enter도 없다(t-11958).
   await openSendToAgent(
     button,
-    formatAnnotationsText(tab.label, tab.url, artifactFeedbackContext(tab)),
+    formatAnnotationsText(tab.label, tab.url, place?.context ?? ""),
     async (recipient) => {
-      // 전달된 주석은 떠난다 — 뱃지가 비고, 다음 묶음이 새로 모인다. 아티팩트의
-      // 판에 단 것이면 떠난 뒤에도 그 페이지의 기록에 남는다(t-11959).
+      // 전달된 주석은 떠난다 — 뱃지가 비고, 다음 묶음이 새로 모인다. 아티팩트
+      // 탭에서 단 것이면 떠난 뒤에도 그 발행물의 기록에 남는다(t-11959, t-14586).
       const delivered = browserAnnotations.get(tab.label) ?? [];
       browserAnnotations.delete(tab.label);
       refreshGrabButtons();
-      await recordArtifactFeedback(tab, delivered, recipient);
+      await recordArtifactFeedback(place, delivered, recipient);
     },
     { submit: false, maker: artifactFactsMaker(tab.artifact), append: true },
   );
