@@ -1127,7 +1127,7 @@ mod model_catalog_overlay_tests {
 /// class and is untouched by Phase 8.
 #[cfg(test)]
 mod golden_parity_tests {
-    use super::{class_for_model, effort_ceiling_for_model, family_for_model, release_rank_for_model, tiers_for_model_under};
+    use super::{class_for_model, effort_ceiling_for_model, family_for_model, release_rank_for_model, tiers_for_model};
     use crate::model_router::{EffortCeiling, ModelTier};
 
     struct Expected {
@@ -1137,6 +1137,11 @@ mod golden_parity_tests {
         rank: u32,
         ceiling: EffortCeiling,
         tiers: &'static [ModelTier],
+    }
+
+    /// The tiers the table holds each row to, as the classifier gives them.
+    fn golden_tiers(id: &str) -> Vec<ModelTier> {
+        tiers_for_model(id).0
     }
 
     #[test]
@@ -1203,14 +1208,6 @@ mod golden_parity_tests {
             "golden table is out of sync with api::provider_catalog(); update both together"
         );
 
-        // The shipped size/family/flagship words, handed in: the words in force
-        // live in one store for the whole process, and
-        // `prior_tables_come_from_the_catalog` publishes `small_tokens:
-        // ["tiny"]` for a moment while it runs beside this table. Read from
-        // the store, spark lost its `spark` size word in that moment and a
-        // parallel gate failed "gpt-5.3-codex-spark missing expected tier
-        // Fast" (t-15568).
-        let shipped = api::shipped_router_priors();
         for expected in &table {
             let id = expected.id;
             assert_eq!(family_for_model(id), expected.family, "family drifted for {id}");
@@ -1221,7 +1218,7 @@ mod golden_parity_tests {
                 expected.ceiling,
                 "effort ceiling drifted for {id}"
             );
-            let (tiers, _provenance) = tiers_for_model_under(id, shipped);
+            let tiers = golden_tiers(id);
             for tier in expected.tiers {
                 assert!(tiers.contains(tier), "{id} missing expected tier {tier:?}");
             }
@@ -1234,18 +1231,23 @@ mod golden_parity_tests {
         }
     }
 
-    /// The table's isolation holds only while the classifier reads the table
-    /// it is handed: one that went back to the process store would pass here
-    /// alone and fail again only beside a publish. Handed the words
-    /// `prior_tables_come_from_the_catalog` publishes, spark leaves the Fast
-    /// tier; handed the shipped ones, it keeps it — whatever the store names.
+    /// The table's tiers hold while other size words are published: the
+    /// moment `prior_tables_come_from_the_catalog` makes beside this table in
+    /// a parallel run, made here on purpose under the env lock. Read from the
+    /// store in that moment, spark lost its `spark` size word and a parallel
+    /// gate failed "gpt-5.3-codex-spark missing expected tier Fast"
+    /// (t-15568).
     #[test]
-    fn the_golden_tiers_are_read_from_the_priors_handed_in() {
-        use ModelTier::Fast;
-
-        let shipped = api::shipped_router_priors();
-        let published = api::RouterPriors { small_tokens: vec!["tiny".to_string()], ..shipped.clone() };
-        assert!(tiers_for_model_under("gpt-5.3-codex-spark", shipped).0.contains(&Fast));
-        assert!(!tiers_for_model_under("gpt-5.3-codex-spark", &published).0.contains(&Fast));
+    fn the_golden_table_keeps_spark_fast_while_other_size_words_are_published() {
+        let _lock = crate::test_env_lock();
+        api::refresh_model_registry_from_json(
+            r#"{"models":[],"aliases":[],"priors":{"small_tokens":["tiny"]}}"#,
+        );
+        let tiers = golden_tiers("gpt-5.3-codex-spark");
+        api::refresh_model_registry_from_json(r#"{"models":[],"aliases":[]}"#);
+        assert!(
+            tiers.contains(&ModelTier::Fast),
+            "the published size words reached the golden table: spark is {tiers:?}"
+        );
     }
 }
