@@ -1797,6 +1797,7 @@ export async function testConversationSteps(browser, origin, ok) {
   await stepsFocusKeepsOpen(browser, origin, ok);
   await stepsSpaceOnALine(browser, origin, ok);
   await stepsSpaceBesideTheGraph(browser, origin, ok);
+  await stepsStillPage(browser, origin, ok);
 }
 
 /* C1–C4, C9 — the rows the fixture comes to, closed, then pressed. */
@@ -2921,6 +2922,57 @@ async function stepsSpaceBesideTheGraph(browser, origin, ok) {
       JSON.stringify({ held, released }),
     );
     ok("C18: the graph beside the page raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C16 — asked for less motion, the whole page holds still, and the mark of a
+ * step that is still out with it (C6 holds the foot line to it): swept over
+ * the page, the pulse of the mark on a step's line, the foot line's ring, the
+ * fades and the dots. The same page is swept again with motion allowed and
+ * moves, so the stillness is the guard's and not an empty page's — the guard
+ * the person approved in the draft (`.run .dot, .spin { animation: none }`). */
+async function stepsStillPage(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await openConversation(page, stepsFixture(), { status: "working" });
+    await installStepsProbe(page);
+    await page.evaluate(async () => {
+      const FOOTER = "/Users/dev/shop-app/src/screens/profile/Footer.tsx";
+      window.__CONVERSATION__.turns.push({
+        role: "tool", text: `Read · ${FOOTER}`, at_ms: 1_790_000_100_000, tool: { call_id: "live1", name: "Read", kind: "read", input: FOOTER, is_error: false },
+      });
+      await pollHelperPages();
+    });
+    const sweep = () => page.evaluate(async () => {
+      const { list, settle } = window.__STEPS__;
+      await settle();
+      const runningIn = (node, options) => node?.getAnimations(options).filter((one) => one.playState === "running") ?? [];
+      const step = list().querySelector(":scope > .is-tool.is-live");
+      return {
+        asked: matchMedia("(prefers-reduced-motion: reduce)").matches,
+        live: step !== null,
+        page: runningIn(document.querySelector("#worker-view"), { subtree: true }).map((one) => one.animationName ?? one.transitionProperty ?? "?"),
+        mark: runningIn(step?.querySelector(":scope > .helper-step-line > .helper-step-icon")).map((one) => one.animationName ?? "?"),
+        status: runningIn(list().querySelector(":scope > .helper-status"), { subtree: true }).length,
+      };
+    });
+    const still = await sweep();
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    const moving = await sweep();
+    ok(
+      "C16: asked for less motion, nothing on the conversation page animates — swept over the whole page with a step still out: no pulse on the step's mark, no ring or fade on the foot line, no dot",
+      still.asked && still.live && still.page.length === 0 && still.mark.length === 0 && still.status === 0,
+      JSON.stringify(still),
+    );
+    ok(
+      "C16: with motion allowed the same page moves — the mark of the step that is out pulses and the foot line animates — so the stillness above is the guard's, not an empty page's",
+      !moving.asked && moving.live && moving.mark.includes("helper-live-pulse") && moving.status >= 1,
+      JSON.stringify(moving),
+    );
+    ok("C16: sweeping the page for motion raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }
