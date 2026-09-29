@@ -36104,8 +36104,13 @@ const thoughtRows = await page.evaluate(async () => {
   seen.toolNameExpected = t("worker.stepRead", "파일 읽기");
   seen.toolArg = tool?.querySelector(".helper-step-target")?.textContent;
   seen.toolSettled = tool ? !tool.classList.contains("is-live") : false;
-  // 입력줄 상자: textarea 에 초점이 와도 링은 상자의 테두리 하나뿐이다.
-  const composer = face.querySelector(".worker-composer");
+  // 입력줄 상자: textarea 에 초점이 와도 링은 상자의 테두리 하나뿐이다. 입력줄은
+  // 판 자신의 대화에 서고, 도우미의 페이지에는 없다(t-15683).
+  window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
+  setActiveTab(owner.id);
+  el("view-toggle-chat").click();
+  await new Promise((done) => setTimeout(done, 150));
+  const composer = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat .worker-composer`);
   const box = composer?.querySelector(".worker-composer-box");
   box?.focus();
   await new Promise((done) => setTimeout(done, 30));
@@ -36116,6 +36121,7 @@ const thoughtRows = await page.evaluate(async () => {
   if (thought) thought.open = false;
   for (const tab of [...tabs]) dropTab(tab.id);
   for (const at of [...termViews.keys()]) dropTermView(at);
+  delete window.__ANSWER__.pane_log;
   return seen;
 });
 ok(
@@ -36257,7 +36263,18 @@ const chatFace = await page.evaluate(async () => {
     calls.push(["key", args.term, args.press.key]);
     return null;
   };
-  const composer = face.querySelector(".worker-composer");
+  // A helper's page has no composer and no door — a footer stands where they
+  // stood (t-15683; the `workers` suite holds its words). The one composer is
+  // the pane's own conversation's, and it is measured there: the same road, the
+  // same box, the same tokens.
+  seen.helperNoComposer = face.querySelector(".worker-composer") === null &&
+    face.querySelector(".worker-composer-door") === null && face.querySelector(".chat-dock") === null;
+  seen.noWhereLine = face.querySelector(".worker-where") === null;
+  window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
+  setActiveTab(owner.id);
+  el("view-toggle-chat").click();
+  await new Promise((done) => setTimeout(done, 150));
+  const composer = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat .worker-composer`);
   seen.composerStands = Boolean(composer);
   const box = composer?.querySelector(".worker-composer-box");
   // The parent is between turns for the sends below: words typed while it
@@ -36285,6 +36302,11 @@ const chatFace = await page.evaluate(async () => {
     box?.dispatchEvent(key);
     return key.defaultPrevented;
   };
+  // A key is pressed in the box the person has focused. On a pane's own page the
+  // active tab is a terminal, so the window's key router takes a key that lands
+  // anywhere but a focused field for the terminal (`keyboardTarget()`): an
+  // unfocused box would hand Shift+Enter to the pane's PTY.
+  box?.focus();
   if (box) box.value = "two lines";
   seen.shiftEnterKeeps = press(true) === false && calls.length === 2;
   seen.enterSends = press(false) === true;
@@ -36300,16 +36322,9 @@ const chatFace = await page.evaluate(async () => {
     box.value = "";
     box.dispatchEvent(new Event("input", { bubbles: true }));
   }
-  // 상자 아래 도구 줄: 왼쪽 문 알약이 부모 탭을 열고, 오른쪽 원형 보내기
-  // 단추는 아이콘만 들되 이름(aria-label)을 말한다.
-  const door = composer?.querySelector(".worker-composer-door");
-  seen.doorWords = door?.textContent.trim();
-  seen.wantDoor = t("worker.inside", "{{title}} 안에서", { title: tabLabel(owner) });
-  const helperTab = `helper:${term}:chatty`;
-  door?.click();
-  seen.doorLeads = activeTabId === owner.id;
-  setActiveTab(helperTab);
-  seen.noWhereLine = face.querySelector(".worker-where") === null;
+  // 상자 아래 도구 줄: 오른쪽 원형 보내기 단추는 아이콘만 들되 이름(aria-label)을
+  // 말한다. 판 자신의 페이지에는 문이 없다 — 부모가 곧 그 판이다.
+  seen.noDoorOnPane = composer?.querySelector(".worker-composer-door") === null;
   const send = composer?.querySelector(".worker-composer-send");
   const sendStyle = send ? getComputedStyle(send) : null;
   // 작업 중이면 같은 자리에서 중지 버튼이 된다 — 이름은 모드를 따라가고,
@@ -36331,7 +36346,7 @@ const chatFace = await page.evaluate(async () => {
   seen.composerRadius = getComputedStyle(composer).borderRadius;
   seen.wantComposerRadius = root.getPropertyValue("--chat-radius-composer").trim();
   // The composer floats in the extension's dock, no wider than the token.
-  const chatDock = face.querySelector(".chat-dock");
+  const chatDock = composer?.closest(".chat-dock") ?? null;
   seen.dockMax = chatDock ? getComputedStyle(chatDock).maxWidth : "";
   seen.wantDockMax = root.getPropertyValue("--chat-dock-max").trim();
   // The composer's focus edge is the agent's accent.
@@ -36347,6 +36362,7 @@ const chatFace = await page.evaluate(async () => {
   delete window.__ANSWER__.subagent_log;
   delete window.__ANSWER__.term_paste;
   delete window.__ANSWER__.term_key;
+  delete window.__ANSWER__.pane_log;
   tell("hook:subagent", { term, rows: [] });
   tell("term:exited", { term });
   await new Promise((done) => setTimeout(done, 40));
@@ -36919,23 +36935,19 @@ const helperWide = await page.evaluate(async () => {
   seen.fillsPane = Math.abs(proseBox.width - (listBox.width - 2 * gutter)) <= 2;
   seen.centered =
     Math.abs((proseBox.left - listBox.left) - (listBox.right - proseBox.right)) <= 2;
-  // The composer floats in the extension's dock: inset from the pane's edges,
-  // no wider than the token, centered on the pane's axis, and the composer
-  // as wide as the dock.
-  const rootTokens = getComputedStyle(document.documentElement);
-  const dockInset = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-inset"));
-  const dockMax = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-max"));
+  // Where the composer floated in the extension's dock, a helper's page stands
+  // its footer (t-15683): as wide as the pane, with its one button inside it.
   const faceBox = face.getBoundingClientRect();
-  const dockBox = face.querySelector(".chat-dock")?.getBoundingClientRect() ?? null;
-  seen.dockWidth = dockBox ? Math.round(dockBox.width) : 0;
-  seen.wantDockWidth = Math.round(Math.min(faceBox.width - 2 * dockInset, dockMax));
-  seen.dockCentered = dockBox
-    ? Math.abs((dockBox.left - faceBox.left) - (faceBox.right - dockBox.right)) <= 2
+  const foot = face.querySelector(".helper-foot");
+  const footBox = foot?.getBoundingClientRect() ?? null;
+  seen.footFillsPane = footBox
+    ? Math.abs(footBox.left - faceBox.left) <= 2 && Math.abs(footBox.right - faceBox.right) <= 2
     : false;
-  const composerBox = face.querySelector(".worker-composer")?.getBoundingClientRect() ?? null;
-  seen.composerOnAxis = composerBox && dockBox
-    ? Math.abs(composerBox.left - dockBox.left) <= 2 && Math.abs(composerBox.right - dockBox.right) <= 2
+  const speakBox = foot?.querySelector(".helper-foot-speak")?.getBoundingClientRect() ?? null;
+  seen.speakInside = speakBox && footBox
+    ? speakBox.left >= footBox.left && speakBox.right <= footBox.right
     : false;
+  seen.noDock = face.querySelector(".chat-dock") === null && face.querySelector(".worker-composer") === null;
   // While the helper runs, the status line under the transcript says the
   // agent's word on the transcript's axis, and the tail calls are out.
   const status = face.querySelector(".helper-status");
@@ -36998,9 +37010,9 @@ const helperNarrow = await page.evaluate(async (term) => {
   seen.groupInside = lastTool
     ? lastTool.getBoundingClientRect().right <= listBox.right + 1
     : false;
-  const box = face.querySelector(".worker-composer-box");
-  seen.composerInside = box
-    ? box.getBoundingClientRect().right <= listBox.right + 1
+  const speak = face.querySelector(".helper-foot-speak");
+  seen.footInside = speak
+    ? speak.getBoundingClientRect().right <= listBox.right + 1
     : false;
   // On the narrow pane the tool rows still stand under their kinds' words.
   seen.liveStillShows = lastTool !== null &&
@@ -37021,15 +37033,14 @@ const helperNarrow = await page.evaluate(async (term) => {
 }, helperWide.term);
 await page.setViewportSize({ width: 1280, height: 860 });
 ok(
-  "the helper conversation takes the pane behind the list's gutters, wide or narrow, with the composer floating in the extension's centered dock and the live line on the transcript's axis",
+  "the helper conversation takes the pane behind the list's gutters, wide or narrow, with the footer standing where the composer stood — as wide as the pane, its one button inside it — and the live line on the transcript's axis",
   helperWide.paneWidth === 1200 &&
     helperWide.gutter > 0 && helperWide.fillsPane &&
-    helperWide.centered && helperWide.dockWidth === helperWide.wantDockWidth &&
-    helperWide.dockWidth < helperWide.columnWidth &&
-    helperWide.dockCentered && helperWide.composerOnAxis &&
+    helperWide.centered && helperWide.footFillsPane && helperWide.speakInside &&
+    helperWide.noDock &&
     helperNarrow.paneWidth === 420 && helperNarrow.fillsPane &&
     helperNarrow.gutterShrank && helperNarrow.noSideScroll &&
-    helperNarrow.groupInside && helperNarrow.composerInside,
+    helperNarrow.groupInside && helperNarrow.footInside,
   JSON.stringify({ helperWide, helperNarrow }),
 );
 ok(
@@ -37043,8 +37054,8 @@ ok(
 );
 
 ok(
-  "the composer under a helper page sends to the parent pane the measured way: paste, one breath, Enter — and an empty box sends nothing",
-  chatFace.composerStands &&
+  "the composer of a pane's own conversation sends to the pane the measured way: paste, one breath, Enter — and an empty box sends nothing — while a helper's page stands none",
+  chatFace.helperNoComposer && chatFace.composerStands &&
     chatFace.pasteFirst &&
     chatFace.sent &&
     chatFace.boxCleared &&
@@ -37052,16 +37063,138 @@ ok(
   JSON.stringify(chatFace),
 );
 ok(
-  "the composer is Codex desktop's: a growing textarea where Enter sends and Shift+Enter adds a line, a door pill to the parent tab on the left, the run's agent pill and a round icon-only send button on the right — all from --chat-* tokens, and no context line left under the head",
+  "the composer is Codex desktop's: a growing textarea where Enter sends and Shift+Enter adds a line, no door pill on the pane's own page, the run's agent pill and a round icon-only send button on the right — all from --chat-* tokens, and no context line left under a helper's head",
   chatFace.boxIsTextarea && chatFace.shiftEnterKeeps && chatFace.enterSends &&
     chatFace.enterSent && chatFace.grows &&
-    chatFace.doorWords === chatFace.wantDoor && chatFace.doorLeads && chatFace.noWhereLine &&
+    chatFace.noDoorOnPane && chatFace.noWhereLine &&
     chatFace.sendNamed && chatFace.sendSquare && chatFace.sendFromToken &&
     chatFace.composerRadius === chatFace.wantComposerRadius &&
     chatFace.composerRadius !== "" && chatFace.dockMax === chatFace.wantDockMax && chatFace.dockMax !== "" &&
     chatFace.modelWords === chatFace.wantModel && chatFace.wantModel !== null,
   JSON.stringify(chatFace),
 );
+
+/* What a helper page's composer stood on its own page — the dock's measure, the
+ * frame that holds still, the draft that survives a poll — the pane's own
+ * conversation stands and holds now that a helper's page has a footer
+ * (t-15683). The measures are the ones the helper's page was held to. */
+const paneDock = await page.evaluate(async () => {
+  const seen = {};
+  const term = await openTermTab({ placement: "tab" });
+  const tell = (name, payload) => {
+    for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+  };
+  const leave = async () => {
+    delete window.__ANSWER__.pane_log;
+    tell("term:exited", { term });
+    await new Promise((done) => setTimeout(done, 40));
+    window.__PANES__ = [];
+    for (const tab of [...tabs]) dropTab(tab.id);
+    for (const at of [...termViews.keys()]) dropTermView(at);
+    return seen;
+  };
+  tell("hook:agent", { term, state: "idle", agent: "zo", session: "s-pane-dock" });
+  await window.__PAINTED__();
+  const turns = [
+    { role: "user", text: "열 폭을 재라" },
+    { role: "assistant", text: "읽는 폭은 눈보다 짧아야 합니다." },
+    ...Array.from({ length: 30 }, (_, i) => ({ role: "assistant", text: `문단 ${i}` })),
+  ];
+  window.__ANSWER__.pane_log = ({ after }) => ({
+    found: true, next: turns.length, turns: turns.slice(after ?? 0), skipped: false, more: false, folded: false,
+  });
+  el("view-toggle-chat").click();
+  await new Promise((done) => setTimeout(done, 200));
+  const face = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
+  seen.stands = face !== null;
+  if (!face) return leave();
+  // 넓은 판 하나를 직접 세운다 — 앞선 검사가 남긴 쪽 나눔에 기대지 않는다.
+  face.style.flex = "none";
+  face.style.width = "1200px";
+  await new Promise(requestAnimationFrame);
+  const list = face.querySelector(".helper-turns");
+  const prose = face.querySelector(".helper-turn.is-assistant");
+  if (!list || !prose) {
+    seen.noList = true;
+    return leave();
+  }
+  const listBox = list.getBoundingClientRect();
+  const proseBox = prose.getBoundingClientRect();
+  seen.paneWidth = Math.round(listBox.width);
+  seen.columnWidth = Math.round(proseBox.width);
+  // The composer floats in the extension's dock: inset from the pane's edges,
+  // no wider than the token, centered on the pane's axis, and the composer
+  // as wide as the dock.
+  const rootTokens = getComputedStyle(document.documentElement);
+  const dockInset = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-inset"));
+  const dockMax = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-max"));
+  const faceBox = face.getBoundingClientRect();
+  const dockBox = face.querySelector(".chat-dock")?.getBoundingClientRect() ?? null;
+  seen.dockWidth = dockBox ? Math.round(dockBox.width) : 0;
+  seen.wantDockWidth = Math.round(Math.min(faceBox.width - 2 * dockInset, dockMax));
+  seen.dockCentered = dockBox
+    ? Math.abs((dockBox.left - faceBox.left) - (faceBox.right - dockBox.right)) <= 2
+    : false;
+  const composerBox = face.querySelector(".worker-composer")?.getBoundingClientRect() ?? null;
+  seen.composerOnAxis = composerBox && dockBox
+    ? Math.abs(composerBox.left - dockBox.left) <= 2 && Math.abs(composerBox.right - dockBox.right) <= 2
+    : false;
+  // 고정 뼈대: 스크롤은 전사만 한다. 머리와 입력줄은 전사를 굴려도 그대로.
+  seen.frame = getComputedStyle(face).overflowY === "hidden" && getComputedStyle(list).overflowY === "auto";
+  const head = face.querySelector(".worker-head");
+  const composerForm = face.querySelector(".worker-composer");
+  list.scrollTop = list.scrollHeight;
+  await new Promise(requestAnimationFrame);
+  const headTop = head?.getBoundingClientRect().top ?? null;
+  const composerBottom = composerForm?.getBoundingClientRect().bottom ?? null;
+  list.scrollTop = 0;
+  await new Promise(requestAnimationFrame);
+  seen.scrolls = list.scrollHeight > list.clientHeight;
+  seen.frameStays = head !== null && composerForm !== null &&
+    Math.abs(head.getBoundingClientRect().top - headTop) <= 1 &&
+    Math.abs(composerForm.getBoundingClientRect().bottom - composerBottom) <= 1;
+  // A poll appends only what arrived and leaves the composer its focus and
+  // its half-typed sentence.
+  const box = face.querySelector(".worker-composer-box");
+  box?.focus();
+  if (box) {
+    box.value = "쓰다 만 문장";
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  const rowsBefore = list.querySelectorAll(":scope > [data-turn]").length;
+  turns.push({ role: "assistant", text: "새로 온 말" }, { role: "assistant", text: "또 새 말" });
+  await pollHelperPages();
+  await new Promise((done) => setTimeout(done, 60));
+  seen.appended = list.querySelectorAll(":scope > [data-turn]").length === rowsBefore + 2;
+  seen.composerHeld = box !== null && document.activeElement === box && box.value === "쓰다 만 문장";
+  if (box) box.value = "";
+  // 좁아지면 입력 상자도 판 안에 남는다.
+  face.style.width = "420px";
+  await new Promise(requestAnimationFrame);
+  const narrowList = list.getBoundingClientRect();
+  seen.narrowWidth = Math.round(narrowList.width);
+  seen.composerInside = box ? box.getBoundingClientRect().right <= narrowList.right + 1 : false;
+  seen.composerOn = composerForm ? composerForm.getBoundingClientRect().bottom <= innerHeight + 1 : false;
+  face.style.flex = "";
+  face.style.width = "";
+  return leave();
+});
+ok(
+  "the pane's own conversation floats its composer in the extension's centered dock — inset from the pane's edges, no wider than the token, the composer as wide as the dock, and inside the pane and on screen when it narrows — the measure a helper's page stood before it got a footer",
+  paneDock.stands && paneDock.paneWidth === 1200 &&
+    paneDock.dockWidth === paneDock.wantDockWidth && paneDock.dockWidth > 0 &&
+    paneDock.dockWidth < paneDock.columnWidth &&
+    paneDock.dockCentered && paneDock.composerOnAxis &&
+    paneDock.narrowWidth === 420 && paneDock.composerInside && paneDock.composerOn,
+  JSON.stringify(paneDock),
+);
+ok(
+  "the pane's own conversation holds its frame and its draft: only the transcript scrolls while the head and the composer keep their places, and a poll that appends turns leaves the composer its focus and its half-typed sentence",
+  paneDock.frame && paneDock.scrolls && paneDock.frameStays &&
+    paneDock.appended && paneDock.composerHeld,
+  JSON.stringify(paneDock),
+);
+
 
 /* 입력줄 옆 「+」 — 파일·폴더·이미지 첨부 (t-2993). 헬퍼 입력줄의 핀 바로 뒤에:
  * 같은 입력줄, 같은 보내기 길 위에 칩이 얹힌다. */
@@ -37286,19 +37419,20 @@ const flatTranscript = await page.evaluate(async () => {
   seen.liveTail = liveLine !== null && liveLine === [...list.querySelectorAll(":scope > [data-turn]")].at(-1) &&
     liveLine.nextElementSibling === statusLine &&
     list.querySelectorAll(".is-live").length === 1 && statusLine !== null && !statusLine.hidden;
-  // 고정 뼈대: 스크롤은 전사만 한다. 머리·문맥·입력줄은 전사를 굴려도 그대로.
+  // 고정 뼈대: 스크롤은 전사만 한다. 머리와 바닥 줄(입력줄이 서던 자리)은 전사를
+  // 굴려도 그대로.
   seen.frame = getComputedStyle(face).overflowY === "hidden" &&
     getComputedStyle(list).overflowY === "auto";
   seen.widePadding = parseFloat(getComputedStyle(list).paddingLeft);
   const head = face.querySelector(".worker-head");
-  const composerForm = face.querySelector(".worker-composer");
+  const foot = face.querySelector(".helper-foot");
   const headTop = head.getBoundingClientRect().top;
-  const composerBottom = composerForm.getBoundingClientRect().bottom;
+  const footBottom = foot.getBoundingClientRect().bottom;
   list.scrollTop = 0;
   await new Promise(requestAnimationFrame);
   seen.frameStays =
     Math.abs(head.getBoundingClientRect().top - headTop) <= 1 &&
-    Math.abs(composerForm.getBoundingClientRect().bottom - composerBottom) <= 1;
+    Math.abs(foot.getBoundingClientRect().bottom - footBottom) <= 1;
   // 읽어 주는 지역과 키보드: 전사는 이름을 달고 탭 멈춤이 있으며, 접힘의
   // 문(「더 보기」, t-6323 A1)은 초점을 받고 잉크 고리를 입고 우물을 연다.
   seen.logLabeled = list.getAttribute("role") === "log" &&
@@ -37321,10 +37455,9 @@ const flatTranscript = await page.evaluate(async () => {
   cap?.click();
 
   // 무게의 실측 1 — 폴은 온 턴만 잇고, 상한은 DOM과 데이터를 함께 지운다.
-  const box = face.querySelector(".worker-composer-box");
+  // 쓰다 만 문장을 들던 입력줄이 없으니, 초점은 바닥 줄의 단추가 든다(t-15683).
+  const box = face.querySelector(".helper-foot-speak");
   box.focus();
-  box.value = "쓰다 만 문장";
-  box.dispatchEvent(new Event("input", { bubbles: true }));
   const rows0 = [...list.querySelectorAll(":scope > [data-turn]")];
   window.__ANSWER__.subagent_log = () => ({
     found: true,
@@ -37349,7 +37482,7 @@ const flatTranscript = await page.evaluate(async () => {
     lives[0].dataset.turn === "401";
   seen.followedTail =
     list.scrollHeight - list.scrollTop - list.clientHeight <= 2;
-  seen.composerHeld = document.activeElement === box && box.value === "쓰다 만 문장";
+  seen.footHeld = document.activeElement === box;
 
   // 무게의 실측 2 — 무변화 폴은 DOM을 한 번도 만지지 않는다.
   window.__ANSWER__.subagent_log = () => ({ found: true, next: 4010, turns: [] });
@@ -37435,7 +37568,7 @@ const flatNarrow = await page.evaluate(async () => {
   await new Promise(requestAnimationFrame);
   const face = document.getElementById("worker-view");
   const list = face.querySelector(".helper-turns");
-  const composer = face.querySelector(".worker-composer");
+  const foot = face.querySelector(".helper-foot");
   return {
     noSideScroll: list.scrollWidth <= list.clientWidth + 1 &&
       document.documentElement.scrollWidth <= innerWidth,
@@ -37450,7 +37583,7 @@ const flatNarrow = await page.evaluate(async () => {
       }
       return worst;
     })(),
-    composerOn: composer.getBoundingClientRect().bottom <= innerHeight + 1,
+    footOn: foot.getBoundingClientRect().bottom <= innerHeight + 1,
     frame: getComputedStyle(face).overflowY === "hidden" &&
       getComputedStyle(list).overflowY === "auto",
     // The pane's width as the window laid it out, for the day this goes red.
@@ -37485,23 +37618,23 @@ ok(
   JSON.stringify(flatTranscript),
 );
 ok(
-  "its skeleton is fixed — header, context and composer hold still, only the transcript scrolls, and the log region is named for keyboard and screen reader",
+  "its skeleton is fixed — header and footer hold still, only the transcript scrolls, and the log region is named for keyboard and screen reader",
   flatTranscript.frame && flatTranscript.frameStays &&
     flatTranscript.logLabeled && flatTranscript.capFocus && flatTranscript.capToggles,
   JSON.stringify(flatTranscript),
 );
 ok(
-  "a poll appends only what arrived: 400 rows keep their DOM identity, the cap drops data and DOM together, and the composer keeps focus and draft",
+  "a poll appends only what arrived: 400 rows keep their DOM identity, the cap drops data and DOM together, and the footer's button keeps the focus",
   flatTranscript.cappedCount === 400 && flatTranscript.identityHeld &&
     flatTranscript.appendedKeys && flatTranscript.liveMoved &&
-    flatTranscript.composerHeld && flatTranscript.quietMutations === 0 &&
+    flatTranscript.footHeld && flatTranscript.quietMutations === 0 &&
     flatTranscript.stillCapped && flatTranscript.hiddenQuiet,
   JSON.stringify({
     cappedCount: flatTranscript.cappedCount,
     identityHeld: flatTranscript.identityHeld,
     appendedKeys: flatTranscript.appendedKeys,
     liveMoved: flatTranscript.liveMoved,
-    composerHeld: flatTranscript.composerHeld,
+    footHeld: flatTranscript.footHeld,
     quietMutations: flatTranscript.quietMutations,
     stillCapped: flatTranscript.stillCapped,
     hiddenQuiet: flatTranscript.hiddenQuiet,
@@ -37519,11 +37652,11 @@ ok(
   }),
 );
 ok(
-  "the transcript survives light, reduced motion and 720px: token inks swap, folds stop easing, nothing overflows sideways and the composer stays on screen",
+  "the transcript survives light, reduced motion and 720px: token inks swap, folds stop easing, nothing overflows sideways and the footer stays on screen",
   flatLight.inkFromToken && flatLight.ink !== flatTranscript.darkInk &&
     flatLight.bg !== flatTranscript.darkBg &&
     flatReduced.cap === "0s" && flatReduced.door === "0s" &&
-    flatNarrow.noSideScroll && flatNarrow.composerOn && flatNarrow.frame &&
+    flatNarrow.noSideScroll && flatNarrow.footOn && flatNarrow.frame &&
     flatNarrow.light && flatNarrow.narrowPadding < flatTranscript.widePadding,
   JSON.stringify({ light: flatLight, reduced: flatReduced, narrow: flatNarrow }),
 );
@@ -55588,25 +55721,33 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       await settle(120);
       seen.codexHead = codexChat?.querySelector(".composer-slash-head")?.textContent ?? null;
       seen.wantCodexHead = `${agentName("codex")} 0.154.0 · ${t("composer.slash.sourceDocs", "문서 기준")}`;
-      // A helper's page keeps the door to its parent and speaks of the parent.
+      // A helper's page has no composer and so no door: its footer says which
+      // conversation directs it and speaks to that parent (t-15683; the `workers`
+      // suite holds the footer to its words).
       const owner = tabOfTerm(term);
       tell("hook:subagent", { term, rows: [{ id: "helper-1", name: "@helper", state: "done" }] });
       window.__ANSWER__.subagent_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
       await openHelperPage({ term, agent: "claude", worktree: owner.worktree, tab: owner }, { id: "helper-1", name: "@helper", state: "done" });
       await settle(120);
-      const helperComposer = document.querySelector("#worker-view .worker-composer");
-      seen.helperDoor = Boolean(helperComposer?.querySelector(".worker-composer-door"));
-      seen.helperPlaceholder = helperComposer?.querySelector(".worker-composer-box")?.placeholder;
-      seen.wantHelperPlaceholder = t("worker.say", "부모 에이전트에게 보내기…");
+      seen.helperStandsWithoutComposer = document.querySelectorAll(
+        "#worker-view .worker-composer, #worker-view .worker-composer-door, #worker-view .chat-dock",
+      ).length === 0 && document.querySelector("#worker-view .helper-foot .helper-foot-speak") !== null;
       // A page nobody has been answered on does not list `/copy` — a row
-      // that would do nothing when it is pressed is not drawn at all.
-      const helperBox = helperComposer?.querySelector(".worker-composer-box");
-      if (helperBox) { helperBox.value = "/"; helperBox.dispatchEvent(new Event("input", { bubbles: true })); }
+      // that would do nothing when it is pressed is not drawn at all. A pane's
+      // conversation that holds only the person's words is such a page.
+      const quietTerm = await openTermTab({ placement: "tab" });
+      tell("hook:agent", { term: quietTerm, state: "idle", agent: "claude", session: "s-quiet", resumable: false, model: "claude-fable-5-1" });
+      await window.__PAINTED__();
+      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
+      el("view-toggle-chat").click();
+      await settle(150);
+      const quietBox = document.querySelector(`.pane-slot[data-term="${quietTerm}"] .pane-chat .worker-composer-box`);
+      if (quietBox) { quietBox.value = "/"; quietBox.dispatchEvent(new Event("input", { bubbles: true })); }
       await settle(120);
-      const helperRows = [...document.querySelectorAll("#worker-view .composer-slash-row .composer-slash-name")]
+      const quietRows = [...document.querySelectorAll(`.pane-slot[data-term="${quietTerm}"] .pane-chat .composer-slash-row .composer-slash-name`)]
         .map((one) => one.textContent);
-      seen.helperRows = helperRows;
-      seen.copyUnlisted = helperRows.length > 0 && !helperRows.includes("/copy");
+      seen.helperRows = quietRows;
+      seen.copyUnlisted = quietRows.length > 0 && !quietRows.includes("/copy");
       delete window.__ANSWER__.term_paste; delete window.__ANSWER__.term_key;
       delete window.__ANSWER__.agent_models; delete window.__ANSWER__.slash_commands;
       delete window.__ANSWER__.pane_log; delete window.__ANSWER__.subagent_log;
@@ -55615,12 +55756,12 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       return seen;
     });
     ok(
-      "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page keeps its door and speaks of the parent",
+      "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page has no composer at all: its footer speaks to the parent instead",
       seen.placeholder === seen.wantPlaceholder && seen.noDoorOnOwnPane &&
         JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-mode", "worker-composer-context", "worker-composer-agents", "worker-composer-right"]) &&
         seen.agentsPillQuiet &&
         seen.chipMark === "✻" && seen.chipName === "Claude" && seen.chipModelRaw === " · claude-fable-5-1" &&
-        seen.helperDoor && seen.helperPlaceholder === seen.wantHelperPlaceholder,
+        seen.helperStandsWithoutComposer,
       JSON.stringify(seen),
     );
     ok(

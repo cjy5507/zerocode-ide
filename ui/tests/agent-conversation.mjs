@@ -94,6 +94,21 @@ export async function testAgentConversation(browser, origin, ok) {
       await page.locator(".helper-said table").count() === 1 &&
       await page.evaluate(() => window.__CHAT_INJECTED__ !== true && !document.querySelector(".helper-said [onerror]")));
 
+    // The composer stands on a pane's own conversation page: a helper's page has a
+    // footer where it stood (t-15683). The sends below are the composer's, so they
+    // ride a pane's conversation (zo, no wire — the transcript view stays), the road a
+    // helper's page used to borrow. The helper's page keeps the fit checks at the end.
+    await page.evaluate(async () => {
+      const term = await openTermTab({ placement: "tab" });
+      paneAgents.set(term, "zo");
+      hookStates.set(term, "working");
+      window.__HELPER_TAB__ = window.__CHAT_TAB__;
+      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "assistant", text: "대기 중입니다." }],
+        skipped: false, more: false, folded: false, model: "claude-opus-5" });
+      await setPaneChat(term, true);
+      window.__CHAT_TAB__ = paneChatOf(term).tab;
+    });
+    await page.waitForSelector(".pane-chat .worker-composer-box");
     await page.fill(".worker-composer-box", "기존 초안");
     const draftBefore = await page.evaluate(() => window.__COUNTS__.term_paste ?? 0);
     // The window's own /artifact, reached through the `/` button's palette,
@@ -111,7 +126,7 @@ export async function testAgentConversation(browser, origin, ok) {
     await page.evaluate(() => {
       const term = window.__CHAT_TAB__.worker.term;
       for (const handler of window.__LISTENERS__["hook:agent"] ?? []) {
-        handler({ payload: { term, state: "idle", agent: "claude" } });
+        handler({ payload: { term, state: "idle", agent: paneAgents.get(term) } });
       }
     });
     const failure = await page.evaluate(async () => {
@@ -154,11 +169,11 @@ export async function testAgentConversation(browser, origin, ok) {
       let finish;
       window.__ANSWER__.term_paste = () => new Promise((done) => { finish = done; });
       const tab = window.__CHAT_TAB__;
-      const host = docHost(tab.pane, "worker");
+      const host = paneChatOf(tab.term).host;
       const previous = host.querySelector(".worker-composer-box");
       host.querySelector(".worker-composer").requestSubmit();
       host.__helperPage = null;
-      paintWorkerView(tab);
+      paintPaneChat(tab.term);
       const current = host.querySelector(".worker-composer-box");
       const state = { rebuilt: previous !== current, readOnly: current.readOnly,
         disabled: host.querySelector(".worker-composer-send").disabled };
@@ -173,6 +188,8 @@ export async function testAgentConversation(browser, origin, ok) {
     await mkdir("output/playwright/agent-conversation", { recursive: true });
     await page.evaluate(() => {
       delete window.__ANSWER__.term_paste;
+      window.__CHAT_TAB__ = window.__HELPER_TAB__;
+      setActiveTab(window.__CHAT_TAB__.id);
       const tab = window.__CHAT_TAB__;
       tab.worker.status = "done";
       tab.worker.endedAt = Date.now();

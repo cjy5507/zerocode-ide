@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { openWindowTestPage } from "./window-boot.mjs";
 
 /* Workers and helpers, on a page of their own (t-4017).
@@ -808,9 +809,11 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       };
       const settle = (ms = 100) => new Promise((done) => setTimeout(done, ms));
       const face = () => document.querySelector("#worker-view");
-      const chip = () => face()?.querySelector(".worker-composer-agent") ?? null;
-      const chipModel = () => chip()?.querySelector(".worker-composer-model-words")?.textContent ?? null;
-      const chipName = () => chip()?.querySelector(".worker-composer-pill-words")?.textContent ?? null;
+      // 페이지 머리의 모델 알약. 입력줄의 칩은 부모의 것이라 도우미의 페이지에서 나갔다(t-15683).
+      const chip = () => face()?.querySelector(".worker-head .helper-model") ?? null;
+      const chipModel = () => chip()?.querySelector(".helper-model-words")?.textContent ?? null;
+      const chipName = () => face()?.querySelector(".worker-head .worker-mark")?.getAttribute("aria-label") ?? null;
+      const repaintPage = () => paintWorkerView(tabs.find((one) => one.id === activeTabId));
       const asked = { id: "h-s", name: "@reader", state: "running", model: "model-s", requestedModel: "sonnet", effort: "high" };
       const blank = { id: "h-blank", name: "@blank", state: "running" };
       const rosterOf = (first) => [first, blank];
@@ -842,15 +845,18 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       seen.pageModel = chipModel();
       seen.pageName = chipName();
       seen.pageTip = chip()?.dataset.tip ?? "";
-      seen.pageOffersSwitch = chip()?.hasAttribute("aria-haspopup") === true ||
-        chip()?.querySelector(".worker-composer-chevron") !== null;
+      seen.pageAsked = chip()?.querySelector(".helper-model-asked")?.textContent ?? null;
+      seen.pageOffersSwitch = chip() === null ? null :
+        chip().tagName === "BUTTON" || chip().hasAttribute("aria-haspopup") ||
+        chip().querySelector(".worker-composer-chevron") !== null;
       chip()?.click();
       await settle();
       seen.pageOpenedAMenu = document.querySelector(".composer-menu") !== null;
       closeComposerMenu();
 
-      // 에이전트 알약의 메뉴: 같은 말.
-      face()?.querySelector(".worker-composer-agents")?.click();
+      // 에이전트 알약의 메뉴: 같은 말. 알약은 부모의 입력줄에 서므로 그 메뉴를 부모 판의
+      // 이름으로 연다 — 도우미의 페이지에는 입력줄이 없다.
+      openComposerAgentsMenu(document.body, { term, agent: "claude" });
       await settle();
       const menuRows = [...document.querySelectorAll(".composer-menu-item")];
       const subOf = (name) => menuRows
@@ -865,6 +871,8 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       seen.blankPageModel = chipModel();
       seen.blankPageName = chipName();
       seen.blankPageTip = chip()?.dataset.tip ?? "";
+      seen.blankPillWords = chip()?.textContent ?? null;
+      seen.blankPillUnknown = chip()?.classList.contains("is-unknown") === true;
 
       // 폴백이 돌던 도우미를 다른 모델로 옮기면 열린 페이지가 따라간다 — 요청은 그대로.
       setActiveTab(`helper:${term}:h-s`);
@@ -887,7 +895,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       await settle();
       seen.namedPage = chipModel();
       seen.namedRow = wornBy(rowOf("h-s"))?.textContent ?? null;
-      face()?.querySelector(".worker-composer-agents")?.click();
+      openComposerAgentsMenu(document.body, { term, agent: "claude" });
       await settle();
       seen.namedMenu = [...document.querySelectorAll(".composer-menu-item")]
         .find((one) => one.querySelector(".composer-menu-name")?.textContent === "@reader")
@@ -902,6 +910,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
         setLocale(code, { refresh: false, persist: false });
         paintWorktreeAgents();
         paintComposerChipsFor(term);
+        repaintPage();
         seen.tipsByLocale[code] = {
           row: wornBy(rowOf("h-s"))?.dataset.tip ?? "",
           chip: chip()?.dataset.tip ?? "",
@@ -910,6 +919,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       setLocale(wore, { refresh: false, persist: false });
       paintWorktreeAgents();
       paintComposerChipsFor(term);
+      repaintPage();
 
       // 거꾸로도 새지 않는다: 도우미의 전사가 말한 모델은 부모 판의 모델이 아니다.
       // 모델을 모르는 부모 판 밑의 도우미 페이지를 폴하면, 전사의 model-s가 그
@@ -958,15 +968,16 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       JSON.stringify(helperOwnModel),
     );
     ok(
-      "a helper's page chip says the helper's model and the agent's name, never the pane's, and does not offer to switch it",
-      helperOwnModel.pageModel === " · model-s" &&
+      "a helper's page header pill says the helper's model, names the agent to a screen reader, shows what was asked beside it, never says the pane's, and does not offer to switch it",
+      helperOwnModel.pageModel === "model-s" &&
         helperOwnModel.pageName === "Claude" &&
+        helperOwnModel.pageAsked?.includes("sonnet") === true &&
         helperOwnModel.pageOffersSwitch === false &&
         helperOwnModel.pageOpenedAMenu === false,
       JSON.stringify(helperOwnModel),
     );
     ok(
-      "the tip on a helper's chip and row says what was asked and what ran, and how hard it thinks",
+      "the tip on a helper's header pill and row says what was asked and what ran, and how hard it thinks",
       helperOwnModel.pageTip.includes("sonnet") && helperOwnModel.pageTip.includes("model-s") &&
         helperOwnModel.pageTip.includes("high") &&
         helperOwnModel.helperRowTip.includes("sonnet") && helperOwnModel.helperRowTip.includes("model-s"),
@@ -980,30 +991,33 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       JSON.stringify(helperOwnModel),
     );
     ok(
-      "a helper whose vendor names no model shows the agent's name alone on its page, with no model and none of its parent's",
-      helperOwnModel.blankPageModel === "" &&
+      "a helper whose vendor names no model shows the agent's name alone in a muted header pill, with no model and none of its parent's, and the tip says the vendor did not tell",
+      helperOwnModel.blankPageModel === null &&
+        helperOwnModel.blankPillUnknown === true &&
+        helperOwnModel.blankPillWords === "Claude" &&
         helperOwnModel.blankPageName === "Claude" &&
+        helperOwnModel.blankPageTip.length > 0 &&
         helperOwnModel.blankPageTip.includes("model-o") === false,
       JSON.stringify(helperOwnModel),
     );
     ok(
       "a helper moved to another model is followed by its open page and its row, the request stays in the tip, and a page outlives its roster row with the last model it knew",
-      helperOwnModel.movedModel === " · model-t" &&
+      helperOwnModel.movedModel === "model-t" &&
         helperOwnModel.movedTip.includes("sonnet") && helperOwnModel.movedTip.includes("model-t") &&
         helperOwnModel.movedTip.includes("model-s") === false &&
         helperOwnModel.movedRow === "model-t" &&
-        helperOwnModel.keptModel === " · model-t",
+        helperOwnModel.keptModel === "model-t",
       JSON.stringify(helperOwnModel),
     );
     ok(
-      "a model the catalog knows is worded by the catalog, the same on the page chip, the sidebar row and the agents menu",
-      helperOwnModel.namedPage === " · Model S" &&
+      "a model the catalog knows is worded by the catalog, the same on the page's header pill, the sidebar row and the agents menu",
+      helperOwnModel.namedPage === "Model S" &&
         helperOwnModel.namedRow === "Model S" &&
         helperOwnModel.namedMenu?.includes("Model S") === true,
       JSON.stringify(helperOwnModel),
     );
     ok(
-      "the tip on a helper's chip and row is worded by every catalog and says the same on both, with the vendor's ids untouched",
+      "the tip on a helper's header pill and row is worded by every catalog and says the same on both, with the vendor's ids untouched",
       Object.values(helperOwnModel.tipsByLocale).length === 4 &&
         new Set(Object.values(helperOwnModel.tipsByLocale).map((tip) => tip.row)).size === 4 &&
         new Set(Object.values(helperOwnModel.tipsByLocale).map((tip) => tip.chip)).size === 4 &&
@@ -1019,6 +1033,9 @@ export async function testWorkers({ browser, origin, ok, faults }) {
         helperOwnModel.leakedIntoParentRow.every((worn) => worn === null),
       JSON.stringify(helperOwnModel),
     );
+
+    // 페이지의 머리·띠·카드·푸터 (t-15683) — 아래 함수.
+    await testHelperPage(page, ok);
 
     /* ---- 그 다섯이 각각 무엇을 하고 있는가 (1-ey) ---------------------------
      *
@@ -1884,4 +1901,1079 @@ export async function testWorkers({ browser, origin, ok, faults }) {
   } finally {
     await page.close();
   }
+}
+
+/* ---- 도우미의 페이지: 누구의 것이고, 무엇을 시켰고, 사람이 여기서 무엇을 할 수 있는가 (t-15683) ----
+ *
+ * 화면(09-30): 도우미의 페이지에는 이름 하나뿐이었다. 어느 대화의 도우미인지도, 돌아가는 길도
+ * 없었고, 도우미가 받은 지시는 입력 상자를 닮은 말풍선에 문장 중간에서 잘려 서 있었고, 바닥의
+ * 입력줄은 「다음 메시지 대기열에 추가」라 했지만 그 말을 누가 받는지 알 수 없었다. 페이지는
+ * 이제 셋을 말한다: 이 도우미가 누구의 것인가(부모 대화로 가는 한 번의 누름, 같은 부모의 다른
+ * 도우미들의 띠), 무엇을 시켰는가(카드), 사람이 여기서 할 수 있는 일(부모 대화에 말하기 —
+ * 도우미 하나만 멈추는 길은 어느 에이전트에도 없어서 그 단추는 서지 않는다).
+ *
+ * 합성 이름과 합성 명부만 쓴다. */
+const HELPER_BRIEFS = {
+  // 문장 여섯. 조건 셋이 말로 적혀 있다: 금지, 범위, 분량.
+  stated:
+    "Review the retry loop in the sync module and report what you find. " +
+    "Start with the backoff timing, then check how errors are counted. " +
+    "Do not modify any files. Only read code under src/sync. " +
+    "Keep the report under 200 words. " +
+    "Write the report so a new teammate could follow it without opening the code.",
+  // 조건처럼 들리지만 세상의 사실을 말하는 문장뿐이다. 태그가 하나도 서면 안 된다.
+  facts:
+    "The tests do not pass on main. Only three of them fail. " +
+    "Investigate why the retry loop gives up early and report the cause.",
+  // 첫 문장 하나가 200자를 넘는다: 문장 중간에서 자를 수밖에 없다.
+  runOn:
+    "Go through every file under the sync module and compare how each of them handles a failed request and a timed out request and a request that came back with an empty body then write down for each file which of the three cases is handled and which is not so that the person reading it can see the gaps at a glance",
+  short: "Look at the retry loop and tell me why it gives up early.",
+};
+// [지시, 조건으로 인용돼야 할 절, 조건이 아니라 사실을 말하는 절] — 다섯 말로.
+const HELPER_BRIEFS_BY_LANGUAGE = {
+  ko: ["동기화 모듈의 재시도 루프를 살펴보고 원인을 보고해 주세요. 파일은 수정하지 마세요. 테스트가 통과하지 않는다.", "파일은 수정하지 마세요", "테스트가 통과하지 않는다"],
+  en: ["Review the retry loop in the sync module and report the cause. Never touch the lockfile. The build does not finish on main.", "Never touch the lockfile", "The build does not finish on main"],
+  ja: ["同期モジュールの再試行ループを調べて原因を報告してください。ファイルは変更しないでください。テストは通らない。", "ファイルは変更しないでください", "テストは通らない"],
+  zh: ["请检查同步模块的重试循环并报告原因。不要修改任何文件。测试没有通过。", "不要修改任何文件", "测试没有通过"],
+  es: ["Revisa el bucle de reintentos del módulo de sincronización e informa de la causa. No modifiques ningún archivo. Las pruebas no pasan en main.", "No modifiques ningún archivo", "Las pruebas no pasan en main"],
+};
+
+async function testHelperPage(page, ok) {
+  const agentSource = await readFile(new URL("../../crates/zerocode-core/src/agent.rs", import.meta.url), "utf8");
+  const catalogIds = [...agentSource.matchAll(/^ {8}id: "([^"]+)"/gm)].map((one) => one[1]);
+  const catalogNames = [...agentSource.matchAll(/^ {8}name: "([^"]+)"/gm)].map((one) => one[1]);
+  const shellSource = await readFile(new URL("../shell.js", import.meta.url), "utf8");
+  const styleSource = await readFile(new URL("../shell.css", import.meta.url), "utf8");
+
+  await page.evaluate(() => {
+    const tell = (name, payload) => {
+      for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+    };
+    const settle = (ms = 100) => new Promise((done) => setTimeout(done, ms));
+    const shown = (node) =>
+      Boolean(node) && node.getClientRects().length > 0 && getComputedStyle(node).visibility !== "hidden";
+    const words = (node) => (node?.textContent ?? "").replace(/\s+/g, " ").trim();
+    const logs = {};
+    const made = [];
+    const parts = () => {
+      const host = document.querySelector("#worker-view");
+      const find = (selector) => host?.querySelector(selector) ?? null;
+      return {
+        host,
+        head: find(".helper-head"),
+        crumb: find(".helper-crumb"),
+        sibs: find(".helper-sibs"),
+        card: find(".helper-brief"),
+        turns: find(".helper-turns"),
+        foot: find(".helper-foot"),
+      };
+    };
+    // 부모 판 하나와 그 명부. 도우미마다 전사가 있어 그 페이지가 열린다.
+    const scene = async (roster, { model = "model-o" } = {}) => {
+      window.__ANSWER__.subagent_log = ({ id, after }) => {
+        const all = logs[id];
+        if (!all) return { found: false };
+        return { found: true, next: all.length, turns: all.slice(after ?? 0), skipped: false };
+      };
+      const term = await openTermTab({ placement: "tab" });
+      made.push(term);
+      const owner = tabOfTerm(term);
+      tell("hook:agent", { term, state: "working", agent: "claude", session: `s-${term}`, model });
+      tell("hook:subagent", { term, rows: roster });
+      for (const row of roster) {
+        logs[row.id] ??= [
+          { role: "user", text: `Look into ${row.name}.` },
+          { role: "assistant", text: "reading" },
+        ];
+      }
+      await window.__PAINTED__();
+      return { term, owner };
+    };
+    const open = async (at, sub, { agent = "claude", brief } = {}) => {
+      if (brief !== undefined || !logs[sub.id]) {
+        logs[sub.id] = [
+          { role: "user", text: brief ?? `Look into ${sub.name}.` },
+          { role: "assistant", text: "reading" },
+        ];
+      }
+      await openHelperPage({ term: at.term, agent, worktree: at.owner.worktree, tab: at.owner }, sub);
+      await settle();
+      return parts();
+    };
+    const cleanup = async () => {
+      setConversationFocusView(false);
+      for (const term of made.splice(0)) {
+        if (paneChatOn(term)) await setPaneChat(term, false);
+        tell("hook:subagent", { term, rows: [] });
+        tell("term:exited", { term });
+      }
+      for (const key of Object.keys(logs)) delete logs[key];
+      for (const command of ["subagent_log", "pane_log", "term_key", "wire_interrupt"]) {
+        delete window.__ANSWER__[command];
+      }
+      window.__PANES__ = [];
+      for (const tab of [...tabs]) dropTab(tab.id);
+      for (const at of [...termViews.keys()]) dropTermView(at);
+    };
+    window.__HP__ = { tell, settle, shown, words, logs, parts, scene, open, cleanup };
+  });
+
+  /* ---- C1: 머리가 부모 대화를 말하고 한 번에 돌아가며, 같은 부모의 도우미들이 한 띠에 선다 ---- */
+  const strip = await page.evaluate(async (briefs) => {
+    const { tell, settle, shown, words, parts, scene, open, cleanup } = window.__HP__;
+    const seen = {};
+    const rows = (over = {}) => [
+      { id: "h-a", name: "@auditor", state: "running", model: "model-s", requestedModel: "sonnet", effort: "high", tool_calls: 3 },
+      { id: "h-b", name: "@mapper", state: "running", model: "model-s" },
+      { id: "h-c", name: "@checker", state: "done", model: "model-s" },
+      { id: "h-d", name: "@linter", state: "done", model: "model-s" },
+    ].map((row) => ({ ...row, ...(over[row.id] ?? {}) }));
+    const at = await scene(rows());
+    // 남의 부모 밑의 도우미는 이 띠에 서지 않는다.
+    await scene([{ id: "h-z", name: "@stranger", state: "running" }]);
+    const here = `helper:${at.term}:h-a`;
+    const chips = () => [...(parts().sibs?.querySelectorAll(".helper-sib") ?? [])].filter(shown).map((node) => ({
+      tag: node.tagName,
+      words: words(node),
+      current: node.getAttribute("aria-current"),
+      expanded: node.getAttribute("aria-expanded"),
+    }));
+    seen.running = subagentStateWords("running");
+    seen.done = subagentStateWords("done");
+    let p = await open(at, rows()[0], { brief: briefs.stated });
+    seen.parentLabel = tabLabel(at.owner);
+    seen.crumbLabel = p.crumb?.getAttribute("aria-label") ?? null;
+    seen.crumbButtons = [...(p.crumb?.querySelectorAll("button") ?? [])].map((one) => ({
+      words: words(one),
+      label: one.getAttribute("aria-label"),
+    }));
+    seen.crumbHere = words(p.crumb?.querySelector(".helper-crumb-here"));
+    seen.oneHead = document.querySelectorAll("#worker-view .worker-head").length;
+    seen.name = words(p.head?.querySelector(".worker-name"));
+    seen.state = words(p.head?.querySelector(".worker-state"));
+    seen.dotWhileRunning = p.head?.querySelector(".helper-state-dot") != null;
+    seen.uses = words(p.head?.querySelector(".worker-uses"));
+    seen.metaHolds = ["worker-focus", "worker-elapsed", "worker-uses", "worker-state"]
+      .every((name) => p.head?.querySelector(`.worker-meta .${name}`) != null);
+
+    // 부모로 가는 길은 한 번의 누름이다.
+    p.crumb?.querySelector("button")?.click();
+    seen.afterBack = activeTabId === at.owner.id;
+    setActiveTab(here);
+    await settle(60);
+    p = parts();
+
+    seen.sibsLabel = p.sibs?.getAttribute("aria-label") ?? null;
+    seen.chips = chips();
+    seen.strangerSeen = words(p.sibs).includes("@stranger");
+    p.sibs?.querySelector(".helper-sib-fold")?.click();
+    await settle(60);
+    seen.chipsOpen = chips();
+    parts().sibs?.querySelector(".helper-sib-fold")?.click();
+    await settle(60);
+    seen.chipsClosedAgain = chips();
+
+    // 형제 하나를 한 번 누르면 그 도우미의 페이지로 간다.
+    [...(parts().sibs?.querySelectorAll("button.helper-sib") ?? [])]
+      .find((one) => words(one).startsWith("@mapper"))?.click();
+    await settle(150);
+    seen.movedTo = activeTabId;
+    seen.expectedMove = `helper:${at.term}:h-b`;
+    p = parts();
+    seen.movedName = words(p.head?.querySelector(".worker-name"));
+    seen.movedChips = chips();
+
+    // 명부가 움직이면 띠가 따라간다.
+    setActiveTab(here);
+    await settle(60);
+    tell("hook:subagent", { term: at.term, rows: rows({ "h-b": { state: "done" } }) });
+    await settle(100);
+    seen.chipsAfterFinish = chips();
+    tell("hook:subagent", { term: at.term, rows: rows({ "h-a": { state: "done" }, "h-b": { state: "done" } }) });
+    await settle(100);
+    p = parts();
+    seen.finishedState = words(p.head?.querySelector(".worker-state"));
+    seen.dotWhenDone = p.head?.querySelector(".helper-state-dot") != null;
+    seen.finishedChips = chips();
+    tell("hook:subagent", { term: at.term, rows: [rows()[0]] });
+    await settle(100);
+    seen.aloneShown = shown(parts().sibs);
+
+    // 지시하던 부모 대화가 닫혔다: 돌아갈 곳이 없으니 돌아가는 조종도 없다.
+    dropTab(at.owner.id);
+    setActiveTab(here);
+    await settle(100);
+    p = parts();
+    seen.orphan = {
+      crumbButtons: p.crumb?.querySelectorAll("button").length ?? null,
+      crumbHere: words(p.crumb?.querySelector(".helper-crumb-here")),
+      foot: words(p.foot),
+      footButtons: p.foot?.querySelectorAll("button").length ?? null,
+    };
+    await cleanup();
+    return seen;
+  }, HELPER_BRIEFS);
+  ok(
+    "a helper's page names its parent conversation in a crumb, and one press on it goes back to that conversation",
+    strip.crumbButtons.length === 1 &&
+      strip.crumbButtons[0].words.includes(strip.parentLabel) &&
+      strip.crumbButtons[0].label?.includes(strip.parentLabel) === true &&
+      strip.crumbLabel?.length > 0 &&
+      strip.crumbHere.length > 0 &&
+      strip.afterBack === true,
+    JSON.stringify(strip),
+  );
+  ok(
+    "a helper's page has one head with its name, its state, its tool count and its clock in one group, and the state's dot shows only while it runs",
+    strip.oneHead === 1 &&
+      strip.name === "@auditor" &&
+      strip.state.length > 0 &&
+      strip.state !== strip.finishedState &&
+      strip.uses.includes("3") &&
+      strip.metaHolds === true &&
+      strip.dotWhileRunning === true &&
+      strip.dotWhenDone === false,
+    JSON.stringify(strip),
+  );
+  ok(
+    "the helpers of one parent stand in one strip: this one marked as current, the running ones as buttons that say their state, the finished ones folded into a count",
+    strip.sibsLabel?.length > 0 &&
+      strip.chips.length === 3 &&
+      strip.chips[0].tag === "SPAN" && strip.chips[0].current === "true" &&
+      strip.chips[0].words.startsWith("@auditor") && strip.chips[0].words.includes(strip.running) &&
+      strip.chips[1].tag === "BUTTON" && strip.chips[1].words.startsWith("@mapper") &&
+      strip.chips[1].words.includes(strip.running) &&
+      strip.chips[2].tag === "BUTTON" && strip.chips[2].expanded === "false" &&
+      strip.chips[2].words.includes("2") &&
+      !strip.chips.some((chip) => /@checker|@linter/.test(chip.words)),
+    JSON.stringify(strip),
+  );
+  ok(
+    "the folded count opens and closes on a press and lists each finished helper with its state, and one press on a running sibling moves to that helper's page",
+    strip.chipsOpen.length === 5 &&
+      strip.chipsOpen.filter((chip) =>
+        chip.tag === "BUTTON" && /@checker|@linter/.test(chip.words) && chip.words.includes(strip.done)).length === 2 &&
+      strip.chipsOpen.find((chip) => chip.expanded !== null)?.expanded === "true" &&
+      strip.chipsClosedAgain.length === 3 &&
+      strip.movedTo === strip.expectedMove &&
+      strip.movedName === "@mapper" &&
+      strip.movedChips.some((chip) => chip.current === "true" && chip.words.startsWith("@mapper")) &&
+      strip.movedChips.some((chip) => chip.tag === "BUTTON" && chip.words.startsWith("@auditor")),
+    JSON.stringify(strip),
+  );
+  ok(
+    "the strip follows the roster: a sibling that finishes moves into the count, a helper of another parent never appears, and a helper on its own shows no strip",
+    strip.chipsAfterFinish.length === 2 &&
+      strip.chipsAfterFinish[1].words.includes("3") &&
+      !strip.chipsAfterFinish.some((chip) => chip.words.startsWith("@mapper")) &&
+      strip.finishedChips.length === 2 &&
+      strip.finishedChips[0].current === "true" &&
+      strip.finishedChips[0].words.startsWith("@auditor") &&
+      strip.finishedChips[1].words.includes("3") &&
+      strip.strangerSeen === false &&
+      strip.aloneShown === false,
+    JSON.stringify(strip),
+  );
+  ok(
+    "a helper whose directing conversation has closed has a crumb with no control to go back to, and a footer that says so and offers nothing",
+    strip.orphan.crumbButtons === 0 &&
+      strip.orphan.crumbHere.length > 0 &&
+      strip.orphan.foot.length > 0 &&
+      strip.orphan.footButtons === 0,
+    JSON.stringify(strip),
+  );
+
+  /* ---- C2: 무엇을 시켰는가는 카드다 ---- */
+  const card = await page.evaluate(async ({ briefs, byLanguage }) => {
+    const { tell, settle, shown, words, parts, scene, open, logs, cleanup } = window.__HP__;
+    const seen = {};
+    const cases = {
+      ...briefs,
+      ...Object.fromEntries(Object.entries(byLanguage).map(([code, [text]]) => [`lang-${code}`, text])),
+    };
+    const roster = Object.keys(cases).map((key) => ({ id: `h-${key}`, name: `@${key}`, state: "running", model: "model-s" }));
+    const at = await scene(roster);
+    const read = (p) => {
+      const q = (selector) => p.card?.querySelector(selector) ?? null;
+      const more = q(".helper-brief-more");
+      const full = q(".helper-brief-full");
+      return {
+        present: p.card !== null,
+        said: q(".helper-brief-said")?.textContent ?? null,
+        cut: q(".helper-brief-cut")?.textContent ?? null,
+        cutSaid: words(q(".helper-brief-text .helper-sr")),
+        tags: [...(p.card?.querySelectorAll(".helper-brief-tag") ?? [])].map((node) => node.textContent),
+        tagsRow: q(".helper-brief-tags") !== null,
+        more: more ? words(more) : null,
+        expanded: more?.getAttribute("aria-expanded") ?? null,
+        controls: more?.getAttribute("aria-controls") ?? null,
+        fullId: full?.id ?? null,
+        fullShown: shown(full),
+        full: full?.textContent ?? null,
+      };
+    };
+    for (const key of Object.keys(cases)) {
+      seen[key] = read(await open(at, roster.find((row) => row.id === `h-${key}`), { brief: cases[key] }));
+    }
+
+    // 조건이 말로 적힌 지시의 카드를 자세히 본다.
+    let p = await open(at, roster.find((row) => row.id === "h-stated"));
+    const first = p.card;
+    const more = first?.querySelector(".helper-brief-more") ?? null;
+    if (first) {
+      const style = getComputedStyle(first);
+      seen.box = {
+        tag: first.tagName,
+        inputs: first.querySelectorAll("textarea, input, select, [contenteditable]").length,
+        borders: [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth],
+        cursor: style.cursor,
+        label: words(first.querySelector(".helper-brief-label")),
+        aria: first.getAttribute("aria-label"),
+      };
+    }
+    const briefing = p.host?.querySelector(".helper-turn.is-briefing") ?? null;
+    seen.briefingRow = briefing === null ? null : getComputedStyle(briefing).display;
+    seen.assistantRowShown = shown(p.host?.querySelector(".helper-turn.is-assistant"));
+    if (more) {
+      const fullStyle = getComputedStyle(first.querySelector(".helper-brief-full"));
+      seen.fullStyle = { white: fullStyle.whiteSpace, overflowY: fullStyle.overflowY, maxHeight: fullStyle.maxHeight };
+      more.focus();
+      more.click();
+      await settle(60);
+      seen.opened = read(parts());
+      seen.openedTabindex = parts().card?.querySelector(".helper-brief-full")?.getAttribute("tabindex") ?? null;
+      seen.moreWordsOpen = words(more);
+      more.click();
+      await settle(60);
+      seen.closedAgain = read(parts());
+      more.click();
+      await settle(60);
+    }
+    // 명부가 움직여 페이지가 다시 그려져도 카드는 다시 지어지지 않고 초점도 그대로다.
+    tell("hook:subagent", {
+      term: at.term,
+      rows: roster.map((row) => (row.id === "h-stated" ? { ...row, tool_calls: 9 } : row)),
+    });
+    await settle(100);
+    seen.sameCard = parts().card === first && first !== null;
+    seen.sameMore = parts().card?.querySelector(".helper-brief-more") === more && more !== null;
+    seen.stillOpen = more?.getAttribute("aria-expanded") === "true";
+    seen.focusHeld = more !== null && document.activeElement === more;
+    // 턴이 사백 개를 넘어 0번 턴이 밀려나도 카드는 지시를 잃지 않는다.
+    logs["h-stated"].push(...Array.from({ length: 450 }, (_, i) => ({ role: "assistant", text: `note ${i}` })));
+    await pollHelperPages();
+    await settle(150);
+    const held = tabs.find((one) => one.id === `helper:${at.term}:h-stated`)?.worker.helper;
+    seen.spliced = held !== undefined && held.turns.every((turn) => turn.seq !== 0) && held.turns.length <= 400;
+    seen.saidAfterCap = parts().card?.querySelector(".helper-brief-said")?.textContent ?? null;
+    seen.fullAfterCap = parts().card?.querySelector(".helper-brief-full")?.textContent ?? null;
+    await cleanup();
+    return seen;
+  }, { briefs: HELPER_BRIEFS, byLanguage: HELPER_BRIEFS_BY_LANGUAGE });
+  const stated = HELPER_BRIEFS.stated;
+  const statedSummary = stated.slice(0, stated.indexOf(" Keep the report"));
+  ok(
+    "the card shows the first whole sentences up to a limit, names no cut where it cut at a sentence, and offers the whole instruction with its length in one press",
+    card["stated"].present === true &&
+      card["stated"].said === statedSummary &&
+      statedSummary.endsWith("src/sync.") && statedSummary.length <= 200 &&
+      card["stated"].cut === null && card["stated"].cutSaid === "" &&
+      card["stated"].more?.includes(String(stated.length)) === true &&
+      card["stated"].expanded === "false" &&
+      card["stated"].fullShown === false &&
+      card.opened.expanded === "true" &&
+      card.opened.fullShown === true &&
+      card.opened.full === stated &&
+      card.moreWordsOpen !== card["stated"].more &&
+      card.opened.controls === card.opened.fullId &&
+      card.closedAgain.expanded === "false" && card.closedAgain.fullShown === false &&
+      card.fullStyle?.white === "pre-wrap" && card.fullStyle?.overflowY === "auto" && card.fullStyle?.maxHeight !== "none" &&
+      card.openedTabindex === "0",
+    JSON.stringify(card),
+  );
+  ok(
+    "an instruction short enough to show whole has no whole-instruction control and no hidden text, and a card that had to cut inside one long sentence says so both in sight and to a screen reader",
+    card["short"].said === HELPER_BRIEFS.short && card["short"].more === null && card["short"].fullId === null &&
+      card["facts"].more === null &&
+      card["runOn"].said?.length <= 200 &&
+      HELPER_BRIEFS.runOn.startsWith(card["runOn"].said ?? "\u0000") &&
+      HELPER_BRIEFS.runOn[(card["runOn"].said ?? "").length] === " " &&
+      card["runOn"].cut === "…" &&
+      card["runOn"].cutSaid.length > 0 &&
+      card["runOn"].more?.includes(String(HELPER_BRIEFS.runOn.length)) === true,
+    JSON.stringify(card),
+  );
+  const tagChecks = Object.fromEntries(Object.entries(HELPER_BRIEFS_BY_LANGUAGE).map(([code, [text, tag, fact]]) => [code, {
+    exactly: JSON.stringify(card[`lang-${code}`].tags) === JSON.stringify([tag]),
+    noFact: !card[`lang-${code}`].tags.some((one) => one.includes(fact)),
+    whole: card[`lang-${code}`].said === text,
+  }]));
+  const quoted = [...card["stated"].tags, ...card["lang-en"].tags].every((one) =>
+    [stated, HELPER_BRIEFS_BY_LANGUAGE.en[0]].some((text) => text.includes(one.replace(/…$/, ""))));
+  ok(
+    "conditions show as short tags only where the instruction states them, each a word-for-word quote, and a sentence that merely mentions a condition or a fact makes no tag, in five languages",
+    JSON.stringify(card["stated"].tags) === JSON.stringify(["Do not modify any files", "Only read code under src/sync", "Keep the report under 200 words"]) &&
+      card["facts"].tags.length === 0 && card["facts"].tagsRow === false &&
+      card["runOn"].tagsRow === false && card["short"].tagsRow === false &&
+      quoted &&
+      Object.values(tagChecks).every((one) => one.exactly && one.noFact && one.whole),
+    JSON.stringify({ tagChecks, tags: card["stated"].tags, facts: card["facts"] }),
+  );
+  ok(
+    "the card is a labelled region and not an input box, with a side rule and no outline and no text cursor, and the briefing bubble is not drawn a second time under it",
+    card.box?.tag === "SECTION" && card.box.inputs === 0 &&
+      JSON.stringify(card.box.borders) === JSON.stringify(["0px", "0px", "0px", "3px"]) &&
+      card.box.cursor !== "text" && card.box.label.length > 0 && card.box.aria?.length > 0 &&
+      card.briefingRow === "none" && card.assistantRowShown === true,
+    JSON.stringify(card),
+  );
+  ok(
+    "a repaint from the roster leaves the card, its open state and its focus alone, and the card keeps the instruction after the turn list has dropped its first turn",
+    card.sameCard === true && card.sameMore === true && card.stillOpen === true && card.focusHeld === true &&
+      card.spliced === true &&
+      card.saidAfterCap === statedSummary && card.fullAfterCap === stated,
+    JSON.stringify(card),
+  );
+
+  /* ---- C3: 입력줄이 서 있던 자리에는 푸터가 선다 ---- */
+  const footer = await page.evaluate(async () => {
+    const { settle, words, parts, scene, open, cleanup } = window.__HP__;
+    const seen = {};
+    const roster = [{ id: "h-a", name: "@auditor", state: "running", model: "model-s" }];
+    const at = await scene(roster, { model: "model-o" });
+    let p = await open(at, roster[0]);
+    seen.parentLabel = tabLabel(at.owner);
+    seen.lastChildIsFoot = p.foot !== null && p.host?.lastElementChild === p.foot;
+    seen.says = words(p.foot?.querySelector(".helper-foot-says"));
+    seen.buttons = [...(p.foot?.querySelectorAll("button") ?? [])].map((one) => words(one));
+    // A place for the road a catalog row may name one day (t-16031 gives zo one):
+    // one group of controls in the footer, its first the speaking button, and a
+    // second control laid in beside it sits on the same row, clear of it.
+    const group = p.foot?.querySelector(".helper-foot-actions") ?? null;
+    const speaking = p.foot?.querySelector(".helper-foot-speak") ?? null;
+    seen.place = {
+      stands: group !== null && group.parentElement === p.foot,
+      holds: group !== null && speaking !== null && speaking.parentElement === group,
+      flex: group !== null && getComputedStyle(group).display === "flex",
+      beside: false,
+    };
+    if (group && speaking) {
+      const spare = document.createElement("button");
+      spare.type = "button";
+      spare.className = speaking.className;
+      spare.textContent = speaking.textContent;
+      group.appendChild(spare);
+      const first = speaking.getBoundingClientRect();
+      const second = spare.getBoundingClientRect();
+      seen.place.beside = Math.abs(first.top - second.top) <= 2 && second.left >= first.right - 1 &&
+        group.getBoundingClientRect().right <= p.foot.getBoundingClientRect().right + 1;
+      spare.remove();
+    }
+    seen.composerParts = p.host?.querySelectorAll(
+      ".chat-dock, .worker-composer, .worker-composer-box, textarea, .worker-composer-door, button.worker-where, .worker-composer-agent, .worker-composer-mode",
+    ).length ?? null;
+    seen.parentModelShown = words(p.host).includes("model-o");
+    seen.stopWords = /멈추|중지|중단|stop|halt|kill|cancel|停止|中止|detener/i
+      .test([p.head, p.sibs, p.card, p.foot].map((node) => words(node)).join(" "));
+
+    // 부모가 터미널일 때: 누르면 부모의 탭이 서고 터미널의 입력에 초점이 간다.
+    p.foot?.querySelector(".helper-foot-speak")?.click();
+    await settle(250);
+    seen.terminalDoor = { tab: activeTabId === at.owner.id, focus: document.activeElement === keySink };
+
+    // 부모가 대화 판일 때: 부모 페이지의 입력 상자에 초점이 간다.
+    window.__ANSWER__.pane_log = () => ({
+      found: true, next: 2, skipped: false, more: false, folded: false, model: "model-o",
+      turns: [{ role: "user", text: "Fix the sync bug." }, { role: "assistant", text: "On it." }],
+    });
+    await setPaneChat(at.term, true);
+    await settle(150);
+    p = await open(at, roster[0]);
+    p.foot?.querySelector(".helper-foot-speak")?.click();
+    await settle(300);
+    const focused = document.activeElement;
+    seen.chatDoor = {
+      tab: activeTabId === at.owner.id,
+      box: focused?.matches?.(".worker-composer-box") === true,
+      inParentChat: Boolean(focused?.closest?.(`.pane-slot[data-term="${at.term}"] .pane-chat`)),
+    };
+    await cleanup();
+    return seen;
+  });
+  ok(
+    "the footer stands where the composer stood, says which conversation directs the helper, holds one button that speaks to that parent in a group with room beside it for one more, and nothing on the page reads the parent's model or offers a stop",
+    footer.lastChildIsFoot === true &&
+      footer.says.includes(footer.parentLabel) &&
+      footer.buttons.length === 1 && footer.buttons[0].length > 0 &&
+      footer.place.stands && footer.place.holds && footer.place.flex && footer.place.beside &&
+      footer.composerParts === 0 &&
+      footer.parentModelShown === false &&
+      footer.stopWords === false,
+    JSON.stringify(footer),
+  );
+  ok(
+    "the press on speaking to the parent goes to the parent's page with its input focused: the terminal's input for a terminal, the composer box for a conversation",
+    footer.terminalDoor.tab === true && footer.terminalDoor.focus === true &&
+      footer.chatDoor.tab === true && footer.chatDoor.box === true && footer.chatDoor.inParentChat === true,
+    JSON.stringify(footer),
+  );
+
+  // Esc: 도우미의 페이지에서 Esc는 부모의 턴 전체를 끊지 않는다 — 끊는 길은 부모 판의 것이다.
+  await page.evaluate(async () => {
+    const { settle, parts, scene, open } = window.__HP__;
+    const roster = [{ id: "h-a", name: "@auditor", state: "running", model: "model-s" }];
+    const at = await scene(roster);
+    window.__ESC__ = { sent: [], focusedInPage: false };
+    window.__ANSWER__.term_key = (args) => { window.__ESC__.sent.push(["term_key", args]); return null; };
+    window.__ANSWER__.wire_interrupt = (args) => { window.__ESC__.sent.push(["wire_interrupt", args]); return null; };
+    const p = await open(at, roster[0]);
+    p.host?.querySelector("button")?.focus();
+    await settle(50);
+    window.__ESC__.focusedInPage = Boolean(p.host?.contains(document.activeElement)) && document.activeElement !== p.host;
+    window.__ESC__.working = hookStates.get(at.term);
+  });
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  const esc = await page.evaluate(async () => {
+    const seen = { ...window.__ESC__ };
+    delete window.__ESC__;
+    await window.__HP__.cleanup();
+    return seen;
+  });
+  ok(
+    "a plain Esc on a helper's page, with its parent at work, sends no interrupt: it cannot end the parent's whole turn from a page that has no input",
+    esc.focusedInPage === true && esc.working === "working" && esc.sent.length === 0,
+    JSON.stringify(esc),
+  );
+
+  /* ---- C3 · C4: 카탈로그의 모든 에이전트에서 머리는 하나이고, 어느 에이전트에도 도우미 하나만 멈추는 길이 없다 ---- */
+  const everyAgent = await page.evaluate(async ({ ids, brief }) => {
+    const { words, parts, scene, open, cleanup } = window.__HP__;
+    const at = await scene([]);
+    const shape = (root) => root === null ? null : [root, ...root.querySelectorAll("*")]
+      .map((node) => `${node.tagName.toLowerCase()}.${[...node.classList].sort().join(".")}`).join(" ");
+    const seen = { shapes: {}, marks: {}, voice: {}, labels: {}, names: {}, footButtons: {}, stopLike: {}, composerParts: {}, withRoad: [] };
+    for (const id of ids) {
+      const sub = { id: `h-${id}`, name: "@one", state: "running", model: "model-s", requestedModel: "sonnet", tool_calls: 2 };
+      const p = await open(at, sub, { agent: id, brief });
+      // A catalog row that names a road to stop one helper (`helper_stop`) is the one
+      // case where a stop button may stand; this page draws none, and says so below.
+      if (installedAgents().find((row) => row.id === id)?.helper_stop) seen.withRoad.push(id);
+      seen.shapes[id] = ["head", "card", "foot"].map((key) => shape(p[key])).join(" | ");
+      const mark = p.head?.querySelector(".worker-mark") ?? null;
+      seen.marks[id] = mark?.textContent ?? null;
+      seen.labels[id] = mark?.getAttribute("aria-label") ?? null;
+      seen.voice[id] = agentVoice(id).glyph;
+      seen.names[id] = agentName(id);
+      seen.footButtons[id] = p.foot?.querySelectorAll("button").length ?? null;
+      seen.stopLike[id] = [...(p.host?.querySelectorAll(".helper-head button, .helper-sibs button, .helper-brief button, .helper-foot button") ?? [])]
+        .map((one) => `${words(one)} ${one.getAttribute("aria-label") ?? ""}`)
+        .filter((text) => /멈추|중지|중단|stop|halt|kill|cancel|停止|中止|detener/i.test(text)).length;
+      seen.composerParts[id] = p.host?.querySelectorAll(".worker-composer, .chat-dock, textarea").length ?? null;
+    }
+    await cleanup();
+    return seen;
+  }, { ids: [...catalogIds, "not-in-catalog"], brief: HELPER_BRIEFS.stated });
+  const distinctShapes = new Set(Object.values(everyAgent.shapes));
+  const wornOff = Object.keys(everyAgent.marks).filter((id) =>
+    everyAgent.marks[id] !== everyAgent.voice[id] || everyAgent.labels[id] !== everyAgent.names[id]);
+  ok(
+    "the head, the card and the footer of a helper's page are one and the same for every agent in the catalog, element for element, with only the mark and its name read from the catalog",
+    catalogIds.length >= 30 &&
+      Object.keys(everyAgent.shapes).length === catalogIds.length + 1 &&
+      distinctShapes.size === 1 &&
+      [...distinctShapes][0].includes("helper-head") && [...distinctShapes][0].includes("helper-brief") &&
+      [...distinctShapes][0].includes("helper-foot") &&
+      wornOff.length === 0,
+    JSON.stringify({ agents: Object.keys(everyAgent.shapes).length, distinct: distinctShapes.size, wornOff, first: [...distinctShapes][0]?.slice(0, 240) }),
+  );
+  ok(
+    "an agent whose catalog row names no road to stop one helper has no stop button on its helper's page: the footer holds the one speaking button, and nothing else on the page reads as a stop or wears a composer",
+    Object.keys(everyAgent.footButtons).length === catalogIds.length + 1 &&
+      Object.entries(everyAgent.footButtons).every(([id, count]) => everyAgent.withRoad.includes(id) || count === 1) &&
+      Object.entries(everyAgent.stopLike).every(([id, count]) => everyAgent.withRoad.includes(id) || count === 0) &&
+      Object.values(everyAgent.composerParts).every((count) => count === 0),
+    JSON.stringify({ withRoad: everyAgent.withRoad, footButtons: everyAgent.footButtons, stopLike: everyAgent.stopLike }).slice(0, 600),
+  );
+  const bodyOf = (name) => {
+    const start = shellSource.search(new RegExp(`^(?:async )?function ${name}\\(`, "m"));
+    return start < 0 ? "" : shellSource.slice(start, shellSource.indexOf("\n}\n", start) + 3);
+  };
+  const literalsOf = (body) => [...body.matchAll(/"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'|`((?:[^`\\]|\\.)*)`/g)]
+    .map((one) => one[1] ?? one[2] ?? one[3] ?? "");
+  const namesAnAgent = (literal) => [...catalogIds, ...catalogNames].some((word) =>
+    literal.toLowerCase() === word.toLowerCase() ||
+    (word.length >= 4 && new RegExp(`\\b${word.replace(/[^\w]/g, "\\$&")}\\b`, "i").test(literal)));
+  const drawn = [...shellSource.matchAll(/^(?:async )?function ((?:helperPage|updateHelperPage|paintHelperPage|helperBrief)\w*)\(/gm)]
+    .map((one) => one[1]);
+  const offending = drawn.flatMap((name) => literalsOf(bodyOf(name)).filter(namesAnAgent).map((lit) => `${name}: ${lit}`));
+  const styleOffending = [...styleSource.matchAll(/^[^{}\n]*\.helper-(?:head|crumb|sibs?|brief|foot|model|state)[^{}\n]*\[data-agent[^\n]*$/gm)]
+    .map((one) => one[0]);
+  ok(
+    "no agent's name is written in the code that draws a helper's head, strip, card and footer: no string in those functions and no rule in their styles names one of the catalog's agents",
+    drawn.length >= 6 && drawn.every((name) => bodyOf(name).length > 0) &&
+      offending.length === 0 && styleOffending.length === 0,
+    JSON.stringify({ drawn, offending, styleOffending }),
+  );
+
+  /* ---- C5: 한 장면에서 자판, 움직임, 대비, 읽어 주기, 다섯 말을 본다 ---- */
+  const localeBrief = `${HELPER_BRIEFS.runOn}. Do not modify any files.`;
+  await page.evaluate(async ({ briefs, brief }) => {
+    const { settle, words, parts, scene, open } = window.__HP__;
+    const roster = [
+      { id: "h-cut", name: "@cutter", state: "running", model: "model-s", requestedModel: "sonnet", effort: "high", tool_calls: 4 },
+      { id: "h-blank", name: "@blank", state: "running" },
+      { id: "h-b", name: "@mapper", state: "running", model: "model-s" },
+      { id: "h-c", name: "@checker", state: "done", model: "model-s" },
+      { id: "h-d", name: "@linter", state: "done", model: "model-s" },
+    ];
+    const at = await scene(roster);
+    await open(at, roster[1], { brief: briefs.short });
+    await open(at, roster[0], { brief });
+    const here = `helper:${at.term}:h-cut`;
+    window.__HPS__ = { at, here, blank: `helper:${at.term}:h-blank`, prior: theme };
+    const controls = [
+      () => parts().crumb?.querySelector("button") ?? null,
+      () => parts().head?.querySelector(".worker-focus") ?? null,
+      () => [...(parts().sibs?.querySelectorAll("button.helper-sib") ?? [])].find((one) => words(one).startsWith("@mapper")) ?? null,
+      () => parts().sibs?.querySelector(".helper-sib-fold") ?? null,
+      () => parts().card?.querySelector(".helper-brief-more") ?? null,
+      () => parts().foot?.querySelector(".helper-foot-speak") ?? null,
+    ];
+    const where = () => activeTabId === at.owner.id ? "parent"
+      : activeTabId === here ? "helper"
+      : activeTabId === `helper:${at.term}:h-b` ? "sibling" : activeTabId;
+    const effects = [
+      where,
+      () => String(focusViewOn()),
+      where,
+      () => parts().sibs?.querySelector(".helper-sib-fold")?.getAttribute("aria-expanded") ?? null,
+      () => parts().card?.querySelector(".helper-brief-more")?.getAttribute("aria-expanded") ?? null,
+      where,
+    ];
+    window.__HPK__ = {
+      // 페이지를 제자리로 — 이 도우미의 페이지, 접힌 띠, 접힌 카드, 꺼진 집중 보기 — 놓고 그 조종에 초점을 준다.
+      async prepare(index) {
+        setConversationFocusView(false);
+        setActiveTab(here);
+        await settle(80);
+        for (const selector of [".helper-sib-fold", ".helper-brief-more"]) {
+          const node = parts().host?.querySelector(selector);
+          if (node?.getAttribute("aria-expanded") === "true") node.click();
+        }
+        await settle(60);
+        controls[index]()?.focus();
+        return controls[index]() !== null && document.activeElement === controls[index]();
+      },
+      read: (index) => effects[index](),
+      which: () => controls.findIndex((pick) => pick() !== null && pick() === document.activeElement),
+      focusedWords: () => words(document.activeElement).slice(0, 60),
+      ring: () => {
+        const style = getComputedStyle(document.activeElement);
+        return { outline: `${style.outlineStyle} ${style.outlineWidth}`, shadow: style.boxShadow };
+      },
+    };
+  }, { briefs: HELPER_BRIEFS, brief: localeBrief });
+
+  // 자판: 첫 조종에서 Tab으로 걸으면 여섯이 읽는 차례로 온다.
+  const reached = [];
+  const rings = [];
+  const tabbedTo = [];
+  await page.evaluate(() => window.__HPK__.prepare(0));
+  for (let step = 0; step < 90 && reached.length < 6; step += 1) {
+    const here = await page.evaluate(() => ({
+      which: window.__HPK__.which(), words: window.__HPK__.focusedWords(), ring: window.__HPK__.ring(),
+    }));
+    tabbedTo.push(here.words);
+    if (here.which >= 0 && reached.at(-1) !== here.which) {
+      reached.push(here.which);
+      rings.push(here.ring);
+    }
+    await page.keyboard.press("Tab");
+  }
+  await page.evaluate(() => window.__HPK__.prepare(1));
+  await page.keyboard.press("Shift+Tab");
+  const shiftBack = await page.evaluate(() => window.__HPK__.which());
+  // 누름: 조종마다 Enter로 한 번, Space로 한 번 — 둘 다 같은 일을 한다.
+  const pressed = [];
+  for (let index = 0; index < 6; index += 1) {
+    for (const key of ["Enter", "Space"]) {
+      const focused = await page.evaluate((one) => window.__HPK__.prepare(one), index);
+      const before = await page.evaluate((one) => window.__HPK__.read(one), index);
+      await page.keyboard.press(key);
+      await page.waitForTimeout(200);
+      const after = await page.evaluate((one) => window.__HPK__.read(one), index);
+      pressed.push({ index, key, focused, before, after });
+    }
+  }
+  const effectOf = ["parent", "true", "sibling", "true", "true", "parent"];
+  const visibleRing = (ring) =>
+    (ring.outline.split(" ")[0] !== "none" && parseFloat(ring.outline.split(" ")[1]) > 0) || ring.shadow !== "none";
+  ok(
+    "every new control is a real button that Tab reaches in reading order and that Enter and Space both press to the same effect: back to the parent, the focus toggle, a sibling, the folded count, the whole instruction, speaking to the parent",
+    JSON.stringify(reached) === "[0,1,2,3,4,5]" &&
+      shiftBack === 0 &&
+      pressed.length === 12 &&
+      pressed.every((one) => one.focused === true && one.before !== one.after && one.after === effectOf[one.index]),
+    JSON.stringify({ reached, shiftBack, pressed }),
+  );
+  ok(
+    "the helpers folded into the count are out of the tab order until the count is opened, and every control wears a visible focus ring when the keyboard reaches it",
+    reached.length === 6 &&
+      !tabbedTo.some((words) => /@checker|@linter/.test(words)) &&
+      rings.length === 6 && rings.every(visibleRing),
+    JSON.stringify({ tabbedTo, rings }),
+  );
+
+  // 움직임: 점의 맥박과 조종들의 부드러움은 움직임 줄이기에서 멈춘다.
+  const motion = {};
+  for (const mode of ["no-preference", "reduce"]) {
+    await page.emulateMedia({ reducedMotion: mode });
+    motion[mode] = await page.evaluate(async () => {
+      const { settle, parts } = window.__HP__;
+      setActiveTab(window.__HPS__.here);
+      await settle(80);
+      const p = parts();
+      const seconds = (node) =>
+        node ? getComputedStyle(node).transitionDuration.split(",").map((one) => parseFloat(one)) : null;
+      const dot = p.head?.querySelector(".helper-state-dot") ?? null;
+      return {
+        dot: dot ? getComputedStyle(dot).animationName : null,
+        crumb: seconds(p.crumb?.querySelector("button")),
+        sib: seconds(p.sibs?.querySelector("button.helper-sib")),
+        fold: seconds(p.sibs?.querySelector(".helper-sib-fold")),
+        more: seconds(p.card?.querySelector(".helper-brief-more")),
+        speak: seconds(p.foot?.querySelector(".helper-foot-speak")),
+      };
+    });
+  }
+  await page.emulateMedia({ reducedMotion: null });
+  const easing = (state) => [state.crumb, state.sib, state.fold, state.more, state.speak];
+  ok(
+    "the state dot's pulse and the controls' easing move when motion is allowed and stop under reduced motion",
+    motion["no-preference"].dot !== null && motion["no-preference"].dot !== "none" &&
+      easing(motion["no-preference"]).every((one) => one !== null && Math.max(...one) > 0) &&
+      motion["reduce"].dot === "none" &&
+      easing(motion["reduce"]).every((one) => one !== null && Math.max(...one) === 0),
+    JSON.stringify(motion),
+  );
+
+  // 대비: 새 머리, 띠, 카드, 푸터의 글은 두 처리 모두에서 4.5:1 이상이다.
+  const required = [
+    ".helper-crumb-back", ".helper-crumb-here", ".worker-name", ".helper-model-words", ".helper-model-asked",
+    ".helper-model.is-unknown", ".worker-state", ".worker-elapsed", ".worker-uses", ".helper-sib.is-here",
+    "button.helper-sib:not(.helper-sib-fold):not(.is-done)", ".helper-sib-fold", ".helper-sib.is-done",
+    ".helper-brief-label", ".helper-brief-said", ".helper-brief-cut", ".helper-brief-tag", ".helper-brief-more",
+    ".helper-brief-full", ".helper-foot-says", ".helper-foot-speak",
+  ];
+  const contrastIn = async (treatment) => {
+    await page.evaluate((code) => setTheme(code), treatment);
+    await page.waitForTimeout(400);
+    return page.evaluate(async (selectors) => {
+      const { settle, shown, parts } = window.__HP__;
+      const freeze = document.createElement("style");
+      freeze.textContent = "*, *::before, *::after { transition: none !important; animation: none !important; }";
+      document.head.append(freeze);
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 1;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      const rgba = (css) => {
+        ctx.clearRect(0, 0, 1, 1);
+        ctx.fillStyle = "#000000";
+        ctx.fillStyle = css;
+        ctx.fillRect(0, 0, 1, 1);
+        const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+        return [r, g, b, a / 255];
+      };
+      const over = (top, under) => [0, 1, 2].map((i) => top[i] * top[3] + under[i] * (1 - top[3]));
+      const light = (rgb) => {
+        const [r, g, b] = rgb.map((one) => {
+          const c = one / 255;
+          return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      };
+      const ratioOf = (node) => {
+        const chain = [];
+        for (let at = node; at; at = at.parentElement) chain.unshift(at);
+        let ground = [255, 255, 255];
+        let opacity = 1;
+        for (const one of chain) {
+          const style = getComputedStyle(one);
+          const back = rgba(style.backgroundColor);
+          if (back[3] > 0) ground = over(back, ground);
+          opacity *= parseFloat(style.opacity);
+        }
+        const ink = rgba(getComputedStyle(node).color);
+        const seen = over([ink[0], ink[1], ink[2], ink[3] * opacity], ground);
+        const a = light(seen);
+        const b = light(ground);
+        return Math.round(((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)) * 100) / 100;
+      };
+      const found = {};
+      const measure = () => {
+        for (const selector of selectors) {
+          for (const node of parts().host?.querySelectorAll(selector) ?? []) {
+            if (!shown(node)) continue;
+            found[selector] = Math.min(found[selector] ?? 99, ratioOf(node));
+          }
+        }
+      };
+      const { here, blank } = window.__HPS__;
+      setActiveTab(here);
+      await settle(80);
+      const fold = parts().sibs?.querySelector(".helper-sib-fold");
+      if (fold?.getAttribute("aria-expanded") !== "true") fold?.click();
+      await settle(60);
+      measure();
+      const more = parts().card?.querySelector(".helper-brief-more");
+      if (more?.getAttribute("aria-expanded") !== "true") more?.click();
+      await settle(60);
+      measure();
+      more?.click();
+      fold?.click();
+      setActiveTab(blank);
+      await settle(80);
+      measure();
+      freeze.remove();
+      return { theme: document.documentElement.dataset.theme ?? null, found };
+    }, required);
+  };
+  const dark = await contrastIn("dark");
+  const lightSide = await contrastIn("light");
+  await page.evaluate(() => setTheme(window.__HPS__.prior));
+  const unread = (side) => required.filter((one) => !(one in side.found) || side.found[one] < 4.5);
+  ok(
+    "every word the new head, strip, card and footer draw reads at 4.5:1 or better against what it stands on, in the dark treatment and in the light one",
+    (dark.theme ?? "dark") === "dark" && lightSide.theme === "light" &&
+      unread(dark).length === 0 && unread(lightSide).length === 0,
+    JSON.stringify({ dark: unread(dark).map((one) => [one, dark.found[one] ?? null]), light: unread(lightSide).map((one) => [one, lightSide.found[one] ?? null]) }),
+  );
+
+  // 읽어 주기: 이름 있는 조종, 이름 있는 영역, 꾸밈은 숨김, 상태는 공손히 알린다.
+  const reading = await page.evaluate(async () => {
+    const { settle, words, parts } = window.__HP__;
+    setActiveTab(window.__HPS__.here);
+    await settle(80);
+    const p = parts();
+    const nameOf = (node) => (node.getAttribute("aria-label") ?? words(node)).trim();
+    const buttons = [...(p.host?.querySelectorAll(".helper-head button, .helper-sibs button, .helper-brief button, .helper-foot button") ?? [])];
+    const mark = p.head?.querySelector(".worker-mark") ?? null;
+    const label = (node) => ({ tag: node?.tagName ?? null, label: node?.getAttribute("aria-label") ?? "" });
+    return {
+      buttons: buttons.length,
+      unnamed: buttons.filter((node) => nameOf(node).length === 0).length,
+      allPlain: buttons.every((node) => node.tagName === "BUTTON" && node.type === "button"),
+      crumb: label(p.crumb),
+      sibs: label(p.sibs),
+      card: label(p.card),
+      full: label(p.card?.querySelector(".helper-brief-full") ?? null),
+      hidden: {
+        sep: p.crumb?.querySelector(".helper-crumb-sep")?.getAttribute("aria-hidden") ?? null,
+        dot: p.head?.querySelector(".helper-state-dot")?.getAttribute("aria-hidden") ?? null,
+        cut: p.card?.querySelector(".helper-brief-cut")?.getAttribute("aria-hidden") ?? null,
+      },
+      state: p.head?.querySelector(".worker-state")?.getAttribute("role") ?? null,
+      mark: { role: mark?.getAttribute("role") ?? null, label: mark?.getAttribute("aria-label") ?? "" },
+      current: p.sibs?.querySelector('[aria-current="true"]')?.tagName ?? null,
+    };
+  });
+  ok(
+    "a screen reader gets every control by name, the crumb, the strip and the card as named regions, the card's whole text as a region under a name of its own, the decorative marks hidden, the current helper marked, and the helper's state announced politely",
+    reading.buttons >= 6 && reading.unnamed === 0 && reading.allPlain === true &&
+      reading.crumb.tag === "NAV" && reading.crumb.label.length > 0 &&
+      reading.sibs.tag === "NAV" && reading.sibs.label.length > 0 &&
+      reading.card.tag === "SECTION" && reading.card.label.length > 0 &&
+      reading.full.tag === "DIV" && reading.full.label.length > 0 && reading.full.label !== reading.card.label &&
+      reading.hidden.sep === "true" && reading.hidden.dot === "true" && reading.hidden.cut === "true" &&
+      reading.state === "status" &&
+      reading.mark.role === "img" && reading.mark.label.length > 0 &&
+      reading.current !== null,
+    JSON.stringify(reading),
+  );
+
+  // 다섯 말: 새 말은 다섯 언어로, 그 언어의 글자로, 부모의 이름과 글자 수가 제자리에 들어간다.
+  const spoken = await page.evaluate(async () => {
+    const { settle, words, parts } = window.__HP__;
+    const { at, here } = window.__HPS__;
+    const wore = locale;
+    const seen = { owned: {}, orphan: {} };
+    const q = (node, selector) => node?.querySelector(selector) ?? null;
+    const gather = () => {
+      const p = parts();
+      return {
+        parent: tabLabel(at.owner),
+        crumbLabel: p.crumb?.getAttribute("aria-label") ?? "",
+        crumbHere: words(q(p.crumb, ".helper-crumb-here")),
+        back: q(p.crumb, "button")?.getAttribute("aria-label") ?? "",
+        sibsLabel: p.sibs?.getAttribute("aria-label") ?? "",
+        fold: words(q(p.sibs, ".helper-sib-fold")),
+        briefLabel: words(q(p.card, ".helper-brief-label")),
+        tagsLabel: q(p.card, ".helper-brief-tags")?.getAttribute("aria-label") ?? "",
+        full: q(p.card, ".helper-brief-full")?.getAttribute("aria-label") ?? "",
+        more: words(q(p.card, ".helper-brief-more")),
+        cutSaid: words(q(p.card, ".helper-brief-text .helper-sr")),
+        asked: words(q(p.head, ".helper-model-asked")),
+        says: words(q(p.foot, ".helper-foot-says")),
+        speak: words(q(p.foot, ".helper-foot-speak")),
+      };
+    };
+    const repaint = async (code) => {
+      setLocale(code, { refresh: false, persist: false });
+      paintWorkerView(tabs.find((one) => one.id === here));
+      await settle(80);
+    };
+    setActiveTab(here);
+    await settle(80);
+    for (const code of ["ko", "en", "ja", "zh", "es"]) {
+      await repaint(code);
+      seen.owned[code] = gather();
+    }
+    dropTab(at.owner.id);
+    setActiveTab(here);
+    await settle(80);
+    for (const code of ["ko", "en", "ja", "zh", "es"]) {
+      await repaint(code);
+      seen.orphan[code] = words(q(parts().foot, ".helper-foot-says"));
+    }
+    setLocale(wore, { refresh: false, persist: false });
+    return seen;
+  });
+  const codes = ["ko", "en", "ja", "zh", "es"];
+  const script = {
+    hangul: /[\u3131-\u318E\uAC00-\uD7A3]/,
+    kana: /[\u3040-\u30FF]/,
+    han: /[\u3400-\u9FFF]/,
+  };
+  const inItsScript = {
+    ko: (one) => script.hangul.test(one),
+    en: (one) => /[A-Za-z]/.test(one) && !script.hangul.test(one) && !script.kana.test(one) && !script.han.test(one),
+    ja: (one) => (script.kana.test(one) || script.han.test(one)) && !script.hangul.test(one),
+    zh: (one) => script.han.test(one) && !script.hangul.test(one) && !script.kana.test(one),
+    es: (one) => /[A-Za-z]/.test(one) && !script.hangul.test(one) && !script.kana.test(one) && !script.han.test(one),
+  };
+  const keys = ["crumbLabel", "crumbHere", "back", "sibsLabel", "fold", "briefLabel", "tagsLabel", "full", "more", "cutSaid", "asked", "says", "speak"];
+  const stray = [];
+  const alike = [];
+  for (const key of keys) {
+    if (new Set(codes.map((code) => spoken.owned[code][key])).size !== codes.length) alike.push(key);
+    for (const code of codes) {
+      const one = spoken.owned[code][key];
+      if (one.length === 0 || !inItsScript[code](one) || /\{\{|\}\}|helper\.[a-z]/.test(one)) stray.push(`${code}.${key}=${one}`);
+    }
+  }
+  const orphanAlike = new Set(codes.map((code) => spoken.orphan[code])).size !== codes.length;
+  const orphanStray = codes.filter((code) => !inItsScript[code](spoken.orphan[code]) || spoken.orphan[code] === spoken.owned[code].says);
+  ok(
+    "the helper page's new words come in all five languages, each in the letters of its language, with the parent's name, the character count and what was asked in place, and the English is plain",
+    alike.length === 0 && stray.length === 0 && !orphanAlike && orphanStray.length === 0 &&
+      codes.every((code) => spoken.owned[code].says.includes(spoken.owned[code].parent)) &&
+      codes.every((code) => spoken.owned[code].back.includes(spoken.owned[code].parent)) &&
+      codes.every((code) => spoken.owned[code].more.includes(String(localeBrief.length))) &&
+      codes.every((code) => spoken.owned[code].asked.includes("sonnet")) &&
+      keys.every((key) => !/breadcrumb|sibling|toggle|subagent/i.test(spoken.owned.en[key])),
+    JSON.stringify({ alike, stray, orphanAlike, orphanStray, en: spoken.owned.en, orphan: spoken.orphan }),
+  );
+  await page.evaluate(async () => {
+    await window.__HP__.cleanup();
+    delete window.__HPS__;
+    delete window.__HPK__;
+  });
+
+  /* ---- 좁은 창: 머리와 띠와 카드와 푸터가 옆으로 밀리지 않고, 목록도 남는다 ---- */
+  await page.setViewportSize({ width: 360, height: 780 });
+  const narrow = await page.evaluate(async (brief) => {
+    const { settle, shown, parts, scene, open, cleanup } = window.__HP__;
+    const long = "@a-helper-with-a-name-that-goes-on-and-on-and-on-past-any-width";
+    const roster = [
+      { id: "h-a", name: long, state: "running", model: "a-model-with-a-long-name-s", requestedModel: "another-long-model-name", effort: "high", tool_calls: 12 },
+      { id: "h-b", name: "@mapper", state: "running" },
+      { id: "h-c", name: `${long}-2`, state: "done" },
+      { id: "h-d", name: "@linter", state: "done" },
+    ];
+    const at = await scene(roster);
+    let p = await open(at, roster[0], { brief });
+    Object.assign(p.host.style, { position: "fixed", inset: "0", zIndex: "100", width: "100vw", height: "100vh" });
+    const seen = {};
+    const longTitle = "Refactor the retry loop in the sync module and its backoff timing tests";
+    const measure = (key) => {
+      const q = parts();
+      // The room to read is the plain page's; a parent title as long as the one
+      // laid in below asks the footer for more lines, and that is measured for
+      // overflow only.
+      const room = Math.round(q.turns?.getBoundingClientRect().height ?? 0);
+      // A long parent title, worded into the crumb and the footer's sentence: the
+      // layout is what is measured, so the words are laid in by hand.
+      const crumb = q.head?.querySelector(".helper-crumb-parent");
+      if (crumb) crumb.textContent = longTitle;
+      const says = q.foot?.querySelector(".helper-foot-says");
+      if (says) says.textContent = `이 도우미는 “${longTitle}” 대화가 지시합니다.`;
+      const view = q.host.getBoundingClientRect();
+      const inside = (node) => {
+        const box = node.getBoundingClientRect();
+        return box.left >= view.left - 1 && box.right <= view.right + 1;
+      };
+      seen[key] = {
+        noSideScroll: q.host.scrollWidth <= q.host.clientWidth + 1,
+        blocksInside: [q.head, q.sibs, q.card, q.foot].every((node) => node !== null && inside(node)),
+        chipsInside: [...q.host.querySelectorAll(".helper-sib, .helper-brief-tag, .helper-model, .helper-state, .helper-foot-speak, .helper-crumb-back")]
+          .filter(shown).every(inside),
+        wide: [...q.host.querySelectorAll("*")]
+          .filter((node) => shown(node) && node.getBoundingClientRect().right > view.right + 1)
+          .slice(0, 6)
+          .map((node) => `${node.tagName.toLowerCase()}.${String(node.className).split(" ")[0]} +${Math.round(node.getBoundingClientRect().right - view.right)}px`),
+        scrollWidth: q.host.scrollWidth,
+        listHeight: room,
+        speakShown: shown(q.foot?.querySelector(".helper-foot-speak")),
+        saysShown: shown(q.foot?.querySelector(".helper-foot-says")),
+      };
+    };
+    await settle(120);
+    measure("shut");
+    p.sibs?.querySelector(".helper-sib-fold")?.click();
+    p.card?.querySelector(".helper-brief-more")?.click();
+    await settle(120);
+    measure("open");
+    await cleanup();
+    return seen;
+  }, HELPER_BRIEFS.stated);
+  await page.setViewportSize({ width: 1280, height: 860 });
+  ok(
+    "at 360px wide the page does not scroll sideways with a long name, a long model, the strip and the card open, its footer's sentence and button both show, and the list of turns keeps room to read",
+    ["shut", "open"].every((key) =>
+      narrow[key].noSideScroll && narrow[key].blocksInside && narrow[key].chipsInside &&
+      narrow[key].speakShown && narrow[key].saysShown) &&
+      narrow.shut.listHeight >= 200 && narrow.open.listHeight >= 100,
+    JSON.stringify(narrow),
+  );
+
+  /* ---- 나머지 페이지는 그대로다: 판의 대화는 제 입력줄과 제 머리를 지키고, 첫 말도 여전히 보인다 ---- */
+  const paneKeeps = await page.evaluate(async () => {
+    const { settle, shown, scene, cleanup } = window.__HP__;
+    const at = await scene([]);
+    window.__ANSWER__.pane_log = () => ({
+      found: true, next: 2, skipped: false, more: false, folded: false, model: "model-o",
+      turns: [{ role: "user", text: "Please look at the sync bug." }, { role: "assistant", text: "On it." }],
+    });
+    await setPaneChat(at.term, true);
+    setActiveTab(at.owner.id);
+    await settle(250);
+    const host = document.querySelector(`.pane-slot[data-term="${at.term}"] .pane-chat`);
+    const seen = {
+      hostFound: host !== null,
+      composer: host?.querySelector(".worker-composer-box") != null,
+      oldHead: host?.querySelector(".worker-head") != null,
+      newChrome: host?.querySelector(".helper-crumb, .helper-sibs, .helper-brief, .helper-foot") != null,
+      firstUserShown: shown(host?.querySelector(".helper-turn.is-user")),
+    };
+    await cleanup();
+    return seen;
+  });
+  ok(
+    "a pane's own conversation keeps its composer and its plain head and still shows its first message, so the helper page's crumb, strip, card and footer stand on helper pages alone",
+    paneKeeps.hostFound === true && paneKeeps.composer === true && paneKeeps.oldHead === true &&
+      paneKeeps.newChrome === false && paneKeeps.firstUserShown === true,
+    JSON.stringify(paneKeeps),
+  );
 }
