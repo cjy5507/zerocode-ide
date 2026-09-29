@@ -663,10 +663,10 @@ fn a_trust_record_the_gate_cannot_believe_is_written_and_reported_as_still_gated
 }
 
 /// Consent was given to the server a project `remove` takes away. Left in the
-/// record, the name would run whatever is added under it next without asking —
-/// so the name leaves with the server, and the names beside it stay.
+/// record, the name would outlive it — so the name leaves with the server, and
+/// the names beside it stay.
 #[test]
-fn a_project_remove_takes_the_name_out_of_the_trust_record_and_a_later_add_is_gated_again() {
+fn a_project_remove_takes_the_name_out_of_the_trust_record_and_keeps_the_others() {
     let scratch = Scratch::new();
     for name in ["repo", "kept"] {
         scratch
@@ -675,25 +675,46 @@ fn a_project_remove_takes_the_name_out_of_the_trust_record_and_a_later_add_is_ga
     }
 
     let report = scratch.json(&["remove", "repo", "--project", "--json"]);
+
+    // The consent itself comes first: what the record holds afterwards.
+    let record: Value = serde_json::from_str(
+        &std::fs::read_to_string(scratch.trust_record()).expect("trust record"),
+    )
+    .expect("the record is JSON");
+    assert_eq!(record, json!(["kept"]));
+    // Then what the report says about it.
     assert_eq!(report["edit"], "removed");
     assert_eq!(report["trustEdit"], "removed");
     assert_eq!(
         report["trustPath"],
         json!(scratch.trust_record().display().to_string())
     );
-    let record: Value = serde_json::from_str(
-        &std::fs::read_to_string(scratch.trust_record()).expect("trust record"),
-    )
-    .expect("the record is JSON");
-    assert_eq!(record, json!(["kept"]));
-
-    // The defect itself: the same name, added again without `--trust`, is not
-    // run on the consent given to the server that was removed.
-    let again = scratch.json(&["add", "repo", "--project", "--json", "--", "uvx", "other"]);
-    assert_eq!(again["gated"], json!(true));
     let config = scratch.loader().load().expect("load");
-    assert!(!config.mcp().servers().contains_key("repo"));
     assert!(config.mcp().servers().contains_key("kept"));
+}
+
+/// The defect itself: a server added later under the name of one that was
+/// removed is not run on the consent given to the removed one.
+#[test]
+fn a_server_added_under_a_removed_name_is_gated_again() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&["add", "repo", "--project", "--trust", "--", "npx"])
+        .expect("add trusted");
+    scratch
+        .run(&["remove", "repo", "--project"])
+        .expect("remove project");
+
+    let again = scratch.json(&["add", "repo", "--project", "--json", "--", "uvx", "other"]);
+
+    assert_eq!(again["gated"], json!(true));
+    assert!(!scratch
+        .loader()
+        .load()
+        .expect("load")
+        .mcp()
+        .servers()
+        .contains_key("repo"));
 }
 
 /// A name the record never held leaves the person's bytes alone, no record is
@@ -709,7 +730,7 @@ fn a_remove_leaves_the_trust_record_alone_when_the_name_was_never_trusted_there(
         .run(&["remove", "plain", "--project"])
         .expect("remove project");
     assert!(!scratch.trust_record().exists(), "{printed}");
-    assert!(!printed.contains("trust"), "{printed}");
+    assert!(!printed.contains("no longer trusted"), "{printed}");
 
     std::fs::write(scratch.trust_record(), "[\"someone-elses\", \"user\"]\n")
         .expect("seed trust record");
@@ -726,5 +747,66 @@ fn a_remove_leaves_the_trust_record_alone_when_the_name_was_never_trusted_there(
     assert_eq!(
         std::fs::read_to_string(scratch.trust_record()).expect("trust record"),
         "[\"someone-elses\", \"user\"]\n"
+    );
+}
+
+/// What a person reads when the name came out of the record.
+#[test]
+fn a_project_remove_says_in_words_that_the_name_came_out_of_the_record() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&["add", "repo", "--project", "--trust", "--", "npx"])
+        .expect("add trusted");
+
+    let printed = scratch
+        .run(&["remove", "repo", "--project"])
+        .expect("remove project");
+
+    assert_eq!(
+        printed,
+        format!(
+            "removed repo from {}\nno longer trusted in {}",
+            scratch.project_settings().display(),
+            scratch.trust_record().display()
+        )
+    );
+}
+
+/// A person can break the record. By then the server is already out of the
+/// settings document, so the failure says what was done and what was not — and
+/// leaves the record the person wrote as it found it.
+#[test]
+fn a_project_remove_that_cannot_edit_the_record_says_the_server_is_already_gone() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&["add", "repo", "--project", "--trust", "--", "npx"])
+        .expect("add trusted");
+    let broken = r#"{"repo": true}"#;
+    std::fs::write(scratch.trust_record(), broken).expect("a person breaks the record");
+
+    let error = scratch
+        .run(&["remove", "repo", "--project"])
+        .expect_err("refusal");
+
+    assert!(
+        error.contains(&format!(
+            "repo was removed from {}",
+            scratch.project_settings().display()
+        )),
+        "{error}"
+    );
+    assert!(
+        error.contains("could not be taken out of the trust record"),
+        "{error}"
+    );
+    assert!(
+        !std::fs::read_to_string(scratch.project_settings())
+            .expect("project settings")
+            .contains("\"repo\""),
+        "the settings document still names the server"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.trust_record()).expect("trust record"),
+        broken
     );
 }

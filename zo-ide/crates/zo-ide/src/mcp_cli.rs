@@ -58,7 +58,8 @@ zo mcp logout <name> [--cwd <dir>]
   it records this one name in the project's trust record, which counts only
   while it is your own uncommitted file — and without it `add` says in one
   line that the server is not loaded and how to trust it. `remove --project`
-  takes the name back out of that record, so consent never outlives the server.
+  takes the name back out of that record, so a server added later under the
+  same name is gated again.
 
   `login` runs the OAuth flow for a remote server (inside the ZeroCode window
   the consent page opens in the window's own browser, where the person is

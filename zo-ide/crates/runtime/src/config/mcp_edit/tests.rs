@@ -488,3 +488,55 @@ fn untrusting_from_a_record_that_is_not_an_array_of_names_is_refused_before_anyt
         seeded
     );
 }
+
+/// A record a person edited by hand may name a server twice. Consent goes with
+/// every copy, or the name would still run what is added under it next.
+#[test]
+fn untrusting_a_name_takes_out_every_copy_of_it() {
+    let dir = tempfile::tempdir().expect("temporary project dir");
+    let record = dir.path().join(mcp_keys::TRUSTED_SERVERS_FILE);
+    std::fs::write(&record, r#"["twice","kept","twice"]"#).expect("a person writes the record");
+
+    assert_eq!(
+        untrust_mcp_server(&record, "twice").expect("untrust"),
+        McpEdit::Removed
+    );
+
+    let names = parse_trusted_mcp_server_names(
+        &record,
+        &std::fs::read_to_string(&record).expect("trust record"),
+    )
+    .expect("parse");
+    assert_eq!(names, ["kept"]);
+}
+
+/// The point of taking the name out: a server added later under it is gated
+/// again. The loader says so, not the writer — and after the last name has
+/// gone the loader still reads the record it left behind.
+#[test]
+fn an_untrusted_name_gates_the_next_server_added_under_it() {
+    let home = tempfile::tempdir().expect("config home");
+    let cwd = tempfile::tempdir().expect("workspace");
+    let settings = cwd.path().join(".zo").join("settings.json");
+    let record = ConfigLoader::new(cwd.path(), home.path()).trusted_mcp_servers_path();
+    write_mcp_server(&settings, "consented", &stdio("npx", &[], &[])).expect("write");
+    trust_mcp_server(&record, "consented").expect("trust");
+    assert!(load_at(&home, &cwd)
+        .mcp()
+        .servers()
+        .contains_key("consented"));
+
+    remove_mcp_server(&settings, "consented").expect("remove");
+    assert_eq!(
+        untrust_mcp_server(&record, "consented").expect("untrust"),
+        McpEdit::Removed
+    );
+
+    // The same name, a different command: what a later `add` could bring.
+    write_mcp_server(&settings, "consented", &stdio("uvx", &["other"], &[])).expect("write");
+    let config = load_at(&home, &cwd);
+    assert!(!config.mcp().servers().contains_key("consented"));
+    let untrusted = config.mcp().untrusted_project_servers();
+    assert_eq!(untrusted.len(), 1);
+    assert_eq!(untrusted[0].name, "consented");
+}
