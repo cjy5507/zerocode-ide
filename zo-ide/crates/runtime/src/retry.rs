@@ -498,6 +498,28 @@ mod tests {
         );
     }
 
+    /// What a 5xx costs in waiting is the provider client's ladder and nothing on top
+    /// of it (t-15565). The `api_error` frame a provider closes a stream with
+    /// (`event: error` on an HTTP 200) reaches this layer only after the stream has
+    /// re-opened itself as often as that ladder allows — five "retrying in Ns" rows —
+    /// and its text has no status in it, so it is not a retry signal here. Reading it
+    /// as one would spend that whole ladder again on every attempt before the quota
+    /// escape got its turn. What a spent ladder does next is the escape's business
+    /// (`decide_quota_escape`), not another retry's.
+    #[test]
+    fn a_spent_api_error_ladder_is_not_re_entered_by_the_runtime_ladder() {
+        for spent in [
+            "runtime: provider stream: transport error: api stream error (api_error): Internal server error",
+            "provider transport: api failed after 6 attempts: api returned 500 Internal Server Error (api_error): Internal server error",
+        ] {
+            assert_eq!(
+                classify_for_retry(spent, 0, Duration::ZERO),
+                RetryVerdict::Fail,
+                "{spent}"
+            );
+        }
+    }
+
     #[test]
     fn classifies_auth_error_as_permanent() {
         let verdict =
