@@ -25240,7 +25240,17 @@ fn an_open_model_dial_says_where_its_model_came_from_and_what_else_is_offered() 
             .any(|c| c["model"] == "model-c" && c["fresh"] == true),
         "the other new arrival is offered and marked: {low}"
     );
-    assert!(answered(&Lined, "agent-list --agent codex")["agents"][0]["summon"].is_null());
+    assert!(row_for(&said, "claude")["summonUnavailable"].is_null());
+    let codex = answered(&Lined, "agent-list --agent codex");
+    assert!(codex["agents"][0]["summon"].is_null());
+    assert_eq!(
+        codex["agents"][0]["summonUnavailable"], SUMMON_NO_LINEUP,
+        "said, not left to a default"
+    );
+    assert_eq!(
+        answered(&Lined, "agent-list --agent copilot")["agents"][0]["summonUnavailable"],
+        SUMMON_NO_MODEL_FLAG
+    );
 
     let mut bench = Bench::new();
     bench.json("run-create --name lineup");

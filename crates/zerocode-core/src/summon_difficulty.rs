@@ -75,7 +75,11 @@ pub fn launchable(agent: &str, profile: &Profile) -> Result<(), String> {
             "{PROFILES_SETTING}: model and effort must be nonempty"
         ));
     }
-    if crate::orchestration::native_agent(&profile.model).is_some_and(|native| native != agent) {
+    // An agent that runs any provider's model (zo) may name another CLI's
+    // model; one tied to its own provider may not.
+    if crate::orchestration::native_agent(&profile.model).is_some_and(|native| native != agent)
+        && !crate::orchestration::runs_model(agent, &profile.model)
+    {
         return Err(format!("{agent}: model belongs to another agent"));
     }
     Ok(())

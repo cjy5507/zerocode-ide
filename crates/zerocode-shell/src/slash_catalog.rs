@@ -570,15 +570,20 @@ pub fn agent_models(agent: &str, home: &Path) -> Vec<ModelRow> {
 }
 
 /// Today's lineup for `agent` — the same catalog [`agent_models`] reads, with
-/// the band, rungs and efforts zo's classifier put on each row — or `None`
-/// for an agent that drives no single provider or a catalog with none of its
-/// rows (t-14437).
+/// the band, rungs and efforts zo's classifier put on each row: its one
+/// provider's rows, or every provider's for an agent that drives none in
+/// particular (zo, which runs any of them). `None` for a catalog with none
+/// of its rows (t-14437).
 pub fn agent_lineup(
     agent: &str,
     home: &Path,
 ) -> Option<zerocode_core::summon_difficulty::lineup::Lineup> {
-    let provider = zerocode_core::agent::agent_voice(agent).models_provider?;
-    zerocode_core::summon_difficulty::lineup::Lineup::from_catalog(&zo_catalog(home), provider)
+    use zerocode_core::summon_difficulty::lineup::Lineup;
+    let catalog = zo_catalog(home);
+    match zerocode_core::agent::agent_voice(agent).models_provider {
+        Some(provider) => Lineup::from_catalog(&catalog, provider),
+        None => Lineup::from_catalog_all(&catalog),
+    }
 }
 
 /// `zo models --json`, whole, cached for [`MODELS_TTL`]; `Null` when zo is

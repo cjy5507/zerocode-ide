@@ -16175,6 +16175,9 @@ const DIALS_FROM_REQUEST: &str = "request";
 /// `dials.modelFrom`: a challenger's turn tried a model with too little
 /// record here (`summon_model::challenger`).
 const DIALS_FROM_CHALLENGE: &str = "challenge";
+/// `dials.modelFrom`: no row, no lineup and no answer named a model, so the
+/// agent's own CLI launched with its default.
+const DIALS_FROM_CLI_DEFAULT: &str = "cli-default";
 
 /// Translate the difficulty ladder through the measured launch table.
 /// Its last column is the highest effort this summons ladder may use.
@@ -16328,8 +16331,26 @@ fn agent_row(
     // `fresh` — so a coordinator can name one with `--model` (t-14437).
     // `null` is "nobody read a lineup", never "no choices".
     row["summon"] = summon.map_or(serde_json::Value::Null, |rows| serde_json::json!(rows));
+    // And when there are none, why — said, never left to a CLI's default.
+    row["summonUnavailable"] = match (tuning, summon) {
+        (None, _) => serde_json::json!(SUMMON_NO_MODEL_FLAG),
+        (Some((_, _, None, _)), _) => serde_json::json!(SUMMON_NO_EFFORT_FLAG),
+        (Some(_), Some(rows)) if !rows.is_empty() => serde_json::Value::Null,
+        (Some(_), _) => serde_json::json!(SUMMON_NO_LINEUP),
+    };
     row
 }
+
+/// `summonUnavailable`: the launch table has measured no `--model` for this
+/// agent's CLI, so a summons cannot name one.
+const SUMMON_NO_MODEL_FLAG: &str = "its CLI takes no measured --model at launch";
+/// `summonUnavailable`: a model can be named but no effort, so no difficulty
+/// row can be launched as a whole.
+const SUMMON_NO_EFFORT_FLAG: &str = "its CLI takes no measured effort at launch";
+/// `summonUnavailable`: the window read no lineup with models for it — its
+/// provider is not connected to zo, or zo's discovery for it failed.
+const SUMMON_NO_LINEUP: &str =
+    "no lineup today: its provider is not connected to zo, or zo could not list it";
 
 /// What this ledger has actually launched, per agent: every `(model, effort)`
 /// pair a summons here has carried, and how many times.
@@ -19576,7 +19597,7 @@ fn plan_inner(
                 Some((_, Some(receipt), None)) if receipt["applied"] == true => receipt["chosen"]
                     .as_str()
                     .zip(receipt[crate::summon_model::EFFORT_KEY].as_str())
-                    .filter(|(chosen, _)| native_agent(chosen).is_none_or(|native| native == agent))
+                    .filter(|(chosen, _)| runs_model(&agent, chosen))
                     .map(|(chosen, effort)| {
                         (chosen.to_string(), effort.to_string(), DIALS_FROM_JEV)
                     }),
@@ -19593,7 +19614,9 @@ fn plan_inner(
                         (Some(_), _, _) => serde_json::json!(DIALS_FROM_REQUEST),
                         (None, Some((_, _, from)), _) => serde_json::json!(from),
                         (None, None, Some(row)) => serde_json::json!(row.from),
-                        (None, None, None) => serde_json::Value::Null,
+                        // Nothing here chose: the agent's own CLI picks, and
+                        // the reply says so rather than leaving it unsaid.
+                        (None, None, None) => serde_json::json!(DIALS_FROM_CLI_DEFAULT),
                     },
                     "effortClamped": profile.as_ref().and_then(|row| row.effort_clamped.clone()),
                     "candidates": profile.as_ref().map_or_else(Vec::new, |row| row.candidates.clone()),

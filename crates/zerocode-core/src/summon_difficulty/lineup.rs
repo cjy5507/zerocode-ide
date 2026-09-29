@@ -168,11 +168,50 @@ impl Lineup {
     /// the answer lists none (no zo, or a provider it does not serve).
     #[must_use]
     pub fn from_catalog(catalog: &Value, provider: &str) -> Option<Self> {
+        Self::from_rows(catalog, |row| {
+            row.get("provider").and_then(Value::as_str) == Some(provider)
+        })
+    }
+
+    /// Every provider's rows — the lineup of an agent that runs any
+    /// provider's model (zo) — and the models of every custom provider the
+    /// answer says is usable, which the person configured and so are never
+    /// news; `None` when the answer lists none.
+    #[must_use]
+    pub fn from_catalog_all(catalog: &Value) -> Option<Self> {
+        let mut all = Self::from_rows(catalog, |_| true).unwrap_or_default();
+        let custom = catalog
+            .get("customProviders")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|provider| provider.get("usable").and_then(Value::as_bool) == Some(true))
+            .flat_map(|provider| {
+                provider
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+            })
+            .map(|id| LiveModel {
+                id: id.to_string(),
+                band: None,
+                rungs: BTreeSet::new(),
+                efforts: None,
+                builtin: true,
+                unlisted: false,
+            });
+        all.models.extend(custom);
+        (!all.models.is_empty()).then_some(all)
+    }
+
+    fn from_rows(catalog: &Value, wanted: impl Fn(&Value) -> bool) -> Option<Self> {
         let models: Vec<LiveModel> = catalog
             .get("models")?
             .as_array()?
             .iter()
-            .filter(|row| row.get("provider").and_then(Value::as_str) == Some(provider))
+            .filter(|row| wanted(row))
             .filter_map(|row| {
                 let band: Option<Band> = row
                     .get("band")
@@ -685,6 +724,46 @@ mod tests {
             Some("model-a")
         );
         assert!(Lineup::from_catalog(&json!({"models": []}), "claude").is_none());
+    }
+
+    /// An agent that runs any provider's model (zo) takes every provider's
+    /// rows and every usable custom provider's models — the person's own, so
+    /// never news — and may be launched on another CLI's model.
+    #[test]
+    fn an_agent_of_every_provider_reads_every_row_and_the_usable_custom_ones() {
+        let catalog = json!({
+            "models": [
+                {"provider": "claude", "id": "model-a", "builtin": true, "band": "second", "rungs": ["hard"]},
+                {"provider": "openai", "id": "model-o", "builtin": false, "band": "rest", "rungs": ["easy"]},
+            ],
+            "customProviders": [
+                {"name": "custom-a", "models": ["custom-a/model-x"], "usable": true},
+                {"name": "custom-b", "models": ["custom-b/model-y"], "usable": false},
+            ],
+        });
+        let all = Lineup::from_catalog_all(&catalog).unwrap();
+        let ids: Vec<&str> = all.models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, ["model-a", "model-o", "custom-a/model-x"]);
+        let mut seen = Seen::default();
+        assert_eq!(
+            seen.observe("zo", &all, NOW).entered,
+            ["model-o"],
+            "a custom model is not news"
+        );
+        assert!(Lineup::from_catalog_all(&json!({"models": []})).is_none());
+        let rows =
+            rows_with_defaults(&Value::Null, &json!({}), "zo", Some(&all), None, NOW).unwrap();
+        assert_eq!(
+            row(&rows, LOW).model,
+            "model-o",
+            "another provider's easy rung"
+        );
+        assert_eq!(row(&rows, HIGH).model, "model-a");
+        let across = Profile {
+            model: "claude-model".into(),
+            effort: "high".into(),
+        };
+        assert!(super::super::launchable("zo", &across).is_ok());
     }
 
     #[test]
