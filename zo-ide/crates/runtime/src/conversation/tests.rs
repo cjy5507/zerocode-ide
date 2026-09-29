@@ -19068,10 +19068,14 @@ fn is_summary_request(request: &ApiRequest) -> bool {
 }
 
 /// A provider whose classifier declines the conversation's turn requests
-/// `declines` times with no category, then answers; a compaction's summary
-/// request is always answered. Keeps every request it was sent.
+/// `declines` times — naming the category it was given by
+/// [`Self::naming`], none by default — then answers; a compaction's summary
+/// request is always answered. Keeps every request it was sent, and takes
+/// [`Self::taking`] to answer each one (none by default).
 struct DecliningProvider {
     declines: usize,
+    category: Mutex<Option<&'static str>>,
+    latency: Duration,
     turn_calls: AtomicUsize,
     requests: Mutex<Vec<ApiRequest>>,
 }
@@ -19080,9 +19084,29 @@ impl DecliningProvider {
     fn new(declines: usize) -> Self {
         Self {
             declines,
+            category: Mutex::new(None),
+            latency: Duration::ZERO,
             turn_calls: AtomicUsize::new(0),
             requests: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The category the classifier names on every decline from now on.
+    fn naming(self, category: &'static str) -> Self {
+        self.name_category(Some(category));
+        self
+    }
+
+    /// Change the category the classifier names between turns — `None` for a
+    /// decline that names none.
+    fn name_category(&self, category: Option<&'static str>) {
+        *self.category.lock().expect("category") = category;
+    }
+
+    /// How long every request takes, a compaction's summary included.
+    fn taking(mut self, latency: Duration) -> Self {
+        self.latency = latency;
+        self
     }
 
     fn requests(&self) -> Vec<ApiRequest> {
@@ -19102,6 +19126,9 @@ impl AsyncApiClient for DecliningProvider {
         Box::pin(async move {
             let summary = is_summary_request(&request);
             self.requests.lock().expect("requests").push(request);
+            if !self.latency.is_zero() {
+                tokio::time::sleep(self.latency).await;
+            }
             if summary {
                 return Ok(vec![
                     AssistantEvent::TextDelta(
@@ -19111,10 +19138,13 @@ impl AsyncApiClient for DecliningProvider {
                 ]);
             }
             if self.turn_calls.fetch_add(1, Ordering::SeqCst) < self.declines {
-                return Ok(vec![
-                    AssistantEvent::StopReason("refusal".to_string()),
-                    AssistantEvent::MessageStop,
-                ]);
+                let named = *self.category.lock().expect("category");
+                let mut declined = vec![AssistantEvent::StopReason("refusal".to_string())];
+                if let Some(category) = named {
+                    declined.push(AssistantEvent::RefusalCategory(category.to_string()));
+                }
+                declined.push(AssistantEvent::MessageStop);
+                return Ok(declined);
             }
             let _ = render_tx
                 .send(crate::message_stream::types::RenderBlock::TextDelta {
@@ -19483,4 +19513,317 @@ fn a_short_declined_conversation_is_surfaced_without_compacting() {
     });
     let kinds: Vec<bool> = provider.requests().iter().map(is_summary_request).collect();
     assert_eq!(kinds, vec![false, false], "the request and the same-model retry only");
+}
+
+// ── t-15890: a decline with nowhere to go is not re-run from the start ──
+//
+// 2026-09-29 22:57, a long conversation on Opus 5.5. The classifier declined
+// it in a category the provider routes nowhere; the ladder asked the same
+// model once more, compacted the conversation (369 messages folded), asked
+// once more and surfaced the decline. The person typed 「계속」 and the whole
+// ladder ran again: the same-model retry, then a second compaction of the
+// conversation it had just compacted (6 messages folded, 52.9k → 49.1k
+// tokens), then the retry after it — and the same notice came back after
+// minutes on "working". These pin the next turn asking once, with the
+// person's words as they wrote them, and saying at once that the decline
+// stands.
+
+/// A category the catalog routes nowhere on the Opus lineup — the ladder's own
+/// view of the decline the person saw ("the provider routes `cyber` declines
+/// to no other model"). This tree's catalog routes `cyber` on Opus 5.5, so the
+/// tests take one it does not; [`the_premise_of_the_standing_decline_tests`]
+/// pins that.
+const UNROUTED_CATEGORY: &str = "reasoning_extraction";
+
+/// What the person types after the decline was surfaced.
+const CONTINUE_WORDS: &str = "continue";
+
+/// What one request costs the tests' provider. The fake answers at once
+/// otherwise, and a request's cost is the number a person feels.
+const REQUEST_LATENCY: Duration = Duration::from_millis(50);
+
+/// The premise of the tests below, said once: on Opus 5.5 the provider routes
+/// [`UNROUTED_CATEGORY`] and a decline naming none nowhere, and `cyber`
+/// somewhere.
+#[test]
+fn the_premise_of_the_standing_decline_tests() {
+    assert!(::api::refusal_route_candidates("claude-opus-5-5", Some(UNROUTED_CATEGORY)).is_empty());
+    assert!(::api::refusal_route_candidates("claude-opus-5-5", None).is_empty());
+    assert!(!::api::refusal_route_candidates("claude-opus-5-5", Some("cyber")).is_empty());
+}
+
+/// Opus 5.5 over [`long_declined_conversation`], every request declined by
+/// `provider`, the turn records written under `cwd`. No turn has run yet.
+fn declined_long_runtime(
+    provider: &Arc<DecliningProvider>,
+    cwd: &std::path::Path,
+) -> ConversationRuntime<StopApiClient, StaticToolExecutor> {
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        StopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_async_api_client(Arc::clone(provider) as Arc<dyn AsyncApiClient>);
+    runtime.session.messages = Arc::new(long_declined_conversation(false));
+    runtime.set_context_model("claude-opus-5-5");
+    runtime.set_workspace_cwd(cwd.to_path_buf());
+    runtime
+}
+
+/// One streaming turn of `words` on `runtime`: how it ended, every block the
+/// screen was sent, and how long it took.
+fn declined_turn(
+    runtime: &mut ConversationRuntime<StopApiClient, StaticToolExecutor>,
+    words: &str,
+) -> (
+    Result<TurnSummary, super::StreamingTurnError>,
+    Vec<crate::message_stream::types::RenderBlock>,
+    Duration,
+) {
+    let prompter = Arc::new(RecordingPrompter {
+        answer: crate::permission::PermissionDecision::Deny,
+        asked: std::sync::Mutex::new(Vec::new()),
+    });
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let started = std::time::Instant::now();
+    let (ended, blocks) = rt.block_on(async {
+        let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(256);
+        let screen = tokio::spawn(async move {
+            let mut blocks = Vec::new();
+            while let Some(block) = render_rx.recv().await {
+                blocks.push(block);
+            }
+            blocks
+        });
+        let ended = runtime
+            .run_turn_streaming_maybe_deep(words, Vec::new(), render_tx, prompter)
+            .await;
+        (ended, screen.await.expect("the screen task"))
+    });
+    (ended, blocks, started.elapsed())
+}
+
+/// Whether each request from `from` on was a compaction's summary — the
+/// shape of what a turn asked the provider.
+fn request_kinds(provider: &DecliningProvider, from: usize) -> Vec<bool> {
+    provider.requests()[from..].iter().map(is_summary_request).collect()
+}
+
+/// The number a person feels, printed for the report (t-15890): how many
+/// requests a `continue` turn sent, how many of them were a compaction's
+/// summary, and how long it took at [`REQUEST_LATENCY`] a request.
+fn print_turn_two(row: &str, kinds: &[bool], took: Duration) {
+    eprintln!(
+        "t-15890 measured | {row:<30} | {} requests ({} summary) | {:.2}s at {:?} a request",
+        kinds.len(),
+        kinds.iter().filter(|summary| **summary).count(),
+        took.as_secs_f64(),
+        REQUEST_LATENCY,
+    );
+}
+
+/// The case seen. The classifier declines the long conversation in a category
+/// the provider routes nowhere and every rung spends itself: the same model
+/// once, one compaction, one retry after it. The person types `continue`. The
+/// decline came back for the same conversation, so the turn asks once — the
+/// person's words as written — and, declined again, says so: no second
+/// same-model retry, no second compaction, no second wait.
+#[test]
+fn a_continue_after_a_decline_with_nowhere_to_go_is_surfaced_at_once() {
+    let _todo_store = HermeticTodoStore::pin();
+    let cwd = temp_workspace("refusal-standing-at-once");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let provider = Arc::new(
+        DecliningProvider::new(usize::MAX)
+            .naming(UNROUTED_CATEGORY)
+            .taking(REQUEST_LATENCY),
+    );
+    let mut runtime = declined_long_runtime(&provider, &cwd);
+
+    let (ended, _, first_took) = declined_turn(&mut runtime, DECLINED_LAST_WORDS);
+    ended.expect("turn one surfaces its decline");
+    assert_eq!(
+        request_kinds(&provider, 0),
+        vec![false, false, true, false],
+        "turn one: the request, the same-model retry, ONE summary, ONE retry after it"
+    );
+    let sent = provider.requests().len();
+
+    let (ended, blocks, took) = declined_turn(&mut runtime, CONTINUE_WORDS);
+    ended.expect("turn two surfaces its decline");
+    let second = request_kinds(&provider, sent);
+    print_turn_two("the case seen: same decline", &second, took);
+    eprintln!(
+        "t-15890 measured | turn one of the case seen sent {sent} requests in {:.2}s",
+        first_took.as_secs_f64()
+    );
+    assert_eq!(
+        second,
+        vec![false],
+        "turn two asks once and says so: no second same-model retry, no summary, no retry after one"
+    );
+    assert_eq!(
+        last_user_words(&provider.requests()[sent]).as_deref(),
+        Some(CONTINUE_WORDS),
+        "the person's words reach the model as they wrote them"
+    );
+    let lines = system_lines(&blocks);
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("Compacted conversation") || line.contains("compacting it")),
+        "nothing was compacted in turn two: {lines:?}"
+    );
+    let records = turn_records(&cwd);
+    let record = records.last().expect("turn two was recorded");
+    assert!(
+        record["refusal_compaction"].is_null(),
+        "and its record holds no compaction: {record}"
+    );
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+/// The words of a decline that stands: that the person's `continue` alone will
+/// be declined again, and what helps. The first surfaced decline keeps the
+/// ordinary words — it does not know yet that it stands.
+#[test]
+fn a_standing_decline_says_that_continue_alone_will_be_declined_again() {
+    let _todo_store = HermeticTodoStore::pin();
+    let cwd = temp_workspace("refusal-standing-words");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let provider = Arc::new(DecliningProvider::new(usize::MAX).naming(UNROUTED_CATEGORY));
+    let mut runtime = declined_long_runtime(&provider, &cwd);
+
+    let (ended, blocks, _) = declined_turn(&mut runtime, DECLINED_LAST_WORDS);
+    ended.expect("turn one surfaces its decline");
+    let lines = system_lines(&blocks);
+    assert!(
+        lines.iter().any(|line| line == super::fallback::REFUSAL_SURFACED_NOTICE),
+        "the first surfaced decline keeps the ordinary notice: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("will be declined again")),
+        "and does not claim what it cannot know yet: {lines:?}"
+    );
+
+    let (ended, blocks, _) = declined_turn(&mut runtime, CONTINUE_WORDS);
+    ended.expect("turn two surfaces its decline");
+    let lines = system_lines(&blocks);
+    let words = lines
+        .iter()
+        .find(|line| line.contains("will be declined again"))
+        .unwrap_or_else(|| panic!("turn two says its words will be declined again: {lines:?}"));
+    for what_helps in ["narrow or rephrase", "/model", "fresh session"] {
+        assert!(words.contains(what_helps), "{what_helps:?} is in: {words}");
+    }
+    let last = runtime.session.messages.last().expect("the surfaced notice");
+    assert!(
+        matches!(last.blocks.first(), Some(ContentBlock::Text { text }) if text == words),
+        "the conversation and the headless result carry the same words: {last:?}"
+    );
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+/// A decline in another category is another decline: a standing one is for
+/// the category the conversation stood on. (A decline that names none is
+/// another category too.)
+#[test]
+fn a_different_category_walks_the_ladder_as_today() {
+    let _todo_store = HermeticTodoStore::pin();
+    let cwd = temp_workspace("refusal-standing-other-category");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let provider = Arc::new(
+        DecliningProvider::new(usize::MAX)
+            .naming(UNROUTED_CATEGORY)
+            .taking(REQUEST_LATENCY),
+    );
+    let mut runtime = declined_long_runtime(&provider, &cwd);
+
+    let (ended, _, _) = declined_turn(&mut runtime, DECLINED_LAST_WORDS);
+    ended.expect("turn one surfaces its decline");
+    let sent = provider.requests().len();
+
+    provider.name_category(None);
+    let (ended, _, took) = declined_turn(&mut runtime, CONTINUE_WORDS);
+    ended.expect("turn two surfaces its decline");
+    print_turn_two("another category", &request_kinds(&provider, sent), took);
+    assert_eq!(
+        request_kinds(&provider, sent),
+        vec![false, false, true, false],
+        "a decline that names another category: the request, the same-model retry, a summary, the retry after it"
+    );
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+/// A conversation that changed since its compaction is not the one that was
+/// declined: the ladder runs as today — the same model once, a compaction, a
+/// retry after it.
+#[test]
+fn a_conversation_that_changed_since_the_decline_walks_the_ladder_as_today() {
+    let _todo_store = HermeticTodoStore::pin();
+    let cwd = temp_workspace("refusal-standing-changed");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let provider = Arc::new(
+        DecliningProvider::new(usize::MAX)
+            .naming(UNROUTED_CATEGORY)
+            .taking(REQUEST_LATENCY),
+    );
+    let mut runtime = declined_long_runtime(&provider, &cwd);
+
+    let (ended, _, _) = declined_turn(&mut runtime, DECLINED_LAST_WORDS);
+    ended.expect("turn one surfaces its decline");
+    let sent = provider.requests().len();
+
+    // The conversation moved on: another dozen exchanges of work.
+    Arc::make_mut(&mut runtime.session.messages).extend(long_declined_conversation(false));
+    let (ended, _, took) = declined_turn(&mut runtime, CONTINUE_WORDS);
+    ended.expect("turn two surfaces its decline");
+    print_turn_two("a conversation that changed", &request_kinds(&provider, sent), took);
+    assert_eq!(
+        request_kinds(&provider, sent),
+        vec![false, false, true, false],
+        "the request, the same-model retry, a summary, the retry after it"
+    );
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+/// A routed category is not this case: the route is taken and the decline is
+/// counted, turn after turn, exactly as today — the same walk each turn and
+/// the session cooldown armed by the second.
+#[test]
+fn a_routed_category_walks_the_ladder_as_today_and_arms_the_cooldown() {
+    let _todo_store = HermeticTodoStore::pin();
+    let cwd = temp_workspace("refusal-standing-routed");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let provider = Arc::new(DecliningProvider::new(usize::MAX).naming("cyber").taking(REQUEST_LATENCY));
+    let mut runtime = declined_long_runtime(&provider, &cwd);
+    runtime.set_classifier_fallback(crate::ClassifierFallback::Auto);
+
+    let (ended, _, _) = declined_turn(&mut runtime, DECLINED_LAST_WORDS);
+    ended.expect("turn one surfaces its decline");
+    assert!(runtime.refusal_dry_until.is_none(), "one turn is not a streak");
+    let first = request_kinds(&provider, 0);
+    let sent = provider.requests().len();
+    eprintln!("t-15890 routed as today: turn one {first:?}");
+
+    let (ended, _, took) = declined_turn(&mut runtime, CONTINUE_WORDS);
+    ended.expect("turn two surfaces its decline");
+    let second = request_kinds(&provider, sent);
+    eprintln!("t-15890 routed as today: turn two {second:?}");
+    print_turn_two("a routed category (cyber)", &second, took);
+    assert!(
+        runtime.refusal_dry_until.is_some(),
+        "two consecutive routed turns arm the session cooldown"
+    );
+    assert!(
+        second.len() >= first.len(),
+        "the routed turn is not cut short: {first:?} then {second:?}"
+    );
+    let _ = fs::remove_dir_all(&cwd);
 }
