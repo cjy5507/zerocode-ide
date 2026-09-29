@@ -1050,7 +1050,7 @@ async function closeTabRun(list) {
     // takes them: ask, and remember it for ⌘⇧T only if it actually went —
     // and, as there, not if the close reclaimed the file out from under it.
     if (!(await letGoOf(tab))) return;
-    if (!tab.reclaimed) closedTabs.push({ kind: tab.kind, path: tab.path });
+    if (!tab.reclaimed) closedTabs.push({ kind: tab.kind, path: tab.path, readOnly: tab.readOnly === true });
   }
 }
 
@@ -1665,7 +1665,7 @@ function tabMenuAt(tab, x, y, opener = null) {
   }
   // 같은 파일의 다른 판으로 건너가는 문(1-g36): markdown 원본에서는 그려진
   // 미리보기로, 미리보기에서는 고칠 수 있는 원본으로.
-  if (tab.kind === "file" && tab.path && renderedAs(tab.path) === "markdown") {
+  if (tab.kind === "file" && tab.path && !tab.readOnly && renderedAs(tab.path) === "markdown") {
     items.push(
       {
         label: t("mdview.open", "Markdown 프리뷰"),

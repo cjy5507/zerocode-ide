@@ -115,9 +115,11 @@ pub(crate) fn root_of(active: PathBuf, vault: Option<&str>, path: &str) -> PathB
 
 /// Whether the project's own file door would read `path` — the open project, or
 /// the saved vault — which is the door an editable tab goes through (t-16006).
-/// Red-stage stub: says yes to everything.
-pub(crate) fn opens_in_project(_active: PathBuf, _vault: Option<&str>, _path: &str) -> bool {
-    true
+/// It asks the door's own resolver, so the answer can never be wider than what
+/// [`read_text_file`] reads: a path in neither root, a link that leaves the
+/// root, and a file that is not there are all "no".
+pub(crate) fn opens_in_project(active: PathBuf, vault: Option<&str>, path: &str) -> bool {
+    resolve_in_project(&root_of(active, vault, path), path).is_ok()
 }
 
 /// What a file is right now, without its text.

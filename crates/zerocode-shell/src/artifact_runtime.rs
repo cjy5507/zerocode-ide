@@ -2178,14 +2178,80 @@ impl Store {
         Ok(payload)
     }
 
-    /// A document row's text, by id (t-16006). Red-stage stub: the road is not
-    /// walked yet.
+    /// A document row's text, by id (t-16006). The gallery lists every project's
+    /// documents and the project's own file door refuses a path outside its
+    /// root, as it must; a document outside the open project is read here
+    /// instead, out of the catalog's own row, so nothing about the path comes
+    /// from the window. The bounds are the drawer preview's (`preview`): a row
+    /// of kind document that is text, a regular file, and the table's text cap
+    /// — a longer file is cut on a whole character and says so, because the
+    /// person asked to read it. `version` names one of the row's kept snapshots,
+    /// found in the store's own list (`versions`) by number. Every refusal names
+    /// the row, so the window can say it in one sentence.
     pub(crate) fn document_text(
         &self,
-        _id: &str,
-        _version: Option<u32>,
+        id: &str,
+        version: Option<u32>,
     ) -> Result<DocumentText, String> {
-        Err("not implemented".to_string())
+        use std::io::Read as _;
+        let artifact = self
+            .get(id)
+            .ok_or_else(|| format!("그 아티팩트가 없습니다: {id}"))?;
+        if artifact.kind != ArtifactKind::Document {
+            return Err(format!(
+                "문서가 아닌 아티팩트입니다: {id} ({})",
+                artifact.kind.as_str()
+            ));
+        }
+        if !is_utf8_document(&artifact.path) {
+            return Err(format!("텍스트 문서가 아닙니다: {id}"));
+        }
+        let path = match version {
+            None => artifact.path,
+            Some(n) => self
+                .versions(id)
+                .into_iter()
+                .find(|kept| kept.n == n)
+                .map(|kept| kept.path)
+                .ok_or_else(|| format!("그 버전은 더 이상 보관되지 않습니다: {id} 버전 {n}"))?,
+        };
+        let cap = self.limits().preview_text_bytes_max;
+        let meta = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+        if !meta.is_file() {
+            return Err(format!("일반 파일이 아닙니다: {id}"));
+        }
+        let mut held = Vec::new();
+        std::fs::File::open(&path)
+            .and_then(|file| file.take(cap).read_to_end(&mut held))
+            .map_err(|error| error.to_string())?;
+        if held.contains(&0) {
+            return Err(format!("바이너리 파일입니다: {id}"));
+        }
+        Ok(DocumentText {
+            text: text_of_whole_characters(held),
+            bytes: meta.len(),
+            truncated: meta.len() > cap,
+        })
+    }
+}
+
+/// Bytes as text, with a character the cut split in two left out rather than
+/// shown as a replacement mark: a Korean document cut at the byte cap ends in
+/// half of a three-byte character two times in three. Anything else that is not
+/// UTF-8 is replaced, as the drawer's preview does.
+fn text_of_whole_characters(held: Vec<u8>) -> String {
+    match String::from_utf8(held) {
+        Ok(text) => text,
+        Err(error) => {
+            let invalid = error.utf8_error();
+            let bytes = error.into_bytes();
+            let whole = if invalid.error_len().is_none() {
+                &bytes[..invalid.valid_up_to()]
+            } else {
+                &bytes[..]
+            };
+            String::from_utf8_lossy(whole).into_owned()
+        }
     }
 }
 
@@ -4386,7 +4452,7 @@ mod tests {
             store
                 .document_text(&history.id, Some(9))
                 .expect_err("no such version")
-                .contains('9')
+                .contains("버전 9")
         );
     }
 
