@@ -1330,7 +1330,7 @@ fn phase_inactivity_resets_only_on_task_progress() {
     };
     assert!(
         !phase_inactivity_exceeded(&running_tool, 100, 10_000, timeout),
-        "a silent long-running tool is bounded by the hard cap, not inactivity"
+        "a silent long-running tool is progress, not inactivity — only a named wall clock ends it"
     );
 
     let stale_manifest = AgentActivitySnapshot {

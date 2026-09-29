@@ -4333,6 +4333,221 @@ fn sync_run_turn_continues_a_text_only_turn_for_pending_steering() {
     assert!(steering.lock().expect("steering queue").is_empty());
 }
 
+/// What a person types while a tool runs, as the host queues it. ASCII, so the
+/// transcript's bytes can be counted without knowing how its JSON escapes.
+const MID_TURN_STEER: &str = "t11457 steer: stop and tell me where you are";
+/// A stall notice the host stages for the running turn (t-11354's D6 rides
+/// the same inbox as a finished agent's result).
+const MID_TURN_NOTICE: &str = "t11457 notice: agent `board3d-impl` may be stuck";
+
+/// Calls the tool once, then — on the request that carries the fold — reads
+/// the transcript on disk the way a resume would at that moment, and answers.
+struct ReadsTheTranscriptAtTheFoldClient {
+    path: PathBuf,
+    calls: usize,
+    at_the_fold: Arc<Mutex<Option<(String, Session)>>>,
+}
+
+impl ApiClient for ReadsTheTranscriptAtTheFoldClient {
+    fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        self.calls += 1;
+        if self.calls == 1 {
+            return Ok(vec![
+                AssistantEvent::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "wait".to_string(),
+                    input: "{}".to_string(),
+                },
+                AssistantEvent::MessageStop,
+            ]);
+        }
+        if self.calls == 2 {
+            let bytes = fs::read_to_string(&self.path).expect("the transcript is on disk");
+            let resumed = Session::load_from_path(&self.path).expect("a resume loads it");
+            *self.at_the_fold.lock().expect("slot") = Some((bytes, resumed));
+        }
+        Ok(vec![
+            AssistantEvent::TextDelta("here is where I am".to_string()),
+            AssistantEvent::MessageStop,
+        ])
+    }
+}
+
+/// The tool the person types into: it queues the steer (and, when given an
+/// inbox, a stall notice) while it runs, as the host does mid-tool.
+fn a_tool_the_person_types_into(
+    steering: super::SteeringQueue,
+    inbox: Arc<Mutex<Option<super::AgentNotificationInbox>>>,
+) -> StaticToolExecutor {
+    StaticToolExecutor::new().register("wait", move |_input| {
+        steering
+            .lock()
+            .expect("steering queue")
+            .push(MID_TURN_STEER.to_string());
+        if let Some(inbox) = inbox.lock().expect("inbox slot").as_ref() {
+            inbox.lock().expect("inbox").push(AgentNotification {
+                label: "board3d-impl".to_string(),
+                status: crate::message_stream::AgentResultStatus::Running,
+                text: MID_TURN_NOTICE.to_string(),
+                kind: crate::conversation::AgentNotificationKind::Message {
+                    agent_id: "agent-board3d".to_string(),
+                },
+                summary: None,
+            });
+        }
+        Ok("waited".to_string())
+    })
+}
+
+/// Where `needle` sits in a loaded transcript: the index of every message whose
+/// text blocks carry it, one entry per block.
+fn where_the_words_are(session: &Session, needle: &str) -> Vec<usize> {
+    session
+        .messages
+        .iter()
+        .enumerate()
+        .flat_map(|(index, message)| {
+            message.blocks.iter().filter_map(move |block| match block {
+                ContentBlock::Text { text } if text.contains(needle) => Some(index),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+/// The index of the tool-result message that answered `tool-1`.
+fn the_tool_result_index(session: &Session) -> usize {
+    session
+        .messages
+        .iter()
+        .position(|message| {
+            message.blocks.iter().any(|block| {
+                matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tool-1")
+            })
+        })
+        .expect("the tool result is in the transcript")
+}
+
+/// Assert `needle` is in `bytes` once and in `resumed` once, on the tool-result
+/// message — where the model read it.
+fn assert_the_words_are_kept_once(bytes: &str, resumed: &Session, needle: &str, when: &str) {
+    assert_eq!(
+        bytes.matches(needle).count(),
+        1,
+        "{when}: the transcript's bytes hold {needle:?} once:\n{bytes}"
+    );
+    assert_eq!(
+        where_the_words_are(resumed, needle),
+        vec![the_tool_result_index(resumed)],
+        "{when}: a resume shows {needle:?} once, on the tool-result message"
+    );
+}
+
+/// Words a person types while a tool runs survive a resume (t-11457). The
+/// streaming turn folds them into the tool-result message, whose line the
+/// append stream had already written; until now only the turn-end persist
+/// rewrote that line, so for the rest of the turn — an hour, on 2026-09-27 —
+/// the words lived in memory alone, and a window restart in between resumed
+/// without them. At the request that carries the fold, a resume already finds
+/// them, exactly once, where the model read them; the turn-end persist changes
+/// nothing about that. A stall notice folded at the same boundary is kept the
+/// same way.
+#[test]
+fn a_steer_typed_during_a_tool_is_on_disk_when_the_model_reads_it() {
+    let _todo_store = HermeticTodoStore::pin();
+    let path = temp_workspace("steer-on-disk").with_extension("jsonl");
+    let steering: super::SteeringQueue = Arc::new(Mutex::new(Vec::new()));
+    let inbox_slot = Arc::new(Mutex::new(None));
+    let at_the_fold = Arc::new(Mutex::new(None));
+    let mut runtime = ConversationRuntime::new(
+        Session::new().with_persistence_path(path.clone()),
+        ReadsTheTranscriptAtTheFoldClient {
+            path: path.clone(),
+            calls: 0,
+            at_the_fold: Arc::clone(&at_the_fold),
+        },
+        a_tool_the_person_types_into(Arc::clone(&steering), Arc::clone(&inbox_slot)),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_steering_queue(steering);
+    *inbox_slot.lock().expect("inbox slot") = Some(runtime.agent_notification_inbox());
+
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    tokio_runtime.block_on(async {
+        let (render_tx, _render_rx) = tokio::sync::mpsc::channel(256);
+        let prompter: Arc<dyn crate::permission::PermissionPrompter> =
+            Arc::new(AllowAsyncPrompterForOverflow);
+        runtime
+            .run_turn_streaming_with_images("run it", Vec::new(), render_tx, prompter)
+            .await
+            .expect("the turn completes");
+    });
+
+    let (bytes, resumed) = at_the_fold
+        .lock()
+        .expect("slot")
+        .take()
+        .expect("the model was asked again after the tool");
+    assert_the_words_are_kept_once(&bytes, &resumed, MID_TURN_STEER, "at the fold");
+    assert_the_words_are_kept_once(&bytes, &resumed, MID_TURN_NOTICE, "at the fold");
+    assert_eq!(
+        where_the_words_are(runtime.session(), MID_TURN_STEER),
+        vec![the_tool_result_index(runtime.session())],
+        "the model's own view holds the steer once, on the tool-result message"
+    );
+
+    runtime
+        .session()
+        .persist_appended_state_to_path(&path)
+        .expect("the turn-end persist");
+    let bytes = fs::read_to_string(&path).expect("read the transcript");
+    let resumed = Session::load_from_path(&path).expect("resume");
+    assert_the_words_are_kept_once(&bytes, &resumed, MID_TURN_STEER, "after the turn");
+    assert_the_words_are_kept_once(&bytes, &resumed, MID_TURN_NOTICE, "after the turn");
+    assert_eq!(resumed.messages, runtime.session().messages);
+
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(path.with_extension("jsonl.lock"));
+}
+
+/// The sync loop's twin (sub-agents run it; a `SendMessage` to a running agent
+/// is its steer): the fold is on disk when the next request reads it.
+#[test]
+fn sync_run_turn_puts_a_steer_typed_during_a_tool_on_disk_before_the_next_request() {
+    let _todo_store = HermeticTodoStore::pin();
+    let path = temp_workspace("sync-steer-on-disk").with_extension("jsonl");
+    let steering: super::SteeringQueue = Arc::new(Mutex::new(Vec::new()));
+    let at_the_fold = Arc::new(Mutex::new(None));
+    let mut runtime = ConversationRuntime::new(
+        Session::new().with_persistence_path(path.clone()),
+        ReadsTheTranscriptAtTheFoldClient {
+            path: path.clone(),
+            calls: 0,
+            at_the_fold: Arc::clone(&at_the_fold),
+        },
+        a_tool_the_person_types_into(Arc::clone(&steering), Arc::new(Mutex::new(None))),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_steering_queue(steering);
+
+    runtime.run_turn("run it", None).expect("the turn completes");
+
+    let (bytes, resumed) = at_the_fold
+        .lock()
+        .expect("slot")
+        .take()
+        .expect("the model was asked again after the tool");
+    assert_the_words_are_kept_once(&bytes, &resumed, MID_TURN_STEER, "at the fold");
+
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(path.with_extension("jsonl.lock"));
+}
+
 /// Answers every request with the same prose — a turn that ends in one
 /// iteration, so a test can count turns rather than model behaviour.
 struct PlainAnswerClient;
@@ -9135,6 +9350,36 @@ fn three_single_read_batches_in_a_row_draw_the_batching_nudge_once() {
     // The third read's result is the one that carries it: messages are
     // user, (assistant, tool) × 4, assistant — the third tool result is at 6.
     assert_eq!(nudged, vec![6]);
+}
+
+/// The batching nudge is folded onto a tool-result line already on disk, like
+/// a steer (t-11457): it is published where the model read it, so the
+/// transcript on disk equals the model's view before any turn-end persist.
+#[test]
+fn the_batching_nudge_is_on_disk_where_the_model_read_it() {
+    let _todo_store = HermeticTodoStore::pin();
+    let path = temp_workspace("nudge-on-disk").with_extension("jsonl");
+    let mut runtime = ConversationRuntime::new(
+        Session::new().with_persistence_path(path.clone()),
+        OneReadPerMessageClient { calls: 0 },
+        StaticToolExecutor::new().register("read_file", |_| Ok("contents".to_string())),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    runtime.run_turn("read four files", None).expect("turn runs");
+
+    let bytes = fs::read_to_string(&path).expect("the transcript is on disk");
+    let resumed = Session::load_from_path(&path).expect("a resume loads it");
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(path.with_extension("jsonl.lock"));
+    // Words of the nudge that no JSON writer escapes.
+    let needle = "The last three tool batches each carried a single read-only call";
+    assert!(super::repetition::SERIAL_READS_NUDGE.contains(needle));
+    assert_eq!(bytes.matches(needle).count(), 1, "{bytes}");
+    assert_eq!(
+        resumed.messages, runtime.session().messages,
+        "before the turn-end persist, a resume already shows what the model read"
+    );
 }
 
 /// The streaming loop announces the request before anything the provider
@@ -16879,6 +17124,54 @@ fn an_attended_turn_has_no_default_budget_and_an_unattended_one_keeps_the_net() 
     assert_eq!(deadline, Some(std::time::Duration::from_secs(5)));
     assert_eq!(output, Some(DEFAULT_TURN_OUTPUT_TOKEN_BUDGET));
     assert_eq!(input, None, "0 is off, for both");
+
+    for (var, value) in VARS.iter().zip(saved) {
+        match value {
+            Some(value) => std::env::set_var(var, value),
+            None => std::env::remove_var(var),
+        }
+    }
+}
+
+/// Only a limit somebody named is a wall clock (t-12076). With nothing named
+/// the turn's deadline is a quiet window pushed on for progress without a
+/// count; a deadline the environment names is the wall its person asked for; a
+/// count somebody names caps the pushes (`0` none), and a step of zero turns
+/// them off.
+#[test]
+fn the_deadline_extension_policy_follows_what_somebody_named() {
+    use super::env_deadline_extension;
+    const VARS: [&str; 3] = [
+        "ZO_TURN_DEADLINE_SECS",
+        "ZO_DEADLINE_EXTENSIONS",
+        "ZO_DEADLINE_EXTENSION_SECS",
+    ];
+    let _lock = crate::test_env_lock();
+    let saved: Vec<Option<String>> = VARS.iter().map(|var| std::env::var(var).ok()).collect();
+    for var in VARS {
+        std::env::remove_var(var);
+    }
+
+    let unnamed = env_deadline_extension().expect("a quiet window by default");
+    assert_eq!(unnamed.max, None, "nobody named a count: no cap");
+    assert_eq!(unnamed.step, std::time::Duration::from_secs(30 * 60));
+
+    std::env::set_var("ZO_TURN_DEADLINE_SECS", "3600");
+    assert!(
+        env_deadline_extension().is_none(),
+        "a deadline somebody named is a wall: nothing pushes it"
+    );
+    std::env::set_var("ZO_DEADLINE_EXTENSIONS", "3");
+    let capped = env_deadline_extension().expect("a named count is honored beside a named deadline");
+    assert_eq!(capped.max, Some(3));
+    std::env::remove_var("ZO_TURN_DEADLINE_SECS");
+    assert_eq!(env_deadline_extension().expect("a named count").max, Some(3));
+
+    std::env::set_var("ZO_DEADLINE_EXTENSIONS", "0");
+    assert!(env_deadline_extension().is_none(), "a named count of zero is no pushes");
+    std::env::remove_var("ZO_DEADLINE_EXTENSIONS");
+    std::env::set_var("ZO_DEADLINE_EXTENSION_SECS", "0");
+    assert!(env_deadline_extension().is_none(), "a step of zero is no pushes");
 
     for (var, value) in VARS.iter().zip(saved) {
         match value {

@@ -7,7 +7,7 @@ use super::items::assemble_item;
 use super::prompts::phase_agent_input;
 use super::spawn::{SpawnUnit, Spawned};
 use super::{
-    is_cancelled, phase_hard_timeout_from_env, AgentBackend, AgentCompletion, EngineState,
+    is_cancelled, phase_wall_limit_from_env, AgentBackend, AgentCompletion, EngineState,
     ItemResult, NormalizedPhase, RunOptions, STATUS_COMPLETED, STATUS_FAILED, STATUS_STOPPED,
 };
 
@@ -48,7 +48,7 @@ pub(super) fn spawn_and_collect(
     let mut active: Vec<Spawned> = Vec::with_capacity(window);
     let mut observed: HashMap<String, AgentCompletion> = HashMap::new();
     let mut items = Vec::new();
-    let mut watch = WaitState::new(Instant::now(), phase_hard_timeout_from_env(opts.phase_timeout));
+    let mut watch = WaitState::new(Instant::now(), phase_wall_limit_from_env(opts.phase_timeout));
 
     loop {
         while active.len() < window && units.peek().is_some() {

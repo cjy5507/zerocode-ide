@@ -8,6 +8,7 @@
 use serde_json::{json, Value};
 
 use crate::session::{ContentBlock, ConversationMessage};
+use crate::subagent_panes::AgeRule;
 
 use super::{
     is_edit_or_write_tool, ApiClient, BudgetExhausted, ConversationRuntime, ToolExecutor,
@@ -37,6 +38,21 @@ pub(super) fn budget_exhausted_notice(kind: BudgetExhausted, iterations: usize) 
         "[budget] {} exhausted after {iterations} iteration(s); the work above is \
          preserved. Continue in a follow-up turn or narrow the task.",
         budget_exhausted_label(kind)
+    )
+}
+
+/// [`budget_exhausted_notice`] for a turn its clock ended, naming which limit
+/// did it (t-12076): no progress for a window nobody named, or a limit
+/// somebody did.
+pub(super) fn deadline_notice(iterations: usize, rule: AgeRule) -> String {
+    let why = match rule {
+        AgeRule::Quiet(_) => format!("the turn showed {}", rule.words()),
+        AgeRule::Wall(_) => format!("the turn ran past {}", rule.words()),
+    };
+    format!(
+        "[budget] {} exhausted after {iterations} iteration(s): {why}; the work above is \
+         preserved. Continue in a follow-up turn or narrow the task.",
+        budget_exhausted_label(BudgetExhausted::Deadline)
     )
 }
 
@@ -340,6 +356,28 @@ where
         assistant_messages: &mut Vec<ConversationMessage>,
     ) -> Result<(), String> {
         let message = budget_exhausted_message(kind, iterations);
+        self.push_closer(message, iterations, assistant_messages)
+    }
+
+    /// [`Self::push_budget_exhausted_closer`] for a turn its clock ended: the
+    /// closer names the limit that did it (t-12076).
+    pub(super) fn push_deadline_closer(
+        &mut self,
+        iterations: usize,
+        rule: AgeRule,
+        assistant_messages: &mut Vec<ConversationMessage>,
+    ) -> Result<(), String> {
+        let text = deadline_notice(iterations, rule);
+        let message = ConversationMessage::assistant(vec![ContentBlock::Text { text }]);
+        self.push_closer(message, iterations, assistant_messages)
+    }
+
+    fn push_closer(
+        &mut self,
+        message: ConversationMessage,
+        iterations: usize,
+        assistant_messages: &mut Vec<ConversationMessage>,
+    ) -> Result<(), String> {
         // Arm the next turn's continuation reminder: this closer is now in the
         // transcript under the assistant role, and the following turn must read
         // it as a harness cutoff rather than as its own give-up.

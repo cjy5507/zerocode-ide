@@ -118,7 +118,7 @@ impl AgentBackend for VirtualBackend<'_> {
             if self.now.get() >= at { flag.store(true, Ordering::Relaxed); }
         }
         if self.expire_on_observation {
-            *watch = WaitState::new(Instant::now(), Duration::ZERO);
+            *watch = WaitState::new(Instant::now(), Some(Duration::ZERO));
         }
         self.completions(ids)
     }

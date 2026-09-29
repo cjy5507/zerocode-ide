@@ -13,8 +13,10 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
+use crate::subagent_panes::AgeRule;
+
 use super::{
-    ask_user_question_async, budget_exhausted_notice, build_assistant_message,
+    ask_user_question_async, budget_exhausted_notice, build_assistant_message, deadline_notice,
     build_async_permission_request, collect_pending_tool_uses, empty_stream_exhausted_message,
     batch_had_successful_mutation, format_tool_result_from_raw, permission_denial_notice,
     is_refusal_stop_reason, is_truncation_stop_reason, is_verify_class_tool, merge_hook_context,
@@ -995,6 +997,18 @@ where
         // stops externalizing progress stops earning extensions.
         let mut deadline_extensions_used: u8 = 0;
         let mut extension_progress_marker: usize = 0;
+        // A deadline nobody named is a quiet window, not a wall (t-12076): the
+        // policy that pushes it has no cap, so a turn that keeps showing
+        // progress is not ended for its age, and time inside a running tool
+        // call does not count against it. A named one — `ZO_TURN_DEADLINE_SECS`
+        // — is the wall its person asked for. `deadline_window` is the length
+        // of the window now running, which a cut names.
+        let quiet_deadline = self
+            .deadline_extension
+            .is_some_and(|extension| extension.max.is_none());
+        let mut deadline_window = self.deadline.map_or(std::time::Duration::ZERO, |deadline| {
+            deadline.saturating_duration_since(std::time::Instant::now())
+        });
         // Gen-abort cap. Set when a call is abandoned mid-generation to deliver
         // steering early (see [`StreamRace::SteeringReissue`]); cleared once the
         // re-issued work reaches a fold boundary. While set, steering that
@@ -1086,29 +1100,38 @@ where
             {
                 // Progress-gated extension: a turn that is demonstrably still
                 // externalizing progress (fresh successful edit/write/plan
-                // results since the last window) earns a bounded deadline push
-                // instead of a mid-work stop — the legitimate long audit or
-                // deploy pipeline the blunt 60-minute cut kept interrupting.
-                // Fake-progress grinds are still bounded: the extension count
-                // is capped, reads/probes don't count as progress, and the
-                // cross-turn escalation ladder catches the repeat pattern.
+                // results since the last window) earns a deadline push instead
+                // of a mid-work stop — the legitimate long audit or deploy
+                // pipeline the blunt 60-minute cut kept interrupting. On a
+                // deadline nobody named the pushes have no count (t-12076: a
+                // turn that keeps writing is not ended for its age); a count
+                // somebody named caps them. Reads and probes never count as
+                // progress, so a grind that only looks is ended after one
+                // window, and the token budgets bound what a grind can cost.
                 let extension_granted = match self.deadline_extension {
-                    Some((max_extensions, step))
-                        if deadline_extensions_used < max_extensions
+                    Some(extension)
+                        if extension
+                            .max
+                            .is_none_or(|max| deadline_extensions_used < max)
                             && super::count_progress_tool_results(&tool_results)
                                 > extension_progress_marker =>
                     {
-                        deadline_extensions_used += 1;
+                        deadline_extensions_used = deadline_extensions_used.saturating_add(1);
                         extension_progress_marker =
                             super::count_progress_tool_results(&tool_results);
-                        self.deadline = Some(std::time::Instant::now() + step);
+                        deadline_window = extension.step;
+                        self.deadline = Some(std::time::Instant::now() + extension.step);
+                        let pushes = extension.max.map_or_else(
+                            || deadline_extensions_used.to_string(),
+                            |max| format!("{deadline_extensions_used}/{max}"),
+                        );
                         let _ = render_tx
                             .send(RenderBlock::System {
                                 id: id_gen.next(),
                                 level: SystemLevel::Info,
                                 text: format!(
-                                    "[budget] deadline extended +{}m ({deadline_extensions_used}/{max_extensions}) — fresh progress detected",
-                                    step.as_secs() / 60
+                                    "[budget] deadline extended +{}m ({pushes}) — fresh progress detected",
+                                    extension.step.as_secs() / 60
                                 ),
                             })
                             .await;
@@ -1117,21 +1140,22 @@ where
                     _ => false,
                 };
                 if !extension_granted {
+                    let rule = if quiet_deadline {
+                        AgeRule::Quiet(deadline_window)
+                    } else {
+                        AgeRule::Wall(deadline_window)
+                    };
                     let error = RuntimeError::new("agent exceeded its time budget");
                     self.clear_empty_retry_reminder(empty_retries);
                     self.record_turn_failed(iterations, &error);
                     budget_exhausted = Some(BudgetExhausted::Deadline);
-                    self.push_budget_exhausted_closer(
-                        BudgetExhausted::Deadline,
-                        iterations,
-                        &mut assistant_messages,
-                    )
-                    .map_err(StreamingTurnError::runtime)?;
+                    self.push_deadline_closer(iterations, rule, &mut assistant_messages)
+                        .map_err(StreamingTurnError::runtime)?;
                     let _ = render_tx
                         .send(RenderBlock::System {
                             id: id_gen.next(),
                             level: SystemLevel::Warn,
-                            text: budget_exhausted_notice(BudgetExhausted::Deadline, iterations),
+                            text: deadline_notice(iterations, rule),
                         })
                         .await;
                     break 'outer;
@@ -2582,6 +2606,10 @@ where
                 });
             }
 
+            // Where the tools begin to run — every permission is settled, so
+            // what follows is the tools' own time (t-12076).
+            let tools_began = std::time::Instant::now();
+
             // ── Pass 2: the waves ──
             // Consecutive tools that may run side by side — reads, and the
             // spawn family — form a wave (`parallel_waves`). A wave runs when
@@ -2884,6 +2912,14 @@ where
                 tool_results.push(result_message);
             }
 
+            // A tool call that is running is progress: on a quiet deadline the
+            // clock does not run while a call does, so a build longer than the
+            // whole window does not end the turn that started it.
+            if quiet_deadline {
+                let ran = tools_began.elapsed();
+                self.deadline = self.deadline.map(|deadline| deadline + ran);
+            }
+
             self.arm_tool_repetition_hard_stops();
 
             // Verification-treadmill circuit breaker (mirrors the sync loop): a
@@ -2950,7 +2986,7 @@ where
                             text: steering_message(&steer),
                         });
                     }
-                    self.session.mark_transcript_dirty();
+                    self.publish_folded_tail();
                 }
             }
             // Mid-turn agent-notification boundary (CC's task-notification
@@ -2979,7 +3015,7 @@ where
                             text: agent_notification_text(&notification),
                         });
                     }
-                    self.session.mark_transcript_dirty();
+                    self.publish_folded_tail();
                 }
             }
             // Re-anchor the live plan after this tool batch (mirrors the sync

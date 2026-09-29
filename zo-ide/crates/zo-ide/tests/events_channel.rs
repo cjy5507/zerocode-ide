@@ -9,10 +9,15 @@ use std::time::Duration;
 
 use runtime::message_stream::{
     BlockId, PermissionChoice, PermissionDecision, PermissionPrompt, RenderBlock, ToolCallId,
+    ToolCallStatus, ToolPreview, ToolResultBody,
 };
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 use zerocode_harness::{method, Client, HarnessError, Incoming, ServeErrorKind};
+use runtime::subagent_panes::{
+    wait_for_turn_result_on, ChannelCoordinates, PaneBudget, PaneOutcome, Tmux, WaitClock,
+    CHANNEL_FILE, TRANSCRIPT_FILE,
+};
 use zo_ide::ide::events::{
     self, Answer, Command, EventsChannel, EventsConfig, ResolvedBy, TurnOutcome,
 };
@@ -242,6 +247,156 @@ async fn the_pane_answering_first_retires_the_prompt() {
     assert_eq!(channel.live_prompts(), 0);
     let listed = connect(&channel, None).await.call(method::LIST, json!({})).await.expect("list");
     assert_eq!(asking(listed), Some(0), "an answered prompt is not waited on");
+}
+
+fn tool_call(call: &str, status: ToolCallStatus) -> RenderBlock {
+    RenderBlock::ToolCall {
+        id: BlockId(1),
+        tool_call_id: ToolCallId(call.to_string()),
+        name: "bash".to_string(),
+        summary: "cargo build".to_string(),
+        preview: ToolPreview::Bash {
+            command: "cargo build".to_string(),
+        },
+        status,
+    }
+}
+
+fn tool_result(call: &str) -> RenderBlock {
+    RenderBlock::ToolResult {
+        id: BlockId(2),
+        tool_call_id: ToolCallId(call.to_string()),
+        is_error: false,
+        body: ToolResultBody::Text {
+            content: "Finished".to_string(),
+            truncated: false,
+        },
+    }
+}
+
+/// 도는 도구 호출도 정체 확인 답에 실린다 — 컴파일 하나가 대화 기록에 한 줄도
+/// 안 쓰고 한 시간을 돌아도, 부모 zo 는 이 숫자로 그 판을 멈춘 판이 아니라
+/// 일하는 판으로 읽는다(t-12076). 호출은 시작 블록으로 세어지고 결과 블록이나
+/// 끝 상태로 지워지며, 턴이 끝나면 남은 것도 함께 지워진다: 결과가 안 온 호출이
+/// 다음 턴까지 「일하는 중」으로 서 있으면 멈춘 판이 영영 안 끊긴다.
+#[tokio::test]
+async fn a_pane_running_a_tool_call_says_so_on_the_liveness_probe() {
+    let channel = open(None).await;
+    let running = |listed: Value| listed[0][runtime::subagent_panes::LIST_RUNNING].as_u64();
+    let listed = || async {
+        connect(&channel, None)
+            .await
+            .call(method::LIST, json!({}))
+            .await
+            .expect("list")
+    };
+    assert_eq!(running(listed().await), Some(0), "nothing runs before a call starts");
+
+    // 인자가 아직 스트리밍 중인 호출은 도는 호출이 아니다.
+    let _ = channel.publish(&tool_call("call-1", ToolCallStatus::Pending));
+    assert_eq!(running(listed().await), Some(0), "a call still being written is not running");
+
+    let _ = channel.publish(&tool_call("call-1", ToolCallStatus::Running));
+    let _ = channel.publish(&tool_call("call-2", ToolCallStatus::Running));
+    // 같은 호출을 두 번 알려도 한 번으로 센다.
+    let _ = channel.publish(&tool_call("call-2", ToolCallStatus::Running));
+    assert_eq!(running(listed().await), Some(2), "each running call is counted once");
+
+    let _ = channel.publish(&tool_result("call-1"));
+    assert_eq!(running(listed().await), Some(1), "a returned call is no longer running");
+    let _ = channel.publish(&tool_call("call-2", ToolCallStatus::Cancelled));
+    assert_eq!(running(listed().await), Some(0), "a cancelled call is no longer running");
+
+    // 결과가 끝내 안 온 호출은 턴과 함께 내려간다.
+    let turn = channel.begin_turn();
+    let _ = channel.publish(&tool_call("call-3", ToolCallStatus::Running));
+    assert_eq!(running(listed().await), Some(1));
+    channel.end_turn(turn, TurnOutcome::Cancelled, None);
+    assert_eq!(running(listed().await), Some(0), "a turn that ends takes its running calls with it");
+}
+
+/// 부모의 시계가 한 걸음씩 가는 대기 — 한 걸음에 창이 한 번 움직이고, 자식 쪽
+/// 사정은 `on_rest` 가 그 걸음에 맞춰 만든다.
+struct SteppedClock<'a> {
+    at: std::cell::Cell<std::time::Instant>,
+    started: std::time::Instant,
+    step: Duration,
+    on_rest: &'a dyn Fn(Duration),
+}
+
+impl WaitClock for SteppedClock<'_> {
+    fn now(&self) -> std::time::Instant {
+        self.at.get()
+    }
+
+    fn rest(&self, _interval: Duration) {
+        self.at.set(self.at.get() + self.step);
+        (self.on_rest)(self.at.get().duration_since(self.started));
+    }
+}
+
+/// 길 전체를 진짜 채널로 한 번 — 부모의 조용함 시계가 **진짜** 자식 채널의
+/// `session.list` 를 읽는다(t-12076). 자식은 대화 기록에 한 줄도 안 쓰는 빌드를
+/// 부모의 시계로 두 시간 반 돌리고, 부모는 그동안 그 판을 닫지 않는다. 호출이
+/// 끝난 뒤에야 조용함이 다시 세어지고, 그때부터 한 시간이 지나면 닫는다.
+/// 러너 쪽 시험은 가짜 채널로 같은 것을 말하고, 이 시험은 두 쪽이 같은 말을 쓰는지
+/// (필드 이름·세는 법)를 맞춘다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parents_quiet_clock_stands_still_while_the_real_channel_reports_a_running_call() {
+    let channel = Arc::new(open(None).await);
+    let directory = tempfile::tempdir().expect("tempdir");
+    let child = directory.path().join("agent-1");
+    std::fs::create_dir_all(&child).expect("mkdir");
+    ChannelCoordinates {
+        addr: channel.local_addr().to_string(),
+        token: None,
+        session_id: SESSION.to_string(),
+    }
+    .write(&child.join(CHANNEL_FILE))
+    .expect("discovery file");
+    // 판이 자기 대화 기록의 자리를 알린 상태 — 시작 때 있던 줄은 진행이 아니다.
+    let transcript = child.join("session.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"user\"}\n").expect("transcript");
+    std::fs::write(child.join(TRANSCRIPT_FILE), transcript.display().to_string())
+        .expect("name the transcript");
+
+    let quiet = Duration::from_secs(60 * 60);
+    let call_takes = Duration::from_secs(150 * 60);
+    let waiting = tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let build_started = std::cell::Cell::new(false);
+        let build_ended = std::cell::Cell::new(false);
+        let child_side = |elapsed: Duration| {
+            if !build_started.replace(true) {
+                let _ = channel.publish(&tool_call("build", ToolCallStatus::Running));
+            }
+            if elapsed > call_takes && !build_ended.replace(true) {
+                let _ = channel.publish(&tool_result("build"));
+            }
+        };
+        let clock = SteppedClock {
+            at: std::cell::Cell::new(started),
+            started,
+            step: Duration::from_secs(60),
+            on_rest: &child_side,
+        };
+        // 물어볼 수 없는 multiplexer 는 판이 죽었다는 증거가 아니다 — 판은 늘 산다.
+        let tmux = Tmux::at("/nonexistent/tmux-that-is-not-there");
+        let budget = PaneBudget::Quiet {
+            limit: quiet,
+            ask_every: Duration::from_secs(10),
+            ask_timeout: Duration::from_secs(3),
+        };
+        let outcome = wait_for_turn_result_on(&clock, &tmux, &child, "%9", 1, budget, &|| false, &|| {});
+        (outcome, clock.at.get().duration_since(started))
+    });
+    let (outcome, waited) = waiting.await.expect("the wait");
+    assert_eq!(outcome, PaneOutcome::TimedOut, "a pane that never goes on is still ended");
+    assert_eq!(
+        waited,
+        call_takes + quiet,
+        "the parent's quiet budget counts from the last look that saw the build running"
+    );
 }
 
 /// 도는 턴이 없으면 스티어는 거절된다(`-32003`), 있으면 명령으로 도착한다.

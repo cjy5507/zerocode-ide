@@ -113,7 +113,7 @@ use fallback::{
 // Turn-completion items the turn loops + `deep_gate` still reference.
 use turn_end::{
     budget_exhausted_notice, build_turn_end_hook_context, changed_files_snapshot,
-    changed_files_snapshot_async,
+    changed_files_snapshot_async, deadline_notice,
 };
 // Reminder items the staying prompt-submit/hook code + `compaction` still reference.
 use reminders::{
@@ -728,14 +728,17 @@ pub struct ConversationRuntime<C, T> {
     /// runaway circuit breaker (see `turn_output_token_budget`). Checked at
     /// iteration boundaries in both turn loops; `None` is unbounded.
     deadline: Option<std::time::Instant>,
-    /// Progress-gated deadline-extension policy `(max_extensions, step)`. When
-    /// the deadline passes but the turn produced fresh progress tool results
-    /// since the last window, the streaming loop pushes the deadline out by
-    /// `step` (at most `max_extensions` times per turn) instead of stopping
-    /// mid-work. `None` (the default, and always for sub-agents) keeps the
-    /// deadline a hard bound. Set per turn by the interactive host from
-    /// `ZO_DEADLINE_EXTENSIONS` / `ZO_DEADLINE_EXTENSION_SECS`.
-    deadline_extension: Option<(u8, std::time::Duration)>,
+    /// Progress-gated deadline-extension policy. When the deadline passes but
+    /// the turn produced fresh progress tool results since the last window, the
+    /// streaming loop pushes the deadline out by `step` instead of stopping
+    /// mid-work — at most `max` times per turn when somebody named a count, and
+    /// with no cap otherwise: a deadline nobody named is a quiet window, and a
+    /// turn that keeps making progress is not ended for its age (t-12076).
+    /// `None` (the default, and always for sub-agents) keeps the deadline a
+    /// wall. Set per turn by the interactive host from `ZO_DEADLINE_EXTENSIONS`
+    /// / `ZO_DEADLINE_EXTENSION_SECS`, and off when the deadline is one the
+    /// environment named (`ZO_TURN_DEADLINE_SECS`).
+    deadline_extension: Option<config::DeadlineExtension>,
     /// Optional per-turn cumulative-output-token budget — the cost circuit
     /// breaker companion to [`Self::deadline`]. When a turn's output tokens
     /// (measured from turn start) cross this at an iteration boundary, the turn
@@ -3220,7 +3223,7 @@ where
                             text: steering_message(&steer),
                         });
                     }
-                    self.session.mark_transcript_dirty();
+                    self.publish_folded_tail();
                 }
             }
             // Mid-turn agent-notification boundary — mirrors the streaming
@@ -3236,7 +3239,7 @@ where
                             text: agent_notification_text(&notification),
                         });
                     }
-                    self.session.mark_transcript_dirty();
+                    self.publish_folded_tail();
                 }
             }
             // Re-anchor the live plan after this tool batch so the next model

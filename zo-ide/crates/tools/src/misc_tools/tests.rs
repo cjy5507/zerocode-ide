@@ -1352,10 +1352,9 @@ fn reclaim_spawn_slots_frees_one_and_keeps_the_unfinished() {
 
     let mut in_flight = vec![done_id.clone(), slow_id.clone()];
     let mut completions = Vec::new();
-    let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut extensions = 0u32;
+    let mut window = super::CollectWindow::due_at(std::time::Instant::now() + std::time::Duration::from_secs(5));
     let start = std::time::Instant::now();
-    super::reclaim_spawn_slots(&test_registry(), &mut in_flight, &mut completions, &mut deadline, &mut extensions);
+    super::reclaim_spawn_slots(&test_registry(), &mut in_flight, &mut completions, &mut window);
     let elapsed = start.elapsed();
 
     assert_eq!(in_flight, [slow_id], "the unfinished sibling stays in flight");
@@ -1417,11 +1416,10 @@ fn reclaim_timeout_cancels_oldest_to_terminal_before_freeing_slot() {
     let mut completions = Vec::new();
     // No manifest heartbeat was ever stamped (`lastActivityAt` absent), so the
     // progress gate treats both agents as stale and never extends the deadline.
-    let mut deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
-    let mut extensions = 0u32;
+    let mut window = super::CollectWindow::due_at(std::time::Instant::now() + std::time::Duration::from_millis(20));
     let start = std::time::Instant::now();
     // Deadline already at/near now, so the timeout branch fires deterministically.
-    super::reclaim_spawn_slots(&test_registry(), &mut in_flight, &mut completions, &mut deadline, &mut extensions);
+    super::reclaim_spawn_slots(&test_registry(), &mut in_flight, &mut completions, &mut window);
     let elapsed = start.elapsed();
 
     assert_eq!(
@@ -1480,15 +1478,13 @@ fn final_drain_cancels_all_live_agents_before_worktree_collect() {
     let mut in_flight = vec![first.clone(), second.clone()];
     let mut completions = Vec::new();
     // No heartbeat stamped → stale → the drain cancels instead of extending.
-    let mut deadline = std::time::Instant::now();
-    let mut extensions = 0u32;
+    let mut window = super::CollectWindow::due_at(std::time::Instant::now());
     let start = std::time::Instant::now();
     super::drain_or_cancel_remaining_agents(
         &test_registry(),
         &mut in_flight,
         &mut completions,
-        &mut deadline,
-        &mut extensions,
+        &mut window,
     );
     let elapsed = start.elapsed();
 
@@ -1546,11 +1542,10 @@ fn shared_deadline_is_not_rearmed_per_reclaim() {
     let mut completions = Vec::new();
     // One deadline shared by every reclaim, already elapsed. No heartbeat is
     // stamped on any manifest, so the progress gate never re-arms it either.
-    let mut deadline = std::time::Instant::now();
-    let mut extensions = 0u32;
+    let mut window = super::CollectWindow::due_at(std::time::Instant::now());
     let start = std::time::Instant::now();
     while !in_flight.is_empty() {
-        super::reclaim_spawn_slots(&test_registry(), &mut in_flight, &mut completions, &mut deadline, &mut extensions);
+        super::reclaim_spawn_slots(&test_registry(), &mut in_flight, &mut completions, &mut window);
     }
     let elapsed = start.elapsed();
 
@@ -1607,28 +1602,39 @@ fn progress_snapshot_covers_heartbeat_and_in_tool_work() {
     );
 }
 
-/// The progress gate that decides between extending the fan-out deadline and
+/// The progress gate that decides between extending the collection window and
 /// cancelling: pure, so every branch is exercised without waiting out a real
-/// deadline. A candidate is spared only while it is progressing AND extensions
-/// remain, so the total collection budget stays bounded.
+/// deadline. A candidate is spared while it is progressing — and only then; how
+/// many looks it has already had is not a reason (t-12076).
 #[test]
-fn deadline_extension_gate_is_progress_and_cap_bounded() {
+fn deadline_extension_gate_is_progress_only() {
     assert!(
-        super::reclaim_should_extend_deadline(true, 0),
-        "a progressing candidate with extensions remaining earns an extension"
+        super::reclaim_should_extend_deadline(true),
+        "a progressing candidate earns an extension, however many it has had"
     );
     assert!(
-        super::reclaim_should_extend_deadline(true, super::SPAWN_DEADLINE_MAX_EXTENSIONS - 1),
-        "the last extension is grantable"
+        !super::reclaim_should_extend_deadline(false),
+        "a stalled candidate is reclaimed"
     );
+}
+
+/// A member finishing on its own is progress: the collection's window starts
+/// again from that moment — never before it was already due, and never when
+/// the collection itself cut a member, which is not a member finishing.
+#[test]
+fn a_member_finishing_starts_the_collection_window_again() {
+    let quiet = std::time::Duration::from_secs(20 * 60);
+    let start = std::time::Instant::now();
+    let mut window = super::CollectWindow::starting(start, quiet, std::time::Duration::from_secs(600));
+    let first = window.deadline;
+    window.progressed();
+    assert!(window.deadline >= first, "the window never moves back");
     assert!(
-        !super::reclaim_should_extend_deadline(false, 0),
-        "a stalled candidate is reclaimed even with extensions to spare"
+        window.deadline + std::time::Duration::from_secs(5) >= std::time::Instant::now() + quiet,
+        "a completion restarts the window from now"
     );
-    assert!(
-        !super::reclaim_should_extend_deadline(true, super::SPAWN_DEADLINE_MAX_EXTENSIONS),
-        "once the cap is spent even a busy agent is reclaimed — the budget stays bounded"
-    );
+    assert_eq!(window.extended, 0, "a completion is not a look that found a member working");
+    assert_eq!(window.limit_words(), "no progress for 20m");
 }
 
 /// Patch a persisted manifest's `lastActivityAt` heartbeat, mirroring what the
@@ -1867,21 +1873,19 @@ fn final_drain_extends_for_a_mid_work_agent_instead_of_cancelling() {
 
     let mut in_flight = vec![busy.clone()];
     let mut completions = Vec::new();
-    let mut deadline = std::time::Instant::now();
-    let mut extensions = 0u32;
+    let mut window = super::CollectWindow::due_at(std::time::Instant::now());
     let start = std::time::Instant::now();
     super::drain_or_cancel_remaining_agents(
         &test_registry(),
         &mut in_flight,
         &mut completions,
-        &mut deadline,
-        &mut extensions,
+        &mut window,
     );
     let elapsed = start.elapsed();
     publisher.join().expect("publisher thread");
 
     assert!(in_flight.is_empty(), "the drain still empties the in-flight set");
-    assert_eq!(extensions, 1, "exactly one progress extension was granted");
+    assert_eq!(window.extended, 1, "exactly one progress extension was granted");
     assert_eq!(completions.len(), 1);
     assert_eq!(
         completions[0].status, "completed",
@@ -1905,12 +1909,15 @@ fn final_drain_extends_for_a_mid_work_agent_instead_of_cancelling() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Once the extension cap is spent, even a demonstrably busy agent is
-/// reclaimed — the collection budget must stay bounded. Same fixture as the
-/// rescue test, but with the counter already at the cap: the drain cancels
-/// immediately instead of waiting another step.
+/// A busy agent is not reclaimed for the number of looks the collection has
+/// already taken: nothing caps the extensions while an agent shows progress
+/// (t-12076). Two extensions used to be the cap, and the third look cancelled
+/// a helper that was mid-work at forty minutes — the person's "에이전트가 1시간
+/// 지나면 중단됨·구현 중에도". Same fixture as the rescue test, with the counter
+/// already where the cap was: the drain grants another extension and collects
+/// the agent's own answer.
 #[test]
-fn final_drain_reclaims_a_busy_agent_once_the_extension_cap_is_spent() {
+fn final_drain_keeps_waiting_for_a_busy_agent_however_many_looks_it_has_had() {
     let _guard = env_lock();
     let dir = temp_dir();
     std::fs::create_dir_all(&dir).expect("create agent store");
@@ -1922,39 +1929,59 @@ fn final_drain_reclaims_a_busy_agent_once_the_extension_cap_is_spent() {
         .expect("time should be after epoch")
         .as_nanos();
     let _completion_rx = super::agent_tools::register_agent_completion_channel();
-    let busy = format!("drain-capped-{stamp}");
+    let busy = format!("drain-uncapped-{stamp}");
     write_manifest_for_drain(&dir, &busy, "sched-sess", "running");
     std::fs::write(dir.join(format!("{busy}.md")), "").expect("busy output file");
     stamp_manifest_activity(&dir, &busy, epoch_secs_now());
 
+    // The agent finishes on its own shortly after: a completion the store
+    // refuses (the scheduler already drove it terminal) says so at the end,
+    // after the assertions that name what went wrong.
+    let publish_id = busy.clone();
+    let publisher = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        super::agent_tools::publish_agent_completion_for_tests(super::AgentCompletion {
+            agent_id: publish_id.clone(),
+            name: "busy".to_string(),
+            status: "completed".to_string(),
+            result: Some("real deliverable".to_string()),
+            structured: None,
+            error: None,
+            run: HelperRun { output_tokens: 1, ..HelperRun::default() },
+        })
+    });
+
     let mut in_flight = vec![busy.clone()];
     let mut completions = Vec::new();
-    let mut deadline = std::time::Instant::now();
-    let mut extensions = super::SPAWN_DEADLINE_MAX_EXTENSIONS;
+    let mut window = super::CollectWindow::due_at(std::time::Instant::now());
+    // Where the cap used to be: two looks had found this agent working.
+    window.extended = 2;
     let start = std::time::Instant::now();
     super::drain_or_cancel_remaining_agents(
         &test_registry(),
         &mut in_flight,
         &mut completions,
-        &mut deadline,
-        &mut extensions,
+        &mut window,
     );
     let elapsed = start.elapsed();
+    let delivered = publisher.join().expect("publisher thread");
 
-    assert!(in_flight.is_empty());
-    assert_eq!(
-        extensions,
-        super::SPAWN_DEADLINE_MAX_EXTENSIONS,
-        "no further extension is granted past the cap"
-    );
     assert_eq!(
         manifest_status_on_disk(&dir, &busy),
-        "stopped",
-        "past the cap the busy agent is driven terminal as before"
+        "running",
+        "the scheduler drove a busy agent terminal at the third look"
     );
+    assert!(in_flight.is_empty());
+    assert_eq!(window.extended, 3, "a third look found it working and was granted");
+    assert_eq!(completions.len(), 1);
+    assert_eq!(
+        completions[0].status, "completed",
+        "the agent's own answer is collected, not a synthetic stop"
+    );
+    assert!(delivered, "the agent's own completion reached the store");
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "a capped drain cancels promptly instead of waiting another step: {elapsed:?}"
+        elapsed < std::time::Duration::from_secs(5),
+        "the wait returns on the completion, not after the whole step: {elapsed:?}"
     );
 
     match prior_store {
@@ -2023,10 +2050,9 @@ fn reclaim_extension_keeps_the_busy_oldest_until_a_sibling_frees_the_slot() {
 
     let mut in_flight = vec![oldest.clone(), sibling.clone()];
     let mut completions = Vec::new();
-    let mut deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
-    let mut extensions = 0u32;
+    let mut window = super::CollectWindow::due_at(std::time::Instant::now() + std::time::Duration::from_millis(20));
     let start = std::time::Instant::now();
-    super::reclaim_spawn_slots(&test_registry(), &mut in_flight, &mut completions, &mut deadline, &mut extensions);
+    super::reclaim_spawn_slots(&test_registry(), &mut in_flight, &mut completions, &mut window);
     let elapsed = start.elapsed();
     publisher.join().expect("publisher thread");
 
@@ -2035,7 +2061,7 @@ fn reclaim_extension_keeps_the_busy_oldest_until_a_sibling_frees_the_slot() {
         std::slice::from_ref(&oldest),
         "the busy oldest keeps its slot; the finished sibling freed one"
     );
-    assert_eq!(extensions, 1, "the grant is recorded against the shared cap");
+    assert_eq!(window.extended, 1, "the grant is recorded on the collection's clock");
     assert_eq!(completions.len(), 1);
     assert_eq!(completions[0].agent_id, sibling);
     assert_eq!(
@@ -2046,6 +2072,181 @@ fn reclaim_extension_keeps_the_busy_oldest_until_a_sibling_frees_the_slot() {
     assert!(
         elapsed < std::time::Duration::from_secs(5),
         "the reclaim returns on the sibling's completion: {elapsed:?}"
+    );
+
+    match prior_store {
+        Some(value) => std::env::set_var("ZO_AGENT_STORE", value),
+        None => std::env::remove_var("ZO_AGENT_STORE"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The mid-loop mirror of the uncapped drain: the reclaim keeps a busy oldest
+/// past the old cap too, and the slot is freed by a sibling's real completion
+/// (t-12076).
+#[test]
+fn reclaim_keeps_a_busy_oldest_however_many_looks_the_collection_has_had() {
+    let _guard = env_lock();
+    let dir = temp_dir();
+    std::fs::create_dir_all(&dir).expect("create agent store");
+    let prior_store = std::env::var_os("ZO_AGENT_STORE");
+    std::env::set_var("ZO_AGENT_STORE", &dir);
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be after epoch")
+        .as_nanos();
+    let _completion_rx = super::agent_tools::register_agent_completion_channel();
+    let oldest = format!("reclaim-uncapped-oldest-{stamp}");
+    let sibling = format!("reclaim-uncapped-sibling-{stamp}");
+    write_manifest_for_drain(&dir, &oldest, "sched-sess", "running");
+    write_manifest_for_drain(&dir, &sibling, "sched-sess", "running");
+    std::fs::write(dir.join(format!("{oldest}.md")), "").expect("oldest output file");
+    std::fs::write(dir.join(format!("{sibling}.md")), "").expect("sibling output file");
+    stamp_manifest_activity(&dir, &oldest, epoch_secs_now());
+
+    let publish_id = sibling.clone();
+    // Publish only after the reclaim has recorded its extension, as the test
+    // above does: the order is a fact, not a sleep.
+    let granted_before =
+        super::RECLAIM_EXTENSIONS_GRANTED.load(std::sync::atomic::Ordering::SeqCst);
+    let publisher = std::thread::spawn(move || {
+        let patience = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while super::RECLAIM_EXTENSIONS_GRANTED.load(std::sync::atomic::Ordering::SeqCst)
+            == granted_before
+            && std::time::Instant::now() < patience
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(super::agent_tools::publish_agent_completion_for_tests(
+            super::AgentCompletion {
+                agent_id: publish_id.clone(),
+                name: "sibling".to_string(),
+                status: "completed".to_string(),
+                result: Some("sibling done".to_string()),
+                structured: None,
+                error: None,
+                run: HelperRun { output_tokens: 1, ..HelperRun::default() },
+            }
+        ));
+    });
+
+    let mut in_flight = vec![oldest.clone(), sibling.clone()];
+    let mut completions = Vec::new();
+    let mut window =
+        super::CollectWindow::due_at(std::time::Instant::now() + std::time::Duration::from_millis(20));
+    // Where the cap used to be.
+    window.extended = 2;
+    super::reclaim_spawn_slots(&test_registry(), &mut in_flight, &mut completions, &mut window);
+    publisher.join().expect("publisher thread");
+
+    assert_eq!(
+        in_flight,
+        std::slice::from_ref(&oldest),
+        "the busy oldest keeps its slot past the old cap; the finished sibling freed one"
+    );
+    assert_eq!(window.extended, 3);
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0].agent_id, sibling);
+    assert_eq!(
+        manifest_status_on_disk(&dir, &oldest),
+        "running",
+        "the mid-work candidate was never cancelled"
+    );
+
+    match prior_store {
+        Some(value) => std::env::set_var("ZO_AGENT_STORE", value),
+        None => std::env::remove_var("ZO_AGENT_STORE"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A helper whose progress this process cannot read is not idle for want of a
+/// reading (t-12076). In a ZeroCode window every helper is a ledger worker —
+/// an external CLI in its own pane — and a pane child writes its work to its
+/// own transcript: neither stamps the parent's manifest, so the collection
+/// found no heartbeat and cut them at the twentieth minute while they were
+/// implementing. Each has its own watcher and its own limit; the collection
+/// window is not a second one.
+#[test]
+fn a_helper_with_its_own_watcher_is_not_idle_for_want_of_a_heartbeat() {
+    let _guard = env_lock();
+    let dir = temp_dir();
+    std::fs::create_dir_all(&dir).expect("create agent store");
+    let prior_store = std::env::var_os("ZO_AGENT_STORE");
+    std::env::set_var("ZO_AGENT_STORE", &dir);
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be after epoch")
+        .as_nanos();
+    let ledger = format!("watched-ledger-{stamp}");
+    let pane = format!("watched-pane-{stamp}");
+    let inline = format!("watched-inline-{stamp}");
+    for id in [&ledger, &pane, &inline] {
+        write_manifest_for_drain(&dir, id, "sched-sess", "running");
+    }
+    for (id, execution) in [(&ledger, "ledger"), (&pane, "pane")] {
+        let path = dir.join(format!("{id}.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read manifest"))
+                .expect("parse manifest");
+        value["execution"] = serde_json::json!(execution);
+        std::fs::write(&path, serde_json::to_string(&value).expect("manifest json"))
+            .expect("write manifest with its execution");
+    }
+
+    assert!(
+        super::agent_shows_progress(&test_registry(), &ledger),
+        "a ledger worker's progress is its window's to judge, not the collection's"
+    );
+    assert!(
+        super::agent_shows_progress(&test_registry(), &pane),
+        "a pane child has its own quiet budget, not the collection's"
+    );
+    assert!(
+        !super::agent_shows_progress(&test_registry(), &inline),
+        "an in-process agent with no heartbeat and nothing in flight is still idle"
+    );
+
+    match prior_store {
+        Some(value) => std::env::set_var("ZO_AGENT_STORE", value),
+        None => std::env::remove_var("ZO_AGENT_STORE"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the collection tells the model when it cuts a helper says which limit
+/// did it — the window's length and that it was progress that ran out — so the
+/// person reading the answer knows it was not a wall clock (t-12076).
+#[test]
+fn a_helper_cut_by_the_collection_is_told_which_limit_cut_it() {
+    let _guard = env_lock();
+    let dir = temp_dir();
+    std::fs::create_dir_all(&dir).expect("create agent store");
+    let prior_store = std::env::var_os("ZO_AGENT_STORE");
+    std::env::set_var("ZO_AGENT_STORE", &dir);
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be after epoch")
+        .as_nanos();
+    let _completion_rx = super::agent_tools::register_agent_completion_channel();
+    let idle = format!("drain-idle-{stamp}");
+    write_manifest_for_drain(&dir, &idle, "sched-sess", "running");
+    std::fs::write(dir.join(format!("{idle}.md")), "").expect("idle output file");
+
+    let mut in_flight = vec![idle.clone()];
+    let mut completions = Vec::new();
+    let mut window = super::CollectWindow::due_at(std::time::Instant::now());
+    window.quiet = std::time::Duration::from_secs(20 * 60);
+    super::drain_or_cancel_remaining_agents(&test_registry(), &mut in_flight, &mut completions, &mut window);
+
+    // The reason is written where the model reads a stopped agent: its output.
+    let told = std::fs::read_to_string(dir.join(format!("{idle}.md"))).expect("read output");
+    assert!(
+        told.contains("no progress for 20m"),
+        "the cut says it was the collection's quiet window that ran out: {told:?}"
     );
 
     match prior_store {

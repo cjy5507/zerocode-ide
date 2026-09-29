@@ -939,7 +939,10 @@ impl PlainSession {
         //
         // Here, beside the deadline it extends, and re-read every turn for
         // the same reason `set_deadline` is: an env change takes effect on
-        // the next turn rather than at next launch.
+        // the next turn rather than at next launch. With nothing named the
+        // deadline is a quiet window pushed on for as long as the turn keeps
+        // showing progress; a deadline the environment names is a wall
+        // (t-12076).
         //
         // Only this host. A spawned sub-agent keeps its deadline as a hard
         // straggler bound — nobody is watching it to notice a grind.
@@ -2559,13 +2562,16 @@ mod turn_arming_tests {
         );
     }
 
-    /// The policy the host arms is the documented one, and it is disableable.
+    /// The policy the host arms is the documented one: with nothing named, a
+    /// quiet window pushed on half an hour at a time for as long as the turn
+    /// keeps making progress — no count (t-12076). The runtime's own test walks
+    /// the rest of the table: a named deadline is a wall, a named count caps.
     #[test]
-    fn the_env_policy_is_two_half_hour_pushes_and_can_be_turned_off() {
+    fn the_env_policy_is_half_hour_pushes_with_no_count_unless_somebody_names_one() {
         // Defaults, with nothing in the environment.
-        let (count, step) = runtime::env_deadline_extension().expect("on by default");
-        assert_eq!(count, 2, "two pushes");
-        assert_eq!(step.as_secs(), 30 * 60, "half an hour each");
+        let extension = runtime::env_deadline_extension().expect("on by default");
+        assert_eq!(extension.max, None, "no cap on pushes nobody capped");
+        assert_eq!(extension.step.as_secs(), 30 * 60, "half an hour each");
     }
 }
 
