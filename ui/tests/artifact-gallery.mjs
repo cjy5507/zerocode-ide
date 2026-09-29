@@ -2671,3 +2671,350 @@ export async function testArtifactFollowed(browser, origin, ok, outputDir) {
     await page.close();
   }
 }
+
+/* 다른 프로젝트의 문서 (t-16006): 갤러리는 모든 프로젝트의 아티팩트를 늘어놓는데, 열린
+ * 프로젝트의 파일 문(`read_text_file`)은 제 뿌리 밖의 경로를 「path escapes the project」로
+ * 막는다 — 막아야 하는 문이다. 그래서 밖의 문서는 저장소가 id로 읽어 주는 읽기 전용 탭으로
+ * 열고(`artifact_document`: 창은 id와 버전 번호만 보낸다), 안의 문서는 지금처럼 고칠 수 있는
+ * 파일 탭으로 연다. 더블클릭도 Enter도 한 번에 한 번만 열고, 실패해도 알림은 하나다. 머리띠의
+ * 버전 선택기가 보관 스냅샷(앱 데이터 폴더)을 읽는 길도 같은 문을 지난다. 목의 `read_text_file`은
+ * 백엔드와 같은 말로 뿌리 밖을 막으므로, 옛 길로 열면 이 시험은 그 알림으로 빨개진다. 미리보기
+ * 탭은 서로를 대신하므로(한 번에 하나) 문서마다 열자마자 잰다. */
+export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  await mkdir(outputDir, { recursive: true });
+  try {
+    await page.setViewportSize({ width: 1440, height: 860 });
+    await page.evaluate(async () => {
+      const root = "/tmp/zerocode-window-test";
+      const other = "/tmp/zerocode-other-project";
+      const versions = "/data/artifacts/versions";
+      const now = Date.now();
+      const line = (name) => `# ${name}\n\n본문 **굵게** 한 줄\n\n[다음 문서](./next.md) ![그림](./pic.png) [맨 위로](#top)\n`;
+      const rows = [
+        { id: "doc-out", path: `${other}/output/ledger/zo-parallel-flakes.md`, text: line("병렬 부하에서만 빨개지는 시험") },
+        { id: "doc-key", path: `${other}/output/ledger/keyboard.md`, text: line("키보드로 연 문서") },
+        { id: "doc-far", path: "/tmp/zerocode-elsewhere/notes/plan.md", text: line("창이 모르는 폴더의 문서") },
+        { id: "doc-hist", path: `${other}/output/history.md`, text: line("고쳐 온 문서") },
+        { id: "doc-gone", path: `${other}/output/gone.md`, text: "" },
+        { id: "doc-cut", path: `${other}/output/big.md`, text: line("표의 상한에서 잘린 문서") },
+        { id: "doc-in", path: `${root}/project/inside.md`, text: line("열린 프로젝트 안의 문서") },
+      ];
+      const held = new Map(rows.map((row) => [row.id, row]));
+      const inside = (path) => path === root || path.startsWith(`${root}/`);
+      const seen = (window.__OTHER__ = { reads: [], images: [], docs: [], writes: [] });
+      window.__ANSWER__.artifacts_list = () => ({
+        rows: rows.map((row, at) => ({
+          id: row.id, kind: "document", title: row.path.split("/").at(-1), path: row.path, bytes: row.text.length,
+          created_ms: now - at, modified_ms: now - at, tags: [], source: "agent_page",
+          origin: { agent: "claude", session: `s-${row.id}`, project: inside(row.path) ? root : other },
+          preview: { kind: "markdown", text: row.text.slice(0, 60) },
+        })),
+        total: rows.length, truncated: false, missing: [], missing_total: 0,
+        thumb: { width: 320, height: 240, queue_max: 24 },
+      });
+      // 프로젝트의 파일 문: 백엔드의 `resolve_in_project`와 같은 말로 뿌리 밖을 막는다.
+      window.__ANSWER__.read_text_file = (args) => {
+        seen.reads.push(args.path);
+        if (!inside(args.path)) throw "path escapes the project";
+        return { text: rows.find((row) => row.path === args.path)?.text ?? "# 파일\n", version: "v1" };
+      };
+      window.__ANSWER__.read_image_file = (args) => {
+        seen.images.push(args.path);
+        throw "path escapes the project";
+      };
+      window.__ANSWER__.write_text_file = (args) => {
+        seen.writes.push({ path: args.path, text: args.text });
+        return "v-saved";
+      };
+      // 도장이 그대로인 파일: 하네스의 `file_version`은 null이라 「파일이 움직였다」로 읽혀 다시 읽는다.
+      window.__ANSWER__.file_version = () => "v1";
+      // 저장소의 문: 창은 id와 버전 번호만 보낸다. 사라진 파일은 한 문장으로 거절한다.
+      window.__ANSWER__.artifact_document = (args) => {
+        seen.docs.push({ id: args.id, version: args.version ?? null, keys: Object.keys(args).sort().join(",") });
+        const row = held.get(args.id);
+        if (!row || row.id === "doc-gone") throw "아티팩트 파일이 사라졌습니다";
+        const text = args.version == null ? row.text : `# 옛 판\n\n${row.id}의 버전 ${args.version} 본문\n`;
+        // 표의 상한에서 잘린 문서: 파일은 900000바이트인데 글은 앞부분뿐이다.
+        const cut = row.id === "doc-cut" && args.version == null;
+        return { text, bytes: cut ? 900_000 : text.length, truncated: cut, in_project: inside(row.path) };
+      };
+      window.__ANSWER__.artifact_versions = (args) => (args.id === "doc-hist" || args.id === "doc-in"
+        ? [1, 2].map((n) => ({ n, path: `${versions}/${args.id}/${n}/history.md`, bytes: 10, modified_ms: n, sha256: String(n).repeat(64) }))
+        : []);
+      // 창이 아는 프로젝트 하나: 밖의 문서가 사는 폴더의 이름을 머리띠가 말한다.
+      projects = [
+        { name: "harbor", path: other, worktrees: [{ path: other, branch: "main", base: "", is_main: true, active: false, is_folder: false }] },
+        ...projects,
+      ];
+      dropTab("artifacts");
+      artifactFilter.tab = "pages";
+      artifactTabPicked = false;
+      el("nav-artifacts").click();
+      await window.__PAINTED__();
+      await new Promise((done) => setTimeout(done, 200));
+    });
+    const settle = (ms = 400) => page.evaluate((wait) => new Promise((done) => setTimeout(done, wait)), ms);
+    const clear = () => page.evaluate(() => document.querySelectorAll(".toast").forEach((one) => one.remove()));
+    // 갤러리를 앞으로 — 앞선 열림이 문서 탭을 앞에 세웠다.
+    const gallery = async () => {
+      await page.evaluate(() => openArtifacts());
+      await settle(150);
+    };
+    const look = (id) => page.evaluate((artifactId) => {
+      const seen = window.__OTHER__;
+      const tab = tabs.find((one) => one.kind === "file" && one.artifact?.id === artifactId);
+      const view = tab ? docHost(tab.pane, "file") : null;
+      const strip = view?.querySelector(".file-view-head .artifact-strip");
+      return {
+        toasts: [...document.querySelectorAll(".toast")].map((one) => one.textContent.trim()),
+        tabs: tabs.filter((one) => one.artifact?.id === artifactId).length,
+        readOnly: tab?.readOnly === true,
+        editable: typeof tab?.version === "string",
+        active: tab ? activeTabId === tab.id : false,
+        body: view?.querySelector(".file-body")?.textContent ?? "",
+        editorHidden: view?.querySelector(".file-edit")?.hidden ?? null,
+        note: view?.querySelector(".file-view-note")?.textContent ?? "",
+        strip: strip && !strip.hidden
+          ? { title: strip.querySelector(".artifact-strip-title").textContent, project: strip.querySelector(".artifact-strip-project").textContent }
+          : null,
+        opened: seen.docs.filter((one) => one.id === artifactId && one.version === null).length,
+        reads: seen.reads.length,
+        images: seen.images.length,
+        path: tab?.path ?? null,
+      };
+    }, id);
+    // 머리띠의 버전 선택기에서 하나를 고른다 — 보관 스냅샷은 저장소의 문으로 읽어야 한다.
+    const pick = (id, value) => page.evaluate(async ({ artifactId, next }) => {
+      const tab = tabs.find((one) => one.kind === "file" && one.artifact?.id === artifactId);
+      if (!tab) return { missing: true, options: [], body: "", readsAfter: -1, versionDocs: [], toasts: [] };
+      setActiveTab(tab.id);
+      await window.__PAINTED__();
+      const view = docHost(tab.pane, "file");
+      const select = view.querySelector(".file-view-head .artifact-strip-version");
+      const reads = window.__OTHER__.reads.length;
+      select.value = next;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((done) => setTimeout(done, 250));
+      return {
+        options: [...select.options].map((one) => one.textContent),
+        body: view.querySelector(".file-body").textContent,
+        readsAfter: window.__OTHER__.reads.length - reads,
+        versionDocs: window.__OTHER__.docs.filter((one) => one.id === artifactId && one.version !== null).map((one) => one.version),
+        toasts: [...document.querySelectorAll(".toast")].map((one) => one.textContent.trim()),
+      };
+    }, { artifactId: id, next: value });
+
+    /* ---- 1. 더블클릭: 밖의 문서가 읽기 전용으로 한 번 열리고 알림이 없다 --------- */
+    await page.locator('.artifact-card[data-id="doc-out"]').dblclick();
+    await settle();
+    const dbl = await look("doc-out");
+    ok(
+      "a double-click on a document outside the open project opens it once, read-only, from the artifact store by id — the project's file door is never asked and nothing raises an error",
+      dbl.tabs === 1 && dbl.readOnly && dbl.active && dbl.body.includes("병렬 부하에서만 빨개지는 시험")
+        && dbl.opened === 1 && dbl.reads === 0 && dbl.toasts.length === 0,
+      JSON.stringify(dbl),
+    );
+    ok(
+      "the read-only tab has no editor, says it is read-only, and its strip names the project the window knows that folder as",
+      dbl.editorHidden === true && dbl.note.includes("읽기 전용")
+        && dbl.strip?.title === "zo-parallel-flakes.md" && dbl.strip?.project.includes("harbor"),
+      JSON.stringify(dbl),
+    );
+    const sent = await page.evaluate(() => window.__OTHER__.docs.filter((one) => one.id === "doc-out"));
+    ok(
+      "the window sends the store only the row's id — no path, no folder",
+      sent.length > 0 && sent.every((one) => one.keys === "id,version" || one.keys === "id"),
+      JSON.stringify(sent),
+    );
+    await page.screenshot({ path: join(outputDir, "artifacts-other-project-dark.png") });
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+    await settle(300);
+    await page.screenshot({ path: join(outputDir, "artifacts-other-project-light.png") });
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+
+    /* ---- 2. 아무도 쓸 수 없다: 저장 없음, 재시작 기록에도 없음 ------------------- */
+    const guarded = await page.evaluate(async () => {
+      const tab = tabs.find((one) => one.kind === "file" && one.artifact?.id === "doc-out");
+      if (!tab) return { missing: true, saved: null, writes: -1, record: "" };
+      const before = window.__OTHER__.writes.length;
+      const draft = tab.draft;
+      tab.draft = "고쳐 쓴 것";
+      const saved = await saveFile(tab);
+      tab.draft = draft;
+      persistStageLayouts();
+      const record = JSON.stringify(pendingStageLayouts.get(tab.worktree) ?? null);
+      return { saved, writes: window.__OTHER__.writes.length - before, record };
+    });
+    ok(
+      "nothing can write to the file from the read-only tab — a save is refused and writes nothing — and the restart record does not hold the tab, so the next start does not go looking for it through the project's door",
+      guarded.saved === false && guarded.writes === 0 && !guarded.record.includes("zo-parallel-flakes"),
+      JSON.stringify(guarded),
+    );
+
+    /* ---- 3. 문서 안의 상대 링크와 그림은 이 한계 밖을 읽지 않는다 ---------------- */
+    await clear();
+    const inner = await page.evaluate(async () => {
+      const tab = tabs.find((one) => one.kind === "file" && one.artifact?.id === "doc-out");
+      if (!tab) return { missing: true, links: 0, reads: -1, images: -1, toasts: [], rawShown: false, editable: null };
+      const view = docHost(tab.pane, "file");
+      const links = [...view.querySelectorAll(".file-body .md-link")].filter((one) => one.dataset.tip === "./next.md");
+      for (const link of links) link.click();
+      await new Promise((done) => setTimeout(done, 200));
+      view.querySelector(".file-view-mode").click();
+      await new Promise((done) => setTimeout(done, 100));
+      const shown = {
+        rawShown: view.querySelector(".file-body").textContent.includes("# 병렬 부하에서만 빨개지는 시험"),
+        editable: view.querySelector('.file-edit:not([hidden]) [contenteditable="true"]') !== null,
+      };
+      view.querySelector(".file-view-mode").click();
+      await new Promise((done) => setTimeout(done, 100));
+      return {
+        links: links.length,
+        reads: window.__OTHER__.reads.length,
+        images: window.__OTHER__.images.length,
+        toasts: [...document.querySelectorAll(".toast")].map((one) => one.textContent.trim()),
+        ...shown,
+      };
+    });
+    ok(
+      "a relative link and a relative picture in the read-only document reach nothing outside the store — no file is read through the project's door, no picture is asked for, and no error appears — and its 원본 view is text nobody can type into",
+      inner.links >= 1 && inner.reads === 0 && inner.images === 0 && inner.toasts.length === 0
+        && inner.rawShown && inner.editable === false,
+      JSON.stringify(inner),
+    );
+
+    /* ---- 4. 닫았다가 ⌘⇧T: 읽기 전용 탭은 재열기 줄에 서지 않는다---------------- */
+    await clear();
+    const reopened = await page.evaluate(async () => {
+      const tab = tabs.find((one) => one.kind === "file" && one.artifact?.id === "doc-out");
+      if (!tab) return { missing: true, stillOpen: null, readsAfter: -1, toasts: [] };
+      closeTab(tab.id);
+      await new Promise((done) => setTimeout(done, 200));
+      const reads = window.__OTHER__.reads.length;
+      reopenClosedTab();
+      await new Promise((done) => setTimeout(done, 300));
+      return {
+        stillOpen: tabs.some((one) => one.artifact?.id === "doc-out"),
+        readsAfter: window.__OTHER__.reads.length - reads,
+        toasts: [...document.querySelectorAll(".toast")].map((one) => one.textContent.trim()),
+      };
+    });
+    ok(
+      "closing the read-only tab and pressing ⌘⇧T raises no error and asks the project's door for nothing",
+      reopened.stillOpen === false && reopened.readsAfter === 0 && reopened.toasts.length === 0,
+      JSON.stringify(reopened),
+    );
+
+    /* ---- 5. Enter (눌러 둔 채 반복해도 한 번) --------------------------------- */
+    await clear();
+    await gallery();
+    await page.locator('.artifact-card[data-id="doc-key"]').click();
+    await page.keyboard.down("Enter");
+    await page.keyboard.down("Enter");
+    await page.keyboard.up("Enter");
+    await settle();
+    const enter = await look("doc-key");
+    ok(
+      "Enter on a selected outside document opens it once — read-only, no error — even when the key is held and repeats",
+      enter.tabs === 1 && enter.readOnly && enter.body.includes("키보드로 연 문서")
+        && enter.opened === 1 && enter.toasts.length === 0,
+      JSON.stringify(enter),
+    );
+
+    /* ---- 6. 창이 모르는 폴더: 머리띠는 폴더 자체를 말한다 ------------------------ */
+    await clear();
+    await gallery();
+    await page.locator('.artifact-card[data-id="doc-far"]').dblclick();
+    await settle();
+    const far = await look("doc-far");
+    ok(
+      "a document in a folder the window does not know as a project says the folder itself in its strip",
+      far.readOnly && far.strip?.project === "/tmp/zerocode-elsewhere/notes" && far.toasts.length === 0,
+      JSON.stringify(far),
+    );
+
+    /* ---- 7. 버전 선택기: 보관 스냅샷도 저장소의 문으로 읽는다 --------------------- */
+    await clear();
+    await gallery();
+    await page.locator('.artifact-card[data-id="doc-hist"]').dblclick();
+    await settle();
+    const snapshot = await pick("doc-hist", "1");
+    const back = await pick("doc-hist", "current");
+    ok(
+      "the version picker of a read-only document reads the kept snapshot from the store by number — never through the project's door — and 「현재 파일」 brings the current text back",
+      snapshot.options.join(",") === "현재 파일,버전 1,버전 2" && snapshot.body.includes("doc-hist의 버전 1 본문")
+        && snapshot.readsAfter === 0 && snapshot.versionDocs.join(",") === "1" && snapshot.toasts.length === 0
+        && back.body.includes("고쳐 온 문서") && back.readsAfter === 0 && back.toasts.length === 0,
+      JSON.stringify({ snapshot, back }),
+    );
+
+    /* ---- 8. 안의 문서는 지금처럼 고칠 수 있는 파일 탭 ----------------------------- */
+    await clear();
+    await gallery();
+    const readsBefore = await page.evaluate(() => window.__OTHER__.reads.length);
+    await page.locator('.artifact-card[data-id="doc-in"]').dblclick();
+    await settle();
+    const inside = await look("doc-in");
+    const insideReads = await page.evaluate((from) => window.__OTHER__.reads.slice(from), readsBefore);
+    const insidePick = await pick("doc-in", "2");
+    // 고른 옛 판을 보는 동안은 저장이 막힌다 — 현재 파일로 돌아와서 고친다.
+    await pick("doc-in", "current");
+    const edited = await page.evaluate(async () => {
+      const tab = tabs.find((one) => one.kind === "file" && one.artifact?.id === "doc-in");
+      if (!tab) return { saved: null, writes: [] };
+      const before = window.__OTHER__.writes.length;
+      tab.draft = `${tab.text}\n고쳐 쓴 줄\n`;
+      const saved = await saveFile(tab);
+      return { saved, writes: window.__OTHER__.writes.slice(before) };
+    });
+    ok(
+      "a document inside the open project still opens as an editable file tab with the artifact strip — the project's door reads it, and a save writes it",
+      inside.tabs === 1 && !inside.readOnly && inside.editable
+        && insideReads.length >= 1 && insideReads.every((path) => path === inside.path)
+        && inside.toasts.length === 0 && inside.strip?.title === "inside.md"
+        && edited.saved === true && edited.writes.length === 1 && edited.writes[0].path === inside.path,
+      JSON.stringify({ inside, insideReads, edited }),
+    );
+    ok(
+      "the version picker of an editable document reads its snapshot from the store too, not through the project's door — the snapshot lives in the app's own folder, outside every project",
+      insidePick.body.includes("doc-in의 버전 2 본문") && insidePick.readsAfter === 0
+        && insidePick.versionDocs.join(",") === "2" && insidePick.toasts.length === 0,
+      JSON.stringify(insidePick),
+    );
+
+    /* ---- 9. 표의 상한에서 잘린 문서는 앞부분만 보인다고 말한다 ------------------------ */
+    await clear();
+    await gallery();
+    await page.locator('.artifact-card[data-id="doc-cut"]').dblclick();
+    await settle();
+    const cutView = await look("doc-cut");
+    ok(
+      "a document the store cut at its byte cap opens read-only and says how much of the file is shown",
+      cutView.readOnly && cutView.body.includes("표의 상한에서 잘린 문서") && cutView.toasts.length === 0
+        && cutView.note.includes("읽기 전용") && cutView.note.includes("만 보입니다") && cutView.note.includes("(전체 878.9 KB)"),
+      JSON.stringify(cutView),
+    );
+
+    /* ---- 10. 실패해도 알림은 하나 ----------------------------------------------- */
+    await clear();
+    await gallery();
+    await page.locator('.artifact-card[data-id="doc-gone"]').dblclick();
+    await settle();
+    const gone = await look("doc-gone");
+    ok(
+      "when the store refuses a document, one double-click raises exactly one error and opens no tab",
+      gone.toasts.length === 1 && gone.tabs === 0 && !gone.toasts[0].includes("path escapes"),
+      JSON.stringify(gone),
+    );
+
+    /* ---- 11. 네 카탈로그와 창의 오류 ------------------------------------------- */
+    const words = await page.evaluate(() => ["en", "ja", "zh", "es"].flatMap((code) => [
+      "artifacts.readOnlyNote", "artifacts.readOnlyCut",
+    ].filter((key) => typeof CATALOG[code][key] !== "string" || CATALOG[code][key] === "").map((key) => `${code}:${key}`)));
+    ok("the new words exist in the en, ja, zh and es catalogs", words.length === 0, words.join(", "));
+    ok("the window raised no errors", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}

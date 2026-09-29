@@ -333,6 +333,17 @@ impl PreviewPayload {
     }
 }
 
+/// A document row's text for a tab nobody can write (t-16006): bounded like the
+/// drawer's preview, and cut at a whole character when the file is longer than
+/// the table allows.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct DocumentText {
+    pub(crate) text: String,
+    /// The file's size on disk, not the text's — a cut text is shorter.
+    pub(crate) bytes: u64,
+    pub(crate) truncated: bool,
+}
+
 /// The preview LRU: bounded by bytes, not by count — one 4 MB screenshot and
 /// a thousand 200-byte texts are not the same memory.
 #[derive(Default)]
@@ -2165,6 +2176,87 @@ impl Store {
             .unwrap_or_else(PoisonError::into_inner)
             .put(id, Arc::clone(&payload), limits.preview_cache_bytes);
         Ok(payload)
+    }
+
+    /// A document row's text, by id (t-16006). The gallery lists every project's
+    /// documents and the project's own file door refuses a path outside its
+    /// root, as it must; a document outside the open project is read here
+    /// instead, out of the catalog's own row, so nothing about the path comes
+    /// from the window. The bounds are the drawer preview's (`preview`): a row
+    /// of kind document that is text, a regular file, and the table's text cap
+    /// — a longer file is cut on a whole character and says so, because the
+    /// person asked to read it. `version` names one of the row's kept snapshots,
+    /// found in the store's own list (`versions`) by number. Every refusal names
+    /// the row, so the window can say it in one sentence.
+    pub(crate) fn document_text(
+        &self,
+        id: &str,
+        version: Option<u32>,
+    ) -> Result<DocumentText, String> {
+        use std::io::Read as _;
+        let artifact = self
+            .get(id)
+            .ok_or_else(|| format!("그 아티팩트가 없습니다: {id}"))?;
+        if artifact.kind != ArtifactKind::Document {
+            return Err(format!(
+                "문서가 아닌 아티팩트입니다: {id} ({})",
+                artifact.kind.as_str()
+            ));
+        }
+        if !is_utf8_document(&artifact.path) {
+            return Err(format!("텍스트 문서가 아닙니다: {id}"));
+        }
+        let path = match version {
+            None => artifact.path,
+            Some(n) => self
+                .versions(id)
+                .into_iter()
+                .find(|kept| kept.n == n)
+                .map(|kept| kept.path)
+                .ok_or_else(|| format!("그 버전은 더 이상 보관되지 않습니다: {id} 버전 {n}"))?,
+        };
+        let cap = self.limits().preview_text_bytes_max;
+        // A row outlives its file until the next scan; say so in words rather than
+        // in the operating system's.
+        let meta = std::fs::metadata(&path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => format!("아티팩트 파일이 사라졌습니다: {id}"),
+            _ => error.to_string(),
+        })?;
+        if !meta.is_file() {
+            return Err(format!("일반 파일이 아닙니다: {id}"));
+        }
+        let mut held = Vec::new();
+        std::fs::File::open(&path)
+            .and_then(|file| file.take(cap).read_to_end(&mut held))
+            .map_err(|error| error.to_string())?;
+        if held.contains(&0) {
+            return Err(format!("바이너리 파일입니다: {id}"));
+        }
+        Ok(DocumentText {
+            text: text_of_whole_characters(held),
+            bytes: meta.len(),
+            truncated: meta.len() > cap,
+        })
+    }
+}
+
+/// Bytes as text, with a character the cut split in two left out rather than
+/// shown as a replacement mark: a Korean document cut at the byte cap ends in
+/// half of a three-byte character two times in three. Anything else that is not
+/// UTF-8 is replaced, as the drawer's preview does.
+fn text_of_whole_characters(held: Vec<u8>) -> String {
+    match String::from_utf8(held) {
+        Ok(text) => text,
+        Err(error) => {
+            let invalid = error.utf8_error();
+            let bytes = error.into_bytes();
+            let whole = if invalid.error_len().is_none() {
+                &bytes[..invalid.valid_up_to()]
+            } else {
+                &bytes[..]
+            };
+            String::from_utf8_lossy(whole).into_owned()
+        }
     }
 }
 
@@ -4220,6 +4312,163 @@ mod tests {
             store.watch_targets().iter().any(|(_, path)| path.as_deref()
                 == Some(project.join("paper.pdf").canonicalize().unwrap().as_path())),
             "the page's file does not ride the watcher's lane"
+        );
+    }
+
+    /// A document that lives outside the open project opens from the gallery as
+    /// a tab nobody can write, and its text comes from here, by id, out of the
+    /// catalog's own row: the project's file door refuses any path outside its
+    /// root and goes on refusing. This door answers for a text document row that
+    /// is a regular file, cut at the preview's own byte cap; anything else is
+    /// refused, and the refusal names the row (t-16006).
+    #[test]
+    fn a_document_row_is_read_by_id_within_the_previews_bounds_and_nothing_else_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().join("project");
+        let store = Store::open(
+            &dir.path().join("data"),
+            Limits {
+                preview_text_bytes_max: 16,
+                ..Limits::default()
+            },
+        );
+        let register = |name: &str, at: i64| {
+            let fact = PageFact {
+                path: project.join(name),
+                at_ms: Some(at),
+                session: Some("s-1".into()),
+                project: Some(project.clone()),
+            };
+            store
+                .register_page(&fact, "claude", at)
+                .expect("registers")
+                .expect("a row")
+        };
+
+        touch(&project.join("short.md"), "# short\n");
+        let short = register("short.md", 1_000);
+        assert_eq!(short.kind, ArtifactKind::Document);
+        assert_eq!(
+            store.document_text(&short.id, None),
+            Ok(DocumentText {
+                text: "# short\n".into(),
+                bytes: 8,
+                truncated: false,
+            })
+        );
+
+        // Longer than the cap: cut and said so, never refused — the person asked
+        // to read it. The cut lands on a whole character.
+        touch(&project.join("long.md"), &"a".repeat(40));
+        let long = register("long.md", 1_100);
+        let cut = store
+            .document_text(&long.id, None)
+            .expect("a long document is cut, not refused");
+        assert_eq!((cut.text.len(), cut.bytes, cut.truncated), (16, 40, true));
+        touch(&project.join("korean.md"), "가나다라마바");
+        let korean = register("korean.md", 1_150);
+        let cut = store
+            .document_text(&korean.id, None)
+            .expect("a Korean document is cut too");
+        assert_eq!(
+            (cut.text.as_str(), cut.bytes, cut.truncated),
+            ("가나다라마", 18, true),
+            "the cut must not leave half a character behind"
+        );
+
+        // A page is not a document, and neither is a worker's report; the
+        // refusal says what the row is.
+        touch(
+            &project.join("index.html"),
+            "<!doctype html><title>a</title>",
+        );
+        let page = register("index.html", 1_200);
+        let refused = store
+            .document_text(&page.id, None)
+            .expect_err("a page is refused");
+        assert!(
+            refused.contains(&page.id) && refused.contains("page"),
+            "{refused}"
+        );
+        let report_file = dir.path().join("t-9-report.md");
+        touch(&report_file, "# report");
+        let report = store
+            .register_report(&report_file, origin("w-1"), 1_300)
+            .expect("report");
+        let refused = store
+            .document_text(&report.id, None)
+            .expect_err("a report is refused");
+        assert!(refused.contains("report"), "{refused}");
+
+        // A PDF is a document row and not text; binary bytes are not text either.
+        touch(&project.join("paper.pdf"), "%PDF-1.4");
+        let pdf = register("paper.pdf", 1_400);
+        assert_eq!(pdf.kind, ArtifactKind::Document);
+        let refused = store
+            .document_text(&pdf.id, None)
+            .expect_err("a PDF is refused");
+        assert!(refused.contains(&pdf.id), "{refused}");
+        std::fs::write(project.join("binary.md"), b"# a\0b").expect("write");
+        let binary = register("binary.md", 1_500);
+        assert_eq!(binary.kind, ArtifactKind::Document);
+        assert!(
+            store
+                .document_text(&binary.id, None)
+                .expect_err("binary bytes are refused")
+                .contains("바이너리")
+        );
+
+        // Not a regular file: the row's path became a folder after it was
+        // catalogued, and a folder is not read.
+        std::fs::remove_file(project.join("short.md")).expect("remove");
+        std::fs::create_dir(project.join("short.md")).expect("mkdir");
+        assert!(
+            store
+                .document_text(&short.id, None)
+                .expect_err("a folder is refused")
+                .contains("일반 파일")
+        );
+        assert!(
+            store
+                .document_text("no-such-row", None)
+                .expect_err("an unknown row is refused")
+                .contains("no-such-row")
+        );
+        // The file went away while its row stayed: one sentence, not an OS error.
+        std::fs::remove_file(project.join("long.md")).expect("remove");
+        assert!(
+            store
+                .document_text(&long.id, None)
+                .expect_err("a vanished file is refused")
+                .contains("사라졌습니다")
+        );
+
+        // A kept version is read from the store's own list of them — the caller
+        // names a number, never a path.
+        touch(&project.join("history.md"), "first\n");
+        let history = register("history.md", 2_000);
+        touch(&project.join("history.md"), "second\n");
+        register("history.md", 3_000);
+        assert_eq!(store.versions(&history.id).len(), 2);
+        assert_eq!(
+            store
+                .document_text(&history.id, Some(1))
+                .expect("version 1")
+                .text,
+            "first\n"
+        );
+        assert_eq!(
+            store
+                .document_text(&history.id, None)
+                .expect("the current file")
+                .text,
+            "second\n"
+        );
+        assert!(
+            store
+                .document_text(&history.id, Some(9))
+                .expect_err("no such version")
+                .contains("버전 9")
         );
     }
 

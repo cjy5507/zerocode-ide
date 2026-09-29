@@ -6511,6 +6511,13 @@ const STAGE_STORED_KINDS = new Set(
   ["file", "image", "mdview", "csv", "ipynb", "board", "changes", "vault", "knowledge", "skills", "artifacts", "jev"],
 );
 
+/* A tab the record may hold: its kind is worth writing down, and it is not a
+ * read-only document the gallery opened from the artifact store (t-16006). That
+ * tab has nothing to come back through — every road back reads its path through
+ * the project's own file door, which refuses a path outside the project — so a
+ * record that held it would raise an error at the next start. */
+const storedInStage = (tab) => STAGE_STORED_KINDS.has(tab.kind) && tab.readOnly !== true;
+
 /* Suppresses the persist calls that restoring itself fires — the same
  * reason `restoringPanes` exists, for the same shape of loop. */
 let restoringStage = false;
@@ -6740,7 +6747,7 @@ function persistStageLayouts({ deferred = false, worktree = activeWorktreePath }
   const active = tabs.find((tab) => tab.id === activeTabByWorktree.get(worktree));
   const groupsRecord = held.map((group) => {
     const owned = inFront ? paneTabs(group) : tabs.filter((tab) => tab.pane === group && tab.worktree === worktree);
-    const docs = owned.filter((tab) => STAGE_STORED_KINDS.has(tab.kind));
+    const docs = owned.filter(storedInStage);
     // The recency order, as indices into the tabs being written — only the
     // documents; a terminal in the order has no seat in this record.
     const recent = (groupRecents.get(group) ?? [])
@@ -6753,7 +6760,7 @@ function persistStageLayouts({ deferred = false, worktree = activeWorktreePath }
     // terminal came back beside the documents of one group.
     const terms = [];
     owned
-      .filter((tab) => STAGE_STORED_KINDS.has(tab.kind) || (tab.kind === "term" && tab.storedId != null))
+      .filter((tab) => storedInStage(tab) || (tab.kind === "term" && tab.storedId != null))
       .forEach((tab, at) => {
         if (tab.kind === "term") terms.push({ id: tab.storedId, at });
       });

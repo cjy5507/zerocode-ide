@@ -5080,7 +5080,8 @@ function openTab(tab, { focus = true } = {}) {
  * watch-list rebuild. */
 let watchedFiles = "";
 function syncWatchedFiles() {
-  const paths = [...new Set(tabs.filter((tab) => tab.kind === "file").map((tab) => tab.path))].sort();
+  // A read-only document from the artifact store (t-16006) is not a file of this checkout.
+  const paths = [...new Set(tabs.filter((tab) => tab.kind === "file" && !tab.readOnly).map((tab) => tab.path))].sort();
   const key = paths.join("\n");
   if (key === watchedFiles) return;
   watchedFiles = key;
@@ -5672,7 +5673,9 @@ function closeTab(id) {
     // the lane's tab exists because the lane does, and reopening it without
     // one would be a tab with nothing behind it. A reclaimed untitled file
     // has no behind either — the close deleted it.
-    if (!tab.reclaimed) closedTabs.push({ kind: tab.kind, path: tab.path });
+    // A read-only document from the artifact store (t-16006) goes on it marked: ⌘⇧T reopens by
+    // path, and that path is one the project's own file door refuses.
+    if (!tab.reclaimed) closedTabs.push({ kind: tab.kind, path: tab.path, readOnly: tab.readOnly === true });
     if (termFloat.hidden) keySink.focus();
   });
 }
@@ -5789,6 +5792,8 @@ const closedTabs = [];
  * what it held. A file closed ten minutes ago and reopened now should be the
  * file as it is, not the copy that happened to be in memory. */
 function reopenClosedTab() {
+  // A read-only document has no path to come back through (t-16006); ⌘⇧T goes on to the one before it.
+  while (closedTabs.at(-1)?.readOnly) closedTabs.pop();
   const tab = closedTabs.pop();
   if (!tab) return;
   // A commit's diff reopens AT its commit. `openDiff` would answer with the
