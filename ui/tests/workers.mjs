@@ -2741,6 +2741,7 @@ async function testHelperPage(page, ok) {
       crumb: label(p.crumb),
       sibs: label(p.sibs),
       card: label(p.card),
+      full: label(p.card?.querySelector(".helper-brief-full") ?? null),
       hidden: {
         sep: p.crumb?.querySelector(".helper-crumb-sep")?.getAttribute("aria-hidden") ?? null,
         dot: p.head?.querySelector(".helper-state-dot")?.getAttribute("aria-hidden") ?? null,
@@ -2752,11 +2753,12 @@ async function testHelperPage(page, ok) {
     };
   });
   ok(
-    "a screen reader gets every control by name, the crumb, the strip and the card as named regions, the decorative marks hidden, the current helper marked, and the helper's state announced politely",
+    "a screen reader gets every control by name, the crumb, the strip and the card as named regions, the card's whole text as a region under a name of its own, the decorative marks hidden, the current helper marked, and the helper's state announced politely",
     reading.buttons >= 6 && reading.unnamed === 0 && reading.allPlain === true &&
       reading.crumb.tag === "NAV" && reading.crumb.label.length > 0 &&
       reading.sibs.tag === "NAV" && reading.sibs.label.length > 0 &&
       reading.card.tag === "SECTION" && reading.card.label.length > 0 &&
+      reading.full.tag === "DIV" && reading.full.label.length > 0 && reading.full.label !== reading.card.label &&
       reading.hidden.sep === "true" && reading.hidden.dot === "true" && reading.hidden.cut === "true" &&
       reading.state === "status" &&
       reading.mark.role === "img" && reading.mark.label.length > 0 &&
