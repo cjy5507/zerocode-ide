@@ -2391,6 +2391,7 @@ async function stepsByKind(browser, origin, ok) {
           task: ["#i-bot", t("worker.stepTask", "헬퍼 호출")],
         },
         table: typeof STEP_NAMES,
+        sidebar: [activityWord("websearch"), t("activity.websearch", "웹 검색"), agentActivityKind("websearch"), agentActivityKind("web")],
       };
     });
     const wanted = KIND_CALLS.map((call) => {
@@ -2408,6 +2409,11 @@ async function stepsByKind(browser, origin, ok) {
       "C11: the page holds no table of vendor tool names — the one it had is gone",
       seen.table === "undefined",
       `typeof STEP_NAMES is ${seen.table}`,
+    );
+    ok(
+      "C11: the sidebar draws the core's word for a search of the web in its own words, not as the raw \"websearch\", and files it where a fetch of a page is filed",
+      seen.sidebar[0] === seen.sidebar[1] && seen.sidebar[0] !== "websearch" && seen.sidebar[2] === seen.sidebar[3] && seen.sidebar[2] !== "other",
+      JSON.stringify(seen.sidebar),
     );
     ok("C11: the kinds raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {

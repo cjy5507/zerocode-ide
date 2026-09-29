@@ -7823,7 +7823,12 @@ fn what_an_agent_is_doing_reaches_the_window_bounded_and_coalesced() {
     // The verb is translated and the target is not: a path and a command
     // are the machine's own words.
     let wording = block_after(window, "function activityWord(verb) {");
-    for key in ["activity.read", "activity.bash", "activity.grep"] {
+    for key in [
+        "activity.read",
+        "activity.bash",
+        "activity.grep",
+        "activity.websearch",
+    ] {
         assert!(
             wording.contains(&format!("t(\"{key}\", ")),
             "`{key}` is not read where the verb is drawn:\n{wording}"
@@ -7839,6 +7844,7 @@ fn what_an_agent_is_doing_reaches_the_window_bounded_and_coalesced() {
             "activity.grep",
             "activity.task",
             "activity.web",
+            "activity.websearch",
             "activity.prompt",
             "activity.stop",
         ] {
