@@ -69,11 +69,7 @@ const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`PtyRun::hang_up`] exists to do.
 const READ_WAIT_MS: u16 = 50;
 
-fn terminal_command(
-    binary: &Path,
-    terminal: Terminal,
-    slave_path: Option<&Path>,
-) -> io::Result<Command> {
+fn terminal_command(binary: &Path, terminal: Terminal, slave_path: &Path) -> Command {
     // This crate forbids unsafe pre_exec. Both modes need setsid: otherwise
     // Crossterm can read the runner's /dev/tty instead of the test's stdio PTY.
     let mut command = Command::new("perl");
@@ -84,11 +80,33 @@ fn terminal_command(
         .arg(binary)
         .env_remove("ZO_E2E_CTTY");
     if terminal == Terminal::Controlling {
-        let slave_path =
-            slave_path.ok_or_else(|| io::Error::other("the pty slave has no name"))?;
         command.env("ZO_E2E_CTTY", slave_path);
     }
-    Ok(command)
+    command
+}
+
+/// The pty slave's device path, as the kernel knows the descriptor.
+///
+/// Not `ttyname` on macOS: libc answers it by searching `/dev` for the
+/// slave's device number, which takes a descriptor of its own and comes back
+/// empty (ERANGE) while other programs on the machine are busy with their
+/// terminals. Under a parallel gate that was "the pty slave has no name"
+/// (t-15568). `F_GETPATH` reads the path the slave was opened by and needs
+/// neither.
+#[cfg(target_os = "macos")]
+fn slave_device_path(slave: &File) -> io::Result<PathBuf> {
+    let mut path = PathBuf::new();
+    fcntl(slave.as_raw_fd(), FcntlArg::F_GETPATH(&mut path))
+        .map_err(|errno| io::Error::other(format!("F_GETPATH on the pty slave: {errno}")))?;
+    Ok(path)
+}
+
+/// Linux's `ttyname` reads the `/proc/self/fd` link instead of searching
+/// `/dev`.
+#[cfg(not(target_os = "macos"))]
+fn slave_device_path(slave: &File) -> io::Result<PathBuf> {
+    nix::unistd::ttyname(slave)
+        .map_err(|errno| io::Error::other(format!("ttyname of the pty slave: {errno}")))
 }
 
 #[derive(Default)]
@@ -120,7 +138,7 @@ pub struct PtyRun {
     /// Read by the pane suite (`e2e_pane_resize_and_wide_table.rs`), not by
     /// this binary — the harness is shared and each binary uses a part of it.
     #[allow(dead_code)]
-    slave_path: Option<std::path::PathBuf>,
+    slave_path: PathBuf,
 }
 
 impl PtyRun {
@@ -280,9 +298,9 @@ impl PtyRun {
         for end in [&master, &slave] {
             fcntl(end.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io::Error::from)?;
         }
-        let slave_path = nix::unistd::ttyname(&slave).ok();
+        let slave_path = slave_device_path(&slave)?;
 
-        let mut command = terminal_command(&zo_binary(), terminal, slave_path.as_deref())?;
+        let mut command = terminal_command(&zo_binary(), terminal, &slave_path);
         configure_command(
             &mut command,
             cwd,
@@ -366,13 +384,9 @@ impl PtyRun {
     /// is told nothing — the shape of a host whose `SIGWINCH` never arrives.
     #[allow(dead_code)] // pane suite only; see `slave_path`
     pub fn resize_silently(&mut self, rows: u16, cols: u16) -> io::Result<()> {
-        let slave = self
-            .slave_path
-            .as_ref()
-            .ok_or_else(|| io::Error::other("slave device name unknown"))?;
         let status = Command::new("stty")
             .arg("-f")
-            .arg(slave)
+            .arg(&self.slave_path)
             .arg("rows")
             .arg(rows.to_string())
             .arg("cols")
