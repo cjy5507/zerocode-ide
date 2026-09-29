@@ -968,7 +968,7 @@ fn running_background_agent_result(
     manifest: &AgentOutput,
     handoff: Option<BlockingHandoff>,
 ) -> Result<String, ToolError> {
-    agent_tools::hand_agent_to_background(manifest.agent_id.clone());
+    agent_tools::hand_agent_to_background(&manifest.agent_id);
     let note = match handoff {
         None => BACKGROUND_AGENT_NOTE.to_string(),
         Some(BlockingHandoff::WaitTimedOut) => format!(
@@ -1002,8 +1002,12 @@ fn finish_blocking_agent_call(
         // single-consumer channel. Marking this id is the only extra wiring a
         // detached spawn needs; `parent_session_id` already scopes the live
         // manifest consumed by the HUD and agents viewer.
-        let _ = turn_stop;
-        return running_background_agent_result(manifest, Some(BlockingHandoff::WaitTimedOut));
+        let handoff = if turn_stop.is_some_and(runtime::HookAbortSignal::is_aborted) {
+            BlockingHandoff::TurnStopped
+        } else {
+            BlockingHandoff::WaitTimedOut
+        };
+        return running_background_agent_result(manifest, Some(handoff));
     }
     to_pretty_json(match completion {
         Some(completion) => json!({

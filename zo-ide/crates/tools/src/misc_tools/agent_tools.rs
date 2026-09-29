@@ -1011,9 +1011,12 @@ pub(crate) fn wait_for_blocking_agent(
     timeout: std::time::Duration,
     turn_stop: Option<&runtime::HookAbortSignal>,
 ) -> Option<AgentCompletion> {
-    let _ = turn_stop;
+    // 턴이 멈추면(Esc·Stop) 런타임은 이 도구의 결과를 버리고 제 길을 간다.
+    // 이 대기는 끊을 수 없는 blocking 스레드에서 돌아서, 멈춤을 보지 않으면 20분
+    // 창을 끝까지 붙잡고, 그 사이에 도움이가 끝내면 결과는 버려지는 반환값과
+    // 함께 사라진다. 멈춤을 보면 곧장 돌아가고, 호출자가 도움이를 배경 길로 넘긴다.
     let ids = [agent_id.to_string()];
-    wait_for_agent_completions(&ids, timeout)
+    wait_for_agent_completions_cancellable(&ids, timeout, turn_stop.map(runtime::HookAbortSignal::flag))
         .into_iter()
         .find(|completion| completion.agent_id == agent_id)
 }

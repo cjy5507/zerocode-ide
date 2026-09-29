@@ -256,6 +256,13 @@ fn build_background_notification(
     completion: &AgentCompletion,
     active_session_id: &str,
 ) -> Option<AgentNotification> {
+    // 도는 도움이의 말(메시지·굶주림 알림)은 끝이 아니다 — 종료 상태 검사를
+    // 건너뛰고, 뒤에 올 결과가 쓸 배경 표식도 가져가지 않는다(t-11459).
+    match completion.status.as_str() {
+        tools::AGENT_MESSAGE_STATUS => return Some(agent_message_notification(completion)),
+        tools::AGENT_STARVED_STATUS => return starvation_notification(completion),
+        _ => {}
+    }
     if !matches!(completion.status.as_str(), "completed" | "failed" | "stopped")
         || !tools::is_background_agent(&completion.agent_id)
     {

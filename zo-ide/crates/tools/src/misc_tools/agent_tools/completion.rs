@@ -236,8 +236,22 @@ pub fn mark_background_agent(agent_id: String) {
 /// or whose wait just timed out — published an event the pump passed by for
 /// want of the mark. The pump claims the mark on the first event it passes,
 /// so of the two copies exactly one reaches the main.
-pub(crate) fn hand_agent_to_background(agent_id: String) {
-    mark_background_agent(agent_id);
+pub(crate) fn hand_agent_to_background(agent_id: &str) {
+    mark_background_agent(agent_id.to_string());
+    let published = completion_store()
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entries
+        .get(agent_id)
+        .map(|stored| stored.completion.clone())
+        .filter(|completion| super::agent_output_status_is_terminal(&completion.status));
+    if let (Some(completion), Some(tx)) = (published, agent_completion_sender()) {
+        let _ = tx.send(AgentCompletion {
+            result: None,
+            ..completion
+        });
+    }
 }
 
 fn mark_background_task(task_id: String, session_id: Option<String>) {
@@ -420,6 +434,12 @@ pub(super) fn notify_agent_message(notice: AgentCompletion) -> MainMessageReceip
     let Some(tx) = agent_completion_sender() else {
         return MainMessageReceipt::NoLiveMain;
     };
+    // 표식 없는 도움이는 메인이 그 결과를 붙잡고 기다리는 중이다(blocking `Agent`·
+    // 팬아웃·부모 도움이) — 펌프가 넘겨도 결과보다 늦게 접히거나, 부모가 아닌
+    // 대화로 간다. 보내지 않고 그렇다고 답한다(t-11459).
+    if !is_background_agent(agent_message_source_id(&notice.agent_id)) {
+        return MainMessageReceipt::AwaitsResult;
+    }
     if tx.send(notice).is_ok() {
         MainMessageReceipt::Delivered
     } else {
