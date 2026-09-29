@@ -57,7 +57,8 @@ zo mcp logout <name> [--cwd <dir>]
   the repository carries is not consent to run it. --trust is that consent —
   it records this one name in the project's trust record, which counts only
   while it is your own uncommitted file — and without it `add` says in one
-  line that the server is not loaded and how to trust it.
+  line that the server is not loaded and how to trust it. `remove --project`
+  takes the name back out of that record, so consent never outlives the server.
 
   `login` runs the OAuth flow for a remote server (inside the ZeroCode window
   the consent page opens in the window's own browser, where the person is
@@ -693,15 +694,38 @@ fn remove(request: &Request, loader: &ConfigLoader, name: &str) -> Result<Report
             path.display()
         ));
     }
-    Ok(render(
-        request.json,
-        &json!({
-            "server": name,
-            "edit": edit_label(edit),
-            "path": path.display().to_string(),
-        }),
-        || format!("removed {name} from {}", path.display()),
-    ))
+    // Consent was given to the server this line took away. Left in the record,
+    // the name would run whatever is added under it next without asking. Only
+    // the project scope is gated, so a user-scope server has no record to edit.
+    let untrusted = request
+        .project
+        .then(|| untrust(loader, name))
+        .transpose()
+        .map_err(|error| format!("{name} was removed from {}, but {error}", path.display()))?;
+    let mut report = json!({
+        "server": name,
+        "edit": edit_label(edit),
+        "path": path.display().to_string(),
+    });
+    if let Some((record, trust_edit)) = &untrusted {
+        report["trustEdit"] = json!(edit_label(*trust_edit));
+        report["trustPath"] = json!(record.display().to_string());
+    }
+    Ok(render(request.json, &report, || {
+        let mut text = format!("removed {name} from {}", path.display());
+        if let Some((record, McpEdit::Removed)) = &untrusted {
+            let _ = write!(text, "\nno longer trusted in {}", record.display());
+        }
+        text
+    }))
+}
+
+/// Take the name out of the gate's own document — the inverse of [`trust`].
+fn untrust(loader: &ConfigLoader, name: &str) -> Result<(PathBuf, McpEdit), String> {
+    let path = loader.trusted_mcp_servers_path();
+    let edit = runtime::untrust_mcp_server(&path, name)
+        .map_err(|error| format!("its name could not be taken out of the trust record: {error}"))?;
+    Ok((path, edit))
 }
 
 const fn edit_label(edit: McpEdit) -> &'static str {
