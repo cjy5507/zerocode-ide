@@ -327,7 +327,9 @@ pub fn challenger<'a>(
     records: &BTreeMap<String, ModelRecord>,
     summonses: usize,
 ) -> Option<&'a Candidate> {
-    if summonses % lineup::CHALLENGE_ONE_IN != 0 || !lineup::CHALLENGED.contains(&row.difficulty) {
+    if !summonses.is_multiple_of(lineup::CHALLENGE_ONE_IN)
+        || !lineup::CHALLENGED.contains(&row.difficulty)
+    {
         return None;
     }
     let ended = |model: &str| records.get(model).map_or(0, |record| record.ended);
