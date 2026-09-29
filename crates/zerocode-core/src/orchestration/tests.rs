@@ -24574,6 +24574,8 @@ fn a_late_sound_never_retires_the_next_occupants_readiness() {
     assert_eq!(heard(&bench), (None, None));
 }
 
+/// t-15554: the assign moment's one request (`tests/assign.rs`).
+mod assign;
 /// t-7812: the window restart restore transitions (`tests/restore.rs`).
 mod restore;
 /// t-7812: the transitions those roads added (`tests/restore_seams.rs`).
@@ -25512,14 +25514,20 @@ fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_ef
             Catalog(&["claude", "codex", "antigravity", "cursor"])
                 .command_for(agent, prompt, tuning)
         }
-        fn choose_difficulty(
+        fn choose_assign(
             &self,
-            look: &crate::summon_difficulty::Look,
+            asked: &crate::summon_assign::AssignAsk,
             _origin: [&str; 3],
-        ) -> Option<serde_json::Value> {
+        ) -> crate::summon_assign::Receipts {
             self.calls.set(self.calls.get() + 1);
-            assert_eq!(look.spec, "translate-labels");
-            self.receipt.clone()
+            assert_eq!(
+                asked.difficulty.as_ref().map(|look| look.spec.as_str()),
+                Some("translate-labels")
+            );
+            crate::summon_assign::Receipts {
+                difficulty: self.receipt.clone(),
+                model: None,
+            }
         }
     }
     for (receipt, flag, expected, calls) in [
@@ -25653,12 +25661,18 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
                 0,
             )
         }
-        fn choose_difficulty(
+        fn choose_assign(
             &self,
-            _: &crate::summon_difficulty::Look,
+            asked: &crate::summon_assign::AssignAsk,
             _: [&str; 3],
-        ) -> Option<serde_json::Value> {
-            Some(serde_json::json!({"chosen":"low", "applied":true}))
+        ) -> crate::summon_assign::Receipts {
+            crate::summon_assign::Receipts {
+                difficulty: asked
+                    .difficulty
+                    .as_ref()
+                    .map(|_| serde_json::json!({"chosen":"low", "applied":true})),
+                model: None,
+            }
         }
     }
     let default = crate::summon_difficulty::profile(&serde_json::Value::Null, "codex", "low")
@@ -25750,14 +25764,17 @@ fn an_open_model_dial_says_where_its_model_came_from_and_what_else_is_offered() 
                 .unwrap()
             })
         }
-        fn choose_difficulty(
+        fn choose_assign(
             &self,
-            _: &crate::summon_difficulty::Look,
+            asked: &crate::summon_assign::AssignAsk,
             _: [&str; 3],
-        ) -> Option<serde_json::Value> {
-            Some(
-                serde_json::json!({"chosen": crate::summon_difficulty::LADDER[0].0, "applied": true}),
-            )
+        ) -> crate::summon_assign::Receipts {
+            crate::summon_assign::Receipts {
+                difficulty: asked.difficulty.as_ref().map(|_| {
+                    serde_json::json!({"chosen": crate::summon_difficulty::LADDER[0].0, "applied": true})
+                }),
+                model: None,
+            }
         }
     }
     let said = answered(&Lined, "agent-list --agent claude");
