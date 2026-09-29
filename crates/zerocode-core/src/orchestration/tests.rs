@@ -10413,6 +10413,73 @@ fn a_go_ahead_leased_into_an_unread_output_stays_unread_and_its_coordinator_hear
     assert_eq!(body["unreadMail"], serde_json::json!([]));
 }
 
+/// A worker the person took over, with mail it has not read, is told to its
+/// coordinator once and named as taken over (t-15313). Nothing ever types
+/// into the person's composer, so without this nobody was told at all:
+/// run-4275's w-14439 sat taken over from 14:53 on 2026-09-29 with six
+/// letters unread, its coordinator's review among them. A taken worker with
+/// nothing unread is the person's to wait on, and is not news.
+#[test]
+fn a_taken_over_workers_unread_mail_is_told_once_and_named_so() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name taken-with-mail");
+    let task = bench.json("task-create --spec review")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    assert!(bench.ledger.worker_taken_over(("team-1", pane.as_str())));
+    let rested = bench.clock + 10;
+    let at_rest = |waiting_on_mail: bool| {
+        [IdleWorker {
+            worker: worker.clone(),
+            rested_ms: rested,
+            waiting_on_mail,
+        }]
+    };
+    assert_eq!(
+        bench
+            .ledger
+            .workers_idle(&at_rest(true), rested + 10 * IDLE_NOTICE_GRACE_MS),
+        0,
+        "a taken worker with nothing unread was told"
+    );
+
+    let review = bench.json(&format!(
+        "send --to {} --type status --body review-is-in",
+        worker_address(&worker)
+    ))["messageId"]
+        .as_str()
+        .expect("an id")
+        .to_string();
+    let now_ms = rested.max(bench.clock) + IDLE_NOTICE_GRACE_MS;
+    assert_eq!(
+        bench.ledger.workers_idle(&at_rest(false), now_ms),
+        1,
+        "a taken worker's unread mail was never told"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_idle(&at_rest(false), now_ms + 10 * IDLE_NOTICE_GRACE_MS),
+        0,
+        "the same rest was told twice"
+    );
+    let mail = bench.json("check --peek --types went_quiet");
+    let notice = &mail["messages"][0];
+    let headline = notice["subject"].as_str().unwrap_or_default();
+    assert!(
+        headline.starts_with("unread mail waiting: ")
+            && headline.contains(&review)
+            && headline.contains("taken over"),
+        "the notice did not name the taken worker's unread mail: {headline}"
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(notice["body"].as_str().expect("a body")).expect("quiet JSON");
+    assert_eq!(body["takenOver"], true, "{body}");
+    assert_eq!(body["unreadMail"], serde_json::json!([review]));
+}
+
 /// A worker waiting on purpose — its question unanswered, nothing unread —
 /// is not idle news: the question is already in the coordinator's inbox
 /// (t-15313). Mail it has not read is news again, question or not: an

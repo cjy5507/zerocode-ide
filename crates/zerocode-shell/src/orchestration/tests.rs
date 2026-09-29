@@ -13161,6 +13161,86 @@ fn a_worker_at_rest_is_pointed_at_a_batch_it_was_handed_and_never_acknowledged()
     crate::orchestration_pointer_mailbox::forget_term(WORKER);
 }
 
+/// A worker the person took over is never typed into, and its unread mail
+/// still reaches its coordinator — once, named as taken over (t-15313).
+///
+/// run-4275's w-14439 was taken over and at rest from 14:53 on 2026-09-29
+/// while six letters to it stood unread, its coordinator's review among
+/// them. The pointer rightly skips a taken pane — the composer is the
+/// person's — and that same skip left it out of every report, so nobody was
+/// ever told. A person's hand usually ends such a turn with an interrupt,
+/// and that rest counts here: the pane is theirs either way.
+#[test]
+fn a_taken_over_worker_with_unread_mail_is_told_to_its_coordinator_and_never_typed_at() {
+    const LEADER: u32 = 15_317;
+    const WORKER: u32 = 15_318;
+    let (_window, _store) = PrivateWindow::boot();
+    let _turn = one_beat_at_a_time();
+    let _stood = crate::standing_clock::stand_still();
+    let team = format!("team-taken-mail-{LEADER}");
+    let (_run_id, worker, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let host = Pointing::default();
+    let as_leader = |line: String| {
+        let answer = run(
+            &host,
+            Vec::new(),
+            &team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words(&line),
+            clock(),
+        );
+        assert_eq!(answer.exit_code, 0, "`{line}`: {}", answer.stderr);
+        serde_json::from_str::<serde_json::Value>(&answer.stdout).expect("JSON")
+    };
+    super::pane_turn_began(LEADER, clock());
+    super::pane_turn_began(WORKER, clock());
+    super::pane_taken_over(WORKER, clock());
+    let rested = clock();
+    super::pane_lead_rested(WORKER, rested, true);
+    let review = as_leader(format!(
+        "send --to {} --type status --body review-is-in --retry-request taken-review-{worker}",
+        zerocode_core::orchestration::worker_address(&worker)
+    ))["messageId"]
+        .as_str()
+        .expect("the review")
+        .to_string();
+    let shown = as_leader(format!("worker-show --worker {worker}"));
+    assert_eq!(shown["takenOver"], true, "{shown}");
+    assert_eq!(shown["unreadMail"], serde_json::json!([review]), "{shown}");
+
+    let grace = zerocode_core::orchestration::IDLE_NOTICE_GRACE_MS;
+    let later = clock().max(rested) + grace;
+    super::tick(&host, &[], later);
+    super::tick(&host, &[], later + grace);
+    assert!(
+        host.typed().iter().all(|(term, _)| *term != WORKER),
+        "a taken pane's composer was typed into: {:?}",
+        host.typed()
+    );
+    let told: Vec<serde_json::Value> =
+        as_leader("check --peek --types went_quiet".to_string())["messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+    assert_eq!(
+        told.len(),
+        1,
+        "a taken worker's unread mail was not told once: {told:?}"
+    );
+    let headline = told[0]["subject"].as_str().unwrap_or_default();
+    assert!(
+        headline.contains(&review) && headline.contains("taken over"),
+        "the notice did not name the taken worker's unread mail: {headline}"
+    );
+
+    super::pane_turn_began(WORKER, clock());
+    super::pane_turn_began(LEADER, clock());
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::orchestration_pointer_mailbox::forget_term(WORKER);
+}
+
 /// Idle is not done (t-15313), pinned where it can drift: the lead's rest
 /// ([`super::pane_rests`]) is written by the rest and struck by the next
 /// turn, the person's interrupt and the terminal going, and READ only by the
