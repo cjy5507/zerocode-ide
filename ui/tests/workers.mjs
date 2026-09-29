@@ -215,7 +215,7 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       window.__ANSWER__.subagent_log = () => ({
         found: true,
         next: 2,
-        turns: [{ role: "assistant", text: "done here" }, { role: "tool", text: "read_file · /a.rs" }],
+        turns: [{ role: "assistant", text: "done here" }, { role: "tool", text: "read_file · /a.rs", tool: { name: "read_file", kind: "read" } }],
       });
       await openHelperPage(
         { term, agent: "zo", worktree: owner.worktree, tab: owner },
@@ -226,10 +226,10 @@ export async function testWorkers({ browser, origin, ok, faults }) {
       seen.pageStatus = pageTab?.worker.status ?? null;
       const face = document.querySelector("#worker-view");
       // A finished helper's page has no call out and no status line — the tail
-      // tool row stands plain under the CLI's own name.
+      // tool row stands plain under its kind's word.
       seen.noRunningTail = face?.querySelector(".is-live") === null &&
         face?.querySelector(".helper-status")?.hidden === true &&
-        face?.querySelector(".helper-turn.is-tool .helper-tool-name")?.textContent === "read_file";
+        face?.querySelector(".helper-turn.is-tool .helper-step-kind")?.textContent === t("worker.stepRead", "파일 읽기");
       // The live one finishes: its open page follows the roster.
       await openHelperPage(
         { term, agent: "zo", worktree: owner.worktree, tab: owner },

@@ -61,7 +61,8 @@ export async function testConversationFont(browser, origin, ok) {
     await openConversation(page, [
       { role: "user", text: "대화 뷰가 느려요 — why is it slow?" },
       { role: "assistant", text: "원인은 paint가 폴마다 목록을 다시 세운 것입니다 — the list was rebuilt on every poll." },
-      { role: "tool", text: "Read · ui/shell.js", tool: { call_id: "r1", name: "Read", input: "ui/shell.js", is_error: false } },
+      // A tool the window has no word for stands under its own name — all Latin.
+      { role: "tool", text: "Lookup · ui/shell.js", tool: { call_id: "r1", name: "Lookup", kind: "Lookup", input: "ui/shell.js", is_error: false } },
     ]);
     await page.evaluate(async () => {
       const list = document.querySelector("#worker-view .helper-turns");
@@ -73,7 +74,7 @@ export async function testConversationFont(browser, origin, ok) {
         const control = document.createElement("span");
         control.id = id;
         control.style.fontFamily = face;
-        control.textContent = "Read";
+        control.textContent = "Lookup";
         list.prepend(control);
       }
       // The engine answers for text it has laid out: a frame first.
@@ -98,16 +99,17 @@ export async function testConversationFont(browser, origin, ok) {
         return {
           choice: document.documentElement.style.getPropertyValue("--font-ui-choice"),
           prose: getComputedStyle(prose).fontFamily,
-          tool: getComputedStyle(document.querySelector("#worker-view .helper-tool-name")).fontFamily,
+          tool: getComputedStyle(document.querySelector("#worker-view .helper-step-kind")).fontFamily,
         };
       }, choice);
       const drawn = {
         prose: await drawnFaces(cdp, "#worker-view .helper-turn.is-assistant .helper-said p"),
-        tool: await drawnFaces(cdp, "#worker-view .helper-tool-name"),
+        tool: await drawnFaces(cdp, "#worker-view .helper-step-kind"),
         user: await drawnFaces(cdp, "#worker-view .helper-turn.is-user .helper-said"),
       };
-      // The Latin words stand in the platform's sans: the tool's name is all
-      // Latin, and the prose and the person's words carry Latin beside Hangul.
+      // The Latin words stand in the platform's sans: the unknown tool's name
+      // is all Latin, and the prose and the person's words carry Latin beside
+      // Hangul.
       const latinInSans = drawn.tool?.join() === system?.join() &&
         [drawn.prose, drawn.user].every((faces) => faces?.includes(system?.[0]) === true);
       const fellToEngine = engine?.[0] !== system?.[0] &&
@@ -151,14 +153,18 @@ export async function testConversationFolds(browser, origin, ok) {
     await openConversation(page, [
       { role: "user", text: lines(40, "브리핑") },
       { role: "user", text: "짧은 부탁" },
-      { role: "tool", text: "Bash · cargo test", tool: { call_id: "b1", name: "Bash", input: "cargo test", is_error: false } },
+      { role: "tool", text: "Bash · cargo test", tool: { call_id: "b1", name: "Bash", kind: "bash", input: "cargo test", is_error: false } },
       { role: "tool_result", text: lines(200, "test"), tool: { call_id: "b1", is_error: false } },
-      { role: "tool", text: "Bash · ls", tool: { call_id: "b2", name: "Bash", input: "ls", is_error: false } },
+      // A word between keeps steps of one kind from folding into one row.
+      { role: "assistant", text: "이어서 봅니다." },
+      { role: "tool", text: "Bash · ls", tool: { call_id: "b2", name: "Bash", kind: "bash", input: "ls", is_error: false } },
       { role: "tool_result", text: "a.rs\nb.rs", tool: { call_id: "b2", is_error: false } },
-      { role: "tool", text: "Edit · src/big.rs", tool: { call_id: "e1", name: "Edit", input: "{}", is_error: false,
+      { role: "assistant", text: "고칩니다." },
+      { role: "tool", text: "Edit · src/big.rs", tool: { call_id: "e1", name: "Edit", kind: "edit", input: "{}", is_error: false,
         edits: [{ path: "src/big.rs", lines: diff(120) }] } },
       { role: "tool_result", text: "updated", tool: { call_id: "e1", is_error: false } },
-      { role: "tool", text: "Edit · src/small.rs", tool: { call_id: "e2", name: "Edit", input: "{}", is_error: false,
+      { role: "assistant", text: "하나 더." },
+      { role: "tool", text: "Edit · src/small.rs", tool: { call_id: "e2", name: "Edit", kind: "edit", input: "{}", is_error: false,
         edits: [{ path: "src/small.rs", lines: diff(5) }] } },
       { role: "tool_result", text: "updated", tool: { call_id: "e2", is_error: false } },
       { role: "assistant", text: "끝났습니다." },
@@ -197,10 +203,17 @@ export async function testConversationFolds(browser, origin, ok) {
       await window.__PAINTED__();
       seen.userClosedAgain = !long.classList.contains("is-open") && Math.round(content(long)) === seen.userHeight;
       seen.shortUser = !users[1].querySelector(".helper-said").classList.contains("is-clipped") && expandOf(users[1]) === null;
-      // A long output: the body stands (no closed fold to press first), its
-      // OUT row stops at the clip and says it has more.
+      // A long output: the step is one closed line; pressed, its body stands
+      // and its OUT row stops at the clip and says it has more.
       const [bash, ls, big, small] = tools;
+      const openRow = async (row) => {
+        row.open = true;
+        await window.__PAINTED__();
+      };
       seen.oldFold = list.querySelectorAll("details.helper-tool-more").length;
+      seen.closedFirst = tools.length === 4 &&
+        tools.every((row) => row.tagName === "DETAILS" && row.open === false && row.querySelector(".helper-step-body") === null);
+      await openRow(bash);
       const out = bash.querySelector(".helper-tool-output");
       seen.bodyShown = out !== null && out.checkVisibility();
       seen.outClipped = out?.classList.contains("is-clipped") === true;
@@ -214,9 +227,11 @@ export async function testConversationFolds(browser, origin, ok) {
       bash.querySelector(".helper-expand")?.click();
       await window.__PAINTED__();
       // A short output stands whole, with no door.
+      await openRow(ls);
       const lsOut = ls.querySelector(".helper-tool-output");
       seen.shortOut = (lsOut === null || !lsOut.classList.contains("is-clipped")) && ls.querySelector(".helper-expand") === null;
       // A long diff: 200px, only the rows the clip shows are built, the door.
+      await openRow(big);
       const bigRows = big.querySelector(".helper-tool-diff-rows");
       seen.diffClipped = bigRows?.classList.contains("is-clipped") === true;
       // The extension's diff BOX is 200px tall — edge and padding included.
@@ -232,6 +247,7 @@ export async function testConversationFolds(browser, origin, ok) {
       big.querySelector(".helper-expand")?.click();
       await window.__PAINTED__();
       seen.diffClosedAgain = bigRows ? Math.round(height(bigRows)) === seen.diffHeight : false;
+      await openRow(small);
       const smallRows = small.querySelector(".helper-tool-diff-rows");
       seen.smallDiff = !smallRows?.classList.contains("is-clipped") && smallRows?.querySelectorAll(".diff-line").length === 5 &&
         small.querySelector(".helper-expand") === null;
@@ -255,13 +271,13 @@ export async function testConversationFolds(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A1: a long tool output stands in its body without a fold to press first — the OUT row stops at the extension's 60px (a token) with 「더 보기」 and opens into its own scrolling well — while a short output stands whole with no door",
-      seen.tokens.tool === 60 && seen.oldFold === 0 && seen.bodyShown && seen.outClipped &&
+      "A1: a long tool output waits one press away — the step is one closed line, and opened its OUT row stops at the extension's 60px (a token) with 「더 보기」 and opens into its own scrolling well — while a short output stands whole with no door",
+      seen.tokens.tool === 60 && seen.oldFold === 0 && seen.closedFirst && seen.bodyShown && seen.outClipped &&
         near(seen.outHeight, seen.tokens.tool) && seen.outDoor === seen.more && seen.outOpen && seen.shortOut,
       JSON.stringify(seen),
     );
     ok(
-      "A1: a long diff's box stops at the extension's 200px (a token) with only the rows that clip shows built, 「더 보기」 builds the rest and opens it into its own scrolling well, 「접기」 closes it back — a short diff stands whole — and a quiet poll writes nothing",
+      "A1: in an opened step a long diff's box stops at the extension's 200px (a token) with only the rows that clip shows built, 「더 보기」 builds the rest and opens it into its own scrolling well, 「접기」 closes it back — a short diff stands whole — and a quiet poll writes nothing",
       seen.tokens.diff === 200 && seen.diffClipped && near(seen.diffHeight, seen.tokens.diff) &&
         seen.diffBuilt > 0 && seen.diffBuilt < 20 && seen.diffDoor === seen.more &&
         seen.diffOpenBuilt === 120 && seen.diffOpenHeight > seen.tokens.diff && seen.diffOpenScrolls && seen.diffDoorOpen === seen.less &&
@@ -301,15 +317,15 @@ export async function testConversationPaths(browser, origin, ok) {
       };
     });
     await openConversation(page, [
-      { role: "tool", text: `Read · ${root}/src/app.rs`, tool: { call_id: "r1", name: "Read", is_error: false,
+      { role: "tool", text: `Read · ${root}/src/app.rs`, tool: { call_id: "r1", name: "Read", kind: "read", is_error: false,
         input: JSON.stringify({ file_path: `${root}/src/app.rs`, offset: 11, limit: 50 }, null, 2),
         file: { path: `${root}/src/app.rs`, offset: 11, limit: 50 } } },
       { role: "tool_result", text: "    11→line 11", tool: { call_id: "r1", is_error: false } },
-      { role: "tool", text: `Edit · ${root}/src/edit.rs`, tool: { call_id: "e1", name: "Edit", is_error: false,
+      { role: "tool", text: `Edit · ${root}/src/edit.rs`, tool: { call_id: "e1", name: "Edit", kind: "edit", is_error: false,
         input: "{}", file: { path: `${root}/src/edit.rs`, search: "let fixed = true;" },
         edits: [{ path: `${root}/src/edit.rs`, lines: [{ kind: "add", text: "let fixed = true;", old: null, new: null }] }] } },
       { role: "tool_result", text: "updated", tool: { call_id: "e1", is_error: false } },
-      { role: "tool", text: "Grep · needle", tool: { call_id: "g1", name: "Grep", is_error: false, input: "{}" } },
+      { role: "tool", text: "Grep · needle", tool: { call_id: "g1", name: "Grep", kind: "grep", is_error: false, input: "{}" } },
       { role: "tool_result", text: "3 matches", tool: { call_id: "g1", is_error: false } },
       { role: "assistant", text: "보세요: [app](src/app.rs:12), [범위](src/lib.rs#L20-L30), 그리고 ui/shell.js:42 에 있습니다." },
     ]);
@@ -329,6 +345,11 @@ export async function testConversationPaths(browser, origin, ok) {
         };
       };
       const [read, edit, grep] = tools;
+      // A step is one closed line: the file's door stands at the top of its
+      // body, which the press that opens the row brings.
+      seen.closedNoDoor = tools.every((row) => doorOf(row) === null);
+      for (const row of tools) row.open = true;
+      await window.__PAINTED__();
       seen.readDoor = doorOf(read) !== null;
       seen.readWhere = read.querySelector(".helper-tool-where")?.textContent ?? "";
       seen.wantReadWhere = t("worker.readLines", "({{from}}–{{to}}행)", { from: 11, to: 60 });
@@ -353,8 +374,8 @@ export async function testConversationPaths(browser, origin, ok) {
       return seen;
     });
     ok(
-      "A2: a Read row's file is a door that says the lines it read and opens the file tab at the first of them — the CLI's own count — an Edit row's opens where its new text stands, and a Grep row names no file and links nothing",
-      seen.readDoor && seen.readWhere === seen.wantReadWhere && seen.grepDoor &&
+      "A2: a Read step's file is a door in its opened row that says the lines it read and opens the file tab at the first of them — the CLI's own count — an Edit step's opens where its new text stands, and a Grep step names no file and links nothing",
+      seen.closedNoDoor && seen.readDoor && seen.readWhere === seen.wantReadWhere && seen.grepDoor &&
         seen.read.tab === `file:${root}/src/app.rs` && seen.read.line === 11 &&
         seen.edit.tab === `file:${root}/src/edit.rs` && seen.edit.line === 41,
       JSON.stringify(seen),
@@ -982,7 +1003,7 @@ export async function testConversationAgents(browser, origin, ok) {
   try {
     await openConversation(page, [
       { role: "user", text: "시작" },
-      { role: "tool", text: "Agent · count md files", tool: { call_id: "toolu_1", name: "Agent", input: "{\"description\":\"count md files\"}", is_error: false } },
+      { role: "tool", text: "Agent · count md files", tool: { call_id: "toolu_1", name: "Agent", kind: "task", input: "{\"description\":\"count md files\"}", is_error: false } },
     ], { status: "working" });
     const seen = await page.evaluate(async () => {
       const seen = {};
@@ -1070,27 +1091,27 @@ export async function testConversationTodos(browser, origin, ok) {
     const todos = (states) => JSON.stringify({
       todos: states.map((status, at) => ({ content: `할 일 ${at + 1}`, status, activeForm: `하는 중 ${at + 1}` })),
     }, null, 2);
-    const call = (id, states) => ({ role: "tool", text: "TodoWrite", tool: { call_id: id, name: "TodoWrite", input: todos(states), is_error: false } });
-    const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", input: "", is_error: false } });
+    const call = (id, states) => ({ role: "tool", text: "TodoWrite", tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: todos(states), is_error: false } });
+    const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: "", is_error: false } });
     await openConversation(page, [
       { role: "user", text: "시작" },
       call("t1", ["in_progress", "pending", "pending"]),
       result("t1"),
-      { role: "tool", text: "Read · a.rs", tool: { call_id: "r1", name: "Read", input: "a.rs", is_error: false } },
-      { role: "tool_result", text: "fn a() {}", tool: { call_id: "r1", name: "Read", input: "", is_error: false } },
+      { role: "tool", text: "Read · a.rs", tool: { call_id: "r1", name: "Read", kind: "read", input: "a.rs", is_error: false } },
+      { role: "tool_result", text: "fn a() {}", tool: { call_id: "r1", name: "Read", kind: "read", input: "", is_error: false } },
       call("t2", ["completed", "in_progress", "pending"]),
       result("t2"),
-      { role: "tool", text: "Read · b.rs", tool: { call_id: "r2", name: "Read", input: "b.rs", is_error: false } },
-      { role: "tool_result", text: "fn b() {}", tool: { call_id: "r2", name: "Read", input: "", is_error: false } },
+      { role: "tool", text: "Read · b.rs", tool: { call_id: "r2", name: "Read", kind: "read", input: "b.rs", is_error: false } },
+      { role: "tool_result", text: "fn b() {}", tool: { call_id: "r2", name: "Read", kind: "read", input: "", is_error: false } },
       { role: "assistant", text: "진행 중입니다." },
     ]);
     const seen = await page.evaluate(async () => {
       const seen = {};
       const call = (id, states) => ({
         role: "tool", text: "TodoWrite",
-        tool: { call_id: id, name: "TodoWrite", input: JSON.stringify({ todos: states.map((status, at) => ({ content: `할 일 ${at + 1}`, status })) }), is_error: false },
+        tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: JSON.stringify({ todos: states.map((status, at) => ({ content: `할 일 ${at + 1}`, status })) }), is_error: false },
       });
-      const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", input: "", is_error: false } });
+      const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", kind: "TodoWrite", input: "", is_error: false } });
       const face = document.querySelector("#worker-view");
       const settle = async () => {
         await pollHelperPages();
@@ -1111,13 +1132,22 @@ export async function testConversationTodos(browser, origin, ok) {
       });
       const rows = todoRows();
       seen.rows = rows.length;
-      seen.second = rows[1] ? items(rows[1]) : null;
-      seen.heads = rows.map((row) => row.querySelector(".helper-tool-name")?.textContent);
+      // A todo call is one closed line — the head and how many are done — and
+      // its list is one press away.
+      seen.heads = rows.map((row) => row.querySelector(".helper-step-kind")?.textContent);
       seen.wantHead = t("worker.todoHead", "할 일 갱신");
+      seen.tallies = rows.map((row) => row.querySelector(".helper-step-res")?.textContent);
+      seen.wantTallies = [0, 1].map((done) => t("worker.stepTodoDone", "{{done}}/{{total}} 완료", { done, total: 3 }));
+      seen.closedFirst = rows.every((row) => row.open === false && row.querySelector(".helper-todos") === null);
+      for (const row of rows) row.open = true;
+      await settle();
+      seen.second = rows[1] ? items(rows[1]) : null;
       seen.named = rows.map((row) => row.getAttribute("aria-label"));
       seen.noActiveForm = !face.textContent.includes("하는 중");
-      seen.noGeneric = rows.every((row) => row.querySelector(".helper-tool-body, .helper-tool-result") === null);
-      seen.argEmpty = rows.every((row) => row.querySelector(".helper-tool-arg")?.textContent === "");
+      seen.noGeneric = rows.every((row) => row.querySelector(".helper-tool-body, .helper-tool-input, .helper-tool-output") === null);
+      seen.argEmpty = rows.every((row) => row.querySelector(".helper-step-target")?.textContent === "");
+      for (const row of rows) row.open = false;
+      await settle();
       // The Focus view: the newest list stands out of its fold.
       face.querySelector(".worker-focus").click();
       await settle();
@@ -1125,6 +1155,7 @@ export async function testConversationTodos(browser, origin, ok) {
       const standing = () => todoRows().map(shown);
       seen.focusFirst = shown(rows[0]);
       seen.focusLatest = shown(rows[1]);
+      seen.focusListStands = rows[1]?.open === true && rows[1].querySelector(".helper-todos") !== null && rows[0]?.open === false;
       seen.readsFolded = [...face.querySelectorAll(".helper-turn.is-tool:not(.is-todo)")].every((row) => row.hidden);
       // A newer list takes its place, and the one before goes back in.
       const log = window.__CONVERSATION__;
@@ -1145,7 +1176,7 @@ export async function testConversationTodos(browser, origin, ok) {
       await settle();
       seen.afterFailure = standing();
       // A call that empties the list is a head alone, and nothing stands.
-      log.turns.push({ role: "tool", text: "TodoWrite", tool: { call_id: "t5", name: "TodoWrite", input: JSON.stringify({ todos: [] }), is_error: false } }, result("t5"));
+      log.turns.push({ role: "tool", text: "TodoWrite", tool: { call_id: "t5", name: "TodoWrite", kind: "TodoWrite", input: JSON.stringify({ todos: [] }), is_error: false } }, result("t5"));
       await settle();
       seen.emptied = standing();
       seen.emptyHead = todoRows().at(-1)?.querySelector(".helper-todos") === null;
@@ -1155,8 +1186,9 @@ export async function testConversationTodos(browser, origin, ok) {
       return seen;
     });
     ok(
-      "A7: a todo call draws its list under the extension's head — a disabled box ticked when done, mixed (`✽`) under way, empty waiting, a done item struck through — with no activeForm, no result line, no generic body and nothing beside the head, while the row is still named for its tool",
-      seen?.rows === 2 && JSON.stringify(seen.second?.map((item) => [item.text, item.state, item.disabled, item.struck])) ===
+      "A7: a todo call is one closed line — the extension's head and how many items are done — that opens to its list: a disabled box ticked when done, mixed (`✽`) under way, empty waiting, a done item struck through — with no activeForm, no generic body and no target beside the head, while the row is still named for its tool",
+      seen?.rows === 2 && seen.closedFirst && JSON.stringify(seen.tallies) === JSON.stringify(seen.wantTallies) &&
+        JSON.stringify(seen.second?.map((item) => [item.text, item.state, item.disabled, item.struck])) ===
         JSON.stringify([["할 일 1", "checked", true, true], ["할 일 2", "mixed", true, false], ["할 일 3", "empty", true, false]]) &&
         seen.second?.[0].mark === "\"✓\"" && seen.second?.[1].mark === "\"✽\"" &&
         seen.heads.every((head) => head === seen.wantHead) && seen.named.every((name) => name.includes("TodoWrite")) &&
@@ -1164,8 +1196,8 @@ export async function testConversationTodos(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "A7: in the Focus view the newest list stands out of its fold while the older ones and the reads stay folded — a call still out stands at once, a failed one gives way to the one before it, a call that emptied the list leaves none standing — and off again every list stands",
-      seen?.focusFirst === false && seen.focusLatest === true && seen.readsFolded &&
+      "A7: in the Focus view the newest list stands out of its fold, open, while the older ones and the reads stay folded — a call still out stands at once, a failed one gives way to the one before it, a call that emptied the list leaves none standing — and off again every list stands",
+      seen?.focusFirst === false && seen.focusLatest === true && seen.focusListStands && seen.readsFolded &&
         JSON.stringify(seen.afterThird) === JSON.stringify([false, false, true]) &&
         JSON.stringify(seen.whileOut) === JSON.stringify([false, false, false, true]) && seen.outIsLive === true &&
         JSON.stringify(seen.afterFailure) === JSON.stringify([false, false, true, false]) &&
@@ -1203,8 +1235,8 @@ export async function testConversationImages(browser, origin, ok) {
     for (let at = 0; at < 30; at += 1) {
       history.push({ role: "assistant", text: `답 ${at}: ${"긴 문장이 이어진다. ".repeat(8)}` });
     }
-    history.push({ role: "tool", text: "mcp__computer-use__screenshot", tool: { call_id: "s1", name: "mcp__computer-use__screenshot", input: "{}", is_error: false } });
-    history.push({ role: "tool_result", text: "screenshot taken", tool: { call_id: "s1", name: "mcp__computer-use__screenshot", input: "", is_error: false }, images: [{ media_type: "image/png", at: "wire:2" }] });
+    history.push({ role: "tool", text: "mcp__computer-use__screenshot", tool: { call_id: "s1", name: "mcp__computer-use__screenshot", kind: "mcp__computer-use__screenshot", input: "{}", is_error: false } });
+    history.push({ role: "tool_result", text: "screenshot taken", tool: { call_id: "s1", name: "mcp__computer-use__screenshot", kind: "mcp__computer-use__screenshot", input: "", is_error: false }, images: [{ media_type: "image/png", at: "wire:2" }] });
     await openConversation(page, history);
     const seen = await page.evaluate(async () => {
       const seen = {};
@@ -1214,22 +1246,39 @@ export async function testConversationImages(browser, origin, ok) {
         for (let beat = 0; beat < n; beat += 1) await window.__PAINTED__();
       };
       await frames(6);
+      // A step is one closed line: the pictures it handed back come with the
+      // press that opens its row.
+      seen.toolClosed = face.querySelector(".helper-turn.is-tool .helper-image") === null;
+      for (const row of face.querySelectorAll(".helper-turn.is-tool")) row.open = true;
+      await frames(6);
       const pills = [...face.querySelectorAll(".helper-image")];
       seen.pills = pills.length;
       const people = [...face.querySelectorAll(".helper-turn.is-user")];
       seen.personPillFirst = people[0]?.firstElementChild?.classList.contains("helper-images") ?? false;
       seen.onlyPicture = people[1] ? [people[1].querySelector(".helper-images") !== null, people[1].querySelector(".helper-said")?.hidden] : null;
       seen.names = pills.map((pill) => pill.querySelector(".helper-image-name")?.textContent);
-      seen.toolPillAfterResult = face.querySelector(".helper-turn.is-tool .helper-tool-result + .helper-images") !== null;
-      // A result that is a picture alone says it with the pill, not 「출력 없음」.
+      seen.toolPillInBody = face.querySelector(".helper-turn.is-tool > .helper-step-body > .helper-images .helper-image") !== null;
+      // A result that is a picture alone says it on the line and with the
+      // pill, not 「출력 없음」.
       window.__CONVERSATION__.turns.push(
-        { role: "tool", text: "mcp__computer-use__zoom", tool: { call_id: "z1", name: "mcp__computer-use__zoom", input: "{}", is_error: false } },
-        { role: "tool_result", text: "", tool: { call_id: "z1", name: "mcp__computer-use__zoom", input: "", is_error: false }, images: [{ media_type: "image/png", at: "wire:4" }] },
+        { role: "tool", text: "mcp__computer-use__zoom", tool: { call_id: "z1", name: "mcp__computer-use__zoom", kind: "mcp__computer-use__zoom", input: "{}", is_error: false } },
+        { role: "tool_result", text: "", tool: { call_id: "z1", name: "mcp__computer-use__zoom", kind: "mcp__computer-use__zoom", input: "", is_error: false }, images: [{ media_type: "image/png", at: "wire:4" }] },
       );
       await pollHelperPages();
       await frames(2);
       const zoom = [...face.querySelectorAll(".helper-turn.is-tool")].at(-1);
-      seen.pictureAlone = zoom ? [zoom.querySelector(".helper-tool-result") === null, zoom.querySelector(".helper-images .helper-image") !== null] : null;
+      const zoomLine = zoom?.querySelector(".helper-step-res")?.textContent;
+      if (zoom) zoom.open = true;
+      await frames(6);
+      seen.pictureAlone = zoom
+        ? [zoomLine === t("worker.stepImages", "이미지 {{n}}장", { n: 1 }) && !zoom.textContent.includes(t("worker.noOutput", "출력 없음")),
+          zoom.querySelector(".helper-images .helper-image") !== null]
+        : null;
+      // A row opens where it stands, as a thought's does, so the body of the
+      // last row grows below the fold: a person scrolls down to what they
+      // pressed, and only then is its picture in view.
+      list.scrollTop = list.scrollHeight;
+      await frames(4);
       // At the foot: the tool's picture is in view, and so is the picture on
       // the person's row that stands stuck at the list's top (the sticky
       // header); the earlier person's row, stuck under it, is covered — in
@@ -1294,9 +1343,9 @@ export async function testConversationImages(browser, origin, ok) {
       return seen;
     });
     ok(
-      "A8: an image stands as the extension's pill — a 12px thumbnail in a 24px pill, `image.<kind>` and its size once loaded — above the person's words (a picture sent alone stands with no empty bubble) and under the line a tool handed it back with",
-      seen.pills === 3 && seen.personPillFirst && JSON.stringify(seen.onlyPicture) === JSON.stringify([true, true]) &&
-        JSON.stringify(seen.names) === JSON.stringify(["image.png", "image.jpeg", "image.png"]) && seen.toolPillAfterResult &&
+      "A8: an image stands as the extension's pill — a 12px thumbnail in a 24px pill, `image.<kind>` and its size once loaded — above the person's words (a picture sent alone stands with no empty bubble) and in the opened row of the step that handed it back, which says so on its closed line",
+      seen.toolClosed && seen.pills === 3 && seen.personPillFirst && JSON.stringify(seen.onlyPicture) === JSON.stringify([true, true]) &&
+        JSON.stringify(seen.names) === JSON.stringify(["image.png", "image.jpeg", "image.png"]) && seen.toolPillInBody &&
         JSON.stringify(seen.pictureAlone) === JSON.stringify([true, true]) &&
         JSON.stringify(seen.thumbBox) === JSON.stringify([12, 12]) && seen.pillHeight === 24 && seen.size === "1×1",
       JSON.stringify(seen),
@@ -1389,13 +1438,14 @@ export async function testConversationCopies(browser, origin, ok) {
 
 /* B1 — a row far from view keeps its height, not its body. The 400-turn
  * page (B0's fixture) builds whole only the rows at its foot — the rest are
- * born without their bodies — and stands bodies (answers' prose, calls' diffs
- * and IN/OUT boxes, pictures) only within two screens of the view; a row that
- * leaves reach keeps the height it stood at. Scrolling brings bodies back
- * before they are seen and the reader's row never moves, even as rows born
- * without their bodies take them above it; once every row has stood whole,
- * the list is as tall at the top as back at the foot. A row the person
- * opened, or holds a selection in, keeps its body; a quiet poll still writes
+ * born without their bodies — and stands bodies (answers' prose) only within
+ * two screens of the view; a row that leaves reach keeps the height it stood
+ * at. Scrolling brings bodies back before they are seen and the reader's row
+ * never moves, even as rows born without their bodies take them above it;
+ * once every row has stood whole, the list is as tall at the top as back at
+ * the foot. A step is one closed line and has no body to give up: the one a
+ * person opened keeps the body its press built. A row that holds a selection
+ * or the keyboard's focus keeps its body; a quiet poll still writes
  * nothing. */
 export async function testConversationShelf(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
@@ -1420,8 +1470,7 @@ export async function testConversationShelf(browser, origin, ok) {
           return box.bottom >= view.top - margin && box.top <= view.bottom + margin;
         };
       };
-      const bodyOf = (row) => row.querySelector(":scope > .helper-tool-diff, :scope > .helper-tool-body, :scope > .helper-images") !== null ||
-        (row.classList.contains("is-assistant") && row.querySelector(":scope > .helper-said")?.childElementCount > 0);
+      const bodyOf = (row) => row.classList.contains("is-assistant") && row.querySelector(":scope > .helper-said")?.childElementCount > 0;
       const judge = () => {
         const near = reach();
         let farBuilt = 0;
@@ -1481,10 +1530,10 @@ export async function testConversationShelf(browser, origin, ok) {
       seen.heightAtFoot = list.scrollHeight;
       list.scrollTop = 0;
       await frames(3);
-      // A row the person opened keeps its body far from view.
-      const bigDiff = rows().find((row) => row.querySelector(":scope > .helper-tool-diff .helper-expand"));
-      bigDiff?.querySelector(".helper-expand")?.click();
-      await frames(1);
+      // A step the person opened keeps the body its press built, far from view.
+      const bigDiff = rows().find((row) => row.classList.contains("is-tool") && !row.classList.contains("is-run") && row.__turn?.tool?.edits?.length > 0);
+      if (bigDiff) bigDiff.open = true;
+      await frames(2);
       // A row holding the person's selection keeps its body too.
       const answer = rows().find((row) => row.classList.contains("is-assistant") && row !== bigDiff && reach()(row) && row.querySelector(".helper-said p"));
       const range = document.createRange();
@@ -1494,16 +1543,16 @@ export async function testConversationShelf(browser, origin, ok) {
       list.scrollTop = list.scrollHeight;
       await frames(4);
       await new Promise((done) => setTimeout(done, 50));
-      seen.openedKept = bigDiff ? !bigDiff.__shelved && bigDiff.querySelector(":scope > .helper-tool-diff") !== null : null;
+      seen.openedKept = bigDiff ? !bigDiff.__shelved && bigDiff.open && bigDiff.querySelector(":scope > .helper-step-body > .helper-tool-diff") !== null : null;
       seen.selectionKept = !answer.__shelved && answer.querySelector(".helper-said p") !== null;
       getSelection().removeAllRanges();
-      // A row holding the keyboard's focus keeps its body too: the door the
+      // A row holding the keyboard's focus keeps its body too: the control the
       // person stands on is not taken from under them by a wheel.
       list.scrollTop = 0;
       await frames(4);
       await new Promise((done) => setTimeout(done, 50));
-      const focused = rows().find((row) => row !== bigDiff && reach()(row) && row.querySelector(":scope > .helper-tool-body .helper-expand"));
-      const door = focused?.querySelector(":scope > .helper-tool-body .helper-expand") ?? null;
+      const focused = rows().find((row) => row.classList.contains("is-assistant") && reach()(row) && row.querySelector(":scope > .helper-actions .helper-copy"));
+      const door = focused?.querySelector(":scope > .helper-actions .helper-copy") ?? null;
       door?.focus();
       list.scrollTop = list.scrollHeight;
       await frames(4);
@@ -1521,8 +1570,8 @@ export async function testConversationShelf(browser, origin, ok) {
       return seen;
     });
     ok(
-      "B1: a 400-turn page opens with only the rows within two screens of its foot standing their bodies — the rows beyond were born without theirs — and a row that gave its body up keeps the height it stood at",
-      seen.atFoot.shelved > 250 && seen.atFoot.born > 250 && seen.atFoot.farBuilt === 0 && seen.atFoot.nearShelved === 0 && seen.atFoot.heightsKept,
+      "B1: a 400-turn page opens with only the answers within two screens of its foot standing their prose — the answers beyond were born without theirs — and a row that gave its body up keeps the height it stood at",
+      seen.atFoot.shelved > 60 && seen.atFoot.born > 60 && seen.atFoot.farBuilt === 0 && seen.atFoot.nearShelved === 0 && seen.atFoot.heightsKept,
       JSON.stringify(seen),
     );
     ok(
@@ -1533,7 +1582,7 @@ export async function testConversationShelf(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "B1: a row whose door the person opened, a row holding the person's selection and a row holding the keyboard's focus keep their bodies far from view; a quiet poll writes nothing",
+      "B1: a step the person opened, an answer holding the person's selection and an answer holding the keyboard's focus keep their bodies far from view; a quiet poll writes nothing",
       seen.openedKept === true && seen.selectionKept && seen.focusKept === true && seen.quiet === 0,
       JSON.stringify(seen),
     );
@@ -1589,6 +1638,1362 @@ export async function testConversationRelease(browser, origin, ok) {
   }
 }
 
+/* C — the steps (t-15682). What an agent did stands in the page as steps a
+ * person can take in at a glance and open when they want the rest: a step is
+ * one closed line — what it was, what it touched, what came of it, how long —
+ * whose raw input and output are one press away, opening in place and staying
+ * open while the page updates; steps of one kind in a row are one row that
+ * opens to its members, a failed one never among them; a thought is one line
+ * (its heading, or its newest sentence) that opens in place; while the turn
+ * is out the foot line says the step that is out; a finished helper's report
+ * stands on top of its page with the steps folded under it. Pane page, helper
+ * page and wire page are one painter, so each of these is read on all three.
+ * Everything here is synthetic — a shop app's profile screen, never a real
+ * path or address. The claims are read off the page a browser laid out. */
+const SHOP = "/Users/dev/shop-app";
+const PROFILE = `${SHOP}/src/screens/profile`;
+const CLOCK = 1_790_000_000_000;
+const READ_FIRST = ["Gallery.tsx", "GalleryGrid.tsx", "Avatar.tsx", "Header.tsx", "useProfile.ts", "styles.ts"];
+const READ_LATER = ["Cell.tsx", "keys.ts"];
+const BASH_COMMAND = 'rg -n "SCREEN_WIDTH" src';
+const BASH_OUTPUT = Array.from({ length: 8 }, (_, at) => (at === 1
+  ? `${PROFILE}/Header.tsx:21:// MARK_TWO_BASH`
+  : `${PROFILE}/${READ_FIRST[at % READ_FIRST.length]}:${11 + at}:const SCREEN_WIDTH = Dimensions.get("window").width;`)).join("\n");
+const WEB_URL = `https://example.com/products?${"filter=new&".repeat(20)}sort=price`;
+const WEB_OUTPUT = "200 OK\ncontent-type: text/html\n\n<title>Products</title>\n<h1>Products</h1>";
+const REPORT_WORDS = ["원인은 셀의 key가 인덱스여서, 스크롤할 때마다 모든 셀이 다시 만들어지는 것이었습니다.", "key를 id로 바꿔 고쳤습니다."];
+
+const fileBody = (name) => [
+  "     1→import React from \"react\";",
+  `     2→// MARK_TWO ${name}`,
+  `     3→export const ${name.split(".")[0]} = () => null;`,
+  "     4→",
+  `     5→export default ${name.split(".")[0]};`,
+].join("\n");
+
+/* The brief, a thought with a heading, six reads, one that fails, two more, a
+ * thought with none, a search, a page fetched, an edit and the answer — every
+ * turn stamped, so how long a thought lasted (12 s, then 4 s) and how long a
+ * call took are the file's own. */
+function stepsFixture() {
+  const turns = [];
+  let clock = CLOCK;
+  const say = (role, text, gap) => turns.push({ role, text, at_ms: (clock += gap) });
+  const step = (id, name, kind, target, answer, { gap = 400, took = 300, failed = false, edits = null } = {}) => {
+    turns.push({
+      role: "tool", text: `${name} · ${target}`, at_ms: (clock += gap),
+      tool: { call_id: id, name, kind, input: target, is_error: false, ...(edits && { edits }) },
+    });
+    turns.push({ role: "tool_result", text: answer, at_ms: (clock += took), tool: { call_id: id, is_error: failed } });
+  };
+  turns.push({ role: "user", text: "프로필 화면이 느린 이유를 찾아서 고쳐 줘.", at_ms: clock });
+  say("thinking", "**Where the profile screen spends its time**\n\nThe gallery grid re-renders on every scroll tick. I should read the grid before I touch anything.", 500);
+  READ_FIRST.forEach((name, at) => step(`r${at + 1}`, "Read", "read", `${PROFILE}/${name}`, fileBody(name), { gap: at === 0 ? 12000 : 400 }));
+  step("r7", "Read", "read", `${PROFILE}/Missing.tsx`, `ENOENT: no such file or directory, open '${PROFILE}/Missing.tsx'`, { took: 200, failed: true });
+  READ_LATER.forEach((name, at) => step(`r${at + 8}`, "Read", "read", `${PROFILE}/${name}`, fileBody(name)));
+  say("thinking", "The list keys are indexes. That makes every cell remount. Memoizing the cells and keying by id should fix it.", 500);
+  step("b1", "Bash", "bash", BASH_COMMAND, BASH_OUTPUT, { gap: 4000, took: 900 });
+  step("w1", "WebFetch", "web", WEB_URL, WEB_OUTPUT, { took: 3900 });
+  step("e1", "Edit", "edit", `${PROFILE}/Gallery.tsx`, `The file ${PROFILE}/Gallery.tsx has been updated.`, {
+    edits: [{ path: `${PROFILE}/Gallery.tsx`, lines: [
+      { kind: "del", text: "  key={index}", old: null, new: null },
+      { kind: "add", text: "  key={item.id}", old: null, new: null },
+    ] }],
+  });
+  say("assistant", REPORT_WORDS.join(" "), 500);
+  return turns;
+}
+
+/* What every case below asks of the page, put on it once: the rows, the row's
+ * own line (a step's `summary`; the old page's call line), the words a person
+ * could read (a closed row's body is not among them) and a frame to settle. */
+async function installStepsProbe(page) {
+  await page.evaluate(() => {
+    const texts = (root) => {
+      const found = [];
+      if (!root) return found;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) found.push(node);
+      return found;
+    };
+    // The wire's page and a helper's stand in `#worker-view`; a pane's conversation
+    // stands in its own slot (`.pane-chat`).
+    const list = () => document.querySelector("#worker-view .helper-turns") ?? document.querySelector(".pane-chat .helper-turns");
+    const rows = () => [...(list()?.querySelectorAll(":scope > .helper-turn") ?? [])];
+    window.__STEPS__ = {
+      list,
+      rows,
+      steps: () => rows().filter((row) => row.classList.contains("is-tool")),
+      thoughts: () => rows().filter((row) => row.classList.contains("is-thinking")),
+      lineOf: (row) => row?.querySelector(":scope > summary") ?? row?.querySelector(":scope > .helper-tool-call") ?? row,
+      holding: (root, needle) => texts(root).filter((node) => node.nodeValue.includes(needle)).map((node) => node.parentElement),
+      shown: (root, needle) => texts(root).some((node) => node.nodeValue.includes(needle) &&
+        node.parentElement.checkVisibility({ checkVisibilityCSS: true })),
+      wordsOf: (node) => (node?.innerText ?? "").replace(/\s+/g, " ").trim(),
+      tall: (node) => Math.round(node.getBoundingClientRect().height),
+      settle: async () => {
+        await window.__PAINTED__();
+        await window.__PAINTED__();
+      },
+    };
+  });
+}
+
+/* A helper's page, opened the way the sidebar opens it: its transcript read
+ * from the parent's record, `state` the helper's own. */
+async function openHelperConversation(page, turns, state) {
+  await page.evaluate(async ({ turns, state }) => {
+    const term = await openTermTab({ placement: "tab" });
+    const owner = tabOfTerm(term);
+    paneAgents.set(term, "claude");
+    hookStates.set(term, "working");
+    window.__ANSWER__.subagent_log = (args) => ({ found: true, next: turns.length, turns: turns.slice(args.after ?? 0) });
+    await openHelperPage({ term, tab: owner, worktree: owner.worktree, agent: "claude" }, { id: "steps-helper", name: "프로필 도우미", state });
+    await pollHelperPages();
+    await window.__PAINTED__();
+  }, { turns, state });
+  await page.waitForSelector("#worker-view .helper-turns .helper-turn");
+}
+
+/* A pane whose agent has no wire, its conversation view open on `turns`. */
+async function openPaneConversation(page, turns) {
+  await page.evaluate(async (turns) => {
+    const term = await openTermTab({ placement: "tab" });
+    paneAgents.set(term, "zo");
+    hookStates.set(term, "working");
+    window.__ANSWER__.pane_log = (args) => ({
+      found: true, next: turns.length, turns: args.after == null ? turns : turns.slice(args.after),
+      skipped: false, more: false, folded: false, model: "claude-opus-5",
+    });
+    await setPaneChat(term, true);
+    await pollHelperPages();
+    await window.__PAINTED__();
+  }, turns);
+  await page.waitForSelector(".pane-chat .helper-turns .helper-turn");
+}
+
+/* What the engine's accessibility tree says of the node a selector names. */
+async function axOf(cdp, selector) {
+  const doc = await cdp.send("DOM.getDocument", { depth: 0 });
+  const found = await cdp.send("DOM.querySelector", { nodeId: doc.root.nodeId, selector });
+  if (!found.nodeId) return null;
+  const { nodes } = await cdp.send("Accessibility.getPartialAXTree", { nodeId: found.nodeId, fetchRelatives: false });
+  const node = nodes[0];
+  const prop = (name) => node?.properties?.find((one) => one.name === name)?.value?.value;
+  return { role: node?.role?.value ?? null, name: node?.name?.value ?? "", expanded: prop("expanded") };
+}
+
+export async function testConversationSteps(browser, origin, ok) {
+  await stepsOnTheWire(browser, origin, ok);
+  await stepsLive(browser, origin, ok);
+  await stepsStill(browser, origin, ok);
+  await stepsReport(browser, origin, ok);
+  await stepsByKeyboard(browser, origin, ok);
+  await stepsAcrossPages(browser, origin, ok);
+  await stepsByKind(browser, origin, ok);
+  await stepsThoughtLine(browser, origin, ok);
+  await stepsThoughtHandOver(browser, origin, ok);
+  await stepsThoughtWrites(browser, origin, ok);
+  await stepsFocusKeepsOpen(browser, origin, ok);
+  await stepsSpaceOnALine(browser, origin, ok);
+  await stepsSpaceBesideTheGraph(browser, origin, ok);
+  await stepsStillPage(browser, origin, ok);
+}
+
+/* C1–C4, C9 — the rows the fixture comes to, closed, then pressed. */
+async function stepsOnTheWire(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, stepsFixture());
+    await installStepsProbe(page);
+    const shape = await page.evaluate(async ({ first, later }) => {
+      const { steps, thoughts, lineOf, wordsOf, tall, holding, shown, settle } = window.__STEPS__;
+      const seen = {};
+      await settle();
+      const standing = steps();
+      seen.stepCount = standing.length;
+      seen.tags = standing.map((row) => `${row.tagName}${row.open ? "+open" : ""}`);
+      seen.heights = standing.map(tall);
+      seen.parts = standing.map((row) => row.getElementsByTagName("*").length);
+      const bash = standing.find((row) => wordsOf(lineOf(row)).includes("SCREEN_WIDTH"));
+      const web = standing.find((row) => wordsOf(lineOf(row)).includes("example.com/products"));
+      seen.bashLine = wordsOf(lineOf(bash));
+      seen.webLine = wordsOf(lineOf(web));
+      seen.sameHeight = bash !== undefined && web !== undefined && Math.abs(tall(bash) - tall(web)) <= 1;
+      // Six reads in a row are one row; the read that failed stands apart, in
+      // the failure ink; the two after it are a row of their own.
+      const [run, failed, tail] = standing;
+      seen.runTag = `${run?.tagName}:${run?.classList.contains("is-run")}`;
+      seen.runLine = wordsOf(lineOf(run));
+      seen.runHides = first.slice(1).every((name) => !shown(run, name));
+      seen.failedApart = failed?.classList.contains("is-failed") === true && !failed.classList.contains("is-run");
+      seen.failedLine = wordsOf(lineOf(failed));
+      const probe = document.createElement("i");
+      probe.style.color = "var(--signal-halt-ink)";
+      document.querySelector("#worker-view").append(probe);
+      const halt = getComputedStyle(probe).color;
+      probe.remove();
+      const says = holding(lineOf(failed), "ENOENT")[0];
+      seen.failedInk = says ? getComputedStyle(says).color === halt : null;
+      seen.tailTag = `${tail?.tagName}:${tail?.classList.contains("is-run")}`;
+      seen.tailLine = wordsOf(lineOf(tail));
+      seen.tailHides = !shown(tail, later[1]);
+      const thinking = thoughts();
+      seen.thoughtCount = thinking.length;
+      seen.thoughtTags = thinking.map((row) => `${row.tagName}${row.open ? "+open" : ""}:${tall(row)}`);
+      seen.thoughtLines = thinking.map((row) => wordsOf(lineOf(row)));
+      return seen;
+    }, { first: READ_FIRST, later: READ_LATER });
+    ok(
+      "C1: a step is one closed line — each row the fixture's steps come to is a closed details no taller than one line of the extension's row (44px), as tall for a 260-character address as for a short command, with a handful of elements behind it, no body built for every row",
+      shape.stepCount === 6 && shape.tags.every((tag) => tag === "DETAILS") && shape.heights.every((height) => height <= 44) &&
+        shape.parts.every((count) => count <= 12) && shape.sameHeight,
+      JSON.stringify(shape),
+    );
+    ok(
+      "C1: a closed step says what it did in its own line — the command it ran, how many lines it printed, how long it took by the file's own stamps; a page fetched says its address and its time",
+      shape.bashLine.includes(BASH_COMMAND) && /\b8\b/.test(shape.bashLine) && shape.bashLine.includes("0.9") &&
+        shape.webLine.includes("example.com/products") && shape.webLine.includes("3.9"),
+      JSON.stringify(shape),
+    );
+    ok(
+      "C3: six reads in a row are one row — its line says six, names the first file and that five more stand behind it, and shows none of the other five until it is opened; the two reads after the failed one are one row of their own",
+      shape.stepCount === 6 && shape.runTag === "DETAILS:true" && /\b6\b/.test(shape.runLine) && /\b5\b/.test(shape.runLine) &&
+        shape.runLine.includes(READ_FIRST[0]) && shape.runHides &&
+        shape.tailTag === "DETAILS:true" && /\b2\b/.test(shape.tailLine) && shape.tailLine.includes(READ_LATER[0]) && shape.tailHides,
+      JSON.stringify(shape),
+    );
+    ok(
+      "C3: a failed step is never folded into a row of its kind — it stands on its own between the two, says how it failed in its line (the error's first words), and wears the failure ink",
+      shape.failedApart && shape.failedLine.includes("ENOENT") && shape.failedLine.includes("Missing.tsx") && shape.failedInk === true,
+      JSON.stringify(shape),
+    );
+    ok(
+      "C4: a thought is one closed line — the heading the model wrote, or its newest sentence when it wrote none (not the first), and how long it lasted by the file's own stamps",
+      shape.thoughtCount === 2 && shape.thoughtTags.every((tag) => /^DETAILS:\d+$/.test(tag) && Number(tag.split(":")[1]) <= 44) &&
+        shape.thoughtLines[0].includes("Where the profile screen spends its time") && !shape.thoughtLines[0].includes("re-renders") &&
+        /\b12\b/.test(shape.thoughtLines[0]) &&
+        shape.thoughtLines[1].includes("Memoizing the cells and keying by id should fix it") &&
+        !shape.thoughtLines[1].includes("The list keys are indexes") && /\b4\b/.test(shape.thoughtLines[1]),
+      JSON.stringify(shape),
+    );
+
+    const opened = await page.evaluate(async () => {
+      const { list, rows, steps, lineOf, wordsOf, tall, shown, settle } = window.__STEPS__;
+      const seen = {};
+      const bash = steps().find((row) => wordsOf(lineOf(row)).includes("SCREEN_WIDTH"));
+      if (!bash) return { missing: true, copies: 0, written: [] };
+      const at = rows().indexOf(bash);
+      const before = { top: bash.offsetTop, height: tall(bash), next: rows()[at + 1]?.offsetTop };
+      seen.rawHidden = !shown(bash, "MARK_TWO_BASH");
+      lineOf(bash).click();
+      await settle();
+      const after = { top: bash.offsetTop, height: tall(bash), next: rows()[at + 1]?.offsetTop };
+      seen.opened = bash.open === true;
+      seen.rawShown = shown(bash, "MARK_TWO_BASH");
+      seen.inPlace = rows()[at] === bash && after.top === before.top && after.height > before.height &&
+        Math.abs((after.next - before.next) - (after.height - before.height)) <= 1;
+      // The words are the person's to copy: the command and what it printed,
+      // each by its own button.
+      const copies = [...bash.querySelectorAll("button")].filter((button) => !button.closest("summary"));
+      window.__CLIPBOARD_WRITES__.length = 0;
+      for (const button of copies) {
+        button.click();
+        await window.__PAINTED__();
+      }
+      seen.copies = copies.length;
+      seen.written = [...window.__CLIPBOARD_WRITES__];
+      // A poll that brings a new row leaves the open one open — the same
+      // node, in the same place — and one that brings nothing writes nothing.
+      window.__CONVERSATION__.turns.push({ role: "assistant", text: "다음으로 넘어갑니다.", at_ms: 1_790_000_060_000 });
+      await pollHelperPages();
+      await settle();
+      seen.kept = bash.isConnected && bash.open === true && rows().indexOf(bash) === at && shown(bash, "MARK_TWO_BASH");
+      seen.rowsAfter = rows().length;
+      const watch = new MutationObserver(() => {});
+      watch.observe(list(), { childList: true, subtree: true, characterData: true, attributes: true });
+      await pollHelperPages();
+      await settle();
+      seen.quiet = watch.takeRecords().length;
+      watch.disconnect();
+      lineOf(bash).click();
+      await settle();
+      seen.closedAgain = bash.open === false && tall(bash) === before.height;
+      return seen;
+    });
+    ok(
+      "C2: the raw words are one press away — a closed step keeps its input and output out of sight, pressing its line opens the row in place (the same row, the same top, the rows below moved down by what it grew), and the command and what it printed each have their own copy",
+      opened.rawHidden && opened.opened && opened.rawShown && opened.inPlace && opened.copies >= 2 &&
+        opened.written.includes(BASH_COMMAND) && opened.written.includes(BASH_OUTPUT),
+      JSON.stringify(opened),
+    );
+    ok(
+      "C2: what was opened stays open while the page updates — a poll that brings a new row leaves the open one open, in its place — a poll that brings nothing writes nothing, and pressing again closes it back to the line it was",
+      opened.kept && opened.rowsAfter === 11 && opened.quiet === 0 && opened.closedAgain,
+      JSON.stringify(opened),
+    );
+
+    const members = await page.evaluate(async ({ first }) => {
+      const { steps, lineOf, wordsOf, tall, shown, settle } = window.__STEPS__;
+      const seen = {};
+      const [run] = steps();
+      lineOf(run)?.click();
+      await settle();
+      seen.open = run?.open === true;
+      const inside = [...(run?.querySelectorAll("details") ?? [])];
+      seen.members = inside.length;
+      seen.named = inside.map((row) => first.some((name) => wordsOf(lineOf(row)).includes(name)));
+      seen.inOrder = inside.every((row, at) => wordsOf(lineOf(row)).includes(first[at]));
+      seen.memberTags = inside.map((row) => `${row.tagName}${row.open ? "+open" : ""}:${tall(row)}`);
+      lineOf(run)?.click();
+      await settle();
+      seen.closedAgain = run?.open === false && first.slice(1).every((name) => !shown(run, name));
+      return seen;
+    }, { first: READ_FIRST });
+    ok(
+      "C3: the row of six opens to its six members, in the order they were read, each one closed line of its own, and closes back to its line",
+      members.open && members.members === 6 && members.inOrder && members.memberTags.every((tag) => /^DETAILS:\d+$/.test(tag) && Number(tag.split(":")[1]) <= 44) && members.closedAgain,
+      JSON.stringify(members),
+    );
+
+    const thought = await page.evaluate(async () => {
+      const { thoughts, lineOf, shown, settle } = window.__STEPS__;
+      const [, second] = thoughts();
+      const top = second?.offsetTop;
+      const seen = { hiddenClosed: !shown(second, "That makes every cell remount") };
+      lineOf(second)?.click();
+      await settle();
+      seen.opens = second?.open === true && shown(second, "That makes every cell remount") && second.offsetTop === top;
+      lineOf(second)?.click();
+      await settle();
+      seen.closes = second?.open === false;
+      return seen;
+    });
+    ok(
+      "C4: everything a thought thought stays out of sight until its line is pressed, which opens it in place, and pressing again closes it",
+      thought.hiddenClosed && thought.opens && thought.closes,
+      JSON.stringify(thought),
+    );
+
+    const inks = await page.evaluate(async () => {
+      const { steps, thoughts, lineOf, settle } = window.__STEPS__;
+      const canvas = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+      const rgba = (css) => {
+        canvas.clearRect(0, 0, 1, 1);
+        canvas.fillStyle = "#000000";
+        canvas.fillStyle = css;
+        canvas.fillRect(0, 0, 1, 1);
+        const [red, green, blue, alpha] = canvas.getImageData(0, 0, 1, 1).data;
+        return [red, green, blue, alpha / 255];
+      };
+      const mix = (top, under) => [0, 1, 2].map((at) => top[at] * top[3] + under[at] * (1 - top[3]));
+      const backdrop = (node) => {
+        const layers = [];
+        for (let at = node; at; at = at.parentElement) {
+          const paint = rgba(getComputedStyle(at).backgroundColor);
+          if (paint[3] > 0) layers.push(paint);
+          if (paint[3] === 1) break;
+        }
+        return layers.reduceRight((under, layer) => mix(layer, under), [255, 255, 255]);
+      };
+      const luminance = (colour) => colour.map((value) => {
+        const unit = value / 255;
+        return unit <= 0.03928 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4;
+      }).reduce((sum, unit, at) => sum + unit * [0.2126, 0.7152, 0.0722][at], 0);
+      const ratio = (left, right) => {
+        const [high, low] = [luminance(left), luminance(right)].sort((one, other) => other - one);
+        return (high + 0.05) / (low + 0.05);
+      };
+      const measure = () => {
+        const worst = { ratio: Infinity, of: "" };
+        let checked = 0;
+        for (const line of [...steps(), ...thoughts()].map(lineOf)) {
+          for (const node of [line, ...line.querySelectorAll("*")]) {
+            if (![...node.childNodes].some((child) => child.nodeType === 3 && child.nodeValue.trim() !== "")) continue;
+            if (!node.checkVisibility({ checkVisibilityCSS: true })) continue;
+            const under = backdrop(node);
+            let opacity = 1;
+            for (let at = node; at; at = at.parentElement) opacity *= parseFloat(getComputedStyle(at).opacity);
+            const ink = rgba(getComputedStyle(node).color);
+            const seen = ratio(mix([ink[0], ink[1], ink[2], ink[3] * opacity], under), under);
+            checked += 1;
+            if (seen < worst.ratio) {
+              worst.ratio = Math.round(seen * 100) / 100;
+              worst.of = `${node.tagName}.${node.className}`;
+            }
+          }
+        }
+        return { checked, worst };
+      };
+      const root = document.documentElement;
+      const was = root.getAttribute("data-theme");
+      const seen = {};
+      for (const theme of ["dark", "light"]) {
+        root.setAttribute("data-theme", theme);
+        await settle();
+        seen[theme] = measure();
+      }
+      if (was === null) root.removeAttribute("data-theme");
+      else root.setAttribute("data-theme", was);
+      return seen;
+    });
+    ok(
+      "C9: every word on a step's line and a thought's line is at least 4.5:1 against what it stands on, in the dark theme and in the light one",
+      ["dark", "light"].every((theme) => inks[theme].checked >= 20 && inks[theme].worst.ratio >= 4.5),
+      JSON.stringify(inks),
+    );
+
+    const languages = await page.evaluate(async () => {
+      const { rows, lineOf, wordsOf, settle } = window.__STEPS__;
+      const said = () => rows().filter((row) => row.matches(".is-tool, .is-thinking")).map((row) => wordsOf(lineOf(row)));
+      const seen = { ko: said() };
+      for (const code of ["en", "ja", "zh", "es"]) {
+        setLocale(code);
+        await pollHelperPages();
+        await settle();
+        seen[code] = said();
+      }
+      setLocale("ko");
+      return seen;
+    });
+    ok(
+      "C9: every word a step and a thought bring is in all five languages — the same eight lines read in English, Japanese, Chinese and Spanish carry no Korean and are worded differently from the Korean ones",
+      languages.ko.length === 8 && ["en", "ja", "zh", "es"].every((code) => languages[code].length === 8 &&
+        !languages[code].some((line) => /[가-힣]/.test(line)) && languages[code].join("|") !== languages.ko.join("|")),
+      JSON.stringify(languages),
+    );
+    ok("C1: the steps raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C5, C6 — the foot line while the turn is out: the step that is out, the
+ * thought that is going, and the turn's end. */
+async function stepsLive(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, stepsFixture(), { status: "working" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async () => {
+      const { list, rows, lineOf, wordsOf, tall, shown, settle } = window.__STEPS__;
+      const seen = {};
+      const status = () => list().querySelector(":scope > .helper-status");
+      const feed = async (...turns) => {
+        window.__CONVERSATION__.turns.push(...turns);
+        await pollHelperPages();
+        await settle();
+      };
+      const FOOTER = "/Users/dev/shop-app/src/screens/profile/Footer.tsx";
+      const AT = 1_790_000_100_000;
+      await feed({ role: "tool", text: `Read · ${FOOTER}`, at_ms: AT, tool: { call_id: "live1", name: "Read", kind: "read", input: FOOTER, is_error: false } });
+      seen.shown = status()?.hidden === false && status().checkVisibility();
+      seen.nowWords = wordsOf(status());
+      seen.namesTheCall = seen.nowWords.includes("Footer.tsx");
+      seen.moving = status()?.getAnimations({ subtree: true }).filter((one) => one.playState === "running").length ?? -1;
+      // The row of the call that is out is a row like any other: open it, and
+      // it stays open — the same row — when the call's answer joins it.
+      const liveRow = rows().findLast((row) => row.classList.contains("is-tool") && row.classList.contains("is-live"));
+      seen.liveRow = liveRow !== undefined;
+      lineOf(liveRow)?.click();
+      await settle();
+      seen.liveOpened = liveRow?.open === true;
+      await feed({
+        role: "tool_result", at_ms: AT + 900, tool: { call_id: "live1", is_error: false },
+        text: "     1→export const Footer = () => null;\n     2→// MARK_TWO Footer.tsx\n     3→\n     4→export default Footer;",
+      });
+      seen.answerKeptOpen = liveRow?.isConnected === true && liveRow.open === true && !liveRow.classList.contains("is-live") &&
+        shown(liveRow, "MARK_TWO Footer.tsx");
+      seen.nowAfter = wordsOf(status());
+      seen.staleNow = seen.nowAfter.includes("Footer.tsx");
+      // What the model is thinking stands as one closed line too.
+      window.__CONVERSATION__.live = [{ role: "thinking", text: "First I check the grid. Then I read the cell." }];
+      await pollHelperPages();
+      await settle();
+      const thinking = list().querySelector(":scope > .is-streaming.is-thinking");
+      seen.thinking = {
+        tag: thinking?.tagName, open: thinking?.open === true, height: thinking ? tall(thinking) : -1,
+        line: wordsOf(lineOf(thinking)),
+      };
+      seen.nowThinking = wordsOf(status());
+      // The turn ends: the foot line and the live rows go with it.
+      window.__CONVERSATION__.status = "idle";
+      window.__CONVERSATION__.live = [];
+      await pollHelperPages();
+      await settle();
+      seen.endedHidden = status()?.hidden === true;
+      seen.endedRows = list().querySelectorAll(":scope > .is-streaming").length;
+      return seen;
+    });
+    ok(
+      "C5: while the turn is out the foot line names the step that is out — the file being read — and stops naming it when that step's answer comes",
+      seen.shown && seen.namesTheCall && !seen.staleNow,
+      JSON.stringify(seen),
+    );
+    ok(
+      "C5: the row of a step that is still out opens like any other, and stays open — the same row — when its answer joins it",
+      seen.liveRow && seen.liveOpened && seen.answerKeptOpen,
+      JSON.stringify(seen),
+    );
+    ok(
+      "C5: what the model is thinking stands as one closed line too — its newest sentence, not its first — and is what the foot line says while nothing else is out",
+      seen.thinking.tag === "DETAILS" && !seen.thinking.open && seen.thinking.height >= 0 && seen.thinking.height <= 44 &&
+        seen.thinking.line.includes("Then I read the cell") && !seen.thinking.line.includes("First I check the grid") &&
+        seen.nowThinking.includes("Then I read the cell"),
+      JSON.stringify(seen),
+    );
+    ok("C5: the foot line and the live thought leave when the turn ends", seen.endedHidden && seen.endedRows === 0, JSON.stringify(seen));
+    ok("C6: with motion allowed the foot line turns — something on it is animating", seen.moving >= 1, JSON.stringify(seen));
+    ok("C5: the live rows raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C6 — asked for less motion, the foot line holds still. */
+async function stepsStill(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await openConversation(page, stepsFixture(), { status: "working" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async () => {
+      const { list, wordsOf, settle } = window.__STEPS__;
+      const seen = { asked: matchMedia("(prefers-reduced-motion: reduce)").matches };
+      const status = () => list().querySelector(":scope > .helper-status");
+      const running = () => status()?.getAnimations({ subtree: true }).filter((one) => one.playState === "running").length ?? -1;
+      const FOOTER = "/Users/dev/shop-app/src/screens/profile/Footer.tsx";
+      window.__CONVERSATION__.turns.push({
+        role: "tool", text: `Read · ${FOOTER}`, at_ms: 1_790_000_100_000, tool: { call_id: "live1", name: "Read", kind: "read", input: FOOTER, is_error: false },
+      });
+      await pollHelperPages();
+      await settle();
+      seen.names = wordsOf(status()).includes("Footer.tsx");
+      const first = wordsOf(status());
+      seen.running = running();
+      await new Promise((done) => setTimeout(done, 700));
+      seen.same = wordsOf(status()) === first;
+      seen.runningLater = running();
+      return seen;
+    });
+    ok(
+      "C6: asked for less motion, the foot line holds still — nothing on it animates and what it says does not change over the next moments — and it still names the step that is out",
+      seen.asked && seen.names && seen.running === 0 && seen.same && seen.runningLater === 0,
+      JSON.stringify(seen),
+    );
+    ok("C6: the still foot line raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C7 — a finished helper's page opens on its report. */
+async function stepsReport(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openHelperConversation(page, stepsFixture(), "done");
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async ({ words, first }) => {
+      const { list, rows, steps, thoughts, wordsOf, holding, shown, settle } = window.__STEPS__;
+      const seen = {};
+      await settle();
+      const visible = (nodes) => nodes.filter((node) => node.checkVisibility({ checkVisibilityCSS: true })).length;
+      const report = list().querySelector(":scope > .helper-report");
+      seen.report = report !== null;
+      seen.wholeReport = words.every((sentence) => shown(report, sentence));
+      // The first row that is not the person's brief is the report; the steps
+      // and thoughts are folded under it, out of sight.
+      const head = [...list().children].find((child) => !child.classList.contains("is-user"));
+      seen.reportFirst = report !== null && head === report;
+      seen.foldedSteps = visible(steps());
+      seen.foldedThoughts = visible(thoughts());
+      seen.foldedWords = shown(list(), first[1]);
+      const door = report?.querySelector("[aria-expanded]");
+      seen.door = { tag: door?.tagName ?? null, expanded: door?.getAttribute("aria-expanded") ?? null, words: wordsOf(door) };
+      // Pressing the door unfolds them under the report, in their order, and
+      // the report's words are still said once.
+      door?.click();
+      await settle();
+      seen.unfolded = {
+        expanded: door?.getAttribute("aria-expanded") ?? null,
+        steps: visible(steps()),
+        thoughts: visible(thoughts()),
+        below: report !== null && steps().every((row) => row.getBoundingClientRect().top >= report.getBoundingClientRect().bottom - 1),
+        said: holding(list(), words[1]).filter((node) => node.checkVisibility({ checkVisibilityCSS: true })).length,
+      };
+      door?.click();
+      await settle();
+      seen.refolded = { expanded: door?.getAttribute("aria-expanded") ?? null, steps: visible(steps()) };
+      seen.rows = rows().length;
+      return seen;
+    }, { words: REPORT_WORDS, first: READ_FIRST });
+    ok(
+      "C7: a finished helper's page has its report on top — the answer it ended on, whole, the first row after the person's brief — with every step and thought folded under it and out of sight",
+      seen.report && seen.wholeReport && seen.reportFirst && seen.foldedSteps === 0 && seen.foldedThoughts === 0 && !seen.foldedWords,
+      JSON.stringify(seen),
+    );
+    ok(
+      "C7: the report's door says how many steps it folds (twelve calls), announces closed and open, unfolds them below the report — the words of the report still said once — and folds them back",
+      seen.door.tag === "BUTTON" && seen.door.expanded === "false" && /\b12\b/.test(seen.door.words) &&
+        seen.unfolded.expanded === "true" && seen.unfolded.steps === 6 && seen.unfolded.thoughts === 2 && seen.unfolded.below &&
+        seen.unfolded.said === 1 && seen.refolded.expanded === "false" && seen.refolded.steps === 0,
+      JSON.stringify(seen),
+    );
+    ok("C7: the report raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C8 — by keyboard: every step's line is reachable in order, Enter and Space
+ * open and close it, the engine says which it is, and the focus stays. */
+async function stepsByKeyboard(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("DOM.enable");
+    await cdp.send("Accessibility.enable");
+    await openConversation(page, stepsFixture());
+    await installStepsProbe(page);
+    await page.evaluate(() => {
+      const { steps, lineOf } = window.__STEPS__;
+      steps().forEach((row, at) => lineOf(row)?.setAttribute("data-probe", `step-${at}`));
+      lineOf(steps()[0])?.focus();
+    });
+    const focused = () => page.evaluate(() => document.activeElement?.getAttribute("data-probe") ?? document.activeElement?.tagName ?? null);
+    const settle = () => page.evaluate(() => window.__STEPS__.settle());
+    const path = [await focused()];
+    await page.keyboard.press("Tab");
+    path.push(await focused());
+    await page.keyboard.press("Tab");
+    path.push(await focused());
+    await page.keyboard.press("Shift+Tab");
+    path.push(await focused());
+    // Enter opens the bash step's row, Space closes it; the focus stays on
+    // its line throughout, and a poll that brings new words does not take it.
+    await page.evaluate(() => window.__STEPS__.lineOf(window.__STEPS__.steps()[3])?.focus());
+    const state = async () => ({
+      open: await page.evaluate(() => window.__STEPS__.steps()[3]?.open === true),
+      focus: await focused(),
+      ax: await axOf(cdp, '[data-probe="step-3"]'),
+    });
+    const states = [await state()];
+    await page.keyboard.press("Enter");
+    await settle();
+    states.push(await state());
+    await page.evaluate(async () => {
+      window.__CONVERSATION__.turns.push({ role: "assistant", text: "다음으로 넘어갑니다.", at_ms: 1_790_000_060_000 });
+      await pollHelperPages();
+    });
+    await settle();
+    states.push(await state());
+    await page.keyboard.press(" ");
+    await settle();
+    states.push(await state());
+    ok(
+      "C8: every step's line is reachable by the Tab key in order — one stop per row, none inside a closed one — and Shift+Tab comes back",
+      JSON.stringify(path) === JSON.stringify(["step-0", "step-1", "step-2", "step-1"]),
+      JSON.stringify(path),
+    );
+    ok(
+      "C8: Enter opens the focused step's row and Space closes it, the engine's accessibility tree says closed, open, open (across a poll) and closed, the name it reads out carries the step's command, and the focus stays on the line the whole time",
+      JSON.stringify(states.map((one) => one.open)) === JSON.stringify([false, true, true, false]) &&
+        JSON.stringify(states.map((one) => one.ax?.expanded)) === JSON.stringify([false, true, true, false]) &&
+        states.every((one) => one.focus === "step-3" && one.ax?.name.includes("SCREEN_WIDTH")),
+      JSON.stringify(states),
+    );
+    ok("C8: the keyboard raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C10 — one painter: the same turns on the wire's page, a helper's page and a
+ * pane's page come to the same rows. */
+async function stepsAcrossPages(browser, origin, ok) {
+  const seen = {};
+  const faulted = [];
+  for (const kind of ["wire", "helper", "pane"]) {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      if (kind === "wire") await openConversation(page, stepsFixture(), { status: "working" });
+      else if (kind === "helper") await openHelperConversation(page, stepsFixture(), "working");
+      else await openPaneConversation(page, stepsFixture());
+      await installStepsProbe(page);
+      seen[kind] = await page.evaluate(async () => {
+        const { list, rows, lineOf, wordsOf, settle } = window.__STEPS__;
+        await settle();
+        return {
+          rows: rows().map((row) => [
+            row.tagName,
+            [...row.classList].filter((name) => name !== "is-live").sort().join("."),
+            wordsOf(row.matches(".is-user, .is-assistant") ? row : lineOf(row)),
+          ].join("|")),
+          report: list().querySelector(":scope > .helper-report") !== null,
+        };
+      });
+      faulted.push(...faults);
+    } finally {
+      await page.close();
+    }
+  }
+  ok(
+    "C10: the wire's page, a helper's page and a pane's page are one painter — the same turns come to the same ten rows on all three (the person's brief, two thoughts, the reads as two rows of their own and the one that failed, the search, the page, the edit and the answer), and a helper still working has no report",
+    seen.wire.rows.length === 10 && JSON.stringify(seen.helper.rows) === JSON.stringify(seen.wire.rows) &&
+      JSON.stringify(seen.pane.rows) === JSON.stringify(seen.wire.rows) && !seen.helper.report,
+    JSON.stringify(seen),
+  );
+  ok("C10: the three pages raised no page errors", faulted.length === 0, faulted.join("\n"));
+}
+
+/* C11 — one table of tool names. The core reduces every vendor's name for a
+ * tool to one word (`hook::Tool::named`) and a turn carries it as `tool.kind`;
+ * the page draws by that word and keeps no list of names of its own, so a name
+ * only the core knows wears the look its kind wears. Each call stands alone (a
+ * sentence between them, so none folds). */
+const KIND_CALLS = [
+  // The name the CLI wrote, the kind the core reduced it to, its target, and
+  // the look the row must wear (null: a kind the page has no word for, drawn
+  // as the tool's own spelling).
+  { name: "OpenDocument", kind: "read", target: `${SHOP}/README.md`, look: "read" },
+  { name: "ripgrep", kind: "grep", target: "SCREEN_WIDTH in src", look: "grep" },
+  { name: "LocalShell", kind: "bash", target: "yarn test", look: "bash" },
+  { name: "GoogleWebSearch", kind: "websearch", target: "react native flatlist keys", look: "websearch" },
+  { name: "UrlFetch", kind: "web", target: "https://example.com/docs", look: "web" },
+  { name: "SubAgent", kind: "task", target: "check the list keys", look: "task" },
+  // The page does not read the name: a call whose name says one thing and whose
+  // kind another wears the kind's look.
+  { name: "Read", kind: "grep", target: "the name is only the CLI's spelling", look: "grep" },
+  // A tool the core has no word for keeps its own spelling as its kind.
+  { name: "Lookup", kind: "Lookup", target: "ui/shell.js", look: null },
+  // A call written before turns carried a kind has none to read: it says its own
+  // name, and the page does not guess a look from it.
+  { name: "Read", kind: undefined, target: `${SHOP}/a.rs`, look: null },
+];
+
+async function stepsByKind(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const turns = [{ role: "user", text: "이 도구들이 무엇을 하는지 보여 줘.", at_ms: CLOCK }];
+    KIND_CALLS.forEach((call, at) => {
+      const id = `k${at}`;
+      turns.push({
+        role: "tool", text: `${call.name} · ${call.target}`, at_ms: CLOCK + 2000 * (at + 1),
+        tool: { call_id: id, name: call.name, ...(call.kind !== undefined && { kind: call.kind }), input: call.target, is_error: false },
+      });
+      turns.push({ role: "tool_result", text: "ok", at_ms: CLOCK + 2000 * (at + 1) + 300, tool: { call_id: id, is_error: false } });
+      turns.push({ role: "assistant", text: `다음 ${at + 1}`, at_ms: CLOCK + 2000 * (at + 1) + 600 });
+    });
+    await openConversation(page, turns);
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async () => {
+      const { steps, lineOf, settle } = window.__STEPS__;
+      await settle();
+      return {
+        rows: steps().map((row) => ({
+          mark: lineOf(row).querySelector(".helper-step-icon use")?.getAttribute("href") ?? null,
+          word: lineOf(row).querySelector(".helper-step-kind")?.textContent ?? null,
+          folded: row.classList.contains("is-run"),
+        })),
+        looks: {
+          read: ["#i-file", t("worker.stepRead", "파일 읽기")],
+          grep: ["#i-search", t("worker.stepSearch", "검색")],
+          bash: ["#i-terminal", t("worker.stepShell", "셸 실행")],
+          web: ["#i-globe", t("worker.stepWeb", "웹 읽기")],
+          websearch: ["#i-globe", t("worker.stepWebSearch", "웹 검색")],
+          task: ["#i-bot", t("worker.stepTask", "헬퍼 호출")],
+        },
+        table: typeof STEP_NAMES,
+        sidebar: [activityWord("websearch"), t("activity.websearch", "웹 검색"), agentActivityKind("websearch"), agentActivityKind("web")],
+      };
+    });
+    const wanted = KIND_CALLS.map((call) => {
+      const [mark, word] = call.look ? seen.looks[call.look] : ["#i-wrench", call.kind ?? call.name];
+      return { mark, word, folded: false };
+    });
+    const wrong = KIND_CALLS.filter((call, at) => JSON.stringify(seen.rows[at]) !== JSON.stringify(wanted[at]))
+      .map((call) => `${call.name}/${call.kind}`);
+    ok(
+      "C11: the page draws a call by the kind the core reduced its tool to, not by a name it knows — a name only the core knows (OpenDocument, ripgrep, LocalShell, GoogleWebSearch, UrlFetch, SubAgent) wears its kind's mark and words, a call whose kind contradicts its name wears the kind's look, a tool with no word keeps its own spelling with the wrench, and a call that carries no kind says its own name",
+      seen.rows.length === KIND_CALLS.length && wrong.length === 0,
+      JSON.stringify({ wrong, rows: seen.rows, wanted }),
+    );
+    ok(
+      "C11: the page holds no table of vendor tool names — the one it had is gone",
+      seen.table === "undefined",
+      `typeof STEP_NAMES is ${seen.table}`,
+    );
+    ok(
+      "C11: the sidebar draws the core's word for a search of the web in its own words, not as the raw \"websearch\", and files it where a fetch of a page is filed",
+      seen.sidebar[0] === seen.sidebar[1] && seen.sidebar[0] !== "websearch" && seen.sidebar[2] === seen.sidebar[3] && seen.sidebar[2] !== "other",
+      JSON.stringify(seen.sidebar),
+    );
+    ok("C11: the kinds raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C12 — a thought's line is the terminal's, held to its examples. The
+ * terminal's `live_heading` (zo-ide `tui/thinking.rs`, t-5872) and the page's
+ * `thoughtHeading` each say what a reasoning block is about in one line. The
+ * cases are the terminal's own — each row names the Rust test it is read from,
+ * its text and what `live_heading` answers (null: it keeps the row's current
+ * word) — so the two are held to the same examples, and a change to one that
+ * leaves the other behind fails here. Two differences are on purpose:
+ *   1. Width. The terminal budgets 48 display columns and cuts at a word; the
+ *      page's line is cut only at THOUGHT_LINE_MAX characters (the row's own
+ *      ellipsis is what a reader sees).
+ *   2. A thought that is over has no "current word" to keep: where the
+ *      terminal answers nothing, the row says the thought's unfinished tail
+ *      (`thoughtHeading(text, true)`). A thought still going says nothing, like
+ *      the terminal, until a sentence closes. */
+const LIVE_HEADING_TESTS = {
+  bold: "a_bold_heading_outranks_the_sentences_only_where_codex_puts_it",
+  newest: "headerless_thinking_says_its_newest_complete_sentence",
+  korean: "korean_sentences_close_and_wide_text_is_cut_by_columns",
+  open: "a_long_open_sentence_is_cut_rather_than_withheld",
+};
+const LIVE_HEADING_CASES = [
+  [LIVE_HEADING_TESTS.bold, "Hmm.\n**Polishing tool display**\nThen more.", "Polishing tool display"],
+  [LIVE_HEADING_TESTS.bold, "The **key** point is the cache. Next", "The key point is the cache"],
+  [LIVE_HEADING_TESTS.newest, "The user wants me to", null],
+  [LIVE_HEADING_TESTS.newest, "The user wants me to read the test. Let me", "The user wants me to read the test"],
+  [LIVE_HEADING_TESTS.newest, "The user wants me to read the test. Let me open src/app.rs first.\nNow", "Let me open src/app.rs first"],
+  [LIVE_HEADING_TESTS.newest, "- **Plan**: read the failing test\n", "Plan: read the failing test"],
+  [LIVE_HEADING_TESTS.newest, "1. Inspect the wiring\n2. Fix", "Inspect the wiring"],
+  [LIVE_HEADING_TESTS.newest, "Reading src/app.rs and v1.2 now", null],
+  [LIVE_HEADING_TESTS.korean, "먼저 실패하는 시험을 읽어야 한다. 그다음", "먼저 실패하는 시험을 읽어야 한다"],
+  [LIVE_HEADING_TESTS.korean, "파일을 읽고 있다。다음은", "파일을 읽고 있다"],
+  [LIVE_HEADING_TESTS.open, "short and still open", null],
+];
+// `leading_bold_heading`'s own lines in the first of those tests: a bold run
+// counts only where it opens a line, and only once it is closed.
+const LEADING_BOLD_CASES = [
+  ["**Title**\nbody", "Title"],
+  ["  **Title** body", "Title"],
+  ["the **key** point", null],
+  ["**still open", null],
+];
+// The two Rust cases that are cut by columns (`korean_…`, `a_long_open_…`) — the
+// page keeps both whole, under its own cap.
+const KOREAN_LONG = "이 문장은 아주 길어서 상태 줄의 인터럽트 힌트를 밀어낼 만큼 넓은 폭을 차지하므로 잘려야 한다.";
+const OPEN_LONG = "this opening sentence goes on well past the cap without a stop";
+
+async function stepsThoughtLine(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const turns = [{ role: "user", text: "무슨 생각을 하고 있어?", at_ms: CLOCK }];
+    LIVE_HEADING_CASES.forEach(([, text], at) => turns.push({ role: "thinking", text, at_ms: CLOCK + 1000 * (at + 1) }));
+    await openConversation(page, turns, { status: "working" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async ({ cases, bold, korean, open }) => {
+      const { thoughts, list, settle } = window.__STEPS__;
+      await settle();
+      const seen = {};
+      seen.going = cases.map(([, text]) => thoughtHeading(text));
+      seen.over = cases.map(([, text]) => thoughtHeading(text, true));
+      seen.bold = bold.map(([text]) => thoughtLeadingBold(text));
+      seen.drawn = thoughts().map((row) => row.querySelector(".helper-step-target")?.textContent ?? null);
+      seen.cap = THOUGHT_LINE_MAX;
+      seen.wide = [thoughtHeading(korean), thoughtHeading(open), thoughtHeading(open, true)];
+      const run = "word ".repeat(120).trim();
+      seen.capped = [thoughtHeading(run), thoughtHeading(`${run}. Next`), thoughtHeading(run, true)];
+      const going = async (text) => {
+        window.__CONVERSATION__.live = [{ role: "thinking", text }];
+        await pollHelperPages();
+        await settle();
+        return list().querySelector(":scope > .is-streaming.is-thinking .helper-step-target")?.textContent ?? null;
+      };
+      seen.live = [
+        await going(cases[2][1]),
+        await going(cases[3][1]),
+        await going(cases[4][1]),
+      ];
+      return seen;
+    }, { cases: LIVE_HEADING_CASES, bold: LEADING_BOLD_CASES, korean: KOREAN_LONG, open: OPEN_LONG });
+    const differ = (got, wanted) => LIVE_HEADING_CASES.filter((one, at) => got[at] !== wanted[at]).map((one) => `${one[0]}: ${JSON.stringify(one[1])}`);
+    const said = LIVE_HEADING_CASES.map((one) => one[2]);
+    const over = LIVE_HEADING_CASES.map((one) => one[2] ?? one[1]);
+    ok(
+      "C12: a thought that is going says what the terminal's live_heading says for the same text — the eleven cases of its four tests (a bold heading that opens a line; else the newest complete sentence, a list marker and emphasis stars left off, a dot in a path or a version not a full stop, a full-width stop closing one) — and nothing at all until a sentence has closed",
+      differ(seen.going, said).length === 0,
+      JSON.stringify({ differ: differ(seen.going, said), going: seen.going }),
+    );
+    ok(
+      "C12: a bold run counts only where it opens a line and only once it is closed — leading_bold_heading's own four cases",
+      JSON.stringify(seen.bold) === JSON.stringify(LEADING_BOLD_CASES.map((one) => one[1])),
+      JSON.stringify(seen.bold),
+    );
+    ok(
+      "C12: a thought that is over has a line where the terminal says nothing — its unfinished tail — and the row drawn for each of the eleven says it",
+      differ(seen.over, over).length === 0 && JSON.stringify(seen.drawn) === JSON.stringify(over),
+      JSON.stringify({ differ: differ(seen.over, over), over: seen.over, drawn: seen.drawn }),
+    );
+    ok(
+      "C12: the row of a thought still going does not flash a half-written sentence — it says nothing until the first sentence closes, then that sentence, then the newest",
+      JSON.stringify(seen.live) === JSON.stringify(["", "The user wants me to read the test", "Let me open src/app.rs first"]),
+      JSON.stringify(seen.live),
+    );
+    ok(
+      "C12: width is the one difference on purpose — the terminal cuts at 48 columns and a word, the page keeps a sentence whole up to its own cap and cuts a longer run with an ellipsis at that cap, closed or open",
+      seen.wide[0] === KOREAN_LONG.slice(0, -1) && seen.wide[1] === null && seen.wide[2] === OPEN_LONG &&
+        seen.capped.every((line) => line?.length === seen.cap && line.endsWith("…")),
+      JSON.stringify({ wide: seen.wide, capped: seen.capped.map((line) => line?.length), cap: seen.cap }),
+    );
+    ok("C12: the thought lines raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C13 — a thought being read does not close under the reader. The words that
+ * streamed into an open line close into their turn; the row that stands for
+ * the turn, in the streaming row's place, is open the way that one was and
+ * holds the keyboard on its line where that one held it. A thought nobody
+ * opened closes into a closed row and takes nothing. */
+async function stepsThoughtHandOver(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, stepsFixture(), { status: "working" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async ({ at }) => {
+      const { list, lineOf, shown, settle } = window.__STEPS__;
+      const streaming = () => list().querySelector(":scope > .is-streaming.is-thinking");
+      const settled = () => [...list().querySelectorAll(":scope > .is-thinking:not(.is-streaming)")];
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+      const stream = async (text) => {
+        window.__CONVERSATION__.live = [{ role: "thinking", text }];
+        await pollHelperPages();
+        await settle();
+      };
+      // The poll that brings the turn brings the empty live list with it.
+      const close = async (text, when) => {
+        window.__CONVERSATION__.turns.push({ role: "thinking", text, at_ms: when });
+        window.__CONVERSATION__.live = [];
+        await pollHelperPages();
+        await settle();
+      };
+      const FIRST = "Every cell remounts on each scroll tick because its key is an index.";
+      const NEWEST = "Keying the cells by id should keep them.";
+      const SECOND = "One more look at the cell before the edit.";
+      const seen = {};
+      const thoughts = settled().length;
+      await stream(`${FIRST} ${NEWEST}`);
+      const going = streaming();
+      lineOf(going).click();
+      await wait(60);
+      await settle();
+      lineOf(going).focus();
+      seen.read = { open: going.open === true, held: document.activeElement === lineOf(going), words: shown(going, FIRST) };
+      await close(`${FIRST} ${NEWEST}`, at);
+      const row = settled().at(-1);
+      seen.turn = {
+        added: settled().length === thoughts + 1,
+        gone: streaming() === null,
+        open: row?.open === true,
+        words: row ? shown(row, FIRST) : false,
+        held: row ? document.activeElement === lineOf(row) : false,
+      };
+      await stream(SECOND);
+      const idle = streaming();
+      seen.idle = { open: idle?.open === true, held: idle ? document.activeElement === lineOf(idle) : false };
+      await close(SECOND, at + 3000);
+      const closed = settled().at(-1);
+      seen.after = {
+        added: settled().length === thoughts + 2,
+        open: closed?.open === true,
+        held: closed ? document.activeElement === lineOf(closed) : false,
+      };
+      return seen;
+    }, { at: CLOCK + 200_000 });
+    ok(
+      "C13: a thought being read does not close under the reader — when its words close into their turn the row that stands for the turn is open, with the whole thought in it, and holds the keyboard on its line where the streaming row held it",
+      seen.read.open && seen.read.held && seen.read.words && seen.turn.added && seen.turn.gone && seen.turn.open &&
+        seen.turn.words && seen.turn.held,
+      JSON.stringify(seen),
+    );
+    ok(
+      "C13: a thought nobody opened closes into a closed row and takes no keyboard — the hand-over is for a reader who asked",
+      !seen.idle.open && !seen.idle.held && seen.after.added && !seen.after.open && !seen.after.held,
+      JSON.stringify(seen),
+    );
+    ok("C13: the thought's hand-over raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C14 — a streaming thought's open body is written once a frame, as a
+ * streaming answer is, and never under a selection: deltas that arrive faster
+ * than the frame come to one write of the newest words, and words a person
+ * chose in the body stay chosen — the frame that would collapse them waits. */
+async function stepsThoughtWrites(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, stepsFixture(), { status: "working" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async () => {
+      const { list, lineOf, settle } = window.__STEPS__;
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+      const run = list().__run;
+      // One delta of the thought that is going, as the wire's poll brings it.
+      const bring = (text) => {
+        window.__CONVERSATION__.live = [{ role: "thinking", text }];
+        run.wireLog = { ...run.wireLog, live: window.__CONVERSATION__.live };
+        syncStreamingTurns(list(), run);
+      };
+      const seen = {};
+      let text = "First words of the thought.";
+      bring(text);
+      const going = list().querySelector(":scope > .is-streaming.is-thinking");
+      lineOf(going).click();
+      await wait(60);
+      await settle();
+      const body = going.querySelector(":scope > .helper-thought-body");
+      seen.opened = going.open === true && body.textContent === text;
+      const watch = new MutationObserver(() => {});
+      watch.observe(body, { childList: true, characterData: true, subtree: true });
+      for (let delta = 0; delta < 20; delta += 1) {
+        text += ` Sentence ${delta} of the thought, one more delta.`;
+        bring(text);
+      }
+      seen.inTheFrame = watch.takeRecords().length;
+      await settle();
+      seen.byTheFrame = watch.takeRecords().length;
+      seen.newest = body.textContent === text;
+      // Words a person chose in the body.
+      const node = body.firstChild;
+      const selection = getSelection();
+      selection.setBaseAndExtent(node, 6, node, 20);
+      const chosen = selection.toString();
+      watch.takeRecords();
+      text += " A newer sentence arrives while these words are chosen.";
+      bring(text);
+      await settle();
+      seen.chosen = chosen;
+      seen.kept = chosen !== "" && selection.toString() === chosen && body.contains(selection.anchorNode);
+      seen.rewrittenUnderIt = watch.takeRecords().length;
+      // Let go of them: the next delta brings the newest words in.
+      selection.removeAllRanges();
+      text += " And a last one, once they are let go.";
+      bring(text);
+      await settle();
+      seen.caughtUp = body.textContent === text;
+      return seen;
+    });
+    ok(
+      "C14: twenty deltas that arrive inside one frame are one write of the open body of a thought that is going — not twenty — and the body holds the newest words",
+      seen.opened && seen.inTheFrame + seen.byTheFrame <= 2 && seen.newest,
+      JSON.stringify(seen),
+    );
+    ok(
+      "C14: words a person chose in that body stay chosen when a newer delta arrives — the frame that would collapse the selection is skipped, and the next delta after they are let go brings the newest words in",
+      seen.kept && seen.rewrittenUnderIt === 0 && seen.caughtUp,
+      JSON.stringify(seen),
+    );
+    ok("C14: the streaming thought raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C15 — turning the Focus view on keeps what a person had open. The Focus
+ * view keeps its rows single, so a row of steps gives its members back as
+ * rows of their own: the member that was open comes back open, the others
+ * closed, and the keyboard, where it was on the row or on that member, is held
+ * by what stands for it — the row's line, or the head of the fold that now
+ * covers it. */
+async function stepsFocusKeepsOpen(browser, origin, ok) {
+  const seen = {};
+  const faulted = [];
+  for (const scenario of ["member", "run"]) {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await openConversation(page, stepsFixture(), { status: "idle" });
+      await installStepsProbe(page);
+      seen[scenario] = await page.evaluate(async ({ scenario, file }) => {
+        const { list, rows, lineOf, shown, settle } = window.__STEPS__;
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+        const out = {};
+        const run = rows().find((row) => row.classList.contains("is-run"));
+        out.hasRun = run !== undefined;
+        lineOf(run).click();
+        await wait(60);
+        await settle();
+        const members = [...run.querySelectorAll(":scope > .helper-run-body > .helper-turn")];
+        out.members = members.length;
+        const seqs = members.map((member) => member.dataset.turn);
+        if (scenario === "member") {
+          lineOf(members[2]).click();
+          await wait(60);
+          await settle();
+          lineOf(members[2]).focus();
+        } else {
+          lineOf(run).focus();
+        }
+        out.before = {
+          run: run.open,
+          open: members.map((member) => member.open),
+          held: document.activeElement === lineOf(scenario === "member" ? members[2] : run),
+        };
+        document.querySelector("#worker-view .worker-focus").click();
+        await wait(60);
+        await settle();
+        const row = (seq) => list().querySelector(`:scope > [data-turn="${seq}"]`);
+        // What stands for a row on screen: its line, or — when the Focus view
+        // has folded it under a head — the head.
+        const standing = (seq) => {
+          const one = row(seq);
+          return one === null ? null : one.hidden ? one.__group?.firstElementChild ?? null : lineOf(one);
+        };
+        const stands = standing(scenario === "member" ? seqs[2] : seqs[0]);
+        out.after = {
+          runs: list().querySelectorAll(":scope > .is-run").length,
+          singles: seqs.map((seq) => row(seq) !== null),
+          open: seqs.map((seq) => row(seq)?.open === true),
+          held: stands !== null && document.activeElement === stands,
+          active: document.activeElement?.tagName ?? null,
+        };
+        if (scenario === "member") {
+          // The fold opened, the member is open in it with its file.
+          row(seqs[2])?.__group?.firstElementChild?.click();
+          await wait(60);
+          await settle();
+          out.shown = row(seqs[2]) !== null && shown(row(seqs[2]), `MARK_TWO ${file}`);
+        }
+        return out;
+      }, { scenario, file: READ_FIRST[2] });
+      faulted.push(...faults);
+    } finally {
+      await page.close();
+    }
+  }
+  const only = (open, at) => JSON.stringify(open) === JSON.stringify([0, 1, 2, 3, 4, 5].map((one) => one === at));
+  ok(
+    "C15: the Focus view gives a row of steps back as single rows, and the member a person had open comes back open — the others closed — with its file in it when the fold that covers it is pressed",
+    seen.member.hasRun && seen.member.members === 6 && seen.member.before.open[2] === true && seen.member.after.runs === 0 &&
+      seen.member.after.singles.every(Boolean) && only(seen.member.after.open, 2) && seen.member.shown === true,
+    JSON.stringify(seen.member),
+  );
+  ok(
+    "C15: the keyboard, on the line of the member that was open, is held by what stands for it when the Focus view comes on — not dropped to the body",
+    seen.member.before.held && seen.member.after.held,
+    JSON.stringify(seen.member),
+  );
+  ok(
+    "C15: the keyboard on a row of steps itself is held by what stands for that row when the Focus view comes on — the first of its members, or the fold's head — and no member is opened that was not",
+    seen.run.hasRun && seen.run.before.held && seen.run.after.singles.every(Boolean) && only(seen.run.after.open, -1) &&
+      seen.run.after.held,
+    JSON.stringify(seen.run),
+  );
+  ok("C15: the Focus view raised no page errors", faulted.length === 0, faulted.join("\n"));
+}
+
+/* Enough turns before the fixture's own that the list scrolls. */
+function paddedFixture() {
+  const filler = Array.from({ length: 30 }, (_, at) => ({
+    role: at % 2 === 0 ? "user" : "assistant",
+    text: `이전 대화 ${at} — ${"길게 이어지는 문장이 목록을 스크롤할 만큼 쌓인다. ".repeat(3)}`,
+  }));
+  return [...filler, ...stepsFixture()];
+}
+
+/* C17 — a Space on a step's line is the line's own. It opens or closes the
+ * row; it is not a wish to go towards the foot (the list's Space) nor to leave
+ * it (Shift+Space), so a reader a little above the foot stays there and a list
+ * that follows its foot goes on following it. */
+async function stepsSpaceOnALine(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, paddedFixture(), { status: "idle" });
+    await installStepsProbe(page);
+    // The reader gets a little above the foot the way a person does, by a wheel
+    // upward, which leaves at once. A place set from script is no such wish: the
+    // list reads an upward move under a list that changed size as the list's own.
+    const middle = await page.evaluate(async () => {
+      const { list, settle } = window.__STEPS__;
+      const box = list();
+      box.scrollTop = box.scrollHeight;
+      await settle();
+      const rect = box.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    });
+    await page.mouse.move(middle.x, middle.y);
+    await page.mouse.wheel(0, -30);
+    const before = await page.evaluate(async () => {
+      const { list, steps, lineOf } = window.__STEPS__;
+      const box = list();
+      // The list has come to rest off its foot, the keyboard on the last step's line.
+      for (let last = -1, beat = 0; beat < 90; beat += 1) {
+        if (box.scrollHeight - box.scrollTop - box.clientHeight > 1 && box.scrollTop === last) break;
+        last = box.scrollTop;
+        await window.__PAINTED__();
+      }
+      lineOf(steps().at(-1)).focus({ preventScroll: true });
+      return {
+        tall: box.scrollHeight > box.clientHeight + 200,
+        away: chatAway(box),
+        gap: Math.round(box.scrollHeight - box.scrollTop - box.clientHeight),
+        held: document.activeElement === lineOf(steps().at(-1)),
+      };
+    });
+    await page.keyboard.press(" ");
+    await page.evaluate(() => window.__STEPS__.settle());
+    const after = await page.evaluate(() => {
+      const { list, steps } = window.__STEPS__;
+      return { away: chatAway(list()), open: steps().at(-1).open === true };
+    });
+    // The list at its foot and following it, the keyboard on another step's line.
+    const following = await page.evaluate(async () => {
+      const { list, steps, lineOf, settle } = window.__STEPS__;
+      const box = list();
+      box.scrollTop = box.scrollHeight;
+      await settle();
+      lineOf(steps()[2]).focus({ preventScroll: true });
+      return { away: chatAway(box), held: document.activeElement === lineOf(steps()[2]) };
+    });
+    await page.keyboard.down("Shift");
+    await page.keyboard.press(" ");
+    await page.keyboard.up("Shift");
+    await page.evaluate(() => window.__STEPS__.settle());
+    const shifted = await page.evaluate(() => ({ away: chatAway(window.__STEPS__.list()) }));
+    ok(
+      "C17: a Space on a step's line opens its row and does not count as a wish to go towards the foot — the reader a little above it is still away from it",
+      before.tall && before.away && before.gap > 1 && before.gap < 50 && before.held && after.open && after.away,
+      JSON.stringify({ before, after }),
+    );
+    ok(
+      "C17: Shift+Space on a step's line does not count as leaving the foot — a list that follows its foot goes on following it",
+      following.held && !following.away && !shifted.away,
+      JSON.stringify({ following, shifted }),
+    );
+    ok("C17: the keys on the step's line raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C18 — with the agent graph on screen in another leaf, a Space on a step's
+ * line still opens its row. The graph takes the Space of its own view (its
+ * hand tool) — holding it still holds the tool with nothing focused — but not
+ * the Space of a line, a button or a keyboard owner on another surface. */
+async function stepsSpaceBesideTheGraph(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, stepsFixture(), { status: "idle" });
+    await installStepsProbe(page);
+    const stood = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+      window.__ANSWER__.board_snapshot = () => ({
+        columns: [{ bucket: "working", cards: [{
+          pane: "term:3", agent: "codex", state: "working", heading: "Held snapshot",
+          task: "Held snapshot", project: "/fixture", worktree: "main", at: 1, changed_at: 1,
+        }] }], attention_count: 0, total_count: 1,
+      });
+      agentBoardMode = "graph";
+      const home = focusedPane;
+      const group = nextGroupId;
+      nextGroupId += 1;
+      setStageTree(splitStageLeaf(stageTree(), home, group, "horizontal", "second"));
+      focusedPane = group;
+      openBoard();
+      await paintBoardView(boardTab(), { force: true });
+      await wait(300);
+      const view = visibleAgentGraphView();
+      const list = document.querySelector("#worker-view .helper-turns");
+      const { steps, lineOf } = window.__STEPS__;
+      lineOf(steps()[3]).focus({ preventScroll: true });
+      return {
+        graph: view !== null,
+        page: list?.checkVisibility() === true,
+        apart: view !== null && list !== null && !view.contains(list) && !list.contains(view),
+        held: document.activeElement === lineOf(steps()[3]),
+        open: steps()[3].open === true,
+      };
+    });
+    await page.keyboard.press(" ");
+    await page.evaluate(() => window.__STEPS__.settle());
+    const after = await page.evaluate(() => ({ open: window.__STEPS__.steps()[3].open === true }));
+    // The hand tool is the graph's own: with nothing focused, holding Space
+    // holds it and letting go lets go.
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.down(" ");
+    const held = await page.evaluate(() => agentGraphSpaceHeld);
+    await page.keyboard.up(" ");
+    const released = await page.evaluate(() => agentGraphSpaceHeld);
+    ok(
+      "C18: the agent graph and a conversation page can be on screen together — a board drawing the graph in one leaf, the page in another",
+      stood.graph && stood.page && stood.apart && stood.held && !stood.open,
+      JSON.stringify(stood),
+    );
+    ok(
+      "C18: with the graph on screen beside it, a Space on a step's line opens the row — the graph does not take a Space that is the line's own",
+      after.open,
+      JSON.stringify({ stood, after }),
+    );
+    ok(
+      "C18: the hand tool is still the graph's own — with nothing focused, holding Space holds it and letting go lets go",
+      held === true && released === false,
+      JSON.stringify({ held, released }),
+    );
+    ok("C18: the graph beside the page raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* C16 — asked for less motion, the whole page holds still, and the mark of a
+ * step that is still out with it (C6 holds the foot line to it): swept over
+ * the page, the pulse of the mark on a step's line, the foot line's ring, the
+ * fades and the dots. The same page is swept again with motion allowed and
+ * moves, so the stillness is the guard's and not an empty page's — the guard
+ * the person approved in the draft (`.run .dot, .spin { animation: none }`). */
+async function stepsStillPage(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await openConversation(page, stepsFixture(), { status: "working" });
+    await installStepsProbe(page);
+    await page.evaluate(async () => {
+      const FOOTER = "/Users/dev/shop-app/src/screens/profile/Footer.tsx";
+      window.__CONVERSATION__.turns.push({
+        role: "tool", text: `Read · ${FOOTER}`, at_ms: 1_790_000_100_000, tool: { call_id: "live1", name: "Read", kind: "read", input: FOOTER, is_error: false },
+      });
+      await pollHelperPages();
+    });
+    const sweep = () => page.evaluate(async () => {
+      const { list, settle } = window.__STEPS__;
+      await settle();
+      const runningIn = (node, options) => node?.getAnimations(options).filter((one) => one.playState === "running") ?? [];
+      const step = list().querySelector(":scope > .is-tool.is-live");
+      return {
+        asked: matchMedia("(prefers-reduced-motion: reduce)").matches,
+        live: step !== null,
+        page: runningIn(document.querySelector("#worker-view"), { subtree: true }).map((one) => one.animationName ?? one.transitionProperty ?? "?"),
+        mark: runningIn(step?.querySelector(":scope > .helper-step-line > .helper-step-icon")).map((one) => one.animationName ?? "?"),
+        status: runningIn(list().querySelector(":scope > .helper-status"), { subtree: true }).length,
+      };
+    });
+    const still = await sweep();
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    const moving = await sweep();
+    ok(
+      "C16: asked for less motion, nothing on the conversation page animates — swept over the whole page with a step still out: no pulse on the step's mark, no ring or fade on the foot line, no dot",
+      still.asked && still.live && still.page.length === 0 && still.mark.length === 0 && still.status === 0,
+      JSON.stringify(still),
+    );
+    ok(
+      "C16: with motion allowed the same page moves — the mark of the step that is out pulses and the foot line animates — so the stillness above is the guard's, not an empty page's",
+      !moving.asked && moving.live && moving.mark.includes("helper-live-pulse") && moving.status >= 1,
+      JSON.stringify(moving),
+    );
+    ok("C16: sweeping the page for motion raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 /* Run by itself (`node ui/tests/conversation-parity.mjs [--engine webkit]
  * [name…]`): every check above in file order, or only those whose function
  * names contain one of the words given, in Chromium or in WebKit (the
@@ -1598,7 +3003,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const all = {
     testConversationFont, testConversationFolds, testConversationPaths, testConversationKeys, testConversationStatus,
     testConversationScroll, testConversationFoot, testConversationAgents, testConversationTodos, testConversationImages,
-    testConversationCopies, testConversationShelf, testConversationRelease,
+    testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps,
   };
   const argv = process.argv.slice(2);
   const at = argv.indexOf("--engine");

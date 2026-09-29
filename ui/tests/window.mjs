@@ -75,7 +75,7 @@ import { testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testWorkers } from "./workers.mjs";
 import { testSidebarAgents } from "./sidebar-agents.mjs";
-import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease } from "./conversation-parity.mjs";
+import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -265,6 +265,10 @@ suite("conversation-images", ({ browser, origin, ok }) => testConversationImages
 suite("conversation-copies", ({ browser, origin, ok }) => testConversationCopies(browser, origin, ok));
 suite("conversation-shelf", ({ browser, origin, ok }) => testConversationShelf(browser, origin, ok));
 suite("conversation-release", ({ browser, origin, ok }) => testConversationRelease(browser, origin, ok));
+/* 걸음 — 한 일이 한 줄로 서고, 같은 종류는 한 행으로 접히고, 생각은 한 줄이고,
+ * 발밑 줄은 지금 나간 걸음을 말하고, 끝난 헬퍼의 페이지는 보고로 열린다
+ * (t-15682). */
+suite("conversation-steps", ({ browser, origin, ok }) => testConversationSteps(browser, origin, ok));
 /* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
  * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
  * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs
@@ -275,8 +279,8 @@ suite("conversation-perf", async ({ browser, origin, ok }) => {
   const { page } = await openWindowTestPage(browser, origin);
   try {
     const measured = await measureConversation(page, { before });
-    ok("B0: the 400-turn conversation was measured — rows, nodes, heap, renderer RSS, delta paint, scroll frames",
-      measured.rows === 400 && measured.paints > 0 && measured.scrollFrames > 0, JSON.stringify(measured));
+    ok("B0: the 400-turn conversation was measured — rows (a kind's settled steps in a row are one), nodes, heap, renderer RSS, delta paint, scroll frames",
+      measured.turns === 400 && measured.rows > 0 && measured.rows <= 400 && measured.paints > 0 && measured.scrollFrames > 0, JSON.stringify(measured));
   } finally {
     await page.close();
   }
@@ -36048,8 +36052,8 @@ ok(
   JSON.stringify(lostWorkers),
 );
 
-/* 생각은 답이 아니다 — Codex·ChatGPT 처럼 「동안 작업」 묶음 안의 접힌 행이고,
- * 그 행의 머리는 생각의 첫 굵은 줄이다. 파서가 `[earlier reasoning]` 패스포트를
+/* 생각은 답이 아니다 — Codex·ChatGPT 처럼 「동안 작업」 묶음 안의 접힌 한
+ * 줄이고, 그 줄의 말은 생각의 굵은 머리 줄이다. 파서가 `[earlier reasoning]` 패스포트를
  * 벗겨 `thinking` 턴으로 내주므로 창에는 그 라벨이 닿지 않는다(2026-09-08:
  * 「[earlier reasoning] **Checking…**Before …」가 답으로 찍혔다). 입력줄의
  * 상자는 둥근 테두리를 제 손으로 밝히니 textarea 에 두 번째 네모 링이 없다. */
@@ -36069,7 +36073,7 @@ const thoughtRows = await page.evaluate(async () => {
     turns: [
       { role: "user", text: "check the flow" },
       { role: "thinking", text: "**Checking the flow**\n\nThe flag gates the call, so read the SQL first." },
-      { role: "tool", text: "Read · proc.sql" },
+      { role: "tool", text: "Read · proc.sql", tool: { name: "Read", kind: "read" } },
       { role: "assistant", text: "The flag gates it." },
     ],
   });
@@ -36083,9 +36087,9 @@ const thoughtRows = await page.evaluate(async () => {
   seen.shape = turns.map((node) => node.className.replace(/\s+/g, " "));
   const thought = turns.find((node) => node.classList.contains("is-thinking"));
   seen.thoughtFolded = thought?.tagName === "DETAILS" && thought.open === false;
-  seen.who = thought?.querySelector(".helper-cap .helper-who")?.textContent ?? "";
+  seen.who = thought?.querySelector(".helper-step-line .helper-step-res")?.textContent ?? "";
   seen.whoExpected = t("worker.thought", "생각");
-  seen.title = thought?.querySelector(".helper-cap .helper-cue")?.textContent ?? "";
+  seen.title = thought?.querySelector(".helper-step-line .helper-step-target")?.textContent ?? "";
   // The body is born on the first opening — a closed thought costs no prose.
   seen.bodyEmptyClosed = thought?.querySelector(".helper-thought-body")?.childElementCount === 0;
   if (thought) thought.open = true;
@@ -36093,11 +36097,12 @@ const thoughtRows = await page.evaluate(async () => {
   seen.bodyWords = thought?.querySelector(".helper-thought-body")?.textContent?.trim() ?? "";
   seen.bodyHasHeading = Boolean(thought?.querySelector(".helper-thought-body strong"));
   seen.labelNowhere = !face.textContent.includes("[earlier reasoning]");
-  // The call between them stands as its own row — the CLI's name, its target
+  // The call between them stands as its own row — its kind's word, its target
   // — and is not out: the answer after it closed it.
   const tool = turns.find((node) => node.classList.contains("is-tool"));
-  seen.toolName = tool?.querySelector(".helper-tool-name")?.textContent;
-  seen.toolArg = tool?.querySelector(".helper-tool-arg")?.textContent;
+  seen.toolName = tool?.querySelector(".helper-step-kind")?.textContent;
+  seen.toolNameExpected = t("worker.stepRead", "파일 읽기");
+  seen.toolArg = tool?.querySelector(".helper-step-target")?.textContent;
   seen.toolSettled = tool ? !tool.classList.contains("is-live") : false;
   // 입력줄 상자: textarea 에 초점이 와도 링은 상자의 테두리 하나뿐이다. 입력줄은
   // 판 자신의 대화에 서고, 도우미의 페이지에는 없다(t-15683).
@@ -36120,16 +36125,16 @@ const thoughtRows = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a thought is a folded row of the transcript — the window's label and its bold heading on the cap, prose born on the first opening, never a paragraph and never the passport label — the call after it is its own row under the CLI's name, and the composer's textarea wears no second ring when focused",
+  "a thought is one closed line of the transcript — the window's label and its bold heading on the line, prose born on the first opening, never a paragraph and never the passport label — the call after it is its own row under its kind's word, and the composer's textarea wears no second ring when focused",
   JSON.stringify(thoughtRows.shape) === JSON.stringify([
-    "helper-turn is-user is-briefing", "helper-turn is-thinking is-step", "helper-turn is-tool is-step", "helper-turn is-assistant is-step",
+    "helper-turn is-user is-briefing", "helper-turn is-thinking", "helper-turn is-tool", "helper-turn is-assistant is-step",
   ]) &&
     thoughtRows.thoughtFolded &&
     thoughtRows.who !== "" && thoughtRows.who === thoughtRows.whoExpected &&
     thoughtRows.title === "Checking the flow" && thoughtRows.bodyEmptyClosed &&
     thoughtRows.bodyWords.includes("The flag gates the call") && thoughtRows.bodyHasHeading &&
     thoughtRows.labelNowhere &&
-    thoughtRows.toolName === "Read" && thoughtRows.toolArg === "proc.sql" && thoughtRows.toolSettled &&
+    thoughtRows.toolName === thoughtRows.toolNameExpected && thoughtRows.toolArg === "proc.sql" && thoughtRows.toolSettled &&
     thoughtRows.boxFocused && thoughtRows.boxRing === "none" && thoughtRows.boxOutline === "none" &&
     thoughtRows.composerRadius !== "0px",
   JSON.stringify(thoughtRows),
@@ -36159,7 +36164,7 @@ const chatFace = await page.evaluate(async () => {
       { role: "user", text: `briefing line one\n${dump}` },
       { role: "assistant", text: "short answer" },
       { role: "tool", text: dump },
-      { role: "tool", text: "Read · one line" },
+      { role: "tool", text: "Read · one line", tool: { name: "Read", kind: "read" } },
     ],
   });
   await openHelperPage(
@@ -36197,15 +36202,19 @@ const chatFace = await page.evaluate(async () => {
   const prose = turns[1]?.querySelector(".helper-said");
   seen.proseFont = prose ? !/mono/i.test(getComputedStyle(prose).fontFamily) : false;
   // Two tool rows, both still out (nothing was said after them, the helper
-  // runs): the accent dot with its halo. The nameless dump is a tool all the
-  // same — the window's word for it, its first line as the target, the rest
-  // standing in the row's body (the extension's box, no fold to press first):
-  // its well cut at the clip with its door, and opened, a well that scrolls
-  // on its own (t-6323 A1).
+  // runs): the mark in the accent. The nameless dump is a tool all the same —
+  // the window's word for it, its first line as the target, on a closed line
+  // — and the rest stands in the row's body, one press away: opened, its well
+  // is cut at the clip with its door, and door-opened, a well that scrolls on
+  // its own (t-6323 A1).
   seen.toolRows = turns.slice(2).map((row) => row.className.replace(/\s+/g, " "));
-  seen.dumpName = turns[2]?.querySelector(".helper-tool-name")?.textContent;
+  seen.dumpName = turns[2]?.querySelector(".helper-step-kind")?.textContent;
   seen.wantDumpName = t("worker.tool", "도구");
-  seen.dumpArg = turns[2]?.querySelector(".helper-tool-arg")?.textContent;
+  seen.dumpArg = turns[2]?.querySelector(".helper-step-target")?.textContent;
+  seen.dumpClosed = turns[2]?.tagName === "DETAILS" && turns[2].open === false &&
+    turns[2].querySelector(".helper-tool-body") === null;
+  if (turns[2]) turns[2].open = true;
+  await new Promise((done) => setTimeout(done, 10));
   const more = turns[2]?.querySelector(".helper-tool-body");
   const well = more?.querySelector(".helper-tool-input");
   const wellDoor = well?.nextElementSibling?.classList.contains("helper-expand") ? well.nextElementSibling : null;
@@ -36219,13 +36228,13 @@ const chatFace = await page.evaluate(async () => {
     more.querySelector(".helper-tool-output").checkVisibility() === false;
   seen.wellScrolls = wellStyle !== null && wellStyle.overflowY === "auto" && wellStyle.maxHeight !== "none";
   wellDoor?.click();
-  seen.readName = turns[3]?.querySelector(".helper-tool-name")?.textContent;
-  seen.readArg = turns[3]?.querySelector(".helper-tool-arg")?.textContent;
+  seen.readName = turns[3]?.querySelector(".helper-step-kind")?.textContent;
+  seen.wantReadName = t("worker.stepRead", "파일 읽기");
+  seen.readArg = turns[3]?.querySelector(".helper-step-target")?.textContent;
   seen.readBare = turns[3]?.querySelector(".helper-tool-body") === null &&
-    turns[3]?.querySelector(".helper-tool-result") === null;
-  const dot = turns[3] ? getComputedStyle(turns[3], "::before") : null;
-  seen.liveDot = dot !== null && dot.content !== "none" &&
-    dot.backgroundColor === probe("--agent-accent-claude", "backgroundColor") && dot.boxShadow !== "none";
+    turns[3]?.querySelector(".helper-step-res")?.textContent === t("worker.stepLive", "진행 중");
+  const mark = turns[3]?.querySelector(".helper-step-icon");
+  seen.liveMark = mark ? getComputedStyle(mark).color === probe("--agent-accent-claude") : false;
   // The page wears the agent: its accent, its mark before the name, its own
   // busy word under the transcript.
   seen.agent = face.dataset.agent;
@@ -36236,9 +36245,11 @@ const chatFace = await page.evaluate(async () => {
   const status = face.querySelector(".helper-status");
   seen.statusShown = status ? !status.hidden : false;
   seen.statusMark = status?.querySelector(".helper-status-mark")?.textContent;
-  // The CLI's one word is what the log says aloud; the verb the eye sees
-  // turns (t-6323 A4) and is hidden from the reader.
-  seen.statusWord = status?.querySelector(".helper-status-said")?.textContent;
+  // The CLI's one word stays on the line; the verb the eye sees turns
+  // (t-6323 A4) and is hidden from the reader, who is told aloud what is going
+  // on — the step that is out, in the words of its row (t-15682).
+  seen.statusWord = status?.querySelector(".helper-status-word")?.textContent;
+  seen.statusSaid = status?.querySelector(".helper-status-said")?.textContent;
   seen.statusTurns = status?.querySelector(".helper-status-word")?.getAttribute("aria-hidden") === "true";
   seen.statusVoice = agentVoice("claude");
   // 입력줄: 부모 판이 서 있으니 composer가 서고, 보내면 부모 판으로
@@ -36361,38 +36372,40 @@ const chatFace = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a helper page speaks the Claude Code grammar: the briefing in a left bubble, prose in the window's type, every tool call its own row — a nameless dump under the window's word with its lines in the row's body, cut at the clip behind 「더 보기」 — and the calls still out wearing the accent dot",
+  "a helper page speaks the Claude Code grammar: the briefing in a left bubble, prose in the window's type, every tool call its own one-line row — a nameless dump under the window's word with its lines one press away in the row's body, cut at the clip behind 「더 보기」 — and the calls still out wearing the accent on their mark",
   chatFace.count === 4 &&
     chatFace.briefingBubble &&
     chatFace.briefingSaid === "briefing line one" &&
     chatFace.briefingWho === chatFace.wantBriefing &&
     chatFace.briefingTip === chatFace.wantBriefing &&
     chatFace.proseFont &&
-    JSON.stringify(chatFace.toolRows) === JSON.stringify(["helper-turn is-tool is-step is-live", "helper-turn is-tool is-step is-live"]) &&
-    chatFace.dumpName === chatFace.wantDumpName && chatFace.dumpArg === "line 0" &&
+    JSON.stringify(chatFace.toolRows) === JSON.stringify(["helper-turn is-tool is-live", "helper-turn is-tool is-live"]) &&
+    chatFace.dumpName === chatFace.wantDumpName && chatFace.dumpArg === "line 0" && chatFace.dumpClosed &&
     chatFace.moreFolded && chatFace.moreWords === chatFace.wantMoreWords &&
     chatFace.wellHolds && chatFace.wellScrolls &&
-    chatFace.readName === "Read" && chatFace.readArg === "one line" && chatFace.readBare &&
-    chatFace.liveDot &&
+    chatFace.readName === chatFace.wantReadName && chatFace.readArg === "one line" && chatFace.readBare &&
+    chatFace.liveMark &&
     chatFace.assistantNamed[0] === chatFace.assistantNamed[1] &&
     chatFace.toolNamed[0] === chatFace.toolNamed[1],
   JSON.stringify(chatFace),
 );
 ok(
-  "the page wears its agent: data-agent picks the accent, the head and the chip carry the agent's own mark, and the status line under the transcript says the CLI's own busy word while the run is out",
+  "the page wears its agent: data-agent picks the accent, the head and the chip carry the agent's own mark, and the status line under the transcript keeps the CLI's own busy word while the run is out and says aloud the step that is out",
   chatFace.agent === "claude" && chatFace.pageAccent !== "" &&
     chatFace.headMark === chatFace.statusVoice.glyph && chatFace.headMark !== "" && chatFace.headMarkAccent &&
     chatFace.statusShown &&
     (chatFace.statusMark === chatFace.statusVoice.glyph || chatFace.statusVoice.glyph_cycle.includes(chatFace.statusMark)) &&
     chatFace.statusWord === chatFace.statusVoice.busy_word && chatFace.statusWord === "Pondering…" &&
+    chatFace.statusSaid === `${chatFace.wantReadName} one line` &&
     chatFace.statusTurns &&
     chatFace.focusEdge && chatFace.modelMark === chatFace.statusVoice.glyph,
   JSON.stringify(chatFace),
 );
 /* The transcript reads as one conversation: the agent's words as markdown
- * behind a quiet dot, each tool line its own row under the CLI's own name
- * (never the window's verb — `read_file` stays `read_file`), and an agent
- * the catalog has no voice for wears the window's one mark and word. */
+ * behind a quiet dot, each tool step its own one-line row under its kind's
+ * word (the CLI's own name — `read_file` — stays the row's name for a screen
+ * reader), and an agent the catalog has no voice for wears the window's one
+ * mark and word. */
 const helperGrammar = await page.evaluate(async () => {
   const seen = {};
   const term = await openTermTab({ placement: "tab" });
@@ -36409,8 +36422,8 @@ const helperGrammar = await page.evaluate(async () => {
     turns: [
       { role: "user", text: "map the cells" },
       { role: "assistant", text: "이제 `CellStyle`과 **다른** 파일들을 읽겠습니다.\n\n- 하나\n- 둘" },
-      { role: "tool", text: "read_file · /repo/ui/tokens.css:1-200" },
-      { role: "tool", text: "grep_search · makeTermView in /repo/ui" },
+      { role: "tool", text: "read_file · /repo/ui/tokens.css:1-200", tool: { name: "read_file", kind: "read" } },
+      { role: "tool", text: "grep_search · makeTermView in /repo/ui", tool: { name: "grep_search", kind: "grep" } },
       { role: "assistant", text: "완벽합니다." },
     ],
   });
@@ -36469,17 +36482,19 @@ const helperGrammar = await page.evaluate(async () => {
     Boolean(meta?.querySelector(".worker-uses")) && Boolean(meta?.querySelector(".worker-state"));
   seen.headNoRule = head ? getComputedStyle(head).borderBottomWidth === "0px" : false;
   seen.ground = getComputedStyle(face).backgroundColor === probe("--chat-ground", "backgroundColor");
-  // Two tool rows under their own names, closed by the answer after them:
-  // no dot on the accent, the target in mono beside the name.
+  // Two tool rows under their kind's word, closed by the answer after them:
+  // the mark quiet, not on the accent, the target in mono beside the word.
   const tools = turns.filter((one) => one.classList.contains("is-tool"));
   seen.toolCount = `×${tools.length}`;
   seen.toolBody = tools
-    .map((row) => `${row.querySelector(".helper-tool-name")?.textContent} · ${row.querySelector(".helper-tool-arg")?.textContent}`)
+    .map((row) => `${row.querySelector(".helper-step-kind")?.textContent} · ${row.querySelector(".helper-step-target")?.textContent}`)
     .join("\n");
-  seen.wantToolBody = "read_file · /repo/ui/tokens.css:1-200\ngrep_search · makeTermView in /repo/ui";
+  seen.wantToolBody = `${t("worker.stepRead", "파일 읽기")} · /repo/ui/tokens.css:1-200\n${t("worker.stepSearch", "검색")} · makeTermView in /repo/ui`;
+  seen.toolNames = tools.map((row) => row.getAttribute("aria-label")).join(",");
+  seen.wantToolNames = ["read_file", "grep_search"].map((name) => t("worker.toolRow", "{{name}} 도구", { name })).join(",");
   seen.toolsSettled = tools.every((row) => !row.classList.contains("is-live")) &&
-    tools.every((row) => getComputedStyle(row, "::before").backgroundColor === probe("--chat-work-ink", "backgroundColor"));
-  seen.argMono = tools[0] ? /mono/i.test(getComputedStyle(tools[0].querySelector(".helper-tool-arg")).fontFamily) : false;
+    tools.every((row) => getComputedStyle(row.querySelector(".helper-step-icon")).color === probe("--ink-mist"));
+  seen.argMono = tools[0] ? /mono/i.test(getComputedStyle(tools[0].querySelector(".helper-step-target")).fontFamily) : false;
   // zo has an accent of its own but the harness catalog gives it no voice: the
   // page wears zo's accent and the window's one mark and word — what every
   // agent the catalog does not voice (Kimi, Grok, …) wears.
@@ -36502,12 +36517,12 @@ const helperGrammar = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a helper page reads as one conversation: markdown prose behind a quiet dot, every tool line its own row under the CLI's own name with the target in mono, and calls the answer closed wearing no accent",
+  "a helper page reads as one conversation: markdown prose behind a quiet dot, every tool step its own one-line row under its kind's word with the target in mono and the CLI's own name for a screen reader, and calls the answer closed wearing no accent",
   helperGrammar.count === 5 &&
     helperGrammar.codeRendered && helperGrammar.boldRendered && helperGrammar.listRendered &&
     helperGrammar.noAgentLabel && helperGrammar.proseFont && helperGrammar.proseDot &&
     helperGrammar.toolCount === "×2" &&
-    helperGrammar.toolBody === helperGrammar.wantToolBody &&
+    helperGrammar.toolBody === helperGrammar.wantToolBody && helperGrammar.toolNames === helperGrammar.wantToolNames &&
     helperGrammar.toolsSettled && helperGrammar.argMono &&
     helperGrammar.tailProse === "완벽합니다.",
   JSON.stringify(helperGrammar),
@@ -36526,13 +36541,13 @@ ok(
   JSON.stringify(helperGrammar),
 );
 
-/* A tool row's dot is the state of the call: four calls the answer closed
- * stand plain; the one still out wears the accent with a halo while the
- * status line says the CLI's word; a result that joins its call turns the
- * dot green and hangs `└ first line` under the row (the rest behind its
- * fold); a failed result turns it the halt ink; and the roster's done takes
- * the accent and the status line away. Rows keep their DOM identity through
- * all of it — a result dresses the row it belongs to. */
+/* A step's mark is the state of the call: four calls the answer closed stand
+ * plain; the one still out wears the accent while the status line says what
+ * it is; a result that joins its call says what came of it on the same line
+ * (both raw sides one press away); a failed result turns the mark and the
+ * words the halt ink; and the roster's done takes the accent and the status
+ * line away. Rows keep their DOM identity through all of it — a result
+ * dresses the row it belongs to. */
 const toolStates = await page.evaluate(async () => {
   const seen = {};
   // The list's last turn — the status row stands after it, as the panel's
@@ -36552,12 +36567,12 @@ const toolStates = await page.evaluate(async () => {
     turns: [
       { role: "user", text: "네 번 읽어라" },
       { role: "assistant", text: "읽겠습니다." },
-      { role: "tool", text: "Read · /repo/a.rs" },
-      { role: "tool", text: "Grep · needle in /repo" },
-      { role: "tool", text: "Edit · /repo/b.rs" },
-      { role: "tool", text: "Bash · cargo test" },
+      { role: "tool", text: "Read · /repo/a.rs", tool: { name: "Read", kind: "read" } },
+      { role: "tool", text: "Grep · needle in /repo", tool: { name: "Grep", kind: "grep" } },
+      { role: "tool", text: "Edit · /repo/b.rs", tool: { name: "Edit", kind: "edit" } },
+      { role: "tool", text: "Bash · cargo test", tool: { name: "Bash", kind: "bash" } },
       { role: "assistant", text: "하나 더." },
-      { role: "tool", text: "Read · /repo/c.rs", tool: { call_id: "c", name: "Read", input: '{\n  "file_path": "/repo/c.rs"\n}', is_error: false } },
+      { role: "tool", text: "Read · /repo/c.rs", tool: { call_id: "c", name: "Read", kind: "read", input: '{\n  "file_path": "/repo/c.rs"\n}', is_error: false } },
     ],
   });
   await openHelperPage(
@@ -36575,28 +36590,35 @@ const toolStates = await page.evaluate(async () => {
     span.remove();
     return value;
   };
-  const dotOf = (row) => getComputedStyle(row, "::before");
+  const markOf = (row) => getComputedStyle(row.querySelector(".helper-step-icon"));
   const tools = [...list.querySelectorAll(".helper-turn.is-tool")];
   // The turns alone — the status row is the list's last child, never a turn.
   seen.rowsTotal = list.querySelectorAll(":scope > .helper-turn").length;
   seen.toolCount = tools.length;
-  // The four the answer closed: the CLI's names as written, no accent.
-  seen.fourNames = tools.slice(0, 4).map((row) => row.querySelector(".helper-tool-name").textContent).join(",");
+  // The four the answer closed: their kinds' words, no accent.
+  seen.fourNames = tools.slice(0, 4).map((row) => row.querySelector(".helper-step-kind").textContent).join(",");
+  seen.wantFourNames = [t("worker.stepRead", "파일 읽기"), t("worker.stepSearch", "검색"),
+    t("worker.stepEdit", "파일 수정"), t("worker.stepShell", "셸 실행")].join(",");
   seen.fourPlain = tools.slice(0, 4).every((row) => !row.classList.contains("is-live") &&
-    dotOf(row).backgroundColor === probe("--chat-work-ink", "backgroundColor") && dotOf(row).boxShadow === "none");
-  // The one still out: accent, halo, and the status line. Its target is the
-  // transcript line's, not the first line of the argument object ("{").
+    markOf(row).color === probe("--ink-mist"));
+  // The one still out: the mark on the accent, "in progress" where its result
+  // will be, and the status line. Its target is the transcript line's, not
+  // the first line of the argument object ("{").
   const out = tools[4];
-  seen.outWords = `${out?.querySelector(".helper-tool-name")?.textContent} · ${out?.querySelector(".helper-tool-arg")?.textContent}`;
-  seen.oneLive = out?.classList.contains("is-live") === true &&
-    dotOf(out).backgroundColor === probe("--agent-accent-claude", "backgroundColor") && dotOf(out).boxShadow !== "none";
+  seen.outWords = `${out?.querySelector(".helper-step-kind")?.textContent} · ${out?.querySelector(".helper-step-target")?.textContent}`;
+  seen.wantOutWords = `${t("worker.stepRead", "파일 읽기")} · /repo/c.rs`;
+  seen.outRes = out?.querySelector(".helper-step-res")?.textContent;
+  seen.wantOutRes = t("worker.stepLive", "진행 중");
+  seen.oneLive = out?.classList.contains("is-live") === true && markOf(out).color === probe("--agent-accent-claude");
   const status = face.querySelector(".helper-status");
   seen.statusShown = status ? !status.hidden : false;
   seen.statusMark = status?.querySelector(".helper-status-mark")?.textContent;
-  seen.statusWord = status?.querySelector(".helper-status-said")?.textContent;
+  seen.statusWord = status?.querySelector(".helper-status-word")?.textContent;
+  seen.statusSaid = status?.querySelector(".helper-status-said")?.textContent;
+  seen.wantStatusSaid = `${t("worker.stepRead", "파일 읽기")} /repo/c.rs`;
   seen.voice = agentVoice("claude");
-  // Its result joins by call id: the same row, now done, with the first
-  // line under it and the rest behind the fold.
+  // Its result joins by call id: the same row, now done, saying what came of
+  // it on its line and the two raw sides one press away.
   const tab = tabs.find((one) => one.id === `helper:${term}:folds`);
   holdHelperTurns(tab.worker.helper, [
     { role: "tool_result", text: "12 lines\nfn main() {}", tool: { call_id: "c", is_error: false } },
@@ -36604,15 +36626,17 @@ const toolStates = await page.evaluate(async () => {
   paintWorkerView(tab);
   const after = [...list.querySelectorAll(".helper-turn.is-tool")];
   seen.sameRow = after[4] === out && after.length === 5;
-  seen.doneDot = out.classList.contains("is-done") && !out.classList.contains("is-live") &&
-    dotOf(out).backgroundColor === probe("--chat-dot-done", "backgroundColor") && dotOf(out).boxShadow === "none";
-  const result = out.querySelector(".helper-tool-result");
+  seen.doneMark = out.classList.contains("is-done") && !out.classList.contains("is-live") &&
+    markOf(out).color === probe("--ink-mist");
+  const result = out.querySelector(".helper-step-res");
   seen.resultLine = result?.textContent;
-  // The extension's secondary line: no glyph before it, the window's type.
-  seen.resultLead = result ? getComputedStyle(result, "::before").content : "";
+  seen.wantResultLine = t("worker.stepLines", "{{n}}줄", { n: 2 });
+  // What came of it is said in the window's type, not the machine's.
   seen.resultMono = result ? /mono/i.test(getComputedStyle(result).fontFamily) : false;
+  out.open = true;
+  await new Promise((done) => setTimeout(done, 10));
   const more = out.querySelector(".helper-tool-body");
-  // Three lines of argument object and two of output stand in the body —
+  // Three lines of argument object and two of output stand in the opened body —
   // both short by the extension's test (three lines, 250 characters), so
   // neither is cut and no door stands (t-6323 A1).
   seen.moreWords = more ? String(more.querySelectorAll(".helper-expand").length) : "";
@@ -36620,26 +36644,28 @@ const toolStates = await page.evaluate(async () => {
   seen.moreOutput = more?.querySelector(".helper-tool-output")?.textContent;
   seen.moreInput = more?.querySelector(".helper-tool-input")?.checkVisibility() === true &&
     more?.querySelector(".helper-tool-input")?.textContent.includes('"file_path": "/repo/c.rs"');
-  // A failing call: its dot and its result line in the halt ink.
+  // A failing call: its mark and its result words in the halt ink.
   holdHelperTurns(tab.worker.helper, [
-    { role: "tool", text: "Bash · false", tool: { call_id: "d", name: "Bash", input: "false", is_error: false } },
+    { role: "tool", text: "Bash · false", tool: { call_id: "d", name: "Bash", kind: "bash", input: "false", is_error: false } },
     { role: "tool_result", text: "exit 1", tool: { call_id: "d", is_error: true } },
   ]);
   paintWorkerView(tab);
   const failed = lastTurnOf(list);
   seen.failedRow = failed.classList.contains("is-tool") && failed.classList.contains("is-failed") &&
     !failed.classList.contains("is-done") && !failed.classList.contains("is-live") &&
-    dotOf(failed).backgroundColor === probe("--chat-dot-failed", "backgroundColor");
-  seen.failedLine = failed.querySelector(".helper-tool-result")?.textContent;
-  seen.failedInk = failed.querySelector(".helper-tool-result")
-    ? getComputedStyle(failed.querySelector(".helper-tool-result")).color === probe("--signal-halt-ink")
+    markOf(failed).color === probe("--signal-halt-ink");
+  seen.failedLine = failed.querySelector(".helper-step-res")?.textContent;
+  seen.wantFailedLine = t("worker.stepFailed", "실패: {{why}}", { why: "exit 1" });
+  seen.failedInk = failed.querySelector(".helper-step-res")
+    ? getComputedStyle(failed.querySelector(".helper-step-res")).color === probe("--signal-halt-ink")
     : false;
   // An edit's row wears the inline diff the backend cut from its input: the
   // review surface's rows and word marks, blank gutters for a snippet, the
   // path left off when it is the one on the call line, the rows past the
-  // ceiling counted, and no input well — the diff is the input.
+  // ceiling counted, and no input well — the diff is the input. It stands in
+  // the row's body, so the row is opened first.
   holdHelperTurns(tab.worker.helper, [
-    { role: "tool", text: "Edit · /repo/d.rs", tool: { call_id: "e", name: "Edit", is_error: false,
+    { role: "tool", text: "Edit · /repo/d.rs", tool: { call_id: "e", name: "Edit", kind: "edit", is_error: false,
       input: '{\n  "file_path": "/repo/d.rs",\n  "old_string": "let x = 1;",\n  "new_string": "let x = 2;"\n}',
       edits: [{ path: "/repo/d.rs", truncated: 3, lines: [
         { kind: "ctx", text: "fn a() {", old: null, new: null },
@@ -36649,7 +36675,9 @@ const toolStates = await page.evaluate(async () => {
   ]);
   paintWorkerView(tab);
   const edited = lastTurnOf(list);
-  const diff = edited.querySelector(":scope > .helper-tool-diff");
+  edited.open = true;
+  await new Promise((done) => setTimeout(done, 10));
+  const diff = edited.querySelector(":scope > .helper-step-body > .helper-tool-diff");
   seen.diffRows = [...(diff?.querySelectorAll(".diff-line") ?? [])].map((row) => row.className.replace("diff-line diff-line--", "")).join(",");
   seen.diffText = [...(diff?.querySelectorAll(".diff-text") ?? [])].map((node) => node.textContent).join("|");
   seen.diffWord = diff?.querySelector(".diff-line--add .diff-word")?.textContent ?? "";
@@ -36663,15 +36691,18 @@ const toolStates = await page.evaluate(async () => {
   seen.diffMono = diff ? /mono/i.test(getComputedStyle(diff).fontFamily) : false;
   // Two files in one call name each file over its rows.
   holdHelperTurns(tab.worker.helper, [
-    { role: "tool", text: "apply_patch", tool: { call_id: "f", name: "apply_patch", is_error: false, input: "*** Begin Patch",
+    { role: "tool", text: "apply_patch", tool: { call_id: "f", name: "apply_patch", kind: "edit", is_error: false, input: "*** Begin Patch",
       edits: [
         { path: "src/a.rs", lines: [{ kind: "add", text: "one", old: null, new: 1 }] },
         { path: "src/b.rs", lines: [{ kind: "meta", text: "*** Delete File: src/b.rs", old: null, new: null }] },
       ] } },
   ]);
   paintWorkerView(tab);
-  seen.patchPaths = [...lastTurnOf(list).querySelectorAll(".helper-tool-diff-path")].map((node) => node.textContent).join(",");
-  seen.patchNumbered = lastTurnOf(list).querySelector(".diff-line--add .diff-num:nth-child(2)")?.textContent;
+  const patched = lastTurnOf(list);
+  patched.open = true;
+  await new Promise((done) => setTimeout(done, 10));
+  seen.patchPaths = [...patched.querySelectorAll(".helper-tool-diff-path")].map((node) => node.textContent).join(",");
+  seen.patchNumbered = patched.querySelector(".diff-line--add .diff-num:nth-child(2)")?.textContent;
   // A quiet paint touches nothing.
   const watch = new MutationObserver(() => {});
   watch.observe(list, { childList: true, subtree: true, characterData: true, attributes: true });
@@ -36692,18 +36723,19 @@ const toolStates = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a tool row's dot is the call's state: calls the answer closed stand plain under the CLI's names, the one still out wears the accent and a halo while the status line says the CLI's word, a result joining by call id turns the same row green with `└ first line` and the rest in its body (short sides whole, no door), a failed result wears the halt ink, an edit's row wears the inline diff cut from its input (the review rows and word marks, blank gutters for a snippet, the rows past the ceiling counted, no input well, a path over each file of a patch), a quiet paint touches nothing, and the roster's done takes the accent and the status away",
+  "a step's mark is the call's state: calls the answer closed stand plain under their kinds' words, the one still out wears the accent and says \"in progress\" while the status line says what it is, a result joining by call id says what came of it on the same row with both raw sides one press away (short sides whole, no door), a failed result wears the halt ink, an edit's row wears the inline diff cut from its input once opened (the review rows and word marks, blank gutters for a snippet, the rows past the ceiling counted, no input well, a path over each file of a patch), a quiet paint touches nothing, and the roster's done takes the accent and the status away",
   toolStates.rowsTotal === 8 && toolStates.toolCount === 5 &&
-    toolStates.fourNames === "Read,Grep,Edit,Bash" && toolStates.fourPlain &&
-    toolStates.oneLive && toolStates.statusShown &&
+    toolStates.fourNames === toolStates.wantFourNames && toolStates.fourPlain &&
+    toolStates.oneLive && toolStates.outRes === toolStates.wantOutRes && toolStates.statusShown &&
     (toolStates.statusMark === toolStates.voice.glyph || toolStates.voice.glyph_cycle.includes(toolStates.statusMark)) &&
     toolStates.statusWord === toolStates.voice.busy_word && toolStates.statusWord === "Pondering…" &&
-    toolStates.sameRow && toolStates.doneDot &&
-    toolStates.resultLine === "12 lines" && toolStates.resultLead === "none" && !toolStates.resultMono &&
-    toolStates.outWords === "Read · /repo/c.rs" &&
+    toolStates.statusSaid === toolStates.wantStatusSaid &&
+    toolStates.sameRow && toolStates.doneMark &&
+    toolStates.resultLine === toolStates.wantResultLine && !toolStates.resultMono &&
+    toolStates.outWords === toolStates.wantOutWords &&
     toolStates.moreWords === toolStates.wantMoreWords && toolStates.moreOutput === "12 lines\nfn main() {}" &&
     toolStates.moreInput &&
-    toolStates.failedRow && toolStates.failedLine === "exit 1" && toolStates.failedInk &&
+    toolStates.failedRow && toolStates.failedLine === toolStates.wantFailedLine && toolStates.failedInk &&
     toolStates.diffRows === "ctx,del,add,meta" && toolStates.diffText === "fn a() {|  let x = 1;|  let x = 2;" &&
     toolStates.diffWord === "2" && toolStates.diffGuttersBlank && toolStates.diffNoPath &&
     toolStates.diffMore === toolStates.wantDiffMore && toolStates.diffNoInputWell && toolStates.diffAddBar &&
@@ -36876,8 +36908,8 @@ const helperWide = await page.evaluate(async () => {
       { role: "user", text: "열 폭을 재라" },
       { role: "assistant", text: "읽는 폭은 눈보다 짧아야 합니다." },
       ...Array.from({ length: 30 }, (_, i) => ({ role: "assistant", text: `문단 ${i}` })),
-      { role: "tool", text: "grep_search · a in /repo" },
-      { role: "tool", text: "grep_search · b in /repo" },
+      { role: "tool", text: "grep_search · a in /repo", tool: { name: "grep_search", kind: "grep" } },
+      { role: "tool", text: "grep_search · b in /repo", tool: { name: "grep_search", kind: "grep" } },
     ],
   });
   await openHelperPage(
@@ -36922,7 +36954,7 @@ const helperWide = await page.evaluate(async () => {
   seen.liveShows = status !== null && !status.hidden &&
     status.textContent.includes(agentVoice("zo").busy_word);
   seen.liveOnAxis = status
-    ? Math.abs(status.querySelector(".helper-status-mark").getBoundingClientRect().left - proseBox.left) <= 2
+    ? Math.abs(status.getBoundingClientRect().left - proseBox.left) <= 2
     : false;
   seen.tailOut = [...face.querySelectorAll(".helper-turn.is-tool")]
     .every((row) => row.classList.contains("is-live"));
@@ -36931,7 +36963,7 @@ const helperWide = await page.evaluate(async () => {
   const toolsBefore = [...face.querySelectorAll(".helper-turn.is-tool")];
   seen.countBefore = `×${toolsBefore.length}`;
   list.scrollTop = list.scrollHeight;
-  holdHelperTurns(tab.worker.helper, [{ role: "tool", text: "grep_search · c in /repo" }]);
+  holdHelperTurns(tab.worker.helper, [{ role: "tool", text: "grep_search · c in /repo", tool: { name: "grep_search", kind: "grep" } }]);
   paintWorkerView(tab);
   const toolsAfter = [...face.querySelectorAll(".helper-turn.is-tool")];
   seen.sameNode = toolsAfter[0] === toolsBefore[0] && toolsAfter[1] === toolsBefore[1];
@@ -36982,9 +37014,9 @@ const helperNarrow = await page.evaluate(async (term) => {
   seen.footInside = speak
     ? speak.getBoundingClientRect().right <= listBox.right + 1
     : false;
-  // On the narrow pane the tool rows still stand under their own names.
+  // On the narrow pane the tool rows still stand under their kinds' words.
   seen.liveStillShows = lastTool !== null &&
-    lastTool.querySelector(".helper-tool-name")?.textContent === "grep_search";
+    lastTool.querySelector(".helper-step-kind")?.textContent === t("worker.stepSearch", "검색");
   face.style.flex = "";
   face.style.width = "";
   delete window.__ANSWER__.subagent_log;
@@ -37237,7 +37269,7 @@ ok(
 /* ---- 평평한 전사와 그 무게 (t-110) --------------------------------------
  *
  * 헬퍼 페이지의 두 계약을 실측한다. 하나, 위계: 에이전트의 말이 맨몸의 주
- * 콘텐츠, 사람의 말은 왼쪽 말풍선, 도구 호출은 점·CLI의 이름·대상 한 행 —
+ * 콘텐츠, 사람의 말은 왼쪽 말풍선, 도구 호출은 표식·종류·대상 한 줄 —
  * 기계의 발췌만 모노다. 둘, 무게: 400턴 위에서 폴은 온 턴만
  * 잇고(행의 DOM 정체성 보존), 상한은 데이터와 DOM을 같은 걸음에 지우며,
  * 바닥 근처의 독자만 따라가고 위를 읽는 독자의 줄은 제자리에 남는다.
@@ -37251,8 +37283,18 @@ ok(
  * pre 둘·문)으로 바뀌어 같은 수이고, 60px을 넘는 브리핑이 제 「더 보기」 문
  * 하나를 얻어 1746. 09-23(t-6323 A4): 상태 줄의 낱말이 확장의 동사를 돌며
  * 읽어 주기에서 빠지고(aria-hidden), 읽어 주는 한 낱말(`.sr`)이 따로 서서
- * 1747. */
-const HELPER_LIST_NODES_CEILING = 1747;
+ * 1747. 09-29(t-15682): 한 걸음이 한 줄이 되어 — 행·줄·표식(svg·use)·말의
+ * 싸개·종류·대상·결과·시간, 아홉 노드 — 이 검사의 400턴처럼 서로 붙지 않은
+ * 결과 없는 도구 줄 132개는 하나에 넷에서 아홉이 되고(+660), 긴 출력의 Bash
+ * 줄은 몸(우물 둘·pre 둘·문)이 여는 때 지어져 열 노드에서 아홉이 되며(−1),
+ * 상태 줄이 고리와 「지금」 칸을 얻어 둘이 늘어(+2) — 셈으로 +661이다.
+ * 메인의 착지 트리들이 찍는 실측은 1628이고 이 가지의 첫 실행은 2290(+662,
+ * 셈에서 한 노드가 더 나온다)이며, 이전 상한 1747은 그 실측보다 119
+ * 넉넉했다. 새 상한은 셈을 그 위에 더한 2408이 아니라 실측 2290이다.
+ * 같은 종류가 붙어 서는 걸음은 한 줄로 접히므로 400걸음의 실측
+ * (measure-steps)은 오히려 준다. 이 검사가 돌 때마다 실측이 `HELPER_NODES`
+ * 줄로 로그에 남는다. */
+const HELPER_LIST_NODES_CEILING = 2290;
 await page.setViewportSize({ width: 1280, height: 860 });
 const flatTranscript = await page.evaluate(async () => {
   const seen = {};
@@ -37265,7 +37307,7 @@ const flatTranscript = await page.evaluate(async () => {
   for (let at = 1; at < 396; at += 1) {
     turns.push(
       at % 3 === 0
-        ? { role: "tool", text: `Read · /repo/file-${at}.rs` }
+        ? { role: "tool", text: `Read · /repo/file-${at}.rs`, tool: { name: "Read", kind: "read" } }
         : at % 3 === 1
           ? { role: "assistant", text: `에이전트의 말 ${at} — 흐르는 본문이다.` }
           : { role: "user", text: `사람의 말 ${at}` },
@@ -37275,9 +37317,9 @@ const flatTranscript = await page.evaluate(async () => {
   // 묶음 하나로 접히지 않도록 말 한 턴을 사이에 둔다 — 묶임 자체는 폭·
   // 활동 검사가 따로 잰다.
   turns.push({ role: "assistant", text: "긴 실행을 시작한다." });
-  turns.push({ role: "tool", text: `Bash · cargo test --workspace\n${dump}` });
+  turns.push({ role: "tool", text: `Bash · cargo test --workspace\n${dump}`, tool: { name: "Bash", kind: "bash" } });
   turns.push({ role: "assistant", text: "긴 실행을 마치고 정리한다." });
-  turns.push({ role: "tool", text: "Grep · helper-turn" });
+  turns.push({ role: "tool", text: "Grep · helper-turn", tool: { name: "Grep", kind: "grep" } });
   let logAsked = 0;
   window.__ANSWER__.subagent_log = (args) => {
     logAsked += 1;
@@ -37338,25 +37380,28 @@ const flatTranscript = await page.evaluate(async () => {
     !brief.querySelector(".helper-who") && !person.querySelector(".helper-who") &&
     brief.getAttribute("aria-label") === t("worker.briefing", "브리핑") &&
     person.getAttribute("aria-label") === t("board.you", "나");
-  // A tool turn is one row of the grid: the gutter dot, the CLI's own name,
-  // the target in mono with an ellipsis — and no fold or result line when
-  // there is nothing past the first line.
+  // A tool turn is one closed line: its mark, its kind's word, the target in
+  // mono with an ellipsis on the words' line — and no body until it is
+  // opened.
   const lone = list.querySelector(".helper-turn.is-tool");
-  seen.toolFolded = lone !== null && lone.querySelector(".helper-tool-body") === null &&
-    lone.querySelector(".helper-tool-result") === null;
-  const toolRow = lone?.querySelector(".helper-tool-call") ?? null;
-  seen.toolLine = toolRow !== null && Number.parseFloat(getComputedStyle(lone).paddingLeft) > 0 &&
-    getComputedStyle(toolRow).display === "flex" && getComputedStyle(lone, "::before").content !== "none";
-  seen.toolVerb = lone?.querySelector(".helper-tool-name")?.textContent;
-  seen.wantToolVerb = "Read";
-  const cue = toolRow?.querySelector(".helper-tool-arg");
+  seen.toolFolded = lone?.tagName === "DETAILS" && lone.open === false && lone.querySelector(".helper-step-body") === null;
+  const toolRow = lone?.querySelector(":scope > .helper-step-line") ?? null;
+  seen.toolLine = toolRow !== null && Number.parseFloat(getComputedStyle(toolRow).paddingLeft) > 0 &&
+    getComputedStyle(toolRow).display === "flex";
+  seen.toolVerb = lone?.querySelector(".helper-step-kind")?.textContent;
+  seen.wantToolVerb = t("worker.stepRead", "파일 읽기");
+  const cue = toolRow?.querySelector(".helper-step-target");
   const cueStyle = cue ? getComputedStyle(cue) : null;
-  seen.cueMono = cueStyle !== null &&
-    /mono/i.test(cueStyle.fontFamily) && cueStyle.textOverflow === "ellipsis";
-  // A long input stands in its row's body cut at the clip, and its door opens
-  // a well of its own that scrolls — the transcript never widens (A1).
+  const wordsStyle = toolRow ? getComputedStyle(toolRow.querySelector(".helper-step-what")) : null;
+  seen.cueMono = cueStyle !== null && /mono/i.test(cueStyle.fontFamily) && wordsStyle?.textOverflow === "ellipsis";
+  // A long input stands in its row's body once opened, cut at the clip, and
+  // its door opens a well of its own that scrolls — the transcript never
+  // widens (A1).
   const foldTool = [...list.querySelectorAll(".helper-turn.is-tool")]
     .find((one) => one.__turn.text.includes("out 299")) ?? null;
+  seen.foldClosed = foldTool?.open === false && foldTool.querySelector(".helper-tool-body") === null;
+  if (foldTool) foldTool.open = true;
+  await new Promise((done) => setTimeout(done, 20));
   const foldRow = foldTool?.querySelector(".helper-tool-body") ?? null;
   const well = foldRow?.querySelector(".helper-tool-input");
   const wellDoor = well?.nextElementSibling?.classList.contains("helper-expand") ? well.nextElementSibling : null;
@@ -37367,8 +37412,8 @@ const flatTranscript = await page.evaluate(async () => {
     wellStyle.overflowY === "auto" && wellStyle.maxHeight !== "none";
   seen.noSideScroll = list.scrollWidth <= list.clientWidth + 1;
   wellDoor?.click();
-  // The run's being out shows as the tail call's accent dot and the status
-  // line under the transcript — one live row, nothing else.
+  // The run's being out shows as the tail call's mark on the accent and the
+  // status line under the transcript — one live row, nothing else.
   const liveLine = list.querySelector(".helper-turn.is-tool.is-live");
   const statusLine = face.querySelector(".helper-status");
   seen.liveTail = liveLine !== null && liveLine === [...list.querySelectorAll(":scope > [data-turn]")].at(-1) &&
@@ -37392,15 +37437,14 @@ const flatTranscript = await page.evaluate(async () => {
   // 문(「더 보기」, t-6323 A1)은 초점을 받고 잉크 고리를 입고 우물을 연다.
   seen.logLabeled = list.getAttribute("role") === "log" &&
     Boolean(list.getAttribute("aria-label")) && list.tabIndex === 0;
-  // The top of the list left the long dump more than two screens away, and a
-  // row that far keeps its height, not its body (t-6323 B1): the reader comes
-  // back to it — its body stands again, door and all — before the door is
-  // asked.
+  // The top of the list left the long dump more than two screens away; the
+  // reader comes back to it — the body they opened stands as they left it,
+  // door and all — before the door is asked.
   foldTool?.scrollIntoView({ block: "nearest" });
   await new Promise(requestAnimationFrame);
   await new Promise(requestAnimationFrame);
   await new Promise((done) => setTimeout(done, 50));
-  const foldBody = foldTool?.querySelector(":scope > .helper-tool-body") ?? null;
+  const foldBody = foldTool?.querySelector(":scope > .helper-step-body > .helper-tool-body") ?? null;
   const cap = foldBody?.querySelector(".helper-expand") ?? null;
   cap?.focus();
   const capStyle = cap ? getComputedStyle(cap) : null;
@@ -37420,7 +37464,7 @@ const flatTranscript = await page.evaluate(async () => {
     next: 4010,
     turns: [
       { role: "assistant", text: "새로 온 말" },
-      { role: "tool", text: "Edit · ui/shell.js" },
+      { role: "tool", text: "Edit · ui/shell.js", tool: { name: "Edit", kind: "edit" } },
     ],
   });
   list.scrollTop = list.scrollHeight;
@@ -37562,12 +37606,12 @@ await page.evaluate(async (term) => {
 }, flatTranscript.term);
 console.log("HELPER_NODES", JSON.stringify({ turns: flatTranscript.count, listNodes: flatTranscript.listNodes }));
 ok(
-  "the helper page is a flat readable transcript: bare assistant prose behind a quiet dot, the person's bubbles on the left, every tool turn one row under the CLI's own name with mono only for machine excerpts, the rest of a long input in the row's body behind its door — and no more nodes at 400 turns than the measured ceiling",
+  "the helper page is a flat readable transcript: bare assistant prose behind a quiet dot, the person's bubbles on the left, every tool step one closed line under its kind's word with mono only for machine excerpts, the rest of a long input in the row's body one press away behind its door — and no more nodes at 400 turns than the measured ceiling",
   flatTranscript.opened && flatTranscript.count === 400 &&
     flatTranscript.listNodes <= HELPER_LIST_NODES_CEILING &&
     flatTranscript.proseFlat && flatTranscript.inkFromToken &&
     flatTranscript.briefingBubble && flatTranscript.userQuiet &&
-    flatTranscript.toolFolded && flatTranscript.toolLine &&
+    flatTranscript.toolFolded && flatTranscript.foldClosed && flatTranscript.toolLine &&
     flatTranscript.toolVerb === flatTranscript.wantToolVerb &&
     flatTranscript.cueMono && flatTranscript.wellBound &&
     flatTranscript.noSideScroll && flatTranscript.liveTail,
@@ -55798,7 +55842,7 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       // never stopped (t-9741).
       const transcript = [
         { role: "user", text: "Wallet 결제 레시피 만들어줘" },
-        { role: "tool", text: "Bash · zerocode-browser open http://admin.internal.example/login" },
+        { role: "tool", text: "Bash · zerocode-browser open http://admin.internal.example/login", tool: { name: "Bash", kind: "bash" } },
         { role: "assistant", text: "저장했습니다." },
       ];
       window.__ANSWER__.pane_log = (args) => ({
@@ -56077,13 +56121,13 @@ suite("focus-view", async ({ browser, origin, ok }) => {
         next: 8,
         turns: [
           { role: "user", text: "둘을 읽고 하나를 고쳐라" },
-          { role: "tool", text: "Read · /repo/a.rs", tool: { call_id: "a", name: "Read", is_error: false } },
+          { role: "tool", text: "Read · /repo/a.rs", tool: { call_id: "a", name: "Read", kind: "read", is_error: false } },
           { role: "tool_result", text: "12 lines", tool: { call_id: "a", is_error: false } },
-          { role: "tool", text: "Grep · needle in /repo", tool: { call_id: "b", name: "Grep", is_error: false } },
+          { role: "tool", text: "Grep · needle in /repo", tool: { call_id: "b", name: "Grep", kind: "grep", is_error: false } },
           { role: "tool_result", text: "no match", tool: { call_id: "b", is_error: true } },
           { role: "thinking", text: "**계획**\n먼저 고친다." },
           { role: "assistant", text: "고치겠습니다." },
-          { role: "tool", text: "Edit · /repo/b.rs", tool: { call_id: "c", name: "Edit", is_error: false } },
+          { role: "tool", text: "Edit · /repo/b.rs", tool: { call_id: "c", name: "Edit", kind: "edit", is_error: false } },
         ],
       });
       await openHelperPage(
@@ -56130,6 +56174,7 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       seen.wantSecondWords = t("worker.focusCalls", "도구 호출 {{n}}회", { n: 1 });
       seen.secondLive = standing[1]?.classList.contains("is-live") === true;
       seen.secondLiveWords = standing[1] ? liveOf(standing[1]) : "";
+      seen.wantSecondLiveWords = `${t("worker.stepEdit", "파일 수정")} /repo/b.rs`;
       // 구성원은 전부 숨고, 목록의 열쇠와 정체성은 그대로다. 숨은 행은
       // 자리도 갖지 않는다 — `[hidden]`이 행의 display를 이겨야 한다.
       seen.onHidden = hiddenRows();
@@ -56169,8 +56214,8 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       // (d) 폴로 도구 턴이 더 오면 **같은 노드**가 제 수를 갈아입는다.
       const secondNode = standing[1];
       holdHelperTurns(tab.worker.helper, [
-        { role: "tool", text: "Bash · cargo test", tool: { call_id: "d", name: "Bash", is_error: false } },
-        { role: "tool", text: "Read · /repo/c.rs", tool: { call_id: "e", name: "Read", is_error: false } },
+        { role: "tool", text: "Bash · cargo test", tool: { call_id: "d", name: "Bash", kind: "bash", is_error: false } },
+        { role: "tool", text: "Read · /repo/c.rs", tool: { call_id: "e", name: "Read", kind: "read", is_error: false } },
       ]);
       paintWorkerView(tab);
       seen.grewSameNode = groups()[1] === secondNode;
@@ -56199,7 +56244,7 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       // (e) 답이 오면 묶음이 닫히고, 다음 도구 턴은 새 묶음이다.
       holdHelperTurns(tab.worker.helper, [
         { role: "assistant", text: "끝났습니다." },
-        { role: "tool", text: "Read · /repo/d.rs", tool: { call_id: "f", name: "Read", is_error: false } },
+        { role: "tool", text: "Read · /repo/d.rs", tool: { call_id: "f", name: "Read", kind: "read", is_error: false } },
       ]);
       paintWorkerView(tab);
       seen.afterAnswerGroups = groups().length;
@@ -56210,7 +56255,7 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       const flood = [];
       for (let at = 0; at < 420; at += 1) {
         flood.push({ role: "tool", text: `Read · /repo/${at}.rs`,
-          tool: { call_id: `x${at}`, name: "Read", is_error: false } });
+          tool: { call_id: `x${at}`, name: "Read", kind: "read", is_error: false } });
         flood.push({ role: "tool_result", text: "ok", tool: { call_id: `x${at}`, is_error: false } });
       }
       holdHelperTurns(tab.worker.helper, flood);
@@ -56241,14 +56286,20 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       seen.wantCappedWords = t("worker.focusCalls", "도구 호출 {{n}}회", { n: capped.at(-1).__calls });
       seen.cappedAllHidden = hiddenRows() === list.querySelectorAll(":scope > .helper-turn.is-grouped").length;
 
-      // (g) 끄면 묶음도 숨은 행도 없다 — 목록의 열쇠는 그대로.
-      const keysWhileOn = keys();
+      // (g) 끄면 묶음도 숨은 행도 없다 — 목록의 열쇠는 있던 턴의 것이고, 같은
+      // 종류로 끝난 걸음들은 다시 한 줄로 접힌다(집중 보기가 켜진 동안은 접히지
+      // 않는다).
+      const keysWhileOn = keys().split(",");
       button.click();
       await new Promise((done) => setTimeout(done, 80));
       seen.savedBack = JSON.stringify(saved);
       seen.backGroups = groups().length;
       seen.backHidden = hiddenRows();
-      seen.backKeys = keys() === keysWhileOn;
+      const keysBack = keys().split(",");
+      seen.backKeys = keysBack.at(-1) === keysWhileOn.at(-1) &&
+        keysBack.every((key, at) => keysWhileOn.includes(key) && (at === 0 || Number(keysBack[at - 1]) < Number(key)));
+      seen.backFolded = keysBack.length < keysWhileOn.length &&
+        list.querySelectorAll(":scope > .helper-turn.is-run").length >= 1;
       seen.backPressed = button.getAttribute("aria-pressed");
 
       tell("hook:subagent", { term, rows: [] });
@@ -56260,14 +56311,14 @@ suite("focus-view", async ({ browser, origin, ok }) => {
       return seen;
     });
     ok(
-      "focus view is off until the head's toggle writes the one global setting; on, a turn's tool work stands behind one summary — `n tool calls · m failed` with the group's own dot, the live call named beside it — its members hidden in place with every `data-turn` and its identity untouched, the cap opens and closes that group alone, a poll that brings more calls grows the SAME node and a quiet poll writes nothing, an answer closes the group and the next call opens a new one, the 400 cap leaves no empty group behind, and turning it off returns the whole transcript",
+      "focus view is off until the head's toggle writes the one global setting; on, a turn's tool work stands behind one summary — `n tool calls · m failed` with the group's own dot, the live call named beside it — its members hidden in place with every `data-turn` and its identity untouched, the cap opens and closes that group alone, a poll that brings more calls grows the SAME node and a quiet poll writes nothing, an answer closes the group and the next call opens a new one, the 400 cap leaves no empty group behind, and turning it off returns the whole transcript — the settled steps of one kind folded into one line again",
       seen.offGroups === 0 && seen.offHidden === 0 && seen.offPressed === "false" &&
         seen.buttonNamed &&
         seen.saved === JSON.stringify([{ on: true }]) && seen.onPressed === "true" &&
         seen.onGroups === 2 &&
         seen.firstWords === seen.wantFirstWords && seen.firstFailed && seen.firstDot &&
         seen.secondWords === seen.wantSecondWords && seen.secondLive && seen.secondDot &&
-        seen.secondLiveWords === "Edit /repo/b.rs" &&
+        seen.secondLiveWords === seen.wantSecondLiveWords &&
         seen.onHidden === 4 && seen.hiddenTakeNoRoom && seen.capsStand &&
         seen.keysAfter === seen.keysBefore &&
         seen.capExpanded === "false" && seen.capNamed &&
@@ -56280,7 +56331,7 @@ suite("focus-view", async ({ browser, origin, ok }) => {
         seen.cappedTurns === 400 && seen.cappedRows === 400 && seen.cappedHonest &&
         seen.cappedWords === seen.wantCappedWords && seen.cappedAllHidden &&
         seen.savedBack === JSON.stringify([{ on: true }, { on: false }]) &&
-        seen.backGroups === 0 && seen.backHidden === 0 && seen.backKeys &&
+        seen.backGroups === 0 && seen.backHidden === 0 && seen.backKeys && seen.backFolded &&
         seen.backPressed === "false",
       JSON.stringify(seen),
     );
@@ -56354,7 +56405,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
         turns: [
           { role: "user", text: "probe.txt를 만들어" },
           { role: "tool", text: "shell · printf hello > probe.txt",
-            tool: { call_id: "c1", name: "shell", input: "printf hello > probe.txt", is_error: false, edits: [] } },
+            tool: { call_id: "c1", name: "shell", kind: "bash", input: "printf hello > probe.txt", is_error: false, edits: [] } },
         ],
         asks: [{
           id: 3, kind: "approval", method: "item/commandExecution/requestApproval", tool: "shell",
@@ -56392,7 +56443,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       log = {
         ...log, status: "idle", asks: [],
         turns: [...log.turns,
-          { role: "tool_result", text: "", tool: { call_id: "c1", name: "shell", input: "", is_error: false } },
+          { role: "tool_result", text: "", tool: { call_id: "c1", name: "shell", kind: "bash", input: "", is_error: false } },
           { role: "assistant", text: "done" }],
       };
       await pollHelperPages();
@@ -56403,7 +56454,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       seen.busyGone = face.querySelector(".helper-status")?.hidden === true;
       seen.idleAgain = face.querySelector(".worker-state")?.textContent === seen.wantIdleWords;
       // The words stream: the wire's live text stands as rows under the last
-      // turn — a thought's fold open, the answer's row — grows in place, and
+      // turn — a thought's closed line, the answer's row — grows in place, and
       // closes into turns in the same paint that brings them.
       seen.rowsBeforeStream = face.querySelectorAll(".helper-turn").length;
       const until = async (test) => {
@@ -56416,9 +56467,14 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       await settle();
       const streaming = face.querySelectorAll(".helper-turn.is-streaming");
       seen.streamingRows = [...streaming].map((row) => row.dataset.role).join("|");
+      // A thought that is going is one closed line — its newest sentence, no
+      // stop — and what has been thought so far is one press away.
+      seen.streamingCue = streaming[0]?.querySelector(".helper-step-target")?.textContent ?? "";
+      seen.streamingClosed = streaming[0]?.open === false;
+      if (streaming[0]) streaming[0].open = true;
+      await new Promise((done) => setTimeout(done, 10));
       seen.streamingThought = streaming[0]?.querySelector(".helper-thought-body")?.textContent ?? "";
-      seen.streamingCue = streaming[0]?.querySelector(".helper-cue")?.textContent ?? "";
-      seen.streamingOpen = streaming[0]?.open === true;
+      if (streaming[0]) streaming[0].open = false;
       const liveRow = streaming[1];
       // What arrived is on screen by the next frame, as the terminal draws it.
       seen.streamingText = (await until(() => liveRow?.textContent.trim() === "Reading")) ? liveRow.textContent.trim() : (liveRow?.textContent ?? "");
@@ -56491,7 +56547,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       return seen;
     });
     ok(
-      "a CLI driven on its wire is a conversation tab: opened for the checkout with the CLI's name, a composer that sends down the wire and no parent door, turns arriving through the poll with the live dot and the busy line, a question standing as the card with the wire's own options (the window's words for their kinds) and the pick going back with its id, the card left alone by a quiet poll and gone when the agent moves on, idle words between turns, the live text streaming as a thought's open fold and the answer's row that grow in place under the last turn with everything that arrived and close into turns in one paint, the session's own news read at once and read again when it came mid-read, the wire's models in the chip menu and a pick sent down the wire, the palette naming the session and its commands, and the tab's close stopping the wire",
+      "a CLI driven on its wire is a conversation tab: opened for the checkout with the CLI's name, a composer that sends down the wire and no parent door, turns arriving through the poll with the live dot and the busy line, a question standing as the card with the wire's own options (the window's words for their kinds) and the pick going back with its id, the card left alone by a quiet poll and gone when the agent moves on, idle words between turns, the live text streaming as a thought's closed line and the answer's row that grow in place under the last turn with everything that arrived and close into turns in one paint, the session's own news read at once and read again when it came mid-read, the wire's models in the chip menu and a pick sent down the wire, the palette naming the session and its commands, and the tab's close stopping the wire",
       seen.opened && seen.startArgs === seen.wantStartArgs && seen.head === seen.wantHead && seen.composer &&
         seen.placeholder === seen.wantPlaceholder && seen.noDoor && seen.chipModel === " · gpt-5.6-sol" &&
         seen.idleWords === seen.wantIdleWords && seen.sent === seen.wantSent && seen.boxCleared &&
@@ -56499,7 +56555,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
         seen.cardActs === seen.wantCardActs && seen.cardKinds === "is-allow|is-allow|is-deny" && seen.cardQuietPoll === 0 &&
         seen.answered === seen.wantAnswered && seen.cardGone && seen.doneRow && seen.busyGone && seen.idleAgain &&
         seen.streamingRows === "thinking|assistant" && seen.streamingThought === "Look at it." &&
-        seen.streamingCue === "Look at it." && seen.streamingOpen && seen.streamingText === "Reading" &&
+        seen.streamingCue === "Look at it" && seen.streamingClosed && seen.streamingText === "Reading" &&
         seen.streamingBelowTurns && seen.streamingGrewInPlace && seen.eventPolled && seen.otherWireIgnored &&
         seen.newsDuringReadReadAgain && seen.closedAtOnce && seen.streamingGone && seen.closedShown &&
         seen.closedRows === 2 && seen.closedThoughtShut &&

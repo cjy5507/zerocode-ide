@@ -11454,6 +11454,62 @@ mod tests {
         );
     }
 
+    /// The conversation page's running marks hold still on the page's own
+    /// guard too, as the approved draft has it (`helper-page-before-after.html`:
+    /// `.run .dot, .spin { animation: none }`). The window-wide rule above is
+    /// the guarantee; this is the page keeping its word if that rule is ever
+    /// scoped down.
+    ///
+    /// Every rule that plays a `helper-*` animation has its selector in the
+    /// reduced-motion block the page keeps beside its transitions, and that
+    /// block turns the animation off. The two that draw a running mark's
+    /// pulse and the foot line's ring must still be played, so the pin holds
+    /// something.
+    #[test]
+    fn the_conversation_pages_running_marks_hold_still_under_reduced_motion() {
+        let css = strip_comments(include_str!("../../../../ui/shell.css"));
+        let opens = "@media (prefers-reduced-motion: reduce) {\n  .helper-cap,";
+        let at = css
+            .find(opens)
+            .expect("the conversation page has no reduced-motion block of its own");
+        let rest = &css[at..];
+        let end = rest
+            .find("\n}\n")
+            .expect("the conversation page's reduced-motion block never closes");
+        let stilled: Vec<&str> = rest[..end]
+            .split('}')
+            .filter(|rule| rule.contains("animation: none"))
+            .filter_map(|rule| rule.rsplit_once('{'))
+            .flat_map(|(selectors, _)| selectors.split(','))
+            .map(str::trim)
+            .collect();
+
+        for keyframes in ["helper-live-pulse", "helper-status-spin"] {
+            assert!(
+                css.contains(&format!("animation: {keyframes} ")),
+                "nothing plays `{keyframes}` any more — the running mark's pulse and the foot line's ring are what this pin holds still"
+            );
+        }
+        let mut unstilled: Vec<&str> = Vec::new();
+        for rule in css.split('}') {
+            let Some((selectors, declarations)) = rule.rsplit_once('{') else {
+                continue;
+            };
+            if !declarations.contains("animation: helper-") {
+                continue;
+            }
+            for selector in selectors.split(',').map(str::trim) {
+                if !stilled.contains(&selector) {
+                    unstilled.push(selector);
+                }
+            }
+        }
+        assert!(
+            unstilled.is_empty(),
+            "these rules play a helper animation that the page's reduced-motion block does not turn off: {unstilled:?}"
+        );
+    }
+
     /// Every catalog is written in the language it claims.
     ///
     /// A split script keyed each block off a line that sorts AFTER the keys it

@@ -19689,6 +19689,73 @@ fn a_continue_after_a_decline_with_nowhere_to_go_is_surfaced_at_once() {
     let _ = fs::remove_dir_all(&cwd);
 }
 
+/// The next bare `continue` stands too (t-16786). The turn that stood folded
+/// nothing, so the decline it kept again must still carry the compaction turn
+/// one made and the decline survived: kept as none — a compaction never made —
+/// turn three folded the conversation once more and surfaced the decline in
+/// the ordinary words, and every other `continue` paid the second compaction
+/// t-15890 set out to remove.
+#[test]
+fn a_second_continue_after_a_standing_decline_stands_too() {
+    let _todo_store = HermeticTodoStore::pin();
+    let cwd = temp_workspace("refusal-standing-second-continue");
+    fs::create_dir_all(&cwd).expect("cwd");
+    let provider = Arc::new(
+        DecliningProvider::new(usize::MAX)
+            .naming(UNROUTED_CATEGORY)
+            .taking(REQUEST_LATENCY),
+    );
+    let mut runtime = declined_long_runtime(&provider, &cwd);
+
+    let (ended, _, _) = declined_turn(&mut runtime, DECLINED_LAST_WORDS);
+    ended.expect("turn one surfaces its decline");
+    let survived = runtime.surfaced_decline.as_ref().and_then(|declined| declined.compaction);
+    assert!(survived.is_some(), "turn one folded the conversation, and the decline survived it");
+    let (ended, _, _) = declined_turn(&mut runtime, CONTINUE_WORDS);
+    ended.expect("turn two stands");
+    let sent = provider.requests().len();
+    assert_eq!(sent, 5, "turn one's four requests, and turn two's one");
+
+    let (ended, blocks, took) = declined_turn(&mut runtime, CONTINUE_WORDS);
+    ended.expect("turn three surfaces its decline");
+    let third = request_kinds(&provider, sent);
+    eprintln!(
+        "t-16786 measured | turn three, a second continue | {} requests ({} summary) | {:.2}s at {:?} a request",
+        third.len(),
+        third.iter().filter(|summary| **summary).count(),
+        took.as_secs_f64(),
+        REQUEST_LATENCY,
+    );
+    assert_eq!(
+        third,
+        vec![false],
+        "turn three asks once too: no summary, no retry after one"
+    );
+    let lines = system_lines(&blocks);
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("Compacted conversation") || line.contains("compacting it")),
+        "nothing was compacted in turn three: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line == core_types::retry_signal::REFUSAL_STANDING_NOTICE),
+        "and it says so in the words of a decline that stands: {lines:?}"
+    );
+    let records = turn_records(&cwd);
+    let record = records.last().expect("turn three was recorded");
+    assert!(
+        record["refusal_compaction"].is_null(),
+        "its record holds no compaction: {record}"
+    );
+    assert_eq!(
+        runtime.surfaced_decline.as_ref().and_then(|declined| declined.compaction),
+        survived,
+        "and the decline kept for turn four still carries turn one's compaction"
+    );
+    let _ = fs::remove_dir_all(&cwd);
+}
+
 /// The words of a decline that stands: that the person's `continue` alone will
 /// be declined again, and what helps. The first surfaced decline keeps the
 /// ordinary words — it does not know yet that it stands.
@@ -20027,6 +20094,108 @@ fn a_compaction_a_decline_survived_is_not_made_twice_but_one_never_made_is() {
     ));
 }
 
+/// A turn that stood folded nothing, and the decline it keeps again is still
+/// the one the compaction did not clear (t-16786): the next turn finds that
+/// compaction spent, as the turn that stood did. The turn's own record says
+/// nothing of it — it made none.
+#[test]
+fn a_decline_kept_again_by_a_standing_turn_carries_the_compaction_it_survived() {
+    use super::RefusalDecision;
+
+    let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), 0);
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
+        RefusalDecision::Standing
+    ));
+    let lines = runtime.settle_surfaced_refusal(Some(UNROUTED_CATEGORY));
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line == core_types::retry_signal::REFUSAL_COMPACTED_RETRY_DECLINED),
+        "the turn that stood folded nothing and says nothing of a compaction: {lines:?}"
+    );
+    assert!(runtime.refusal_compaction.is_none(), "nor does its turn record hold one");
+    assert_eq!(
+        runtime.surfaced_decline.as_ref().and_then(|declined| declined.compaction),
+        Some(a_compaction_that_did_not_clear_it()),
+        "the decline kept again carries the compaction it survived"
+    );
+
+    // So the next `continue`, on the conversation as it was, stands too.
+    begin_public_refusal_test_turn(&mut runtime, "continue");
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
+        RefusalDecision::Standing
+    ));
+}
+
+/// Only a decline that stands keeps a compaction an earlier turn made
+/// (t-16786). One that no longer stands — the conversation moved by the drift,
+/// another category — is kept with what its own turn did, here nothing; and a
+/// turn that folded the conversation itself keeps its own compaction.
+#[test]
+fn a_decline_keeps_an_earlier_turns_compaction_only_while_it_stands() {
+    use super::fallback::STANDING_REFUSAL;
+    use super::RefusalDecision;
+    let drift = isize::try_from(STANDING_REFUSAL.message_drift).expect("a small number");
+
+    for (label, messages_from_now, category) in [
+        ("the conversation moved by the drift", drift, Some(UNROUTED_CATEGORY)),
+        ("another category", 0, None),
+    ] {
+        let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), messages_from_now);
+        // The ladder from its first rung. The decision alone folds nothing
+        // (the turn loop does), so the turn made no compaction.
+        assert!(
+            matches!(runtime.decide_refusal_fallback(category), RefusalDecision::RetrySameModel),
+            "{label}: the same model once"
+        );
+        assert!(
+            matches!(runtime.decide_refusal_fallback(category), RefusalDecision::RetryCompacted(_)),
+            "{label}: the compaction rung"
+        );
+        assert!(
+            matches!(runtime.decide_refusal_fallback(category), RefusalDecision::Surface),
+            "{label}: surfaced"
+        );
+        runtime.settle_surfaced_refusal(category);
+        assert_eq!(
+            runtime.surfaced_decline.as_ref().map(|declined| declined.compaction),
+            Some(None),
+            "{label}: kept with no compaction, not the one an earlier decline survived"
+        );
+    }
+
+    // A decline that stands whose compaction was never made, on a conversation
+    // that can be folded now: the turn folds it, and keeps that compaction.
+    let mut runtime = runtime_that_kept(Some(UNROUTED_CATEGORY), 0);
+    runtime.surfaced_decline.as_mut().expect("the kept decline").compaction = None;
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
+        RefusalDecision::RetryCompacted(_)
+    ));
+    runtime.note_refusal_compaction(super::AutoCompactionEvent {
+        removed_message_count: 8,
+        tokens_before: 9_000,
+        tokens_after: 3_000,
+    });
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some(UNROUTED_CATEGORY)),
+        RefusalDecision::Surface
+    ));
+    runtime.settle_surfaced_refusal(Some(UNROUTED_CATEGORY));
+    assert_eq!(
+        runtime.surfaced_decline.as_ref().and_then(|declined| declined.compaction),
+        Some(crate::turn_trace::RefusalCompaction {
+            removed_messages: 8,
+            tokens_before: 9_000,
+            tokens_after: 3_000,
+            resolved: false,
+        }),
+        "the compaction this turn made, which did not clear it"
+    );
+}
+
 /// A surfaced decline lives on only while public turns keep surfacing it: a
 /// turn that ended any other way — answered — ended it; one that surfaced it
 /// again renewed it; a new model world and a conversation without its
@@ -20156,7 +20325,8 @@ impl ApiClient for DecliningSyncClient {
 
 /// The headless loop walks the same ladder and keeps the same memory: turn two
 /// of a `zo -p`-style session asks once, and the answer it records — the
-/// headless result — is the words of a standing decline.
+/// headless result — is the words of a standing decline; so does turn three,
+/// the next bare `continue` (t-16786).
 #[test]
 fn the_sync_loop_surfaces_a_standing_decline_at_once_too() {
     let _todo_store = HermeticTodoStore::pin();
@@ -20201,6 +20371,21 @@ fn the_sync_loop_surfaces_a_standing_decline_at_once_too() {
         last_text(&runtime).as_deref(),
         Some(core_types::retry_signal::REFUSAL_STANDING_NOTICE),
         "and the headless result says that a bare continue will be declined again"
+    );
+
+    // And the next bare continue stands too (t-16786): turn two folded
+    // nothing, and the decline it kept still carries turn one's compaction.
+    let sent = requests.lock().expect("requests").len();
+    runtime.run_turn(CONTINUE_WORDS, None).expect("turn three surfaces its decline");
+    assert_eq!(
+        kinds(sent),
+        vec![false],
+        "turn three asks once too: no summary, no retry after one"
+    );
+    assert_eq!(
+        last_text(&runtime).as_deref(),
+        Some(core_types::retry_signal::REFUSAL_STANDING_NOTICE),
+        "in the words of a decline that stands"
     );
     let _ = fs::remove_dir_all(&cwd);
 }

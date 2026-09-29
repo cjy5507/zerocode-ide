@@ -958,6 +958,12 @@ const STOP_VERB: &str = "stop";
 /// worth naming on the row, and inventing a category for it would be this
 /// table pretending to know something it does not.
 ///
+/// It is the only table of tool names the window keeps (t-15682): the guard's
+/// text sources, the sidebar's activity rows and — through
+/// `TranscriptTool::kind` — every step line the conversation page draws read
+/// this word, and the page holds no list of vendor names beside it. A name that
+/// only a second list knew was a call two parts of the window drew two ways.
+///
 /// Serialized as a **plain string**, not as a tagged enum: the webview draws a
 /// word per verb and falls through to the raw name for everything else, and
 /// `{"other":"…"}` would make the window unwrap a shape to learn what it
@@ -970,7 +976,12 @@ pub enum Tool {
     Bash,
     Grep,
     Task,
+    /// A page fetched.
     Web,
+    /// The web searched — told from [`Tool::Web`] because a step line words
+    /// the two differently, and a search's answer is as much the web's text as
+    /// a page is.
+    WebSearch,
     Other(String),
 }
 
@@ -986,6 +997,7 @@ impl Tool {
             Tool::Grep => "grep",
             Tool::Task => "task",
             Tool::Web => "web",
+            Tool::WebSearch => "websearch",
             Tool::Other(name) => name,
         }
     }
@@ -995,22 +1007,24 @@ impl Tool {
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
         let known = match normalized_event(name).as_str() {
-            "read" | "readfile" | "readmanyfiles" | "view" | "viewfile" | "opendocument" => {
-                Some(Tool::Read)
-            }
+            "read" | "readfile" | "readmanyfiles" | "view" | "viewfile" | "opendocument"
+            | "cat" | "notebookread" => Some(Tool::Read),
             "edit" | "editfile" | "multiedit" | "strreplace" | "strreplaceeditor"
             | "applypatch" | "patch" | "replace" | "notebookedit" => Some(Tool::Edit),
             "write" | "writefile" | "createfile" | "savefile" | "newfile" => Some(Tool::Write),
             "bash" | "shell" | "localshell" | "runshellcommand" | "runcommand"
             | "runterminalcommand" | "shellcommand" | "terminal" | "exec" | "execute"
-            | "executecommand" => Some(Tool::Bash),
+            | "executecommand" | "execcommand" | "bashoutput" => Some(Tool::Bash),
             "grep" | "glob" | "search" | "searchfiles" | "findfiles" | "ripgrep"
-            | "codebasesearch" | "filesearch" | "grepsearch" => Some(Tool::Grep),
+            | "codebasesearch" | "filesearch" | "grepsearch" | "ls" | "listdir" | "listfiles"
+            | "find" | "codesearch" | "searchfilecontent" => Some(Tool::Grep),
             "task" | "agent" | "subagent" | "spawnagent" | "dispatchagent" | "delegate" => {
                 Some(Tool::Task)
             }
-            "websearch" | "webfetch" | "fetch" | "browse" | "browser" | "urlfetch"
-            | "googlewebsearch" | "webread" | "openurl" => Some(Tool::Web),
+            "websearch" | "googlewebsearch" => Some(Tool::WebSearch),
+            "webfetch" | "fetch" | "browse" | "browser" | "urlfetch" | "webread" | "openurl" => {
+                Some(Tool::Web)
+            }
             _ => None,
         };
         known.or_else(|| activity_text(name).map(Tool::Other))
@@ -2691,6 +2705,59 @@ mod tests {
         envelope.hook_event_name = String::new();
         envelope.payload = "not json".into();
         assert_eq!(envelope_event_name(&envelope), None);
+    }
+
+    /// One table names the kind of every tool call: the window's step lines,
+    /// its file doors and its sidebar all read this word, so a name only a
+    /// second list knew was a call two parts of the window drew two ways
+    /// (t-15682). These are the names the page's own list used to know and this
+    /// one did not, the names only this one knew, and the one split a step's
+    /// line needs — a search of the web is not a fetch of a page.
+    #[test]
+    fn one_table_reduces_every_vendors_tool_name_to_the_kind_a_row_is_drawn_by() {
+        let kind = |name: &str| Tool::named(name).map(|tool| tool.as_str().to_string());
+        for (names, word) in [
+            (
+                &[
+                    "cat",
+                    "notebook_read",
+                    "NotebookRead",
+                    "view_file",
+                    "open_document",
+                ][..],
+                "read",
+            ),
+            (&["exec_command", "BashOutput", "local_shell"][..], "bash"),
+            (
+                &[
+                    "ls",
+                    "list_dir",
+                    "list_files",
+                    "find",
+                    "CodeSearch",
+                    "search_file_content",
+                    "ripgrep",
+                ][..],
+                "grep",
+            ),
+            (
+                &["WebSearch", "web_search", "google_web_search"][..],
+                "websearch",
+            ),
+            (&["WebFetch", "web_fetch", "fetch", "browse"][..], "web"),
+            (&["subagent", "spawn_agent"][..], "task"),
+        ] {
+            for &name in names {
+                assert_eq!(kind(name).as_deref(), Some(word), "`{name}` is a {word}");
+            }
+        }
+        // A name the table does not know keeps its own spelling, and a blank
+        // one is the vendor saying nothing.
+        assert_eq!(
+            kind("mcp__linear__create_issue").as_deref(),
+            Some("mcp__linear__create_issue")
+        );
+        assert_eq!(kind("  "), None);
     }
 
     /// The detail the bridge used to drop, out of the shapes the vendors this
