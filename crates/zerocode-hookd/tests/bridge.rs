@@ -1832,3 +1832,96 @@ fn the_briefs_wall_leaves_the_scripts_budget_its_margin() {
         "{script}"
     );
 }
+
+/* ---- zerocode-find (t-14869) ------------------------------------------------------- */
+
+/// A window whose file find answers `listing`, and keeps what it was asked.
+struct StandingFinder {
+    listing: String,
+    asked: std::sync::Mutex<Vec<zerocode_core::file_find::FindAsk>>,
+}
+
+impl zerocode_hookd::FileFind for StandingFinder {
+    fn find(&self, ask: zerocode_core::file_find::FindAsk) -> Result<String, String> {
+        self.asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ask);
+        Ok(self.listing.clone())
+    }
+}
+
+/// `zerocode-find` rides the bridge with the hook token: the window is asked
+/// with the agent's words, the folder and the pane, and its listing is the
+/// command's output; without the token nothing is read, and without words
+/// the command is its usage.
+#[tokio::test]
+async fn zerocode_find_asks_the_window_with_the_agents_words_folder_and_pane() {
+    use zerocode_core::file_find::{CWD_FLAG, FindAsk, PANE_FLAG, ROUTE, USAGE};
+    let finder = Arc::new(StandingFinder {
+        listing: "src/parser.rs\n".to_string(),
+        asked: std::sync::Mutex::new(Vec::new()),
+    });
+    let (state, _events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(state.with_file_find(finder.clone()));
+    let body = |words: &[&str]| {
+        let mut body = String::new();
+        for word in words {
+            body.push_str(word);
+            body.push('\u{1f}');
+        }
+        body
+    };
+    let find = |token: Option<&str>, body: String| {
+        let mut builder = Request::post(ROUTE)
+            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream");
+        if let Some(token) = token {
+            builder = builder.header(HOOK_TOKEN_HEADER, token);
+        }
+        builder.body(Body::from(body)).expect("request")
+    };
+    let answered = service
+        .clone()
+        .oneshot(find(
+            Some(TOKEN),
+            body(&[
+                "fix",
+                "the parser",
+                CWD_FLAG,
+                "/w/project",
+                PANE_FLAG,
+                "term-2",
+            ]),
+        ))
+        .await
+        .expect("the find");
+    assert_eq!(answered.status(), StatusCode::OK);
+    let said = axum::body::to_bytes(answered.into_body(), 4096)
+        .await
+        .expect("the listing");
+    assert_eq!(&said[..], b"src/parser.rs\n");
+    assert_eq!(
+        *finder.asked.lock().expect("the asks"),
+        [FindAsk {
+            request: "fix the parser".to_string(),
+            cwd: Some("/w/project".to_string()),
+            pane: Some("term-2".to_string()),
+        }]
+    );
+    let refused = service
+        .clone()
+        .oneshot(find(None, body(&["fix"])))
+        .await
+        .expect("no token");
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    let usage = service
+        .oneshot(find(Some(TOKEN), body(&[CWD_FLAG, "/w"])))
+        .await
+        .expect("no words");
+    assert_eq!(usage.status(), StatusCode::CONFLICT);
+    let said = axum::body::to_bytes(usage.into_body(), 4096)
+        .await
+        .expect("the usage");
+    assert_eq!(&said[..], USAGE.as_bytes());
+    assert_eq!(finder.asked.lock().expect("the asks").len(), 1);
+}

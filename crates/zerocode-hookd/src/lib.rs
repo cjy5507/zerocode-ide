@@ -483,6 +483,8 @@ pub struct BridgeState {
     /// Where the window keeps what the seats say at a turn's start — see
     /// [`TurnBrief`]. `None` until the window installs one.
     brief: Option<Arc<dyn TurnBrief>>,
+    /// Where the window answers `zerocode-find` — see [`FileFind`].
+    finder: Option<Arc<dyn FileFind>>,
     artifacts: Option<Arc<dyn ArtifactCommands>>,
     /// Where a fixed ledger pointer waits for a provider's own hook — see
     /// [`pointer_mailbox::PointerMailbox`]. `None` until the window installs
@@ -570,6 +572,16 @@ pub struct TurnBriefAsk {
     pub wall: std::time::Duration,
 }
 
+/// `zerocode-find`, answered by the window (t-14869): the files of the pane's
+/// project most likely involved in what the agent is about to change or
+/// debug — the bridge only authenticates, reads the argv and forwards. The
+/// answer is the command's output; an error is its refusal.
+pub trait FileFind: Send + Sync {
+    /// # Errors
+    /// Why the window could not look.
+    fn find(&self, ask: zerocode_core::file_find::FindAsk) -> Result<String, String>;
+}
+
 /// The window owns the catalog; the HTTP bridge only authenticates and forwards.
 pub trait ArtifactCommands: Send + Sync {
     fn execute(&self, request: serde_json::Value) -> Result<serde_json::Value, String>;
@@ -617,6 +629,13 @@ impl BridgeState {
     #[must_use]
     pub fn with_turn_brief(mut self, source: Arc<dyn TurnBrief>) -> Self {
         self.brief = Some(source);
+        self
+    }
+
+    /// Install the window's answer to `zerocode-find`.
+    #[must_use]
+    pub fn with_file_find(mut self, finder: Arc<dyn FileFind>) -> Self {
+        self.finder = Some(finder);
         self
     }
 
@@ -671,6 +690,7 @@ impl BridgeState {
                 federation,
                 knowledge: None,
                 brief: None,
+                finder: None,
                 artifacts: None,
                 pointers: None,
                 selection_context: Arc::new(std::sync::Mutex::new(
