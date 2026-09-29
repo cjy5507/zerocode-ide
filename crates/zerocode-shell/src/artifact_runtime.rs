@@ -215,6 +215,8 @@ pub(crate) const FEEDBACK_SELECTOR_MAX: usize = 1024;
 pub(crate) const FEEDBACK_COMMENT_MAX: usize = 4000;
 /// 받는 판의 에이전트 id가 가질 수 있는 글자 수.
 pub(crate) const FEEDBACK_AGENT_MAX: usize = 64;
+/// 링크를 따라간 페이지의 주소가 가질 수 있는 글자 수(t-14586).
+pub(crate) const FEEDBACK_PAGE_URL_MAX: usize = 2048;
 /// 내보낼 파일 이름이 이미 있을 때 번호를 붙여 볼 횟수.
 const EXPORT_NAME_TRIES: u32 = 100;
 /// 내보낼 파일 이름에서 제목이 차지할 수 있는 글자 수.
@@ -222,6 +224,8 @@ const EXPORT_STEM_MAX: usize = 60;
 
 /// 창이 청하는 기록 한 줄: 어느 발행물의 몇 번 판에 단 주석을 어느 판에 넣었는가.
 /// 그 판의 SHA와 고칠 원본은 창이 말하지 않는다 — 스토어가 제 기록에서 적는다.
+/// 탭이 그 판에서 링크를 따라 발행물이 아닌 페이지로 갔으면 `page_url`이 주석을 단
+/// 그 페이지이고, `version`은 탭이 떠날 때 보이던 판이다(t-14586).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FeedbackAsk {
@@ -229,6 +233,8 @@ pub(crate) struct FeedbackAsk {
     pub(crate) version: u32,
     pub(crate) items: Vec<FeedbackItem>,
     pub(crate) recipient: FeedbackRecipient,
+    #[serde(default)]
+    pub(crate) page_url: Option<String>,
 }
 
 /// 주석 하나 — 찍은 요소의 선택자와 사람이 쓴 말.
@@ -261,6 +267,10 @@ pub(crate) struct FeedbackLine {
     pub(crate) recipient: FeedbackRecipient,
     pub(crate) items: Vec<FeedbackItem>,
     pub(crate) at_ms: i64,
+    /// 판이 아니라 그 판에서 따라간 페이지에 단 주석이면 그 주소. 이 필드가 없던
+    /// 빌드의 줄은 없는 채로 읽힌다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) page_url: Option<String>,
 }
 
 /// 한 페이지의 기록을 센 것: 읽히는 줄의 수와 가장 새 줄이 단 판.
@@ -1020,6 +1030,7 @@ impl Store {
             recipient: ask.recipient,
             items: ask.items,
             at_ms,
+            page_url: ask.page_url,
         };
         let encoded = serde_json::to_vec(&line).map_err(|error| error.to_string())?;
         if encoded.len() > FEEDBACK_LINE_MAX_BYTES {
@@ -2183,7 +2194,8 @@ impl ScanBudget {
 /// Whether a row is a publication (t-3952): the only rows that carry a
 /// version number of their own, written by `artifact_publish::PageMeta`.
 /// 창이 청한 피드백 한 줄의 모양: 판 번호, 주석의 수와 길이, 받는 판의 열쇠와
-/// 에이전트 id. 판에 그대로 붙여 넣은 말이라도 기록에는 터미널 제어 문자를 받지 않는다.
+/// 에이전트 id, 따라간 페이지의 주소. 판에 그대로 붙여 넣은 말이라도 기록에는 터미널
+/// 제어 문자를 받지 않는다.
 fn validate_feedback(ask: &FeedbackAsk) -> Result<(), String> {
     if ask.version == 0 {
         return Err("피드백의 버전은 1부터입니다".into());
@@ -2224,6 +2236,15 @@ fn validate_feedback(ask: &FeedbackAsk) -> Result<(), String> {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
     {
         return Err("받는 판의 에이전트 id가 아닙니다".into());
+    }
+    if let Some(url) = &ask.page_url
+        && (url.trim().is_empty()
+            || url.chars().count() > FEEDBACK_PAGE_URL_MAX
+            || !plain(url, false))
+    {
+        return Err(format!(
+            "따라간 페이지의 주소는 비지 않고 제어 문자 없이 {FEEDBACK_PAGE_URL_MAX}자까지입니다"
+        ));
     }
     Ok(())
 }
@@ -4509,6 +4530,7 @@ mod tests {
                 pane: "term-4".into(),
                 agent: "claude".into(),
             },
+            page_url: None,
         }
     }
 
@@ -4739,6 +4761,117 @@ mod tests {
         );
     }
 
+    /// 링크를 따라간 페이지에 단 주석(t-14586): 줄은 떠난 판의 번호와 그 페이지의
+    /// 주소를 함께 적고, 주소는 다른 문자열처럼 길이와 제어 문자로 막힌다. 주소가
+    /// 없던 빌드의 줄은 그대로 읽혀 함께 세이고, 주소 없는 전달은 그 필드를 쓰지
+    /// 않는다. 청은 여전히 모르는 필드를 받지 않는다.
+    #[test]
+    fn a_followed_page_address_is_recorded_bounded_and_old_lines_are_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, _) = published_twice(dir.path());
+        let file = feedback_file(&store, &id);
+        // R3가 쓴 모양 그대로의 줄 — `page_url`이 없다.
+        let old = format!(
+            r#"{{"id":"{id}","version":1,"sha256":null,"source_path":null,"recipient":{{"pane":"term-2","agent":"claude"}},"items":[{{"selector":".pin","comment":"옛 줄"}}],"at_ms":3}}"#
+        );
+        std::fs::write(&file, format!("{old}\n")).unwrap();
+        assert_eq!(
+            store.feedback_summary(&id),
+            FeedbackSummary {
+                count: 1,
+                version: Some(1)
+            }
+        );
+
+        let followed = "file:///tmp/zerocode-test/notes/plain.html";
+        let mut ask = feedback_ask(&id, 2, "따라간 페이지의 제목이 잘립니다");
+        ask.page_url = Some(followed.into());
+        let summary = store.record_feedback(ask, 7).unwrap();
+        assert_eq!(
+            summary,
+            FeedbackSummary {
+                count: 2,
+                version: Some(2)
+            }
+        );
+        let plain = store
+            .record_feedback(feedback_ask(&id, 2, "판에서 단 주석"), 8)
+            .unwrap();
+        assert_eq!(plain.count, 3);
+        let text = std::fs::read_to_string(&file).unwrap();
+        let raw: Vec<&str> = text.lines().collect();
+        assert_eq!(raw.len(), 3, "{text}");
+        let lines: Vec<FeedbackLine> = raw
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0].page_url, None);
+        assert_eq!(lines[1].page_url.as_deref(), Some(followed));
+        assert_eq!(lines[1].version, 2);
+        assert!(lines[1].sha256.is_some());
+        assert_eq!(lines[2].page_url, None);
+        assert!(
+            !raw[2].contains("page_url"),
+            "a delivery on the version itself wrote the followed-page field: {}",
+            raw[2]
+        );
+        let listed = store.list(&Filter::default());
+        assert_eq!(listed.rows[0].feedback_count, Some(3));
+
+        let with_url = |url: String| {
+            let mut ask = feedback_ask(&id, 2, "좋습니다");
+            ask.page_url = Some(url);
+            ask
+        };
+        let at_bound = format!(
+            "https://example.com/{}",
+            "a".repeat(FEEDBACK_PAGE_URL_MAX - "https://example.com/".len())
+        );
+        assert_eq!(at_bound.chars().count(), FEEDBACK_PAGE_URL_MAX);
+        let before = std::fs::read(&file).unwrap();
+        let refused = [
+            ("an empty address", String::new()),
+            ("a blank address", "   ".to_string()),
+            ("an address past its bound", format!("{at_bound}a")),
+            (
+                "a line break in the address",
+                "https://example.com/\nx".into(),
+            ),
+            (
+                "a terminal escape in the address",
+                "https://example.com/\u{1b}[2J".into(),
+            ),
+        ];
+        for (why, url) in refused {
+            assert!(
+                store.record_feedback(with_url(url), 9).is_err(),
+                "took {why}"
+            );
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), before, "a refusal wrote");
+        assert_eq!(
+            store.record_feedback(with_url(at_bound), 9).unwrap().count,
+            4
+        );
+
+        let asked = serde_json::from_value::<FeedbackAsk>(serde_json::json!({
+            "id": id, "version": 1, "page_url": followed,
+            "items": [{"selector": ".pin", "comment": "x"}],
+            "recipient": {"pane": "term-4", "agent": "claude"},
+        }))
+        .unwrap();
+        assert_eq!(asked.page_url.as_deref(), Some(followed));
+        let unknown_field = serde_json::from_value::<FeedbackAsk>(serde_json::json!({
+            "id": id, "version": 1, "page": followed,
+            "items": [{"selector": ".pin", "comment": "x"}],
+            "recipient": {"pane": "term-4", "agent": "claude"},
+        }));
+        assert!(
+            unknown_field.is_err(),
+            "the ask took a field it does not know"
+        );
+    }
+
     /// 한 줄이 깨져도 기록은 선다: 읽히지 않는 줄과 다른 페이지를 말하는 줄은 세지
     /// 않고, 끝이 잘린 줄 뒤의 다음 전달은 제 줄에서 시작한다 — 깨진 조각은 지우지
     /// 않는다(덧붙이기만).
@@ -4758,6 +4891,7 @@ mod tests {
             },
             items: Vec::new(),
             at_ms: 1,
+            page_url: None,
         })
         .unwrap();
         std::fs::write(&file, format!("not json\n{stranger}\n{{\"id\":")).unwrap();

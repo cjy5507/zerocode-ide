@@ -8362,22 +8362,64 @@ async function exportArtifactVersion(facts) {
   }
 }
 
-/* 주석을 사람이 고른 판에 초안으로 넣은 뒤, 그 묶음을 페이지의 기록에 남긴다
- * (t-11959). 발행물의 판을 보며 단 주석만 — 링크를 따라 나간 페이지의 것은 기록할
- * 판이 없다. 기록이 실패해도 초안은 이미 판에 있다: 그 사실만 말한다. */
-async function recordArtifactFeedback(tab, notes, recipient) {
-  const version = artifactFeedbackVersion(tab);
-  if (version === null || !recipient || notes.length === 0) return;
-  const facts = tab.artifact;
+/* 주석을 단 자리(t-14586): 초안의 맥락과 기록할 발행물·판을 전달 전에 한 번 정한다.
+ * 탭이 판을 보고 있으면 그 판이다. 링크를 따라 나갔으면 먼저 스토어에 묻는다 —
+ * 따라간 페이지가 스토어의 발행물(어느 판이든 현재 파일이든)이면 그 발행물의 그
+ * 판이다. 아니면 떠나온 아티팩트의 떠날 때 보이던 판에 그 페이지의 주소를 붙여
+ * 적는다. 아티팩트를 보인 적 없는 탭은 자리가 없다 — 기록도 맥락도 없다. `version`이
+ * null이면(발행물이 아닌 페이지) 맥락만 말하고 기록하지 않는다. */
+async function artifactFeedbackPlace(tab) {
+  const facts = tab?.artifact;
+  if (!facts || !tab.url) return null;
+  if (artifactFeedbackSeat(tab) !== null) {
+    return { facts, version: artifactFeedbackVersion(tab), pageUrl: null, context: artifactFeedbackContext(tab) };
+  }
+  const path = fileUrlPath(tab.url);
+  let found = null;
+  if (path !== null) {
+    try {
+      found = await invoke("artifact_page_at", { path });
+    } catch {
+      found = null;
+    }
+  }
+  if (found?.artifact) {
+    const other = artifactStripFacts(found.artifact);
+    other.version = found.version ?? other.current;
+    try {
+      const versions = await invoke("artifact_versions", { id: other.id });
+      other.versions = Array.isArray(versions) ? versions : [];
+    } catch {
+      other.versions = [];
+    }
+    // 판 목록을 못 읽었어도 스토어가 판정한 번호로 적는다 — 맥락은 제목만 선다.
+    const view = { artifact: other, url: tab.url };
+    const context = artifactFeedbackContext(view)
+      || t("artifacts.feedback.subject", "아티팩트 «{{title}}» ({{id}})", { title: other.title, id: other.id });
+    return { facts: other, version: other.version, pageUrl: null, context };
+  }
+  const left = facts.version ?? facts.current;
+  const context = left == null
+    ? t("artifacts.feedback.followedFrom", "주석을 단 페이지: {{url}} — 아티팩트 «{{title}}» ({{id}})에서 링크를 따라간 페이지이며, 이 아티팩트의 파일이 아닙니다.", { url: tab.url, title: facts.title, id: facts.id })
+    : t("artifacts.feedback.followed", "주석을 단 페이지: {{url}} — 아티팩트 «{{title}}» ({{id}})의 버전 {{n}}에서 링크를 따라간 페이지이며, 이 아티팩트의 파일이 아닙니다.", { url: tab.url, title: facts.title, id: facts.id, n: left });
+  return { facts, version: left, pageUrl: tab.url, context };
+}
+
+/* 주석을 사람이 고른 판에 초안으로 넣은 뒤, 그 묶음을 `place`(`artifactFeedbackPlace`)
+ * 가 정한 발행물의 기록에 남긴다(t-11959, t-14586). 기록이 실패해도 초안은 이미
+ * 판에 있다: 그 사실만 말한다. */
+async function recordArtifactFeedback(place, notes, recipient) {
+  if (place == null || place.version == null || !recipient || notes.length === 0) return;
+  const { facts, version, pageUrl } = place;
+  const feedback = {
+    id: facts.id,
+    version,
+    items: notes.map((one) => ({ selector: String(one.selector ?? ""), comment: String(one.comment ?? "") })),
+    recipient: { pane: `term-${recipient.term}`, agent: recipient.agent },
+  };
+  if (pageUrl) feedback.page_url = pageUrl;
   try {
-    const summary = await invoke("artifact_feedback_record", {
-      feedback: {
-        id: facts.id,
-        version,
-        items: notes.map((one) => ({ selector: String(one.selector ?? ""), comment: String(one.comment ?? "") })),
-        recipient: { pane: `term-${recipient.term}`, agent: recipient.agent },
-      },
-    });
+    const summary = await invoke("artifact_feedback_record", { feedback });
     for (const held of tabs) {
       if (held.artifact?.id !== facts.id) continue;
       held.artifact.feedbackCount = summary.count;
