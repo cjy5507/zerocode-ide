@@ -544,7 +544,7 @@ pub(crate) fn captured_lines(binary: &Path, args: &[&str], wait: Duration) -> Op
 /// filtered to the provider the agent drives.
 pub fn agent_models(agent: &str, home: &Path) -> Vec<ModelRow> {
     let provider = zerocode_core::agent::agent_voice(agent).models_provider;
-    let catalog = zo_catalog(home);
+    let catalog = zo_models_catalog(home);
     let rows = catalog
         .get("models")
         .and_then(serde_json::Value::as_array)
@@ -579,7 +579,7 @@ pub fn agent_lineup(
     home: &Path,
 ) -> Option<zerocode_core::summon_difficulty::lineup::Lineup> {
     use zerocode_core::summon_difficulty::lineup::Lineup;
-    let catalog = zo_catalog(home);
+    let catalog = zo_models_catalog(home);
     match zerocode_core::agent::agent_voice(agent).models_provider {
         Some(provider) => Lineup::from_catalog(&catalog, provider),
         None => Lineup::from_catalog_all(&catalog),
@@ -588,7 +588,7 @@ pub fn agent_lineup(
 
 /// `zo models --json`, whole, cached for [`MODELS_TTL`]; `Null` when zo is
 /// missing or said nothing readable.
-fn zo_catalog(home: &Path) -> serde_json::Value {
+fn zo_models_catalog(home: &Path) -> serde_json::Value {
     if let Ok(cache) = models_cache().lock()
         && let Some((at, catalog)) = cache.as_ref()
         && at.elapsed() < MODELS_TTL

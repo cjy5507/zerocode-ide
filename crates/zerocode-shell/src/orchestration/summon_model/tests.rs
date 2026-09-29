@@ -1,6 +1,5 @@
 use super::*;
 use crate::systemone::tests::Endpoint;
-use std::cell::RefCell;
 use zerocode_core::summon_difficulty::lineup::{Lineup, Seen};
 use zerocode_core::summon_difficulty::{LADDER, Look};
 
@@ -106,19 +105,6 @@ fn only_a_seat_that_applies_asks_on_the_launchs_path_and_abstain_never_acts() {
     }
 }
 
-struct Deferred {
-    wire: Wire,
-    jobs: RefCell<Vec<Box<dyn FnOnce() + Send>>>,
-}
-impl crate::agent_teams::Host for Deferred {
-    fn jev_wire(&self) -> Option<Wire> {
-        Some(self.wire.clone())
-    }
-    fn off_the_beat(&self, job: Box<dyn FnOnce() + Send>) {
-        self.jobs.borrow_mut().push(job);
-    }
-}
-
 /// A launcher whose summons reads a synthetic lineup, answers every
 /// difficulty `low`, and whose model seat only records.
 struct Lined;
@@ -194,17 +180,14 @@ fn a_challengers_turn_is_recorded_off_the_beat_and_marked() {
     let prepared = prepared.unwrap();
     let home = tempfile::tempdir().unwrap();
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer("model-b"), 0);
-    let host = Deferred {
-        wire: wire(&home, &endpoint, "shadow"),
-        jobs: Default::default(),
-    };
+    let host =
+        super::super::summon_difficulty::tests::Deferred::on(&wire(&home, &endpoint, "shadow"));
     record(&host, &prepared, home.path().to_str(), 3);
     assert!(
         endpoint.asked().is_empty(),
         "recording returns before a socket opens"
     );
-    let job = host.jobs.borrow_mut().pop().unwrap();
-    job();
+    host.drain();
     assert_eq!(
         endpoint.asked().len(),
         1,

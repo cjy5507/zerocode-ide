@@ -477,4 +477,4 @@ pub(super) fn record_observations_of(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

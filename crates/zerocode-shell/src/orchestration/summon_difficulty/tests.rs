@@ -134,19 +134,21 @@ fn replay_recorded_summonses() {
 
 /// A host that keeps the jobs it is handed off the beat until the test runs
 /// them, so a test sees what the summons did before any socket opened.
-struct Deferred {
-    wire: Wire,
+/// A host whose off-the-beat jobs wait to be run by hand — shared with the
+/// model seat's tests.
+pub(in crate::orchestration) struct Deferred {
+    pub(in crate::orchestration) wire: Wire,
     jobs: std::cell::RefCell<Vec<Box<dyn FnOnce() + Send>>>,
 }
 impl Deferred {
-    fn on(wire: &Wire) -> Self {
+    pub(in crate::orchestration) fn on(wire: &Wire) -> Self {
         Self {
             wire: wire.clone(),
             jobs: Default::default(),
         }
     }
     /// Run every job handed off the beat so far.
-    fn drain(&self) {
+    pub(in crate::orchestration) fn drain(&self) {
         let jobs: Vec<_> = self.jobs.borrow_mut().drain(..).collect();
         for job in jobs {
             job();
