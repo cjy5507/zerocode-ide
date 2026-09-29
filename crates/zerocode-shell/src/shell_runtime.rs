@@ -1030,13 +1030,15 @@ pub(super) fn zo_subagent_helpers(frame: &serde_json::Value) -> Option<Vec<ZoHel
                 let name = named("label")
                     .or_else(|| named("model"))
                     .unwrap_or_else(|| id.split('-').rfind(|part| !part.is_empty()).unwrap_or(id));
+                let transcript = helper_transcript_named(id, named("transcript"));
+                let runs_on = zo_helper_model(named("model"), transcript.as_deref(), id);
                 Some(ZoHelper {
                     row: hooks::SubagentRow {
                         id: id.to_string(),
                         name: name.to_string(),
                         state: hooks::SubagentState::Running,
                         born_listed: true,
-                        transcript: helper_transcript_named(id, named("transcript")),
+                        transcript,
                         // A vendor that counts for itself is believed; one
                         // that says nothing starts at nothing, and the tool
                         // road is what moves it.
@@ -1045,12 +1047,96 @@ pub(super) fn zo_subagent_helpers(frame: &serde_json::Value) -> Option<Vec<ZoHel
                             .and_then(serde_json::Value::as_u64)
                             .unwrap_or(0),
                         registry: None,
+                        runs_on,
                     },
                     activity: named("activity").and_then(zerocode_core::hook::activity_said),
                 })
             })
             .collect(),
     )
+}
+
+/// What a zo helper runs on: the model that ran, what it was asked for, and
+/// how hard it thinks (t-15625).
+///
+/// The frame names the model that RAN (`model`: zo's resolved one, which
+/// follows the helper if zo moves it to another). The record zo keeps beside
+/// the helper's transcript — `<id>.json` next to `<id>.session.jsonl` — names
+/// what it was ASKED for and the effort it thinks at, and names the model too
+/// where the frame did not. One reader for the three words, so no surface
+/// has to know which of the two said what; nothing is looked up by model name
+/// anywhere, and a helper with no readable record still says what its frame
+/// named.
+fn zo_helper_model(
+    frame_model: Option<&str>,
+    transcript: Option<&Path>,
+    id: &str,
+) -> hooks::HelperModel {
+    let record = transcript.and_then(|transcript| helper_record_beside(transcript, id));
+    let ran_per_record = record.as_ref().and_then(|record| {
+        unblank(record.resolved_model.clone()).or_else(|| unblank(record.model.clone()))
+    });
+    let model = frame_model.map(str::to_string).or(ran_per_record);
+    // Asked-for is only said beside a model that ran, and only when it is not
+    // that model: one model is not two words.
+    let requested_model = record
+        .as_ref()
+        .and_then(|record| unblank(record.requested_model.clone()))
+        .filter(|asked| model.as_ref().is_some_and(|ran| ran != asked));
+    let effort = record
+        .and_then(|record| record.activity)
+        .and_then(|activity| unblank(activity.effective_effort));
+    hooks::HelperModel {
+        model,
+        requested_model,
+        effort,
+    }
+}
+
+/// A word a vendor said, or nothing when it said only blanks.
+fn unblank(said: Option<String>) -> Option<String> {
+    said.map(|word| word.trim().to_string())
+        .filter(|word| !word.is_empty())
+}
+
+/// The record zo keeps for one helper, so far as this window reads it: the
+/// three fields that say what the helper runs on, and nothing else. Its
+/// output tail, its tool trail, what it is doing — all of it is ignored by
+/// the parser, and none of it is kept.
+#[derive(serde::Deserialize)]
+struct HelperRecord {
+    #[serde(rename = "requestedModel")]
+    requested_model: Option<String>,
+    #[serde(rename = "resolvedModel")]
+    resolved_model: Option<String>,
+    model: Option<String>,
+    activity: Option<HelperRecordActivity>,
+}
+
+#[derive(serde::Deserialize)]
+struct HelperRecordActivity {
+    #[serde(rename = "effectiveEffort")]
+    effective_effort: Option<String>,
+}
+
+/// The largest record read. zo's own reader refuses anything bigger
+/// (`MAX_MANIFEST_BYTES`): one that size is not a record, and a frame must not
+/// wait on a file that is not one.
+const HELPER_RECORD_CAP: u64 = 256 * 1024;
+
+/// The record beside a helper's transcript, when there is one that can be
+/// read: `<id>.json` in the transcript's own directory, a regular file no
+/// bigger than [`HELPER_RECORD_CAP`]. The transcript is the one
+/// [`helper_transcript_named`] held to this helper's id, so the record is the
+/// helper's own; a symlink, a directory or a pipe where it should be is not a
+/// record, and reading a pipe would stall the frame that asked.
+fn helper_record_beside(transcript: &Path, id: &str) -> Option<HelperRecord> {
+    let path = transcript.with_file_name(format!("{id}.json"));
+    let stat = std::fs::symlink_metadata(&path).ok()?;
+    if !stat.is_file() || stat.len() > HELPER_RECORD_CAP {
+        return None;
+    }
+    serde_json::from_slice(&std::fs::read(&path).ok()?).ok()
 }
 
 /// The helper's own transcript, as the vendor named it — and only when the
