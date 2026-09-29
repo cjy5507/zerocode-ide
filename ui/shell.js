@@ -13175,7 +13175,8 @@ function applyFocusView(list, on) {
   list.__focus = on;
   // Steps of one kind stand as one row unless the page folds by turn: a group
   // counts calls, so it counts single rows (t-15682).
-  if (on) dissolveSteps(list, list.__run);
+  let lands = null;
+  if (on) lands = dissolveSteps(list, list.__run);
   else if (was === true) regroupSteps(list, list.__run);
   if (on) {
     for (const row of [...list.children]) {
@@ -13189,6 +13190,8 @@ function applyFocusView(list, on) {
   standLatestTodo(list, on);
   // Rows the fold had hidden are judged again where they now stand (B1).
   askShelfAgain(list);
+  // The keyboard goes where it was, on what stands for it under the folds.
+  if (lands) landFocus(lands);
 }
 
 /* 전사를 장부에 맞춘다 — 통째로 다시 세우지 않고.

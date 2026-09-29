@@ -1556,11 +1556,34 @@ function foldSettledStep(row, run) {
 }
 
 /* The Focus view folds by turn and keeps its rows single: turned on, every
- * row of steps gives its members back as rows; turned off, they fold again. */
+ * row of steps gives its members back as rows; turned off, they fold again.
+ * What a reader had of a row of steps is kept: a member that was open comes
+ * back open, and the row that stands for where the keyboard was — the member
+ * it was on or in, else the first — is returned, for `landFocus` once the
+ * Focus view has laid its folds. */
 function dissolveSteps(list, run) {
+  const held = document.activeElement;
+  let lands = null;
   for (const row of list.querySelectorAll(":scope > .is-run")) {
-    row.replaceWith(...row.__members.map((turn) => stepRowNode(run, turn, -1)));
+    const members = [...(row.querySelector(":scope > .helper-run-body")?.children ?? [])];
+    const rows = row.__members.map((turn) => stepRowNode(run, turn, -1));
+    row.replaceWith(...rows);
+    members.forEach((member, at) => {
+      if (!member.open) return;
+      rows[at].open = true;
+      paintStepBody(rows[at], run);
+    });
+    if (row.contains(held)) lands = rows[Math.max(0, members.findIndex((member) => member.contains(held)))];
   }
+  return lands;
+}
+
+/* The keyboard, put back on what stands for `row` now that the row was
+ * rebuilt: its line — or, when the Focus view has folded the row away under a
+ * head, that head, the one thing on screen that stands for it. */
+function landFocus(row) {
+  const line = row.hidden ? row.__group?.firstElementChild : row.firstElementChild;
+  line?.focus({ preventScroll: true });
 }
 
 function regroupSteps(list, run) {
