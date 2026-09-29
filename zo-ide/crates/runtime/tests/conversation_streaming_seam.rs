@@ -1729,3 +1729,326 @@ fn sync_run_turn_swaps_to_quota_fallback() {
         .join("\n");
     assert!(history.contains("sync fallback answer"), "got {history:?}");
 }
+
+// --- A 5xx that outlives the retry ladder → one-tier demotion (t-15565) --------
+
+/// The text the reported turn died on (2026-09-22), as the runtime sees it once the
+/// `api` layer's five re-opens are spent: an SSE `api_error` frame, which rides an
+/// HTTP 200 and so has no status in it.
+const SPENT_API_ERROR_FRAME: &str =
+    "provider stream: transport error: api stream error (api_error): Internal server error";
+
+/// A provider whose SERVER is failing the heavy tier, as the runtime meets it after
+/// the `api` layer has spent its ladder: a request that still names the session's own
+/// model ends with `text` under `class`, and one that carries a lighter tier's
+/// override is answered — or, with `lighter_fails`, ends the same way. Every call
+/// records its override, and the two moments a latency reading needs.
+struct ServerFaultingAsyncApi {
+    text: &'static str,
+    class: ProviderErrorClass,
+    lighter_fails: bool,
+    calls: AtomicUsize,
+    seen_overrides: std::sync::Mutex<Vec<Option<String>>>,
+    marks: std::sync::Mutex<Vec<(&'static str, std::time::Instant)>>,
+    answer: String,
+}
+
+impl ServerFaultingAsyncApi {
+    fn new(text: &'static str, class: ProviderErrorClass, answer: &str) -> Self {
+        Self {
+            text,
+            class,
+            lighter_fails: false,
+            calls: AtomicUsize::new(0),
+            seen_overrides: std::sync::Mutex::new(Vec::new()),
+            marks: std::sync::Mutex::new(Vec::new()),
+            answer: answer.to_string(),
+        }
+    }
+
+    fn also_failing_on_the_lighter_tier(mut self) -> Self {
+        self.lighter_fails = true;
+        self
+    }
+
+    fn overrides(&self) -> Vec<Option<String>> {
+        self.seen_overrides.lock().expect("lock").clone()
+    }
+
+    /// The instants the first `what` mark was taken at, if any.
+    fn mark(&self, what: &str) -> Option<std::time::Instant> {
+        self.marks
+            .lock()
+            .expect("lock")
+            .iter()
+            .find(|(name, _)| *name == what)
+            .map(|(_, at)| *at)
+    }
+}
+
+impl AsyncApiClient for ServerFaultingAsyncApi {
+    fn stream_async<'a>(
+        &'a self,
+        request: ApiRequest,
+        render_tx: mpsc::Sender<RenderBlock>,
+        text_block_id: BlockId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen_overrides
+                .lock()
+                .expect("lock")
+                .push(request.model_override.clone());
+            if request.model_override.is_none() || self.lighter_fails {
+                self.marks
+                    .lock()
+                    .expect("lock")
+                    .push(("failed", std::time::Instant::now()));
+                return Err(RuntimeError::with_provider_error_class(self.text, self.class));
+            }
+            render_tx
+                .send(RenderBlock::TextDelta {
+                    id: text_block_id,
+                    text: self.answer.clone(),
+                    done: true,
+                })
+                .await
+                .map_err(|_| RuntimeError::new("channel closed"))?;
+            self.marks
+                .lock()
+                .expect("lock")
+                .push(("first token", std::time::Instant::now()));
+            Ok(vec![
+                AssistantEvent::TextDelta(self.answer.clone()),
+                AssistantEvent::StopReason("end_turn".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        })
+    }
+}
+
+/// A runtime on a model that has a lighter rung on its own provider's ladder — the
+/// demotion needs one.
+fn demotable_runtime(
+    main: Arc<dyn AsyncApiClient>,
+) -> ConversationRuntime<ExplodingSyncApi, StaticToolExecutor> {
+    let mut runtime = quota_runtime(main);
+    runtime.set_context_model("claude-opus-5");
+    runtime
+}
+
+/// One streaming turn: its iteration count (or the error's words) and every block it drew.
+async fn run_turn_reporting(
+    runtime: &mut ConversationRuntime<ExplodingSyncApi, StaticToolExecutor>,
+    input: &str,
+) -> (Result<usize, String>, Vec<RenderBlock>) {
+    let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
+    let drain = drain_task(rx);
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
+    let result = runtime
+        .run_turn_streaming(input, tx, prompter)
+        .await
+        .map(|summary| summary.iterations)
+        .map_err(|error| error.to_string());
+    (result, drain.await.expect("drain"))
+}
+
+fn warn_texts(blocks: &[RenderBlock]) -> Vec<String> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            RenderBlock::System {
+                level: SystemLevel::Warn,
+                text,
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// (1) The reported turn: the heavy tier's ladder is spent on an `api_error` frame.
+/// The turn continues one tier down instead of dying, and the NEXT turn starts on the
+/// model the person chose again — with its own one demotion when its ladder is spent.
+///
+/// Prints the reading the slice asks for: how long the runtime takes from the spent
+/// ladder to the lighter tier's first token. The fake answers at once, so it is the
+/// runtime's own cost (the demotion notice and the rebuilt request), not a model's.
+#[tokio::test]
+async fn a_5xx_that_outlives_the_ladder_continues_the_turn_one_tier_down() {
+    let _env = hermetic_env();
+    let main = Arc::new(ServerFaultingAsyncApi::new(
+        SPENT_API_ERROR_FRAME,
+        ProviderErrorClass::Transient,
+        "lighter answer",
+    ));
+    let mut runtime = demotable_runtime(main.clone());
+
+    let (first, blocks) = run_turn_reporting(&mut runtime, "turn one").await;
+    assert_eq!(first, Ok(2), "the spent ladder costs one extra iteration, not the turn");
+    let overrides = main.overrides();
+    assert_eq!(overrides.len(), 2, "exactly one demotion: {overrides:?}");
+    assert_eq!(overrides[0], None, "the turn starts on the model the person chose");
+    assert!(
+        overrides[1].as_deref().is_some_and(|model| model.contains("sonnet")),
+        "an Opus turn continues on Sonnet, got {overrides:?}"
+    );
+    assert!(history_text(&runtime).contains("lighter answer"));
+    assert_eq!(
+        warn_texts(&blocks).len(),
+        1,
+        "the demotion is announced once: {blocks:?}"
+    );
+    let (failed, first_token) = (
+        main.mark("failed").expect("the heavy tier failed"),
+        main.mark("first token").expect("the lighter tier answered"),
+    );
+    eprintln!(
+        "[t-15565] spent 5xx ladder handed up -> first token on the lighter tier: {:?}",
+        first_token.duration_since(failed)
+    );
+
+    // The demotion is the turn's, not the session's.
+    let (second, _) = run_turn_reporting(&mut runtime, "turn two").await;
+    assert_eq!(second, Ok(2));
+    let overrides = main.overrides();
+    assert_eq!(overrides.len(), 4, "{overrides:?}");
+    assert_eq!(
+        overrides[2], None,
+        "the next turn starts on the model the person chose"
+    );
+    assert!(overrides[3].is_some(), "and gets its own one demotion");
+}
+
+/// (2) Nothing that is not a provider dropping the request is demoted: a 400 fails the
+/// turn as it did, on its first and only request.
+#[tokio::test]
+async fn a_4xx_still_fails_the_turn_without_a_demotion() {
+    let _env = hermetic_env();
+    let main = Arc::new(ServerFaultingAsyncApi::new(
+        "provider transport: api returned 400 Bad Request (invalid_request_error): messages.3.content: invalid",
+        ProviderErrorClass::NonRetryable,
+        "never",
+    ));
+    let mut runtime = demotable_runtime(main.clone());
+
+    let (result, blocks) = run_turn_reporting(&mut runtime, "hi").await;
+    let error = result.expect_err("a 400 fails the turn");
+    assert!(error.contains("400 Bad Request"), "{error}");
+    assert_eq!(main.overrides(), vec![None], "no second request, no lighter tier");
+    assert!(warn_texts(&blocks).is_empty(), "{blocks:?}");
+}
+
+/// (3) The demotion says what a 529's says, from the same table: the two turns' warn
+/// lines are the same words for the same models.
+#[tokio::test]
+async fn a_5xx_demotion_is_announced_in_the_words_a_529_demotion_is() {
+    let _env = hermetic_env();
+    let warns_of = |text: &'static str, class: ProviderErrorClass| async move {
+        let main = Arc::new(ServerFaultingAsyncApi::new(text, class, "lighter answer"));
+        let mut runtime = demotable_runtime(main);
+        let (result, blocks) = run_turn_reporting(&mut runtime, "hi").await;
+        assert_eq!(result, Ok(2), "{text}");
+        warn_texts(&blocks)
+    };
+    // Keyword-free text for the 529: the escape reads the class, and the retry
+    // ladder in front of it stays out of a test that is not about it.
+    let overloaded = warns_of(
+        "simulated provider overload (test)",
+        ProviderErrorClass::provider_overloaded(None),
+    )
+    .await;
+    let dropped = warns_of(SPENT_API_ERROR_FRAME, ProviderErrorClass::Transient).await;
+
+    assert_eq!(overloaded.len(), 1, "{overloaded:?}");
+    assert_eq!(dropped, overloaded, "one warn table for both walls");
+}
+
+/// (4) A lighter tier that is dropped too escalates the way a 529 does: with nowhere
+/// else to go the turn ends after exactly one demotion; with a cross-provider client
+/// installed the turn changes provider and completes there.
+#[tokio::test]
+async fn a_5xx_on_the_lighter_tier_too_ends_the_turn_or_changes_provider() {
+    let _env = hermetic_env();
+
+    let alone = Arc::new(
+        ServerFaultingAsyncApi::new(
+            SPENT_API_ERROR_FRAME,
+            ProviderErrorClass::Transient,
+            "never",
+        )
+        .also_failing_on_the_lighter_tier(),
+    );
+    let mut runtime = demotable_runtime(alone.clone());
+    let (result, _) = run_turn_reporting(&mut runtime, "hi").await;
+    assert!(result.is_err(), "nowhere left to go: the turn ends");
+    assert_eq!(alone.overrides().len(), 2, "one demotion, never a second");
+
+    let main = Arc::new(
+        ServerFaultingAsyncApi::new(
+            SPENT_API_ERROR_FRAME,
+            ProviderErrorClass::Transient,
+            "never",
+        )
+        .also_failing_on_the_lighter_tier(),
+    );
+    let mut runtime = demotable_runtime(main.clone());
+    let fallback = Arc::new(RecordingAnswerAsyncApi::new("fallback answer"));
+    runtime.set_quota_fallback_client(Some((fallback.clone(), "gpt-peer-x".to_string())));
+    let (result, blocks) = run_turn_reporting(&mut runtime, "hi").await;
+    assert_eq!(result, Ok(3), "heavy, lighter, then the other provider");
+    assert_eq!(main.overrides().len(), 2);
+    assert_eq!(fallback.call_count(), 1, "the other provider carried the turn");
+    assert!(history_text(&runtime).contains("fallback answer"));
+    assert_eq!(warn_texts(&blocks).len(), 2, "the demotion, then the swap: {blocks:?}");
+}
+
+/// (5) The headless `run_turn` road takes the same escape: it has its own decision
+/// site, and a spent 5xx ladder must not die there while the streaming turn lives.
+#[test]
+fn sync_run_turn_demotes_a_spent_5xx_ladder() {
+    struct ServerFaultingSyncApi;
+    impl ApiClient for ServerFaultingSyncApi {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            if request.model_override.is_none() {
+                return Err(RuntimeError::with_provider_error_class(
+                    SPENT_API_ERROR_FRAME,
+                    ProviderErrorClass::Transient,
+                ));
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("lighter sync answer".to_string()),
+                AssistantEvent::StopReason("end_turn".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    let _env = hermetic_env();
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        ServerFaultingSyncApi,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    runtime.set_context_model("claude-opus-5");
+
+    let summary = runtime
+        .run_turn("hi", None)
+        .expect("the sync turn continues one tier down, not fails");
+
+    assert!(summary.iterations >= 2, "the sync loop re-requested one tier down");
+    let history = runtime
+        .session()
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            runtime::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(history.contains("lighter sync answer"), "got {history:?}");
+}

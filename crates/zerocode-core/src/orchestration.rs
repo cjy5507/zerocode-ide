@@ -13857,7 +13857,7 @@ pub trait Launcher {
     /// when nothing came back whole; the summons is then refused by name
     /// rather than landed on a guess. The default is a launcher with no seat.
     ///
-    /// `origin` names the summons the way [`Self::choose_difficulty`]'s does
+    /// `origin` names the summons the way [`Self::choose_assign`]'s does
     /// — the team, the summoning pane and its retry name — so the host asks
     /// under the workspace consent it observed for this very call.
     fn choose_agent(
@@ -13869,14 +13869,17 @@ pub trait Launcher {
         None
     }
 
-    /// An acting difficulty request's receipt, or no request while recording.
-    /// Fresh summonses can fill either omitted dial; sealed handovers decline.
-    fn choose_difficulty(
+    /// The assign moment's request (t-15554): the questions `asked` carries
+    /// — the difficulty, the model and its effort — and each riding seat's
+    /// receipt row, `applied` true only for an answer that is to run. No
+    /// receipt for a seat that asked nothing on the launch's path; fresh
+    /// summonses can fill either omitted dial, sealed handovers decline.
+    fn choose_assign(
         &self,
-        _look: &crate::summon_difficulty::Look,
+        _asked: &crate::summon_assign::AssignAsk,
         _origin: [&str; 3],
-    ) -> Option<serde_json::Value> {
-        None
+    ) -> crate::summon_assign::Receipts {
+        crate::summon_assign::Receipts::default()
     }
 
     /// The launch row for `difficulty` — the person's, else today's lineup's,
@@ -13902,16 +13905,6 @@ pub trait Launcher {
     /// — lineup, book and records — or `None` when the host holds no lineup
     /// or the launch was sealed (t-14437).
     fn model_facts(&self, _agent: &str, _origin: [&str; 3]) -> Option<crate::summon_model::Facts> {
-        None
-    }
-
-    /// Ask the model seat `asked`: the receipt row, `applied` true only when
-    /// its answer is to run. `None` while the seat is off.
-    fn choose_model(
-        &self,
-        _asked: &crate::summon_model::ModelAsk,
-        _origin: [&str; 3],
-    ) -> Option<serde_json::Value> {
         None
     }
 
@@ -16567,6 +16560,19 @@ pub fn difficulty_effort(agent: &str, difficulty: &str) -> Option<&'static str> 
     } else {
         effort
     })
+}
+
+/// Every effort `agent`'s difficulty ladder launches at, lowest first, once
+/// each — what a model that names no efforts of its own is offered at, so
+/// the model question needs no difficulty's answer to be built (t-15554).
+#[must_use]
+pub fn ladder_efforts(agent: &str) -> Vec<&'static str> {
+    let mut efforts: Vec<&'static str> = crate::summon_difficulty::LADDER
+        .iter()
+        .filter_map(|(difficulty, _, _)| difficulty_effort(agent, difficulty))
+        .collect();
+    efforts.dedup();
+    efforts
 }
 
 /// Turn `--model`/`--effort` into the words the agent's own CLI takes.
@@ -19973,23 +19979,88 @@ fn plan_inner(
             };
             // Explicit choices survive; omitted dials may use the table.
             // The server window owns remote summonses.
-            let difficulty_receipt = if (effort.is_none() || model.is_none())
-                && words.value("--on").is_none()
-                && !difficulty_look.spec.is_empty()
-                && difficulty_effort(&agent, crate::summon_difficulty::LADDER[0].0).is_some()
-            {
-                launcher.choose_difficulty(&difficulty_look, summons_origin)
-            } else {
+            let open = words.value("--on").is_none() && !difficulty_look.spec.is_empty();
+            let asks_difficulty = (effort.is_none() || model.is_none())
+                && open
+                && difficulty_effort(&agent, crate::summon_difficulty::LADDER[0].0).is_some();
+            // The model dial nobody filled — no `--model`, no row the person
+            // wrote — is the model seat's (t-14437), and its question rides
+            // the difficulty's request (t-15554): built before either answer,
+            // so a model that names no efforts is offered at every rung of
+            // the agent's ladder, and asked while a row the difficulty can
+            // land on is not the person's. An agent whose command line takes
+            // no effort has no pair to offer, and is asked no model question.
+            // Which answer runs is decided below, once, from the one reply.
+            let ladder = ladder_efforts(&agent);
+            let rows_ahead: Vec<crate::summon_difficulty::lineup::Row> =
+                if model.is_none() && open && !ladder.is_empty() {
+                    crate::summon_difficulty::LADDER
+                        .iter()
+                        .filter_map(|(difficulty, _, _)| {
+                            launcher
+                                .difficulty_profile(&agent, difficulty, summons_origin)
+                                .ok()
+                                .flatten()
+                        })
+                        .filter(|row| row.from != crate::summon_difficulty::lineup::Source::Person)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+            let facts = if rows_ahead.is_empty() {
                 None
+            } else {
+                launcher.model_facts(&agent, summons_origin)
             };
+            let summonses = ledger
+                .runs()
+                .iter()
+                .flat_map(|run| run.workers.iter())
+                .filter(|held| held.agent == agent)
+                .count();
+            let model_asked = facts.as_ref().and_then(|facts| {
+                let options = crate::summon_model::options(
+                    &agent,
+                    &facts.lineup,
+                    Some(&facts.seen),
+                    &facts.records,
+                    &ladder,
+                    |offered| {
+                        launcher
+                            .provider_headroom(&agent, Some(offered))
+                            .map(|held| (held.used_percent, held.window.as_str()))
+                    },
+                    now_ms,
+                );
+                crate::summon_model::ask(&difficulty_look, &options)
+            });
+            // A challenger's turn runs whatever the seat would say, so the
+            // launch does not wait for it to say it: the difficulty rides
+            // alone, and the model question is asked once the pane is open.
+            // It is the turn when a row the difficulty can land on holds a
+            // model with too little record here.
+            let challenge_turn = facts.as_ref().is_some_and(|facts| {
+                rows_ahead.iter().any(|row| {
+                    crate::summon_model::challenger(row, &facts.records, summonses).is_some()
+                })
+            });
+            let assign = crate::summon_assign::AssignAsk {
+                difficulty: asks_difficulty.then(|| difficulty_look.clone()),
+                model: model_asked.clone().filter(|_| !challenge_turn),
+            };
+            // One request, one wall: a late or broken reply leaves every
+            // dial to its default.
+            let receipts = if assign.is_empty() {
+                crate::summon_assign::Receipts::default()
+            } else {
+                launcher.choose_assign(&assign, summons_origin)
+            };
+            let difficulty_receipt = receipts.difficulty;
             let chosen = difficulty_receipt
                 .as_ref()
                 .filter(|row| row["applied"].as_bool() == Some(true))
                 .and_then(|row| row["chosen"].as_str());
-            let profile = if model.is_none()
-                && words.value("--on").is_none()
-                && !difficulty_look.spec.is_empty()
-            {
+            let profile = if model.is_none() && open {
                 launcher.difficulty_profile(
                     &agent,
                     chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
@@ -19998,62 +20069,30 @@ fn plan_inner(
             } else {
                 None
             };
-            // The model dial nobody filled — no `--model`, no row the person
-            // wrote — is the model seat's (t-14437): asked over today's
-            // lineup whenever it can be; a challenger's turn tries a model
-            // with too little record first, and the seat's applied answer
-            // runs otherwise. The ladder's row is the road back.
-            let model_turn = if model.is_none()
-                && words.value("--on").is_none()
-                && !difficulty_look.spec.is_empty()
-                && profile
-                    .as_ref()
-                    .is_some_and(|row| row.from != crate::summon_difficulty::lineup::Source::Person)
-            {
-                launcher.model_facts(&agent, summons_origin).map(|facts| {
-                    let ladder = difficulty_effort(
-                        &agent,
-                        chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
-                    )
-                    .unwrap_or_default();
-                    let options = crate::summon_model::options(
-                        &agent,
-                        &facts.lineup,
-                        Some(&facts.seen),
-                        &facts.records,
-                        ladder,
-                        |offered| {
-                            launcher
-                                .provider_headroom(&agent, Some(offered))
-                                .map(|held| (held.used_percent, held.window.as_str()))
-                        },
-                        now_ms,
-                    );
-                    let asked = crate::summon_model::ask(&difficulty_look, &options);
-                    let summonses = ledger
-                        .runs()
-                        .iter()
-                        .flat_map(|run| run.workers.iter())
-                        .filter(|held| held.agent == agent)
-                        .count();
+            // The model seat's turn, at the difficulty the answer chose: a
+            // challenger's turn tries a model with too little record first,
+            // and the seat's applied answer runs otherwise. The ladder's row
+            // is the road back, and a row the person wrote is never moved.
+            let model_turn = facts
+                .filter(|_| {
+                    profile.as_ref().is_some_and(|row| {
+                        row.from != crate::summon_difficulty::lineup::Source::Person
+                    })
+                })
+                .map(|facts| {
                     let challenge = profile
                         .as_ref()
                         .and_then(|row| {
                             crate::summon_model::challenger(row, &facts.records, summonses)
                         })
                         .cloned();
-                    // A challenger's turn runs whatever the seat would say,
-                    // so the launch does not wait for it to say it: the
-                    // question is kept, and asked once the pane is open.
-                    let receipt = asked
-                        .as_ref()
-                        .filter(|_| challenge.is_none())
-                        .and_then(|asked| launcher.choose_model(asked, summons_origin));
-                    (asked, receipt, challenge, facts)
-                })
-            } else {
-                None
-            };
+                    (
+                        model_asked.clone(),
+                        receipts.model.clone().filter(|_| challenge.is_none()),
+                        challenge,
+                        facts,
+                    )
+                });
             let model_pick: Option<(String, String, &str)> = match &model_turn {
                 Some((_, _, Some(challenge), _)) => Some((
                     challenge.model.clone(),
@@ -20095,14 +20134,25 @@ fn plan_inner(
                     "why": dials_why(model_turn.as_ref(), model_pick.as_ref(), profile.as_ref()),
                 })
             });
-            let model_shadow = model_turn
+            // The model question's row says its answer ran only when it did:
+            // a person's row, a model the agent cannot run and a challenger's
+            // turn leave the answer written down, never carried out.
+            let ran_jev = model_pick
                 .as_ref()
-                .and_then(|(asked, receipt, challenge, _)| {
-                    Some(crate::summon_model::Shadow {
-                        ask: asked.clone()?,
-                        receipt: receipt.clone(),
-                        challenge: challenge.is_some(),
-                    })
+                .is_some_and(|(_, _, from)| *from == DIALS_FROM_JEV);
+            let model_shadow = model_asked
+                .filter(|_| receipts.model.is_some() || model_turn.is_some())
+                .map(|ask| crate::summon_model::Shadow {
+                    ask,
+                    receipt: receipts.model.map(|mut receipt| {
+                        if !ran_jev {
+                            receipt["applied"] = serde_json::json!(false);
+                        }
+                        receipt
+                    }),
+                    challenge: model_turn
+                        .as_ref()
+                        .is_some_and(|(_, _, challenge, _)| challenge.is_some()),
                 });
             let effort = effort.or_else(|| {
                 model_pick

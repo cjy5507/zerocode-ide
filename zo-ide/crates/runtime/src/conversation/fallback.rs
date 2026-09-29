@@ -256,7 +256,8 @@ pub(super) enum QuotaEscape {
     /// Swap this turn onto the cross-provider fallback (`model`) and re-request.
     Fallback(String),
     /// Re-request this turn on a lighter model of the SAME provider (`model`),
-    /// because the provider is shedding the heavier one.
+    /// because the provider is shedding the heavier one — or its server dropped
+    /// the request and a 5xx outlived its ladder, which is read the same way.
     ///
     /// Preferred over [`Self::Fallback`] for a provider overload: it is the
     /// smaller change (same provider, same credentials, same tool surface), and
@@ -1154,9 +1155,12 @@ where
 
     /// Decide how a turn-killing error should escape a hard `RateLimit` on the
     /// main model. Only a [`api::ProviderErrorClass::RateLimit`] that survived
-    /// the retry budget (the wall is still up) is a candidate; anything else, or
-    /// a turn already on the fallback, yields [`QuotaEscape::None`] so the caller
-    /// fails exactly as before.
+    /// the retry budget (the wall is still up) is a candidate — or a
+    /// [`api::ProviderErrorClass::Transient`] whose text names the provider's own
+    /// server (a 5xx that outlived its ladder, see
+    /// [`core_types::retry_signal::is_server_fault`]), which is read as a
+    /// provider-scoped wall; anything else, or a turn already on the fallback,
+    /// yields [`QuotaEscape::None`] so the caller fails exactly as before.
     ///
     /// Preference order:
     /// 1. **Wait** — when the exhausted window lifts within [`Self::quota_wait_band`]
@@ -1278,12 +1282,25 @@ where
         if self.cross_fallback_active() {
             return QuotaEscape::None;
         }
-        let Some(::api::ProviderErrorClass::RateLimit {
-            retry_after,
-            scope,
-        }) = error.provider_error_class()
-        else {
-            return QuotaEscape::None;
+        let (retry_after, scope) = match error.provider_error_class() {
+            Some(::api::ProviderErrorClass::RateLimit { retry_after, scope }) => {
+                (retry_after, scope)
+            }
+            // A server that dropped the request after its ladder was spent — a 5xx
+            // status or an `api_error` frame (t-15565) — is a provider wall as well:
+            // it names no account window, and a lighter tier is what gets through
+            // (the reported turn: five re-opens, then a dead turn, with the account
+            // at 7 % and another client answered in the same minute). From here it
+            // takes the road a 529 takes: one tier down, once per turn, then the
+            // cross-provider client. `Transient` alone is not enough — it also covers
+            // a dropped connection, a silent stream and a 408 / 409, none of which a
+            // lighter tier answers — so the text has to name the server too.
+            Some(::api::ProviderErrorClass::Transient)
+                if core_types::retry_signal::is_server_fault(&error.to_string()) =>
+            {
+                (None, ::api::CapacityScope::Provider)
+            }
+            _ => return QuotaEscape::None,
         };
         // Whose capacity ran out decides which of the two account-scoped steps
         // below still make sense. See this function's doc comment: for a provider
