@@ -26,6 +26,7 @@ pub mod game_state;
 pub mod identity;
 pub mod keys;
 pub mod marks;
+pub mod pointer;
 pub mod reflex;
 pub mod render;
 pub mod text_field;

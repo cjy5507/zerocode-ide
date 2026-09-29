@@ -3312,7 +3312,10 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ("absent", "absent"),
         ("reset-budget", "resetBudget"),
         ("reset", "reset"),
-        ("allow-self", "allowSelf"),
+        (
+            "allow-self",
+            crate::computer_use_protocol::identity::ALLOW_SELF_KEY,
+        ),
         ("instant", "instant"),
         ("pass", "pass"),
         ("fail", "fail"),
