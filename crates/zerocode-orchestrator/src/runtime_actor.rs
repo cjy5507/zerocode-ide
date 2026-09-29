@@ -367,9 +367,16 @@ pub enum RuntimeRequest {
         now_ms: i64,
     },
     /// Workers whose live panes the window measured as quiet past the stall
-    /// grace. The ledger revalidates lifecycle and reminder cadence.
+    /// grace. The ledger revalidates lifecycle and the episode's one notice.
     QuietSweep {
         stalled: Vec<(String, i64)>,
+        now_ms: i64,
+    },
+    /// Workers whose leads the window saw come to rest, parked `Stop` or
+    /// not, and whether each sleeps in its own `check --wait` (t-15313). The
+    /// ledger decides from its own mail whether that rest is news.
+    IdleSweep {
+        idle: Vec<zerocode_core::orchestration::IdleWorker>,
         now_ms: i64,
     },
     /// Workers the window found at their provider's quota wall — with BOTH
@@ -754,6 +761,11 @@ impl std::fmt::Debug for RuntimeRequest {
             Self::QuietSweep { stalled, now_ms } => formatter
                 .debug_struct("RuntimeRequest::QuietSweep")
                 .field("workers", &stalled.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::IdleSweep { idle, now_ms } => formatter
+                .debug_struct("RuntimeRequest::IdleSweep")
+                .field("workers", &idle.len())
                 .field("now_ms", now_ms)
                 .finish(),
             // A count: the witness carries the agent's own words.
@@ -1828,6 +1840,19 @@ impl RuntimeActor {
         now_ms: i64,
     ) -> Result<(bool, u64), RuntimeError> {
         match self.request(RuntimeRequest::QuietSweep { stalled, now_ms })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// The beat's leads at rest (t-15313). Answers whether an idle notice
+    /// was written, and the revision that answer speaks for.
+    pub fn idle_sweep(
+        &self,
+        idle: Vec<zerocode_core::orchestration::IdleWorker>,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::IdleSweep { idle, now_ms })? {
             RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
             _ => Err(RuntimeError::AuthorityRejected),
         }
@@ -3112,6 +3137,7 @@ impl RuntimeState {
                 now_ms,
             } => self.turn_ended(term, turn_ended_ms, interrupted, now_ms),
             RuntimeRequest::QuietSweep { stalled, now_ms } => self.quiet_swept(&stalled, now_ms),
+            RuntimeRequest::IdleSweep { idle, now_ms } => self.idle_swept(&idle, now_ms),
             RuntimeRequest::QuotaWalls { walled, now_ms } => self.quota_walled(&walled, now_ms),
             RuntimeRequest::QuotaLifts { lifted, now_ms } => self.quota_lifted(&lifted, now_ms),
             RuntimeRequest::ClassifierDeclines { declined, now_ms } => {
@@ -4408,6 +4434,39 @@ impl RuntimeState {
         }
         let told = self.ledger.workers_stalled(stalled, now_ms)
             + self.ledger.receivers_told_stalled(stalled, now_ms);
+        if told == 0 {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    /// Write the idle notices due in the durable quiet episodes (t-15313):
+    /// a notice and nothing else — no attempt, task or terminal moves on a
+    /// rest, because idle is not done.
+    fn idle_swept(
+        &mut self,
+        idle: &[zerocode_core::orchestration::IdleWorker],
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || idle.len() > MAX_LIST
+            || idle.iter().any(|one| {
+                one.worker.is_empty() || one.worker.len() > MAX_NAME || one.rested_ms < 0
+            })
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let told = self.ledger.workers_idle(idle, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
                 moved: false,
