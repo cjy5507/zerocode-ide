@@ -389,6 +389,8 @@ pub(super) async fn hook_loop(
                                 born_listed: false,
                                 transcript: None,
                                 registry: None,
+                                // A command run names no model of its own.
+                                runs_on: hooks::HelperModel::default(),
                             });
                         }
                         Phase::Finished | Phase::Failed => {
