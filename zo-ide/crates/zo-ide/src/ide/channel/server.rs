@@ -196,13 +196,16 @@ fn dispatch(
     match request.method.as_str() {
         // The questions to a person standing open ride on the liveness probe:
         // a parent waiting on this pane reads them to tell a pane waiting on
-        // somebody from one that stopped (t-11458).
+        // somebody from one that stopped (t-11458) — and so do the tool calls
+        // running now, which write nothing to the transcript until they
+        // return (t-12076).
         method::LIST => RpcResponse::ok(
             id,
             json!([{
                 "id": state.session_id(),
                 "messages": state.history().len(),
                 runtime::subagent_panes::LIST_ASKING: state.live_prompts(),
+                runtime::subagent_panes::LIST_RUNNING: state.running_tools(),
             }]),
         ),
         method::CAPABILITIES => {

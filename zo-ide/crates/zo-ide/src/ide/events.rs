@@ -289,6 +289,9 @@ impl EventsChannel {
     /// 프롬프트가 아니면 `None`.
     #[must_use]
     pub fn publish(&self, block: &RenderBlock) -> Option<u64> {
+        // A tool call's start and end blocks are what `session.list` counts
+        // its running calls by; every block passes here on its way out.
+        self.state.note_tool_block(block);
         let projected = SerializableRenderBlock::from_block(block);
         let Some(kind) = prompt_kind_of(block) else {
             // 흔한 길(텍스트 델타·툴 호출)은 `Value` 를 거치지 않고 바로 줄이
