@@ -41,6 +41,18 @@ const REVERSE_INDEX: &str = "\u{1b}M";
 /// 스크롤 영역 해제.
 const SCROLL_REGION_RESET: &str = "\u{1b}[r";
 
+/// 빈 줄을 그리는 페이로드 — 스크롤이 새로 드러낸 행이 이 모양이다.
+const BLANK_PAYLOAD: &str = "\u{1b}[0m\u{1b}[K\u{1b}[0m";
+
+/// 바뀐 행이 이만큼은 돼야 행이 통째로 밀린 것인지 찾아본다.
+const MIN_SHIFT_ROWS: usize = 3;
+/// 행이 한 프레임에 이보다 많이 밀리면 밀린 것으로 보지 않는다 — 화살표 키 한 번,
+/// 마우스 휠 몇 칸이다. 페이지 넘김은 겹치는 행이 없다.
+const MAX_SHIFT: usize = 8;
+/// 영역 스크롤을 내는 바이트(영역 지정, 커서 이동, 줄바꿈들, 영역 해제)의 어림 —
+/// 이만큼 아끼지 못하면 밀지 않는다.
+const SHIFT_MIN_GAIN: usize = 40;
+
 /// 뷰포트가 살아 있으려면 화면에 최소한 이만큼은 있어야 한다 — 위쪽에 삽입
 /// 영역이 한 줄도 없으면 히스토리를 밀어 넣을 자리가 없다.
 pub const MIN_ROWS: u16 = 4;
@@ -61,6 +73,11 @@ impl Row {
     fn unknown() -> Self {
         Self { payload: String::from('\u{0}'), cells: None }
     }
+
+    /// 스크롤이 드러낸 행 — 터미널이 기본 배경의 빈칸으로 채운다.
+    fn blank(cols: usize) -> Self {
+        Self { payload: String::from(BLANK_PAYLOAD), cells: Some(RowCells::blank(cols)) }
+    }
 }
 
 /// 터미널이 커서의 모양과 보임을 어떻게 갖고 있다고 아는가.
@@ -71,6 +88,17 @@ enum Caret {
     /// 기본 모양으로 보인다(`ESC[0 q ESC[?25h`).
     Shown,
     Hidden,
+}
+
+/// 뷰포트 행 `lo..=hi` 를 터미널이 `by` 행 밀어 주면 새 프레임이 쓸 행이 줄어든다.
+#[derive(Debug, Clone, Copy)]
+struct Shift {
+    /// 뷰포트 안의 첫 행과 끝 행(끝 포함) — 영역이다.
+    lo: usize,
+    hi: usize,
+    by: usize,
+    /// 참이면 내용이 위로 올라간다(줄바꿈), 아니면 아래로(역인덱스).
+    up: bool,
 }
 
 /// 인라인 뷰포트 painter.
@@ -1019,9 +1047,10 @@ impl<W: Write> Painter<W> {
     /// 뷰포트를 그린다. `rows` 길이는 [`Painter::set_height`] 로 맞춰 둔 높이여야
     /// 한다 — 넘치면 잘리고 모자라면 빈 줄로 채운다.
     ///
-    /// 바뀐 행만 쓴다. 바뀐 행은 직전에 쓴 행과 칸 단위로 견주어 다른 구간만 쓴다
-    /// (`rowdiff`) — 칸으로 나눌 수 없거나 직전 모습을 모르는 행, 그리고 그 편이 더 짧은
-    /// 행만 통째로 쓴다.
+    /// 바뀐 행만 쓴다. 행이 그대로 위나 아래로 밀렸으면(목록·페이저를 한 줄 넘길 때)
+    /// 터미널이 그 행들을 영역 안에서 밀게 하고 새로 드러난 행만 쓴다. 바뀐 행은
+    /// 직전에 쓴 행과 칸 단위로 견주어 다른 구간만 쓴다(`rowdiff`) — 칸으로 나눌 수
+    /// 없거나 직전 모습을 모르는 행, 그리고 그 편이 더 짧은 행만 통째로 쓴다.
     pub fn paint(&mut self, rows: &[Line]) {
         // 이 프레임에 아무도 쓰지 않았다면 커서는 지난 프레임이 놓은 자리에 있다.
         self.at = if self.frame.is_empty() { self.last_cursor } else { None };
@@ -1049,6 +1078,9 @@ impl<W: Write> Painter<W> {
         // 이 호출에서 `ESC[0m` 이 나갔는가 — 처음 칸을 쓰는 바이트 앞에 한 번 둔다.
         // 밖에서 누가 스타일을 켜 둔 채 두었더라도 고쳐 주는 보험이다.
         let mut reset_sent = false;
+        if let Some(shift) = self.find_shift(&payloads) {
+            self.scroll_rows(shift, &mut reset_sent);
+        }
         for (index, payload) in payloads.iter().enumerate() {
             // 캐시는 화면 절대 행으로 본다 — 뷰포트 안에서 인덱스가 밀렸을
             // 뿐인 행은 화면의 같은 자리에 이미 옳게 그려져 있다.
@@ -1129,6 +1161,113 @@ impl<W: Write> Painter<W> {
             }
         }
         *cells_scratch = cells;
+    }
+
+    /// 새 프레임의 행들이 옛 행들을 위나 아래로 몇 행 민 것이면, 그 행들을 터미널이
+    /// 밀게 하는 편이 다시 쓰는 것보다 얼마나 짧은지 셈해 가장 남는 밀기를 고른다.
+    /// 찾는 것은 페이로드가 글자 하나까지 같은 행의 이어짐이다.
+    fn find_shift(&self, payloads: &[String]) -> Option<Shift> {
+        let height = payloads.len();
+        let top = usize::from(self.top);
+        let old = |index: usize| self.rendered.get(top + index).map(|slot| slot.payload.as_str());
+        let stale = |index: usize| old(index) != Some(payloads[index].as_str());
+        if (0..height).filter(|index| stale(*index)).count() < MIN_SHIFT_ROWS {
+            return None;
+        }
+        let mut best: Option<(usize, Shift)> = None;
+        for by in 1..=MAX_SHIFT.min(height.saturating_sub(1)) {
+            for up in [true, false] {
+                // 새 행 `index` 가 옛 행 `source(index)` 와 같다.
+                let source = |index: usize| {
+                    if up { index.checked_add(by).filter(|found| *found < height) } else { index.checked_sub(by) }
+                };
+                let follows = |index: usize| {
+                    source(index).is_some_and(|found| {
+                        old(found).is_some_and(|text| text != "\u{0}" && text == payloads[index])
+                    })
+                };
+                let mut index = 0;
+                while index < height {
+                    if !follows(index) {
+                        index += 1;
+                        continue;
+                    }
+                    let first = index;
+                    while index < height && follows(index) {
+                        index += 1;
+                    }
+                    let last = index - 1;
+                    // 영역과 드러나는 행들, 그리고 남는 바이트.
+                    let (lo, hi, exposed) = if up {
+                        (first, last + by, last + 1..=last + by)
+                    } else {
+                        (first - by, last, first - by..=first - 1)
+                    };
+                    let mut gain: isize = (first..=last)
+                        .filter(|kept| stale(*kept))
+                        .map(|kept| isize::try_from(payloads[kept].len()).unwrap_or(0))
+                        .sum();
+                    for shown in exposed {
+                        let after = if payloads[shown] == BLANK_PAYLOAD { 0 } else { payloads[shown].len() };
+                        let before = if stale(shown) { payloads[shown].len() } else { 0 };
+                        gain -= isize::try_from(after).unwrap_or(0) - isize::try_from(before).unwrap_or(0);
+                    }
+                    gain -= isize::try_from(SHIFT_MIN_GAIN / 2 + by).unwrap_or(0);
+                    if let Ok(gain) = usize::try_from(gain) {
+                        if gain >= SHIFT_MIN_GAIN && best.is_none_or(|(most, _)| gain > most) {
+                            best = Some((gain, Shift { lo, hi, by, up }));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(_, shift)| shift)
+    }
+
+    /// 뷰포트 행 `shift.lo..=shift.hi` 를 터미널이 밀게 한다 — 영역을 그 행들로 묶고,
+    /// 위로 올릴 때는 아래 끝 행에서 줄바꿈을, 아래로 내릴 때는 위 끝 행에서 역인덱스를
+    /// 낸다(히스토리 삽입과 같은 문법). 뷰포트는 늘 둘째 행 이하라 영역의 위쪽 여백이
+    /// 화면 첫 행이 될 수 없다 — 밀려난 행이 스크롤백으로 가지 않는다. 캐시도 같이 밀고,
+    /// 드러난 행은 빈 줄로 안다.
+    fn scroll_rows(&mut self, shift: Shift, reset_sent: &mut bool) {
+        // 드러나는 행은 지금 켜 둔 배경으로 칠해진다 — 기본 스타일에서 민다.
+        if !*reset_sent {
+            self.frame.push_str(RESET);
+            *reset_sent = true;
+        }
+        #[allow(clippy::cast_possible_truncation)] // 뷰포트 행 수는 u16 이다.
+        let (lo, hi) = (self.top + shift.lo as u16, self.top + shift.hi as u16);
+        set_scroll_region(&mut self.frame, lo + 1, hi + 1);
+        if shift.up {
+            cup(&mut self.frame, 0, hi);
+            for _ in 0..shift.by {
+                self.frame.push('\n');
+            }
+        } else {
+            cup(&mut self.frame, 0, lo);
+            for _ in 0..shift.by {
+                self.frame.push_str(REVERSE_INDEX);
+            }
+        }
+        self.frame.push_str(SCROLL_REGION_RESET);
+        let cols = usize::from(self.cols);
+        let first = usize::from(self.top) + shift.lo;
+        if let Some(slots) = self.rendered.get_mut(first..=usize::from(self.top) + shift.hi) {
+            let count = slots.len();
+            if shift.up {
+                slots.rotate_left(shift.by);
+                for slot in &mut slots[count - shift.by..] {
+                    *slot = Row::blank(cols);
+                }
+            } else {
+                slots.rotate_right(shift.by);
+                for slot in &mut slots[..shift.by] {
+                    *slot = Row::blank(cols);
+                }
+            }
+        }
+        // 영역 지정은 커서를 처음 자리로 돌려 놓는다.
+        self.at = None;
     }
 
     /// 뷰포트 안 `(col, row)` 상대 좌표를 화면 절대 좌표로.

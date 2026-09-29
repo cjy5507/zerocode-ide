@@ -90,6 +90,11 @@ pub(super) struct RowCells {
 }
 
 impl RowCells {
+    /// `cols` 칸 전부 빈칸인 행 — 스크롤이 새로 드러낸 행이 이렇다.
+    pub(super) fn blank(cols: usize) -> Self {
+        Self { cells: vec![BLANK; cols] }
+    }
+
     /// 칸의 수 — 화면 폭이 바뀌었는데 옛 행이 남았다면 견주지 않는다.
     pub(super) fn width(&self) -> usize {
         self.cells.len()
@@ -418,6 +423,7 @@ mod tests {
         let row = cells(&text("hi"));
         assert_eq!(row.cells.len(), usize::from(COLS));
         assert_eq!(row.cells[2], BLANK);
+        assert!(RowCells::blank(3).cells.iter().all(|cell| *cell == BLANK));
         let wide = cells(&text("한"));
         assert_eq!((wide.cells[0].part, wide.cells[1].part), (Part::Head, Part::Tail));
     }
