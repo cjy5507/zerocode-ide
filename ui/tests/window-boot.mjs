@@ -1319,6 +1319,18 @@ const stubBackend = ({ boot, pollers }) => {
       if (kind === "export") return { kind: "none", bytes: 12, truncated: false };
       return { kind: "text", text: `{"n":${at}}\n`, bytes: 8, truncated: false };
     },
+    /* 갤러리 문서의 문 (t-16006): 창은 행의 id(와 보관 판의 번호)만 보낸다. 열린 프로젝트
+       (`active_root`) 안의 파일이면 `in_project`가 참이라 프로젝트의 파일 문으로 열리고, 밖이면
+       저장소가 읽어 준 글이 읽기 전용 탭이 된다. 행의 경로는 창의 카탈로그(`artifactRows`)에서
+       찾는다 — 어느 시험이 어떤 행을 갖다 놓아도 같은 답이다. */
+    artifact_document: (args) => {
+      window.__DOCUMENT_ASKS__ = (window.__DOCUMENT_ASKS__ ?? []).concat([{ ...args }]);
+      const path = artifactRows.get(args.id)?.path ?? "";
+      const text = args.version == null
+        ? `# 문서\n\n${path}`
+        : `# 문서\n\n/data/artifacts/versions/${args.id}/${args.version}/${path.split("/").at(-1)}`;
+      return { text, bytes: text.length, truncated: false, in_project: path.startsWith(`${boot.active_root}/`) };
+    },
     artifact_counts: () => {
       const rows = window.__buildArtifacts__(window.__ARTIFACTS__ ?? { count: 0 });
       const counts = {

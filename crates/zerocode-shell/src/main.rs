@@ -357,7 +357,7 @@ use cmd::{
     worktree_loss, worktree_prefs, worktree_stamp, write_primary_selection, write_text_file,
 };
 use cmd::{
-    artifact_copy_path, artifact_counts, artifact_delete, artifact_export,
+    artifact_copy_path, artifact_counts, artifact_delete, artifact_document, artifact_export,
     artifact_feedback_record, artifact_import_transcripts, artifact_open, artifact_page_at,
     artifact_preview, artifact_register, artifact_reveal, artifact_search, artifact_thumbnail,
     artifact_versions, artifacts_list, set_artifacts_auto_open_beside,
@@ -2997,6 +2997,7 @@ fn main() -> ExitCode {
             artifacts_list,
             artifact_search,
             artifact_preview,
+            artifact_document,
             artifact_counts,
             artifact_open,
             artifact_reveal,
