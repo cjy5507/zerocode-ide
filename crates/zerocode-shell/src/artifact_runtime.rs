@@ -2216,7 +2216,12 @@ impl Store {
                 .ok_or_else(|| format!("그 버전은 더 이상 보관되지 않습니다: {id} 버전 {n}"))?,
         };
         let cap = self.limits().preview_text_bytes_max;
-        let meta = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+        // A row outlives its file until the next scan; say so in words rather than
+        // in the operating system's.
+        let meta = std::fs::metadata(&path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => format!("아티팩트 파일이 사라졌습니다: {id}"),
+            _ => error.to_string(),
+        })?;
         if !meta.is_file() {
             return Err(format!("일반 파일이 아닙니다: {id}"));
         }
@@ -4425,6 +4430,14 @@ mod tests {
                 .document_text("no-such-row", None)
                 .expect_err("an unknown row is refused")
                 .contains("no-such-row")
+        );
+        // The file went away while its row stayed: one sentence, not an OS error.
+        std::fs::remove_file(project.join("long.md")).expect("remove");
+        assert!(
+            store
+                .document_text(&long.id, None)
+                .expect_err("a vanished file is refused")
+                .contains("사라졌습니다")
         );
 
         // A kept version is read from the store's own list of them — the caller

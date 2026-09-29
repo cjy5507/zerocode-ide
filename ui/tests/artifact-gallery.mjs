@@ -2697,6 +2697,7 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
         { id: "doc-far", path: "/tmp/zerocode-elsewhere/notes/plan.md", text: line("창이 모르는 폴더의 문서") },
         { id: "doc-hist", path: `${other}/output/history.md`, text: line("고쳐 온 문서") },
         { id: "doc-gone", path: `${other}/output/gone.md`, text: "" },
+        { id: "doc-cut", path: `${other}/output/big.md`, text: line("표의 상한에서 잘린 문서") },
         { id: "doc-in", path: `${root}/project/inside.md`, text: line("열린 프로젝트 안의 문서") },
       ];
       const held = new Map(rows.map((row) => [row.id, row]));
@@ -2734,7 +2735,9 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
         const row = held.get(args.id);
         if (!row || row.id === "doc-gone") throw "아티팩트 파일이 사라졌습니다";
         const text = args.version == null ? row.text : `# 옛 판\n\n${row.id}의 버전 ${args.version} 본문\n`;
-        return { text, bytes: text.length, truncated: false, in_project: inside(row.path) };
+        // 표의 상한에서 잘린 문서: 파일은 900000바이트인데 글은 앞부분뿐이다.
+        const cut = row.id === "doc-cut" && args.version == null;
+        return { text, bytes: cut ? 900_000 : text.length, truncated: cut, in_project: inside(row.path) };
       };
       window.__ANSWER__.artifact_versions = (args) => (args.id === "doc-hist" || args.id === "doc-in"
         ? [1, 2].map((n) => ({ n, path: `${versions}/${args.id}/${n}/history.md`, bytes: 10, modified_ms: n, sha256: String(n).repeat(64) }))
@@ -2980,7 +2983,20 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
       JSON.stringify(insidePick),
     );
 
-    /* ---- 9. 실패해도 알림은 하나 ------------------------------------------------ */
+    /* ---- 9. 표의 상한에서 잘린 문서는 앞부분만 보인다고 말한다 ------------------------ */
+    await clear();
+    await gallery();
+    await page.locator('.artifact-card[data-id="doc-cut"]').dblclick();
+    await settle();
+    const cutView = await look("doc-cut");
+    ok(
+      "a document the store cut at its byte cap opens read-only and says how much of the file is shown",
+      cutView.readOnly && cutView.body.includes("표의 상한에서 잘린 문서") && cutView.toasts.length === 0
+        && cutView.note.includes("읽기 전용") && cutView.note.includes("만 보입니다") && cutView.note.includes("(전체 878.9 KB)"),
+      JSON.stringify(cutView),
+    );
+
+    /* ---- 10. 실패해도 알림은 하나 ----------------------------------------------- */
     await clear();
     await gallery();
     await page.locator('.artifact-card[data-id="doc-gone"]').dblclick();
@@ -2992,7 +3008,7 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
       JSON.stringify(gone),
     );
 
-    /* ---- 10. 네 카탈로그와 창의 오류 ------------------------------------------- */
+    /* ---- 11. 네 카탈로그와 창의 오류 ------------------------------------------- */
     const words = await page.evaluate(() => ["en", "ja", "zh", "es"].flatMap((code) => [
       "artifacts.readOnlyNote", "artifacts.readOnlyCut",
     ].filter((key) => typeof CATALOG[code][key] !== "string" || CATALOG[code][key] === "").map((key) => `${code}:${key}`)));
