@@ -96,8 +96,9 @@ const PROBE_PROMPT: &str = "hi";
 
 /// Answers by (agent, checkout), each with the moment it was read.
 type CatalogCache = HashMap<(String, String), (Instant, SlashCatalog)>;
-/// zo's model rows, with the moment they were read.
-type ModelsCache = Option<(Instant, Vec<serde_json::Value>)>;
+/// zo's model catalog (`zo models --json`, whole), with the moment it was
+/// read.
+type ModelsCache = Option<(Instant, serde_json::Value)>;
 
 fn catalog_cache() -> &'static Mutex<CatalogCache> {
     static CACHE: OnceLock<Mutex<CatalogCache>> = OnceLock::new();
@@ -543,7 +544,11 @@ pub(crate) fn captured_lines(binary: &Path, args: &[&str], wait: Duration) -> Op
 /// filtered to the provider the agent drives.
 pub fn agent_models(agent: &str, home: &Path) -> Vec<ModelRow> {
     let provider = zerocode_core::agent::agent_voice(agent).models_provider;
-    let rows = zo_models(home);
+    let catalog = zo_catalog(home);
+    let rows = catalog
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
     rows.iter()
         .filter_map(|row| {
             let id = row.get("id")?.as_str()?;
@@ -564,26 +569,39 @@ pub fn agent_models(agent: &str, home: &Path) -> Vec<ModelRow> {
         .collect()
 }
 
-fn zo_models(home: &Path) -> Vec<serde_json::Value> {
+/// Today's lineup for `agent` — the same catalog [`agent_models`] reads, with
+/// the band, rungs and efforts zo's classifier put on each row — or `None`
+/// for an agent that drives no single provider or a catalog with none of its
+/// rows (t-14437).
+pub fn agent_lineup(
+    agent: &str,
+    home: &Path,
+) -> Option<zerocode_core::summon_difficulty::lineup::Lineup> {
+    let provider = zerocode_core::agent::agent_voice(agent).models_provider?;
+    zerocode_core::summon_difficulty::lineup::Lineup::from_catalog(&zo_catalog(home), provider)
+}
+
+/// `zo models --json`, whole, cached for [`MODELS_TTL`]; `Null` when zo is
+/// missing or said nothing readable.
+fn zo_catalog(home: &Path) -> serde_json::Value {
     if let Ok(cache) = models_cache().lock()
-        && let Some((at, rows)) = cache.as_ref()
+        && let Some((at, catalog)) = cache.as_ref()
         && at.elapsed() < MODELS_TTL
     {
-        return rows.clone();
+        return catalog.clone();
     }
     let bin = crate::zo_companion::zo_path_under(home);
-    let rows = crate::proc::quiet_command(&bin)
+    let catalog = crate::proc::quiet_command(&bin)
         .args(["models", "--json"])
         .output()
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-        .and_then(|catalog| catalog.get("models")?.as_array().cloned())
         .unwrap_or_default();
     if let Ok(mut cache) = models_cache().lock() {
-        *cache = Some((Instant::now(), rows.clone()));
+        *cache = Some((Instant::now(), catalog.clone()));
     }
-    rows
+    catalog
 }
 
 // ---- readers ----------------------------------------------------------------

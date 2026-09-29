@@ -13572,14 +13572,23 @@ pub trait Launcher {
         None
     }
 
-    /// The person's difficulty table, captured by the host for this launch.
+    /// The launch row for `difficulty` — the person's, else today's lineup's,
+    /// else the shipped table's — captured by the host for this launch, with
+    /// what else the lineup offers there (t-14437).
     fn difficulty_profile(
         &self,
         _agent: &str,
         _difficulty: &str,
         _origin: [&str; 3],
-    ) -> Result<Option<crate::summon_difficulty::Profile>, String> {
+    ) -> Result<Option<crate::summon_difficulty::lineup::Row>, String> {
         Ok(None)
+    }
+
+    /// Every difficulty's launch row for `agent` as the window's lineup
+    /// snapshot reads today — peeked, never fetched: this runs inside the
+    /// actor. `None` when nobody looked (t-14437).
+    fn summon_rows(&self, _agent: &str) -> Option<Vec<crate::summon_difficulty::lineup::Row>> {
+        None
     }
 
     /// What this machine actually has, one row per agent the catalog knows.
@@ -16139,6 +16148,13 @@ const TUNABLE: &[(&str, &str, Option<EffortRide>, &str)] = &[
     ("cursor", "--model", None, ""),
 ];
 
+/// `dials.difficultyFrom`: the difficulty seat's applied answer chose it.
+const DIALS_FROM_JEV: &str = "jev";
+/// `dials.difficultyFrom`: nobody chose; the ladder's middle stood.
+const DIALS_FROM_FALLBACK: &str = "fallback";
+/// `dials.modelFrom`: the summons named its own `--model`.
+const DIALS_FROM_REQUEST: &str = "request";
+
 /// Translate the difficulty ladder through the measured launch table.
 /// Its last column is the highest effort this summons ladder may use.
 #[must_use]
@@ -16245,6 +16261,7 @@ fn agent_row(
     launched: &[serde_json::Value],
     headroom: Option<&Headroom>,
     readiness: Option<&crate::readiness::AgentReadinessSnapshot>,
+    summon: Option<&[crate::summon_difficulty::lineup::Row]>,
     now_ms: i64,
 ) -> serde_json::Value {
     let tuning = TUNABLE.iter().find(|(id, _, _, _)| *id == spec.id);
@@ -16284,6 +16301,12 @@ fn agent_row(
     // The binary and the login as the window's probe last saw them, with
     // the age on it; `unknown` where nobody has observed this agent.
     row["readiness"] = readiness_json(readiness, now_ms);
+    // What a summons that leaves the model open would launch with at each
+    // difficulty, where that came from (`person`, `lineup`, `table`), and
+    // what else today's lineup offers there, a newly arrived model marked
+    // `fresh` — so a coordinator can name one with `--model` (t-14437).
+    // `null` is "nobody read a lineup", never "no choices".
+    row["summon"] = summon.map_or(serde_json::Value::Null, |rows| serde_json::json!(rows));
     row
 }
 
@@ -19250,12 +19273,14 @@ fn plan_inner(
                     // and a binary that arrived since the last look is a
                     // fact the snapshot's own `binary` carries.
                     let readiness = launcher.readiness(spec.id);
+                    let summon = launcher.summon_rows(spec.id);
                     agent_row(
                         spec,
                         seen,
                         history,
                         headroom.as_ref(),
                         readiness.as_ref(),
+                        summon.as_deref(),
                         now_ms,
                     )
                 })
@@ -19467,6 +19492,22 @@ fn plan_inner(
             } else {
                 None
             };
+            // What the reply says about the dials the coordinator left open:
+            // the difficulty and who chose it, where the model came from, and
+            // what else today's lineup offers at that difficulty (t-14437).
+            let dials = (model.is_none() || effort.is_none()).then(|| {
+                serde_json::json!({
+                    "difficulty": chosen.unwrap_or(crate::summon_difficulty::FALLBACK_DIFFICULTY),
+                    "difficultyFrom": if chosen.is_some() { DIALS_FROM_JEV } else { DIALS_FROM_FALLBACK },
+                    "modelFrom": match (&model, &profile) {
+                        (Some(_), _) => serde_json::json!(DIALS_FROM_REQUEST),
+                        (None, Some(row)) => serde_json::json!(row.from),
+                        (None, None) => serde_json::Value::Null,
+                    },
+                    "effortClamped": profile.as_ref().and_then(|row| row.effort_clamped.clone()),
+                    "candidates": profile.as_ref().map_or_else(Vec::new, |row| row.candidates.clone()),
+                })
+            });
             let model = model.or_else(|| profile.as_ref().map(|p| p.model.clone()));
             let effort = effort
                 .or_else(|| profile.as_ref().map(|p| p.effort.clone()))
@@ -19844,6 +19885,7 @@ fn plan_inner(
                         // carries, `null` where nothing was asked.
                         "model": model,
                         "effort": effort,
+                        "dials": dials,
                         "launchNotice": launch_notice,
                         // The disk's word on a `--worktree` cut: `null` when
                         // it had nothing to say, the arithmetic when live

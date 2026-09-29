@@ -58,6 +58,9 @@ struct HostOrigin {
     checkout: Option<std::path::PathBuf>,
     settings: Value,
     fresh: bool,
+    /// Today's lineups as the window held them when the summons began —
+    /// peeked outside the actor, like the settings (t-14437).
+    lineup: crate::summon_lineup::Snapshot,
 }
 fn origins() -> &'static std::sync::Mutex<std::collections::HashMap<OriginKey, HostOrigin>> {
     static ORIGINS: std::sync::OnceLock<
@@ -78,11 +81,12 @@ impl Drop for Origin {
 pub(super) fn origin(key: [&str; 3], checkout: Option<std::path::PathBuf>, fresh: bool) -> Origin {
     // Read the table outside the ledger actor. A handover has already sealed
     // its launch settings, including an explicitly inherited CLI default.
-    origin_with(
+    origin_held(
         key,
         checkout,
         fresh,
         Wire::of_this_machine().settings_root(),
+        crate::summon_lineup::snapshot(),
     )
 }
 fn origin_with(
@@ -90,6 +94,21 @@ fn origin_with(
     checkout: Option<std::path::PathBuf>,
     fresh: bool,
     settings: Value,
+) -> Origin {
+    origin_held(
+        key,
+        checkout,
+        fresh,
+        settings,
+        crate::summon_lineup::Snapshot::default(),
+    )
+}
+fn origin_held(
+    key: [&str; 3],
+    checkout: Option<std::path::PathBuf>,
+    fresh: bool,
+    settings: Value,
+    lineup: crate::summon_lineup::Snapshot,
 ) -> Origin {
     let key = key.map(str::to_string);
     origins()
@@ -101,6 +120,7 @@ fn origin_with(
                 checkout,
                 settings,
                 fresh,
+                lineup,
             },
         );
     Origin(key)
@@ -131,11 +151,24 @@ pub(super) fn fresh_checkout(origin: [&str; 3]) -> Option<Option<std::path::Path
         .map(|origin| origin.checkout.clone())
 }
 
+/// [`origin`] with the lineup handed in — how a test gives a summons a
+/// synthetic lineup.
+#[cfg(test)]
+pub(super) fn origin_with_lineup_for_tests(
+    key: [&str; 3],
+    settings: Value,
+    lineup: crate::summon_lineup::Snapshot,
+) -> Origin {
+    origin_held(key, None, true, settings, lineup)
+}
+
+/// The launch row a fresh summons under `origin` takes at `level`: the
+/// person's, else the lineup's, else the shipped table's (t-14437).
 pub(super) fn profile(
     agent: &str,
     level: &str,
     origin: [&str; 3],
-) -> Result<Option<difficulty::Profile>, String> {
+) -> Result<Option<difficulty::lineup::Row>, String> {
     let held = origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -145,7 +178,43 @@ pub(super) fn profile(
     else {
         return Ok(None);
     };
-    difficulty::profile(&origin.settings, agent, level)
+    difficulty::lineup::row_at(
+        &origin.settings,
+        agent,
+        level,
+        origin.lineup.lineups.get(agent),
+        Some(&origin.lineup.seen),
+        crate::usage_runtime::epoch_ms_now(),
+    )
+}
+
+/// Every difficulty's launch row for `agent` as the window reads today —
+/// `agent-list`'s peek (t-14437). `None` while no lineup has been read at
+/// all, which is "nobody looked" and not "no choices".
+pub(super) fn rows(agent: &str) -> Option<Vec<difficulty::lineup::Row>> {
+    rows_in(
+        &Wire::of_this_machine().settings_root(),
+        agent,
+        &crate::summon_lineup::snapshot(),
+    )
+}
+
+fn rows_in(
+    settings: &Value,
+    agent: &str,
+    lineup: &crate::summon_lineup::Snapshot,
+) -> Option<Vec<difficulty::lineup::Row>> {
+    if lineup.lineups.is_empty() {
+        return None;
+    }
+    difficulty::lineup::rows(
+        settings,
+        agent,
+        lineup.lineups.get(agent),
+        Some(&lineup.seen),
+        crate::usage_runtime::epoch_ms_now(),
+    )
+    .ok()
 }
 
 pub(super) fn choose(look: &Look, origin: [&str; 3]) -> Option<Value> {

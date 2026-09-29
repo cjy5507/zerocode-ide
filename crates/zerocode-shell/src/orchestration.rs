@@ -2984,8 +2984,15 @@ impl Launcher for LiveCatalog {
         agent: &str,
         difficulty: &str,
         origin: [&str; 3],
-    ) -> Result<Option<zerocode_core::summon_difficulty::Profile>, String> {
+    ) -> Result<Option<zerocode_core::summon_difficulty::lineup::Row>, String> {
         summon_difficulty::profile(agent, difficulty, origin)
+    }
+
+    fn summon_rows(
+        &self,
+        agent: &str,
+    ) -> Option<Vec<zerocode_core::summon_difficulty::lineup::Row>> {
+        summon_difficulty::rows(agent)
     }
 
     fn choose_difficulty(

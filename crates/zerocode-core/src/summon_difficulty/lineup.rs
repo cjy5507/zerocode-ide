@@ -10,9 +10,10 @@
 //! came from, and what else today's lineup offers there.
 //!
 //! - A difficulty's default is the lineup's model for its rung (`easy`,
-//!   `medium`, `hard`), at the ladder's effort brought inside what that model
-//!   accepts. The shipped table is only the road back when no lineup was read
-//!   or it has no model for the rung, and a row says which road it took.
+//!   `medium`, `hard`), at the agent's ladder effort brought inside what that
+//!   model accepts. The shipped table is only the road back when no lineup
+//!   was read or it has no model for the rung, and a row says which road it
+//!   took.
 //! - A row the person wrote is theirs and never moves; a saved row equal to
 //!   the shipped one is the shipped one.
 //! - A model without a band is offered only at the lowest difficulty: nothing
@@ -24,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{LADDER, PROFILES_SETTING, Profile};
+use crate::jev::SMART_SETTINGS_KEY;
 
 /// How long a model counts as newly arrived after this window first saw it.
 pub const NEW_FOR_MS: i64 = 7 * 24 * 60 * 60 * 1000;
@@ -41,13 +43,29 @@ pub enum Band {
     Superseded,
 }
 
-/// The implementation rung a model serves, from the same classifier.
+/// The implementation rung a model serves, from the same classifier — one
+/// per difficulty, in the ladder's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Rung {
     Easy,
     Medium,
     Hard,
+}
+
+const RUNGS: [Rung; 3] = [Rung::Easy, Rung::Medium, Rung::Hard];
+
+impl Rung {
+    fn difficulty(self) -> &'static str {
+        LADDER[RUNGS.iter().position(|rung| *rung == self).unwrap_or(0)].0
+    }
+
+    fn of(difficulty: &str) -> Option<Self> {
+        LADDER
+            .iter()
+            .position(|(key, _, _)| *key == difficulty)
+            .map(|at| RUNGS[at])
+    }
 }
 
 /// One row of today's lineup for one agent.
@@ -71,14 +89,54 @@ impl LiveModel {
     /// Out of every choice: unlisted, or an older release of its own line.
     #[must_use]
     pub fn folded(&self) -> bool {
-        let _ = self;
-        false
+        self.unlisted || self.band == Some(Band::Superseded)
     }
 
-    /// The difficulties this model is offered at.
+    /// The difficulties this model is offered at: its rungs; the top band
+    /// (which plans and verifies) and a second band without a rung at the
+    /// highest; anything else — no band at all included — at the lowest.
     #[must_use]
     pub fn difficulties(&self) -> BTreeSet<&'static str> {
-        BTreeSet::new()
+        if self.folded() {
+            return BTreeSet::new();
+        }
+        let mut at: BTreeSet<&'static str> =
+            self.rungs.iter().map(|rung| rung.difficulty()).collect();
+        match self.band {
+            Some(Band::Top) => {
+                at.insert(LADDER[2].0);
+            }
+            Some(Band::Second) if at.is_empty() => {
+                at.insert(LADDER[2].0);
+            }
+            Some(Band::Rest) | None if at.is_empty() => {
+                at.insert(LADDER[0].0);
+            }
+            _ => {}
+        }
+        at
+    }
+
+    /// `wanted`, or the nearest effort below it the model accepts (the
+    /// lowest it accepts when none is below); `None` when it stands as is.
+    fn clamp(&self, wanted: &str) -> Option<String> {
+        let accepted = self.efforts.as_ref()?;
+        if accepted.iter().any(|effort| effort == wanted) {
+            return None;
+        }
+        let rank = |effort: &str| EFFORT_SCALE.iter().position(|known| *known == effort);
+        let wanted_rank = rank(wanted)?;
+        let mut known: Vec<(usize, &String)> = accepted
+            .iter()
+            .filter_map(|effort| Some((rank(effort)?, effort)))
+            .collect();
+        known.sort();
+        known
+            .iter()
+            .rev()
+            .find(|(at, _)| *at < wanted_rank)
+            .or_else(|| known.first())
+            .map(|(_, effort)| (*effort).clone())
     }
 }
 
@@ -93,8 +151,72 @@ impl Lineup {
     /// The rows of `provider` in a `zo models --json` answer; `None` when
     /// the answer lists none (no zo, or a provider it does not serve).
     #[must_use]
-    pub fn from_catalog(_catalog: &Value, _provider: &str) -> Option<Self> {
-        None
+    pub fn from_catalog(catalog: &Value, provider: &str) -> Option<Self> {
+        let models: Vec<LiveModel> = catalog
+            .get("models")?
+            .as_array()?
+            .iter()
+            .filter(|row| row.get("provider").and_then(Value::as_str) == Some(provider))
+            .filter_map(|row| {
+                let band: Option<Band> = row
+                    .get("band")
+                    .and_then(|band| serde_json::from_value(band.clone()).ok());
+                Some(LiveModel {
+                    id: row.get("id")?.as_str()?.to_string(),
+                    band,
+                    rungs: band
+                        .and_then(|_| serde_json::from_value(row.get("rungs")?.clone()).ok())
+                        .unwrap_or_default(),
+                    efforts: row
+                        .get("efforts")
+                        .and_then(|efforts| {
+                            serde_json::from_value::<Vec<String>>(efforts.clone()).ok()
+                        })
+                        .filter(|efforts| !efforts.is_empty()),
+                    builtin: row.get("builtin").and_then(Value::as_bool).unwrap_or(false),
+                    unlisted: row
+                        .get("unlistedSince")
+                        .is_some_and(|since| !since.is_null()),
+                })
+            })
+            .collect();
+        if models.is_empty() {
+            return None;
+        }
+        let aliases = catalog
+            .get("aliases")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                let canonical = row.get("canonical")?.as_str()?;
+                models.iter().any(|model| model.id == canonical).then(|| {
+                    Some((
+                        row.get("alias")?.as_str()?.to_string(),
+                        canonical.to_string(),
+                    ))
+                })?
+            })
+            .collect();
+        Some(Self { models, aliases })
+    }
+
+    /// The id `model` names: itself, or what its alias resolves to.
+    #[must_use]
+    pub fn canonical<'a>(&'a self, model: &'a str) -> &'a str {
+        self.aliases.get(model).map_or(model, String::as_str)
+    }
+
+    #[must_use]
+    pub fn find(&self, model: &str) -> Option<&LiveModel> {
+        let id = self.canonical(model);
+        self.models.iter().find(|held| held.id == id)
+    }
+
+    /// Listed today and not folded.
+    #[must_use]
+    pub fn live(&self, model: &str) -> bool {
+        self.find(model).is_some_and(|held| !held.folded())
     }
 }
 
@@ -129,14 +251,49 @@ impl Change {
 
 impl Seen {
     /// Record `lineup` for `agent` and say what arrived and what folded.
-    pub fn observe(&mut self, _agent: &str, _lineup: &Lineup, _now_ms: i64) -> Change {
-        Change::default()
+    /// The first look at an agent takes what the binary shipped as known;
+    /// anything discovered since is news.
+    pub fn observe(&mut self, agent: &str, lineup: &Lineup, now_ms: i64) -> Change {
+        let first_look = !self.agents.contains_key(agent);
+        let book = self.agents.entry(agent.to_string()).or_default();
+        let mut change = Change::default();
+        for model in &lineup.models {
+            let folded = model.folded();
+            if let Some(held) = book.get_mut(&model.id) {
+                if folded && !held.folded {
+                    change.folded.push(model.id.clone());
+                }
+                held.folded = folded;
+                continue;
+            }
+            let known = first_look && model.builtin;
+            book.insert(
+                model.id.clone(),
+                SeenModel {
+                    first_ms: if known { 0 } else { now_ms },
+                    folded,
+                },
+            );
+            if !known && !folded {
+                change.entered.push(model.id.clone());
+            }
+        }
+        for (id, held) in book.iter_mut() {
+            if !held.folded && !lineup.models.iter().any(|model| model.id == *id) {
+                held.folded = true;
+                change.folded.push(id.clone());
+            }
+        }
+        change
     }
 
     /// Whether `model` arrived within [`NEW_FOR_MS`] of `now_ms`.
     #[must_use]
-    pub fn fresh(&self, _agent: &str, _model: &str, _now_ms: i64) -> bool {
-        false
+    pub fn fresh(&self, agent: &str, model: &str, now_ms: i64) -> bool {
+        self.agents
+            .get(agent)
+            .and_then(|book| book.get(model))
+            .is_some_and(|held| held.first_ms > 0 && now_ms - held.first_ms < NEW_FOR_MS)
     }
 }
 
@@ -213,15 +370,173 @@ pub fn rows(
 /// # Errors
 /// As [`rows`].
 pub fn rows_with_defaults(
-    _root: &Value,
-    _defaults: &Value,
-    _agent: &str,
-    _lineup: Option<&Lineup>,
-    _seen: Option<&Seen>,
-    _now_ms: i64,
+    root: &Value,
+    defaults: &Value,
+    agent: &str,
+    lineup: Option<&Lineup>,
+    seen: Option<&Seen>,
+    now_ms: i64,
 ) -> Result<Vec<Row>, String> {
-    let _ = PROFILES_SETTING;
-    Ok(Vec::new())
+    build(root, defaults, agent, lineup, seen, now_ms, None)
+}
+
+/// The one difficulty `difficulty` of [`rows`]; a person's row at another
+/// difficulty that cannot launch does not refuse this one.
+///
+/// # Errors
+/// As [`rows`], for this difficulty's row alone.
+pub fn row_at(
+    root: &Value,
+    agent: &str,
+    difficulty: &str,
+    lineup: Option<&Lineup>,
+    seen: Option<&Seen>,
+    now_ms: i64,
+) -> Result<Option<Row>, String> {
+    let defaults: Value =
+        serde_json::from_str(super::DEFAULT_PROFILES).map_err(|e| e.to_string())?;
+    Ok(build(
+        root,
+        &defaults,
+        agent,
+        lineup,
+        seen,
+        now_ms,
+        Some(difficulty),
+    )?
+    .pop())
+}
+
+fn build(
+    root: &Value,
+    defaults: &Value,
+    agent: &str,
+    lineup: Option<&Lineup>,
+    seen: Option<&Seen>,
+    now_ms: i64,
+    only: Option<&str>,
+) -> Result<Vec<Row>, String> {
+    let written = root
+        .get(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(PROFILES_SETTING))
+        .and_then(|table| table.get(agent));
+    let read = |table: Option<&Value>, difficulty: &str| -> Result<Option<Profile>, String> {
+        table
+            .and_then(|rows| rows.get(difficulty))
+            .map(|row| serde_json::from_value::<Profile>(row.clone()).map_err(|e| e.to_string()))
+            .transpose()
+    };
+    let mut rows = Vec::new();
+    for (difficulty, _, _) in LADDER {
+        if only.is_some_and(|only| only != difficulty) {
+            continue;
+        }
+        let shipped = read(defaults.get(agent), difficulty)?;
+        let person = read(written, difficulty)?.filter(|row| Some(row) != shipped.as_ref());
+        // The agent's own ladder effort: the measured launch table's word
+        // for this difficulty, ceiling included.
+        let ladder = crate::orchestration::difficulty_effort(agent, difficulty);
+        let (model, effort, from, effort_clamped) = if let Some(person) = person {
+            super::launchable(agent, &person)?;
+            let clamped = lineup
+                .and_then(|held| held.find(&person.model))
+                .and_then(|held| held.clamp(&person.effort))
+                .map(|to| Clamp {
+                    from: person.effort.clone(),
+                    to,
+                });
+            (person.model, person.effort, Source::Person, clamped)
+        } else if let Some((pick, ladder)) = lineup.zip(ladder).and_then(|(held, ladder)| {
+            let rung = Rung::of(difficulty)?;
+            let by_rung = held
+                .models
+                .iter()
+                .find(|model| !model.folded() && model.rungs.contains(&rung));
+            // No model for the rung: the table's model stands while it is
+            // live here; only a folded one gives way to what
+            // the lineup offers at this difficulty.
+            let table_stands = shipped.as_ref().is_some_and(|row| held.live(&row.model));
+            let pick = by_rung.or_else(|| {
+                (!table_stands)
+                    .then(|| offered(held, difficulty).next())
+                    .flatten()
+            })?;
+            Some((pick, ladder))
+        }) {
+            let clamped = pick.clamp(ladder);
+            let effort = clamped.clone().unwrap_or_else(|| ladder.to_string());
+            (
+                pick.id.clone(),
+                effort,
+                Source::Lineup,
+                clamped.map(|to| Clamp {
+                    from: ladder.to_string(),
+                    to,
+                }),
+            )
+        } else if let Some(table) =
+            shipped.filter(|row| lineup.is_none_or(|held| held.live(&row.model)))
+        {
+            let clamped = lineup
+                .and_then(|held| held.find(&table.model))
+                .and_then(|held| held.clamp(&table.effort));
+            let effort = clamped.clone().unwrap_or_else(|| table.effort.clone());
+            (
+                table.model,
+                effort,
+                Source::Table,
+                clamped.map(|to| Clamp {
+                    from: table.effort,
+                    to,
+                }),
+            )
+        } else {
+            continue;
+        };
+        let candidates = match (lineup, ladder) {
+            (Some(held), Some(ladder)) => offered(held, difficulty)
+                .filter(|candidate| candidate.id != held.canonical(&model))
+                .map(|candidate| Candidate {
+                    model: candidate.id.clone(),
+                    effort: candidate
+                        .clamp(ladder)
+                        .unwrap_or_else(|| ladder.to_string()),
+                    fresh: seen.is_some_and(|seen| seen.fresh(agent, &candidate.id, now_ms)),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        rows.push(Row {
+            difficulty,
+            model,
+            effort,
+            from,
+            effort_clamped,
+            candidates,
+        });
+    }
+    Ok(rows)
+}
+
+/// The live models `lineup` offers at `difficulty`, the ones whose rung it
+/// is first.
+fn offered<'a>(
+    lineup: &'a Lineup,
+    difficulty: &'a str,
+) -> impl Iterator<Item = &'a LiveModel> + 'a {
+    let rung = Rung::of(difficulty);
+    let exact = move |model: &&LiveModel| rung.is_some_and(|rung| model.rungs.contains(&rung));
+    let at = move |model: &&LiveModel| model.difficulties().contains(difficulty);
+    lineup
+        .models
+        .iter()
+        .filter(move |model| at(model) && exact(model))
+        .chain(
+            lineup
+                .models
+                .iter()
+                .filter(move |model| at(model) && !exact(model)),
+        )
 }
 
 #[cfg(test)]
