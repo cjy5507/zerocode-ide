@@ -2899,6 +2899,10 @@ async function testHelperPage(page, ok) {
     const longTitle = "Refactor the retry loop in the sync module and its backoff timing tests";
     const measure = (key) => {
       const q = parts();
+      // The room to read is the plain page's; a parent title as long as the one
+      // laid in below asks the footer for more lines, and that is measured for
+      // overflow only.
+      const room = Math.round(q.turns?.getBoundingClientRect().height ?? 0);
       // A long parent title, worded into the crumb and the footer's sentence: the
       // layout is what is measured, so the words are laid in by hand.
       const crumb = q.head?.querySelector(".helper-crumb-parent");
@@ -2920,7 +2924,7 @@ async function testHelperPage(page, ok) {
           .slice(0, 6)
           .map((node) => `${node.tagName.toLowerCase()}.${String(node.className).split(" ")[0]} +${Math.round(node.getBoundingClientRect().right - view.right)}px`),
         scrollWidth: q.host.scrollWidth,
-        listHeight: Math.round(q.turns?.getBoundingClientRect().height ?? 0),
+        listHeight: room,
         speakShown: shown(q.foot?.querySelector(".helper-foot-speak")),
         saysShown: shown(q.foot?.querySelector(".helper-foot-says")),
       };
