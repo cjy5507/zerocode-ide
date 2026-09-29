@@ -1072,6 +1072,16 @@ done
         settled_as: Vec<DeliveryOutcome>,
     }
 
+    #[cfg(unix)]
+    impl Restart {
+        /// Whether each of `deliveries` was called delivered, and none took
+        /// more than its Enter and the one pressed again.
+        fn kept_its_word(&self, deliveries: usize) -> bool {
+            self.settled_as == vec![DeliveryOutcome::Delivered; deliveries]
+                && (deliveries..=deliveries * 2).contains(&self.enters)
+        }
+    }
+
     /// t-14037, the acceptance count: each shape a restart meets, brought
     /// back three times — the words are sent, by the program itself, exactly
     /// once, and two deliveries queued on one pane each go once, in order.
@@ -1097,6 +1107,11 @@ done
                 once, RUNS,
                 "{takes:?}: the words were sent exactly once in {once}/{RUNS} restarts: {runs:?}"
             );
+            assert!(
+                runs.iter().all(|run| run.kept_its_word(1)),
+                "{takes:?}: a delivery was pressed more than once again, or not called delivered: \
+                 {runs:?}"
+            );
         }
         let queued = ["the continuation", "You have 1 orchestration message."];
         let runs: Vec<Restart> = (0..RUNS)
@@ -1106,6 +1121,11 @@ done
         assert_eq!(
             both, RUNS,
             "two deliveries on one booting pane went each once, in order, in {both}/{RUNS}: \
+             {runs:?}"
+        );
+        assert!(
+            runs.iter().all(|run| run.kept_its_word(queued.len())),
+            "a queued delivery was pressed more than once again, or not called delivered: \
              {runs:?}"
         );
     }
