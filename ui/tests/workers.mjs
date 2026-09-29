@@ -2896,8 +2896,15 @@ async function testHelperPage(page, ok) {
     let p = await open(at, roster[0], { brief });
     Object.assign(p.host.style, { position: "fixed", inset: "0", zIndex: "100", width: "100vw", height: "100vh" });
     const seen = {};
+    const longTitle = "Refactor the retry loop in the sync module and its backoff timing tests";
     const measure = (key) => {
       const q = parts();
+      // A long parent title, worded into the crumb and the footer's sentence: the
+      // layout is what is measured, so the words are laid in by hand.
+      const crumb = q.head?.querySelector(".helper-crumb-parent");
+      if (crumb) crumb.textContent = longTitle;
+      const says = q.foot?.querySelector(".helper-foot-says");
+      if (says) says.textContent = `이 도우미는 “${longTitle}” 대화가 지시합니다.`;
       const view = q.host.getBoundingClientRect();
       const inside = (node) => {
         const box = node.getBoundingClientRect();
@@ -2908,6 +2915,11 @@ async function testHelperPage(page, ok) {
         blocksInside: [q.head, q.sibs, q.card, q.foot].every((node) => node !== null && inside(node)),
         chipsInside: [...q.host.querySelectorAll(".helper-sib, .helper-brief-tag, .helper-model, .helper-state, .helper-foot-speak, .helper-crumb-back")]
           .filter(shown).every(inside),
+        wide: [...q.host.querySelectorAll("*")]
+          .filter((node) => shown(node) && node.getBoundingClientRect().right > view.right + 1)
+          .slice(0, 6)
+          .map((node) => `${node.tagName.toLowerCase()}.${String(node.className).split(" ")[0]} +${Math.round(node.getBoundingClientRect().right - view.right)}px`),
+        scrollWidth: q.host.scrollWidth,
         listHeight: Math.round(q.turns?.getBoundingClientRect().height ?? 0),
         speakShown: shown(q.foot?.querySelector(".helper-foot-speak")),
         saysShown: shown(q.foot?.querySelector(".helper-foot-says")),
