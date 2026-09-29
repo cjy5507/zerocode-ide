@@ -82,6 +82,9 @@ impl Rung {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveModel {
     pub id: String,
+    /// The provider key its row names — what an agent of every provider
+    /// (zo) tells its rows apart by.
+    pub provider: String,
     /// `None` when the row carries no band — an older zo, or a model the
     /// classifier left out.
     pub band: Option<Band>,
@@ -187,15 +190,21 @@ impl Lineup {
             .flatten()
             .filter(|provider| provider.get("usable").and_then(Value::as_bool) == Some(true))
             .flat_map(|provider| {
+                let name = provider
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 provider
                     .get("models")
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
                     .filter_map(Value::as_str)
+                    .map(move |id| (name, id))
             })
-            .map(|id| LiveModel {
+            .map(|(provider, id)| LiveModel {
                 id: id.to_string(),
+                provider: provider.to_string(),
                 band: None,
                 rungs: BTreeSet::new(),
                 efforts: None,
@@ -218,6 +227,7 @@ impl Lineup {
                     .and_then(|band| serde_json::from_value(band.clone()).ok());
                 Some(LiveModel {
                     id: row.get("id")?.as_str()?.to_string(),
+                    provider: row.get("provider")?.as_str()?.to_string(),
                     band,
                     rungs: band
                         .and_then(|_| serde_json::from_value(row.get("rungs")?.clone()).ok())
@@ -502,6 +512,13 @@ fn build(
             .map(|row| serde_json::from_value::<Profile>(row.clone()).map_err(|e| e.to_string()))
             .transpose()
     };
+    // An agent of every provider (zo) falls back to the provider of the
+    // model its own settings run, when its lineup lists that model.
+    let home = root
+        .get("model")
+        .and_then(Value::as_str)
+        .and_then(|model| lineup?.find(model))
+        .map(|model| model.provider.clone());
     let mut rows = Vec::new();
     for (difficulty, _, _) in LADDER {
         if only.is_some_and(|only| only != difficulty) {
@@ -527,7 +544,8 @@ fn build(
             let by_rung = held
                 .models
                 .iter()
-                .find(|model| !model.folded() && model.rungs.contains(&rung));
+                .filter(|model| !model.folded() && model.rungs.contains(&rung))
+                .min_by_key(|model| home.as_ref() != Some(&model.provider));
             // No model for the rung: the table's model stands while it is
             // live here; only a folded one gives way to what
             // the lineup offers at this difficulty.
@@ -735,6 +753,7 @@ mod tests {
             "models": [
                 {"provider": "claude", "id": "model-a", "builtin": true, "band": "second", "rungs": ["hard"]},
                 {"provider": "openai", "id": "model-o", "builtin": false, "band": "rest", "rungs": ["easy"]},
+                {"provider": "openai", "id": "model-p", "builtin": true, "band": "second", "rungs": ["hard"]},
             ],
             "customProviders": [
                 {"name": "custom-a", "models": ["custom-a/model-x"], "usable": true},
@@ -743,7 +762,7 @@ mod tests {
         });
         let all = Lineup::from_catalog_all(&catalog).unwrap();
         let ids: Vec<&str> = all.models.iter().map(|model| model.id.as_str()).collect();
-        assert_eq!(ids, ["model-a", "model-o", "custom-a/model-x"]);
+        assert_eq!(ids, ["model-a", "model-o", "model-p", "custom-a/model-x"]);
         let mut seen = Seen::default();
         assert_eq!(
             seen.observe("zo", &all, NOW).entered,
@@ -758,7 +777,19 @@ mod tests {
             "model-o",
             "another provider's easy rung"
         );
-        assert_eq!(row(&rows, HIGH).model, "model-a");
+        assert_eq!(
+            row(&rows, HIGH).model,
+            "model-a",
+            "no settings: the lineup's order"
+        );
+        let runs_openai = json!({"model": "model-o"});
+        let rows =
+            rows_with_defaults(&runs_openai, &json!({}), "zo", Some(&all), None, NOW).unwrap();
+        assert_eq!(
+            row(&rows, HIGH).model,
+            "model-p",
+            "the provider zo's own settings run comes first"
+        );
         let across = Profile {
             model: "claude-model".into(),
             effort: "high".into(),

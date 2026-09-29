@@ -69,7 +69,9 @@ pub fn render(refresh: bool, json: bool) -> Result<String, String> {
     let rows = user.rows(&ALL_PROVIDERS, false);
     // Classified after the publish above, so discovered ids are ranked
     // beside the shipped ones.
-    let tiers = runtime::catalog_tier_assignments();
+    let listed: Vec<(api::ProviderKind, &str)> =
+        rows.iter().map(|row| (row.provider.kind(), row.id.as_str())).collect();
+    let tiers = runtime::tier_assignments_of(&listed);
     let report = Report {
         policy,
         catalog: &catalog,
@@ -578,7 +580,9 @@ mod tests {
         let rows = user.rows(&super::ALL_PROVIDERS, false);
         let catalog = DiscoveredCatalog::default();
         let overlay = Overlay::default();
-        let tiers = runtime::catalog_tier_assignments();
+        let listed: Vec<(api::ProviderKind, &str)> =
+            rows.iter().map(|row| (row.provider.kind(), row.id.as_str())).collect();
+        let tiers = runtime::tier_assignments_of(&listed);
         let report = super::Report {
             policy: UpdatePolicy::Auto,
             catalog: &catalog,

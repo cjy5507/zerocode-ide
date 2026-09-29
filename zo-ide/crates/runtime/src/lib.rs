@@ -241,7 +241,7 @@ pub use mcp_stdio::{
 };
 pub use mcp_ws::{connect_mcp_ws, McpWsProcess};
 pub use model_inventory::{
-    catalog_tier_assignments, connected_model_inventory, model_inventory_from_authorized_providers,
+    connected_model_inventory, tier_assignments_of, model_inventory_from_authorized_providers,
 };
 pub use model_router::{
     agent_preference_adjustment, agent_stats_for_route, completion_ceiling_for, completion_loop_step,
