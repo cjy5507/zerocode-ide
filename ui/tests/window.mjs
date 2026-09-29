@@ -36290,6 +36290,11 @@ const chatFace = await page.evaluate(async () => {
     box?.dispatchEvent(key);
     return key.defaultPrevented;
   };
+  // A key is pressed in the box the person has focused. On a pane's own page the
+  // active tab is a terminal, so the window's key router takes a key that lands
+  // anywhere but a focused field for the terminal (`keyboardTarget()`): an
+  // unfocused box would hand Shift+Enter to the pane's PTY.
+  box?.focus();
   if (box) box.value = "two lines";
   seen.shiftEnterKeeps = press(true) === false && calls.length === 2;
   seen.enterSends = press(false) === true;
