@@ -102,9 +102,9 @@ pub fn records<'a>(
         by_summons.insert((run, dispatch), row);
     }
     let mut records: BTreeMap<String, ModelRecord> = BTreeMap::new();
-    let mut rework: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    let mut tokens: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    let mut minutes: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    // Each model's samples, in the order the record names their medians:
+    // rework rounds, tokens, minutes.
+    let mut samples: BTreeMap<String, [Vec<u64>; 3]> = BTreeMap::new();
     for row in by_summons.into_values() {
         let Some(model) = row["executionModel"].as_str().map(&canonical) else {
             continue;
@@ -117,35 +117,27 @@ pub fn records<'a>(
         };
         record.ended += 1;
         record.passed_first_try += usize::from(first);
-        if let Some(rounds) = outcome["reworkRounds"].as_u64() {
-            rework.entry(model.clone()).or_default().push(rounds);
-        }
-        if let Some(wall) = outcome["wallMs"].as_u64() {
-            minutes
-                .entry(model.clone())
-                .or_default()
-                .push(wall / MS_A_MINUTE);
-        }
-        if let Some(spent) = outcome["tokens"].as_u64() {
-            tokens.entry(model).or_default().push(spent);
-        }
-    }
-    for (model, mut held) in rework {
-        held.sort_unstable();
-        if let Some(record) = records.get_mut(&model) {
-            record.median_rework_rounds = crate::jev::summary::percentile(&held, 0.50);
+        let held = samples.entry(model).or_default();
+        for (at, sample) in [
+            outcome["reworkRounds"].as_u64(),
+            outcome["tokens"].as_u64(),
+            outcome["wallMs"].as_u64().map(|wall| wall / MS_A_MINUTE),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            held[at].extend(sample);
         }
     }
-    for (model, mut held) in tokens {
-        held.sort_unstable();
+    for (model, held) in samples {
+        let [rework, tokens, minutes] = held.map(|mut held| {
+            held.sort_unstable();
+            crate::jev::summary::percentile(&held, 0.50)
+        });
         if let Some(record) = records.get_mut(&model) {
-            record.median_tokens = crate::jev::summary::percentile(&held, 0.50);
-        }
-    }
-    for (model, mut held) in minutes {
-        held.sort_unstable();
-        if let Some(record) = records.get_mut(&model) {
-            record.median_minutes = crate::jev::summary::percentile(&held, 0.50);
+            record.median_rework_rounds = rework;
+            record.median_tokens = tokens;
+            record.median_minutes = minutes;
         }
     }
     records
