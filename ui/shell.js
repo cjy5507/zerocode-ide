@@ -14312,7 +14312,7 @@ function helperPageBriefBuild(card, run, parts) {
     full.className = "helper-brief-full";
     full.id = `helper-brief-full-${card.dataset.seq}`;
     full.setAttribute("role", "region");
-    full.setAttribute("aria-label", words);
+    full.setAttribute("aria-label", t("helper.brief.full", "지시 전체"));
     full.tabIndex = 0;
     full.hidden = true;
     full.textContent = parts.body;

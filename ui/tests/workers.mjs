@@ -2784,6 +2784,7 @@ async function testHelperPage(page, ok) {
         fold: words(q(p.sibs, ".helper-sib-fold")),
         briefLabel: words(q(p.card, ".helper-brief-label")),
         tagsLabel: q(p.card, ".helper-brief-tags")?.getAttribute("aria-label") ?? "",
+        full: q(p.card, ".helper-brief-full")?.getAttribute("aria-label") ?? "",
         more: words(q(p.card, ".helper-brief-more")),
         cutSaid: words(q(p.card, ".helper-brief-text .helper-sr")),
         asked: words(q(p.head, ".helper-model-asked")),
@@ -2825,7 +2826,7 @@ async function testHelperPage(page, ok) {
     zh: (one) => script.han.test(one) && !script.hangul.test(one) && !script.kana.test(one),
     es: (one) => /[A-Za-z]/.test(one) && !script.hangul.test(one) && !script.kana.test(one) && !script.han.test(one),
   };
-  const keys = ["crumbLabel", "crumbHere", "back", "sibsLabel", "fold", "briefLabel", "tagsLabel", "more", "cutSaid", "asked", "says", "speak"];
+  const keys = ["crumbLabel", "crumbHere", "back", "sibsLabel", "fold", "briefLabel", "tagsLabel", "full", "more", "cutSaid", "asked", "says", "speak"];
   const stray = [];
   const alike = [];
   for (const key of keys) {
