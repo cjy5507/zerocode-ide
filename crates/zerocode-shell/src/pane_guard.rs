@@ -722,6 +722,7 @@ fn file(
                 decide_step(book, step, at, labels);
             }
         }
+        Moment::Tally(_) => {}
         Moment::TurnEnded { stopped, said } => {
             end_turn(book, stopped, at, labels);
             settle_picks(book, pane, at, labels);

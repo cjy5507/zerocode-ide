@@ -407,6 +407,9 @@ pub enum Moment {
     /// while the claim seat is asked, where its answer is — the payload's own
     /// words, credentials scrubbed, or the transcript to read them from.
     TurnEnded { stopped: bool, said: Option<SaidAt> },
+    /// What the turn's ruler counts of a call ([`tally::tallied_parsed`]) —
+    /// no seat's question, filed beside the moments of the same event.
+    Tally(tally::Tallied),
 }
 
 /// The kind of text a finished tool handed back, told from its normalized

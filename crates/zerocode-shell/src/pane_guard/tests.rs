@@ -8,6 +8,7 @@ use std::sync::{LazyLock, Mutex};
 
 use serde_json::json;
 use zerocode_core::hook_guard::Call;
+use zerocode_core::hook_guard::tally::{self, CallKind, Tallied};
 use zerocode_core::jev::SMART_SETTINGS_KEY;
 use zerocode_core::jev::questions::{
     COMMAND_GUARD_IRREVERSIBLE, COMMAND_GUARD_OUTSIDE, INSTRUCTED,
@@ -963,6 +964,102 @@ fn a_panes_file_pick_is_asked_at_a_code_task_and_graded_on_its_turns_edits() {
     )
     .expect("the ledger");
     for words in ["parser", "lexer", "empty line", "src/"] {
+        assert!(!written.contains(words), "{words} in {written}");
+    }
+}
+
+/// The turn's ruler (t-14869) rides the file pick seat: a pane's turn is
+/// counted off its calls — a row of numbers beside the seats' ledgers,
+/// naming the agent — and the file pick's label says how many calls looked
+/// around before the turn's first edit.
+#[test]
+fn a_panes_turn_is_counted_and_its_file_pick_label_says_how_long_it_looked() {
+    let endpoint = judging();
+    let project = tempfile::tempdir().expect("a project");
+    std::fs::create_dir(project.path().join("src")).expect("its sources");
+    std::fs::write(
+        project.path().join("src/parser.rs"),
+        "//! The parser, which turns a line into tokens.\npub fn parse() {}\n",
+    )
+    .expect("a source file");
+    let (_home, wire) = home_with(&endpoint, project.path(), &[&FILE_PICK], JevMode::Shadow);
+    let guards = fresh_guards();
+    let claude = pane(AgentKind::Claude, project.path());
+    let asking = Asking::of([&FILE_PICK]);
+    join(note(
+        guards,
+        &wire,
+        &claude,
+        asking,
+        vec![Moment::Prompt(
+            "fix the parser crash on an empty line".to_string(),
+        )],
+        1,
+    ));
+    let looked = |what: &str| {
+        Moment::Tally(Tallied::Called {
+            key: tally::call_key("Read", Some(&json!({ "file_path": what }))),
+            kind: CallKind {
+                explore: true,
+                ..CallKind::default()
+            },
+        })
+    };
+    let edited = project.path().join("src/parser.rs");
+    join(note(
+        guards,
+        &wire,
+        &claude,
+        asking,
+        vec![
+            looked("src/lexer.rs"),
+            looked("src/parser.rs"),
+            Moment::Tally(Tallied::Called {
+                key: tally::call_key("Edit", Some(&json!({ "file_path": "src/parser.rs" }))),
+                kind: CallKind {
+                    edit: true,
+                    ..CallKind::default()
+                },
+            }),
+            Moment::Started {
+                call_id: Some("call-3".to_string()),
+                tool: "Edit".to_string(),
+                words: None,
+                paths: vec![edited.to_string_lossy().into_owned()],
+            },
+            Moment::TurnEnded {
+                stopped: false,
+                said: None,
+            },
+        ],
+        2,
+    ));
+    let held = project_rows(&wire, &FILE_PICK, project.path(), 2);
+    let label = labels(&held);
+    assert_eq!(label.len(), 1, "{held:?}");
+    assert_eq!(label[0]["searchCallsBeforeFirstEdit"], json!(2), "{held:?}");
+    let ledger = systemone::requests_file(&wire, tally::PANE_TURNS_LEDGER).expect("a zo home");
+    let mut turns = systemone::read_rows(&ledger);
+    for _ in 0..200 {
+        if !turns.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        turns = systemone::read_rows(&ledger);
+    }
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    assert_eq!(
+        (
+            &turns[0]["from"],
+            &turns[0]["calls"],
+            &turns[0]["exploreBeforeFirstEdit"],
+            &turns[0]["callsBeforeFirstEdit"],
+        ),
+        (&json!("claude"), &json!(3), &json!(2), &json!(2)),
+        "{turns:?}"
+    );
+    let written = std::fs::read_to_string(&ledger).expect("the ledger");
+    for words in ["parser", "lexer", "src/"] {
         assert!(!written.contains(words), "{words} in {written}");
     }
 }

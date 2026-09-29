@@ -125,11 +125,15 @@ pub fn answered_by(body: &str) -> Option<String> {
 /// in and the folder the door counts in cannot drift apart per seat.
 #[must_use]
 pub fn ledger_of(wire: &Wire, row: &JevUse) -> Option<PathBuf> {
-    Some(
-        wire.config_home()?
-            .join(count::REQUESTS_DIR)
-            .join(row.ledger),
-    )
+    requests_file(wire, row.ledger)
+}
+
+/// A file `name` in the folder the door counts the day in, beside the seats'
+/// ledgers — where a count that is no seat's (a pane turn's ruler, t-14869)
+/// is kept.
+#[must_use]
+pub fn requests_file(wire: &Wire, name: &str) -> Option<PathBuf> {
+    Some(wire.config_home()?.join(count::REQUESTS_DIR).join(name))
 }
 
 /// Where zo keeps one project's rows of a seat it keeps per project — the
