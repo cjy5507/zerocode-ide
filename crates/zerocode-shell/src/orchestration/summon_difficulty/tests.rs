@@ -1,5 +1,6 @@
 use super::*;
 use crate::systemone::tests::Endpoint;
+use std::time::{Duration, Instant};
 
 fn look() -> Look {
     Look {

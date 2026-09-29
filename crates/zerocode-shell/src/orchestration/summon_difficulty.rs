@@ -1,38 +1,36 @@
-//! One difficulty request per successful summons. Recording never delays the
-//! pane; an acting request's receipt is carried through reservation instead.
+//! One difficulty question per successful summons, riding the assign
+//! moment's one request (`summon_assign`, t-15554). Recording never delays
+//! the pane; an acting request's receipt is carried through reservation
+//! instead.
+#[cfg(test)]
 use crate::agent_teams::Host;
-use crate::systemone::{Wire, request_body};
+use crate::systemone::Wire;
 use serde_json::{Value, json};
 use std::path::Path;
-use std::time::{Duration, Instant};
 use zerocode_core::jev::SUMMON_DIFFICULTY;
+#[cfg(test)]
 use zerocode_core::orchestration::PreparedWorkerStart;
 use zerocode_core::summon_difficulty::{self as difficulty, Look};
 
-pub(super) fn ask(wire: &Wire, look: &Look, checkout: Option<&Path>) -> Value {
-    let mut row = json!({
+/// The seat's row before any answer: the task's attempt history, as the
+/// judge reads it to count one sample per task, and the ladder it chose on.
+pub(super) fn head(look: &Look) -> Value {
+    json!({
         "rubricVersion": difficulty::RUBRIC_VERSION,
         "attempt": look.attempt,
         "failures": look.failures,
         "retryOf": look.retry_of,
         "options": difficulty::LADDER.iter().map(|(key, _, _)| *key).collect::<Vec<_>>(),
         "applied": false,
-    });
-    let began = Instant::now();
-    let answer = wire.ask(
-        &SUMMON_DIFFICULTY,
-        checkout,
-        request_body(&look.state(), &difficulty::questions()),
-        Duration::from_millis(difficulty::APPLY_DEADLINE_MS),
-    );
-    row["elapsedMs"] = json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
-    row["requestBytes"] = json!(answer.request_bytes);
-    answer.spent.stamp(&mut row);
-    let read = answer.answer.and_then(|body| {
-        let parsed: Value =
-            serde_json::from_str(&body).map_err(|_| crate::systemone::SCHEMA.to_string())?;
-        difficulty::read(&parsed["answers"]).map_err(|err| err.token().to_string())
-    });
+    })
+}
+
+/// What the seat's question got back — `answers`, or the word nothing came
+/// back with — written onto its `row`: the pick, and whether it runs.
+pub(super) fn answered(wire: &Wire, row: &mut Value, answers: Result<&Value, &str>) {
+    let read = answers
+        .map_err(str::to_string)
+        .and_then(|answers| difficulty::read(answers).map_err(|err| err.token().to_string()));
     match read {
         Ok(pick) => {
             row["outcome"] = json!("answered");
@@ -49,7 +47,21 @@ pub(super) fn ask(wire: &Wire, look: &Look, checkout: Option<&Path>) -> Value {
         }
         Err(token) => row["outcome"] = json!(token),
     }
-    row
+}
+
+/// The seat asked alone — how its own tests read one row.
+#[cfg(test)]
+fn ask(wire: &Wire, look: &Look, checkout: Option<&Path>) -> Value {
+    super::summon_assign::ask(
+        wire,
+        &zerocode_core::summon_assign::AssignAsk {
+            difficulty: Some(look.clone()),
+            model: None,
+        },
+        checkout,
+    )
+    .difficulty
+    .unwrap_or_default()
 }
 
 type OriginKey = [String; 3];
@@ -258,10 +270,11 @@ fn rows_in(
     .ok()
 }
 
-pub(super) fn choose_with(wire: &Wire, look: &Look, origin: [&str; 3]) -> Option<Value> {
-    if !crate::systemone::applies(wire, &SUMMON_DIFFICULTY) {
-        return None;
-    }
+/// The workspace a question asked on a summons's own path under `origin`
+/// asks consent for — `None` when the window observed a handover whose
+/// launch was sealed, which asks nothing on the beat; an origin nobody
+/// observed asks with no workspace, which the door consents to nothing for.
+pub(super) fn beat_checkout(origin: [&str; 3]) -> Option<Option<std::path::PathBuf>> {
     let context = origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -270,66 +283,48 @@ pub(super) fn choose_with(wire: &Wire, look: &Look, origin: [&str; 3]) -> Option
     if context.as_ref().is_some_and(|origin| !origin.fresh) {
         return None;
     }
-    let checkout = context.and_then(|origin| origin.checkout);
-    Some(ask(wire, look, checkout.as_deref()))
+    Some(context.and_then(|origin| origin.checkout))
 }
 
-pub(super) fn record(
-    host: &dyn Host,
-    prepared: &PreparedWorkerStart,
-    checkout: Option<&str>,
+/// The seat's receipt on a summons's own path, asked alone — how its own
+/// tests ask it.
+#[cfg(test)]
+fn choose_with(wire: &Wire, look: &Look, origin: [&str; 3]) -> Option<Value> {
+    super::summon_assign::choose_with(
+        wire,
+        &zerocode_core::summon_assign::AssignAsk {
+            difficulty: Some(look.clone()),
+            model: None,
+        },
+        origin,
+    )
+    .difficulty
+}
+
+/// The row the window writes for a summons: `row` — the path's receipt, or
+/// the answer asked after the pane opened — beside what was launched.
+pub(super) fn write(
+    mut row: Value,
+    shadow: &difficulty::Shadow,
+    launched: &super::summon_assign::Launched,
+    mode: zerocode_core::jev::JevMode,
+    ledger: &Path,
     now_ms: i64,
 ) {
-    let Some(shadow) = prepared.difficulty_shadow.clone() else {
-        return;
-    };
-    let Some(wire) = host.jev_wire() else { return };
-    let mode = SUMMON_DIFFICULTY.mode_in(&wire.settings_root());
-    let Some(ledger) =
-        crate::systemone::ledger_of(&wire, &SUMMON_DIFFICULTY).filter(|_| mode.asks())
-    else {
-        return;
-    };
-    let run = prepared.run.clone();
-    let worker = prepared.worker.clone();
-    let dispatch = prepared.dispatch.clone();
-    let task = prepared.task.clone();
-    let agent = prepared.agent.clone();
-    let execution_model = prepared
-        .summon_shadow
-        .as_ref()
-        .and_then(|shadow| shadow.pinned.model.clone());
-    let executed_effort = prepared
-        .summon_shadow
-        .as_ref()
-        .and_then(|shadow| shadow.pinned.effort.clone());
-    let checkout = checkout.map(std::path::PathBuf::from);
-    host.off_the_beat(Box::new(move || {
-        let mut row = shadow.receipt.unwrap_or_else(|| {
-            let mut row = ask(&wire, &shadow.look, checkout.as_deref());
-            // A background answer was never used for this launch.
-            row["applied"] = json!(false);
-            row
-        });
-        row["at"] = json!(now_ms);
-        row["requestAt"] = json!(now_ms);
-        row["run"] = json!(run);
-        row["worker"] = json!(worker);
-        // Taskless summonses have a stable worker identity instead of a null
-        // request name (which would join unrelated rows).
-        row["dispatch"] = json!(dispatch.unwrap_or(worker));
-        row["task"] = json!(task);
-        row["mode"] = json!(mode.key());
-        row["agent"] = json!(agent);
-        row["executionModel"] = json!(execution_model);
-        row["effort"] = json!(executed_effort);
-        row["pinnedEffort"] = json!(shadow.teacher_effort);
-        row["baselineHigh"] = json!(shadow.baseline_high);
-        if row["outcome"] == "answered" {
-            difficulty::compare(&mut row, shadow.teacher_effort.as_deref());
-        }
-        crate::systemone::record_rows(&SUMMON_DIFFICULTY, &ledger, &[row], now_ms);
-    }));
+    launched.stamp(&mut row, mode, now_ms);
+    row["pinnedEffort"] = json!(shadow.teacher_effort);
+    row["baselineHigh"] = json!(shadow.baseline_high);
+    if row["outcome"] == "answered" {
+        difficulty::compare(&mut row, shadow.teacher_effort.as_deref());
+    }
+    crate::systemone::record_rows(&SUMMON_DIFFICULTY, ledger, &[row], now_ms);
+}
+
+/// The seats' rows beside what the summons launched, off the beat — how
+/// this seat's own tests record one.
+#[cfg(test)]
+fn record(host: &dyn Host, prepared: &PreparedWorkerStart, checkout: Option<&str>, now_ms: i64) {
+    super::summon_assign::record(host, prepared, checkout, now_ms);
 }
 
 /// Current observations, including revisions after a retry or late usage scan.

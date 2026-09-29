@@ -254,3 +254,98 @@ fn a_persons_row_keeps_its_model_and_the_pair_is_only_recorded() {
         "the answer is written down, never said to have run"
     );
 }
+
+/// A window like [`Assigned`] for any agent of the catalog: every agent's
+/// lineup is the same synthetic one, and every agent's command is its id.
+struct AnyAgent(Assigned);
+
+impl Launcher for AnyAgent {
+    fn command_for(&self, agent: &str, _: &str, tuning: &[String]) -> Result<String, String> {
+        Ok(std::iter::once(agent.to_string())
+            .chain(tuning.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+    fn difficulty_profile(
+        &self,
+        agent: &str,
+        difficulty: &str,
+        origin: [&str; 3],
+    ) -> Result<Option<lineup::Row>, String> {
+        self.0.difficulty_profile(agent, difficulty, origin)
+    }
+    fn model_facts(&self, agent: &str, origin: [&str; 3]) -> Option<crate::summon_model::Facts> {
+        self.0.model_facts(agent, origin)
+    }
+    fn choose_assign(&self, asked: &AssignAsk, origin: [&str; 3]) -> Receipts {
+        self.0.choose_assign(asked, origin)
+    }
+}
+
+/// A8 (the person, 2026-09-29: Jev is used the same whatever CLI runs): the
+/// summons is the one layer every agent of the catalog passes. An agent
+/// whose command line takes a model and an effort is asked the difficulty
+/// and the pair in one request and runs the pair; one that takes a model
+/// but no effort has no pair to offer and is asked nothing, its CLI's own
+/// default running and the reply saying so; one that takes neither is asked
+/// nothing either, and refuses a model it was handed.
+#[test]
+fn every_agent_of_the_catalog_passes_the_same_moment() {
+    let (mut pairs, mut models_only, mut neither) = (0, 0, 0);
+    for spec in crate::agent::AGENT_SPECS {
+        let agent = spec.id;
+        let launcher = AnyAgent(Assigned::answering(recorded(), ("model-b", "high")));
+        let mut bench = Bench::new();
+        bench.json("run-create --name catalog");
+        let planned = planned_on(
+            &mut bench.ledger,
+            &mut bench.team,
+            &launcher,
+            &format!("worker-start --agent {agent} --prompt translate-labels"),
+            bench.clock + 1,
+        );
+        assert_eq!(
+            planned.reply.exit_code, 0,
+            "{agent}: {}",
+            planned.reply.stderr
+        );
+        let reply: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+        let asked = launcher.0.asked.borrow();
+        let takes_a_model = launch_tuning(agent, Some("model-b"), None).is_ok();
+        let takes_an_effort = !ladder_efforts(agent).is_empty();
+        match (takes_a_model, takes_an_effort) {
+            (true, true) => {
+                pairs += 1;
+                assert_eq!(asked.len(), 1, "{agent}: one request");
+                assert!(asked[0].shared(), "{agent}: both questions ride it");
+                assert_eq!(
+                    (reply["model"].as_str(), reply["effort"].as_str()),
+                    (Some("model-b"), Some("high")),
+                    "{agent}: {reply}"
+                );
+                assert_eq!(reply["dials"]["modelFrom"], "jev", "{agent}: {reply}");
+            }
+            (true, false) => {
+                models_only += 1;
+                assert!(asked.is_empty(), "{agent}: no pair to offer: {asked:?}");
+                assert_eq!(
+                    reply["dials"]["modelFrom"], DIALS_FROM_CLI_DEFAULT,
+                    "{agent}: the reply says its CLI's own default runs: {reply}"
+                );
+            }
+            (false, _) => {
+                neither += 1;
+                assert!(asked.is_empty(), "{agent}: {asked:?}");
+                assert!(
+                    launch_tuning(agent, Some("model-b"), None)
+                        .is_err_and(|refused| refused.contains(agent)),
+                    "{agent}: a model it cannot take is refused, and says whose"
+                );
+            }
+        }
+    }
+    assert!(
+        pairs > 0 && models_only > 0 && neither > 0,
+        "the catalog holds every kind: {pairs} {models_only} {neither}"
+    );
+}

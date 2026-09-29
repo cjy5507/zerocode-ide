@@ -229,14 +229,15 @@ fn a_late_answer_costs_one_wall_and_applies_nothing() {
     }
 }
 
-/// A launcher whose seats are this window's own, on a test's wire, over the
-/// synthetic lineup.
+/// A launcher whose seats are this window's own, on a test's wire, over
+/// `lineup` — the synthetic one unless a measurement sizes its own.
 struct Wired<'a> {
     wire: &'a Wire,
+    lineup: Lineup,
 }
 impl zerocode_core::orchestration::Launcher for Wired<'_> {
-    fn command_for(&self, _: &str, _: &str, _: &[String]) -> Result<String, String> {
-        Ok("claude".into())
+    fn command_for(&self, agent: &str, _: &str, _: &[String]) -> Result<String, String> {
+        Ok(agent.to_string())
     }
     fn choose_assign(&self, asked: &AssignAsk, origin: [&str; 3]) -> Receipts {
         choose_with(self.wire, asked, origin)
@@ -247,13 +248,27 @@ impl zerocode_core::orchestration::Launcher for Wired<'_> {
         level: &str,
         _: [&str; 3],
     ) -> Result<Option<lineup::Row>, String> {
-        lineup::row_at(&Value::Null, agent, level, Some(&lineup()), None, 0)
+        lineup::row_at(&Value::Null, agent, level, Some(&self.lineup), None, 0)
     }
     fn model_facts(&self, _: &str, _: [&str; 3]) -> Option<model::Facts> {
         Some(model::Facts {
-            lineup: lineup(),
+            lineup: self.lineup.clone(),
             seen: Seen::default(),
-            records: records(),
+            // Every model with a record: no summons is a challenger's turn.
+            records: self
+                .lineup
+                .models
+                .iter()
+                .map(|held| {
+                    (
+                        held.id.clone(),
+                        ModelRecord {
+                            ended: lineup::CHALLENGE_MIN_SAMPLES,
+                            ..ModelRecord::default()
+                        },
+                    )
+                })
+                .collect(),
         })
     }
 }
@@ -265,6 +280,17 @@ fn summoned(
     checkout: &Path,
     request: &str,
 ) -> (Value, zerocode_core::orchestration::PreparedWorkerStart) {
+    summoned_as(wire, checkout, request, "claude", lineup())
+}
+
+/// [`summoned`], of `agent` over `lineup`.
+fn summoned_as(
+    wire: &Wire,
+    checkout: &Path,
+    request: &str,
+    agent: &str,
+    lineup: Lineup,
+) -> (Value, zerocode_core::orchestration::PreparedWorkerStart) {
     let mut ledger = zerocode_core::orchestration::Ledger::new();
     let mut team = zerocode_core::agent_teams::Team::new("team-assign", "test-token", 1);
     let _origin = super::super::summon_difficulty::origin_with_for_tests(
@@ -273,7 +299,7 @@ fn summoned(
         true,
         wire.settings_root(),
     );
-    let launcher = Wired { wire };
+    let launcher = Wired { wire, lineup };
     let mut summoned = None;
     for (at, command) in [
         (
@@ -282,7 +308,7 @@ fn summoned(
         ),
         (
             2,
-            format!("worker-start --agent claude --prompt {SPEC_WORD} --retry-request {request}"),
+            format!("worker-start --agent {agent} --prompt {SPEC_WORD} --retry-request {request}"),
         ),
     ] {
         let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
@@ -377,43 +403,131 @@ fn assert_shared_rows(wire: &Wire, applied: bool) {
 }
 
 /// A6: what a summons waits for Jev and sends, before and after, against a
-/// loopback endpoint that answers in a fixed 250 ms. Prints one JSON line;
-/// run by hand (`-- --ignored --nocapture assign_moment_numbers`).
+/// loopback endpoint that answers in a fixed 250 ms — per agent summoned
+/// this week, each over as many models naming no efforts as its lineup
+/// holds on the machine it was measured on (`zo models --json`, 2026-09-29:
+/// claude 8, codex 6, zo 26 with its custom providers'). Prints one JSON
+/// line an agent; run by hand
+/// (`-- --ignored --nocapture --exact
+/// orchestration::summon_assign::tests::assign_moment_numbers`).
 #[test]
 #[ignore = "a measurement, run by hand"]
 fn assign_moment_numbers() {
     const SAMPLES: usize = 30;
     const HOLD_MS: u64 = 250;
-    let mut waits = Vec::new();
-    let mut requests = 0;
-    let mut bytes = 0;
-    for nth in 0..SAMPLES {
-        let home = tempfile::tempdir().unwrap();
-        let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, HOLD_MS);
-        let wire = wire(&home, &endpoint, "on", "on");
-        let began = Instant::now();
-        let _ = summoned(&wire, home.path(), &format!("measure-{nth}"));
-        waits.push(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
-        let heard = endpoint.asked();
-        requests += heard.len();
-        bytes += heard
-            .iter()
-            .map(|request| {
-                request
-                    .split_once("\r\n\r\n")
-                    .map_or(0, |(_, body)| body.len())
+    for (agent, models) in [("claude", 8), ("codex", 6), ("zo", 26)] {
+        let lineup = Lineup::from_catalog_all(&json!({"models": (0..models)
+            .map(|nth| json!({"provider": "synthetic", "id": format!("model-{nth}"), "builtin": true}))
+            .collect::<Vec<_>>()}))
+        .unwrap();
+        let mut waits = Vec::new();
+        let mut requests = 0;
+        let mut bytes = 0;
+        for nth in 0..SAMPLES {
+            let home = tempfile::tempdir().unwrap();
+            let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, HOLD_MS);
+            let wire = wire(&home, &endpoint, "on", "on");
+            let began = Instant::now();
+            let _ = summoned_as(
+                &wire,
+                home.path(),
+                &format!("measure-{nth}"),
+                agent,
+                lineup.clone(),
+            );
+            waits.push(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
+            let heard = endpoint.asked();
+            requests += heard.len();
+            bytes += heard
+                .iter()
+                .map(|request| {
+                    request
+                        .split_once("\r\n\r\n")
+                        .map_or(0, |(_, body)| body.len())
+                })
+                .sum::<usize>();
+        }
+        waits.sort_unstable();
+        let at = |share: f64| zerocode_core::jev::summary::percentile(&waits, share);
+        println!(
+            "{}",
+            json!({
+                "agent": agent, "models": models, "samples": SAMPLES, "holdMs": HOLD_MS,
+                "requestsPerSummons": requests as f64 / SAMPLES as f64,
+                "requestBytesPerSummons": bytes / SAMPLES,
+                "waitP50Ms": at(0.50), "waitP95Ms": at(0.95),
             })
-            .sum::<usize>();
+        );
     }
-    waits.sort_unstable();
-    let at = |share: f64| zerocode_core::jev::summary::percentile(&waits, share);
+}
+
+/// A6 against the real service: the path's request with the difficulty
+/// question alone, and with the model question riding beside it, asked in
+/// turn — what a summons waits for each (p50, p95) and what each sends. The
+/// number that decides whether a recording seat rides an acting seat's
+/// request (the coordinator, 2026-09-29 23:07: apart if the joint request is
+/// slower at p95 by more than a fifth). Settings, the day's count and the
+/// ledgers are a temporary home's; the key rides one command's environment
+/// and is never printed.
+///
+/// ```sh
+/// TYPESAFE_API_KEY="$(security find-generic-password \
+///     -s dev.zerocode.key.TYPESAFE_API_KEY -a "$USER" -w)" \
+///   cargo test -p zerocode-shell --bin zerocode-shell \
+///   orchestration::summon_assign::tests::live_assign_moment_numbers \
+///   -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "live Jev requests; requires a command-scoped key"]
+fn live_assign_moment_numbers() {
+    const SAMPLES: usize = 20;
+    let key = std::env::var("TYPESAFE_API_KEY").expect("a command-scoped key");
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {
+            SUMMON_DIFFICULTY.setting: "on",
+            SUMMON_MODEL.setting: "on",
+            "jev": {"workspaces": ["*"]},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let wire = Wire::at(crate::systemone::SYSTEMONE_BASE_URL, &key, Some(settings));
+    let mut single = Vec::new();
+    let mut joint = Vec::new();
+    let answered =
+        |row: &Option<Value>| row.as_ref().is_some_and(|row| row["outcome"] == "answered");
+    for _ in 0..SAMPLES {
+        for (asked, held) in [
+            (both().only(true, false), &mut single),
+            (both(), &mut joint),
+        ] {
+            let receipts = ask(&wire, &asked, Some(home.path()));
+            let row = receipts.difficulty.clone();
+            if answered(&row) && (asked.model.is_none() || answered(&receipts.model)) {
+                let row = row.unwrap_or_default();
+                held.push((
+                    row["elapsedMs"].as_u64().unwrap_or(u64::MAX),
+                    row["requestBytes"].as_u64().unwrap_or_default(),
+                ));
+            }
+        }
+    }
+    let said = |held: &[(u64, u64)]| {
+        let bytes = held.first().map(|(_, bytes)| *bytes);
+        let mut waits: Vec<u64> = held.iter().map(|(wait, _)| *wait).collect();
+        waits.sort_unstable();
+        json!({
+            "answered": waits.len(),
+            "p50Ms": zerocode_core::jev::summary::percentile(&waits, 0.50),
+            "p95Ms": zerocode_core::jev::summary::percentile(&waits, 0.95),
+            "requestBytes": bytes,
+        })
+    };
     println!(
         "{}",
-        json!({
-            "samples": SAMPLES, "holdMs": HOLD_MS,
-            "requestsPerSummons": requests as f64 / SAMPLES as f64,
-            "requestBytesPerSummons": bytes / SAMPLES,
-            "waitP50Ms": at(0.50), "waitP95Ms": at(0.95),
-        })
+        json!({"samples": SAMPLES, "single": said(&single), "joint": said(&joint)})
     );
 }

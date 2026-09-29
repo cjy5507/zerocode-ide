@@ -48,22 +48,29 @@ fn wire(home: &tempfile::TempDir, endpoint: &Endpoint, mode: &str) -> Wire {
     Wire::at(&endpoint.base(), "test-key", Some(settings))
 }
 
-/// The pair `model` at the ladder's easy effort — the one effort a model
-/// that names none is offered at.
+/// The pair `model` at the ladder's easy effort — an effort every question
+/// here offers a model that names none at.
 fn pair(model: &str) -> String {
     model::option_word(model, LADDER[0].2)
 }
 
 fn answer(word: &str) -> String {
-    let words = [
-        pair("model-a"),
-        pair("model-b"),
-        pair("model-c"),
-        model::ABSTAIN.to_string(),
-    ];
+    answer_to(&asked(), word)
+}
+
+/// Jev's answer `word` to `asked`, over every option it offered.
+fn answer_to(asked: &ModelAsk, word: &str) -> String {
+    let words: Vec<String> = asked
+        .offered()
+        .iter()
+        .map(|(offered, effort)| model::option_word(offered, effort))
+        .chain([model::ABSTAIN.to_string()])
+        .collect();
+    // The rest of the chosen word's share, spread over the others.
+    let rest = 0.15 / f64::from(u32::try_from(words.len() - 1).unwrap_or(u32::MAX));
     let probabilities: serde_json::Map<String, Value> = words
         .iter()
-        .map(|each| (each.clone(), json!(if each == word { 0.85 } else { 0.05 })))
+        .map(|each| (each.clone(), json!(if each == word { 0.85 } else { rest })))
         .collect();
     json!({"model": "jev-1.13.0", "answers": {model::QUESTION: {
         "type": "choice", "choice": word, "probabilities": probabilities, "confidence": 0.85,
@@ -230,7 +237,11 @@ fn a_challengers_turn_is_recorded_off_the_beat_and_marked() {
         "the low difficulty's untried model"
     );
     let home = tempfile::tempdir().unwrap();
-    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(&pair("model-b")), 0);
+    let kept = prepared
+        .model_shadow
+        .as_ref()
+        .expect("the question is kept");
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer_to(&kept.ask, &pair("model-b")), 0);
     let host =
         super::super::summon_difficulty::tests::Deferred::on(&wire(&home, &endpoint, "shadow"));
     record(&host, &prepared, home.path().to_str(), 3);
