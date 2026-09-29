@@ -107,8 +107,8 @@ pub(crate) use verified_state::receipt_in;
 use fallback::{
     is_refusal_stop_reason, overload_demotion_warn, quota_fallback_swap_warn,
     quota_wait_hold_warn,
-    refusal_surfaced_message, QuotaEscape, RefusalDecision,
-    REFUSAL_CONTEXT_CLEANED_WARN, REFUSAL_SURFACED_NOTICE,
+    refusal_surfaced_message, surfaced_refusal_notice, QuotaEscape, RefusalDecision,
+    REFUSAL_CONTEXT_CLEANED_WARN,
 };
 // Turn-completion items the turn loops + `deep_gate` still reference.
 use turn_end::{
@@ -1115,6 +1115,12 @@ pub struct ConversationRuntime<C, T> {
     /// compaction cost and whether the retry cleared the decline. Cleared at
     /// every public turn begin.
     refusal_compaction: Option<crate::turn_trace::RefusalCompaction>,
+    /// The decline the ladder last surfaced with nowhere to go, kept across
+    /// turns so the same decline coming back for the same conversation is not
+    /// walked from the first rung again (t-15890). Process memory only, like
+    /// the cooldown; cleared with the model world and by a public turn that
+    /// did not surface it. See [`fallback::SurfacedDecline`].
+    surfaced_decline: Option<fallback::SurfacedDecline>,
     /// The category of the refusal that armed [`Self::refusal_dry_until`]:
     /// the pre-arm routes that category, and only a routed one arms it.
     refusal_dry_category: Option<String>,
@@ -1858,6 +1864,7 @@ where
             refusal_images_asked_for_turn: false,
             refusal_compaction_used: false,
             refusal_compaction: None,
+            surfaced_decline: None,
             refusal_dry_category: None,
             escalation_model_override: None,
             escalation_armed_fresh: false,
@@ -2670,6 +2677,7 @@ where
                         other => break other,
                     }
                 };
+                let standing = matches!(decision, RefusalDecision::Standing);
                 match decision {
                     // The compacted retry was folded where it was decided;
                     // like the same-model retry, all that is left is to ask.
@@ -2711,11 +2719,11 @@ where
                         eprintln!("[zo] {REFUSAL_CONTEXT_CLEANED_WARN}");
                         continue;
                     }
-                    RefusalDecision::Surface => {
+                    RefusalDecision::Surface | RefusalDecision::Standing => {
                         if let Some(usage) = refused_usage {
                             self.usage_tracker.record(usage);
                         }
-                        for line in self.settle_surfaced_refusal() {
+                        for line in self.settle_surfaced_refusal(category) {
                             eprintln!("[zo] {line}");
                         }
                         // A route nobody could be asked about is said so (t-7153).
@@ -2733,7 +2741,7 @@ where
                         }) {
                             eprintln!("[zo] {}", core_types::retry_signal::refusal_stands_notice(word));
                         }
-                        let assistant_message = refusal_surfaced_message();
+                        let assistant_message = refusal_surfaced_message(standing);
                         self.record_assistant_iteration(iterations, &assistant_message, 0);
                         self.session
                             .push_message(assistant_message)
