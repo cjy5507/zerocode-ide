@@ -15922,6 +15922,29 @@ button.worker-composer-pill:hover {
   color: var(--ink-mist);
 }
 
+/* The chip reads 「✓ 끝남 · 2분 14초」 (the mockup's): a helper that ended plainly wears a check before
+ * its word, and its clock — its file's own span — stands after a dot. A file that stamped nothing has
+ * no clock to show, so the span is empty and takes no room (t-18702). */
+.helper-head .worker-state.is-clean::before {
+  content: "✓";
+  margin-inline-end: var(--space-1);
+}
+
+.helper-head .worker-elapsed:empty {
+  display: none;
+}
+
+.helper-head .worker-elapsed:not(:empty)::before {
+  content: "·";
+  margin-inline-end: var(--space-1);
+}
+
+/* An ended helper's chip is quiet: the mockup draws it in the mist, not in the running chip's ink. */
+.helper-state.is-done,
+.helper-head .helper-state.is-done .worker-state {
+  color: var(--ink-mist);
+}
+
 .helper-state-dot {
   flex: none;
   width: 6px;

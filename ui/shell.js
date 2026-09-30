@@ -117,6 +117,14 @@ const panePermissionModes = new Map();
  * piece the voice finished (`done`) stands until the turn that says those
  * words arrives (`settlePaneLive`), so the close is one paint, never a blink. */
 const paneLive = new Map();
+/* What a pane's agent says it is doing, by pane: the `activity` of the newest
+ * `session_status` its own channel sent — zo says what its working row says, a
+ * tool's verb and target or waiting, reconnecting, thinking, and leaves the
+ * fact out while the pane is idle and in the first token's grace period. The
+ * foot line of the pane's conversation says it when no row of a step is out to
+ * (`nowActivityOf`, t-18702). A frame without it, the turn's end and the next
+ * turn's start take it away. */
+const paneNow = new Map();
 /* The question a pane's program is asking, when the hook DESCRIBED it — a
  * permission request (tool, summary, the edit as rows) or an AskUserQuestion
  * with its options — keyed by term, cleared by the next report that is not a
@@ -9157,6 +9165,13 @@ listen("hook:activity", (event) => {
   // 모아서 함께 싣는다. 이어 붙이고 스무 개에서 끊는다.
   const held = [...(paneActivities.get(pane) ?? []), ...activities];
   paneActivities.set(pane, held.slice(-ACTIVITY_RING));
+  // A helper's page says what its own card last did when no row is out to say
+  // it (`nowActivityOf`): the card's news is the foot line's, not the list's.
+  const page = activeHelperPage();
+  if (page && isHelperPage(page.worker) && helperCardOf(page.worker) === pane) {
+    const status = helperStatusOf(page);
+    if (status) updateHelperStatus(status, page.worker);
+  }
   // A tool call is a line in the transcript already; the conversation view on
   // this pane, if it is up, reads it now (`pollHelperPages` is the one reader).
   const term = Number(/^term:(\d+)$/.exec(pane)?.[1]);
@@ -11389,7 +11404,22 @@ function elapsedWords(ms) {
 }
 
 function workerElapsedWords(run) {
+  if (isHelperPage(run)) return helperSpanWords(run);
   return elapsedWords((run.endedAt ?? Date.now()) - run.startedAt);
+}
+
+/* How long a helper ran, by the times its file stamped: from its first stamped line to its last — to
+ * now while it runs. The window's own clock says nothing about it (it started when the page happened
+ * to open, so every finished helper read 「완료 0초」), and a file that stamped nothing has no clock:
+ * the head says nothing rather than a time nobody knows (t-18702). Under half a second it would be
+ * worded 0초, which is the same nothing. */
+const HELPER_SPAN_MIN_MS = 500;
+
+function helperSpanWords(run) {
+  const held = run.helper;
+  if (held.firstStampMs === undefined) return "";
+  const span = (run.status === "running" ? Date.now() : held.lastStampMs) - held.firstStampMs;
+  return span >= HELPER_SPAN_MIN_MS ? elapsedWords(span) : "";
 }
 
 /* The clock alone, so a second's tick never rebuilds the page under a
@@ -11448,14 +11478,24 @@ function holdHelperTurns(held, turns) {
   const now = Date.now();
   for (const turn of turns) {
     // 벤더가 줄에 찍은 시각이 있으면 그것(`TranscriptTurn.at_ms`), 없으면
-    // 도착한 순간 — 「{{time}} 동안 작업」의 시간은 이 시각들의 차다.
+    // 도착한 순간 — 「{{time}} 동안 작업」의 시간은 이 시각들의 차다. 찍힌 시각이
+    // 없는 줄을 백엔드는 `null`로 보낸다(빠진 열쇠가 아니다): 둘 다 「없음」이다.
+    const stamp = Number.isFinite(turn.at_ms) ? turn.at_ms : null;
+    // 헬퍼 자신의 시계는 파일이 찍은 첫 줄에서 끝 줄까지다(`helperSpanWords`) —
+    // 페이지가 열린 순간이 아니라. 턴을 앞에서 지워도(상한) 이 둘은 남는다.
+    if (stamp !== null) {
+      if (held.firstStampMs === undefined) held.firstStampMs = stamp;
+      held.lastStampMs = Math.max(held.lastStampMs ?? stamp, stamp);
+    }
     if (turn.role === "tool_result" && turn.tool?.call_id) {
       const call = held.turns.findLast((one) => one.role === "tool" &&
         one.tool?.call_id === turn.tool.call_id && one.output === undefined);
       if (call) {
         call.output = turn.text;
         call.outputError = turn.tool.is_error === true;
-        call.outputAt = turn.at_ms ?? now;
+        call.outputAt = stamp ?? now;
+        // A length is said only between two times the file itself gave (`stepTook`).
+        call.outputFromClock = stamp === null;
         // What the result handed back beside its words: pictures (A8).
         if (turn.images?.length > 0) call.outputImages = turn.images;
         // An edit the result describes and the call did not (ACP hands the
@@ -11473,13 +11513,13 @@ function holdHelperTurns(held, turns) {
     // A length of nothing is no length: turns held in one read share one
     // clock reading, and a file can stamp two lines alike.
     const last = held.turns.at(-1);
-    const fromClock = turn.at_ms === undefined;
+    const fromClock = stamp === null;
     if (last?.role === "thinking" && last.thoughtMs === undefined && last.fromClock === fromClock) {
-      const lasted = (turn.at_ms ?? now) - last.at;
+      const lasted = (stamp ?? now) - last.at;
       if (lasted > 0) last.thoughtMs = lasted;
     }
     held.turns.push({ role: turn.role, text: turn.text, tool: turn.tool ?? null,
-      seq: held.seq, at: turn.at_ms ?? now, fromClock, ...(turn.images?.length > 0 && { images: turn.images }) });
+      seq: held.seq, at: stamp ?? now, fromClock, ...(turn.images?.length > 0 && { images: turn.images }) });
     held.seq += 1;
   }
   if (held.turns.length > HELPER_TURN_CAP) {
@@ -11953,6 +11993,7 @@ function forgetPaneChat(term) {
   held.run.queue = null;
   paneChats.delete(term);
   paneLive.delete(term);
+  paneNow.delete(term);
   paneUsage.delete(term);
 }
 
@@ -12252,7 +12293,12 @@ async function pollHelperPages() {
     if (activeHelperPage() === tab) paintHelperSurface(tab);
   }
   const replaced = after !== null && more.next < after;
-  if (replaced) { held.turns.length = 0; held.skipped = false; }
+  if (replaced) {
+    held.turns.length = 0;
+    held.skipped = false;
+    held.firstStampMs = undefined;
+    held.lastStampMs = undefined;
+  }
   // The first read of a pane's transcript began at its tail: the turns above
   // are not carried, and the page says so once (`paintPaneChat`).
   if (more.folded === true) held.folded = true;
@@ -12444,9 +12490,12 @@ function toolWords(turn) {
     } catch {}
   }
 
+  // `arg` is the target as a line has room for it; `whole` is what a shell step's title is read from —
+  // a `cd <long path> &&` cut at 80 letters would take the command's own words with it (t-18702).
+  const whole = target || input.split("\n", 1)[0];
   if (target && target.length > 80) target = `${target.slice(0, 77)}…`;
 
-  return { name, arg: target || input.split("\n", 1)[0], input };
+  return { name, arg: target || input.split("\n", 1)[0], whole, input };
 }
 
 function cleanseAssistantText(text) {
@@ -12585,7 +12634,7 @@ function dressToolTurn(row, turn, run, spoken) {
  * extension's 「Thought for 3s」), the bare word until then. */
 function thoughtLabel(turn) {
   if (turn.thoughtMs !== undefined) {
-    return t("worker.thoughtFor", "{{s}}초 동안 생각", { s: Math.max(1, Math.round(turn.thoughtMs / 1000)) });
+    return t("worker.thoughtFor", "생각 {{s}}초", { s: Math.max(1, Math.round(turn.thoughtMs / 1000)) });
   }
   return t("worker.thought", "생각");
 }
@@ -12643,10 +12692,11 @@ function updateHelperStatus(line, run) {
   wearReach(line, composerReachOf(run));
   const mark = line.querySelector(".helper-status-mark");
   // What is going on now, in the words its row wears (t-15682): the step that
-  // is out, else the thought that is going. With nothing to name the line
-  // keeps the CLI's own verb, which holds still for a person who asked for
-  // less motion.
-  const naming = shown ? nowWordsOf(line.parentElement) : "";
+  // is out, else the thought that is going, else what the card's activity says
+  // (t-18702). With nothing to name a voice that turns through verbs keeps the
+  // CLI's own, which holds still for a person who asked for less motion; a
+  // voice with one static word gives way to the window's own.
+  const naming = shown ? nowSaidOf(line.parentElement, run, voice) : "";
   writeClass(line, "is-naming", naming !== "");
   writeTextContent(line.querySelector(".helper-status-now"), naming === "" ? "" : `${t("worker.now", "지금")} · ${naming}`);
   writeTextContent(line.querySelector(".helper-status-said"), naming === "" ? voice.busy_word : naming);
@@ -14094,7 +14144,9 @@ function updateHelperPageHead(head, run, owner) {
     dot.remove();
   }
   const said = state.querySelector(".worker-state");
-  writeAttribute(said, "class", `worker-state is-${run.status}`);
+  // 「✓ 끝남」: the check stands only before the plain ending, not before 「직접 멈춤」.
+  const clean = run.status === "done" && !run.helper?.stopRecord;
+  writeAttribute(said, "class", `worker-state is-${run.status}${clean ? " is-clean" : ""}`);
   writeTextContent(said, workerStatusWords(run));
   writeTextContent(state.querySelector(".worker-elapsed"), workerElapsedWords(run));
   writeTextContent(head.querySelector(".worker-uses"), toolUsesWords(run.toolCalls ?? 0));
@@ -14444,7 +14496,7 @@ async function stopHelperFromPage(stop, run) {
 /* A finished helper's word: the plain one, unless the person's stop is what
  * its record says ended it. */
 function helperStopRecordWords(record) {
-  const ended = t("worker.ended", "완료");
+  const ended = t("worker.ended", "끝남");
   return record ? helperStopWords(record, ended) : ended;
 }
 
@@ -15778,6 +15830,14 @@ function laneSignal(session, frame) {
       paneLive.delete(term);
       paintPaneLive(term);
     }
+    notePaneNow(session, null);
+  } else if (frame.type === "turn") {
+    // The turn ended, however it ended: what it was doing is over.
+    notePaneNow(session, null);
+  } else if (frame.type === "session_status") {
+    // zo's status card carries what its working row says (`activity`); the
+    // frame leaves it out while the pane is idle.
+    notePaneNow(session, frame.activity && typeof frame.activity === "object" ? frame.activity : null);
   } else if (frame.type === "usage") {
     /* 상태바와 보드는 같은 손으로 읽는다 (t-2374). 두 번째 파서를 지으면
      * 「상태바는 24,489인데 카드는 비었다」가 언제든 생긴다 — 그리고 그것은
@@ -15823,6 +15883,33 @@ function notePaneLive(session, frame) {
     paneLive.set(term, pieces);
     paintPaneLive(term);
   }
+}
+
+/* Keep what a pane's channel says the pane is doing (`null`: nothing), and
+ * repaint the foot line of its conversation when that moved. */
+function notePaneNow(session, activity) {
+  for (const term of paneTermsBySession(session)) {
+    const held = paneNow.get(term) ?? null;
+    const same = activity === null
+      ? held === null
+      : held?.verb === activity.verb && held.target === activity.target && held.phase === activity.phase;
+    if (same) continue;
+    if (activity === null) paneNow.delete(term);
+    else paneNow.set(term, activity);
+    paintPaneNow(term);
+  }
+}
+
+/* The foot line of the page a tab is, when it stands drawn on screen. */
+function helperStatusOf(tab) {
+  const host = tab.kind === "chat" ? paneChats.get(tab.term)?.host : groups.get(tab.pane)?.workerView;
+  return host && !host.hidden ? host.__helperPage?.status ?? null : null;
+}
+
+function paintPaneNow(term) {
+  const tab = paneChats.get(term)?.tab;
+  const status = tab ? helperStatusOf(tab) : null;
+  if (status) updateHelperStatus(status, tab.worker);
 }
 
 /* The streaming rows of a pane's conversation, when it is on screen, follow

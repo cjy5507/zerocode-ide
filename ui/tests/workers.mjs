@@ -1974,6 +1974,12 @@ async function testHelperPage(page, ok) {
         foot: find(".helper-foot"),
       };
     };
+    // 도우미의 파일은 줄마다 시각을 찍는다 — 머리의 시계는 그 시각들의 폭이다(t-18702): 시각이
+    // 없는 파일의 페이지는 시계를 그리지 않으므로, 시계가 있는 머리를 보는 시험은 찍힌 파일을 쓴다.
+    const stampedLog = (brief) => [
+      { role: "user", text: brief, at_ms: Date.now() - 41_000 },
+      { role: "assistant", text: "reading", at_ms: Date.now() - 1_000 },
+    ];
     // 부모 판 하나와 그 명부. 도우미마다 전사가 있어 그 페이지가 열린다.
     const scene = async (roster, { model = "model-o" } = {}) => {
       window.__ANSWER__.subagent_log = ({ id, after }) => {
@@ -1986,22 +1992,12 @@ async function testHelperPage(page, ok) {
       const owner = tabOfTerm(term);
       tell("hook:agent", { term, state: "working", agent: "claude", session: `s-${term}`, model });
       tell("hook:subagent", { term, rows: roster });
-      for (const row of roster) {
-        logs[row.id] ??= [
-          { role: "user", text: `Look into ${row.name}.` },
-          { role: "assistant", text: "reading" },
-        ];
-      }
+      for (const row of roster) logs[row.id] ??= stampedLog(`Look into ${row.name}.`);
       await window.__PAINTED__();
       return { term, owner };
     };
     const open = async (at, sub, { agent = "claude", brief } = {}) => {
-      if (brief !== undefined || !logs[sub.id]) {
-        logs[sub.id] = [
-          { role: "user", text: brief ?? `Look into ${sub.name}.` },
-          { role: "assistant", text: "reading" },
-        ];
-      }
+      if (brief !== undefined || !logs[sub.id]) logs[sub.id] = stampedLog(brief ?? `Look into ${sub.name}.`);
       await openHelperPage({ term: at.term, agent, worktree: at.owner.worktree, tab: at.owner }, sub);
       await settle();
       return parts();

@@ -3528,11 +3528,22 @@ function fenceOf(line) {
   return null;
 }
 
+/* A list item that breaks a paragraph off, as CommonMark reads it: a bullet (`-`, `*` or `+`) or an
+ * ordered item that starts at 1 (`1.`, `1)`), indented at most three spaces, with words after its
+ * marker. What is not one stays the sentence's own text: 「2024. 한 해」 (an ordered item that starts
+ * at any other number), a hyphen that opens a word (`-word`), an item with nothing in it, a line
+ * indented four spaces. */
+const MD_LIST_INTERRUPT = /^ {0,3}(?:[-*+]|0*1[.)])[ \t]+\S/;
+
+function opensAListItem(line) {
+  return MD_LIST_INTERRUPT.test(line);
+}
+
 /* Whether this line starts a block, which is where a paragraph stops. */
 function opensABlock(line) {
   if (fenceOf(line) !== null) return true;
   const trimmed = line.trimStart();
-  return trimmed.startsWith(">") || /^#{1,6}\s/.test(trimmed);
+  return trimmed.startsWith(">") || /^#{1,6}\s/.test(trimmed) || opensAListItem(line);
 }
 
 function isTableRule(line) {
@@ -3729,7 +3740,9 @@ function paintMarkdown(body, text) {
     (stack.length > 0 ? stack[stack.length - 1].item ?? body : body).appendChild(
       markMarkdownReviewTarget(node, startLine, Math.max(startLine, at)),
     );
-    stack = [];
+    // A paragraph inside a list item is the item's own, and an item that breaks it off goes on with the
+    // same list; anything else that follows closes the lists itself.
+    if (at >= lines.length || !opensAListItem(lines[at])) stack = [];
   }
 }
 
