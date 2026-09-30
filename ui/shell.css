@@ -16015,10 +16015,14 @@ button.helper-sib:hover {
 /* What the helper did, counted (t-18702), under the brief: the whole in the
  * ink, each kind of step and the failures in the mist, and a bar of the kinds'
  * shares in the agent's accent, the first kind strongest. A failure is the one
- * thing coloured; none says so in the quiet green of a ready thing. */
+ * thing coloured; none says so in the quiet green of a ready thing. On a page
+ * too short for every row the tally gives up its room first, so the footer's
+ * doors stay on screen. */
 .helper-tally {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1) var(--space-3);
