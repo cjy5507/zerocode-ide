@@ -3954,7 +3954,10 @@ mod agent_manifest_tests {
     /// holds while it holds it.
     #[test]
     fn a_live_worker_and_a_background_mark_each_keep_the_session_busy_while_they_stand() {
-        use super::{register_agent_cancel_signal_for_tests, unregister_agent_cancel_signal_for_tests};
+        use super::{
+            mark_background_agent, register_agent_cancel_signal_for_tests,
+            unregister_agent_cancel_signal_for_tests,
+        };
 
         let busy = || *runtime::helper_activity::watch().borrow();
         register_agent_cancel_signal_for_tests("busy-worker", 7);

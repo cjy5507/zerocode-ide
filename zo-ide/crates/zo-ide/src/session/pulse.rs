@@ -158,10 +158,12 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(1), &mut waiting_second).await.is_ok());
     }
 
-    /// While something runs the beat comes once a second — never more often,
-    /// and each one within the second.
+    /// While something runs a beat comes within every second. Where in the
+    /// second it falls is the wall clock's, which a paused test clock does not
+    /// move, so this pins the bound; the spacing is pinned on the real clock
+    /// below.
     #[tokio::test(start_paused = true)]
-    async fn while_something_runs_the_beat_comes_once_a_second() {
+    async fn while_something_runs_a_beat_comes_within_every_second() {
         let activity = Activity::new();
         activity.set(Count::Background, 1);
         let mut pulse = Pulse::over(activity.watch());
@@ -174,6 +176,26 @@ mod tests {
             let waited = started.elapsed();
             assert!(waited <= Duration::from_millis(1_050), "beat {beat} took {waited:?}");
         }
+    }
+
+    /// The beats of a running session are a second apart, not a frame's: two
+    /// of them take a second or more. This runs on the real clock (about two
+    /// seconds) because the phase is the wall clock's; the floor is loose
+    /// because a beat wakes late under load and never early.
+    #[tokio::test]
+    async fn the_beats_of_a_running_session_are_a_second_apart_not_a_frame_apart() {
+        let activity = Activity::new();
+        activity.set(Count::Background, 1);
+        let mut pulse = Pulse::over(activity.watch());
+        pulse.next(None).await;
+        let after_first = std::time::Instant::now();
+        pulse.next(None).await;
+        pulse.next(None).await;
+        let two_beats = after_first.elapsed();
+        assert!(
+            two_beats >= Duration::from_millis(1_000),
+            "two beats took {two_beats:?} after the first: the pulse beats faster than once a second"
+        );
     }
 
     /// The last thing ending is one look more — the look that sees it gone —
@@ -211,5 +233,4 @@ mod tests {
         let mut parked = Pulse::over(runtime::helper_activity::Activity::new().watch());
         assert!(!arrives_within(&mut parked, None, Duration::from_secs(60)).await);
     }
-
 }
