@@ -36613,7 +36613,7 @@ const toolStates = await page.evaluate(async () => {
   // The four the answer closed: their kinds' words, no accent.
   seen.fourNames = tools.slice(0, 4).map((row) => row.querySelector(".helper-step-kind").textContent).join(",");
   seen.wantFourNames = [t("worker.stepRead", "파일 읽기"), t("worker.stepSearch", "검색"),
-    t("worker.stepEdit", "파일 수정"), t("worker.stepShell", "셸 실행")].join(",");
+    t("worker.stepEdit", "파일 수정"), t("worker.stepShell", "셸")].join(",");
   seen.fourPlain = tools.slice(0, 4).every((row) => !row.classList.contains("is-live") &&
     markOf(row).color === probe("--ink-mist"));
   // The one still out: the mark on the accent, "in progress" where its result

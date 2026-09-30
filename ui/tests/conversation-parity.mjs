@@ -1826,6 +1826,7 @@ export async function testConversationSteps(browser, origin, ok) {
   await stepsNowWithoutARow(browser, origin, ok);
   await stepsListUnderASentence(browser, origin, ok);
   await stepsHelperTally(browser, origin, ok);
+  await stepsWebResults(browser, origin, ok);
 }
 
 /* C1–C4, C9 — the rows the fixture comes to, closed, then pressed. */
@@ -2426,7 +2427,7 @@ async function stepsByKind(browser, origin, ok) {
         looks: {
           read: ["#i-file", t("worker.stepRead", "파일 읽기")],
           grep: ["#i-search", t("worker.stepSearch", "검색")],
-          bash: ["#i-terminal", t("worker.stepShell", "셸 실행")],
+          bash: ["#i-terminal", t("worker.stepShell", "셸")],
           web: ["#i-globe", t("worker.stepWeb", "웹 읽기")],
           websearch: ["#i-globe", t("worker.stepWebSearch", "웹 검색")],
           task: ["#i-bot", t("worker.stepTask", "헬퍼 호출")],
@@ -3703,6 +3704,56 @@ async function stepsHelperTally(browser, origin, ok) {
     ok("D6: the quiet helper's strip raised no page errors", quiet.faults.length === 0, quiet.faults.join("\n"));
   } finally {
     await quiet.page.close();
+  }
+}
+
+/* D7 — what a search of the web says came of it: how much came back, the way the mockup's row does
+ * (「결과 13 KB」), not the first line of whatever the engine printed. A page fetched keeps the size of
+ * what came back. A shell step's kind is worded 「셸」 (the mockup's), in the rows, the foot line and the
+ * strip — the kind's one word, so it is checked once here where the three read it. */
+async function stepsWebResults(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const listing = "- 묶음 상품 목록 화면의 제품 정보와 가격을 보여 주는 페이지\n".repeat(400);
+    const turns = [{ role: "user", text: "웹을 조사해 줘.", at_ms: CLOCK }];
+    let clock = CLOCK;
+    const call = (id, name, kind, input, answer) => {
+      turns.push({ role: "tool", text: `${name} · ${input}`, at_ms: (clock += 1000), tool: { call_id: id, name, kind, input, is_error: false } });
+      turns.push({ role: "tool_result", text: answer, at_ms: (clock += 400), tool: { call_id: id, is_error: false } });
+    };
+    call("ws1", "WebSearch", "websearch", "bundle product list", listing);
+    call("wf1", "WebFetch", "web", "https://example.com/products/", WEB_OUTPUT);
+    call("ws2", "WebSearch", "websearch", "nothing at all", "");
+    call("sh1", "Bash", "bash", "ls", "a\nb");
+    await openConversation(page, turns);
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async ({ listing, fetched }) => {
+      const { steps, lineOf, settle } = window.__STEPS__;
+      await settle();
+      const rowOf = (id) => steps().find((row) => row.__turn?.tool?.call_id === id);
+      const partOf = (id, part) => lineOf(rowOf(id))?.querySelector(part)?.textContent ?? null;
+      return {
+        search: partOf("ws1", ".helper-step-res"),
+        wantSearch: t("worker.stepResultSize", "결과 {{size}}", { size: bytesLabel(listing.length) }),
+        fetch: partOf("wf1", ".helper-step-res"),
+        wantFetch: bytesLabel(fetched.length),
+        empty: partOf("ws2", ".helper-step-res"),
+        shell: partOf("sh1", ".helper-step-kind"),
+      };
+    }, { listing, fetched: WEB_OUTPUT });
+    ok(
+      "D7: a search of the web says how much came back — 「결과 13 KB」 — and a page fetched says the size of what it got, as before; a search that brought nothing says nothing",
+      seen.search === seen.wantSearch && /^결과 \d+ KB$/.test(seen.search ?? "") && seen.fetch === seen.wantFetch && seen.empty === "",
+      JSON.stringify(seen),
+    );
+    ok(
+      "D7: a shell step's kind is worded 「셸」 — the mockup's word — not 「셸 실행」",
+      seen.shell === "셸",
+      JSON.stringify(seen),
+    );
+    ok("D7: the web results raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
   }
 }
 
