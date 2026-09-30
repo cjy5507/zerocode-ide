@@ -249,7 +249,7 @@ async fn settle(pane: &tauri::Webview, deadline: Instant) -> Result<plan::Settle
     evaluate(
         pane,
         plan::arm_script(),
-        within(deadline, Duration::from_secs(5)),
+        within(deadline, plan::SCRIPT_BUDGET),
     )
     .await?;
     let started = Instant::now();
@@ -257,7 +257,7 @@ async fn settle(pane: &tauri::Webview, deadline: Instant) -> Result<plan::Settle
         let answer = evaluate(
             pane,
             plan::POLL_SCRIPT.to_string(),
-            within(deadline, Duration::from_secs(5)),
+            within(deadline, plan::SCRIPT_BUDGET),
         )
         .await?;
         let settled = plan::parse_settled(&answer)
@@ -363,7 +363,7 @@ async fn backing_scale(pane: &tauri::Webview) -> Result<f64, String> {
         let _ = tx.send(crate::artifact_webkit::backing_scale(view));
     })
     .map_err(|error| error.to_string())?;
-    receive(rx, Duration::from_secs(2), "화면 배율").await
+    receive(rx, plan::SCALE_BUDGET, "화면 배율").await
 }
 
 /// A renderer with a fixed answer that remembers what it was asked — the seam's

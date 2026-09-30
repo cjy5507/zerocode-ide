@@ -101,7 +101,7 @@ pub(crate) fn evaluate_string(view: &WKWebView, script: &str, tx: Sender<Result<
         let _ = tx.send(answer);
     });
     unsafe {
-        view.evaluateJavaScript_completionHandler(&NSString::from_str(script), Some(&block));
+        view.evaluateJavaScript_completionHandler(&NSString::from_str(script), Some(&*block));
     }
 }
 

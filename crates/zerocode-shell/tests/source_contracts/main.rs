@@ -1,5 +1,6 @@
 mod act_lines;
 mod agent_capabilities;
+mod artifact_export;
 mod ask_popup;
 mod bundle_resources;
 mod cli_login;

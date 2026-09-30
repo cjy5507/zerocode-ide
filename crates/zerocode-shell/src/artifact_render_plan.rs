@@ -53,6 +53,10 @@ pub(crate) const SETTLE_POLL: Duration = Duration::from_millis(50);
 pub(crate) const FRAME_CAP_MS: u32 = 1500;
 /// How long a print job is given from its start to its file.
 pub(crate) const PRINT_BUDGET: Duration = Duration::from_secs(15);
+/// How long one script asked of the page is given to answer.
+pub(crate) const SCRIPT_BUDGET: Duration = Duration::from_secs(5);
+/// How long the pane's backing scale is given to be read.
+pub(crate) const SCALE_BUDGET: Duration = Duration::from_secs(2);
 /// The whole render, from asking for the pane to holding the bytes. Under the
 /// door shim's own deadline (`ARTIFACT_SHIM_TIMEOUT_SECS`, asserted where both
 /// are in sight), so the door answers rather than times out.
@@ -249,7 +253,13 @@ mod tests {
         assert!((A4_HEIGHT_PT / A4_WIDTH_PT - 297.0 / 210.0).abs() < 1e-3);
         assert!(PDF_MARGIN_PT * 2.0 < A4_WIDTH_PT);
         assert!(SETTLE_BUDGET > Duration::from_millis(u64::from(FRAME_CAP_MS)));
-        for phase in [LOAD_BUDGET, SETTLE_BUDGET, PRINT_BUDGET] {
+        for phase in [
+            LOAD_BUDGET,
+            SETTLE_BUDGET,
+            PRINT_BUDGET,
+            SCRIPT_BUDGET,
+            SCALE_BUDGET,
+        ] {
             assert!(
                 phase < RENDER_BUDGET,
                 "{phase:?} leaves the whole render no room"
