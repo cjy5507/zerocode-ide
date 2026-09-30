@@ -897,12 +897,13 @@ outdated task lists it under `blockedBy`, because nothing in this run can
 produce it. `--status ready` (or any other status) puts a closed task back to
 work and drops its reason.
 
-`task-settle [--days <n>]` lists — and only lists — the tasks whose every
-attempt ended handing nothing in and that nobody has touched for a week (the
-default is `SETTLE_QUIET_DAYS`): the old tasks that can never take a review
-record. `task-settle --apply --retry-request settle-<run>` closes exactly that
-list `outdated`, from the coordinator seat only. Run it without `--apply` first
-and read the count.
+`task-settle [--days <n>]` lists, and only lists, two piles of old work: the
+open tasks (pending, ready, blocked) whose every attempt ended handing nothing
+in and that nobody has touched for a week (the default is `SETTLE_QUIET_DAYS`),
+and — apart, as `unreviewableCompleted` — the completed tasks that can never
+take a review record. `task-settle --apply --retry-request settle-<run>` closes
+the first pile `outdated`, from the coordinator seat only; a completed task is
+never changed by it. Run it without `--apply` first and read both counts.
 
 ## Decision gates
 

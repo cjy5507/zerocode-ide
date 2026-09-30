@@ -17217,8 +17217,9 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "task-settle",
-        "[--days <n>] [--apply] · the tasks whose every attempt ended handing nothing in and that \
-         nobody has touched for --days (default one week): listed, and closed `outdated` only with \
+        "[--days <n>] [--apply] · the open tasks whose every attempt ended handing nothing in and \
+         that nobody has touched for --days (default one week), and apart the completed ones that \
+         can take no review: listed; only the open ones are closed `outdated`, and only with \
          --apply, from the coordinator seat",
         Doing::Policy,
     ),
@@ -19868,13 +19869,16 @@ fn plan_inner(
             // Which statuses the list is made of, so a coordinator reads the
             // shape of the pile — finished-and-unreviewed, or never finished —
             // before it decides to close it.
-            let mut by_status = serde_json::Map::new();
-            for task in settle_candidates(run, now_ms, days) {
-                let held = by_status
-                    .entry(task.status.as_str().to_string())
-                    .or_insert(0.into());
-                *held = (held.as_u64().unwrap_or(0) + 1).into();
-            }
+            let unreviewable: Vec<serde_json::Value> = unreviewable_completed(run, now_ms, days)
+                .into_iter()
+                .map(|task| {
+                    serde_json::json!({
+                        "taskId": task.id,
+                        "title": task.display_name(),
+                        "quietDays": now_ms.saturating_sub(last_touched_ms(run, task)) / DAY_MS,
+                    })
+                })
+                .collect();
             let mut closed = Vec::new();
             if apply {
                 let why =
@@ -19895,8 +19899,10 @@ fn plan_inner(
                 "apply": apply,
                 "days": days,
                 "count": found.len(),
-                "byStatus": by_status,
                 "candidates": found,
+                // Completed, and never closed here: what can take no review.
+                "unreviewableCompleted": unreviewable,
+                "unreviewableCount": unreviewable.len(),
                 "closed": closed,
             }))
         }
@@ -22200,21 +22206,40 @@ fn last_touched_ms(run: &Run, task: &Task) -> i64 {
         .fold(task.created_ms, i64::max)
 }
 
-/// The tasks the settle pass would close: at least one attempt was made, every
-/// attempt has ended, none of them handed anything in (so none can take a
-/// review record), the task is not failed, closed, gated or at work, no
-/// coordinator has written a review on it (work already judged is not old
-/// news), and nobody has touched it for `days`.
+/// The tasks the settle pass would close: still open (pending, ready or
+/// blocked), at least one attempt was made, every attempt has ended, none of
+/// them handed anything in (so none can take a review record), no decision
+/// stands in front of it, and nobody has touched it for `days`. A completed
+/// task is never here — done is done, and what settle owes it is a listing
+/// ([`unreviewable_completed`]), not a new status.
 pub fn settle_candidates(run: &Run, now_ms: i64, days: i64) -> Vec<&Task> {
+    quiet_unhanded(run, now_ms, days, |status| {
+        matches!(
+            status,
+            TaskStatus::Pending | TaskStatus::Ready | TaskStatus::Blocked
+        )
+    })
+}
+
+/// The completed tasks that can never take a review record — every attempt
+/// ended handing nothing in, no coordinator wrote a review, nobody touched
+/// them for `days`. Listed beside the settle candidates and never closed: the
+/// board's 검증 대기 is the word they are waiting under, and the list is what a
+/// person reads to decide what to do about that.
+pub fn unreviewable_completed(run: &Run, now_ms: i64, days: i64) -> Vec<&Task> {
+    quiet_unhanded(run, now_ms, days, |status| status == TaskStatus::Completed)
+}
+
+fn quiet_unhanded(
+    run: &Run,
+    now_ms: i64,
+    days: i64,
+    status: impl Fn(TaskStatus) -> bool,
+) -> Vec<&Task> {
     let cutoff = now_ms.saturating_sub(days.saturating_mul(DAY_MS));
     run.tasks
         .iter()
-        .filter(|task| {
-            matches!(
-                task.status,
-                TaskStatus::Pending | TaskStatus::Ready | TaskStatus::Completed
-            )
-        })
+        .filter(|task| status(task.status))
         .filter(|task| run.pending_gate_on(&task.id).is_none())
         .filter(|task| !ReviewFacts::from_result(task.result.as_str()).written)
         .filter(|task| {

@@ -247,6 +247,12 @@ fn the_settle_pass_lists_first_and_closes_only_when_applied() {
     let empty = task_with_an_empty_attempt(&mut bench, "empty");
     let untouched = task_of(&mut bench, "no attempt at all");
     let failed_empty = task_with_an_empty_attempt(&mut bench, "also empty");
+    // Done is done: a completed task with nothing handed in is listed apart
+    // and never closed.
+    let done_unhanded = task_with_an_empty_attempt(&mut bench, "done by hand");
+    bench.json(&format!(
+        "task-update --task {done_unhanded} --status completed"
+    ));
     // One a coordinator already judged: old news it is not.
     let judged = task_with_an_empty_attempt(&mut bench, "judged");
     bench.ledger.runs[0]
@@ -286,6 +292,11 @@ fn the_settle_pass_lists_first_and_closes_only_when_applied() {
             && !ids.contains(&judged),
         "{ids:?}"
     );
+    assert_eq!(listed["unreviewableCount"], 1, "{listed}");
+    assert_eq!(
+        listed["unreviewableCompleted"][0]["taskId"],
+        done_unhanded.as_str()
+    );
     // Listing wrote nothing.
     assert!(
         bench.ledger.runs[0]
@@ -302,6 +313,14 @@ fn the_settle_pass_lists_first_and_closes_only_when_applied() {
     let task = bench.ledger.runs[0].task(&empty).expect("task");
     assert_eq!(task.status, TaskStatus::Closed);
     assert!(matches!(task.closed, Some(Closure::Outdated { .. })));
+    assert_eq!(
+        bench.ledger.runs[0]
+            .task(&done_unhanded)
+            .expect("task")
+            .status,
+        TaskStatus::Completed,
+        "settle changed a completed task"
+    );
     // A second pass finds nothing left to do.
     assert_eq!(bench.json("task-settle")["count"], 0);
 }
