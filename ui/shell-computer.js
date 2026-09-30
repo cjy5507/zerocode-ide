@@ -1,22 +1,20 @@
 /* ---- Computer Use: the one hand and the last step ---------------------------
  *
- * (docs/design/computer-use-full-operator.md §1.3, §1.5.) Two small surfaces
- * over the whole window, both driven by the backend's events: a band that
- * says the operator is acting (and offers the stop — the same stop as the
- * desktop chord and `zerocode-computer stop`), and a question when a press
- * is about to land on a payment, transfer or delete control, with the two
- * buttons only a person presses. Every judgement is the backend's; this file
- * paints, counts down, and answers by id. */
+ * (docs/design/computer-use-full-operator.md §1.3, §1.5.) A band over the whole
+ * window, driven by the backend's events, that says the operator is acting (and
+ * offers the stop — the same stop as the desktop chord and `zerocode-computer
+ * stop`); and two questions the operator puts to the person — a press about to
+ * land on a payment, transfer or delete control, and the hand-over of the desk —
+ * which are asks like any other and stand in the ask popup in the middle of the
+ * window (`registerAskKind`, shell-term.js), where the person is looking. The
+ * band asks nothing, so it stays where it is. Every judgement is the backend's;
+ * this file paints, counts down, and answers by id. */
 
 /* How long the band stays after the last action before it slips away. */
 const COMPUTER_BAND_IDLE_MS = 8000;
-/* How often the question's clock is repainted. */
-const COMPUTER_CONFIRM_TICK_MS = 1000;
 
 let computerBandState = { active: false, stopped: null, actions: 0, verb: null };
 let computerBandTimer = null;
-let computerConfirmOpen = null;
-let computerConfirmClock = null;
 
 function paintComputerBand() {
   const band = el("computer-band");
@@ -66,6 +64,12 @@ el("computer-band-resume").addEventListener("click", () => {
   invoke("computer_resume", { reset: false }).catch(() => {});
 });
 
+function computerConfirmTitle(kind) {
+  if (kind === "transfer") return t("computer.confirm.transferTitle", "이체 단추를 누를까요?");
+  if (kind === "delete") return t("computer.confirm.deleteTitle", "삭제 단추를 누를까요?");
+  return t("computer.confirm.paymentTitle", "결제 단추를 누를까요?");
+}
+
 function computerConfirmWords(ask) {
   const label = ask.label ?? "";
   if (ask.kind === "transfer") {
@@ -75,58 +79,6 @@ function computerConfirmWords(ask) {
     return t("computer.confirm.delete", "삭제 단추 「{{label}}」를 누르려 합니다", { label });
   }
   return t("computer.confirm.payment", "결제 단추 「{{label}}」를 누르려 합니다", { label });
-}
-
-function paintComputerConfirmClock() {
-  if (!computerConfirmOpen) return;
-  const left = Math.max(0, Math.ceil((computerConfirmOpen.until - Date.now()) / 1000));
-  el("computer-confirm-clock").textContent = t("computer.confirm.clock", "{{seconds}}초 뒤 거부", {
-    seconds: left,
-  });
-}
-
-function showComputerConfirm(ask) {
-  computerConfirmOpen = { id: ask.id, until: Date.now() + (ask.timeoutMs ?? 0) };
-  el("computer-confirm-text").textContent = computerConfirmWords(ask);
-  el("computer-confirm").hidden = false;
-  clearInterval(computerConfirmClock);
-  paintComputerConfirmClock();
-  computerConfirmClock = setInterval(paintComputerConfirmClock, COMPUTER_CONFIRM_TICK_MS);
-  el("computer-confirm-allow").focus();
-}
-
-function hideComputerConfirm(id) {
-  if (computerConfirmOpen && id && computerConfirmOpen.id !== id) return;
-  computerConfirmOpen = null;
-  clearInterval(computerConfirmClock);
-  computerConfirmClock = null;
-  el("computer-confirm").hidden = true;
-}
-
-function answerComputerConfirm(allow) {
-  if (!computerConfirmOpen) return;
-  const id = computerConfirmOpen.id;
-  invoke("computer_confirm_answer", { id, allow }).catch(() => {});
-  hideComputerConfirm(id);
-}
-
-listen("computer:confirm", (event) => {
-  if (event.payload?.id) showComputerConfirm(event.payload);
-});
-listen("computer:confirm-closed", (event) => hideComputerConfirm(event.payload?.id));
-el("computer-confirm-allow").addEventListener("click", () => answerComputerConfirm(true));
-el("computer-confirm-deny").addEventListener("click", () => answerComputerConfirm(false));
-
-/* The person's turn (§7.4): the operator hands the desk over — a 2FA code, a
- * CAPTCHA, a press it may not make — and waits for 「다 했어요」. Same channel
- * as the question: the answer goes back by id. */
-let computerHandoffOpen = null;
-let computerHandoffClock = null;
-
-function paintComputerHandoffClock() {
-  if (!computerHandoffOpen) return;
-  const left = Math.max(0, Math.ceil((computerHandoffOpen.until - Date.now()) / 1000));
-  el("computer-handoff-clock").textContent = t("computer.handoff.clock", "{{seconds}}초 남음", { seconds: left });
 }
 
 /* The window's own reasons for handing the desk over, in the source
@@ -145,37 +97,94 @@ function computerHandoffText(handoff) {
   return say ? say(handoff.reasonArgs ?? {}) : (handoff.reason ?? "");
 }
 
-function showComputerHandoff(handoff) {
-  computerHandoffOpen = { id: handoff.id, until: Date.now() + (handoff.timeoutMs ?? 0) };
-  el("computer-handoff-text").textContent = computerHandoffText(handoff);
-  el("computer-handoff").hidden = false;
-  clearInterval(computerHandoffClock);
-  paintComputerHandoffClock();
-  computerHandoffClock = setInterval(paintComputerHandoffClock, COMPUTER_CONFIRM_TICK_MS);
-  el("computer-handoff-done").focus();
+/* The seconds the backend will still wait. They count from the moment it
+ * asked — the backend's own clock started then — so an ask that waits its turn
+ * behind another in the popup is already spending them. Reaching nought
+ * answers nothing here: the backend refuses when ITS time is up and says so with
+ * a `-closed`, and the window is not the one that decides a press. */
+function computerAskSeconds(ask) {
+  return Math.max(0, Math.ceil((ask.until - Date.now()) / 1000));
 }
 
-function hideComputerHandoff(id) {
-  if (computerHandoffOpen && id && computerHandoffOpen.id !== id) return;
-  computerHandoffOpen = null;
-  clearInterval(computerHandoffClock);
-  computerHandoffClock = null;
-  el("computer-handoff").hidden = true;
-}
+/* Both answer the same road, by the id they were asked under: `allow` is the
+ * press for the confirm and 「다 했어요」 for the hand-over. */
+const computerAnswerRoad = {
+  deliver: (ask, choice) => invoke("computer_confirm_answer", { id: ask.id, allow: choice.allow }),
+};
 
-function answerComputerHandoff(done) {
-  if (!computerHandoffOpen) return;
-  const id = computerHandoffOpen.id;
-  invoke("computer_confirm_answer", { id, allow: done }).catch(() => {});
-  hideComputerHandoff(id);
-}
-
-listen("computer:handoff", (event) => {
-  if (event.payload?.id) showComputerHandoff(event.payload);
+/* The last step (§1.5): the person answers before a press lands on a payment,
+ * transfer or delete control. Its default is refusing — the refusal holds the
+ * focus so a stray Enter refuses, Escape refuses, and a question nobody
+ * answers is refused by the backend when its time is up. */
+registerAskKind("computer-confirm", {
+  ...computerAnswerRoad,
+  tone: "computer-confirm",
+  view: (ask) => ({
+    agent: t("computerUse.title", "컴퓨터 사용"),
+    title: computerConfirmTitle(ask.payload.kind),
+    why: computerConfirmWords(ask.payload),
+    choices: [
+      { label: t("computer.confirm.deny", "거부"), allow: false, tone: "primary" },
+      { label: t("computer.confirm.allow", "허용"), allow: true, tone: "plain" },
+    ],
+    initial: 0,
+    safe: 0,
+  }),
+  clock: (ask) => t("computer.confirm.clock", "{{seconds}}초 뒤 거부", {
+    seconds: computerAskSeconds(ask),
+  }),
 });
-listen("computer:handoff-closed", (event) => hideComputerHandoff(event.payload?.id));
-el("computer-handoff-done").addEventListener("click", () => answerComputerHandoff(true));
-el("computer-handoff-cancel").addEventListener("click", () => answerComputerHandoff(false));
+
+/* The person's turn (§7.4): the operator hands the desk over — a 2FA code, a
+ * CAPTCHA, a press it may not make — and waits for 「다 했어요」. Same channel
+ * as the question: the answer goes back by id. Enter says nothing; Tab reaches
+ * 「다 했어요」, and Escape hands the desk back unfinished. */
+registerAskKind("computer-handoff", {
+  ...computerAnswerRoad,
+  tone: "computer-handoff",
+  view: (ask) => ({
+    agent: t("computerUse.title", "컴퓨터 사용"),
+    title: t("computer.handoff.title", "사람이 할 차례"),
+    why: computerHandoffText(ask.payload),
+    // Neither answer is the primary: the primary is the button Enter presses,
+    // and Enter answers nothing here. 「다 했어요」 says the person did a thing
+    // on their desktop, and a stray Enter must not say it for them. The
+    // keyboard starts on the frame; Tab reaches either answer, and Escape
+    // hands the desk back.
+    choices: [
+      { label: t("computer.handoff.cancel", "취소"), allow: false, tone: "plain" },
+      { label: t("computer.handoff.done", "다 했어요"), allow: true, tone: "plain" },
+    ],
+    initial: null,
+    safe: 0,
+  }),
+  clock: (ask) => t("computer.handoff.clock", "{{seconds}}초 남음", {
+    seconds: computerAskSeconds(ask),
+  }),
+});
+
+function raiseComputerAsk(kind, ask) {
+  if (!ask?.id) return;
+  raiseAsk({
+    kind,
+    key: `computer:${ask.id}`,
+    id: ask.id,
+    payload: ask,
+    until: Date.now() + (ask.timeoutMs ?? 0),
+  });
+}
+
+/* The backend closing an ask — answered from another door, or its time run out
+ * — takes it away wherever it stands: on screen, or waiting its turn. */
+function closeComputerAsk(id) {
+  if (!id) return;
+  withdrawAsks((ask) => ask.key === `computer:${id}`);
+}
+
+listen("computer:confirm", (event) => raiseComputerAsk("computer-confirm", event.payload));
+listen("computer:confirm-closed", (event) => closeComputerAsk(event.payload?.id));
+listen("computer:handoff", (event) => raiseComputerAsk("computer-handoff", event.payload));
+listen("computer:handoff-closed", (event) => closeComputerAsk(event.payload?.id));
 
 /* Both Settings and the refusal card name the row the list judges: the helper
  * for Accessibility, the app itself for Screen Recording (the report carries
