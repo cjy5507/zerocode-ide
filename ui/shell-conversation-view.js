@@ -598,6 +598,13 @@ function keepToFoot(list) {
     } else if (CHAT_FOLLOW_KEYS.up.has(event.key)) leave();
     else if (CHAT_FOLLOW_KEYS.down.has(event.key)) toward();
   });
+  // A row's body is built the first time it opens. `toggle` does not bubble,
+  // so one capturing listener on the list stands for the one each row of a page
+  // of hundreds would carry; a row names the painter it wants (`__paint`).
+  list.addEventListener("toggle", (event) => {
+    const row = event.target;
+    if (row.open && row.__paint && list.__run) row.__paint(row, list.__run);
+  }, true);
   list.addEventListener("scroll", () => {
     noteChatScroll(list, state);
     paintFootDoor(list);
@@ -1520,9 +1527,7 @@ function stepRowNode(run, turn, spoken) {
   row.__turn = turn;
   row.__kind = stepKindOf(turn, run);
   row.appendChild(stepLineNode(stepLook(row.__kind)));
-  row.addEventListener("toggle", () => {
-    if (row.open) paintStepBody(row, run);
-  });
+  row.__paint = paintStepBody;
   dressToolTurn(row, turn, run, spoken);
   return row;
 }
@@ -1542,9 +1547,7 @@ function runRowNode(run, turns) {
   row.__turn = turns.at(-1);
   row.dataset.turn = String(row.__turn.seq);
   row.appendChild(stepLineNode(stepLook(row.__kind)));
-  row.addEventListener("toggle", () => {
-    if (row.open) paintRunBody(row, run);
-  });
+  row.__paint = paintRunBody;
   dressRunLine(row);
   return row;
 }
@@ -1749,9 +1752,7 @@ function thoughtRowNode(className, run) {
   const body = document.createElement("div");
   body.className = "helper-thought-body";
   row.appendChild(body);
-  row.addEventListener("toggle", () => {
-    if (row.open) paintThoughtBody(row, run);
-  });
+  row.__paint = paintThoughtBody;
   return row;
 }
 
