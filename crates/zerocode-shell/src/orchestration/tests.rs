@@ -10043,11 +10043,11 @@ fn a_persons_key_takes_the_workers_pane_over_durably() {
     crate::agent_teams::forget_term(LEADER);
 }
 
-/// A taken worker that writes to the ledger again is the ledger's again,
-/// and the key gate hears it on the next beat (t-17644): the person's next
-/// own words in that pane are a takeover reported afresh.
+/// A taken worker's letter leaves the pane the person's; `worker-return`
+/// hands it back, and the key gate hears that on the next beat (t-17644):
+/// the person's next own words in that pane are a takeover reported afresh.
 #[test]
-fn a_taken_worker_that_speaks_again_reopens_the_key_gate() {
+fn worker_return_reopens_the_key_gate_on_the_next_beat() {
     const LEADER: u32 = 11_640;
     const WORKER: u32 = 11_641;
     let _window = the_window();
@@ -10081,10 +10081,21 @@ fn a_taken_worker_that_speaks_again_reopens_the_key_gate() {
         clock(),
     );
     assert_eq!(spoke.exit_code, 0, "{}", spoke.stderr);
-    assert!(
-        !taken(),
-        "the worker spoke and the pane stayed the person's"
+    assert!(taken(), "the worker's letter handed the person's pane back");
+    super::forget_returned_terms();
+    assert!(gated(), "the gate opened on a letter alone");
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let back = run(
+        &Nowhere,
+        Vec::new(),
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &words(&format!("worker-return --worker {worker}")),
+        clock(),
     );
+    assert_eq!(back.exit_code, 0, "{}", back.stderr);
+    assert!(!taken(), "worker-return left the pane the person's");
     super::forget_returned_terms();
     assert!(!gated(), "the gate still swallows the next takeover");
     super::pane_taken_over(WORKER, clock());

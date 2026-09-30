@@ -1172,9 +1172,10 @@ pub struct Worker {
     /// close it or type into it refuse instead, and only `worker-abandon`,
     /// which touches nothing, still applies. An Enter that only submitted
     /// words the WINDOW placed is not a takeover (the window never reports
-    /// one, t-17644). It ends when the pane is the ledger's again: the
-    /// worker itself writes to the ledger ([`Ledger::send`]), or somebody
-    /// hands it back with `worker-return` ([`Ledger::worker_returned`]).
+    /// one, t-17644). A report from a taken pane lands but hands nothing
+    /// back — the person may still be sitting there — and only
+    /// `worker-return` ([`Ledger::worker_returned`]) makes the pane the
+    /// ledger's again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub taken_over: bool,
     /// The checkout its pane sits in — the window's placement fact, reported
@@ -6645,16 +6646,6 @@ impl Ledger {
             .run_mut(run_id)
             .ok_or_else(|| format!("unknown run: {run_id}"))?;
         let id = message.id.clone();
-        /* A worker that writes to the ledger again is the ledger's again
-         * (t-17644): a person who took its pane and then left it to go on by
-         * itself has handed it back, and the pointer, stop, release and every
-         * plan that reads `taken_over` apply to it once more. Read from the
-         * signature the verb road wrote, never from the agent's name. */
-        if let Some(worker_id) = message.from.strip_prefix(WORKER_ADDRESS_PREFIX)
-            && let Some(worker) = run.workers.iter_mut().find(|one| one.id == worker_id)
-        {
-            worker.taken_over = false;
-        }
         if let Some(ok) = worker_done {
             let ended = message.created_ms;
             /* The body is the WORKER's writing, whatever keys it carries: the
@@ -11758,9 +11749,8 @@ impl Ledger {
 
     /// The person took a pane: real keys, typed by a hand, landed in it.
     ///
-    /// Recorded on the worker sitting there until the pane is the ledger's
-    /// again — the worker writes to the ledger itself, or `worker-return`
-    /// hands it back ([`Self::worker_returned`], t-17644) — and it also retires
+    /// Recorded on the worker sitting there until `worker-return` hands the
+    /// pane back ([`Self::worker_returned`], t-17644) — and it also retires
     /// the readiness window, because a hand on the keys is louder than any
     /// hook. Answers whether anything moved, so the window's once-per-pane
     /// gate can skip the write-through for a pane already taken.

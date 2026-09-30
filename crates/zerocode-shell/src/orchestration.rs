@@ -4636,9 +4636,8 @@ fn return_refused(argv: &[String]) -> Option<String> {
 }
 
 /// Let the key gate forget every pane the ledger holds as its own again
-/// (t-17644): a worker that wrote to the ledger, or one handed back with
-/// `worker-return`. The next hand of the person's own words in that pane is
-/// a takeover again, reported afresh.
+/// (t-17644): one handed back with `worker-return`. The next hand of the
+/// person's own words in that pane is a takeover again, reported afresh.
 fn forget_returned_terms() {
     let Some(returned) = with_ledger_seats(|ledger, seats| {
         ledger

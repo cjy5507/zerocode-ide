@@ -25948,12 +25948,12 @@ fn conditional_worker_stop_does_not_end_a_reassigned_attempt() {
     );
 }
 
-/// A worker that writes to the ledger again is the ledger's again
-/// (t-17644), whichever catalog agent it is and whichever letter it
-/// writes: a status, a question, `worker_done`. The rule reads the
-/// signature the verb road wrote, never the agent's name.
+/// A taken worker that writes to the ledger — a status, a question, its
+/// `worker_done` — stays the person's (t-17644): the letter lands, the
+/// pane is not handed back, whichever catalog agent it is. The person may
+/// still be sitting there; only `worker-return` gives the pane back.
 #[test]
-fn a_taken_over_worker_that_speaks_again_is_the_ledgers_again_for_every_agent() {
+fn a_taken_over_worker_that_speaks_stays_the_persons_for_every_agent() {
     // A launcher that knows every catalog row, so no agent is left out.
     let every: &'static [&'static str] = Box::leak(
         crate::agent::AGENT_SPECS
@@ -25985,10 +25985,15 @@ fn a_taken_over_worker_that_speaks_again_is_the_ledgers_again_for_every_agent() 
                     .taken_over
             };
             assert!(taken(&bench), "{}: the takeover never landed", spec.id);
-            bench.json_at(&pane, letter);
+            let said = bench.at(&pane, letter);
+            assert_eq!(
+                said.reply.exit_code, 0,
+                "{}: `{letter}` was refused: {}",
+                spec.id, said.reply.stderr
+            );
             assert!(
-                !taken(&bench),
-                "{}: `{letter}` left the pane the person's",
+                taken(&bench),
+                "{}: `{letter}` handed the person's pane back",
                 spec.id
             );
         }

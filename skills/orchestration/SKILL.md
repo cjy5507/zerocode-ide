@@ -716,12 +716,11 @@ These are the ones that cost you a run when you get them wrong.
 - **A pane the person touched is theirs.** Real keys in a worker's pane take
   it over: from then on `worker-stop`, `worker-release` and `dispatch` refuse
   — the refusal names the road left — and `worker-abandon`, which touches
-  nothing, is how you stop tracking it. Reports from that pane still land —
-  and a report is the pane coming back: the moment that worker writes to the
-  ledger again, it is yours again. An Enter that only sent words the window
-  placed (a resume nudge, a mail pointer) takes nothing over. `worker-return
-  --worker <id>` hands a pane back by name, and is refused while the
-  person's own words sit unsent on its line.
+  nothing, is how you stop tracking it. Reports from that pane still land,
+  and hand nothing back — the person may still be sitting there. An Enter
+  that only sent words the window placed (a resume nudge, a mail pointer)
+  takes nothing over. `worker-return --worker <id>` hands a pane back by
+  name, and is refused while the person's own words sit unsent on its line.
 
 ## When to orchestrate — and when not to
 
