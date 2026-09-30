@@ -415,10 +415,12 @@ pub(crate) struct StageCount {
 
 /// The pipeline's stages in the order the board draws them — a task's one
 /// word. The flow reads left to right (written down with its dependencies
-/// unmet, ready, carried, reported, merged); the four after it are where a
-/// task stands still: a decision in front of it, held back, failed, closed
-/// (over without being done or failed — `TaskStatus::Closed`).
-pub(crate) const STAGES: [&str; 9] = [
+/// unmet, ready, carried, reported, merged); the five after it are where a
+/// task stands still or is over: a decision in front of it, held back, failed,
+/// completed with nothing a coordinator could ever review
+/// (`ReviewFacts::unreviewable`), closed (over without being done or failed —
+/// `TaskStatus::Closed`).
+pub(crate) const STAGES: [&str; 10] = [
     "pending",
     "ready",
     "dispatched",
@@ -427,6 +429,7 @@ pub(crate) const STAGES: [&str; 9] = [
     "gate",
     "blocked",
     "failed",
+    "unreviewable",
     "closed",
 ];
 
@@ -434,9 +437,10 @@ pub(crate) const STAGES: [&str; 9] = [
 /// the ledger hands work out in. The rest are endings, listed newest first.
 const OPEN_STAGES: [&str; 5] = ["pending", "ready", "dispatched", "gate", "blocked"];
 
-/// The stages a finished task stands in — reported, merged — the ones whose
-/// rows carry the task's cost (t-9470).
-const FINISHED_STAGES: [&str; 2] = ["reported", "merged"];
+/// The stages a finished task stands in — reported, merged, and completed with
+/// nothing a coordinator could review — the ones whose rows carry the task's
+/// cost (t-9470).
+const FINISHED_STAGES: [&str; 3] = ["reported", "unreviewable", "merged"];
 
 /// The most rows one stage carries across the wire. Its count carries the
 /// rest: a run of two hundred finished tasks is two hundred numbers nobody
@@ -449,7 +453,11 @@ pub(crate) const STAGE_ROWS: usize = 24;
 /// become ready by itself. A completed task is merged only where a
 /// coordinator wrote so against the task's newest attempt
 /// (`Run::review_of`, `ReviewFacts::merged`); a worker's report alone —
-/// whatever keys its body carries — is "reported".
+/// whatever keys its body carries — is "reported", which is the board's
+/// 검증 대기 and holds only what a coordinator can still review. One that
+/// nothing was handed in on can take no review record for ever, and the
+/// ledger says so (`ReviewFacts::unreviewable`): it is its own stage, never
+/// "reported" (t-19328).
 fn stage_of(run: &Run, task: &Task) -> &'static str {
     if run.pending_gate_on(&task.id).is_some() {
         return "gate";
@@ -459,14 +467,23 @@ fn stage_of(run: &Run, task: &Task) -> &'static str {
         TaskStatus::Pending | TaskStatus::Blocked => "blocked",
         TaskStatus::Ready => "ready",
         TaskStatus::Dispatched => "dispatched",
-        TaskStatus::Completed if run.review_of(task).merged => "merged",
-        TaskStatus::Completed => "reported",
+        TaskStatus::Completed => {
+            let review = run.review_of(task);
+            if review.merged {
+                "merged"
+            } else if review.unreviewable {
+                "unreviewable"
+            } else {
+                "reported"
+            }
+        }
         TaskStatus::Failed => "failed",
         TaskStatus::Closed => "closed",
     }
 }
 
-/// Whether a task is finished: reported, or merged ([`FINISHED_STAGES`]).
+/// Whether a task is finished: reported, merged, or completed with nothing a
+/// coordinator could review ([`FINISHED_STAGES`]).
 pub(crate) fn finished(run: &Run, task: &Task) -> bool {
     FINISHED_STAGES.contains(&stage_of(run, task))
 }

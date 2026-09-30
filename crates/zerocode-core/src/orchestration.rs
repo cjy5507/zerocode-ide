@@ -784,8 +784,10 @@ pub enum ReviewAuthor {
 /// of 2026-09-05 (t-2607) found the words only in `task-update --result`
 /// JSON, in the coordinator's own keys — so this reads exactly those keys and
 /// nothing else. Absence is "not written down", never a fact of absence: a
-/// row wears "검증 대기" until a coordinator writes otherwise, and the label
-/// is never inferred from a `Done` turn or a `worker_done`.
+/// row wears "검증 대기" until a coordinator writes otherwise — unless nothing
+/// was ever handed in for a review to name, which the ledger says itself
+/// ([`Self::unreviewable`]) — and the label is never inferred from a `Done`
+/// turn or a `worker_done`.
 ///
 /// The keys, as coordinators on this machine have actually written them:
 /// `verified` or `reviewedBy` records a review decision. A test command or
@@ -838,6 +840,20 @@ pub struct ReviewFacts {
     /// attempt are spelled ([`Run::review_of`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_now: Option<String>,
+    /// No review record can ever be written for this task: it is completed
+    /// and nothing was handed in for a review to name
+    /// ([`Run::handed_nothing_in`], the settle pass's own reading). A review
+    /// binds to the newest attempt's source and `task-update` refuses one of
+    /// an attempt that handed nothing in, so nothing a coordinator can still
+    /// do would move this — the board says 완료 — 검토 기록 없음 instead of
+    /// 검증 대기 (t-19328, t-15558 slice 2).
+    ///
+    /// The ledger's reading of the attempts each time it is asked: never a
+    /// thing anybody wrote and never stored, so a later attempt that hands
+    /// something in takes it back, and absent from every review an older
+    /// window sent, which reads as `false`.
+    #[serde(default)]
+    pub unreviewable: bool,
 }
 
 impl ReviewFacts {
@@ -3379,9 +3395,17 @@ impl Run {
     /// The one reader. `Task` alone cannot answer, because the attempts and
     /// what they handed in are the run's rows; a reading that skipped them
     /// would be the inheritance this exists to refuse.
+    ///
+    /// It also says whether any review can be written at all
+    /// ([`ReviewFacts::unreviewable`]): a completed task nothing was handed in
+    /// on. That is asked of the attempts here, once, so no window has to
+    /// count them again.
     #[must_use]
     pub fn review_of(&self, task: &Task) -> ReviewFacts {
-        let facts = ReviewFacts::written_by(&task.result, task.result_author.as_ref());
+        let facts = ReviewFacts {
+            unreviewable: task.status == TaskStatus::Completed && self.handed_nothing_in(task),
+            ..ReviewFacts::written_by(&task.result, task.result_author.as_ref())
+        };
         if facts.author != ReviewAuthor::Coordinator {
             return facts;
         }
@@ -3414,6 +3438,32 @@ impl Run {
             source_now: source_moved.then(|| handed.map(str::to_string)).flatten(),
             ..facts
         }
+    }
+
+    /// Whether nothing was ever handed in for a review to name: the task has
+    /// had at least one attempt, every attempt has ended and none of them
+    /// handed anything in ([`Dispatch::source`]), no decision stands in front
+    /// of it and no review key is written in its result.
+    ///
+    /// The one place this reading is written. A review binds to the newest
+    /// attempt's source and `task-update` refuses one of an attempt that
+    /// handed nothing in, so where this holds no coordinator can write a
+    /// review. The settle pass asks it of open and of completed tasks
+    /// (`quiet_unhanded`, plus its own quiet time), and [`Self::review_of`]
+    /// asks it of completed ones for the board ([`ReviewFacts::unreviewable`]),
+    /// which has no reason to wait a week: work done by hand a minute ago is
+    /// as unreviewable as work done a year ago.
+    #[must_use]
+    pub fn handed_nothing_in(&self, task: &Task) -> bool {
+        let mut attempts = self
+            .dispatches
+            .iter()
+            .filter(|held| held.task == task.id)
+            .peekable();
+        attempts.peek().is_some()
+            && attempts.all(|held| !held.is_open() && held.source.is_none())
+            && self.pending_gate_on(&task.id).is_none()
+            && !ReviewFacts::from_result(task.result.as_str()).written
     }
 
     /// The seat somebody is sitting in right now, or `None` for a run whose
@@ -22223,9 +22273,11 @@ pub fn settle_candidates(run: &Run, now_ms: i64, days: i64) -> Vec<&Task> {
 
 /// The completed tasks that can never take a review record — every attempt
 /// ended handing nothing in, no coordinator wrote a review, nobody touched
-/// them for `days`. Listed beside the settle candidates and never closed: the
-/// board's 검증 대기 is the word they are waiting under, and the list is what a
-/// person reads to decide what to do about that.
+/// them for `days`. Listed beside the settle candidates and never closed. The
+/// board no longer waits on them: a completed task nothing was handed in on
+/// reads 완료 — 검토 기록 없음 instead of 검증 대기 the moment it is so
+/// (`ReviewFacts::unreviewable`, the same reading without the quiet time), and
+/// this list is what a person reads to see the old ones.
 pub fn unreviewable_completed(run: &Run, now_ms: i64, days: i64) -> Vec<&Task> {
     quiet_unhanded(run, now_ms, days, |status| status == TaskStatus::Completed)
 }
@@ -22240,16 +22292,7 @@ fn quiet_unhanded(
     run.tasks
         .iter()
         .filter(|task| status(task.status))
-        .filter(|task| run.pending_gate_on(&task.id).is_none())
-        .filter(|task| !ReviewFacts::from_result(task.result.as_str()).written)
-        .filter(|task| {
-            let mut attempts = run.dispatches.iter().filter(|held| held.task == task.id);
-            let mut any = false;
-            attempts.all(|held| {
-                any = true;
-                !held.is_open() && held.source.is_none()
-            }) && any
-        })
+        .filter(|task| run.handed_nothing_in(task))
         .filter(|task| last_touched_ms(run, task) <= cutoff)
         .collect()
 }

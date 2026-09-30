@@ -373,7 +373,7 @@ fn a_closed_task_reads_closed_with_its_reason_and_is_never_called_failed() {
     }
     // The backend's stage list is the order the desk draws; closed is last.
     let desk = shell_source("orchestration/desk.rs");
-    let table = block_after(&desk, "pub(crate) const STAGES: [&str; 9] = [");
+    let table = block_after(&desk, "pub(crate) const STAGES: [&str; 10] = [");
     assert!(
         table
             .find("\"failed\"")
