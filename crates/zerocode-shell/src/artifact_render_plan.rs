@@ -7,6 +7,9 @@
 //! renderer ([`crate::artifact_render`]), the proof harness that drives a real
 //! `WKWebView` without the person's window, and the unit tests read the very same
 //! numbers.
+// Only the macOS road draws (`artifact_webkit`); on another platform the table
+// is read by its tests alone, and that is not a table gone dead.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::time::Duration;
 

@@ -50,6 +50,7 @@ const _: () = assert!(
 /// The hidden pane the exports draw in. Not a `browser-N`, like the thumbnail
 /// pane: the agents' `tabs` does not list it and no `zerocode-browser` verb can
 /// steer it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) const EXPORT_LABEL: &str = "artifact-export";
 
 /// Where the export pane's own page loads land.
