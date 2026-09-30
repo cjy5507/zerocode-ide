@@ -24576,6 +24576,9 @@ fn a_late_sound_never_retires_the_next_occupants_readiness() {
 
 /// t-15554: the assign moment's one request (`tests/assign.rs`).
 mod assign;
+/// t-19159: a closed state that is not failure, and the settle pass
+/// (`tests/closed.rs`).
+mod closed;
 /// t-7812: the window restart restore transitions (`tests/restore.rs`).
 mod restore;
 /// t-7812: the transitions those roads added (`tests/restore_seams.rs`).
