@@ -532,31 +532,35 @@ async fn a_pane_grown_without_sigwinch_is_noticed_by_the_size_poll() {
     }
 }
 
-/// The signal never comes and nothing else wakes zo: the idle look is thirty
-/// seconds away (`IDLE_TEND`), so what puts the screen right is the person's
-/// next key — the draw it causes asks the pty's size before it paints
-/// (t-17057). A one-second poll used to repaint an idle screen within a moment
-/// of a silent grow, one of the timers that woke an idle zo 3.2 times a second;
-/// zo now writes nothing until a key comes, and the key's own frame is laid out
-/// for the new size. Both halves are pinned: the quiet before the key, and the
-/// repaint at the new bottom right after it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_pane_grown_without_sigwinch_is_put_right_by_the_next_key_and_not_by_a_timer_in_between() {
-    let layout = Layout::new();
-    let service = ScriptedAnthropicService::text(KOREAN_TABLE_ANSWER)
-        .await
-        .expect("start script");
-    let mut run = spawn_pane(&layout, service.base_url(), 24, 133);
-    run.wait_for("directory:", TEST_TIMEOUT);
-    let before_first = run.output_len();
-    run.send(b"\xec\x98\x81\xed\x96\xa5\xeb\x8f\x84?\r").expect("prompt 1");
-    run.wait_for_after("영향 없습니다", before_first, TEST_TIMEOUT);
+/// A pane whose terminal zo does not control: `stty` on its slave resizes the
+/// pty and no `SIGWINCH` reaches zo — the shape of a host whose signal never
+/// arrives. [`spawn_pane`] gives zo a controlling terminal, where the same
+/// `stty` delivers the signal and zo repaints a millisecond or two later, so its
+/// "silent" resizes are not silent (t-17057 measured 1 to 2 ms with a controlling
+/// terminal and no byte for four seconds without one, on the same binary). The
+/// two tests below, which pin what happens when the signal is missing, spawn
+/// this way.
+fn spawn_pane_without_signal(layout: &Layout, base_url: &str, rows: u16, cols: u16) -> PtyRun {
+    PtyRun::spawn_sized(
+        rows,
+        cols,
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        base_url,
+        &["--permission-mode", "danger-full-access"],
+        &[("ZEROCODE_PANE_KEY", "e2e-pane")],
+    )
+    .expect("spawn zo in PTY")
+}
 
-    // The answer is on the screen, but the turn that made it may still be
-    // running, and a running turn keeps a one-second size poll of its own — not
-    // what this test is about. Wait for the "Working … esc to interrupt" row to
-    // go and for the pane to say nothing for a while; then it grows and nobody
-    // says so.
+/// After an answer, an idle zo: the turn's "Working … esc to interrupt" row is
+/// gone — a running turn keeps a one-second size poll of its own, which is not
+/// what the tests below are about — and the pane has said nothing for two and a
+/// half seconds. Returns how long the row took to go and how long the pane took
+/// to go quiet, both counted from the call (the answer's last row was just seen).
+async fn wait_until_idle_after_the_answer(run: &mut PtyRun) -> (Duration, Duration) {
     let answered_at = std::time::Instant::now();
     run.wait_until(0, SETTLE_TIMEOUT, |bytes| {
         let mut screen = Screen::new(24);
@@ -579,7 +583,31 @@ async fn a_pane_grown_without_sigwinch_is_put_right_by_the_next_key_and_not_by_a
             quiet_since = std::time::Instant::now();
         }
     }
-    let went_quiet = answered_at.elapsed();
+    (working_left, answered_at.elapsed())
+}
+
+/// The signal never comes and nothing else wakes zo: the idle look is thirty
+/// seconds away (`IDLE_TEND`), so what puts the screen right is the person's
+/// next key — the draw it causes asks the pty's size before it paints
+/// (t-17057). A one-second poll used to repaint an idle screen within a moment
+/// of a silent grow, one of the timers that woke an idle zo 3.2 times a second;
+/// zo now writes nothing until a key comes, and the key's own frame is laid out
+/// for the new size. Both halves are pinned: the quiet before the key, and the
+/// repaint at the new bottom right after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pane_grown_without_sigwinch_is_put_right_by_the_next_key_and_not_by_a_timer_in_between() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text(KOREAN_TABLE_ANSWER)
+        .await
+        .expect("start script");
+    let mut run = spawn_pane_without_signal(&layout, service.base_url(), 24, 133);
+    run.wait_for("directory:", TEST_TIMEOUT);
+    let before_first = run.output_len();
+    run.send(b"\xec\x98\x81\xed\x96\xa5\xeb\x8f\x84?\r").expect("prompt 1");
+    run.wait_for_after("영향 없습니다", before_first, TEST_TIMEOUT);
+    let (working_left, went_quiet) = wait_until_idle_after_the_answer(&mut run).await;
+
+    // The pane grows and nobody says so.
     let before_resize = run.output_len();
     let resized_at = std::time::Instant::now();
     run.resize_silently(44, 176).expect("resize pty silently");
@@ -608,6 +636,32 @@ async fn a_pane_grown_without_sigwinch_is_put_right_by_the_next_key_and_not_by_a
         written_while_idle, 0,
         "an idle zo wrote {written_while_idle} bytes in the four seconds after a silent grow, the first {first_write:?} after it: a timer is looking at its terminal again; it began {written_head}"
     );
+}
+
+/// The signal never comes and no key does either: the idle look puts the screen
+/// right within its bound (t-17057). `IDLE_TEND` is thirty seconds after zo's last
+/// wake and the grow comes a few seconds after that wake, so the look falls
+/// about half a minute in; forty seconds leaves ten for a loaded machine. Without
+/// the look nothing would ever repaint, and the wait would time out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pane_grown_without_sigwinch_and_without_a_key_is_put_right_within_the_idle_look() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text(KOREAN_TABLE_ANSWER)
+        .await
+        .expect("start script");
+    let mut run = spawn_pane_without_signal(&layout, service.base_url(), 24, 133);
+    run.wait_for("directory:", TEST_TIMEOUT);
+    let before_first = run.output_len();
+    run.send(b"\xec\x98\x81\xed\x96\xa5\xeb\x8f\x84?\r").expect("prompt 1");
+    run.wait_for_after("영향 없습니다", before_first, TEST_TIMEOUT);
+    let _ = wait_until_idle_after_the_answer(&mut run).await;
+
+    let before_resize = run.output_len();
+    let resized_at = std::time::Instant::now();
+    run.resize_silently(44, 176).expect("resize pty silently");
+    run.wait_until(before_resize, Duration::from_secs(40), |bytes| max_cursor_row(bytes) >= 40);
+    eprintln!("--- silent grow, no key: put right {:?} after the grow", resized_at.elapsed());
+    let _ = run.finish();
 }
 
 /// The report's direction: the pane SHRINKS and the signal never comes. Rows
