@@ -121,7 +121,12 @@ await take("6-generic-confirm", (page) => page.evaluate(() => {
     cancel: false,
   });
 }));
-await take("7-three-waiting", async (page) => {
+/* Two asks at once: the oldest stands, the count says one waits behind it. */
+await take("7a-two-waiting", async (page) => {
+  await frame(page, "s-tool", TOOL_FRAME);
+  await frame(page, "s-zo", QUESTION_FRAME);
+});
+await take("7b-three-waiting", async (page) => {
   await frame(page, "s-tool", TOOL_FRAME);
   await frame(page, "s-zo", QUESTION_FRAME);
   await event(page, "computer:confirm", CONFIRM);
