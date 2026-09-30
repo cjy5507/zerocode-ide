@@ -29,7 +29,7 @@ const NO_NEW_OUTPUT_AFTER: Duration = Duration::from_secs(5 * 60);
 /// quiet session is looked at on this interval only for what no event tells it —
 /// another zo's write to the same store, a helper reaped elsewhere — which is
 /// therefore seen within it (t-17057; it was a look a second, forever).
-const QUIET_LOOK: Duration = Duration::from_secs(15);
+const QUIET_LOOK: Duration = Duration::from_secs(60);
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1453,6 +1453,14 @@ mod tests {
         }
     }
 
+    /// One jump of the clock, and the real moments the scan it wakes needs. A
+    /// jump fires one look, however far it goes: the next is not asked for until
+    /// the scan has finished, which takes real time.
+    async fn jump(seconds: u64) {
+        tokio::time::advance(Duration::from_secs(seconds)).await;
+        settle().await;
+    }
+
     /// Let what is ready run: a scan is a blocking task, and it finishes in real
     /// time while the clock stands still.
     async fn settle() {
@@ -1484,11 +1492,13 @@ mod tests {
         let (_store, watcher) = quiet_watcher(&activity);
         settle().await;
         assert_eq!(watcher.scans(), 1, "the first look is at once");
-        advance(60).await;
+        for _ in 0..3 {
+            jump(60).await;
+        }
         let scans = watcher.scans();
         assert!(
-            (4..=6).contains(&scans),
-            "a session that ran nothing was looked at {scans} times in a minute"
+            (3..=5).contains(&scans),
+            "a session that ran nothing was looked at {scans} times in three minutes"
         );
     }
 
@@ -1550,9 +1560,9 @@ mod tests {
             .expect("manifest json"),
         )
         .expect("write manifest");
-        advance(16).await;
+        jump(61).await;
         let rows = watcher.receiver.borrow().agents.clone();
-        assert_eq!(rows.len(), 1, "a helper another zo started was not seen in sixteen seconds: {rows:?}");
+        assert_eq!(rows.len(), 1, "a helper another zo started was not seen within the quiet interval: {rows:?}");
         assert_eq!(rows[0].agent_id, "agent-elsewhere");
     }
 }

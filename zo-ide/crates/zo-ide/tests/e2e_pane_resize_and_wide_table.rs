@@ -27,10 +27,10 @@ use tempfile::TempDir;
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a state the TUI reaches on its own clock (the idle size poll, a
 /// settle) may take under load before the test calls it missing. An idle zo
-/// looks at its terminal at most ten seconds after its last wake (`IDLE_TEND`;
+/// looks at its terminal at most thirty seconds after its last wake (`IDLE_TEND`;
 /// it was a look a second, which woke an idle zo 3.2 times a second — t-17057),
 /// and the silent resizes below come a moment after the turn that woke it last.
-const SETTLE_TIMEOUT: Duration = Duration::from_secs(25);
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 const KOREAN_TABLE_ANSWER: &str = "영향도만 정리하면, 기능적으로 바뀌는 건 \"어느 지점에서 발급 가능한가\" 하나뿐이고 나머지 로직은 전부 동일합니다. 대신 재고 통계와 신청 대장에 흔적이 남습니다.\n\n## 의도한 변화\n\n| 대상 | 변경 전 | 변경 후 |\n|---|---|---|\n| 발급 가능 지점 | 동대문만 | 평택만 |\n| 어드민 목록 | 동대문 직원에게 보임 | 평택 직원에게 보임 |\n| 재고 수량 | 동대문 750장 | 동대문 550장 / 평택 +200장 |\n\n발급 조회가 직원 소속 지점으로 필터되기 때문입니다.\n\n## 영향 없음 (확인 완료)\n\n- **모바일지점 판정**: 두 지점 모두 `MOBILE_BRANCH_YN='N'`이라 발급 흐름이 동일합니다.\n- **BC 대사**: 일련번호를 바꾸지 않으므로 영향 없습니다.\n";
 

@@ -115,8 +115,10 @@ const SIZE_POLL: Duration = Duration::from_secs(1);
 /// 깨어날 때마다([`Ui::tend_terminal`] 을 부르는 반복 머리) 그 자리에서도
 /// 살핀다. 이 간격은 **아무 사건도 없을 때**의 상한이다 — SIGWINCH 가 끝내
 /// 안 온 리사이즈나, 유휴 중에 전경 그룹을 가로챈 프로세스가 이 안에 바로잡힌다.
-/// 초당 한 번이던 것이 깨움만 3.2/s 를 만들었다(t-17057).
-const IDLE_TEND: Duration = Duration::from_secs(10);
+/// 초당 한 번이던 것이 깨움만 3.2/s 를 만들었다(t-17057). 한 번의 틱은 창의 깨움
+/// 서넛으로 세어져(타이머를 쥔 워커와 메인 스레드) 10초 간격은 0.5/s 언저리였다 —
+/// 목표(0.5/s 이하)에 여유가 없어 30초로 늘렸다.
+const IDLE_TEND: Duration = Duration::from_secs(30);
 /// Ignore quit-shaped control noise while a freshly rendered pane settles.
 ///
 /// The window can finish a pointer-driven launch while terminal protocol

@@ -6159,7 +6159,7 @@ POSIX::tcsetpgrp(fileno($tty), getpgrp()) or exit 3; exit 0') >/dev/null 2>&1 &"
 ///
 /// The one-second size poll that healed this woke an idle zo 3.2 times a
 /// second; the idle look is now at every wake and, when nothing wakes zo,
-/// `IDLE_TEND` (ten seconds) after the last. A stray that takes the foreground
+/// `IDLE_TEND` (thirty seconds) after the last. A stray that takes the foreground
 /// group after the turn is over — no key ever arrives to tell zo — is the case
 /// only that look can heal, so the bound is pinned here: what is typed after
 /// the strike reaches the composer within it.
@@ -6189,7 +6189,7 @@ async fn e2e_a_terminal_taken_while_zo_idles_is_taken_back_within_the_idle_bound
     // command returned; by four it has, and nothing wakes zo.
     tokio::time::sleep(Duration::from_secs(4)).await;
     run.send(b"typed after the strike").expect("type after the strike");
-    run.wait_for("typed after the strike", Duration::from_secs(25));
+    run.wait_for("typed after the strike", Duration::from_secs(45));
     let _ = run.finish();
 }
 
