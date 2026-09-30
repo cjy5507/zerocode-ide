@@ -3323,21 +3323,30 @@ async function stepsHelperClock(browser, origin, ok) {
       await page.close();
     }
   }
-  // A session after compaction opens with a summary stamped at the moment it was written — later than the
-  // older lines that follow it (by design, t-18703): a clock that would run backwards is no clock, and a
-  // number measured from the summary to the newer lines would be a time since the compaction, not the helper's.
-  for (const [name, more] of [["only the older lines follow", []], ["older lines and newer ones follow", [{ role: "assistant", text: "요약 뒤에 이어 한 일.", at_ms: CLOCK + 620_000 }]]]) {
+  // Stamps that go backwards make no clock. A session after compaction opens with a summary stamped at the
+  // moment it was written — later than the older lines that follow it (by design, t-18703): a number measured
+  // from the summary to the newer lines would be a time since the compaction, not the helper's. And a stamp
+  // that goes back anywhere else in a file is as little to be measured from: no backwards span, ever.
+  const older = stamped(134_000, { lines: 4 });
+  const summary = { role: "user", text: "이전 대화의 요약.", at_ms: CLOCK + 600_000 };
+  const newer = { role: "assistant", text: "요약 뒤에 이어 한 일.", at_ms: CLOCK + 620_000 };
+  // The second call's answer stamped before its call, well after the file's start and well before its end.
+  const back = older.map((turn, at) => (at === 4 ? { ...turn, at_ms: CLOCK + 20_000 } : turn));
+  for (const [name, turns] of [
+    ["a summary first, only the older lines after it", [summary, ...older]],
+    ["a summary first, older lines and newer ones after it", [summary, ...older, newer]],
+    ["a stamp that goes back in the middle of the file", back],
+  ]) {
     const { page, faults } = await openWindowTestPage(browser, origin);
     try {
-      const turns = [{ role: "user", text: "이전 대화의 요약.", at_ms: CLOCK + 600_000 }, ...stamped(134_000, { lines: 4 }), ...more];
       await openHelperConversation(page, turns, "done");
       const seen = await clockOf(page);
       ok(
-        `D3: a helper file that opens with a summary stamped later than the lines after it (${name}) gives the head no clock — no backwards span, no time since the summary`,
+        `D3: a helper file whose stamps go backwards (${name}) gives the head no clock — no backwards span, no time since the summary`,
         seen.clock === "" && seen.state === seen.ended && !seen.dot.includes("·"),
         JSON.stringify(seen),
       );
-      ok(`D3: the compacted helper's head (${name}) raised no page errors`, faults.length === 0, faults.join("\n"));
+      ok(`D3: the backwards-stamped helper's head (${name}) raised no page errors`, faults.length === 0, faults.join("\n"));
     } finally {
       await page.close();
     }

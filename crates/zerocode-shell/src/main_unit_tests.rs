@@ -18491,9 +18491,9 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
             vec!["worker.tallyTotal", "worker.tallyFailed"],
         ),
         // What the foot line says while no row is out (t-18702): the three
-        // status words are read where the activity is worded.
+        // status words are read where zo's status verbs are tabled.
         (
-            "function nowActivityWords(activity, run) {",
+            "const ZO_STATUS_WORDS = {",
             vec![
                 "worker.nowWaiting",
                 "worker.nowReconnecting",
