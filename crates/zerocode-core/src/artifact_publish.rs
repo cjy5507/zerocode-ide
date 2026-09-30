@@ -855,6 +855,114 @@ mod tests {
         }
     }
 
+    /// One published page in a scratch store, for the export tests below.
+    fn published_page(dir: &Path, html: &str) -> PageMeta {
+        let source = dir.join("input.html");
+        std::fs::write(&source, html).unwrap();
+        publish(
+            dir,
+            &PublishInput {
+                file_path: source,
+                ..Default::default()
+            },
+            &Limits::default(),
+        )
+        .unwrap()
+    }
+
+    /// The door names the kind of file it writes by the extension of `--out`
+    /// (t-18558). It used to copy the page's HTML bytes into whatever name it
+    /// was given, so `--out report.pdf` left a file that claims to be a PDF
+    /// and opens in no viewer. With no renderer behind the call (the headless
+    /// catalog, a build without the window's WebKit) a `.pdf` or `.png` is
+    /// refused with its format named, and nothing is written.
+    #[test]
+    fn an_export_named_pdf_or_png_is_never_html_bytes_in_disguise() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = published_page(dir.path(), "<title>Report</title><main>hello</main>");
+        for (name, format) in [
+            ("report.pdf", "pdf"),
+            ("REPORT.PDF", "pdf"),
+            ("picture.png", "png"),
+        ] {
+            let out = dir.path().join(name);
+            let refused = export(
+                dir.path(),
+                &ExportInput {
+                    id: meta.id.clone(),
+                    version: None,
+                    out: out.clone(),
+                },
+            )
+            .expect_err(&format!("{name} was written as the page's HTML bytes"));
+            assert!(
+                refused.to_lowercase().contains(format),
+                "{name}: the refusal does not name the format: {refused}"
+            );
+            assert!(!out.exists(), "{name}: a refused export left a file behind");
+        }
+    }
+
+    /// Any other name — another extension, none, or an empty one — is refused
+    /// with the formats the door can write, at the argv (before the window is
+    /// asked) and again at the export itself.
+    #[test]
+    fn an_export_with_any_other_extension_is_refused_with_the_list_of_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = published_page(dir.path(), "<main>hello</main>");
+        for name in [
+            "notes.txt",
+            "deck.docx",
+            "noext",
+            "report.pdf.bak",
+            "trailing.",
+        ] {
+            let out = dir.path().join(name);
+            let refused = export(
+                dir.path(),
+                &ExportInput {
+                    id: meta.id.clone(),
+                    version: None,
+                    out: out.clone(),
+                },
+            )
+            .expect_err(&format!("{name} was written as HTML"));
+            for format in ["html", "htm", "pdf", "png"] {
+                assert!(
+                    refused.contains(format),
+                    "{name}: the refusal leaves out {format}: {refused}"
+                );
+            }
+            assert!(!out.exists(), "{name}: a refused export left a file behind");
+        }
+        let words = ["export", "p-test", "--out", "/tmp/notes.txt"];
+        let early = request_from_argv(&words.map(str::to_owned))
+            .expect_err("the argv accepted a name the door cannot write");
+        assert!(early.contains("pdf") && early.contains("png"), "{early}");
+    }
+
+    /// `.html` and `.htm`, in any case, keep today's copy: the version's own
+    /// bytes, byte for byte.
+    #[test]
+    fn an_export_named_html_or_htm_keeps_copying_the_versions_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = published_page(dir.path(), "<title>Report</title><main>hello</main>");
+        let snapshot = std::fs::read(meta.path()).unwrap();
+        for name in ["page.html", "PAGE.HTML", "page.htm"] {
+            let out = dir.path().join(name);
+            export(
+                dir.path(),
+                &ExportInput {
+                    id: meta.id.clone(),
+                    version: None,
+                    out: out.clone(),
+                },
+            )
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(std::fs::read(&out).unwrap(), snapshot, "{name}");
+        }
+    }
+
     #[test]
     fn artifact_read_returns_the_immutable_version_named_by_its_metadata() {
         let dir = tempfile::tempdir().unwrap();

@@ -2994,6 +2994,35 @@ mod tests {
         );
     }
 
+    /// t-18558: the window's door names the file's kind by `--out`'s extension.
+    /// A store with no renderer behind it (this test, a build without the
+    /// window's WebKit) refuses `.pdf` and `.png` — and any other name that is
+    /// not `.html` or `.htm` — instead of writing the page's HTML bytes into a
+    /// file that claims to be a PDF or a picture.
+    #[test]
+    fn the_door_never_writes_html_bytes_into_a_pdf_or_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("store"), Limits::default());
+        let source = dir.path().join("source.html");
+        touch(&source, "<title>Report</title><main>hello</main>");
+        let published = artifact_request(
+            &store,
+            serde_json::json!({"action":"publish", "file_path":source}),
+            &nobody,
+        )
+        .unwrap();
+        for name in ["report.pdf", "picture.png", "notes.txt"] {
+            let out = dir.path().join(name);
+            let answer = artifact_request(
+                &store,
+                serde_json::json!({"action":"export", "id":published["id"], "out":out}),
+                &nobody,
+            );
+            assert!(answer.is_err(), "{name}: the door answered {answer:?}");
+            assert!(!out.exists(), "{name}: a refused export left a file behind");
+        }
+    }
+
     #[test]
     fn artifact_window_export_uses_the_requested_snapshot_without_changing_the_catalog() {
         let dir = tempfile::tempdir().unwrap();
