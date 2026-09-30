@@ -360,10 +360,11 @@ pub(in crate::computer_use::errand) fn fake_cli(
     let script = format!(
         "#!/bin/sh\n\
          here=\"{here}\"\n\
+         if [ {pause} -gt 0 ]; then sleep {pause} & echo $! > \"$here.child\"; fi\n\
          printf '%s\\n' \"$@\" > \"$here.argv\"\n\
          env > \"$here.env\"\n\
          cat > \"$here.stdin\"\n\
-         if [ {pause} -gt 0 ]; then sleep {pause} & echo $! > \"$here.child\"; wait; fi\n\
+         if [ {pause} -gt 0 ]; then wait; fi\n\
          cat \"$here.answer\"\n\
          exit {rc}\n",
         here = at.display(),
