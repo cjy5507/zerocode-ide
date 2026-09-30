@@ -5900,6 +5900,9 @@ private enum DesktopWindows {
                 row["layer"] = layer
                 row["alpha"] = (info[kCGWindowAlpha as String] as? Double) ?? 1
                 row["overlay"] = DesktopOverlay.isOverlay(layer: layer, bounds: bounds, displays: displays)
+                // The pointer's own picture, told once for every reader (t-12979).
+                row["pointer"] = DesktopPointerPicture.isPointerPicture(
+                    layer: layer, ownerName: (info[kCGWindowOwnerName as String] as? String) ?? "", bounds: bounds)
                 if row["overlay"] as? Bool == true {
                     let owner = AXUIElementCreateApplication(ownerPid)
                     let frames = (copyArray(owner, kAXChildrenAttribute as String) ?? []).compactMap(absoluteFrame)
@@ -6281,30 +6284,18 @@ enum OperatorHandHost {
 enum DesktopSelf {
     /// Whose window a click at `point` lands on: the frontmost that hides
     /// what is under it — an overlay (`DesktopOverlay`) does not, and taking
-    /// the Dock's for one let every click through to ZeroCode's own window.
+    /// the Dock's for one let every click through to ZeroCode's own window;
+    /// nor does the pointer's own picture (`DesktopPointerPicture`), and
+    /// taking it for one let a click where the pointer rests through to
+    /// ZeroCode's own window (t-12979). The walk is `DesktopFrontOwner`'s.
     static func ownerPid(at point: CGPoint) -> pid_t? {
         guard let infos = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return nil }
-        let displays = DesktopScreen.displays().map(\.bounds)
-        for info in infos {
-            guard let layer = info[kCGWindowLayer as String] as? Int, layer >= 0,
-                  let alpha = info[kCGWindowAlpha as String] as? CGFloat, alpha > 0.01,
-                  let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
-                  bounds.contains(point),
-                  let ownerPid = info[kCGWindowOwnerPID as String] as? pid_t
-            else { continue }
-            if DesktopOverlay.isOverlay(layer: layer, bounds: bounds, displays: displays) {
-                // Its background is transparent but its icons receive input.
-                var hit: AXUIElement?
-                if AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
-                   let hit, let actual = pidAttribute(hit) {
-                    return actual
-                }
-                continue
-            }
-            return ownerPid
+        return DesktopFrontOwner.pid(at: point, infos: infos, displays: DesktopScreen.displays().map(\.bounds)) { point in
+            var hit: AXUIElement?
+            guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
+                  let hit else { return nil }
+            return pidAttribute(hit)
         }
-        return nil
     }
 
     static func refuseOwnWindow(at point: CGPoint) throws {
