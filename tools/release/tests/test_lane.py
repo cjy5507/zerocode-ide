@@ -1615,6 +1615,20 @@ class GateOwed(LaneCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(self.gates(SHA_A), ({"root", "zo"}, set()))
 
+    def test_a_shared_gate_policy_change_owes_both_gates(self):
+        self.seed_installed(SHA_C)
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(CHANGED_PATHS="tools/release/verify-every-recipe.sh")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.gates(SHA_A), ({"root", "zo"}, set()))
+
+    def test_the_gate_planner_change_owes_both_gates(self):
+        self.seed_installed(SHA_C)
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(CHANGED_PATHS="tools/release/lane.sh")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.gates(SHA_A), ({"root", "zo"}, set()))
+
     def test_a_real_change_in_a_stamp_file_owes_its_gate(self):
         self.seed_installed(SHA_C)
         self.lane.enqueue(SHA_A)

@@ -14,6 +14,9 @@ case $recipes in
 esac
 rc=0
 for recipe in $recipes; do
+  # Log the strict name so the lane classifies a failed cross-check as a
+  # real recipe failure, rather than the development gate's skipped success.
+  case $recipe in win-check-if-available) recipe=win-check ;; esac
   # The lane reads each failure against the recipe it came from (failed_tests):
   # a recipe that failed without naming a test is a red of its own.
   echo "==> verify recipe $recipe"

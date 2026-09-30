@@ -802,7 +802,8 @@ do_publish() {
 # installed.json are the base (the app's sha for root, zo's for zo), so a
 # folded ancestor never becomes the base. The crates zo reads from outside its
 # own tree belong to both trees; they come off cargo's metadata, not a list
-# kept by hand. Anything the lane cannot tell — no install yet, git or cargo
+# kept by hand. A change to their shared gate policy owes both gates again.
+# Anything the lane cannot tell — no install yet, git or cargo
 # not answering — runs the gate.
 # Measured 2026-09-16 (three green runs): gate-root 1105–1615 s, gate-zo
 # 876–1296 s, on releases that each changed one tree.
@@ -848,6 +849,7 @@ gate_owed() { # root|zo — 0 when the gate must run; otherwise SKIP says why an
     n=$(( n + 1 ))
     case " $RELEASE_STAMP_FILES " in *" $path "*) stamp_only "$path" "$since" && continue ;; esac
     case $path in docs/*|*.md) continue ;; esac
+    case $path in tools/release/lane.sh|tools/release/verify-every-recipe.sh) return 0 ;; esac
     case $lane in
       zo)   case $path in zo-ide/*) owed=$path ;; esac
             for s in $shared; do case $path in "$s"*) owed=$path ;; esac; done ;;

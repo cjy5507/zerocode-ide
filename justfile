@@ -47,6 +47,7 @@ shell-lint:
 # tests had.
 tools-test:
     python3 tools/release/tests/test_lane.py
+    python3 tools/release/tests/test_win_check.py
     python3 tools/release/tests/test_bump.py
     python3 tools/release/tests/test_pii_scan.py
     python3 tools/signing/tests/test_signing.py
