@@ -43,6 +43,7 @@
 //! | [`view`] | 뷰포트 레이아웃(상태·컴포저·푸터·다이얼로그) |
 //! | [`paths`] | 부팅 카드 경로의 가운데 자르기 |
 //! | [`painter`] | 스크롤 영역 삽입과 뷰포트 그리기 |
+//! | `rowdiff` | 뷰포트 한 행에서 바뀐 칸 구간만 다시 쓰기 |
 //! | [`input`] | 터미널 입력 스트림 — 깨움이 온 때만 crossterm 을 묻는다 |
 //! | [`app`] | 상태기계 — 키·블록·턴 |
 
@@ -69,6 +70,7 @@ pub mod rerank;
 pub mod models;
 pub mod painter;
 mod paint_probe;
+mod rowdiff;
 pub mod palette;
 pub mod pending_input;
 pub mod permissions;
@@ -81,6 +83,8 @@ pub mod slash;
 pub mod summary;
 pub mod strings;
 pub mod tables;
+#[cfg(test)]
+mod test_screen;
 pub mod thinking;
 pub mod tools;
 pub mod transcript;
