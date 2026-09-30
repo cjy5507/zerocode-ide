@@ -19,18 +19,10 @@
 //!   after the interval a looker names for what no event tells it (a resize the
 //!   window never signalled, another zo's write to the same store).
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use runtime::helper_activity::until_next_beat;
 use tokio::sync::watch;
-
-/// The time to the next turn of the wall clock's second — where every beat
-/// falls, so that the loopers' wakes coincide.
-fn until_next_beat() -> Duration {
-    let into = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.subsec_nanos());
-    Duration::from_nanos(u64::from(1_000_000_000 - into)).max(Duration::from_millis(1))
-}
 
 /// A looker's view of the beat. One per looker: each keeps what it has seen of
 /// what runs, so an edge is a look for it however many others saw it too.
@@ -115,7 +107,7 @@ mod tests {
 
     use runtime::helper_activity::{Activity, Count};
 
-    use super::{until_next_beat, Pulse};
+    use super::Pulse;
 
     async fn arrives_within(pulse: &mut Pulse, idle_after: Option<Duration>, limit: Duration) -> bool {
         tokio::time::timeout(limit, pulse.next(idle_after)).await.is_ok()
@@ -220,11 +212,4 @@ mod tests {
         assert!(!arrives_within(&mut parked, None, Duration::from_secs(60)).await);
     }
 
-    /// Every beat falls on the turn of a second of the wall clock, so loopers
-    /// that started at different moments still wake together.
-    #[test]
-    fn a_beat_falls_within_the_next_second() {
-        let wait = until_next_beat();
-        assert!(wait > Duration::ZERO && wait <= Duration::from_secs(1), "{wait:?}");
-    }
 }

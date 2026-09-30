@@ -15,6 +15,7 @@
 //! sum is above zero, instead of asking on a timer.
 
 use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
 
@@ -67,6 +68,18 @@ impl Activity {
     pub fn watch(&self) -> watch::Receiver<usize> {
         self.sum.subscribe()
     }
+}
+
+/// The time to the next turn of the wall clock's second — where the session's
+/// once-a-second looks fall, so that everything that looks once a second wakes
+/// together and the timer driver wakes once for all of it. The idle loop's pulse
+/// (in the zo-ide crate) and a pane child's wait both rest until it.
+#[must_use]
+pub fn until_next_beat() -> Duration {
+    let into = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.subsec_nanos());
+    Duration::from_nanos(u64::from(1_000_000_000 - into)).max(Duration::from_millis(1))
 }
 
 static PROCESS: OnceLock<Activity> = OnceLock::new();
@@ -126,6 +139,17 @@ mod tests {
         activity.set(Count::Workers, 0);
         seen.changed().await.expect("woken by the end");
         assert_eq!(*seen.borrow_and_update(), 0);
+    }
+
+    /// Every once-a-second look falls on the turn of a second of the wall clock,
+    /// so lookers that started at different moments still wake together.
+    #[test]
+    fn a_beat_falls_within_the_next_second() {
+        let wait = super::until_next_beat();
+        assert!(
+            wait > std::time::Duration::ZERO && wait <= std::time::Duration::from_secs(1),
+            "{wait:?}"
+        );
     }
 
     /// A late joiner reads what is running now, not what happened before it

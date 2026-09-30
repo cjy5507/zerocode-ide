@@ -1750,7 +1750,9 @@ pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(
 
 /// The longest a watched wait rests between two looks at what only time
 /// changes: the caller's cancel flag, the budget and the child's transcript.
-/// It is also how long a `Esc` may wait for the pane to be ended.
+/// It is also how long an `Esc` may wait for the pane to be ended. The rest
+/// ends at the session's next beat (`helper_activity::until_next_beat`), so the
+/// waits of several helpers wake the process together.
 pub const LOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A watched wait reads the result files at least this often even when its
@@ -2014,9 +2016,14 @@ fn wait_with_cadence(
                 }
             }
         }
+        // A watched wait rests until the session's next beat (the turn of the
+        // wall clock's second), so the waits of three helpers and the idle loop
+        // wake the process once between them and not once each.
         let interval = if watch.is_some() {
-            cadence.look_every
+            cadence
+                .look_every
                 .min(budget.rule().remaining(ran, quiet_for))
+                .min(crate::helper_activity::until_next_beat())
                 .max(Duration::from_millis(1))
         } else {
             POLL_INTERVAL
