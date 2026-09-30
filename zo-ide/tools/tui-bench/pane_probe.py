@@ -125,9 +125,11 @@ def run(binary: str, label: str, seconds: int, rounds: int, channels: bool, samp
         assert process.stdout is not None
         for line in process.stdout:
             output.append(line)
-            if not line.startswith("PANE_PROBE "):
+            # libtest prints "test <name> ... " in front of the first line the test writes.
+            at = line.find("PANE_PROBE ")
+            if at < 0:
                 continue
-            _, tag, payload = line.split(" ", 2)
+            _, tag, payload = line[at:].split(" ", 2)
             fields[tag] = json.loads(payload)
             if tag in ("work_start", "work_end"):
                 marks[tag] = account(process.pid) or {}
@@ -146,6 +148,8 @@ def run(binary: str, label: str, seconds: int, rounds: int, channels: bool, samp
     start, end = marks.get("work_start"), marks.get("work_end")
     if not (start and end and "cpu_ms" in start and "cpu_ms" in end):
         result["error"] = "the probe printed no work window"
+        result["marks"] = marks
+        result["fields"] = sorted(fields)
         result["output_tail"] = "".join(output[-15:])
         return result
     wall = end["mono"] - start["mono"]
