@@ -2036,14 +2036,17 @@ fn wait_with_cadence(
         // only now and then — a process spawn at every look was four a second
         // for each child. With the channel held, its ending is what says the
         // child is gone. A wait on a clock that listens asks without waiting
-        // and reads the answer at a later look; one on a clock that does not —
-        // a test's pretended time, whose steps take no real time — waits for
-        // the answer where it asks, within the same bound.
+        // and reads the answer at a later look, and asks nothing more while a
+        // question is out — a spawn the system holds is one thread, not one
+        // every few seconds; one on a clock that does not — a test's pretended
+        // time, whose steps take no real time — waits for the answer where it
+        // asks, within the same bound.
         let held = watch.as_ref().is_some_and(ChildWatch::holds_channel);
         let every = if held { cadence.pane_ask_held } else { cadence.pane_ask_bare };
         if woken.channel_closed {
             // What a question already out says may be from before the child
-            // died: it is dropped, and its tmux with it, for one asked now.
+            // died: it is dropped, and its tmux with it, for one asked now —
+            // the one question asked beside another.
             drop(asking.take());
         }
         if let Some(said) = asking.as_ref().and_then(tmux_ask::Ask::heard) {
@@ -4080,6 +4083,46 @@ mod tests {
             "kill-pane was waited for {took:?}"
         );
         stalling.assert_nothing_outlives(ended, "kill-pane");
+    }
+
+    /// A spawn the system holds — a first exec it checks, a stuck
+    /// `syspolicyd` — is not given up on and asked again beside itself
+    /// (t-18917): a wait has one tmux question out at a time, so a held spawn
+    /// costs it one thread, not one every few seconds. Given up at
+    /// [`TMUX_ASK_BOUND`], the question was asked again at the next look that
+    /// was due; with tmux asked every half second, five seconds would have
+    /// asked it twice. No test can make the system hold a spawn, so the hold
+    /// is stood in for by the ask itself (`held_spawns`, tests only).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_held_spawn_is_not_asked_again_beside_itself() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let program = fake_tmux(directory.path(), "'%9'");
+        tmux_ask::held_spawns::hold(program.as_os_str(), Duration::from_secs(12));
+        let tmux = Tmux::at(&program);
+        let child = directory.path().join("agent-43");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let cadence = Cadence {
+            pane_ask_bare: Duration::from_millis(500),
+            ..Cadence::STANDARD
+        };
+        let outcome = wait_with_cadence(
+            &SystemWaitClock,
+            &tmux,
+            &child,
+            "%9",
+            1,
+            PaneBudget::Wall(Duration::from_secs(5)),
+            &|| false,
+            &|| {},
+            cadence,
+        );
+        assert_eq!(outcome, PaneOutcome::TimedOut);
+        assert_eq!(
+            tmux_ask::held_spawns::asked(program.as_os_str(), "list-panes"),
+            1,
+            "a held question was asked again beside itself"
+        );
     }
 
     /// A tmux is asked in a process group of its own (t-18917), so that ending

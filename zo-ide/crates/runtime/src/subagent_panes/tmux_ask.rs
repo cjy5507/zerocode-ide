@@ -53,7 +53,6 @@ pub(super) enum Said {
 /// One tmux call, answered on a thread of its own.
 pub(super) struct Ask {
     shared: Arc<Shared>,
-    started: Instant,
     /// Whether dropping the handle ends the tmux: [`Ask::let_finish`] clears it.
     end_on_drop: bool,
 }
@@ -104,19 +103,17 @@ impl Ask {
         }
         Self {
             shared,
-            started,
             end_on_drop: true,
         }
     }
 
-    /// What the tmux said — [`Said::Nothing`] once [`TMUX_ASK_BOUND`] has passed
-    /// without a word, which covers a spawn that is itself stuck — or `None`
-    /// while it may still speak.
+    /// What the tmux said, once its thread has answered — within
+    /// [`TMUX_ASK_BOUND`] of the start, unless the spawn itself is held by
+    /// the system (a first exec it checks), which nothing here can end. Until
+    /// then `None`, and the asker keeps the question rather than ask again
+    /// beside it: a held spawn costs one thread, not one every few seconds.
     pub(super) fn heard(&self) -> Option<Said> {
-        lock(&self.shared)
-            .said
-            .clone()
-            .or_else(|| (self.started.elapsed() >= TMUX_ASK_BOUND).then_some(Said::Nothing))
+        lock(&self.shared).said.clone()
     }
 
     /// Wait up to `within` for what the tmux says; `None` if it has not said it
@@ -195,6 +192,10 @@ fn ask(shared: &Shared, program: &std::ffi::OsStr, args: &[OsString], printing: 
     {
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
+    }
+    #[cfg(test)]
+    if let Some(hold) = held_spawns::held(program, args.first()) {
+        std::thread::sleep(hold);
     }
     let Ok(mut child) = command.spawn() else {
         return Said::Nothing;
@@ -314,6 +315,53 @@ fn end_group(pid: u32) {
 fn spawned_group(pid: u32) -> Option<nix::unistd::Pid> {
     let group = nix::unistd::Pid::from_raw(i32::try_from(pid).ok().filter(|raw| *raw > 1)?);
     (group != nix::unistd::getpid() && group != nix::unistd::getpgrp()).then_some(group)
+}
+
+/// Tests only: a spawn the system holds — a first exec it checks, a stuck
+/// `syspolicyd` — stood in for by program, since no test can make the system
+/// hold one. A held program's spawns wait this long before they are made, and
+/// each is counted by its verb. Keyed by the program's path, which is a test's
+/// own, so the tests that run beside it are not held.
+#[cfg(test)]
+pub(super) mod held_spawns {
+    use std::ffi::{OsStr, OsString};
+    use std::sync::{Mutex, PoisonError};
+    use std::time::Duration;
+
+    struct Held {
+        program: OsString,
+        hold: Duration,
+        verbs: Vec<OsString>,
+    }
+
+    static HELD: Mutex<Vec<Held>> = Mutex::new(Vec::new());
+
+    /// Hold every spawn of `program` for `hold`, from now on.
+    pub(crate) fn hold(program: &OsStr, hold: Duration) {
+        HELD.lock().unwrap_or_else(PoisonError::into_inner).push(Held {
+            program: program.to_os_string(),
+            hold,
+            verbs: Vec::new(),
+        });
+    }
+
+    /// How many spawns of `program` with `verb` were held.
+    pub(crate) fn asked(program: &OsStr, verb: &str) -> usize {
+        HELD.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|held| held.program == program)
+            .map(|held| held.verbs.iter().filter(|asked| asked.as_os_str() == OsStr::new(verb)).count())
+            .sum()
+    }
+
+    /// The hold for a spawn of `program`, counted under `verb`, if it is held.
+    pub(super) fn held(program: &OsStr, verb: Option<&OsString>) -> Option<Duration> {
+        let mut all = HELD.lock().unwrap_or_else(PoisonError::into_inner);
+        let one = all.iter_mut().find(|held| held.program == program)?;
+        one.verbs.extend(verb.cloned());
+        Some(one.hold)
+    }
 }
 
 #[cfg(all(test, unix))]
