@@ -66,8 +66,15 @@ fn the_window_has_one_ask_popup_and_it_stands_above_the_other_dialogs() {
         markup.contains(r#"id="computer-band""#) && sheet.contains(".computer-band {"),
         "the status that asks nothing lost its place"
     );
-    for gone in [".computer-confirm {", ".computer-handoff {", ".computer-confirm-clock"] {
-        assert!(!sheet.contains(gone), "{gone} still dresses a surface that is gone");
+    for gone in [
+        ".computer-confirm {",
+        ".computer-handoff {",
+        ".computer-confirm-clock",
+    ] {
+        assert!(
+            !sheet.contains(gone),
+            "{gone} still dresses a surface that is gone"
+        );
     }
 
     // One registry entry for the popup, and none for the modal it replaced.
@@ -87,9 +94,17 @@ fn the_window_has_one_ask_popup_and_it_stands_above_the_other_dialogs() {
 #[test]
 fn every_kind_of_ask_is_registered_once_by_the_file_that_owns_its_words() {
     let window = window_source();
-    for kind in ["tool", "question", "computer-confirm", "computer-handoff", "confirm"] {
+    for kind in [
+        "tool",
+        "question",
+        "computer-confirm",
+        "computer-handoff",
+        "confirm",
+    ] {
         assert_eq!(
-            window.matches(&format!("registerAskKind(\"{kind}\", {{")).count(),
+            window
+                .matches(&format!("registerAskKind(\"{kind}\", {{"))
+                .count(),
             1,
             "the `{kind}` kind is not registered exactly once"
         );
@@ -146,7 +161,10 @@ fn a_question_is_told_from_a_tool_by_its_kind_and_never_by_its_tool_string() {
     );
     let topics = block_after(window, "const ASK_TOPICS = Object.freeze({");
     for topic in ["model_switch", "declined_images"] {
-        assert!(topics.contains(topic), "the topic `{topic}` has no words:\n{topics}");
+        assert!(
+            topics.contains(topic),
+            "the topic `{topic}` has no words:\n{topics}"
+        );
     }
 }
 
@@ -190,7 +208,10 @@ fn enter_is_the_safe_answer_of_its_kind_and_a_held_key_answers_once() {
     );
     // A tool prompt is what it always was: the first choice holds the keyboard.
     let tool = block_after(window, "registerAskKind(\"tool\", {");
-    assert!(tool.contains("initial: 0,"), "the tool prompt's keyboard moved:\n{tool}");
+    assert!(
+        tool.contains("initial: 0,"),
+        "the tool prompt's keyboard moved:\n{tool}"
+    );
     // Escape refuses with the plain `deny` — the one that is not remembered.
     assert!(
         tool.contains("choice.decision === \"deny\""),
@@ -200,7 +221,9 @@ fn enter_is_the_safe_answer_of_its_kind_and_a_held_key_answers_once() {
     // One key, one answer.
     assert!(
         window.contains("askScrim.addEventListener(\n  \"keydown\",")
-            && window.contains("if (!event.repeat || (event.key !== \"Enter\" && event.key !== \" \")) return;"),
+            && window.contains(
+                "if (!event.repeat || (event.key !== \"Enter\" && event.key !== \" \")) return;"
+            ),
         "a repeating Enter or Space can answer the next ask"
     );
     let input = ui_file("shell-input.js");
@@ -275,7 +298,8 @@ fn the_popup_is_dressed_by_kind_and_carries_no_motion_of_its_own() {
     // Reduced motion is the sheet's one global rule; the popup adds no
     // animation of its own that the rule would not reach.
     assert!(
-        !frame.contains("animation") && !block_after_css(&sheet, ".ask-clock {").contains("animation"),
+        !frame.contains("animation")
+            && !block_after_css(&sheet, ".ask-clock {").contains("animation"),
         "the popup carries motion of its own"
     );
 }
