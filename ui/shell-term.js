@@ -4584,7 +4584,7 @@ function askQuestionTitle(frame) {
     const topic = ASK_TOPICS[frame.topic];
     return t(topic.key, topic.word);
   }
-  const named = String(frame.title ?? "").trim();
+  const named = typeof frame.title !== "string" ? "" : frame.title.trim();
   return named || t("ask.question.title", "에이전트가 묻습니다");
 }
 
