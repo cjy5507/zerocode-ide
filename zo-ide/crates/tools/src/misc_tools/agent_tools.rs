@@ -3946,6 +3946,25 @@ mod agent_manifest_tests {
         assert!(!agent_worker_generation_is_live(id, 2));
     }
 
+    /// The session's pulse beats while a helper worker lives or a background
+    /// mark stands (t-17057): the stall notice and a roster row's elapsed time
+    /// ride that beat, so both registries must tell `helper_activity` whenever
+    /// they change. Other tests of this process register their own, so this
+    /// reads only what they cannot undo: the count is at least the one this test
+    /// holds while it holds it.
+    #[test]
+    fn a_live_worker_and_a_background_mark_each_keep_the_session_busy_while_they_stand() {
+        use super::{register_agent_cancel_signal_for_tests, unregister_agent_cancel_signal_for_tests};
+
+        let busy = || *runtime::helper_activity::watch().borrow();
+        register_agent_cancel_signal_for_tests("busy-worker", 7);
+        assert!(busy() >= 1, "a registered worker did not make the session busy");
+        unregister_agent_cancel_signal_for_tests("busy-worker", 7);
+        mark_background_agent("busy-mark".to_string());
+        assert!(busy() >= 1, "a background mark did not make the session busy");
+        clear_background_agent("busy-mark");
+    }
+
     #[test]
     fn cancel_and_salvage_persists_stopped_manifest() {
         let dir = temp_dir("cancel-salvage");

@@ -532,6 +532,43 @@ async fn a_pane_grown_without_sigwinch_is_noticed_by_the_size_poll() {
     }
 }
 
+/// The signal never comes and nothing else wakes zo: the idle look is thirty
+/// seconds away (`IDLE_TEND`), so what puts the screen right is the person's
+/// next key — the draw it causes asks the pty's size before it paints
+/// (t-17057). A one-second poll used to repaint an idle screen within a moment
+/// of a silent grow, one of the timers that woke an idle zo 3.2 times a second;
+/// zo now writes nothing until a key comes, and the key's own frame is laid out
+/// for the new size. Both halves are pinned: the quiet before the key, and the
+/// repaint at the new bottom right after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pane_grown_without_sigwinch_is_put_right_by_the_next_key_and_not_by_a_timer_in_between() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text(KOREAN_TABLE_ANSWER)
+        .await
+        .expect("start script");
+    let mut run = spawn_pane(&layout, service.base_url(), 24, 133);
+    run.wait_for("directory:", TEST_TIMEOUT);
+    let before_first = run.output_len();
+    run.send(b"\xec\x98\x81\xed\x96\xa5\xeb\x8f\x84?\r").expect("prompt 1");
+    run.wait_for_after("영향 없습니다", before_first, TEST_TIMEOUT);
+
+    // The turn's last frames settle; then the pane grows and nobody says so.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let before_resize = run.output_len();
+    run.resize_silently(44, 176).expect("resize pty silently");
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let written_while_idle = run.output_len() - before_resize;
+
+    let before_key = run.output_len();
+    run.send(b"k").expect("a key");
+    run.wait_until(before_key, SETTLE_TIMEOUT, |bytes| max_cursor_row(bytes) >= 40);
+    let _ = run.finish();
+    assert_eq!(
+        written_while_idle, 0,
+        "an idle zo wrote {written_while_idle} bytes in the four seconds after a silent grow: a timer is looking at its terminal again"
+    );
+}
+
 /// The report's direction: the pane SHRINKS and the signal never comes. Rows
 /// laid out for the old, taller terminal would be clamped onto the pane's last
 /// row and overwrite each other — the table body vanishing. With the poll the
