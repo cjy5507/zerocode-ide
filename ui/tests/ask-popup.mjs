@@ -943,6 +943,72 @@ async function askers(browser, origin, ok) {
   });
 }
 
+/* An ask that arrives while another is being answered changes the count and
+ * nothing else: the buttons under the person's finger are the very nodes they
+ * pressed, still off while their answer travels — a repaint here is how one
+ * answer becomes two. And an ask taken away while its answer is on the way
+ * moves the popup on once, not twice: the answer is for the ask that was
+ * pressed, and only that ask lets the line move. */
+async function midAnswer(browser, origin, ok) {
+  await scenario(browser, origin, "asks arriving and leaving mid-answer", ok, async (page, faults) => {
+    const late = await page.evaluate(async () => {
+      const T = window.__ASK_T__;
+      T.frame("s-l", { type: "permission_prompt", prompt_id: 91, tool_name: "first", reasoning: "", audit_hint: null });
+      await T.settle(300);
+      const button = document.querySelector("#ask-choices button");
+      window.__ANSWER__.respond_permission = (args) => new Promise((done) => setTimeout(() => { T.sent.push(JSON.parse(JSON.stringify(args))); done(null); }, 250));
+      button.click();
+      await T.settle(30);
+      const before = { off: button.disabled, mono: T.look().mono };
+      T.frame("s-m", { type: "permission_prompt", prompt_id: 92, tool_name: "second", reasoning: "", audit_hint: null });
+      T.frame("s-n", { type: "permission_prompt", prompt_id: 93, kind: "question", topic: "model_switch", reasoning: "질문", audit_hint: null });
+      await T.settle(30);
+      const during = {
+        sameNode: document.querySelector("#ask-choices button") === button && button.isConnected,
+        off: button.disabled,
+        mono: T.look().mono,
+        more: T.look().more,
+      };
+      await T.settle(400);
+      return { before, during, after: { mono: T.look().mono, more: T.look().more }, sent: T.sent.slice() };
+    });
+    ok(
+      "an ask that arrives while an answer is on its way changes only the count: the pressed buttons are the same nodes, still off",
+      late.before.off && late.before.mono === "first" && late.during.sameNode && late.during.off && late.during.mono === "first"
+        && late.during.more === "2개 더 대기 중" && late.sent.length === 1 && late.sent[0].promptId === 91 && late.after.mono === "second",
+      JSON.stringify(late),
+    );
+
+    ok("the late-arrival scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+  await scenario(browser, origin, "an ask withdrawn mid-answer", ok, async (page, faults) => {
+    const flight = await page.evaluate(async () => {
+      const T = window.__ASK_T__;
+      for (const [id, tool] of [[101, "A-tool"], [102, "B-tool"], [103, "C-tool"]]) {
+        T.frame("s-w", { type: "permission_prompt", prompt_id: id, tool_name: tool, reasoning: "", audit_hint: null });
+      }
+      await T.settle(300);
+      window.__ANSWER__.respond_permission = (args) => new Promise((done) => setTimeout(() => { T.sent.push(JSON.parse(JSON.stringify(args))); done(null); }, 250));
+      document.querySelector("#ask-choices button").click();
+      await T.settle(30);
+      // The pane answered A first while our answer travels: the channel retires it.
+      T.frame("s-w", { type: "prompt_resolved", prompt_id: 101, by: "pane" });
+      await T.settle(60);
+      const midway = T.look();
+      await T.settle(400);
+      const after = T.look();
+      return { midway: midway.mono, midwayMore: midway.more, after: after.mono, afterMore: after.more, sent: T.sent.slice() };
+    });
+    ok(
+      "an ask withdrawn while its answer travels moves the popup on once: the next ask is shown, and the answer's arrival does not skip it",
+      flight.midway === "B-tool" && flight.midwayMore === "1개 더 대기 중" && flight.after === "B-tool" && flight.afterMore === "1개 더 대기 중"
+        && flight.sent.length === 1 && flight.sent[0].promptId === 101,
+      JSON.stringify(flight),
+    );
+    ok("the mid-answer scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+}
+
 /* One key, one answer. Two asks stand; the key that answers the first, held
  * down, repeats — and a repeat is not an answer to the second, which its person
  * has not read. */
@@ -1042,6 +1108,7 @@ export async function testAskPopup(browser, origin, ok) {
   await confirm(browser, origin, ok);
   await queue(browser, origin, ok);
   await keyboard(browser, origin, ok);
+  await midAnswer(browser, origin, ok);
   await oneKey(browser, origin, ok);
   await identity(browser, origin, ok);
   await languages(browser, origin, ok);
