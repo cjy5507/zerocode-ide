@@ -25,6 +25,18 @@ struct Desk {
     /// Whether the target's app publishes its windows to accessibility: a
     /// non-activating panel does not, and the helper refuses to move it.
     unpublished: bool,
+    /// Whether the target's app is the active one already: bringing it
+    /// forward, when it publishes no window to raise, changes no order —
+    /// as measured on the bench (t-12979 measurement 4).
+    already_active: bool,
+    /// How many lists after a window comes forward still tell the order
+    /// before it — the window server's order lands after the helper's
+    /// answer (measurement 5) — unless the hand pauses first.
+    late: u32,
+    /// The order a late list tells, and how many lists more tell it.
+    stale: Option<(Vec<Value>, u32)>,
+    /// The pauses the hand made.
+    paused: Vec<Duration>,
 }
 
 fn row(id: u64, pid: i64, app: &str, layer: i64, rect: (f64, f64, f64, f64)) -> Value {
@@ -45,19 +57,41 @@ impl Desk {
     /// The target under a window of the app `pid` at `layer` over its middle —
     /// the target's own app when `pid` is the target's.
     fn owned_over(pid: i64, app: &str, layer: i64) -> Self {
+        Self::of(vec![
+            row(OVER, pid, app, layer, (200.0, 150.0, 300.0, 200.0)),
+            row(TARGET, 10, "Target", 0, (100.0, 100.0, 400.0, 300.0)),
+        ])
+    }
+
+    /// A desk of `windows`, front to back, whose target publishes its
+    /// windows and is not yet active, and whose order lands at once.
+    fn of(windows: Vec<Value>) -> Self {
         Self {
-            windows: vec![
-                row(OVER, pid, app, layer, (200.0, 150.0, 300.0, 200.0)),
-                row(TARGET, 10, "Target", 0, (100.0, 100.0, 400.0, 300.0)),
-            ],
+            windows,
             acted: Vec::new(),
             unpublished: false,
+            already_active: false,
+            late: 0,
+            stale: None,
+            paused: Vec::new(),
         }
+    }
+
+    fn pause(&mut self, wait: Duration) {
+        self.paused.push(wait);
+        self.stale = None;
     }
 
     fn call(&mut self, method: &str, params: Value) -> Result<Value, ComputerUseError> {
         match method {
-            "listAllWindows" => Ok(json!({ "windows": self.windows })),
+            "listAllWindows" => match self.stale.take() {
+                Some((before, left)) if left > 0 => {
+                    let told = json!({ "windows": before });
+                    self.stale = Some((before, left - 1));
+                    Ok(told)
+                }
+                _ => Ok(json!({ "windows": self.windows })),
+            },
             "displays" => Ok(json!({ "displays": [
                 { "index": 0, "bounds": { "x": 0.0, "y": 0.0, "width": 1440.0, "height": 900.0 } }
             ] })),
@@ -79,6 +113,13 @@ impl Desk {
                     .find(|window| window["app"]["pid"] == pid)
                     .and_then(|window| window["id"].as_u64())
                     .expect("a window of the app");
+                if self.unpublished && self.already_active {
+                    self.acted.push((
+                        "windowAction".to_string(),
+                        json!({ "windowId": id, "action": "activate" }),
+                    ));
+                    return Ok(json!({ "active": true }));
+                }
                 let unpublished = std::mem::replace(&mut self.unpublished, false);
                 let raised =
                     self.call("windowAction", json!({ "action": "focus", "windowId": id }));
@@ -99,6 +140,9 @@ impl Desk {
                     // To the front of its own layer: what stays above
                     // ordinary windows stays above it.
                     Some("focus") => {
+                        if self.late > 0 {
+                            self.stale = Some((self.windows.clone(), self.late));
+                        }
                         let window = self.windows.remove(at);
                         let layer = window["layer"].as_i64().unwrap_or_default();
                         let under = self
@@ -226,7 +270,7 @@ fn run(
     let desk_cell = std::cell::RefCell::new(desk);
     let ended = {
         let mut call = |method: &str, params: Value| desk_cell.borrow_mut().call(method, params);
-        let mut pause = |_wait: Duration| {};
+        let mut pause = |wait: Duration| desk_cell.borrow_mut().pause(wait);
         let mut ask_person = |line: &Said| {
             shown.push(line.clone());
             if person == Decision::Allowed
@@ -800,11 +844,7 @@ fn the_hand_holds_its_lines_on_scenes_drawn_from_seeds() {
         }
         let (width, height) = (length_of(width), length_of(height));
         windows.push(row(TARGET, 10, "Target", 0, (x, y, width, height)));
-        let mut desk = Desk {
-            windows,
-            acted: Vec::new(),
-            unpublished: false,
-        };
+        let mut desk = Desk::of(windows);
         let before = cover_of(&listed(&desk), TARGET, Some(local)).expect("listed");
         let theirs = before
             .coverers
@@ -939,5 +979,131 @@ fn a_refused_move_is_written_down_as_not_made() {
         json!(["raise_target", "move_target"]),
         "{label}"
     );
-    assert_eq!(label["notMade"], json!(["move_target"]), "{label}");
+    // Its own panel stays in front whether its app comes forward or not:
+    // the raise changed nothing and is not made either.
+    assert_eq!(
+        label["notMade"],
+        json!(["raise_target", "move_target"]),
+        "{label}"
+    );
+}
+
+/// The target's app is the active one and publishes no window to raise —
+/// the bench's borderless window after its first presses: bringing the app
+/// forward is answered and changes no order. The hand looks again once, and
+/// what did not change it writes down as not made; the answer's one move
+/// made nothing, so today's rule goes on with the moves not yet tried, and
+/// what none cleared is the person's in one line.
+#[test]
+fn a_raise_that_changes_no_order_is_not_made_and_the_rest_goes_on() {
+    let mut desk = Desk::with_over(0);
+    desk.unpublished = true;
+    desk.already_active = true;
+    let mut seat = Seat::at(
+        JevMode::Auto,
+        true,
+        body(
+            "window",
+            &[
+                ("raise_target", 0.9),
+                ("move_target", 0.04),
+                ("look_again", 0.02),
+                ("ask_person", 0.04),
+            ],
+        ),
+    );
+    let (ended, shown) = run(&mut desk, &mut seat, Decision::Refused, None);
+    assert_eq!(
+        ended.expect("listed"),
+        Uncovered::Held {
+            held: Held::NothingCleared,
+            over: "Other".into()
+        }
+    );
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        desk.paused,
+        [Duration::from_millis(COVER_LOOK_AGAIN_MS)],
+        "one look again before the raise is called not made"
+    );
+    let label = seat.rows.last().expect("a label");
+    assert_eq!(
+        label["tried"],
+        json!(["raise_target", "move_target"]),
+        "{label}"
+    );
+    assert_eq!(
+        label["notMade"],
+        json!(["raise_target", "move_target"]),
+        "{label}"
+    );
+    assert_eq!(label["clearedBy"], Value::Null, "{label}");
+    assert!(
+        label.get("agreed").is_none(),
+        "a move not made is not compared: {label}"
+    );
+}
+
+/// The target's window comes forward, but the list read at once still tells
+/// the order before it: the hand looks again before its next move, and the
+/// place shows — the raise cleared it, and no move the helper would refuse
+/// is asked for or credited.
+#[test]
+fn a_raise_the_list_tells_late_is_the_raise_that_cleared_it() {
+    let mut desk = Desk::with_over(0);
+    desk.unpublished = true;
+    desk.late = 1;
+    let mut seat = Seat::at(
+        JevMode::Shadow,
+        false,
+        body(
+            "window",
+            &[
+                ("raise_target", 0.9),
+                ("move_target", 0.04),
+                ("look_again", 0.02),
+                ("ask_person", 0.04),
+            ],
+        ),
+    );
+    let (ended, shown) = run(&mut desk, &mut seat, Decision::Refused, None);
+    assert_eq!(
+        ended.expect("listed"),
+        Uncovered::Clear {
+            moves: vec![Move::RaiseTarget],
+            by_person: false
+        }
+    );
+    assert!(shown.is_empty());
+    assert_eq!(desk.moved(), [(TARGET, "activate".to_string())]);
+    assert_eq!(desk.paused, [Duration::from_millis(COVER_LOOK_AGAIN_MS)]);
+    let label = seat.rows.last().expect("a label");
+    assert_eq!(label["clearedBy"], "raise_target", "{label}");
+    assert_eq!(label["notMade"], json!([]), "{label}");
+}
+
+/// The helper's displays, as it renders them on a desk of three: bounds in
+/// global points whatever the scale — a screen left of the main one at a
+/// negative origin, a Retina one at scale 2, one at scale 3 above — are the
+/// screens a move is kept on, one each, in the order given.
+#[test]
+fn the_screens_are_the_displays_bounds_in_points_whatever_their_scale() {
+    let displays = json!({ "displays": [
+        { "index": 0, "id": 1, "main": true, "scale": 1.0,
+          "bounds": { "x": 0.0, "y": 0.0, "width": 1920.0, "height": 1080.0 } },
+        { "index": 1, "id": 2, "main": false, "scale": 2.0,
+          "bounds": { "x": -3008.0, "y": -300.0, "width": 3008.0, "height": 1692.0 } },
+        { "index": 2, "id": 3, "main": false, "scale": 3.0,
+          "bounds": { "x": 0.0, "y": -982.0, "width": 1512.0, "height": 982.0 } },
+        { "index": 3, "id": 4, "main": false, "scale": 2.0, "bounds": { "x": 0.0 } },
+    ] });
+    assert_eq!(
+        screens_of(&displays),
+        [
+            Rect::new(0.0, 0.0, 1_920.0, 1_080.0),
+            Rect::new(-3_008.0, -300.0, 3_008.0, 1_692.0),
+            Rect::new(0.0, -982.0, 1_512.0, 982.0),
+        ],
+        "a display without whole bounds is no screen to move onto"
+    );
 }
