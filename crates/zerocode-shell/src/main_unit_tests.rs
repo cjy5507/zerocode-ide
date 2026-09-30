@@ -17852,6 +17852,37 @@ fn a_folder_panel_presumed_lost_yields_to_a_fresh_one_and_its_late_answer_is_ign
 }
 
 #[test]
+fn a_folder_panel_settles_once_per_generation_by_whichever_road_ends_it() {
+    let mut desk = FolderPanelDesk::new();
+    let opened = Instant::now();
+    assert_eq!(desk.ask(opened), FolderPanelAsk::Fresh { generation: 1 });
+    let settled = desk
+        .settle(1, FolderPanelHow::Cancelled, opened + Duration::from_secs(9))
+        .expect("the standing panel settles");
+    assert_eq!(settled.1, FolderPanelSettled { generation: 1, how: FolderPanelHow::Cancelled });
+    assert_eq!(settled.0.stood_for, Duration::from_secs(9));
+    // The same generation never settles twice.
+    assert_eq!(desk.settle(1, FolderPanelHow::Answered, opened + Duration::from_secs(10)), None);
+    assert_eq!(FolderPanelSettled::EVENT, "project:folder-panel-settled");
+}
+
+#[test]
+fn a_panel_presumed_lost_is_settled_lost_when_the_next_ask_replaces_it_and_not_again_when_it_answers() {
+    let mut desk = FolderPanelDesk::new();
+    let opened = Instant::now();
+    assert_eq!(desk.ask(opened), FolderPanelAsk::Fresh { generation: 1 });
+    assert_eq!(desk.take_replaced(), None);
+    let lost = opened + FOLDER_PANEL_PRESUMED_LOST;
+    assert_eq!(desk.ask(lost), FolderPanelAsk::Fresh { generation: 2 });
+    assert_eq!(
+        desk.take_replaced(),
+        Some(FolderPanelSettled { generation: 1, how: FolderPanelHow::Lost })
+    );
+    assert_eq!(desk.take_replaced(), None);
+    assert_eq!(desk.settle(1, FolderPanelHow::Answered, lost), None);
+}
+
+#[test]
 fn the_folder_panel_clock_is_ordered() {
     // The receipt behind the panel's task is judged before the panel is
     // overdue, and a panel is overdue long before it is presumed lost. A

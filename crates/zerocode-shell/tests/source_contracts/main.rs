@@ -35993,7 +35993,8 @@ mod tests {
             "tokio::time::timeout(remaining, &mut helper)",
             "bring_main_window_forward(app)",
             "emit_to(MAIN_WINDOW_LABEL, FOLDER_PANEL_OVERDUE_EVENT, overdue)",
-            "folder_panel_desk().answered(generation,",
+            "folder_panel_desk().settle(generation,",
+            "FolderPanelSettled::EVENT",
         ] {
             assert!(
                 picking.contains(step),
