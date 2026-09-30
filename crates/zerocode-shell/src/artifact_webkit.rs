@@ -75,13 +75,6 @@ pub(crate) fn take_snapshot_png(
     }
 }
 
-/// How many device pixels one point of `view` is — the window's backing scale
-/// (2 on a Retina screen), 1 for a view no window holds yet.
-pub(crate) fn backing_scale(view: &WKWebView) -> f64 {
-    view.window()
-        .map_or(1.0, |window| window.backingScaleFactor())
-}
-
 /// Run `script` in the page and send its string answer — an empty string for
 /// `undefined` or `null`, the page's own message for a script that throws.
 /// `evaluateJavaScript` does not wait for a promise, so a script that needs

@@ -48,19 +48,28 @@ pub(crate) const SETTLE_BUDGET: Duration = Duration::from_secs(6);
 /// How often the settle is asked again.
 pub(crate) const SETTLE_POLL: Duration = Duration::from_millis(50);
 /// How long the two animation frames are waited for before the page counts as
-/// settled without them: a view WebKit thinks hidden runs few frames or none,
+/// settled without them: a view WebKit thinks hidden runs few frames or none —
+/// the proof harness's offscreen view ran none in 1.5 s, three times in three —
 /// and that is not a page that never settles.
-pub(crate) const FRAME_CAP_MS: u32 = 1500;
+pub(crate) const FRAME_CAP_MS: u32 = 400;
 /// How long a print job is given from its start to its file.
 pub(crate) const PRINT_BUDGET: Duration = Duration::from_secs(15);
 /// How long one script asked of the page is given to answer.
 pub(crate) const SCRIPT_BUDGET: Duration = Duration::from_secs(5);
-/// How long the pane's backing scale is given to be read.
-pub(crate) const SCALE_BUDGET: Duration = Duration::from_secs(2);
 /// The whole render, from asking for the pane to holding the bytes. Under the
 /// door shim's own deadline (`ARTIFACT_SHIM_TIMEOUT_SECS`, asserted where both
 /// are in sight), so the door answers rather than times out.
 pub(crate) const RENDER_BUDGET: Duration = Duration::from_secs(25);
+
+// The table's relations to itself, checked when it is compiled rather than when
+// it is tested: a cap that outgrows what a bitmap holds, a start height above
+// the cap or a margin wider than the paper is a table that does not compile.
+const _: () = {
+    assert!(PNG_MAX_HEIGHT_PT * PNG_SCALE <= 16_384.0);
+    assert!(PNG_START_HEIGHT_PT < PNG_MAX_HEIGHT_PT);
+    assert!(PDF_MARGIN_PT * 2.0 < A4_WIDTH_PT);
+    assert!((A4_HEIGHT_PT / A4_WIDTH_PT - 297.0 / 210.0).abs() < 1e-3);
+};
 
 // ---- the settle -----------------------------------------------------------
 
@@ -142,16 +151,23 @@ pub(crate) fn plan_png(content_height_pt: f64) -> PngPlan {
     }
 }
 
-/// The `snapshotWidth` (points) that makes the picture [`PNG_WIDTH_PT`] ×
-/// [`PNG_SCALE`] pixels wide on a screen `backing` device pixels to the point.
+/// The `snapshotWidth` that makes the picture [`PNG_WIDTH_PT`] × [`PNG_SCALE`]
+/// pixels wide. WebKit takes it as the picture's width in pixels: with 640, 1280
+/// and 2560 asked for, 640, 1280 and 2560 pixels came back (the proof harness,
+/// `probe`), so the stated pixel width is the whole calculation.
+pub(crate) const PNG_SNAPSHOT_WIDTH: f64 = PNG_WIDTH_PT * PNG_SCALE;
+
+/// The width to ask again if a picture came back other than [`PNG_SNAPSHOT_WIDTH`]
+/// pixels wide — a screen whose scale WebKit folds into the picture, which the
+/// harness's offscreen window (scale 1) cannot show. `None` when it came back
+/// right (within a pixel), or so far off that no correction is believed.
 #[must_use]
-pub(crate) fn snapshot_points(backing: f64) -> f64 {
-    PNG_WIDTH_PT * PNG_SCALE
-        / if backing.is_finite() && backing >= 1.0 {
-            backing
-        } else {
-            1.0
-        }
+pub(crate) fn snapshot_correction(asked: f64, got_px: u32) -> Option<f64> {
+    if got_px == 0 || (f64::from(got_px) - PNG_SNAPSHOT_WIDTH).abs() <= 1.0 {
+        return None;
+    }
+    let factor = PNG_SNAPSHOT_WIDTH / f64::from(got_px);
+    (0.25..=4.0).contains(&factor).then_some(asked * factor)
 }
 
 // ---- the files ------------------------------------------------------------
@@ -244,22 +260,12 @@ mod tests {
         assert_eq!(plan_png(f64::NAN).height_pt, PNG_START_HEIGHT_PT);
     }
 
-    /// The cap keeps a picture inside what a bitmap can hold, at the states
-    /// scale, and A4 is A4.
+    /// The waits fit one inside the other: none of the phases is longer than the whole
+    /// render, and the frame cap is shorter than the settle it belongs to.
     #[test]
-    fn the_tables_numbers_agree_with_each_other() {
-        assert!(PNG_MAX_HEIGHT_PT * PNG_SCALE <= 16_384.0);
-        assert!(PNG_START_HEIGHT_PT < PNG_MAX_HEIGHT_PT);
-        assert!((A4_HEIGHT_PT / A4_WIDTH_PT - 297.0 / 210.0).abs() < 1e-3);
-        assert!(PDF_MARGIN_PT * 2.0 < A4_WIDTH_PT);
+    fn the_waits_of_the_table_fit_inside_the_whole_render() {
         assert!(SETTLE_BUDGET > Duration::from_millis(u64::from(FRAME_CAP_MS)));
-        for phase in [
-            LOAD_BUDGET,
-            SETTLE_BUDGET,
-            PRINT_BUDGET,
-            SCRIPT_BUDGET,
-            SCALE_BUDGET,
-        ] {
+        for phase in [LOAD_BUDGET, SETTLE_BUDGET, PRINT_BUDGET, SCRIPT_BUDGET] {
             assert!(
                 phase < RENDER_BUDGET,
                 "{phase:?} leaves the whole render no room"
@@ -267,14 +273,35 @@ mod tests {
         }
     }
 
-    /// The width a picture states is what a screen of any backing scale is
-    /// asked for, and a nonsense scale asks for the plain one.
+    /// The snapshot is asked for at the stated pixel width, and a picture that comes
+    /// back at another width is asked for again in proportion — once, and only
+    /// where the correction is believable.
     #[test]
-    fn the_snapshot_width_gives_the_stated_pixels_on_any_screen() {
-        assert_eq!(snapshot_points(2.0), PNG_WIDTH_PT);
-        assert_eq!(snapshot_points(1.0), PNG_WIDTH_PT * PNG_SCALE);
-        assert_eq!(snapshot_points(0.0), PNG_WIDTH_PT * PNG_SCALE);
-        assert_eq!(snapshot_points(f64::NAN), PNG_WIDTH_PT * PNG_SCALE);
+    fn a_picture_that_comes_back_at_the_wrong_width_is_asked_for_again_in_proportion() {
+        assert_eq!(PNG_SNAPSHOT_WIDTH, 2560.0);
+        assert_eq!(snapshot_correction(2560.0, 2560), None);
+        assert_eq!(
+            snapshot_correction(2560.0, 2561),
+            None,
+            "a pixel is not a correction"
+        );
+        assert_eq!(
+            snapshot_correction(2560.0, 5120),
+            Some(1280.0),
+            "a scale folded in twice"
+        );
+        assert_eq!(
+            snapshot_correction(1280.0, 1280),
+            Some(2560.0),
+            "a scale folded out"
+        );
+        assert_eq!(snapshot_correction(2560.0, 0), None);
+        assert_eq!(
+            snapshot_correction(2560.0, 100),
+            None,
+            "far off is not believed"
+        );
+        assert_eq!(snapshot_correction(2560.0, 40_000), None);
     }
 
     #[test]

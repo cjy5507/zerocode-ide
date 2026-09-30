@@ -338,12 +338,17 @@ async fn picture(
         resize(planned.height_pt)?;
         settle(pane, deadline).await?;
     }
-    let backing = backing_scale(pane).await?;
-    let bytes =
-        crate::cmd::fs::snapshot_webview_png(pane.clone(), Some(plan::snapshot_points(backing)))
-            .await?;
-    let (width, height) =
+    let mut asked = plan::PNG_SNAPSHOT_WIDTH;
+    let mut bytes = snapshot(pane, asked).await?;
+    let (mut width, mut height) =
         plan::png_size(&bytes).ok_or_else(|| "스냅샷이 PNG가 아닙니다".to_string())?;
+    // A screen whose scale WebKit folds into the picture: ask again, once, in proportion.
+    if let Some(again) = plan::snapshot_correction(asked, width) {
+        asked = again;
+        bytes = snapshot(pane, asked).await?;
+        (width, height) =
+            plan::png_size(&bytes).ok_or_else(|| "스냅샷이 PNG가 아닙니다".to_string())?;
+    }
     Ok(Rendered {
         bytes,
         width: Some(width),
@@ -353,17 +358,10 @@ async fn picture(
     })
 }
 
-/// The pane's backing scale (2 on a Retina screen), read on the main thread.
+/// One snapshot of the whole pane at `width` pixels, on the window's own road.
 #[cfg(target_os = "macos")]
-async fn backing_scale(pane: &tauri::Webview) -> Result<f64, String> {
-    let (tx, rx) = channel();
-    pane.with_webview(move |platform| {
-        // Main thread, by `with_webview`'s contract — WebKit requires it.
-        let view: &objc2_web_kit::WKWebView = unsafe { &*platform.inner().cast() };
-        let _ = tx.send(crate::artifact_webkit::backing_scale(view));
-    })
-    .map_err(|error| error.to_string())?;
-    receive(rx, plan::SCALE_BUDGET, "화면 배율").await
+async fn snapshot(pane: &tauri::Webview, width: f64) -> Result<Vec<u8>, String> {
+    crate::cmd::fs::snapshot_webview_png(pane.clone(), Some(width)).await
 }
 
 /// A renderer with a fixed answer that remembers what it was asked — the seam's
