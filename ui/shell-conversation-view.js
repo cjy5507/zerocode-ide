@@ -1404,6 +1404,37 @@ function stepTook(from, to) {
   return t("worker.elapsedShort", "{{s}}초", { s: (took / 1000).toFixed(1) });
 }
 
+/* A step's mark is one `span` whose `::before` is the sprite's glyph as a CSS
+ * mask — not an `<svg><use>`, which stands an svg, a use and a shadow copy of
+ * the symbol (about a dozen nodes the element count does not see) for every
+ * row of a page of hundreds. The glyph's source is the window's own sprite
+ * symbol, read once per mark into one rule of one sheet; its strokes are
+ * `.icon`'s (`shell.css`), on the same 24 grid. */
+const STEP_MARK_GRID = "viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'";
+let stepMarkSheet = null;
+const stepMarksMade = new Set();
+
+function stepMarkNode(name) {
+  if (!stepMarksMade.has(name)) {
+    stepMarksMade.add(name);
+    const symbol = document.getElementById(`i-${name}`);
+    if (symbol) {
+      if (!stepMarkSheet) {
+        const style = document.createElement("style");
+        document.head.appendChild(style);
+        stepMarkSheet = style.sheet;
+      }
+      const svg = `<svg xmlns='http://www.w3.org/2000/svg' ${STEP_MARK_GRID}>${symbol.innerHTML}</svg>`;
+      stepMarkSheet.insertRule(`.helper-step-icon[data-mark="${name}"]::before { mask-image: url("data:image/svg+xml,${encodeURIComponent(svg)}"); }`, stepMarkSheet.cssRules.length);
+    }
+  }
+  const icon = document.createElement("span");
+  icon.className = "helper-step-icon";
+  icon.dataset.mark = name;
+  icon.setAttribute("aria-hidden", "true");
+  return icon;
+}
+
 /* One step's line: its mark, what it was and touched, what came of it, how
  * long it took — the summary of the row. A summary holds no controls, so the
  * file's door and the copies stand in the body. Its Tab, Enter and Space, while
@@ -1413,8 +1444,7 @@ function stepLineNode(look) {
   const line = document.createElement("summary");
   line.className = "helper-step-line";
   line.dataset.keyboardOwner = "true";
-  const icon = iconNode(look.icon);
-  icon.classList.add("helper-step-icon");
+  const icon = stepMarkNode(look.icon);
   const what = document.createElement("span");
   what.className = "helper-step-what";
   const kind = document.createElement("span");

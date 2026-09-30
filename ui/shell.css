@@ -14468,6 +14468,18 @@ details[open] > .helper-step-line::after {
   color: var(--ink-mist);
 }
 
+/* The glyph: a mask in the ink colour, sized to the tile's content box. */
+.helper-step-icon::before {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: currentColor;
+  mask-position: center;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+}
+
 .helper-turn.is-tool.is-live > .helper-step-line > .helper-step-icon {
   color: var(--chat-accent);
   animation: helper-live-pulse 1s linear infinite;

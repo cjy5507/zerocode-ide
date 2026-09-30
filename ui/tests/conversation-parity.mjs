@@ -2420,24 +2420,24 @@ async function stepsByKind(browser, origin, ok) {
       await settle();
       return {
         rows: steps().map((row) => ({
-          mark: lineOf(row).querySelector(".helper-step-icon use")?.getAttribute("href") ?? null,
+          mark: lineOf(row).querySelector(".helper-step-icon")?.dataset.mark ?? null,
           word: lineOf(row).querySelector(".helper-step-kind")?.textContent ?? null,
           folded: row.classList.contains("is-run"),
         })),
         looks: {
-          read: ["#i-file", t("worker.stepRead", "파일 읽기")],
-          grep: ["#i-search", t("worker.stepSearch", "검색")],
-          bash: ["#i-terminal", t("worker.stepShell", "셸")],
-          web: ["#i-globe", t("worker.stepWeb", "웹 읽기")],
-          websearch: ["#i-globe", t("worker.stepWebSearch", "웹 검색")],
-          task: ["#i-bot", t("worker.stepTask", "헬퍼 호출")],
+          read: ["file", t("worker.stepRead", "파일 읽기")],
+          grep: ["search", t("worker.stepSearch", "검색")],
+          bash: ["terminal", t("worker.stepShell", "셸")],
+          web: ["globe", t("worker.stepWeb", "웹 읽기")],
+          websearch: ["globe", t("worker.stepWebSearch", "웹 검색")],
+          task: ["bot", t("worker.stepTask", "헬퍼 호출")],
         },
         table: typeof STEP_NAMES,
         sidebar: [activityWord("websearch"), t("activity.websearch", "웹 검색"), agentActivityKind("websearch"), agentActivityKind("web")],
       };
     });
     const wanted = KIND_CALLS.map((call) => {
-      const [mark, word] = call.look ? seen.looks[call.look] : ["#i-wrench", call.kind ?? call.name];
+      const [mark, word] = call.look ? seen.looks[call.look] : ["wrench", call.kind ?? call.name];
       return { mark, word, folded: false };
     });
     const wrong = KIND_CALLS.filter((call, at) => JSON.stringify(seen.rows[at]) !== JSON.stringify(wanted[at]))
