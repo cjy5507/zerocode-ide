@@ -3891,3 +3891,30 @@ fn rewind_with_user_role_results_removes_several_tool_rounds_too() {
     assert_eq!(session.rewind_turns(1), 6);
     assert_eq!(session.messages.len(), 2);
 }
+
+#[test]
+fn a_user_prompt_is_a_user_message_without_a_tool_result() {
+    assert!(ConversationMessage::user_text("hi").is_user_prompt());
+    assert!(!make_tool_result_message("t1").is_user_prompt());
+    assert!(make_tool_result_message("t1").holds_tool_result());
+    let tool_role = ConversationMessage::tool_result("t1", "bash", "ok", false);
+    assert!(!tool_role.is_user_prompt());
+    assert!(tool_role.holds_tool_result());
+    assert!(!zo_text_reply("a").is_user_prompt());
+}
+
+#[test]
+fn rewind_stops_at_a_compaction_summary_after_tool_role_rounds() {
+    let mut session = Session::new();
+    let mut summary = ConversationMessage::user_text("summary of earlier work");
+    summary.role = MessageRole::System;
+    session.push_message(summary).unwrap();
+    session.push_user_text("q1").unwrap();
+    session.push_message(assistant_tool_use("t1", "bash")).unwrap();
+    session
+        .push_message(ConversationMessage::tool_result("t1", "bash", "ok", false))
+        .unwrap();
+
+    assert_eq!(session.rewind_turns(3), 3);
+    assert_eq!(session.messages.len(), 1);
+}
