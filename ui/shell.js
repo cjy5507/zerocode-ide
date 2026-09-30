@@ -14275,6 +14275,51 @@ function paintHelperPageSibs(nav, run) {
   if (kept) nav.querySelector(`[data-sib="${CSS.escape(kept)}"]`)?.focus();
 }
 
+/* The strip under the brief (t-18702): what the helper did, counted — the whole,
+ * each kind of step in the words the step rows wear, how many failed, and a bar
+ * of the kinds' shares (the mockup's 「도구 9 · 웹 2 · 셸 1 · 파일 읽기 6 · 실패
+ * 0」). Nothing done, nothing shown. Repainted only when the log moved (`seq`
+ * counts every turn and every answer), so a quiet poll costs no mutation. */
+function helperPageTallyNode() {
+  const strip = document.createElement("div");
+  strip.className = "helper-tally";
+  strip.hidden = true;
+  return strip;
+}
+
+function paintHelperPageTally(strip, run) {
+  const sig = `${run.helper.seq}|${locale}`;
+  if (strip.__sig === sig) return;
+  strip.__sig = sig;
+  const { total, failed, kinds } = helperTally(run);
+  writeHidden(strip, total === 0);
+  if (total === 0) {
+    strip.replaceChildren();
+    return;
+  }
+  const whole = document.createElement("b");
+  whole.className = "helper-tally-total";
+  whole.textContent = t("worker.tallyTotal", "도구 {{n}}", { n: total });
+  const parts = [...kinds].map(([kind, count]) => {
+    const one = document.createElement("span");
+    one.className = "helper-tally-kind";
+    one.textContent = `${stepLook(kind).word()} ${count}`;
+    return one;
+  });
+  const lost = document.createElement("span");
+  lost.className = `helper-tally-failed ${failed > 0 ? "is-failed" : "is-ok"}`;
+  lost.textContent = t("worker.tallyFailed", "실패 {{n}}", { n: failed });
+  const bar = document.createElement("span");
+  bar.className = "helper-tally-bar";
+  bar.setAttribute("aria-hidden", "true");
+  for (const count of kinds.values()) {
+    const share = document.createElement("i");
+    share.style.flexGrow = String(count);
+    bar.appendChild(share);
+  }
+  strip.replaceChildren(whole, ...parts, lost, bar);
+}
+
 /* The card: what the helper was asked, drawn once from the instruction and
  * left alone by the repaints that follow (an open card stays open, its focus
  * stays). Never a box to type in: a label, the words, tags, one control. */
@@ -14550,6 +14595,7 @@ function updateHelperPageChrome(page, run, owner) {
   updateHelperPageHead(page.head, run, owner);
   paintHelperPageSibs(page.sibs, run);
   paintHelperPageBrief(page.brief, run);
+  paintHelperPageTally(page.tally, run);
   updateHelperPageFoot(page.foot, run, owner);
 }
 
@@ -14594,12 +14640,13 @@ function paintHelperPageOwn(host, tab, run, owner) {
     head: helperPageHeadNode(run, owner),
     sibs: helperPageSibsNode(),
     brief: helperPageBriefNode(),
+    tally: helperPageTallyNode(),
     foot: helperPageFootNode(run, owner),
     turns,
     status,
     run,
   };
-  host.append(page.head, page.sibs, page.brief, body, page.foot);
+  host.append(page.head, page.sibs, page.brief, page.tally, body, page.foot);
   updateHelperPageChrome(page, run, owner);
   standChatPlace(turns);
   host.__helperPage = page;

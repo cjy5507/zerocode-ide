@@ -2455,6 +2455,11 @@
   --chat-step-body-indent: 38px;
   --chat-status-ring: 12px;
   --chat-status-ring-stroke: 2px;
+  /* The strip under a helper's brief that counts what it did (t-18702): its
+   * bar is 4px tall and never narrower than 80px, so a helper with two kinds
+   * of step still draws a bar whose shares can be read. */
+  --chat-tally-bar-h: 4px;
+  --chat-tally-bar-min: 80px;
   --chat-actions-h: 16px;
   --chat-actions-gap: 2px;
   --chat-copy-size: 20px;

@@ -1861,6 +1861,23 @@ function helperStepCount(run) {
   return run.helper.turns.filter((turn) => turn.role === "tool" || turn.role === "tool_result").length;
 }
 
+/* What a helper did, counted for the strip under its brief (t-18702): every step once, the kinds in the
+ * order each first came (a Map keeps it), how many failed. A row's kind is the one its line is drawn by
+ * (`stepKindOf`), so the strip and the rows say the same words. */
+function helperTally(run) {
+  const kinds = new Map();
+  let total = 0;
+  let failed = 0;
+  for (const turn of run.helper.turns) {
+    if (turn.role !== "tool") continue;
+    total += 1;
+    const kind = stepKindOf(turn, run);
+    kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
+    if (turn.outputError === true) failed += 1;
+  }
+  return { total, failed, kinds };
+}
+
 function paintReportDoor(list, card) {
   const door = card.__door;
   const n = helperStepCount(card.__run);

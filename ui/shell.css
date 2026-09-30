@@ -16012,6 +16012,68 @@ button.helper-sib:hover {
   background: var(--chat-accent);
 }
 
+/* What the helper did, counted (t-18702), under the brief: the whole in the
+ * ink, each kind of step and the failures in the mist, and a bar of the kinds'
+ * shares in the agent's accent, the first kind strongest. A failure is the one
+ * thing coloured; none says so in the quiet green of a ready thing. */
+.helper-tally {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) var(--helper-gutter) 0;
+  font-size: var(--text-xs);
+  color: var(--ink-mist);
+}
+
+.helper-tally[hidden] {
+  display: none;
+}
+
+.helper-tally-total {
+  font-weight: 600;
+  color: var(--ink-chalk);
+}
+
+.helper-tally-failed.is-ok {
+  color: var(--signal-ready);
+}
+
+.helper-tally-failed.is-failed {
+  color: var(--signal-halt-ink);
+}
+
+.helper-tally-bar {
+  display: flex;
+  flex: 1 1 var(--chat-tally-bar-min);
+  gap: var(--rule-width);
+  min-width: var(--chat-tally-bar-min);
+  height: var(--chat-tally-bar-h);
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--chat-meter-track);
+}
+
+.helper-tally-bar > i {
+  display: block;
+  flex: 1 1 0;
+  min-width: 0;
+  background: var(--chat-accent);
+}
+
+.helper-tally-bar > i:nth-child(2) {
+  background: color-mix(in srgb, var(--chat-accent) 70%, transparent);
+}
+
+.helper-tally-bar > i:nth-child(3) {
+  background: color-mix(in srgb, var(--chat-accent) 48%, transparent);
+}
+
+.helper-tally-bar > i:nth-child(n + 4) {
+  background: color-mix(in srgb, var(--chat-accent) 32%, transparent);
+}
+
 .helper-sib.is-done .helper-sib-mark {
   background: none;
   box-shadow: inset 0 0 0 1px var(--ink-mist);
