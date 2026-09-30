@@ -2656,10 +2656,11 @@ mod tests {
     /// line (`"'%9'"`, `"'%1' '%2'"`); they are kept in the directory's `panes`
     /// file, which a test may rewrite to take a pane out of the table.
     fn fake_tmux(directory: &Path, panes: &str) -> PathBuf {
-        let lines: String = panes
-            .split_whitespace()
-            .map(|word| format!("{}\n", word.trim_matches('\'')))
-            .collect();
+        let mut lines = String::new();
+        for word in panes.split_whitespace() {
+            lines.push_str(word.trim_matches('\''));
+            lines.push('\n');
+        }
         std::fs::write(directory.join("panes"), lines).expect("write panes");
         link_fake_tmux(directory)
     }
