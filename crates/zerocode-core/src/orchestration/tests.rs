@@ -25947,3 +25947,79 @@ fn conditional_worker_stop_does_not_end_a_reassigned_attempt() {
         false
     );
 }
+
+/// A worker that writes to the ledger again is the ledger's again
+/// (t-17644), whichever catalog agent it is and whichever letter it
+/// writes: a status, a question, `worker_done`. The rule reads the
+/// signature the verb road wrote, never the agent's name.
+#[test]
+fn a_taken_over_worker_that_speaks_again_is_the_ledgers_again_for_every_agent() {
+    for spec in crate::agent::AGENT_SPECS {
+        for letter in [
+            "send --type status --body still-here",
+            "send --type question --body which",
+            "send --type worker_done --body {\"ok\":true}",
+        ] {
+            let mut bench = Bench::new();
+            bench.json("run-create --name taken-then-speaks");
+            let (worker, pane) = bench.seat(&format!("worker-start --agent {}", spec.id));
+            assert!(bench.ledger.worker_taken_over(("team-1", &pane)));
+            let taken = |bench: &Bench| {
+                bench.ledger.runs()[0]
+                    .worker(&worker)
+                    .expect("the worker row")
+                    .taken_over
+            };
+            assert!(taken(&bench), "{}: the takeover never landed", spec.id);
+            bench.json_at(&pane, letter);
+            assert!(
+                !taken(&bench),
+                "{}: `{letter}` left the pane the person's",
+                spec.id
+            );
+        }
+    }
+}
+
+/// Somebody else's letter ABOUT a taken worker is not the worker speaking:
+/// the pane stays the person's.
+#[test]
+fn a_letter_to_a_taken_over_worker_does_not_hand_its_pane_back() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name taken-and-told");
+    let (worker, pane) = bench.seat("worker-start --agent claude");
+    assert!(bench.ledger.worker_taken_over(("team-1", &pane)));
+    bench.json(&format!(
+        "send --to worker:{worker} --type status --body hello"
+    ));
+    assert!(
+        bench.ledger.runs()[0]
+            .worker(&worker)
+            .expect("row")
+            .taken_over
+    );
+}
+
+/// `worker-return` hands a taken pane back by name, answers whether
+/// anything moved, and a stop refused while it was taken applies after.
+#[test]
+fn worker_return_hands_a_taken_pane_back_to_the_ledger() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name returned");
+    let (worker, pane) = bench.seat("worker-start --agent codex");
+    assert!(bench.ledger.worker_taken_over(("team-1", &pane)));
+    let refused = bench.run(&format!("worker-stop --worker {worker}"));
+    assert_ne!(refused.reply.exit_code, 0, "a taken pane was stopped");
+    let back = bench.json(&format!("worker-return --worker {worker}"));
+    assert_eq!(back["returned"], true, "{back}");
+    assert!(
+        !bench.ledger.runs()[0]
+            .worker(&worker)
+            .expect("row")
+            .taken_over
+    );
+    let again = bench.json(&format!("worker-return --worker {worker}"));
+    assert_eq!(again["returned"], false, "{again}");
+    let stopped = bench.run(&format!("worker-stop --worker {worker}"));
+    assert_eq!(stopped.reply.exit_code, 0, "{}", stopped.reply.stderr);
+}

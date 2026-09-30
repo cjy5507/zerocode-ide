@@ -75,19 +75,25 @@ pub(super) fn refresh_hand(term: TermId, line: Line) -> Line {
 
 /// Record a successful human write before the caller releases the terminal
 /// lock. Keys, paste and committed IME text all use this door.
+///
+/// Answers whether the hand put the PERSON's own words on the line — the
+/// question a takeover asks (t-17644). A lone Enter on a line holding no
+/// words of theirs only submitted what the window placed there (a resume
+/// nudge, a mail pointer, a preamble) or nothing at all: the window's own
+/// record of the line says so, read before this write moves it.
 pub(super) fn human_write<E>(
     term: TermId,
     bytes: &[u8],
     write: impl FnOnce() -> Result<(), E>,
-) -> Result<(), E> {
+) -> Result<bool, E> {
+    let theirs_before = crate::human_input::holds_own_words(term);
     write()?;
     crate::human_input::typed(term);
-    if let Ok(text) = std::str::from_utf8(bytes)
-        && zerocode_core::ask::is_potential_submit_input(text)
-    {
+    let text = std::str::from_utf8(bytes).ok();
+    if text.is_some_and(zerocode_core::ask::is_potential_submit_input) {
         crate::human_input::entered(term);
     }
-    Ok(())
+    Ok(theirs_before || !text.is_some_and(zerocode_core::ask::is_submit_enter))
 }
 
 /// Whether a question or an approval is on the pane's screen, waiting for a
@@ -284,6 +290,34 @@ mod tests {
         human_write(TERM, b"\r", || Ok::<(), ()>(())).unwrap();
         crate::human_input::submitted(TERM);
         assert!(!refresh_hand(TERM, old).draft);
+        crate::human_input::forget_term(TERM);
+    }
+
+    /// The same keystroke, two lines (t-17644): an Enter on words the WINDOW
+    /// placed — a restart nudge, a pointer — puts nothing of the person's on
+    /// the line; an Enter on words they typed closes over their own.
+    #[test]
+    fn an_enter_on_the_windows_line_is_not_the_persons_words_but_on_theirs_it_is() {
+        const TERM: TermId = 17_644;
+        crate::human_input::forget_term(TERM);
+        // The window's nudge sat unsent; nobody's hand reached the line.
+        assert!(!human_write(TERM, b"\r", || Ok::<(), ()>(())).unwrap());
+        // Every Enter spelling says the same, and a second one before the
+        // provider's word still adds nothing of theirs.
+        for enter in ["\r", "\n", "\r\n", "\x1b[13u", "\x1b[13;1u"] {
+            assert!(
+                !human_write(TERM, enter.as_bytes(), || Ok::<(), ()>(())).unwrap(),
+                "{enter:?} read as the person's words"
+            );
+        }
+        crate::human_input::submitted(TERM);
+        // Their own words, then the very same keystroke.
+        assert!(human_write(TERM, b"fix it", || Ok::<(), ()>(())).unwrap());
+        assert!(human_write(TERM, b"\r", || Ok::<(), ()>(())).unwrap());
+        crate::human_input::submitted(TERM);
+        assert!(!human_write(TERM, b"\r", || Ok::<(), ()>(())).unwrap());
+        // Any other key — an arrow, an interrupt — is still a hand.
+        assert!(human_write(TERM, b"\x03", || Ok::<(), ()>(())).unwrap());
         crate::human_input::forget_term(TERM);
     }
 
