@@ -20118,6 +20118,113 @@ fn a_finished_worker_is_listed_while_its_checkout_stands() {
     );
 }
 
+/// What the board's rows say about a finished task nobody can review (t-19328,
+/// t-15558 slice 2).
+///
+/// A worker stopped before it handed anything in, on a task the coordinator
+/// then wrote down as done by hand, leaves work in a checkout that no review
+/// can ever name — no attempt has a source. Its row says so
+/// (`review.unreviewable`, the ledger's own reading and not the window's
+/// guess), beside the row of a worker whose report a coordinator can still
+/// review, which says the opposite. The window reads the flag and nothing else.
+#[test]
+fn a_finished_workers_row_says_whether_its_task_can_take_a_review() {
+    use zerocode_core::orchestration::{
+        Ending, Ledger, MessageKind, ResultAuthor, TaskStatus, worker_address,
+    };
+    let emptied = tempfile::tempdir().expect("the stopped worker's checkout");
+    let emptied = emptied.path().to_string_lossy().into_owned();
+    let handed = tempfile::tempdir().expect("the reporting worker's checkout");
+    let handed = handed.path().to_string_lossy().into_owned();
+
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("two kinds of finished", 1);
+    // Somebody still works for this run: it is in play.
+    let carrying = ledger
+        .create_task(&run, "do".into(), "still going".into(), vec![], None, 2)
+        .unwrap();
+    ledger
+        .start_worker(&run, "codex", ("team", "%9"), Some(&carrying), 3)
+        .unwrap();
+
+    // Stopped before handing anything in; the coordinator wrote the task down as done.
+    let by_hand = ledger
+        .create_task(&run, "do".into(), "by hand".into(), vec![], None, 10)
+        .unwrap();
+    let stopped = ledger
+        .start_worker(&run, "claude", ("team", "%2"), Some(&by_hand), 11)
+        .unwrap()
+        .worker;
+    assert!(ledger.worker_seated(("team", "%2"), &emptied));
+    ledger
+        .end_attempt(&stopped, Ending::Stopped, "lost", 12)
+        .unwrap();
+    ledger
+        .update_task(
+            &run,
+            &by_hand,
+            Some(TaskStatus::Completed),
+            None,
+            ResultAuthor::Coordinator {
+                seat: "team/%1".to_string(),
+                generation: Some(1),
+                attempt: None,
+                source: None,
+            },
+        )
+        .unwrap();
+
+    // A worker that reported: its report is the source a review can name.
+    let reported = ledger
+        .create_task(&run, "do".into(), "reported".into(), vec![], None, 20)
+        .unwrap();
+    let worker = ledger
+        .start_worker(&run, "claude", ("team", "%3"), Some(&reported), 21)
+        .unwrap()
+        .worker;
+    assert!(ledger.worker_seated(("team", "%3"), &handed));
+    let dispatch = ledger
+        .run(&run)
+        .unwrap()
+        .worker(&worker)
+        .unwrap()
+        .dispatch
+        .clone();
+    ledger
+        .send(
+            &run,
+            zerocode_core::orchestration::Message {
+                dispatch,
+                task: Some(reported.clone()),
+                ..relation_test_message(
+                    &worker_address(&worker),
+                    &format!("run:{run}"),
+                    MessageKind::WorkerDone,
+                    "{\"ok\":true}",
+                    22,
+                )
+            },
+        )
+        .unwrap();
+    ledger.begin_release(&worker).unwrap();
+    ledger.finish_release(&worker, None);
+
+    let rows = super::ledger_agents_for_seats(&ledger, &super::TeamSeatIndex::new());
+    let row = |task: &str| {
+        let found = rows.iter().find(|row| row.task_id == task);
+        found.unwrap_or_else(|| panic!("{task} has no row: {rows:?}"))
+    };
+    let said = |task: &str| {
+        serde_json::to_value(&row(task).review).expect("a review serializes")["unreviewable"]
+            .clone()
+    };
+    assert_eq!(said(&by_hand), true, "{:?}", row(&by_hand));
+    assert_eq!(said(&reported), false, "{:?}", row(&reported));
+    // The attempt's own ending is still said apart from the task's: the stopped
+    // worker's attempt did not succeed, and the task is done all the same.
+    assert!(row(&by_hand).reported && row(&by_hand).failed);
+}
+
 /* ---- worktree-evidence, through the door an agent uses ----------------- */
 
 /// A host that knows where it put one pane and does nothing else.

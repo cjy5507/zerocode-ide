@@ -112,7 +112,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
   /* The run's tasks by the pipeline's own stage words, sixty by default. */
   const stages = [
     ["pending", 6], ["ready", 20], ["dispatched", 5], ["reported", 6],
-    ["merged", 18], ["gate", 2], ["blocked", 2], ["failed", 1], ["closed", 0],
+    ["merged", 18], ["gate", 2], ["blocked", 2], ["failed", 1], ["unreviewable", 0], ["closed", 0],
   ];
   const total = stages.reduce((sum, [, count]) => sum + count, 0);
   /* What a finished task cost, as `task_cost` hands it over (t-9470): one in
@@ -624,6 +624,31 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       turned && after.order[0] === "run-desk/w-2" && after.rows["w-2"].health === "판 없음" &&
       after.rows["w-2"].cls === "is-gone" && after.rows["w-4"].health === "유휴", JSON.stringify(after));
 
+    /* ---- 검토 기록을 받을 수 없는 일 (t-19328): 워커 줄도 검증 대기라 하지 않는다 ---- */
+    const restate = (change) => page.evaluate(async (changed) => {
+      const w2 = window.__LEDGER__.find((row) => row.worker === "w-2");
+      // The row as an older ledger sent it carries no such key at all.
+      const { unreviewable, ...rest } = w2.review ?? {};
+      w2.review = changed.unreviewable ? { ...rest, unreviewable: true } : rest;
+      w2.failed = changed.failed === true;
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+      return true;
+    }, change);
+    await restate({ unreviewable: true });
+    await settleMail();
+    const unrecorded = await readWorkers();
+    await restate({ unreviewable: true, failed: true });
+    await settleMail();
+    const unrecordedAfterFailure = await readWorkers();
+    await restate({});
+    await settleMail();
+    const older = await readWorkers();
+    ok("a worker whose task was done by hand with nothing handed in reads 완료 — 검토 기록 없음, never 검증 대기 and never 실패; a row from an older ledger, without the fact, reads as it did",
+      unrecorded.rows["w-2"].task === "데스크 과업 2 · 완료 — 검토 기록 없음" &&
+      unrecordedAfterFailure.rows["w-2"].task === "데스크 과업 2 · 완료 — 검토 기록 없음" &&
+      older.rows["w-2"].task === "데스크 과업 2 · 검증 대기", JSON.stringify({ unrecorded, unrecordedAfterFailure, older }));
+
     /* ---- 과업 흐름: `task-list`의 자리, 멈춰 선 단계가 먼저 펼쳐진다 ---------- */
     const settleDesk = () => page.evaluate(async () => {
       for (let beat = 0; beat < 20 && (deskLedgerAsking || deskPaintFrame !== null); beat += 1) {
@@ -650,8 +675,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last",
       pipeline.shown && pipeline.head === "과업 흐름 · 60" &&
       pipeline.chips.map((chip) => chip.split(":").slice(0, 2).join(":")).join() ===
-        "pending:6,ready:20,dispatched:5,reported:6,merged:18,gate:2,blocked:2,failed:1,closed:0" &&
-      pipeline.words.join() === "선행 대기,준비,진행,보고됨,병합,게이트,막힘,실패,닫힘", JSON.stringify(pipeline));
+        "pending:6,ready:20,dispatched:5,reported:6,merged:18,gate:2,blocked:2,failed:1,unreviewable:0,closed:0" &&
+      pipeline.words.join() === "선행 대기,준비,진행,보고됨,병합,게이트,막힘,실패,완료 — 검토 기록 없음,닫힘", JSON.stringify(pipeline));
     ok("a stuck stage with tasks wears its signal and opens first, naming the gate and its question",
       pipeline.chips.includes("gate:2:true:is-wait") && pipeline.chips.includes("failed:1:false:is-halt") &&
       pipeline.chips.includes("blocked:2:false:is-wait") && pipeline.chips.includes("ready:20:false:is-flow") &&
@@ -702,6 +727,31 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       closedStage.chips.includes("failed:1:false:is-halt") &&
       closedStage.rows.map((row) => row.note).join("|") === "접힘 → t-902|넘김 → run-9|낡음 · 다른 과업이 덮음",
       JSON.stringify(closedStage));
+
+    /* ---- 완료 — 검토 기록 없음 (t-19328): 검증 대기(보고됨)가 아니고, 열린 수에 들지 않는다 ---- */
+    await page.evaluate(async () => {
+      const cost = { attempts: 2, wallMs: 90 * 60_000,
+        generation: { sessionsKnown: 0, sessionsLinked: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+          cacheWriteTokens: 0, usd: null, usdReason: "unlinked" },
+        jev: { requests: 0, stampedSeats: 4, unstampedSeats: 23, inputTokens: null } };
+      const unrecorded = [1, 2, 3].map((n) => ({ run: window.__DESK__.runs[0].run, id: `t-95${n}`,
+        title: `손으로 끝낸 ${n}`, stage: "unreviewable", gate: null, blocked_by: [], closed: null,
+        created_ms: 10 + n, cost }));
+      window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
+        tasks: [...window.__DESK__.tasks, ...unrecorded],
+        stages: window.__DESK__.stages.map((one) => one.stage === "unreviewable" ? { ...one, count: 3 } : one) };
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    await settleDesk();
+    const noRecordChip = await page.$('#board-view [data-desk-block="pipeline"] [data-stage="unreviewable"]');
+    if (noRecordChip) await noRecordChip.click();
+    const noRecordStage = await readPipeline();
+    ok("work nothing can review stands in its own stage — 완료 — 검토 기록 없음, not 보고됨 (검증 대기), not counted as open, in no signal tone — and its rows say what the task cost",
+      noRecordStage.head === "과업 흐름 · 84" && noRecordStage.chips.includes("unreviewable:3:true:") &&
+      noRecordStage.chips.includes("reported:6:false:is-flow") && noRecordStage.chips.includes("closed:3:false:") &&
+      noRecordStage.rows.length === 3 && noRecordStage.rows.every((row) => row.note === ""),
+      JSON.stringify(noRecordStage));
 
     /* ---- 과업이 든 비용 (t-9470): 끝난 행마다 한 줄, 모르는 것은 「—」와 그 까닭 ---- */
     const readCosts = () => page.evaluate(() =>

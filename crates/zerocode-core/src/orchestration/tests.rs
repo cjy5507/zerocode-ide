@@ -24586,6 +24586,9 @@ mod closed;
 mod restore;
 /// t-7812: the transitions those roads added (`tests/restore_seams.rs`).
 mod restore_seams;
+/// t-19328: the board stops counting work nothing can review as 검증 대기
+/// (`tests/unreviewable.rs`).
+mod unreviewable;
 
 /* ---- served rows name their verb (t-6742) ---------------------------- */
 
