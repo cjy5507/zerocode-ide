@@ -1231,3 +1231,6 @@ done
         );
     }
 }
+
+#[cfg(test)]
+mod measured_composer;

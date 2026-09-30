@@ -2480,4 +2480,52 @@ mod tests {
             Step::Done(Outcome::Refused(Refusal::LaunchChanged))
         );
     }
+
+    /* ---- no words, no paste frame (t-17274) ------------------------------ */
+
+    /// Every byte a delivery writes, round by round, until it settles: a
+    /// composer that shook hands, then one showing its cursor, on a clock
+    /// that passes the gap before the Enter each round.
+    fn every_write(mut delivery: PromptDelivery, start: Instant) -> (Vec<u8>, Outcome) {
+        let mut wrote = Vec::new();
+        let mut now = start;
+        for round in 0..100 {
+            let shows = u64::from(round > 0);
+            match delivery.poll_line(seen(round == 0, true, shows, false), Line::default(), now) {
+                Step::Write(bytes) | Step::Submit(bytes) => wrote.extend(bytes),
+                Step::Done(outcome) => return (wrote, outcome),
+                Step::Waiting => {}
+            }
+            now += SUBMIT_GAP;
+        }
+        panic!("the delivery never settled");
+    }
+
+    /// A restored worker's pane is waited on by a delivery that carries no
+    /// words — its composer standing is all that is wanted of it (the worker
+    /// split's restoring road). That wait still wrote its envelope, and an
+    /// envelope around nothing is an EMPTY paste: what a terminal sends for
+    /// Cmd+V when the clipboard holds only a picture. Claude Code 2.1.285 on
+    /// macOS answers one by reading the system clipboard and attaching the
+    /// picture — the pty probe saw it reach for `com.apple.pasteboard.1` the
+    /// moment an empty frame arrived — and the person's screenshot went into
+    /// three restored workers' conversations that way on 2026-09-30 (08:44
+    /// and 09:46). No words, no frame: the wait writes nothing, and one that
+    /// asks for an Enter writes the Enter alone.
+    #[test]
+    fn a_delivery_with_no_words_writes_no_paste_frame() {
+        let start = Instant::now();
+        let waiting = PromptDelivery::new(String::new(), false, ReadySignal::CursorShown, start);
+        assert_eq!(
+            every_write(waiting, start),
+            (Vec::new(), Outcome::Delivered),
+            "a readiness wait wrote to the composer it waited for"
+        );
+        let entering = PromptDelivery::new(String::new(), true, ReadySignal::CursorShown, start);
+        assert_eq!(
+            every_write(entering, start),
+            (b"\r".to_vec(), Outcome::Delivered),
+            "an Enter with no words came wrapped in an empty paste"
+        );
+    }
 }
