@@ -7675,6 +7675,14 @@ mod tests {
                     .contains("ledgerReviewPhaseOf(work)"),
             "the agent rows under a card stopped telling 검증 대기 from 검증됨"
         );
+        // A failed attempt's dot says why, as far as the ledger knows.
+        assert!(
+            window.contains(
+                "const AGENT_FAILED_TIP = { key: \"worktree.attemptFailedTip\", word: \""
+            ) && block_after(window, "function makeFinishedWorkRow(path, work) {")
+                .contains("dressFailedDot("),
+            "a failed attempt's dot stopped saying why"
+        );
     }
 
     /// Middle-clicking a tab closes it.

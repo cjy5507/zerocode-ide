@@ -9815,6 +9815,21 @@ function agentDotNode(mark) {
   return dot;
 }
 
+/* What a failed attempt's dot says when it is pointed at: as much as the
+ * ledger knows, which is one fact — the attempt ended without a successful
+ * report (the worker said ok:false, or the attempt was stopped or abandoned).
+ * The reason's own words never reach this window: a ledger row carries
+ * `failed`, not a summary. Keyed through `applyLocale` (`data-i18n-title`)
+ * because a finished-work row is not rebuilt for a change of language. */
+const AGENT_FAILED_TIP = { key: "worktree.attemptFailedTip", word: "실패 — 원장에 성공 보고 없이 끝난 시도로 적혀 있습니다(워커가 ok:false로 보고했거나, 시도가 멈추거나 폐기됨)" };
+
+function dressFailedDot(dot) {
+  if (!dot) return;
+  dot.dataset.tip = t(AGENT_FAILED_TIP.key, AGENT_FAILED_TIP.word);
+  dot.dataset.i18nTitle = AGENT_FAILED_TIP.key;
+  dot.dataset.i18nSourcedatatip = AGENT_FAILED_TIP.word;
+}
+
 /* The task a workspace is working on, when the ledger seated one in a pane
  * here — the card's first words then, ahead of a branch named after a task id
  * (`wt/t-4238/…`). Roots only, in the order the card lists them. */
@@ -10178,6 +10193,7 @@ function makeAgentRow(row, gutter = false) {
     fold.setAttribute("aria-hidden", "true");
   }
   const dot = agentDotNode(agentRowMark(state, agentRowPhase(row, state)));
+  if (state === "done" && !row.sub && paneLedger.get(row.term)?.failed === true) dressFailedDot(dot);
   // The agent's REAL face beside its state ("어떤 에이전트가 도는지 아이콘
   // 실제") — the registry's favicon chain, with its letter tile standing in
   // until the mark lands. A row that predates the registry, or a helper with
@@ -10421,6 +10437,7 @@ function makeFinishedWorkRow(path, work) {
   if (phase !== "") {
     node.querySelector(".wt-agent-dot")?.replaceWith(agentDotNode(agentRowMark("done", phase)));
   }
+  if (work.failed === true) dressFailedDot(node.querySelector(".wt-agent-dot"));
   return node;
 }
 

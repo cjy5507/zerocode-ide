@@ -28,7 +28,7 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * Every fixture is built from the window's own roads — `hook:agent`,
  * `ledger:changed` over `ledger_agents` — and the page dies with the suite. */
 
-/* The scene. Ten checkouts in one repository, each one a case the person can
+/* The scene. Twelve checkouts in one repository, each one a case the person can
  * meet: the ledger's rows are the shape `ledger_agents` sends — a seated worker
  * has a `term`, a released one whose work still stands has `settled` and the
  * checkout it left it in. */
@@ -48,6 +48,7 @@ const SCENE = [
     ledger: { reported: true, failed: true } },
   { path: "/r/quiet", term: 8108, hook: "done", task: "turn ended, nothing filed",
     ledger: { reported: false } },
+  { path: "/r/lost", settled: { reported: true, failed: true, task: "released, failed" } },
   { path: "/r/idle" },
 ];
 
@@ -57,7 +58,7 @@ const WANT_GROUPS = {
   done: ["/r/ver", "/r/own", "/r/landed"],
   working: ["/r/work"],
   active: ["/r/failed", "/r/quiet"],
-  inactive: ["/r/idle"],
+  inactive: ["/r/lost", "/r/idle"],
 };
 
 /* What each row's dot should read, by the indicator the window draws. 완료 is
@@ -68,7 +69,7 @@ const WANT_GROUPS = {
 const WANT_INDICATOR = {
   "/r/ask": "permission", "/r/rep": "review", "/r/claim": "review", "/r/ver": "done",
   "/r/own": "done", "/r/work": "working", "/r/gone": "review", "/r/landed": "done",
-  "/r/failed": "active", "/r/quiet": "active", "/r/idle": "inactive",
+  "/r/failed": "active", "/r/quiet": "active", "/r/lost": "inactive", "/r/idle": "inactive",
 };
 
 /* The words that stood on one tooltip before (`worktree.stateIdle`), one per
@@ -267,12 +268,16 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
         return {
           klass: node.className,
           glyph: node.querySelector(".wt-agent-dot use")?.getAttribute("href") ?? null,
+          dotTip: node.querySelector(".wt-agent-dot")?.dataset.tip ?? "",
           said,
         };
       };
-      return Object.fromEntries(["/r/rep", "/r/claim", "/r/ver", "/r/own", "/r/gone", "/r/landed", "/r/failed", "/r/quiet"]
+      return Object.fromEntries(["/r/rep", "/r/claim", "/r/ver", "/r/own", "/r/gone", "/r/landed", "/r/failed", "/r/quiet", "/r/lost"]
         .map((path) => [path, read(path)]));
     });
+    // The failed attempt's line, as the window words it — "" where the window has none.
+    const failedTip = await page.evaluate(() =>
+      typeof AGENT_FAILED_TIP === "undefined" ? "" : t(AGENT_FAILED_TIP.key, AGENT_FAILED_TIP.word));
     const wantWords = await page.evaluate(() => ({
       awaiting: t("board.awaitingReview", "검증 대기"), claimed: t("board.claimedMerged", "병합됐다 함"),
       verified: t("board.verified", "검증됨"), merged: t("board.merged", "병합됨"), done: t("board.done", "완료"),
@@ -294,8 +299,14 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
         agents["/r/failed"]?.glyph === null && agents["/r/failed"].klass.includes("is-unsettled") &&
         agents["/r/failed"].said === wantWords.failed &&
         agents["/r/quiet"]?.glyph === null && agents["/r/quiet"].klass.includes("is-unsettled") &&
-        agents["/r/quiet"].said === wantWords.idle,
-      JSON.stringify({ agents, wantWords }),
+        agents["/r/quiet"].said === wantWords.idle &&
+        // A failed attempt's dot says why, as far as the ledger knows — on a
+        // live row and on the work a released worker left. Nothing else does.
+        agents["/r/lost"]?.said === wantWords.failed && agents["/r/lost"].glyph === null &&
+        failedTip !== "" && agents["/r/failed"].dotTip === failedTip && agents["/r/lost"].dotTip === failedTip &&
+        ["/r/rep", "/r/claim", "/r/ver", "/r/own", "/r/gone", "/r/landed", "/r/quiet"]
+          .every((path) => agents[path].dotTip === ""),
+      JSON.stringify({ agents, wantWords, failedTip }),
     );
 
     /* ---- 4. no hop under the pointer -------------------------------------- */
@@ -341,7 +352,10 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
         await new Promise((done) => setTimeout(done, 200));
         await window.__PAINTED__();
         const words = (path) => window.__READ__.mark(path);
+        const dotTip = (path) => document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(path)}"] .wt-agent-dot`)?.dataset.tip ?? "";
         return {
+          failedTip: { want: typeof AGENT_FAILED_TIP === "undefined" ? "" : t(AGENT_FAILED_TIP.key, AGENT_FAILED_TIP.word),
+            live: dotTip("/r/failed"), settled: dotTip("/r/lost") },
           review: t("board.awaitingReview", "검증 대기"), done: t("sidebar.stateDone", "완료"),
           heads: window.__READ__.groups().map((lane) => lane.head),
           gone: words("/r/gone"), landed: words("/r/landed"), own: words("/r/own"),
@@ -356,6 +370,11 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       LOCALES.every((code) => {
         const one = languages[code];
         return one.review !== one.done &&
+          // The failed attempt's tooltip follows the language on a row that was
+          // rebuilt (the live one) and on one that was not (the released worker's).
+          one.failedTip.want !== "" && one.failedTip.live === one.failedTip.want &&
+          one.failedTip.settled === one.failedTip.want &&
+          (code === "ko" || one.failedTip.want !== languages.ko.failedTip.want) &&
           one.heads.includes(one.review) && one.heads.includes(one.done) &&
           one.gone.chip === one.review && one.landed.chip === one.done && one.own.chip === one.done &&
           one.gone.tip.includes(one.review) && one.landed.tip.includes(one.done) &&
