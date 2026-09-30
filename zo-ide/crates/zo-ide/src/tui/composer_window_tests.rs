@@ -239,10 +239,10 @@ fn after_a_20_kb_paste_the_next_letter_appears_at_the_caret() {
     let mut number = 0;
     while text.len() < 20 * 1024 {
         number += 1;
-        let _ = write!(
+        let _ = writeln!(
             text,
             "draft line {number:03}: the quick brown fox jumps over the lazy dog while the notes \
-             for step {number} are written down in plain words\n"
+             for step {number} are written down in plain words"
         );
     }
     text.push_str("the very last words");
