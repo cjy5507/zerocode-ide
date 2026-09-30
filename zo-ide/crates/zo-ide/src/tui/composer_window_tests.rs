@@ -234,14 +234,16 @@ fn a_letter_typed_at_the_end_of_a_long_draft_is_drawn_at_the_caret() {
 /// 벤치의 `draft` 상태: 20 KB 를 붙이면 캐럿은 끝에 있고, 그다음 글자가 그 자리에 나타난다.
 #[test]
 fn after_a_20_kb_paste_the_next_letter_appears_at_the_caret() {
+    use std::fmt::Write as _;
     let mut text = String::new();
     let mut number = 0;
     while text.len() < 20 * 1024 {
         number += 1;
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             "draft line {number:03}: the quick brown fox jumps over the lazy dog while the notes \
              for step {number} are written down in plain words\n"
-        ));
+        );
     }
     text.push_str("the very last words");
     let mut rig = Rig::new(120, 40);
