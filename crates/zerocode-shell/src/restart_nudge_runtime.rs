@@ -632,6 +632,35 @@ pub(super) fn place_words(
     (pending, delivery)
 }
 
+/// The line a restored worker's continuation files once its pane reported
+/// taking it (t-18353): the same `receipt=working@Ns` the wake road files, so
+/// the person can read at the next restart that every restored pane took its
+/// words — until now only a continuation left unsent left a line at all.
+/// Only for a pane whose row reports the prompts it takes (its delivery is
+/// `Delivered` on that report, not on the Enter's write); any other pane's
+/// delivery says nothing about the words being taken, and files no line.
+pub(crate) fn continuation_taken_line(
+    _term: TermId,
+    _agent: &str,
+    _session_id: &str,
+    _elapsed: Duration,
+) -> Option<String> {
+    None
+}
+
+/// File [`continuation_taken_line`] in the window's log.
+pub(crate) fn note_continuation_taken(
+    state: &AppState,
+    term: TermId,
+    agent: &str,
+    session_id: &str,
+    elapsed: Duration,
+) {
+    if let Some(line) = continuation_taken_line(term, agent, session_id, elapsed) {
+        note_window_event(state.local_data_root(), &line);
+    }
+}
+
 /// The line for a sleeper's wake that started nothing because the ledger
 /// would not seat it (t-7812 R1): the pane would have been a conversation
 /// the ledger does not know, which is the fault the witness exists to close.
@@ -2047,6 +2076,154 @@ mod tests {
                 "{}: a delivered continuation was watched",
                 spec.id
             );
+        }
+    }
+
+    /// When, after its start, `delivery` first writes anything at a program
+    /// that behaves as one just started (t-18353): a handshake round, then a
+    /// first frame 50 ms later that draws the composer's glyph and shows the
+    /// cursor, then nothing at all — round after round on a 50 ms clock,
+    /// which is what 2.1.285 gives for seconds after its first frame — until
+    /// the delivery writes or gives up. `None` when it gave up without
+    /// writing. A synthetic clock, so the answer is exact and instant.
+    fn first_write_at_a_program_just_started(
+        mut delivery: PromptDelivery,
+        start: Instant,
+    ) -> Option<Duration> {
+        const ROUND: Duration = Duration::from_millis(50);
+        let line = zerocode_pty::ready::Line::default();
+        let mut now = start;
+        for round in 0..3_000 {
+            let seen = match round {
+                0 => Observed {
+                    wrote: true,
+                    bracketed_paste: true,
+                    ..Observed::default()
+                },
+                1 => Observed {
+                    wrote: true,
+                    bracketed_paste: true,
+                    cursor_shows: 1,
+                    marker_written: true,
+                    marker_in_alt: true,
+                    alt_screen: true,
+                },
+                _ => Observed {
+                    wrote: false,
+                    bracketed_paste: true,
+                    cursor_shows: 1,
+                    marker_written: false,
+                    marker_in_alt: false,
+                    alt_screen: true,
+                },
+            };
+            match delivery.poll_line(seen, line, now) {
+                DeliveryStep::Write(_) | DeliveryStep::Submit(_) => return Some(now - start),
+                DeliveryStep::Done(_) => return None,
+                DeliveryStep::Waiting => {}
+            }
+            now += ROUND;
+        }
+        None
+    }
+
+    /// A restored worker's continuation, and the Enter pressed again for it,
+    /// are typed at a program the window started moments ago, and wait
+    /// behind the door its row names for that (t-18353) — every catalog row
+    /// walked.
+    ///
+    /// Measured on Claude Code 2.1.285: its first frame draws the composer
+    /// 30 ms after its handshake, and words placed there are lost, or left
+    /// unsent with every Enter after them ignored. The door the reseat used
+    /// — a running composer's rest — opens on that first glyph. A row that
+    /// says it has such a hand-over (`start_settle_ms`) is typed at only
+    /// after its settle of silence, the words and the Enter alone alike; a
+    /// row that says nothing is typed at exactly as before.
+    #[test]
+    fn a_restored_pane_is_typed_at_only_after_its_row_says_it_has_settled() {
+        use crate::cmd::terminal::{PromptReadiness, prompt_delivery_for};
+        let start = Instant::now();
+        let mut settled = Vec::new();
+        for spec in &zerocode_core::AGENT_SPECS {
+            let row = Some(spec.id);
+            let door = |readiness, words: &str| {
+                first_write_at_a_program_just_started(
+                    prompt_delivery_for(words.to_string(), true, row, readiness, None, start),
+                    start,
+                )
+            };
+            let running = door(PromptReadiness::RestingBesideADraft, "words");
+            let restored = door(PromptReadiness::MountingBesideADraft, "words");
+            let enter_again = door(PromptReadiness::EnterAgain(None), "");
+            match start_settle_for(row) {
+                Some(settle) => {
+                    settled.push(spec.id);
+                    assert!(
+                        running.is_some_and(|at| at < settle),
+                        "{}: the door the reseat used no longer opens inside the hand-over \
+                         ({running:?}, settle {settle:?}) — the measurement this test stands on",
+                        spec.id
+                    );
+                    for (road, at) in [("the words", restored), ("the Enter alone", enter_again)] {
+                        assert!(
+                            at.is_some_and(|at| at >= settle),
+                            "{}: {road} were placed at a program still handing over its \
+                             start-up ({at:?}, settle {settle:?})",
+                            spec.id
+                        );
+                    }
+                }
+                None => {
+                    assert_eq!(
+                        restored, running,
+                        "{}: a row with no hand-over was typed at differently",
+                        spec.id
+                    );
+                    // The words and the Enter alone both go on the round the
+                    // door opens, so one time answers for both.
+                    assert_eq!(
+                        enter_again, running,
+                        "{}: a row with no hand-over had its Enter pressed differently",
+                        spec.id
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            settled,
+            ["claude"],
+            "the rows that wait for a hand-over are the measured ones"
+        );
+    }
+
+    /// A restored worker's continuation the pane reported taking files the
+    /// wake's own receipt line (t-18353) — every catalog row walked: a row
+    /// whose program reports the prompts it takes files
+    /// `receipt=working@Ns` in the wake road's exact words, and a row that
+    /// reports nothing files none, because its delivery says nothing about
+    /// the words being taken.
+    #[test]
+    fn a_continuation_a_pane_reported_taking_files_the_wake_receipt_line() {
+        for spec in &zerocode_core::AGENT_SPECS {
+            let line = continuation_taken_line(
+                TEST_TERM_WITH_RECEIPT,
+                spec.id,
+                "01234567-session",
+                Duration::from_secs(9),
+            );
+            let reports = spec.harness.submit_ack != zerocode_core::capabilities::SubmitAck::None;
+            assert_eq!(line.is_some(), reports, "{}", spec.id);
+            if let Some(line) = line {
+                assert_eq!(
+                    line,
+                    format!(
+                        "term 41 resumed {} 01234567 nudge=composer receipt=working@9s",
+                        spec.id
+                    ),
+                    "{}",
+                    spec.id
+                );
+            }
         }
     }
 }

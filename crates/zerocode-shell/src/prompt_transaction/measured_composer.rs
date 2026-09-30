@@ -495,6 +495,9 @@ fn every_road_hands_the_measured_composer_its_words_and_never_its_pasteboard() {
         crate::cmd::terminal::PromptReadiness::Mounting,
         crate::cmd::terminal::PromptReadiness::Resting,
         crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+        // The reseat's continuation (t-18353): the same words in the same
+        // frame, behind a door that waits for the program's hand-over.
+        crate::cmd::terminal::PromptReadiness::MountingBesideADraft,
     ] {
         let delivery = crate::cmd::terminal::prompt_delivery_for(
             WORDS.to_string(),
@@ -550,17 +553,6 @@ fn every_row_writes_its_words_the_way_its_row_says() {
     let words = "first line\nsecond line";
     for spec in &zerocode_core::AGENT_SPECS {
         let row = Some(spec.id);
-        let wrote = written(
-            crate::cmd::terminal::prompt_delivery_for(
-                words.to_string(),
-                false,
-                row,
-                crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
-                None,
-                start,
-            ),
-            start,
-        );
         let expected = match spec.composer_words {
             zerocode_core::ComposerWords::Pasted => zerocode_pty::encode_paste(words, true),
             zerocode_core::ComposerWords::Typed { line_break } => [
@@ -570,7 +562,25 @@ fn every_row_writes_its_words_the_way_its_row_says() {
             ]
             .concat(),
         };
-        assert_eq!(wrote, expected, "{}", spec.id);
+        // A restored pane's continuation (t-18353) writes what any other
+        // send to a running composer writes — only its door differs.
+        for readiness in [
+            crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+            crate::cmd::terminal::PromptReadiness::MountingBesideADraft,
+        ] {
+            let wrote = written(
+                crate::cmd::terminal::prompt_delivery_for(
+                    words.to_string(),
+                    false,
+                    row,
+                    readiness,
+                    None,
+                    start,
+                ),
+                start,
+            );
+            assert_eq!(wrote, expected, "{} at {readiness:?}", spec.id);
+        }
         let waited = written(
             PromptDelivery::with_deadlines(
                 String::new(),

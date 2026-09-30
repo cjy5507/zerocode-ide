@@ -737,6 +737,24 @@ impl TeamWindow {
     /// draft-preserving readiness yields to their hand, a parked question
     /// and a relaunch, at the write.
     fn pasted(&self, term: TermId, text: &str) -> Option<DeliveryOutcome> {
+        self.pasted_at(
+            term,
+            text,
+            crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+        )
+    }
+
+    /// [`Self::pasted`] at the readiness the pane's program calls for: a
+    /// restored worker's continuation is typed at a program the window
+    /// started moments ago, and waits behind the door its row names for that
+    /// (t-18353) — the one door the paste and the Enter pressed again for it
+    /// share, so neither lands in a start-up that has not handed over.
+    fn pasted_at(
+        &self,
+        term: TermId,
+        text: &str,
+        readiness: crate::cmd::terminal::PromptReadiness,
+    ) -> Option<DeliveryOutcome> {
         let state = self.app.state::<AppState>();
         let agent = state.agent_terms().get(&term).copied();
         let waiting = crate::cmd::terminal::type_prompt_at_term(
@@ -745,15 +763,17 @@ impl TeamWindow {
             text.to_string(),
             true,
             agent,
-            crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+            readiness,
         )
         .ok()?;
-        // Its wait covers the delivery's own for the pane's receipt
-        // (t-14037). Words entered twice at a pane that never answered are
-        // on its line, told to the person, and not the run's to type again.
+        // Its wait covers the delivery's own — the door's, which is longer
+        // by the settle where the row has one — and its wait for the pane's
+        // receipt (t-14037). Words entered twice at a pane that never
+        // answered are on its line, told to the person, and not the run's to
+        // type again.
         waiting
             .recv_timeout(
-                zerocode_pty::ready::TIMEOUT + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
+                readiness.door_deadline(agent) + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
             )
             .ok()
     }
@@ -1512,11 +1532,30 @@ impl agent_teams::Host for TeamWindow {
         let launch = crate::cmd::terminal::launch_of(&state, term);
         let hand = crate::human_input::line_of(term).1;
         let agent = state.agent_terms().get(&term).copied();
-        let Some(outcome) = self.pasted(term, text) else {
+        // A restored worker's pane was started a moment ago: its
+        // continuation waits for the program's start-up to hand over
+        // (t-18353), where its row says it has one.
+        let placed = Instant::now();
+        let Some(outcome) = self.pasted_at(
+            term,
+            text,
+            crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+        ) else {
             return false;
         };
         if let Some(agent) = agent {
             let session = self.provider_session(term).map(|held| held.id);
+            // A continuation the pane reported taking is its own receipt:
+            // the wake's line, so a restart leaves one per restored pane.
+            if matches!(outcome, DeliveryOutcome::Delivered) {
+                crate::restart_nudge_runtime::note_continuation_taken(
+                    &state,
+                    term,
+                    agent,
+                    session.as_deref().unwrap_or_default(),
+                    placed.elapsed(),
+                );
+            }
             crate::restart_nudge_runtime::arm_left_unsent(
                 &self.app,
                 term,

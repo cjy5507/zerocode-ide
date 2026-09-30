@@ -666,7 +666,11 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         // 2.1.274, fresh and resumed (zerocode-pty's recordings) — and a
         // paste right after the first one showed in the composer within
         // 131 ms in each. No quiet floor: silence is what it gives between
-        // handlers.
+        // handlers. That is the launch door's measure on 2.1.273/274 and
+        // this row keeps it for that door; a pane the window types at
+        // moments after starting it — a restored worker's continuation — is
+        // another door's, and `start_settle_ms` below is its measure on
+        // 2.1.285.
         ready: ReadyMark::ComposerPrompt('\u{276f}'),
         ready_quiet_ms: None,
         ready_timeout_ms: None,
@@ -693,6 +697,28 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 model: Some(MoveRoad::Line("/model")),
                 ladder: CLAUDE_EFFORT_LADDER,
             },
+            // Measured 2026-09-30 on 2.1.285 (t-18353), `claude --resume` on
+            // a transcript whose last turn was cut, in a pty behind this
+            // window's own terminal answers (XTVERSION, DA1, DECRQM): the
+            // first frame — the composer and its `❯` — is drawn 30 ms after
+            // the `?2004h` handshake; of 16 runs that placed words from
+            // before the handshake to 1.1 s after it, 11 lost them or left
+            // them on the line with every Enter after them ignored, and of
+            // 11 that placed them 1.3 s or later after it, none did. It is
+            // the 22:31 restart's nudges: four restored workers, four words
+            // left unsent, a person's Enter each. Nothing the pane draws in
+            // that span says it is not listening yet — its glyph is its
+            // first frame — so the window counts the settle from its first
+            // look at the pane, never earlier than the pane's start. 6 s: on
+            // a quiet machine the span ended 1.1 s after the handshake; at
+            // the 22:31 restart, with the build queue at 25–42, the
+            // coordinator's pane — started with its prompt on argv — took it
+            // 4–5 s after its start (its REPL mounting), and the four
+            // workers' words, typed 3.4–5.4 s after theirs, were the four
+            // left unsent. A settle that clears that mount and the second
+            // after it costs a restored worker two seconds more than one
+            // that clears the quiet machine's.
+            start_settle_ms: Some(6_000),
             ..Harness::PLAIN
         },
     },

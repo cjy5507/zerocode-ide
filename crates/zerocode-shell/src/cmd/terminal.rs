@@ -886,6 +886,16 @@ pub(crate) enum PromptReadiness {
     /// be half a thought a person is still writing, and clear keys take them
     /// with no undo. So this variant never sends them.
     RestingBesideADraft,
+    /// A program the window started moments ago, and whatever is already on
+    /// the line stays there (t-18353): a restored worker's continuation. The
+    /// glyph and the cursor a program just started draws are its first
+    /// frame, before its start-up has handed over, and words placed there
+    /// are lost or left unsent with every Enter after them ignored — so
+    /// where the program's row says it has such a hand-over
+    /// (`start_settle_ms`), this waits until the program has been up that
+    /// long, and then for its rest; where it does not, this is
+    /// [`Self::RestingBesideADraft`] exactly.
+    MountingBesideADraft,
     /// At rest, for the Enter alone (t-17037): words a delivery left on the
     /// line with their Enter never taken are sent by one Enter at the
     /// composer's next ready — never typed again. Everything
@@ -903,17 +913,41 @@ impl PromptReadiness {
             // Rest keeps the same glyph as a mounting wait and adds the two
             // signs a running composer actually gives: a cursor shown again,
             // or the stream settling into silence.
-            Self::Resting | Self::RestingBesideADraft | Self::EnterAgain(_) => {
-                ReadySignal::Rest(ready_signal_for(agent).marker())
+            Self::Resting | Self::RestingBesideADraft => Self::rest(agent),
+            // A program just started is given its start-up to hand over
+            // first, where its row says it has one (t-18353), and the Enter
+            // pressed again for words placed at it waits behind the same
+            // door: an Enter inside the hand-over is ignored like the words.
+            Self::MountingBesideADraft | Self::EnterAgain(_) => {
+                start_settle_for(agent).map_or_else(|| Self::rest(agent), ReadySignal::Settled)
             }
         }
+    }
+
+    /// What a composer already running says when it is at rest — the row's
+    /// own glyph, or a cursor shown again, or silence. Named once so the
+    /// doors that wait for rest cannot come to disagree about it.
+    fn rest(agent: Option<&str>) -> ReadySignal {
+        ReadySignal::Rest(ready_signal_for(agent).marker())
+    }
+
+    /// The most this readiness waits for its door to open: the shared
+    /// deadline plus the settle a program just started is given (t-18353).
+    /// A caller that blocks on the delivery's answer budgets this, and the
+    /// receipt after it, and no less — or it gives up on a delivery that is
+    /// still waiting for its program to hand over.
+    pub(crate) fn door_deadline(self, agent: Option<&str>) -> std::time::Duration {
+        zerocode_pty::ready::TIMEOUT.saturating_add(self.signal(agent).settle())
     }
 
     /// The Enter alone this readiness asks for, if it does.
     const fn enter_again(self) -> Option<zerocode_pty::EnterAgain> {
         match self {
             Self::EnterAgain(hand) => Some(zerocode_pty::EnterAgain { hand }),
-            Self::Mounting | Self::Resting | Self::RestingBesideADraft => None,
+            Self::Mounting
+            | Self::Resting
+            | Self::RestingBesideADraft
+            | Self::MountingBesideADraft => None,
         }
     }
 
@@ -922,6 +956,7 @@ impl PromptReadiness {
         match self {
             Self::Mounting | Self::Resting => composer_clear_for(agent),
             Self::RestingBesideADraft => false,
+            Self::MountingBesideADraft => false,
             Self::EnterAgain(_) => false,
         }
     }
@@ -937,6 +972,11 @@ impl PromptReadiness {
         match self {
             Self::Mounting | Self::Resting => zerocode_pty::ready::Guard::for_its_own_line(launch),
             Self::RestingBesideADraft => {
+                zerocode_pty::ready::Guard::for_somebody_elses_line(launch)
+            }
+            // The same line, seen while its program is still starting
+            // (t-18353): the words are somebody else's there too.
+            Self::MountingBesideADraft => {
                 zerocode_pty::ready::Guard::for_somebody_elses_line(launch)
             }
             // Everything the draft-preserving readiness yields to, the Enter
@@ -993,6 +1033,7 @@ pub(crate) fn prompt_delivery_for(
         .words(words),
         PromptReadiness::Resting
         | PromptReadiness::RestingBesideADraft
+        | PromptReadiness::MountingBesideADraft
         | PromptReadiness::EnterAgain(_) => PromptDelivery::new(text, submit, signal, started)
             .clearing(clearing)
             .guarded(guard)

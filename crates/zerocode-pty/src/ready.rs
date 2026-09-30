@@ -154,22 +154,57 @@ pub enum ReadySignal {
     /// 2026-08-14: an idle codex took no send for the whole eight-second
     /// budget).
     Rest(Option<char>),
+    /// It has JUST STARTED, and what is placed before its start-up has
+    /// settled is lost (t-18353). A program moments old takes its input into
+    /// a start-up buffer that folds a carriage return into a line break and
+    /// drops a paste frame's markers — the words are left on the line and
+    /// every Enter after them is ignored — or into a first input handler
+    /// taken down again before the real one stands, and they are gone.
+    /// Claude Code 2.1.285, in a pty behind this window's own terminal
+    /// answers: of 16 runs that placed words from before its handshake to
+    /// 1.1 s after it, 11 lost them or left them unsent; of 11 that placed
+    /// them 1.3 s or later after it, none did.
+    ///
+    /// So this is [`Rest`](Self::Rest) held back until the program has been
+    /// up for the settle, counted from its handshake — a wait registered
+    /// late counts from its own first look at the program, which only ever
+    /// errs later. Its composer glyph is no sign at all: the first frame
+    /// draws the composer before the hand-over, which is exactly what `Rest`
+    /// takes for rest. What is left, once the settle has passed, is a
+    /// running composer's own two signs: a cursor shown again, or the stream
+    /// gone quiet — so a program still replaying its transcript is not typed
+    /// at, and one that keeps drawing is, as `Rest` would.
+    ///
+    /// The wait carries its own deadline: the shared one from registration
+    /// plus the settle, so a caller that budgets [`TIMEOUT`] plus
+    /// [`ReadySignal::settle`] is always answered.
+    Settled(Duration),
 }
 
 impl ReadySignal {
+    /// How long a program just started is given to hand over before this
+    /// wait opens — zero for every other signal.
+    #[must_use]
+    pub const fn settle(&self) -> Duration {
+        match self {
+            Self::Settled(settle) => *settle,
+            _ => Duration::ZERO,
+        }
+    }
+
     /// The glyph this signal waits to see printed, when it waits for one.
     ///
     /// The pump has to ask the grid about a *particular* character —
     /// [`TerminalGrid::take_glyph_drawn`](crate::TerminalGrid::take_glyph_drawn)
     /// notices one, and the signal is the only thing that knows which. `None`
-    /// for the other two: they are read off state the terminal keeps anyway
+    /// for the others: they are read off state the terminal keeps anyway
     /// and cost the paint path nothing.
     #[must_use]
     pub const fn marker(&self) -> Option<char> {
         match self {
             Self::Prompt(glyph) | Self::AltScreenPrompt(glyph) => Some(*glyph),
             Self::Rest(glyph) => *glyph,
-            Self::CursorShown | Self::Quiet => None,
+            Self::CursorShown | Self::Quiet | Self::Settled(_) => None,
         }
     }
 }
@@ -288,6 +323,13 @@ impl Readiness {
         quiet: Duration,
         timeout: Duration,
     ) -> Self {
+        // A settle is the program's own hand-over and moves the deadline
+        // with it (t-18353): a wait that opens only after the settle cannot
+        // also be given up on before it.
+        let timeout = match &signal {
+            ReadySignal::Settled(settle) => timeout.saturating_add(*settle),
+            _ => timeout,
+        };
         Self {
             signal,
             quiet,
@@ -379,6 +421,15 @@ impl Readiness {
             // was quiet for a while *before* announcing itself has not yet
             // drawn anything, and that silence says nothing about being ready.
             ReadySignal::Quiet => now.duration_since(self.spoke.max(shook_at)) >= self.quiet,
+            // A running composer's rest, held back until the program has been
+            // up for its settle (t-18353): a settle passed, and then a cursor
+            // shown again or the stream gone quiet. Its glyph is not asked
+            // for — the first frame of a program just started draws it
+            // before the hand-over.
+            ReadySignal::Settled(_) => {
+                seen.cursor_shows > shows_at_handshake
+                    || now.duration_since(self.spoke.max(shook_at)) >= self.quiet
+            }
             // Three doors, first one open wins. The glyph and the cursor are
             // edges measured from the handshake like their launch cousins;
             // the silence clock is the same one `Quiet` reads.
@@ -412,7 +463,11 @@ impl Readiness {
     /// two minutes for it.
     fn settle_if_late(&mut self, now: Instant) -> State {
         let late = match self.signal {
-            ReadySignal::Rest(_) => now.duration_since(self.started) >= self.timeout,
+            // A settle's deadline is hard like a running composer's: the
+            // caller that waits on it is answered, chatty program or not.
+            ReadySignal::Rest(_) | ReadySignal::Settled(_) => {
+                now.duration_since(self.started) >= self.timeout
+            }
             _ => {
                 now.duration_since(self.spoke) >= self.timeout
                     || now.duration_since(self.started) >= PATIENCE
@@ -449,11 +504,12 @@ impl Readiness {
             ReadySignal::CursorShown => Unmet::Cursor,
             // Every signal with a silence door reports the silence: of its
             // doors it is the one a program can visibly hold shut.
-            ReadySignal::Quiet | ReadySignal::AltScreenPrompt(_) | ReadySignal::Rest(_) => {
-                Unmet::Quiet {
-                    last_write: now.saturating_duration_since(self.spoke),
-                }
-            }
+            ReadySignal::Quiet
+            | ReadySignal::AltScreenPrompt(_)
+            | ReadySignal::Rest(_)
+            | ReadySignal::Settled(_) => Unmet::Quiet {
+                last_write: now.saturating_duration_since(self.spoke),
+            },
         })
     }
 
@@ -1256,6 +1312,7 @@ mod tests {
             ReadySignal::AltScreenPrompt('❯'),
             ReadySignal::Quiet,
             ReadySignal::Rest(Some(COMPOSER_PROMPT)),
+            ReadySignal::Settled(QUIET),
         ] {
             let mut wait = Readiness::new(signal.clone(), start);
             let long_after = start + QUIET * 3;
@@ -1266,6 +1323,212 @@ mod tests {
             );
             assert!(!wait.shook_hands());
         }
+    }
+
+    /// A program just started is not ready at its first glyph, but after its
+    /// settle (t-18353).
+    ///
+    /// Measured 2026-09-30 on Claude Code 2.1.285 — `claude --resume` on a
+    /// transcript whose last turn was cut, in a pty behind this window's own
+    /// terminal answers: the first frame, the composer and its `❯` among it,
+    /// is drawn 30 ms after the handshake; of 16 runs that placed words from
+    /// before the handshake to 1.1 s after it, 11 lost them or left them in
+    /// the composer with every Enter after them ignored, and of 11 that
+    /// placed them 1.3 s after it or later none did. The 22:31 restart met
+    /// the same: four restored workers, four nudges left unsent, a person's
+    /// Enter each. `Rest` opens on that first glyph and on the cursor shown
+    /// with it — the door a program just started was typed at through;
+    /// `Settled` opens on neither before its settle has passed.
+    #[test]
+    fn a_program_just_started_is_not_ready_at_its_first_glyph_but_after_its_settle() {
+        const SETTLE: Duration = Duration::from_millis(3_000);
+        let start = Instant::now();
+        let first_frame = start + Duration::from_millis(30);
+
+        let mut rest = Readiness::new(ReadySignal::Rest(Some(COMPOSER_PROMPT)), start);
+        assert_eq!(
+            rest.observe(seen(true, true, 0, false), start),
+            State::Waiting
+        );
+        assert_eq!(
+            rest.observe(seen(true, true, 1, true), first_frame),
+            State::Ready,
+            "the door a program just started was typed at through moved"
+        );
+
+        let mut wait = Readiness::new(ReadySignal::Settled(SETTLE), start);
+        assert_eq!(
+            wait.observe(seen(true, true, 0, false), start),
+            State::Waiting
+        );
+        assert_eq!(
+            wait.observe(seen(true, true, 1, true), first_frame),
+            State::Waiting,
+            "the first frame's glyph and cursor opened a settle"
+        );
+        // It writes again — the queries it sends, a redraw — and it is still
+        // a program moments old.
+        assert_eq!(
+            wait.observe(seen(true, true, 1, true), start + Duration::from_secs(1)),
+            State::Waiting
+        );
+        assert_eq!(
+            wait.observe(
+                seen(false, true, 1, false),
+                start + SETTLE - Duration::from_millis(1)
+            ),
+            State::Waiting,
+            "a settle opened a millisecond early"
+        );
+        assert_eq!(
+            wait.observe(seen(false, true, 1, false), start + SETTLE),
+            State::Ready
+        );
+        assert_eq!(
+            wait.unmet(start + SETTLE),
+            None,
+            "a wait that was answered owes no reason"
+        );
+    }
+
+    /// A settle passed is not enough: what is left is a running composer's
+    /// rest. A program that shows no cursor and is still writing has not
+    /// finished — a transcript still replaying, say — and is not typed at
+    /// until it has been quiet for the shared window.
+    #[test]
+    fn a_settle_passed_still_needs_a_program_at_rest() {
+        const SETTLE: Duration = Duration::from_millis(3_000);
+        let start = Instant::now();
+        let mut wait = Readiness::new(ReadySignal::Settled(SETTLE), start);
+        assert_eq!(
+            wait.observe(seen(true, true, 0, false), start),
+            State::Waiting
+        );
+        // No cursor is ever shown again; it writes until 2.5 s.
+        let last_write = start + Duration::from_millis(2_500);
+        assert_eq!(
+            wait.observe(seen(true, true, 0, false), last_write),
+            State::Waiting
+        );
+        assert_eq!(
+            wait.observe(seen(false, true, 0, false), start + SETTLE),
+            State::Waiting,
+            "a program that wrote half a second ago was called at rest"
+        );
+        assert_eq!(
+            wait.observe(
+                seen(false, true, 0, false),
+                last_write + QUIET - Duration::from_millis(1)
+            ),
+            State::Waiting
+        );
+        assert_eq!(
+            wait.observe(seen(false, true, 0, false), last_write + QUIET),
+            State::Ready
+        );
+
+        // A cursor shown again is the other sign, and it is enough once the
+        // settle has passed — however lately the program wrote.
+        let mut shown = Readiness::new(ReadySignal::Settled(SETTLE), start);
+        shown.observe(seen(true, true, 0, false), start);
+        assert_eq!(
+            shown.observe(seen(true, true, 1, false), start + SETTLE),
+            State::Ready
+        );
+    }
+
+    /// A settle names no glyph, and the door it is still waiting at is the
+    /// silence.
+    #[test]
+    fn a_settle_names_no_glyph_and_the_door_it_waits_at_is_the_quiet() {
+        const SETTLE: Duration = Duration::from_millis(3_000);
+        let start = Instant::now();
+        assert_eq!(ReadySignal::Settled(SETTLE).marker(), None);
+        assert_eq!(ReadySignal::Settled(SETTLE).settle(), SETTLE);
+        for other in [
+            ReadySignal::Quiet,
+            ReadySignal::CursorShown,
+            ReadySignal::Prompt(COMPOSER_PROMPT),
+            ReadySignal::AltScreenPrompt(COMPOSER_PROMPT),
+            ReadySignal::Rest(Some(COMPOSER_PROMPT)),
+        ] {
+            assert_eq!(other.settle(), Duration::ZERO, "{other:?}");
+        }
+        let mut wait = Readiness::new(ReadySignal::Settled(SETTLE), start);
+        wait.observe(seen(true, true, 0, false), start);
+        assert_eq!(
+            wait.unmet(start + SETTLE / 3),
+            Some(Unmet::Quiet {
+                last_write: SETTLE / 3
+            })
+        );
+    }
+
+    /// A settle's deadline is the caller's own plus the settle, and hard: a
+    /// program that never rests — never quiet, never showing its cursor — is
+    /// answered `TimedOut` there, not after [`PATIENCE`]. The caller that
+    /// budgets [`TIMEOUT`] plus the settle for its answer (a restored
+    /// worker's continuation waits exactly that) must be answered, and must
+    /// not be left holding a wait that outlives its budget.
+    #[test]
+    fn a_settle_is_answered_at_its_deadline_by_a_program_that_never_rests() {
+        const SETTLE: Duration = Duration::from_millis(3_000);
+        let start = Instant::now();
+        let mut wait = Readiness::new(ReadySignal::Settled(SETTLE), start);
+        wait.observe(seen(true, true, 0, false), start);
+        let mut answered = None;
+        let mut elapsed = Duration::ZERO;
+        while elapsed < PATIENCE {
+            elapsed += Duration::from_millis(100);
+            let state = wait.observe(seen(true, true, 0, false), start + elapsed);
+            if state != State::Waiting {
+                answered = Some((state, elapsed));
+                break;
+            }
+        }
+        assert_eq!(answered, Some((State::TimedOut, TIMEOUT + SETTLE)));
+    }
+
+    /// The delivery behind a settle writes nothing while the program's first
+    /// frame, its cursor and its short silences go by, and then the words —
+    /// whole, in one write, and the Enter a gap after.
+    #[test]
+    fn a_delivery_behind_a_settle_writes_nothing_until_it_has_settled() {
+        const SETTLE: Duration = Duration::from_millis(3_000);
+        let start = Instant::now();
+        let mut delivery = PromptDelivery::new(
+            "do the task".into(),
+            true,
+            ReadySignal::Settled(SETTLE),
+            start,
+        )
+        .clearing(false);
+        assert_eq!(
+            delivery.poll(seen(true, true, 0, false), start),
+            Step::Waiting
+        );
+        // Its first frame, with the glyph and a cursor shown, then silence.
+        assert_eq!(
+            delivery.poll(seen(true, true, 1, true), start + Duration::from_millis(30)),
+            Step::Waiting,
+            "the first frame's glyph opened the door"
+        );
+        for later in [200, 900, 1_100, 2_000, 2_999] {
+            assert_eq!(
+                delivery.poll(
+                    seen(false, true, 1, false),
+                    start + Duration::from_millis(later)
+                ),
+                Step::Waiting,
+                "{later} ms after its handshake"
+            );
+            assert!(!delivery.pasted());
+        }
+        let Step::Write(paste) = delivery.poll(seen(false, true, 1, false), start + SETTLE) else {
+            panic!("the settle did not produce the paste");
+        };
+        assert!(paste.starts_with(b"\x1b[200~") && paste.ends_with(b"\x1b[201~"));
+        assert!(delivery.pasted());
     }
 
     /// The round the handshake lands is not the round anything is ready.

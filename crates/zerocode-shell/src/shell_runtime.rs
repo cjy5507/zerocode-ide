@@ -2978,6 +2978,20 @@ pub(super) fn ready_quiet_for(agent: Option<&str>) -> Duration {
         })
 }
 
+/// How long a program just started must have been up before words are
+/// typed at it (t-18353): the row's measured start-up hand-over
+/// (`start_settle_ms`), or `None` where its composer takes words as soon as
+/// it is drawn. Kept beside the other readiness readers so every door that
+/// types at a pane started moments ago — a restored worker's continuation,
+/// and the Enter pressed again for it — waits for the same thing, and the
+/// row is the only place a program is said to have a hand-over.
+pub(super) fn start_settle_for(agent: Option<&str>) -> Option<Duration> {
+    agent
+        .and_then(zerocode_core::agent_capabilities)
+        .and_then(|caps| caps.startup.settle_ms)
+        .map(|ms| Duration::from_millis(u64::from(ms)))
+}
+
 /// How long a LAUNCH delivery waits before giving up — Orca's
 /// `resolveDraftPasteReadyTimeoutMs`, minus the per-call override nothing
 /// here passes: the agent's own figure when the catalog carries one, the

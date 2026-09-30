@@ -35841,13 +35841,36 @@ mod tests {
             .expect("the next host method")
             .0;
         // The dispatch host's paste — and a restored worker's continuation
-        // beside it (t-17037) — types through its one helper.
-        let pasted = block_after(backend, "fn pasted(&self, term: TermId, text: &str)");
+        // beside it (t-17037) — types through its one helper, which takes
+        // the readiness the pane's program calls for (t-18353).
+        let pasting = block_after(backend, "fn pasted(&self, term: TermId, text: &str)");
+        let pasted = block_after(backend, "fn pasted_at(");
         assert!(
             sending.contains("type_prompt_at_term(")
                 && paste.contains("self.pasted(term, text)")
+                && pasting.contains("self.pasted_at(")
                 && pasted.contains("type_prompt_at_term("),
             "send and dispatch stopped sharing the typed-prompt function"
+        );
+        // A restored worker's pane was started a moment ago: its continuation
+        // waits for the program's start-up to hand over where its row says it
+        // has one, and a dispatch to a running pane does not (t-18353).
+        let continuing = block_after(host, "fn paste_continuation(");
+        let dispatching = block_after(host, "fn paste(&self, term: TermId, text: &str) -> bool {");
+        assert!(
+            continuing.contains("self.pasted_at(")
+                && continuing.contains("PromptReadiness::MountingBesideADraft")
+                && !dispatching.contains("MountingBesideADraft")
+                && !pasting.contains("MountingBesideADraft"),
+            "the reseat's continuation left the door that waits for its program to \
+             hand over, or a dispatch to a running pane began waiting for one:\n{continuing}"
+        );
+        // The caller that blocks on the delivery budgets the door it
+        // registered, settle included, or it gives up on a wait still open.
+        assert!(
+            pasted.contains("readiness.door_deadline(agent)")
+                && !pasted.contains("zerocode_pty::ready::TIMEOUT +"),
+            "a delivery's caller budgets less than the door it registered waits:\n{pasted}"
         );
         assert_eq!(
             backend.matches("fn type_prompt_at_term(").count(),

@@ -422,6 +422,18 @@ pub struct Harness {
     /// beat's step-effort seat and the composer's model chip both read
     /// these; neither spells a command of its own.
     pub moves: TurnMoves,
+    /// How long a program JUST STARTED goes on taking its input somewhere
+    /// that is not its composer, counted from its handshake (t-18353): a
+    /// start-up buffer that folds a
+    /// carriage return into a line break and drops a paste frame's markers,
+    /// or a first input handler taken down again before the real one
+    /// stands. Words placed inside it are lost, or left on the line with
+    /// every Enter after them ignored — and the composer glyph and the
+    /// cursor the program draws in that span are its first frame, not a
+    /// sign it is listening. `None` for a row nobody measured to have one:
+    /// its composer takes words as soon as it is drawn. Read by every door
+    /// that types at a pane started moments ago; see [`Startup::settle_ms`].
+    pub start_settle_ms: Option<u32>,
 }
 
 impl Harness {
@@ -437,6 +449,7 @@ impl Harness {
         vault_resume_carries_launch_args: false,
         auth_probes: &[],
         moves: TurnMoves::NONE,
+        start_settle_ms: None,
     };
 }
 
@@ -472,6 +485,10 @@ pub struct Startup {
     pub quiet_ms: Option<u32>,
     /// A hard deadline of the agent's own, or the shared one when `None`.
     pub timeout_ms: Option<u32>,
+    /// How long a program just started must have been up before words are
+    /// placed at it (t-18353) — [`Harness::start_settle_ms`] — or `None`
+    /// when its composer takes words as soon as it is drawn.
+    pub settle_ms: Option<u32>,
 }
 
 /// Steering a RUNNING agent: every catalog agent is steered by words at its
@@ -627,6 +644,7 @@ impl AgentSpec {
                 mark: self.ready,
                 quiet_ms: self.ready_quiet_ms,
                 timeout_ms: self.ready_timeout_ms,
+                settle_ms: self.harness.start_settle_ms,
             },
             steer: Steer {
                 clear: self.composer_clear,
@@ -940,6 +958,48 @@ mod tests {
         assert_eq!(after.resume.selectors, before.resume.selectors);
         assert_eq!(after.resume.store, before.resume.store);
         assert_eq!(after.auth_probe, before.auth_probe);
+    }
+
+    /// Only a program measured to lose its first input has a start-up settle
+    /// (t-18353), and its settle is longer than the last loss measured.
+    ///
+    /// The column is a measurement, like `composer_words`: a row nobody
+    /// measured keeps the door it always had, so this fails the day a row is
+    /// given a hand-over without the run that shows it — and the day the
+    /// measured row's figure falls under a multiple of what was lost.
+    #[test]
+    fn only_a_program_measured_to_hand_over_late_has_a_start_settle() {
+        assert_eq!(
+            ids_where(|caps| caps.startup.settle_ms.is_some()),
+            ["claude"],
+            "a row was given a start-up settle, or claude lost its own"
+        );
+        // Claude Code 2.1.285, 16 runs from before its handshake to 1.1 s
+        // after it lost words in 11; the last loss was 1.14 s after it.
+        const LAST_LOSS_MS: u32 = 1_140;
+        let settle = agent_capabilities("claude")
+            .and_then(|caps| caps.startup.settle_ms)
+            .expect("claude's row carries its start-up settle");
+        assert!(
+            settle >= 3 * LAST_LOSS_MS,
+            "{settle} ms is under three times the last loss measured"
+        );
+        // The settle is its own column: it moved neither the quiet window nor
+        // the deadline any row carries.
+        for spec in &AGENT_SPECS {
+            let caps = spec.capabilities();
+            assert_eq!(caps.startup.quiet_ms, spec.ready_quiet_ms, "{}", spec.id);
+            assert_eq!(
+                caps.startup.timeout_ms, spec.ready_timeout_ms,
+                "{}",
+                spec.id
+            );
+            assert_eq!(
+                caps.startup.settle_ms, spec.harness.start_settle_ms,
+                "{}",
+                spec.id
+            );
+        }
     }
 
     #[test]

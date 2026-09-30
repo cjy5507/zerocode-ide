@@ -74,6 +74,7 @@ fn write_doors() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
         ("ready_timeout_for", None, "fn ready_timeout_for("),
         ("composer_clear_for", None, "fn composer_clear_for("),
         ("composer_words_for", None, "fn composer_words_for("),
+        ("start_settle_for", None, "fn start_settle_for("),
         // The worker split and the ledger's typed roads: the dispatch
         // paste, the mail pointer, the ssh send.
         ("split", None, "fn split("),
@@ -204,6 +205,7 @@ fn every_write_door_reads_its_decision_off_the_table() {
         "fn ready_timeout_for(",
         "fn composer_clear_for(",
         "fn composer_words_for(",
+        "fn start_settle_for(",
     ] {
         let reading = block_after(backend, reader);
         assert!(
@@ -416,6 +418,7 @@ fn no_delivery_door_reaches_the_pasteboard() {
         "fn send(&self, term: TermId, text: &str) -> bool {",
         "fn paste_continuation(",
         "fn pasted(",
+        "fn pasted_at(",
         "impl WakeReceipts for WindowReceipts {",
     ] {
         doors.push((opens, block_after(&backend, opens)));
