@@ -276,6 +276,12 @@ export async function testPaneConversation(browser, origin, ok) {
     // on the Korean page. The turn's end (or its next start) takes it away. It stands last: the zo row it
     // installs is the catalog the rest of this test's page was drawn without.
     await standZo(page);
+    // The page was drawn before the row stood — in the window the agent list is the boot's own, read before
+    // any page is drawn — so it is drawn again, now that zo has its voice.
+    await page.evaluate(async () => {
+      paintPaneChat(window.__TERM__);
+      await new Promise((done) => requestAnimationFrame(done));
+    });
     const nowLine = await page.evaluate(async () => {
       const tell = (name, payload) => {
         for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
