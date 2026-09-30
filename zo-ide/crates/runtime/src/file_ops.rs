@@ -2853,4 +2853,171 @@ needle b
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ---- a zo session record never hands its reasoning to a search or a read (t-17474) ----
+
+    /// Stands for reasoning text: nothing a tool returns from a session record
+    /// may spell it.
+    const REASONING_SENTINEL: &str = "SENTINEL-REASONING-4471";
+
+    /// An assistant message shaped as `ContentBlock::to_json` writes it: its
+    /// blocks open with a `thinking` block and go on to the words it said.
+    fn message_with_reasoning(reasoning: &str, said: &str) -> String {
+        format!(
+            r#"{{"blocks":[{{"signature":"sig-abc","thinking":"{reasoning}: the board holds 60 cards","type":"thinking"}},{{"text":"{said}","type":"text"}}],"role":"assistant"}}"#
+        )
+    }
+
+    /// One line of a session transcript.
+    fn record_line_with_reasoning(reasoning: &str, said: &str) -> String {
+        format!(
+            r#"{{"message":{},"turn_index":1,"type":"message"}}"#,
+            message_with_reasoning(reasoning, said)
+        )
+    }
+
+    /// One line of the vault beside it.
+    fn vault_line_with_reasoning(reasoning: &str, said: &str) -> String {
+        format!(
+            r#"{{"message":{},"type":"vault","vault_seq":4}}"#,
+            message_with_reasoning(reasoning, said)
+        )
+    }
+
+    fn a_user_line(said: &str) -> String {
+        format!(r#"{{"message":{{"blocks":[{{"text":"{said}","type":"text"}}],"role":"user"}},"type":"message"}}"#)
+    }
+
+    fn grep_content(path: &std::path::Path, pattern: &str, context: Option<usize>) -> super::GrepSearchOutput {
+        grep_search(&GrepSearchInput {
+            pattern: pattern.to_string(),
+            path: Some(path.to_string_lossy().into_owned()),
+            glob: None,
+            output_mode: Some(String::from("content")),
+            before: None,
+            after: None,
+            context_short: None,
+            context,
+            line_numbers: Some(true),
+            case_insensitive: Some(false),
+            file_type: None,
+            head_limit: Some(50),
+            offset: Some(0),
+            multiline: Some(false),
+        })
+        .expect("grep should succeed")
+    }
+
+    /// A search whose matching line carries a `thinking` block returns the words
+    /// the assistant said and a marker where it reasoned — the marker
+    /// `session_recall` uses — never the reasoning. Its context lines and the
+    /// vault beside the session are held to the same rule, and every line that
+    /// carries no reasoning comes back byte for byte.
+    #[test]
+    fn a_search_over_a_session_record_hands_back_no_thinking() {
+        let dir = temp_path("record-search");
+        let sessions = dir.join("projects").join("acme").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        let asked = a_user_line("count the cards");
+        let matching = record_line_with_reasoning(REASONING_SENTINEL, "There are 60 cards.");
+        let next = record_line_with_reasoning(&format!("{REASONING_SENTINEL}-next"), "Done.");
+        let record = sessions.join("session-1.jsonl");
+        std::fs::write(&record, format!("{asked}\n{matching}\n{next}\n")).expect("record");
+        let vault = sessions.join("session-1.vault.jsonl");
+        std::fs::write(
+            &vault,
+            vault_line_with_reasoning(&format!("{REASONING_SENTINEL}-vault"), "Vaulted 60 cards.") + "\n",
+        )
+        .expect("vault");
+
+        let found = grep_content(&dir, "60 cards", Some(1));
+        let content = found.content.expect("content mode returns rows");
+        assert!(
+            !content.contains(REASONING_SENTINEL),
+            "the search handed back reasoning: {content}"
+        );
+        assert!(content.contains("There are 60 cards."), "the words said stay: {content}");
+        assert!(content.contains("Vaulted 60 cards."), "the vault's words stay: {content}");
+        assert!(content.contains("[thinking]"), "a marker stands where it reasoned: {content}");
+        assert!(content.contains(&asked), "a line without reasoning comes back byte for byte: {content}");
+        assert_eq!(found.num_files, 2, "the vault is a match too, as before");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The read tool is held to the same rule as the search, window and all.
+    #[test]
+    fn a_read_of_a_session_record_hands_back_no_thinking() {
+        let dir = temp_path("record-read");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let asked = a_user_line("count the cards");
+        let record = dir.join("session-2.jsonl");
+        std::fs::write(
+            &record,
+            format!(
+                "{asked}\n{}\n{}\n",
+                record_line_with_reasoning(REASONING_SENTINEL, "There are 60 cards."),
+                a_user_line("thanks")
+            ),
+        )
+        .expect("record");
+
+        let whole = read_file(record.to_string_lossy().as_ref(), None, None).expect("read");
+        assert!(!whole.file.content.contains(REASONING_SENTINEL), "{}", whole.file.content);
+        assert!(whole.file.content.contains("[thinking]"), "{}", whole.file.content);
+        assert!(whole.file.content.contains("There are 60 cards."), "{}", whole.file.content);
+        assert_eq!((whole.file.num_lines, whole.file.total_lines), (3, 3));
+
+        let window = read_file(record.to_string_lossy().as_ref(), Some(1), Some(1)).expect("read");
+        assert!(!window.file.content.contains(REASONING_SENTINEL), "{}", window.file.content);
+        assert_eq!((window.file.start_line, window.file.num_lines), (2, 1));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing else about the search changes: a file that is not a session
+    /// record, a record line whose keys merely say the word, and a line that
+    /// carries no reasoning come back exactly as they are — the mask re-writes
+    /// a line only when it takes reasoning out of it.
+    #[test]
+    fn a_search_leaves_everything_but_reasoning_as_it_was() {
+        let dir = temp_path("record-controls");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let notes = dir.join("notes.txt");
+        let looks_like_a_record = record_line_with_reasoning(REASONING_SENTINEL, "Notes on 60 cards.");
+        std::fs::write(&notes, format!("{looks_like_a_record}\n")).expect("notes");
+        let unsorted = r#"{"z":1,"a":"thinking about 60 cards","type":"note"}"#;
+        std::fs::write(dir.join("log.jsonl"), format!("{unsorted}\n")).expect("log");
+
+        let found = grep_content(&dir, "60 cards", None);
+        let content = found.content.expect("content mode returns rows");
+        assert!(
+            content.contains(&looks_like_a_record),
+            "a file that is not a session record is not touched: {content}"
+        );
+        assert!(
+            content.contains(unsorted),
+            "a jsonl line with no reasoning block is not re-written: {content}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A record line that does not parse (a write cut short) and that carries a
+    /// reasoning block is withheld whole: it cannot be masked, and it must not
+    /// be handed back.
+    #[test]
+    fn a_torn_record_line_with_reasoning_is_withheld() {
+        let dir = temp_path("record-torn");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let whole = record_line_with_reasoning(REASONING_SENTINEL, "There are 60 cards.");
+        let torn = &whole[..whole.len() - 9];
+        std::fs::write(dir.join("torn.jsonl"), format!("{torn}\n")).expect("record");
+
+        let found = grep_content(&dir, "60 cards", None);
+        let content = found.content.expect("content mode returns rows");
+        assert!(!content.contains(REASONING_SENTINEL), "{content}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

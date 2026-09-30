@@ -346,3 +346,22 @@ mod permission_metadata_tests {
         assert_eq!(bash.input_summary, "cargo test -p runtime");
     }
 }
+
+#[cfg(test)]
+mod refusal_question_tests {
+    use super::{refusal_question, refusal_switch_choices};
+
+    /// The ladder's questions are not tool permissions (t-17474): the prompt
+    /// said "Allow safety-classifier decline" with a risk line, and the window
+    /// showed its tool modal, "Run this tool?", with that string as the tool.
+    /// A question names no tool.
+    #[test]
+    fn a_refusal_question_names_no_tool() {
+        let request = refusal_question(
+            "claude-sonnet-5-5 → claude-opus-5-5".to_string(),
+            "Continue this turn on claude-opus-5-5?".to_string(),
+            refusal_switch_choices("claude-sonnet-5-5"),
+        );
+        assert_eq!(request.tool, "", "a question puts no tool to the person: {request:?}");
+    }
+}

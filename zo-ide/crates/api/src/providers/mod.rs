@@ -4791,8 +4791,8 @@ mod tests {
     #[test]
     fn a_refusal_goes_where_its_category_routes() {
         use super::{
-            refusal_fallback_candidates, refusal_route_candidates, resolve_catalog_alias,
-            resolve_model_alias, ANTHROPIC_OPUS_MODEL_ALIAS,
+            refusal_route_candidates, resolve_catalog_alias, resolve_model_alias,
+            ANTHROPIC_OPUS_MODEL_ALIAS,
         };
         let _lock = crate::test_env_lock();
         super::reset_model_registry_for_tests();
@@ -4835,12 +4835,95 @@ mod tests {
             }
             assert!(refusal_route_candidates(opus, Some("reasoning_extraction")).is_empty());
         }
-        // No routes declared: the one list answers every category, as before.
-        assert_eq!(
-            refusal_route_candidates("claude-sonnet-5", Some("reasoning_extraction")),
-            refusal_fallback_candidates("claude-sonnet-5")
-        );
         assert!(refusal_route_candidates("gpt-6-astra", Some("cyber")).is_empty());
+    }
+
+    /// A lineup that declares a fallback and no routes keeps its one list for
+    /// every category, as before. It was pinned on Sonnet until t-17474: that
+    /// pin held the defect — a Sonnet 5.5 decline in `reasoning_extraction`, a
+    /// category Opus lets stand, was offered Opus 5.5, which declined it again.
+    /// Sonnet now declares its routes (below), so the rule is pinned on a
+    /// lineup the shipped catalog does not name.
+    #[test]
+    fn a_lineup_declaring_no_routes_keeps_its_one_list_for_every_category() {
+        use super::{refusal_fallback_candidates, refusal_route_candidates};
+        let _lock = crate::test_env_lock();
+        let _shipped = ShippedRegistryOnDrop;
+        super::reset_model_registry_for_tests();
+        super::refresh_model_registry_from_json(
+            r#"{"aliases":[
+                {"alias":"mythos","canonical":"claude-mythos-5","provider":"anthropic","refusal_fallback":["claude-opus-5"]}
+            ]}"#,
+        );
+        let list = refusal_fallback_candidates("claude-mythos-5");
+        assert_eq!(list, ["claude-opus-5"], "premise: the lineup states a list and no routes");
+        for category in [Some("cyber"), Some("reasoning_extraction"), Some("general_harms"), None] {
+            assert_eq!(refusal_route_candidates("claude-mythos-5", category), list, "{category:?}");
+        }
+    }
+
+    /// A Sonnet or Haiku decline goes where the provider routes its category,
+    /// as an Opus one does (t-17474). Measured on 2026-09-30: Sonnet 5.5
+    /// declined a `reasoning_extraction` request twice and its ladder asked to
+    /// continue on Opus 5.5 — a lineup behind the same classifier, which
+    /// declined it too — because the `sonnet` row declared one fallback list
+    /// and no routes, so every category went to the Opus head. Claude Code
+    /// 2.1.285 routes Sonnet 5.5's `cyber` and `frontier_llm` declines to
+    /// Sonnet 5 (`iY`, no `bio`), and every model it has no table for — Haiku
+    /// 4.5 among them — by its default table (`rY`: `cyber` to Opus 4.8, `bio`
+    /// and `frontier_llm` to Opus 5). A category a table leaves out stands, and
+    /// so does a decline that names none.
+    #[test]
+    fn a_sonnet_or_haiku_refusal_goes_where_the_provider_routes_its_category() {
+        use super::{refusal_route_candidates, resolve_catalog_alias};
+        let _lock = crate::test_env_lock();
+        super::reset_model_registry_for_tests();
+        let openai = resolve_catalog_alias("openai-latest");
+        let sonnet_5 = resolve_catalog_alias("claude-sonnet-5");
+        let opus_4_8 = resolve_catalog_alias("claude-opus-4-8");
+        let opus_5 = resolve_catalog_alias("claude-opus-5");
+        let stands = [
+            Some("reasoning_extraction"),
+            Some("general_harms"),
+            Some("Reasoning_Extraction "),
+            None,
+        ];
+
+        for sonnet in ["sonnet", "claude-sonnet-5-5", "Claude-Sonnet-5-5[1m]", "claude-sonnet-5"] {
+            for category in ["cyber", "frontier_llm"] {
+                assert_eq!(
+                    refusal_route_candidates(sonnet, Some(category)),
+                    vec![sonnet_5.clone(), openai.clone()],
+                    "{sonnet} {category}: the provider sends it to Sonnet 5, not to the Opus head"
+                );
+            }
+            for category in stands.iter().copied().chain([Some("bio")]) {
+                assert!(
+                    refusal_route_candidates(sonnet, category).is_empty(),
+                    "{sonnet} {category:?} stands: Opus is behind the same classifier"
+                );
+            }
+        }
+        for haiku in ["haiku", "claude-haiku-4-5-20251001", "claude-haiku"] {
+            assert_eq!(
+                refusal_route_candidates(haiku, Some("cyber")),
+                vec![opus_4_8.clone(), openai.clone()],
+                "{haiku} cyber"
+            );
+            for category in ["bio", "frontier_llm"] {
+                assert_eq!(
+                    refusal_route_candidates(haiku, Some(category)),
+                    vec![opus_5.clone(), openai.clone()],
+                    "{haiku} {category}"
+                );
+            }
+            for category in stands {
+                assert!(
+                    refusal_route_candidates(haiku, category).is_empty(),
+                    "{haiku} {category:?} stands"
+                );
+            }
+        }
     }
 
     /// The router's per-role specialty seed is catalog data too, keyed by
@@ -4986,6 +5069,17 @@ mod tests {
                 resolve_catalog_alias("openai-latest"),
             ],
             "the shipped Sonnet row's fallback, its opus now Opus 5.5"
+        );
+        // And its routes (t-17474): on the person's build a Sonnet 5.5
+        // `reasoning_extraction` decline stands — Opus 5.5 is behind the same
+        // classifier — and a `cyber` one goes to Sonnet 5, as the provider does.
+        assert!(
+            refusal_route_candidates("claude-sonnet-5-5", Some("reasoning_extraction")).is_empty(),
+            "the shipped Sonnet row's routes, on the discovered release"
+        );
+        assert_eq!(
+            refusal_route_candidates("claude-sonnet-5-5", Some("cyber")).first().map(String::as_str),
+            Some("claude-sonnet-5"),
         );
     }
 

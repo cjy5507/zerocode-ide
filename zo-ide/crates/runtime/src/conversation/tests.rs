@@ -17663,6 +17663,71 @@ fn a_zo_turn_declined_twice_offers_the_fallback_rung() {
     }
 }
 
+/// A decline on the Sonnet or Haiku lineup stands or routes as the provider
+/// does, as it does on Opus (t-17474): a category the provider routes nowhere
+/// gets the one same-model retry and then stands — no question about leaving
+/// the chosen model, since Opus 5.5 is behind the same classifier and would
+/// decline it again — and one it routes goes where the provider sends it,
+/// Sonnet 5.5's `cyber` to Sonnet 5, Haiku's to Opus 4.8. Until then the
+/// Sonnet row declared one list and no routes, so every category asked to
+/// continue on Opus.
+#[test]
+fn a_sonnet_or_haiku_decline_stands_or_routes_as_the_provider_does() {
+    use super::RefusalDecision;
+    use crate::ClassifierFallback;
+
+    let attended = |model: &str| {
+        let mut runtime = refusal_dry_test_runtime(model);
+        runtime.set_attendance(crate::Attendance::Attended);
+        runtime.set_classifier_fallback(ClassifierFallback::Ask);
+        begin_public_refusal_test_turn(&mut runtime, "a declined turn");
+        runtime
+    };
+
+    for (model, stands) in [
+        (
+            "claude-sonnet-5-5",
+            vec![Some("reasoning_extraction"), Some("general_harms"), Some("bio"), None],
+        ),
+        (
+            "claude-haiku-4-5-20251001",
+            vec![Some("reasoning_extraction"), Some("general_harms"), None],
+        ),
+    ] {
+        for category in stands {
+            let mut runtime = attended(model);
+            assert!(
+                matches!(runtime.decide_refusal_fallback(category), RefusalDecision::RetrySameModel),
+                "{model} {category:?}: the one same-model retry first"
+            );
+            assert!(
+                matches!(runtime.decide_refusal_fallback(category), RefusalDecision::Surface),
+                "{model} {category:?}: the decline stands and no question is put"
+            );
+            assert_eq!(runtime.effective_request_model(), Some(model), "{model} {category:?}");
+            assert_eq!(runtime.refusal_switch_unasked_to, None, "{model} {category:?}");
+        }
+    }
+
+    for (model, category, route) in [
+        ("claude-sonnet-5-5", "cyber", "claude-sonnet-5"),
+        ("claude-sonnet-5-5", "frontier_llm", "claude-sonnet-5"),
+        ("claude-haiku-4-5-20251001", "cyber", CYBER_ROUTE),
+        ("claude-haiku-4-5-20251001", "bio", "claude-opus-5"),
+        ("claude-haiku-4-5-20251001", "frontier_llm", "claude-opus-5"),
+    ] {
+        let mut runtime = attended(model);
+        assert!(matches!(
+            runtime.decide_refusal_fallback(Some(category)),
+            RefusalDecision::RetrySameModel
+        ));
+        let RefusalDecision::Ask { to } = runtime.decide_refusal_fallback(Some(category)) else {
+            panic!("{model} {category}: a category the provider routes asks before leaving the model");
+        };
+        assert_eq!(to, route, "{model} {category}");
+    }
+}
+
 /// And the streaming turn puts that question to the person through the
 /// prompt, and continues on the route on their yes, with the receipt that
 /// says which model it left.
@@ -17716,6 +17781,115 @@ fn a_declined_streaming_turn_asks_the_person_before_the_route() {
             .iter()
             .any(|block| matches!(block, RenderBlock::System { text, .. } if *text == receipt)),
         "the receipt names the model it left: {blocks:?}"
+    );
+}
+
+/// Declines every request under one category after a fixed latency, and
+/// counts them — a classifier that holds the category on every model behind
+/// it, which is what a decline the provider routes nowhere means (t-17474).
+struct DeclineEveryRequestClient {
+    calls: AtomicUsize,
+    category: &'static str,
+}
+
+impl AsyncApiClient for DeclineEveryRequestClient {
+    fn stream_async<'a>(
+        &'a self,
+        _request: ApiRequest,
+        _render_tx: tokio::sync::mpsc::Sender<crate::message_stream::types::RenderBlock>,
+        _text_block_id: crate::message_stream::types::BlockId,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok(vec![
+                AssistantEvent::StopReason("refusal".to_string()),
+                AssistantEvent::RefusalCategory(self.category.to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        })
+    }
+}
+
+/// The person's 2026-09-30 decline, on a fake backend: Sonnet 5.5 declined
+/// under `reasoning_extraction`, a category the provider routes nowhere and
+/// Opus 5.5 declines just the same. The turn makes the request and the one
+/// same-model retry and then says the decline stands — it asks no question
+/// about switching, sends nothing to Opus 5.5, and the person who would have
+/// said yes is not made to. (Before: a third request on Opus 5.5 after the
+/// question, declined again.)
+#[test]
+fn a_sonnet_decline_the_provider_routes_nowhere_asks_no_switch_question() {
+    use crate::message_stream::types::RenderBlock;
+
+    let _todo_store = HermeticTodoStore::pin();
+    let client = Arc::new(DeclineEveryRequestClient {
+        calls: AtomicUsize::new(0),
+        category: "reasoning_extraction",
+    });
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        StopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_async_api_client(client.clone());
+    runtime.set_context_model("claude-sonnet-5-5");
+    runtime.set_attendance(crate::Attendance::Attended);
+    runtime.set_classifier_fallback(crate::ClassifierFallback::Ask);
+    let prompter = Arc::new(RecordingPrompter {
+        answer: crate::permission::PermissionDecision::AllowOnce,
+        asked: std::sync::Mutex::new(Vec::new()),
+    });
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let started = std::time::Instant::now();
+    let blocks = rt.block_on(async {
+        let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+        runtime
+            .run_turn_streaming_maybe_deep("say hello", Vec::new(), render_tx, prompter.clone())
+            .await
+            .expect("a decline that stands ends the turn cleanly");
+        let mut blocks = Vec::new();
+        while let Ok(block) = render_rx.try_recv() {
+            blocks.push(block);
+        }
+        blocks
+    });
+    let took = started.elapsed();
+    let requests = client.calls.load(Ordering::SeqCst);
+    let asked = prompter.asked.lock().expect("lock");
+    eprintln!(
+        "t-17474 measured | Sonnet 5.5, reasoning_extraction, declined every time | \
+         {requests} requests, {} questions, {:.2}s at 50ms a request",
+        asked.len(),
+        took.as_secs_f64(),
+    );
+    assert!(asked.is_empty(), "no question about leaving Sonnet 5.5: {asked:?}");
+    assert_eq!(requests, 2, "the request and the one same-model retry");
+    let wire_models: Vec<&str> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            RenderBlock::WireModel(wire) => Some(wire.model.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !wire_models.is_empty() && wire_models.iter().all(|model| *model == "claude-sonnet-5-5"),
+        "a request went to another model: {wire_models:?}"
+    );
+    let stands = core_types::retry_signal::refusal_stands_notice("reasoning_extraction");
+    assert!(
+        blocks
+            .iter()
+            .any(|block| matches!(block, RenderBlock::System { text, .. } if *text == stands)),
+        "the standing notice names the category: {blocks:?}"
     );
 }
 
