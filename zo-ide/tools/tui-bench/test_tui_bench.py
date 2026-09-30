@@ -55,6 +55,15 @@ class Tokens(unittest.TestCase):
         data = frame((0, "a"), (5, "bcd"), caret=(3, 6))
         self.assertEqual(sum(size for _kind, size, _row in bench.tokenize(data)), len(data))
 
+    def test_a_sequence_cut_at_the_end_of_a_chunk_is_counted_and_does_not_stop_the_run(self) -> None:
+        # A CLI that does not bracket its frames is cut into bursts by the gap between reads, and a read can end inside
+        # a sequence: Claude Code's did, and the tokenizer died on the missing final byte (2026-09-30, the quiet window).
+        for cut in (b"ab\x1b[", b"ab\x1b[1;", b"ab\x1b[38;2;12", b"ab\x1b[?2", b"ab\x1b[1 "):
+            tokens = bench.tokenize(cut)
+            self.assertEqual(sum(size for _kind, size, _row in tokens), len(cut), cut)
+            self.assertEqual(tokens[0], ("text", 2, None), cut)
+            self.assertEqual(tokens[-1][0], "other", cut)
+
 
 class Attribution(unittest.TestCase):
     def test_a_cell_that_changes_costs_a_whole_row_today(self) -> None:

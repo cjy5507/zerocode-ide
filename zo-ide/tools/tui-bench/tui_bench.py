@@ -1137,6 +1137,7 @@ TOKEN = re.compile(
     rb"|[\r\n]"
     rb"|[^\x1b\r\n]+"
 )
+CUT_CSI = re.compile(rb"\x1b\[[0-?]*[ -/]*")
 BURST_GAP_NS = 4_000_000
 SHIFT_REACH = 3
 
@@ -1176,7 +1177,12 @@ def tokenize(piece: bytes) -> list[tuple[str, int, int | None]]:
         text = match.group(0)
         position = match.end()
         row: int | None = None
-        if text.startswith(b"\x1b["):
+        if text.startswith(b"\x1b[") and match.group("final") is None:
+            # A sequence cut where a read ended (a CLI without frame pairs is cut into bursts by the gap between
+            # reads): what was written of it is counted whole, the rest belongs to the next chunk.
+            cut = CUT_CSI.match(piece, match.start())
+            text, position, kind = cut.group(0), cut.end(), "other"
+        elif text.startswith(b"\x1b["):
             param, inter, final = match.group("param"), match.group("inter"), match.group("final")
             if final in (b"h", b"l") and param.startswith(b"?"):
                 kind = "sync" if param == b"?2026" else "cursor" if param == b"?25" else "other"
