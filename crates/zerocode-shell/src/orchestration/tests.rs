@@ -10043,6 +10043,115 @@ fn a_persons_key_takes_the_workers_pane_over_durably() {
     crate::agent_teams::forget_term(LEADER);
 }
 
+/// A taken worker's letter leaves the pane the person's; `worker-return`
+/// hands it back, and the key gate hears that on the next beat (t-17644):
+/// the person's next own words in that pane are a takeover reported afresh.
+#[test]
+fn worker_return_reopens_the_key_gate_on_the_next_beat() {
+    const LEADER: u32 = 11_640;
+    const WORKER: u32 = 11_641;
+    let _window = the_window();
+    let team = format!("team-speaks-{LEADER}");
+    let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let taken = || {
+        the_rows()
+            .workers
+            .iter()
+            .find(|row| row.run == run_id && row.id == worker)
+            .expect("the worker row")
+            .taken_over
+    };
+    let gated = || {
+        super::taken_terms()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .contains(&WORKER)
+    };
+    super::pane_taken_over(WORKER, clock());
+    assert!(taken() && gated());
+    let held =
+        crate::agent_teams::current_pane_capability(&team, &pane).expect("the worker capability");
+    let spoke = run(
+        &Nowhere,
+        Vec::new(),
+        &team,
+        &pane,
+        &held,
+        &words("send --type status --body back-at-it"),
+        clock(),
+    );
+    assert_eq!(spoke.exit_code, 0, "{}", spoke.stderr);
+    assert!(taken(), "the worker's letter handed the person's pane back");
+    super::forget_returned_terms();
+    assert!(gated(), "the gate opened on a letter alone");
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let back = run(
+        &Nowhere,
+        Vec::new(),
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &words(&format!("worker-return --worker {worker}")),
+        clock(),
+    );
+    assert_eq!(back.exit_code, 0, "{}", back.stderr);
+    assert!(!taken(), "worker-return left the pane the person's");
+    super::forget_returned_terms();
+    assert!(!gated(), "the gate still swallows the next takeover");
+    super::pane_taken_over(WORKER, clock());
+    assert!(taken(), "the person's next words took nothing over");
+    crate::agent_teams::forget_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+}
+
+/// `worker-return` is refused while the person's own words sit unsent on
+/// the pane's line, and hands the pane back once they do not (t-17644).
+#[test]
+fn worker_return_is_refused_over_the_persons_own_draft() {
+    const LEADER: u32 = 11_642;
+    const WORKER: u32 = 11_643;
+    let _window = the_window();
+    let team = format!("team-return-{LEADER}");
+    let (run_id, worker, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    super::pane_taken_over(WORKER, clock());
+    crate::human_input::forget_term(WORKER);
+    crate::human_input::typed(WORKER);
+    let give_back = || {
+        run(
+            &Nowhere,
+            Vec::new(),
+            &team,
+            leader,
+            TEST_CAPABILITY,
+            &words(&format!("worker-return --worker {worker}")),
+            clock(),
+        )
+    };
+    let refused = give_back();
+    assert_ne!(refused.exit_code, 0, "a draft's pane was handed back");
+    assert!(
+        refused.stderr.contains("has not sent"),
+        "{}",
+        refused.stderr
+    );
+    // Their Enter closes over the draft: nothing of theirs is left unsent.
+    crate::human_input::entered(WORKER);
+    let back = give_back();
+    assert_eq!(back.exit_code, 0, "{}", back.stderr);
+    assert!(
+        !the_rows()
+            .workers
+            .iter()
+            .find(|row| row.run == run_id && row.id == worker)
+            .expect("the worker row")
+            .taken_over
+    );
+    crate::human_input::forget_term(WORKER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+}
+
 /// The window's seat answer rides the split's own capability back and
 /// lands on the worker row, durably — and a host that answers nothing
 /// leaves the row honestly UNREPORTED, which the fourth group's refusal
