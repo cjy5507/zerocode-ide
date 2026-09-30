@@ -2651,31 +2651,92 @@ mod tests {
     /// A shell script rather than a Rust double, because the thing under test
     /// is a PROCESS BOUNDARY: the argv this module hands `Command`, and the
     /// stdout it reads back. A trait object would test neither.
+    ///
+    /// `panes` is the shell words the fake prints for `list-panes`, one id a
+    /// line (`"'%9'"`, `"'%1' '%2'"`); they are kept in the directory's `panes`
+    /// file, which a test may rewrite to take a pane out of the table.
     fn fake_tmux(directory: &Path, panes: &str) -> PathBuf {
-        let log = directory.join("tmux.log");
-        let script = directory.join("tmux");
-        std::fs::write(
-            &script,
-            format!(
+        let lines: String = panes
+            .split_whitespace()
+            .map(|word| format!("{}\n", word.trim_matches('\'')))
+            .collect();
+        std::fs::write(directory.join("panes"), lines).expect("write panes");
+        link_fake_tmux(directory)
+    }
+
+    /// The one script every fake `tmux` is: written once, run once before any
+    /// test uses it, and reached through a symlink in each test's directory,
+    /// from which it finds that test's `panes` and `tmux.log` (beside the path
+    /// it was called by).
+    ///
+    /// A script written for each test cost each test the first exec of a new
+    /// file, and this machine checks those one at a time: about 0.35 s for one,
+    /// 0.8 s for four at once, seconds for the tests of a parallel suite (a
+    /// probe in `reports/t-17057/spawn-latency-probe.txt`; a second exec of the
+    /// same script was 7 ms with 64 at once). The waits' first ask of tmux
+    /// blocked for that long, so an answer was heard a second late, a 300 ms
+    /// limit ended after three, and a channel was not held within 700 ms — in
+    /// the tests that ran together, and not in one that ran alone.
+    fn shared_fake_tmux() -> &'static Path {
+        static SCRIPT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        SCRIPT.get_or_init(|| {
+            // Kept for the life of the process (named so that one left behind is
+            // recognised); the tests' own directories are what is cleaned up.
+            let home: &'static tempfile::TempDir = Box::leak(Box::new(
+                tempfile::Builder::new()
+                    .prefix("zo-fake-tmux-")
+                    .tempdir()
+                    .expect("tempdir"),
+            ));
+            let script = home.path().join("tmux");
+            std::fs::write(
+                &script,
                 "#!/bin/sh\n\
-                 printf '%s\\n' \"$*\" >> {log}\n\
+                 here=\"${0%/*}\"\n\
+                 printf '%s\\n' \"$*\" >> \"$here/tmux.log\"\n\
                  case \"$1\" in\n\
                  split-window) echo '%9' ;;\n\
-                 list-panes) printf '%s\\n' {panes} ;;\n\
+                 list-panes) cat \"$here/panes\" ;;\n\
                  kill-pane) : ;;\n\
                  esac\n",
-                log = log.display(),
-                panes = panes,
-            ),
-        )
-        .expect("write fake tmux");
+            )
+            .expect("write fake tmux");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+            // The first exec is the slow one; do it here, while the tests that
+            // need the script wait for it, and not inside a test's wait.
+            let _ = std::process::Command::new(&script).arg("warm").output();
+            script
+        })
+    }
+
+    /// A symlink named `tmux` in `directory` to the shared script.
+    fn link_fake_tmux(directory: &Path) -> PathBuf {
+        let link = directory.join("tmux");
+        let _ = std::fs::remove_file(&link);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
+        std::os::unix::fs::symlink(shared_fake_tmux(), &link).expect("link fake tmux");
+        #[cfg(not(unix))]
+        std::fs::copy(shared_fake_tmux(), &link).expect("copy fake tmux");
+        link
+    }
+
+    /// Wait, at most `limit`, until `condition` holds. A test that used to sleep
+    /// a fixed time and then look now looks when the thing it waits for is there,
+    /// so a slow machine slows the test and does not fail it.
+    fn wait_until_true(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
-        script
+        condition()
     }
 
     fn tmux_log(directory: &Path) -> Vec<String> {
@@ -2935,6 +2996,14 @@ mod tests {
                 );
                 (outcome, std::time::Instant::now())
             });
+            // The settling is counted from the first ask of tmux, which the fake
+            // logs as it starts: a wait still on its way to its first look is
+            // not resting, and an answer landed then is heard when the look
+            // comes, however the answer is waited for.
+            assert!(
+                wait_until_true(Duration::from_secs(60), || pane_asks(directory.path()) >= 1),
+                "the wait never asked tmux"
+            );
             let settle_until = std::time::Instant::now() + Duration::from_millis(1200);
             while std::time::Instant::now() < settle_until && pane_asks(directory.path()) < 2 {
                 std::thread::sleep(Duration::from_millis(2));
@@ -2947,8 +3016,12 @@ mod tests {
             (outcome, heard.duration_since(landed))
         });
         assert!(matches!(outcome, PaneOutcome::Finished(_)), "{outcome:?}");
+        // The look it replaces was a quarter second apart, and landing just after
+        // one leaves the whole of it: 253 ms on the old wait (its red run). A
+        // wake by the watch is a millisecond; 150 ms leaves room for a loaded
+        // machine's scheduler and still fails the old wait.
         assert!(
-            lag < Duration::from_millis(100),
+            lag < Duration::from_millis(150),
             "the answer was heard {lag:?} after it landed"
         );
     }
@@ -3439,28 +3512,7 @@ mod tests {
     /// A tmux whose panes are whatever its `panes` file holds when it is asked
     /// — one id a line — so a test can take a pane out of the table.
     fn fake_tmux_reading(directory: &Path) -> PathBuf {
-        let script = directory.join("tmux");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\n\
-                 printf '%s\\n' \"$*\" >> {log}\n\
-                 case \"$1\" in\n\
-                 split-window) echo '%9' ;;\n\
-                 list-panes) cat {panes} ;;\n\
-                 kill-pane) : ;;\n\
-                 esac\n",
-                log = directory.join("tmux.log").display(),
-                panes = directory.join("panes").display(),
-            ),
-        )
-        .expect("write fake tmux");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        }
-        script
+        link_fake_tmux(directory)
     }
 
     /// A child's channel whose connections end when the test says its process
@@ -3535,9 +3587,13 @@ mod tests {
                 );
                 (outcome, std::time::Instant::now())
             });
-            std::thread::sleep(Duration::from_millis(700));
+            // The channel is held after the first ask; how long that takes is the
+            // machine's business, so the test looks when it is there.
+            assert!(
+                wait_until_true(Duration::from_secs(20), || channel.connections() == 1),
+                "the parent did not hold the child's channel"
+            );
             let working_asks = pane_asks(directory.path());
-            assert_eq!(channel.connections(), 1, "the parent did not hold the child's channel");
             std::fs::write(directory.path().join("panes"), "").expect("the pane leaves the table");
             let died = std::time::Instant::now();
             channel.die();
@@ -3547,7 +3603,9 @@ mod tests {
         assert_eq!(outcome, PaneOutcome::Vanished);
         assert_eq!(working_asks, 1, "tmux was asked while the child worked");
         assert_eq!(pane_asks(directory.path()), 2, "the start and the confirmation, and no more");
-        assert!(lag < Duration::from_millis(500), "the death was heard {lag:?} after it");
+        // What the death would otherwise wait for is the next ask, half a minute
+        // on (`watching_cadence`); the confirming ask is a process spawn.
+        assert!(lag < Duration::from_secs(5), "the death was heard {lag:?} after it");
     }
 
     /// A child that answers and then exits is a result, not a death: its
@@ -3576,7 +3634,13 @@ mod tests {
                     watching_cadence(),
                 )
             });
-            std::thread::sleep(Duration::from_millis(500));
+            // The child answers once the wait has asked tmux and holds its channel.
+            assert!(
+                wait_until_true(Duration::from_secs(20), || {
+                    pane_asks(directory.path()) >= 1 && channel.connections() == 1
+                }),
+                "the parent did not hold the child's channel"
+            );
             // A well-behaved child writes, and then its pane and process go.
             let mut wrote = TeammateResult::new("agent-31", Exit::Ok);
             wrote.final_message = "done".to_string();
@@ -3616,9 +3680,14 @@ mod tests {
                     watching_cadence(),
                 )
             });
-            std::thread::sleep(Duration::from_millis(300));
+            // The channel lands after the wait has begun looking (its first ask is
+            // logged) and is held from the moment its file lands.
+            assert!(
+                wait_until_true(Duration::from_secs(20), || pane_asks(directory.path()) >= 1),
+                "the wait never asked tmux"
+            );
             let channel = DyingChannel::stand(&child);
-            std::thread::sleep(Duration::from_millis(400));
+            wait_until_true(Duration::from_secs(20), || channel.connections() == 1);
             let connections_when_up = channel.connections();
             std::fs::write(directory.path().join("panes"), "").expect("the pane leaves the table");
             channel.die();
