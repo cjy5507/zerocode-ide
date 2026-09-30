@@ -1258,7 +1258,7 @@ const STEP_LOOKS = new Map(Object.entries({
   read: { icon: "file", word: () => t("worker.stepRead", "파일 읽기") },
   edit: { icon: "pencil", word: () => t("worker.stepEdit", "파일 수정") },
   write: { icon: "pencil", word: () => t("worker.stepWrite", "파일 쓰기") },
-  bash: { icon: "terminal", word: () => t("worker.stepShell", "셸 실행") },
+  bash: { icon: "terminal", word: () => t("worker.stepShell", "셸") },
   grep: { icon: "search", word: () => t("worker.stepSearch", "검색") },
   web: { icon: "globe", word: () => t("worker.stepWeb", "웹 읽기") },
   websearch: { icon: "globe", word: () => t("worker.stepWebSearch", "웹 검색") },
@@ -1369,6 +1369,8 @@ function stepResultWords(kind, turn, output, failed, row) {
       return t("worker.stepPrinted", "{{n}}줄 출력", { n: stepLineCount(output) });
     case "web":
       return output === "" ? "" : bytesLabel(output.length);
+    case "websearch":
+      return output === "" ? "" : t("worker.stepResultSize", "결과 {{size}}", { size: bytesLabel(output.length) });
     case "edit":
     case "write":
       return stepEditTally(turn);
