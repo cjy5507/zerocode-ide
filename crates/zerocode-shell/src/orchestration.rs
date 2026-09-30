@@ -10282,7 +10282,7 @@ fn federation_attach_from_home(
             let unwound = actor.federation(FederationCall::AbortRemote {
                 run: prepared.run.clone(),
                 dispatch: prepared.dispatch.clone(),
-                task_preimage: prepared.task_preimage.clone(),
+                task_preimage: Box::new(prepared.task_preimage.clone()),
                 now_ms,
             });
             match unwound {

@@ -1223,7 +1223,9 @@ pub enum FederationCall {
     AbortRemote {
         run: String,
         dispatch: String,
-        task_preimage: zerocode_core::orchestration::Task,
+        // Boxed: a `Task` carries its closing reason, and the largest variant
+        // would otherwise set the size of every call this enum holds.
+        task_preimage: Box<zerocode_core::orchestration::Task>,
         now_ms: i64,
     },
     /// Every live remote seat on the home side, for the relay loop.
