@@ -1658,6 +1658,24 @@ svg.wt-agent-dot {
   color: var(--signal-done);
 }
 
+/* And a turn that ended on work nobody has stood behind yet is not a quiet
+ * check either: it is an hourglass in the waiting amber (`is-review`,
+ * `agentRowPhase` — the glyph is `agentRowMark`'s), so 검증 대기 and 검증됨 differ
+ * in shape and in ink, and in the word at the row's edge. A turn that ended on
+ * work never handed in (`is-unsettled`) is neither and keeps the plain dot. A
+ * retained row — the
+ * finished work of a worker no pane is left for — is dimmed as the past, but
+ * not when the ledger has a verdict on it: that verdict is the reason it is
+ * still on the card. */
+.wt-agent.is-review .wt-agent-dot {
+  color: var(--signal-wait);
+}
+
+.wt-agent.is-retained.is-review .wt-agent-dot,
+.wt-agent.is-retained.is-verified .wt-agent-dot {
+  opacity: 1;
+}
+
 /* The window's one word for "turning": a plain linear revolution. Four
  * spinners named this for months while nobody had written it — CSS treats
  * an unknown animation name as silence, so the orange board ring simply
@@ -1749,6 +1767,10 @@ svg.wt-agent-dot {
 
 .wt-agent.is-verified .wt-agent-state {
   color: var(--signal-done);
+}
+
+.wt-agent.is-review .wt-agent-state {
+  color: var(--signal-wait-ink);
 }
 
 /* A row at work reads in two lines: what it is doing (the title, with the
@@ -2074,6 +2096,56 @@ svg.wt-agent-dot {
 
 .wt-default:empty {
   display: none;
+}
+
+/* The word a 검증 대기 or 완료 row wears beside its name — the lane's own name
+ * (`workspaceStateWord`), so a lane and the rows under it cannot say two
+ * things. It is the `.wt-default` chip's grammar (a pixel shorter, the type
+ * scale's smallest, a 4px corner) in the two inks the two states already have;
+ * the mark says it in shape, this says it in words, and a row in the
+ * repository view has no lane header over it to say it a third time.
+ *
+ * What does not fit is cut with an ellipsis (the full word is on the dot's
+ * tooltip). Empty, it is not there — a row at work, or asking, or bare, has
+ * nothing to add. */
+.wt-phase {
+  /* The name gives way first and the word does not: it is the news, and a name
+   * cut to an ellipsis is still a name. Half the line is the most it takes, so
+   * a very narrow sidebar cuts the word rather than the name to nothing. */
+  flex: none;
+  max-width: 50%;
+  /* One pixel under `.wt-default`'s 16: the name's own line is 15.25 tall, so
+   * a chip any taller than that grows the row when it arrives and shrinks it
+   * when it leaves — and a row that changes height under the pointer is the
+   * hop this change exists to avoid. */
+  height: 15px;
+  padding: 0 5px;
+  /* Centred on the name's line, not hung from its baseline: a chip whose
+   * baseline sits where the name's does pokes above or below that line and
+   * grows the row. */
+  align-self: center;
+  overflow: hidden;
+  border: var(--rule-width) solid color-mix(in srgb, currentColor 40%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  font-family: var(--font-ui);
+  font-size: var(--text-3xs);
+  font-weight: 500;
+  line-height: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wt-phase:empty {
+  display: none;
+}
+
+.wt-phase[data-phase="review"] {
+  color: var(--signal-wait-ink);
+}
+
+.wt-phase[data-phase="done"] {
+  color: var(--signal-ready-ink);
 }
 
 /* Where a branch came from, said on the branch line itself — `← main` after
@@ -2432,6 +2504,46 @@ svg.wt-agent-dot {
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
+}
+
+/* 검증 대기 and 완료 are the two states a person has to tell apart at a glance,
+ * and they used to be one green dot: a worker that filed its report and work a
+ * coordinator verified both read `done`. So each has a SHAPE of its own, and
+ * the word beside the name (`.wt-phase`) says the rest — colour is never the
+ * only thing telling them apart, and neither is the same shape as the ring
+ * that says a turn is running, the question that says a person is wanted or
+ * the bars of a pause.
+ *
+ * The ink is the pseudo's own `color`, the way the question mark's is, so the
+ * mark and what measures it are one thing. Nothing here moves: a mark that
+ * turned or pulsed would say "working". */
+
+/* The hourglass — handed in, and waiting on a coordinator. In the waiting
+ * amber's ink, the family a person-is-wanted question wears: both are
+ * somebody's turn. */
+.wt-dot.is-review::before {
+  width: 9px;
+  height: 11px;
+  border-radius: 0;
+  background: currentColor;
+  color: var(--signal-wait-ink);
+  clip-path: polygon(0 0, 100% 0, 100% 14%, 62% 50%, 100% 86%, 100% 100%, 0 100%, 0 86%, 38% 50%, 0 14%);
+}
+
+/* The check — done. The ready green `is-active` still wears as a dot (the rule
+ * above), here in its ink: a workspace you can walk into. Two borders of a box
+ * turned an eighth, so it is drawn by the stylesheet and needs no glyph in the
+ * row. */
+.wt-dot.is-done::before {
+  width: 4px;
+  height: 8px;
+  margin-top: -2px;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  border-radius: 0;
+  background: none;
+  color: var(--signal-ready-ink);
+  transform: rotate(45deg);
 }
 
 /* The PR lanes' marks — Orca's conductor glyphs in the measured tones

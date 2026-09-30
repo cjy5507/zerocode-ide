@@ -7461,11 +7461,29 @@ mod tests {
         );
         // One door for both roads: the row the rebuild builds and the row a
         // beat later corrects must not be able to wear two different dots.
+        // t-18902: the mark is the fold's word REFINED by the ledger's reading
+        // of the work in that checkout, so both roads that draw one — the dot
+        // on the row and the frozen reading the lanes stand on — come through
+        // `worktreeMark`, and the words come off the same two facts.
         let dressing = block_after(window, "function dressWorktreeDot(row, state) {");
         assert!(
-            dressing.contains("WORKTREE_INDICATOR[state]")
-                && dressing.contains("worktreeStateLabel(state)"),
-            "the dot's mark and its words no longer come off one state:\n{dressing}"
+            dressing.contains("worktreeMark(row.dataset.worktreePath, state)")
+                && dressing.contains("worktreeStateLabel(said, phase)"),
+            "the dot's mark and its words no longer come off one state and one \
+             reading of the ledger:\n{dressing}"
+        );
+        let marking = block_after(window, "function worktreeMark(path, state) {");
+        assert!(
+            marking.contains("WORKTREE_INDICATOR[state]")
+                && marking.contains("worktreeReviewPhase(path)"),
+            "the mark no longer folds the state onto Orca's five and asks the \
+             ledger about what is quiet:\n{marking}"
+        );
+        assert!(
+            block_after(window, "function freezeWorkspaceActivity() {")
+                .contains("worktreeMark(worktree.path, worktreeDotState("),
+            "the lanes stand on a reading the row's dot does not share, so a \
+             row can wear one mark under another lane's head"
         );
         assert!(
             !window.contains("row.classList.add(`is-${state}`)"),
@@ -7522,6 +7540,140 @@ mod tests {
             !styles.contains(".wt-row[aria-current"),
             "the workspace row is painted off both the class and the aria \
              attribute, so the two can disagree about which row is current"
+        );
+    }
+
+    /// The sidebar tells 작업 중, 검증 대기 and 완료 apart, by the ledger
+    /// (t-18902).
+    ///
+    /// Reported 2026-09-30: a worker that had filed its `worker_done` and work
+    /// a coordinator had verified both read 「완료」, because `done` was one
+    /// thing in the sidebar — an agent's turn ended — and the row's tooltip
+    /// said the confusion out loud, 「완료 또는 대기 중」. The ledger has always
+    /// known the two apart: the board's own review stages
+    /// (`ledgerReviewStage`, which names what `ledgerReviewWord` answers).
+    ///
+    /// What is pinned is that the sidebar READS that hand and does not grow one
+    /// of its own, that the lane and the mark and the word all come off one
+    /// reading, and that the two states differ in SHAPE — an hourglass and a
+    /// check, drawn by the stylesheet on the dot and by the sprite on the
+    /// agent rows — so colour is never the only thing telling them apart.
+    /// The behaviour itself is `sidebar-review-state`'s, in the window suite.
+    #[test]
+    fn the_sidebar_tells_waiting_for_review_from_done_by_the_boards_own_stages() {
+        let window = window_source();
+        let styles = include_str!("../../../../ui/shell.css");
+        let tokens = include_str!("../../../../ui/tokens.css");
+        let sprite = include_str!("../../../../ui/index.html");
+
+        // The verdict is the board's, folded onto the two words a row can say.
+        let phase = block_after(window, "function ledgerReviewPhaseOf(facts) {");
+        assert!(
+            phase.contains("ledgerReviewStage(null, facts)"),
+            "the sidebar reads the ledger's review in a hand of its own:\n{phase}"
+        );
+        let table = block_after(window, "const LEDGER_REVIEW_PHASE = Object.freeze({");
+        for (stage, word) in [
+            ("reported", "review"),
+            ("\"claimed-verified\"", "review"),
+            ("\"claimed-merged\"", "review"),
+            ("\"claimed-deployed\"", "review"),
+            ("verified", "vouched"),
+            ("merged", "vouched"),
+            ("deployed", "vouched"),
+        ] {
+            assert!(
+                table.contains(&format!("{stage}: \"{word}\"")),
+                "the stage {stage} is not placed on {word}:\n{table}"
+            );
+        }
+        // The checkout is found by its path, through the same two ledgers the
+        // card's title reads — the seats in its tabs, then the work a released
+        // worker left in it.
+        let reading = block_after(window, "function worktreeReviewPhase(path) {");
+        assert!(
+            reading.contains("paneLedger.get(term)")
+                && reading.contains("checkoutLedger.get(checkoutKey(path))"),
+            "the checkout is linked to its ledger work some other way than by \
+             its path:\n{reading}"
+        );
+
+        // One lane, in the board's own word, between what asks for a person
+        // and what is done; and the lane, the dot and the word share a door.
+        assert!(
+            window.contains(
+                "{ id: \"review\", key: \"board.awaitingReview\", name: \"검증 대기\" },"
+            ),
+            "the 검증 대기 lane is gone from the 상태별 ladder, or says a word the \
+             board does not"
+        );
+        let words = block_after(window, "function workspaceStateWord(indicator) {");
+        assert!(
+            words.contains("WORKSPACE_STATE_GROUPS.find("),
+            "the word on a row is not the lane's own name:\n{words}"
+        );
+        let label = block_after(window, "function worktreeStateLabel(state, phase = \"\") {");
+        assert!(
+            label.contains("\"worktree.stateReview\"")
+                && label.contains("\"worktree.stateVouched\"")
+                && label.contains("\"worktree.stateIdle\""),
+            "the tooltip stopped telling 검증 대기, 완료 and a turn that ended \
+             apart:\n{label}"
+        );
+        assert!(
+            !strip_comments(window).contains("완료 또는 대기 중"),
+            "the one sentence that said two states at once is back"
+        );
+
+        // Two marks of their own on the dot, in inks that clear 4.5:1 in both
+        // treatments — and the agent rows hung under a card wear the same two
+        // shapes from the sprite.
+        let hourglass = block_after_css(styles, ".wt-dot.is-review::before {");
+        assert!(
+            hourglass.contains("clip-path: polygon(")
+                && hourglass.contains("var(--signal-wait-ink)"),
+            "검증 대기 is not an hourglass in the waiting ink:\n{hourglass}"
+        );
+        let check = block_after_css(styles, ".wt-dot.is-done::before {");
+        assert!(
+            check.contains("border-width: 0 2px 2px 0;")
+                && check.contains("transform: rotate(45deg);")
+                && check.contains("var(--signal-ready-ink)"),
+            "완료 is not a check in the ready ink:\n{check}"
+        );
+        assert!(
+            styles.contains("\n.wt-phase {")
+                && styles.contains("\n.wt-phase[data-phase=\"review\"] {")
+                && styles.contains("\n.wt-phase[data-phase=\"done\"] {"),
+            "the word beside a row's name lost its rule"
+        );
+        assert_eq!(
+            tokens.matches("  --signal-ready-ink: ").count(),
+            2,
+            "the green's ink is not defined in both treatments"
+        );
+        assert!(
+            sprite.contains("<symbol id=\"i-hourglass\" viewBox=\"0 0 24 24\">"),
+            "the agent rows' hourglass left the sprite"
+        );
+        let mark = block_after(window, "function agentRowMark(state, phase) {");
+        assert!(
+            mark.contains("#i-hourglass")
+                && mark.contains("#i-circle-check")
+                && mark.contains("#i-msg-ask"),
+            "an agent row's dot lost one of its three glyphs:\n{mark}"
+        );
+        assert!(
+            block_after(window, "function makeAgentRow(row, gutter = false) {")
+                .contains("agentRowMark(state, agentRowPhase(row, state))")
+                && block_after(
+                    window,
+                    "function agentRowClasses(state, here, foldedSummary, row = null) {"
+                )
+                .contains("agentRowPhase(row, state)")
+                && block_after(window, "function makeFinishedWorkRow(path, work) {")
+                    .contains("ledgerReviewPhaseOf(work)"),
+            "the agent rows under a card stopped telling 검증 대기 from 검증됨"
         );
     }
 
@@ -9887,6 +10039,10 @@ mod tests {
             "sidebar.showMoreSessions",
             "worktree.stateEmpty",
             "worktree.stateIdle",
+            // t-18902: 검증 대기 and 완료 have a sentence each, so the row's
+            // tooltip stops saying two states at once (「완료 또는 대기 중」).
+            "worktree.stateReview",
+            "worktree.stateVouched",
             "worktree.stateStreaming",
             "worktree.stateWaiting",
             "worktree.stateBlocked",
@@ -20153,6 +20309,7 @@ mod tests {
         let ladder = block_after(window, "const WORKSPACE_STATE_GROUPS = [");
         for (at, id) in [
             "permission",
+            "review",
             "done",
             "working",
             "paused",
@@ -20170,7 +20327,8 @@ mod tests {
             assert_eq!(
                 earlier, at,
                 "the attention ladder is out of the original's order at `{id}` \
-                 — done above working is deliberate:\n{ladder}"
+                 — done above working is deliberate, and 검증 대기 (t-18902) \
+                 stands between what asks for a person and what is done:\n{ladder}"
             );
         }
     }

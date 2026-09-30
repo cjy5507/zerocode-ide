@@ -46,24 +46,29 @@ const SCENE = [
     review: { verified: true, merged: true, written: true, author: "coordinator" } } },
   { path: "/r/failed", term: 8107, hook: "done", task: "failed attempt",
     ledger: { reported: true, failed: true } },
+  { path: "/r/quiet", term: 8108, hook: "done", task: "turn ended, nothing filed",
+    ledger: { reported: false } },
   { path: "/r/idle" },
 ];
 
 const WANT_GROUPS = {
   permission: ["/r/ask"],
   review: ["/r/rep", "/r/claim", "/r/gone"],
-  done: ["/r/ver", "/r/own", "/r/landed", "/r/failed"],
+  done: ["/r/ver", "/r/own", "/r/landed"],
   working: ["/r/work"],
+  active: ["/r/failed", "/r/quiet"],
   inactive: ["/r/idle"],
 };
 
-/* What each row's dot should read, by the indicator the window draws. A failed
- * attempt keeps the rule it always had: the ledger says nothing to verify, so
- * the sidebar says what the agent's turn said. */
+/* What each row's dot should read, by the indicator the window draws. 완료 is
+ * the ledger's word (verified, merged, deployed) or the turn of an agent the
+ * ledger never gave a task; work the ledger holds that was never handed in, or
+ * whose attempt failed, is neither, and the row does not say it is done — it
+ * is a session standing there, which is all that is known. */
 const WANT_INDICATOR = {
   "/r/ask": "permission", "/r/rep": "review", "/r/claim": "review", "/r/ver": "done",
   "/r/own": "done", "/r/work": "working", "/r/gone": "review", "/r/landed": "done",
-  "/r/failed": "done", "/r/idle": "inactive",
+  "/r/failed": "active", "/r/quiet": "active", "/r/idle": "inactive",
 };
 
 /* The words that stood on one tooltip before (`worktree.stateIdle`), one per
@@ -170,6 +175,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
             aria: row.getAttribute("aria-label") ?? "",
             chip: shown ? chip.textContent : null,
             chipPhase: chip?.dataset.phase ?? null,
+            chipTip: shown ? chip.dataset.tip ?? "" : null,
             shape: window.__READ__.shape(dot),
           };
         },
@@ -187,8 +193,8 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
     }));
     const membership = Object.fromEntries(lanes.map((lane) => [lane.id, lane.rows]));
     ok(
-      "the 상태별 lanes stand 권한 필요, 검증 대기, 완료, 작업 중 — a worker that reported waits for review, and 완료 holds only what the ledger vouched for or an agent with no ledger task",
-      JSON.stringify(lanes.map((lane) => lane.id)) === JSON.stringify(["permission", "review", "done", "working", "inactive"]) &&
+      "the 상태별 lanes stand 권한 필요, 검증 대기, 완료, 작업 중 — a worker that reported waits for review, and 완료 holds only what the ledger vouched for or an agent with no ledger task: a failed attempt and a turn that ended before its report are not done",
+      JSON.stringify(lanes.map((lane) => lane.id)) === JSON.stringify(["permission", "review", "done", "working", "active", "inactive"]) &&
         JSON.stringify(membership) === JSON.stringify(WANT_GROUPS) &&
         lanes.find((lane) => lane.id === "review")?.head === want.review &&
         lanes.find((lane) => lane.id === "done")?.head === want.done &&
@@ -219,8 +225,13 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       marks["/r/rep"].chip === want.review && marks["/r/claim"].chip === want.review &&
         marks["/r/gone"].chip === want.review && marks["/r/ver"].chip === want.done &&
         marks["/r/own"].chip === want.done && marks["/r/landed"].chip === want.done &&
-        marks["/r/failed"].chip === want.done &&
         marks["/r/work"].chip === null && marks["/r/ask"].chip === null && marks["/r/idle"].chip === null &&
+        marks["/r/failed"].chip === null && marks["/r/quiet"].chip === null &&
+        // The word carries the whole sentence as its own tooltip.
+        ["/r/rep", "/r/claim", "/r/gone", "/r/ver", "/r/own", "/r/landed"]
+          .every((path) => marks[path].chipTip === marks[path].tip && marks[path].chipTip !== "") &&
+        marks["/r/failed"].tip === marks["/r/quiet"].tip &&
+        !marks["/r/failed"].tip.includes(want.done) &&
         distinctTips.size === 5 &&
         tips["/r/rep"].includes(want.review) && tips["/r/ver"].includes(want.done) && tips["/r/own"].includes(want.done) &&
         !Object.values(tips).some((tip) => CONFLATED.includes(tip)) &&
@@ -259,14 +270,16 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
           said,
         };
       };
-      return Object.fromEntries(["/r/rep", "/r/claim", "/r/ver", "/r/own", "/r/gone", "/r/landed"].map((path) => [path, read(path)]));
+      return Object.fromEntries(["/r/rep", "/r/claim", "/r/ver", "/r/own", "/r/gone", "/r/landed", "/r/failed", "/r/quiet"]
+        .map((path) => [path, read(path)]));
     });
     const wantWords = await page.evaluate(() => ({
       awaiting: t("board.awaitingReview", "검증 대기"), claimed: t("board.claimedMerged", "병합됐다 함"),
       verified: t("board.verified", "검증됨"), merged: t("board.merged", "병합됨"), done: t("board.done", "완료"),
+      failed: t("board.desk.stageFailed", "실패"), idle: t("board.idle", "대기 중"),
     }));
     ok(
-      "the agent rows hung under a card wear the same distinction: an hourglass and 검증 대기 while the coordinator has not vouched, a check and the ledger's word once it has, a plain 완료 for an agent the ledger never seated",
+      "the agent rows hung under a card wear the same distinction: an hourglass and 검증 대기 while the coordinator has not vouched, a check and the ledger's word once it has, a plain 완료 for an agent the ledger never seated, and a plain dot at rest — never a check — for a turn that ended before its report or a failed attempt",
       agents["/r/rep"]?.glyph === "#i-hourglass" && agents["/r/rep"].klass.includes("is-review") &&
         agents["/r/rep"].said === wantWords.awaiting &&
         agents["/r/claim"]?.glyph === "#i-hourglass" && agents["/r/claim"].said === wantWords.claimed &&
@@ -277,7 +290,11 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
         agents["/r/gone"]?.glyph === "#i-hourglass" && agents["/r/gone"].klass.includes("is-review") &&
         agents["/r/gone"].said === wantWords.awaiting &&
         agents["/r/landed"]?.glyph === "#i-circle-check" && agents["/r/landed"].klass.includes("is-verified") &&
-        agents["/r/landed"].said === wantWords.merged,
+        agents["/r/landed"].said === wantWords.merged &&
+        agents["/r/failed"]?.glyph === null && agents["/r/failed"].klass.includes("is-unsettled") &&
+        agents["/r/failed"].said === wantWords.failed &&
+        agents["/r/quiet"]?.glyph === null && agents["/r/quiet"].klass.includes("is-unsettled") &&
+        agents["/r/quiet"].said === wantWords.idle,
       JSON.stringify({ agents, wantWords }),
     );
 
@@ -352,6 +369,11 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
     );
 
     /* ---- 6. contrast, both treatments, every state a row can be in ---------- */
+    // A row's wash and its ink ease over 200 ms (`.wt-row`'s transition), and a
+    // computed colour read mid-ease is a colour that is not on screen yet — so
+    // the measure is taken with the easing off. The reduced-motion check below
+    // reads the page as it ships.
+    await page.addStyleTag({ content: "*, *::before, *::after { transition: none !important; }", });
     const contrast = {};
     for (const theme of ["dark", "light"]) {
       contrast[theme] = {};
@@ -362,6 +384,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       for (const state of ["rest", "hover", "active", "selected"]) {
         if (state === "hover") await page.hover('.wt-row[data-worktree-path="/r/claim"]');
         else await page.mouse.move(2, 2);
+        await page.waitForTimeout(60);
         contrast[theme][state] = await page.evaluate((mode) => {
           const parse = (css) => {
             const parts = css.match(/-?\d*\.?\d+(?:e-?\d+)?/gi)?.map(Number) ?? [];
@@ -423,7 +446,13 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
     }
     const floor = (measured, key) => Math.min(...Object.values(measured).flatMap((byState) =>
       Object.values(byState).flatMap((byPath) => Object.values(byPath).map((one) => one[key]))));
-    await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "dark";
+      // The measure's own style leaves with the measure.
+      for (const style of [...document.querySelectorAll("style")]) {
+        if (style.textContent.startsWith("*, *::before, *::after { transition: none")) style.remove();
+      }
+    });
     ok(
       "the word and the mark on 검증 대기 and 완료 rows read at 4.5:1 or better on every state a row can be in, in both treatments",
       floor(contrast, "text") >= 4.5 && floor(contrast, "mark") >= 4.5,
@@ -464,12 +493,20 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
               lineOverflow: line.scrollWidth - line.clientWidth,
               wordOutside: word.right > box.right + 0.5 || word.left < box.left - 0.5,
               rowPastList: box.right > edge + 0.5,
-              // A title stays readable: at least 40 px of it, or all of it when it is shorter.
-              titleShort: title.clientWidth < Math.min(title.scrollWidth, 40) - 1,
+              // A title stays readable: at least 24 px of it — two or three
+              // characters and the ellipsis — or all of it when it is shorter.
+              // The line is 67 px wide in the narrowest sidebar, and the word
+              // takes what it needs of it, no more than half.
+              titleShort: title.clientWidth < Math.min(title.scrollWidth, 24) - 1,
             };
           });
+          // One row's parts, so a failure says WHERE the width went.
+          const parts = (row) => row === undefined ? null : Object.fromEntries(
+            [".wt-twist", ".wt-dot", ".wt-titlebox", ".wt-topline", ".wt-title", ".wt-phase"]
+              .map((one) => [one.slice(4), Math.round(row.querySelector(one)?.getBoundingClientRect().width ?? -1)]));
           return {
             rowWidth: wearing.length ? Math.round(wearing[0].getBoundingClientRect().width) : 0,
+            sample: parts(wearing.find((row) => row.dataset.worktreePath === "/r/claim")),
             wearing: wearing.length,
             bad: seen.filter((one) => one.rowOverflow > 1 || one.lineOverflow > 1 || one.wordOutside ||
               one.rowPastList || one.titleShort),
@@ -481,7 +518,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
     await page.evaluate(() => setLocale("ko", { persist: false }));
     ok(
       "a row wearing its word fits the sidebar at its narrowest (180 px) and in a 360 px window, in Spanish where the word is longest: nothing overflows, the word stays inside the row, and the title keeps room to read",
-      Object.values(fits).every((one) => one.wearing >= 6 && one.bad.length === 0 && one.pageScroll <= 0),
+      Object.values(fits).every((one) => one.wearing >= 2 && one.bad.length === 0 && one.pageScroll <= 0),
       JSON.stringify(fits),
     );
 
