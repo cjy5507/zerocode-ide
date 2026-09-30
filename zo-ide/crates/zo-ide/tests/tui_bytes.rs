@@ -2617,6 +2617,7 @@ fn question_frame<'a>(composer: &'a Composer, question: &'a view::Question) -> F
         dream: None,
         width: 120,
         max_rows: 39,
+        max_height: 39,
     }
 }
 
@@ -2779,6 +2780,7 @@ fn frame_build_cost() {
         dream: None,
         width: 120,
         max_rows: 39,
+        max_height: 39,
     };
     let started = Instant::now();
     let mut rows = 0usize;
@@ -3025,6 +3027,7 @@ fn the_composer_marker_span_boundary_is_the_captured_one() {
         Some(EffortTier::Max),
         None,
         Instant::now(),
+        usize::MAX,
     );
     let mut tiered = String::new();
     write_spans(&tier_lines[1], &mut tiered);

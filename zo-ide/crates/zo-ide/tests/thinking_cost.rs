@@ -41,6 +41,7 @@ fn frame<'a>(composer: &'a Composer, status: Option<&'a Status>) -> Frame<'a> {
         dream: None,
         width: 120,
         max_rows: 39,
+        max_height: 39,
     }
 }
 

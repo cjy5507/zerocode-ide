@@ -1319,8 +1319,14 @@ pub struct Frame<'a> {
     /// Last completed Dreamer pass. `None` preserves the old footer height.
     pub dream: Option<&'a str>,
     pub width: usize,
-    /// 뷰포트가 쓸 수 있는 최대 높이 — 피커가 목록 창을 여기에 맞춘다.
+    /// 뷰포트가 쓸 수 있는 최대 높이 — 피커가 목록 창을 여기에 맞춘다. 팝업·질문처럼 화면
+    /// 위를 덮는 것이 떠 있는 동안은 화면을 밀지 않고 쓸 수 있는 예산이라 화면보다 작다.
     pub max_rows: usize,
+    /// painter 가 그리는 가장 큰 높이(`Painter::max_height`) — 이보다 아래 행은 그려지지
+    /// 않는다. 작성창은 `max_rows` 가 아니라 이 높이에 맞춰 자른다: 예산은 팝업이 열릴 때마다
+    /// 줄지만 그때 화면은 그대로이고, 예산에 맞추면 팝업이 열린 순간 여러 줄짜리 초안이
+    /// 쪼그라든다.
+    pub max_height: usize,
 }
 
 /// 프레임을 줄들과 커서 좌표로 편다. 커서가 `None` 이면 숨긴다.
@@ -1340,14 +1346,19 @@ fn build_question(
     // 자유 서술과 Other — codex 도 이 갈래에서는 오버레이 안의 컴포저가
     // 답을 받는다(`…__freeform.snap`: 질문 아래 `› Type your answer`). Other는
     // 목록까지 남기고 같은 컴포저를 그 아래에 둔다.
+    let footer = question.footer_lines_with_focus(frame.width, focus);
+    let mut head = question.head_with_focus(frame.width, focus);
+    // 컴포저의 몫은 화면이 줄 수 있는 높이에서 나머지를 뺀 것이다: 머리와 푸터, 그 앞뒤의 빈
+    // 줄 둘, 그리고 Other 는 목록의 앞뒤 빈 줄과 목록 한 줄까지. 긴 답은 그 안에서 스크롤된다.
+    let others = head.len() + footer.len() + if question.is_other_input() { 4 } else { 2 };
     let (lines, (col, row)) = frame.composer.render_with_effort(
         frame.width,
         ANSWER_PLACEHOLDER,
         frame.effort_tier,
         frame.effort_effect,
         frame.now,
+        frame.max_height.saturating_sub(others),
     );
-    let footer = question.footer_lines_with_focus(frame.width, focus);
     let mut rows = if question.is_other_input() {
         question.option_body_with_focus(
             frame.width,
@@ -1356,7 +1367,6 @@ fn build_question(
             focus,
         )
     } else {
-        let mut head = question.head_with_focus(frame.width, focus);
         head.push(Line::empty());
         head
     };
@@ -1381,12 +1391,33 @@ fn build_with_focus(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16,
         return (pager.to_vec(), None);
     }
     if let Some(question) = frame.question {
-        return build_question(frame, question, focus);
+        return keep_caret_in_view(build_question(frame, question, focus), frame.max_height);
     }
     if let Some(page) = frame.warnings {
         return (page.to_vec(), None);
     }
-    build_bottom_pane(frame, focus)
+    keep_caret_in_view(build_bottom_pane(frame, focus), frame.max_height)
+}
+
+/// 커서가 있는 행이 `max_height` 안에 들도록 그 위의 행을 덜어 낸다. painter 는 그 높이 밑의 행을
+/// 그리지 않고, 캐럿이 그려지지 않은 행에 서면 사람은 자기가 치는 글을 볼 수 없다. 아래 창의
+/// 붙박이 줄들(빈 줄·상태·푸터)만으로도 화면보다 높은 아주 낮은 화면이나, 대기 입력이 화면만큼
+/// 쌓인 경우에만 걸린다 — 작성창은 그 줄들과 다투면 늘 이긴다. 작성창 자신은 이미 남는 높이에
+/// 맞춰 스크롤되어 있으니 덜어 내는 것은 언제나 그 위의 여백·상태·대기 입력이다.
+fn keep_caret_in_view(
+    (mut rows, cursor): (Vec<Line>, Option<(u16, u16)>),
+    max_height: usize,
+) -> (Vec<Line>, Option<(u16, u16)>) {
+    let Some((col, row)) = cursor else {
+        return (rows, None);
+    };
+    let cut = (usize::from(row) + 1).saturating_sub(max_height).min(rows.len());
+    if cut == 0 {
+        return (rows, cursor);
+    }
+    rows.drain(..cut);
+    let row = row.saturating_sub(u16::try_from(cut).unwrap_or(u16::MAX));
+    (rows, Some((col, row)))
 }
 
 /// The bottom pane — status, the `?` card, pending input, the composer and
@@ -1410,24 +1441,69 @@ fn build_bottom_pane(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16
     }
     below.push(Line::empty());
     let composer_offset = below.len();
+    // 컴포저 아래의 줄들을 먼저 짓는다 — 컴포저는 화면이 줄 수 있는 높이에서 자기 위아래의
+    // 줄들을 뺀 만큼만 쓰고, 초안이 그보다 길면 상자 안에서 스크롤한다. painter 가 화면 밑을
+    // 자르게 두면 긴 초안의 끝, 곧 캐럿이 그려지지 않는다(t-17194).
+    let under = rows_under_the_composer(frame, focus);
+    let room = frame
+        .max_height
+        .saturating_sub(rows.len() + composer_offset + under.len());
     let (lines, (col, row)) = frame.composer.render_with_effort(
         frame.width,
         PLACEHOLDER,
         frame.effort_tier,
         frame.effort_effect,
         frame.now,
+        room,
     );
     below.extend(lines);
-    below.push(Line::empty());
+    below.extend(under);
+    // Codex `composer_layout.rs`: the card grows above the composer and
+    // yields its own rows when the pane is short — the composer, the footer
+    // and the cursor never move for it.
+    if let Some(card) = frame.shortcuts {
+        let room = frame.max_rows.saturating_sub(rows.len() + below.len() + 1);
+        if room > 0 {
+            rows.push(Line::empty());
+            rows.extend(super::shortcuts::fit(card, room));
+        }
+    }
+    let composer_row = u16::try_from(rows.len() + composer_offset).unwrap_or(0);
+    rows.extend(below);
+    // 활성 셀이 먼저 — codex 는 그 위에 빈 줄 하나(`top: 1`)를 띄운다.
+    let Some(active) = frame.active.filter(|active| !active.is_empty()) else {
+        return (rows, Some((col, composer_row + row)));
+    };
+    // 아래 창이 이미 화면을 채웠다 — 긴 초안이 남는 높이를 다 쓴 때다. 활성 셀 위의 빈 줄
+    // 하나도 놓을 자리가 없고, 놓으면 푸터의 마지막 줄이 화면 밑으로 밀려난다.
+    if rows.len() >= frame.max_height {
+        return (rows, Some((col, composer_row + row)));
+    }
+    let budget = frame.max_rows.saturating_sub(rows.len() + 1);
+    let mut head: Vec<Line> = Vec::with_capacity(budget + 1);
+    head.push(Line::empty());
+    head.extend(
+        clip_active(active, budget)
+            .into_iter()
+            .map(|line| line.truncated(frame.width)),
+    );
+    let composer_row = composer_row + u16::try_from(head.len()).unwrap_or(u16::MAX);
+    head.extend(rows);
+    (head, Some((col, composer_row + row)))
+}
+
+/// 컴포저 아래의 줄들 — 빈 줄 하나, 그리고 팝업이나(없으면) 푸터.
+fn rows_under_the_composer(frame: &Frame<'_>, focus: Color) -> Vec<Line> {
+    let mut under: Vec<Line> = vec![Line::empty()];
     // 팝업은 푸터 자리에 앉는다 — 캡처의 `/model` 프레임이 그 자리에서
     // 모델·cwd 줄을 밀어냈다. 둘째 줄도 함께 밀려난다.
     if let Some(mention) = frame.mention {
-        below.extend(mention.lines(frame.width, focus));
+        under.extend(mention.lines(frame.width, focus));
     } else if let Some(popup) = frame.popup {
-        below.extend(popup.lines_with_focus(frame.width, focus));
+        under.extend(popup.lines_with_focus(frame.width, focus));
     } else {
         if let Some(dream) = frame.dream {
-            below.push(dreamer_footer(dream, frame.width));
+            under.push(dreamer_footer(dream, frame.width));
         }
         let mut line = footer(
             frame.model,
@@ -1447,36 +1523,10 @@ fn build_bottom_pane(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16
         {
             line = effect.footer_line_at(&line, frame.width, frame.now);
         }
-        below.push(line);
-        below.push(super::footer_hints::hint_row(frame.hints, frame.width));
+        under.push(line);
+        under.push(super::footer_hints::hint_row(frame.hints, frame.width));
     }
-    // Codex `composer_layout.rs`: the card grows above the composer and
-    // yields its own rows when the pane is short — the composer, the footer
-    // and the cursor never move for it.
-    if let Some(card) = frame.shortcuts {
-        let room = frame.max_rows.saturating_sub(rows.len() + below.len() + 1);
-        if room > 0 {
-            rows.push(Line::empty());
-            rows.extend(super::shortcuts::fit(card, room));
-        }
-    }
-    let composer_row = u16::try_from(rows.len() + composer_offset).unwrap_or(0);
-    rows.extend(below);
-    // 활성 셀이 먼저 — codex 는 그 위에 빈 줄 하나(`top: 1`)를 띄운다.
-    let Some(active) = frame.active.filter(|active| !active.is_empty()) else {
-        return (rows, Some((col, composer_row + row)));
-    };
-    let budget = frame.max_rows.saturating_sub(rows.len() + 1);
-    let mut head: Vec<Line> = Vec::with_capacity(budget + 1);
-    head.push(Line::empty());
-    head.extend(
-        clip_active(active, budget)
-            .into_iter()
-            .map(|line| line.truncated(frame.width)),
-    );
-    let composer_row = composer_row + u16::try_from(head.len()).unwrap_or(u16::MAX);
-    head.extend(rows);
-    (head, Some((col, composer_row + row)))
+    under
 }
 
 /// The active cell's lines that fit above the bottom pane.
@@ -1578,6 +1628,7 @@ mod tests {
             dream: None,
             width: 60,
             max_rows: 39,
+            max_height: 39,
         }
     }
 
