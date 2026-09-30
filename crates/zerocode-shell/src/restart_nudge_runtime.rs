@@ -280,10 +280,11 @@ pub(crate) enum Said {
     Reached,
     /// The words are on the line and their Enter was not taken, with nobody
     /// else's hand on it (t-17037): the pane never reported taking them, or
-    /// the terminal refused the Enter's write. Never typed again — the one
-    /// fallback is an Enter alone, at the composer's next ready. Without it
-    /// the words sat in the box after a restart until a person pressed
-    /// Enter (2026-09-30, twice).
+    /// the terminal refused the Enter's write. Never typed again — the
+    /// fallback is an Enter alone, at the composer's next ready, pressed
+    /// again while the pane reports nothing (t-18353). Without it the words
+    /// sat in the box after a restart until a person pressed Enter
+    /// (2026-09-30, four times).
     Unsent,
     /// Nothing was sent: the composer never said it was ready. The line is
     /// still the wake's, and the one fallback may place the words there.
@@ -351,15 +352,37 @@ pub(super) struct PendingNudge {
     /// The line's hand count read before the words were placed (t-17037): an
     /// Enter pressed again goes only on a line no hand has reached since.
     pub(super) hand: Option<u64>,
-    /// The one fallback, once it went — typed or submitted, never both, and
-    /// never twice.
+    /// The fallback, once it went — typed or submitted, never both. The
+    /// words are typed at most once; an Enter alone is pressed again after
+    /// each try the pane did not answer, for as long as the row says
+    /// ([`Self::retry_for`]).
     pub(super) fallback: Option<Fallback>,
+    /// How many Enters alone this wake has pressed (t-18353).
+    pub(super) presses: u8,
+    /// How long after the words went in the Enter alone is pressed again,
+    /// after each try the pane did not answer (t-18353): the agent's row
+    /// says so (`enter_retry_ms`), or says nothing, and its one Enter alone
+    /// stays one.
+    pub(super) retry_for: Option<Duration>,
     /// The goodbye's word to spend once the words may have reached the pane;
     /// `None` once spent, or for words that owe nobody.
     pub(super) owed: Option<Owed>,
 }
 
 impl PendingNudge {
+    /// Whether an Enter alone may be pressed once more (t-18353): only for a
+    /// row that carries a horizon, only inside it, and never more often than
+    /// the pane can answer one — a try whose answer came sooner than the
+    /// receipt window was a refused write, not a silent pane, so the
+    /// horizon over the window is the most tries a row can make.
+    fn may_press_again(&self, now: Instant) -> bool {
+        self.retry_for.is_some_and(|horizon| {
+            let most = (horizon.as_millis() / zerocode_pty::ready::SUBMIT_ACK_TIMEOUT.as_millis())
+                .min(u128::from(u8::MAX));
+            now.saturating_duration_since(self.started) < horizon && u128::from(self.presses) < most
+        })
+    }
+
     /// The goodbye's word, spent: the words reached the pane, or may have.
     fn spend(&mut self) {
         if let Some(owed) = self.owed.take() {
@@ -378,9 +401,10 @@ pub(super) enum Resolution {
     /// stays, waiting for this delivery's own answer and receipt.
     FallbackDeliver(PendingNudge),
     /// The delivery answered that the words are on the line and their Enter
-    /// was not taken (t-17037): press Enter alone, once, when the composer
-    /// next says it is ready. The row stays, for that Enter's own answer and
-    /// the pane's `working` hook.
+    /// was not taken (t-17037): press Enter alone when the composer next
+    /// says it is ready — and again after each try the pane did not answer,
+    /// for as long as the agent's row says (t-18353). The row stays, for
+    /// that Enter's own answer and the pane's `working` hook.
     FallbackSubmit(PendingNudge),
     /// A full window after the first closed and still no `working`: give up
     /// on this wake and file it `receipt=none`. Nothing is delivered — the
@@ -403,6 +427,11 @@ impl PendingNudges {
         self.rows.contains_key(&term)
     }
 
+    /// How long the wake at `term` may keep pressing Enter alone (t-18353).
+    pub(super) fn retry_for(&self, term: TermId) -> Option<Duration> {
+        self.rows.get(&term)?.retry_for
+    }
+
     pub(super) fn working(&mut self, term: TermId, now: Instant) -> Option<Resolution> {
         let mut pending = self.rows.remove(&term)?;
         // The pane took input: whatever its delivery has said so far, the
@@ -417,11 +446,15 @@ impl PendingNudges {
     /// What the delivery answered about the words (t-7812 R2). Words that
     /// reached the pane spend the goodbye's word the moment that is known.
     ///
-    /// Words left on the line with their Enter untaken arm the one fallback
-    /// on the spot (t-17037): an Enter alone, which itself waits for the
-    /// composer to say it is ready. The fallback gets a full receipt window
-    /// of its own from `now` when the first has already closed. A wake whose
-    /// one fallback already went — typed or submitted — arms nothing more.
+    /// Words left on the line with their Enter untaken arm the fallback on
+    /// the spot (t-17037): an Enter alone, which itself waits for the
+    /// composer to say it is ready. Each try gets a full receipt window of
+    /// its own from `now` when the first has already closed, and one the
+    /// pane did not answer arms the next — a program just resumed reads its
+    /// input late, and an Enter written before it does is ignored — for as
+    /// long as the agent's row says (t-18353). A wake whose fallback was the
+    /// words typed again arms no Enter beside it, and words are never typed
+    /// twice.
     pub(super) fn heard(
         &mut self,
         term: TermId,
@@ -434,10 +467,15 @@ impl PendingNudges {
         if matches!(said, Said::Reached | Said::Unsent) {
             pending.spend();
         }
-        if said != Said::Unsent || pending.fallback.is_some() {
+        if said != Said::Unsent {
             return None;
         }
-        pending.fallback = Some(Fallback::Submitted);
+        match pending.fallback {
+            None => pending.fallback = Some(Fallback::Submitted),
+            Some(Fallback::Submitted) if pending.may_press_again(now) => {}
+            Some(_) => return None,
+        }
+        pending.presses = pending.presses.saturating_add(1);
         if pending.first_window_closed.is_some() {
             pending.first_window_closed = Some(now);
         }
@@ -519,14 +557,68 @@ pub(super) fn log_line(
     road: Option<zerocode_core::NudgeRoad>,
     receipt: Option<Duration>,
 ) -> String {
-    let receipt = receipt.map_or_else(
-        || "none".to_string(),
-        |elapsed| format!("working@{}s", elapsed.as_secs()),
-    );
+    let receipt = receipt_word(receipt);
     format!(
         "{} receipt={receipt}",
         resumed_head(term, agent, session_id, road)
     )
+}
+
+/// How a wake's receipt reads in its line: how long the pane took to report
+/// taking the words, or that it never did.
+fn receipt_word(receipt: Option<Duration>) -> String {
+    receipt.map_or_else(
+        || "none".to_string(),
+        |elapsed| format!("working@{}s", elapsed.as_secs()),
+    )
+}
+
+/// The first characters of a session id, as every wake's line carries it.
+fn session_prefix(session_id: &str) -> String {
+    session_id
+        .chars()
+        .take(RESUME_LOG_SESSION_PREFIX_CHARS)
+        .collect()
+}
+
+/// The line a wake files once it pressed Enter alone more than once
+/// (t-18353): the road it took is the retry itself, and `n` says how many
+/// Enters the pane needed — `nudge=enter-retry n=4 receipt=working@61s` — so
+/// a person reading the log at the next restart sees a pane that took a
+/// minute, and a pane that never did, apart from one that took its words at
+/// the first Enter.
+pub(super) fn retry_line(
+    term: TermId,
+    agent: &str,
+    session_id: &str,
+    presses: u8,
+    receipt: Option<Duration>,
+) -> String {
+    let session = session_prefix(session_id);
+    let receipt = receipt_word(receipt);
+    format!("term {term} resumed {agent} {session} nudge=enter-retry n={presses} receipt={receipt}")
+}
+
+/// The line a wake's row files when it ends, whichever way it ends: the
+/// retry's own when the Enter was pressed more than once.
+fn filed_line(term: TermId, pending: &PendingNudge, receipt: Option<Duration>) -> String {
+    if pending.presses >= 2 {
+        retry_line(
+            term,
+            &pending.agent,
+            &pending.session_id,
+            pending.presses,
+            receipt,
+        )
+    } else {
+        log_line(
+            term,
+            &pending.agent,
+            &pending.session_id,
+            Some(pending.road),
+            receipt,
+        )
+    }
 }
 
 /// What every wake's line opens with: the pane, the agent, the session's
@@ -537,10 +629,7 @@ fn resumed_head(
     session_id: &str,
     road: Option<zerocode_core::NudgeRoad>,
 ) -> String {
-    let session: String = session_id
-        .chars()
-        .take(RESUME_LOG_SESSION_PREFIX_CHARS)
-        .collect();
+    let session = session_prefix(session_id);
     let road = match road {
         Some(zerocode_core::NudgeRoad::Argv) => "argv",
         Some(zerocode_core::NudgeRoad::Composer) => "composer",
@@ -624,12 +713,53 @@ pub(super) fn place_words(
         launch: words.launch,
         hand: words.hand,
         fallback: None,
+        presses: 0,
+        retry_for: enter_retry_for(Some(words.agent)),
         owed: Some(words.owed),
     };
     if said == Some(Said::Reached) {
         pending.spend();
     }
     (pending, delivery)
+}
+
+/// The line a restored worker's continuation files once its pane reported
+/// taking it (t-18353): the same `receipt=working@Ns` the wake road files, so
+/// the person can read at the next restart that every restored pane took its
+/// words — until now only a continuation left unsent left a line at all.
+/// Only for a pane whose row reports the prompts it takes (its delivery is
+/// `Delivered` on that report, not on the Enter's write); any other pane's
+/// delivery says nothing about the words being taken, and files no line.
+pub(crate) fn continuation_taken_line(
+    term: TermId,
+    agent: &str,
+    session_id: &str,
+    elapsed: Duration,
+) -> Option<String> {
+    zerocode_core::agent_capabilities(agent)
+        .is_some_and(|caps| caps.submit_ack != zerocode_core::capabilities::SubmitAck::None)
+        .then(|| {
+            log_line(
+                term,
+                agent,
+                session_id,
+                Some(zerocode_core::NudgeRoad::Composer),
+                Some(elapsed),
+            )
+        })
+}
+
+/// File [`continuation_taken_line`] in the window's log.
+pub(crate) fn note_continuation_taken(
+    state: &AppState,
+    term: TermId,
+    agent: &str,
+    session_id: &str,
+    elapsed: Duration,
+) {
+    if let Some(line) = continuation_taken_line(term, agent, session_id, elapsed) {
+        note_window_event(state.local_data_root(), &line);
+    }
 }
 
 /// The line for a sleeper's wake that started nothing because the ledger
@@ -699,13 +829,7 @@ fn note_resolution(
 ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
     match resolution {
         Resolution::Working(pending, elapsed) => {
-            window.note(&log_line(
-                term,
-                &pending.agent,
-                &pending.session_id,
-                Some(pending.road),
-                Some(elapsed),
-            ));
+            window.note(&filed_line(term, &pending, Some(elapsed)));
             None
         }
         // Deliver the one fallback and file nothing yet: its own answer and
@@ -720,33 +844,33 @@ fn note_resolution(
             window.type_again(term, &pending.agent, &pending.text)
         }
         // The Enter alone, and only at the launch the words were placed at:
-        // the delivery itself withholds it from a line a person reached.
+        // the delivery itself withholds it from a line a person reached. One
+        // line for the wake, at its first Enter; the ones after it are the
+        // same Enter pressed again, and the line the wake files at its end
+        // says how long the pane took.
         Resolution::FallbackSubmit(pending) => {
             if window.launch(term) != pending.launch {
                 return None;
             }
-            window.note(&fallback_line(term, &pending, Fallback::Submitted));
+            if pending.presses <= 1 {
+                window.note(&fallback_line(term, &pending, Fallback::Submitted));
+            }
             window.submit_again(term, &pending.agent, pending.hand)
         }
         // A full window after the first and still no receipt: the line is
         // filed `receipt=none`, and nothing is delivered again.
         Resolution::GaveUp(pending) => {
-            window.note(&log_line(
-                term,
-                &pending.agent,
-                &pending.session_id,
-                Some(pending.road),
-                None,
-            ));
+            window.note(&filed_line(term, &pending, None));
             None
         }
     }
 }
 
-/// The most beats one wake's watch runs: the first window, a window for
-/// the one fallback, and the close that gives up. The table gives up on its
-/// own by then; this only keeps a watch from outliving its row.
-const WATCH_BEATS: usize = 3;
+/// The most beats one wake's watch runs before its row's horizon (t-18353):
+/// the first window, a window for the one fallback, and the close that gives
+/// up. The table gives up on its own by then; this only keeps a watch from
+/// outliving its row.
+const WATCH_BEATS: u32 = 3;
 
 /// Watch one marked wake through its receipt windows (t-3058, t-7812 R2,
 /// t-17037), each `window` long — the product's is
@@ -755,12 +879,14 @@ const WATCH_BEATS: usize = 3;
 /// `delivery` is the first delivery's own answer, for words typed at a
 /// composer; words that rode the argv come registered as already said. It is
 /// heard the moment it comes, however many windows that takes: words left on
-/// the line with their Enter untaken get the one fallback there and then —
-/// an Enter alone, which waits for the composer's ready. A window's close
-/// gives words that never left a composer that was not ready the one
-/// fallback, typed beside whatever a person has left on the line; every
-/// other wake waits out the window after for its `working` hook. Nothing
-/// here types, or presses, because a hook was silent.
+/// the line with their Enter untaken get the fallback there and then —
+/// an Enter alone, which waits for the composer's ready, and again after
+/// each try the pane did not answer (t-18353). A window's close gives words
+/// that never left a composer that was not ready the one typed fallback,
+/// beside whatever a person has left on the line; every other wake waits
+/// out the window after for its `working` hook. Nothing here types, or
+/// presses, because a hook was silent: an Enter is pressed again only for
+/// words the pane never took and nobody else has reached.
 pub(super) fn watch(
     receipts: &dyn WakeReceipts,
     term: TermId,
@@ -768,8 +894,12 @@ pub(super) fn watch(
     window: Duration,
 ) {
     let mut delivery = delivery;
-    for _ in 0..WATCH_BEATS {
-        if !receipts.rows().holds(term) {
+    let began = Instant::now();
+    loop {
+        // A row that presses Enter again keeps its watch as long as its
+        // horizon, and one that does not keeps it for the beats it always had.
+        let horizon = receipts.rows().retry_for(term).unwrap_or_default();
+        if !receipts.rows().holds(term) || began.elapsed() >= window * WATCH_BEATS + horizon {
             break;
         }
         let beat = Instant::now() + window;
@@ -953,6 +1083,8 @@ fn left_unsent(
         launch: words.launch,
         hand: words.hand,
         fallback: None,
+        presses: 0,
+        retry_for: enter_retry_for(Some(words.agent)),
         owed: None,
     };
     let (answer, delivery) = std::sync::mpsc::sync_channel(1);
@@ -988,16 +1120,7 @@ pub(super) fn received(receipts: &dyn WakeReceipts, term: TermId) {
 pub(super) fn forgotten(state: &AppState, term: TermId) {
     let pending = state.pending_nudges().remove(term);
     if let Some(pending) = pending {
-        note_window_event(
-            state.local_data_root(),
-            &log_line(
-                term,
-                &pending.agent,
-                &pending.session_id,
-                Some(pending.road),
-                None,
-            ),
-        );
+        note_window_event(state.local_data_root(), &filed_line(term, &pending, None));
     }
 }
 
@@ -1033,6 +1156,8 @@ mod tests {
             launch: None,
             hand: None,
             fallback: None,
+            presses: 0,
+            retry_for: None,
             owed: None,
         }
     }
@@ -1736,6 +1861,9 @@ mod tests {
         /// What each fallback's delivery answers, in order; `Delivered` past
         /// the end.
         answers: std::sync::Mutex<std::collections::VecDeque<DeliveryOutcome>>,
+        /// The pane reports taking the words — its `working` hook — the
+        /// moment this many Enters alone have been pressed (t-18353).
+        working_at_press: Option<usize>,
     }
 
     impl FakeWindow {
@@ -1802,11 +1930,18 @@ mod tests {
 
         fn submit_again(
             &self,
-            _term: TermId,
+            term: TermId,
             _agent: &str,
             hand: Option<u64>,
         ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
-            self.entered.lock().unwrap().push(hand);
+            let pressed = {
+                let mut entered = self.entered.lock().unwrap();
+                entered.push(hand);
+                entered.len()
+            };
+            if self.working_at_press == Some(pressed) {
+                received(self, term);
+            }
             Some(self.answer())
         }
 
@@ -1859,6 +1994,238 @@ mod tests {
             )),
             Said::Unsent
         );
+    }
+
+    /// A row whose agent's catalog row says it is pressed at again for `horizon`
+    /// after its words went in (t-18353).
+    fn retrying(started: Instant, horizon: Duration) -> PendingNudge {
+        PendingNudge {
+            hand: Some(11),
+            retry_for: Some(horizon),
+            ..pending("claude", zerocode_core::NudgeRoad::Composer, started)
+        }
+    }
+
+    /// 22:31 on 2026-09-30, and again seven `--resume` at once on a machine
+    /// swapping 22 of 23 GB: the pane drew its first frame and read no input
+    /// for a minute, so every Enter written before it did was ignored and
+    /// the words waited on the line for a person. An Enter alone is pressed
+    /// again after each try the pane does not answer — until the pane takes
+    /// one — and the wake files how many it needed, the words never typed a
+    /// second time.
+    #[test]
+    fn a_pane_that_ignores_its_first_enters_is_pressed_at_until_it_takes_one() {
+        let window = FakeWindow {
+            working_at_press: Some(4),
+            answers: std::sync::Mutex::new([NOT_TAKEN; 32].into_iter().collect()),
+            ..FakeWindow::default()
+        };
+        window.walk(
+            TEST_TERM_WITHOUT_RECEIPT,
+            retrying(Instant::now(), Duration::from_secs(90)),
+            Some(NOT_TAKEN),
+        );
+        assert_eq!(
+            window.entered(),
+            vec![Some(11); 4],
+            "not four Enters alone, each on the hand count from before the words"
+        );
+        assert_eq!(window.typed(), 0, "the words were typed a second time");
+        assert_eq!(
+            window.noted_with("submitted again"),
+            1,
+            "the retries filed a line each"
+        );
+        assert_eq!(
+            window.noted_with("nudge=enter-retry n=4 receipt=working@"),
+            1,
+            "the wake did not file how many Enters the pane needed: {:?}",
+            window.noted.lock().unwrap()
+        );
+        assert!(!window.rows().holds(TEST_TERM_WITHOUT_RECEIPT));
+    }
+
+    /// The pane's `working` hook ends the repeat: not one Enter is pressed
+    /// after the pane reported taking the words, whatever the tries in flight
+    /// answer after it.
+    #[test]
+    fn no_enter_is_pressed_after_the_pane_reports_working() {
+        let window = FakeWindow {
+            working_at_press: Some(2),
+            answers: std::sync::Mutex::new([NOT_TAKEN; 32].into_iter().collect()),
+            ..FakeWindow::default()
+        };
+        window.walk(
+            TEST_TERM_WITHOUT_RECEIPT,
+            retrying(Instant::now(), Duration::from_secs(90)),
+            Some(NOT_TAKEN),
+        );
+        assert_eq!(window.entered().len(), 2, "an Enter followed the hook");
+        assert_eq!(
+            window.noted_with("nudge=enter-retry n=2 receipt=working@"),
+            1
+        );
+        assert_eq!(window.noted_with("receipt=none"), 0);
+    }
+
+    /// A person's hand — one keystroke — on the line ends the repeat: the
+    /// try it reached is refused by the delivery itself (`ready`'s guard,
+    /// against the hand count from before the words), which answers the row
+    /// that the words are the person's now, and no Enter is pressed after.
+    #[test]
+    fn a_hand_on_the_line_ends_the_repeat() {
+        use zerocode_pty::ready::Refusal;
+        for why in [
+            Refusal::HandReached,
+            Refusal::HoldsADraft,
+            Refusal::Parked,
+            Refusal::LaunchChanged,
+        ] {
+            let window = FakeWindow {
+                answers: std::sync::Mutex::new(
+                    [
+                        NOT_TAKEN,
+                        NOT_TAKEN,
+                        DeliveryOutcome::Refused(why),
+                        NOT_TAKEN,
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..FakeWindow::default()
+            };
+            window.walk(
+                TEST_TERM_WITHOUT_RECEIPT,
+                retrying(Instant::now(), Duration::from_secs(90)),
+                Some(NOT_TAKEN),
+            );
+            assert_eq!(
+                window.entered().len(),
+                3,
+                "{why:?}: the repeat went on past the person's hand"
+            );
+            assert_eq!(window.typed(), 0, "{why:?}: the words were typed again");
+        }
+    }
+
+    /// The repeat has an end, the row's own: past its horizon after the
+    /// words went in — or the most tries a pane can answer inside it — the
+    /// next silent try arms nothing, and the wake gives up, filing how many
+    /// Enters it pressed. A row that carries no horizon never presses a
+    /// second time.
+    #[test]
+    fn the_repeat_ends_at_the_rows_horizon_and_the_line_says_how_many_tries() {
+        let started = Instant::now();
+        let horizon = Duration::from_secs(60);
+        let mut rows = PendingNudges::default();
+        rows.register(TEST_TERM_WITHOUT_RECEIPT, retrying(started, horizon));
+        let mut presses = 0;
+        // Each try answers ten seconds after the last, as a pane that stays
+        // silent does: the receipt window and its patience.
+        for tenth in 1..=8 {
+            let now = started + Duration::from_secs(10) * tenth;
+            let armed = rows.heard(TEST_TERM_WITHOUT_RECEIPT, NOT_TAKEN, now);
+            if armed.is_some() {
+                presses += 1;
+            }
+            assert_eq!(
+                armed.is_some(),
+                now < started + horizon,
+                "the try answered {tenth}0 s after the words: horizon {horizon:?}"
+            );
+        }
+        assert_eq!(presses, 5, "a try armed at 10, 20, 30, 40 and 50 s");
+        // Answers that come sooner than a pane can be silent — a write the
+        // terminal refused, over and over — run out at the most a pane can
+        // answer inside the horizon, however early the horizon.
+        let mut fast = PendingNudges::default();
+        fast.register(1, retrying(started, horizon));
+        let armed = (0..100)
+            .filter(|tick| {
+                fast.heard(1, NOT_TAKEN, started + Duration::from_millis(*tick))
+                    .is_some()
+            })
+            .count();
+        assert_eq!(
+            u128::try_from(armed).expect("a count"),
+            horizon.as_millis() / zerocode_pty::ready::SUBMIT_ACK_TIMEOUT.as_millis()
+        );
+        // A row with no horizon: the one Enter alone, and never a second.
+        let mut plain = PendingNudges::default();
+        plain.register(
+            2,
+            pending("codex", zerocode_core::NudgeRoad::Composer, started),
+        );
+        assert!(plain.heard(2, NOT_TAKEN, started).is_some());
+        assert!(plain.heard(2, NOT_TAKEN, started).is_none());
+        // What the wake files when it gives up says how many it pressed: the
+        // first window closes on the fallback, the second gives up.
+        let window = Duration::from_secs(20);
+        assert!(
+            rows.timeout(TEST_TERM_WITHOUT_RECEIPT, started + horizon, window)
+                .is_none()
+        );
+        let filed = rows.timeout(
+            TEST_TERM_WITHOUT_RECEIPT,
+            started + horizon + window,
+            window,
+        );
+        let filed = match filed {
+            Some(Resolution::GaveUp(row)) => filed_line(TEST_TERM_WITHOUT_RECEIPT, &row, None),
+            other => panic!("the wake did not give up: {other:?}"),
+        };
+        assert!(
+            filed.ends_with("nudge=enter-retry n=5 receipt=none"),
+            "{filed}"
+        );
+    }
+
+    /// Every catalog row: the words left untaken are pressed at again only
+    /// where the row says its program reads its input late — and there for
+    /// exactly as long as the row says, on the same watch, the words never
+    /// typed a second time.
+    #[test]
+    fn only_a_row_that_says_so_is_pressed_at_again() {
+        let mut retried = Vec::new();
+        for spec in &zerocode_core::AGENT_SPECS {
+            let horizon = enter_retry_for(Some(spec.id));
+            let window = FakeWindow {
+                answers: std::sync::Mutex::new([NOT_TAKEN; 200].into_iter().collect()),
+                ..FakeWindow::default()
+            };
+            let (row, first) = left_unsent(
+                LeftUnsent {
+                    agent: spec.id,
+                    session_id: "01234567-session",
+                    text: RESTART_NUDGE,
+                    launch: None,
+                    hand: Some(3),
+                },
+                NOT_TAKEN,
+            )
+            .expect("an untaken Enter is watched");
+            assert_eq!(row.retry_for, horizon, "{}", spec.id);
+            window.rows().register(TEST_TERM_WITHOUT_RECEIPT, row);
+            watch(
+                &window,
+                TEST_TERM_WITHOUT_RECEIPT,
+                Some(first),
+                SHORT_WINDOW,
+            );
+            let most = horizon.map_or(1, |horizon| {
+                usize::try_from(
+                    horizon.as_millis() / zerocode_pty::ready::SUBMIT_ACK_TIMEOUT.as_millis(),
+                )
+                .unwrap_or(usize::MAX)
+                .min(usize::from(u8::MAX))
+            });
+            assert_eq!(window.entered().len(), most, "{}", spec.id);
+            assert_eq!(window.typed(), 0, "{}: the words were typed again", spec.id);
+            if horizon.is_some() {
+                retried.push(spec.id);
+            }
+        }
+        assert_eq!(retried, ["claude"], "a row was given a retry, or lost it");
     }
 
     /// A person's hand in between withdraws the Enter. Their own Enter (or
@@ -2047,6 +2414,153 @@ mod tests {
                 "{}: a delivered continuation was watched",
                 spec.id
             );
+        }
+    }
+
+    /// When, after its start, `delivery` first writes anything at a program
+    /// that behaves as one just started (t-18353): a handshake round, then a
+    /// first frame 50 ms later that draws the composer's glyph and shows the
+    /// cursor, then nothing at all — round after round on a 50 ms clock,
+    /// which is what 2.1.285 gives for seconds after its first frame — until
+    /// the delivery writes or gives up. `None` when it gave up without
+    /// writing. A synthetic clock, so the answer is exact and instant.
+    fn first_write_at_a_program_just_started(
+        mut delivery: PromptDelivery,
+        start: Instant,
+    ) -> Option<Duration> {
+        const ROUND: Duration = Duration::from_millis(50);
+        let line = zerocode_pty::ready::Line::default();
+        let mut now = start;
+        for round in 0..3_000 {
+            let seen = match round {
+                0 => Observed {
+                    wrote: true,
+                    bracketed_paste: true,
+                    ..Observed::default()
+                },
+                1 => Observed {
+                    wrote: true,
+                    bracketed_paste: true,
+                    cursor_shows: 1,
+                    marker_written: true,
+                    marker_in_alt: true,
+                    alt_screen: true,
+                },
+                _ => Observed {
+                    wrote: false,
+                    bracketed_paste: true,
+                    cursor_shows: 1,
+                    marker_written: false,
+                    marker_in_alt: false,
+                    alt_screen: true,
+                },
+            };
+            match delivery.poll_line(seen, line, now) {
+                DeliveryStep::Write(_) | DeliveryStep::Submit(_) => return Some(now - start),
+                DeliveryStep::Done(_) => return None,
+                DeliveryStep::Waiting => {}
+            }
+            now += ROUND;
+        }
+        None
+    }
+
+    /// A restored worker's continuation is typed at a program the window
+    /// started moments ago, and waits behind the door its row names for that
+    /// (t-18353) — every catalog row walked. The Enter pressed again for it
+    /// does not: its words were placed behind that door some ten seconds
+    /// before, so it waits for rest, as it always did (t-17037), whatever
+    /// the row.
+    ///
+    /// Measured on Claude Code 2.1.285: its first frame draws the composer
+    /// 30 ms after its handshake, and words placed there are lost, or left
+    /// unsent with every Enter after them ignored. The door the reseat used
+    /// — a running composer's rest — opens on that first glyph. A row that
+    /// says it has such a hand-over (`start_settle_ms`) is typed at only
+    /// after its settle; a row that says nothing is typed at exactly as
+    /// before.
+    #[test]
+    fn a_restored_pane_is_typed_at_only_after_its_row_says_it_has_settled() {
+        use crate::cmd::terminal::{PromptReadiness, prompt_delivery_for};
+        let start = Instant::now();
+        let mut settled = Vec::new();
+        for spec in &zerocode_core::AGENT_SPECS {
+            let row = Some(spec.id);
+            let door = |readiness, words: &str| {
+                first_write_at_a_program_just_started(
+                    prompt_delivery_for(words.to_string(), true, row, readiness, None, start),
+                    start,
+                )
+            };
+            let running = door(PromptReadiness::RestingBesideADraft, "words");
+            let restored = door(PromptReadiness::MountingBesideADraft, "words");
+            let enter_again = door(PromptReadiness::EnterAgain(None), "");
+            // The words and the Enter alone both go on the round a running
+            // composer's door opens, so one time answers for both — for
+            // every row: the Enter pressed again never waits out a settle.
+            assert_eq!(
+                enter_again, running,
+                "{}: the Enter pressed again did not wait for rest alone",
+                spec.id
+            );
+            match start_settle_for(row) {
+                Some(settle) => {
+                    settled.push(spec.id);
+                    assert!(
+                        running.is_some_and(|at| at < settle),
+                        "{}: the door the reseat used no longer opens inside the hand-over \
+                         ({running:?}, settle {settle:?}) — the measurement this test stands on",
+                        spec.id
+                    );
+                    assert!(
+                        restored.is_some_and(|at| at >= settle),
+                        "{}: the words were placed at a program still handing over its \
+                         start-up ({restored:?}, settle {settle:?})",
+                        spec.id
+                    );
+                }
+                None => assert_eq!(
+                    restored, running,
+                    "{}: a row with no hand-over was typed at differently",
+                    spec.id
+                ),
+            }
+        }
+        assert_eq!(
+            settled,
+            ["claude"],
+            "the rows that wait for a hand-over are the measured ones"
+        );
+    }
+
+    /// A restored worker's continuation the pane reported taking files the
+    /// wake's own receipt line (t-18353) — every catalog row walked: a row
+    /// whose program reports the prompts it takes files
+    /// `receipt=working@Ns` in the wake road's exact words, and a row that
+    /// reports nothing files none, because its delivery says nothing about
+    /// the words being taken.
+    #[test]
+    fn a_continuation_a_pane_reported_taking_files_the_wake_receipt_line() {
+        for spec in &zerocode_core::AGENT_SPECS {
+            let line = continuation_taken_line(
+                TEST_TERM_WITH_RECEIPT,
+                spec.id,
+                "01234567-session",
+                Duration::from_secs(9),
+            );
+            let reports = spec.harness.submit_ack != zerocode_core::capabilities::SubmitAck::None;
+            assert_eq!(line.is_some(), reports, "{}", spec.id);
+            if let Some(line) = line {
+                assert_eq!(
+                    line,
+                    format!(
+                        "term 41 resumed {} 01234567 nudge=composer receipt=working@9s",
+                        spec.id
+                    ),
+                    "{}",
+                    spec.id
+                );
+            }
         }
     }
 }
