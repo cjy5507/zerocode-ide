@@ -1140,13 +1140,14 @@ mod tests {
     }
 
     /// `.html` and `.htm`, in any case, keep today's copy: the version's own
-    /// bytes, byte for byte.
+    /// bytes, byte for byte. (Three different names: this folder's file system
+    /// may not tell `a.html` from `A.HTML`, and an export never overwrites.)
     #[test]
     fn an_export_named_html_or_htm_keeps_copying_the_versions_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let meta = published_page(dir.path(), "<title>Report</title><main>hello</main>");
         let snapshot = std::fs::read(meta.path()).unwrap();
-        for name in ["page.html", "PAGE.HTML", "page.htm"] {
+        for name in ["page.html", "UPPER.HTML", "third.htm"] {
             let out = dir.path().join(name);
             export(
                 dir.path(),
