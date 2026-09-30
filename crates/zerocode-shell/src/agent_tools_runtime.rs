@@ -729,6 +729,34 @@ impl TeamWindow {
         let screen = pty.terminal().grid().visible_text();
         observe(&screen, since_ms);
     }
+
+    /// Paste prose at a pane on the ledger's behalf and wait for the
+    /// delivery's answer — `None` when it could not be asked, or never
+    /// answered. A dispatch preamble is typed at a pane the run summoned, and
+    /// a pane a person has reached is not the run's to type into: the
+    /// draft-preserving readiness yields to their hand, a parked question
+    /// and a relaunch, at the write.
+    fn pasted(&self, term: TermId, text: &str) -> Option<DeliveryOutcome> {
+        let state = self.app.state::<AppState>();
+        let agent = state.agent_terms().get(&term).copied();
+        let waiting = crate::cmd::terminal::type_prompt_at_term(
+            &state,
+            term,
+            text.to_string(),
+            true,
+            agent,
+            crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+        )
+        .ok()?;
+        // Its wait covers the delivery's own for the pane's receipt
+        // (t-14037). Words entered twice at a pane that never answered are
+        // on its line, told to the person, and not the run's to type again.
+        waiting
+            .recv_timeout(
+                zerocode_pty::ready::TIMEOUT + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
+            )
+            .ok()
+    }
 }
 
 impl agent_teams::Host for TeamWindow {
@@ -1470,30 +1498,36 @@ impl agent_teams::Host for TeamWindow {
     }
 
     fn paste(&self, term: TermId, text: &str) -> bool {
+        self.pasted(term, text)
+            .is_some_and(DeliveryOutcome::entered)
+    }
+
+    fn paste_continuation(&self, term: TermId, text: &str) -> bool {
         let state = self.app.state::<AppState>();
+        // Read before the words go: the Enter pressed again is for this
+        // launch, on a line no hand has reached since (t-17037).
+        let launch = crate::cmd::terminal::launch_of(&state, term);
+        let hand = crate::human_input::line_of(term).1;
         let agent = state.agent_terms().get(&term).copied();
-        // A dispatch preamble is typed on the ledger's behalf, at a pane the
-        // run summoned — and a pane a person has reached is not the run's to
-        // type into. The draft-preserving readiness yields to their hand, a
-        // parked question and a relaunch, at the write.
-        let Ok(waiting) = crate::cmd::terminal::type_prompt_at_term(
-            &state,
-            term,
-            text.to_string(),
-            true,
-            agent,
-            crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
-        ) else {
+        let Some(outcome) = self.pasted(term, text) else {
             return false;
         };
-        // Its wait covers the delivery's own for the pane's receipt
-        // (t-14037). Words entered twice at a pane that never answered are
-        // on its line, told to the person, and not the run's to type again.
-        waiting
-            .recv_timeout(
-                zerocode_pty::ready::TIMEOUT + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
-            )
-            .is_ok_and(DeliveryOutcome::entered)
+        if let Some(agent) = agent {
+            let session = self.provider_session(term).map(|held| held.id);
+            crate::restart_nudge_runtime::arm_left_unsent(
+                &self.app,
+                term,
+                crate::restart_nudge_runtime::LeftUnsent {
+                    agent,
+                    session_id: session.as_deref().unwrap_or_default(),
+                    text,
+                    launch,
+                    hand,
+                },
+                outcome,
+            );
+        }
+        outcome.entered()
     }
 
     /// The integration record's verdict on this pane's zo, as the one sentence

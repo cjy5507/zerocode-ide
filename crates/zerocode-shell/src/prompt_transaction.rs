@@ -153,11 +153,15 @@ pub(super) fn turn(
 /// leaves the person holding the words, so they travel with the outcome. One
 /// that pasted and withheld the Enter has left them in the composer, where
 /// the person can already read them; carrying them again would be a second
-/// copy of a line that is on screen.
+/// copy of a line that is on screen. So has an Enter alone (t-17037): it
+/// carries no words, and the ones it was for are on the line already.
 pub(super) fn words_to_hand_back(
     delivery: &PromptDelivery,
     outcome: DeliveryOutcome,
 ) -> Option<String> {
+    if delivery.enter_again().is_some() {
+        return None;
+    }
     match outcome {
         DeliveryOutcome::Delivered | DeliveryOutcome::Unsubmitted(_) => None,
         DeliveryOutcome::TimedOut | DeliveryOutcome::Refused(_) => {
@@ -237,7 +241,8 @@ pub(super) fn settle(
                 term,
                 PromptDelivery::new(next.text, next.submit, next.signal, now)
                     .clearing(next.clearing)
-                    .guarded(next.guard),
+                    .guarded(next.guard)
+                    .pressing(next.enter_again),
             );
         }
         if row.is_empty() {
@@ -342,6 +347,100 @@ mod tests {
         );
     }
 
+    /// t-17037: the Enter alone the restart's watch presses, for words a
+    /// resumed pane left on its line with their Enter untaken, is the one
+    /// typed-prompt door's own delivery turned by the pump's seam: one
+    /// carriage return and nothing else — no clear keys, no paste — and a
+    /// person's hand on the line since the words were placed withholds it
+    /// entirely. A queued copy stays the Enter alone.
+    #[test]
+    fn the_enter_alone_writes_one_return_and_yields_to_a_hand_since_the_words() {
+        use crate::cmd::terminal::{PromptReadiness, prompt_delivery_for};
+        const TERM: TermId = 8_317;
+        crate::human_input::forget_term(TERM);
+        let placed = crate::human_input::line_of(TERM).1;
+        let enter_alone = |now: Instant| {
+            prompt_delivery_for(
+                String::new(),
+                true,
+                Some("claude"),
+                PromptReadiness::EnterAgain(placed),
+                None,
+                now,
+            )
+        };
+        // Turn one delivery until it settles; answers every write and how it
+        // settled.
+        let drive = |delivery: &mut PromptDelivery, start: Instant| {
+            let mut wrote: Vec<Vec<u8>> = Vec::new();
+            let mut round = 0;
+            loop {
+                let line = refresh_hand(TERM, Line::default());
+                let turned = turn(
+                    TERM,
+                    delivery,
+                    composer(round),
+                    line,
+                    start + SUBMIT_GAP * u32::try_from(round).unwrap_or(u32::MAX),
+                    |bytes| {
+                        wrote.push(bytes.to_vec());
+                        true
+                    },
+                );
+                if let Turned::Settled(outcome) = turned {
+                    return (wrote, outcome);
+                }
+                round += 1;
+                assert!(round < 16, "the Enter alone never settled");
+            }
+        };
+        let start = Instant::now();
+        let (wrote, outcome) = drive(&mut enter_alone(start), start);
+        assert_eq!(
+            wrote,
+            vec![b"\r".to_vec()],
+            "not one Enter and nothing else"
+        );
+        assert_eq!(outcome, DeliveryOutcome::Delivered);
+
+        // A person types after the words were placed: nothing is written.
+        human_write(TERM, b"x", || Ok::<(), ()>(())).unwrap();
+        let (wrote, outcome) = drive(&mut enter_alone(start), start);
+        assert!(
+            wrote.is_empty(),
+            "an Enter went over a person's hand: {wrote:?}"
+        );
+        assert_eq!(outcome, DeliveryOutcome::Refused(Refusal::HandReached));
+
+        // Parked behind another delivery, it comes back the Enter alone.
+        let mut deliveries = HashMap::new();
+        let mut waiters = HashMap::new();
+        let mut queue: HashMap<TermId, VecDeque<QueuedPrompt>> = HashMap::new();
+        let (completion, _receipt) = std::sync::mpsc::sync_channel(1);
+        queue.entry(TERM).or_default().push_back(QueuedPrompt {
+            text: String::new(),
+            submit: true,
+            signal: ReadySignal::Rest(None),
+            clearing: false,
+            guard: Guard::for_somebody_elses_line(None),
+            enter_again: Some(zerocode_pty::EnterAgain { hand: placed }),
+            completion,
+        });
+        settle(
+            TERM,
+            DeliveryOutcome::Delivered,
+            &mut deliveries,
+            &mut waiters,
+            &mut queue,
+            start,
+        );
+        assert_eq!(
+            deliveries.get(&TERM).and_then(PromptDelivery::enter_again),
+            Some(zerocode_pty::EnterAgain { hand: placed })
+        );
+        crate::human_input::forget_term(TERM);
+    }
+
     /// The grid's facts for a composer that shook hands and showed its
     /// cursor: the shape every round below feeds.
     fn composer(shows: u64) -> Observed {
@@ -374,6 +473,7 @@ mod tests {
                 signal: ReadySignal::CursorShown,
                 clearing: false,
                 guard,
+                enter_again: None,
                 completion,
             },
             receipt,
@@ -988,6 +1088,7 @@ done
                     signal: ReadySignal::Rest(ready_signal_for(Some("claude")).marker()),
                     clearing: false,
                     guard: Guard::for_somebody_elses_line(None),
+                    enter_again: None,
                     completion,
                 });
         }

@@ -710,6 +710,21 @@ impl Refusal {
     }
 }
 
+/// The Enter a paste's own delivery pressed and its pane never took, pressed
+/// once more on its own (t-17037) — no words, no clear keys, no envelope.
+///
+/// Words a resumed pane was handed can land in a composer that is mounted
+/// enough to take the paste and not yet the Enter: they sit there as a
+/// draft, and a person had to press Enter for them. What finishes them is an
+/// Enter at the next moment the composer says it is ready — never the words
+/// typed a second time. `hand` is the line's hand count read before those
+/// words were placed: a hand that has reached the line since means a person
+/// is on it, and the Enter is theirs to press or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnterAgain {
+    pub hand: Option<u64>,
+}
+
 /// One prompt on its way into one shell, driven by the pump.
 ///
 /// The shape is a hand-rolled future on purpose: the pump loop is the one
@@ -733,6 +748,9 @@ pub struct PromptDelivery {
     /// left to a person (t-14037) — [`SUBMIT_ACK_TIMEOUT`] and [`TIMEOUT`]
     /// everywhere but a test's short clock.
     receipt: ReceiptClock,
+    /// Set for a delivery that presses only the Enter its words are still
+    /// waiting on (t-17037); `None` for one that carries words.
+    enter_again: Option<EnterAgain>,
 }
 
 /// The receipt's two clocks (t-14037).
@@ -782,6 +800,7 @@ impl PromptDelivery {
             wait: Readiness::new(signal, now),
             phase: Phase::Waiting,
             receipt: ReceiptClock::default(),
+            enter_again: None,
         }
     }
 
@@ -823,6 +842,7 @@ impl PromptDelivery {
             wait: Readiness::with_deadlines(signal, now, quiet, timeout),
             phase: Phase::Waiting,
             receipt: ReceiptClock::default(),
+            enter_again: None,
         }
     }
 
@@ -845,6 +865,29 @@ impl PromptDelivery {
     pub const fn receipt_clock(mut self, window: Duration, patience: Duration) -> Self {
         self.receipt = ReceiptClock { window, patience };
         self
+    }
+
+    /// Make this delivery the Enter alone, for words already on the line
+    /// (t-17037) — or leave it carrying its words, for `None`. See
+    /// [`EnterAgain`]: once the composer is ready, the Enter goes only on a
+    /// line no hand has reached since `hand`, with no question parked there,
+    /// under the launch addressed; and it goes once — a pane that still
+    /// reports nothing is not pressed a third time.
+    #[must_use]
+    pub const fn pressing(mut self, enter_again: Option<EnterAgain>) -> Self {
+        if let Some(again) = enter_again {
+            self.hand_at_paste = again.hand;
+            self.submit = true;
+            self.clearing = false;
+        }
+        self.enter_again = enter_again;
+        self
+    }
+
+    /// Whether this delivery is the Enter alone, and for which hand count.
+    #[must_use]
+    pub const fn enter_again(&self) -> Option<EnterAgain> {
+        self.enter_again
     }
 
     /// Choose what this delivery refuses to write over. See [`Guard`].
@@ -909,6 +952,7 @@ impl PromptDelivery {
                     self.phase = Phase::Done(Outcome::TimedOut);
                     Step::Done(Outcome::TimedOut)
                 }
+                State::Ready if self.enter_again.is_some() => self.enter_alone(line, now),
                 State::Ready => {
                     // The line, looked at as the words are about to land —
                     // not when they were registered, which may have been a
@@ -972,6 +1016,31 @@ impl PromptDelivery {
             } => self.confirm(line, now, entered_at, taken, again),
             Phase::Done(outcome) => Step::Done(outcome),
         }
+    }
+
+    /// The Enter alone, at a composer that just said it is ready (t-17037).
+    ///
+    /// The same guard as any Enter over words already on the line, read
+    /// against the hand count from before they were placed: a person who
+    /// reached the line since, a question parked there, a relaunch — each
+    /// withholds it, and nothing was written. A pane that reports what it
+    /// takes is then waited on for its receipt with the one Enter already
+    /// spent, so silence leaves the words to a person rather than pressing
+    /// again.
+    fn enter_alone(&mut self, line: Line, now: Instant) -> Step {
+        if let Some(why) = self.guard.against_submit(line, self.hand_at_paste) {
+            self.phase = Phase::Done(Outcome::Refused(why));
+            return Step::Done(Outcome::Refused(why));
+        }
+        self.phase = match line.taken {
+            Some(taken) => Phase::Confirming {
+                entered_at: now,
+                taken,
+                again: true,
+            },
+            None => Phase::Done(Outcome::Delivered),
+        };
+        Step::Submit(b"\r".to_vec())
     }
 
     /// One round of waiting for the pane's receipt (t-14037).
@@ -2271,5 +2340,144 @@ mod tests {
         let distinct: std::collections::HashSet<&str> = tokens.into_iter().collect();
         assert_eq!(distinct.len(), tokens.len(), "two refusals share a token");
         assert_eq!(Refusal::HoldsADraft.token(), "holds_a_draft");
+    }
+
+    /* ---- the Enter alone, for words already on the line (t-17037) ------ */
+
+    /// An Enter-only delivery on somebody else's line, its hand count pinned
+    /// at `hand`, reporting its pane's receipts on the short clock.
+    fn enter_again(hand: Option<u64>, start: Instant) -> PromptDelivery {
+        PromptDelivery::new(String::new(), true, ReadySignal::CursorShown, start)
+            .guarded(Guard::for_somebody_elses_line(None))
+            .receipt_clock(WINDOW, SILENCE)
+            .pressing(Some(EnterAgain { hand }))
+    }
+
+    /// 07:08 on 2026-09-30: the words were pasted, both Enters went while
+    /// the resumed program was still booting, and they sat in the composer
+    /// until a person pressed Enter. What finishes them is one Enter at the
+    /// composer's next ready — no paste, no clear keys, and never a third
+    /// Enter: a pane that still reports nothing leaves them to a person.
+    #[test]
+    fn the_enter_alone_writes_one_carriage_return_and_no_words() {
+        let start = Instant::now();
+        let mut delivery = enter_again(Some(3), start);
+        let line = Line {
+            hand: Some(3),
+            ..reporting(4)
+        };
+        assert_eq!(
+            delivery.poll_line(seen(true, true, 0, false), line, start),
+            Step::Waiting
+        );
+        let entered = start + SUBMIT_GAP;
+        assert_eq!(
+            delivery.poll_line(seen(true, true, 1, false), line, entered),
+            Step::Submit(b"\r".to_vec()),
+            "the ready composer was not sent its Enter alone"
+        );
+        // Past the receipt window with no receipt: no Enter again.
+        assert_eq!(
+            delivery.poll_line(seen(false, true, 1, false), line, entered + WINDOW),
+            Step::Waiting,
+            "the Enter alone was pressed a second time"
+        );
+        assert_eq!(
+            delivery.poll_line(
+                seen(false, true, 1, false),
+                line,
+                entered + WINDOW + SILENCE
+            ),
+            Step::Done(Outcome::Unsubmitted(Refusal::NotTaken))
+        );
+        // A pane that takes it is done with it.
+        let mut taken = enter_again(None, start);
+        taken.poll_line(seen(true, true, 0, false), reporting(4), start);
+        taken.poll_line(seen(true, true, 1, false), reporting(4), entered);
+        assert_eq!(
+            taken.poll_line(
+                seen(false, true, 1, false),
+                reporting(5),
+                entered + SUBMIT_GAP
+            ),
+            Step::Done(Outcome::Delivered)
+        );
+        // A pane that reports nothing is done at the Enter.
+        let mut silent = enter_again(None, start);
+        silent.poll_line(seen(true, true, 0, false), Line::default(), start);
+        assert_eq!(
+            silent.poll_line(seen(true, true, 1, false), Line::default(), entered),
+            Step::Submit(b"\r".to_vec())
+        );
+        assert_eq!(
+            silent.poll_line(seen(false, true, 1, false), Line::default(), entered),
+            Step::Done(Outcome::Delivered)
+        );
+    }
+
+    /// A person's hand since the words were placed, a question parked on the
+    /// pane, a program relaunched under it: each withholds the Enter alone,
+    /// and nothing at all is written.
+    #[test]
+    fn the_enter_alone_is_withheld_from_a_line_a_person_reached() {
+        let start = Instant::now();
+        let placed = Line {
+            hand: Some(3),
+            ..Line::default()
+        };
+        for (name, line, why) in [
+            (
+                "a hand since",
+                Line {
+                    hand: Some(4),
+                    draft: true,
+                    ..placed
+                },
+                Refusal::HandReached,
+            ),
+            (
+                "a first hand",
+                Line {
+                    hand: Some(1),
+                    ..Line::default()
+                },
+                Refusal::HandReached,
+            ),
+            (
+                "a parked question",
+                Line {
+                    parked: true,
+                    ..placed
+                },
+                Refusal::Parked,
+            ),
+        ] {
+            let pinned = if name == "a first hand" {
+                None
+            } else {
+                Some(3)
+            };
+            let mut delivery = enter_again(pinned, start);
+            delivery.poll_line(seen(true, true, 0, false), line, start);
+            assert_eq!(
+                delivery.poll_line(seen(true, true, 1, false), line, start + SUBMIT_GAP),
+                Step::Done(Outcome::Refused(why)),
+                "{name}"
+            );
+            assert!(!delivery.pasted(), "{name}");
+        }
+        let mut relaunched =
+            PromptDelivery::new(String::new(), true, ReadySignal::CursorShown, start)
+                .guarded(Guard::for_somebody_elses_line(Some(7)))
+                .pressing(Some(EnterAgain { hand: Some(3) }));
+        let moved = Line {
+            launch: Some(8),
+            ..placed
+        };
+        relaunched.poll_line(seen(true, true, 0, false), moved, start);
+        assert_eq!(
+            relaunched.poll_line(seen(true, true, 1, false), moved, start + SUBMIT_GAP),
+            Step::Done(Outcome::Refused(Refusal::LaunchChanged))
+        );
     }
 }
