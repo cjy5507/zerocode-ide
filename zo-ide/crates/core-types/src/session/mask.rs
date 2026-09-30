@@ -163,7 +163,7 @@ fn mask_value(value: &mut Value) -> bool {
 /// Overwrite a string field with `replacement`; whether there was one.
 fn replace_string(field: Option<&mut Value>, replacement: &str) -> bool {
     match field {
-        Some(slot @ Value::String(_)) => {
+        Some(slot) if slot.is_string() => {
             *slot = Value::String(replacement.to_owned());
             true
         }
