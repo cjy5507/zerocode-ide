@@ -467,10 +467,15 @@ impl PendingNudges {
         if matches!(said, Said::Reached | Said::Unsent) {
             pending.spend();
         }
-        if said != Said::Unsent || pending.fallback.is_some() {
+        if said != Said::Unsent {
             return None;
         }
-        pending.fallback = Some(Fallback::Submitted);
+        match pending.fallback {
+            None => pending.fallback = Some(Fallback::Submitted),
+            Some(Fallback::Submitted) if pending.may_press_again(now) => {}
+            Some(_) => return None,
+        }
+        pending.presses = pending.presses.saturating_add(1);
         if pending.first_window_closed.is_some() {
             pending.first_window_closed = Some(now);
         }
@@ -824,13 +829,7 @@ fn note_resolution(
 ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
     match resolution {
         Resolution::Working(pending, elapsed) => {
-            window.note(&log_line(
-                term,
-                &pending.agent,
-                &pending.session_id,
-                Some(pending.road),
-                Some(elapsed),
-            ));
+            window.note(&filed_line(term, &pending, Some(elapsed)));
             None
         }
         // Deliver the one fallback and file nothing yet: its own answer and
@@ -853,19 +852,15 @@ fn note_resolution(
             if window.launch(term) != pending.launch {
                 return None;
             }
-            window.note(&fallback_line(term, &pending, Fallback::Submitted));
+            if pending.presses <= 1 {
+                window.note(&fallback_line(term, &pending, Fallback::Submitted));
+            }
             window.submit_again(term, &pending.agent, pending.hand)
         }
         // A full window after the first and still no receipt: the line is
         // filed `receipt=none`, and nothing is delivered again.
         Resolution::GaveUp(pending) => {
-            window.note(&log_line(
-                term,
-                &pending.agent,
-                &pending.session_id,
-                Some(pending.road),
-                None,
-            ));
+            window.note(&filed_line(term, &pending, None));
             None
         }
     }
@@ -875,7 +870,7 @@ fn note_resolution(
 /// the first window, a window for the one fallback, and the close that gives
 /// up. The table gives up on its own by then; this only keeps a watch from
 /// outliving its row.
-const WATCH_BEATS: usize = 3;
+const WATCH_BEATS: u32 = 3;
 
 /// Watch one marked wake through its receipt windows (t-3058, t-7812 R2,
 /// t-17037), each `window` long — the product's is
@@ -899,8 +894,12 @@ pub(super) fn watch(
     window: Duration,
 ) {
     let mut delivery = delivery;
-    for _ in 0..WATCH_BEATS {
-        if !receipts.rows().holds(term) {
+    let began = Instant::now();
+    loop {
+        // A row that presses Enter again keeps its watch as long as its
+        // horizon, and one that does not keeps it for the beats it always had.
+        let horizon = receipts.rows().retry_for(term).unwrap_or_default();
+        if !receipts.rows().holds(term) || began.elapsed() >= window * WATCH_BEATS + horizon {
             break;
         }
         let beat = Instant::now() + window;
@@ -1121,16 +1120,7 @@ pub(super) fn received(receipts: &dyn WakeReceipts, term: TermId) {
 pub(super) fn forgotten(state: &AppState, term: TermId) {
     let pending = state.pending_nudges().remove(term);
     if let Some(pending) = pending {
-        note_window_event(
-            state.local_data_root(),
-            &log_line(
-                term,
-                &pending.agent,
-                &pending.session_id,
-                Some(pending.road),
-                None,
-            ),
-        );
+        note_window_event(state.local_data_root(), &filed_line(term, &pending, None));
     }
 }
 
