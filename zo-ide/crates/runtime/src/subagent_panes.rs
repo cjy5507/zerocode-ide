@@ -53,8 +53,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 mod child_watch;
+mod tmux_ask;
 
 pub use child_watch::{ChildWatch, Woken};
+use tmux_ask::Said;
 
 /// Settings key holding the sub-agent mode (`auto` | `panes` | `inline`).
 pub const SETTINGS_MODE_KEY: &str = "subagentMode";
@@ -1597,34 +1599,50 @@ impl Tmux {
     }
 
     /// End one pane. `false` when tmux refused — the pane may already be gone,
-    /// which is the same outcome.
+    /// which is the same outcome — or has not answered within
+    /// [`PANE_KILL_WAIT`]; a `kill-pane` that slow is left to finish on its
+    /// own, within [`TMUX_ASK_BOUND`] (t-18917).
     #[must_use]
     pub fn kill_pane(&self, pane: &str) -> bool {
-        self.run(&[
-            "kill-pane".to_string(),
-            "-t".to_string(),
-            pane.to_string(),
-        ])
-        .is_ok()
+        let ask = tmux_ask::Ask::start(&self.program, &["kill-pane", "-t", pane], false, None);
+        match ask.answer_within(PANE_KILL_WAIT) {
+            Some(said) => matches!(said, Said::Yes(_)),
+            None => {
+                ask.let_finish();
+                false
+            }
+        }
     }
 
     /// Is this pane still one of the team's?
     ///
     /// The question a parent asks about a child that has written nothing: a
     /// pane that is gone with no `result.json` is a child that died, and
-    /// waiting out the whole budget for it would hide that for an hour.
+    /// waiting out the whole budget for it would hide that for an hour. Asked
+    /// and waited for here, within [`TMUX_ASK_BOUND`] (t-18917); a wait on a
+    /// clock that listens asks without waiting, and looks at the answer when
+    /// it is in.
     #[must_use]
     pub fn pane_exists(&self, pane: &str) -> bool {
-        let Ok(listed) = self.run(&[
-            "list-panes".to_string(),
-            "-F".to_string(),
-            "#{pane_id}".to_string(),
-        ]) else {
-            // tmux could not be asked. That is not evidence the pane died, and
-            // treating it as such would end a child that is still working.
-            return true;
-        };
-        listed.lines().any(|line| line.trim() == pane)
+        self.ask_panes(None)
+            .answer_within(TMUX_ASK_BOUND)
+            .is_none_or(|said| stands(&said, pane))
+    }
+
+    /// Ask which panes stand, on a thread of its own: `wake` ends the asking
+    /// wait's rest once tmux has answered.
+    fn ask_panes(&self, wake: Option<child_watch::Waker>) -> tmux_ask::Ask {
+        tmux_ask::Ask::start(&self.program, &["list-panes", "-F", "#{pane_id}"], true, wake)
+    }
+}
+
+/// Whether what tmux said leaves `pane` standing. A tmux that could not be
+/// asked, or said nothing in time, is not evidence the pane died, and treating
+/// it as such would end a child that is still working.
+fn stands(said: &Said, pane: &str) -> bool {
+    match said {
+        Said::Yes(listed) => listed.lines().any(|line| line.trim() == pane),
+        Said::No | Said::Nothing => true,
     }
 }
 
@@ -1912,7 +1930,10 @@ pub fn wait_for_turn_result(
 /// tmux is asked once at the start and then only when the child's channel ends
 /// or, with none held, every [`PANE_ASK_BARE`]. Without a watch it looks at
 /// everything at every look, as it always did, but asks tmux no oftener than
-/// that.
+/// that. No ask of tmux holds the wait past [`TMUX_ASK_BOUND`]: each runs on a
+/// thread of its own, which a wait on a clock that listens does not wait for,
+/// and the end's `kill-pane` is waited for [`PANE_KILL_WAIT`] at most
+/// (t-18917).
 #[allow(clippy::too_many_arguments)] // one wait, one table of ways it ends
 pub fn wait_for_turn_result_on(
     clock: &dyn WaitClock,
@@ -1950,6 +1971,10 @@ fn wait_with_cadence(
     let mut read_at: Option<std::time::Instant> = None;
     let mut pane_asked_at: Option<std::time::Instant> = None;
     let mut channel_tried_at: Option<std::time::Instant> = None;
+    // The pane question out on a thread of its own. Dropped with the wait, a
+    // question still out ends its tmux.
+    let mut asking: Option<tmux_ask::Ask> = None;
+    let waker = watch.as_ref().map(ChildWatch::waker);
     let answered = || {
         TeammateResult::read_turn(directory, turn)
             .map(|result| PaneOutcome::Finished(Box::new(result)))
@@ -1972,8 +1997,10 @@ fn wait_with_cadence(
         }
         if cancelled() {
             // The door first, then the pane. A pane that is already gone
-            // answers `false`, which is the same outcome as one this ended.
+            // answers `false`, which is the same outcome as one this ended. A
+            // question still out is moot, and its tmux goes first.
             close();
+            drop(asking.take());
             let _ = tmux.kill_pane(pane);
             return answered().unwrap_or(PaneOutcome::Cancelled);
         }
@@ -2000,6 +2027,7 @@ fn wait_with_cadence(
         let ran = now.duration_since(started);
         if budget.rule().reached(ran, quiet_for) {
             close();
+            drop(asking.take());
             let _ = tmux.kill_pane(pane);
             return answered().unwrap_or(PaneOutcome::TimedOut);
         }
@@ -2007,12 +2035,32 @@ fn wait_with_cadence(
         // from `split-window`), when the child's channel ended, and otherwise
         // only now and then — a process spawn at every look was four a second
         // for each child. With the channel held, its ending is what says the
-        // child is gone.
+        // child is gone. A wait on a clock that listens asks without waiting
+        // and reads the answer at a later look; one on a clock that does not —
+        // a test's pretended time, whose steps take no real time — waits for
+        // the answer where it asks, within the same bound.
         let held = watch.as_ref().is_some_and(ChildWatch::holds_channel);
         let every = if held { cadence.pane_ask_held } else { cadence.pane_ask_bare };
-        if woken.channel_closed || pane_asked_at.is_none_or(|at| now.duration_since(at) >= every) {
+        if woken.channel_closed {
+            // What a question already out says may be from before the child
+            // died: it is dropped, and its tmux with it, for one asked now.
+            drop(asking.take());
+        }
+        if let Some(said) = asking.as_ref().and_then(tmux_ask::Ask::heard) {
+            asking = None;
+            if !stands(&said, pane) {
+                // The child may have written since the read above.
+                return answered().unwrap_or(PaneOutcome::Vanished);
+            }
+        }
+        if asking.is_none() && (woken.channel_closed || pane_asked_at.is_none_or(|at| now.duration_since(at) >= every)) {
             pane_asked_at = Some(now);
-            if !tmux.pane_exists(pane) {
+            if clock.listens() {
+                // Only the confirmation of a death wakes the wait when tmux
+                // has answered. Any other answer is read at the next look,
+                // which costs the wait no wake-up of its own.
+                asking = Some(tmux.ask_panes(if woken.channel_closed { waker.clone() } else { None }));
+            } else if !tmux.pane_exists(pane) {
                 // The child may have written between the read above and this ask.
                 return answered().unwrap_or(PaneOutcome::Vanished);
             }
