@@ -88,13 +88,14 @@ impl ApiClient for ExplodingSyncApi {
     }
 }
 
-/// Declines every request in the `cyber` category, after [`REQUEST_LATENCY`],
-/// and counts them.
-struct DecliningCyber {
+/// Declines every request in one category, after [`REQUEST_LATENCY`], and
+/// counts them.
+struct Declining {
     calls: AtomicUsize,
+    category: &'static str,
 }
 
-impl AsyncApiClient for DecliningCyber {
+impl AsyncApiClient for Declining {
     fn stream_async<'a>(
         &'a self,
         _request: ApiRequest,
@@ -105,14 +106,19 @@ impl AsyncApiClient for DecliningCyber {
             self.calls.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(REQUEST_LATENCY).await;
             let mut events = vec![AssistantEvent::StopReason("refusal".to_string())];
-            runtime::push_refusal_category(&mut events, Some("cyber"));
+            runtime::push_refusal_category(&mut events, Some(self.category));
             events.push(AssistantEvent::MessageStop);
             Ok(events)
         })
     }
 }
 
+/// Denies whatever it is asked, and counts the questions. The count is a
+/// static because the tests of this binary run one at a time under
+/// [`ENV_LOCK`].
 struct DenyPrompter;
+
+static QUESTIONS_ASKED: AtomicUsize = AtomicUsize::new(0);
 
 impl PermissionPrompter for DenyPrompter {
     fn decide<'a>(
@@ -120,6 +126,7 @@ impl PermissionPrompter for DenyPrompter {
         _request: AsyncPermissionRequest,
     ) -> Pin<Box<dyn Future<Output = Result<AsyncPermissionDecision, PermissionError>> + Send + 'a>>
     {
+        QUESTIONS_ASKED.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(AsyncPermissionDecision::Deny) })
     }
 }
@@ -166,8 +173,9 @@ fn system_lines(blocks: &[RenderBlock]) -> Vec<String> {
 #[tokio::test]
 async fn a_continue_after_the_persons_cyber_decline_asks_once_and_says_so() {
     let _catalog = the_persons_catalog();
-    let client = Arc::new(DecliningCyber {
+    let client = Arc::new(Declining {
         calls: AtomicUsize::new(0),
+        category: "cyber",
     });
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -221,5 +229,66 @@ async fn a_continue_after_the_persons_cyber_decline_asks_once_and_says_so() {
                 if text == core_types::retry_signal::REFUSAL_STANDING_NOTICE
         ),
         "the conversation records the same words: {last:?}"
+    );
+}
+
+/// t-15890's path covers the Sonnet lineup too (t-17474). A Sonnet 5.5
+/// `reasoning_extraction` decline is routed nowhere — the `sonnet` row used to
+/// declare no routes, so the ladder offered Opus 5.5, behind the same
+/// classifier, and asked the person whether to continue there. Now the turn
+/// makes the request and the one same-model retry, says the decline stands,
+/// and asks nothing; the person's `continue` asks once and hears what a bare
+/// `continue` will meet, as on Opus.
+#[tokio::test]
+async fn a_continue_after_a_sonnet_decline_the_provider_routes_nowhere_asks_once_and_says_so() {
+    let _catalog = the_persons_catalog();
+    QUESTIONS_ASKED.store(0, Ordering::SeqCst);
+    let client = Arc::new(Declining {
+        calls: AtomicUsize::new(0),
+        category: "reasoning_extraction",
+    });
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        ExplodingSyncApi,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    runtime.set_context_model("claude-sonnet-5-5");
+    runtime.set_attendance(runtime::Attendance::Attended);
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Ask);
+    runtime.set_async_api_client(client.clone());
+
+    let (iterations, blocks, first_took) = turn(&mut runtime, "say hello").await;
+    let first = client.calls.load(Ordering::SeqCst);
+    assert_eq!(first, 2, "turn one: the request and the same-model retry");
+    assert_eq!(iterations, 2);
+    assert_eq!(
+        QUESTIONS_ASKED.load(Ordering::SeqCst),
+        0,
+        "no question about leaving Sonnet 5.5 for a model behind the same classifier"
+    );
+    let lines = system_lines(&blocks);
+    assert!(
+        lines.contains(&core_types::retry_signal::refusal_stands_notice("reasoning_extraction")),
+        "the provider routes `reasoning_extraction` to no other model, and the turn says so: {lines:?}"
+    );
+
+    let (iterations, blocks, took) = turn(&mut runtime, "continue").await;
+    let second = client.calls.load(Ordering::SeqCst) - first;
+    eprintln!(
+        "t-17474 measured | Sonnet 5.5, reasoning_extraction, no route | turn one {first} requests, \
+         0 questions in {:.2}s | the continue turn {second} requests in {:.2}s at {:?} a request",
+        first_took.as_secs_f64(),
+        took.as_secs_f64(),
+        REQUEST_LATENCY,
+    );
+    assert_eq!(second, 1, "turn two asks once");
+    assert_eq!(iterations, 1);
+    assert_eq!(QUESTIONS_ASKED.load(Ordering::SeqCst), 0);
+    let lines = system_lines(&blocks);
+    assert!(
+        lines.contains(&core_types::retry_signal::REFUSAL_STANDING_NOTICE.to_string()),
+        "and says what a bare continue will meet: {lines:?}"
     );
 }

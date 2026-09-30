@@ -73,6 +73,7 @@ fn write_doors() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
         ("ready_quiet_for", None, "fn ready_quiet_for("),
         ("ready_timeout_for", None, "fn ready_timeout_for("),
         ("composer_clear_for", None, "fn composer_clear_for("),
+        ("composer_words_for", None, "fn composer_words_for("),
         // The worker split and the ledger's typed roads: the dispatch
         // paste, the mail pointer, the ssh send.
         ("split", None, "fn split("),
@@ -202,6 +203,7 @@ fn every_write_door_reads_its_decision_off_the_table() {
         "fn ready_quiet_for(",
         "fn ready_timeout_for(",
         "fn composer_clear_for(",
+        "fn composer_words_for(",
     ] {
         let reading = block_after(backend, reader);
         assert!(
@@ -357,6 +359,79 @@ fn the_between_turn_move_roads_are_spelled_on_the_rows_alone() {
                 !moves.ladder.is_empty(),
                 "{} moves its effort between turns with no ladder to read a rung off",
                 spec.id
+            );
+        }
+    }
+}
+
+fn pty_source(name: &str) -> String {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../zerocode-pty/src");
+    std::fs::read_to_string(src.join(name)).unwrap_or_else(|why| panic!("{name}: {why}"))
+}
+
+/// What a door would have to spell to read or write the person's clipboard:
+/// the pasteboard itself, the tools that reach it, the plugin, and a
+/// synthesized Cmd+V.
+const PASTEBOARD_SPELLINGS: [&str; 9] = [
+    "NSPasteboard",
+    "generalPasteboard",
+    "pbcopy",
+    "pbpaste",
+    "arboard",
+    "clipboard_manager",
+    "clipboard()",
+    "osascript",
+    "CGEvent",
+];
+
+/// No delivery door touches the person's clipboard (t-17274): the words go
+/// to the pty as bytes — a paste frame or typed keys, the row decides — and
+/// nothing on the way reads or writes the pasteboard. The delivery machine
+/// and its encodings take words and answer bytes; every door that hands a
+/// composer words, from the restart's wake to the mail pointer, reaches
+/// the pty through them and nothing else.
+#[test]
+fn no_delivery_door_reaches_the_pasteboard() {
+    for file in ["ready.rs", "input.rs"] {
+        let machine = strip_rust_comments(&pty_source(file));
+        for spelled in PASTEBOARD_SPELLINGS {
+            assert!(
+                !machine.contains(spelled),
+                "the delivery machine's `{file}` spells `{spelled}`"
+            );
+        }
+    }
+    let backend = shipped_code(shipped_backend());
+    let orchestration = strip_rust_comments(&shell_source("orchestration.rs"));
+    let transaction = shipped_code(&shell_source("prompt_transaction.rs"));
+    let mut doors: Vec<(&str, &str)> = write_doors()
+        .into_iter()
+        .filter_map(|(door, source, opens)| source.is_none().then_some((door, opens)))
+        .map(|(door, opens)| (door, block_after(&backend, opens)))
+        .collect();
+    for opens in [
+        "fn type_prompt_at_term(",
+        "fn prompt_delivery_for(",
+        "fn press_enter_at_term(",
+        "fn send(&self, term: TermId, text: &str) -> bool {",
+        "fn paste_continuation(",
+        "fn pasted(",
+        "impl WakeReceipts for WindowReceipts {",
+    ] {
+        doors.push((opens, block_after(&backend, opens)));
+    }
+    doors.push((
+        "deliver_continuation",
+        block_after(&orchestration, "fn deliver_continuation("),
+    ));
+    for opens in ["pub(super) fn turn(", "pub(super) fn settle("] {
+        doors.push((opens, block_after(&transaction, opens)));
+    }
+    for (door, block) in doors {
+        for spelled in PASTEBOARD_SPELLINGS {
+            assert!(
+                !block.contains(spelled),
+                "the `{door}` door spells `{spelled}`:\n{block}"
             );
         }
     }

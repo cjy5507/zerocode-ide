@@ -37,6 +37,7 @@ import { testBoardOrbit } from "./board-orbit.mjs";
 import { testAutonomyBoard } from "./autonomy-board.mjs";
 import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
+import { testTabstripOverflow } from "./tabstrip-overflow.mjs";
 import { testStartupProjects } from "./startup-projects.mjs";
 import { testWorkspaceBoard } from "./workspace-board.mjs";
 import { testFlowConsole } from "./flow-console.mjs";
@@ -68,6 +69,7 @@ import { testPaneFollowsCwd } from "./pane-follow.mjs";
 import { testZoRestore } from "./zo-restore.mjs";
 import { testRestartSamePanes } from "./restart-same-panes.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
+import { testAskPopup } from "./ask-popup.mjs";
 import { testEditorSelection } from "./editor-selection.mjs";
 import { testEditorRecovery } from "./editor-recovery.mjs";
 import { testComposerAttach } from "./attach.mjs";
@@ -206,6 +208,8 @@ suite("board-orbit", ({ browser, origin, ok }) => testBoardOrbit(browser, origin
 suite("autonomy-board", ({ browser, origin, ok }) => testAutonomyBoard(browser, origin, ok));
 suite("connected-workbench", ({ browser, origin, ok }) => testConnectedWorkbench(browser, origin, ok));
 suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsive(browser, origin, ok));
+// The title bar's tab strip under sixty tabs at four widths (t-17078).
+suite("tabstrip-overflow", ({ browser, origin, ok }) => testTabstripOverflow(browser, origin, ok));
 suite("startup-projects", ({ browser, origin, ok }) => testStartupProjects(browser, origin, ok));
 suite("workspace-board", ({ browser, origin, ok }) => testWorkspaceBoard(browser, origin, ok));
 suite("flow-console", ({ browser, origin, ok }) => testFlowConsole(browser, origin, ok));
@@ -234,6 +238,8 @@ suite("zo-restore", ({ browser, origin, ok }) => testZoRestore(browser, origin, 
 // The panes a restart opens again, where they stood, in every workspace (t-14036).
 suite("restart-same-panes", ({ browser, origin, ok }) => testRestartSamePanes(browser, origin, ok));
 suite("permission-card", ({ browser, origin, ok }) => testPermissionCard(browser, origin, ok));
+// Every question the window puts to the person, in the one popup (t-17514).
+suite("ask-popup", ({ browser, origin, ok }) => testAskPopup(browser, origin, ok));
 suite("editor-selection", ({ browser, origin, ok }) => testEditorSelection(browser, origin, ok));
 suite("editor-recovery", ({ browser, origin, ok }) => testEditorRecovery(browser, origin, ok));
 suite("ime-broken-commit", ({ browser, origin, ok }) => testImeBrokenCommit(browser, origin, ok));
@@ -18659,6 +18665,13 @@ const elapsedClock = await page.evaluate(async () => {
         bodySpills: body.scrollWidth > body.clientWidth + 1,
         // 자리를 내주는 쪽은 이미 말줄임을 하는 워크스페이스 이름이다.
         whereEllipsed: where ? where.scrollWidth > where.clientWidth + 1 : false,
+        // 이름을 다 적으면 한 줄에 못 서는 자리인가 — 그 자리에서만 이름이
+        // 말줄임으로 물러나야 한다. 판이 넉넉하면 다 적는 것이 맞다.
+        nameMustGive: foot
+          ? [...foot.children].reduce((sum, one) => sum + one.scrollWidth, 0) +
+            parseFloat(getComputedStyle(foot).columnGap) * (foot.children.length - 1) >
+            foot.clientWidth + 1
+          : true,
       });
     }
     locale = "ko";
@@ -18669,12 +18682,12 @@ const elapsedClock = await page.evaluate(async () => {
   window.__MEASURE_ELAPSED__ = measure;
   return seen;
 });
-/* 그리고 창을 좁혀 다시. 이 패널이 갖는 폭은 하나가 아니다: 그림 옆에 설
- * 때는 `--agent-graph-inspector-width`의 고정 레일(안쪽 299px)이고, 판이
- * 600px 아래로 좁아지면 아래로 접혀 판의 폭을 통째로 갖는다(720px 창에서
- * 394px). 640px 창은 사이드바가 접히며 판이 도로 넓어져 레일로 돌아오므로,
- * 이 셋이 함께 두 모양을 다 덮는다 — 실측값이고, 다른 그릇에서 들고 온
- * 숫자가 아니다. */
+/* 그리고 창을 좁혀 다시. 이 패널이 갖는 폭은 하나가 아니다(t-17078 실측,
+ * 제목줄이 몸 그리드를 더는 창 밖으로 밀지 않는 정직한 폭에서): 1280px 창에서
+ * 649px, 720px 창에서 가장 좁은 279px — 여기서 이름이 물러나야 한다 — 이고,
+ * 640px 창은 사이드바가 접히며 판의 폭 640px을 통째로 가져 이름을 다 적는다.
+ * 예전 주석의 299/394px는 제목줄 min-content가 창을 ~1083px로 부풀리던 때의
+ * 숫자였다. */
 await page.setViewportSize({ width: 720, height: 640 });
 const elapsedNarrow = await page.evaluate(() => window.__MEASURE_ELAPSED__());
 await page.setViewportSize({ width: 640, height: 620 });
@@ -18734,7 +18747,9 @@ ok(
     new Set(elapsedFits.map((one) => one.panel)).size >= 2 &&
     elapsedFits.every((one) =>
       one.word !== "" && !one.clipped && !one.footSpills && !one.bodySpills &&
-      one.whereEllipsed) &&
+      (!one.nameMustGive || one.whereEllipsed)) &&
+    // 이름이 물러나야 하는 좁은 자리를 적어도 한 번은 재었다.
+    elapsedFits.some((one) => one.nameMustGive) &&
     elapsedRestored,
   JSON.stringify({ ...elapsedClock, fit: elapsedFits }),
 );
@@ -28777,32 +28792,32 @@ const permissionRoad = await page.evaluate(async () => {
   frame("s-b", 22, "git");
   frame("s-c", 33, "rm");
   await settle();
-  seen.showing = el("perm-cmd").textContent;
-  seen.names = el("perm-agent").textContent.includes(shortSession("s-a"));
-  seen.queued = permissionQueue.length;
-  seen.more = el("perm-more").textContent;
+  seen.showing = el("ask-body").textContent;
+  seen.names = el("ask-agent").textContent.includes(shortSession("s-a"));
+  seen.queued = askQueue.length;
+  seen.more = el("ask-more").textContent;
   seen.expectTwo = behindWord(2);
   seen.expectOne = behindWord(1);
   // 줄 뒤쪽 하나가 끝나면 그것만 빠진다 — 화면에 선 물음은 그대로다.
   ended("s-c");
   await settle();
-  seen.afterWithdraw = el("perm-more").textContent;
-  seen.stillShowing = el("perm-cmd").textContent;
+  seen.afterWithdraw = el("ask-more").textContent;
+  seen.stillShowing = el("ask-body").textContent;
   // 첫 번째에 답한다: 첫 번째의 id가 나가고, 두 번째가 올라온다.
-  el("perm-actions").querySelector("button").click();
+  el("ask-choices").querySelector("button").click();
   await settle();
   seen.sentFirst = sent[0];
-  seen.thenShowing = el("perm-cmd").textContent;
-  seen.thenCounterGone = el("perm-more").hidden;
-  seen.thenQueued = permissionQueue.length;
+  seen.thenShowing = el("ask-body").textContent;
+  seen.thenCounterGone = el("ask-more").hidden;
+  seen.thenQueued = askQueue.length;
   // 화면에 선 물음의 세션이 끝나면 모달이 내려간다 — 대기 중인 다른 물음이
   // 없으므로 아무도 뒤에 남지 않는다.
   ended("s-b");
   await settle();
-  seen.active = activePrompt;
+  seen.active = activeAsk;
   seen.sentAfterEnd = sent.length;
   await new Promise((done) => setTimeout(done, 220));
-  seen.scrimDown = el("perm-scrim").hidden;
+  seen.scrimDown = el("ask-scrim").hidden;
   delete window.__ANSWER__.respond_permission;
   return seen;
 });
@@ -28844,25 +28859,25 @@ const promptResolved = await page.evaluate(async () => {
   ask("r-a", 72, "write");
   ask("r-b", 73, "rm");
   await settle();
-  seen.showing = el("perm-cmd").textContent;
-  seen.queued = permissionQueue.map((one) => one.frame.prompt_id);
+  seen.showing = el("ask-body").textContent;
+  seen.queued = askQueue.map((one) => one.frame.prompt_id);
   resolved("r-a", 72);
   await settle();
-  seen.afterQueued = permissionQueue.map((one) => one.frame.prompt_id);
-  seen.stillShowing = el("perm-cmd").textContent;
+  seen.afterQueued = askQueue.map((one) => one.frame.prompt_id);
+  seen.stillShowing = el("ask-body").textContent;
   resolved("r-a", 71);
   await settle();
-  seen.thenShowing = el("perm-cmd").textContent;
-  seen.thenActive = activePrompt?.frame?.prompt_id ?? null;
+  seen.thenShowing = el("ask-body").textContent;
+  seen.thenActive = activeAsk?.frame?.prompt_id ?? null;
   resolved("r-b", 999);
   resolved("r-a", 73);
   await settle();
-  seen.survived = activePrompt?.frame?.prompt_id ?? null;
+  seen.survived = activeAsk?.frame?.prompt_id ?? null;
   resolved("r-b", 73);
   await settle();
-  seen.emptied = activePrompt;
+  seen.emptied = activeAsk;
   await new Promise((done) => setTimeout(done, 220));
-  seen.scrimDown = el("perm-scrim").hidden;
+  seen.scrimDown = el("ask-scrim").hidden;
   return seen;
 });
 ok(
@@ -29944,11 +29959,11 @@ const wires = await page.evaluate(async () => {
     ] } });
   }
   seen.usageSaid = document.getElementById("sb-usage").textContent;
-  seen.raised = activePrompt?.frame?.prompt_id;
-  seen.queued = permissionQueue.length;
-  activePrompt = null;
-  permissionQueue.length = 0;
-  paintPermission();
+  seen.raised = activeAsk?.frame?.prompt_id;
+  seen.queued = askQueue.length;
+  activeAsk = null;
+  askQueue.length = 0;
+  paintAsk();
 
   // D) the quick-command trash: it deletes the SAVED command through the
   // backend and redraws the submenu from the backend's answer.
@@ -55044,20 +55059,24 @@ const computerHand = await page.evaluate(async () => {
   await settle();
   seen.resumeAsked = window.__COMPUTER_RESUMED__?.reset === false;
   seen.bandGone = el("computer-band").hidden;
+  // The last-step question stands in the ask popup (t-17514), not along the
+  // top edge; the popup leaves through its exit animation, so it is given its time.
+  const popupGone = () => new Promise((done) => setTimeout(done, 260));
+  const ask = () => document.querySelector("#ask-scrim .permission");
   fire("computer:confirm", { id: "confirm-1", kind: "payment", label: "Place order", verb: "mouse-click", timeoutMs: 120000 });
   await settle();
-  seen.askShown = !el("computer-confirm").hidden;
-  seen.askLabel = el("computer-confirm-text").textContent.includes("Place order");
-  seen.askClock = el("computer-confirm-clock").textContent.includes("120");
-  el("computer-confirm-allow").click();
-  await settle();
+  seen.askShown = !el("ask-scrim").hidden && ask().dataset.kind === "computer-confirm";
+  seen.askLabel = el("ask-why").textContent.includes("Place order");
+  seen.askClock = el("ask-clock").textContent.includes("120");
+  [...el("ask-choices").querySelectorAll("button")].find((one) => one.textContent === t("computer.confirm.allow", "허용")).click();
+  await popupGone();
   seen.answered = JSON.stringify(window.__COMPUTER_ANSWER__);
-  seen.askHidden = el("computer-confirm").hidden;
+  seen.askHidden = el("ask-scrim").hidden;
   fire("computer:confirm", { id: "confirm-2", kind: "delete", label: "Delete account", verb: "click", timeoutMs: 120000 });
   await settle();
   fire("computer:confirm-closed", { id: "confirm-2", decision: "timedout" });
-  await settle();
-  seen.closedByBackend = el("computer-confirm").hidden;
+  await popupGone();
+  seen.closedByBackend = el("ask-scrim").hidden;
   setSettingsOpen(true);
   showSettingsPane("computer-use");
   await settle();
@@ -55108,20 +55127,21 @@ const computerHandoff = await page.evaluate(async () => {
   const fire = (name, payload) => {
     for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
   };
+  const popupGone = () => new Promise((done) => setTimeout(done, 260));
   fire("computer:handoff", { id: "handoff-1", reason: "휴대폰의 2FA 코드를 입력해 주세요", timeoutMs: 600000 });
   await settle();
-  seen.shown = !el("computer-handoff").hidden;
-  seen.reason = el("computer-handoff-text").textContent;
-  seen.clock = el("computer-handoff-clock").textContent.includes("600");
-  el("computer-handoff-done").click();
-  await settle();
+  seen.shown = !el("ask-scrim").hidden && document.querySelector("#ask-scrim .permission").dataset.kind === "computer-handoff";
+  seen.reason = el("ask-why").textContent;
+  seen.clock = el("ask-clock").textContent.includes("600");
+  [...el("ask-choices").querySelectorAll("button")].find((one) => one.textContent === t("computer.handoff.done", "다 했어요")).click();
+  await popupGone();
   seen.answered = JSON.stringify(window.__COMPUTER_HANDOFF_ANSWER__);
-  seen.hidden = el("computer-handoff").hidden;
+  seen.hidden = el("ask-scrim").hidden;
   fire("computer:handoff", { id: "handoff-2", reason: "CAPTCHA", timeoutMs: 600000 });
   await settle();
   fire("computer:handoff-closed", { id: "handoff-2", decision: "timedout" });
-  await settle();
-  seen.closedByBackend = el("computer-handoff").hidden;
+  await popupGone();
+  seen.closedByBackend = el("ask-scrim").hidden;
   delete window.__ANSWER__.computer_confirm_answer;
   return seen;
 });

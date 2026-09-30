@@ -23,6 +23,7 @@ mod error;
 mod fork;
 mod head;
 mod json_field;
+mod mask;
 mod message;
 mod tool_pairing;
 
@@ -31,6 +32,10 @@ pub use tool_pairing::ToolCallPairing;
 pub use error::SessionError;
 pub use fork::SessionFork;
 pub use head::TranscriptHead;
+pub use mask::{
+    mask_thinking_in_record_line, masked_record_line, REDACTED_THINKING_MARKER, THINKING_MARKER,
+    WITHHELD_LINE_MARKER,
+};
 pub use message::{
     is_reminder_lineage_text, ContentBlock, ConversationMessage, MessageRole,
     CLEARED_REMINDER_PLACEHOLDER, REMINDER_TAG_OPEN,

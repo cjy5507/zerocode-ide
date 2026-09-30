@@ -4833,11 +4833,33 @@ function renderPane(pane, group) {
   // beat, with nothing on the strip having changed (the freeze probe's
   // `#tabstrip childList×236` over sixty frames).
   if (strip.lastElementChild !== add || add.previousElementSibling !== pill) strip.append(pill, add);
+  revealActiveTab(pane);
   // Every strip in the tree stays visible: a group with no tabs has already
   // folded out of the tree (`collapseStageGroup`), so the only empty strip
   // left is the last group standing — the stage itself, which carries the
   // way to open a terminal exactly when there is nothing open.
   strip.hidden = false;
+}
+
+/* The tab in front is a tab the person can see. A strip of sixty tabs
+ * scrolls, and a tab picked by the keyboard, or born at the far end, must not
+ * be selected somewhere behind the fade. It moves only when the active tab
+ * CHANGES — a repaint with the same tab in front leaves wherever the person
+ * scrolled to alone. The margin is the fade's own width (`--tab-fade`), read
+ * back as the strip's `scroll-padding`, so a revealed tab stands clear of the
+ * mask rather than under it. */
+function revealActiveTab(pane) {
+  const strip = pane.strip;
+  const node = strip.querySelector(".tab.is-active");
+  const id = node?.dataset.tab ?? null;
+  if (id === pane.revealedTab) return;
+  pane.revealedTab = id;
+  if (!node || strip.scrollWidth <= strip.clientWidth) return;
+  const fade = parseFloat(getComputedStyle(strip).scrollPaddingLeft) || 0;
+  const box = node.getBoundingClientRect();
+  const view = strip.getBoundingClientRect();
+  if (box.left < view.left + fade) strip.scrollLeft -= view.left + fade - box.left;
+  else if (box.right > view.right - fade) strip.scrollLeft += box.right - (view.right - fade);
 }
 
 /* Dragging a tab to reorder it, measured from Orca rather than guessed.

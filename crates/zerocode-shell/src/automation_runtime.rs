@@ -839,7 +839,8 @@ pub(super) fn start_automation(
             ready_timeout_for(driving),
         )
         .clearing(false)
-        .guarded(zerocode_pty::ready::Guard::for_its_own_line(Some(launch))),
+        .guarded(zerocode_pty::ready::Guard::for_its_own_line(Some(launch)))
+        .words(composer_words_for(driving)),
     );
     state.cadence().wake();
     // And the run itself, written down. `last_run_at` above says only WHEN the

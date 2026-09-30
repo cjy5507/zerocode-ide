@@ -695,6 +695,7 @@ fn a_permission_prompt_is_parked_not_answered() {
                 label: "Allow once".to_string(),
                 decision: PermissionDecision::AllowOnce,
             }],
+            question: None,
             responder,
         }))
     };

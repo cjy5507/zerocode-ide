@@ -2949,6 +2949,22 @@ pub(super) fn composer_clear_for(agent: Option<&str>) -> bool {
         .is_some_and(|caps| caps.steer.clear == ComposerClear::Keys)
 }
 
+/// How a delivery's words go onto this agent's composer (t-17274): typed
+/// where its row measured an empty paste reading the person's clipboard,
+/// pasted everywhere else. An unknown agent takes the paste, the road of
+/// every composer nobody measured.
+pub(super) fn composer_words_for(agent: Option<&str>) -> zerocode_pty::Words {
+    match agent
+        .and_then(zerocode_core::agent_capabilities)
+        .map(|caps| caps.steer.words)
+    {
+        Some(zerocode_core::ComposerWords::Typed { line_break }) => {
+            zerocode_pty::Words::Typed { line_break }
+        }
+        Some(zerocode_core::ComposerWords::Pasted) | None => zerocode_pty::Words::Pasted,
+    }
+}
+
 /// How long a launch must stay quiet after the bracketed-paste handshake.
 /// Most TUIs use the shared window; a catalog override is a measured startup
 /// gate that keeps painting after its composer first appears. Kept beside the
@@ -2992,6 +3008,9 @@ pub(super) struct QueuedPrompt {
     /// Set when the queued delivery is the Enter alone for words already on
     /// the line (t-17037), so the copy parked behind another stays that.
     pub(super) enter_again: Option<zerocode_pty::EnterAgain>,
+    /// How its words go onto the composer, the row's answer carried to the
+    /// queued copy (t-17274).
+    pub(super) words: zerocode_pty::Words,
     pub(super) completion: std::sync::mpsc::SyncSender<DeliveryOutcome>,
 }
 
