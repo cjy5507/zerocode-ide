@@ -196,6 +196,9 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKUserContentController",
     "WKUserScript",
     "WKSnapshotConfiguration",
+    # The page renderer (t-18558): the view's own preferences decide whether a
+    # PDF keeps the page's backgrounds.
+    "WKPreferences",
 ] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
@@ -221,6 +224,16 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     # crate gates behind its `libc` feature; `libc` itself is already a
     # dependency of this crate.
     "libc",
+    # The page renderer (t-18558) prints a page to a PDF with WebKit's print
+    # operation on A4 paper, and asks the window for its backing scale; the
+    # margins and the scale are `CGFloat`s, which the crate gates behind
+    # `objc2-core-foundation` (already a dependency of this crate).
+    "NSPrintInfo",
+    "NSPrintOperation",
+    "objc2-core-foundation",
+    # The print job is run modal for a window of its own, never the person's:
+    # `NSWindow`'s initializer and `NSBackingStoreType` live behind `NSGraphics`.
+    "NSGraphics",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
@@ -237,6 +250,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSError",
     "NSString",
     "NSValue",
+    # The page renderer (t-18558): the PDF's paper and print view are `NSSize`
+    # and `NSRect`, and its temp file is an `NSURL`.
+    "NSGeometry",
+    "NSURL",
+    "NSObject",
 ] }
 # The emulator pane's fast road: the window server will hand over the picture
 # the Simulator is already drawing for a tenth of what CoreSimulator charges

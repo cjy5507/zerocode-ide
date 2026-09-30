@@ -10,6 +10,7 @@
 use crate::*;
 
 use zerocode_core::artifact::Artifact;
+use zerocode_core::artifact_publish::ExportFormat;
 
 /// What one listing answers, plus the retention the sweep is running with —
 /// the drawer shows it beside the file's age.
@@ -201,18 +202,59 @@ pub(crate) fn artifact_feedback_record(
     Ok(summary)
 }
 
-/// 머리띠의 「내보내기」: 발행물의 한 판을 사람이 고른 폴더에 새 파일로 쓴다. 폴더는
-/// 창이 폴더 대화상자(`choose_project`)로 받아 온 것이고, 쓰는 것은 문의 내보내기와
-/// 같은 불변 스냅샷이다. 있는 파일은 덮지 않는다.
-#[tauri::command(async)]
-pub(crate) fn artifact_export(
+/// 머리띠의 「내보내기」: 발행물의 한 판을 사람이 고른 폴더에 새 파일로 쓴다 — HTML은
+/// 복사하고, PDF와 PNG는 창의 WebKit이 숨은 판에서 그린다(t-18558). 폴더는 창이 폴더
+/// 대화상자(`choose_project`)로 받아 온 것이고, 쓰는 것은 문의 내보내기와 같은 불변
+/// 스냅샷이다. 있는 파일은 덮지 않는다. 형식(`html`·`pdf`·`png`)을 말하지 않으면 HTML이다.
+#[tauri::command]
+pub(crate) async fn artifact_export(
     webview: tauri::Webview,
     id: String,
     version: u32,
     folder: String,
+    format: Option<String>,
 ) -> Result<zerocode_core::artifact_publish::ExportedFile, String> {
     from_the_main_webview(&webview)?;
-    store_or_refuse()?.export_into(&id, version, Path::new(&folder))
+    let format = match format.as_deref() {
+        None => ExportFormat::Html,
+        Some(word) => ExportFormat::from_word(word)
+            .ok_or_else(|| format!("알 수 없는 내보내기 형식입니다: {word}"))?,
+    };
+    let store = store_or_refuse()?;
+    // 그리는 일은 창의 스레드에서 도는 WebKit의 답을 기다린다. 그 기다림은 막아도 되는
+    // 스레드에서만 한다 — 창의 스레드나 비동기 일꾼에서 기다리면 서로를 기다린다.
+    tauri::async_runtime::spawn_blocking(move || {
+        store.export_into(&id, version, Path::new(&folder), format)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// 「내보내기」 메뉴가 묻는 것(t-18558): 형식마다 이 창이 쓸 수 있는가, 못 쓰면 이유의
+/// 코드. 문이 거절하는 것과 같은 답이다 — 그릴 렌더러가 서 있는가.
+#[tauri::command(async)]
+pub(crate) fn artifact_export_formats(
+    webview: tauri::Webview,
+) -> Result<Vec<artifact_render::FormatChoice>, String> {
+    from_the_main_webview(&webview)?;
+    Ok(artifact_render::format_choices(
+        store_or_refuse()?.renderer().as_deref(),
+    ))
+}
+
+/// 방금 이 창이 내보낸 파일을 파일 관리자에서 보인다 — 알림의 「Finder에서 보기」.
+/// 이 창이 쓴 파일만 보인다: 창이 다른 경로를 말해도 보이지 않는다.
+#[tauri::command(async)]
+pub(crate) fn artifact_export_reveal(webview: tauri::Webview, path: String) -> Result<(), String> {
+    from_the_main_webview(&webview)?;
+    let path = PathBuf::from(path);
+    if !store_or_refuse()?.was_exported(&path) {
+        return Err("이 창이 내보낸 파일만 보일 수 있습니다".into());
+    }
+    if !path.exists() {
+        return Err("내보낸 파일이 사라졌습니다".into());
+    }
+    reveal_in_file_manager(&path)
 }
 
 /// The refresh button's road into the transcripts (t-3233 §2): the same
@@ -246,23 +288,28 @@ pub(crate) fn artifact_open(id: String) -> Result<(), String> {
 /// `version`, the immutable file of that version rather than the current one.
 #[tauri::command(async)]
 pub(crate) fn artifact_reveal(id: String, version: Option<u32>) -> Result<(), String> {
-    let path = path_of_version(&id, version)?;
+    reveal_in_file_manager(&path_of_version(&id, version)?)
+}
+
+/// Show one file in the file manager: selected on macOS and Windows, its folder
+/// on Linux. Both reveal roads (the store's file, an exported one) go through it.
+fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let command = {
         let mut it = crate::proc::quiet_command("open");
-        it.arg("-R").arg(&path);
+        it.arg("-R").arg(path);
         it
     };
     #[cfg(target_os = "linux")]
     let command = {
         let mut it = crate::proc::quiet_command("xdg-open");
-        it.arg(path.parent().unwrap_or(&path));
+        it.arg(path.parent().unwrap_or(path));
         it
     };
     #[cfg(target_os = "windows")]
     let command = {
         let mut it = crate::proc::quiet_command("explorer");
-        it.arg("/select,").arg(&path);
+        it.arg("/select,").arg(path);
         it
     };
     zerocode_core::reap::spawn_forgotten(command)

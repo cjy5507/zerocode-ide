@@ -37,6 +37,7 @@ use zerocode_core::artifact::{
     self, Artifact, ArtifactKind, Limits, Origin, Preview, Source, artifact_id,
     artifact_id_for_url, body_tokens, kind_of, preview_of, query_matches, title_of,
 };
+use zerocode_core::artifact_publish::{ExportFormat, PageRenderer};
 use zerocode_core::artifact_transcript::{PageFact, RemoteFact};
 
 /// The store's folder under the local data root.
@@ -221,6 +222,9 @@ pub(crate) const FEEDBACK_PAGE_URL_MAX: usize = 2048;
 const EXPORT_NAME_TRIES: u32 = 100;
 /// 내보낼 파일 이름에서 제목이 차지할 수 있는 글자 수.
 const EXPORT_STEM_MAX: usize = 60;
+/// 이 창이 방금 내보낸 파일을 몇 개까지 기억하는가 — 토스트의 「Finder에서 보기」가 이
+/// 목록 안의 파일만 보인다(t-18558).
+const EXPORTED_KEPT: usize = 64;
 
 /// 창이 청하는 기록 한 줄: 어느 발행물의 몇 번 판에 단 주석을 어느 판에 넣었는가.
 /// 그 판의 SHA와 고칠 원본은 창이 말하지 않는다 — 스토어가 제 기록에서 적는다.
@@ -427,6 +431,13 @@ pub(crate) struct Store {
     /// 페이지마다 마지막으로 센 피드백과 그때 파일의 도장. 목록은 도장이 같으면
     /// 파일을 다시 읽지 않는다.
     feedback: Mutex<HashMap<String, (Stamp, FeedbackSummary)>>,
+    /// 「내보내기」와 문이 페이지를 PDF·그림으로 그릴 때 쓰는 렌더러(t-18558). 창이 뜨면
+    /// `install`이 창의 숨은 판을 세우고 시험은 가짜를 세운다. 없으면 그려야 하는 형식은
+    /// 이유와 함께 거절된다 — HTML 바이트를 .pdf에 쓰지 않는다.
+    renderer: Mutex<Option<Arc<dyn PageRenderer>>>,
+    /// 이 창이 방금 내보낸 파일들, 오래된 것부터. 토스트의 「Finder에서 보기」는 이 밖의
+    /// 경로를 보이지 않는다.
+    exported: Mutex<VecDeque<PathBuf>>,
 }
 
 fn store_cell() -> &'static Mutex<Option<Arc<Store>>> {
@@ -436,6 +447,9 @@ fn store_cell() -> &'static Mutex<Option<Arc<Store>>> {
 
 /// Put the booted store where every road finds it.
 pub(crate) fn install(store: Arc<Store>, app: tauri::AppHandle) {
+    store.set_renderer(Arc::new(crate::artifact_render::WindowRenderer::new(
+        app.clone(),
+    )));
     *store.window.lock().unwrap_or_else(PoisonError::into_inner) = Some(app);
     *store_cell().lock().unwrap_or_else(PoisonError::into_inner) = Some(store);
 }
@@ -526,6 +540,8 @@ impl Store {
             transcript_reads: Mutex::new(()),
             swept_beside: Mutex::new(None),
             feedback: Mutex::new(HashMap::new()),
+            renderer: Mutex::new(None),
+            exported: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -1139,15 +1155,47 @@ impl Store {
         artifact.feedback_version = summary.version;
     }
 
-    /// 발행물의 한 판을 사람이 고른 폴더에 새 파일(`<제목>-v<n>.html`)로 내보낸다.
-    /// 쓰는 것은 문의 내보내기(`artifact_publish::export`)와 같은 불변 스냅샷이고,
-    /// 이름이 있으면 번호를 붙여 새 이름을 찾는다 — 있는 파일은 덮지 않는다. 스토어
-    /// 안으로는 내보내지 않는다.
+    /// 페이지를 그릴 렌더러 — 창의 숨은 판, 시험의 가짜, 아니면 없음.
+    pub(crate) fn renderer(&self) -> Option<Arc<dyn PageRenderer>> {
+        self.renderer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn set_renderer(&self, renderer: Arc<dyn PageRenderer>) {
+        *self.renderer.lock().unwrap_or_else(PoisonError::into_inner) = Some(renderer);
+    }
+
+    /// 이 창이 방금 내보낸 파일인가 — 토스트의 「Finder에서 보기」가 묻는다.
+    pub(crate) fn was_exported(&self, path: &Path) -> bool {
+        self.exported
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|held| held == path)
+    }
+
+    fn note_exported(&self, path: &Path) {
+        let mut held = self.exported.lock().unwrap_or_else(PoisonError::into_inner);
+        held.push_back(path.to_path_buf());
+        while held.len() > EXPORTED_KEPT {
+            held.pop_front();
+        }
+    }
+
+    /// 발행물의 한 판을 사람이 고른 폴더에 새 파일(`<제목>-v<n>.<형식>`)로 내보낸다 —
+    /// HTML은 그대로 복사하고, PDF와 PNG는 창의 WebKit이 그린다(t-18558). 쓰는 것은
+    /// 문의 내보내기(`artifact_publish::export_with`)와 같은 불변 스냅샷이다. 그리는
+    /// 일은 이름을 찾기 전에 한 번만 하고, 이름이 있으면 번호를 붙여 새 이름을 찾는다
+    /// — 있는 파일은 덮지 않는다. 스토어 안으로는 내보내지 않는다. 그릴 렌더러를
+    /// 기다리므로 창의 스레드나 비동기 일꾼이 아니라 막아도 되는 스레드에서 부른다.
     pub(crate) fn export_into(
         &self,
         id: &str,
         version: u32,
         folder: &Path,
+        format: ExportFormat,
     ) -> Result<zerocode_core::artifact_publish::ExportedFile, String> {
         let row = self
             .get(id)
@@ -1167,31 +1215,38 @@ impl Store {
         {
             return Err("아티팩트 스토어 안으로는 내보내지 않습니다".into());
         }
+        let renderer = self.renderer();
+        let prepared = zerocode_core::artifact_publish::prepare_export(
+            &self.root,
+            id,
+            Some(version),
+            format,
+            renderer.as_deref(),
+        )?;
         let stem = export_stem(&row.title, id);
+        let extension = format.word();
         for n in 1..=EXPORT_NAME_TRIES {
             let name = if n == 1 {
-                format!("{stem}-v{version}.html")
+                format!("{stem}-v{version}.{extension}")
             } else {
-                format!("{stem}-v{version} ({n}).html")
+                format!("{stem}-v{version} ({n}).{extension}")
             };
             let out = folder.join(name);
             if out.symlink_metadata().is_ok() {
                 continue;
             }
-            let input = zerocode_core::artifact_publish::ExportInput {
-                id: id.to_string(),
-                version: Some(version),
-                out: out.clone(),
-            };
-            match zerocode_core::artifact_publish::export(&self.root, &input) {
-                Ok(done) => return Ok(done),
+            match zerocode_core::artifact_publish::write_export(&out, &prepared) {
+                Ok(done) => {
+                    self.note_exported(&done.path);
+                    return Ok(done);
+                }
                 // 물은 사이에 누가 그 이름을 썼다 — 다음 번호로.
                 Err(_) if out.symlink_metadata().is_ok() => {}
                 Err(error) => return Err(error),
             }
         }
         Err(format!(
-            "{stem}-v{version}.html 이름의 파일이 이미 {EXPORT_NAME_TRIES}개 있습니다"
+            "{stem}-v{version}.{extension} 이름의 파일이 이미 {EXPORT_NAME_TRIES}개 있습니다"
         ))
     }
 
@@ -2866,9 +2921,13 @@ fn artifact_request(
             let input: zerocode_core::artifact_publish::ExportInput =
                 serde_json::from_value(request).map_err(|e| e.to_string())?;
             store.get(&input.id).ok_or("artifact not found")?;
-            serde_json::to_value(zerocode_core::artifact_publish::export(
+            // `--out`의 확장자가 파일의 종류를 가른다: .html·.htm은 복사, .pdf·.png는
+            // 창의 렌더러가 그린다(t-18558). 렌더러가 없으면 이유와 함께 거절한다.
+            let renderer = store.renderer();
+            serde_json::to_value(zerocode_core::artifact_publish::export_with(
                 store.root(),
                 &input,
+                renderer.as_deref(),
             )?)
             .map_err(|e| e.to_string())
         }
@@ -2991,6 +3050,196 @@ mod tests {
         assert_eq!(
             reopened.list(&Filter::default()).rows[0].title,
             "SFTP home mapping and transfer queue"
+        );
+    }
+
+    /// t-18558: the window's door names the file's kind by `--out`'s extension.
+    /// A store with no renderer behind it (this test, a build without the
+    /// window's WebKit) refuses `.pdf` and `.png` — and any other name that is
+    /// not `.html` or `.htm` — instead of writing the page's HTML bytes into a
+    /// file that claims to be a PDF or a picture.
+    #[test]
+    fn the_door_never_writes_html_bytes_into_a_pdf_or_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("store"), Limits::default());
+        let source = dir.path().join("source.html");
+        touch(&source, "<title>Report</title><main>hello</main>");
+        let published = artifact_request(
+            &store,
+            serde_json::json!({"action":"publish", "file_path":source}),
+            &nobody,
+        )
+        .unwrap();
+        for name in ["report.pdf", "picture.png", "notes.txt"] {
+            let out = dir.path().join(name);
+            let answer = artifact_request(
+                &store,
+                serde_json::json!({"action":"export", "id":published["id"], "out":out}),
+                &nobody,
+            );
+            assert!(answer.is_err(), "{name}: the door answered {answer:?}");
+            assert!(!out.exists(), "{name}: a refused export left a file behind");
+        }
+    }
+
+    /// One published page in a scratch store, with a fake renderer behind it.
+    fn store_drawing(
+        dir: &Path,
+        drawn: &[u8],
+    ) -> (
+        Store,
+        String,
+        Arc<crate::artifact_render::fake::FakeRenderer>,
+    ) {
+        let store = Store::open(&dir.join("store"), Limits::default());
+        let source = dir.join("source.html");
+        touch(&source, "<title>Card sketch</title><main>hello</main>");
+        let published = artifact_request(
+            &store,
+            serde_json::json!({"action":"publish", "file_path":source}),
+            &nobody,
+        )
+        .unwrap();
+        let renderer = Arc::new(crate::artifact_render::fake::FakeRenderer::drawing(drawn));
+        store.set_renderer(renderer.clone());
+        let id = published["id"].as_str().unwrap().to_string();
+        (store, id, renderer)
+    }
+
+    /// t-18558: with a renderer behind the store the door writes a PDF or a
+    /// picture where `--out`'s extension says so — drawn from the version's own
+    /// immutable file — and a copy still asks nobody.
+    #[test]
+    fn the_door_draws_a_pdf_or_png_where_the_extension_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, renderer) = store_drawing(dir.path(), b"%PDF-1.7 drawn");
+        let out = dir.path().join("report.pdf");
+        let answer = artifact_request(
+            &store,
+            serde_json::json!({"action":"export", "id":id, "out":out}),
+            &nobody,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"%PDF-1.7 drawn");
+        assert_eq!(
+            (answer["format"].as_str(), answer["pages"].as_u64()),
+            (Some("pdf"), Some(2))
+        );
+        let snapshot = store.root().join("pages").join(&id).join("v1/index.html");
+        assert_eq!(renderer.asked(), vec![(snapshot, ExportFormat::Pdf)]);
+
+        let copy = dir.path().join("copy.html");
+        artifact_request(
+            &store,
+            serde_json::json!({"action":"export", "id":id, "out":copy}),
+            &nobody,
+        )
+        .unwrap();
+        assert_eq!(renderer.asked().len(), 1, "a copy asked the renderer");
+
+        let bad = dir.path().join("notes.txt");
+        let refused = artifact_request(
+            &store,
+            serde_json::json!({"action":"export", "id":id, "out":bad}),
+            &nobody,
+        )
+        .unwrap_err();
+        assert!(
+            refused.contains(".pdf") && refused.contains(".png"),
+            "{refused}"
+        );
+        assert!(!bad.exists());
+    }
+
+    /// t-18558: the strip's 「내보내기」 names its file `<제목>-v<n>.<형식>` in the
+    /// folder it was given, draws once whatever the numbering costs, never
+    /// overwrites, refuses a folder inside the store before drawing anything, and
+    /// remembers the files it wrote so that the notice can reveal exactly those.
+    #[test]
+    fn export_into_names_a_drawn_file_by_its_format_and_draws_it_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, renderer) = store_drawing(dir.path(), b"%PDF-1.7 drawn");
+        let folder = dir.path().join("shared");
+        std::fs::create_dir_all(&folder).unwrap();
+        let first = store
+            .export_into(&id, 1, &folder, ExportFormat::Pdf)
+            .unwrap();
+        let second = store
+            .export_into(&id, 1, &folder, ExportFormat::Pdf)
+            .unwrap();
+        assert_eq!(first.path.file_name().unwrap(), "Card sketch-v1.pdf");
+        assert_eq!(second.path.file_name().unwrap(), "Card sketch-v1 (2).pdf");
+        assert_eq!(std::fs::read(&first.path).unwrap(), b"%PDF-1.7 drawn");
+        assert_eq!((first.format, first.pages), (ExportFormat::Pdf, Some(2)));
+        // A taken name costs a probe, never a second drawing: two exports, two drawings.
+        assert_eq!(renderer.asked().len(), 2);
+
+        let picture = store
+            .export_into(&id, 1, &folder, ExportFormat::Png)
+            .unwrap();
+        assert_eq!(picture.path.file_name().unwrap(), "Card sketch-v1.png");
+        assert_eq!(picture.format, ExportFormat::Png);
+        let copy = store
+            .export_into(&id, 1, &folder, ExportFormat::Html)
+            .unwrap();
+        assert_eq!(copy.path.file_name().unwrap(), "Card sketch-v1.html");
+        assert_eq!(renderer.asked().len(), 3, "a copy asked the renderer");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 4);
+
+        for one in [&first, &second, &picture, &copy] {
+            assert!(store.was_exported(&one.path), "{:?}", one.path);
+        }
+        assert!(!store.was_exported(&folder.join("elsewhere.pdf")));
+
+        let before = renderer.asked().len();
+        assert!(
+            store
+                .export_into(&id, 1, store.root(), ExportFormat::Pdf)
+                .is_err()
+        );
+        assert!(
+            store
+                .export_into(&id, 9, &folder, ExportFormat::Pdf)
+                .is_err()
+        );
+        assert_eq!(
+            renderer.asked().len(),
+            before,
+            "a refused export drew a page"
+        );
+    }
+
+    /// With no renderer behind the store, a drawn kind is refused with its
+    /// reason and a copy still works; the menu's answer says the same.
+    #[test]
+    fn export_into_without_a_renderer_refuses_a_drawing_and_still_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("store"), Limits::default());
+        let source = dir.path().join("source.html");
+        touch(&source, "<title>Card sketch</title><main>hello</main>");
+        let published = artifact_request(
+            &store,
+            serde_json::json!({"action":"publish", "file_path":source}),
+            &nobody,
+        )
+        .unwrap();
+        let id = published["id"].as_str().unwrap();
+        let folder = dir.path().join("shared");
+        std::fs::create_dir_all(&folder).unwrap();
+        let refused = store
+            .export_into(id, 1, &folder, ExportFormat::Pdf)
+            .unwrap_err();
+        assert!(refused.contains("WebKit"), "{refused}");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+        assert!(
+            store
+                .export_into(id, 1, &folder, ExportFormat::Html)
+                .is_ok()
+        );
+        let choices = crate::artifact_render::format_choices(store.renderer().as_deref());
+        assert_eq!(
+            choices.iter().map(|one| one.available).collect::<Vec<_>>(),
+            [true, false, false]
         );
     }
 
@@ -5246,17 +5495,37 @@ mod tests {
 
         let folder = dir.path().join("shared");
         std::fs::create_dir_all(&folder).unwrap();
-        let first = store.export_into(&id, 1, &folder).unwrap();
-        let second = store.export_into(&id, 1, &folder).unwrap();
+        let first = store
+            .export_into(&id, 1, &folder, ExportFormat::Html)
+            .unwrap();
+        let second = store
+            .export_into(&id, 1, &folder, ExportFormat::Html)
+            .unwrap();
         assert_eq!(first.path.file_name().unwrap(), "card-v1.html");
         assert_eq!(second.path.file_name().unwrap(), "card-v1 (2).html");
         assert_eq!(std::fs::read(&first.path).unwrap(), snapshot);
         assert_eq!(std::fs::read(&second.path).unwrap(), snapshot);
         assert_eq!((first.version, second.version), (1, 1));
-        assert!(store.export_into(&id, 1, Path::new("shared")).is_err());
-        assert!(store.export_into(&id, 1, store.root()).is_err());
-        assert!(store.export_into(&id, 9, &folder).is_err());
-        assert!(store.export_into(&copied.id, 1, &folder).is_err());
+        assert!(
+            store
+                .export_into(&id, 1, Path::new("shared"), ExportFormat::Html)
+                .is_err()
+        );
+        assert!(
+            store
+                .export_into(&id, 1, store.root(), ExportFormat::Html)
+                .is_err()
+        );
+        assert!(
+            store
+                .export_into(&id, 9, &folder, ExportFormat::Html)
+                .is_err()
+        );
+        assert!(
+            store
+                .export_into(&copied.id, 1, &folder, ExportFormat::Html)
+                .is_err()
+        );
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
 
         let reopened = Store::open(&dir.path().join("store"), Limits::default());

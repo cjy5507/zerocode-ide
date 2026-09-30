@@ -2200,7 +2200,12 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
   try {
     await page.setViewportSize({ width: 1440, height: 860 });
     await page.evaluate(() => {
-      window.__BAND__ = { opens: [], navigations: [], pastes: [], prompts: [], records: [], exports: [], folders: 0 };
+      window.__BAND__ = {
+        opens: [], navigations: [], pastes: [], prompts: [], records: [], exports: [], folders: 0,
+        reveals: [], formatAsks: 0, tall: false,
+        // 백엔드 `artifact_export_formats`의 답 모양: 형식마다 가능 여부와, 안 되면 이유 코드.
+        formats: [{ format: "html", available: true }, { format: "pdf", available: true }, { format: "png", available: true }],
+      };
       let born = 0;
       window.__ANSWER__.open_browser_pane = (args) => {
         born += 1;
@@ -2221,10 +2226,19 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
         return { count: 2 + window.__BAND__.records.length, version: args.feedback.version };
       };
       window.__ANSWER__.choose_project = () => ((window.__BAND__.folders += 1), "/tmp/zerocode-window-test/shared");
+      // 문의 답 그대로: 고른 형식의 확장자로 쓰고, 그림은 상한에서 잘렸을 수 있다.
       window.__ANSWER__.artifact_export = (args) => {
         window.__BAND__.exports.push({ ...args });
-        return { id: args.id, version: args.version, path: `${args.folder}/card-v${args.version}.html`, bytes: 10 };
+        const format = args.format ?? "html";
+        const cut = format === "png" && window.__BAND__.tall;
+        return {
+          id: args.id, version: args.version, format, bytes: 10,
+          path: `${args.folder}/card-v${args.version}.${format}`,
+          ...(cut ? { truncated: true, height: 16384 } : {}),
+        };
       };
+      window.__ANSWER__.artifact_export_formats = () => (window.__BAND__.formatAsks += 1, window.__BAND__.formats);
+      window.__ANSWER__.artifact_export_reveal = (args) => (window.__BAND__.reveals.push({ ...args }), null);
       for (const tab of [...tabs]) dropTab(tab.id);
       renderTabs();
       updateStage();
@@ -2369,27 +2383,139 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
         && delivered.elsewhere?.page_url === "https://example.com/elsewhere",
       JSON.stringify(delivered));
 
-    /* ---- 4. 「내보내기」: 폴더를 묻고 본 판을 쓰며, 공개라고 말하지 않는다 ---------- */
-    const exported = await page.evaluate(async () => {
+    /* ---- 4. 「내보내기」(t-18558): 형식 셋을 보이고, 고른 형식으로 폴더를 한 번 묻고 본 판을 쓰며,
+     *         공개라고 말하지 않는다 ---------------------------------------------------- */
+    const shared = "/tmp/zerocode-window-test/shared";
+    const menuRows = () => [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
+    const opened = await page.evaluate(async () => {
       const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-band");
       setActiveTab(tab.id);
       document.querySelectorAll(".toast").forEach((one) => one.remove());
-      docHost(tab.pane, "browser").querySelector(".artifact-strip-export").click();
-      await new Promise((done) => setTimeout(done, 160));
+      const button = docHost(tab.pane, "browser").querySelector(".artifact-strip-export");
+      button.click();
+      await new Promise((done) => setTimeout(done, 200));
+      const rows = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
       return {
+        words: rows.map((one) => one.textContent.trim()),
+        disabled: rows.map((one) => one.disabled),
+        popup: button.getAttribute("aria-haspopup"),
+        expanded: button.getAttribute("aria-expanded"),
         folders: window.__BAND__.folders,
-        exports: window.__BAND__.exports.slice(),
-        toast: [...document.querySelectorAll(".toast")].map((one) => one.textContent).join(" | "),
+        exports: window.__BAND__.exports.length,
+        asks: window.__BAND__.formatAsks,
       };
     });
     ok(
-      "「내보내기」 asks for a folder and exports the immutable version on screen there, and its notice names the local file without calling it public",
-      exported.folders === 1 && exported.exports.length === 1 && exported.exports[0].id === "p-band"
-        && exported.exports[0].version === 3 && exported.exports[0].folder === "/tmp/zerocode-window-test/shared"
-        && exported.toast.includes("/tmp/zerocode-window-test/shared/card-v3.html")
-        && exported.toast.includes("내보냈습니다") && !/공개|public|공유 링크/i.test(exported.toast),
-      JSON.stringify(exported),
+      "「내보내기」 opens a menu of HTML, PDF and 이미지(PNG), all enabled, and asks for no folder and writes nothing until one is picked",
+      opened.words.join("|") === "HTML|PDF|이미지(PNG)" && opened.disabled.every((one) => one === false)
+        && opened.popup === "menu" && opened.expanded === "true"
+        && opened.folders === 0 && opened.exports === 0 && opened.asks >= 1,
+      JSON.stringify(opened),
     );
+    await shoot("export-menu", ".artifact-strip:not([hidden]), #sidebar-menu:not([hidden])");
+    // 고른 것을 누르고 기다린다: 폴더 한 번, 내보내기 한 번, 알림 하나.
+    const exportVia = (word, tall = false) => page.evaluate(async ({ word, tall }) => {
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-band");
+      setActiveTab(tab.id);
+      document.querySelectorAll(".toast").forEach((one) => one.remove());
+      window.__BAND__.folders = 0;
+      window.__BAND__.exports.length = 0;
+      window.__BAND__.tall = tall;
+      const button = docHost(tab.pane, "browser").querySelector(".artifact-strip-export");
+      if (document.querySelector("#sidebar-menu .sidebar-menu-item") === null || document.querySelector("#sidebar-menu").hidden) {
+        button.click();
+        await new Promise((done) => setTimeout(done, 200));
+      }
+      const row = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")].find((one) => one.textContent.trim() === word);
+      row?.click();
+      await new Promise((done) => setTimeout(done, 260));
+      return {
+        found: Boolean(row),
+        folders: window.__BAND__.folders,
+        exports: window.__BAND__.exports.slice(),
+        toast: [...document.querySelectorAll(".toast")].map((one) => one.textContent).join(" | "),
+        actions: [...document.querySelectorAll(".toast .toast-action")].map((one) => one.textContent.trim()),
+      };
+    }, { word, tall });
+    const asPdf = await exportVia("PDF");
+    ok(
+      "choosing PDF asks for a folder once and exports the immutable version on screen there as a pdf, and its notice names the format and the local file without calling it public",
+      asPdf.found && asPdf.folders === 1 && asPdf.exports.length === 1 && asPdf.exports[0].id === "p-band"
+        && asPdf.exports[0].version === 3 && asPdf.exports[0].folder === shared && asPdf.exports[0].format === "pdf"
+        && asPdf.toast.includes(`${shared}/card-v3.pdf`) && asPdf.toast.includes("PDF")
+        && asPdf.toast.includes("내보냈습니다") && !/공개|public|공유 링크/i.test(asPdf.toast),
+      JSON.stringify(asPdf),
+    );
+    ok(
+      "the notice offers 「Finder에서 보기」 and it reveals the file just written, by the path the export answered",
+      asPdf.actions.join("|") === "Finder에서 보기",
+      JSON.stringify(asPdf.actions),
+    );
+    const revealed = await page.evaluate(async () => {
+      document.querySelector(".toast .toast-action")?.click();
+      await new Promise((done) => setTimeout(done, 120));
+      return window.__BAND__.reveals.slice();
+    });
+    ok(
+      "the notice's 「Finder에서 보기」 sends the written file's path and nothing else",
+      revealed.length === 1 && JSON.stringify(revealed[0]) === JSON.stringify({ path: `${shared}/card-v3.pdf` }),
+      JSON.stringify(revealed),
+    );
+    const asPng = await exportVia("이미지(PNG)", true);
+    ok(
+      "choosing 이미지(PNG) exports as a png, and a page cut at the cap says so with the height it kept",
+      asPng.found && asPng.folders === 1 && asPng.exports.length === 1 && asPng.exports[0].format === "png"
+        && asPng.toast.includes(`${shared}/card-v3.png`) && asPng.toast.includes("이미지(PNG)")
+        && asPng.toast.includes("16384") && asPng.toast.includes("내보냈습니다") && !/공개|public|공유 링크/i.test(asPng.toast),
+      JSON.stringify(asPng),
+    );
+    const asHtml = await exportVia("HTML");
+    ok(
+      "choosing HTML is today's copy of the version on screen: format html, and the same notice about a file on this machine",
+      asHtml.found && asHtml.folders === 1 && asHtml.exports.length === 1 && asHtml.exports[0].format === "html"
+        && asHtml.exports[0].version === 3 && asHtml.exports[0].folder === shared
+        && asHtml.toast.includes(`${shared}/card-v3.html`) && asHtml.toast.includes("이 기계의 파일로 내보냈습니다")
+        && !/공개|public|공유 링크/i.test(asHtml.toast),
+      JSON.stringify(asHtml),
+    );
+    // WebKit이 없는 빌드: 문이 못 그린다고 말한 형식은 이유와 함께 꺼져 있고, 눌러도 폴더를 묻지 않는다.
+    const noWebkitSeen = await page.evaluate(async () => {
+      window.__BAND__.formats = [
+        { format: "html", available: true },
+        { format: "pdf", available: false, why: "no-webkit" },
+        { format: "png", available: false, why: "no-webkit" },
+      ];
+      const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-band");
+      setActiveTab(tab.id);
+      document.querySelectorAll(".toast").forEach((one) => one.remove());
+      window.__BAND__.folders = 0;
+      window.__BAND__.exports.length = 0;
+      docHost(tab.pane, "browser").querySelector(".artifact-strip-export").click();
+      await new Promise((done) => setTimeout(done, 200));
+      const rows = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
+      return {
+        words: rows.map((one) => one.textContent.trim()),
+        disabled: rows.map((one) => one.disabled),
+        tips: rows.map((one) => one.dataset.tip ?? ""),
+      };
+    });
+    await shoot("export-menu-no-webkit", ".artifact-strip:not([hidden]), #sidebar-menu:not([hidden])");
+    const noWebkit = await page.evaluate(async (seen) => {
+      const rows = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
+      rows[1].click();
+      rows[2].click();
+      await new Promise((done) => setTimeout(done, 200));
+      window.__BAND__.formats = [{ format: "html", available: true }, { format: "pdf", available: true }, { format: "png", available: true }];
+      return { ...seen, folders: window.__BAND__.folders, exports: window.__BAND__.exports.length };
+    }, noWebkitSeen);
+    ok(
+      "on a build without WebKit, PDF and 이미지(PNG) are shown disabled with the reason on them, HTML stays enabled, and picking a disabled one asks for nothing",
+      noWebkit.words.join("|") === "HTML|PDF|이미지(PNG)" && noWebkit.disabled.join() === "false,true,true"
+        && noWebkit.tips[0] === "" && noWebkit.tips[1].includes("WebKit") && noWebkit.tips[2].includes("WebKit")
+        && noWebkit.folders === 0 && noWebkit.exports === 0,
+      JSON.stringify(noWebkit),
+    );
+    await page.evaluate(() => document.querySelector("#sidebar-menu") && closeSidebarMenu());
 
     /* ---- 5. 「나란히」: 두 불변 판이 나란히 선다 ----------------------------------- */
     const groupsBefore = await page.evaluate(() => stageGroups().length);
@@ -2446,23 +2572,33 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
         && narrow.feedback.startsWith("피드백") && !narrow.overflows,
       JSON.stringify(narrow),
     );
-    const menu = await page.evaluate(async () => {
+    const folded = await page.evaluate(async () => {
       const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-band");
       const strip = docHost(tab.pane, "browser").querySelector(".artifact-strip");
       strip.querySelector(".artifact-strip-more").click();
-      await new Promise((done) => setTimeout(done, 80));
+      await new Promise((done) => setTimeout(done, 120));
       const rows = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
-      const words = rows.map((one) => one.textContent.trim());
-      const expanded = strip.querySelector(".artifact-strip-more").getAttribute("aria-expanded");
-      const exports = window.__BAND__.exports.length;
-      rows.find((one) => one.textContent.includes("내보내기"))?.click();
-      await new Promise((done) => setTimeout(done, 160));
-      return { words, expanded, exported: window.__BAND__.exports.length - exports };
+      return {
+        words: rows.map((one) => one.textContent.trim()),
+        expanded: strip.querySelector(".artifact-strip-more").getAttribute("aria-expanded"),
+      };
     });
+    await shoot("band-narrow-menu", ".artifact-strip:not([hidden]), #sidebar-menu:not([hidden])");
+    const menu = await page.evaluate(async (seen) => {
+      const exports = window.__BAND__.exports.length;
+      const rows = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
+      rows.find((one) => one.textContent.trim() === "내보내기 · PDF")?.click();
+      await new Promise((done) => setTimeout(done, 260));
+      return {
+        ...seen, exported: window.__BAND__.exports.length - exports,
+        format: window.__BAND__.exports.at(-1)?.format ?? null,
+      };
+    }, folded);
     ok(
-      "the folded menu holds every action the band hid — 「나란히」, 「내보내기」, 「공유」, 「Finder에서 보기」 — and its 「내보내기」 acts",
-      ["나란히", "내보내기", "공유", "Finder에서 보기"].every((word) => menu.words.some((one) => one.includes(word)))
-        && menu.expanded === "true" && menu.exported === 1,
+      "the folded menu holds every action the band hid — 「나란히」, 「내보내기」 as HTML, PDF and 이미지(PNG) rows, 「공유」, 「Finder에서 보기」 — and its PDF row exports a pdf",
+      ["나란히", "내보내기 · HTML", "내보내기 · PDF", "내보내기 · 이미지(PNG)", "공유", "Finder에서 보기"]
+        .every((word) => menu.words.some((one) => one === word))
+        && menu.expanded === "true" && menu.exported === 1 && menu.format === "pdf",
       JSON.stringify(menu),
     );
     await shoot("band-narrow", ".artifact-strip:not([hidden])");

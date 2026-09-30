@@ -63,9 +63,13 @@ mod agent_tools_runtime;
 mod agent_trust_presets;
 pub(crate) mod api_routers;
 mod app_paths;
+mod artifact_render;
+mod artifact_render_plan;
 mod artifact_runtime;
 mod artifact_thumbs;
 mod artifact_transcripts;
+#[cfg(target_os = "macos")]
+mod artifact_webkit;
 mod automation_runtime;
 mod awake;
 mod browser_cookie_import;
@@ -363,6 +367,7 @@ use cmd::{
     artifact_versions, artifacts_list, set_artifacts_auto_open_beside,
     set_artifacts_retention_days, set_vault_session_limit,
 };
+use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
     claim_coordinator_seat, coordinator_handover_status, coordinator_seat_runs,
     set_coordinator_handover,
@@ -3009,6 +3014,8 @@ fn main() -> ExitCode {
             artifact_page_at,
             artifact_feedback_record,
             artifact_export,
+            artifact_export_formats,
+            artifact_export_reveal,
             artifact_thumbnail,
             artifact_import_transcripts,
             set_artifacts_retention_days, set_vault_session_limit,
