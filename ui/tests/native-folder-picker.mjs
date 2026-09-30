@@ -133,8 +133,11 @@ export async function testNativeFolderPicker(browser, origin, ok) {
     ok("a closed form's late picker reply cannot overwrite a reopened form", stale === job.default, stale);
     const fire = (name, payload) => page.evaluate(([n, p]) => { for (const h of window.__LISTENERS__[n] ?? []) h({ payload: p }); }, [name, payload]);
     const standing = () => page.evaluate(() => document.querySelectorAll(".folder-panel-cancel").length);
+    // The stale-form case above leaves its own picker standing; count from there.
+    await page.evaluate(() => { dismissFolderPanelToast(); });
+    await page.waitForFunction(() => document.querySelectorAll(".folder-panel-cancel").length === 0, null, { timeout: 1000 });
     await fire("project:folder-panel-overdue", { generation: 7, after_ms: 8000, brought_forward: false, main_thread_wait_ms: null });
-    ok("an overdue panel stands as one toast", (await standing()) === 1);
+    ok("an overdue panel stands as one toast", (await standing()) === 1, String(await standing()));
     await fire("project:folder-panel-settled", { generation: 6, how: "answered" });
     ok("another generation's settle leaves the toast standing", (await standing()) === 1);
     await fire("project:folder-panel-settled", { generation: 7, how: "answered" });
