@@ -2048,6 +2048,30 @@ def compare_screens(args: argparse.Namespace) -> int:
     return 1 if different else 0
 
 
+def measure_floor(args: argparse.Namespace, base: Path) -> dict:
+    """What the driver costs, with no CLI in the way: the same letters, the same spacing, into `cat` on a pty (the tty
+    echoes a letter itself, before any process reads it), quiet and under the same busy processes as the `loaded` state."""
+    result: dict = {}
+    for label, count in (("quiet", 0), ("loaded", args.load)):
+        if label == "loaded" and not count:
+            continue
+        term = Terminal(["/bin/cat"], {"PATH": BENCH_PATH, "TERM": "xterm-256color"}, base)
+        try:
+            term.pump(0.5)
+            with Busy(count):
+                term.pump(1.0 if count else 0.1)
+                typed: list[Keystroke] = []
+                for letter in TYPED:
+                    term.keystroke(letter)
+                    typed.append(term.keys[-1])
+                    term.pump(0.25)
+                term.pump(0.3)
+            result[label] = echo_stats(typed)
+        finally:
+            term.close([b"\x04"])
+    return result
+
+
 def uptime() -> str:
     try:
         return subprocess.run(["uptime"], capture_output=True, text=True, timeout=5).stdout.strip()
@@ -2297,6 +2321,9 @@ def main() -> int:
     parser.add_argument("--load", type=int, default=os.cpu_count() or 1,
                         help="busy processes (`yes > /dev/null`, default priority) that run during the "
                              "`loaded` state; default the number of logical cores, 0 skips the state")
+    parser.add_argument("--floor", action="store_true",
+                        help="first measure the driver's own floor: keystroke to echo of `cat` on a pty, quiet and "
+                             "under the same `--load`, so the loaded rows can be read as CLI plus that floor")
     parser.add_argument("--attribute", action="store_true",
                         help="keep every byte a CLI writes and split the frames of the waiting, "
                              "streaming and tool states by what the bytes are for (rows written, cells "
@@ -2353,6 +2380,9 @@ def main() -> int:
                                                           "HOME": str(base)}).stdout.strip().splitlines()[0]
         except (OSError, subprocess.TimeoutExpired, IndexError):
             cli.version = "?"
+    floor = measure_floor(args, base) if args.floor else {}
+    if floor:
+        (out / "floor.json").write_text(json.dumps(floor))
     process, url, log = start_service(args, base, out)
     by_cli: dict[str, list[dict]] = {cli.name: [] for cli in clis}
     raw = out / "runs.jsonl"
@@ -2386,6 +2416,9 @@ def main() -> int:
         shutil.rmtree(base, ignore_errors=True)
     versions = " · ".join(f"{cli.name}: {cli.version}" for cli in clis)
     rendered = table(by_cli) + f"\nversions: {versions}\nuptime at end: {uptime()}\n"
+    for label, stats in floor.items():
+        rendered += (f"driver floor, {label} (echo of `cat`, no CLI): p50 {stats.get('echo_p50_ms')} · "
+                     f"p95 {stats.get('echo_p95_ms')} · p99 {stats.get('echo_p99_ms')} · max {stats.get('echo_max_ms')} ms\n")
     if args.note:
         rendered += f"conditions: {args.note}\n"
     (out / "table.md").write_text(rendered)
