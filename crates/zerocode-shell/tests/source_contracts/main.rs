@@ -1,5 +1,6 @@
 mod act_lines;
 mod agent_capabilities;
+mod ask_popup;
 mod bundle_resources;
 mod cli_login;
 mod computer_use_mirrors;
@@ -2907,12 +2908,16 @@ mod tests {
             modal_exit.contains("if (options.animated && !root.hidden) closing(root, finish);"),
             "an animated modal no longer reaches the shared exit:\n{modal_exit}"
         );
-        for surface in ["qoScrim", "permScrim"] {
-            assert!(
-                window.contains(&format!("hideModal({surface}, {{ animated: true")),
-                "`{surface}` does not leave through the modal manager's shared exit"
-            );
-        }
+        assert!(
+            window.contains("hideModal(qoScrim, { animated: true"),
+            "`qoScrim` does not leave through the modal manager's shared exit"
+        );
+        // The ask popup leaves animated too, except a kind that says it leaves
+        // at once (the window's own confirm, whose caller must not wait on a fade).
+        assert!(
+            window.contains("hideModal(askScrim, { animated: !askLeavesAtOnce })"),
+            "`askScrim` does not leave through the modal manager's shared exit"
+        );
         let tab_picker_exit = block_after(window, "function closeTabCreate(");
         assert!(
             tab_picker_exit.contains("hideModal(tabCreatePop")
@@ -5151,7 +5156,9 @@ mod tests {
         // (the original's own anatomy: the bordered path box on both project
         // doors, `checkedHostDescription` inside the NonGit body, and
         // `variant="destructive"` on Remove and its kin).
-        let asking = block_after(window, "function askConfirm(spec) {");
+        // The confirm is one kind of the ask popup (t-17514); its anatomy is
+        // the kind's paint, and `askConfirm` only puts the question in line.
+        let asking = block_after(window, "registerAskKind(\"confirm\", {");
         assert!(
             asking.contains("spec.detail") && asking.contains("spec.note"),
             "the question dialog lost its path box or its in-body note:\n{asking}"
@@ -9960,10 +9967,10 @@ mod tests {
             // through the wrapper rather than `updateStage` directly, for the
             // reason the wrapper exists.
             "repaintDocumentsForLocale()",
-            // A permission prompt already on screen. Its buttons are built
-            // from the catalog, and it is the surface a person is least able
-            // to wait out: the lane behind it is blocked until they answer.
-            "paintPermission()",
+            // An ask already on screen. Its title and buttons are built from
+            // the catalog, and it is the surface a person is least able to
+            // wait out: the agent behind it is blocked until they answer.
+            "paintAsk()",
         ] {
             assert!(
                 switching.contains(repaint),
@@ -30211,9 +30218,12 @@ mod tests {
     /// (`NativeChatInteractiveCard`, index-ftls8Hg_.js:69488-69494). That is
     /// right for a pane — a TUI asks one thing at a time — and it is why the
     /// per-pane cards below need no queue at all. The two surfaces that are
-    /// SINGULAR for the whole window do: the permission modal, and the
-    /// pinned-close question, which was literally a single slot and dropped
-    /// the first caller's promise on the floor when a second aim arrived.
+    /// SINGULAR for the whole window do: the ask popup (t-17514: the tool
+    /// permission, an agent's own question, Computer Use's confirm and
+    /// hand-over, and the window's own confirms are kinds of ask in it), and
+    /// the pinned-close question, which was literally a single slot and
+    /// dropped the first caller's promise on the floor when a second aim
+    /// arrived.
     #[test]
     fn a_waiting_question_is_never_overwritten_by_the_next_one() {
         let window = window_source();
@@ -30267,51 +30277,59 @@ mod tests {
              caller is left hanging"
         );
 
-        // ── the permission modal ─────────────────────────────────────────
-        // A prompt arriving behind one already on screen only moves the
-        // count. A repaint here would rebuild the buttons an answer in
-        // flight was pressed on, which is how one answer becomes two.
-        let raising = block_after(window, "function raisePermission(");
+        // ── the ask popup ────────────────────────────────────────────────
+        // An ask arriving behind one already on screen only moves the count.
+        // A repaint here would rebuild the buttons an answer in flight was
+        // pressed on, which is how one answer becomes two.
+        let raising = block_after(window, "function raiseAsk(ask) {");
         assert!(
-            raising.contains("if (alreadyRaised(frame)) return;")
-                && raising.contains("if (activePrompt) paintPermissionCount();")
-                && raising.contains("else showNextPermission();"),
-            "a second permission prompt no longer waits its turn, or repaints \
-             the modal an answer is being pressed on:\n{raising}"
+            raising.contains("askAlreadyRaised(ask)")
+                && raising.contains("if (activeAsk) paintAskCount();")
+                && raising.contains("else showNextAsk();"),
+            "a second ask no longer waits its turn, or repaints the popup an \
+             answer is being pressed on:\n{raising}"
         );
+        // The identity of a permission prompt is its session AND its id: the
+        // id counts per channel, so two sessions on their first prompt both
+        // say 1, and one key on the id alone dropped the second agent's
+        // question without a word.
+        let channel = block_after(window, "function raisePermission(session, frame) {");
         assert!(
-            block_after(window, "function alreadyRaised(").contains("prompt_id"),
+            channel.contains("`${session}#${frame.prompt_id}`")
+                && block_after(window, "function askAlreadyRaised(ask) {").contains("ask.key"),
             "the same prompt id can be raised twice — a re-hydrated channel \
-             then shows a modal whose id the server has already retired"
+             then shows a popup whose id the server has already retired — or \
+             two sessions' first prompts are taken for one"
         );
-        // The answer belongs to the question it was pressed on, and only that
-        // question advances the queue: a withdrawal landing inside the await
-        // already moved the modal on, and a second shift would take the next
-        // agent's question off the queue without ever showing it.
-        let answering = block_after(window, "async function answerPermission(");
+        // The answer belongs to the ask it was pressed on, and only that ask
+        // advances the queue: a withdrawal landing inside the await already
+        // moved the popup on, and a second shift would take the next agent's
+        // question off the queue without ever showing it.
+        let answering = block_after(window, "async function answerAsk(choice) {");
         assert!(
-            answering.contains("const answered = activePrompt;")
-                && answering.contains("if (activePrompt !== answered) return;")
-                && answering.contains("if (activePrompt === answered) showNextPermission();"),
-            "an answer can now be delivered to, or advance past, a question \
-             other than the one it was pressed on:\n{answering}"
+            answering.contains("const answered = activeAsk;")
+                && answering.contains("if (activeAsk !== answered) return;")
+                && answering.contains("if (activeAsk === answered) showNextAsk();"),
+            "an answer can now be delivered to, or advance past, an ask other \
+             than the one it was pressed on:\n{answering}"
         );
         // A session that ended takes its questions out of the queue — from
         // both roads that end one, because a prompt id retired with its
-        // channel can only fail, and a modal that cannot be answered is a
+        // channel can only fail, and a popup that cannot be answered is a
         // wall in front of the questions behind it. Nothing is hidden: the
         // lane is gated `blocked` on the same event (제품 원칙 1).
-        let withdrawing = block_after(window, "function withdrawPermissions(");
+        let withdrawing = block_after(window, "function withdrawAsks(matches) {");
         assert!(
-            withdrawing.contains("permissionQueue.splice(at, 1)")
-                && withdrawing
-                    .contains("if (activePrompt?.session === session) showNextPermission();"),
-            "withdrawing a session's questions no longer clears the queue or \
-             the modal:\n{withdrawing}"
+            withdrawing.contains("askQueue.splice(at, 1)")
+                && withdrawing.contains("if (activeAsk && matches(activeAsk))")
+                && withdrawing.contains("showNextAsk();"),
+            "withdrawing asks no longer clears the queue or the popup:\n{withdrawing}"
         );
         assert!(
-            block_after(window, r#"listen("session:ended", (event) => {"#)
-                .contains("withdrawPermissions(session)")
+            block_after(window, "function withdrawPermissions(session) {")
+                .contains("withdrawAsks((ask) => ask.session === session)")
+                && block_after(window, r#"listen("session:ended", (event) => {"#)
+                    .contains("withdrawPermissions(session)")
                 && block_after(window, "function removeLane(")
                     .contains("withdrawPermissions(entry.lane.session_id)"),
             "a session ending, or its lane closing, leaves a question nobody \
@@ -30320,7 +30338,7 @@ mod tests {
 
         // ── and the count is a real element, in every language ───────────
         assert!(
-            markup.contains(r#"id="pin-more""#) && markup.contains(r#"id="perm-more""#),
+            markup.contains(r#"id="pin-more""#) && markup.contains(r#"id="ask-more""#),
             "the dialogs have nowhere to say how many questions are waiting"
         );
         assert!(
