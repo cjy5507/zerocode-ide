@@ -231,6 +231,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSPrintInfo",
     "NSPrintOperation",
     "objc2-core-foundation",
+    # The print job is run modal for a window of its own, never the person's:
+    # `NSWindow`'s initializer and `NSBackingStoreType` live behind `NSGraphics`.
+    "NSGraphics",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",

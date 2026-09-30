@@ -9,8 +9,9 @@
 //! main thread too, and each completion sends its answer down the channel the
 //! async side waits on with a deadline — nothing here blocks the main thread.
 
+use std::cell::OnceCell;
 use std::ffi::c_void;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use block2::RcBlock;
@@ -18,8 +19,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObjectProtocol as _};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSPaperOrientation, NSPrintInfo,
-    NSPrintJobSavingURL, NSPrintOperation, NSPrintSaveJob, NSWindow,
+    NSBackingStoreType, NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSPaperOrientation,
+    NSPrintInfo, NSPrintJobSavingURL, NSPrintOperation, NSPrintSaveJob, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSDictionary, NSError, NSNumber, NSObject, NSPoint, NSRect, NSSize, NSString, NSURL,
@@ -126,6 +128,23 @@ pub(crate) struct Paper {
 
 struct PrintDoneIvars {
     tx: Sender<Result<(), String>>,
+    /// The file the job writes: nobody's once the side that waited for it is gone.
+    file: PathBuf,
+}
+
+/// Say that the print job ended. When nobody is waiting any more — the render's
+/// budget ran out and its receiver left before the job did — the file the job has
+/// just written is nobody's, and it is removed here rather than left in the temp
+/// folder for good.
+fn deliver(tx: &Sender<Result<(), String>>, file: &Path, success: bool) {
+    let answer = if success {
+        Ok(())
+    } else {
+        Err("인쇄 작업이 실패했습니다".to_string())
+    };
+    if tx.send(answer).is_err() {
+        let _ = std::fs::remove_file(file);
+    }
 }
 
 define_class!(
@@ -143,32 +162,60 @@ define_class!(
         // calls once the job is over: (operation, success, contextInfo).
         #[unsafe(method(printOperationDidRun:success:contextInfo:))]
         fn did_run(&self, _operation: &AnyObject, success: Bool, _context: *mut c_void) {
-            let _ = self.ivars().tx.send(if success.as_bool() {
-                Ok(())
-            } else {
-                Err("인쇄 작업이 실패했습니다".to_string())
-            });
+            let ivars = self.ivars();
+            deliver(&ivars.tx, &ivars.file, success.as_bool());
         }
     }
 );
 
 impl PrintDone {
-    fn new(mtm: MainThreadMarker, tx: Sender<Result<(), String>>) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(PrintDoneIvars { tx });
+    fn new(mtm: MainThreadMarker, tx: Sender<Result<(), String>>, file: PathBuf) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(PrintDoneIvars { tx, file });
         // SAFETY: the signature of NSObject's `init` is correct.
         unsafe { msg_send![super(this), init] }
     }
+}
+
+thread_local! {
+    /// The window print jobs are run modal for: one of our own, never shown, that
+    /// nothing else uses. `runOperationModalForWindow:` holds its window for the
+    /// life of the job, and that must never be the person's — the export runs for
+    /// seconds while they type. Main thread only, like everything here.
+    static PRINT_WINDOW: OnceCell<Retained<NSWindow>> = const { OnceCell::new() };
+}
+
+fn print_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
+    PRINT_WINDOW.with(|held| {
+        held.get_or_init(|| {
+            let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0));
+            // SAFETY: released-when-closed is switched off below, as a window made
+            // outside a window controller must have it.
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    frame,
+                    NSWindowStyleMask::Borderless,
+                    NSBackingStoreType::Buffered,
+                    true,
+                )
+            };
+            unsafe { window.setReleasedWhenClosed(false) };
+            window
+        })
+        .clone()
+    })
 }
 
 /// Print the page in `view` into the PDF file at `out`, paginated on `paper`:
 /// `WKWebView.printOperationWithPrintInfo` run as a save job with no panel — the
 /// page's `@media print` rules apply, text stays text, and WebKit breaks the
 /// pages. The job is asynchronous by WebKit's design (`run` on the main thread
-/// prints nothing): the job ends by `tx` — `Ok` once the file is written.
+/// prints nothing): the job ends by `tx` — `Ok` once the file is written — and a
+/// job whose waiter is gone removes its own file ([`deliver`]). It is run modal
+/// for a window of its own ([`print_window`]), never the person's.
 pub(crate) fn print_pdf(
     mtm: MainThreadMarker,
     view: &WKWebView,
-    window: &NSWindow,
     out: &Path,
     paper: Paper,
     tx: Sender<Result<(), String>>,
@@ -208,13 +255,14 @@ pub(crate) fn print_pdf(
             NSSize::new(paper.width, paper.height),
         ));
     }
-    let done = PrintDone::new(mtm, tx);
+    let done = PrintDone::new(mtm, tx, out.to_path_buf());
+    let window = print_window(mtm);
     // SAFETY: an object pointer is an `AnyObject`; the selector is the one
     // `PrintDone` implements, with the signature AppKit calls it with.
     let delegate: &AnyObject = unsafe { &*Retained::as_ptr(&done).cast::<AnyObject>() };
     unsafe {
         operation.runOperationModalForWindow_delegate_didRunSelector_contextInfo(
-            window,
+            &window,
             Some(delegate),
             Some(sel!(printOperationDidRun:success:contextInfo:)),
             std::ptr::null_mut(),
@@ -225,4 +273,37 @@ pub(crate) fn print_pdf(
     // lives for the process rather than risk a call into a freed one.
     std::mem::forget(done);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    /// A job that ends after its waiter left removes the file it wrote; one that
+    /// ends while somebody waits leaves the file to them, and a failed one says so.
+    #[test]
+    fn a_print_job_that_ends_after_its_waiter_left_removes_its_own_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("zerocode-export-late.pdf");
+
+        std::fs::write(&file, b"%PDF-").expect("write");
+        let (tx, rx) = channel();
+        drop(rx);
+        deliver(&tx, &file, true);
+        assert!(
+            !file.exists(),
+            "a file nobody waits for was left in the temp folder"
+        );
+
+        std::fs::write(&file, b"%PDF-").expect("write");
+        let (tx, rx) = channel();
+        deliver(&tx, &file, true);
+        assert_eq!(rx.recv().expect("an answer"), Ok(()));
+        assert!(file.exists(), "the waiter's file was removed under it");
+
+        let (tx, rx) = channel();
+        deliver(&tx, &file, false);
+        assert!(rx.recv().expect("an answer").is_err());
+    }
 }

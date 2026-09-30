@@ -285,7 +285,6 @@ async fn print(pane: &tauri::Webview, deadline: Instant) -> Result<Rendered, Str
     pane.with_webview(move |platform| {
         // Main thread, by `with_webview`'s contract — WebKit requires it.
         let view: &objc2_web_kit::WKWebView = unsafe { &*platform.inner().cast() };
-        let window: &objc2_app_kit::NSWindow = unsafe { &*platform.ns_window().cast() };
         // The marker is the compiler's word for what the closure already knows.
         let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
         crate::artifact_webkit::allow_print_backgrounds(view);
@@ -294,9 +293,7 @@ async fn print(pane: &tauri::Webview, deadline: Instant) -> Result<Rendered, Str
             height: plan::A4_HEIGHT_PT,
             margin: plan::PDF_MARGIN_PT,
         };
-        if let Err(why) =
-            crate::artifact_webkit::print_pdf(mtm, view, window, &path, paper, tx.clone())
-        {
+        if let Err(why) = crate::artifact_webkit::print_pdf(mtm, view, &path, paper, tx.clone()) {
             let _ = tx.send(Err(why));
         }
     })
