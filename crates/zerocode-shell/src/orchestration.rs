@@ -4574,9 +4574,11 @@ fn reported_sessions() -> &'static Mutex<ReportedSessions> {
 ///
 /// Called from the window's OWN key road — never from paste delivery or any
 /// programmatic write — because "the person took this pane" must mean a
-/// hand, not a machine. One report per terminal per incarnation: the ledger
-/// marks the worker sitting there as the person's, durably, and the gate
-/// keeps every later keystroke to a lock-and-probe.
+/// hand, not a machine — and only a hand that put the person's own words on
+/// the line (`human_write`'s answer, t-17644). One report per terminal while
+/// it stays taken: the ledger marks the worker sitting there as the
+/// person's, and the gate keeps every later keystroke to a lock-and-probe
+/// until the beat sees the pane returned ([`forget_returned_terms`]).
 pub(crate) fn pane_taken_over(term: u32, now_ms: i64) {
     {
         let mut taken = taken_terms()
@@ -4595,6 +4597,68 @@ pub(crate) fn pane_taken_over(term: u32, now_ms: i64) {
     if let Ok((moved, _)) = held.actor.pane_taken_over(term, now_ms) {
         rang(moved);
     }
+}
+
+/// The terminal a live worker sits in, read from its row and the seats.
+fn term_of_worker(ledger: &Ledger, seats: &TeamSeatIndex, worker_id: &str) -> Option<u32> {
+    let worker = ledger
+        .runs()
+        .iter()
+        .flat_map(|run| run.workers.iter())
+        .find(|one| one.id == worker_id && one.state.is_live())?;
+    seats
+        .get(worker.team.as_str())?
+        .get(worker.pane.as_str())
+        .copied()
+}
+
+/// `worker-return` is the ledger's verb, but only the window can see the
+/// line (t-17644): a pane holding a draft of the person's own words is
+/// genuinely theirs, and handing it back would type the next pointer on top
+/// of what they are writing.
+fn return_refused(argv: &[String]) -> Option<String> {
+    if argv.first().map(String::as_str) != Some("worker-return") {
+        return None;
+    }
+    let worker = argv
+        .windows(2)
+        .find(|pair| pair[0] == "--worker")
+        .map(|pair| pair[1].as_str())?;
+    let term =
+        with_ledger_seats(|ledger, seats| term_of_worker(ledger, seats, worker)).flatten()?;
+    crate::human_input::holds_own_words(term).then(|| {
+        format!(
+            "worker {worker}'s pane holds words the person typed and has not sent — \
+             it is still theirs; it comes back when they send or clear them, or \
+             when the worker writes to the ledger again"
+        )
+    })
+}
+
+/// Let the key gate forget every pane the ledger holds as its own again
+/// (t-17644): one handed back with `worker-return`. The next hand of the
+/// person's own words in that pane is a takeover again, reported afresh.
+fn forget_returned_terms() {
+    let Some(returned) = with_ledger_seats(|ledger, seats| {
+        ledger
+            .runs()
+            .iter()
+            .flat_map(|run| run.workers.iter())
+            .filter(|worker| worker.state.is_live() && !worker.taken_over)
+            .filter_map(|worker| {
+                seats
+                    .get(worker.team.as_str())?
+                    .get(worker.pane.as_str())
+                    .copied()
+            })
+            .collect::<std::collections::HashSet<u32>>()
+    }) else {
+        return;
+    };
+    taken_terms()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .retain(|term| !returned.contains(term));
 }
 
 /// The window is on its way out, and every pane in it goes with it (t-3058).
@@ -6581,6 +6645,8 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // A decline whose pause dialog stands behind a stale `working` hook, which
     // the sweep cannot see, is told on its own two witnesses (t-6747).
     note_paused_declines(host, now_ms);
+    // A pane the ledger holds as its own again reopens the key gate.
+    forget_returned_terms();
     // Every switch of model a worker's CLI made to answer a classifier
     // decline is written down, whether or not the worker went quiet (t-6747).
     note_model_deviations(host, now_ms);
@@ -8433,6 +8499,9 @@ fn run_seated(
      * already carries in its environment. */
     if let Some(said) = federation_book_verbs(argv) {
         return said;
+    }
+    if let Some(why) = return_refused(argv) {
+        return refused(why);
     }
     let Some(held) = runtime() else {
         return refused("orchestration is unavailable in this window — the runtime never started");

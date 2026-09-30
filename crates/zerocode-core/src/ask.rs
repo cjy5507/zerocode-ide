@@ -467,6 +467,13 @@ pub fn keys_for(
 /// encoded.
 const SUBMIT_ENTER_INPUTS: [&str; 5] = ["\r", "\n", "\r\n", "\x1b[13u", "\x1b[13;1u"];
 
+/// Enter alone, in any of its spellings — a keystroke that adds no words to
+/// the line, only sends what is already there.
+#[must_use]
+pub fn is_submit_enter(data: &str) -> bool {
+    SUBMIT_ENTER_INPUTS.contains(&data)
+}
+
 /// A byte that could be answering a question at the keyboard — Enter, or a
 /// row digit (`isPotentialQuestionAnsweredSubmitInput`, `:33-35`).
 ///

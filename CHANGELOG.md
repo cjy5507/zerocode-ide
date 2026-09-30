@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.1.44] — 2026-09-30
+
+### feat
+
+- feat(window): every question the window puts to the person is one popup in the middle of the window, one at a time with the count of those waiting — a tool permission, an agent's own question (zo's model switch), Computer Use's last-step confirm and its hand-over, and the window's own confirms; Enter gives the kind's safe default and Escape refuses (t-17514)
+- feat(window): a running helper's page can stop that one helper where its agent's catalog row names a road (zo today): one press asks once, the answer's word stands for a beat, and the head says the person stopped it only when the roster says the helper ended (t-16943)
+- feat(zo): zo's Codex model list reaches the models the ChatGPT backend shows only to newer Codex versions, such as gpt-6.1-sol — the request names the newest Codex this machine has seen, floor 0.159.2 (t-17403)
+- feat(orchestration): `worker-return --worker <id>` hands a pane the person took back to the ledger by name, refused while their own unsent words sit on its line (t-17644)
+
+### fix
+
+- fix(window): after a window restart, words the window left in an agent's composer with their Enter untaken are sent by one Enter alone at the composer's next ready — never left for the person, never typed twice (t-17037)
+- fix(window): the words the window places in an agent's composer never carry the person's clipboard — a delivery with no words writes no bytes (the empty paste frame Claude Code read as Cmd+V), an Enter alone is the Enter alone, and every catalog row keeps one whole paste frame (t-17274)
+- fix(window): a person's Enter that only sends words the window placed in a worker's pane (a resume nudge, a mail pointer) takes nothing over, so the mail pointer, stop and release keep working for that worker; a taken pane stays the person's even when its worker reports (t-17644)
+- fix(window): the title bar keeps the window's width however many tabs it holds — the strip scrolls, the tab in front is brought clear of the fade, the controls on the right stay on screen (sixty tabs made a 10437 px bar in a 720 px window before); a board card's foot wraps its clocks on the narrowest rail instead of spilling (t-17078)
+- fix(zo): a Sonnet or Haiku decline follows the provider's own routes, so a category the provider routes nowhere stands after one retry; the ladder's two questions (switch models, retry without the images) are questions, not tool permissions, and the window draws them as such; a search or read of a session transcript masks its thinking blocks (t-17474)
+- fix(zo): a zo started by a zo ranks its parent's published model catalog under its own discovery, so a helper answers a model name with what it can see (t-17403)
+
+### perf
+
+- perf(zo): zo's painter writes what changed on the screen and nothing else — a changed row goes out as the cells that changed, a row that only moved is scrolled by the terminal, a pen or caret the terminal already holds is not sent again: 39 to 93 percent fewer bytes for the same screen, waiting for the model 3,234 → 1,484 bytes a second (t-17056)
+
+### internal
+
+- test(zo): the quality baseline's Q3 is pinned on what the product does today (t-17783); the autopilot's stale-or-late-answer test is listed as a load flake the lane judges solo
+
 ## [1.1.43] — 2026-09-30
 
 _since v1.1.42 (134 commits)_
