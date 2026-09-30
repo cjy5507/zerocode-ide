@@ -1233,7 +1233,10 @@ impl agent_teams::Host for TeamWindow {
                 // The briefing owns its composer — new, empty, the window's
                 // own — and yields only to the pane being relaunched under
                 // it, which would make these words the last occupant's.
-                .guarded(zerocode_pty::ready::Guard::for_its_own_line(Some(launch)));
+                .guarded(zerocode_pty::ready::Guard::for_its_own_line(Some(launch)))
+                // Pasted or typed as the row says (t-17274); a restored
+                // process's wait carries no words and so writes none.
+                .words(composer_words_for(named));
                 if !restoring && caps.is_some_and(|caps| caps.submit_ack == SubmitAck::Channel) {
                     // A channel-acknowledged agent's submission receipt is the
                     // channel's turn/start frame. Park the composer delivery

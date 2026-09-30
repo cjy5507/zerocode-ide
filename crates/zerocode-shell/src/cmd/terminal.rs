@@ -978,6 +978,7 @@ pub(crate) fn prompt_delivery_for(
     let signal = readiness.signal(agent);
     let clearing = readiness.clearing(agent);
     let guard = readiness.guard(launch);
+    let words = composer_words_for(agent);
     match readiness {
         PromptReadiness::Mounting => PromptDelivery::with_deadlines(
             text,
@@ -988,13 +989,15 @@ pub(crate) fn prompt_delivery_for(
             ready_timeout_for(agent),
         )
         .clearing(clearing)
-        .guarded(guard),
+        .guarded(guard)
+        .words(words),
         PromptReadiness::Resting
         | PromptReadiness::RestingBesideADraft
         | PromptReadiness::EnterAgain(_) => PromptDelivery::new(text, submit, signal, started)
             .clearing(clearing)
             .guarded(guard)
-            .pressing(readiness.enter_again()),
+            .pressing(readiness.enter_again())
+            .words(words),
     }
 }
 
@@ -1052,6 +1055,7 @@ pub(crate) fn type_prompt_at_term(
                 clearing,
                 guard,
                 enter_again: readiness.enter_again(),
+                words: composer_words_for(agent),
                 completion: notify,
             });
         return Ok(waiting);
@@ -1452,7 +1456,8 @@ pub(crate) fn launch_agent_tab(
                 ready_timeout_for(Some(spec.id)),
             )
             .clearing(false)
-            .guarded(zerocode_pty::ready::Guard::for_its_own_line(launch)),
+            .guarded(zerocode_pty::ready::Guard::for_its_own_line(launch))
+            .words(composer_words_for(Some(spec.id))),
         );
     }
     state.cadence().wake();
