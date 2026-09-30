@@ -220,6 +220,21 @@ pub(crate) fn print_pdf(
     paper: Paper,
     tx: Sender<Result<(), String>>,
 ) -> Result<(), String> {
+    print_pdf_for(mtm, view, &print_window(mtm), out, paper, tx)
+}
+
+/// [`print_pdf`] with the window the job is run modal for named. The window is
+/// a parameter so that the proof harness can run the same job for the view's
+/// own window, as the first version did, and measure what the private window
+/// saves; the export itself always goes through [`print_pdf`].
+pub(crate) fn print_pdf_for(
+    mtm: MainThreadMarker,
+    view: &WKWebView,
+    doc_window: &NSWindow,
+    out: &Path,
+    paper: Paper,
+    tx: Sender<Result<(), String>>,
+) -> Result<(), String> {
     if !view.respondsToSelector(sel!(printOperationWithPrintInfo:)) {
         return Err("이 macOS의 WebKit은 PDF 인쇄를 지원하지 않습니다".to_string());
     }
@@ -256,13 +271,12 @@ pub(crate) fn print_pdf(
         ));
     }
     let done = PrintDone::new(mtm, tx, out.to_path_buf());
-    let window = print_window(mtm);
     // SAFETY: an object pointer is an `AnyObject`; the selector is the one
     // `PrintDone` implements, with the signature AppKit calls it with.
     let delegate: &AnyObject = unsafe { &*Retained::as_ptr(&done).cast::<AnyObject>() };
     unsafe {
         operation.runOperationModalForWindow_delegate_didRunSelector_contextInfo(
-            &window,
+            doc_window,
             Some(delegate),
             Some(sel!(printOperationDidRun:success:contextInfo:)),
             std::ptr::null_mut(),

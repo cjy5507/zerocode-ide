@@ -2479,7 +2479,7 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
       JSON.stringify(asHtml),
     );
     // WebKit이 없는 빌드: 문이 못 그린다고 말한 형식은 이유와 함께 꺼져 있고, 눌러도 폴더를 묻지 않는다.
-    const noWebkit = await page.evaluate(async () => {
+    const noWebkitSeen = await page.evaluate(async () => {
       window.__BAND__.formats = [
         { format: "html", available: true },
         { format: "pdf", available: false, why: "no-webkit" },
@@ -2493,17 +2493,21 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
       docHost(tab.pane, "browser").querySelector(".artifact-strip-export").click();
       await new Promise((done) => setTimeout(done, 200));
       const rows = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
-      const seen = {
+      return {
         words: rows.map((one) => one.textContent.trim()),
         disabled: rows.map((one) => one.disabled),
         tips: rows.map((one) => one.dataset.tip ?? ""),
       };
+    });
+    await shoot("export-menu-no-webkit", ".artifact-strip:not([hidden]), #sidebar-menu:not([hidden])");
+    const noWebkit = await page.evaluate(async (seen) => {
+      const rows = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
       rows[1].click();
       rows[2].click();
       await new Promise((done) => setTimeout(done, 200));
       window.__BAND__.formats = [{ format: "html", available: true }, { format: "pdf", available: true }, { format: "png", available: true }];
       return { ...seen, folders: window.__BAND__.folders, exports: window.__BAND__.exports.length };
-    });
+    }, noWebkitSeen);
     ok(
       "on a build without WebKit, PDF and 이미지(PNG) are shown disabled with the reason on them, HTML stays enabled, and picking a disabled one asks for nothing",
       noWebkit.words.join("|") === "HTML|PDF|이미지(PNG)" && noWebkit.disabled.join() === "false,true,true"
@@ -2568,22 +2572,28 @@ export async function testArtifactBand(browser, origin, ok, outputDir) {
         && narrow.feedback.startsWith("피드백") && !narrow.overflows,
       JSON.stringify(narrow),
     );
-    const menu = await page.evaluate(async () => {
+    const folded = await page.evaluate(async () => {
       const tab = tabs.find((one) => one.kind === "browser" && one.artifact?.id === "p-band");
       const strip = docHost(tab.pane, "browser").querySelector(".artifact-strip");
       strip.querySelector(".artifact-strip-more").click();
-      await new Promise((done) => setTimeout(done, 80));
+      await new Promise((done) => setTimeout(done, 120));
       const rows = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
-      const words = rows.map((one) => one.textContent.trim());
-      const expanded = strip.querySelector(".artifact-strip-more").getAttribute("aria-expanded");
+      return {
+        words: rows.map((one) => one.textContent.trim()),
+        expanded: strip.querySelector(".artifact-strip-more").getAttribute("aria-expanded"),
+      };
+    });
+    await shoot("band-narrow-menu", ".artifact-strip:not([hidden]), #sidebar-menu:not([hidden])");
+    const menu = await page.evaluate(async (seen) => {
       const exports = window.__BAND__.exports.length;
+      const rows = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
       rows.find((one) => one.textContent.trim() === "내보내기 · PDF")?.click();
       await new Promise((done) => setTimeout(done, 260));
       return {
-        words, expanded, exported: window.__BAND__.exports.length - exports,
+        ...seen, exported: window.__BAND__.exports.length - exports,
         format: window.__BAND__.exports.at(-1)?.format ?? null,
       };
-    });
+    }, folded);
     ok(
       "the folded menu holds every action the band hid — 「나란히」, 「내보내기」 as HTML, PDF and 이미지(PNG) rows, 「공유」, 「Finder에서 보기」 — and its PDF row exports a pdf",
       ["나란히", "내보내기 · HTML", "내보내기 · PDF", "내보내기 · 이미지(PNG)", "공유", "Finder에서 보기"]
