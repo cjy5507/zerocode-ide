@@ -4071,6 +4071,46 @@ async fn e2e_a_tall_edit_cell_keeps_the_composer_on_the_floor() {
     }
 }
 
+/// A draft taller than the pane keeps the row of its caret on screen (t-17194).
+///
+/// Before: the view built every row of the composer and the painter drew the
+/// first rows the pane had, so with a 60-row draft in a 10-row pane the caret
+/// and every letter typed at the end of the draft were on rows nobody drew.
+/// The composer now scrolls the draft between its own lines: the end of the
+/// paste is on screen, and the next letter is drawn where the caret is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_draft_taller_than_the_pane_keeps_what_is_typed_at_its_end_on_screen() {
+    const ROWS: u16 = 10;
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("nothing is asked")
+        .await
+        .expect("start text script");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_sized(
+        ROWS,
+        80,
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[],
+    )
+    .expect("spawn zo in a short PTY");
+    run.wait_for("directory:", TEST_TIMEOUT);
+    let draft = (1..=60)
+        .map(|number| format!("row {number:02} of the draft"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    run.send(format!("\u{1b}[200~{draft}\u{1b}[201~").as_bytes())
+        .expect("paste a 60-row draft");
+    run.wait_for_screen("row 60 of the draft", usize::from(ROWS), TEST_TIMEOUT);
+    run.send(b"Z").expect("type a letter at the end of the draft");
+    run.wait_for_screen("row 60 of the draftZ", usize::from(ROWS), TEST_TIMEOUT);
+    let _ = run.finish();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_a_fresh_session_at_sixty_rows_keeps_the_composer_on_the_floor() {
     a_fresh_session_fills_the_pane_from_the_top(60, "sixty-rows").await;

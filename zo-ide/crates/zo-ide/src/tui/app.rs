@@ -1757,6 +1757,7 @@ impl Ui {
             dream: dream.as_deref(),
             width: self.painter.cols() as usize,
             max_rows: max_rows as usize,
+            max_height: usize::from(self.painter.max_height()),
         };
         let (rows, cursor) = view::build(&frame);
         let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
@@ -8239,6 +8240,7 @@ mod tests {
             dream: None,
             width: 80,
             max_rows: 23,
+            max_height: 23,
         };
         let (rows, _) = crate::tui::view::build(&frame);
         assert!(

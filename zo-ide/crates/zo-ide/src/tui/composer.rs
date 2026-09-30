@@ -7,6 +7,7 @@
 //! 완성된 `KeyCode::Char` 로만 준다).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use super::ansi::{char_width, Color, Line, Span, Style};
@@ -123,6 +124,11 @@ pub struct Composer {
     browsing: Option<usize>,
     draft: String,
     images: Vec<LocalImage>,
+    /// 초안이 화면에 다 들어가지 못할 때 상자 위로 밀려난 초안 행의 수. 캐럿이 보이는
+    /// 행들 안에서 움직이는 동안은 그대로 두고, 밖으로 나갈 때만 옮긴다 — codex 의
+    /// `TextAreaState::scroll` 과 같다. 그리는 길이 `&self` 라 안에서 고쳐야 하고, 어느
+    /// 스레드가 읽어도 되도록 원자값으로 둔다.
+    scroll: AtomicUsize,
 }
 
 impl Composer {
@@ -584,11 +590,21 @@ impl Composer {
     /// 요청했으므로 이 블록에만 둥근 상자를 그리는 의도된 이탈이다. 상자 두
     /// 칸을 먼저 떼고, 그 안에서 다시 caret 두 칸을 떼므로 기존 본문·이미지
     /// placeholder 폭 계약은 그대로다. 피커·히스토리 셀에는 이 선이 없다.
+    ///
+    /// 높이에는 한도가 없다 — 한도가 있어야 하는 화면은 [`Self::render_with_effort`] 다.
     #[must_use]
     pub fn render(&self, width: usize, placeholder: &str) -> (Vec<Line>, (u16, u16)) {
-        self.render_with_effort(width, placeholder, None, None, Instant::now())
+        self.render_with_effort(width, placeholder, None, None, Instant::now(), usize::MAX)
     }
 
+    /// [`Self::render`] 를 겉모습(effort tier·테두리 효과)과 **높이 한도**를 주어 그린다.
+    ///
+    /// `max_rows` 는 상자가 위아래 선까지 합쳐 쓸 수 있는 가장 큰 높이다. 초안이 그보다 많은
+    /// 행이면 선은 그대로 두고 그 안에서 초안이 스크롤된다: 캐럿이 있는 행은 늘 보이는 행들
+    /// 안에 있고, 캐럿이 그 안에서 움직이는 동안은 글이 제자리에 있다. 화면이 아래를 자르는
+    /// 대신 작성창이 스스로 자르는 것이다 — 자르는 쪽이 painter 였을 때 긴 초안의 끝은 그려지지
+    /// 않은 행에 있었고, 사람은 자기가 치는 글을 볼 수 없었다(t-17194). 한도가 아무리 작아도
+    /// 상자는 위아래 선과 캐럿 행 하나, 세 줄 아래로 줄지 않는다.
     #[must_use]
     pub fn render_with_effort(
         &self,
@@ -597,6 +613,7 @@ impl Composer {
         tier: Option<EffortTier>,
         effect: Option<&EffortEffect>,
         now: Instant,
+        max_rows: usize,
     ) -> (Vec<Line>, (u16, u16)) {
         self.render_with_effort_for_palette(
             width,
@@ -604,10 +621,14 @@ impl Composer {
             tier,
             effect,
             now,
+            max_rows,
             palette::terminal_palette(),
         )
     }
 
+    // 인자가 여덟이다 — 폭과 높이 한도, 그리고 겉모습(tier·효과·시각·팔레트)을 시험이 따로 줄 수
+    // 있어야 해서 한 묶음으로 만들지 않았다.
+    #[allow(clippy::too_many_arguments)]
     fn render_with_effort_for_palette(
         &self,
         width: usize,
@@ -615,6 +636,7 @@ impl Composer {
         tier: Option<EffortTier>,
         effect: Option<&EffortEffect>,
         now: Instant,
+        max_rows: usize,
         terminal_palette: Option<palette::TerminalPalette>,
     ) -> (Vec<Line>, (u16, u16)) {
         let caret = tier.map_or_else(
@@ -625,7 +647,8 @@ impl Composer {
         // 여섯 칸보다 좁으면 양쪽 선, 두 칸 caret, 폭 2짜리 글자를 함께 세울
         // 수 없다. 이때만 테두리를 접고 줄과 커서를 주어진 폭 안으로 제한한다.
         if width < 6 {
-            let (lines, (col, row)) = self.render_content(width, placeholder, caret);
+            // 선이 없으니 상자의 행이 곧 초안의 행이다.
+            let (lines, (col, row)) = self.render_content(width, placeholder, caret, max_rows);
             let lines = lines
                 .into_iter()
                 .map(|line| line.truncated(width).styled(composer_style))
@@ -635,7 +658,9 @@ impl Composer {
         }
 
         let inner_width = width - 2;
-        let (content, (col, row)) = self.render_content(inner_width, placeholder, caret);
+        // 위아래 선이 두 줄을 먹는다. 그래도 캐럿이 있는 행 하나는 늘 남긴다.
+        let visible = max_rows.saturating_sub(2);
+        let (content, (col, row)) = self.render_content(inner_width, placeholder, caret, visible);
         let border_style = effect.map_or_else(idle_border_style, |effect| {
             effect.border_style_at(now)
         });
@@ -664,14 +689,18 @@ impl Composer {
         (lines, (col.saturating_add(1), row.saturating_add(1)))
     }
 
+    /// 초안의 보이는 행들(마커를 단 채)과 캐럿의 자리 `(col, row)`. `row` 는 그 보이는 행들 안의
+    /// 번호다. `visible` 은 한 번에 보일 행의 수 — 초안이 그만큼이 안 되면 초안 전부를 그린다.
     fn render_content(
         &self,
         width: usize,
         placeholder: &str,
         caret: Span,
+        visible: usize,
     ) -> (Vec<Line>, (u16, u16)) {
         let content = width.saturating_sub(CARET_WIDTH).max(1);
         if self.text.is_empty() {
+            self.scroll.store(0, Ordering::Relaxed);
             let line = Line::new(vec![
                 caret,
                 Span::raw(CARET_GAP),
@@ -685,7 +714,7 @@ impl Composer {
         // 같은 순회 안에서 판단한다.
         let mut rows: Vec<Vec<Span>> = vec![Vec::new()];
         let mut used = 0usize;
-        let mut cursor_at = (2u16, 0u16);
+        let mut cursor_at = position(0, 0);
         let mut offset = 0usize;
         for ch in self.text.chars() {
             if offset == self.cursor {
@@ -716,14 +745,21 @@ impl Composer {
         if offset == self.cursor {
             cursor_at = position(rows.len() - 1, used);
         }
+        let (cursor_col, cursor_row) = cursor_at;
 
+        let visible = visible.max(1);
+        let first = self.window_start(rows.len(), cursor_row, visible);
         let lines = rows
             .into_iter()
             .enumerate()
+            .skip(first)
+            .take(visible)
             .map(|(index, spans)| {
                 let mut line = Line::new(spans);
-                if index == 0 {
-                    // 마커와 빈칸은 다른 스팬이다 — 스타일이 `›` 에서 끝난다.
+                if index == first {
+                    // 마커와 빈칸은 다른 스팬이다 — 스타일이 `›` 에서 끝난다. 마커는 보이는
+                    // 첫 행에 선다(codex 도 글 영역의 첫 행에 찍는다): 초안이 스크롤돼 있어도
+                    // 여기가 입력창임을 알린다.
                     line = line.prefixed(Span::raw(CARET_GAP)).prefixed(caret.clone());
                 } else {
                     line = line.prefixed(Span::raw("  "));
@@ -731,7 +767,35 @@ impl Composer {
                 line
             })
             .collect();
-        (lines, cursor_at)
+        let col = u16::try_from(cursor_col).unwrap_or(u16::MAX);
+        let row = u16::try_from(cursor_row.saturating_sub(first)).unwrap_or(u16::MAX);
+        (lines, (col, row))
+    }
+
+    /// 초안 `total` 행 가운데 보이는 `visible` 행이 시작할 행. 기억해 둔 스크롤을 캐럿 행이
+    /// 보이는 데 필요한 만큼만 옮기고, 그 결과를 다음 그리기를 위해 기억한다.
+    fn window_start(&self, total: usize, caret_row: usize, visible: usize) -> usize {
+        let first = scrolled_to(self.scroll.load(Ordering::Relaxed), total, caret_row, visible);
+        self.scroll.store(first, Ordering::Relaxed);
+        first
+    }
+}
+
+/// 스크롤이 `scroll` 인 초안(`total` 행)에서, 캐럿 행 `caret` 이 `visible` 행 창 안에 드는 가장 작은
+/// 움직임 뒤의 첫 행. 창 안이면 그대로 두고, 위로 나갔으면 캐럿이 첫 행이 되게, 아래로 나갔으면
+/// 마지막 행이 되게 옮긴다. 초안이 창에 다 들어가면 0 이다. 캐럿이 창 안에서 움직이는 동안 글이
+/// 미끄러지지 않는 것이 요점이다 — 캐럿을 늘 창의 아래에 붙이면 위로 걸을 때마다 화면이 통째로 밀린다.
+fn scrolled_to(scroll: usize, total: usize, caret: usize, visible: usize) -> usize {
+    if total <= visible {
+        return 0;
+    }
+    let first = scroll.min(total - visible);
+    if caret < first {
+        caret
+    } else if caret >= first + visible {
+        caret + 1 - visible
+    } else {
+        first
     }
 }
 
@@ -869,12 +933,15 @@ fn skip_escape_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     }
 }
 
-/// 본문 안 `(행, 열)` 을 caret 두 칸을 더한 화면 좌표로.
-fn position(row: usize, column: usize) -> (u16, u16) {
-    let col = u16::try_from(column + 2).unwrap_or(u16::MAX);
-    let row = u16::try_from(row).unwrap_or(u16::MAX);
-    (col, row)
+/// 본문 안 `(행, 열)` 을 caret 두 칸을 더한 `(열, 행)` 으로. 화면 좌표로 줄이는 것은 창을 정한
+/// 뒤의 일이다 — 행이 `u16` 을 넘는 초안에서도 캐럿 행을 잃지 않는다.
+fn position(row: usize, column: usize) -> (usize, usize) {
+    (column + CARET_WIDTH, row)
 }
+
+#[cfg(test)]
+#[path = "composer_window_tests.rs"]
+mod window_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1046,6 +1113,7 @@ mod tests {
             None,
             None,
             Instant::now(),
+            usize::MAX,
             Some(palette),
         );
 
@@ -1075,6 +1143,7 @@ mod tests {
                 Some(tier),
                 None,
                 Instant::now(),
+                usize::MAX,
                 None,
             );
             let caret = &lines[1].spans[1];

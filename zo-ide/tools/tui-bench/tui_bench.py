@@ -31,9 +31,10 @@ States, in the order one run passes through them:
   pager         (zo) Ctrl+T opens the transcript over the long conversation and
                 the up arrow moves it one line, 40 keys a second: what a held
                 arrow key costs in bytes
-  draft         a 20 KB draft pasted into the composer (bracketed paste), the
-                caret sent to its start with Ctrl-A, then one unique letter every
-                250 ms: keystroke-to-echo with a long draft
+  draft         a 20 KB draft pasted into the composer (bracketed paste), then
+                one unique letter every 250 ms where the caret stands after a
+                paste, at the end of the draft: keystroke-to-echo with a long
+                draft (a CLI that does not scroll its draft echoes nothing)
 
 What is measured per state: CPU time of the CLI's own processes (user+sys; a
 shell a tool ran and everything under it is the tool's, the same for every CLI,
@@ -1953,9 +1954,10 @@ def run_once(cli: Cli, run: int, args: argparse.Namespace, url: str, log: Servic
             term.write(close_keys)
             term.wait_quiet(0.6, 10)
 
-        # Keystrokes with a long draft in the composer: pasted (bracketed), the caret
-        # sent to the start of it with Ctrl-A so the typed letters stand on a row that
-        # is on screen, then one unique letter every 250 ms.
+        # Keystrokes with a long draft in the composer: pasted (bracketed), then one
+        # unique letter every 250 ms where the caret is after a paste, at the end of the
+        # draft. Until t-17194 the caret was sent to the start with Ctrl-A: a composer
+        # taller than the screen drew neither the caret nor the letters typed at its end.
         if "draft" in wanted:
             text = draft_text()
             term.wait_quiet(1.0, 10)
@@ -1963,8 +1965,6 @@ def run_once(cli: Cli, run: int, args: argparse.Namespace, url: str, log: Servic
             term.paste(text)
             term.wait_quiet(0.6, 30)
             settled = mono_ns()
-            term.write(b"\x01")
-            term.wait_quiet(0.4, 10)
             first = mono_ns()
             typed: list[Keystroke] = []
             for letter in TYPED:
