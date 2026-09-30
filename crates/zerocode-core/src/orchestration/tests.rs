@@ -25971,7 +25971,12 @@ fn a_taken_over_worker_that_speaks_again_is_the_ledgers_again_for_every_agent() 
             let mut bench = Bench::new();
             bench.launcher = Catalog(every);
             bench.json("run-create --name taken-then-speaks");
-            let (worker, pane) = bench.seat(&format!("worker-start --agent {}", spec.id));
+            let task = bench.json("task-create --spec speak")["taskId"]
+                .as_str()
+                .expect("a task")
+                .to_string();
+            let (worker, pane) =
+                bench.seat(&format!("worker-start --agent {} --task {task}", spec.id));
             assert!(bench.ledger.worker_taken_over(("team-1", &pane)));
             let taken = |bench: &Bench| {
                 bench.ledger.runs()[0]
