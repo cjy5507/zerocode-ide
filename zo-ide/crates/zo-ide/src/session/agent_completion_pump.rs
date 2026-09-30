@@ -962,10 +962,15 @@ mod tests {
         }
         assert!(looks(&pump) >= 5, "a running helper was looked at {} times in five seconds", looks(&pump));
 
+        // The end is looked at once more, a beat later, and a beat that was
+        // already armed when it came may be one of the looks: three seconds, a
+        // second at a time, hold every look there is to be, and after them none.
         activity.set(runtime::helper_activity::Count::Background, 0);
-        tokio::time::advance(Duration::from_secs(2)).await;
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
         }
         let ended = looks(&pump);
         tokio::time::advance(Duration::from_secs(3600)).await;

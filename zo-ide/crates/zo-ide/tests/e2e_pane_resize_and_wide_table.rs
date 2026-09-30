@@ -552,8 +552,31 @@ async fn a_pane_grown_without_sigwinch_is_put_right_by_the_next_key_and_not_by_a
     run.send(b"\xec\x98\x81\xed\x96\xa5\xeb\x8f\x84?\r").expect("prompt 1");
     run.wait_for_after("영향 없습니다", before_first, TEST_TIMEOUT);
 
-    // The turn's last frames settle; then the pane grows and nobody says so.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // The answer is on the screen, but the turn that made it may still be
+    // running, and a running turn keeps a one-second size poll of its own — not
+    // what this test is about. Wait for the "Working … esc to interrupt" row to
+    // go and for the pane to say nothing for a while; then it grows and nobody
+    // says so.
+    run.wait_until(0, SETTLE_TIMEOUT, |bytes| {
+        let mut screen = Screen::new(24);
+        screen.feed(bytes);
+        !screen.visible().iter().any(|row| row.contains("esc to interrupt"))
+    });
+    let quiet_deadline = std::time::Instant::now() + SETTLE_TIMEOUT;
+    let mut last_len = run.output_len();
+    let mut quiet_since = std::time::Instant::now();
+    while quiet_since.elapsed() < Duration::from_millis(2500) {
+        assert!(
+            std::time::Instant::now() < quiet_deadline,
+            "the pane never went quiet after the turn: a timer is drawing at an idle zo"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let len = run.output_len();
+        if len != last_len {
+            last_len = len;
+            quiet_since = std::time::Instant::now();
+        }
+    }
     let before_resize = run.output_len();
     run.resize_silently(44, 176).expect("resize pty silently");
     tokio::time::sleep(Duration::from_secs(4)).await;
