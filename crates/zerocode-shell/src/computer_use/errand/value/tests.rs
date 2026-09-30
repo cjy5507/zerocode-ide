@@ -758,6 +758,21 @@ fn with_no_login_on_either_road_the_refusal_names_each_roads_reason() {
     );
 }
 
+/// The fake CLI that pauses starts its child, and writes the pid, before any
+/// other work a loaded machine could stretch past the wall.
+#[cfg(unix)]
+#[test]
+fn a_pausing_fake_starts_its_child_before_anything_else() {
+    let dir = tempfile::tempdir().expect("a root");
+    let claude = fake_cli(dir.path(), "claude", "{}", 0, 30);
+    let script = std::fs::read_to_string(&claude).expect("the script");
+    let first = script.lines().nth(2).expect("the line after `here=`");
+    assert!(
+        first.contains(".child"),
+        "the child starts after other work: {first}"
+    );
+}
+
 /// A CLI that outlives its wall is ended with every process it started, and
 /// the road says it ran out of time.
 #[cfg(unix)]
