@@ -16,6 +16,7 @@ mod orchestration;
 pub mod process_lifecycle;
 pub mod permission_bridge;
 pub mod plain_session;
+pub(crate) mod pulse;
 mod request_types;
 pub(crate) mod route_fact;
 pub mod runtime_bridge;

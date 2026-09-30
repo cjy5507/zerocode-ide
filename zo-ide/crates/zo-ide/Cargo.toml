@@ -73,6 +73,10 @@ rustix = { version = "1", default-features = false, features = ["std", "termios"
 session-corpus = { path = "../session-corpus" }
 mock-anthropic-service = { path = "../mock-anthropic-service" }
 tempfile.workspace = true
+# `start_paused`: the session's beat and the watchers that wait on it are tested
+# on a clock the test moves, so an hour of an idle session is not an hour
+# (t-17057). A feature of a crate already linked, and dev-only.
+tokio = { workspace = true, features = ["test-util"] }
 # 이벤트 채널 왕복 테스트는 IDE 가 실제로 쓰는 클라이언트로 친다 —
 # `crates/zerocode-harness`(부모 저장소, 읽기 전용)가 이 와이어의 정본이므로
 # 손으로 흉내 낸 프레임이 아니라 그 클라이언트가 그대로 붙는지를 잰다.

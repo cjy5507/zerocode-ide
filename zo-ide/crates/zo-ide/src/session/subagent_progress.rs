@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,13 +16,20 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tools::AgentRegistry;
 
+use super::pulse::Pulse;
+
 /// Manifests normally refresh every few seconds while a provider streams, and
 /// faster while output is landing. Five minutes is deliberately conservative:
 /// it avoids turning an ordinary quiet provider request or long tool call into
 /// an alarm. Even after this threshold the UI reports only the measured lack
 /// of new output; it never diagnoses the agent as stuck.
 const NO_NEW_OUTPUT_AFTER: Duration = Duration::from_secs(5 * 60);
-pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// How often a watcher looks while nothing of the session runs. What is running
+/// is looked at on every beat of the session's [`Pulse`] (once a second); a
+/// quiet session is looked at on this interval only for what no event tells it —
+/// another zo's write to the same store, a helper reaped elsewhere — which is
+/// therefore seen within it (t-17057; it was a look a second, forever).
+const QUIET_LOOK: Duration = Duration::from_secs(60);
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +151,10 @@ pub(crate) struct SubagentProgressWatcher {
     /// The registry the snapshots are the whole of — `None` for a test seam
     /// fed by hand, whose frames then carry no registry mark.
     registry_id: Option<String>,
+    /// Scans the poller has begun: what a test reads to see how often a watcher
+    /// looks at a session that runs nothing.
+    #[cfg_attr(not(test), allow(dead_code))]
+    scans: Arc<AtomicUsize>,
 }
 
 impl SubagentProgressWatcher {
@@ -178,15 +190,28 @@ impl SubagentProgressWatcher {
         parent_session_id: String,
         started_at_floor: Option<u64>,
     ) -> Self {
+        Self::start_with(registry, parent_session_id, started_at_floor, Pulse::new())
+    }
+
+    /// [`Self::start_since`] on a beat of the caller's: a test's.
+    fn start_with(
+        registry: Arc<AgentRegistry>,
+        parent_session_id: String,
+        started_at_floor: Option<u64>,
+        mut pulse: Pulse,
+    ) -> Self {
         let registry_id = registry.session_id().map(str::to_string);
         let notes_roster = started_at_floor.is_none();
         let (sender, receiver) = watch::channel(RosterSnapshot::default());
+        let scans = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&scans);
         let task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(POLL_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let cache = Arc::new(Mutex::new(ManifestCache::shared()));
+            // The first look is at once; after it the watcher waits on the
+            // session's beat, which comes once a second while something runs
+            // and is parked while nothing does.
             loop {
-                interval.tick().await;
+                counted.fetch_add(1, Ordering::Relaxed);
                 let registry = Arc::clone(&registry);
                 let session_id = parent_session_id.clone();
                 let cache = Arc::clone(&cache);
@@ -210,28 +235,35 @@ impl SubagentProgressWatcher {
                     RosterSnapshot { agents, generation }
                 })
                 .await;
-                let Ok(snapshot) = scan else {
-                    // A join failure must not erase the last truthful
-                    // snapshot. The next poll can recover it.
-                    continue;
-                };
-                if sender.is_closed() {
-                    return;
-                }
-                sender.send_if_modified(|current| {
-                    if *current == snapshot {
-                        return false;
+                // A join failure must not erase the last truthful snapshot.
+                // The next look can recover it.
+                if let Ok(snapshot) = scan {
+                    if sender.is_closed() {
+                        return;
                     }
-                    *current = snapshot;
-                    true
-                });
+                    sender.send_if_modified(|current| {
+                        if *current == snapshot {
+                            return false;
+                        }
+                        *current = snapshot;
+                        true
+                    });
+                }
+                pulse.next(Some(QUIET_LOOK)).await;
             }
         });
         Self {
             receiver,
             task,
             registry_id,
+            scans,
         }
+    }
+
+    /// How many scans the poller has begun.
+    #[cfg(test)]
+    fn scans(&self) -> usize {
+        self.scans.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -241,6 +273,7 @@ impl SubagentProgressWatcher {
             receiver,
             task,
             registry_id: None,
+            scans: Arc::default(),
         }
     }
 
@@ -807,10 +840,16 @@ fn epoch_seconds_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::time::Duration;
 
+    use runtime::helper_activity::{Activity, Count};
     use serde_json::json;
+    use tools::AgentRegistry;
 
-    use super::{epoch_seconds_now, scan_registry, scan_store, ManifestCache, NO_NEW_OUTPUT_AFTER};
+    use super::{
+        epoch_seconds_now, scan_registry, scan_store, ManifestCache, Pulse, SubagentProgressWatcher,
+        NO_NEW_OUTPUT_AFTER,
+    };
 
     /// One line of a zo session transcript, as the session writes it.
     fn transcript_line(role: &str, blocks: &serde_json::Value) -> String {
@@ -1403,5 +1442,127 @@ mod tests {
         assert_eq!(scan_registry(&registry, "session-a", 200, None, &mut cache).len(), 1);
         assert_eq!(cache.remembered(), 5);
         assert_eq!(cache.bodies_kept(), 2, "finished manifests were kept whole");
+    }
+
+    /// One virtual second at a time, and the real moments the blocking pool
+    /// needs to finish the scan that second began.
+    async fn advance(seconds: u64) {
+        for _ in 0..seconds {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            settle().await;
+        }
+    }
+
+    /// One jump of the clock, and the real moments the scan it wakes needs. A
+    /// jump fires one look, however far it goes: the next is not asked for until
+    /// the scan has finished, which takes real time.
+    async fn jump(seconds: u64) {
+        tokio::time::advance(Duration::from_secs(seconds)).await;
+        settle().await;
+    }
+
+    /// Let what is ready run: a scan is a blocking task, and it finishes in real
+    /// time while the clock stands still.
+    async fn settle() {
+        for _ in 0..60 {
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_micros(500));
+        }
+    }
+
+    fn quiet_watcher(activity: &Activity) -> (tempfile::TempDir, SubagentProgressWatcher) {
+        let store = tempfile::tempdir().expect("store");
+        let registry = AgentRegistry::at_root_for_tests("session-a", store.path());
+        let watcher = SubagentProgressWatcher::start_with(
+            registry,
+            "session-a".to_string(),
+            None,
+            Pulse::over(activity.watch()),
+        );
+        (store, watcher)
+    }
+
+    /// A session that runs nothing is looked at on the quiet interval and not
+    /// every second (t-17057): the roster watcher was one of the three timers
+    /// that woke an idle zo 3.2 times a second, each of them a look at a roster
+    /// with nobody in it.
+    #[tokio::test(start_paused = true)]
+    async fn a_watcher_over_a_session_that_runs_nothing_looks_only_on_its_quiet_interval() {
+        let activity = Activity::new();
+        let (_store, watcher) = quiet_watcher(&activity);
+        settle().await;
+        assert_eq!(watcher.scans(), 1, "the first look is at once");
+        for _ in 0..3 {
+            jump(60).await;
+        }
+        let scans = watcher.scans();
+        assert!(
+            (3..=5).contains(&scans),
+            "a session that ran nothing was looked at {scans} times in three minutes"
+        );
+    }
+
+    /// While a helper runs it is looked at once a second, so its elapsed time
+    /// and its activity stay true on the screen.
+    #[tokio::test(start_paused = true)]
+    async fn a_watcher_looks_every_second_while_a_helper_runs() {
+        let activity = Activity::new();
+        activity.set(Count::Workers, 1);
+        let (_store, watcher) = quiet_watcher(&activity);
+        settle().await;
+        let before = watcher.scans();
+        advance(10).await;
+        let looks = watcher.scans() - before;
+        assert!((9..=11).contains(&looks), "a running helper was looked at {looks} times in ten seconds");
+    }
+
+    /// A helper starting is looked at at once — not at the next beat, nor at
+    /// the quiet interval — and its end is looked at once more; after that the
+    /// watcher is quiet again.
+    #[tokio::test(start_paused = true)]
+    async fn a_helper_starting_is_looked_at_at_once_and_its_end_once_more() {
+        let activity = Activity::new();
+        let (_store, watcher) = quiet_watcher(&activity);
+        settle().await;
+        let idle = watcher.scans();
+        activity.set(Count::Workers, 1);
+        settle().await;
+        assert_eq!(watcher.scans(), idle + 1, "the start was not looked at at once");
+        advance(1).await;
+        let running = watcher.scans();
+        assert!(running > idle + 1, "a running helper was not looked at on the beat");
+        activity.set(Count::Workers, 0);
+        advance(2).await;
+        let ended = watcher.scans();
+        assert!(ended > running, "the look that sees the helper gone never came");
+        advance(10).await;
+        assert_eq!(watcher.scans(), ended, "the watcher went on looking after everything had ended");
+    }
+
+    /// A helper another zo started — one this process holds no worker for, so
+    /// no event tells this watcher of it — is seen within the quiet interval
+    /// (t-17057): the bound on what the beat alone would never look at.
+    #[tokio::test(start_paused = true)]
+    async fn a_helper_another_zo_started_is_seen_within_the_quiet_interval() {
+        let activity = Activity::new();
+        let (store, watcher) = quiet_watcher(&activity);
+        settle().await;
+        assert!(watcher.receiver.borrow().agents.is_empty(), "a store with nobody in it showed a row");
+        fs::write(
+            store.path().join("agent-elsewhere.json"),
+            serde_json::to_vec(&json!({
+                "agentId": "agent-elsewhere",
+                "parentSessionId": "session-a",
+                "name": "elsewhere",
+                "status": "running",
+                "startedAt": epoch_seconds_now().to_string(),
+            }))
+            .expect("manifest json"),
+        )
+        .expect("write manifest");
+        jump(61).await;
+        let rows = watcher.receiver.borrow().agents.clone();
+        assert_eq!(rows.len(), 1, "a helper another zo started was not seen within the quiet interval: {rows:?}");
+        assert_eq!(rows[0].agent_id, "agent-elsewhere");
     }
 }
