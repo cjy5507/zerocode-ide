@@ -1913,12 +1913,18 @@ pub(crate) fn clipboard_has_image(webview: tauri::Webview) -> Result<bool, Strin
 
 #[cfg(target_os = "macos")]
 fn clipboard_holds_image() -> bool {
-    use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeTIFF};
+    pasteboard_holds_image(&objc2_app_kit::NSPasteboard::generalPasteboard())
+}
+
+/// The clipboard's checks take the pasteboard as an argument so a test can
+/// read a pasteboard of its own instead of the person's.
+#[cfg(target_os = "macos")]
+fn pasteboard_holds_image(pasteboard: &objc2_app_kit::NSPasteboard) -> bool {
+    use objc2_app_kit::{NSPasteboardTypePNG, NSPasteboardTypeTIFF};
     use objc2_foundation::NSArray;
     // SAFETY: the two type names are AppKit's own constants (extern statics,
-    // read the way `clipboard_png` reads them); the answer is a name copied
-    // out, and nothing here outlives the call.
-    let pasteboard = NSPasteboard::generalPasteboard();
+    // read the way `png_from_pasteboard` reads them); the answer is a name
+    // copied out, and nothing here outlives the call.
     let wanted = unsafe { NSArray::from_slice(&[NSPasteboardTypePNG, NSPasteboardTypeTIFF]) };
     pasteboard.availableTypeFromArray(&wanted).is_some()
 }
@@ -1930,14 +1936,19 @@ fn clipboard_holds_image() -> bool {
 
 #[cfg(target_os = "macos")]
 fn clipboard_png() -> Result<Option<Vec<u8>>, String> {
+    png_from_pasteboard(&objc2_app_kit::NSPasteboard::generalPasteboard())
+}
+
+#[cfg(target_os = "macos")]
+fn png_from_pasteboard(
+    pasteboard: &objc2_app_kit::NSPasteboard,
+) -> Result<Option<Vec<u8>>, String> {
     use objc2_app_kit::{
-        NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypePNG,
-        NSPasteboardTypeTIFF,
+        NSBitmapImageFileType, NSBitmapImageRep, NSPasteboardTypePNG, NSPasteboardTypeTIFF,
     };
     use objc2_foundation::NSDictionary;
     // SAFETY (below): the two type names are AppKit's own constants and the
     // reads copy the bytes out; nothing here outlives the call.
-    let pasteboard = NSPasteboard::generalPasteboard();
     if let Some(png) = unsafe { pasteboard.dataForType(NSPasteboardTypePNG) } {
         return Ok(Some(png.to_vec()));
     }
@@ -1955,4 +1966,108 @@ fn clipboard_png() -> Result<Option<Vec<u8>>, String> {
 #[cfg(not(target_os = "macos"))]
 fn clipboard_png() -> Result<Option<Vec<u8>>, String> {
     Ok(None)
+}
+
+/// The clipboard's picture, read from a pasteboard of the test's own
+/// (`pasteboardWithUniqueName`) — never the person's general pasteboard — in
+/// every format a phone's Universal Clipboard or a screenshot tool may leave
+/// there (t-19409): the window's `paste` event no longer hands the picture over
+/// as WebKit's `image/*` file, so this reader is the only road for all of them.
+#[cfg(all(test, target_os = "macos"))]
+mod clipboard_picture_tests {
+    use super::{pasteboard_holds_image, png_from_pasteboard};
+    use objc2_app_kit::{
+        NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypePNG,
+        NSPasteboardTypeTIFF,
+    };
+    use objc2_foundation::{NSData, NSDictionary, NSString};
+
+    /// A 1×1 PNG (70 bytes).
+    const ONE_PIXEL_PNG: [u8; 70] = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xfc,
+        0xcf, 0xc0, 0x50, 0x0f, 0x00, 0x04, 0x85, 0x01, 0x80, 0x84, 0xa9, 0x8c, 0x21, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    fn reencoded(kind: NSBitmapImageFileType) -> Vec<u8> {
+        let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(&ONE_PIXEL_PNG))
+            .expect("the fixture PNG decodes");
+        unsafe { rep.representationUsingType_properties(kind, &NSDictionary::new()) }
+            .expect("the fixture re-encodes")
+            .to_vec()
+    }
+
+    /// `sips` writes the one format AppKit's bitmap rep cannot: HEIC.
+    fn heic() -> Option<Vec<u8>> {
+        let dir = std::env::temp_dir().join(format!("zerocode-heic-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok()?;
+        let (from, to) = (dir.join("one.png"), dir.join("one.heic"));
+        std::fs::write(&from, ONE_PIXEL_PNG).ok()?;
+        let made = std::process::Command::new("/usr/bin/sips")
+            .args(["-s", "format", "heic"])
+            .arg(&from)
+            .arg("--out")
+            .arg(&to)
+            .output()
+            .ok()?
+            .status
+            .success();
+        let bytes = made.then(|| std::fs::read(&to).ok()).flatten();
+        let _ = std::fs::remove_dir_all(&dir);
+        bytes
+    }
+
+    fn png_for(kind: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+        let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+        pasteboard.clearContents();
+        let ty = NSString::from_str(kind);
+        assert!(pasteboard.setData_forType(Some(&NSData::with_bytes(bytes)), &ty));
+        assert!(
+            pasteboard_holds_image(&pasteboard),
+            "a pasteboard holding {kind} says it has no picture"
+        );
+        png_from_pasteboard(&pasteboard).expect("the picture decodes")
+    }
+
+    #[test]
+    fn a_picture_is_read_as_png_whatever_format_the_pasteboard_holds() {
+        let (png, tiff, jpeg) = (
+            ONE_PIXEL_PNG.to_vec(),
+            reencoded(NSBitmapImageFileType::TIFF),
+            reencoded(NSBitmapImageFileType::JPEG),
+        );
+        let mut cases = vec![
+            (unsafe { NSPasteboardTypePNG }.to_string(), png),
+            (unsafe { NSPasteboardTypeTIFF }.to_string(), tiff),
+            ("public.jpeg".to_string(), jpeg),
+        ];
+        match heic() {
+            Some(bytes) => cases.push(("public.heic".to_string(), bytes)),
+            None => eprintln!("HEIC is not writable here (sips failed): that case is skipped"),
+        }
+        for (kind, bytes) in cases {
+            let got = png_for(&kind, &bytes)
+                .unwrap_or_else(|| panic!("a pasteboard holding only {kind} gave no picture"));
+            assert_eq!(
+                &got[..8],
+                &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+                "{kind} did not come back as a PNG"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pasteboard_without_a_picture_gives_none() {
+        let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+        pasteboard.clearContents();
+        assert!(
+            pasteboard.setString_forType(&NSString::from_str("words"), unsafe {
+                objc2_app_kit::NSPasteboardTypeString
+            },)
+        );
+        assert!(!pasteboard_holds_image(&pasteboard));
+        assert_eq!(png_from_pasteboard(&pasteboard), Ok(None));
+    }
 }
