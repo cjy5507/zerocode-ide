@@ -25954,6 +25954,14 @@ fn conditional_worker_stop_does_not_end_a_reassigned_attempt() {
 /// signature the verb road wrote, never the agent's name.
 #[test]
 fn a_taken_over_worker_that_speaks_again_is_the_ledgers_again_for_every_agent() {
+    // A launcher that knows every catalog row, so no agent is left out.
+    let every: &'static [&'static str] = Box::leak(
+        crate::agent::AGENT_SPECS
+            .iter()
+            .map(|spec| spec.id)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
     for spec in crate::agent::AGENT_SPECS {
         for letter in [
             "send --type status --body still-here",
@@ -25961,6 +25969,7 @@ fn a_taken_over_worker_that_speaks_again_is_the_ledgers_again_for_every_agent() 
             "send --type worker_done --body {\"ok\":true}",
         ] {
             let mut bench = Bench::new();
+            bench.launcher = Catalog(every);
             bench.json("run-create --name taken-then-speaks");
             let (worker, pane) = bench.seat(&format!("worker-start --agent {}", spec.id));
             assert!(bench.ledger.worker_taken_over(("team-1", &pane)));

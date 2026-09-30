@@ -10069,12 +10069,14 @@ fn a_taken_worker_that_speaks_again_reopens_the_key_gate() {
     };
     super::pane_taken_over(WORKER, clock());
     assert!(taken() && gated());
+    let held =
+        crate::agent_teams::current_pane_capability(&team, &pane).expect("the worker capability");
     let spoke = run(
         &Nowhere,
         Vec::new(),
         &team,
         &pane,
-        TEST_CAPABILITY,
+        &held,
         &words("send --type status --body back-at-it"),
         clock(),
     );
