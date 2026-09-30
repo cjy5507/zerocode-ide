@@ -1044,7 +1044,7 @@ fn observe_for_reporter(
         }
         RenderBlock::PermissionPrompt(prompt) => {
             if let Some(reporter) = reporter {
-                reporter.permission_request(&prompt.tool_name, &prompt.reasoning, session_id);
+                reporter.prompt(prompt, session_id);
             }
         }
         RenderBlock::UserQuestionPrompt(prompt) => {

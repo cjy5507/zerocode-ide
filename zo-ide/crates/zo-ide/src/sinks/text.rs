@@ -81,11 +81,19 @@ impl<W: Write> Sink for TextSink<W> {
                 writeln!(self.writer, "[system] {text}")?;
             }
             RenderBlock::PermissionPrompt(prompt) => {
-                writeln!(
-                    self.writer,
-                    "[permission] {}: {}",
-                    prompt.tool_name, prompt.reasoning
-                )?;
+                match &prompt.question {
+                    // A question zo puts to the person names no tool (t-17474).
+                    Some(question) => writeln!(
+                        self.writer,
+                        "[question] {}: {}",
+                        question.title, prompt.reasoning
+                    )?,
+                    None => writeln!(
+                        self.writer,
+                        "[permission] {}: {}",
+                        prompt.tool_name, prompt.reasoning
+                    )?,
+                }
                 if let Some(audit_hint) = &prompt.audit_hint {
                     writeln!(self.writer, "[permission-audit] {audit_hint}")?;
                 }

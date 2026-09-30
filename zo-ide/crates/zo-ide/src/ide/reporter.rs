@@ -611,6 +611,24 @@ impl HookReporter {
         );
     }
 
+    /// A prompt that reached the screen. A tool call awaiting approval is the
+    /// `PermissionRequest` hook — the window reads its `tool_name` as an
+    /// approval of that tool. A question zo puts to the person itself (the
+    /// refusal ladder's "switch models?") is not an approval of anything: it
+    /// goes out as the same `Notification` an `AskUserQuestion` sends, so the
+    /// window no longer reads "Zo needs permission to run `safety-classifier
+    /// decline`" (t-17474).
+    pub fn prompt(
+        &self,
+        prompt: &runtime::message_stream::PermissionPrompt,
+        session_id: &str,
+    ) {
+        match &prompt.question {
+            Some(_) => self.question(&prompt.reasoning, session_id),
+            None => self.permission_request(&prompt.tool_name, &prompt.reasoning, session_id),
+        }
+    }
+
     pub fn permission_request(&self, tool_name: &str, reasoning: &str, session_id: &str) {
         self.post(
             "PermissionRequest",

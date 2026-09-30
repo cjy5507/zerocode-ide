@@ -548,6 +548,18 @@ pub fn refusal_switch_unasked_notice(from: &str, to: &str) -> String {
     )
 }
 
+/// The topic word and the short title of the ladder's switch question
+/// (t-17474): a question zo puts to the person itself carries them, so the pane
+/// titles it and a window picks its own words for it by the topic — neither
+/// dresses it as a tool permission.
+pub const REFUSAL_SWITCH_TOPIC: &str = "model_switch";
+/// See [`REFUSAL_SWITCH_TOPIC`].
+pub const REFUSAL_SWITCH_TITLE: &str = "Switch models?";
+/// The topic word of the declined-images question (t-17474).
+pub const DECLINED_IMAGES_TOPIC: &str = "declined_images";
+/// The short title of the declined-images question (t-17474).
+pub const DECLINED_IMAGES_TITLE: &str = "Retry without the images?";
+
 /// What the ladder asks when the declined request carried images (t-6747): a
 /// picture of a declined screen re-declines whoever reads it, so they are
 /// sent again only if the person keeps them.
