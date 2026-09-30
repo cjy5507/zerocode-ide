@@ -26069,7 +26069,13 @@ fn a_reply_to_another_runs_coordinator_reaches_the_run_it_asked_from() {
         .as_str()
         .expect("question")
         .to_string();
-    let question = bench.ledger.run(&run_b).unwrap().message(&asked).unwrap().clone();
+    let question = bench
+        .ledger
+        .run(&run_b)
+        .unwrap()
+        .message(&asked)
+        .unwrap()
+        .clone();
     assert!(bench.ledger.run(&run_b).unwrap().awaits_answer(&question));
 
     // B's coordinator answers once.
@@ -26078,9 +26084,20 @@ fn a_reply_to_another_runs_coordinator_reaches_the_run_it_asked_from() {
         "reply --run {run_b} --to-message {asked} --body main"
     ));
     std::mem::swap(&mut bench.team, &mut other);
-    assert_eq!(answered["deliveredTo"]["runId"], run_a.as_str(), "{answered}");
-    let carried = answered["deliveredTo"]["messageId"].as_str().expect("delivered id");
-    let held = bench.ledger.run(&run_a).unwrap().message(carried).expect("in a");
+    assert_eq!(
+        answered["deliveredTo"]["runId"],
+        run_a.as_str(),
+        "{answered}"
+    );
+    let carried = answered["deliveredTo"]["messageId"]
+        .as_str()
+        .expect("delivered id");
+    let held = bench
+        .ledger
+        .run(&run_a)
+        .unwrap()
+        .message(carried)
+        .expect("in a");
     assert_eq!(held.to, format!("run:{run_a}"));
     assert_eq!(held.thread.as_deref(), Some(asked.as_str()));
     assert_eq!(held.body.as_str(), "main");
@@ -26096,7 +26113,12 @@ fn a_reply_to_another_runs_coordinator_reaches_the_run_it_asked_from() {
     );
     std::mem::swap(&mut bench.team, &mut other);
     assert_ne!(second.reply.exit_code, 0, "{:?}", second.reply);
-    assert!(second.reply.stderr.contains("already has a different answer"));
+    assert!(
+        second
+            .reply
+            .stderr
+            .contains("already has a different answer")
+    );
 }
 
 /// The same-run reply is untouched: no second delivery.
