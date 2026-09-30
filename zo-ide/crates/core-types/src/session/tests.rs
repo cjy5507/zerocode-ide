@@ -3238,7 +3238,7 @@ fn write_file_without_message_times(path: &Path, texts: &[&str]) {
             .to_string(),
     ];
     for (index, text) in texts.iter().enumerate() {
-        let role = if index % 2 == 0 { "user" } else { "assistant" };
+        let role = if index.is_multiple_of(2) { "user" } else { "assistant" };
         lines.push(format!(
             r#"{{"message":{{"blocks":[{{"text":"{text}","type":"text"}}],"role":"{role}"}},"turn_index":{index},"type":"message"}}"#
         ));
@@ -3495,7 +3495,7 @@ fn the_session_time_read_back_after_a_full_rewrite_does_not_run_backwards() {
 #[test]
 #[ignore = "reads the file named by ZO_T18703_SEGMENT and prints a measurement"]
 fn measure_message_times_on_a_real_segment() {
-    let Some(source) = std::env::var_os("ZO_T18703_SEGMENT") else {
+    let Some(source) = std::env::var_os("ZO_T18703_SEGMENT").map(PathBuf::from) else {
         println!("ZO_T18703_SEGMENT is not set; nothing to measure");
         return;
     };
@@ -3503,7 +3503,7 @@ fn measure_message_times_on_a_real_segment() {
     fs::create_dir_all(&scratch).expect("create the scratch directory");
     let copy_of = |road: &str| -> PathBuf {
         let copy = scratch.join(format!("{road}.jsonl"));
-        fs::copy(&source, &copy).expect("copy the segment");
+        fs::copy(source.as_path(), &copy).expect("copy the segment");
         copy
     };
     let report = |road: &str, path: &Path| {
