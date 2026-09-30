@@ -35915,9 +35915,10 @@ mod tests {
         );
         // The line's head is shared with the fallback's own line (t-17037).
         let logging = format!(
-            "{}{}",
+            "{}{}{}",
             block_after(backend, "fn log_line("),
-            block_after(backend, "fn resumed_head(")
+            block_after(backend, "fn resumed_head("),
+            block_after(backend, "fn receipt_word(")
         );
         for words in [
             "term {term} resumed",
@@ -35931,6 +35932,38 @@ mod tests {
                 "the one-line wake receipt lost `{words}`:\n{logging}"
             );
         }
+        // A pane pressed at again files how many Enters it needed, on the
+        // road the retry itself is (t-18353) — and every way a wake ends
+        // files through the one function that chooses between the two lines.
+        let retrying = block_after(backend, "fn retry_line(");
+        assert!(
+            retrying.contains("nudge=enter-retry n={presses}")
+                && retrying.contains("receipt_word(receipt)"),
+            "the retry's receipt line lost its shape:\n{retrying}"
+        );
+        let filing = block_after(backend, "fn note_resolution(");
+        assert_eq!(
+            filing.matches("filed_line(term, &pending,").count(),
+            2,
+            "a wake's working or give-up line stopped going through the one filer:\n{filing}"
+        );
+        assert!(
+            block_after(backend, "fn forgotten(").contains("filed_line(term, &pending,"),
+            "a forgotten wake files its line another way"
+        );
+        // The retry is the row's, not a number of the runtime's: its bound
+        // reads the row's horizon and nothing else.
+        let bounding = block_after(backend, "fn may_press_again(");
+        assert!(
+            bounding.contains("self.retry_for") && !bounding.contains("const "),
+            "the Enter retry's bound left the agent's row:\n{bounding}"
+        );
+        assert!(
+            block_after(backend, "fn place_words(").contains("enter_retry_for(Some(words.agent))")
+                && block_after(backend, "fn left_unsent(")
+                    .contains("enter_retry_for(Some(words.agent))"),
+            "a wake's row is not given its agent's retry horizon"
+        );
     }
 
     /// t-2488 — the folder panel is guarded, and the guard is visible from

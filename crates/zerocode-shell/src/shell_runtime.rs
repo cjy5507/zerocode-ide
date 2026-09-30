@@ -2978,11 +2978,23 @@ pub(super) fn ready_quiet_for(agent: Option<&str>) -> Duration {
         })
 }
 
-/// How long a program just started must have been up before words are
-/// typed at it (t-18353): the row's measured start-up hand-over
-/// (`start_settle_ms`), or `None` where its composer takes words as soon as
-/// it is drawn. Kept beside the other readiness readers so every door that
-/// types words at a pane started moments ago — a restored worker's
+/// How long after its words went in a program just resumed is pressed at
+/// with an Enter alone, again after each try it did not answer (t-18353): the
+/// row's measured horizon (`enter_retry_ms`), or `None` where its one Enter
+/// alone stays one. Kept beside the other readiness readers, so the row is
+/// the only place a program is said to read its input late.
+pub(super) fn enter_retry_for(agent: Option<&str>) -> Option<Duration> {
+    agent
+        .and_then(zerocode_core::agent_capabilities)
+        .and_then(|caps| caps.startup.enter_retry_ms)
+        .map(|ms| Duration::from_millis(u64::from(ms)))
+}
+
+/// How long the start-up of a program a pane was just started with is given
+/// to hand over before words are typed at it (t-18353): the row's measured
+/// hand-over (`start_settle_ms`), or `None` where its composer takes words as
+/// soon as it is drawn. Kept beside the other readiness readers so every door
+/// that types words at a pane started moments ago — a restored worker's
 /// continuation — waits for the same thing, and the row is the only place a
 /// program is said to have a hand-over.
 pub(super) fn start_settle_for(agent: Option<&str>) -> Option<Duration> {

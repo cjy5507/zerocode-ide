@@ -719,6 +719,21 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
             // after it costs a restored worker two seconds more than one
             // that clears the quiet machine's.
             start_settle_ms: Some(6_000),
+            // Measured 2026-10-01 on 2.1.285 (t-18353): seven `claude
+            // --resume` started at once — the restart's shape — on a
+            // machine swapping 22 of its 23 GB, each on a 2 MB conversation
+            // of its own. Every one drew its first frame in under a second
+            // and none read its input before 52 s after the words went in;
+            // the last did at 70 s. An Enter written before the pane read
+            // was ignored — the words appeared later, on the line, unsent —
+            // and one written after it was taken: pressing Enter alone every
+            // 11 s, all seven were taken, at the fourth to the sixth try
+            // (52 to 70 s), with no word sent twice. Neither the door in
+            // v1.1.44 (glyph, then a quiet 1.5 s) nor the settle above
+            // took one of the seven. 90 s: the last taken input and a
+            // half again, counted from the moment the first delivery
+            // answered its Enter was not taken.
+            enter_retry_ms: Some(90_000),
             ..Harness::PLAIN
         },
     },
