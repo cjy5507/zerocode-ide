@@ -71,8 +71,11 @@ pub fn build_render_prompt(
         tool_call_id: runtime::message_stream::ToolCallId(String::new()),
         tool_name: request.tool.clone(),
         reasoning: request.reasoning.clone(),
-        audit_hint: Some(request.audit_hint()),
+        // A question zo puts to the person has no risk to state and nothing to
+        // unblock (t-17474): the line is a tool prompt's.
+        audit_hint: request.prompt_audit_hint(),
         choices,
+        question: request.question.clone(),
         responder: modal_tx,
     }
 }
@@ -144,6 +147,7 @@ mod tests {
                 decision: L3Decision::AllowOnce,
             }],
             risk_level: runtime::permission::RiskLevel::Low,
+            question: None,
         };
         let decide = tokio::spawn(async move { prompter.decide(request).await });
 
@@ -158,6 +162,62 @@ mod tests {
 
         let decision = decide.await.expect("join").expect("decision");
         assert_eq!(decision, L3Decision::AllowOnce);
+        drop(render_rx);
+        let _ = pump.await;
+    }
+
+    /// A question zo puts to the person crosses the bridge as a question
+    /// (t-17474): no tool name, no risk line, its topic and title kept — and
+    /// what the person picks still comes back as the decision it stands for.
+    #[tokio::test]
+    async fn a_question_crosses_the_bridge_as_a_question() {
+        use runtime::permission::{ChannelPrompter, PermissionPrompter, PromptQuestion};
+
+        let (prompter, request_rx) = ChannelPrompter::new(4);
+        let (render_tx, mut render_rx) = mpsc::channel::<RenderBlock>(4);
+        let pump = tokio::spawn(run_permission_pump(
+            request_rx,
+            render_tx,
+            BlockIdGen::default(),
+        ));
+        let request = PermissionRequest {
+            tool: String::new(),
+            input_summary: "a → b".to_string(),
+            input_hash: String::new(),
+            reasoning: "Continue this turn on b?".to_string(),
+            choices: vec![
+                L3PermissionChoice {
+                    key: 'o',
+                    label: "Switch for this turn".to_string(),
+                    decision: L3Decision::AllowOnce,
+                },
+                L3PermissionChoice {
+                    key: 'n',
+                    label: "Stay on a".to_string(),
+                    decision: L3Decision::Deny,
+                },
+            ],
+            risk_level: runtime::permission::RiskLevel::Low,
+            question: Some(PromptQuestion {
+                topic: "model_switch".to_string(),
+                title: "Switch models?".to_string(),
+            }),
+        };
+        let decide = tokio::spawn(async move { prompter.decide(request).await });
+
+        let Some(RenderBlock::PermissionPrompt(prompt)) = render_rx.recv().await else {
+            panic!("expected a prompt block");
+        };
+        assert_eq!(prompt.tool_name, "", "a question names no tool");
+        assert_eq!(prompt.audit_hint, None, "and states no risk");
+        let question = prompt.question.as_ref().expect("it stays a question");
+        assert_eq!((question.topic.as_str(), question.title.as_str()), ("model_switch", "Switch models?"));
+        assert_eq!(prompt.choices.len(), 2);
+        prompt
+            .responder
+            .send(RenderPermissionDecision::AllowOnce)
+            .expect("modal answer");
+        assert_eq!(decide.await.expect("join").expect("decision"), L3Decision::AllowOnce);
         drop(render_rx);
         let _ = pump.await;
     }

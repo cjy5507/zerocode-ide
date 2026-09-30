@@ -17773,7 +17773,19 @@ fn a_declined_streaming_turn_asks_the_person_before_the_route() {
     });
     let asked = prompter.asked.lock().expect("lock");
     assert_eq!(asked.len(), 1, "one question, on the second decline: {asked:?}");
-    assert_eq!(asked[0].tool, super::streaming::REFUSAL_QUESTION_TOOL);
+    assert_eq!(asked[0].tool, "", "a question names no tool");
+    assert_eq!(
+        asked[0]
+            .question
+            .as_ref()
+            .map(|question| (question.topic.as_str(), question.title.as_str())),
+        Some((
+            core_types::retry_signal::REFUSAL_SWITCH_TOPIC,
+            core_types::retry_signal::REFUSAL_SWITCH_TITLE
+        )),
+        "it says what it is about: {:?}",
+        asked[0]
+    );
     assert_eq!(asked[0].input_summary, format!("claude-fable-5-1 → {CYBER_ROUTE}"));
     let receipt = super::fallback::refusal_route_warn("claude-fable-5-1", CYBER_ROUTE, Some("cyber"));
     assert!(

@@ -22,7 +22,8 @@ use crate::message_stream::anthropic::tools::preview_tool_input;
 use crate::message_stream::types::ToolPreview;
 use crate::permission::{
     PermissionChoice as AsyncPermissionChoice, PermissionDecision as AsyncPermissionDecision,
-    PermissionRequest as AsyncPermissionRequest, RiskLevel as AsyncRiskLevel,
+    PermissionRequest as AsyncPermissionRequest, PromptQuestion as AsyncPromptQuestion,
+    RiskLevel as AsyncRiskLevel,
 };
 use crate::permissions::{
     PermissionPromptDecision, PermissionPrompter, PermissionRequest as SyncPermissionRequest,
@@ -81,25 +82,41 @@ pub(crate) fn default_permission_choices() -> Vec<AsyncPermissionChoice> {
     ]
 }
 
-/// The name a refusal's questions carry (t-6747) — not a tool but a choice
-/// the refusal ladder puts to the person, named so the prompt says what it
-/// asks about.
-pub(crate) const REFUSAL_QUESTION_TOOL: &str = "safety-classifier decline";
-
-/// One question the refusal ladder asks the person, in the prompt every
-/// permission question uses (t-6747).
+/// One question the refusal ladder asks the person (t-6747). It goes through
+/// the prompt every permission question uses, but it is not a tool: it names
+/// none and carries no risk, and `question` — the ladder's own
+/// [`refusal_switch_prompt`] or [`declined_images_prompt`] — is what the pane
+/// titles it by and the window dresses it by (t-17474).
 pub(crate) fn refusal_question(
+    question: AsyncPromptQuestion,
     summary: String,
     reasoning: String,
     choices: Vec<AsyncPermissionChoice>,
 ) -> AsyncPermissionRequest {
     AsyncPermissionRequest {
-        tool: REFUSAL_QUESTION_TOOL.to_string(),
+        tool: String::new(),
         input_hash: format!("{:x}", Sha256::digest(summary.as_bytes())),
         input_summary: summary,
         reasoning,
         choices,
         risk_level: AsyncRiskLevel::Low,
+        question: Some(question),
+    }
+}
+
+/// What the ladder asks before it leaves the model the person chose.
+pub(crate) fn refusal_switch_prompt() -> AsyncPromptQuestion {
+    AsyncPromptQuestion {
+        topic: core_types::retry_signal::REFUSAL_SWITCH_TOPIC.to_string(),
+        title: core_types::retry_signal::REFUSAL_SWITCH_TITLE.to_string(),
+    }
+}
+
+/// What the ladder asks about the declined request's images.
+pub(crate) fn declined_images_prompt() -> AsyncPromptQuestion {
+    AsyncPromptQuestion {
+        topic: core_types::retry_signal::DECLINED_IMAGES_TOPIC.to_string(),
+        title: core_types::retry_signal::DECLINED_IMAGES_TITLE.to_string(),
     }
 }
 
@@ -312,6 +329,7 @@ pub(crate) fn build_async_permission_request(
         }),
         choices: default_permission_choices(),
         risk_level: risk_from_tool_name(&sync_request.tool_name),
+        question: None,
     }
 }
 
@@ -349,19 +367,41 @@ mod permission_metadata_tests {
 
 #[cfg(test)]
 mod refusal_question_tests {
-    use super::{refusal_question, refusal_switch_choices};
+    use super::{
+        declined_images_choices, declined_images_prompt, refusal_question, refusal_switch_choices,
+        refusal_switch_prompt,
+    };
 
     /// The ladder's questions are not tool permissions (t-17474): the prompt
     /// said "Allow safety-classifier decline" with a risk line, and the window
     /// showed its tool modal, "Run this tool?", with that string as the tool.
-    /// A question names no tool.
+    /// A question names no tool, carries no risk line, and says what it is
+    /// about by a topic and a short title.
     #[test]
-    fn a_refusal_question_names_no_tool() {
-        let request = refusal_question(
+    fn a_refusal_question_names_no_tool_and_carries_its_topic_and_title() {
+        let switch = refusal_question(
+            refusal_switch_prompt(),
             "claude-sonnet-5-5 → claude-opus-5-5".to_string(),
             "Continue this turn on claude-opus-5-5?".to_string(),
             refusal_switch_choices("claude-sonnet-5-5"),
         );
-        assert_eq!(request.tool, "", "a question puts no tool to the person: {request:?}");
+        assert_eq!(switch.tool, "", "a question puts no tool to the person: {switch:?}");
+        assert_eq!(switch.prompt_audit_hint(), None, "and no risk line");
+        let asked = switch.question.as_ref().expect("a question says so");
+        assert_eq!((asked.topic.as_str(), asked.title.as_str()), ("model_switch", "Switch models?"));
+
+        let images = refusal_question(
+            declined_images_prompt(),
+            "2 image(s) in the declined request".to_string(),
+            "Retry without the 2?".to_string(),
+            declined_images_choices(),
+        );
+        assert_eq!(images.tool, "");
+        assert_eq!(images.prompt_audit_hint(), None);
+        let asked = images.question.as_ref().expect("the same kind of thing");
+        assert_eq!(
+            (asked.topic.as_str(), asked.title.as_str()),
+            ("declined_images", "Retry without the images?")
+        );
     }
 }
