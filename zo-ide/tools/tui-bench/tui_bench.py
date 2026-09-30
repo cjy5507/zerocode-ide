@@ -1793,13 +1793,16 @@ class Busy:
 
 
 DURATION = re.compile(r"\b\d+(?:\.\d+)?(?:ms|s|m|h)\b(?: \d+(?:\.\d+)?(?:ms|s|m))*")
+# A run's temporary folder shows on the screen (the boot card's directory, the footer's path), and its name
+# carries the run's random suffix and the label of the binary that ran there.
+RUN_DIR = re.compile(r"/(?:private/)?var/folders/\S*")
 
 
 def normalize_screen(lines: list[str]) -> str:
     """A screen without what differs between two runs of the same script: line ends,
-    trailing blank rows and every elapsed time."""
+    trailing blank rows, the run's temporary folder and every elapsed time."""
     text = "\n".join(line.rstrip() for line in lines).rstrip("\n")
-    return DURATION.sub("<t>", text)
+    return DURATION.sub("<t>", RUN_DIR.sub("<run-dir>", text))
 
 
 def run_once(cli: Cli, run: int, args: argparse.Namespace, url: str, log: ServiceLog,

@@ -117,6 +117,14 @@ class Screens(unittest.TestCase):
         self.assertEqual(bench.normalize_screen(a), bench.normalize_screen(b))
         self.assertNotEqual(bench.normalize_screen(a), bench.normalize_screen(["• Working", "other"]))
 
+    def test_the_runs_temporary_folder_does_not_make_two_screens_differ(self) -> None:
+        a = ["directory: /private/var/folders/yv/…/before-1/project",
+             "claude-opus-5 high · /private/var/folders/yv/23c9/T/tui-bench-runs-4g4a4g… 100% context left"]
+        b = ["directory: /private/var/folders/yv/…/after-1/project",
+             "claude-opus-5 high · /private/var/folders/yv/23c9/T/tui-bench-runs-9x9x9x… 100% context left"]
+        self.assertEqual(bench.normalize_screen(a), bench.normalize_screen(b))
+        self.assertNotEqual(bench.normalize_screen(a), bench.normalize_screen(a[:1] + ["claude-opus-5 low"]))
+
 
 if __name__ == "__main__":
     unittest.main()
