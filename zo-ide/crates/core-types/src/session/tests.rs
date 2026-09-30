@@ -3129,3 +3129,418 @@ fn a_full_snapshot_re_arms_the_fast_path_for_the_next_append() {
     );
     cleanup_session_file(&path);
 }
+
+// --- a full rewrite keeps each message's own time (t-18703) -----------------
+//
+// The window reads how long a step took from the `updated_at_ms` on each
+// message record. zo wrote it on the append road only, so every full rewrite
+// (a compaction, a rewind, a fork, the heal snapshot after an in-place edit)
+// wrote every message without one, and the window drew 0.0 seconds for steps
+// that had run for minutes. These tests read the FILE, not the loaded session:
+// the window reads the file, so a time lost between memory and disk is lost
+// exactly where it is needed.
+
+/// The `updated_at_ms` of every message record in the session file at `path`,
+/// in file order; `None` for a record that carries none.
+fn message_times_on_disk(path: &Path) -> Vec<Option<u64>> {
+    fs::read_to_string(path)
+        .expect("read the session file")
+        .lines()
+        .filter_map(|line| JsonValue::parse(line).ok())
+        .filter_map(|record| {
+            let record = record.as_object()?;
+            (record.get("type")?.as_str()? == "message").then(|| {
+                record
+                    .get("updated_at_ms")
+                    .and_then(JsonValue::as_i64)
+                    .and_then(|ms| u64::try_from(ms).ok())
+            })
+        })
+        .collect()
+}
+
+/// Waits until the clock reads later than `after_ms`, so that what a test
+/// appends next carries a time of its own instead of the previous one's.
+fn wait_past(after_ms: u64) {
+    while super::current_time_millis() <= after_ms {
+        std::thread::yield_now();
+    }
+}
+
+/// A bound session holding four messages appended one clock tick apart, and
+/// the path of its file. The header is written first, so every message goes
+/// down the append road as its own line and carries its own time; the first
+/// message of a file that does not exist yet is written by another road, which
+/// `the_first_message_of_a_new_file_carries_its_time` covers.
+fn a_session_with_four_timed_messages(label: &str) -> (Session, PathBuf) {
+    let path = temp_session_path(label);
+    let mut session = Session::new().with_persistence_path(path.clone());
+    session.save_to_path(&path).expect("seed the header");
+    for text in ["one", "two", "three", "four"] {
+        wait_past(session.updated_at_ms);
+        push_text(&mut session, text).expect("append");
+    }
+    (session, path)
+}
+
+/// A bound session holding two prompt-and-answer turns appended one clock tick
+/// apart, and the path of its file, seeded with its header like the session
+/// above.
+fn a_session_with_two_timed_turns(label: &str) -> (Session, PathBuf) {
+    let path = temp_session_path(label);
+    let mut session = Session::new().with_persistence_path(path.clone());
+    session.save_to_path(&path).expect("seed the header");
+    for prompt in ["one", "two"] {
+        wait_past(session.updated_at_ms);
+        push_text(&mut session, prompt).expect("append the prompt");
+        wait_past(session.updated_at_ms);
+        session
+            .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: format!("answer to {prompt}"),
+            }]))
+            .expect("append the answer");
+    }
+    (session, path)
+}
+
+/// The message a compaction puts at the head of the transcript: new, `System`,
+/// and not written by anything yet.
+fn continuation_message() -> ConversationMessage {
+    let mut message =
+        ConversationMessage::user_text("This session continues from a compacted context.");
+    message.role = MessageRole::System;
+    message
+}
+
+/// What the runtime's `apply_compaction` hands the compaction seam: the new
+/// continuation, then clones of the messages kept from `keep_from` on.
+fn compact_keeping_from(session: &mut Session, keep_from: usize) {
+    let mut compacted = vec![continuation_message()];
+    compacted.extend(session.messages[keep_from..].iter().cloned());
+    session.apply_compaction_atomic(
+        std::sync::Arc::new(compacted),
+        "summary of the earlier messages",
+        keep_from,
+        None,
+    );
+}
+
+/// A session file the way a zo from before the per-message time left it after
+/// any full rewrite: a header, then message records with no `updated_at_ms`.
+fn write_file_without_message_times(path: &Path, texts: &[&str]) {
+    let mut lines = vec![
+        r#"{"created_at_ms":1790000000000,"session_id":"session-older-zo-0","type":"session_meta","updated_at_ms":1790000001000,"version":1}"#
+            .to_string(),
+    ];
+    for (index, text) in texts.iter().enumerate() {
+        let role = if index % 2 == 0 { "user" } else { "assistant" };
+        lines.push(format!(
+            r#"{{"message":{{"blocks":[{{"text":"{text}","type":"text"}}],"role":"{role}"}},"turn_index":{index},"type":"message"}}"#
+        ));
+    }
+    fs::write(path, format!("{}\n", lines.join("\n"))).expect("write the older zo's file");
+}
+
+#[test]
+fn the_first_message_of_a_new_file_carries_its_time() {
+    // Appending into a file that does not exist yet writes a full snapshot of
+    // the session instead of one line, and that snapshot wrote the message
+    // without its time: the first prompt of every new session had none.
+    let path = temp_session_path("times-first-message");
+    let mut session = Session::new().with_persistence_path(path.clone());
+
+    push_text(&mut session, "the first words").expect("append");
+
+    assert_eq!(
+        message_times_on_disk(&path),
+        vec![Some(session.updated_at_ms)],
+        "the message that created the file is written with the time it was pushed at"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_compaction_rewrite_keeps_the_time_each_surviving_message_had() {
+    let (mut session, path) = a_session_with_four_timed_messages("times-compaction");
+    let before = message_times_on_disk(&path);
+    assert_eq!(before.len(), 4);
+    assert!(
+        before.iter().all(Option::is_some) && before.windows(2).all(|pair| pair[0] < pair[1]),
+        "the append road stamps every line with a time of its own: {before:?}"
+    );
+
+    compact_keeping_from(&mut session, 2);
+
+    let after = message_times_on_disk(&path);
+    assert_eq!(after.len(), 3, "the continuation and the two messages kept");
+    assert_eq!(
+        after[1..],
+        before[2..],
+        "the compaction rewrote the file; each message it kept must keep the time it was written at"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn the_continuation_a_compaction_writes_carries_the_compactions_own_time() {
+    let (mut session, path) = a_session_with_four_timed_messages("times-continuation");
+    let last_appended = session.updated_at_ms;
+    wait_past(last_appended);
+
+    compact_keeping_from(&mut session, 2);
+
+    let after = message_times_on_disk(&path);
+    assert!(
+        session.updated_at_ms > last_appended,
+        "the compaction ran after the last append"
+    );
+    assert_eq!(
+        after.first().copied().flatten(),
+        Some(session.updated_at_ms),
+        "the continuation is new, so it carries the time of the compaction that wrote it: {after:?}"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_heal_snapshot_after_an_in_place_edit_keeps_every_time() {
+    // A fold onto a message already on disk (a steering note landing on the
+    // last tool result) and a microcompact clear both end in this same full
+    // snapshot, and that road runs after almost every turn of a long session.
+    let (mut session, path) = a_session_with_four_timed_messages("times-heal");
+    let before = message_times_on_disk(&path);
+    if let Some(last) = std::sync::Arc::make_mut(&mut session.messages).last_mut() {
+        last.blocks.push(ContentBlock::Text {
+            text: "folded steering".to_string(),
+        });
+    }
+
+    session
+        .publish_transcript_rewrite()
+        .expect("publish the rewrite");
+
+    assert_eq!(
+        message_times_on_disk(&path),
+        before,
+        "an in-place edit rewrites the whole file; no message may lose its time to it"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_resumed_session_rewrites_its_file_with_the_times_it_read() {
+    let (session, path) = a_session_with_four_timed_messages("times-resume");
+    let before = message_times_on_disk(&path);
+    // The first session hands the writer lease back before the resumed one binds the file.
+    drop(session);
+
+    let resumed = Session::load_from_path(&path).expect("resume the session");
+    resumed.mark_transcript_dirty();
+    resumed
+        .persist_appended_state_to_path(&path)
+        .expect("the heal snapshot");
+
+    assert_eq!(
+        message_times_on_disk(&path),
+        before,
+        "a session read back from its file must write back the times it read"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_rewind_keeps_the_time_of_every_message_that_remains() {
+    let (mut session, path) = a_session_with_two_timed_turns("times-rewind");
+    let before = message_times_on_disk(&path);
+    assert_eq!(before.len(), 4);
+    assert!(
+        before.iter().all(Option::is_some),
+        "the append road stamps every line: {before:?}"
+    );
+
+    assert_eq!(session.rewind_turns(1), 2, "the last prompt and its answer");
+
+    assert_eq!(
+        message_times_on_disk(&path),
+        before[..2].to_vec(),
+        "the first turn keeps the times it was written at"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_fork_written_to_its_own_file_carries_the_times_of_the_messages_it_copied() {
+    let (session, path) = a_session_with_four_timed_messages("times-fork");
+    let before = message_times_on_disk(&path);
+
+    let child = temp_session_path("times-fork-child");
+    session
+        .fork(Some("branch".to_string()))
+        .save_to_path(&child)
+        .expect("write the fork");
+    assert_eq!(
+        message_times_on_disk(&child),
+        before,
+        "a fork of the live session"
+    );
+
+    // The road the fork tool takes: read the parent's file, fork it, write it.
+    let read_back_child = temp_session_path("times-fork-read-back-child");
+    Session::load_from_path(&path)
+        .expect("read the parent's file")
+        .fork(None)
+        .save_to_path(&read_back_child)
+        .expect("write the fork");
+    assert_eq!(
+        message_times_on_disk(&read_back_child),
+        before,
+        "a fork of the session read back from its file"
+    );
+    cleanup_session_file(&child);
+    cleanup_session_file(&read_back_child);
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_file_from_an_older_zo_is_rewritten_without_inventing_a_time() {
+    let path = temp_session_path("times-older-zo");
+    write_file_without_message_times(&path, &["one", "two", "three", "four"]);
+    let mut session = Session::load_from_path(&path).expect("load the older zo's file");
+
+    session.mark_transcript_dirty();
+    session
+        .persist_appended_state_to_path(&path)
+        .expect("the heal snapshot");
+    assert_eq!(
+        message_times_on_disk(&path),
+        vec![None::<u64>; 4],
+        "a heal snapshot"
+    );
+
+    let child = temp_session_path("times-older-zo-fork");
+    session
+        .fork(Some("branch".to_string()))
+        .save_to_path(&child)
+        .expect("write the fork");
+    assert_eq!(
+        message_times_on_disk(&child),
+        vec![None::<u64>; 4],
+        "a fork"
+    );
+    cleanup_session_file(&child);
+
+    assert_eq!(session.rewind_turns(1), 2);
+    assert_eq!(
+        message_times_on_disk(&path),
+        vec![None::<u64>; 2],
+        "a rewind"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_compaction_of_an_older_file_stamps_only_the_continuation_it_writes() {
+    let path = temp_session_path("times-older-zo-compaction");
+    write_file_without_message_times(&path, &["one", "two", "three", "four"]);
+    let mut session = Session::load_from_path(&path).expect("load the older zo's file");
+
+    compact_keeping_from(&mut session, 2);
+
+    assert_eq!(
+        message_times_on_disk(&path),
+        vec![Some(session.updated_at_ms), None, None],
+        "the continuation is new and carries the compaction's time; the two messages kept never had one and stay without"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn the_session_time_read_back_after_a_full_rewrite_does_not_run_backwards() {
+    // The header's `updated_at_ms` is when the session last changed. A
+    // compaction or a rewind touches it, but the messages it keeps are older:
+    // a loader that let the last message record's time replace the header's
+    // would read the session back as older than it is.
+    let (mut session, path) = a_session_with_four_timed_messages("times-header-compaction");
+    wait_past(session.updated_at_ms);
+    compact_keeping_from(&mut session, 2);
+    let reloaded = Session::load_from_path(&path).expect("reload after the compaction");
+    assert_eq!(
+        reloaded.updated_at_ms, session.updated_at_ms,
+        "after a compaction"
+    );
+    cleanup_session_file(&path);
+
+    let (mut session, path) = a_session_with_two_timed_turns("times-header-rewind");
+    wait_past(session.updated_at_ms);
+    assert_eq!(session.rewind_turns(1), 2);
+    let reloaded = Session::load_from_path(&path).expect("reload after the rewind");
+    assert_eq!(
+        reloaded.updated_at_ms, session.updated_at_ms,
+        "after a rewind"
+    );
+    cleanup_session_file(&path);
+}
+
+/// The measurement t-18703 asks for, on a real transcript, kept beside the fix
+/// it measures. `ZO_T18703_SEGMENT` names a session file; every road below
+/// works on its own copy of it, never on the file itself. It prints, per road,
+/// how many of the file's message records carry a time, and asserts nothing, so
+/// the same test runs on a tree without the fix. Run it with `--ignored
+/// --nocapture`.
+#[test]
+#[ignore = "reads the file named by ZO_T18703_SEGMENT and prints a measurement"]
+fn measure_message_times_on_a_real_segment() {
+    let Some(source) = std::env::var_os("ZO_T18703_SEGMENT") else {
+        println!("ZO_T18703_SEGMENT is not set; nothing to measure");
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("t18703-measure-{}", std::process::id()));
+    fs::create_dir_all(&scratch).expect("create the scratch directory");
+    let copy_of = |road: &str| -> PathBuf {
+        let copy = scratch.join(format!("{road}.jsonl"));
+        fs::copy(&source, &copy).expect("copy the segment");
+        copy
+    };
+    let report = |road: &str, path: &Path| {
+        let times = message_times_on_disk(path);
+        println!(
+            "{road}: {} of {} message records carry a time",
+            times.iter().flatten().count(),
+            times.len()
+        );
+    };
+
+    report("as read", &copy_of("as-read"));
+
+    // What almost every turn of a long session ends in after a fold or a microcompact clear.
+    let path = copy_of("heal");
+    let session = Session::load_from_path(&path).expect("load the copy");
+    session.mark_transcript_dirty();
+    session
+        .persist_appended_state_to_path(&path)
+        .expect("the heal snapshot");
+    report("after a heal snapshot", &path);
+
+    let path = copy_of("rewind");
+    let mut session = Session::load_from_path(&path).expect("load the copy");
+    let removed = session.rewind_turns(1);
+    report(&format!("after a rewind of one turn (removed {removed})"), &path);
+
+    let child = scratch.join("fork-child.jsonl");
+    Session::load_from_path(copy_of("fork-parent"))
+        .expect("load the copy")
+        .fork(None)
+        .save_to_path(&child)
+        .expect("write the fork");
+    report("the fork's file", &child);
+
+    // The runtime keeps 4 messages by default; a longer tail shows the same road with more to lose.
+    for keep in [4_usize, 40] {
+        let path = copy_of(&format!("compact-{keep}"));
+        let mut session = Session::load_from_path(&path).expect("load the copy");
+        let keep_from = session.messages.len().saturating_sub(keep);
+        compact_keeping_from(&mut session, keep_from);
+        report(&format!("after a compaction keeping the last {keep}"), &path);
+    }
+    let _ = fs::remove_dir_all(&scratch);
+}
