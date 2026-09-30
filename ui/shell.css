@@ -33834,9 +33834,15 @@ details.task-board-section > summary {
   font-size: var(--agent-graph-screen-text);
 }
 
+/* 발치는 줄을 바꿀 수 있다 (t-17078). 가장 좁은 레일(720px 창에서 안쪽
+ * 279px)에서 이름이 0까지 줄어도 모델·시계 넷의 폭이 판을 넘는 언어가
+ * 있으므로(스페인어 「ahora mismo」+「lleva 50 min」), 그때 넘치는 대신 시계가
+ * 다음 줄로 내려간다. 이름은 기준 폭이 0이라 줄을 가르는 셈에 끼지 않고 남은
+ * 자리만 받는다 — 좁을 때 자리를 내주는 쪽은 여전히 이름이다. */
 .board-card-foot {
   display: flex;
-  gap: var(--space-2);
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
   align-items: center;
   min-width: 0;
   color: var(--ink-mist);
@@ -33844,6 +33850,8 @@ details.task-board-section > summary {
 }
 
 .board-card-where {
+  flex: 1 1 0;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

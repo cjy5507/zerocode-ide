@@ -18662,6 +18662,13 @@ const elapsedClock = await page.evaluate(async () => {
         bodySpills: body.scrollWidth > body.clientWidth + 1,
         // 자리를 내주는 쪽은 이미 말줄임을 하는 워크스페이스 이름이다.
         whereEllipsed: where ? where.scrollWidth > where.clientWidth + 1 : false,
+        // 이름을 다 적으면 한 줄에 못 서는 자리인가 — 그 자리에서만 이름이
+        // 말줄임으로 물러나야 한다. 판이 넉넉하면 다 적는 것이 맞다.
+        nameMustGive: foot
+          ? [...foot.children].reduce((sum, one) => sum + one.scrollWidth, 0) +
+            parseFloat(getComputedStyle(foot).columnGap) * (foot.children.length - 1) >
+            foot.clientWidth + 1
+          : true,
       });
     }
     locale = "ko";
@@ -18672,12 +18679,12 @@ const elapsedClock = await page.evaluate(async () => {
   window.__MEASURE_ELAPSED__ = measure;
   return seen;
 });
-/* 그리고 창을 좁혀 다시. 이 패널이 갖는 폭은 하나가 아니다: 그림 옆에 설
- * 때는 `--agent-graph-inspector-width`의 고정 레일(안쪽 299px)이고, 판이
- * 600px 아래로 좁아지면 아래로 접혀 판의 폭을 통째로 갖는다(720px 창에서
- * 394px). 640px 창은 사이드바가 접히며 판이 도로 넓어져 레일로 돌아오므로,
- * 이 셋이 함께 두 모양을 다 덮는다 — 실측값이고, 다른 그릇에서 들고 온
- * 숫자가 아니다. */
+/* 그리고 창을 좁혀 다시. 이 패널이 갖는 폭은 하나가 아니다(t-17078 실측,
+ * 제목줄이 몸 그리드를 더는 창 밖으로 밀지 않는 정직한 폭에서): 1280px 창에서
+ * 649px, 720px 창에서 가장 좁은 279px — 여기서 이름이 물러나야 한다 — 이고,
+ * 640px 창은 사이드바가 접히며 판의 폭 640px을 통째로 가져 이름을 다 적는다.
+ * 예전 주석의 299/394px는 제목줄 min-content가 창을 ~1083px로 부풀리던 때의
+ * 숫자였다. */
 await page.setViewportSize({ width: 720, height: 640 });
 const elapsedNarrow = await page.evaluate(() => window.__MEASURE_ELAPSED__());
 await page.setViewportSize({ width: 640, height: 620 });
@@ -18737,7 +18744,9 @@ ok(
     new Set(elapsedFits.map((one) => one.panel)).size >= 2 &&
     elapsedFits.every((one) =>
       one.word !== "" && !one.clipped && !one.footSpills && !one.bodySpills &&
-      one.whereEllipsed) &&
+      (!one.nameMustGive || one.whereEllipsed)) &&
+    // 이름이 물러나야 하는 좁은 자리를 적어도 한 번은 재었다.
+    elapsedFits.some((one) => one.nameMustGive) &&
     elapsedRestored,
   JSON.stringify({ ...elapsedClock, fit: elapsedFits }),
 );
