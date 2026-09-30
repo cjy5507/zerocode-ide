@@ -11410,14 +11410,15 @@ function workerElapsedWords(run) {
 
 /* How long a helper ran, by the times its file stamped: from its first stamped line to its last — to
  * now while it runs. The window's own clock says nothing about it (it started when the page happened
- * to open, so every finished helper read 「완료 0초」), and a file that stamped nothing has no clock:
- * the head says nothing rather than a time nobody knows (t-18702). Under half a second it would be
- * worded 0초, which is the same nothing. */
+ * to open, so every finished helper read 「완료 0초」), and a file that stamped nothing, or whose
+ * stamps go backwards (`holdHelperTurns`), has no clock: the head says nothing rather than a time
+ * nobody knows (t-18702). A span that is not positive, or under half a second, is worded 0초 or less,
+ * which is the same nothing. */
 const HELPER_SPAN_MIN_MS = 500;
 
 function helperSpanWords(run) {
   const held = run.helper;
-  if (held.firstStampMs === undefined) return "";
+  if (held.firstStampMs === undefined || held.clockBroken === true) return "";
   const span = (run.status === "running" ? Date.now() : held.lastStampMs) - held.firstStampMs;
   return span >= HELPER_SPAN_MIN_MS ? elapsedWords(span) : "";
 }
@@ -11480,12 +11481,17 @@ function holdHelperTurns(held, turns) {
     // 벤더가 줄에 찍은 시각이 있으면 그것(`TranscriptTurn.at_ms`), 없으면
     // 도착한 순간 — 「{{time}} 동안 작업」의 시간은 이 시각들의 차다. 찍힌 시각이
     // 없는 줄을 백엔드는 `null`로 보낸다(빠진 열쇠가 아니다): 둘 다 「없음」이다.
-    const stamp = Number.isFinite(turn.at_ms) ? turn.at_ms : null;
+    const stamp = Number.isFinite(turn.at_ms) && turn.at_ms > 0 ? turn.at_ms : null;
     // 헬퍼 자신의 시계는 파일이 찍은 첫 줄에서 끝 줄까지다(`helperSpanWords`) —
-    // 페이지가 열린 순간이 아니라. 턴을 앞에서 지워도(상한) 이 둘은 남는다.
+    // 페이지가 열린 순간이 아니라. 턴을 앞에서 지워도(상한) 이 둘은 남는다. 두
+    // 번째 도장이 첫 도장보다 이르면(압축한 세션의 맨 앞 요약은 쓰인 순간이 찍혀서
+    // 뒤따르는 옛 줄들보다 늦다 — 설계이고 지어낸 시각이 아니다) 그 파일의 시계는
+    // 곧지 않다: 폭을 말하지 않는다.
     if (stamp !== null) {
-      if (held.firstStampMs === undefined) held.firstStampMs = stamp;
-      held.lastStampMs = Math.max(held.lastStampMs ?? stamp, stamp);
+      held.stampCount = (held.stampCount ?? 0) + 1;
+      if (held.stampCount === 1) held.firstStampMs = stamp;
+      else if (held.stampCount === 2 && stamp < held.firstStampMs) held.clockBroken = true;
+      held.lastStampMs = stamp;
     }
     if (turn.role === "tool_result" && turn.tool?.call_id) {
       const call = held.turns.findLast((one) => one.role === "tool" &&
@@ -12296,8 +12302,10 @@ async function pollHelperPages() {
   if (replaced) {
     held.turns.length = 0;
     held.skipped = false;
+    held.stampCount = 0;
     held.firstStampMs = undefined;
     held.lastStampMs = undefined;
+    held.clockBroken = false;
   }
   // The first read of a pane's transcript began at its tail: the turns above
   // are not carried, and the page says so once (`paintPaneChat`).
