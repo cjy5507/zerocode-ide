@@ -821,6 +821,11 @@ struct RunningSubagent<'a> {
 }
 
 /// 프롬프트 블록인가 — 맞다면 어떤 종류인가.
+///
+/// 이 종류는 **답이 어느 문으로 오는가**다. zo 가 스스로 사람에게 던지는 질문
+/// (거절 사다리의 「모델을 바꿀까요?」)은 `question` 을 단 `PermissionPrompt`
+/// 이고 권한 결정으로 답하므로 여기서는 권한이다. 도구가 아니라는 사실은
+/// 프레임의 `kind`/`topic`/`title`(`sinks::serializable`)이 창에 알린다(t-17474).
 const fn prompt_kind_of(block: &RenderBlock) -> Option<PromptKind> {
     match block {
         RenderBlock::PermissionPrompt(_) => Some(PromptKind::Permission),
@@ -916,6 +921,7 @@ mod tests {
                 label: "Allow once".to_string(),
                 decision: PermissionDecision::AllowOnce,
             }],
+            question: None,
             responder,
         })
     }

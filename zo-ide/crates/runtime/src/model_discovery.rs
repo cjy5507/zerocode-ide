@@ -23,6 +23,11 @@
 //!   Codex, the window's account sync and zo all read; when the live call
 //!   fails, the freshest cache this machine has answers instead
 //!   ([`freshest_codex_cache`]), and the report line says which and how old.
+//!   The live request names the newest Codex version this machine holds — the
+//!   selected cache's, any other Codex home's, the installed `codex`'s own —
+//!   and never less than [`CODEX_CLIENT_VERSION_DEFAULT`]: the backend lists a
+//!   new model only to a client that names the version it came with, and the
+//!   selected cache repeats the version it was last answered under (t-17403).
 //! - **A failed source keeps its rows** ([`carry_forward`]) — never an empty
 //!   family for one transport error.
 //! - **A selected model never vanishes** ([`keep_selected`]): a row the
@@ -39,10 +44,12 @@
 //! `pinned` publishes nothing at all.
 
 use std::collections::{HashMap, HashSet};
-use std::io;
+use std::ffi::{OsStr, OsString};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Once, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, Once, PoisonError, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -59,10 +66,23 @@ pub const LIVE_TTL_SECS: u64 = 60 * 60;
 /// How long a selected row its source stopped listing stays — dimmed, with
 /// the time it went unlisted — before it is dropped for never coming back.
 pub const UNLISTED_GRACE_SECS: u64 = 7 * 24 * 60 * 60;
-/// The Codex client version the live ChatGPT request names when no cache
-/// says one. The backend gates the list on it, and Codex refetches a cache
-/// whose `client_version` is not its own — so the cache's word wins.
-pub const CODEX_CLIENT_VERSION_DEFAULT: &str = "0.153.4";
+/// The floor of the Codex client version the live ChatGPT request names
+/// (t-17403). The backend gates its list on the version a request names — a
+/// model that came with Codex 0.159.0 is not listed to a client naming
+/// 0.157.1 — so the request names the newest of what this machine's Codex
+/// caches and installed `codex` say, and never less than this. It is what a
+/// machine with no Codex cache and no `codex` asks at; raise it when a Codex
+/// release brings models the catalog should not wait for a Codex cache to
+/// learn.
+pub const CODEX_CLIENT_VERSION_DEFAULT: &str = "0.159.2";
+/// The program the installed Codex is asked through, and the word its own
+/// `--version` line names it by (`codex-cli 0.159.2`) — one name for both, so
+/// a banner that names some other program is not taken for its version.
+const CODEX_PROGRAM: &str = "codex";
+/// How long `codex --version` may take before it is taken to say nothing.
+const CODEX_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// How much of what `codex --version` printed is read.
+const CODEX_PROBE_OUTPUT_LIMIT: u64 = 4096;
 /// Where the ChatGPT backend lists the models a Codex login may use — the
 /// very request Codex makes to fill `models_cache.json`. It is Codex's
 /// `/backend-api/codex/models`, not the plain `/backend-api/models`: that one
@@ -1036,6 +1056,14 @@ pub struct CodexCache {
     pub document: Value,
 }
 
+impl CodexCache {
+    /// The Codex version this cache's list was answered under, when the file
+    /// names one that reads as a version.
+    fn answered_under(&self) -> Option<ClientVersion> {
+        self.client_version.as_deref().and_then(ClientVersion::parse)
+    }
+}
+
 /// Read one Codex cache file. `Err` says why not — a missing file, bad JSON,
 /// no `models` array.
 pub fn read_codex_cache(path: &Path) -> Result<CodexCache, String> {
@@ -1137,6 +1165,139 @@ pub fn codex_cache_models_from(paths: &[PathBuf]) -> SourceAnswer {
     })
 }
 
+// ---------------------------------------------------------------------------
+// The version the request names (t-17403)
+// ---------------------------------------------------------------------------
+
+/// A Codex version as its three numbers. The backend gates its list on the
+/// `client_version` a request names, so what matters is which of two versions
+/// is newer — compared number by number, never as text (`0.99.0` is older
+/// than `0.159.2`) — and a pre-release suffix is not read: Codex names its
+/// own whole version, so `0.160.0-alpha.1` asks as `0.160.0`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct ClientVersion(u64, u64, u64);
+
+impl ClientVersion {
+    /// `0.159.2`, `v0.160.0` or `0.160.0-alpha.1`: three whole numbers, then
+    /// at most a suffix. Two numbers, four, a word or nothing is not a version.
+    fn parse(text: &str) -> Option<Self> {
+        let text = text.trim().trim_start_matches(['v', 'V']);
+        let mut parts = text.split(['-', '+']).next()?.split('.').map(whole_number);
+        let version = Self(parts.next()??, parts.next()??, parts.next()??);
+        parts.next().is_none().then_some(version)
+    }
+
+    /// The version `codex --version` printed: the first word of its first
+    /// line that reads as one, on a line that names the program we called
+    /// ([`CODEX_PROGRAM`], as in `codex-cli 0.159.2`). A wrapper's banner is
+    /// not a Codex version.
+    fn of_codex_output(output: &str) -> Option<Self> {
+        let line = output.lines().map(str::trim).find(|line| !line.is_empty())?;
+        if !line.to_ascii_lowercase().contains(CODEX_PROGRAM) {
+            return None;
+        }
+        line.split_whitespace().find_map(Self::parse)
+    }
+}
+
+impl std::fmt::Display for ClientVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.0, self.1, self.2)
+    }
+}
+
+/// Digits only, so a sign or a space is not a number.
+fn whole_number(part: &str) -> Option<u64> {
+    if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    part.parse().ok()
+}
+
+/// `<program> --version`, read as a Codex version: `None` when the program is
+/// not there, does not succeed within `timeout`, or prints no version. What it
+/// prints goes to an unnamed temp file rather than a pipe, so a program that
+/// prints more than a pipe holds cannot pass for one that hangs; one still
+/// running at the deadline is killed.
+fn probe_codex_version(program: impl AsRef<OsStr>, timeout: Duration) -> Option<ClientVersion> {
+    let mut printed = tempfile::tempfile().ok()?;
+    let mut child = Command::new(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(printed.try_clone().ok()?))
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    printed.seek(SeekFrom::Start(0)).ok()?;
+    let mut output = String::new();
+    printed.take(CODEX_PROBE_OUTPUT_LIMIT).read_to_string(&mut output).ok()?;
+    ClientVersion::of_codex_output(&output)
+}
+
+/// The Codex this machine has, by asking it: `codex --version` on `PATH` —
+/// inside a window pane the window's own shim, which passes a version probe
+/// straight through to the real one. Asked once per process, the answer (or
+/// that there was none) kept for the `PATH` it was asked under, so a refresh
+/// an hour does not start a process an hour.
+fn installed_codex_version() -> Option<ClientVersion> {
+    /// What `codex --version` said under one `PATH`.
+    struct Said {
+        path: Option<OsString>,
+        version: Option<ClientVersion>,
+    }
+    static SAID: Mutex<Option<Said>> = Mutex::new(None);
+    let path = std::env::var_os("PATH");
+    let mut said = SAID.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(known) = said.as_ref().filter(|known| known.path == path) {
+        return known.version;
+    }
+    let version = probe_codex_version(CODEX_PROGRAM, CODEX_PROBE_TIMEOUT);
+    *said = Some(Said { path, version });
+    version
+}
+
+/// The `client_version` the live request names: the newest of what the
+/// selected home's cache says, what any Codex cache in `cache_paths` says,
+/// what the installed Codex says of itself, and [`CODEX_CLIENT_VERSION_DEFAULT`],
+/// which is a floor. Each is a reason to believe the machine's Codex is at
+/// least that new, and the backend lists a new model only to a client that
+/// names the version it came with. The rule this replaced asked what the
+/// selected cache said and stopped there — and that cache holds the version
+/// it was last answered under, so it never moved.
+fn client_version_to_ask(
+    selected: Option<&CodexCache>,
+    cache_paths: &[PathBuf],
+    installed: Option<ClientVersion>,
+) -> ClientVersion {
+    ClientVersion::parse(CODEX_CLIENT_VERSION_DEFAULT)
+        .into_iter()
+        .chain(installed)
+        .chain(selected.and_then(CodexCache::answered_under))
+        .chain(
+            cache_paths
+                .iter()
+                .filter_map(|path| read_codex_cache(path).ok())
+                .filter_map(|cache| cache.answered_under()),
+        )
+        .max()
+        .unwrap_or_default()
+}
+
 /// What the live ChatGPT request answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveModels {
@@ -1172,6 +1333,11 @@ fn chatgpt_backend_models() -> SourceAnswer {
 /// The answer is written back only when `cache_path`'s home is this login's
 /// (or nobody's): a bare-terminal zo with its own ChatGPT login must not
 /// overwrite the person's `~/.codex` cache with another account's list.
+///
+/// The request names the newest Codex version this machine holds
+/// (`client_version_to_ask`), which reads the Codex homes' caches and asks the
+/// installed `codex` once — so what the machine has decides the answer, and a
+/// test that calls this says what machine it runs on.
 pub fn chatgpt_backend_models_at(
     url: &str,
     tokens: &core_types::OpenAiOAuthTokens,
@@ -1180,7 +1346,9 @@ pub fn chatgpt_backend_models_at(
     now_secs: u64,
 ) -> SourceAnswer {
     let source = OPENAI_SOURCE.to_string();
-    let answer = fetch_chatgpt_models(url, tokens, cache).map_err(|detail| (source.clone(), detail))?;
+    let client_version = client_version_to_ask(cache, &codex_cache_paths(), installed_codex_version());
+    let answer = fetch_chatgpt_models(url, tokens, cache, &client_version.to_string())
+        .map_err(|detail| (source.clone(), detail))?;
     let mut note = answer.not_modified.then(|| "304, the cache is current".to_string());
     let written = cache_write_allowed(cache_path, tokens)
         .and_then(|()| write_codex_cache(cache_path, &answer, SystemTime::now()).map_err(|error| error.to_string()));
@@ -1198,20 +1366,27 @@ pub fn chatgpt_backend_models_at(
 }
 
 /// `GET <url>?client_version=<v>` with the login's bearer, its
-/// `chatgpt-account-id`, Codex's client fingerprint and — when `cache` has
-/// one — `If-None-Match: <etag>`. `304` keeps the cache's document; any
-/// other non-success status, a transport failure or a body without a
-/// `models` array is the `Err` the caller falls back on. Never logs the
-/// token.
+/// `chatgpt-account-id`, Codex's client fingerprint and — when `cache` holds
+/// the list this version was answered with — `If-None-Match: <etag>`. `304`
+/// keeps the cache's document; any other non-success status, a transport
+/// failure or a body without a `models` array is the `Err` the caller falls
+/// back on. Never logs the token.
+///
+/// An etag names one list, and a list is one version's: sent to another
+/// version it lets the backend say "unchanged", and the old list stays under
+/// the new version for good. So the cache's etag goes only when the cache
+/// names the very version asked; a newer version asks for the list itself.
 pub fn fetch_chatgpt_models(
     url: &str,
     tokens: &core_types::OpenAiOAuthTokens,
     cache: Option<&CodexCache>,
+    client_version: &str,
 ) -> Result<LiveModels, String> {
-    let client_version = cache
-        .and_then(|cache| cache.client_version.clone())
-        .unwrap_or_else(|| CODEX_CLIENT_VERSION_DEFAULT.to_string());
-    let etag = cache.and_then(|cache| cache.etag.clone());
+    let asked = ClientVersion::parse(client_version);
+    let etag = cache
+        .filter(|cache| asked.is_some() && cache.answered_under() == asked)
+        .and_then(|cache| cache.etag.clone());
+    let client_version = client_version.to_string();
     let request_url = format!("{url}?client_version={client_version}");
     let access_token = tokens.access_token.clone();
     let account_id = tokens.account_id.clone();
@@ -1244,7 +1419,10 @@ pub fn fetch_chatgpt_models(
         Ok::<_, String>((status, body, answered_etag))
     })?;
     if status == reqwest::StatusCode::NOT_MODIFIED {
-        let cache = cache.ok_or_else(|| "HTTP 304 without a cache to keep".to_string())?;
+        // Only an etag that was sent can have been answered "unchanged".
+        let cache = cache
+            .filter(|_| etag.is_some())
+            .ok_or_else(|| "HTTP 304 without a cache to keep".to_string())?;
         return Ok(LiveModels {
             document: json!({ "models": cache.document.get("models").cloned().unwrap_or_else(|| json!([])) }),
             etag: cache.etag.clone().or(answered_etag),
@@ -2862,20 +3040,34 @@ mod tests {
     /// script in order, and every request head it saw is handed back for
     /// the assertions.
     fn fake_backend(script: Vec<ScriptedAnswer>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let requests = script.len();
+        let mut script = script.into_iter();
+        fake_backend_by(requests, move |_head| script.next().expect("one scripted answer per request"))
+    }
+
+    /// [`fake_backend`] for a backend that reads the request it answers:
+    /// `answer` is given each request head, in order, and says what comes
+    /// back for it.
+    fn fake_backend_by(
+        requests: usize,
+        mut answer: impl FnMut(&str) -> ScriptedAnswer + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         use std::fmt::Write as _;
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/backend-api/codex/models", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
             let mut heads = Vec::new();
-            for (status, headers, body) in script {
+            for _ in 0..requests {
                 let (mut socket, _) = listener.accept().unwrap();
                 let mut head = Vec::new();
                 let mut byte = [0u8; 1];
                 while !head.ends_with(b"\r\n\r\n") && socket.read(&mut byte).unwrap_or(0) == 1 {
                     head.push(byte[0]);
                 }
-                heads.push(String::from_utf8_lossy(&head).into_owned());
+                let head = String::from_utf8_lossy(&head).into_owned();
+                let (status, headers, body) = answer(&head);
+                heads.push(head);
                 let mut response = format!("HTTP/1.1 {status}\r\nconnection: close\r\ncontent-length: {}\r\n", body.len());
                 for (name, value) in &headers {
                     let _ = write!(response, "{name}: {value}\r\n");
@@ -2905,6 +3097,7 @@ mod tests {
             super::CHATGPT_MODELS_URL
         );
         let dir = scratch("web-picker");
+        let _machine = bare_machine(&dir);
         let cache_path = dir.join("account").join(super::CODEX_MODELS_CACHE_FILE);
         let tokens = core_types::OpenAiOAuthTokens {
             access_token: "secret-bearer".to_string(),
@@ -2937,6 +3130,7 @@ mod tests {
     #[test]
     fn the_live_chatgpt_source_parses_honours_the_etag_writes_codex_format_and_falls_back() {
         let dir = scratch("live");
+        let _machine = bare_machine(&dir);
         let account_home = dir.join("account");
         let cache_path = account_home.join(super::CODEX_MODELS_CACHE_FILE);
         let tokens = core_types::OpenAiOAuthTokens {
@@ -3027,6 +3221,460 @@ mod tests {
         let (_, detail) = super::chatgpt_backend_models_at(&offline_url, &tokens, &cache_path, None, 1_788_510_800)
             .expect_err("a refused connection is a failure of the live source");
         assert!(!detail.starts_with("skipped:"), "a transport failure keeps last time's rows: {detail}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// t-17403 — the version the live ChatGPT request names, read off the
+    /// request line a fake backend saw. Unix only: the stub `codex` is a shell
+    /// script. Every machine here is built in a scratch folder and put on the
+    /// process environment under the env lock, so a test never sees the
+    /// caches or the `codex` of whoever runs it.
+    #[cfg(unix)]
+    mod the_version_the_request_names {
+        use super::{codex_cache_document, fake_backend_by, path_with, scratch, CredentialScope};
+        use crate::model_discovery as discovery;
+        use serde_json::{json, Value};
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::{Path, PathBuf};
+        use std::time::{Duration, Instant};
+
+        /// The model whose absence started this (2026-09-30: Codex 0.159.x
+        /// listed `gpt-6.1-sol`, `zo models` did not). The backend lists it
+        /// only to a client that names Codex 0.159.0 or newer.
+        const NEW_MODEL: &str = "gpt-6.1-sol";
+        const NEW_MODEL_SINCE: (u64, u64, u64) = (0, 159, 0);
+        /// The backend's etag does not say which client asked. That is the
+        /// worst case a request must be safe against: it answers `304` to
+        /// every etag it ever gave, so an etag sent to another version keeps
+        /// the old list under the new version.
+        const ETAG: &str = "W/\"gated\"";
+        const STAMP: &str = "2026-09-30T02:00:00.000000Z";
+        const LISTED_BEFORE: [&str; 2] = ["gpt-6-astra", "gpt-6-sol"];
+
+        /// `0.159.2` as three numbers; a request always names a whole version.
+        fn numbers(version: &str) -> (u64, u64, u64) {
+            let mut parts = version.split('.').map(|part| part.parse::<u64>().expect("a whole version"));
+            (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+        }
+
+        /// The `client_version` a request line carries.
+        fn requested_version(head: &str) -> String {
+            let request_line = head.lines().next().expect("a request line");
+            request_line
+                .split("client_version=")
+                .nth(1)
+                .and_then(|rest| rest.split(' ').next())
+                .unwrap_or_else(|| panic!("no client_version in {request_line}"))
+                .to_string()
+        }
+
+        /// The backend's list, with `NEW_MODEL` in it or not.
+        fn list_body(with_new_model: bool) -> String {
+            let mut slugs = LISTED_BEFORE.to_vec();
+            if with_new_model {
+                slugs.insert(0, NEW_MODEL);
+            }
+            let cache: Value = serde_json::from_str(&codex_cache_document(STAMP, None, "0.0.0", &slugs)).unwrap();
+            json!({ "models": cache["models"] }).to_string()
+        }
+
+        /// The ChatGPT backend as t-17403 saw it: `NEW_MODEL` is in the list
+        /// only for a client naming 0.159.0 or newer, and any etag is `304`.
+        fn gated_backend() -> (String, std::thread::JoinHandle<Vec<String>>) {
+            fake_backend_by(1, |head| {
+                if head.lines().any(|line| line.to_ascii_lowercase().starts_with("if-none-match:")) {
+                    return ("304 Not Modified", vec![("etag", ETAG)], String::new());
+                }
+                let listed = numbers(&requested_version(head)) >= NEW_MODEL_SINCE;
+                ("200 OK", vec![("etag", ETAG), ("content-type", "application/json")], list_body(listed))
+            })
+        }
+
+        /// What `codex --version` does on the machine.
+        #[derive(Clone, Copy)]
+        enum OnPath {
+            /// There is no `codex` on `PATH`.
+            Absent,
+            /// It prints this line and succeeds.
+            Prints(&'static str),
+            /// It prints a line and fails: what it printed is not an answer.
+            PrintsThenFails(&'static str),
+            /// It never answers.
+            Hangs,
+        }
+
+        /// One machine, as the request sees it.
+        struct Machine {
+            /// The selected Codex home's cache — `client_version`, and the etag
+            /// the backend answers `304` to — or no cache file there.
+            selected: Option<&'static str>,
+            /// The `client_version` of the cache in the person's own `~/.codex`.
+            personal: Option<&'static str>,
+            codex: OnPath,
+        }
+
+        /// What one refresh did on a machine.
+        struct Asked {
+            /// The `client_version` on the request line.
+            version: String,
+            etag_sent: bool,
+            /// How many models the answer lists.
+            models: usize,
+            lists_new_model: bool,
+            /// The `client_version` the selected home's cache names afterwards.
+            written: String,
+            elapsed: Duration,
+        }
+
+        /// A machine built in a scratch folder, and its environment.
+        struct Rig {
+            name: String,
+            dir: PathBuf,
+            selected: PathBuf,
+            calls: PathBuf,
+            _scope: CredentialScope,
+        }
+
+        impl Rig {
+            fn new(name: &str, machine: &Machine) -> Self {
+                let dir = scratch(name);
+                let account = dir.join("account");
+                let personal = dir.join("home").join(".codex");
+                let bin = dir.join("bin");
+                for folder in [&account, &personal, &bin] {
+                    std::fs::create_dir_all(folder).unwrap();
+                }
+                let cache = |home: &Path, etag: &str, version: &str| {
+                    let document = codex_cache_document(STAMP, Some(etag), version, &LISTED_BEFORE);
+                    std::fs::write(home.join(discovery::CODEX_MODELS_CACHE_FILE), document).unwrap();
+                };
+                if let Some(version) = machine.selected {
+                    cache(&account, ETAG, version);
+                }
+                if let Some(version) = machine.personal {
+                    cache(&personal, "W/\"personal\"", version);
+                }
+                let calls = dir.join("calls");
+                Self::write_codex_stub(&bin, &calls, machine.codex);
+                let path = path_with(&bin);
+                let scope = CredentialScope::new(&[
+                    ("HOME", Some(dir.join("home").as_path())),
+                    ("CODEX_HOME", Some(account.as_path())),
+                    ("ZO_CODEX_HOME", None),
+                    ("ZO_DISABLE_EXTERNAL_CREDENTIALS", Some(Path::new("1"))),
+                    ("PATH", Some(path.as_path())),
+                ]);
+                Self { name: name.to_string(), selected: account.join(discovery::CODEX_MODELS_CACHE_FILE), calls, dir, _scope: scope }
+            }
+
+            /// A `codex` in `bin` that counts its calls in `calls`.
+            fn write_codex_stub(bin: &Path, calls: &Path, on_path: OnPath) {
+                let count = format!("echo x >> '{}'", calls.display());
+                let body = match on_path {
+                    OnPath::Absent => return,
+                    OnPath::Prints(line) => format!("{count}\necho '{line}'"),
+                    OnPath::PrintsThenFails(line) => format!("{count}\necho '{line}'\nexit 1"),
+                    OnPath::Hangs => format!("{count}\nexec sleep 20"),
+                };
+                let script = bin.join("codex");
+                std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+
+            /// One refresh of the OpenAI column against a fresh gated backend.
+            fn ask(&self) -> Asked {
+                let tokens = core_types::OpenAiOAuthTokens {
+                    access_token: "secret-bearer".to_string(),
+                    refresh_token: None,
+                    expires_at: None,
+                    account_id: Some("acct_42".to_string()),
+                    scopes: Vec::new(),
+                };
+                let cache = discovery::read_codex_cache(&self.selected).ok();
+                let (url, server) = gated_backend();
+                let started = Instant::now();
+                let answer =
+                    discovery::chatgpt_backend_models_at(&url, &tokens, &self.selected, cache.as_ref(), 1_788_800_000)
+                        .unwrap_or_else(|(source, detail)| panic!("{source}: {detail}"));
+                let elapsed = started.elapsed();
+                let head = server.join().unwrap().remove(0);
+                let written: Value = serde_json::from_str(&std::fs::read_to_string(&self.selected).unwrap()).unwrap();
+                let asked = Asked {
+                    version: requested_version(&head),
+                    etag_sent: head.to_ascii_lowercase().contains("if-none-match"),
+                    models: answer.models.len(),
+                    lists_new_model: answer.models.iter().any(|model| model.id == NEW_MODEL),
+                    written: written["client_version"].as_str().unwrap().to_string(),
+                    elapsed,
+                };
+                // The receipt: what the request carried and what came back, per case.
+                eprintln!(
+                    "t-17403 [{}] client_version={} etag_sent={} models={} lists_{NEW_MODEL}={} cache_written_as={}",
+                    self.name, asked.version, asked.etag_sent, asked.models, asked.lists_new_model, asked.written
+                );
+                asked
+            }
+
+            /// How many times the stub `codex` ran.
+            fn codex_calls(&self) -> usize {
+                std::fs::read_to_string(&self.calls).map_or(0, |text| text.lines().count())
+            }
+        }
+
+        impl Drop for Rig {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        /// (a) The machine as it was measured on 2026-09-30: the window's runtime
+        /// home — the selected one, the cache a pane's zo reads — at 0.157.1
+        /// while Codex itself was at 0.159.x, and the person's own `~/.codex` at
+        /// 0.159.1. The backend lists the new model to 0.159.0 and newer; the
+        /// request kept naming 0.157.1, the selected cache's word rewritten
+        /// with itself at every refresh, and got none. Both caches are behind
+        /// the default, which is the newest of the three and what is asked.
+        #[test]
+        fn the_machine_as_it_was_measured_gets_the_new_model() {
+            let measured = Machine { selected: Some("0.157.1"), personal: Some("0.159.1"), codex: OnPath::Absent };
+            let asked = Rig::new("version-as-measured", &measured).ask();
+            assert_eq!(asked.version, discovery::CODEX_CLIENT_VERSION_DEFAULT, "the request named the selected cache's 0.157.1");
+            assert!(asked.lists_new_model, "the backend lists {NEW_MODEL} to 0.159.0 and newer");
+            assert_eq!(asked.models, LISTED_BEFORE.len() + 1);
+            assert_eq!(asked.written, discovery::CODEX_CLIENT_VERSION_DEFAULT, "the cache names the version that was sent");
+        }
+
+        /// (a) A cache in another Codex home that is ahead of the selected one
+        /// — and of the default — names the version: the selected cache's word
+        /// no longer stands alone.
+        #[test]
+        fn a_newer_cache_in_another_codex_home_names_the_version() {
+            let behind = Machine { selected: Some("0.157.1"), personal: Some("0.201.0"), codex: OnPath::Absent };
+            let asked = Rig::new("version-neighbour", &behind).ask();
+            assert_eq!(asked.version, "0.201.0", "the request named the selected cache's version, not the newest");
+            assert!(asked.lists_new_model, "the backend lists {NEW_MODEL} to 0.201.0");
+            assert_eq!(asked.written, "0.201.0", "the cache names the version that was sent");
+        }
+
+        /// An older cache in another home never lowers it, and the cache
+        /// written back never goes down.
+        #[test]
+        fn an_older_cache_in_another_codex_home_never_lowers_the_version() {
+            let ahead = Machine { selected: Some("0.201.0"), personal: Some("0.157.1"), codex: OnPath::Absent };
+            let asked = Rig::new("version-selected-ahead", &ahead).ask();
+            assert_eq!(asked.version, "0.201.0", "an older cache elsewhere lowered the version");
+            assert_eq!(asked.written, "0.201.0");
+        }
+
+        /// The default is a floor: a machine that only has an old cache asks
+        /// at the default, and the default is not behind the version the new
+        /// model came with.
+        #[test]
+        fn a_machine_that_only_has_an_old_cache_asks_at_the_floor() {
+            let floor = discovery::CODEX_CLIENT_VERSION_DEFAULT;
+            assert!(numbers(floor) >= NEW_MODEL_SINCE, "the floor {floor} is behind the version that lists {NEW_MODEL}");
+            let old = Machine { selected: Some("0.157.1"), personal: None, codex: OnPath::Absent };
+            let asked = Rig::new("version-floor", &old).ask();
+            assert_eq!(asked.version, floor, "the request named the old cache's version, not the floor");
+            assert!(asked.lists_new_model);
+            assert_eq!(asked.written, floor);
+        }
+
+        /// (b) The installed Codex says its own version, whatever the caches
+        /// hold; a pre-release suffix is not sent.
+        #[test]
+        fn the_installed_codex_names_its_own_version() {
+            let stub = |line| Machine { selected: Some("0.157.1"), personal: None, codex: OnPath::Prints(line) };
+            let asked = Rig::new("version-codex", &stub("codex-cli 0.210.3")).ask();
+            assert_eq!(asked.version, "0.210.3", "the stub codex printed the newest version on the machine");
+            assert!(asked.lists_new_model);
+            let asked = Rig::new("version-codex-alpha", &stub("codex-cli 0.210.4-alpha.2")).ask();
+            assert_eq!(asked.version, "0.210.4", "the whole version is sent, as Codex sends its own");
+        }
+
+        /// (b) No `codex`, a `codex` that fails and a `codex` that never
+        /// answers all say nothing: the caches' newest is asked, and the
+        /// refresh is not held up.
+        #[test]
+        fn a_codex_that_says_nothing_leaves_the_caches_newest_and_never_stalls_the_refresh() {
+            for (name, codex) in [
+                ("absent", OnPath::Absent),
+                ("fails", OnPath::PrintsThenFails("codex-cli 0.999.0")),
+                ("hangs", OnPath::Hangs),
+            ] {
+                let machine = Machine { selected: Some("0.157.1"), personal: Some("0.201.0"), codex };
+                let asked = Rig::new(&format!("version-silent-{name}"), &machine).ask();
+                assert_eq!(asked.version, "0.201.0", "{name}: the caches' newest, not the stub's line");
+                assert!(asked.lists_new_model, "{name}");
+                assert!(asked.elapsed < Duration::from_secs(10), "{name}: the refresh took {:?}", asked.elapsed);
+            }
+        }
+
+        /// (c) Versions are numbers: as text 0.99.0 is newer than
+        /// 0.201.0-alpha.1, as numbers it is not, and the suffix is not read.
+        #[test]
+        fn versions_compare_as_numbers_part_by_part_and_a_pre_release_suffix_is_ignored() {
+            let machine = Machine { selected: Some("0.99.0"), personal: Some("0.201.0-alpha.1"), codex: OnPath::Absent };
+            let asked = Rig::new("version-numbers", &machine).ask();
+            assert_eq!(asked.version, "0.201.0");
+        }
+
+        /// (d) Nothing on the machine says a version: the default, as ever.
+        #[test]
+        fn a_machine_with_no_cache_and_no_codex_asks_at_the_default() {
+            let bare = Machine { selected: None, personal: None, codex: OnPath::Absent };
+            let asked = Rig::new("version-bare", &bare).ask();
+            assert_eq!(asked.version, discovery::CODEX_CLIENT_VERSION_DEFAULT);
+            assert_eq!(asked.written, discovery::CODEX_CLIENT_VERSION_DEFAULT);
+        }
+
+        /// The etag belongs to the list a version was answered with. Asking a
+        /// newer version with the old version's etag lets the backend say
+        /// "unchanged" — and the old list is kept under the new version for
+        /// good. At the same version the etag still goes, and `304` still
+        /// keeps the list.
+        #[test]
+        fn an_etag_goes_only_to_the_version_it_was_answered_under() {
+            let moved = Machine { selected: Some("0.157.1"), personal: Some("0.201.0"), codex: OnPath::Absent };
+            let asked = Rig::new("version-etag-moved", &moved).ask();
+            assert_eq!(asked.version, "0.201.0");
+            assert!(!asked.etag_sent, "the etag of the 0.157.1 list went with a 0.201.0 request");
+            assert!(asked.lists_new_model, "the backend was not asked to say the old list is current");
+
+            let same = Machine { selected: Some("0.201.0"), personal: None, codex: OnPath::Absent };
+            let asked = Rig::new("version-etag-same", &same).ask();
+            assert!(asked.etag_sent, "at the version its list was answered under, the etag goes");
+            assert!(!asked.lists_new_model, "and the 304 keeps the cache's list");
+        }
+
+        /// `codex --version` is asked once per process, not at every refresh.
+        #[test]
+        fn codex_is_asked_once_per_process() {
+            let machine =
+                Machine { selected: Some("0.157.1"), personal: None, codex: OnPath::Prints("codex-cli 0.210.3") };
+            let rig = Rig::new("version-once", &machine);
+            assert_eq!(rig.ask().version, "0.210.3");
+            assert_eq!(rig.ask().version, "0.210.3");
+            assert_eq!(rig.codex_calls(), 1, "`codex --version` ran once for two refreshes");
+        }
+
+        /// The probe on its own, without the environment: what a `codex`
+        /// prints is read from a file, so a program that prints more than a
+        /// pipe holds is not taken for one that hangs; one that is absent,
+        /// fails, prints no version or never answers says nothing, and the
+        /// one that never answers is given up on at its deadline.
+        #[test]
+        fn the_probe_reads_what_codex_prints_and_gives_up_on_one_that_is_absent_fails_or_hangs() {
+            let dir = scratch("version-probe");
+            let stub = |name: &str, body: &str| -> PathBuf {
+                let script = dir.join(name);
+                std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+                script
+            };
+            let probe = |program: &Path, timeout: Duration| {
+                discovery::probe_codex_version(program, timeout).map(|version| version.to_string())
+            };
+            let patient = Duration::from_secs(10);
+            assert_eq!(probe(&stub("prints", "echo 'codex-cli 0.210.3'"), patient).as_deref(), Some("0.210.3"));
+            assert_eq!(
+                probe(&stub("prints-a-lot", "echo 'codex-cli 0.210.3'; head -c 300000 /dev/zero | tr '\\0' x"), patient)
+                    .as_deref(),
+                Some("0.210.3"),
+                "three hundred thousand bytes fill a pipe; a file takes them"
+            );
+            assert_eq!(probe(&stub("fails", "echo 'codex-cli 0.999.0'; exit 1"), patient), None);
+            assert_eq!(probe(&stub("no-version", "echo 'hello'"), patient), None);
+            assert_eq!(probe(&dir.join("absent"), patient), None);
+            let started = Instant::now();
+            assert_eq!(probe(&stub("hangs", "exec sleep 20"), Duration::from_millis(300)), None);
+            assert!(started.elapsed() < Duration::from_secs(5), "the probe waited for a codex that never answers");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// (c) A version is three numbers, compared part by part, and a
+    /// pre-release suffix is not read.
+    #[test]
+    fn client_versions_are_numbers_compared_part_by_part() {
+        let version = |text: &str| super::ClientVersion::parse(text).unwrap_or_else(|| panic!("{text:?} is a version"));
+        assert!(version("0.99.0") < version("0.159.2"), "as text 0.99.0 would be the newer");
+        assert!(version("0.159.2") < version("0.160.0"));
+        assert!(version("0.159.9") < version("0.159.10"), "ten is more than nine");
+        assert_eq!(version("0.160.0-alpha.1"), version("0.160.0"), "a pre-release suffix is not read");
+        assert_eq!(version("v0.160.0+build.5"), version("0.160.0"));
+        assert_eq!(version(" 0.159.2\n").to_string(), "0.159.2");
+        for not_a_version in ["", "0", "0.159", "0.159.x", "0.159.2.1", "-0.1.2", "+0.1.2", "0..2", "codex-cli", "1.2.3 4"] {
+            assert_eq!(super::ClientVersion::parse(not_a_version), None, "{not_a_version:?}");
+        }
+        assert!(
+            super::ClientVersion::parse(super::CODEX_CLIENT_VERSION_DEFAULT).is_some(),
+            "the floor reads as a version"
+        );
+    }
+
+    /// `codex --version` says its version on a line that names codex; any
+    /// other line — a wrapper's banner, a second line — is not it.
+    #[test]
+    fn the_line_codex_version_prints_is_read_for_its_version() {
+        let read = |output: &str| super::ClientVersion::of_codex_output(output).map(|version| version.to_string());
+        assert_eq!(read("codex-cli 0.159.2\n").as_deref(), Some("0.159.2"));
+        assert_eq!(read("codex 0.160.0-alpha.1").as_deref(), Some("0.160.0"));
+        assert_eq!(read("\n  OpenAI Codex v0.161.3 (build 7)\n").as_deref(), Some("0.161.3"));
+        assert_eq!(read("codex-cli 0.159.2\ncodex-cli 9.9.9\n").as_deref(), Some("0.159.2"), "the first line answers");
+        assert_eq!(read("node v22.4.0\n"), None, "a banner that does not name codex is not its version");
+        assert_eq!(read("codex-cli\n"), None);
+        assert_eq!(read(""), None);
+    }
+
+    /// The version asked is the newest of every place that names one — the
+    /// selected cache, any cache in another Codex home, the installed Codex —
+    /// and never less than the default. A file that is not a cache, a cache
+    /// that names no version and a version that does not read name nothing.
+    #[test]
+    fn the_version_asked_is_the_newest_any_place_names_and_never_less_than_the_default() {
+        let dir = scratch("version-choice");
+        let floor = super::CODEX_CLIENT_VERSION_DEFAULT;
+        let cache_with = |name: &str, version: &str| {
+            let path = dir.join(name).join(super::CODEX_MODELS_CACHE_FILE);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, codex_cache_document("2026-09-30T00:00:00Z", None, version, &["gpt-6-astra"])).unwrap();
+            path
+        };
+        let file_with = |name: &str, text: &str| {
+            let path = dir.join(name).join(super::CODEX_MODELS_CACHE_FILE);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        let asked = |selected: Option<&std::path::Path>, paths: &[std::path::PathBuf], installed: Option<&str>| {
+            let selected = selected.and_then(|path| super::read_codex_cache(path).ok());
+            let installed = installed.and_then(super::ClientVersion::parse);
+            super::client_version_to_ask(selected.as_ref(), paths, installed).to_string()
+        };
+
+        assert_eq!(asked(None, &[], None), floor, "nothing names a version: the floor");
+        let old = cache_with("old", "0.153.1");
+        let older = cache_with("older", "0.99.0");
+        assert_eq!(asked(Some(&old), &[old.clone(), older.clone()], None), floor, "caches behind the floor: the floor");
+
+        // Numbers, not text: 0.99.0 is the greatest of these as text and the least as numbers.
+        let ahead = cache_with("ahead", "0.400.1");
+        let alpha = cache_with("alpha", "0.401.0-alpha.2");
+        assert_eq!(asked(None, &[ahead.clone(), alpha.clone(), older.clone()], None), "0.401.0");
+        assert_eq!(asked(None, &[older.clone(), alpha.clone(), ahead.clone()], None), "0.401.0", "wherever it sits");
+
+        // The selected cache and the installed codex take part like the others.
+        let selected = cache_with("selected", "0.500.0");
+        assert_eq!(asked(Some(&selected), std::slice::from_ref(&ahead), None), "0.500.0");
+        assert_eq!(asked(Some(&old), std::slice::from_ref(&ahead), Some("0.600.2")), "0.600.2");
+        assert_eq!(asked(Some(&old), std::slice::from_ref(&ahead), Some("0.100.0")), "0.400.1", "an older codex lowers nothing");
+
+        // What names nothing is not asked.
+        let broken = file_with("broken", "{not json");
+        let versionless = file_with("versionless", r#"{"models": []}"#);
+        let unreadable = cache_with("unreadable", "soon");
+        assert_eq!(asked(None, &[broken, versionless, unreadable, dir.join("absent").join("models_cache.json")], None), floor);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -3384,6 +4032,33 @@ mod tests {
             ("ANTHROPIC_API_KEY", None),
             ("ANTHROPIC_AUTH_TOKEN", None),
             ("ANTHROPIC_BASE_URL", Some(std::path::Path::new("http://127.0.0.1:9"))),
+        ])
+    }
+
+    /// `PATH` as a test wants it (t-17403): `dir` first, then the system's two
+    /// folders, so `git` and `sh` stay reachable for the tests running beside
+    /// this one while the machine's own `codex` (npm, brew) stays out of sight.
+    fn path_with(dir: &std::path::Path) -> std::path::PathBuf {
+        let system: &[&str] = if cfg!(unix) { &["/bin", "/usr/bin"] } else { &[] };
+        let folders = std::iter::once(dir.to_path_buf()).chain(system.iter().map(std::path::PathBuf::from));
+        std::env::join_paths(folders).map(std::path::PathBuf::from).expect("no separator in these folders")
+    }
+
+    /// The machine a ChatGPT-request test runs on (t-17403): `HOME` inside
+    /// `dir`, no Codex home named, no window home, and no `codex` on `PATH`.
+    /// The request asks this machine what Codex it has — the caches under its
+    /// homes and `codex --version` — so a test that did not say would be
+    /// answered by whichever machine it happens to run on.
+    fn bare_machine(dir: &std::path::Path) -> CredentialScope {
+        let empty = dir.join("no-codex-here");
+        std::fs::create_dir_all(&empty).unwrap();
+        let path = path_with(&empty);
+        CredentialScope::new(&[
+            ("HOME", Some(dir.join("home").as_path())),
+            ("CODEX_HOME", None),
+            ("ZO_CODEX_HOME", None),
+            ("ZO_DISABLE_EXTERNAL_CREDENTIALS", Some(std::path::Path::new("1"))),
+            ("PATH", Some(path.as_path())),
         ])
     }
 

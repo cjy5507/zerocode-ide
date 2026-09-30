@@ -1170,8 +1170,12 @@ pub struct Worker {
     /// Whether the PERSON took this pane: real keys, typed by a hand, landed
     /// in it. From that moment the terminal is theirs — the verbs that would
     /// close it or type into it refuse instead, and only `worker-abandon`,
-    /// which touches nothing, still applies. Never unset: a takeover is a
-    /// fact about who is sitting there, not a mood.
+    /// which touches nothing, still applies. An Enter that only submitted
+    /// words the WINDOW placed is not a takeover (the window never reports
+    /// one, t-17644). A report from a taken pane lands but hands nothing
+    /// back — the person may still be sitting there — and only
+    /// `worker-return` ([`Ledger::worker_returned`]) makes the pane the
+    /// ledger's again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub taken_over: bool,
     /// The checkout its pane sits in — the window's placement fact, reported
@@ -11745,8 +11749,8 @@ impl Ledger {
 
     /// The person took a pane: real keys, typed by a hand, landed in it.
     ///
-    /// Recorded on the worker sitting there and never unset — a takeover is
-    /// a fact about who is at the terminal, not a mood — and it also retires
+    /// Recorded on the worker sitting there until `worker-return` hands the
+    /// pane back ([`Self::worker_returned`], t-17644) — and it also retires
     /// the readiness window, because a hand on the keys is louder than any
     /// hook. Answers whether anything moved, so the window's once-per-pane
     /// gate can skip the write-through for a pane already taken.
@@ -11766,6 +11770,28 @@ impl Ledger {
             }
         }
         false
+    }
+
+    /// Hand a taken pane back to the ledger (`worker-return`, t-17644).
+    ///
+    /// The counterpart of [`Self::worker_taken_over`], asked by name. The
+    /// window refuses before this runs when the pane holds a draft of the
+    /// person's own words — that pane is still genuinely theirs. Answers
+    /// whether anything moved: a pane nobody took has nothing to return.
+    pub fn worker_returned(&mut self, worker_id: &str) -> Result<bool, String> {
+        let worker = self
+            .runs
+            .iter_mut()
+            .flat_map(|run| run.workers.iter_mut())
+            .find(|one| one.id == worker_id)
+            .ok_or_else(|| format!("unknown worker: {worker_id}"))?;
+        if !worker.state.is_live() {
+            return Err(format!(
+                "worker {worker_id} is {} and has no pane to return",
+                worker.state.as_str()
+            ));
+        }
+        Ok(std::mem::take(&mut worker.taken_over))
     }
 
     /// The window reports where a summoned pane actually sits.
@@ -17033,6 +17059,11 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::Mutation,
     ),
     (
+        "worker-return",
+        "--worker <id> · give a pane the person took back to the ledger; refused while their own words sit on its line",
+        Doing::Mutation,
+    ),
+    (
         "worker-release",
         "--worker <id> [--lines <n>] · archive its screen, then retire that terminal",
         Doing::Mutation,
@@ -20683,6 +20714,21 @@ fn plan_inner(
                 .ok_or_else(|| format!("unknown worker: {id}"))?;
             let now = ledger.retain_worker(&id)?;
             said(serde_json::json!({ "workerId": id, "state": now.as_str() }))
+        }
+
+        "worker-return" => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            let id = words
+                .value("--worker")
+                .ok_or("worker-return needs --worker")?
+                .to_string();
+            ledger
+                .run(&run_id)
+                .ok_or_else(|| unknown_run(&run_id))?
+                .worker(&id)
+                .ok_or_else(|| format!("unknown worker: {id}"))?;
+            let returned = ledger.worker_returned(&id)?;
+            said(serde_json::json!({ "workerId": id, "returned": returned }))
         }
 
         "worker-release" => {

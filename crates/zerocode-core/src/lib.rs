@@ -133,7 +133,7 @@ pub use account::{
     providers_for,
 };
 pub use agent::{
-    AGENT_SPECS, ALL_AGENTS, AgentKind, AgentPresence, AgentSpec, ComposerClear,
+    AGENT_SPECS, ALL_AGENTS, AgentKind, AgentPresence, AgentSpec, ComposerClear, ComposerWords,
     DefaultAgentPreference, HookAdditionalContext, Injection, NudgeRoad, ReadyMark, agent_presence,
     agent_spec,
 };

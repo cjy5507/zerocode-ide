@@ -351,6 +351,12 @@ kbd {
    * commit that touches what it samples — the standing cost behind t-161
    * (전체 창 간헐 깜박임). */
   user-select: none;
+  /* A grid item's floor is its min-content, and a strip of sixty tabs has a
+   * min-content ten thousand pixels wide: the whole bar grew past the window,
+   * the strip never had anything to scroll, and the controls on the right
+   * left the screen (live report 2026-09-30, 「탭이 늘어날수록 화면이 깨지는
+   * 버그」). The row is as wide as the window; the strip scrolls inside it. */
+  min-width: 0;
 }
 
 /* 손잡이는 어디서나 손잡이의 몸짓을 한다. 표면의 글자들(워드마크·프로젝트
@@ -538,6 +544,9 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 }
 
 .titlebar-right {
+  /* The controls keep their width however many tabs stand beside them —
+   * the strip is what gives way, and it gives way by scrolling. */
+  flex: none;
   margin-left: auto;
   display: flex;
   align-items: center;
@@ -5672,6 +5681,9 @@ body.is-dragging-pane {
   border-bottom: var(--rule-width) solid var(--edge-rule);
   overflow-x: auto;
   scrollbar-width: none;
+  /* The fade's width, as the strip's own scroll padding: a tab brought into
+   * view (`revealActiveTab`) stops clear of the mask, not under it. */
+  scroll-padding-inline: var(--tab-fade);
   /* What overflows FADES rather than being cut. With the scrollbar hidden
    * (below) a clipped strip gives no sign that there is more to the right —
    * the last tab simply ends mid-word and reads as a rendering fault. The
@@ -16117,8 +16129,9 @@ button.helper-sib:hover {
 
 .helper-foot-actions {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
   flex-wrap: wrap;
+  max-width: 100%;
   align-items: center;
   gap: var(--space-2);
 }
@@ -16144,7 +16157,37 @@ button.helper-sib:hover {
   background: var(--chat-pill-bg);
 }
 
-.worker-view :is(.helper-crumb-back, .helper-sib, .helper-brief-more, .helper-foot-speak):focus-visible {
+/* Stopping one helper: the same pill in the halt's ink, the one destructive
+ * door on this page. While its answer is out it takes no press (the page keeps
+ * its focus on it, so it is marked, not disabled). */
+.helper-foot-stop {
+  flex: none;
+  max-width: 100%;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--signal-halt) 55%, transparent);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--signal-halt-ink);
+  font: inherit;
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+
+.helper-foot-stop:hover:not(.is-busy) {
+  border-color: var(--signal-halt);
+  background: color-mix(in srgb, var(--signal-halt) 10%, transparent);
+}
+
+.helper-foot-stop.is-busy {
+  cursor: default;
+}
+
+.worker-view :is(.helper-crumb-back, .helper-sib, .helper-brief-more, .helper-foot-speak, .helper-foot-stop):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -16185,7 +16228,8 @@ button.helper-sib:hover {
   .helper-crumb-back,
   .helper-sib,
   .helper-brief-more,
-  .helper-foot-speak {
+  .helper-foot-speak,
+  .helper-foot-stop {
     transition: none;
   }
 
@@ -24177,6 +24221,53 @@ select {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+
+/* ---- the ask popup ----
+ *
+ * One frame for every kind of question the window puts to the person, so what
+ * tells the kinds apart at a glance is a rule along the top edge, read before
+ * the words are: amber, a person is needed; halt, a press that cannot be taken
+ * back is about to land; nothing, the window's own confirm — the person asked
+ * for that one themselves. The rule is drawn inside the frame (an inset shadow
+ * follows the corner) over the float shadow every surface of this kind wears. */
+.permission.ask {
+  --ask-edge: var(--signal-wait);
+  box-shadow: inset 0 3px 0 var(--ask-edge), var(--shadow-float);
+}
+
+.permission.ask[data-kind="computer-confirm"] {
+  --ask-edge: var(--signal-halt);
+}
+
+.permission.ask[data-kind="confirm"] {
+  --ask-edge: transparent;
+}
+
+.permission.ask h2 {
+  font-size: var(--text-lg);
+}
+
+/* The frame holds the keyboard for a kind whose Enter answers nothing; it is
+ * a seat for the keys, not a control, so it wears no ring. */
+.permission.ask:focus {
+  outline: none;
+}
+
+/* The sentence a question is made of is its body, not a footnote to a tool. */
+.permission.ask .perm-why {
+  font-size: var(--text-sm);
+  color: var(--ink-chalk);
+}
+
+/* 남은 시간은 재촉이 아니라 사실이다 — 백엔드가 얼마나 기다리는지를 말할
+ * 뿐이므로 숫자의 폭만 고정해 자릿수가 바뀌어도 줄이 흔들리지 않게 한다. */
+.ask-clock {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-chalk);
 }
 
 /* The repository trust gate rides the permission dialog's anatomy and narrows
@@ -33822,9 +33913,15 @@ details.task-board-section > summary {
   font-size: var(--agent-graph-screen-text);
 }
 
+/* 발치는 줄을 바꿀 수 있다 (t-17078). 가장 좁은 레일(720px 창에서 안쪽
+ * 279px)에서 이름이 0까지 줄어도 모델·시계 넷의 폭이 판을 넘는 언어가
+ * 있으므로(스페인어 「ahora mismo」+「lleva 50 min」), 그때 넘치는 대신 시계가
+ * 다음 줄로 내려간다. 이름은 기준 폭이 0이라 줄을 가르는 셈에 끼지 않고 남은
+ * 자리만 받는다 — 좁을 때 자리를 내주는 쪽은 여전히 이름이다. */
 .board-card-foot {
   display: flex;
-  gap: var(--space-2);
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
   align-items: center;
   min-width: 0;
   color: var(--ink-mist);
@@ -33832,6 +33929,8 @@ details.task-board-section > summary {
 }
 
 .board-card-where {
+  flex: 1 1 0;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -43890,15 +43989,15 @@ button.jev-token:hover {
 #sb-hang { color: var(--ink-chalk); }
 #sb-hang[hidden] { display: none; }
 
-/* ---- Computer Use: the band and the question (C4-c) ----
+/* ---- Computer Use: the band (C4-c) ----
  *
- * Both float over the whole window at the top, centred, above everything a
+ * It floats over the whole window at the top, centred, above everything a
  * person might be looking at — the operator is acting on THEIR desktop and
- * the one hand must be in reach. Every colour is a token; the stop is halt,
- * the working dot breathes. */
-.computer-band,
-.computer-confirm,
-.computer-handoff {
+ * the one hand must be in reach. It says a fact and asks nothing, so it stays
+ * where it is; the questions the operator puts to the person (the last step,
+ * the hand-over) stand in the ask popup in the middle of the window. Every
+ * colour is a token; the stop is halt, the working dot breathes. */
+.computer-band {
   position: fixed;
   top: var(--space-3);
   left: 50%;
@@ -43937,24 +44036,6 @@ button.jev-token:hover {
   color: var(--signal-halt-ink);
 }
 
-.computer-confirm {
-  top: calc(var(--space-3) + 40px);
-  padding: var(--space-2) var(--space-4);
-}
-
-.computer-confirm-text {
-  margin: 0;
-}
-
-.computer-confirm-clock {
-  color: var(--ink-figure);
-  font-size: var(--text-xs);
-}
-
-.computer-confirm-allow {
-  color: var(--signal-ready);
-}
-
 @keyframes computer-band-breathe {
   0%,
   100% {
@@ -43963,29 +44044,6 @@ button.jev-token:hover {
   50% {
     opacity: 0.35;
   }
-}
-
-.computer-handoff {
-  top: calc(var(--space-3) + 40px);
-  padding: var(--space-2) var(--space-4);
-}
-
-.computer-handoff-title {
-  margin: 0;
-  font-weight: 600;
-}
-
-.computer-handoff-text {
-  margin: 0;
-}
-
-.computer-handoff-clock {
-  color: var(--ink-figure);
-  font-size: var(--text-xs);
-}
-
-.computer-handoff-done {
-  color: var(--signal-ready);
 }
 
 .wt-directory-row { display: flex; flex-wrap: wrap; gap: var(--space-2); }

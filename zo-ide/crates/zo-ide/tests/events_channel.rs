@@ -68,6 +68,7 @@ fn parked_permission(block_id: u64) -> (RenderBlock, PendingPrompt, oneshot::Rec
                 decision: PermissionDecision::Deny,
             },
         ],
+        question: None,
         responder,
     };
     // 채널에 실을 블록과 패인이 파킹하는 프롬프트는 **같은 프롬프트**여야
@@ -82,6 +83,7 @@ fn parked_permission(block_id: u64) -> (RenderBlock, PendingPrompt, oneshot::Rec
         reasoning: prompt.reasoning.clone(),
         audit_hint: prompt.audit_hint.clone(),
         choices: prompt.choices.clone(),
+        question: prompt.question.clone(),
         responder: twin_responder,
     });
     (twin, PendingPrompt::Permission(prompt), runtime_side)
@@ -247,6 +249,92 @@ async fn the_pane_answering_first_retires_the_prompt() {
     assert_eq!(channel.live_prompts(), 0);
     let listed = connect(&channel, None).await.call(method::LIST, json!({})).await.expect("list");
     assert_eq!(asking(listed), Some(0), "an answered prompt is not waited on");
+}
+
+/// A question zo puts to the person itself — the refusal ladder's "switch
+/// models?" — crosses the channel as a question (t-17474). The frame is still
+/// a `permission_prompt` and is answered on the same road, `permission.respond`
+/// with a decision tag, so a window that answers permissions answers it; what
+/// it adds is `kind`, `topic` and `title`, and it drops the tool name and the
+/// risk line a tool prompt carries. A tool prompt's frame gains no key.
+#[tokio::test]
+async fn a_question_zo_puts_to_the_person_crosses_the_channel_as_a_question() {
+    let channel = Arc::new(open(None).await);
+    let mut client = connect(&channel, None).await;
+    client.session_name(SESSION).await.expect("subscribe");
+
+    // A tool prompt, first: no key of the three.
+    let (block, _parked, _runtime_side) = parked_permission(0);
+    let tool_id = channel.publish(&block).expect("prompt id");
+    let tool_frame = next_frame_of(&mut client, "permission_prompt").await;
+    assert_eq!(tool_frame["tool_name"], json!("Bash"));
+    for absent in ["kind", "topic", "title"] {
+        assert!(tool_frame.get(absent).is_none(), "a tool prompt carries no `{absent}`: {tool_frame}");
+    }
+    channel.retire_prompt(tool_id, ResolvedBy::Pane);
+    next_frame_of(&mut client, "prompt_resolved").await;
+
+    // The question.
+    let (responder, _unused) = oneshot::channel();
+    let question = RenderBlock::PermissionPrompt(PermissionPrompt {
+        id: BlockId(1),
+        tool_call_id: ToolCallId(String::new()),
+        tool_name: String::new(),
+        reasoning: "The safety classifier declined the answer twice. Continue this turn on the \
+                    category's route?"
+            .to_string(),
+        audit_hint: None,
+        choices: vec![
+            PermissionChoice {
+                key: 'y',
+                label: "Switch, and from now on".to_string(),
+                decision: PermissionDecision::AllowAlways,
+            },
+            PermissionChoice {
+                key: 'o',
+                label: "Switch for this turn".to_string(),
+                decision: PermissionDecision::AllowOnce,
+            },
+            PermissionChoice {
+                key: 'n',
+                label: "Stay".to_string(),
+                decision: PermissionDecision::Deny,
+            },
+        ],
+        question: Some(runtime::permission::PromptQuestion {
+            topic: "model_switch".to_string(),
+            title: "Switch models?".to_string(),
+        }),
+        responder,
+    });
+    let prompt_id = channel.publish(&question).expect("a prompt frame carries an id");
+    let frame = next_frame_of(&mut client, "permission_prompt").await;
+    assert_eq!(frame["prompt_id"], json!(prompt_id));
+    assert_eq!(frame["kind"], json!("question"));
+    assert_eq!(frame["topic"], json!("model_switch"));
+    assert_eq!(frame["title"], json!("Switch models?"));
+    assert_eq!(frame["tool_name"], json!(""), "no tool: {frame}");
+    assert!(frame["audit_hint"].is_null(), "and no risk line: {frame}");
+    assert_eq!(frame["choices"][0]["decision"], json!("allow_always"));
+    assert_eq!(frame["choices"][1]["decision"], json!("allow_once"));
+    assert_eq!(frame["choices"][2]["decision"], json!("deny"));
+
+    // The answer comes back on the road a permission does.
+    let waiting = tokio::spawn({
+        let channel = Arc::clone(&channel);
+        async move { channel.answer(prompt_id).await }
+    });
+    connect(&channel, None)
+        .await
+        .respond_to_permission(prompt_id, "allow_once")
+        .await
+        .expect("permission.respond");
+    let answer = tokio::time::timeout(PATIENCE, waiting)
+        .await
+        .expect("the front-end sees the answer")
+        .expect("join")
+        .expect("an answer, not a retirement");
+    assert_eq!(answer, Answer::Permission(PermissionDecision::AllowOnce));
 }
 
 fn tool_call(call: &str, status: ToolCallStatus) -> RenderBlock {

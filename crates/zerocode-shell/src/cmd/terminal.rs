@@ -978,6 +978,7 @@ pub(crate) fn prompt_delivery_for(
     let signal = readiness.signal(agent);
     let clearing = readiness.clearing(agent);
     let guard = readiness.guard(launch);
+    let words = composer_words_for(agent);
     match readiness {
         PromptReadiness::Mounting => PromptDelivery::with_deadlines(
             text,
@@ -988,13 +989,15 @@ pub(crate) fn prompt_delivery_for(
             ready_timeout_for(agent),
         )
         .clearing(clearing)
-        .guarded(guard),
+        .guarded(guard)
+        .words(words),
         PromptReadiness::Resting
         | PromptReadiness::RestingBesideADraft
         | PromptReadiness::EnterAgain(_) => PromptDelivery::new(text, submit, signal, started)
             .clearing(clearing)
             .guarded(guard)
-            .pressing(readiness.enter_again()),
+            .pressing(readiness.enter_again())
+            .words(words),
     }
 }
 
@@ -1052,6 +1055,7 @@ pub(crate) fn type_prompt_at_term(
                 clearing,
                 guard,
                 enter_again: readiness.enter_again(),
+                words: composer_words_for(agent),
                 completion: notify,
             });
         return Ok(waiting);
@@ -1452,7 +1456,8 @@ pub(crate) fn launch_agent_tab(
                 ready_timeout_for(Some(spec.id)),
             )
             .clearing(false)
-            .guarded(zerocode_pty::ready::Guard::for_its_own_line(launch)),
+            .guarded(zerocode_pty::ready::Guard::for_its_own_line(launch))
+            .words(composer_words_for(Some(spec.id))),
         );
     }
     state.cadence().wake();
@@ -1469,13 +1474,15 @@ pub(crate) fn term_text(
     human: Option<bool>,
 ) -> Result<(), String> {
     if human == Some(true) {
-        with_terminal(&state, term, |pty| {
+        let theirs = with_terminal(&state, term, |pty| {
             pty.terminal_mut().grid_mut().view_to_bottom();
             crate::prompt_transaction::human_write(term, text.as_bytes(), || {
                 pty.write_input(text.as_bytes())
             })
         })?;
-        orchestration::pane_taken_over(term, now_epoch_ms());
+        if theirs {
+            orchestration::pane_taken_over(term, now_epoch_ms());
+        }
     } else {
         write_terminal_text(&state, term, &text)?;
     }
@@ -1492,18 +1499,22 @@ pub(crate) fn term_key(
     let Some(bytes) = encode_key(&press) else {
         return Ok(());
     };
-    with_terminal(&state, term, |pty| {
+    let theirs = with_terminal(&state, term, |pty| {
         // A keystroke is aimed at the program, and the program is at the
         // bottom — reading history ends the moment typing starts.
         pty.terminal_mut().grid_mut().view_to_bottom();
         crate::prompt_transaction::human_write(term, &bytes, || pty.write_input(&bytes))
     })?;
     // A DELIVERED key from this road is a person's hand — paste delivery and
-    // every programmatic write take other roads — and a hand in a worker's
-    // pane takes the pane over, durably. After the write and only on
-    // success, for the same reason as the wait below: a key this window
-    // failed to deliver took nothing over.
-    orchestration::pane_taken_over(term, now_epoch_ms());
+    // every programmatic write take other roads — and a hand that puts the
+    // person's own words in a worker's pane takes the pane over. After the
+    // write and only on success, for the same reason as the wait below: a
+    // key this window failed to deliver took nothing over. A lone Enter on a
+    // line holding none of their words only sent what the window placed
+    // there, and takes nothing (t-17644).
+    if theirs {
+        orchestration::pane_taken_over(term, now_epoch_ms());
+    }
     // The same hand is the notify seat's label (t-6043): a key into a pane
     // that rang inside the last minute says the ring was worth it, and any
     // key says the person is at the window — which is also when the rings
@@ -1749,7 +1760,7 @@ pub(crate) fn term_paste(
         pty.terminal_mut().grid_mut().view_to_bottom();
         let bracketed = pty.terminal().grid().bracketed_paste();
         let bytes = encode_paste(&text, bracketed);
-        crate::prompt_transaction::human_write(term, &bytes, || pty.write_input(&bytes))
+        crate::prompt_transaction::human_write(term, &bytes, || pty.write_input(&bytes)).map(drop)
     })?;
     // A paste is a person's hand as much as a key is (t-6043).
     notify_call::note_hand(&app, term);

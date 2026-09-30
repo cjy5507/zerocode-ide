@@ -264,6 +264,21 @@ pub(crate) fn generation(term: u32) -> Option<u64> {
         .map(|held| held.generation)
 }
 
+/// Whether the PERSON's own words sit unsent on this pane's line: a hand
+/// reached it and no Enter has closed over that hand yet.
+///
+/// Narrower than the draft a delivery refuses on: a line whose last hand was
+/// an Enter still waits for the provider's word, but it holds nothing of the
+/// person's to lose — which is what a takeover and a hand-back ask (t-17644).
+pub(crate) fn holds_own_words(term: u32) -> bool {
+    hands()
+        .typed
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&term)
+        .is_some_and(|held| held.pending && held.entered_at != Some(held.generation))
+}
+
 /// What the window knows about this pane's line, in the delivery's words —
 /// the two facts a guarded write reads at the moment it is due.
 pub(crate) fn line_of(term: u32) -> (bool, Option<u64>) {

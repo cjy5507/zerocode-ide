@@ -228,6 +228,24 @@ pub(crate) mod serializable {
             /// Selectable options in display order. Empty for a pre-F2 frame.
             #[serde(default)]
             choices: Vec<SerializablePermissionChoice>,
+            /// What kind of prompt this is: `question` for a
+            /// choice zo puts to the person itself (the refusal ladder's
+            /// "switch models?"); absent for a tool call awaiting approval —
+            /// which is what every frame older than the field is. A question
+            /// has an empty `tool_name` and no `audit_hint`, and is answered
+            /// the same way, by `permission.respond` (t-17474).
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            kind: Option<String>,
+            /// What a question is about, as a stable word (`model_switch`,
+            /// `declined_images`) — the key a window picks its own words by.
+            /// Only with a question.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            topic: Option<String>,
+            /// A question's short English title — the pane shows it, and a
+            /// window shows it for a topic it has no words for. Only with a
+            /// question.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            title: Option<String>,
         },
         /// Blocking user question prompt.
         UserQuestionPrompt {
@@ -295,6 +313,10 @@ pub(crate) mod serializable {
         /// Decision tag: `allow_once` | `allow_always` | `deny` | `deny_always`.
         pub decision: String,
     }
+
+    /// The `kind` a prompt frame carries when it is a question zo puts to the
+    /// person itself and not a tool call awaiting approval (t-17474).
+    pub const PROMPT_KIND_QUESTION: &str = "question";
 
     /// Default `prompt_id` for a frame decoded without one (pre-F2 server):
     /// `u64::MAX` marks it unroutable so the client shows a passive notice
@@ -472,6 +494,9 @@ pub(crate) mod serializable {
                             decision: permission_decision_tag(c.decision).to_string(),
                         })
                         .collect(),
+                    kind: prompt.question.as_ref().map(|_| PROMPT_KIND_QUESTION.to_string()),
+                    topic: prompt.question.as_ref().map(|question| question.topic.clone()),
+                    title: prompt.question.as_ref().map(|question| question.title.clone()),
                 },
                 RenderBlock::UserQuestionPrompt(prompt) => Self::UserQuestionPrompt {
                     id: prompt.id.0,
@@ -696,6 +721,9 @@ pub(crate) mod serializable {
                 reasoning,
                 audit_hint,
                 choices,
+                kind,
+                topic,
+                title,
             } => {
                 if *prompt_id == default_prompt_id() {
                     // Pre-F2 server: no route home, so render a passive notice
@@ -728,6 +756,12 @@ pub(crate) mod serializable {
                                 decision: permission_decision_from_tag(&c.decision),
                             })
                             .collect(),
+                        question: (kind.as_deref() == Some(PROMPT_KIND_QUESTION)).then(|| {
+                            runtime::permission::PromptQuestion {
+                                topic: topic.clone().unwrap_or_default(),
+                                title: title.clone().unwrap_or_default(),
+                            }
+                        }),
                         responder,
                     })
                 }
@@ -1048,6 +1082,85 @@ mod agent_result_wire_tests {
                 assert_eq!(text, "claude OAuth login successful!");
             }
             other => panic!("round-trip lost the notice: {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod prompt_wire_tests {
+    use super::render_block_from_value;
+    use super::serializable::SerializableRenderBlock;
+    use runtime::message_stream::{
+        BlockId, PermissionChoice, PermissionDecision, PermissionPrompt, RenderBlock, ToolCallId,
+    };
+    use runtime::permission::PromptQuestion;
+
+    fn prompt(question: Option<PromptQuestion>) -> RenderBlock {
+        let (responder, _unused) = tokio::sync::oneshot::channel();
+        RenderBlock::PermissionPrompt(PermissionPrompt {
+            id: BlockId(7),
+            tool_call_id: ToolCallId(String::new()),
+            tool_name: if question.is_some() { String::new() } else { "Bash".to_string() },
+            reasoning: "run ls".to_string(),
+            audit_hint: question.is_none().then(|| "risk: high; explicitly unblock".to_string()),
+            choices: vec![PermissionChoice {
+                key: 'o',
+                label: "Once".to_string(),
+                decision: PermissionDecision::AllowOnce,
+            }],
+            question,
+            responder,
+        })
+    }
+
+    /// A question zo puts to the person itself keeps its kind, its topic and its
+    /// title across the `zo attach` wire, and comes back a question (t-17474).
+    #[test]
+    fn a_question_keeps_its_kind_topic_and_title_over_the_wire() {
+        let asked = PromptQuestion {
+            topic: "model_switch".to_string(),
+            title: "Switch models?".to_string(),
+        };
+        let json = serde_json::to_value(SerializableRenderBlock::from_block(&prompt(Some(asked.clone()))))
+            .expect("serialize");
+        assert_eq!(json["kind"], "question");
+        assert_eq!(json["topic"], "model_switch");
+        assert_eq!(json["title"], "Switch models?");
+        assert_eq!(json["tool_name"], "");
+        match render_block_from_value(&json).expect("deserialize") {
+            RenderBlock::PermissionPrompt(back) => {
+                assert_eq!(back.question, Some(asked));
+                assert_eq!(back.tool_name, "");
+                assert_eq!(back.audit_hint, None);
+            }
+            other => panic!("not a permission prompt: {other:?}"),
+        }
+    }
+
+    /// A tool prompt's frame gains no key, and a frame from before the fields
+    /// existed decodes as the tool prompt it was.
+    #[test]
+    fn a_tool_prompt_gains_no_key_and_an_older_frame_is_a_tool_prompt() {
+        let json = serde_json::to_value(SerializableRenderBlock::from_block(&prompt(None)))
+            .expect("serialize");
+        for absent in ["kind", "topic", "title"] {
+            assert!(json.get(absent).is_none(), "`{absent}` on a tool prompt: {json}");
+        }
+        let older = serde_json::json!({
+            "type": "permission_prompt",
+            "id": 3,
+            "prompt_id": 3,
+            "tool_name": "Bash",
+            "reasoning": "run ls",
+            "audit_hint": "risk: high; explicitly unblock",
+            "choices": [{"key": "o", "label": "Once", "decision": "allow_once"}],
+        });
+        match render_block_from_value(&older).expect("deserialize") {
+            RenderBlock::PermissionPrompt(back) => {
+                assert_eq!(back.question, None);
+                assert_eq!(back.tool_name, "Bash");
+            }
+            other => panic!("not a permission prompt: {other:?}"),
         }
     }
 }

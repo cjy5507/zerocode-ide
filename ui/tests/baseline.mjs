@@ -52,16 +52,20 @@ async function restoredWindow(root, id) {
       return { resumed, calm, calls };
     }, JSON.parse(await readFile(join(root, "evidence/window-layout.json"), "utf8")));
     assert.equal(result.resumed.woke, true);
-    assert.equal(result.calls[0].interrupted, true);
+    // Whether a wake is told to go on is the goodbye's word about the
+    // conversation, judged in the backend (`restart_nudge_runtime::tab_nudge`,
+    // pinned by `a_persons_tab_whose_turn_the_restart_cut_is_told_once_to_go_on`).
+    // The renderer's part is to record the mid-turn mark and then say nothing
+    // of it: neither a cut nor a calm restore may send a nudge field.
     assert.equal(result.calls[0].session.id, id);
-    assert.equal(result.calls[1].interrupted, false, "idle restore must not receive a nudge");
-    await writeFile(join(root, "evidence/window-resume.json"), JSON.stringify({ interrupted: result.calls[0].interrupted, id: result.calls[0].session.id, restarted: true, calm_interrupted: result.calls[1].interrupted }));
+    for (const call of result.calls) assert(!("interrupted" in call), "the renderer must leave the nudge to the goodbye");
+    await writeFile(join(root, "evidence/window-resume.json"), JSON.stringify({ interrupted: saved.interrupted, id: result.calls[0].session.id, restarted: true, sent_mark: result.calls.some(call => "interrupted" in call) }));
   } finally { await browser.close(); await new Promise(done => files.close(done)); }
 }
 
 if (process.argv[2] === "--restore") {
   await restoredWindow(resolve(process.argv[3]), process.argv[4]);
-  console.log("PASS Q3 interrupted renderer restart and restore nudge");
+  console.log("PASS Q3 mid-turn record saved and restore sends no nudge mark");
 } else {
   const args = process.argv.slice(2);
   const outAt = args.indexOf("--out");
@@ -106,7 +110,7 @@ if (process.argv[2] === "--restore") {
           assert(row, `missing ${task}-${repeat} process run`);
           if (task === "Q3") {
             const restore = JSON.parse(await readFile(join(root, "evidence/window-resume.json"), "utf8"));
-            assert(restore.interrupted && restore.restarted && !restore.calm_interrupted);
+            assert(restore.interrupted && restore.restarted && !restore.sent_mark);
           } else {
             const ledger = JSON.parse(await readFile(join(root, "evidence/ledger.json"), "utf8"));
             assert(validResult(ledger.result));

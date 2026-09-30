@@ -2881,4 +2881,56 @@ mod search_input_tests {
             "correction must point at the listing tool: {message}"
         );
     }
+
+    /// zo's search and read tools never hand a model the reasoning stored in
+    /// zo's own session records (t-17474). A model searching its own history
+    /// for a phrase got whole record lines back, thinking blocks included, and
+    /// the provider declined the next request that carried them. The words the
+    /// assistant said stay; where it reasoned, the marker `session_recall`
+    /// uses stands. Through the dispatch a model calls, with a fake record.
+    #[test]
+    fn grep_and_read_of_a_session_record_hand_back_no_thinking() {
+        const SENTINEL: &str = "SENTINEL-REASONING-9902";
+        let dir = std::env::temp_dir().join(format!(
+            "zo-record-mask-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let sessions = dir.join("projects").join("acme").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions dir");
+        let record = sessions.join("session-9.jsonl");
+        std::fs::write(
+            &record,
+            format!(
+                r#"{{"message":{{"blocks":[{{"signature":"sig-abc","thinking":"{SENTINEL}: there are 60 cards","type":"thinking"}},{{"text":"The board lists 60 cards.","type":"text"}}],"role":"assistant"}},"turn_index":3,"type":"message"}}"#
+            ) + "\n",
+        )
+        .expect("record");
+
+        let ctx = ToolContext::new();
+        let searched = dispatch(
+            &ctx,
+            None,
+            "grep_search",
+            &json!({"pattern": "60 cards", "path": sessions.to_string_lossy(), "output_mode": "content"}),
+        )
+        .expect("grep_search is dispatched")
+        .expect("the search succeeds");
+        assert!(!searched.contains(SENTINEL), "the search handed back reasoning: {searched}");
+        assert!(searched.contains("The board lists 60 cards."), "{searched}");
+        assert!(searched.contains("[thinking]"), "{searched}");
+
+        let read = dispatch(
+            &ctx,
+            None,
+            "read_file",
+            &json!({"path": record.to_string_lossy()}),
+        )
+        .expect("read_file is dispatched")
+        .expect("the read succeeds");
+        assert!(!read.contains(SENTINEL), "the read handed back reasoning: {read}");
+        assert!(read.contains("[thinking]"), "{read}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

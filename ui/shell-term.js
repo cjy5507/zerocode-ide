@@ -4200,11 +4200,46 @@ const floatView = makeTermView(el("terminal"), el("term"), el("caret"), {
   address: () => ({ kind: "term", term: FLOAT_TERM, key: `term:${FLOAT_TERM}` }),
 });
 
-/* ---- permission modal (F6) ---- */
+/* ---- the ask popup ---- */
 
-/* A queue, not a stack: prompts are answered in arrival order and there is
- * exactly one modal on screen. Every answer goes through permission.respond —
- * no code path answers by itself (제품 원칙 3).
+/* Every question the window puts to the person is a KIND of ask, and every
+ * kind is shown in the same frame (`#ask-scrim`) in the middle of the window:
+ * one at a time, oldest first, with the number that wait behind it. A tool
+ * permission, an agent's own question (zo's model switch), Computer Use's
+ * confirm and its hand-over, and the window's own confirms (`askConfirm`)
+ * used to be four surfaces in three places — one of them a pill along the top
+ * edge that a person looking at the middle of the window did not see, and one
+ * that drew a question as a tool. They are one popup now.
+ *
+ * What the popup owns, for every kind: the frame; the queue and its count; the
+ * keyboard — the kind's default answer holds the focus so Enter gives it, and
+ * Escape gives the kind's safe one; and the way an answer travels — the
+ * buttons are off while it is on its way, and if it never arrives the ask
+ * stays with the reason and the same buttons again, because closing it would
+ * leave the asker waiting with the person believing they had answered
+ * (제품 원칙 1: 막힌 것은 조용할 수 없다). What is a kind's own is written by
+ * the file that owns its words, through `registerAskKind`:
+ *
+ *   tone         the frame's `data-kind`, which the stylesheet dresses
+ *   view(ask)    { agent, agentClass, title, mono, why, choices, initial, safe }
+ *                — `choices` is [{ label, tone: primary | halt | plain, … }],
+ *                or null for a kind whose buttons are the markup's own;
+ *                `initial` is the choice that holds the keyboard, so the one
+ *                Enter gives — the SAFE one of its kind, never the riskiest —
+ *                or null when Enter must give none; `safe` is Escape's
+ *   clock(ask)   the words for a deadline the ask carries (Computer Use)
+ *   deliver(ask, choice)  a promise that settles once the answer has reached
+ *                whoever asked; a rejection keeps the ask on screen
+ *   raised / delivered / withdrawn   what the kind does to the rest of the
+ *                window when its ask arrives, is answered, or leaves
+ *   paint / clear   the kind's own parts of the frame
+ *   escape(ask)  Escape, for a kind whose safe answer is not one of its choices
+ *   instant      leaves without the exit animation
+ *
+ * A queue, not a stack: asks are answered in arrival order and there is
+ * exactly one popup on screen. No code path answers by itself — a Computer Use
+ * clock says how long the backend waits before IT refuses, and the window
+ * answers nothing when it reaches nought (제품 원칙 3).
  *
  * Two agents stopping at once is the ordinary case, not the corner: five
  * lanes are five programs asking for their own permissions on their own
@@ -4212,70 +4247,432 @@ const floatView = makeTermView(el("terminal"), el("term"), el("caret"), {
  * than replacing the first, that answering the first delivers to the first,
  * and that a question whose session has gone leaves instead of standing in
  * front of everybody else's (`withdrawPermissions`). */
-const permissionQueue = [];
-let activePrompt = null;
+const askKinds = new Map();
+const askQueue = [];
+let activeAsk = null;
+let askPainted = null;
+let askFocus = null;
+let askSafe = null;
+let askClockTimer = null;
+let askLeavesAtOnce = false;
+const ASK_CLOCK_TICK_MS = 1000;
+const askFrame = askScrim.querySelector(".permission");
+
+/* One key, one answer. A key held down repeats, and a repeat that lands after
+ * the first press has answered the ask on screen lands on the NEXT ask —
+ * answering a question its person has not read. So a repeating Enter or Space
+ * answers nothing here; a repeating Escape is left out by the modal manager
+ * (`ignoresRepeat`, shell-input.js). */
+askScrim.addEventListener(
+  "keydown",
+  (event) => {
+    if (!event.repeat || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    event.stopPropagation();
+  },
+  true,
+);
+
+function registerAskKind(name, kind) {
+  askKinds.set(name, kind);
+}
+
+function askKindOf(ask) {
+  return askKinds.get(ask.kind);
+}
 
 /* Already on the road?
  *
- * The `prompt_id` is the identity, because it is what the server retires on
- * the answer. The backend allows one subscriber per session, but a lane
- * closed and re-attached hydrates again — and a second modal carrying an id
- * the first one is about to retire is a question that can only fail to be
- * answered. */
-function alreadyRaised(frame) {
-  const id = frame.prompt_id;
-  if (id === undefined || id === null) return false;
-  return (
-    activePrompt?.frame?.prompt_id === id ||
-    permissionQueue.some((queued) => queued.frame?.prompt_id === id)
-  );
+ * `key` is the identity an ask brings from where it came, because it is what
+ * the asker retires on the answer. A permission prompt's is its session AND
+ * its `prompt_id`: the id counts per channel, so two sessions each on their
+ * first prompt both say 1, and one key on the id alone dropped the second
+ * agent's question without a word. The backend allows one subscriber per
+ * session, but a lane closed and re-attached hydrates again — and a second
+ * popup carrying an id the first is about to retire is a question that can
+ * only fail to be answered. */
+function askAlreadyRaised(ask) {
+  if (ask.key === undefined || ask.key === null) return false;
+  return activeAsk?.key === ask.key || askQueue.some((queued) => queued.key === ask.key);
 }
 
-function raisePermission(session, frame) {
-  if (alreadyRaised(frame)) return;
-  permissionQueue.push({ session, frame });
-  const entry = laneBySession(session);
-  if (entry) {
-    invoke("gate_lane", { id: entry.lane.id, gate: "awaiting_permission" }).catch(() => {});
-  }
+function raiseAsk(ask) {
+  if (!askKinds.has(ask.kind) || askAlreadyRaised(ask)) return false;
+  askQueue.push(ask);
+  askKindOf(ask).raised?.(ask);
   // Behind a question already on screen: the count says so and nothing else
   // moves. A full repaint here would rebuild the buttons an answer in flight
   // was pressed on, which is how one answer becomes two.
-  if (activePrompt) paintPermissionCount();
-  else showNextPermission();
+  if (activeAsk) paintAskCount();
+  else showNextAsk();
+  return true;
 }
 
-function showNextPermission() {
-  activePrompt = permissionQueue.shift() ?? null;
-  paintPermission();
+function showNextAsk() {
+  const leaving = activeAsk;
+  activeAsk = askQueue.shift() ?? null;
+  askLeavesAtOnce = leaving !== null && askKindOf(leaving).instant === true;
+  paintAsk();
 }
 
-/* How many questions are behind the one on screen.
+/* How many asks are behind the one on screen.
  *
  * Its own function because it is written from two places — the repaint, and
- * a prompt arriving while the modal already stands — and because the second
- * of those must touch nothing else on the dialog. */
-function paintPermissionCount() {
-  const waiting = permissionQueue.length;
-  const more = el("perm-more");
+ * an ask arriving while the popup already stands — and because the second of
+ * those must touch nothing else on the dialog. */
+function paintAskCount() {
+  const waiting = askQueue.length;
+  const more = el("ask-more");
   more.hidden = waiting === 0;
   more.textContent =
     waiting === 0 ? "" : t("ask.more", "{{count}}개 더 대기 중", { count: waiting });
 }
 
+/* One line of the frame: its words, or gone. A hidden part reads as absent to
+ * anyone — a kind with no tool to name has no tool chip, not an empty one. */
+function paintAskPart(id, words) {
+  const node = el(id);
+  const said = typeof words === "string" && words !== "" ? words : null;
+  node.hidden = said === null;
+  node.textContent = said ?? "";
+}
+
+function paintAskClock() {
+  if (!activeAsk) return;
+  paintAskPart("ask-clock", askKindOf(activeAsk).clock?.(activeAsk) ?? null);
+}
+
+function askButton(choice) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `btn${choice.tone === "primary" ? " btn--primary" : ""}${
+    choice.tone === "halt" ? " btn--halt" : ""
+  }`;
+  button.textContent = choice.label;
+  button.addEventListener("click", () => void answerAsk(choice));
+  return button;
+}
+
+/* Draw whichever ask is current, in the language now in force.
+ *
+ * Split from taking the next one off the queue so a language change can
+ * redraw the popup without consuming anything. The `shift` belongs to
+ * `showNextAsk` and to nowhere else: a second one here would answer an ask by
+ * discarding it, which is the one failure this window must never have
+ * (제품 원칙 3). */
+function paintAsk() {
+  clearInterval(askClockTimer);
+  askClockTimer = null;
+  for (const kind of askKinds.values()) kind.clear?.();
+  const ask = activeAsk;
+  if (!ask) {
+    askFocus = null;
+    askSafe = null;
+    askPainted = null;
+    // `closing` is a no-op on a surface that is already hidden, so the
+    // repaint path a language change takes does not animate a popup nobody
+    // opened.
+    hideModal(askScrim, { animated: !askLeavesAtOnce });
+    return;
+  }
+  const kind = askKindOf(ask);
+  const view = kind.view(ask);
+  askFrame.dataset.kind = kind.tone;
+  paintAskPart("ask-agent", view.agent ?? null);
+  el("ask-agent").className = `perm-agent ${view.agentClass ?? ""}`.trim();
+  paintAskPart("ask-title", view.title);
+  paintAskPart("ask-body", view.mono ?? null);
+  paintAskPart(
+    "ask-why",
+    ask.failure === undefined
+      ? view.why ?? null
+      : t("perm.failed", "응답이 서버에 닿지 못했습니다 — 다시 시도하세요. ({{error}})", {
+          error: ask.failure,
+        }),
+  );
+  paintAskPart("ask-clock", kind.clock?.(ask) ?? null);
+  const choices = view.choices ?? null;
+  el("ask-choices").hidden = choices === null;
+  el("ask-confirm-actions").hidden = choices !== null;
+  if (choices === null) {
+    el("ask-choices").replaceChildren();
+    askFocus = el("ask-yes");
+    askSafe = null;
+  } else {
+    const buttons = choices.map(askButton);
+    for (const button of buttons) button.disabled = ask.sending === true;
+    el("ask-choices").replaceChildren(...buttons);
+    // `initial: null` is a kind whose Enter must answer nothing (the hand-over):
+    // the keyboard starts on the frame itself, and the person Tabs to the
+    // answer they mean.
+    askFocus =
+      view.initial === null ? askFrame : buttons[view.initial ?? 0] ?? buttons[0] ?? null;
+    askSafe = choices[view.safe] ?? null;
+  }
+  kind.paint?.(ask, view);
+  paintAskCount();
+  if (kind.clock) askClockTimer = setInterval(paintAskClock, ASK_CLOCK_TICK_MS);
+  const changed = ask !== askPainted;
+  askPainted = ask;
+  showModal(askScrim, { animated: true });
+  // A new ask starts the keyboard on its own default. The same ask repainted
+  // (a language change) keeps wherever the person's hand already is.
+  if (changed) askFocus?.focus({ preventScroll: true });
+}
+
+/* Where the keyboard starts, and what Escape gives — the modal manager asks
+ * both of these of the popup, whatever kind is on it. */
+function askFocusTarget() {
+  return askFocus;
+}
+
+function askEscape() {
+  const ask = activeAsk;
+  if (!ask || ask.sending === true) return;
+  const kind = askKindOf(ask);
+  if (kind.escape) kind.escape(ask);
+  else if (askSafe) void answerAsk(askSafe);
+}
+
+/* An answer travels; the popup advances ONLY on a delivered one. A failed
+ * delivery keeps the ask on screen with the buttons re-enabled and the reason
+ * shown — closing it would leave the asker's ask pending with the person
+ * believing they answered (제품 원칙 1). */
+async function answerAsk(choice) {
+  // WHICH ask this press answers, held rather than re-read: the await below
+  // is a hole in time, and a session ending inside it moves the popup on.
+  // Everything after the await asks whether the screen is still showing the
+  // ask that was pressed.
+  const answered = activeAsk;
+  if (!answered || answered.sending === true) return;
+  answered.sending = true;
+  for (const button of el("ask-choices").querySelectorAll("button")) button.disabled = true;
+  const kind = askKindOf(answered);
+  try {
+    await kind.deliver(answered, choice);
+  } catch (error) {
+    answered.sending = false;
+    if (activeAsk !== answered) return;
+    answered.failure = String(error);
+    paintAskPart(
+      "ask-why",
+      t("perm.failed", "응답이 서버에 닿지 못했습니다 — 다시 시도하세요. ({{error}})", {
+        error: answered.failure,
+      }),
+    );
+    // The buttons on screen NOW, not the ones that were pressed: a language
+    // change during the await drew new ones.
+    for (const button of el("ask-choices").querySelectorAll("button")) button.disabled = false;
+    return;
+  }
+  answered.sending = false;
+  kind.delivered?.(answered, choice);
+  // Advance only if this is still the ask on screen. A withdrawal that landed
+  // during the await already advanced, and a second shift here would take the
+  // NEXT agent's question off the queue without ever showing it — an answer
+  // nobody was asked for, and a question nobody sees.
+  if (activeAsk === answered) showNextAsk();
+}
+
+/* An ask whose answer needs no road — the window's own confirm, whose caller
+ * holds a promise — is over when its owner says so. */
+function settleAsk(ask) {
+  if (activeAsk === ask) {
+    showNextAsk();
+    return;
+  }
+  const at = askQueue.indexOf(ask);
+  if (at < 0) return;
+  askQueue.splice(at, 1);
+  if (activeAsk) paintAskCount();
+}
+
+/* Take away every ask that `matches`, waiting or on screen. What is on screen
+ * is replaced by the next; what waits just leaves the count. */
+function withdrawAsks(matches) {
+  for (let at = askQueue.length - 1; at >= 0; at -= 1) {
+    if (!matches(askQueue[at])) continue;
+    const [gone] = askQueue.splice(at, 1);
+    askKindOf(gone).withdrawn?.(gone);
+  }
+  if (activeAsk && matches(activeAsk)) {
+    askKindOf(activeAsk).withdrawn?.(activeAsk);
+    showNextAsk();
+  } else if (activeAsk) {
+    paintAskCount();
+  }
+}
+
+/* ---- the asks an agent's channel raises ---- */
+
+/* Who is asking, in the words the catalog has for it — and never in a name
+ * this file spells. The lane or the pane that holds the session says which
+ * agent it is; a session nobody holds yet is known by the session alone. The
+ * hue bar is the lane's own colour when there is a lane. */
+function askerOf(session) {
+  const short = shortSession(session);
+  const entry = laneBySession(session);
+  const term = paneTermsBySession(session)[0];
+  const slug =
+    entry?.lane.agent ??
+    (term === undefined ? null : paneSessions.get(term)?.agent ?? paneAgents.get(term) ?? null);
+  return {
+    text: slug ? `${agentName(slug)} · ${short}` : short,
+    className: entry ? slotClass(entry.lane.id) : "",
+  };
+}
+
+/* The lane behind a session's ask is gated while an ask stands, and calm again
+ * when none is left. */
+function askGateLane(session, gate) {
+  const entry = laneBySession(session);
+  if (entry) invoke("gate_lane", { id: entry.lane.id, gate }).catch(() => {});
+}
+
+function askWaitsOnSession(session) {
+  return activeAsk?.session === session || askQueue.some((queued) => queued.session === session);
+}
+
+/* The choices a permission frame offers, in its order — and the two any frame
+ * can be answered with when it lists none. The decisions are the wire's tags
+ * (`allow_once`, `allow_always`, `deny`, `deny_always`): the one-time allow
+ * wears the primary, a refusal wears the halt, and the refusal that Escape
+ * gives is the plain `deny` — the one that is not remembered. */
+function askFrameChoices(frame) {
+  const listed =
+    Array.isArray(frame.choices) && frame.choices.length > 0
+      ? frame.choices
+      : [
+          { label: t("perm.allow", "허용"), decision: "allow_once" },
+          { label: t("perm.deny", "거부"), decision: "deny" },
+        ];
+  return listed.map((choice) => ({
+    label: choice.label ?? choice.decision,
+    decision: choice.decision,
+    tone:
+      choice.decision === "allow_once"
+        ? "primary"
+        : choice.decision?.startsWith("deny")
+          ? "halt"
+          : "plain",
+  }));
+}
+
+/* The choice a question hands to Enter: the one that applies ONCE
+ * (`allow_once`, "for this turn"), wherever the frame lists it — never the one
+ * that stays (`allow_always`, "from now on"), which a person picks with a
+ * deliberate Tab or click. A question with no once-only choice hands Enter its
+ * plain refusal, and failing that nothing. */
+function askQuestionInitial(choices) {
+  const once = choices.findIndex((choice) => choice.decision === "allow_once");
+  if (once >= 0) return once;
+  const refusal = choices.findIndex((choice) => choice.decision === "deny");
+  return refusal >= 0 ? refusal : null;
+}
+
+/* A question's title comes from the key its frame names, not from a tool: the
+ * topic picks the words in the window's language, a topic the window has no
+ * words for falls back to the title the frame carries, and a question with
+ * neither says only that it is one. */
+const ASK_TOPICS = Object.freeze({
+  model_switch: { key: "ask.topic.model_switch", word: "모델을 바꿀까요?" },
+  declined_images: { key: "ask.topic.declinedImages", word: "이미지 없이 다시 시도할까요?" },
+});
+
+function askQuestionTitle(frame) {
+  if (typeof frame.topic === "string" && Object.hasOwn(ASK_TOPICS, frame.topic)) {
+    const topic = ASK_TOPICS[frame.topic];
+    return t(topic.key, topic.word);
+  }
+  const named = typeof frame.title === "string" ? frame.title.trim() : "";
+  return named || t("ask.question.title", "에이전트가 묻습니다");
+}
+
+/* What the two kinds an agent's channel raises share: the road their answer
+ * takes (`permission.respond`, by the prompt's own id), and what they do to
+ * the lane behind them. */
+const askFromChannel = {
+  deliver: (ask, choice) =>
+    invoke("respond_permission", {
+      session: ask.session,
+      promptId: ask.frame.prompt_id,
+      decision: choice.decision,
+    }),
+  raised: (ask) => askGateLane(ask.session, "awaiting_permission"),
+  delivered: (ask) => {
+    if (!askQueue.some((queued) => queued.session === ask.session)) {
+      askGateLane(ask.session, "idle");
+    }
+  },
+};
+
+registerAskKind("tool", {
+  ...askFromChannel,
+  tone: "tool",
+  view: (ask) => {
+    const frame = ask.frame;
+    const who = askerOf(ask.session);
+    const choices = askFrameChoices(frame);
+    return {
+      agent: who.text,
+      agentClass: who.className,
+      title: t("perm.title", "이 도구를 실행할까요?"),
+      mono: frame.tool_name ? String(frame.tool_name) : null,
+      why: [frame.reasoning, frame.audit_hint].filter(Boolean).join(" — ") || null,
+      choices,
+      initial: 0,
+      safe: choices.findIndex((choice) => choice.decision === "deny"),
+    };
+  },
+});
+
+registerAskKind("question", {
+  ...askFromChannel,
+  tone: "question",
+  view: (ask) => {
+    const frame = ask.frame;
+    const who = askerOf(ask.session);
+    const choices = askFrameChoices(frame);
+    return {
+      agent: who.text,
+      agentClass: who.className,
+      title: askQuestionTitle(frame),
+      // A question has no tool to name and no risk to weigh, whatever else
+      // the frame carries: it draws its sentence and its choices.
+      mono: null,
+      why: typeof frame.reasoning === "string" ? frame.reasoning.trim() || null : null,
+      choices,
+      initial: askQuestionInitial(choices),
+      safe: choices.findIndex((choice) => choice.decision === "deny"),
+    };
+  },
+});
+
+/* The frame `permission_prompt` says what it is with `kind` — `question` for
+ * an agent's own question, anything else (and no `kind` at all, the frames
+ * every older zo sends) for a tool. The window never tells one from the other
+ * by what the tool is called. */
+function raisePermission(session, frame) {
+  raiseAsk({
+    kind: frame.kind === "question" ? "question" : "tool",
+    key:
+      frame.prompt_id === undefined || frame.prompt_id === null
+        ? null
+        : `${session}#${frame.prompt_id}`,
+    session,
+    frame,
+  });
+}
+
 /* A session that ended takes its questions with it.
  *
  * The prompt id died with the session, so `respond_permission` can now only
- * fail: the modal would stand there refusing every press, in front of the
+ * fail: the popup would stand there refusing every press, in front of the
  * questions behind it that CAN still be answered. Nothing is hidden by this
  * — the lane is gated `blocked` on the same event and keeps saying so on its
  * row (제품 원칙 1). What leaves is the door that no longer opens. */
 function withdrawPermissions(session) {
-  for (let at = permissionQueue.length - 1; at >= 0; at -= 1) {
-    if (permissionQueue[at].session === session) permissionQueue.splice(at, 1);
-  }
-  if (activePrompt?.session === session) showNextPermission();
-  else if (activePrompt) paintPermissionCount();
+  withdrawAsks((ask) => ask.session === session);
 }
 
 /* Retire exactly one prompt after the pane wins the shared prompt race.
@@ -4285,101 +4682,8 @@ function withdrawPermissions(session) {
  * withdrawing the whole session here would hide valid work. */
 function withdrawPrompt(session, promptId) {
   if (promptId === undefined || promptId === null) return;
-  const mine = (queued) =>
-    queued.session === session && queued.frame?.prompt_id === promptId;
-  for (let at = permissionQueue.length - 1; at >= 0; at -= 1) {
-    if (mine(permissionQueue[at])) permissionQueue.splice(at, 1);
-  }
-  if (activePrompt && mine(activePrompt)) showNextPermission();
-  else if (activePrompt) paintPermissionCount();
-
-  const entry = laneBySession(session);
-  const waiting =
-    activePrompt?.session === session ||
-    permissionQueue.some((queued) => queued.session === session);
-  if (entry && !waiting) {
-    invoke("gate_lane", { id: entry.lane.id, gate: "idle" }).catch(() => {});
-  }
-}
-
-/* Draw whichever prompt is current, in the language now in force.
- *
- * Split from taking the next one off the queue so a language change can
- * redraw the modal without consuming anything. The `shift` belongs to
- * `showNextPermission` and to nowhere else: a second one here would answer a
- * permission by discarding it, which is the one failure this window must
- * never have (제품 원칙 3). */
-function paintPermission() {
-  if (!activePrompt) {
-    // `closing` is a no-op on a surface that is already hidden, so the
-    // repaint path a language change takes does not animate a modal nobody
-    // opened.
-    hideModal(permScrim, { animated: true });
-    return;
-  }
-  const { session, frame } = activePrompt;
-  const entry = laneBySession(session);
-  el("perm-agent").textContent = `ZO · ${shortSession(session)}`;
-  el("perm-agent").className = `perm-agent ${entry ? slotClass(entry.lane.id) : ""}`;
-  el("perm-cmd").textContent = `${frame.tool_name ?? ""}`;
-  el("perm-why").textContent = [frame.reasoning, frame.audit_hint]
-    .filter(Boolean)
-    .join(" — ");
-  const actions = el("perm-actions");
-  actions.replaceChildren();
-  const choices =
-    Array.isArray(frame.choices) && frame.choices.length > 0
-      ? frame.choices
-      : [
-          { label: t("perm.allow", "허용"), decision: "allow_once" },
-          { label: t("perm.deny", "거부"), decision: "deny" },
-        ];
-  for (const choice of choices) {
-    const button = document.createElement("button");
-    button.type = "button";
-    const halting = choice.decision?.startsWith("deny");
-    button.className = `btn${choice.decision === "allow_once" ? " btn--primary" : ""}${
-      halting ? " btn--halt" : ""
-    }`;
-    button.textContent = choice.label ?? choice.decision;
-    button.addEventListener("click", () => answerPermission(choice.decision));
-    actions.appendChild(button);
-  }
-  paintPermissionCount();
-  showModal(permScrim, { animated: true });
-}
-
-/* The modal advances ONLY on a delivered answer. A failed permission.respond
- * keeps the prompt on screen with the buttons re-enabled and the reason
- * shown — closing it would leave the server's prompt pending with the person
- * believing they answered (제품 원칙 1: 막힌 레인은 조용할 수 없다). */
-async function answerPermission(decision) {
-  if (!activePrompt) return;
-  // WHICH question this press answers, held rather than re-read: the await
-  // below is a hole in time, and a session ending inside it moves the modal
-  // on. Everything after the await asks whether the screen is still showing
-  // the question that was pressed.
-  const answered = activePrompt;
-  const { session, frame } = answered;
-  const buttons = [...el("perm-actions").querySelectorAll("button")];
-  for (const button of buttons) button.disabled = true;
-  try {
-    await invoke("respond_permission", { session, promptId: frame.prompt_id, decision });
-  } catch (error) {
-    if (activePrompt !== answered) return;
-    el("perm-why").textContent = t("perm.failed", "응답이 서버에 닿지 못했습니다 — 다시 시도하세요. ({{error}})", { error });
-    for (const button of buttons) button.disabled = false;
-    return;
-  }
-  const entry = laneBySession(session);
-  if (entry && !permissionQueue.some((queued) => queued.session === session)) {
-    invoke("gate_lane", { id: entry.lane.id, gate: "idle" }).catch(() => {});
-  }
-  // Advance only if this is still the question on screen. A withdrawal that
-  // landed during the await already advanced, and a second shift here would
-  // take the NEXT agent's question off the queue without ever showing it —
-  // an answer nobody was asked for, and a question nobody sees.
-  if (activePrompt === answered) showNextPermission();
+  withdrawAsks((ask) => ask.session === session && ask.frame?.prompt_id === promptId);
+  if (!askWaitsOnSession(session)) askGateLane(session, "idle");
 }
 
 /* ---- threads ---- */
