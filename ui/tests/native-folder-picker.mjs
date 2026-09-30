@@ -131,6 +131,22 @@ export async function testNativeFolderPicker(browser, origin, ok) {
       return el("wt-directory").value;
     });
     ok("a closed form's late picker reply cannot overwrite a reopened form", stale === job.default, stale);
+    const fire = (name, payload) => page.evaluate(([n, p]) => { for (const h of window.__LISTENERS__[n] ?? []) h({ payload: p }); }, [name, payload]);
+    const standing = () => page.evaluate(() => document.querySelectorAll(".folder-panel-cancel").length);
+    await fire("project:folder-panel-overdue", { generation: 7, after_ms: 8000, brought_forward: false, main_thread_wait_ms: null });
+    ok("an overdue panel stands as one toast", (await standing()) === 1);
+    await fire("project:folder-panel-settled", { generation: 6, how: "answered" });
+    ok("another generation's settle leaves the toast standing", (await standing()) === 1);
+    await fire("project:folder-panel-settled", { generation: 7, how: "answered" });
+    await page.waitForFunction(() => document.querySelectorAll(".folder-panel-cancel").length === 0, null, { timeout: 1000 });
+    ok("a panel that answers by any road takes its overdue toast with it", (await standing()) === 0);
+    await fire("project:folder-panel-overdue", { generation: 7, after_ms: 9000, brought_forward: false, main_thread_wait_ms: null });
+    ok("a late overdue of a settled generation stands no toast", (await standing()) === 0);
+    await page.evaluate(() => { window.__CANCELS__ = 0; window.__ANSWER__.cancel_folder_panel = () => { window.__CANCELS__++; return true; }; });
+    await fire("project:folder-panel-overdue", { generation: 8, after_ms: 8000, brought_forward: false, main_thread_wait_ms: null });
+    await page.evaluate(() => document.querySelector(".folder-panel-cancel").click());
+    await page.waitForFunction(() => document.querySelectorAll(".folder-panel-cancel").length === 0, null, { timeout: 1000 });
+    ok("cancel on the toast closes it at once and cancels the helper", (await page.evaluate(() => window.__CANCELS__)) === 1);
     ok("folder picker flows raise no page errors", faults.length === 0, faults.join("\n"));
   } finally { await page.close(); }
 }
