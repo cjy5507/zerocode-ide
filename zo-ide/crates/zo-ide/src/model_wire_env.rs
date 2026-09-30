@@ -602,4 +602,295 @@ mod tests {
         publish_effort_ceilings(None).expect("restore");
         assert_eq!(std::env::var(api::MODEL_EFFORT_CEILINGS_ENV).as_deref(), Ok(r#"{"gpt-5.7-sol":"max"}"#));
     }
+
+    // ---- t-17403: a zo started by a zo ------------------------------------------
+
+    /// What a parent zo had discovered when it published: `google-latest` was
+    /// 3.7, and there was a model only it knew.
+    const PARENT_DISCOVERY: &str = r#"{"models":[{"provider":"google","ids":["gemini-parent-only"],"wire":"gemini-parent-only-low"}],"aliases":[{"alias":"google-latest","canonical":"gemini-3.7-flash","provider":"google"}]}"#;
+    /// What a child zo discovered since: `google-latest` is 3.8.
+    const CHILD_DISCOVERY: &str = r#"{"models":[],"aliases":[{"alias":"google-latest","canonical":"gemini-3.8-flash","provider":"google"}]}"#;
+    /// An operator's decision about the same name.
+    const OPERATOR_PIN: &str = r#"{"models":[],"aliases":[{"alias":"google-latest","canonical":"gemini-3.5-flash","provider":"google"}]}"#;
+
+    /// Both bridges: the variable `api` reads, the mark of what zo published
+    /// into it, and the operator's export carried beside it.
+    const BRIDGE_VARIABLES: [&str; 6] = [
+        api::MODEL_CONTEXT_WINDOWS_ENV,
+        "ZO_MODEL_CONTEXT_WINDOWS_PUBLISHED",
+        "ZO_MODEL_CONTEXT_WINDOWS_OPERATOR",
+        api::MODEL_EFFORT_CEILINGS_ENV,
+        "ZO_MODEL_EFFORT_CEILINGS_PUBLISHED",
+        "ZO_MODEL_EFFORT_CEILINGS_OPERATOR",
+    ];
+
+    /// Every bridge variable cleared for the length of a test, and put back after.
+    fn bare_bridges() -> Vec<crate::support::EnvVarGuard> {
+        BRIDGE_VARIABLES.into_iter().map(|key| crate::support::EnvVarGuard::set(key, None)).collect()
+    }
+
+    /// The next process starts in the environment the last one left: nothing
+    /// is captured yet.
+    fn next_process() {
+        reset_ownership_for_tests();
+    }
+
+    /// Leaves the process-global registry as it was found — nothing in the
+    /// environment, nothing captured, an empty overlay published — when the
+    /// test ends, whether it passed or not.
+    struct RegistryBack;
+
+    impl Drop for RegistryBack {
+        fn drop(&mut self) {
+            for key in BRIDGE_VARIABLES {
+                std::env::remove_var(key);
+            }
+            next_process();
+            let _ = publish(Some(r#"{"models":[],"aliases":[]}"#), None);
+        }
+    }
+
+    fn google_latest() -> String {
+        api::resolve_catalog_alias("google-latest")
+    }
+
+    /// (b) A zo started by a zo inherits the variable its parent published.
+    /// That is what the parent knew, not an operator's decision, and the marks
+    /// say whose it is: the child ranks it under its own discovery — a
+    /// snapshot to start from — and not ahead of everything. (2026-09-30: `sol`
+    /// stayed `gpt-6-sol` in every helper after `gpt-6.1-sol` was discovered.)
+    #[test]
+    fn a_child_zo_ranks_its_parents_published_catalog_under_its_own_discovery() {
+        let _lock = crate::test_env_lock();
+        let _bridges = bare_bridges();
+        let _registry = RegistryBack;
+        next_process();
+
+        publish(None, Some(PARENT_DISCOVERY)).expect("the parent publishes");
+        assert_eq!(google_latest(), "gemini-3.7-flash");
+
+        next_process();
+        publish(None, Some(CHILD_DISCOVERY)).expect("the child publishes");
+        assert_eq!(google_latest(), "gemini-3.8-flash", "the child's own discovery outranks the parent's snapshot");
+        assert_eq!(
+            api::wire_model_for_effort("gemini-parent-only", api::EffortLevel::Low).as_deref(),
+            Some("gemini-parent-only-low"),
+            "what only the parent knew still stands"
+        );
+
+    }
+
+    /// (e) The same discovery in both, the same answer: the child and its
+    /// parent name one model alike unless the child has learned something.
+    #[test]
+    fn a_child_zo_with_the_parents_discovery_resolves_as_the_parent_does() {
+        let _lock = crate::test_env_lock();
+        let _bridges = bare_bridges();
+        let _registry = RegistryBack;
+        next_process();
+
+        publish(None, Some(PARENT_DISCOVERY)).expect("the parent publishes");
+        next_process();
+        publish(None, Some(PARENT_DISCOVERY)).expect("the child publishes");
+        assert_eq!(google_latest(), "gemini-3.7-flash");
+        assert_eq!(
+            api::wire_model_for_effort("gemini-parent-only", api::EffortLevel::Low).as_deref(),
+            Some("gemini-parent-only-low")
+        );
+
+    }
+
+    /// (a) A value the person exports by hand in a zo's shell is theirs: the
+    /// marks their zo left in the environment do not fit it, so it stays ahead
+    /// of everything in the child, and the parent's value is gone with the
+    /// one it replaced.
+    #[test]
+    fn a_value_exported_by_hand_in_a_zo_shell_wins_in_the_child() {
+        let _lock = crate::test_env_lock();
+        let _bridges = bare_bridges();
+        let _registry = RegistryBack;
+        next_process();
+
+        publish(None, Some(PARENT_DISCOVERY)).expect("the parent publishes");
+        std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, OPERATOR_PIN);
+
+        next_process();
+        publish(None, Some(CHILD_DISCOVERY)).expect("the child publishes");
+        assert_eq!(google_latest(), "gemini-3.5-flash", "the export outranks the child's discovery");
+        assert!(
+            api::wire_model_for_effort("gemini-parent-only", api::EffortLevel::Low).is_none(),
+            "the export replaced the parent's value"
+        );
+
+    }
+
+    /// (c) A published value someone edited is no longer what zo published:
+    /// the marks do not fit it, and it is read as the export it has become.
+    #[test]
+    fn a_published_value_that_was_edited_is_read_as_an_operators_export() {
+        let _lock = crate::test_env_lock();
+        let _bridges = bare_bridges();
+        let _registry = RegistryBack;
+        next_process();
+
+        publish(None, Some(PARENT_DISCOVERY)).expect("the parent publishes");
+        let published = std::env::var(api::MODEL_CONTEXT_WINDOWS_ENV).expect("the parent published");
+        std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, published.replace("gemini-3.7-flash", "gemini-3.6-pinned"));
+
+        next_process();
+        let child = publish(None, Some(CHILD_DISCOVERY)).expect("the child publishes").expect("published");
+        assert_eq!(google_latest(), "gemini-3.6-pinned", "the edited value is a decision");
+        assert_eq!(child.layers[0].0, "operator export");
+
+    }
+
+    /// (d) A value with no marks — an older zo wrote it, or a person did — is
+    /// an operator's export, as every value was before the marks.
+    #[test]
+    fn a_value_with_no_marks_is_an_operators_export_as_it_always_was() {
+        let _lock = crate::test_env_lock();
+        let _bridges = bare_bridges();
+        let _registry = RegistryBack;
+        std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, PARENT_DISCOVERY);
+        next_process();
+
+        let child = publish(None, Some(CHILD_DISCOVERY)).expect("the child publishes").expect("published");
+        assert_eq!(google_latest(), "gemini-3.7-flash", "a decision stands ahead of the child's discovery");
+        let sources: Vec<&str> = child.layers.iter().map(|(source, _)| *source).collect();
+        assert_eq!(sources, ["operator export", "discovered model catalog"]);
+
+    }
+
+    /// A real export stays first through every generation: the parent merges
+    /// it in, the child and the grandchild inherit the merge, and none of them
+    /// mistakes it for a snapshot.
+    #[test]
+    fn a_real_export_outranks_the_parent_the_child_and_the_grandchild() {
+        let _lock = crate::test_env_lock();
+        let _bridges = bare_bridges();
+        let _registry = RegistryBack;
+        std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, OPERATOR_PIN);
+        next_process();
+
+        publish(None, Some(PARENT_DISCOVERY)).expect("the parent publishes");
+        assert_eq!(google_latest(), "gemini-3.5-flash");
+        for generation in ["child", "grandchild"] {
+            next_process();
+            publish(None, Some(CHILD_DISCOVERY)).expect("published");
+            assert_eq!(google_latest(), "gemini-3.5-flash", "the {generation} keeps the export first");
+        }
+
+    }
+
+    /// What zo publishes is marked, and the operator's export rides beside it
+    /// verbatim; an export restored as it was carries neither. The names are a
+    /// contract between zo versions: a child of another version reads them.
+    #[test]
+    fn what_zo_publishes_is_marked_and_an_operators_export_is_carried_beside_it() {
+        let _lock = crate::test_env_lock();
+        let _bridges = bare_bridges();
+        let _registry = RegistryBack;
+        let var = |key: &str| std::env::var(key).ok();
+        next_process();
+
+        publish(None, Some(PARENT_DISCOVERY)).expect("published");
+        assert!(
+            var("ZO_MODEL_CONTEXT_WINDOWS_PUBLISHED").is_some_and(|mark| !mark.is_empty()),
+            "a published value carries a mark"
+        );
+        assert_eq!(var("ZO_MODEL_CONTEXT_WINDOWS_OPERATOR"), None, "no export, no operator half");
+
+        std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, OPERATOR_PIN);
+        std::env::remove_var("ZO_MODEL_CONTEXT_WINDOWS_PUBLISHED");
+        next_process();
+        publish(None, Some(PARENT_DISCOVERY)).expect("published");
+        assert_eq!(var("ZO_MODEL_CONTEXT_WINDOWS_OPERATOR").as_deref(), Some(OPERATOR_PIN));
+        assert_ne!(var(api::MODEL_CONTEXT_WINDOWS_ENV).as_deref(), Some(OPERATOR_PIN), "the merge is not the export");
+
+        // Nothing of zo's to add: the export comes back as it was, unmarked.
+        publish(None, None).expect("restored");
+        assert_eq!(var(api::MODEL_CONTEXT_WINDOWS_ENV).as_deref(), Some(OPERATOR_PIN));
+        assert_eq!(var("ZO_MODEL_CONTEXT_WINDOWS_PUBLISHED"), None);
+        assert_eq!(var("ZO_MODEL_CONTEXT_WINDOWS_OPERATOR"), None);
+
+    }
+
+    /// The audit lists the parent's snapshot as a layer of its own, under the
+    /// child's, and a model only the snapshot names is read as inherited.
+    #[test]
+    fn the_audit_lists_the_parents_snapshot_under_the_childs_own_layers() {
+        let _lock = crate::test_env_lock();
+        let _bridges = bare_bridges();
+        let _registry = RegistryBack;
+        next_process();
+
+        publish(None, Some(PARENT_DISCOVERY)).expect("the parent publishes");
+        next_process();
+        let child = publish(None, Some(CHILD_DISCOVERY)).expect("the child publishes").expect("published");
+        let document = audit_document(Some(&child), 1_700_000_000).expect("document");
+        let sources: Vec<&str> =
+            document["layers"].as_array().unwrap().iter().map(|layer| layer["source"].as_str().unwrap()).collect();
+        assert_eq!(sources, ["discovered model catalog", "parent zo's published catalog", "shipped"]);
+        assert_eq!(super::selection_provenance("gemini-parent-only"), ("inherited", "mixed"));
+
+    }
+
+    /// The effort ceilings ride the same bridge shape and follow the same
+    /// rule: a parent's are a snapshot under the child's own discovery, and an
+    /// operator's export stays first through every generation. (A model no
+    /// family knows gets `High` when nothing declares its ceiling, so every
+    /// value below is one the bridge, and only the bridge, can have set.)
+    #[test]
+    fn effort_ceilings_follow_the_same_rule() {
+        let _lock = crate::test_env_lock();
+        let _bridges = bare_bridges();
+        let _registry = RegistryBack;
+        let ceiling = || api::max_supported_effort("acme-model-1");
+        next_process();
+
+        publish_effort_ceilings(Some(r#"{"acme-model-1":"low","acme-model-2":"xhigh"}"#)).expect("the parent publishes");
+        assert_eq!(ceiling(), api::EffortLevel::Low);
+
+        next_process();
+        publish_effort_ceilings(Some(r#"{"acme-model-1":"max"}"#)).expect("the child publishes");
+        assert_eq!(ceiling(), api::EffortLevel::Max, "the child's discovery outranks the parent's snapshot");
+        assert_eq!(api::max_supported_effort("acme-model-2"), api::EffortLevel::Xhigh, "what only the parent knew stands");
+
+        // An export the person made: first for the parent, and for every process after it.
+        for key in BRIDGE_VARIABLES {
+            std::env::remove_var(key);
+        }
+        std::env::set_var(api::MODEL_EFFORT_CEILINGS_ENV, r#"{"acme-model-1":"medium"}"#);
+        next_process();
+        publish_effort_ceilings(Some(r#"{"acme-model-1":"low"}"#)).expect("the parent publishes");
+        assert_eq!(ceiling(), api::EffortLevel::Medium);
+        next_process();
+        publish_effort_ceilings(Some(r#"{"acme-model-1":"max"}"#)).expect("the child publishes");
+        assert_eq!(ceiling(), api::EffortLevel::Medium, "the export outranks the child's discovery");
+
+        // A value exported afresh under a parent's marks is an export too.
+        std::env::set_var(api::MODEL_EFFORT_CEILINGS_ENV, r#"{"acme-model-1":"xhigh"}"#);
+        next_process();
+        publish_effort_ceilings(Some(r#"{"acme-model-1":"max"}"#)).expect("published");
+        assert_eq!(ceiling(), api::EffortLevel::Xhigh);
+
+    }
+
+    /// The same child publishing twice sends the same bytes: the snapshot is
+    /// carried once, not folded in again each time.
+    #[test]
+    fn a_child_publishing_twice_sends_the_same_bytes() {
+        let _lock = crate::test_env_lock();
+        let _bridges = bare_bridges();
+        let _registry = RegistryBack;
+        next_process();
+
+        publish(None, Some(PARENT_DISCOVERY)).expect("the parent publishes");
+        next_process();
+        publish(None, Some(CHILD_DISCOVERY)).expect("first");
+        let first = std::env::var(api::MODEL_CONTEXT_WINDOWS_ENV).expect("set");
+        publish(None, Some(CHILD_DISCOVERY)).expect("second");
+        assert_eq!(std::env::var(api::MODEL_CONTEXT_WINDOWS_ENV).as_deref(), Ok(first.as_str()));
+
+    }
 }
