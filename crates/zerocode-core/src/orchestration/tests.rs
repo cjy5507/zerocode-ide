@@ -26042,3 +26042,101 @@ fn worker_return_hands_a_taken_pane_back_to_the_ledger() {
     let stopped = bench.run(&format!("worker-stop --worker {worker}"));
     assert_eq!(stopped.reply.exit_code, 0, "{}", stopped.reply.stderr);
 }
+
+/// t-18649 — one run's coordinator asks another's (`send --run B`); the
+/// answer is one `reply`, and it reaches the run the asker sits in. Before
+/// this the reply stayed in B, so both coordinators answered by `send` and
+/// the board piled up questions that never read as answered.
+#[test]
+fn a_reply_to_another_runs_coordinator_reaches_the_run_it_asked_from() {
+    let mut bench = Bench::new();
+    let run_a = bench.json("run-create --name asker")["runId"]
+        .as_str()
+        .expect("run a")
+        .to_string();
+    let mut other = Team::new("team-2", "second", 70);
+    std::mem::swap(&mut bench.team, &mut other);
+    let run_b = bench.json("run-create --name answerer")["runId"]
+        .as_str()
+        .expect("run b")
+        .to_string();
+    std::mem::swap(&mut bench.team, &mut other);
+
+    // A's coordinator asks B's.
+    let asked = bench.json(&format!(
+        "send --run {run_b} --to run:{run_b} --type question --body which-branch"
+    ))["messageId"]
+        .as_str()
+        .expect("question")
+        .to_string();
+    let question = bench
+        .ledger
+        .run(&run_b)
+        .unwrap()
+        .message(&asked)
+        .unwrap()
+        .clone();
+    assert!(bench.ledger.run(&run_b).unwrap().awaits_answer(&question));
+
+    // B's coordinator answers once.
+    std::mem::swap(&mut bench.team, &mut other);
+    let answered = bench.json(&format!(
+        "reply --run {run_b} --to-message {asked} --body main"
+    ));
+    std::mem::swap(&mut bench.team, &mut other);
+    assert_eq!(
+        answered["deliveredTo"]["runId"],
+        run_a.as_str(),
+        "{answered}"
+    );
+    let carried = answered["deliveredTo"]["messageId"]
+        .as_str()
+        .expect("delivered id");
+    let held = bench
+        .ledger
+        .run(&run_a)
+        .unwrap()
+        .message(carried)
+        .expect("in a");
+    assert_eq!(held.to, format!("run:{run_a}"));
+    assert_eq!(held.thread.as_deref(), Some(asked.as_str()));
+    assert_eq!(held.body.as_str(), "main");
+
+    // Closed where it was received.
+    assert!(!bench.ledger.run(&run_b).unwrap().awaits_answer(&question));
+
+    // (b) a second, different answer is refused.
+    std::mem::swap(&mut bench.team, &mut other);
+    let second = bench.at(
+        agent_teams::LEADER_PANE,
+        &format!("reply --run {run_b} --to-message {asked} --body develop"),
+    );
+    std::mem::swap(&mut bench.team, &mut other);
+    assert_ne!(second.reply.exit_code, 0, "{:?}", second.reply);
+    assert!(
+        second
+            .reply
+            .stderr
+            .contains("already has a different answer")
+    );
+}
+
+/// The same-run reply is untouched: no second delivery.
+#[test]
+fn a_reply_inside_one_run_is_not_delivered_anywhere_else() {
+    let mut bench = Bench::new();
+    let run = bench.json("run-create --name solo")["runId"]
+        .as_str()
+        .expect("run")
+        .to_string();
+    let (_, worker_pane) = bench.seat("worker-start --agent codex");
+    let asked = bench.json_at(
+        &worker_pane,
+        &format!("send --to run:{run} --type question --body q"),
+    )["messageId"]
+        .as_str()
+        .expect("question")
+        .to_string();
+    let answered = bench.json(&format!("reply --to-message {asked} --body a"));
+    assert!(answered.get("deliveredTo").is_none(), "{answered}");
+}
