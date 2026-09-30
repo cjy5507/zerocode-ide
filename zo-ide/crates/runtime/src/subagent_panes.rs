@@ -2676,7 +2676,10 @@ mod tests {
     /// same script was 7 ms with 64 at once). The waits' first ask of tmux
     /// blocked for that long, so an answer was heard a second late, a 300 ms
     /// limit ended after three, and a channel was not held within 700 ms — in
-    /// the tests that ran together, and not in one that ran alone.
+    /// the tests that ran together, and not in one that ran alone. Every test
+    /// gets its fake here, so the one exec that is slow is made once, before
+    /// any of them starts its clock: they wait for it inside `get_or_init`,
+    /// where nothing is being timed.
     fn shared_fake_tmux() -> &'static Path {
         static SCRIPT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
         SCRIPT.get_or_init(|| {
@@ -2708,8 +2711,16 @@ mod tests {
                     .expect("chmod");
             }
             // The first exec is the slow one; do it here, while the tests that
-            // need the script wait for it, and not inside a test's wait.
-            let _ = std::process::Command::new(&script).arg("warm").output();
+            // need the script wait for it, and not inside a test's wait. A
+            // file that was just written can be refused once ("text file
+            // busy") when another test's child is between its fork and its
+            // exec, so a refusal is tried again.
+            for _ in 0..50 {
+                if std::process::Command::new(&script).arg("warm").output().is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
             script
         })
     }
@@ -2723,20 +2734,6 @@ mod tests {
         #[cfg(not(unix))]
         std::fs::copy(shared_fake_tmux(), &link).expect("copy fake tmux");
         link
-    }
-
-    /// Wait, at most `limit`, until `condition` holds. A test that used to sleep
-    /// a fixed time and then look now looks when the thing it waits for is there,
-    /// so a slow machine slows the test and does not fail it.
-    fn wait_until_true(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
-        let deadline = std::time::Instant::now() + limit;
-        while std::time::Instant::now() < deadline {
-            if condition() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        condition()
     }
 
     fn tmux_log(directory: &Path) -> Vec<String> {
@@ -2996,14 +2993,6 @@ mod tests {
                 );
                 (outcome, std::time::Instant::now())
             });
-            // The settling is counted from the first ask of tmux, which the fake
-            // logs as it starts: a wait still on its way to its first look is
-            // not resting, and an answer landed then is heard when the look
-            // comes, however the answer is waited for.
-            assert!(
-                wait_until_true(Duration::from_secs(60), || pane_asks(directory.path()) >= 1),
-                "the wait never asked tmux"
-            );
             let settle_until = std::time::Instant::now() + Duration::from_millis(1200);
             while std::time::Instant::now() < settle_until && pane_asks(directory.path()) < 2 {
                 std::thread::sleep(Duration::from_millis(2));
@@ -3016,12 +3005,8 @@ mod tests {
             (outcome, heard.duration_since(landed))
         });
         assert!(matches!(outcome, PaneOutcome::Finished(_)), "{outcome:?}");
-        // The look it replaces was a quarter second apart, and landing just after
-        // one leaves the whole of it: 253 ms on the old wait (its red run). A
-        // wake by the watch is a millisecond; 150 ms leaves room for a loaded
-        // machine's scheduler and still fails the old wait.
         assert!(
-            lag < Duration::from_millis(150),
+            lag < Duration::from_millis(100),
             "the answer was heard {lag:?} after it landed"
         );
     }
@@ -3587,13 +3572,9 @@ mod tests {
                 );
                 (outcome, std::time::Instant::now())
             });
-            // The channel is held after the first ask; how long that takes is the
-            // machine's business, so the test looks when it is there.
-            assert!(
-                wait_until_true(Duration::from_secs(20), || channel.connections() == 1),
-                "the parent did not hold the child's channel"
-            );
+            std::thread::sleep(Duration::from_millis(700));
             let working_asks = pane_asks(directory.path());
+            assert_eq!(channel.connections(), 1, "the parent did not hold the child's channel");
             std::fs::write(directory.path().join("panes"), "").expect("the pane leaves the table");
             let died = std::time::Instant::now();
             channel.die();
@@ -3603,9 +3584,7 @@ mod tests {
         assert_eq!(outcome, PaneOutcome::Vanished);
         assert_eq!(working_asks, 1, "tmux was asked while the child worked");
         assert_eq!(pane_asks(directory.path()), 2, "the start and the confirmation, and no more");
-        // What the death would otherwise wait for is the next ask, half a minute
-        // on (`watching_cadence`); the confirming ask is a process spawn.
-        assert!(lag < Duration::from_secs(5), "the death was heard {lag:?} after it");
+        assert!(lag < Duration::from_millis(500), "the death was heard {lag:?} after it");
     }
 
     /// A child that answers and then exits is a result, not a death: its
@@ -3634,13 +3613,7 @@ mod tests {
                     watching_cadence(),
                 )
             });
-            // The child answers once the wait has asked tmux and holds its channel.
-            assert!(
-                wait_until_true(Duration::from_secs(20), || {
-                    pane_asks(directory.path()) >= 1 && channel.connections() == 1
-                }),
-                "the parent did not hold the child's channel"
-            );
+            std::thread::sleep(Duration::from_millis(500));
             // A well-behaved child writes, and then its pane and process go.
             let mut wrote = TeammateResult::new("agent-31", Exit::Ok);
             wrote.final_message = "done".to_string();
@@ -3680,14 +3653,9 @@ mod tests {
                     watching_cadence(),
                 )
             });
-            // The channel lands after the wait has begun looking (its first ask is
-            // logged) and is held from the moment its file lands.
-            assert!(
-                wait_until_true(Duration::from_secs(20), || pane_asks(directory.path()) >= 1),
-                "the wait never asked tmux"
-            );
+            std::thread::sleep(Duration::from_millis(300));
             let channel = DyingChannel::stand(&child);
-            wait_until_true(Duration::from_secs(20), || channel.connections() == 1);
+            std::thread::sleep(Duration::from_millis(400));
             let connections_when_up = channel.connections();
             std::fs::write(directory.path().join("panes"), "").expect("the pane leaves the table");
             channel.die();
