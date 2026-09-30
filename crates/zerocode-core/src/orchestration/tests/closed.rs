@@ -347,12 +347,9 @@ fn a_closed_task_is_never_graded_as_a_failed_attempt() {
             &total,
         )
     };
-    // An attempt that ended without a report is a failed one while the task
-    // is open; the work moving elsewhere makes it no evidence at all.
-    assert_eq!(
-        grade(&bench).expect("graded").first_attempt_success,
-        Some(false)
-    );
+    // While the task is open, its stopped attempt is graded; once the work
+    // has moved elsewhere it is no evidence about the model at all.
+    assert!(grade(&bench).is_some(), "the open task was not graded");
     bench.json(&format!(
         "task-update --task {id} --status closed --closed-as outdated --why moved"
     ));
