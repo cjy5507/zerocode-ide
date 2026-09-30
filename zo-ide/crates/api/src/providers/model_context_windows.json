@@ -364,13 +364,22 @@
       "canonical": "claude-sonnet-5",
       "provider": "anthropic",
       "demotes_to": "haiku",
-      "refusal_fallback": ["opus", "openai-latest"]
+      "refusal_fallback": ["opus", "openai-latest"],
+      "refusal_routes": {
+        "cyber": ["claude-sonnet-5", "openai-latest"],
+        "frontier_llm": ["claude-sonnet-5", "openai-latest"]
+      }
     },
     {
       "alias": "haiku",
       "canonical": "claude-haiku-4-5-20251001",
       "provider": "anthropic",
-      "refusal_fallback": ["opus", "openai-latest"]
+      "refusal_fallback": ["opus", "openai-latest"],
+      "refusal_routes": {
+        "cyber": ["claude-opus-4-8", "openai-latest"],
+        "bio": ["claude-opus-5", "openai-latest"],
+        "frontier_llm": ["claude-opus-5", "openai-latest"]
+      }
     },
     {
       "alias": "claude-opus",
@@ -573,6 +582,6 @@
     "fast_pair": "Release-specific priority-tier spelling when it is not `<id>[fast]`.",
     "demotes_to": "One-step rate-limit fallback for an id that is not a family alias's canonical.",
     "refusal_fallback": "Where a safety-classifier refusal on this lineup goes next, as one alias or an ordered list of them (an alias row carries its family's; a model row carries a retired lineup's). The head that shares this provider is retried on the bound client; a cross-provider candidate is handed the turn like a quota fallback, skipping any whose provider is not connected. Absent: a refusal is surfaced after one same-model retry. The runtime names no lineup for this.",
-    "refusal_routes": "Where a safety-classifier refusal on this lineup goes, per the category the classifier names (cyber, bio, frontier_llm, reasoning_extraction, general_harms): the provider's own routing, by model id and never by a family alias that moves (Claude Code 2.1.281 routes cyber from Fable 5.1, Opus 5 and Opus 5.5 to Opus 4.8, and bio from Fable 5.1 and Opus 5.5 — and frontier_llm from Opus 5.5 — to Opus 5; a route naming the refusing model itself is skipped, so Opus 5's own bio refusal goes on across providers). A category absent here is routed nowhere and its refusal stands; a refusal naming no category stands too. Absent altogether: refusal_fallback answers for every category. Measured t-6747."
+    "refusal_routes": "Where a safety-classifier refusal on this lineup goes, per the category the classifier names (cyber, bio, frontier_llm, reasoning_extraction, general_harms): the provider's own routing, by model id and never by a family alias that moves (Claude Code 2.1.281 routes cyber from Fable 5.1, Opus 5 and Opus 5.5 to Opus 4.8, and bio from Fable 5.1 and Opus 5.5 — and frontier_llm from Opus 5.5 — to Opus 5; a route naming the refusing model itself is skipped, so Opus 5's own bio refusal goes on across providers; Claude Code 2.1.285 routes Sonnet 5.5's cyber and frontier_llm to Sonnet 5 and its bio nowhere, and every model it has no table for, Haiku 4.5 among them, by the default table: cyber to Opus 4.8, bio and frontier_llm to Opus 5). A category absent here is routed nowhere and its refusal stands; a refusal naming no category stands too, and so do reasoning_extraction and general_harms on every Anthropic lineup, since the Opus head is behind the same classifier and declines them again (t-17474). Absent altogether: refusal_fallback answers for every category. Measured t-6747."
   }
 }

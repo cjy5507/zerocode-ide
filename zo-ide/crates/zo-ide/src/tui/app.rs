@@ -3293,21 +3293,9 @@ impl Ui {
 
     fn park(&mut self, prompt: PendingPrompt) {
         let screen = match &prompt {
-            PendingPrompt::Permission(permission) => ParkedScreen::Dialog(Dialog {
-                title: "Allow".to_string(),
-                subject: crate::util::ansi::sanitize_inline(&permission.tool_name),
-                body: permission
-                    .audit_hint
-                    .clone()
-                    .unwrap_or_else(|| permission.reasoning.clone()),
-                options: permission
-                    .choices
-                    .iter()
-                    .map(|choice| choice.label.clone())
-                    .collect(),
-                selected: 0,
-                footer: "Press enter to continue".to_string(),
-            }),
+            PendingPrompt::Permission(permission) => {
+                ParkedScreen::Dialog(Dialog::for_permission(permission))
+            }
             // 세 갈래 모두 같은 오버레이다 — 보기가 있으면 번호 목록,
             // 다중이면 그 목록에 `[x]`, 없으면 컴포저가 답을 받는다.
             PendingPrompt::Question(question) => {
@@ -4264,7 +4252,7 @@ impl Ui {
                 }
             }
             RenderBlock::PermissionPrompt(prompt) => {
-                reporter.permission_request(&prompt.tool_name, &prompt.reasoning, session_id);
+                reporter.prompt(prompt, session_id);
             }
             RenderBlock::UserQuestionPrompt(prompt) => {
                 reporter.question(&prompt.question, session_id);
@@ -6557,6 +6545,7 @@ mod tests {
                     decision: PermissionDecision::Deny,
                 },
             ],
+            question: None,
             responder,
         });
         (block, decision)
