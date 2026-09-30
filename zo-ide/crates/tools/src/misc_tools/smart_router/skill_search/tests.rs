@@ -794,3 +794,23 @@ fn a_skill_load_labels_its_explicit_search_even_while_a_suggestion_waits() {
     assert!(skill_search_path(&cwd).is_file(), "the pending suggestion swallowed the search label");
     finish_turn_suggestion(&cwd, &[]);
 }
+
+/// A narrow request that never got a reply — the wire timed out or the
+/// service answered 503 — is a fallback, not a malformed reply: the judge
+/// holds a seat from rising for any `schema` row in its window and forgives
+/// one wire failure (t-19255). Every `schema` row the suggestion ledgers on
+/// this machine carried a wire word under `rejected`.
+#[test]
+fn a_narrow_request_that_got_no_reply_is_not_written_as_a_refused_reply() {
+    for wire in ["timeout", "http_503", "deadline"] {
+        let mut row = SkillSearchRow::new(key(&candidates(1)), 1, 2, String::new());
+        settle_narrow_failure(&mut row, NarrowFailure::Wire(wire.to_string()));
+        assert_eq!(row.outcome, wire);
+        assert!(!zerocode_core::jev::promote::names_a_schema_failure(&row.outcome));
+        assert_eq!(row.rejected, None);
+    }
+    let mut row = SkillSearchRow::new(key(&candidates(1)), 1, 2, String::new());
+    settle_narrow_failure(&mut row, NarrowFailure::Refused("score_mismatch".to_string()));
+    assert_eq!(row.outcome, "schema");
+    assert_eq!(row.rejected.as_deref(), Some("score_mismatch"));
+}

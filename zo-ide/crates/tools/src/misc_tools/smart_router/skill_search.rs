@@ -797,8 +797,7 @@ async fn judge_suggestion(
             acting, started, &mut row).await {
             Ok(winner) => winner,
             Err(reason) => {
-                row.outcome = SystemOneFailure::Schema.ledger_token();
-                row.rejected = Some(reason);
+                settle_narrow_failure(&mut row, NarrowFailure::Refused(reason));
                 record_row(&SKILL_SUGGESTION, &skill_suggestion_path(&cwd), &row);
                 return None;
             }
@@ -820,6 +819,23 @@ async fn judge_suggestion(
         );
     }
     acting.then(|| suggestion_note(winner.as_ref().map(|choice| choice.name.as_str())))
+}
+
+/// Why the narrow request gave nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NarrowFailure {
+    /// No reply came: a ledger token of the wire, the door or the clock.
+    Wire(String),
+    /// A reply came and the rule named here refused it.
+    Refused(String),
+}
+
+/// What the narrow request's failure writes on the row. Today every failure
+/// of it is written as a refused reply.
+fn settle_narrow_failure(row: &mut SkillSearchRow, failure: NarrowFailure) {
+    let (NarrowFailure::Wire(reason) | NarrowFailure::Refused(reason)) = failure;
+    row.outcome = SystemOneFailure::Schema.ledger_token();
+    row.rejected = Some(reason);
 }
 
 async fn ask_wide(
