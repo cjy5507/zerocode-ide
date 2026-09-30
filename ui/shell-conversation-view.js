@@ -1813,28 +1813,30 @@ function activityKindOf(verb, run) {
   return STEP_LOOKS.has(verb) ? verb : `tool:${verb}`;
 }
 
+/* The verbs a status card carries that name no tool of the core's, with the page's own words for them
+ * (an empty word: a fact the page has none for, so the line falls back). They are zo's protocol, spelled
+ * once, here: `session_status.activity.verb` says waiting, reconnecting, reasoning silently and quiet
+ * (`tui/strings.rs` ACTIVITY_*, `StatusActivity::verb` in `tui/view.rs`), and a zo helper's card says a
+ * bare working before its first call (`session/subagent_progress.rs`). A source contract holds this
+ * table to those spellings, so a word zo changes breaks that test instead of the line quietly naming
+ * nothing. */
+const ZO_STATUS_WORDS = {
+  waiting: () => t("worker.nowWaiting", "답을 기다리는 중"),
+  reconnecting: () => t("worker.nowReconnecting", "다시 연결하는 중"),
+  "reasoning silently": () => t("worker.nowThinking", "생각하는 중"),
+  quiet: () => "",
+  working: () => "",
+};
+
 /* What one activity says, in the words the step rows wear — the same kind words and the same titles —
- * and, for the facts an agent's status carries that are no tool (zo's waiting, reconnecting and
- * reasoning silently), in the page's own. An activity that is over names nothing, and neither does a
- * fact the page has no word for (zo's quiet, a helper's bare working). */
+ * and, for the facts an agent's status carries that are no tool, in the page's own (`ZO_STATUS_WORDS`).
+ * An activity that is over names nothing. */
 function nowActivityWords(activity, run) {
   if (!activity || activity.phase !== "started" || typeof activity.verb !== "string") return "";
-  switch (activity.verb) {
-    case "waiting":
-      return t("worker.nowWaiting", "답을 기다리는 중");
-    case "reconnecting":
-      return t("worker.nowReconnecting", "다시 연결하는 중");
-    case "reasoning silently":
-      return t("worker.nowThinking", "생각하는 중");
-    case "quiet":
-    case "working":
-      return "";
-    default: {
-      const kind = activityKindOf(activity.verb, run);
-      const target = kind === "todo" || typeof activity.target !== "string" ? "" : activity.target;
-      return `${stepLook(kind).word()} ${stepTitleWords(kind, target)}`.trim();
-    }
-  }
+  if (Object.hasOwn(ZO_STATUS_WORDS, activity.verb)) return ZO_STATUS_WORDS[activity.verb]();
+  const kind = activityKindOf(activity.verb, run);
+  const target = kind === "todo" || typeof activity.target !== "string" ? "" : activity.target;
+  return `${stepLook(kind).word()} ${stepTitleWords(kind, target)}`.trim();
 }
 
 function nowSaidOf(list, run, voice) {

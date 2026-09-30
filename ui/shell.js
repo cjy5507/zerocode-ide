@@ -11483,14 +11483,13 @@ function holdHelperTurns(held, turns) {
     // 없는 줄을 백엔드는 `null`로 보낸다(빠진 열쇠가 아니다): 둘 다 「없음」이다.
     const stamp = Number.isFinite(turn.at_ms) && turn.at_ms > 0 ? turn.at_ms : null;
     // 헬퍼 자신의 시계는 파일이 찍은 첫 줄에서 끝 줄까지다(`helperSpanWords`) —
-    // 페이지가 열린 순간이 아니라. 턴을 앞에서 지워도(상한) 이 둘은 남는다. 두
-    // 번째 도장이 첫 도장보다 이르면(압축한 세션의 맨 앞 요약은 쓰인 순간이 찍혀서
-    // 뒤따르는 옛 줄들보다 늦다 — 설계이고 지어낸 시각이 아니다) 그 파일의 시계는
-    // 곧지 않다: 폭을 말하지 않는다.
+    // 페이지가 열린 순간이 아니라. 턴을 앞에서 지워도(상한) 이 둘은 남는다. 도장이
+    // 직전 도장보다 이르면(압축한 세션의 맨 앞 요약은 쓰인 순간이 찍혀서 뒤따르는
+    // 옛 줄들보다 늦다 — 설계이고 지어낸 시각이 아니다) 그 파일의 시계는 곧지
+    // 않다: 어디서든 뒤로 가면 폭을 말하지 않는다.
     if (stamp !== null) {
-      held.stampCount = (held.stampCount ?? 0) + 1;
-      if (held.stampCount === 1) held.firstStampMs = stamp;
-      else if (held.stampCount === 2 && stamp < held.firstStampMs) held.clockBroken = true;
+      if (held.firstStampMs === undefined) held.firstStampMs = stamp;
+      else if (stamp < held.lastStampMs) held.clockBroken = true;
       held.lastStampMs = stamp;
     }
     if (turn.role === "tool_result" && turn.tool?.call_id) {
@@ -12302,7 +12301,6 @@ async function pollHelperPages() {
   if (replaced) {
     held.turns.length = 0;
     held.skipped = false;
-    held.stampCount = 0;
     held.firstStampMs = undefined;
     held.lastStampMs = undefined;
     held.clockBroken = false;
