@@ -112,3 +112,9 @@ root:shell_path::tests::a_real_shell_is_read_and_a_stuck_one_is_killed
 ui:the workspace spinner writes its four dots once a step, not once a frame
 zo:a_verifier_is_watched_over_a_file_its_tree_holds_that_the_index_let_go_of
 zo:a_verifier_names_the_source_it_read_from_its_start_and_never_one_it_did_not_see
+
+# The autopilot's threaded test double: the second asked row is read (`until_rows`) before its `why` lands
+# under load (left Null, right "plan_mismatch"); red on a worker's whole shell-bin run beside a second lane
+# (2026-09-30 15:44, t-17078's job, 2523/2524) and in two earlier loaded runs; green alone on the same head
+# and in three quiet coordinator gates that day (2525/0, 2526/0, 2528/0). The branch touched no Rust.
+root:computer_use::reflex::autopilot::tests::a_stale_or_mismatched_or_late_answer_is_never_carried_out

@@ -75,6 +75,10 @@ pub const UNLISTED_GRACE_SECS: u64 = 7 * 24 * 60 * 60;
 /// release brings models the catalog should not wait for a Codex cache to
 /// learn.
 pub const CODEX_CLIENT_VERSION_DEFAULT: &str = "0.159.2";
+/// The program the installed Codex is asked through, and the word its own
+/// `--version` line names it by (`codex-cli 0.159.2`) — one name for both, so
+/// a banner that names some other program is not taken for its version.
+const CODEX_PROGRAM: &str = "codex";
 /// How long `codex --version` may take before it is taken to say nothing.
 const CODEX_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// How much of what `codex --version` printed is read.
@@ -1184,11 +1188,12 @@ impl ClientVersion {
     }
 
     /// The version `codex --version` printed: the first word of its first
-    /// line that reads as one, on a line that names codex (`codex-cli
-    /// 0.159.2`). A wrapper's banner is not a Codex version.
+    /// line that reads as one, on a line that names the program we called
+    /// ([`CODEX_PROGRAM`], as in `codex-cli 0.159.2`). A wrapper's banner is
+    /// not a Codex version.
     fn of_codex_output(output: &str) -> Option<Self> {
         let line = output.lines().map(str::trim).find(|line| !line.is_empty())?;
-        if !line.to_ascii_lowercase().contains("codex") {
+        if !line.to_ascii_lowercase().contains(CODEX_PROGRAM) {
             return None;
         }
         line.split_whitespace().find_map(Self::parse)
@@ -1261,7 +1266,7 @@ fn installed_codex_version() -> Option<ClientVersion> {
     if let Some(known) = said.as_ref().filter(|known| known.path == path) {
         return known.version;
     }
-    let version = probe_codex_version("codex", CODEX_PROBE_TIMEOUT);
+    let version = probe_codex_version(CODEX_PROGRAM, CODEX_PROBE_TIMEOUT);
     *said = Some(Said { path, version });
     version
 }

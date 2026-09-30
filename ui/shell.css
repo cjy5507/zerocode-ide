@@ -351,6 +351,12 @@ kbd {
    * commit that touches what it samples — the standing cost behind t-161
    * (전체 창 간헐 깜박임). */
   user-select: none;
+  /* A grid item's floor is its min-content, and a strip of sixty tabs has a
+   * min-content ten thousand pixels wide: the whole bar grew past the window,
+   * the strip never had anything to scroll, and the controls on the right
+   * left the screen (live report 2026-09-30, 「탭이 늘어날수록 화면이 깨지는
+   * 버그」). The row is as wide as the window; the strip scrolls inside it. */
+  min-width: 0;
 }
 
 /* 손잡이는 어디서나 손잡이의 몸짓을 한다. 표면의 글자들(워드마크·프로젝트
@@ -538,6 +544,9 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 }
 
 .titlebar-right {
+  /* The controls keep their width however many tabs stand beside them —
+   * the strip is what gives way, and it gives way by scrolling. */
+  flex: none;
   margin-left: auto;
   display: flex;
   align-items: center;
@@ -5672,6 +5681,9 @@ body.is-dragging-pane {
   border-bottom: var(--rule-width) solid var(--edge-rule);
   overflow-x: auto;
   scrollbar-width: none;
+  /* The fade's width, as the strip's own scroll padding: a tab brought into
+   * view (`revealActiveTab`) stops clear of the mask, not under it. */
+  scroll-padding-inline: var(--tab-fade);
   /* What overflows FADES rather than being cut. With the scrollbar hidden
    * (below) a clipped strip gives no sign that there is more to the right —
    * the last tab simply ends mid-word and reads as a rendering fault. The
@@ -33901,9 +33913,15 @@ details.task-board-section > summary {
   font-size: var(--agent-graph-screen-text);
 }
 
+/* 발치는 줄을 바꿀 수 있다 (t-17078). 가장 좁은 레일(720px 창에서 안쪽
+ * 279px)에서 이름이 0까지 줄어도 모델·시계 넷의 폭이 판을 넘는 언어가
+ * 있으므로(스페인어 「ahora mismo」+「lleva 50 min」), 그때 넘치는 대신 시계가
+ * 다음 줄로 내려간다. 이름은 기준 폭이 0이라 줄을 가르는 셈에 끼지 않고 남은
+ * 자리만 받는다 — 좁을 때 자리를 내주는 쪽은 여전히 이름이다. */
 .board-card-foot {
   display: flex;
-  gap: var(--space-2);
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
   align-items: center;
   min-width: 0;
   color: var(--ink-mist);
@@ -33911,6 +33929,8 @@ details.task-board-section > summary {
 }
 
 .board-card-where {
+  flex: 1 1 0;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
