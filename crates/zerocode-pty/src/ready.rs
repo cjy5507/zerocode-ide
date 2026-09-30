@@ -37,7 +37,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::input::encode_paste;
+use crate::input::Words;
 
 /// How long a silent program must stay silent before it counts as ready.
 ///
@@ -751,6 +751,8 @@ pub struct PromptDelivery {
     /// Set for a delivery that presses only the Enter its words are still
     /// waiting on (t-17037); `None` for one that carries words.
     enter_again: Option<EnterAgain>,
+    /// How the words go onto the composer: its agent's row says (t-17274).
+    words: Words,
 }
 
 /// The receipt's two clocks (t-14037).
@@ -801,6 +803,7 @@ impl PromptDelivery {
             phase: Phase::Waiting,
             receipt: ReceiptClock::default(),
             enter_again: None,
+            words: Words::Pasted,
         }
     }
 
@@ -843,6 +846,7 @@ impl PromptDelivery {
             phase: Phase::Waiting,
             receipt: ReceiptClock::default(),
             enter_again: None,
+            words: Words::Pasted,
         }
     }
 
@@ -888,6 +892,14 @@ impl PromptDelivery {
     #[must_use]
     pub const fn enter_again(&self) -> Option<EnterAgain> {
         self.enter_again
+    }
+
+    /// Choose how this delivery's words go onto the composer (t-17274): its
+    /// agent's row decides — see [`Words`]. The default is the paste.
+    #[must_use]
+    pub const fn words(mut self, words: Words) -> Self {
+        self.words = words;
+        self
     }
 
     /// Choose what this delivery refuses to write over. See [`Guard`].
@@ -966,23 +978,36 @@ impl PromptDelivery {
                     // consumes these edit keys. Launch composers are new and
                     // empty; several TUIs insert Ctrl+U/Ctrl+K as literal
                     // text. When present, the clear rides OUTSIDE the envelope:
-                    // inside brackets a Ctrl+U is always paste data.
-                    let mut bytes = if self.clearing {
+                    // inside brackets a Ctrl+U is always paste data. And it is
+                    // only ever made room for words: a delivery with none
+                    // empties nobody's line (t-17274).
+                    let mut bytes = if self.clearing && !self.text.is_empty() {
                         clear_input_for_text("")
                     } else {
                         Vec::new()
                     };
-                    // Always bracketed: the handshake this wait is gated on IS
-                    // the program turning bracketed paste on, so by the time
-                    // anything is written the envelope is wanted. Sanitisation
-                    // lives inside `encode_paste`.
-                    bytes.extend(encode_paste(&self.text, true));
+                    // The words the way the agent's row says they go (t-17274):
+                    // framed in a paste — always bracketed, since the handshake
+                    // this wait is gated on IS the program turning bracketed
+                    // paste on — or typed as keys at a composer where a frame
+                    // that comes apart is a picture paste. Sanitisation lives
+                    // in the encoding.
+                    bytes.extend(self.words.encode(&self.text));
                     if self.submit {
                         self.phase = Phase::Submitting { pasted_at: now };
                     } else {
                         self.phase = Phase::Done(Outcome::Delivered);
                     }
-                    Step::Write(bytes)
+                    match (bytes.is_empty(), self.submit) {
+                        (false, _) => Step::Write(bytes),
+                        // No words and no clear keys: nothing is written — a
+                        // wait for the composer to stand, or an Enter with
+                        // nothing before it. An envelope around nothing is an
+                        // empty paste, which a composer that reads the
+                        // clipboard for a picture answers with the person's.
+                        (true, false) => Step::Done(Outcome::Delivered),
+                        (true, true) => Step::Waiting,
+                    }
                 }
             },
             Phase::Submitting { pasted_at } => {

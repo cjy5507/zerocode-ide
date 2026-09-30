@@ -335,6 +335,25 @@ pub enum NudgeRoad {
     Composer,
 }
 
+/// How a delivery's words go onto this agent's composer (t-17274).
+///
+/// A bracketed paste is every measured composer's road for words — while its
+/// frame arrives whole. Where an EMPTY paste is the composer's picture paste
+/// (the gesture a terminal sends for Cmd+V with only a picture on the
+/// clipboard), a frame that comes apart on its way in is one too, and the
+/// person's picture rides the words; such a composer is typed at instead,
+/// and typed keys hold no frame to come apart. Unmeasured agents keep the
+/// paste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComposerWords {
+    /// In one bracketed paste frame.
+    Pasted,
+    /// As typed keys and never a paste frame, a line break typed as
+    /// `line_break` — the composer's new-line key, because its Enter sends.
+    Typed { line_break: &'static [u8] },
+}
+
 /// One agent, and everything needed to start it and talk to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct AgentSpec {
@@ -343,6 +362,9 @@ pub struct AgentSpec {
     pub id: &'static str,
     /// Whether a send to an already-running composer may use edit keys first.
     pub composer_clear: ComposerClear,
+    /// How a delivery's words go onto the composer: pasted, or typed where a
+    /// paste frame can reach the person's clipboard (t-17274).
+    pub composer_words: ComposerWords,
     /// Where a continuation prompt goes after this agent is resumed.
     pub resume_nudge: NudgeRoad,
     pub name: &'static str,
@@ -557,6 +579,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "zo",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "ZO",
         favicon_domain: "",
@@ -597,6 +620,18 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "claude",
         composer_clear: ComposerClear::None,
+        // Measured 2026-09-30 against Claude Code 2.1.285 on macOS (t-17274):
+        // an empty paste is its picture paste — it reads the system clipboard
+        // and attaches the picture — and a frame can come apart on its way in:
+        // the buffer that collects input while it starts drops escape
+        // sequences, a frame's start among them, and its reader closes a paste
+        // quiet for two seconds. Either way the frame's end arrives with no
+        // start, which is an empty paste. In a pty under a sandbox refusing
+        // pasteboard lookups, empty frames and lone ends reached for the
+        // clipboard in every run watched for eight seconds (4 of 4; 7 of 12
+        // in all), whole frames in none of 6 and typed words in none of 4.
+        // Ctrl+J is its `chat:newline` key; Ctrl+V is its picture key.
+        composer_words: ComposerWords::Typed { line_break: b"\n" },
         resume_nudge: NudgeRoad::Argv,
         name: "Claude",
         favicon_domain: "claude.ai",
@@ -654,6 +689,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "openclaude",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "OpenClaude",
         favicon_domain: "openclaude.gitlawb.com",
@@ -676,6 +712,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "codex",
         composer_clear: ComposerClear::Keys,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Codex",
         favicon_domain: "openai.com",
@@ -723,6 +760,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "devin",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Devin",
         favicon_domain: "devin.ai",
@@ -749,6 +787,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "ante",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Ante",
         favicon_domain: "antigma.ai",
@@ -771,6 +810,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "trae",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Trae",
         favicon_domain: "www.trae.cn",
@@ -793,6 +833,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "autohand",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Autohand Code",
         favicon_domain: "autohand.ai",
@@ -815,6 +856,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "opencode",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "OpenCode",
         favicon_domain: "opencode.ai",
@@ -840,6 +882,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "mimo-code",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "MiMo Code",
         favicon_domain: "mimo.xiaomi.com",
@@ -862,6 +905,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "pi",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Pi",
         favicon_domain: "pi.dev",
@@ -887,6 +931,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "omp",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "OMP",
         favicon_domain: "omp.sh",
@@ -912,6 +957,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "prime-agent",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Prime Agent",
         favicon_domain: "primeintellect.ai",
@@ -940,6 +986,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "antigravity",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Antigravity",
         favicon_domain: "antigravity.google",
@@ -982,6 +1029,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "aider",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Aider",
         favicon_domain: "aider.chat",
@@ -1004,6 +1052,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "goose",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Goose",
         favicon_domain: "goose-docs.ai",
@@ -1026,6 +1075,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "amp",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Amp",
         favicon_domain: "ampcode.com",
@@ -1048,6 +1098,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "kilo",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Kilocode",
         favicon_domain: "kilo.ai",
@@ -1070,6 +1121,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "kiro",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Kiro",
         favicon_domain: "kiro.dev",
@@ -1092,6 +1144,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "crush",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Charm",
         favicon_domain: "charm.sh",
@@ -1114,6 +1167,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "aug",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Auggie",
         favicon_domain: "augmentcode.com",
@@ -1136,6 +1190,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "cline",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Cline",
         favicon_domain: "cline.bot",
@@ -1158,6 +1213,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "codebuff",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Codebuff",
         favicon_domain: "codebuff.com",
@@ -1180,6 +1236,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "command-code",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Command Code",
         favicon_domain: "commandcode.ai",
@@ -1202,6 +1259,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "continue",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Continue",
         favicon_domain: "continue.dev",
@@ -1224,6 +1282,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "cursor",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Cursor",
         favicon_domain: "cursor.com",
@@ -1257,6 +1316,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "droid",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Droid",
         favicon_domain: "factory.ai",
@@ -1283,6 +1343,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "kimi",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Kimi",
         favicon_domain: "moonshot.cn",
@@ -1308,6 +1369,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "mistral-vibe",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Mistral Vibe",
         favicon_domain: "mistral.ai",
@@ -1330,6 +1392,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "qwen-code",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Qwen Code",
         favicon_domain: "qwenlm.github.io",
@@ -1352,6 +1415,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "rovo",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Rovo Dev",
         favicon_domain: "atlassian.com",
@@ -1382,6 +1446,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "hermes",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Hermes",
         favicon_domain: "nousresearch.com",
@@ -1404,6 +1469,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "openclaw",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "OpenClaw",
         favicon_domain: "openclaw.ai",
@@ -1426,6 +1492,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "copilot",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "GitHub Copilot",
         favicon_domain: "github.com",
@@ -1457,6 +1524,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
     AgentSpec {
         id: "grok",
         composer_clear: ComposerClear::None,
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Composer,
         name: "Grok",
         favicon_domain: "x.ai",
@@ -3032,6 +3100,36 @@ mod tests {
                 .filter(|spec| spec.id != "codex")
                 .all(|spec| spec.composer_clear == ComposerClear::None),
             "an unmeasured agent was opted into destructive clear keys"
+        );
+    }
+
+    /// A composer is typed at only where an empty paste was measured reading
+    /// the person's clipboard (t-17274), and a typed row's line break is a
+    /// key that makes a new line — never a carriage return, the Enter that
+    /// would send the words a line at a time. Every other row keeps the
+    /// paste it was measured taking.
+    #[test]
+    fn only_a_composer_measured_reading_the_clipboard_is_typed_at() {
+        assert_eq!(
+            agent_spec("claude").map(|spec| spec.composer_words),
+            Some(ComposerWords::Typed { line_break: b"\n" })
+        );
+        for spec in AGENT_SPECS {
+            if let ComposerWords::Typed { line_break } = spec.composer_words {
+                assert!(
+                    !line_break.is_empty() && !line_break.contains(&b'\r'),
+                    "{}'s line break is empty or sends",
+                    spec.id
+                );
+            }
+        }
+        assert_eq!(
+            AGENT_SPECS
+                .iter()
+                .filter(|spec| spec.composer_words != ComposerWords::Pasted)
+                .count(),
+            1,
+            "an unmeasured agent was taken off the paste"
         );
     }
 

@@ -21,7 +21,9 @@
 use serde::Serialize;
 
 use crate::account::{Provider, providers_for};
-use crate::agent::{AgentSpec, ComposerClear, Injection, NudgeRoad, ReadyMark, agent_spec};
+use crate::agent::{
+    AgentSpec, ComposerClear, ComposerWords, Injection, NudgeRoad, ReadyMark, agent_spec,
+};
 
 /// How the pane that runs this agent is opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -472,12 +474,14 @@ pub struct Startup {
     pub timeout_ms: Option<u32>,
 }
 
-/// Steering a RUNNING agent: every catalog agent is steered by a paste at its
+/// Steering a RUNNING agent: every catalog agent is steered by words at its
 /// resting composer; `clear` says whether edit keys may empty that composer
-/// first, which only a measured agent consumes as commands.
+/// first, which only a measured agent consumes as commands, and `words`
+/// whether the words are pasted or typed (t-17274).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Steer {
     pub clear: ComposerClear,
+    pub words: ComposerWords,
 }
 
 /// How the window proves the composer is empty before it pastes.
@@ -626,6 +630,7 @@ impl AgentSpec {
             },
             steer: Steer {
                 clear: self.composer_clear,
+                words: self.composer_words,
             },
             empty_composer_proof: match self.composer_clear {
                 ComposerClear::Keys => EmptyComposerProof::ClearKeys,

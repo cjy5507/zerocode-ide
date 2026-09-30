@@ -242,7 +242,8 @@ pub(super) fn settle(
                 PromptDelivery::new(next.text, next.submit, next.signal, now)
                     .clearing(next.clearing)
                     .guarded(next.guard)
-                    .pressing(next.enter_again),
+                    .pressing(next.enter_again)
+                    .words(next.words),
             );
         }
         if row.is_empty() {
@@ -424,6 +425,7 @@ mod tests {
             clearing: false,
             guard: Guard::for_somebody_elses_line(None),
             enter_again: Some(zerocode_pty::EnterAgain { hand: placed }),
+            words: zerocode_pty::Words::Pasted,
             completion,
         });
         settle(
@@ -474,6 +476,7 @@ mod tests {
                 clearing: false,
                 guard,
                 enter_again: None,
+                words: zerocode_pty::Words::Pasted,
                 completion,
             },
             receipt,
@@ -1089,6 +1092,7 @@ done
                     clearing: false,
                     guard: Guard::for_somebody_elses_line(None),
                     enter_again: None,
+                    words: composer_words_for(Some("claude")),
                     completion,
                 });
         }

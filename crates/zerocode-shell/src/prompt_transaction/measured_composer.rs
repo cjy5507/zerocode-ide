@@ -490,3 +490,51 @@ fn every_road_hands_the_measured_composer_its_words_and_never_its_pasteboard() {
         "the restoring worker's wait wrote {waited:?} to the composer it waited for"
     );
 }
+
+/// Every catalog row, walked (t-17274): its words go the way its row says —
+/// one whole frame where it takes a paste, keys and its own line-break key
+/// where it is typed at — and no row's wait for a composer to stand writes
+/// anything at all.
+#[test]
+fn every_row_writes_its_words_the_way_its_row_says() {
+    let start = Instant::now();
+    let words = "first line\nsecond line";
+    for spec in &zerocode_core::AGENT_SPECS {
+        let row = Some(spec.id);
+        let wrote = written(
+            crate::cmd::terminal::prompt_delivery_for(
+                words.to_string(),
+                false,
+                row,
+                crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+                None,
+                start,
+            ),
+            start,
+        );
+        let expected = match spec.composer_words {
+            zerocode_core::ComposerWords::Pasted => zerocode_pty::encode_paste(words, true),
+            zerocode_core::ComposerWords::Typed { line_break } => [
+                b"first line".as_slice(),
+                line_break,
+                b"second line".as_slice(),
+            ]
+            .concat(),
+        };
+        assert_eq!(wrote, expected, "{}", spec.id);
+        let waited = written(
+            PromptDelivery::with_deadlines(
+                String::new(),
+                false,
+                ready_signal_for(row),
+                start,
+                ready_quiet_for(row),
+                ready_timeout_for(row),
+            )
+            .clearing(false)
+            .words(composer_words_for(row)),
+            start,
+        );
+        assert!(waited.is_empty(), "{}'s wait wrote {waited:?}", spec.id);
+    }
+}

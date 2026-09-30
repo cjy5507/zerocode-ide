@@ -255,6 +255,84 @@ pub fn sanitize_paste(text: &str) -> String {
     out
 }
 
+/// How a delivery's words go onto a composer (t-17274). The agent's row
+/// decides; the delivery only follows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Words {
+    /// Framed in one bracketed paste.
+    #[default]
+    Pasted,
+    /// Typed as keys, with no frame at all, a line break typed as
+    /// `line_break` — the key the composer takes as a new line, because a
+    /// typed Enter sends.
+    Typed { line_break: &'static [u8] },
+}
+
+impl Words {
+    /// The bytes that put `text` on a composer this way — and nothing at
+    /// all for no words. An envelope around nothing is an EMPTY paste, which
+    /// is what a terminal sends for Cmd+V when the clipboard holds only a
+    /// picture; a composer that reads the clipboard for one attaches the
+    /// person's picture to whatever it sends next.
+    #[must_use]
+    pub fn encode(self, text: &str) -> Vec<u8> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+        match self {
+            Self::Pasted => encode_paste(text, true),
+            Self::Typed { line_break } => encode_typed(text, line_break),
+        }
+    }
+}
+
+/// Words typed as keys rather than pasted (t-17274).
+///
+/// Nothing typed may be a key but the letters and the line break:
+///
+/// - a line break (`\r\n`, `\r` or `\n`) is typed as `line_break`, the
+///   composer's own new-line key: a typed carriage return is its Enter, and
+///   would send the words a line at a time;
+/// - a tab is typed as a space: a typed tab is a completion key;
+/// - every other control — C0, DEL and C1 — is typed as its visible picture,
+///   the escape as `␛` the way a paste has it: typed, Ctrl+V is a picture
+///   paste, Ctrl+C ends a program that is still starting, and an escape
+///   opens a sequence, a paste frame's end among them.
+#[must_use]
+pub fn encode_typed(text: &str, line_break: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut buffer = [0; 4];
+    while let Some(ch) = chars.next() {
+        let typed = match ch {
+            '\r' | '\n' => {
+                if ch == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.extend_from_slice(line_break);
+                continue;
+            }
+            '\t' => ' ',
+            control if control.is_control() => control_picture(control),
+            letter => letter,
+        };
+        out.extend_from_slice(typed.encode_utf8(&mut buffer).as_bytes());
+    }
+    out
+}
+
+/// A control character's visible stand-in: its Control Pictures glyph for
+/// C0 (the escape's is [`INERT_ESCAPE`]), `␡` for DEL, and the replacement
+/// character for C1, which has no picture.
+fn control_picture(control: char) -> char {
+    let code = u32::from(control);
+    match code {
+        0x00..=0x1f => char::from_u32(0x2400 + code).unwrap_or(char::REPLACEMENT_CHARACTER),
+        0x7f => '\u{2421}',
+        _ => char::REPLACEMENT_CHARACTER,
+    }
+}
+
 /// What the pointer did, as the view reports it.
 ///
 /// Cells, not pixels: the window owns the font metrics and the child owns the
@@ -817,5 +895,44 @@ mod tests {
         // TUI reads as pasted lines, and the ONE Enter that submits is the
         // window's own, sent after the envelope (`TeamWindow::paste`).
         assert!(!body.contains(&b'\n'), "a raw line feed survived");
+    }
+
+    /// Typed words carry no key but their letters and the line break
+    /// (t-17274): no frame, no escape, no Ctrl+V, no Ctrl+C, no Enter —
+    /// every control typed as its picture, a tab as a space, and every
+    /// spelling of a line break as the composer's own new-line key.
+    #[test]
+    fn typed_words_carry_no_key_but_their_letters_and_the_line_break() {
+        let typed = encode_typed(
+            "one\r\ntwo\rthree\nfour\tfive\u{16}\u{3}\u{1b}[201~\u{7f}\u{9b}six",
+            b"\n",
+        );
+        assert_eq!(
+            String::from_utf8(typed.clone()).expect("utf-8"),
+            "one\ntwo\nthree\nfour five\u{2416}\u{2403}\u{241b}[201~\u{2421}\u{fffd}six"
+        );
+        assert!(
+            typed
+                .iter()
+                .all(|byte| *byte == b'\n' || (0x20..0x7f).contains(byte) || *byte >= 0x80),
+            "a control rode the typed words: {typed:?}"
+        );
+        assert_eq!(
+            encode_typed("a\r\nb", b"\x1b\r"),
+            b"a\x1b\rb",
+            "the line break is the row's key, whatever it is"
+        );
+    }
+
+    /// No words, no bytes, whichever way words would go — an envelope
+    /// around nothing is an empty paste (t-17274).
+    #[test]
+    fn no_words_write_no_frame() {
+        let typed = Words::Typed { line_break: b"\n" };
+        assert!(Words::Pasted.encode("").is_empty());
+        assert!(typed.encode("").is_empty());
+        assert_eq!(Words::Pasted.encode("hi"), b"\x1b[200~hi\x1b[201~");
+        assert_eq!(typed.encode("hi\nthere"), b"hi\nthere");
+        assert_eq!(Words::default(), Words::Pasted);
     }
 }

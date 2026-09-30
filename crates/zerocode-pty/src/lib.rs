@@ -34,8 +34,8 @@ pub use grid::{
     TerminalGrid, drawn,
 };
 pub use input::{
-    KeyPress, MouseEvent, MouseKind, encode_focus, encode_key, encode_mouse, encode_paste,
-    sanitize_paste,
+    KeyPress, MouseEvent, MouseKind, Words, encode_focus, encode_key, encode_mouse, encode_paste,
+    encode_typed, sanitize_paste,
 };
 pub use lane::{
     DECLARED_TERMINAL, INHERITED_SESSION_MARKERS, INHERITED_TERMINAL_IDENTITY,
