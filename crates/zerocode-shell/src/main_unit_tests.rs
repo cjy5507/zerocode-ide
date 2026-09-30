@@ -18466,6 +18466,14 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         // A read's lines beside its file's door (t-6323 A2).
         "worker.readLines",
         "worker.readFrom",
+        // The foot line's words for what an agent's status says with no row
+        // of a step out to name (t-18702): waiting, reconnecting, thinking.
+        "worker.nowWaiting",
+        "worker.nowReconnecting",
+        "worker.nowThinking",
+        // The strip under a helper's brief that counts what it did (t-18702).
+        "worker.tallyTotal",
+        "worker.tallyFailed",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -18508,6 +18516,21 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
             vec!["worker.thinking"],
         ),
         ("function agentVoice(id) {", vec!["worker.busy"]),
+        // The strip's two words are read where the strip is painted (t-18702).
+        (
+            "function paintHelperPageTally(strip, run) {",
+            vec!["worker.tallyTotal", "worker.tallyFailed"],
+        ),
+        // What the foot line says while no row is out (t-18702): the three
+        // status words are read where zo's status verbs are tabled.
+        (
+            "const ZO_STATUS_WORDS = {",
+            vec![
+                "worker.nowWaiting",
+                "worker.nowReconnecting",
+                "worker.nowThinking",
+            ],
+        ),
         // The copy stands under every answer now (the extension's
         // `assistantActions`), not only the last one's tail.
         (

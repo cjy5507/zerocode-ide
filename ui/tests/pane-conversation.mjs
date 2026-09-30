@@ -10,6 +10,7 @@
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { standZo } from "./conversation-parity.mjs";
 
 const OPENING = [
   { role: "user", text: "이 화면 버그 좀 봐줘." },
@@ -266,6 +267,99 @@ export async function testPaneConversation(browser, origin, ok) {
     }));
     ok("a pane learns its model from the transcript when no hook has carried one",
       chip.model === "claude-opus-5", JSON.stringify(chip));
+
+    // ------------------------------------ what the pane is doing, with no row to say it
+    // zo says what its working row says in every `session_status` frame — `activity`: a verb, a
+    // target, a phase. With no step or thought out to name, the foot line says it in the window's own
+    // words: the step rows' kind words for a tool, the page's own for waiting, reconnecting and
+    // thinking, the window's 「작업 중…」 when nothing is known — never zo's English 「Working…」
+    // on the Korean page. The turn's end (or its next start) takes it away. It stands last: the zo row it
+    // installs is the catalog the rest of this test's page was drawn without.
+    await standZo(page);
+    // The page was drawn before the row stood — in the window the agent list is the boot's own, read before
+    // any page is drawn — so it is drawn again, now that zo has its voice.
+    await page.evaluate(async () => {
+      paintPaneChat(window.__TERM__);
+      await new Promise((done) => requestAnimationFrame(done));
+    });
+    const nowLine = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const term = window.__TERM__;
+      const session = "s-zo-live";
+      const status = () => document.querySelector(".pane-chat .helper-status");
+      const words = () => status()?.querySelector(".helper-status-now")?.textContent ?? "";
+      const seeing = () => (status()?.innerText ?? "").replace(/\s+/g, " ").trim();
+      const state = () => ({ now: words(), seeing: seeing(), naming: status()?.classList.contains("is-naming") ?? false });
+      const say = async (activity) => {
+        tell("session:frame", { session, frame: { type: "session_status", session, model: "claude-opus-5", ...(activity && { activity }) } });
+        await frame();
+        await frame();
+        return state();
+      };
+      const voice = agentVoice("zo");
+      const now = t("worker.now", "지금");
+      const seen = {
+        busy: voice.busy_word,
+        wordNode: status()?.querySelector(".helper-status-word")?.textContent ?? "",
+        wantNothing: `${now} · ${t("worker.busy", "작업 중…")}`,
+        wantRead: `${now} · ${t("worker.stepRead", "파일 읽기")} src/tui/view.rs`,
+        wantWaiting: `${now} · ${t("worker.nowWaiting", "답을 기다리는 중")}`,
+        wantReconnecting: `${now} · ${t("worker.nowReconnecting", "다시 연결하는 중")}`,
+        wantThinking: `${now} · ${t("worker.nowThinking", "생각하는 중")}`,
+      };
+      tell("session:frame", { session, frame: { type: "turn", turn_id: 20, phase: "start" } });
+      await frame();
+      await frame();
+      seen.nothing = await say(null);
+      seen.read = await say({ verb: "read", target: "src/tui/view.rs", phase: "started", elapsed_secs: 2 });
+      seen.bash = await say({ verb: "bash", target: "cd /Users/dev/shop-app && make test", phase: "started", elapsed_secs: 3 });
+      seen.waiting = await say({ verb: "waiting", target: "model", phase: "started", elapsed_secs: 4 });
+      seen.reconnecting = await say({ verb: "reconnecting", target: "attempt 2 in 5s", phase: "started", elapsed_secs: 5 });
+      seen.thinking = await say({ verb: "reasoning silently", phase: "started", elapsed_secs: 6 });
+      seen.quiet = await say({ verb: "quiet", target: "last: read a.rs", phase: "started", elapsed_secs: 7 });
+      // A frame that carries no activity (zo leaves it out while the pane is idle and in the first
+      // token's grace period) clears the line.
+      await say({ verb: "grep", target: "SCREEN_WIDTH", phase: "started", elapsed_secs: 1 });
+      seen.cleared = await say(null);
+      // The turn's end clears it too, whatever the last frame said.
+      await say({ verb: "grep", target: "SCREEN_WIDTH", phase: "started", elapsed_secs: 1 });
+      tell("session:frame", { session, frame: { type: "turn", turn_id: 20, phase: "end" } });
+      await frame();
+      await frame();
+      seen.ended = state();
+      // And a new turn's start clears what was left standing.
+      await say({ verb: "grep", target: "SCREEN_WIDTH", phase: "started", elapsed_secs: 1 });
+      tell("session:frame", { session, frame: { type: "turn", turn_id: 21, phase: "start" } });
+      await frame();
+      await frame();
+      seen.restarted = state();
+      // Another session's frames are not this pane's.
+      tell("session:frame", { session: "s-elsewhere", frame: { type: "session_status", session: "s-elsewhere", activity: { verb: "read", target: "elsewhere.rs", phase: "started", elapsed_secs: 1 } } });
+      await frame();
+      await frame();
+      seen.elsewhere = state();
+      return seen;
+    });
+    const nothingKnown = (one) => one.now === nowLine.wantNothing && one.naming && !one.seeing.includes(nowLine.busy);
+    ok("a zo pane with no step out and no activity known says the window's own 「지금 · 작업 중…」 — zo's English word is not on the page, though the word's own node still holds it",
+      nowLine.busy !== "" && nothingKnown(nowLine.nothing) && nowLine.wordNode === nowLine.busy,
+      JSON.stringify(nowLine.nothing));
+    ok("the activity in zo's session status is said on the foot line — a file read in the step rows' words, a shell command by its title (the command's first words and the folder, no cd) — and waiting, reconnecting and thinking in the page's own words",
+      nowLine.read.now === nowLine.wantRead && nowLine.bash.now.includes("make test") &&
+      nowLine.bash.now.endsWith(" · shop-app") && !/(^|\s)cd\s/.test(nowLine.bash.now) &&
+      nowLine.waiting.now === nowLine.wantWaiting && nowLine.reconnecting.now === nowLine.wantReconnecting &&
+      nowLine.thinking.now === nowLine.wantThinking &&
+      [nowLine.read, nowLine.bash, nowLine.waiting, nowLine.reconnecting, nowLine.thinking].every((one) => one.naming && !one.seeing.includes(nowLine.busy)),
+      JSON.stringify(nowLine));
+    ok("a status that says quiet names nothing the page can name, and a status frame with no activity takes the line back to 「작업 중…」",
+      nothingKnown(nowLine.quiet) && nothingKnown(nowLine.cleared),
+      JSON.stringify({ quiet: nowLine.quiet, cleared: nowLine.cleared }));
+    ok("the turn's end and the next turn's start take the activity away, and another session's status is not this pane's",
+      nothingKnown(nowLine.ended) && nothingKnown(nowLine.restarted) && nothingKnown(nowLine.elsewhere),
+      JSON.stringify({ ended: nowLine.ended, restarted: nowLine.restarted, elsewhere: nowLine.elsewhere }));
 
     await page.screenshot({ path: "output/playwright/pane-conversation/chat.png" });
     ok("the conversation raised no page errors", faults.length === 0, faults.join("\n"));

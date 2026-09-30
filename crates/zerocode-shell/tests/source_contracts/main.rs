@@ -37665,3 +37665,71 @@ fn a_prompt_names_its_pane_only_once_its_record_says_a_person_typed_it() {
         "the window does not take a settled name:\n{hooked}"
     );
 }
+
+/// The verbs a zo status card carries that name no tool (t-18702) are spelled
+/// once in the window, and that table is zo's own words.
+///
+/// The foot line of a conversation names what an agent is doing; zo says what
+/// its working row says in `session_status.activity`, and a zo helper's card
+/// says it in the `subagents` frame. A verb that is no tool — waiting,
+/// reconnecting, reasoning silently, quiet — is zo's protocol, not the
+/// core's, so the window keeps one table of them (`ZO_STATUS_WORDS`) and this
+/// test holds it to zo's constants: a word zo changes breaks here instead of
+/// leaving the line quietly naming nothing, and a word the table gains that zo
+/// never sends breaks here too.
+#[test]
+fn the_windows_table_of_zo_status_verbs_is_zos_own_words() {
+    let strings = include_str!("../../../../zo-ide/crates/zo-ide/src/tui/strings.rs");
+    let view = include_str!("../../../../zo-ide/crates/zo-ide/src/tui/view.rs");
+    let progress =
+        include_str!("../../../../zo-ide/crates/zo-ide/src/session/subagent_progress.rs");
+
+    // The four verbs `StatusActivity::verb` sends, by the constants it names.
+    let constants = [
+        "ACTIVITY_WAITING",
+        "ACTIVITY_RECONNECTING",
+        "ACTIVITY_REASONING_SILENTLY",
+        "ACTIVITY_QUIET",
+    ];
+    let verbs = support::block_after(view, "pub fn verb(&self) -> String {");
+    let mut sent: Vec<String> = Vec::new();
+    for constant in constants {
+        assert!(
+            verbs.contains(&format!("strings::{constant}.to_string()")),
+            "zo's `StatusActivity::verb` no longer sends {constant}:\n{verbs}"
+        );
+        let head = format!("pub const {constant}: &str = \"");
+        let at = strings
+            .find(&head)
+            .unwrap_or_else(|| panic!("zo's tui/strings.rs no longer declares {constant}"));
+        let rest = &strings[at + head.len()..];
+        sent.push(rest[..rest.find('"').expect("a constant's closing quote")].to_string());
+    }
+    // A helper's card says a bare `working` before its first call.
+    assert!(
+        progress.contains(".unwrap_or_else(|| \"working\".to_string())"),
+        "zo's helper progress no longer falls back to the bare word `working`"
+    );
+    sent.push("working".to_string());
+
+    // The window's table: every key of `ZO_STATUS_WORDS`.
+    let window = support::window_source();
+    let table = support::block_after(window, "const ZO_STATUS_WORDS = {");
+    let mut spelled: Vec<String> = table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let line = line.trim();
+            let (key, rest) = line.split_once(':')?;
+            rest.trim_start()
+                .starts_with("() =>")
+                .then(|| key.trim_matches('"').to_string())
+        })
+        .collect();
+    spelled.sort();
+    sent.sort();
+    assert_eq!(
+        spelled, sent,
+        "the window's table of zo's status verbs is not the verbs zo sends:\n{table}"
+    );
+}

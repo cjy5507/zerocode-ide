@@ -1258,7 +1258,7 @@ const STEP_LOOKS = new Map(Object.entries({
   read: { icon: "file", word: () => t("worker.stepRead", "파일 읽기") },
   edit: { icon: "pencil", word: () => t("worker.stepEdit", "파일 수정") },
   write: { icon: "pencil", word: () => t("worker.stepWrite", "파일 쓰기") },
-  bash: { icon: "terminal", word: () => t("worker.stepShell", "셸 실행") },
+  bash: { icon: "terminal", word: () => t("worker.stepShell", "셸") },
   grep: { icon: "search", word: () => t("worker.stepSearch", "검색") },
   web: { icon: "globe", word: () => t("worker.stepWeb", "웹 읽기") },
   websearch: { icon: "globe", word: () => t("worker.stepWebSearch", "웹 검색") },
@@ -1297,6 +1297,34 @@ function stepTargetWords(arg) {
   if (bare.length <= STEP_TARGET_FIT || /\s/.test(bare) || !bare.includes("/")) return bare;
   const parts = bare.split("/");
   return parts.length > 4 ? `…/${parts.slice(-3).join("/")}` : bare;
+}
+
+/* A shell step is titled by what its command does: its own first words, fitted the way a target is. A
+ * command that opens by changing folder — `cd <dir> && …`, `cd <dir> ; …`, one after another — says
+ * where it ran, not what it did, so the title drops it and closes with the folder's last name after
+ * 「 · 」 (the mockup's 「셸 grep SCREEN_WIDTH… · src」). The opened row keeps the whole command. A
+ * `cd` that is not the command's opening is part of what it does, and stays in. */
+const SHELL_CD_LEAD = /^\s*cd\s+(?:"([^"]*)"|'([^']*)'|((?:\\.|[^\s;&|"'\\])+))\s*(?:&&|;)\s*/;
+
+function shellTargetWords(command) {
+  let rest = command;
+  let folder = "";
+  for (let lead = SHELL_CD_LEAD.exec(rest); lead !== null; lead = SHELL_CD_LEAD.exec(rest)) {
+    folder = lead[1] ?? lead[2] ?? lead[3];
+    rest = rest.slice(lead[0].length);
+  }
+  // Nothing after the change of folder: the change is what the step did.
+  if (rest.trim() === "") return command;
+  const fitted = rest.length > STEP_TARGET_FIT ? `${rest.slice(0, STEP_TARGET_FIT - 1).trimEnd()}…` : rest;
+  const where = basename(folder.replace(/[\\/]+$/, ""));
+  return where === "" ? fitted : `${fitted} · ${where}`;
+}
+
+/* A step's title by its kind: a shell step's is its command's own words (`arg` is the transcript's
+ * line, cut at a length nobody wants for a command — `whole` is the command), every other kind's is
+ * its target as the line says it. */
+function stepTitleWords(kind, arg, whole = arg) {
+  return kind === "bash" ? shellTargetWords(whole) : stepTargetWords(arg);
 }
 
 function stepFirstLine(text) {
@@ -1341,6 +1369,8 @@ function stepResultWords(kind, turn, output, failed, row) {
       return t("worker.stepPrinted", "{{n}}줄 출력", { n: stepLineCount(output) });
     case "web":
       return output === "" ? "" : bytesLabel(output.length);
+    case "websearch":
+      return output === "" ? "" : t("worker.stepResultSize", "결과 {{size}}", { size: bytesLabel(output.length) });
     case "edit":
     case "write":
       return stepEditTally(turn);
@@ -1360,11 +1390,18 @@ function stepResultWords(kind, turn, output, failed, row) {
   }
 }
 
-/* How long a call took by the file's own stamps (the window's clock when the
- * file stamped nothing), from `from`'s start to `to`'s answer. */
+/* How long a call took by the file's own stamps, from `from`'s start to `to`'s answer. A line the file
+ * did not stamp was read at the moment the window read it — lines read in one batch share one time — so
+ * a length is said only when both its ends carry a time from the file, and only when it comes to
+ * something: nothing is better than 「0.0초」, which says a time nobody knows (t-18702). A length under
+ * 50 ms is a 0.0 to the eye, and is nothing here too. */
+const STEP_TOOK_MIN_MS = 50;
+
 function stepTook(from, to) {
-  if (to.outputAt === undefined || from.at === undefined) return "";
-  return t("worker.elapsedShort", "{{s}}초", { s: (Math.max(0, to.outputAt - from.at) / 1000).toFixed(1) });
+  if (from.fromClock !== false || to.outputFromClock !== false) return "";
+  const took = to.outputAt - from.at;
+  if (!(took >= STEP_TOOK_MIN_MS)) return "";
+  return t("worker.elapsedShort", "{{s}}초", { s: (took / 1000).toFixed(1) });
 }
 
 /* One step's line: its mark, what it was and touched, what came of it, how
@@ -1398,7 +1435,7 @@ function stepLineNode(look) {
 function dressStepLine(row, turn, words, state) {
   const line = row.firstElementChild;
   writeTextContent(line.querySelector(".helper-step-kind"), state.todo ? t("worker.todoHead", "할 일 갱신") : stepLook(row.__kind).word());
-  writeTextContent(line.querySelector(".helper-step-target"), state.todo ? "" : stepTargetWords(words.arg));
+  writeTextContent(line.querySelector(".helper-step-target"), state.todo ? "" : stepTitleWords(row.__kind, words.arg, words.whole));
   let res = "";
   if (state.live) res = t("worker.stepLive", "진행 중");
   else if (state.output !== undefined) res = stepResultWords(row.__kind, turn, state.output, state.failed, row);
@@ -1486,8 +1523,9 @@ function dressRunLine(row) {
   const line = row.firstElementChild;
   const turns = row.__members;
   writeTextContent(line.querySelector(".helper-step-kind"), t("worker.stepRun", "{{kind}} {{n}}개", { kind: stepLook(row.__kind).word(), n: turns.length }));
+  const first = toolWords(turns[0]);
   writeTextContent(line.querySelector(".helper-step-target"),
-    `${stepTargetWords(toolWords(turns[0]).arg)} ${t("worker.stepMore", "외 {{n}}개", { n: turns.length - 1 })}`);
+    `${stepTitleWords(row.__kind, first.arg, first.whole)} ${t("worker.stepMore", "외 {{n}}개", { n: turns.length - 1 })}`);
   writeTextContent(line.querySelector(".helper-step-meta"), stepTook(turns[0], turns.at(-1)));
 }
 
@@ -1748,6 +1786,65 @@ function nowWordsOf(list) {
   return list.querySelector(":scope > .is-streaming.is-thinking .helper-step-target")?.textContent ?? "";
 }
 
+/* ---- the foot line, when no row is out to name (t-18702) ----------------------------
+ *
+ * The line names the step or thought that is going (`nowWordsOf`). With none, it says what the page's
+ * card last said it was doing: a helper's page reads its own card — the activity zo's `subagents`
+ * frame names for each helper, filed under `sub:<term>:<id>` — and a pane's conversation reads what its
+ * own channel's `session_status` says (`paneNow`). A wire page names its own live rows. With nothing
+ * known the line falls back by the agent's voice: a voice that turns through verbs (Claude Code's)
+ * keeps its own line, a voice with one static word — zo's English 「Working…」, which a Korean page
+ * must not say aloud — gives way to the window's own word. */
+function helperCardOf(run) {
+  return `sub:${run.term}:${run.helper.id}`;
+}
+
+function nowActivityOf(run) {
+  if (run.wire) return null;
+  if (isHelperPage(run)) return newestActivity(helperCardOf(run)) ?? null;
+  return run.helper?.id === PANE_LOG_ID ? paneNow.get(run.term) ?? null : null;
+}
+
+/* The kind an activity's verb is drawn by: the catalog's todo tool; else the word the core reduced the
+ * tool to, which is the key of the step rows' kinds; else a kind of its own, worded as the tool's own name. */
+function activityKindOf(verb, run) {
+  const todo = agentVoice(run.agent).todo_tool;
+  if (todo && verb === todo) return "todo";
+  return STEP_LOOKS.has(verb) ? verb : `tool:${verb}`;
+}
+
+/* The verbs a status card carries that name no tool of the core's, with the page's own words for them
+ * (an empty word: a fact the page has none for, so the line falls back). They are zo's protocol, spelled
+ * once, here: `session_status.activity.verb` says waiting, reconnecting, reasoning silently and quiet
+ * (`tui/strings.rs` ACTIVITY_*, `StatusActivity::verb` in `tui/view.rs`), and a zo helper's card says a
+ * bare working before its first call (`session/subagent_progress.rs`). A source contract holds this
+ * table to those spellings, so a word zo changes breaks that test instead of the line quietly naming
+ * nothing. */
+const ZO_STATUS_WORDS = {
+  waiting: () => t("worker.nowWaiting", "답을 기다리는 중"),
+  reconnecting: () => t("worker.nowReconnecting", "다시 연결하는 중"),
+  "reasoning silently": () => t("worker.nowThinking", "생각하는 중"),
+  quiet: () => "",
+  working: () => "",
+};
+
+/* What one activity says, in the words the step rows wear — the same kind words and the same titles —
+ * and, for the facts an agent's status carries that are no tool, in the page's own (`ZO_STATUS_WORDS`).
+ * An activity that is over names nothing. */
+function nowActivityWords(activity, run) {
+  if (!activity || activity.phase !== "started" || typeof activity.verb !== "string") return "";
+  if (Object.hasOwn(ZO_STATUS_WORDS, activity.verb)) return ZO_STATUS_WORDS[activity.verb]();
+  const kind = activityKindOf(activity.verb, run);
+  const target = kind === "todo" || typeof activity.target !== "string" ? "" : activity.target;
+  return `${stepLook(kind).word()} ${stepTitleWords(kind, target)}`.trim();
+}
+
+function nowSaidOf(list, run, voice) {
+  const named = nowWordsOf(list) || nowActivityWords(nowActivityOf(run), run);
+  if (named !== "") return named;
+  return voice.spinner_verbs.length > 0 ? "" : t("worker.busy", "작업 중…");
+}
+
 /* ---- a finished helper opens on its report (t-15682) --------------------------
  *
  * A helper that finished has one thing to say — the answer it ended on — and
@@ -1766,6 +1863,23 @@ function helperReportOf(run) {
 
 function helperStepCount(run) {
   return run.helper.turns.filter((turn) => turn.role === "tool" || turn.role === "tool_result").length;
+}
+
+/* What a helper did, counted for the strip under its brief (t-18702): every step once, the kinds in the
+ * order each first came (a Map keeps it), how many failed. A row's kind is the one its line is drawn by
+ * (`stepKindOf`), so the strip and the rows say the same words. */
+function helperTally(run) {
+  const kinds = new Map();
+  let total = 0;
+  let failed = 0;
+  for (const turn of run.helper.turns) {
+    if (turn.role !== "tool") continue;
+    total += 1;
+    const kind = stepKindOf(turn, run);
+    kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
+    if (turn.outputError === true) failed += 1;
+  }
+  return { total, failed, kinds };
 }
 
 function paintReportDoor(list, card) {
