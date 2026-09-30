@@ -877,6 +877,10 @@ fn position(row: usize, column: usize) -> (u16, u16) {
 }
 
 #[cfg(test)]
+#[path = "composer_window_tests.rs"]
+mod window_tests;
+
+#[cfg(test)]
 mod tests {
     /// codex `test_current_at_token_*` — the whitespace word under the cursor,
     /// when it starts with `@`; the range covers the sigil, the token does not.
