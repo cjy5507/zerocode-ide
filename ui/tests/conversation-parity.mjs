@@ -1825,6 +1825,7 @@ export async function testConversationSteps(browser, origin, ok) {
   await stepsHelperClock(browser, origin, ok);
   await stepsNowWithoutARow(browser, origin, ok);
   await stepsListUnderASentence(browser, origin, ok);
+  await stepsHelperTally(browser, origin, ok);
 }
 
 /* C1–C4, C9 — the rows the fixture comes to, closed, then pressed. */
@@ -3570,6 +3571,138 @@ async function stepsListUnderASentence(browser, origin, ok) {
     ok("D5: the report raised no page errors", report.faults.length === 0, report.faults.join("\n"));
   } finally {
     await report.page.close();
+  }
+}
+
+/* D6 — what the helper did, counted, under its brief (the mockup's 「도구 9 · 웹 2 · 셸 1 · 파일 읽기 6 ·
+ * 실패 0」 and its bar): the whole, then each kind of step in the order its kind first came — worded as
+ * the step rows word it, no second wording — then how many failed, and a bar whose segments are the
+ * kinds' shares. It follows the steps as they come, and is not there for a helper that has done nothing. */
+async function stepsHelperTally(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openHelperConversation(page, stepsFixture().filter((turn) => turn.role !== "assistant"), "running");
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async () => {
+      const { settle } = window.__STEPS__;
+      await settle();
+      const strip = () => document.querySelector("#worker-view .helper-tally");
+      const read = () => {
+        const node = strip();
+        const brief = document.querySelector("#worker-view .helper-brief");
+        const body = document.querySelector("#worker-view .helper-body");
+        return {
+          shown: node !== null && node.checkVisibility(),
+          total: node?.querySelector(".helper-tally-total")?.textContent ?? null,
+          kinds: [...(node?.querySelectorAll(".helper-tally-kind") ?? [])].map((one) => one.textContent),
+          failed: node?.querySelector(".helper-tally-failed")?.textContent ?? null,
+          failedClass: node?.querySelector(".helper-tally-failed")?.className ?? "",
+          bar: [...(node?.querySelectorAll(".helper-tally-bar > i") ?? [])].map((one) => Number(one.style.flexGrow)),
+          barHidden: node?.querySelector(".helper-tally-bar")?.getAttribute("aria-hidden") ?? null,
+          barBox: (() => {
+            const box = node?.querySelector(".helper-tally-bar")?.getBoundingClientRect();
+            return box ? { width: Math.round(box.width), height: Math.round(box.height) } : null;
+          })(),
+          placed: node !== null && brief !== null && body !== null &&
+            Boolean(brief.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+            Boolean(node.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING),
+          overflows: node !== null && node.scrollWidth > node.clientWidth + 1,
+        };
+      };
+      const word = (kind) => stepLook(kind).word();
+      const seen = { first: read() };
+      seen.want = {
+        // The fixture: nine reads (one of them failed), a shell command, a page, an edit.
+        total: t("worker.tallyTotal", "도구 {{n}}", { n: 12 }),
+        kinds: [`${word("read")} 9`, `${word("bash")} 1`, `${word("web")} 1`, `${word("edit")} 1`],
+        failed: t("worker.tallyFailed", "실패 {{n}}", { n: 1 }),
+        later: {
+          total: t("worker.tallyTotal", "도구 {{n}}", { n: 13 }),
+          kinds: [`${word("read")} 9`, `${word("bash")} 1`, `${word("web")} 1`, `${word("edit")} 1`, `${word("grep")} 1`],
+          failed: t("worker.tallyFailed", "실패 {{n}}", { n: 2 }),
+        },
+      };
+      // A step goes out, and its answer says it failed: the strip follows.
+      window.__HELPER_TURNS__.push({
+        role: "tool", text: "Grep · SCREEN_WIDTH", at_ms: 1_790_000_300_000,
+        tool: { call_id: "tally1", name: "Grep", kind: "grep", input: "SCREEN_WIDTH", is_error: false },
+      });
+      await pollHelperPages();
+      await settle();
+      seen.out = read();
+      window.__HELPER_TURNS__.push({ role: "tool_result", text: "no such file", at_ms: 1_790_000_300_500, tool: { call_id: "tally1", is_error: true } });
+      await pollHelperPages();
+      await settle();
+      seen.later = read();
+      return seen;
+    });
+    ok(
+      "D6: under the brief stands one strip — the whole (「도구 12」), each kind of step in the order its kind first came, in the words the step rows wear, with its count, and how many failed — and it sits between the brief and the list",
+      seen.first.shown && seen.first.total === seen.want.total &&
+        JSON.stringify(seen.first.kinds) === JSON.stringify(seen.want.kinds) && seen.first.failed === seen.want.failed &&
+        seen.first.placed && !seen.first.overflows,
+      JSON.stringify({ first: seen.first, want: seen.want }),
+    );
+    ok(
+      "D6: its bar is the kinds' shares — one segment per kind, each as wide as its count (9, 1, 1, 1) — a picture that a screen reader is not told about, four pixels tall or so and wider than a thumbnail",
+      JSON.stringify(seen.first.bar) === JSON.stringify([9, 1, 1, 1]) && seen.first.barHidden === "true" &&
+        seen.first.barBox !== null && seen.first.barBox.width >= 80 && seen.first.barBox.height >= 2 && seen.first.barBox.height <= 8,
+      JSON.stringify(seen.first),
+    );
+    ok(
+      "D6: a failure is the one thing the strip colours — 「실패 1」 stands in the failure class, and a helper with none says 「실패 0」 in the quiet one",
+      seen.first.failedClass.includes("is-failed") && !seen.first.failedClass.includes("is-ok"),
+      JSON.stringify(seen.first),
+    );
+    ok(
+      "D6: the strip follows the steps as they come — a step that went out is counted at once, its failure when its answer comes, and a new kind stands after the ones before it",
+      seen.out.total === seen.want.later.total && seen.out.failed === seen.want.failed &&
+        seen.later.total === seen.want.later.total && JSON.stringify(seen.later.kinds) === JSON.stringify(seen.want.later.kinds) &&
+        seen.later.failed === seen.want.later.failed && JSON.stringify(seen.later.bar) === JSON.stringify([9, 1, 1, 1, 1]),
+      JSON.stringify({ out: seen.out, later: seen.later, want: seen.want.later }),
+    );
+    ok("D6: the strip raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+  // A helper that has done nothing has nothing to count, and a helper with no failure says so quietly.
+  const quiet = await openWindowTestPage(browser, origin);
+  try {
+    await openHelperConversation(quiet.page, [
+      { role: "user", text: "아직 아무것도 안 한 도우미.", at_ms: CLOCK },
+      { role: "assistant", text: "읽는 중입니다.", at_ms: CLOCK + 1000 },
+    ], "running");
+    const none = await quiet.page.evaluate(async () => {
+      await window.__PAINTED__();
+      const node = document.querySelector("#worker-view .helper-tally");
+      return { there: node !== null, shown: node !== null && node.checkVisibility() };
+    });
+    await quiet.page.evaluate(async () => {
+      window.__HELPER_TURNS__.push(
+        { role: "tool", text: "Read · /Users/dev/shop-app/a.tsx", at_ms: 1_790_000_400_000, tool: { call_id: "q1", name: "Read", kind: "read", input: "/Users/dev/shop-app/a.tsx", is_error: false } },
+        { role: "tool_result", text: "ok", at_ms: 1_790_000_400_500, tool: { call_id: "q1", is_error: false } },
+      );
+      await pollHelperPages();
+      await window.__PAINTED__();
+      await window.__PAINTED__();
+    });
+    const one = await quiet.page.evaluate(() => {
+      const node = document.querySelector("#worker-view .helper-tally");
+      return {
+        shown: node !== null && node.checkVisibility(),
+        failed: node?.querySelector(".helper-tally-failed")?.textContent ?? null,
+        failedClass: node?.querySelector(".helper-tally-failed")?.className ?? "",
+        want: t("worker.tallyFailed", "실패 {{n}}", { n: 0 }),
+      };
+    });
+    ok(
+      "D6: a helper that has done nothing has no strip; with a step done and none failed it says 「실패 0」 in the quiet class",
+      !none.shown && one.shown && one.failed === one.want && one.failedClass.includes("is-ok") && !one.failedClass.includes("is-failed"),
+      JSON.stringify({ none, one }),
+    );
+    ok("D6: the quiet helper's strip raised no page errors", quiet.faults.length === 0, quiet.faults.join("\n"));
+  } finally {
+    await quiet.page.close();
   }
 }
 

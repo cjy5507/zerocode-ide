@@ -18440,6 +18440,9 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.nowWaiting",
         "worker.nowReconnecting",
         "worker.nowThinking",
+        // The strip under a helper's brief that counts what it did (t-18702).
+        "worker.tallyTotal",
+        "worker.tallyFailed",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -18482,6 +18485,11 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
             vec!["worker.thinking"],
         ),
         ("function agentVoice(id) {", vec!["worker.busy"]),
+        // The strip's two words are read where the strip is painted (t-18702).
+        (
+            "function paintHelperPageTally(strip, run) {",
+            vec!["worker.tallyTotal", "worker.tallyFailed"],
+        ),
         // What the foot line says while no row is out (t-18702): the three
         // status words are read where the activity is worded.
         (
