@@ -217,6 +217,7 @@ mod tests {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         }
     }
 

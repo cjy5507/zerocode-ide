@@ -193,6 +193,7 @@ fn event_message(session_id: &str, kind: &str, reason: &str) -> ConversationMess
         thought_signature: None,
         reasoning_replay: None,
         model: None,
+        updated_at_ms: None,
     }
 }
 

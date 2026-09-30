@@ -9172,6 +9172,7 @@ fn a_spoofed_contract_prefix_in_low_trust_text_does_not_suppress_teaching() {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         })
         .expect("low-trust reminder");
 
@@ -12813,6 +12814,7 @@ fn reminder_system_message(text: &str) -> crate::session::ConversationMessage {
         thought_signature: None,
         reasoning_replay: None,
         model: None,
+        updated_at_ms: None,
     }
 }
 
@@ -16440,6 +16442,7 @@ fn the_plan_is_not_re_anchored_while_the_model_can_still_see_it() {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         })
         .expect("persisted reminder");
     runtime.reinject_todo_progress_reminder();
@@ -16563,6 +16566,7 @@ fn compaction_plan_for(
                 thought_signature: None,
                 reasoning_replay: None,
                 model: None,
+                updated_at_ms: None,
             })
             .expect("continuation");
     }
@@ -16610,6 +16614,7 @@ async fn the_compaction_seat_changes_what_the_summary_reads_and_nothing_else() {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         },
         ConversationMessage::assistant(vec![ContentBlock::ToolUse {
             id: "t1".to_string(),
@@ -16629,6 +16634,7 @@ async fn the_compaction_seat_changes_what_the_summary_reads_and_nothing_else() {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         },
         ConversationMessage::assistant(vec![ContentBlock::Text { text: "done".to_string() }]),
     ] {
@@ -16960,6 +16966,7 @@ fn orphan_compaction_plan(orphan_id: &str) -> crate::compact::CompactionPlan {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         })
         .expect("continuation");
     session.push_user_text("run the long command").expect("user");

@@ -519,6 +519,7 @@ pub fn apply_compaction(plan: CompactionPlan, raw_summary: &str) -> CompactionRe
         thought_signature: None,
         reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
     }];
     compacted_messages.extend(preserved_tail);
 
@@ -526,7 +527,10 @@ pub fn apply_compaction(plan: CompactionPlan, raw_summary: &str) -> CompactionRe
     // the pre-compaction snapshot BEFORE replacing `messages`. On a persistence
     // Conflict this rolls the whole mutation (messages + metadata) back to the
     // original state instead of leaving memory holding a compacted view that
-    // diverges from a peer's newer file.
+    // diverges from a peer's newer file. The seam also stamps the continuation
+    // (index 0, the one new message) with the compaction's time; the preserved
+    // tail was cloned from the live messages and keeps the time each carries,
+    // which is why it is passed as messages and not rebuilt (t-18703).
     compacted_session.apply_compaction_atomic(
         std::sync::Arc::new(compacted_messages),
         summary.clone(),

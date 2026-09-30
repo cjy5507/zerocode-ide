@@ -367,6 +367,7 @@ fn reconstructs_usage_from_session_messages() {
         thought_signature: None,
         reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
     }]);
 
     let tracker = UsageTracker::from_session(&session);

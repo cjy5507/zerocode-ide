@@ -873,8 +873,12 @@ impl Session {
         }
     }
 
-    pub fn push_message(&mut self, message: ConversationMessage) -> Result<(), SessionError> {
+    pub fn push_message(&mut self, mut message: ConversationMessage) -> Result<(), SessionError> {
         self.touch();
+        // The line this appends and every full rewrite of the file after it
+        // carry this time, so it goes on the message and not only on the line:
+        // a message stored without it is written by the first rewrite with none.
+        message.updated_at_ms = Some(self.updated_at_ms);
         Arc::make_mut(&mut self.messages).push(message);
         let persist_result = {
             let message_ref = self.messages.last().ok_or_else(|| {
@@ -974,7 +978,10 @@ impl Session {
         // an atomic replace+record that also restores the original transcript
         // on Conflict, use [`apply_compaction_atomic`](Self::apply_compaction_atomic).
         let rollback = MutationRollback::capture(self);
-        self.commit_compaction(summary, removed_message_count, anchor, rollback);
+        // The caller swapped `messages` itself, so this method cannot tell
+        // which of them, if any, is the continuation the compaction wrote: it
+        // stamps none.
+        self.commit_compaction(summary, removed_message_count, anchor, rollback, false);
     }
 
     /// Atomically replace the transcript with the compacted set and record the
@@ -989,6 +996,13 @@ impl Session {
     /// [`record_compaction_with_anchor`](Self::record_compaction_with_anchor),
     /// the caller must NOT pre-assign `self.messages`; it passes the replacement
     /// so the rollback snapshot still knows the original transcript.
+    ///
+    /// The first message of `compacted_messages` is the continuation this
+    /// compaction wrote, and it is new: it takes the time of the compaction
+    /// (this session's `updated_at_ms` once it is touched), unless the caller
+    /// already gave it one. The messages after it are clones of messages the
+    /// session already held and keep the time each carries; one that never had
+    /// a time is not given one here.
     pub fn apply_compaction_atomic(
         &mut self,
         compacted_messages: Arc<Vec<ConversationMessage>>,
@@ -1000,21 +1014,31 @@ impl Session {
         // pre-compaction transcript, not the compacted set.
         let rollback = MutationRollback::capture(self);
         self.messages = compacted_messages;
-        self.commit_compaction(summary, removed_message_count, anchor, rollback);
+        self.commit_compaction(summary, removed_message_count, anchor, rollback, true);
     }
 
     /// Shared core of the compaction seam: advance the compaction metadata and
     /// `first_message_index`, then re-persist the full snapshot once, rolling
     /// back to `rollback` on a persistence Conflict. The caller owns capturing
     /// `rollback` at the correct point (see the two public entry points).
+    ///
+    /// `stamp_continuation` says the first message is the continuation this
+    /// compaction just wrote, which takes the compaction's time.
     fn commit_compaction(
         &mut self,
         summary: impl Into<String>,
         removed_message_count: usize,
         anchor: Option<AnchorSummary>,
         rollback: MutationRollback,
+        stamp_continuation: bool,
     ) {
         self.touch();
+        if stamp_continuation {
+            let compacted_at = self.updated_at_ms;
+            if let Some(continuation) = Arc::make_mut(&mut self.messages).first_mut() {
+                continuation.updated_at_ms = continuation.updated_at_ms.or(Some(compacted_at));
+            }
+        }
         let count = self.compaction.as_ref().map_or(1, |value| value.count + 1);
         let first_kept_message_index = self
             .first_message_index
@@ -1466,9 +1490,12 @@ impl Session {
                     message,
                     line_number,
                 } => {
-                    if let Some(record_updated_at_ms) = record_updated_at_ms {
-                        updated_at_ms = Some(record_updated_at_ms);
-                    }
+                    // The latest of the header's time and every record's, not
+                    // the last record's: a compaction or a rewind touches the
+                    // header, but the messages it keeps are older, and reading
+                    // the last of them back as the session's time would run it
+                    // backwards.
+                    updated_at_ms = updated_at_ms.max(record_updated_at_ms);
                     if let Some(from_turn) = from_turn {
                         let Some(turn_index) = turn_index else {
                             return Err(SessionError::Format(format!(
@@ -1535,13 +1562,19 @@ impl Session {
     /// the compaction record if any, then one record per message, each on its
     /// own line. What [`Self::save_to_path`] writes, without the write — a
     /// corpus generator renders through here so its files are the writer's.
+    ///
+    /// Each message record carries the time its message carries
+    /// ([`ConversationMessage::updated_at_ms`]) and none when it has none, so a
+    /// full rewrite of the file (a compaction, a rewind, a fork, the heal after
+    /// an in-place edit, the first message of a file that does not exist yet)
+    /// keeps every message's own time instead of writing them all without.
     pub fn render_jsonl_snapshot(&self) -> Result<String, SessionError> {
         let mut lines = vec![self.meta_record()?.render()];
         if let Some(compaction) = &self.compaction {
             lines.push(compaction.to_jsonl_record()?.render());
         }
         lines.extend(self.messages.iter().enumerate().map(|(index, message)| {
-            message_record(message, self.absolute_turn_index(index), None).render()
+            message_record(message, self.absolute_turn_index(index), message.updated_at_ms).render()
         }));
         let mut rendered = lines.join("\n");
         rendered.push('\n');
@@ -1555,7 +1588,7 @@ impl Session {
         let path = persistence.path.clone();
         let secure = persistence.secure_regular_file;
         let turn_index = self.absolute_turn_index(self.messages.len().saturating_sub(1));
-        let line = message_record(message, turn_index, Some(self.updated_at_ms)).render();
+        let line = message_record(message, turn_index, message.updated_at_ms).render();
 
         // The append shares the same writer lease + fingerprint as full
         // snapshots, so an append and a concurrent full-snapshot rewrite can
@@ -2007,6 +2040,9 @@ pub fn reconcile_tool_history(
                 thought_signature: message.thought_signature.clone(),
                 reasoning_replay: message.reasoning_replay.clone(),
                             model: None,
+                // A per-request view, never stored: it keeps the time so a
+                // message rebuilt from a stored one is not one that never had it.
+                updated_at_ms: message.updated_at_ms,
             }
         })
         .collect();
@@ -2102,19 +2138,29 @@ pub(super) fn parse_jsonl_record(
                 .and_then(JsonValue::as_str)
                 .map(ToOwned::to_owned),
         },
-        "message" => SessionJsonlRecord::Message {
-            turn_index: parse_turn_index(object, line_number)?,
-            record_updated_at_ms: object
+        "message" => {
+            let turn_index = parse_turn_index(object, line_number)?;
+            let record_updated_at_ms = object
                 .get("updated_at_ms")
                 .map(|_| required_u64(object, "updated_at_ms"))
-                .transpose()?,
-            message: ConversationMessage::from_json(object.get("message").ok_or_else(|| {
-                SessionError::Format(format!(
-                    "JSONL record at line {line_number} missing message"
-                ))
-            })?)?,
-            line_number,
-        },
+                .transpose()?;
+            let mut message =
+                ConversationMessage::from_json(object.get("message").ok_or_else(|| {
+                    SessionError::Format(format!(
+                        "JSONL record at line {line_number} missing message"
+                    ))
+                })?)?;
+            // The time is the record's key, and from here on the message's
+            // own: every reader of the record sees it, and a full rewrite
+            // writes it back.
+            message.updated_at_ms = record_updated_at_ms;
+            SessionJsonlRecord::Message {
+                turn_index,
+                record_updated_at_ms,
+                message,
+                line_number,
+            }
+        }
         "compaction" => SessionJsonlRecord::Compaction(SessionCompaction::from_json(
             &JsonValue::Object(object.clone()),
         )?),
