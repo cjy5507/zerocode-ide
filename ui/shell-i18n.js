@@ -20585,6 +20585,7 @@ const CATALOG = {
     "clipboard.writeFailed": "No se pudo copiar el texto al portapapeles.",
     "clipboard.pasteFailed": "No se pudo pegar el texto del portapapeles.",
     "clipboard.imagePasteFailed": "No se pudo pegar la imagen del portapapeles.",
+    "clipboard.pasteSlow": "Esperando a que el portapapeles entregue su contenido…",
     "caffeinate.title": "Caffeinate",
     "caffeinate.on": "Activado",
     "caffeinate.auto": "Agente",
