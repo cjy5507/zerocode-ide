@@ -1881,12 +1881,12 @@ mod tests {
     /// (its name, its risk line) or a question zo puts to the person itself,
     /// as the ladder's request crosses the permission bridge (t-17474).
     fn prompt_block(
-        request: runtime::permission::PermissionRequest,
+        request: &runtime::permission::PermissionRequest,
     ) -> runtime::message_stream::PermissionPrompt {
         let (responder, _answer) = tokio::sync::oneshot::channel();
         // The bridge builds the block the pane parks; so does this.
         crate::session::permission_bridge::build_render_prompt(
-            &request,
+            request,
             responder,
             runtime::message_stream::BlockId(1),
         )
@@ -1928,7 +1928,7 @@ mod tests {
                 title: core_types::retry_signal::REFUSAL_SWITCH_TITLE.to_string(),
             }),
         };
-        let plain: Vec<String> = Dialog::for_permission(&prompt_block(asked))
+        let plain: Vec<String> = Dialog::for_permission(&prompt_block(&asked))
             .lines(100)
             .iter()
             .map(Line::plain)
@@ -1955,7 +1955,7 @@ mod tests {
             risk_level: RiskLevel::High,
             question: None,
         };
-        let plain: Vec<String> = Dialog::for_permission(&prompt_block(tool))
+        let plain: Vec<String> = Dialog::for_permission(&prompt_block(&tool))
             .lines(100)
             .iter()
             .map(Line::plain)
