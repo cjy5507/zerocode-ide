@@ -93,6 +93,7 @@ fn review_facts_read_only_what_a_coordinator_wrote() {
             attempt: Some("dp-1".into()),
             source: None,
         }),
+        closed: None,
     };
     let facts = ReviewFacts::written_by(task.result.as_str(), task.result_author.as_ref());
     assert!(facts.merged && !facts.claimed_merged);
@@ -1884,6 +1885,7 @@ fn worker_worktree_titles_keep_the_id_across_free_form_task_titles() {
         failures: 0,
         created_ms: 0,
         result_author: None,
+        closed: None,
     };
 
     let korean = task(
@@ -6154,6 +6156,7 @@ fn an_agents_words_never_reach_a_debug_rendering() {
                 failures: 0,
                 created_ms: 1,
                 result_author: None,
+                closed: None,
             },
         }
     );

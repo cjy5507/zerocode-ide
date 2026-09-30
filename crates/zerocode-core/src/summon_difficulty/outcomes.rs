@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::jev::promote::{Agreement, Line};
-use crate::orchestration::{Dispatch, MessageKind, Run, task_cost};
+use crate::orchestration::{Dispatch, MessageKind, Run, TaskStatus, task_cost};
 
 pub const KEY: &str = "executionOutcome";
 pub const MIN_EXECUTIONS: usize = 30;
@@ -40,6 +40,12 @@ pub fn observe(
     total: &task_cost::TaskCost,
 ) -> Option<Outcome> {
     let task = run.task(&dispatch.task)?;
+    // A closed task was folded, handed over or overtaken: what its attempts
+    // did is not evidence about the model that ran them, and an attempt
+    // stopped because the work moved is not a failure to grade.
+    if task.status == TaskStatus::Closed {
+        return None;
+    }
     let attempts = task_cost::attempts(run, &task.id);
     let rework_rounds = attempts.len().saturating_sub(1);
     let retry_count = attempts.iter().filter(|one| one.retry_of.is_some()).count();

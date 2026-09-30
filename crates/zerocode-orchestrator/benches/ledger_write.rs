@@ -61,6 +61,7 @@ fn a_projection() -> LedgerProjectionV1 {
                 failures: 0,
                 created_ms: at as i64,
                 result_author: None,
+                closed: None,
             })
             .collect(),
         dispatches: (0..DISPATCH_COUNT)

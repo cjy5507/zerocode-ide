@@ -836,7 +836,7 @@ function paintDeskWorkers(block, now, view) {
       ? t("board.desk.mailAge", "{{time}} 전", { time: agoWord(at, now) }) : "");
     const review = ledgerReviewWord(row);
     writeTextContent(node.querySelector(".board-desk-worker-task"),
-      [row.task || row.task_id, review].filter(Boolean).join(" · "));
+      [row.task || row.task_id, review, ledgerClosedReason(row.closed)].filter(Boolean).join(" · "));
     writeTextContent(node.querySelector(".board-desk-worker-facts"), deskWorkerFacts(row, now));
     const main = node.querySelector(".board-desk-worker-main");
     writeDisabled(main, node.__term == null);
@@ -912,11 +912,12 @@ const DESK_STAGES = Object.freeze([
   { id: "gate", flow: false, tone: "wait", key: "board.desk.stageGate", word: "게이트" },
   { id: "blocked", flow: false, tone: "wait", key: "board.desk.stageBlocked", word: "막힘" },
   { id: "failed", flow: false, tone: "halt", key: "board.desk.stageFailed", word: "실패" },
+  { id: "closed", flow: false, tone: "", key: "board.closed", word: "닫힘" },
 ]);
 
 /* 처음 펼쳐 둘 단계: 멈춰 선 단계 가운데 과업이 있는 첫째. 없으면 아무것도. */
 function deskDefaultStage(counts) {
-  return DESK_STAGES.find((stage) => !stage.flow && (counts.get(stage.id) ?? 0) > 0)?.id ?? null;
+  return DESK_STAGES.find((stage) => !stage.flow && stage.tone !== "" && (counts.get(stage.id) ?? 0) > 0)?.id ?? null;
 }
 
 function deskStageChip(host, stage, counts, view) {
@@ -950,6 +951,8 @@ function deskTaskRow(held, task, runs) {
   writeTextContent(title, runs > 1 ? `${task.title} · ${task.run}` : task.title);
   const note = task.gate
     ? t("board.desk.taskGate", "{{gate}} · {{question}}", { gate: task.gate.id, question: task.gate.question })
+    : task.closed
+      ? [ledgerClosedReason(task.closed), task.closed.why].filter(Boolean).join(" · ")
     : task.blocked_by?.length
       ? t("board.desk.taskBlockedBy", "실패한 선행: {{tasks}}", { tasks: task.blocked_by.join(", ") })
       : "";
@@ -967,8 +970,9 @@ function paintDeskPipeline(block, now, view) {
   const ledger = deskLedger;
   if (!ledger || !Array.isArray(ledger.stages) || ledger.runs?.length === 0) return false;
   const counts = new Map(ledger.stages.map((one) => [one.stage, one.count]));
-  const total = [...counts.values()].reduce((sum, count) => sum + count, 0);
-  if (total === 0) return false;
+  // A closed task is over: the pipeline's count is what is still in play.
+  const total = [...counts].reduce((sum, [stage, count]) => sum + (stage === "closed" ? 0 : count), 0);
+  if (total === 0 && (counts.get("closed") ?? 0) === 0) return false;
   writeTextContent(block.firstElementChild, t("board.desk.pipeline", "과업 흐름 · {{count}}", { count: total }));
   const body = block.lastElementChild;
   let strip = body.querySelector(":scope > .board-desk-stages");

@@ -30,9 +30,10 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use zerocode_core::orchestration::{
-    AckedRow, AttachmentRow, Auto, BoundRow, CHECK_RENDERER, CheckV1, CoordinatorSeat, Delivery,
-    DispatchRow, GateRow, HandoverPolicy, InboxRow, LedgerProjectionV1, MessageRow, Pinned,
-    ResultAuthor, RunRow, RunSummary, ServedAnswer, ServedRow, TaskRow, Text, VerbTally, WorkerRow,
+    AckedRow, AttachmentRow, Auto, BoundRow, CHECK_RENDERER, CheckV1, Closure, CoordinatorSeat,
+    Delivery, DispatchRow, GateRow, HandoverPolicy, InboxRow, LedgerProjectionV1, MessageRow,
+    Pinned, ResultAuthor, RunRow, RunSummary, ServedAnswer, ServedRow, TaskRow, Text, VerbTally,
+    WorkerRow,
 };
 
 use crate::effect_journal::{EffectJournalError, from_sql_u64, to_sql_u64};
@@ -118,6 +119,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         failures INTEGER NOT NULL CHECK (failures >= 0),
         created_ms INTEGER NOT NULL,
         result_author TEXT,
+        closed TEXT,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, run, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -411,6 +413,9 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
          * and NULL for every row written before authorship was recorded,
          * which the review reads as a claim by nobody known (t-6815). */
         ("ledger_tasks", "result_author", "TEXT"),
+        /* Why a task is closed, as one JSON document — NULL for every task
+         * not closed, and for every row written before closings existed. */
+        ("ledger_tasks", "closed", "TEXT"),
         ("ledger_dispatches", "retry_of", "TEXT"),
         ("ledger_workers", "model", "TEXT"),
         ("ledger_workers", "effort", "TEXT"),
@@ -1567,8 +1572,8 @@ fn write_rows(
                 .execute(
                     "INSERT INTO ledger_tasks (
                         ledger_id, ordinal, run, id, spec, title, parent, status,
-                        result, failures, created_ms, result_author
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        result, failures, created_ms, result_author, closed
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         ledger_id,
                         at,
@@ -1582,6 +1587,11 @@ fn write_rows(
                         i64::from(row.failures),
                         row.created_ms,
                         row.result_author
+                            .as_ref()
+                            .map(serde_json::to_string)
+                            .transpose()
+                            .map_err(|_| EffectJournalError::Corrupt)?,
+                        row.closed
                             .as_ref()
                             .map(serde_json::to_string)
                             .transpose()
@@ -2295,7 +2305,7 @@ fn read_repairable_from_head(
     each(
         connection,
         "SELECT ordinal, run, id, spec, title, parent, status, result, failures, created_ms,
-                result_author
+                result_author, closed
            FROM ledger_tasks WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -2312,6 +2322,7 @@ fn read_repairable_from_head(
                 row.get::<_, i64>(8)?,
                 row.get::<_, i64>(9)?,
                 row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
             ));
             Ok(())
         },
@@ -2320,7 +2331,10 @@ fn read_repairable_from_head(
         .into_iter()
         .zip(task_words)
         .map(
-            |((at, run, id, spec, title, parent, result, failures, created_ms, author), status)| {
+            |(
+                (at, run, id, spec, title, parent, result, failures, created_ms, author, closed),
+                status,
+            )| {
                 Ok(TaskRow {
                     run,
                     id,
@@ -2337,6 +2351,11 @@ fn read_repairable_from_head(
                     result_author: author
                         .as_deref()
                         .map(serde_json::from_str::<ResultAuthor>)
+                        .transpose()
+                        .map_err(|_| EffectJournalError::Corrupt)?,
+                    closed: closed
+                        .as_deref()
+                        .map(serde_json::from_str::<Closure>)
                         .transpose()
                         .map_err(|_| EffectJournalError::Corrupt)?,
                 })
@@ -2982,6 +3001,7 @@ mod tests {
                 failures: 2,
                 created_ms: 7,
                 result_author: None,
+                closed: None,
             }],
             dispatches: vec![DispatchRow {
                 run: "run-2".to_string(),

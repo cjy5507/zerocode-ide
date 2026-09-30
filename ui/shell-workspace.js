@@ -3967,6 +3967,8 @@ function worktreeMark(path, state) {
   if (phase === "review") return { indicator: "review", phase, said: state };
   if (phase === "vouched") return { indicator: "done", phase, said: state };
   if (phase === "unsettled" && base === "done") return { indicator: "active", phase: "", said: "active" };
+  // Closed work waits on nobody: a turn that ended on it is at rest, not done.
+  if (phase === "closed" && base === "done") return { indicator: "inactive", phase: "", said: state };
   return { indicator: base, phase: "", said: state };
 }
 

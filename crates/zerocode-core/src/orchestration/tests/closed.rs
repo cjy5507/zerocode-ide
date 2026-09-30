@@ -37,7 +37,10 @@ fn a_closing_is_refused_without_its_reason_and_its_target() {
     let one = task_of(&mut bench, "one");
     let two = task_of(&mut bench, "two");
 
-    let said = refused(&mut bench, &format!("task-update --task {one} --status closed"));
+    let said = refused(
+        &mut bench,
+        &format!("task-update --task {one} --status closed"),
+    );
     assert!(said.contains("--closed-as"), "{said}");
     let said = refused(
         &mut bench,
@@ -234,12 +237,7 @@ fn a_ledger_written_before_closings_loads_unchanged() {
     let carried = Ledger::rebuild(bench.ledger.export()).expect("a readable ledger");
     let task = carried.runs[0].task(&id).expect("the task");
     assert_eq!(task.status, TaskStatus::Closed);
-    assert_eq!(
-        task.closed,
-        Some(Closure::Outdated {
-            why: "gone".into()
-        })
-    );
+    assert_eq!(task.closed, Some(Closure::Outdated { why: "gone".into() }));
 }
 
 #[test]
@@ -249,6 +247,14 @@ fn the_settle_pass_lists_first_and_closes_only_when_applied() {
     let empty = task_with_an_empty_attempt(&mut bench, "empty");
     let untouched = task_of(&mut bench, "no attempt at all");
     let failed_empty = task_with_an_empty_attempt(&mut bench, "also empty");
+    // One a coordinator already judged: old news it is not.
+    let judged = task_with_an_empty_attempt(&mut bench, "judged");
+    bench.ledger.runs[0]
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == judged)
+        .expect("the task")
+        .result = r#"{"merged":true}"#.into();
     // Nobody has touched any of it for longer than the quiet time.
     bench.clock += SETTLE_QUIET_DAYS * 86_400_000 + 1;
     // One handed something in, however long ago: it can take a review.
@@ -269,9 +275,15 @@ fn the_settle_pass_lists_first_and_closes_only_when_applied() {
         .iter()
         .map(|r| r["taskId"].as_str().expect("id").to_string())
         .collect();
-    assert!(ids.contains(&empty) && ids.contains(&failed_empty), "{ids:?}");
     assert!(
-        !ids.contains(&untouched) && !ids.contains(&handed) && !ids.contains(&fresh),
+        ids.contains(&empty) && ids.contains(&failed_empty),
+        "{ids:?}"
+    );
+    assert!(
+        !ids.contains(&untouched)
+            && !ids.contains(&handed)
+            && !ids.contains(&fresh)
+            && !ids.contains(&judged),
         "{ids:?}"
     );
     // Listing wrote nothing.
@@ -292,4 +304,38 @@ fn the_settle_pass_lists_first_and_closes_only_when_applied() {
     assert!(matches!(task.closed, Some(Closure::Outdated { .. })));
     // A second pass finds nothing left to do.
     assert_eq!(bench.json("task-settle")["count"], 0);
+}
+
+#[test]
+fn a_closed_task_is_never_graded_as_a_failed_attempt() {
+    use crate::summon_difficulty::outcomes::observe;
+    let mut bench = Bench::new();
+    bench.json("run-create --name graded");
+    let id = task_with_an_empty_attempt(&mut bench, "stopped");
+    let dispatch = bench.ledger.runs()[0].dispatches[0].id.clone();
+    let grade = |bench: &Bench| {
+        let run = &bench.ledger.runs()[0];
+        let total = task_cost::task_cost(
+            run,
+            &id,
+            &task_cost::SessionBook::default(),
+            task_cost::JevTally::default(),
+        );
+        observe(
+            run,
+            run.dispatch(&dispatch).expect("the attempt"),
+            &task_cost::GenerationCost::default(),
+            &total,
+        )
+    };
+    // An attempt that ended without a report is a failed one while the task
+    // is open; the work moving elsewhere makes it no evidence at all.
+    assert_eq!(
+        grade(&bench).expect("graded").first_attempt_success,
+        Some(false)
+    );
+    bench.json(&format!(
+        "task-update --task {id} --status closed --closed-as outdated --why moved"
+    ));
+    assert_eq!(grade(&bench), None);
 }
