@@ -1740,19 +1740,41 @@ async function installStepsProbe(page) {
 }
 
 /* A helper's page, opened the way the sidebar opens it: its transcript read
- * from the parent's record, `state` the helper's own. */
-async function openHelperConversation(page, turns, state) {
-  await page.evaluate(async ({ turns, state }) => {
+ * from the parent's record, `state` the helper's own, `agent` the parent's. */
+async function openHelperConversation(page, turns, state, { agent = "claude" } = {}) {
+  await page.evaluate(async ({ turns, state, agent }) => {
     const term = await openTermTab({ placement: "tab" });
     const owner = tabOfTerm(term);
-    paneAgents.set(term, "claude");
+    paneAgents.set(term, agent);
     hookStates.set(term, "working");
+    window.__HELPER_TURNS__ = turns;
     window.__ANSWER__.subagent_log = (args) => ({ found: true, next: turns.length, turns: turns.slice(args.after ?? 0) });
-    await openHelperPage({ term, tab: owner, worktree: owner.worktree, agent: "claude" }, { id: "steps-helper", name: "프로필 도우미", state });
+    await openHelperPage({ term, tab: owner, worktree: owner.worktree, agent }, { id: "steps-helper", name: "프로필 도우미", state });
     await pollHelperPages();
     await window.__PAINTED__();
-  }, { turns, state });
+  }, { turns, state, agent });
   await page.waitForSelector("#worker-view .helper-turns .helper-turn:not(.is-briefing)", { state: "attached" });
+}
+
+/* zo's row as the core catalog voices it (`agent_voice`, `zo`): the harness's own
+ * list has none, and zo is the agent whose word for a turn that is out is a
+ * static English one — no spinner verbs to turn through — which the Korean page
+ * must not say aloud. */
+export const ZO_ROW = {
+  id: "zo", name: "ZO", favicon_domain: "", homepage_url: "", installed: true, found_as: "zo",
+  unsupported_here: false, missing_requirement: null, takes_a_paste: true, ready: "quiet",
+  glyph: "◐", glyph_cycle: [], busy_word: "Working…", spinner_verbs: [], todo_tool: "TodoWrite",
+  helper_stop: "helper.stop",
+};
+
+/* The window's agent list with zo in it, before any page is opened on a zo. */
+export async function standZo(page) {
+  await page.evaluate(async (row) => {
+    const listed = await invoke("list_agents", {});
+    window.__ANSWER__.list_agents = () => [row, ...listed];
+    agentMarks.clear();
+    await refreshAgents();
+  }, ZO_ROW);
 }
 
 /* A pane whose agent has no wire, its conversation view open on `turns`. */
@@ -1798,6 +1820,11 @@ export async function testConversationSteps(browser, origin, ok) {
   await stepsSpaceOnALine(browser, origin, ok);
   await stepsSpaceBesideTheGraph(browser, origin, ok);
   await stepsStillPage(browser, origin, ok);
+  await stepsShellTitle(browser, origin, ok);
+  await stepsUnknownTimes(browser, origin, ok);
+  await stepsHelperClock(browser, origin, ok);
+  await stepsNowWithoutARow(browser, origin, ok);
+  await stepsListUnderASentence(browser, origin, ok);
 }
 
 /* C1–C4, C9 — the rows the fixture comes to, closed, then pressed. */
@@ -2991,6 +3018,558 @@ async function stepsStillPage(browser, origin, ok) {
     ok("C16: sweeping the page for motion raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
+  }
+}
+
+/* D — what a step's line says when it cannot know, and what a shell step is titled (t-18702). The
+ * conversation view against its approved mockup (「도우미 대화 화면 시안」, v2): five places the page
+ * still differed from it — a shell step's title carried the whole `cd … && …` command, a time nobody
+ * knows was written 「0.0초」 (and a header clock said 「완료 0초」 on every finished helper), the now
+ * line fell back to the agent's English word, a thought's length was worded backwards, and a list
+ * written right under a sentence ran into the sentence. Synthetic like everything here: a shop app,
+ * never a real path or address. */
+
+/* D1 — a shell step is titled by what it did. A command that opens by changing folder — `cd <dir> &&
+ * …`, `cd <dir> ; …` — says where it ran, not what it did: the title is the command's own first words,
+ * fitted to STEP_TARGET_FIT, and when a folder was named, its last name after 「 · 」 (the mockup's
+ * row: 「셸 grep SCREEN_WIDTH… · src」). The opened row keeps the whole command, as it always did. */
+const SHELL_TITLES = [
+  { id: "s1", command: `cd ${SHOP} && grep -rn "SCREEN_WIDTH\\|SCREEN_HEIGHT\\|SCREEN_W\\b" src | head -60` },
+  { id: "s2", command: 'cd "/Users/dev/my shop" ; ls -la', title: "ls -la · my shop" },
+  { id: "s3", command: `cd ${SHOP}/ios && cd Pods && make test`, title: "make test · Pods" },
+  { id: "s4", command: "npm test -- --runInBand --testPathPattern=profile/Gallery --coverage" },
+  // A `cd` that is not the command's opening is part of what the command does.
+  { id: "s5", command: 'echo "cd /x && y" | wc -l', title: 'echo "cd /x && y" | wc -l' },
+];
+
+async function stepsShellTitle(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const turns = [{ role: "user", text: "셸로 확인해 줘.", at_ms: CLOCK }];
+    let clock = CLOCK;
+    const call = (id, name, kind, input, answer) => {
+      turns.push({ role: "tool", text: `${name} · ${input}`, at_ms: (clock += 1000), tool: { call_id: id, name, kind, input, is_error: false } });
+      turns.push({ role: "tool_result", text: answer, at_ms: (clock += 400), tool: { call_id: id, is_error: false } });
+    };
+    // A step of another kind stands between two shell steps, or they would fold into one row.
+    for (const one of SHELL_TITLES) {
+      call(one.id, "Bash", "bash", one.command, "ok");
+      call(`${one.id}-read`, "Read", "read", `${PROFILE}/Gallery.tsx`, fileBody("Gallery.tsx"));
+    }
+    // A search of the web whose words look like a command is not one.
+    call("q1", "WebSearch", "websearch", "cd /tmp && ls", "results");
+    // Two shell steps in a row are one row, whose title is the first one's, then how many more.
+    call("f1", "Bash", "bash", `cd ${SHOP} && git status`, "clean");
+    call("f2", "Bash", "bash", `cd ${SHOP} && git log -1`, "abc123");
+    await openConversation(page, turns);
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async ({ ids, whole }) => {
+      const { steps, lineOf, settle } = window.__STEPS__;
+      await settle();
+      const rowOf = (id) => steps().find((row) => row.__turn?.tool?.call_id === id);
+      const targetOf = (row) => lineOf(row)?.querySelector(".helper-step-target")?.textContent ?? null;
+      const seen = { fit: STEP_TARGET_FIT, titles: {}, kinds: {} };
+      for (const id of ids) {
+        seen.titles[id] = targetOf(rowOf(id));
+        seen.kinds[id] = lineOf(rowOf(id))?.querySelector(".helper-step-kind")?.textContent ?? null;
+      }
+      seen.search = targetOf(rowOf("q1"));
+      const run = steps().find((row) => row.classList.contains("is-run") && row.__kind === "bash");
+      seen.run = targetOf(run);
+      seen.runMore = t("worker.stepMore", "외 {{n}}개", { n: 1 });
+      // The opened row keeps the whole command.
+      lineOf(rowOf("s1")).click();
+      await settle();
+      seen.opened = (rowOf("s1")?.querySelector(":scope > .helper-step-body")?.innerText ?? "").replace(/\s+/g, " ");
+      seen.whole = whole.replace(/\s+/g, " ");
+      return seen;
+    }, { ids: SHELL_TITLES.map((one) => one.id), whole: SHELL_TITLES[0].command });
+    const head = (words) => (words ?? "").split(" · ")[0];
+    const t1 = seen.titles.s1 ?? "";
+    ok(
+      "D1: a shell step whose command opens with `cd <dir> &&` is titled with the command's own first words, cut at the fit with a mark, and the folder's last name after 「 · 」 — the cd and the folder's whole path are not in the title",
+      t1.startsWith('grep -rn "SCREEN_WIDTH') && t1.endsWith(" · shop-app") && head(t1).endsWith("…") &&
+        head(t1).length <= seen.fit && !/(^|\s)cd\s/.test(t1) && !t1.includes("/Users/dev") && !t1.includes("&&"),
+      JSON.stringify(seen),
+    );
+    ok(
+      "D1: `cd \"a b\" ;` and `cd a && cd b &&` are read the same way — the semicolon's chain, a quoted folder with a space in it, the last folder named — and a command with no folder to name ends where the command does",
+      seen.titles.s2 === SHELL_TITLES[1].title && seen.titles.s3 === SHELL_TITLES[2].title,
+      JSON.stringify(seen.titles),
+    );
+    const t4 = seen.titles.s4 ?? "";
+    ok(
+      "D1: a shell command with no cd is fitted too — its own first words cut at the fit with a mark, no folder — and a `cd` inside the command's words is not stripped",
+      t4.endsWith("…") && t4.length <= seen.fit && !t4.includes(" · ") &&
+        SHELL_TITLES[3].command.startsWith(t4.slice(0, -1).trimEnd()) && seen.titles.s5 === SHELL_TITLES[4].title,
+      JSON.stringify(seen.titles),
+    );
+    ok(
+      "D1: only a shell step is read as a command — a search of the web whose query begins `cd /tmp &&` keeps its words — and a row of shell steps is titled like one step, then how many more stand behind it",
+      seen.search === "cd /tmp && ls" && seen.run.includes("git status") && seen.run.includes(" · shop-app") &&
+        !/(^|\s)cd\s/.test(seen.run) && seen.run.endsWith(seen.runMore),
+      JSON.stringify({ search: seen.search, run: seen.run }),
+    );
+    ok(
+      "D1: the opened row keeps the whole command, the cd and the folder's whole path included",
+      seen.opened.includes(seen.whole) && seen.whole.includes(`cd ${SHOP} &&`),
+      JSON.stringify({ opened: seen.opened.slice(0, 300), whole: seen.whole }),
+    );
+  } finally {
+    await page.close();
+  }
+  // The foot line says the same title while the step is out.
+  const live = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(live.page, [{ role: "user", text: "셸로 확인해 줘.", at_ms: CLOCK }], { status: "working" });
+    await installStepsProbe(live.page);
+    const saying = await live.page.evaluate(async ({ command }) => {
+      const { list, settle } = window.__STEPS__;
+      window.__CONVERSATION__.turns.push({
+        role: "tool", text: `Bash · ${command}`, at_ms: 1_790_000_100_000,
+        tool: { call_id: "live-shell", name: "Bash", kind: "bash", input: command, is_error: false },
+      });
+      await pollHelperPages();
+      await settle();
+      return {
+        now: list().querySelector(":scope > .helper-status .helper-status-now")?.textContent ?? "",
+        row: list().querySelector(":scope > .is-tool.is-live .helper-step-target")?.textContent ?? "",
+      };
+    }, { command: `cd ${SHOP} && make test-all-the-things --with --a-long --list --of --flags --that --goes --on` });
+    ok(
+      "D1: the foot line names a shell step that is out by its title — the command's first words and the folder — not by the whole `cd … &&` line",
+      saying.now.endsWith(`${saying.row}`) && saying.row.endsWith(" · shop-app") && !/(^|\s)cd\s/.test(saying.now) &&
+        saying.now.includes("make test-all-the-things"),
+      JSON.stringify(saying),
+    );
+    ok("D1: the titles raised no page errors", live.faults.length === 0, live.faults.join("\n"));
+  } finally {
+    await live.page.close();
+  }
+}
+
+/* D2 — a length only when the file said both ends. A line the file did not stamp is read at the moment
+ * the window read it, so lines read in one batch share one time and a step between two of them "took"
+ * 0.0 s — or, where only one end was stamped, the days between the file's clock and the window's. A
+ * step shows its length when both of its ends carry a time from the file, and nothing otherwise; a
+ * length that comes to nothing is nothing. The thought's own fold is worded 「생각 12초」. */
+async function stepsUnknownTimes(browser, origin, ok) {
+  const read = (page) => page.evaluate(async () => {
+    const { list, steps, thoughts, lineOf, wordsOf, settle } = window.__STEPS__;
+    await settle();
+    return {
+      metas: steps().map((row) => row.querySelector(":scope > summary .helper-step-meta")?.textContent ?? null),
+      runs: steps().filter((row) => row.classList.contains("is-run")).length,
+      text: list().innerText,
+      thought: wordsOf(lineOf(thoughts()[0])),
+    };
+  });
+  // The backend says `null` for a line it found no time on (`TranscriptTurn.at_ms`), not a missing key.
+  const bare = (turns) => turns.map((turn) => ({ ...turn, at_ms: null }));
+  // A file that stamped nothing: none of its steps says a length, and the page says no 「0.0초」.
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await openConversation(page, bare(stepsFixture()));
+      await installStepsProbe(page);
+      const seen = await read(page);
+      ok(
+        "D2: a file that stamped nothing — its lines read in one batch, so they share the moment they were read — shows no length on any step or row of steps, and no 「0.0초」 anywhere on the page",
+        seen.metas.length >= 5 && seen.runs >= 1 && seen.metas.every((meta) => meta === "") && !/\d\.\d초/.test(seen.text),
+        JSON.stringify(seen.metas),
+      );
+      ok("D2: the unstamped page raised no page errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+  // A file that stamped everything: every step says its own length, and a thought says how long it thought.
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await openConversation(page, stepsFixture());
+      await installStepsProbe(page);
+      const seen = await read(page);
+      ok(
+        "D2: stamped steps show theirs — one decimal and 「초」, the row of steps from its first call to its last answer",
+        seen.metas.length >= 5 && seen.metas.every((meta) => /^\d+\.\d초$/.test(meta ?? "")),
+        JSON.stringify(seen.metas),
+      );
+      ok(
+        "D2: a thought that lasted 12 seconds is worded 「생각 12초」 — the word first, then the length — not 「12초 동안 생각」",
+        seen.thought.includes("생각 12초") && !seen.thought.includes("동안"),
+        seen.thought,
+      );
+      ok("D2: the stamped page raised no page errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+  // Half a stamp is no stamp: the call's or the answer's missing, or the two the same.
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      const turns = [{ role: "user", text: "시간을 알 수 없는 줄들.", at_ms: CLOCK }];
+      const pair = (id, name, kind, target, call, answer) => {
+        turns.push({ role: "tool", text: `${name} · ${target}`, ...call, tool: { call_id: id, name, kind, input: target, is_error: false } });
+        turns.push({ role: "tool_result", text: "ok", ...answer, tool: { call_id: id, is_error: false } });
+      };
+      // Four kinds, so no two of them fold into one row.
+      pair("m1", "WebFetch", "web", "https://example.com/a", { at_ms: CLOCK + 1000 }, { at_ms: CLOCK + 3000 });
+      pair("m2", "Read", "read", `${PROFILE}/A.tsx`, { at_ms: CLOCK + 4000 }, { at_ms: null });
+      pair("m3", "Grep", "grep", "SCREEN_WIDTH", { at_ms: null }, { at_ms: CLOCK + 6000 });
+      pair("m4", "Bash", "bash", "ls", { at_ms: CLOCK + 7000 }, { at_ms: CLOCK + 7000 });
+      // A stamp that goes backwards is no length either — a session after compaction opens with a summary
+      // stamped at the moment it was written, later than the older lines that follow it (by design, t-18703),
+      // so the difference of two stamps is not always a time: a step whose answer is stamped before its call,
+      // and a row of steps whose last answer is stamped before its first call, say nothing.
+      pair("m5", "Edit", "edit", `${PROFILE}/A.tsx`, { at_ms: CLOCK + 9000 }, { at_ms: CLOCK + 8000 });
+      pair("m6", "Read", "read", `${PROFILE}/B.tsx`, { at_ms: CLOCK + 12_000 }, { at_ms: CLOCK + 12_300 });
+      pair("m7", "Read", "read", `${PROFILE}/C.tsx`, { at_ms: CLOCK + 11_000 }, { at_ms: CLOCK + 11_200 });
+      await openConversation(page, turns);
+      await installStepsProbe(page);
+      const seen = await read(page);
+      ok(
+        "D2: a step whose answer was not stamped, one whose call was not, one whose two ends are the same instant, one whose answer is stamped before its call, and a row of steps whose last answer is stamped before its first call say no length — only the step both of whose ends the file stamped, in order, says its 2.0 seconds",
+        JSON.stringify(seen.metas) === JSON.stringify(["2.0초", "", "", "", "", ""]) && seen.runs === 1 &&
+          !/\d\.\d초|-\d/.test(seen.text.replace("2.0초", "")),
+        JSON.stringify(seen.metas),
+      );
+      ok("D2: the half-stamped page raised no page errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+}
+
+/* D3 — the header clock is the helper's, and says nothing when it cannot know. The head read 「실행 중
+ * 0초」 (counted from the moment the page opened) and 「완료 0초」 on every finished helper, whichever
+ * hour it ran. The helper's own clock is the span of the times its file stamped — its first line to its
+ * last, or to now while it runs — and a file that stamped nothing has no clock. A helper that ended
+ * reads 「✓ 끝남 · 2분 14초」 (the mockup's chip): the word, a check before it, the length after a dot. */
+async function stepsHelperClock(browser, origin, ok) {
+  const clockOf = (page) => page.evaluate(async () => {
+    await window.__PAINTED__();
+    await window.__PAINTED__();
+    const head = document.querySelector("#worker-view .helper-head");
+    const state = head?.querySelector(".worker-state");
+    const clock = head?.querySelector(".worker-elapsed");
+    const before = (node) => (node ? getComputedStyle(node, "::before").content : "");
+    return {
+      state: state?.textContent ?? null,
+      clock: clock?.textContent ?? null,
+      check: before(state),
+      dot: before(clock),
+      ended: t("worker.ended", "끝남"),
+    };
+  });
+  const stamped = (span, { lines = 2 } = {}) => {
+    const turns = [{ role: "user", text: "이 도우미에게 맡긴 일.", at_ms: CLOCK }];
+    for (let at = 1; at < lines; at += 1) {
+      turns.push({
+        role: "tool", text: `Read · ${PROFILE}/A${at}.tsx`, at_ms: CLOCK + Math.round((span * at) / lines),
+        tool: { call_id: `h${at}`, name: "Read", kind: "read", input: `${PROFILE}/A${at}.tsx`, is_error: false },
+      });
+      turns.push({
+        role: "tool_result", text: "ok", at_ms: CLOCK + Math.round((span * at) / lines) + 100, tool: { call_id: `h${at}`, is_error: false },
+      });
+    }
+    turns.push({ role: "assistant", text: "끝났습니다.", at_ms: CLOCK + span });
+    return turns;
+  };
+  // Ended: from the first stamped line to the last — the mockup's 2 minutes 14 seconds.
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await openHelperConversation(page, stamped(134_000, { lines: 4 }), "done");
+      const seen = await clockOf(page);
+      ok(
+        "D3: a helper that ended says how long it ran by its file's own stamps — 「2분 14초」 for a file whose first line and last are 134 seconds apart — however long ago it ran and whenever its page was opened",
+        seen.clock === "2분 14초",
+        JSON.stringify(seen),
+      );
+      ok(
+        "D3: a helper that ended wears 「끝남」 with a check before it and its length after a dot — the mockup's 「✓ 끝남 · 2분 14초」",
+        seen.state === seen.ended && seen.state === "끝남" && seen.check.includes("✓") && seen.dot.includes("·"),
+        JSON.stringify(seen),
+      );
+      ok("D3: the ended helper's head raised no page errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+  // Running: from the first stamped line to now, counting on.
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      const start = Date.now() - 41_000;
+      const turns = [
+        { role: "user", text: "지금 돌고 있는 도우미.", at_ms: start },
+        { role: "tool", text: `WebFetch · https://example.com/health`, at_ms: start + 1000,
+          tool: { call_id: "run1", name: "WebFetch", kind: "web", input: "https://example.com/health", is_error: false } },
+        { role: "tool_result", text: "200 OK", at_ms: start + 2000, tool: { call_id: "run1", is_error: false } },
+      ];
+      await openHelperConversation(page, turns, "running");
+      const seen = await clockOf(page);
+      ok(
+        "D3: a helper that is running counts from its file's first stamped line, not from the moment the page opened — 41 seconds in, the head says a number of seconds in the forties or fifties, and no 「✓」 stands before 「실행 중」",
+        /^(4|5)\d초$/.test(seen.clock ?? "") && !seen.check.includes("✓") && seen.dot.includes("·"),
+        JSON.stringify(seen),
+      );
+      ok("D3: the running helper's head raised no page errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+  // A session after compaction opens with a summary stamped at the moment it was written — later than the
+  // older lines that follow it (by design, t-18703): a clock that would run backwards is no clock, and a
+  // number measured from the summary to the newer lines would be a time since the compaction, not the helper's.
+  for (const [name, more] of [["only the older lines follow", []], ["older lines and newer ones follow", [{ role: "assistant", text: "요약 뒤에 이어 한 일.", at_ms: CLOCK + 620_000 }]]]) {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      const turns = [{ role: "user", text: "이전 대화의 요약.", at_ms: CLOCK + 600_000 }, ...stamped(134_000, { lines: 4 }), ...more];
+      await openHelperConversation(page, turns, "done");
+      const seen = await clockOf(page);
+      ok(
+        `D3: a helper file that opens with a summary stamped later than the lines after it (${name}) gives the head no clock — no backwards span, no time since the summary`,
+        seen.clock === "" && seen.state === seen.ended && !seen.dot.includes("·"),
+        JSON.stringify(seen),
+      );
+      ok(`D3: the compacted helper's head (${name}) raised no page errors`, faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+  // Unknown: a file that stamped nothing has no clock — no number, no dot, and not 「0초」.
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      const bare = stamped(134_000, { lines: 4 }).map((turn) => ({ ...turn, at_ms: null }));
+      await openHelperConversation(page, bare, "done");
+      const seen = await clockOf(page);
+      ok(
+        "D3: a file that stamped nothing gives the head no clock at all — the state word alone, no 「0초」, no dot after it",
+        seen.clock === "" && seen.state === seen.ended && !seen.dot.includes("·"),
+        JSON.stringify(seen),
+      );
+      ok("D3: the unstamped helper's head raised no page errors", faults.length === 0, faults.join("\n"));
+    } finally {
+      await page.close();
+    }
+  }
+}
+
+/* D4 — the now line, when no row of a step or a thought is out to name. A helper's page reads its own
+ * card's newest activity (zo's `subagents` frame names what each helper is doing, and the window files
+ * it under `sub:<term>:<id>`); a tool's verb is worded the way the step rows word that kind, waiting,
+ * reconnecting and thinking are the page's own words, and when nothing is known the line says the
+ * window's own 「작업 중…」 — never the agent's English word on a Korean page. An agent whose voice turns
+ * through verbs (Claude Code's) keeps its own line where nothing is known. */
+async function stepsNowWithoutARow(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standZo(page);
+    // The helper is still at work, and every call it made has come back.
+    await openHelperConversation(page, stepsFixture().filter((turn) => turn.role !== "assistant"), "running", { agent: "zo" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async () => {
+      const { settle } = window.__STEPS__;
+      const tab = activeHelperPage();
+      const card = `sub:${tab.worker.term}:${tab.worker.helper.id}`;
+      const status = () => document.querySelector("#worker-view .helper-status");
+      const nowWords = () => status()?.querySelector(".helper-status-now")?.textContent ?? "";
+      const seeing = () => (status()?.innerText ?? "").replace(/\s+/g, " ").trim();
+      const state = () => ({ now: nowWords(), seeing: seeing(), naming: status()?.classList.contains("is-naming") ?? false });
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      let seq = 100;
+      const say = async (activity) => {
+        tell("hook:activity", { pane: card, activities: [{ seq: (seq += 1), activity }] });
+        await settle();
+        return state();
+      };
+      const feed = async (...turns) => {
+        window.__HELPER_TURNS__.push(...turns);
+        await pollHelperPages();
+        await settle();
+      };
+      const voice = agentVoice("zo");
+      const now = t("worker.now", "지금");
+      const seen = {
+        busy: voice.busy_word,
+        wordNode: status()?.querySelector(".helper-status-word")?.textContent ?? "",
+        wantNothing: `${now} · ${t("worker.busy", "작업 중…")}`,
+        wantWaiting: `${now} · ${t("worker.nowWaiting", "답을 기다리는 중")}`,
+        wantReconnecting: `${now} · ${t("worker.nowReconnecting", "다시 연결하는 중")}`,
+        wantThinking: `${now} · ${t("worker.nowThinking", "생각하는 중")}`,
+      };
+      await settle();
+      seen.nothing = state();
+      // What a call's own row says on the foot line while it is out, and what the card's activity says
+      // of the same call when the row is gone: one wording.
+      const same = {};
+      const shop = "/Users/dev/shop-app";
+      let call = 0;
+      const wear = async (key, name, kind, target, activity) => {
+        // The card's newest activity is one that is over, so it names nothing while the call's row is out.
+        await say({ verb: "read", target: "x", phase: "finished" });
+        call += 1;
+        const id = `same-${call}`;
+        const turn = { role: "tool", text: `${name} · ${target}`, at_ms: 1_790_000_200_000 + call * 10_000,
+          tool: { call_id: id, name, ...(kind !== null && { kind }), input: target, is_error: false } };
+        await feed(turn);
+        const row = nowWords();
+        await feed({ role: "tool_result", text: "ok", at_ms: turn.at_ms + 900, tool: { call_id: id, is_error: false } });
+        const after = state();
+        const said = await say(activity);
+        same[key] = { row, after: after.now, card: said.now };
+      };
+      await wear("web", "WebFetch", "web", "https://example.com/health", { verb: "web", target: "https://example.com/health", phase: "started" });
+      await wear("bash", "Bash", "bash", `cd ${shop} && make test`, { verb: "bash", target: `cd ${shop} && make test`, phase: "started" });
+      await wear("read", "Read", "read", `${shop}/src/screens/profile/Footer.tsx`, { verb: "read", target: `${shop}/src/screens/profile/Footer.tsx`, phase: "started" });
+      await wear("other", "mcp__shop__lookup", null, "sku-1", { verb: "mcp__shop__lookup", target: "sku-1", phase: "started" });
+      seen.same = same;
+      seen.waiting = await say({ verb: "waiting", target: "model", phase: "started" });
+      seen.reconnecting = await say({ verb: "reconnecting", target: "attempt 2 in 5s", phase: "started" });
+      seen.thinking = await say({ verb: "reasoning silently", phase: "started" });
+      seen.quiet = await say({ verb: "quiet", target: "last: read a.rs", phase: "started" });
+      seen.finished = await say({ verb: "read", target: "a.rs", phase: "finished" });
+      // A call still out is named again, and the turn's end takes the line away.
+      seen.again = await say({ verb: "grep", target: "SCREEN_WIDTH", phase: "started" });
+      tell("hook:subagent", { term: tab.worker.term, rows: [{ id: tab.worker.helper.id, name: "프로필 도우미", state: "done" }] });
+      await settle();
+      seen.ended = { hidden: status()?.hidden === true };
+      return seen;
+    });
+    const nothingKnown = (one) => one.now === seen.wantNothing && one.naming && !one.seeing.includes(seen.busy);
+    ok(
+      "D4: a helper page with no row out and nothing known says the window's own 「지금 · 작업 중…」 — the agent's English word (zo's 「Working…」) is not on the page, though the word's own node still holds it",
+      seen.busy !== "" && nothingKnown(seen.nothing) && seen.wordNode === seen.busy,
+      JSON.stringify(seen.nothing),
+    );
+    ok(
+      "D4: what the helper's own card says it is doing — a page read, a shell command with its folder, a file read, a tool the page has no word for — is said in the words the step rows wear for that call, the row's own words and no second wording",
+      ["web", "bash", "read", "other"].every((key) => seen.same[key]?.row !== "" && seen.same[key]?.card === seen.same[key]?.row &&
+        seen.same[key]?.after === seen.wantNothing),
+      JSON.stringify(seen.same),
+    );
+    ok(
+      "D4: waiting, reconnecting and thinking are the page's words, one line each — and a card that says quiet, or a call that is already finished, says nothing the page can name, so the line is the window's 「작업 중…」 again",
+      seen.waiting.now === seen.wantWaiting && seen.reconnecting.now === seen.wantReconnecting &&
+        seen.thinking.now === seen.wantThinking && nothingKnown(seen.quiet) && nothingKnown(seen.finished),
+      JSON.stringify({ w: seen.waiting.now, r: seen.reconnecting.now, t: seen.thinking.now, q: seen.quiet.now, f: seen.finished.now }),
+    );
+    ok(
+      "D4: none of them says the agent's English word aloud, and every one is the naming band, not the agent's mark and word",
+      [seen.waiting, seen.reconnecting, seen.thinking, seen.again].every((one) => one.naming && !one.seeing.includes(seen.busy)) &&
+        seen.again.now.includes("SCREEN_WIDTH"),
+      JSON.stringify(seen.again),
+    );
+    ok("D4: when the helper's turn ends the line goes with it", seen.ended.hidden, JSON.stringify(seen.ended));
+    ok("D4: the now line raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+  // An agent whose voice turns through verbs keeps its own line where nothing is known.
+  const claude = await openWindowTestPage(browser, origin);
+  try {
+    await openHelperConversation(claude.page, stepsFixture().filter((turn) => turn.role !== "assistant"), "running");
+    await installStepsProbe(claude.page);
+    const kept = await claude.page.evaluate(async () => {
+      await window.__STEPS__.settle();
+      const status = document.querySelector("#worker-view .helper-status");
+      return {
+        naming: status?.classList.contains("is-naming") ?? true,
+        now: status?.querySelector(".helper-status-now")?.textContent ?? null,
+        verbs: agentVoice("claude").spinner_verbs.length,
+      };
+    });
+    ok(
+      "D4: an agent whose voice turns through verbs (Claude Code's) keeps its own line where nothing is known — the fallback is for a voice with one static word",
+      kept.verbs > 0 && kept.naming === false && kept.now === "",
+      JSON.stringify(kept),
+    );
+    ok("D4: the kept voice raised no page errors", claude.faults.length === 0, claude.faults.join("\n"));
+  } finally {
+    await claude.page.close();
+  }
+}
+
+/* D5 — a list written right under a sentence is a list. A paragraph ran until a blank line or a line
+ * that opens a block, and a list item was not one, so 「… 찾았습니다.\n- 원인: …\n- 새 규칙: …」 ran
+ * together as one paragraph. CommonMark's rule: a bullet (`-`, `*`, `+` and a space, with words after
+ * it) interrupts a paragraph; an ordered item does only when it starts at 1 — 「2024. 한 해」 under a
+ * sentence stays text, and so does a hyphen that opens a word, an item with nothing in it, and a line
+ * indented four spaces (the paragraph's own continuation). */
+const READER_ROWS = [
+  ["a bullet under a sentence", "문장입니다.\n- a\n- b", { paras: 1, lists: ["ul"], items: 2 }],
+  ["a star under a sentence", "문장입니다.\n* a\n* b", { paras: 1, lists: ["ul"], items: 2 }],
+  ["a plus under a sentence", "문장입니다.\n+ a", { paras: 1, lists: ["ul"], items: 1 }],
+  ["an ordered list from 1", "문장입니다.\n1. a\n2. b", { paras: 1, lists: ["ol"], items: 2 }],
+  ["an ordered list from 1 with a parenthesis", "문장입니다.\n1) a\n2) b", { paras: 1, lists: ["ol"], items: 2 }],
+  ["a bullet indented two spaces", "문장입니다.\n  - a", { paras: 1, lists: ["ul"], items: 1 }],
+  ["a sentence, a blank line and a list (as ever)", "문장입니다.\n\n- a\n- b", { paras: 1, lists: ["ul"], items: 2 }],
+  ["a list, a blank line and a sentence", "- a\n- b\n\n문장입니다.", { paras: 1, lists: ["ul"], items: 2 }],
+  // The line after an item is that item's own, and the item that breaks it off is the same list's next one.
+  ["an item, its continuation line and the next item", "- a\n  continued\n- b", { paras: 0, lists: ["ul"], items: 2 }],
+  ["a year with a stop", "문장입니다.\n2024. 한 해가 저물었다.", { paras: 1, lists: [], items: 0 }],
+  ["an ordered item that starts at 2", "문장입니다.\n2. b\n3. c", { paras: 1, lists: [], items: 0 }],
+  ["a hyphen that opens a word", "문장입니다.\n-하이픈으로 시작하는 낱말", { paras: 1, lists: [], items: 0 }],
+  ["a bullet with nothing in it", "문장입니다.\n- ", { paras: 1, lists: [], items: 0 }],
+  ["a bullet indented four spaces", "문장입니다.\n    - a", { paras: 1, lists: [], items: 0 }],
+  ["a dash in the middle of a line", "문장입니다 - a - b", { paras: 1, lists: [], items: 0 }],
+];
+
+async function stepsListUnderASentence(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const seen = await page.evaluate((rows) => rows.map(([name, text]) => {
+      const host = document.createElement("div");
+      paintHelperProse(host, text, "/tmp/zerocode-window-test");
+      return {
+        name,
+        paras: host.querySelectorAll(":scope > p.md-para").length,
+        lists: [...host.children].filter((node) => node.matches("ul.md-list, ol.md-list")).map((node) => node.tagName.toLowerCase()),
+        items: host.querySelectorAll("li").length,
+        text: host.innerText.replace(/\s+/g, " ").trim(),
+      };
+    }), READER_ROWS);
+    const wrong = READER_ROWS.filter(([, , want], at) => JSON.stringify({ paras: seen[at].paras, lists: seen[at].lists, items: seen[at].items }) !== JSON.stringify(want))
+      .map(([name]) => name);
+    ok(
+      "D5: a bullet, a star or a plus, and an ordered item that starts at 1, written right under a sentence, is a list after a paragraph — and a year with a stop, an item that starts at 2, a hyphen that opens a word, a bullet with nothing in it and a line indented four spaces stay the sentence's own text",
+      wrong.length === 0,
+      JSON.stringify({ wrong, seen: seen.filter((one) => wrong.includes(one.name)) }),
+    );
+  } finally {
+    await page.close();
+  }
+  // A helper's report, as a helper writes it.
+  const report = await openWindowTestPage(browser, origin);
+  try {
+    const answer = "원인과 새 규칙을 찾았습니다.\n- 원인: 셀의 key가 인덱스여서 스크롤할 때마다 모든 셀이 다시 만들어집니다.\n- 새 규칙: key는 id로 씁니다.";
+    await openHelperConversation(report.page, [
+      { role: "user", text: "원인을 찾아 줘.", at_ms: CLOCK },
+      { role: "assistant", text: answer, at_ms: CLOCK + 5000 },
+    ], "done");
+    const shown = await report.page.evaluate(async () => {
+      await window.__PAINTED__();
+      const said = document.querySelector("#worker-view .helper-report .helper-said");
+      return {
+        paras: said?.querySelectorAll(":scope > p.md-para").length ?? -1,
+        lists: said?.querySelectorAll(":scope > ul.md-list").length ?? -1,
+        items: [...(said?.querySelectorAll("li") ?? [])].map((item) => item.textContent),
+      };
+    });
+    ok(
+      "D5: a finished helper's report that writes its list right under its sentence stands as one paragraph and a list of two — 「원인: …」 and 「새 규칙: …」 are two lines, not the sentence's tail",
+      shown.paras === 1 && shown.lists === 1 && shown.items.length === 2 && shown.items[0].startsWith("원인:") && shown.items[1].startsWith("새 규칙:"),
+      JSON.stringify(shown),
+    );
+    ok("D5: the report raised no page errors", report.faults.length === 0, report.faults.join("\n"));
+  } finally {
+    await report.page.close();
   }
 }
 
