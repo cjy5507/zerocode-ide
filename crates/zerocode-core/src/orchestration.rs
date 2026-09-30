@@ -6245,6 +6245,21 @@ impl Ledger {
         self.runs.iter_mut().find(|run| run.id == id)
     }
 
+    /// The other run a pane coordinates, when `address` is that pane's.
+    ///
+    /// A question one run's coordinator puts to another (`send --run B`)
+    /// lands in B under the asker's PANE address — a stranger there — while
+    /// the asker reads its own run's inbox. This is how an answer finds the
+    /// run the asker actually sits in.
+    fn asker_run(&self, address: &str, answered_in: &str) -> Option<String> {
+        let seat = address.strip_prefix(PANE_ADDRESS_PREFIX)?;
+        self.runs
+            .iter()
+            .filter(|run| run.id != answered_in)
+            .find(|run| run.seat_is_coordinator(seat) == Some(true))
+            .map(|run| run.id.clone())
+    }
+
     /// Which run this caller's bare verbs land in.
     pub fn bound_run(&self, caller: &str) -> Option<&str> {
         self.bound
@@ -21375,6 +21390,13 @@ fn plan_inner(
                 .message(&thread)
                 .ok_or_else(|| format!("unknown message: {thread}"))?;
             let (to, kind) = (answered.from.clone(), answered.kind);
+            // The run the asker reads, when the asker is another run's
+            // coordinator: the answer is delivered there too, so one
+            // `reply` reaches it whatever run the question was filed in.
+            let asker_run = match kind == MessageKind::Question {
+                true => ledger.asker_run(&to, &run_id),
+                false => None,
+            };
             let me = sender(ledger, &team.leader_pane, &run_id, (&team.id, pane));
             /* A question binds who may answer it, not just where it was
              * delivered.
@@ -21452,8 +21474,22 @@ fn plan_inner(
                         task: None,
                         dispatch: None,
                     };
+                    let carried = asker_run.map(|asker| {
+                        let copy = Draft {
+                            from: sender(ledger, &team.leader_pane, &asker, (&team.id, pane)),
+                            to: format!("{RUN_ADDRESS_PREFIX}{asker}"),
+                            ..draft.clone()
+                        };
+                        (asker, copy)
+                    });
                     let id = ledger.post_as(&run_id, draft, Some(&seat), now_ms)?;
-                    said(serde_json::json!({ "messageId": id }))
+                    let mut said_back = serde_json::json!({ "messageId": id });
+                    if let Some((asker, copy)) = carried {
+                        let held = ledger.post_as(&asker, copy, Some(&seat), now_ms)?;
+                        said_back["deliveredTo"] =
+                            serde_json::json!({ "runId": asker, "messageId": held });
+                    }
+                    said(said_back)
                 }
             }
         }

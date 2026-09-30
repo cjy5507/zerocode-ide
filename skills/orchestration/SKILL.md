@@ -460,6 +460,7 @@ answer, the blocked `ask` wakes on them, and `cancelled` says in so many words
 not to ask again and not to summon a replacement — that is its coordinator's
 decision. On the answering side you are just reading mail:
 `check --types question`, then `reply --to-message <id> --body '<answer>'`.
+A question from ANOTHER run's coordinator (`send --run <run> --to run:<run> --type question`) is answered the same way: one `reply --to-message <id>` closes it here and is delivered to the run that asked (`deliveredTo` in its answer) — do not answer with a `send --type status`, which leaves the question standing on the board.
 `worker-start` also takes launch tuning where the agent's own CLI does —
 `--model <id>` (an opaque provider id, passed through unread), `--effort`
 beside it where a ride exists — plus `--retry-of <dispatchId>` to link a
