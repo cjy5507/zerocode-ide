@@ -2826,7 +2826,7 @@ mod tests {
         let assigned: Vec<&str> = window
             .lines()
             .map(str::trim)
-            .filter(|line| line.contains(".title ="))
+            .filter(|line| line.contains(".title =") && !line.contains(".title =="))
             .filter(|line| !line.starts_with("//") && !line.starts_with('*'))
             .filter(|line| !line.starts_with("frame.title ="))
             .collect();
