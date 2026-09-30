@@ -228,7 +228,7 @@ pub(crate) mod serializable {
             /// Selectable options in display order. Empty for a pre-F2 frame.
             #[serde(default)]
             choices: Vec<SerializablePermissionChoice>,
-            /// What kind of prompt this is: [`PROMPT_KIND_QUESTION`] for a
+            /// What kind of prompt this is: `question` for a
             /// choice zo puts to the person itself (the refusal ladder's
             /// "switch models?"); absent for a tool call awaiting approval —
             /// which is what every frame older than the field is. A question

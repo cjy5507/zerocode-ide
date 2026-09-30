@@ -275,6 +275,16 @@ fn is_session_record_file(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
+/// A line of `path` as a model may be handed it: with the reasoning taken out
+/// when `path` is a session record, as it is for any other file.
+fn line_for_model<'a>(path: &Path, line: &'a str) -> std::borrow::Cow<'a, str> {
+    if is_session_record_file(path) {
+        crate::session::mask_thinking_in_record_line(line)
+    } else {
+        std::borrow::Cow::Borrowed(line)
+    }
+}
+
 /// The text of a session record with the reasoning taken out of every line,
 /// or the text itself when no line carried any.
 fn mask_session_record_text(content: String) -> String {
@@ -1357,7 +1367,6 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         let Ok(file_contents) = fs::read_to_string(file_path) else {
             return Ok(true);
         };
-        let record = is_session_record_file(file_path);
 
         if output_mode == "count" {
             let count = regex.find_iter(&file_contents).count();
@@ -1394,11 +1403,7 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
                 for (current, line) in lines.iter().enumerate().take(end).skip(start) {
                     // A matching line and its context lines alike: the search
                     // shows where the words are, not what the model thought.
-                    let line = if record {
-                        crate::session::mask_thinking_in_record_line(line)
-                    } else {
-                        std::borrow::Cow::Borrowed(*line)
-                    };
+                    let line = line_for_model(file_path, line);
                     let prefix = if input.line_numbers.unwrap_or(true) {
                         format!("{}:{}:", file_path.to_string_lossy(), current + 1)
                     } else {
