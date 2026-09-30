@@ -306,6 +306,38 @@ function ledgerVouched(review) {
   return Boolean(review && (review.verified || review.merged || review.deployed));
 }
 
+/* Where the sidebar places one piece of work, in the two words it has for it.
+ *
+ * The verdict is the board's own — `ledgerReviewStage`, which reads the one
+ * hand (`ledgerReviewWord`) and names its answer as a stage — and this table
+ * only folds those stages onto what a sidebar row can say: `review` is work
+ * handed in that no coordinator has stood behind yet (a worker's own
+ * 「~됐다 함」 is still a claim, so it waits with the report), `vouched` is what
+ * a coordinator wrote as verified, merged or deployed. A stage with no entry —
+ * a failed attempt, work never reported — says neither: `worktreeReviewPhase`
+ * and `agentRowPhase` call that `unsettled` where the ledger holds a task, and
+ * leave it unsaid where it holds none. */
+const LEDGER_REVIEW_PHASE = Object.freeze({
+  reported: "review",
+  "claimed-verified": "review",
+  "claimed-merged": "review",
+  "claimed-deployed": "review",
+  verified: "vouched",
+  merged: "vouched",
+  deployed: "vouched",
+});
+
+function ledgerReviewPhaseOf(facts) {
+  return LEDGER_REVIEW_PHASE[ledgerReviewStage(null, facts)] ?? "";
+}
+
+/* Whether the ledger holds a task for this seat or checkout: a named one, or —
+ * where a sweep compacted the task away and left its title empty — the failed
+ * attempt that proves there was one (a closed dispatch always carried a task). */
+function ledgerHoldsTask(facts) {
+  return facts.failed === true || Boolean(facts.taskId || facts.task);
+}
+
 function seedPaneAgents() {
   void refreshPaneLedger();
   return invoke("agent_terms")
@@ -9721,6 +9753,9 @@ function agentRowStatusWord(row, state) {
   if (row.history) return "";
   const ledgerWord = row.sub ? "" : paneLedgerWord(row.term);
   if (ledgerWord && !LIVE_HOOK_STATES.has(state)) return ledgerWord;
+  // A turn that ended before the ledger's task was handed in is at rest, not
+  // done — the same reading the workspace's dot takes of it (`agentRowPhase`).
+  if (agentRowPhase(row, state) === "unsettled") return bucketWord("idle");
   return bucketWord(state === "needs-attention" ? "attention" : state);
 }
 
@@ -9730,6 +9765,78 @@ function agentRowStatusWord(row, state) {
 function agentRowVerified(row) {
   if (row.sub || row.history) return false;
   return ledgerVouched(paneLedger.get(row.term)?.review);
+}
+
+/* And the other half of that distinction: where the ledger says the work of a
+ * turn that ENDED stands.
+ *
+ *   review     handed in, and nobody has stood behind it yet — 검증 대기, or a
+ *              worker's own 「~됐다 함」. The row's mark says so in SHAPE (an
+ *              hourglass, where a verified turn wears a check), not in grey
+ *              alone
+ *   failed     the attempt ended without a successful report — the worker said
+ *              ok:false, or it was stopped or abandoned
+ *   unsettled  the ledger gave this seat a task and the turn ended without
+ *              handing anything in
+ *   ""         nothing to say — a person's own agent, or a verified turn
+ *
+ * The last two are not done, and the row does not say so: it is at rest, in a
+ * plain dot. Only a turn that ended can be any of them — `done`, or `idle`, the
+ * process that left with no `Stop` (which the workspace dot folds as done) — a
+ * row at work is at work, whatever it filed before. The reading is the
+ * workspace dot's (`worktreeReviewPhase`), for one seat. */
+function agentRowPhase(row, state) {
+  if (row.sub || row.history || (state !== "done" && state !== "idle")) return "";
+  const facts = paneLedger.get(row.term);
+  if (!facts) return "";
+  const said = ledgerReviewPhaseOf(facts);
+  if (said !== "") return said === "review" ? "review" : "";
+  if (facts.failed === true) return "failed";
+  return ledgerHoldsTask(facts) ? "unsettled" : "";
+}
+
+/* The glyph an agent row's dot wears, out of the state and that reading: a
+ * check for a turn that ended, an hourglass while its work waits for a
+ * coordinator, a question for a person wanted. Working, and a turn that ended
+ * on work never handed in or failed, are drawn by CSS on a bare span, so they
+ * have no glyph. */
+function agentRowMark(state, phase) {
+  if (phase === "review") return "#i-hourglass";
+  if (state === "done") return phase === "unsettled" || phase === "failed" ? "" : "#i-circle-check";
+  return state === "needs-attention" ? "#i-msg-ask" : "";
+}
+
+/* One agent row's dot: the sprite's glyph when the state has one, else the bare
+ * span the stylesheet draws (the ring while at work, the floor's dot). */
+function agentDotNode(mark) {
+  let dot;
+  if (mark) {
+    dot = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    dot.setAttribute("class", "icon wt-agent-dot");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", mark);
+    dot.appendChild(use);
+  } else {
+    dot = document.createElement("span");
+    dot.className = "wt-agent-dot";
+  }
+  dot.setAttribute("aria-hidden", "true");
+  return dot;
+}
+
+/* What a failed attempt's dot says when it is pointed at: as much as the
+ * ledger knows, which is one fact — the attempt ended without a successful
+ * report (the worker said ok:false, or the attempt was stopped or abandoned).
+ * The reason's own words never reach this window: a ledger row carries
+ * `failed`, not a summary. Keyed through `applyLocale` (`data-i18n-title`)
+ * because a finished-work row is not rebuilt for a change of language. */
+const AGENT_FAILED_TIP = { key: "worktree.attemptFailedTip", word: "실패 — 원장에 성공 보고 없이 끝난 시도로 적혀 있습니다(워커가 ok:false로 보고했거나, 시도가 멈추거나 폐기됨)" };
+
+function dressFailedDot(dot) {
+  if (!dot) return;
+  dot.dataset.tip = t(AGENT_FAILED_TIP.key, AGENT_FAILED_TIP.word);
+  dot.dataset.i18nTitle = AGENT_FAILED_TIP.key;
+  dot.dataset.i18nSourcedatatip = AGENT_FAILED_TIP.word;
 }
 
 /* The task a workspace is working on, when the ledger seated one in a pane
@@ -9744,6 +9851,43 @@ function worktreeTaskTitle(path) {
   // No pane here carries a task, but the work a released worker finished in
   // this checkout still does (t-10993).
   return checkoutLedger.get(checkoutKey(path))?.task?.trim() ?? "";
+}
+
+/* Where the ledger says the work standing in one checkout is:
+ *
+ *   review     handed in, and no coordinator has stood behind it yet
+ *   vouched    a coordinator wrote verified, merged or deployed
+ *   unsettled  the ledger holds a task here that nobody handed in — the turn
+ *              ended before `worker_done`, or the attempt failed
+ *   ""         the ledger has nothing to say about this checkout at all
+ *
+ * The last is the rule the sidebar always had (an agent whose turn ended is
+ * 완료, and a person's own agent has no ledger task to be measured against).
+ * The third exists so a row never SAYS 완료 about work the ledger knows is not
+ * done: see `worktreeMark`.
+ *
+ * The checkout is found by PATH, the link `worktreeTaskTitle` already draws
+ * its title by and the task board follows — never by the branch's name: the
+ * seats in this checkout's tabs first, then the work a released worker left
+ * in it. With several the one still waiting wins, and anything unresolved
+ * outranks what is settled, so a worker's verified report cannot hide
+ * another's that nobody has looked at. */
+const WORKTREE_PHASE_RANK = Object.freeze({ "": 0, vouched: 1, unsettled: 2, review: 3 });
+
+function worktreeReviewPhase(path) {
+  if (paneLedger.size === 0 && checkoutLedger.size === 0) return "";
+  let phase = "";
+  const read = (facts) => {
+    if (!facts) return;
+    const said = ledgerReviewPhaseOf(facts) || (ledgerHoldsTask(facts) ? "unsettled" : "");
+    if (WORKTREE_PHASE_RANK[said] > WORKTREE_PHASE_RANK[phase]) phase = said;
+  };
+  for (const tab of tabs) {
+    if (tab.kind !== "term" || tab.worktree !== path) continue;
+    for (const term of paneLeaves(tab.layout)) read(paneLedger.get(term));
+  }
+  read(checkoutLedger.get(checkoutKey(path)));
+  return phase;
 }
 
 /* Whether this row IS the pane on stage — Orca's `isFocusedPane`, which fills
@@ -9800,13 +9944,14 @@ function agentPaneName(tab, term, agent = "") {
  * back by `redressAgentRows` to tell a row whose words moved from a row whose
  * shape did. */
 function agentRowClasses(state, here, foldedSummary, row = null) {
+  const phase = row ? agentRowPhase(row, state) : "";
   return `wt-agent is-${state === "needs-attention" ? "waiting" : state}${
     here ? " is-here" : ""
   }${foldedSummary ? " is-folded-summary" : ""}${row?.history ? " is-history" : ""}${
     row?.ancestry ? " is-ancestry" : ""
   }${!row?.history && LIVE_HOOK_STATES.has(state) ? " is-live" : ""}${
     row && agentRowVerified(row) ? " is-verified" : ""
-  }`;
+  }${phase ? ` is-${phase}` : ""}`;
 }
 
 function agentHistoryLabel(row) {
@@ -9824,7 +9969,9 @@ function agentFoldLabel(row) {
 /* What a folded summary row says: identity, the state's word, and the
  * disclosure — the tip carries the first two, the label all three. */
 function foldedSummaryWords(row, state, fold) {
-  const stateWord = bucketWord(state === "needs-attention" ? "attention" : state);
+  // The row's own status word (`agentRowStatusWord`): 검증 대기 or the ledger's
+  // other word where a coordinator has been told, else the state's.
+  const stateWord = agentRowStatusWord(row, state);
   const identity = row.agent ? agentName(row.agent) : stateWord;
   const disclosure = fold?.getAttribute("aria-label") ?? "";
   return {
@@ -10056,20 +10203,9 @@ function makeAgentRow(row, gutter = false) {
     fold.className = "wt-agent-fold is-quiet";
     fold.setAttribute("aria-hidden", "true");
   }
-  const mark =
-    state === "done" ? "#i-circle-check" : state === "needs-attention" ? "#i-msg-ask" : "";
-  let dot;
-  if (mark) {
-    dot = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    dot.setAttribute("class", "icon wt-agent-dot");
-    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
-    use.setAttribute("href", mark);
-    dot.appendChild(use);
-  } else {
-    dot = document.createElement("span");
-    dot.className = "wt-agent-dot";
-  }
-  dot.setAttribute("aria-hidden", "true");
+  const phase = agentRowPhase(row, state);
+  const dot = agentDotNode(agentRowMark(state, phase));
+  if (phase === "failed") dressFailedDot(dot);
   // The agent's REAL face beside its state ("어떤 에이전트가 도는지 아이콘
   // 실제") — the registry's favicon chain, with its letter tile standing in
   // until the mark lands. A row that predates the registry, or a helper with
@@ -10304,6 +10440,16 @@ function makeFinishedWorkRow(path, work) {
     session: work.conversation ?? null,
   });
   if (ledgerVouched(work.review)) node.classList.add("is-verified");
+  // The dot says where the work stands, in the glyph a live row's turn wears —
+  // an hourglass while it waits for a coordinator, a check once one vouched. An
+  // attempt that failed, or work the ledger has no phase for, keeps the plain
+  // dot the retained rows always had.
+  const phase = ledgerReviewPhaseOf(work);
+  if (phase === "review") node.classList.add("is-review");
+  if (phase !== "") {
+    node.querySelector(".wt-agent-dot")?.replaceWith(agentDotNode(agentRowMark("done", phase)));
+  }
+  if (phase === "" && work.failed === true) dressFailedDot(node.querySelector(".wt-agent-dot"));
   return node;
 }
 

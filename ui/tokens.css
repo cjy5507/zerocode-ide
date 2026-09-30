@@ -255,6 +255,12 @@
    * at **8.9:1**, so the ink is the signal colour and one value is honest. */
   --signal-wait-ink: var(--signal-wait);
 
+  /* And the green, for the sidebar's 완료 word and check (t-18902): a word set
+   * in the ready green on a ground tinted by that same green. On this floor
+   * the tint barely lifts the ground, so the ink is the signal colour and one
+   * value is honest; the light block is where the two part. */
+  --signal-ready-ink: var(--signal-ready);
+
   /* The PR lanes' own tones (main.css:188-190 — Orca repeats the same three
    * values verbatim in both modes, so both blocks here do too): the sidebar's
    * PR grouping wears these on its lane dots. Done is the odd tan on purpose —
@@ -2771,6 +2777,15 @@
    * measured on those same painted pixels, **5.52:1**. Same hue, same ramp,
    * same reasoning as `--signal-halt-ink` three lines up. */
   --signal-wait-ink: #92400e; /* amber-800 — 5.52:1 on the 12% amber ground */
+
+  /* …and the green, one ramp stop later, for the same arithmetic. #15803d
+   * clears 5.02:1 on white and is not chosen for a GROUND: the sidebar's 완료
+   * word sits on a 10% green wash over a row that may itself be washed by an
+   * active or selected fill, and read off those painted pixels it measured
+   * **4.04:1** at 10px — under the 4.5:1 a word that small needs. Green-800
+   * (#166534) is the next stop and the first that clears it on every row state:
+   * see `sidebar-review-state`, which measures it in both treatments. */
+  --signal-ready-ink: #166534; /* green-800 */
 
   /* PR lane tones — the original's light block repeats the dark values
    * verbatim (main.css:296-298), and so does this one: the mark stands

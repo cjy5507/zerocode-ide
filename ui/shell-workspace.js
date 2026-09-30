@@ -2212,7 +2212,11 @@ function measureSleepingWorkspaces() {
   const owned = worktreeLanes();
   for (const project of projects) {
     for (const worktree of project.worktrees) {
-      if (worktreeDotState(worktree.path, owned.get(worktree.path) ?? []) === "empty") {
+      const state = worktreeDotState(worktree.path, owned.get(worktree.path) ?? []);
+      // A released worker's checkout has no pane in it and folds to `empty`, and
+      // its work that waits for a coordinator is the one thing on this list a
+      // sweep for "nothing going on" must not take: it is what 검증 대기 is for.
+      if (state === "empty" && worktreeMark(worktree.path, state).indicator !== "review") {
         sleepingPaths.add(worktree.path);
       }
     }
@@ -2259,9 +2263,17 @@ let activityGeneration = 0;
  * idle. `done` above `working` is deliberate and is theirs: a finished agent
  * is a thing waiting for a person, and a running one is not. Our five
  * indicators fold onto it with `active` between working and idle, where
- * `foldWorktreeState` already puts it. */
+ * `foldWorktreeState` already puts it.
+ *
+ * One lane is ours and not theirs: 검증 대기, between the two. A worker that
+ * filed its `worker_done` is finished AND unverified, and a coordinator or a
+ * person is who it waits for — so it stands with what waits on a person, above
+ * 완료, which holds only what the ledger vouched for (or an agent the ledger
+ * never seated, which keeps the rule it always had). The word is the board's
+ * own (`board.awaitingReview`), not a second one. */
 const WORKSPACE_STATE_GROUPS = [
   { id: "permission", key: "sidebar.stateNeedsYou", name: "권한 필요" },
+  { id: "review", key: "board.awaitingReview", name: "검증 대기" },
   { id: "done", key: "sidebar.stateDone", name: "완료" },
   { id: "working", key: "sidebar.stateWorking", name: "작업 중" },
   { id: "paused", key: "board.autonomy.paused", name: "일시 정지" },
@@ -2325,8 +2337,8 @@ function freezeWorkspaceActivity() {
     for (const worktree of project.worktrees) {
       next.set(
         worktree.path,
-        WORKTREE_INDICATOR[worktreeDotState(worktree.path, owned.get(worktree.path) ?? [])]
-          ?? "inactive",
+        worktreeMark(worktree.path, worktreeDotState(worktree.path, owned.get(worktree.path) ?? []))
+          .indicator,
       );
     }
   }
@@ -3486,6 +3498,11 @@ function makeStateGroupHeader(group) {
   const name = document.createElement("span");
   name.className = "proj-name";
   name.textContent = t(group.key, group.name);
+  // Keyed, so a change of language re-reads the head where it stands
+  // (`applyLocale`): a lane is not rebuilt for a language, and without this
+  // every head kept the language the list was drawn in.
+  name.dataset.i18n = group.key;
+  name.dataset.i18nSource = group.name;
   const count = document.createElement("span");
   count.className = "state-group-count";
   count.textContent = String(group.members.length);
@@ -3733,15 +3750,29 @@ function dirname(path) {
  * The dot is a colour, and a colour is not a label — this is the text a screen
  * reader reads and a pointer uncovers. It lives here rather than as a map
  * literal inside the row builder for two reasons: one `t()` call per row
- * instead of five, and nothing allocated per row at all. */
-function worktreeStateLabel(state) {
+ * instead of five, and nothing allocated per row at all.
+ *
+ * `idle` used to be one sentence, 「완료 또는 대기 중」, and that sentence was
+ * the confusion: a worker that had filed its report, work a coordinator had
+ * verified, and an agent whose turn had merely ended all read it. So the
+ * ledger's reading (`phase`, from `worktreeMark`) speaks first — it is the
+ * only thing that knows which of the three this is — and what is left of
+ * `idle` is only an agent whose turn ended. Being asked a question is its own
+ * state (`waiting`) and never this one. */
+function worktreeStateLabel(state, phase = "") {
+  if (phase === "review") {
+    return t("worktree.stateReview", "검증 대기 — 워커가 보고했고 코디네이터가 아직 검증하지 않았습니다");
+  }
+  if (phase === "vouched") {
+    return t("worktree.stateVouched", "완료 — 코디네이터가 검증·병합·배포를 기록했습니다");
+  }
   switch (state) {
     case "empty":
       return t("worktree.stateEmpty", "활성 세션 없음");
     case "active":
       return t("worktree.stateActive", "세션 실행 중");
     case "idle":
-      return t("worktree.stateIdle", "완료 또는 대기 중");
+      return t("worktree.stateIdle", "완료 — 에이전트가 턴을 마쳤습니다");
     case "streaming":
       return t("worktree.stateStreaming", "작업 중");
     case "paused":
@@ -3895,6 +3926,56 @@ function worktreeDotState(path, ownedLanes) {
   );
 }
 
+/* What the ledger may refine. Work in flight, a person wanted and a pause are
+ * somebody's live word, and the ledger's verdict on the work never speaks over
+ * them; what is QUIET — an agent's turn ended, a shell standing by, nothing at
+ * all — is exactly where that verdict is the news. A released worker's work
+ * stands in a checkout no pane is in, and it is `inactive` to the fold. */
+const WORKTREE_LEDGER_REFINES = new Set(["done", "active", "inactive"]);
+
+/* The two indicators that wear a word on the row and share the lane's own: the
+ * word IS the lane's name (`WORKSPACE_STATE_GROUPS`), read from the one table.
+ * The dot and the word follow the ledger at once and the lane follows after the
+ * frozen reading settles, so for a few seconds a row may say the word of the
+ * lane it is about to move to — that is the price of a list that does not hop
+ * under the pointer. */
+const WORKTREE_WORDED = new Set(["review", "done"]);
+
+/* One workspace's MARK — the indicator its dot draws and the lane it stands in
+ * — out of the fold's word and the ledger's reading of the work standing in
+ * that checkout (`worktreeReviewPhase`, the board's own review stages). It
+ * answers three things: the `indicator`, the ledger's `phase` that refined it
+ * (which picks the tooltip), and the state word the tooltip is said off (`said`,
+ * which is not always the fold's).
+ *
+ * `worktreeDotState` is left as it was and this is a layer over it: the
+ * workspace board reads that fold too, and its lanes (`idle` is 결과 확인
+ * 대기 there) are not this list's to change. Both roads that draw a mark — the
+ * frozen reading the lanes stand on and the dot on the row — come through
+ * here, so the lane a row stands in and the mark it wears cannot come from two
+ * readings.
+ *
+ * Only a turn that ended can be called 완료, and only on the ledger's word or
+ * on no ledger task at all: work the ledger holds that was never handed in, or
+ * whose attempt failed, is not done, and a row that said so would be saying
+ * something the ledger knows to be false. It is a session standing in its
+ * checkout, which is all that is known — 활성, the way it would read if the
+ * agent had never spoken. */
+function worktreeMark(path, state) {
+  const base = WORKTREE_INDICATOR[state] ?? "inactive";
+  const phase = WORKTREE_LEDGER_REFINES.has(base) ? worktreeReviewPhase(path) : "";
+  if (phase === "review") return { indicator: "review", phase, said: state };
+  if (phase === "vouched") return { indicator: "done", phase, said: state };
+  if (phase === "unsettled" && base === "done") return { indicator: "active", phase: "", said: "active" };
+  return { indicator: base, phase: "", said: state };
+}
+
+/* The word a lane and its rows say, for one indicator. */
+function workspaceStateWord(indicator) {
+  const lane = WORKSPACE_STATE_GROUPS.find((group) => group.id === indicator);
+  return lane ? t(lane.key, lane.name) : "";
+}
+
 /* One workspace's dot, dressed in place.
  *
  * The state class rides the DOT rather than the ROW, and that is not a detail:
@@ -3905,14 +3986,32 @@ function worktreeDotState(path, ownedLanes) {
 function dressWorktreeDot(row, state) {
   const dot = row.querySelector(".wt-dot");
   if (!dot) return;
-  const indicator = WORKTREE_INDICATOR[state] ?? "inactive";
+  const { indicator, phase, said } = worktreeMark(row.dataset.worktreePath, state);
   // The words stay finer than the picture — see `WORKTREE_INDICATOR` — which
   // is also why they are half of the guard: two states share one mark (waiting
   // and blocked are both the amber question) and never share a sentence. And a
   // guard there has to be, because this runs once a frame per row for as long
   // as anything is working, and an attribute written to the value it already
   // holds still costs the accessibility tree a look.
-  const label = worktreeStateLabel(state);
+  const label = worktreeStateLabel(said, phase);
+  // The two states a person has to tell apart at a glance — waiting for a
+  // coordinator, and done — also wear their word on the row, beside the name:
+  // a shape alone is a thing to learn, and a colour alone is not a label. The
+  // chip is written before the guard because it carries words, and a change of
+  // language moves words without moving the state; its tooltip is the whole
+  // sentence, for a word the narrowest sidebar had to cut.
+  const chip = row.querySelector(".wt-phase");
+  if (chip) {
+    const word = WORKTREE_WORDED.has(indicator) ? workspaceStateWord(indicator) : "";
+    writeTextContent(chip, word);
+    if (word === "") {
+      chip.removeAttribute("data-phase");
+      chip.removeAttribute("data-tip");
+    } else {
+      if (chip.dataset.phase !== indicator) chip.dataset.phase = indicator;
+      if (chip.dataset.tip !== label) chip.dataset.tip = label;
+    }
+  }
   if (dot.dataset.state === indicator && dot.dataset.tip === label) return;
   dot.dataset.state = indicator;
   dot.className = `wt-dot is-${indicator}`;
@@ -4150,7 +4249,8 @@ function makeWorktreeNode(worktree, held) {
     '<button class="wt-twist" type="button"></button>' +
     '<span class="wt-dot" aria-hidden="true"></span>' +
     '<span class="wt-titlebox">' +
-    '<span class="wt-topline"><span class="wt-title"></span><span class="wt-default"></span></span>' +
+    '<span class="wt-topline"><span class="wt-title"></span><span class="wt-default"></span>' +
+    '<span class="wt-phase" aria-hidden="true"></span></span>' +
     '<span class="wt-branch"></span>' +
     '</span>';
 
@@ -5267,6 +5367,9 @@ function workspaceBoardCardMenuAt(worktree, x, y, opener = null) {
 function workspaceBoardCardPaintSignature(worktree) {
   const project = projectOfWorktree(worktree.path);
   const rows = workspaceBoardAgentRows.get(worktree.path) ?? [];
+  // The live line says what the ledger says of the work in the checkout, and a
+  // released worker's work has no agent row to carry that into the signature.
+  const mark = worktreeMark(worktree.path, workspaceBoardWorktreeState(worktree));
   return [
     locale,
     workspaceBoardMode,
@@ -5281,6 +5384,8 @@ function workspaceBoardCardPaintSignature(worktree) {
     worktree.path === activeWorktreePath ? "active" : "",
     workspaceBoardUnread(worktree.path) ? "unread" : "",
     workspaceBoardWorktreeState(worktree),
+    mark.said,
+    mark.phase,
     workspaceBoardCardMeta(worktree.path).pinned ? "pinned" : "",
     project?.name ?? "",
     project?.path ?? "",
@@ -5407,7 +5512,8 @@ function workspaceBoardCardNode(worktree, index, animate) {
   const liveState = workspaceBoardWorktreeState(worktree);
   live.dataset.state = liveState;
   const stateWord = document.createElement("strong");
-  stateWord.textContent = worktreeStateLabel(liveState);
+  const liveMark = worktreeMark(worktree.path, liveState);
+  stateWord.textContent = worktreeStateLabel(liveMark.said, liveMark.phase);
   live.appendChild(stateWord);
   const rowsAt = workspaceBoardAgentRows.get(worktree.path) ?? [];
   const firstActive = rowsAt.find((row) => LIVE_HOOK_STATES.has(agentRowState(row)))
