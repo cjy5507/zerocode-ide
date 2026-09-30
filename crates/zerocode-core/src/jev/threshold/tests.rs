@@ -363,3 +363,22 @@ fn a_row_the_replay_writes_reads_back_as_the_line_it_drew() {
         None
     );
 }
+
+/// A seat whose answer is a list of choices says its confidence on the first
+/// choice; a row's own reading wins, and a row saying neither says none
+/// (t-19255). The skill suggestion's request rows are the first kind.
+#[test]
+fn a_confidence_is_read_off_the_first_choice_when_the_row_says_none() {
+    use serde_json::json;
+    let own = json!({"confidence": 0.8, "chosen": [{"name": "a", "confidence": 0.3}]});
+    assert_eq!(answer_confidence(&own), Some(0.8));
+    let listed =
+        json!({"chosen": [{"name": "a", "confidence": 0.3}, {"name": "b", "confidence": 0.9}]});
+    assert_eq!(answer_confidence(&listed), Some(0.3));
+    assert_eq!(answer_confidence(&json!({"outcome": "answered"})), None);
+    assert_eq!(answer_confidence(&json!({"chosen": "effort_up"})), None);
+    assert_eq!(
+        answer_confidence(&json!({"chosen": [{"name": "a", "confidence": 2.0}]})),
+        None
+    );
+}

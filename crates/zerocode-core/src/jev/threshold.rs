@@ -77,8 +77,15 @@ pub const CALIBRATION: Calibration = Calibration {
 /// or a reading outside `0..=1`, which no line can be read against.
 #[must_use]
 pub fn answer_confidence(row: &Value) -> Option<f64> {
+    // A seat that answers with a list of choices (the skill suggestion's
+    // `chosen`) says it on the first choice, not on the row.
+    let first_choice = || {
+        let choice = row.get("chosen")?.as_array()?.first()?;
+        CONFIDENCE.read(choice)
+    };
     CONFIDENCE
         .read(row)
+        .or_else(first_choice)
         .and_then(Value::as_f64)
         .filter(|confidence| (0.0..=1.0).contains(confidence))
 }
