@@ -37459,7 +37459,7 @@ fn the_windows_table_of_zo_status_verbs_is_zos_own_words() {
         "ACTIVITY_REASONING_SILENTLY",
         "ACTIVITY_QUIET",
     ];
-    let verbs = support::block_after(view, "    pub fn verb(&self) -> String {");
+    let verbs = support::block_after(view, "pub fn verb(&self) -> String {");
     let mut sent: Vec<String> = Vec::new();
     for constant in constants {
         assert!(
