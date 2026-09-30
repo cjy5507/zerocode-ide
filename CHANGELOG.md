@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.1.45] — 2026-10-01
+
+### feat
+
+- feat(window): the sidebar tells 작업 중, 검증 대기 and 완료 apart by the ledger — work a worker reported waits in its own 검증 대기 lane with an hourglass and a word, 완료 (a check and a word) holds only what a coordinator verified, merged or deployed, and working rows stay as they were (t-18902).
+- feat(window): the helper conversation view matches its mockup — a shell step is titled by what it does (「셸 grep … · shop-app」), times the file never stamped are hidden instead of 「0.0초」, a now line says what the helper is doing, a list under a sentence renders as a list, a web search says how much came back, and a strip under the brief counts the steps by kind with failures; five languages (t-18702).
+- feat(window): an artifact's 「내보내기」 also writes a PDF (A4 pages, text kept) or a picture (PNG of the whole page) drawn by the window's own WebKit, and zerocode-artifact export --out x.pdf|x.png converts by the extension — it used to write the page's HTML bytes into a file named .pdf (t-18558).
+
+### fix
+
+- fix(window): the 「폴더 선택 창이 아직 열려 있습니다」 notice goes away when the folder panel ends — answered, cancelled, lost or its helper gone — whichever road opened it, and its 취소 closes it at once; before, only the project-open button's own answer could dismiss it, so a panel an agent or the onboarding opened left the notice standing for ever (t-18551).
+- fix(zo): a draft taller than the screen scrolls inside zo's composer, so the caret's row and the letters typed at the end of a long paste are always drawn; before, the composer grew past the screen and the last lines of a long paste were typed where nobody could see them (t-17194).
+- fix(window): after a restart, a restored Claude worker's continuation is sent without a person's Enter even when the pane takes a minute to read its input — the Enter alone is pressed again until the pane takes it (Claude's catalog row: 90 s), stopped at once by the pane working, a person's keystroke, a draft or a question, and the words are never typed twice; seven panes resumed at once went from 0/7 to 7/7 arriving (t-18353).
+- fix(orchestration): a reply to a question another run's coordinator asked now reaches the run that asked (`deliveredTo`), so coordinators stop answering each other with sends and the board stops piling open questions (t-18649).
+- fix(zo): zo keeps each message's own time through a full rewrite of its session file (compaction, rewind, fork, heal), so the window's helper page can show how long a step took instead of 「0.0초」 (t-18703).
+
+### perf
+
+- perf(zo): an idle zo wakes about 0.1 times a second instead of 4 — its three one-second timers become one beat that runs only while a helper or a background task does — and a pane helper's answer is heard the moment it lands instead of at the next quarter-second look, with the parent spawning tmux 12 times in 20 s instead of about 225 (t-17057).
+
+### internal
+
+- internal(release): the release lane compiles Windows even when its gate targets are cold, and a failed cross-check or a missing tool is a named red instead of a skipped green; a change to the lane's shared gate policy runs both gates again (t-19107).
+
 ## [1.1.44] — 2026-09-30
 
 ### feat
