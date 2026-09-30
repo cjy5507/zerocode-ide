@@ -43951,6 +43951,30 @@ const slowPaste = await page.evaluate(async () => {
   field.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
   field.remove();
 
+  // 상한(30 s)을 넘겨 온 답은 버린다 — 사람은 이미 포기했거나 다시 붙였을 수 있다.
+  // 시계를 31 s 앞으로 감아 그 사이에 답한 것으로 친다; 상한 뒤의 새 붙여넣기는 된다.
+  const realNow = performance.now.bind(performance);
+  let skew = 0;
+  performance.now = () => realNow() + skew;
+  try {
+    const before = pastes.length;
+    window.__CLIPBOARD_TEXT__ = "too late";
+    window.__CLIPBOARD_READ_HOLD__ = true;
+    fire(sink);
+    await settle(20);
+    skew += 31_000;
+    window.__CLIPBOARD_READ_HOLD__ = false;
+    window.__CLIPBOARD_RELEASE__?.();
+    await settle(80);
+    seen.lateDropped = pastes.length === before;
+    window.__CLIPBOARD_TEXT__ = "fresh";
+    fire(sink);
+    await settle(80);
+    seen.afterCeilingTaken = pastes.length === before + 1 && pastes.at(-1)?.text === "fresh";
+  } finally {
+    performance.now = realNow;
+  }
+
   window.__CLIPBOARD_TEXT__ = "";
   delete window.__ANSWER__.term_paste;
   closeTab(activeTabId);
@@ -43959,10 +43983,11 @@ const slowPaste = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a slow clipboard never holds the window: the paste waits in the background, lands in the pane that had the focus, pastes once, says so after a moment, and the field road undoes",
+  "a slow clipboard never holds the window: the paste waits in the background, lands in the pane that had the focus, pastes once, says so after a moment, drops an answer that comes past the ceiling, and the field road undoes",
   slowPaste.prevented && slowPaste.secondPrevented && slowPaste.slowNotice && slowPaste.readOnce &&
     slowPaste.untouched && slowPaste.landsOnce && slowPaste.nextAllowed && slowPaste.fieldPrevented &&
-    slowPaste.fieldWaits && slowPaste.fieldLands && slowPaste.fieldUndo && slowPaste.composingLeftAlone,
+    slowPaste.fieldWaits && slowPaste.fieldLands && slowPaste.fieldUndo && slowPaste.composingLeftAlone &&
+    slowPaste.lateDropped && slowPaste.afterCeilingTaken,
   JSON.stringify(slowPaste),
 );
 
