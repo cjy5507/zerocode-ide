@@ -17,7 +17,13 @@
 //!   follows is a paste end with no start;
 //! - typed words, a line break typed as Ctrl+J, never did (0 of 4); a typed
 //!   Ctrl+V did (1 of 1) — Ctrl+V is its picture key, and finding no picture
-//!   it went on to read the clipboard's text with `pbpaste` (refused too).
+//!   it went on to read the clipboard's text with `pbpaste` (refused too);
+//! - but typed words are read for their first character: `# Plan` (Ctrl+J,
+//!   more words) arrived as `Plan` — a memory note — and `! this is not a
+//!   command …` ran `this` in a shell and reached no model (1 of 1 each, the
+//!   same pty, 16:44); a line starting with a path (`/Users/…`) and one
+//!   holding `@zerocode` were sent as typed. So no row is typed at: the words
+//!   go as one whole frame once the composer stands, and no words, no bytes.
 //!
 //! Read from the bundle, not driven: while the program starts, before its
 //! composer stands, it collects what it is sent into a buffer that drops
@@ -441,11 +447,33 @@ fn the_model_answers_what_the_pty_answered() {
     assert!(handed_over_at(b"no\x03more", 5).ended);
 }
 
-/// The measured row, every road that hands its composer words: whatever
-/// the program is doing when they land — still starting, or with its
-/// reader gone quiet mid-write — the words arrive and the pasteboard is
-/// never read. The restoring worker's wait (the worker split) carries no
-/// words at all and must write none.
+/// The words as one whole frame at a composer that stands, in one write —
+/// what the paste road hands over once the readiness door has opened: the
+/// words arrive, nothing else does, and the pasteboard is never read nor
+/// changed. (A frame split by the start-up hand-over or by the reader's
+/// quiet does read the picture — `the_model_answers_what_the_pty_answered`
+/// says so — which is why the door must open only for a standing composer:
+/// t-18353 for the reseat road's door.)
+fn the_words_arrive_whole(bytes: &[u8], words: &str, road: &str) {
+    let composer = handed_over_at(bytes, 0);
+    assert_eq!(
+        composer.pasteboard,
+        Pasteboard::holding(PICTURE),
+        "the composer read the pasteboard ({road}: {bytes:?})"
+    );
+    assert!(!composer.ended, "the program was ended ({road})");
+    assert_eq!(
+        letters(&composer.arrived()),
+        letters(words),
+        "not the words, or not only them ({road}: {bytes:?})"
+    );
+}
+
+/// The measured row, every road that hands its composer words: at a
+/// standing composer the words arrive whole and the pasteboard is never
+/// read; the Enter alone is the Enter alone whatever the composer is doing;
+/// and the restoring worker's wait (the worker split) carries no words at
+/// all and must write none.
 #[test]
 fn every_road_hands_the_measured_composer_its_words_and_never_its_pasteboard() {
     let row = "claude";
@@ -463,7 +491,7 @@ fn every_road_hands_the_measured_composer_its_words_and_never_its_pasteboard() {
             None,
             start,
         );
-        only_the_words_arrive(&written(delivery, start), WORDS, &format!("{readiness:?}"));
+        the_words_arrive_whole(&written(delivery, start), WORDS, &format!("{readiness:?}"));
     }
     let enter = crate::cmd::terminal::prompt_delivery_for(
         String::new(),

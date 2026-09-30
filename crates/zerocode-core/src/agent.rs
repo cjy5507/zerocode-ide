@@ -341,9 +341,12 @@ pub enum NudgeRoad {
 /// frame arrives whole. Where an EMPTY paste is the composer's picture paste
 /// (the gesture a terminal sends for Cmd+V with only a picture on the
 /// clipboard), a frame that comes apart on its way in is one too, and the
-/// person's picture rides the words; such a composer is typed at instead,
-/// and typed keys hold no frame to come apart. Unmeasured agents keep the
-/// paste.
+/// person's picture rides the words; such a composer could be typed at
+/// instead, and typed keys hold no frame to come apart — where typing does
+/// not change the words' meaning. No row is typed at today: the one
+/// composer measured so far reads a typed `#` or `!` at the line's start as
+/// a memory note or a shell command (see the `claude` row). Unmeasured
+/// agents keep the paste.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ComposerWords {
@@ -630,8 +633,15 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         // pasteboard lookups, empty frames and lone ends reached for the
         // clipboard in every run watched for eight seconds (4 of 4; 7 of 12
         // in all), whole frames in none of 6 and typed words in none of 4.
+        // Typed words are not the road either: at this composer a typed `#`
+        // at the line's start makes the line a memory note and a typed `!`
+        // runs the rest as a shell command (both measured, the same day, the
+        // same pty: `# Plan` arrived as `Plan`, `! this …` ran `this` and
+        // reached no model), and a typed `/` opens its command menu. So its
+        // words go as one whole frame, written only once the composer stands
+        // (the readiness door), and a delivery with no words writes nothing.
         // Ctrl+J is its `chat:newline` key; Ctrl+V is its picture key.
-        composer_words: ComposerWords::Typed { line_break: b"\n" },
+        composer_words: ComposerWords::Pasted,
         resume_nudge: NudgeRoad::Argv,
         name: "Claude",
         favicon_domain: "claude.ai",
@@ -3103,16 +3113,18 @@ mod tests {
         );
     }
 
-    /// A composer is typed at only where an empty paste was measured reading
-    /// the person's clipboard (t-17274), and a typed row's line break is a
-    /// key that makes a new line — never a carriage return, the Enter that
-    /// would send the words a line at a time. Every other row keeps the
-    /// paste it was measured taking.
+    /// No row is typed at today (t-17274): the one composer measured reading
+    /// the person's clipboard on an empty paste was also measured changing a
+    /// typed line's meaning at its start (`#` a memory note, `!` a shell
+    /// command, `/` its command menu), so every row keeps the paste and the
+    /// leak is closed by writing nothing for no words. A row that is ever
+    /// typed at must name a line break that makes a new line — never a
+    /// carriage return, the Enter that would send the words a line at a time.
     #[test]
-    fn only_a_composer_measured_reading_the_clipboard_is_typed_at() {
+    fn no_row_is_typed_at_today_and_a_typed_rows_line_break_could_never_send() {
         assert_eq!(
             agent_spec("claude").map(|spec| spec.composer_words),
-            Some(ComposerWords::Typed { line_break: b"\n" })
+            Some(ComposerWords::Pasted)
         );
         for spec in AGENT_SPECS {
             if let ComposerWords::Typed { line_break } = spec.composer_words {
@@ -3128,8 +3140,8 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.composer_words != ComposerWords::Pasted)
                 .count(),
-            1,
-            "an unmeasured agent was taken off the paste"
+            0,
+            "a row was taken off the paste without a measurement"
         );
     }
 
