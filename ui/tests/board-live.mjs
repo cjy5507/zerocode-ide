@@ -799,9 +799,12 @@ async function testLiveMap(browser, origin, ok) {
        * 서 있는가」를 물을 때(`agentGraphLiveStageHolds`) 그 행에서 참이어야 한다. */
       const misnamed = AGENT_GRAPH_LIVE_STAGES.filter((one) => {
         // `reported`와 `failed`는 행의 칸이고(실패도 닫힌 보고다), 나머지는 검토의 칸이다.
-        const row = one.flag === "reported" || one.flag === "failed"
-          ? { reported: true, [one.flag]: true, review: null }
-          : { reported: false, review: { [one.flag]: true } };
+        // `closed`는 행의 칸이고 까닭을 든 닫힘이다(접힘·넘김·낡음 중 하나).
+        const row = one.flag === "closed"
+          ? { reported: false, closed: { kind: "outdated", why: "x" }, review: null }
+          : one.flag === "reported" || one.flag === "failed"
+            ? { reported: true, [one.flag]: true, review: null }
+            : { reported: false, review: { [one.flag]: true } };
         return ledgerReviewWord(row) !== t(one.key, one.word)
           || !agentGraphLiveStageHolds(one.stage, null, row);
       }).map((one) => one.stage);

@@ -92,7 +92,7 @@ const TALL = 2400;
  * through the sidebar unplaced. */
 const WANT_PHASE = {
   reported: "review", "claimed-verified": "review", "claimed-merged": "review", "claimed-deployed": "review",
-  verified: "vouched", merged: "vouched", deployed: "vouched", failed: "",
+  verified: "vouched", merged: "vouched", deployed: "vouched", failed: "", closed: "closed",
 };
 
 export async function testSidebarReviewState({ browser, origin, ok, faults }) {
@@ -747,9 +747,11 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       // tomorrow lands here red instead of falling through silently.
       const stages = AGENT_GRAPH_LIVE_STAGES.map((one) => one.stage);
       const placed = Object.fromEntries(AGENT_GRAPH_LIVE_STAGES.map((one) => {
-        const row = one.flag === "reported" || one.flag === "failed"
-          ? { reported: true, [one.flag]: true, review: null }
-          : { reported: true, review: { [one.flag]: true } };
+        const row = one.flag === "closed"
+          ? { reported: true, closed: { kind: "outdated", why: "x" }, review: null }
+          : one.flag === "reported" || one.flag === "failed"
+            ? { reported: true, [one.flag]: true, review: null }
+            : { reported: true, review: { [one.flag]: true } };
         return [one.stage, ledgerReviewPhaseOf(row)];
       }));
       return { stages, placed, none: ledgerReviewPhaseOf({ reported: false, review: null }),

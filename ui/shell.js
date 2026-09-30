@@ -232,6 +232,7 @@ async function refreshPaneLedger() {
         reported: row?.reported === true,
         failed: row?.failed === true,
         review: row?.review ?? null,
+        closed: row?.closed ?? null,
       };
       if (typeof row?.term === "number") next.set(row.term, facts);
       else if (row?.settled === true && row.checkout) {
@@ -265,7 +266,7 @@ function paneLedgerSaid(map) {
     .sort(([a], [b]) => a - b)
     .map(([term, f]) =>
       `${term}:${f.taskId}:${f.task}:${f.ledger}:${f.reported ? 1 : 0}:${f.failed ? 1 : 0}` +
-      `:${JSON.stringify(f.review)}`)
+      `:${JSON.stringify(f.review)}:${JSON.stringify(f.closed)}`)
     .join(",");
 }
 
@@ -295,6 +296,9 @@ function paneLedgerWord(term) {
  * task board's worker roster draws (t-6588). */
 function ledgerReviewWord(facts) {
   const review = facts.review ?? {};
+  // Closed is neither done nor failed: the coordinator folded, handed over or
+  // retired the task, so no report or claim on it still waits for anyone.
+  if (facts.closed) return t("board.closed", "닫힘");
   if (review.deployed) return t("board.deployed", "배포됨");
   if (review.merged) return t("board.merged", "병합됨");
   if (review.verified) return t("board.verified", "검증됨");
@@ -306,6 +310,21 @@ function ledgerReviewWord(facts) {
   if (facts.failed) return t("board.desk.stageFailed", "실패");
   if (facts.reported) return t("board.awaitingReview", "검증 대기");
   return "";
+}
+
+/* 닫힘의 까닭을 낱말로 — 원장의 `Closure` 종류(`closed.kind`)마다 한 줄씩, 이 표가
+ * 그 낱말의 유일한 곳이다. `target`은 접힌 과업·넘긴 런의 이름이고, 낡음은 가리킬 곳이
+ * 없다(그 한 줄 이유는 `closed.why`로 데스크 행이 덧붙인다). */
+const CLOSED_REASONS = Object.freeze({
+  folded: { key: "board.closedFolded", word: "접힘 → {{target}}", target: "into" },
+  "handed-over": { key: "board.closedHandedOver", word: "넘김 → {{target}}", target: "to" },
+  outdated: { key: "board.closedOutdated", word: "낡음", target: null },
+});
+
+function ledgerClosedReason(closed) {
+  const held = closed && CLOSED_REASONS[closed.kind];
+  if (!held) return "";
+  return t(held.key, held.word, { target: held.target ? closed[held.target] ?? "" : "" });
 }
 
 /* Whether a coordinator has stood behind the work — verified, merged or
@@ -326,6 +345,7 @@ function ledgerVouched(review) {
  * and `agentRowPhase` call that `unsettled` where the ledger holds a task, and
  * leave it unsaid where it holds none. */
 const LEDGER_REVIEW_PHASE = Object.freeze({
+  closed: "closed",
   reported: "review",
   "claimed-verified": "review",
   "claimed-merged": "review",
@@ -9887,7 +9907,7 @@ function worktreeTaskTitle(path) {
  * in it. With several the one still waiting wins, and anything unresolved
  * outranks what is settled, so a worker's verified report cannot hide
  * another's that nobody has looked at. */
-const WORKTREE_PHASE_RANK = Object.freeze({ "": 0, vouched: 1, unsettled: 2, review: 3 });
+const WORKTREE_PHASE_RANK = Object.freeze({ "": 0, closed: 1, vouched: 2, unsettled: 3, review: 4 });
 
 function worktreeReviewPhase(path) {
   if (paneLedger.size === 0 && checkoutLedger.size === 0) return "";
@@ -10449,7 +10469,7 @@ function makeFinishedWorkRow(path, work) {
   const node = makePastRow({
     agent: work.agent,
     name: work.task || work.taskId,
-    said: ledgerReviewWord(work),
+    said: [ledgerReviewWord(work), ledgerClosedReason(work.closed)].filter(Boolean).join(" · "),
     at: work.at,
     worktree: path,
     session: work.conversation ?? null,
@@ -10461,7 +10481,7 @@ function makeFinishedWorkRow(path, work) {
   // dot the retained rows always had.
   const phase = ledgerReviewPhaseOf(work);
   if (phase === "review") node.classList.add("is-review");
-  if (phase !== "") {
+  if (phase !== "" && phase !== "closed") {
     node.querySelector(".wt-agent-dot")?.replaceWith(agentDotNode(agentRowMark("done", phase)));
   }
   if (phase === "" && work.failed === true) dressFailedDot(node.querySelector(".wt-agent-dot"));

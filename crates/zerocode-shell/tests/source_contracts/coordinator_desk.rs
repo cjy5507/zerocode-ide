@@ -317,3 +317,67 @@ fn the_desks_numbers_are_the_backends_and_the_window_counts_no_letter() {
         "a kind the table does not know is drawn as a silence:\n{letter}"
     );
 }
+
+/// A task the coordinator folded, handed over or retired reads 닫힘 and its
+/// reason in words — never 실패 (t-19159, t-15558 slice 1).
+///
+/// Reported as the whole problem of the old tasks: work folded into another
+/// task or handed to the other run could only be written `completed` or
+/// `failed`, and the board showed the second as 실패. What is pinned is that the
+/// desk has a stage of its own for it and draws it without the failed tone,
+/// that the three reasons live in one table (`CLOSED_REASONS`) and say
+/// 접힘 → t-…, 넘김 → run-…, 낡음, that the word is one key read by every
+/// surface, and that all five languages carry those words.
+#[test]
+fn a_closed_task_reads_closed_with_its_reason_and_is_never_called_failed() {
+    let window = window_source();
+    let stages = block_after(window, "const DESK_STAGES = Object.freeze([");
+    assert!(
+        stages.contains(
+            r#"{ id: "closed", flow: false, tone: "", key: "board.closed", word: "닫힘" }"#
+        ),
+        "the desk has no closed stage, or draws it in a signal tone:\n{stages}"
+    );
+    let reasons = block_after(window, "const CLOSED_REASONS = Object.freeze({");
+    for held in [
+        r#"key: "board.closedFolded", word: "접힘 → {{target}}""#,
+        r#"key: "board.closedHandedOver", word: "넘김 → {{target}}""#,
+        r#"key: "board.closedOutdated", word: "낡음""#,
+    ] {
+        assert!(
+            reasons.contains(held),
+            "the reasons lost `{held}`:\n{reasons}"
+        );
+    }
+    let word = block_after(window, "function ledgerReviewWord(facts) {");
+    assert!(
+        word.contains(r#"if (facts.closed) return t("board.closed", "닫힘");"#),
+        "a closed task's card does not say closed:\n{word}"
+    );
+    assert!(
+        word.find("facts.closed") < word.find("stageFailed"),
+        "a closed task is read as failed before it is read as closed:\n{word}"
+    );
+    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    for key in [
+        "board.closed",
+        "board.closedFolded",
+        "board.closedHandedOver",
+        "board.closedOutdated",
+    ] {
+        assert_eq!(
+            i18n.matches(&format!("\"{key}\":")).count(),
+            4,
+            "{key} is not in every language but the source's own Korean"
+        );
+    }
+    // The backend's stage list is the order the desk draws; closed is last.
+    let desk = shell_source("orchestration/desk.rs");
+    let table = block_after(&desk, "pub(crate) const STAGES: [&str; 9] = [");
+    assert!(
+        table
+            .find("\"failed\"")
+            .is_some_and(|failed| table.find("\"closed\"") > Some(failed)),
+        "the backend's stages do not end with closed:\n{table}"
+    );
+}

@@ -82,6 +82,11 @@ pub enum TaskStatus {
     Failed,
     /// Held back by a person or a gate, not by a dependency.
     Blocked,
+    /// Over without being done and without having failed: folded into
+    /// another task, handed to another run, or overtaken by events. Its
+    /// reason is [`Task::closed`]; a closed task is neither a completion nor a
+    /// failure anywhere a count is made.
+    Closed,
 }
 
 impl TaskStatus {
@@ -93,6 +98,7 @@ impl TaskStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Blocked => "blocked",
+            Self::Closed => "closed",
         }
     }
 
@@ -105,7 +111,7 @@ impl TaskStatus {
     /// free the dependants; the code beside it has said `Completed` since both
     /// were written in the same commit, and the code is the one that is right.
     pub const fn is_final(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed)
+        matches!(self, Self::Completed | Self::Failed | Self::Closed)
     }
 
     /// The status/attempt contract shared by live corrections and rebuild.
@@ -124,6 +130,11 @@ impl TaskStatus {
             Self::Completed | Self::Failed | Self::Blocked => {
                 (&[0, 1], "a task is carried by one attempt or by none")
             }
+            Self::Closed => (
+                &[0],
+                "a closed task has no worker under it — stop the attempt first, or the \
+                 worker keeps working on what the record says is over",
+            ),
         };
         if allowed.contains(&carrying) {
             Ok(())
@@ -149,9 +160,43 @@ impl std::str::FromStr for TaskStatus {
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "blocked" => Self::Blocked,
+            "closed" => Self::Closed,
             _ => return Err(format!("unknown status: {word}")),
         })
     }
+}
+
+/// A task's status and, when it was folded into another, that other task's
+/// id — all a dependency needs to be followed ([`followed_status`]).
+type Standing = (TaskStatus, Option<String>);
+
+/// The task a closed task was folded into; `None` for every other way of
+/// being, or not being, closed.
+fn folded_into(closed: Option<&Closure>) -> Option<String> {
+    match closed {
+        Some(Closure::Folded { into }) => Some(into.clone()),
+        _ => None,
+    }
+}
+
+/// How many folds one dependency is followed through before it counts as
+/// unmet. A fold is refused when it would circle ([`Ledger::close_task`]), so
+/// a long chain is a hand-edited or corrupt file; a bound keeps such a file
+/// from hanging a load, and "unmet" is the answer that strands nothing.
+const FOLD_HOPS_MAX: usize = 16;
+
+/// What a dependency amounts to: its own status, or — when it was folded into
+/// another task — that task's, followed on. `None` where a name is not held.
+fn followed_status(dep: &str, held: &impl Fn(&str) -> Option<Standing>) -> Option<TaskStatus> {
+    let mut name = dep.to_string();
+    for _ in 0..FOLD_HOPS_MAX {
+        let (status, folded) = held(&name)?;
+        match folded {
+            Some(next) if status == TaskStatus::Closed => name = next,
+            _ => return Some(status),
+        }
+    }
+    None
 }
 
 /// Where a worker's TERMINAL stands — which is not where its task stands.
@@ -600,6 +645,35 @@ pub struct Gate {
     pub held_for: Option<String>,
 }
 
+/// Why a task is [`TaskStatus::Closed`] — the one reason the ledger needs to
+/// say it was neither done nor failed, with the target that makes it a fact
+/// and not a shrug. The words are [`Closure::word`], the only table of them;
+/// the window's board keeps its own table of the same three for five
+/// languages (`ui/shell-board.js`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum Closure {
+    /// The work moved into a bigger task of this run. Dependants follow it.
+    Folded { into: String },
+    /// The other run took the work; it is that run's now.
+    HandedOver { to: String },
+    /// Events overtook it. `why` is the one line a person reads on the board.
+    Outdated { why: Text },
+}
+
+impl Closure {
+    /// The `--closed-as` words, in the order a person is told them.
+    pub const WORDS: [&'static str; 3] = ["folded", "handed-over", "outdated"];
+
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::Folded { .. } => Self::WORDS[0],
+            Self::HandedOver { .. } => Self::WORDS[1],
+            Self::Outdated { .. } => Self::WORDS[2],
+        }
+    }
+}
+
 /// One unit of work, written down before anybody is asked to do it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -629,6 +703,10 @@ pub struct Task {
     /// as "nobody known": the keys in such a result are claims, not facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_author: Option<ResultAuthor>,
+    /// Why the task is closed; `Some` exactly when `status` is `Closed`. Absent
+    /// from every row written before closings existed, which read as they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<Closure>,
 }
 
 /// Who wrote a task's `result` last — the provenance [`ReviewFacts`] asks
@@ -3593,17 +3671,17 @@ impl Run {
     /// task waiting on a name nobody wrote down should stay waiting and be
     /// visible, not quietly become ready.
     pub fn deps_met(&self, task: &Task) -> bool {
-        Self::dependencies_met(&task.deps, |dep| self.task(dep).map(|held| held.status))
+        Self::dependencies_met(&task.deps, |dep| {
+            self.task(dep)
+                .map(|held| (held.status, folded_into(held.closed.as_ref())))
+        })
     }
 
     // Both live runs and boot projections resolve names within their run.
-    fn dependencies_met(
-        dependencies: &[String],
-        status_of: impl Fn(&str) -> Option<TaskStatus>,
-    ) -> bool {
+    fn dependencies_met(dependencies: &[String], held: impl Fn(&str) -> Option<Standing>) -> bool {
         dependencies
             .iter()
-            .all(|dep| status_of(dep) == Some(TaskStatus::Completed))
+            .all(|dep| followed_status(dep, &held) == Some(TaskStatus::Completed))
     }
 
     /// The dependencies that have ENDED without completing.
@@ -3621,8 +3699,15 @@ impl Run {
         task.deps
             .iter()
             .filter(|dep| {
-                self.task(dep)
-                    .is_some_and(|held| held.status == TaskStatus::Failed)
+                /* A folded task follows the one it was folded into, so what
+                 * ended is the answer there. A task handed over or made
+                 * outdated produced nothing this run can wait for: it says
+                 * so here rather than waiting forever, unseen. */
+                followed_status(dep, &|name: &str| {
+                    self.task(name)
+                        .map(|held| (held.status, folded_into(held.closed.as_ref())))
+                })
+                .is_some_and(|status| matches!(status, TaskStatus::Failed | TaskStatus::Closed))
             })
             .cloned()
             .collect()
@@ -6126,6 +6211,8 @@ fn changes_the_ledger(verb: &str, words: &Words) -> bool {
         // Reading the policy changes nothing; choosing one, or asking for a
         // sweep, changes what the ledger holds.
         "retention" => words.value("--days").is_some() || words.has("--sweep"),
+        // Listing what would be settled changes nothing; applying it does.
+        "task-settle" => words.has("--apply"),
         _ => true,
     };
     doing(verb).is_some_and(|what| what.changes(spending))
@@ -6317,7 +6404,7 @@ impl Ledger {
     }
 
     pub fn create_run(&mut self, name: &str, now_ms: i64) -> String {
-        let id = self.mint("run-");
+        let id = self.mint(RUN_ID_PREFIX);
         self.runs.push(Run {
             id: id.clone(),
             name: name.to_string(),
@@ -7565,6 +7652,7 @@ impl Ledger {
             failures: 0,
             created_ms: now_ms,
             result_author: None,
+            closed: None,
         };
         let status = if run.deps_met(&task) {
             TaskStatus::Ready
@@ -7600,6 +7688,10 @@ impl Ledger {
             .iter()
             .position(|task| task.id == task_id)
             .ok_or_else(|| format!("unknown task: {task_id}"))?;
+        // A closing carries its reason, and the reason is written in one place.
+        if status == Some(TaskStatus::Closed) {
+            return Err("closing a task says why — use close_task".to_string());
+        }
         // Refuse before either field changes. A verb must not write a status
         // that the same window refuses to rebuild on its next boot.
         if let Some(asked) = status {
@@ -7633,6 +7725,8 @@ impl Ledger {
         }
         if let Some(status) = status {
             run.tasks[at].status = status;
+            // Put back to work, a task no longer says why it was closed.
+            run.tasks[at].closed = None;
             if status == TaskStatus::Completed {
                 run.tasks[at].failures = 0;
             }
@@ -7640,6 +7734,89 @@ impl Ledger {
         let now = run.tasks[at].status;
         Self::refresh_ready(run);
         Ok(now)
+    }
+
+    /// Close a task with the reason it is over: folded into another task of
+    /// this run, handed to another run, or overtaken by events.
+    ///
+    /// The same refusals as a status written by hand — no worker under it, no
+    /// decision standing in front of it — plus the ones that make a reason
+    /// worth keeping: the task a fold names exists, is not this one and does
+    /// not lead back here, a hand-over names a run, and an outdating says why
+    /// in words.
+    pub fn close_task(
+        &mut self,
+        run_id: &str,
+        task_id: &str,
+        closure: Closure,
+    ) -> Result<TaskStatus, String> {
+        let run = self.run(run_id).ok_or_else(|| unknown_run(run_id))?;
+        if run.task(task_id).is_none() {
+            return Err(format!("unknown task: {task_id}"));
+        }
+        let carrying = run
+            .dispatches
+            .iter()
+            .filter(|one| one.task == task_id && one.is_open())
+            .count();
+        TaskStatus::Closed.validate_open_attempts(run_id, task_id, carrying)?;
+        if let Some(gate) = run.pending_gate_on(task_id) {
+            return Err(format!(
+                "task {task_id} is blocked by gate {} — resolve it rather than closing over \
+                 the decision",
+                gate.id
+            ));
+        }
+        match &closure {
+            Closure::Folded { into } => {
+                if into == task_id {
+                    return Err(format!("task {task_id} cannot be folded into itself"));
+                }
+                if run.task(into).is_none() {
+                    return Err(format!(
+                        "--into {into} is not a task of run {run_id} — a fold names the task \
+                         the work went into"
+                    ));
+                }
+                // Follow the target's own folds: arriving here means a circle,
+                // and a dependency on any of them would wait on itself.
+                let mut hop = into.as_str();
+                for _ in 0..FOLD_HOPS_MAX {
+                    match run.task(hop).and_then(|held| held.closed.as_ref()) {
+                        Some(Closure::Folded { into: next }) if next == task_id => {
+                            return Err(format!(
+                                "folding {task_id} into {into} would circle: {hop} was folded \
+                                 into {task_id}"
+                            ));
+                        }
+                        Some(Closure::Folded { into: next }) => hop = next,
+                        _ => break,
+                    }
+                }
+            }
+            Closure::HandedOver { to } => {
+                if !to.starts_with(RUN_ID_PREFIX) {
+                    return Err(format!(
+                        "--to names a run, like {RUN_ID_PREFIX}12 — {to} is not one"
+                    ));
+                }
+            }
+            Closure::Outdated { why } => {
+                if why.trim().is_empty() {
+                    return Err("--why says in a line why the task is outdated".to_string());
+                }
+            }
+        }
+        let run = self.run_mut(run_id).ok_or_else(|| unknown_run(run_id))?;
+        let at = run
+            .tasks
+            .iter()
+            .position(|task| task.id == task_id)
+            .expect("checked above");
+        run.tasks[at].status = TaskStatus::Closed;
+        run.tasks[at].closed = Some(closure);
+        Self::refresh_ready(run);
+        Ok(TaskStatus::Closed)
     }
 
     /// Put a decision in front of a task.
@@ -9418,6 +9595,22 @@ impl Ledger {
                     .count();
                 task.status
                     .validate_open_attempts(&run.id, &task.id, carrying)?;
+                /* A closed task says why and nothing else does: a closing
+                 * with no reason is a record nobody can explain, and a reason
+                 * on a task at work is one the next close would contradict. */
+                if (task.status == TaskStatus::Closed) != task.closed.is_some() {
+                    return Err(format!(
+                        "in run {} task {} is {} and {} a reason for being closed",
+                        run.id,
+                        task.id,
+                        task.status.as_str(),
+                        if task.closed.is_some() {
+                            "holds"
+                        } else {
+                            "holds no"
+                        }
+                    ));
+                }
             }
             let mut addresses: HashSet<&str> = HashSet::new();
             for (address, inbox) in &run.inboxes {
@@ -12499,7 +12692,7 @@ impl Ledger {
         if let Some(run) = self.runs.iter().find(|run| run.name == name) {
             return run.id.clone();
         }
-        let id = self.mint("run-");
+        let id = self.mint(RUN_ID_PREFIX);
         self.runs.push(Run {
             id: id.clone(),
             name,
@@ -13708,6 +13901,18 @@ pub struct Draft {
 /// How many attempts one task gets before the circuit opens.
 pub const MAX_ATTEMPTS: u32 = 3;
 
+/// How long a task must have gone untouched before the settle pass
+/// ([`settle_candidates`]) may call it outdated, in days.
+///
+/// A week: the ledger's own cadence is a release every day or two, so seven
+/// days is several releases in which nobody dispatched, reviewed or corrected
+/// the task — long enough that "nobody is coming back to it" is the ordinary
+/// reading, and short enough that work set aside over a weekend is spared.
+pub const SETTLE_QUIET_DAYS: i64 = 7;
+
+/// The first word of a run's id, as [`Ledger::create_run`] mints it.
+const RUN_ID_PREFIX: &str = "run-";
+
 /// What `reset` may clear. The receipts are never on the list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetScope {
@@ -13840,6 +14045,7 @@ const BOOL_FLAGS: &[&str] = &[
     "--peek",
     "--format",
     "--sweep",
+    "--apply",
     "--wip-commit",
     "--inherit-checkout",
 ];
@@ -17006,8 +17212,16 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "task-list",
-        "[--status <s>] [--ready] [--open] [--brief] · what is written down (--open: not yet completed or failed)",
+        "[--status <s>] [--ready] [--open] [--brief] · what is written down (--open: not yet completed, failed or closed)",
         Doing::FreshRead,
+    ),
+    (
+        "task-settle",
+        "[--days <n>] [--apply] · the open tasks whose every attempt ended handing nothing in and \
+         that nobody has touched for --days (default one week), and apart the completed ones that \
+         can take no review: listed; only the open ones are closed `outdated`, and only with \
+         --apply, from the coordinator seat",
+        Doing::Policy,
     ),
     (
         "task-update",
@@ -19241,6 +19455,7 @@ fn plan_inner(
                 TaskStatus::Completed,
                 TaskStatus::Failed,
                 TaskStatus::Blocked,
+                TaskStatus::Closed,
             ] {
                 tasks.insert(
                     status.as_str().to_string(),
@@ -19609,6 +19824,89 @@ fn plan_inner(
             said(serde_json::json!({ "tasks": tasks }))
         }
 
+        /* The settle pass for old tasks: what a coordinator reads first, and
+         * applies only by saying so. Like `retention`, LISTING is anybody's and
+         * APPLYING is the coordinator seat's, and like `reset` the record it
+         * writes is a closing, never a failure. */
+        "task-settle" => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            let apply = words.has("--apply");
+            let days = match words.value("--days") {
+                Some(raw) => raw
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|days| *days >= 1)
+                    .ok_or("--days is a whole number of days, one or more")?,
+                None => SETTLE_QUIET_DAYS,
+            };
+            if apply {
+                // The same seat every correction needs; any task of the run
+                // will do to ask it, and a run with none has nothing to settle.
+                if let Some(first) = ledger.run(&run_id).and_then(|run| run.tasks.first()) {
+                    let task = first.id.clone();
+                    correction_author(
+                        ledger,
+                        &team.leader_pane,
+                        &run_id,
+                        &task,
+                        (&team.id, pane),
+                        Observed::default(),
+                    )?;
+                }
+            }
+            let run = ledger.run(&run_id).ok_or_else(|| unknown_run(&run_id))?;
+            let found: Vec<serde_json::Value> = settle_candidates(run, now_ms, days)
+                .into_iter()
+                .map(|task| {
+                    serde_json::json!({
+                        "taskId": task.id,
+                        "title": task.display_name(),
+                        "status": task.status.as_str(),
+                        "quietDays": now_ms.saturating_sub(last_touched_ms(run, task)) / DAY_MS,
+                    })
+                })
+                .collect();
+            // Which statuses the list is made of, so a coordinator reads the
+            // shape of the pile — finished-and-unreviewed, or never finished —
+            // before it decides to close it.
+            let unreviewable: Vec<serde_json::Value> = unreviewable_completed(run, now_ms, days)
+                .into_iter()
+                .map(|task| {
+                    serde_json::json!({
+                        "taskId": task.id,
+                        "title": task.display_name(),
+                        "quietDays": now_ms.saturating_sub(last_touched_ms(run, task)) / DAY_MS,
+                    })
+                })
+                .collect();
+            let mut closed = Vec::new();
+            if apply {
+                let why =
+                    format!("no attempt handed anything in and nobody touched it for {days} days");
+                for row in &found {
+                    let id = row["taskId"].as_str().unwrap_or_default().to_string();
+                    ledger.close_task(
+                        &run_id,
+                        &id,
+                        Closure::Outdated {
+                            why: why.as_str().into(),
+                        },
+                    )?;
+                    closed.push(id);
+                }
+            }
+            said(serde_json::json!({
+                "apply": apply,
+                "days": days,
+                "count": found.len(),
+                "candidates": found,
+                // Completed, and never closed here: what can take no review.
+                "unreviewableCompleted": unreviewable,
+                "unreviewableCount": unreviewable.len(),
+                "closed": closed,
+            }))
+        }
+
         "task-update" => {
             // Never acknowledge a field this mutation cannot apply. In
             // particular, --deps belongs to task-create; ignoring it can
@@ -19619,6 +19917,10 @@ fn plan_inner(
                 "--result",
                 "--attempt",
                 "--source",
+                "--closed-as",
+                "--into",
+                "--to",
+                "--why",
                 "--run",
                 "--retry-request",
             ];
@@ -19645,6 +19947,7 @@ fn plan_inner(
                 Some(named) => Some(named.parse::<TaskStatus>()?),
                 None => None,
             };
+            let closure = closure_asked(&words, status)?;
             let result = words.value("--result").map(str::to_string);
             /* Whether this correction vouches for anything is read with the
              * same keys the board reads it with ([`ReviewFacts::from_result`]
@@ -19678,7 +19981,15 @@ fn plan_inner(
                 observed,
             )?;
             let signed = author.kind();
-            let now = ledger.update_task(&run_id, task_id, status, result, author)?;
+            let now = match closure {
+                Some(closure) => {
+                    if let Some(result) = result {
+                        ledger.update_task(&run_id, task_id, None, Some(result), author)?;
+                    }
+                    ledger.close_task(&run_id, task_id, closure)?
+                }
+                None => ledger.update_task(&run_id, task_id, status, result, author)?,
+            };
             said(serde_json::json!({
                 "taskId": task_id,
                 "status": now.as_str(),
@@ -21830,6 +22141,119 @@ fn inbox_of(ledger: &Ledger, leader_pane: &str, run_id: &str, seat: (&str, &str)
     sender(ledger, leader_pane, run_id, seat)
 }
 
+/// The closing a `task-update` asks for, read from `--closed-as` and the one
+/// flag each kind needs. `None` when the status is not `closed`; refused when
+/// `closed` arrives without its reason and target, or a reason arrives without
+/// the closing it explains — a flag that changes nothing is never accepted.
+fn closure_asked(words: &Words, status: Option<TaskStatus>) -> Result<Option<Closure>, String> {
+    let kind = words.value("--closed-as");
+    let stray = ["--into", "--to", "--why"]
+        .into_iter()
+        .find(|flag| words.value(flag).is_some());
+    if status != Some(TaskStatus::Closed) {
+        return match kind.or(stray) {
+            Some(_) => Err("--closed-as, --into, --to and --why go with `--status closed`".into()),
+            None => Ok(None),
+        };
+    }
+    let kinds = Closure::WORDS.join(" | ");
+    let given = |flag: &str, what: &str| {
+        words
+            .value(flag)
+            .map(str::trim)
+            .filter(|held| !held.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("a {what} needs {flag}; nothing was changed"))
+    };
+    let kind = kind.ok_or_else(|| {
+        format!("--status closed says why with --closed-as <{kinds}>; nothing was changed")
+    })?;
+    let [folded, handed, outdated] = Closure::WORDS;
+    let (closure, others) = match kind {
+        k if k == folded => (
+            Closure::Folded {
+                into: given("--into", "fold")?,
+            },
+            ["--to", "--why"],
+        ),
+        k if k == handed => (
+            Closure::HandedOver {
+                to: given("--to", "hand-over")?,
+            },
+            ["--into", "--why"],
+        ),
+        k if k == outdated => (
+            Closure::Outdated {
+                why: given("--why", "closing as outdated")?.into(),
+            },
+            ["--into", "--to"],
+        ),
+        other => return Err(format!("--closed-as {other} is not one of {kinds}")),
+    };
+    if let Some(flag) = others.into_iter().find(|flag| words.value(flag).is_some()) {
+        return Err(format!("{flag} does not go with --closed-as {kind}"));
+    }
+    Ok(Some(closure))
+}
+
+/// When a task was last touched: written, or an attempt on it began or ended.
+fn last_touched_ms(run: &Run, task: &Task) -> i64 {
+    run.dispatches
+        .iter()
+        .filter(|held| held.task == task.id)
+        .flat_map(|held| [Some(held.started_ms), held.ended_ms])
+        .flatten()
+        .fold(task.created_ms, i64::max)
+}
+
+/// The tasks the settle pass would close: still open (pending, ready or
+/// blocked), at least one attempt was made, every attempt has ended, none of
+/// them handed anything in (so none can take a review record), no decision
+/// stands in front of it, and nobody has touched it for `days`. A completed
+/// task is never here — done is done, and what settle owes it is a listing
+/// ([`unreviewable_completed`]), not a new status.
+pub fn settle_candidates(run: &Run, now_ms: i64, days: i64) -> Vec<&Task> {
+    quiet_unhanded(run, now_ms, days, |status| {
+        matches!(
+            status,
+            TaskStatus::Pending | TaskStatus::Ready | TaskStatus::Blocked
+        )
+    })
+}
+
+/// The completed tasks that can never take a review record — every attempt
+/// ended handing nothing in, no coordinator wrote a review, nobody touched
+/// them for `days`. Listed beside the settle candidates and never closed: the
+/// board's 검증 대기 is the word they are waiting under, and the list is what a
+/// person reads to decide what to do about that.
+pub fn unreviewable_completed(run: &Run, now_ms: i64, days: i64) -> Vec<&Task> {
+    quiet_unhanded(run, now_ms, days, |status| status == TaskStatus::Completed)
+}
+
+fn quiet_unhanded(
+    run: &Run,
+    now_ms: i64,
+    days: i64,
+    status: impl Fn(TaskStatus) -> bool,
+) -> Vec<&Task> {
+    let cutoff = now_ms.saturating_sub(days.saturating_mul(DAY_MS));
+    run.tasks
+        .iter()
+        .filter(|task| status(task.status))
+        .filter(|task| run.pending_gate_on(&task.id).is_none())
+        .filter(|task| !ReviewFacts::from_result(task.result.as_str()).written)
+        .filter(|task| {
+            let mut attempts = run.dispatches.iter().filter(|held| held.task == task.id);
+            let mut any = false;
+            attempts.all(|held| {
+                any = true;
+                !held.is_open() && held.source.is_none()
+            }) && any
+        })
+        .filter(|task| last_touched_ms(run, task) <= cutoff)
+        .collect()
+}
+
 /// What a `task-update` says it looked at: the attempt and the source.
 ///
 /// A correction that carries a review — any of the keys [`ReviewFacts`]
@@ -22049,6 +22473,8 @@ fn task_json(run: &Run, task: &Task) -> serde_json::Value {
         "attempt": newest.map(|one| one.id.as_str()),
         "source": newest.and_then(|one| one.source.as_deref()),
         "failures": task.failures,
+        // Why it is closed, in the ledger's words; `null` for any other task.
+        "closed": task.closed,
     })
 }
 
@@ -22481,14 +22907,19 @@ pub fn repair_unattempted_dispatched_tasks(projection: &mut LedgerProjectionV1) 
         let statuses: HashMap<_, _> = projection
             .tasks
             .iter()
-            .map(|task| ((task.run.as_str(), task.id.as_str()), task.status))
+            .map(|task| {
+                (
+                    (task.run.as_str(), task.id.as_str()),
+                    (task.status, folded_into(task.closed.as_ref())),
+                )
+            })
             .collect();
         projection
             .tasks
             .iter()
             .map(|task| {
                 Run::dependencies_met(&task.deps, |dep| {
-                    statuses.get(&(task.run.as_str(), dep)).copied()
+                    statuses.get(&(task.run.as_str(), dep)).cloned()
                 })
             })
             .collect()
@@ -22579,6 +23010,10 @@ pub struct TaskRow {
     /// back as nobody known (t-6815).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_author: Option<ResultAuthor>,
+    /// Why the task is closed; absent from every store written before
+    /// closings existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<Closure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22953,6 +23388,7 @@ impl Ledger {
                     failures: task.failures,
                     created_ms: task.created_ms,
                     result_author: task.result_author.clone(),
+                    closed: task.closed.clone(),
                 });
             }
             for dispatch in &run.dispatches {
@@ -23167,6 +23603,7 @@ impl Ledger {
                 failures: row.failures,
                 created_ms: row.created_ms,
                 result_author: row.result_author,
+                closed: row.closed,
             });
         }
         for row in projected.dispatches {

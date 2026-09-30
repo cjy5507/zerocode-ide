@@ -855,6 +855,7 @@ function dressAgentGraphWait(chip, wait) {
  * 지난 결과 사건을 누를 때 그 사건이 적은 사실이
  * 지금도 **같은 사실로** 서 있는지 이 칸으로 묻는다(`agentGraphLiveStageHolds`). */
 const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
+  { stage: "closed", flag: "closed", key: "board.closed", word: "닫힘" },
   { stage: "deployed", flag: "deployed", key: "board.deployed", word: "배포됨" },
   { stage: "merged", flag: "merged", key: "board.merged", word: "병합됨" },
   { stage: "verified", flag: "verified", key: "board.verified", word: "검증됨" },
@@ -874,6 +875,7 @@ function ledgerReviewStage(place, row) {
     reported: place?.reported === true || row?.reported === true,
     failed: row?.failed === true,
     review: row?.review ?? null,
+    closed: row?.closed ?? null,
   });
   return AGENT_GRAPH_LIVE_STAGES.find((one) => t(one.key, one.word) === said)?.stage
     ?? "dispatched";
@@ -891,6 +893,7 @@ function agentGraphLiveStageHolds(stage, place, row) {
 function agentGraphLiveFlagHolds(held, place, row) {
   if (held.flag === "reported") return place?.reported === true || row?.reported === true;
   if (held.flag === "failed") return row?.failed === true;
+  if (held.flag === "closed") return row?.closed != null;
   return row?.review?.[held.flag] === true;
 }
 

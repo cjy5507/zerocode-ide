@@ -1895,6 +1895,10 @@ pub(crate) struct LedgerAgent {
     /// claim: verified, merged, deployed — or nothing yet. Never inferred
     /// from a provider's turn ending or from `reported` above.
     pub(crate) review: zerocode_core::orchestration::ReviewFacts,
+    /// Why the task is closed — folded into a task, handed to a run, or
+    /// outdated — when it is. A closed task is neither reported nor failed:
+    /// the board says 닫힘 and its reason, and the card leaves the open lanes.
+    pub(crate) closed: Option<zerocode_core::orchestration::Closure>,
     /// The seat this window holds for it, when it holds one. `Some` means a
     /// pane card already speaks for this worker and the window drops this row
     /// rather than drawing the agent twice.
@@ -2394,6 +2398,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 dispatch_started_ms,
                 retry_of,
                 review,
+                closed: carried.and_then(|held| held.closed.clone()),
                 term,
                 // Finished work is dated by when its attempt ended — the
                 // moment the board's card and the sidebar's clock count from.
@@ -10277,7 +10282,7 @@ fn federation_attach_from_home(
             let unwound = actor.federation(FederationCall::AbortRemote {
                 run: prepared.run.clone(),
                 dispatch: prepared.dispatch.clone(),
-                task_preimage: prepared.task_preimage.clone(),
+                task_preimage: Box::new(prepared.task_preimage.clone()),
                 now_ms,
             });
             match unwound {

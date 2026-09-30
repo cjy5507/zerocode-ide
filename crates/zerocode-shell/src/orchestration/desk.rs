@@ -15,7 +15,8 @@ use std::path::Path;
 use serde::Serialize;
 use zerocode_core::orchestration::task_cost::TaskCost;
 use zerocode_core::orchestration::{
-    Delivery, Ledger, Message, MessageKind, Run, Task, TaskStatus, WorktreeRoom, worktree_room,
+    Closure, Delivery, Ledger, Message, MessageKind, Run, Task, TaskStatus, WorktreeRoom,
+    worktree_room,
 };
 
 /// The desk's reading of the ledger, published beside the board's other
@@ -391,6 +392,9 @@ pub(crate) struct DeskTask {
     pub(crate) gate: Option<DeskGate>,
     /// Its dependencies that failed (`Run::blocked_by`).
     pub(crate) blocked_by: Vec<String>,
+    /// Why a closed task is closed — folded into a task, handed to a run, or
+    /// outdated with its line. `None` for every task that is not closed.
+    pub(crate) closed: Option<Closure>,
     pub(crate) created_ms: i64,
     /// What the task cost, for a finished one ([`finished`], t-9470) —
     /// `None` while it is still moving.
@@ -411,9 +415,10 @@ pub(crate) struct StageCount {
 
 /// The pipeline's stages in the order the board draws them — a task's one
 /// word. The flow reads left to right (written down with its dependencies
-/// unmet, ready, carried, reported, merged); the three after it are where a
-/// task stands still: a decision in front of it, held back, failed.
-pub(crate) const STAGES: [&str; 8] = [
+/// unmet, ready, carried, reported, merged); the four after it are where a
+/// task stands still: a decision in front of it, held back, failed, closed
+/// (over without being done or failed — `TaskStatus::Closed`).
+pub(crate) const STAGES: [&str; 9] = [
     "pending",
     "ready",
     "dispatched",
@@ -422,6 +427,7 @@ pub(crate) const STAGES: [&str; 8] = [
     "gate",
     "blocked",
     "failed",
+    "closed",
 ];
 
 /// The stages a task is still moving through: listed oldest first, the order
@@ -456,6 +462,7 @@ fn stage_of(run: &Run, task: &Task) -> &'static str {
         TaskStatus::Completed if run.review_of(task).merged => "merged",
         TaskStatus::Completed => "reported",
         TaskStatus::Failed => "failed",
+        TaskStatus::Closed => "closed",
     }
 }
 
@@ -518,6 +525,7 @@ pub(crate) fn desk_snapshot(
                         question: gate.question.as_str().to_string(),
                     }),
                     blocked_by: run.blocked_by(task),
+                    closed: task.closed.clone(),
                     created_ms: task.created_ms,
                     cost: None,
                 },
@@ -1637,6 +1645,16 @@ mod tests {
         let held = task(&mut ledger, "held", vec![], 17);
         let gated = task(&mut ledger, "gated", vec![], 18);
         let claimed = task(&mut ledger, "claimed", vec![], 19);
+        let folded = task(&mut ledger, "folded", vec![], 21);
+        ledger
+            .close_task(
+                &run,
+                &folded,
+                Closure::Folded {
+                    into: ready.clone(),
+                },
+            )
+            .expect("a closing");
         ledger
             .start_worker(&run, "codex", ("team-desk", "%2"), Some(&carried), 20)
             .expect("a worker carries one");
@@ -1720,9 +1738,22 @@ mod tests {
             (&stranded, "blocked"),
             (&held, "blocked"),
             (&gated, "gate"),
+            (&folded, "closed"),
         ] {
             assert_eq!(stage(id), word, "{id}");
         }
+        // A closed task says why, and is not the stranded kind of blocked.
+        let folded_row = desk
+            .tasks
+            .iter()
+            .find(|one| one.id == folded)
+            .expect("folded");
+        assert_eq!(
+            folded_row.closed,
+            Some(Closure::Folded {
+                into: ready.clone()
+            })
+        );
         let gated_row = desk
             .tasks
             .iter()
@@ -1754,6 +1785,7 @@ mod tests {
                 ("gate", 1),
                 ("blocked", 2),
                 ("failed", 1),
+                ("closed", 1),
             ]
         );
     }

@@ -112,7 +112,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
   /* The run's tasks by the pipeline's own stage words, sixty by default. */
   const stages = [
     ["pending", 6], ["ready", 20], ["dispatched", 5], ["reported", 6],
-    ["merged", 18], ["gate", 2], ["blocked", 2], ["failed", 1],
+    ["merged", 18], ["gate", 2], ["blocked", 2], ["failed", 1], ["closed", 0],
   ];
   const total = stages.reduce((sum, [, count]) => sum + count, 0);
   /* What a finished task cost, as `task_cost` hands it over (t-9470): one in
@@ -650,8 +650,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last",
       pipeline.shown && pipeline.head === "과업 흐름 · 60" &&
       pipeline.chips.map((chip) => chip.split(":").slice(0, 2).join(":")).join() ===
-        "pending:6,ready:20,dispatched:5,reported:6,merged:18,gate:2,blocked:2,failed:1" &&
-      pipeline.words.join() === "선행 대기,준비,진행,보고됨,병합,게이트,막힘,실패", JSON.stringify(pipeline));
+        "pending:6,ready:20,dispatched:5,reported:6,merged:18,gate:2,blocked:2,failed:1,closed:0" &&
+      pipeline.words.join() === "선행 대기,준비,진행,보고됨,병합,게이트,막힘,실패,닫힘", JSON.stringify(pipeline));
     ok("a stuck stage with tasks wears its signal and opens first, naming the gate and its question",
       pipeline.chips.includes("gate:2:true:is-wait") && pipeline.chips.includes("failed:1:false:is-halt") &&
       pipeline.chips.includes("blocked:2:false:is-wait") && pipeline.chips.includes("ready:20:false:is-flow") &&
@@ -679,6 +679,29 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("a stage longer than the rows the ledger sent says how many more the ledger holds",
       long && window44.rows.length === 20 && window44.more === "24개 더 — 원장에 있음" &&
       window44.head === "과업 흐름 · 84", JSON.stringify(window44));
+
+    /* ---- 닫힘 (t-19159): 실패가 아니고, 까닭을 낱말로, 열린 수에 들지 않는다 ---- */
+    await page.evaluate(async () => {
+      const closed = [
+        { id: "t-901", closed: { kind: "folded", into: "t-902" } },
+        { id: "t-903", closed: { kind: "handed-over", to: "run-9" } },
+        { id: "t-904", closed: { kind: "outdated", why: "다른 과업이 덮음" } },
+      ].map((one) => ({ run: window.__DESK__.runs[0].run, title: `닫힌 ${one.id}`, stage: "closed", gate: null,
+        blocked_by: [], created_ms: 1, cost: null, ...one }));
+      window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
+        tasks: [...window.__DESK__.tasks, ...closed],
+        stages: window.__DESK__.stages.map((one) => one.stage === "closed" ? { ...one, count: 3 } : one) };
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    await settleDesk();
+    await page.click('#board-view [data-desk-block="pipeline"] [data-stage="closed"]');
+    const closedStage = await readPipeline();
+    ok("closed tasks stand in their own stage — not failed, not counted as open — and each says why in words",
+      closedStage.head === "과업 흐름 · 84" && closedStage.chips.includes("closed:3:true:") &&
+      closedStage.chips.includes("failed:1:false:is-halt") &&
+      closedStage.rows.map((row) => row.note).join("|") === "접힘 → t-902|넘김 → run-9|낡음 · 다른 과업이 덮음",
+      JSON.stringify(closedStage));
 
     /* ---- 과업이 든 비용 (t-9470): 끝난 행마다 한 줄, 모르는 것은 「—」와 그 까닭 ---- */
     const readCosts = () => page.evaluate(() =>
