@@ -471,6 +471,28 @@ fn a_completed_task_nothing_can_review_reads_no_review_record_and_never_awaiting
         "a checkout's phase ranking does not know the stage:\n{rank}"
     );
 
+    // The phases that wait on nobody are one set, read by the checkout's mark and
+    // by the fold of a finished child pane — so a coordinator is not shown a row
+    // that has nothing left for it (t-19328).
+    let rest = block_after(window, "const LEDGER_AT_REST_PHASES = new Set(");
+    assert!(
+        rest.contains("\"closed\"") && rest.contains("\"unreviewable\""),
+        "the phases that wait on nobody lost one:\n{rest}"
+    );
+    assert!(
+        block_after(window, "function ledgerAwaitsCoordinator(facts) {")
+            .contains("LEDGER_AT_REST_PHASES.has(ledgerReviewPhaseOf(facts))")
+            && block_after(window, "function worktreeMark(path, state) {")
+                .contains("LEDGER_AT_REST_PHASES.has(phase)"),
+        "the mark or the helper keeps a set of its own"
+    );
+    let rows = block_after(window, "function worktreeAgentRows(path) {");
+    assert!(
+        rows.contains("ledgerAwaitsCoordinator(paneLedger.get(child.term))")
+            && !rows.contains("ledgerVouched("),
+        "the fold of a finished child pane reads the ledger in a hand of its own:\n{rows}"
+    );
+
     // The window draws the backend's stages, in the backend's order.
     let table = block_after(&desk, "pub(crate) const STAGES: [&str; 10] = [");
     let backend: Vec<&str> = table

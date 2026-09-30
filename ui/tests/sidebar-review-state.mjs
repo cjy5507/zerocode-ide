@@ -385,6 +385,63 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       JSON.stringify({ agents: [agents["/r/norec"], agents["/r/norecfail"], agents["/r/norecseat"]], wantWords }),
     );
 
+    /* A finished child pane folds into 완료 N개 unless the ledger still owes it a
+     * coordinator's look — a report nobody vouched for, a claim, an attempt that
+     * failed. Work nothing can ever review (and work closed) owes nobody anything,
+     * so its pane folds like a vouched one instead of standing for ever as if a
+     * coordinator had something left to do on it (t-19328). */
+    const kids = await page.evaluate(() => {
+      const path = "/r/kids";
+      const tab = { kind: "term", worktree: path, id: "kids-tab",
+        layout: { type: "split", first: { type: "leaf", term: 8201 }, second: { type: "leaf", term: 8202 } } };
+      tabs.push(tab);
+      hookStates.set(8201, "done");
+      hookStates.set(8202, "done");
+      paneAgents.set(8201, "claude");
+      paneAgents.set(8202, "codex");
+      paneParents.set(8202, 8201);
+      agentFolded.delete(8201);
+      const old = { verified: false, merged: false, deployed: false, written: false };
+      const facts = (review, over = {}) => ({ run: "run-1", worker: "w-kid", agent: "codex", task: "a child's task",
+        taskId: "t-kid", ledger: "active", reported: true, failed: false, review, closed: null, ...over });
+      const seen = {};
+      try {
+        for (const [name, review, over] of [
+          ["waiting", old, {}],
+          ["claimed", { ...old, claimed_verified: true, author: "worker" }, {}],
+          ["failedAttempt", old, { failed: true }],
+          ["vouched", { ...old, verified: true, written: true, author: "coordinator" }, {}],
+          ["unreviewable", { ...old, unreviewable: true }, {}],
+          ["afterFailure", { ...old, unreviewable: true }, { failed: true }],
+          ["closed", old, { closed: { kind: "outdated", why: "x" } }],
+        ]) {
+          paneLedger.set(8202, facts(review, over));
+          const rows = worktreeAgentRows(path);
+          seen[name] = { stands: rows.some((row) => row.term === 8202 && !row.sub && !row.history),
+            folded: rows.find((row) => row.history)?.history ?? 0 };
+        }
+      } finally {
+        tabs.splice(tabs.indexOf(tab), 1);
+        for (const term of [8201, 8202]) {
+          hookStates.delete(term);
+          paneAgents.delete(term);
+          paneLedger.delete(term);
+        }
+        paneParents.delete(8202);
+      }
+      return seen;
+    });
+    ok(
+      "a child pane whose work nothing can review (or that was closed) folds into 완료 N개 like a vouched one — a coordinator has nothing left to do on it — while a child that waits for review, claims a result or failed still stands",
+      kids.waiting.stands && kids.waiting.folded === 0 && kids.claimed.stands && kids.claimed.folded === 0 &&
+        kids.failedAttempt.stands && kids.failedAttempt.folded === 0 &&
+        !kids.vouched.stands && kids.vouched.folded === 1 &&
+        !kids.unreviewable.stands && kids.unreviewable.folded === 1 &&
+        !kids.afterFailure.stands && kids.afterFailure.folded === 1 &&
+        !kids.closed.stands && kids.closed.folded === 1,
+      JSON.stringify(kids),
+    );
+
     /* The other two places that word a workspace's state say it the same way: a
      * folded summary row's tooltip, and the workspace board's card. */
     const others = await page.evaluate(() => {
