@@ -797,7 +797,7 @@ async fn judge_suggestion(
             acting, started, &mut row).await {
             Ok(winner) => winner,
             Err(reason) => {
-                settle_narrow_failure(&mut row, NarrowFailure::Refused(reason));
+                settle_narrow_failure(&mut row, reason);
                 record_row(&SKILL_SUGGESTION, &skill_suggestion_path(&cwd), &row);
                 return None;
             }
@@ -830,12 +830,17 @@ enum NarrowFailure {
     Refused(String),
 }
 
-/// What the narrow request's failure writes on the row. Today every failure
-/// of it is written as a refused reply.
+/// What the narrow request's failure writes on the row: a wire word as the
+/// outcome itself — the judge forgives one bad minute of the wire and holds a
+/// seat for any refused reply — and `schema` only for a reply a rule refused.
 fn settle_narrow_failure(row: &mut SkillSearchRow, failure: NarrowFailure) {
-    let (NarrowFailure::Wire(reason) | NarrowFailure::Refused(reason)) = failure;
-    row.outcome = SystemOneFailure::Schema.ledger_token();
-    row.rejected = Some(reason);
+    match failure {
+        NarrowFailure::Wire(token) => row.outcome = token,
+        NarrowFailure::Refused(rule) => {
+            row.outcome = SystemOneFailure::Schema.ledger_token();
+            row.rejected = Some(rule);
+        }
+    }
 }
 
 async fn ask_wide(
@@ -894,7 +899,7 @@ async fn ask_narrow(
     acting: bool,
     started: Instant,
     row: &mut SkillSearchRow,
-) -> Result<Option<SkillReading>, String> {
+) -> Result<Option<SkillReading>, NarrowFailure> {
     let details = shortlist.iter().map(|&position| SkillDetail {
         position,
         excerpt: skills.get(position).and_then(|skill| std::fs::read_to_string(&skill.path).ok())
@@ -905,16 +910,17 @@ async fn ask_narrow(
     row.shards = 2;
     let remaining = SKILL_SEARCH_DEADLINE.saturating_sub(started.elapsed());
     if remaining.is_zero() {
-        return Err("deadline".into());
+        return Err(NarrowFailure::Wire("deadline".into()));
     }
-    let (call, withheld) = send_stage(&SKILL_SUGGESTION, door, client, &state, &questions, acting, remaining).await?;
+    let (call, withheld) = send_stage(&SKILL_SUGGESTION, door, client, &state, &questions, acting, remaining).await
+        .map_err(NarrowFailure::Wire)?;
     row.requests = Some(row.requests.unwrap_or(0).saturating_add(call.requests));
     row.retries = row.retries.saturating_add(call.retries);
     row.elapsed_ms = row.elapsed_ms.saturating_add(jev_gate::millis(call.elapsed));
     row.redacted_lines = Some(row.redacted_lines.unwrap_or(0).saturating_add(withheld));
-    let response = call.outcome.map_err(SystemOneFailure::ledger_token)?;
+    let response = call.outcome.map_err(|failure| NarrowFailure::Wire(failure.ledger_token()))?;
     row.input_tokens = Some(row.input_tokens.unwrap_or(0).saturating_add(response.usage.input_tokens));
-    let winner = read_narrow(&response, candidates, &details).map_err(str::to_string)?;
+    let winner = read_narrow(&response, candidates, &details).map_err(|rule| NarrowFailure::Refused(rule.to_string()))?;
     row.shards_answered = 2;
     Ok(winner)
 }
