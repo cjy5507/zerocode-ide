@@ -69,7 +69,16 @@ const MODAL_SPECS = Object.freeze({
     initial: "ext-suppress-cancel",
     cancel: () => closeExternalSuppress(),
   },
-  "ask-scrim": { initial: "ask-yes", cancel: () => closeAsk(null) },
+  // The ask popup is every question the window puts to the person, of every
+  // kind. Where the keyboard starts is the kind's default answer, and Escape is
+  // its safe one (`askFocusTarget`, `askEscape` in shell-term.js).
+  "ask-scrim": {
+    initial: () => askFocusTarget(),
+    cancel: () => askEscape(),
+    // One key, one answer: a held Escape repeats, and the repeat would refuse
+    // the NEXT ask, which the person has not read.
+    ignoresRepeat: true,
+  },
   "coordinator-scrim": { initial: "coordinator-run", cancel: () => closeCoordinatorPanel() },
   "trust-scrim": { initial: "trust-skip", cancel: () => closeTrust(false) },
   "term-theme-import-scrim": {
@@ -132,9 +141,6 @@ const MODAL_SPECS = Object.freeze({
   "guide-scrim": { initial: "guide-close", cancel: () => closeSetupGuide() },
   "wall-scrim": { initial: "wall-next", cancel: () => closeFeatureWall() },
   "tip-scrim": { initial: "tip-go", cancel: () => closeTip(false) },
-  // A permission prompt has allow/deny choices but no generic cancellation.
-  // Escape is consumed so it cannot operate the workbench behind the prompt.
-  "perm-scrim": { initial: () => el("perm-actions").querySelector("button"), cancel: null },
   "tab-create-pop": {
     initial: () => tcInput,
     cancel: () => closeTabCreate("escape"),
@@ -337,6 +343,7 @@ function handleModalKeydown(event) {
     // The old window-wide Escape ladder must not also cancel a surface below
     // this one. The top stack entry is the whole ordering rule.
     event.stopImmediatePropagation();
+    if (event.repeat && entry.spec.ignoresRepeat === true) return;
     entry.spec.cancel?.();
     return;
   }

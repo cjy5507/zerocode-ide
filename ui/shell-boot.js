@@ -255,5 +255,5 @@ const attentionCount = el("attention-count");
 const termFloat = el("term-float");
 const keySink = el("key-sink");
 const fileTree = el("file-tree");
-const permScrim = el("perm-scrim");
+const askScrim = el("ask-scrim");
 

@@ -462,6 +462,38 @@ pub struct Dialog {
 }
 
 impl Dialog {
+    /// The dialog a permission prompt parks as. A tool call awaiting approval
+    /// reads `Allow <tool>` over its risk-and-unblock line, as ever. A
+    /// question zo puts to the person itself — the refusal ladder's "switch
+    /// models?" — is not a tool: it reads its title over its words and its
+    /// choices, with no `Allow`, no tool and no risk line (t-17474).
+    #[must_use]
+    pub fn for_permission(prompt: &runtime::message_stream::PermissionPrompt) -> Self {
+        let options = prompt.choices.iter().map(|choice| choice.label.clone()).collect();
+        let footer = "Press enter to continue".to_string();
+        match &prompt.question {
+            Some(question) => Self {
+                title: String::new(),
+                subject: crate::util::ansi::sanitize_inline(&question.title),
+                body: prompt.reasoning.clone(),
+                options,
+                selected: 0,
+                footer,
+            },
+            None => Self {
+                title: "Allow".to_string(),
+                subject: crate::util::ansi::sanitize_inline(&prompt.tool_name),
+                body: prompt
+                    .audit_hint
+                    .clone()
+                    .unwrap_or_else(|| prompt.reasoning.clone()),
+                options,
+                selected: 0,
+                footer,
+            },
+        }
+    }
+
     #[must_use]
     pub fn lines(&self, width: usize) -> Vec<Line> {
         self.lines_with_focus(width, palette::COMMAND_TOKEN)
@@ -1843,6 +1875,93 @@ mod tests {
             .iter()
             .all(|span| span.style.fg == Some(crate::tui::palette::COMMAND_TOKEN)));
         assert_eq!(plain.last().expect("footer"), "Press enter to continue");
+    }
+
+    /// What a permission prompt block is, for the pane's dialog: a tool call
+    /// (its name, its risk line) or a question zo puts to the person itself,
+    /// as the ladder's request crosses the permission bridge (t-17474).
+    fn prompt_block(
+        request: &runtime::permission::PermissionRequest,
+    ) -> runtime::message_stream::PermissionPrompt {
+        let (responder, _answer) = tokio::sync::oneshot::channel();
+        // The bridge builds the block the pane parks; so does this.
+        crate::session::permission_bridge::build_render_prompt(
+            request,
+            responder,
+            runtime::message_stream::BlockId(1),
+        )
+    }
+
+    fn choice(key: char, label: &str, decision: runtime::permission::PermissionDecision)
+        -> runtime::permission::PermissionChoice
+    {
+        runtime::permission::PermissionChoice {
+            key,
+            label: label.to_string(),
+            decision,
+        }
+    }
+
+    /// The person's 2026-09-30 screen: the ladder's question read "Allow
+    /// safety-classifier decline", with "risk: low; explicitly unblock with
+    /// [y] …" under it. A question reads its title, its words and its
+    /// choices — and a tool call is drawn exactly as before.
+    #[test]
+    fn a_question_dialog_has_no_allow_and_no_risk_line() {
+        use runtime::permission::{PermissionDecision, PermissionRequest, PromptQuestion, RiskLevel};
+
+        let asked = PermissionRequest {
+            tool: String::new(),
+            input_summary: "claude-sonnet-5-5 → claude-opus-5-5".to_string(),
+            input_hash: String::new(),
+            reasoning: "The safety classifier declined the answer twice. Continue this turn on \
+                        the category's route?"
+                .to_string(),
+            choices: vec![
+                choice('y', "Switch, and from now on", PermissionDecision::Allow),
+                choice('o', "Switch for this turn", PermissionDecision::AllowOnce),
+                choice('n', "Stay on claude-sonnet-5-5", PermissionDecision::Deny),
+            ],
+            risk_level: RiskLevel::Low,
+            question: Some(PromptQuestion {
+                topic: core_types::retry_signal::REFUSAL_SWITCH_TOPIC.to_string(),
+                title: core_types::retry_signal::REFUSAL_SWITCH_TITLE.to_string(),
+            }),
+        };
+        let plain: Vec<String> = Dialog::for_permission(&prompt_block(&asked))
+            .lines(100)
+            .iter()
+            .map(Line::plain)
+            .collect();
+        let screen = plain.join("\n");
+        assert!(!screen.contains("Allow"), "a question is not an Allow: {screen}");
+        assert!(!screen.contains("risk:"), "and states no risk: {screen}");
+        assert!(!screen.contains("explicitly unblock"), "{screen}");
+        assert_eq!(plain[0], "> Switch models?", "{screen}");
+        assert!(screen.contains("Continue this turn on the category's route?"), "{screen}");
+        assert!(plain.contains(&"› 1. Switch, and from now on".to_string()), "{screen}");
+        assert!(plain.contains(&"  3. Stay on claude-sonnet-5-5".to_string()), "{screen}");
+        assert_eq!(plain.last().expect("footer"), "Press enter to continue");
+
+        let tool = PermissionRequest {
+            tool: "Bash".to_string(),
+            input_summary: "cargo test".to_string(),
+            input_hash: String::new(),
+            reasoning: "runs a command".to_string(),
+            choices: vec![
+                choice('y', "Allow", PermissionDecision::Allow),
+                choice('n', "Deny", PermissionDecision::Deny),
+            ],
+            risk_level: RiskLevel::High,
+            question: None,
+        };
+        let plain: Vec<String> = Dialog::for_permission(&prompt_block(&tool))
+            .lines(100)
+            .iter()
+            .map(Line::plain)
+            .collect();
+        assert_eq!(plain[0], "> Allow Bash", "a tool permission is unchanged: {plain:?}");
+        assert!(plain.iter().any(|line| line.starts_with("  risk: high; explicitly unblock with")), "{plain:?}");
     }
 
     /// codex caps every popup at `MAX_POPUP_ROWS` and scrolls the window

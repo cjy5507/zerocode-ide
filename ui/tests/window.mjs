@@ -69,6 +69,7 @@ import { testPaneFollowsCwd } from "./pane-follow.mjs";
 import { testZoRestore } from "./zo-restore.mjs";
 import { testRestartSamePanes } from "./restart-same-panes.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
+import { testAskPopup } from "./ask-popup.mjs";
 import { testEditorSelection } from "./editor-selection.mjs";
 import { testEditorRecovery } from "./editor-recovery.mjs";
 import { testComposerAttach } from "./attach.mjs";
@@ -237,6 +238,8 @@ suite("zo-restore", ({ browser, origin, ok }) => testZoRestore(browser, origin, 
 // The panes a restart opens again, where they stood, in every workspace (t-14036).
 suite("restart-same-panes", ({ browser, origin, ok }) => testRestartSamePanes(browser, origin, ok));
 suite("permission-card", ({ browser, origin, ok }) => testPermissionCard(browser, origin, ok));
+// Every question the window puts to the person, in the one popup (t-17514).
+suite("ask-popup", ({ browser, origin, ok }) => testAskPopup(browser, origin, ok));
 suite("editor-selection", ({ browser, origin, ok }) => testEditorSelection(browser, origin, ok));
 suite("editor-recovery", ({ browser, origin, ok }) => testEditorRecovery(browser, origin, ok));
 suite("ime-broken-commit", ({ browser, origin, ok }) => testImeBrokenCommit(browser, origin, ok));
@@ -28789,32 +28792,32 @@ const permissionRoad = await page.evaluate(async () => {
   frame("s-b", 22, "git");
   frame("s-c", 33, "rm");
   await settle();
-  seen.showing = el("perm-cmd").textContent;
-  seen.names = el("perm-agent").textContent.includes(shortSession("s-a"));
-  seen.queued = permissionQueue.length;
-  seen.more = el("perm-more").textContent;
+  seen.showing = el("ask-body").textContent;
+  seen.names = el("ask-agent").textContent.includes(shortSession("s-a"));
+  seen.queued = askQueue.length;
+  seen.more = el("ask-more").textContent;
   seen.expectTwo = behindWord(2);
   seen.expectOne = behindWord(1);
   // 줄 뒤쪽 하나가 끝나면 그것만 빠진다 — 화면에 선 물음은 그대로다.
   ended("s-c");
   await settle();
-  seen.afterWithdraw = el("perm-more").textContent;
-  seen.stillShowing = el("perm-cmd").textContent;
+  seen.afterWithdraw = el("ask-more").textContent;
+  seen.stillShowing = el("ask-body").textContent;
   // 첫 번째에 답한다: 첫 번째의 id가 나가고, 두 번째가 올라온다.
-  el("perm-actions").querySelector("button").click();
+  el("ask-choices").querySelector("button").click();
   await settle();
   seen.sentFirst = sent[0];
-  seen.thenShowing = el("perm-cmd").textContent;
-  seen.thenCounterGone = el("perm-more").hidden;
-  seen.thenQueued = permissionQueue.length;
+  seen.thenShowing = el("ask-body").textContent;
+  seen.thenCounterGone = el("ask-more").hidden;
+  seen.thenQueued = askQueue.length;
   // 화면에 선 물음의 세션이 끝나면 모달이 내려간다 — 대기 중인 다른 물음이
   // 없으므로 아무도 뒤에 남지 않는다.
   ended("s-b");
   await settle();
-  seen.active = activePrompt;
+  seen.active = activeAsk;
   seen.sentAfterEnd = sent.length;
   await new Promise((done) => setTimeout(done, 220));
-  seen.scrimDown = el("perm-scrim").hidden;
+  seen.scrimDown = el("ask-scrim").hidden;
   delete window.__ANSWER__.respond_permission;
   return seen;
 });
@@ -28856,25 +28859,25 @@ const promptResolved = await page.evaluate(async () => {
   ask("r-a", 72, "write");
   ask("r-b", 73, "rm");
   await settle();
-  seen.showing = el("perm-cmd").textContent;
-  seen.queued = permissionQueue.map((one) => one.frame.prompt_id);
+  seen.showing = el("ask-body").textContent;
+  seen.queued = askQueue.map((one) => one.frame.prompt_id);
   resolved("r-a", 72);
   await settle();
-  seen.afterQueued = permissionQueue.map((one) => one.frame.prompt_id);
-  seen.stillShowing = el("perm-cmd").textContent;
+  seen.afterQueued = askQueue.map((one) => one.frame.prompt_id);
+  seen.stillShowing = el("ask-body").textContent;
   resolved("r-a", 71);
   await settle();
-  seen.thenShowing = el("perm-cmd").textContent;
-  seen.thenActive = activePrompt?.frame?.prompt_id ?? null;
+  seen.thenShowing = el("ask-body").textContent;
+  seen.thenActive = activeAsk?.frame?.prompt_id ?? null;
   resolved("r-b", 999);
   resolved("r-a", 73);
   await settle();
-  seen.survived = activePrompt?.frame?.prompt_id ?? null;
+  seen.survived = activeAsk?.frame?.prompt_id ?? null;
   resolved("r-b", 73);
   await settle();
-  seen.emptied = activePrompt;
+  seen.emptied = activeAsk;
   await new Promise((done) => setTimeout(done, 220));
-  seen.scrimDown = el("perm-scrim").hidden;
+  seen.scrimDown = el("ask-scrim").hidden;
   return seen;
 });
 ok(
@@ -29956,11 +29959,11 @@ const wires = await page.evaluate(async () => {
     ] } });
   }
   seen.usageSaid = document.getElementById("sb-usage").textContent;
-  seen.raised = activePrompt?.frame?.prompt_id;
-  seen.queued = permissionQueue.length;
-  activePrompt = null;
-  permissionQueue.length = 0;
-  paintPermission();
+  seen.raised = activeAsk?.frame?.prompt_id;
+  seen.queued = askQueue.length;
+  activeAsk = null;
+  askQueue.length = 0;
+  paintAsk();
 
   // D) the quick-command trash: it deletes the SAVED command through the
   // backend and redraws the submenu from the backend's answer.
@@ -55056,20 +55059,24 @@ const computerHand = await page.evaluate(async () => {
   await settle();
   seen.resumeAsked = window.__COMPUTER_RESUMED__?.reset === false;
   seen.bandGone = el("computer-band").hidden;
+  // The last-step question stands in the ask popup (t-17514), not along the
+  // top edge; the popup leaves through its exit animation, so it is given its time.
+  const popupGone = () => new Promise((done) => setTimeout(done, 260));
+  const ask = () => document.querySelector("#ask-scrim .permission");
   fire("computer:confirm", { id: "confirm-1", kind: "payment", label: "Place order", verb: "mouse-click", timeoutMs: 120000 });
   await settle();
-  seen.askShown = !el("computer-confirm").hidden;
-  seen.askLabel = el("computer-confirm-text").textContent.includes("Place order");
-  seen.askClock = el("computer-confirm-clock").textContent.includes("120");
-  el("computer-confirm-allow").click();
-  await settle();
+  seen.askShown = !el("ask-scrim").hidden && ask().dataset.kind === "computer-confirm";
+  seen.askLabel = el("ask-why").textContent.includes("Place order");
+  seen.askClock = el("ask-clock").textContent.includes("120");
+  [...el("ask-choices").querySelectorAll("button")].find((one) => one.textContent === t("computer.confirm.allow", "허용")).click();
+  await popupGone();
   seen.answered = JSON.stringify(window.__COMPUTER_ANSWER__);
-  seen.askHidden = el("computer-confirm").hidden;
+  seen.askHidden = el("ask-scrim").hidden;
   fire("computer:confirm", { id: "confirm-2", kind: "delete", label: "Delete account", verb: "click", timeoutMs: 120000 });
   await settle();
   fire("computer:confirm-closed", { id: "confirm-2", decision: "timedout" });
-  await settle();
-  seen.closedByBackend = el("computer-confirm").hidden;
+  await popupGone();
+  seen.closedByBackend = el("ask-scrim").hidden;
   setSettingsOpen(true);
   showSettingsPane("computer-use");
   await settle();
@@ -55120,20 +55127,21 @@ const computerHandoff = await page.evaluate(async () => {
   const fire = (name, payload) => {
     for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
   };
+  const popupGone = () => new Promise((done) => setTimeout(done, 260));
   fire("computer:handoff", { id: "handoff-1", reason: "휴대폰의 2FA 코드를 입력해 주세요", timeoutMs: 600000 });
   await settle();
-  seen.shown = !el("computer-handoff").hidden;
-  seen.reason = el("computer-handoff-text").textContent;
-  seen.clock = el("computer-handoff-clock").textContent.includes("600");
-  el("computer-handoff-done").click();
-  await settle();
+  seen.shown = !el("ask-scrim").hidden && document.querySelector("#ask-scrim .permission").dataset.kind === "computer-handoff";
+  seen.reason = el("ask-why").textContent;
+  seen.clock = el("ask-clock").textContent.includes("600");
+  [...el("ask-choices").querySelectorAll("button")].find((one) => one.textContent === t("computer.handoff.done", "다 했어요")).click();
+  await popupGone();
   seen.answered = JSON.stringify(window.__COMPUTER_HANDOFF_ANSWER__);
-  seen.hidden = el("computer-handoff").hidden;
+  seen.hidden = el("ask-scrim").hidden;
   fire("computer:handoff", { id: "handoff-2", reason: "CAPTCHA", timeoutMs: 600000 });
   await settle();
   fire("computer:handoff-closed", { id: "handoff-2", decision: "timedout" });
-  await settle();
-  seen.closedByBackend = el("computer-handoff").hidden;
+  await popupGone();
+  seen.closedByBackend = el("ask-scrim").hidden;
   delete window.__ANSWER__.computer_confirm_answer;
   return seen;
 });

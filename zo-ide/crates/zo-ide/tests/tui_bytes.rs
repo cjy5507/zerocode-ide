@@ -145,6 +145,12 @@ fn a_history_line_is_framed_exactly_like_the_capture() {
 /// Five noop iterations occupy the painter's one live-cell row. Each newer
 /// count replaces that row; none of the discarded iteration candidates is
 /// inserted into scrollback.
+///
+/// The counter is one digit of a row that stays where it is, so the delta is that
+/// digit: a move to its column, its style, the digit. It used to be the whole row
+/// again (`ESC[16;1H ESC[0m ESC[K` and every span). The screen is the same either
+/// way — `painter::cell_tests::a_counter_that_ticks_in_a_live_row_costs_the_digit`
+/// replays both onto a terminal and compares them cell by cell (t-17056).
 #[test]
 fn five_quiet_loop_iterations_are_one_cell_and_one_row_delta() {
     let first = cells::quiet_loop_cell("loop-1", 1, "04:12", 80);
@@ -163,17 +169,13 @@ fn five_quiet_loop_iterations_are_one_cell_and_one_row_delta() {
 
     assert_eq!(
         delta.matches("\u{1b}[K").count(),
-        1,
-        "only the changed live row may be redrawn: {delta:?}"
+        0,
+        "the live row is not erased and written again: {delta:?}"
     );
     assert_eq!(
         delta,
-        concat!(
-            "\u{1b}[?2026h\u{1b}[16;1H\u{1b}[0m\u{1b}[K",
-            "\u{1b}[2m• \u{1b}[22m\u{1b}[1mloop-1\u{1b}[22m",
-            "\u{1b}[2m\u{1b}[2m · quiet ×5 (last 04:12)\u{1b}[0m",
-        ),
-        "the one-row live-slot delta is a byte golden"
+        "\u{1b}[?2026h\u{1b}[0m\u{1b}[16;19H\u{1b}[2m5",
+        "the one-row live-slot delta is a byte golden: the digit that changed"
     );
 }
 

@@ -725,8 +725,8 @@ const PLAIN_SEAMS: &[&str] = &[
     "[tool error: ",
     "[image: ",
     "]",
-    "[thinking]",
-    "[redacted thinking]",
+    runtime::session::THINKING_MARKER,
+    runtime::session::REDACTED_THINKING_MARKER,
     "\n",
 ];
 
@@ -921,8 +921,14 @@ fn message_plain_with(msg: &ConversationMessage, include_tool_results: bool) -> 
                 parts.push(format!("[image: {media_type}]"));
             }
             // Reasoning blocks are internal; surface only a marker in recall text.
-            ContentBlock::Thinking { .. } => parts.push("[thinking]".to_owned()),
-            ContentBlock::RedactedThinking { .. } => parts.push("[redacted thinking]".to_owned()),
+            // The same markers stand in the search and read tools' answers for a
+            // raw record line (`runtime::session::mask_thinking_in_record_line`).
+            ContentBlock::Thinking { .. } => {
+                parts.push(runtime::session::THINKING_MARKER.to_owned());
+            }
+            ContentBlock::RedactedThinking { .. } => {
+                parts.push(runtime::session::REDACTED_THINKING_MARKER.to_owned());
+            }
         }
     }
     parts.join("\n")

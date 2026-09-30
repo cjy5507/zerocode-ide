@@ -164,6 +164,7 @@ mod tests {
                     decision: PermissionDecision::Deny,
                 },
             ],
+            question: None,
             responder: tx,
         }
     }
