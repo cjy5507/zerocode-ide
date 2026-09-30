@@ -83,6 +83,53 @@ pub(crate) async fn session_info(
     .map_err(|join| join.to_string())?
 }
 
+/// Stop ONE helper of a pane's session, by its id — the helper page's stop
+/// button (t-16943). The webview names the agent, never a method: the method
+/// is the agent's catalog row's `helper_stop`, and a row with none is refused
+/// here, so no other method on the pane's channel is reachable through this
+/// door. The channel's answer (`status`, `agent_id`, `record_key`, `detail`)
+/// goes back to the window as it came; the window words it.
+#[tauri::command]
+pub(crate) async fn stop_pane_helper(
+    state: State<'_, AppState>,
+    session: String,
+    agent: String,
+    agent_id: String,
+) -> Result<serde_json::Value, String> {
+    // The address is looked up now and its absence reported only at the call:
+    // a row with no road is refused first, whatever the pane.
+    let addr = channel_addr(&state, &session);
+    let token = state
+        .supervisor()
+        .and_then(|supervisor| supervisor.token().map(str::to_string));
+    tauri::async_runtime::spawn_blocking(move || {
+        stop_helper_through(&agent, &session, &agent_id, |method, params| {
+            with_client(addr?, token, async move |client| {
+                client
+                    .call(method, params)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+        })
+    })
+    .await
+    .map_err(|join| join.to_string())?
+}
+
+/// The stop's one rule, apart from the socket: the row's road or a refusal,
+/// and the request's params are exactly the session and the helper's id.
+pub(crate) fn stop_helper_through(
+    agent: &str,
+    session: &str,
+    agent_id: &str,
+    call: impl FnOnce(&'static str, serde_json::Value) -> Result<serde_json::Value, String>,
+) -> Result<serde_json::Value, String> {
+    let Some(method) = zerocode_core::agent::agent_voice(agent).helper_stop else {
+        return Err(format!("{agent} has no way to stop one helper"));
+    };
+    call(method, json!({ "id": session, "agent_id": agent_id }))
+}
+
 /// The workspace's re-enterable Claude conversations, newest first.
 ///
 /// Reads at most the newest eight files' 256 KiB heads — the sidebar wants

@@ -1045,7 +1045,7 @@ async fn e2e_fresh_pane_ignores_quit_noise_then_accepts_composer_input() {
 
     run.send(b"launch-road composer live")
         .expect("type after the survival window");
-    run.wait_for("launch-road composer live", TEST_TIMEOUT);
+    run.wait_for_screen("launch-road composer live", 40, TEST_TIMEOUT);
     let _ = run.finish();
 }
 
@@ -6142,7 +6142,7 @@ async fn e2e_a_tool_that_takes_the_terminal_does_not_take_the_pane_input() {
     // The thief is gone and so, until the next size tick, is the terminal.
     // Typing must still reach the composer.
     run.send(b"still typing here").expect("type after the tool");
-    run.wait_for("still typing here", TEST_TIMEOUT);
+    run.wait_for_screen("still typing here", 40, TEST_TIMEOUT);
     let _ = run.finish();
 }
 
@@ -8149,11 +8149,14 @@ async fn e2e_at_popup_lists_files_and_tab_inserts_the_selected_path() {
             .any(|row| row.starts_with("  composer.rs       src/"))
     });
     run.send(b"\x1b[B").expect("move the selection down");
-    let popup_seen = run.wait_for("> composer.rs       src/", TEST_TIMEOUT);
+    let popup_seen = run.wait_for_screen("> composer.rs       src/", 40, TEST_TIMEOUT);
     run.resize(41, 120).expect("resize the pty by one row");
-    let repainted = run.wait_for_after("Filesystem Only    Skills", popup_seen, TEST_TIMEOUT);
+    run.wait_for_after("Filesystem Only    Skills", popup_seen, TEST_TIMEOUT);
     run.send(b"\t").expect("accept the selected file");
-    run.wait_for_after("look at src/composer.rs", repainted, TEST_TIMEOUT);
+    // The completed path lands on the composer row as the cells that changed,
+    // so it is read off the screen — the 41-row one the resize made, from the
+    // resize on, where every row was written whole.
+    run.wait_for_screen_after("look at src/composer.rs", 41, popup_seen, TEST_TIMEOUT);
     run.send(b"\r").expect("submit");
     run.wait_for_history_row("the path arrived", TEST_TIMEOUT);
     let capture = run.finish();

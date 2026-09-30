@@ -886,6 +886,13 @@ pub(crate) enum PromptReadiness {
     /// be half a thought a person is still writing, and clear keys take them
     /// with no undo. So this variant never sends them.
     RestingBesideADraft,
+    /// At rest, for the Enter alone (t-17037): words a delivery left on the
+    /// line with their Enter never taken are sent by one Enter at the
+    /// composer's next ready — never typed again. Everything
+    /// [`Self::RestingBesideADraft`] refuses, this refuses too, and it also
+    /// yields to any hand that reached the line since the carried hand
+    /// count, read before those words were placed.
+    EnterAgain(Option<u64>),
 }
 
 impl PromptReadiness {
@@ -896,9 +903,17 @@ impl PromptReadiness {
             // Rest keeps the same glyph as a mounting wait and adds the two
             // signs a running composer actually gives: a cursor shown again,
             // or the stream settling into silence.
-            Self::Resting | Self::RestingBesideADraft => {
+            Self::Resting | Self::RestingBesideADraft | Self::EnterAgain(_) => {
                 ReadySignal::Rest(ready_signal_for(agent).marker())
             }
+        }
+    }
+
+    /// The Enter alone this readiness asks for, if it does.
+    const fn enter_again(self) -> Option<zerocode_pty::EnterAgain> {
+        match self {
+            Self::EnterAgain(hand) => Some(zerocode_pty::EnterAgain { hand }),
+            Self::Mounting | Self::Resting | Self::RestingBesideADraft => None,
         }
     }
 
@@ -907,6 +922,7 @@ impl PromptReadiness {
         match self {
             Self::Mounting | Self::Resting => composer_clear_for(agent),
             Self::RestingBesideADraft => false,
+            Self::EnterAgain(_) => false,
         }
     }
 
@@ -923,6 +939,9 @@ impl PromptReadiness {
             Self::RestingBesideADraft => {
                 zerocode_pty::ready::Guard::for_somebody_elses_line(launch)
             }
+            // Everything the draft-preserving readiness yields to, the Enter
+            // alone yields to as well (t-17037).
+            Self::EnterAgain(_) => zerocode_pty::ready::Guard::for_somebody_elses_line(launch),
         }
     }
 }
@@ -970,11 +989,12 @@ pub(crate) fn prompt_delivery_for(
         )
         .clearing(clearing)
         .guarded(guard),
-        PromptReadiness::Resting | PromptReadiness::RestingBesideADraft => {
-            PromptDelivery::new(text, submit, signal, started)
-                .clearing(clearing)
-                .guarded(guard)
-        }
+        PromptReadiness::Resting
+        | PromptReadiness::RestingBesideADraft
+        | PromptReadiness::EnterAgain(_) => PromptDelivery::new(text, submit, signal, started)
+            .clearing(clearing)
+            .guarded(guard)
+            .pressing(readiness.enter_again()),
     }
 }
 
@@ -1031,6 +1051,7 @@ pub(crate) fn type_prompt_at_term(
                 signal,
                 clearing,
                 guard,
+                enter_again: readiness.enter_again(),
                 completion: notify,
             });
         return Ok(waiting);
@@ -1045,6 +1066,32 @@ pub(crate) fn type_prompt_at_term(
     // rate to see it — an idle nap would spend most of the readiness window.
     state.cadence().wake();
     Ok(waiting)
+}
+
+/// Press Enter alone at `term` once its composer next says it is ready
+/// (t-17037) — the one fallback for words that reached the line and whose
+/// Enter the pane did not take. Nothing is typed. It goes through the one
+/// typed-prompt door and its queue, so it waits behind any other delivery on
+/// the pane; `hand` is the line's hand count from before those words were
+/// placed.
+///
+/// # Errors
+///
+/// When no such shell exists.
+pub(crate) fn press_enter_at_term(
+    state: &AppState,
+    term: TermId,
+    agent: Option<&str>,
+    hand: Option<u64>,
+) -> Result<std::sync::mpsc::Receiver<DeliveryOutcome>, String> {
+    type_prompt_at_term(
+        state,
+        term,
+        String::new(),
+        true,
+        agent,
+        PromptReadiness::EnterAgain(hand),
+    )
 }
 
 /// Which terminals hold an agent, for the send menu to offer.
