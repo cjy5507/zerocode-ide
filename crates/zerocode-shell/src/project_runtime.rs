@@ -103,6 +103,28 @@ pub(super) enum FolderPanelAsk {
     Standing { since: Duration, recalls: u32 },
 }
 
+/// How a standing panel ended, as the window hears it.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum FolderPanelHow {
+    Answered,
+    Cancelled,
+    Lost,
+    Died,
+}
+
+/// Told to the window once for every generation whose panel stood and ended,
+/// so the toast raised at [`FOLDER_PANEL_OVERDUE`] never outlives it.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub(super) struct FolderPanelSettled {
+    pub(super) generation: u64,
+    pub(super) how: FolderPanelHow,
+}
+
+impl FolderPanelSettled {
+    pub(super) const EVENT: &'static str = "project:folder-panel-settled";
+}
+
 /// What the desk hands back when a panel answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct FolderPanelReceipt {
@@ -145,6 +167,8 @@ struct StandingPanel {
 pub(super) struct FolderPanelDesk {
     standing: Option<StandingPanel>,
     generations: u64,
+    /// The generation a fresh ask replaced as presumed lost, until told.
+    replaced: Option<u64>,
 }
 
 impl FolderPanelDesk {
@@ -152,6 +176,7 @@ impl FolderPanelDesk {
         Self {
             standing: None,
             generations: 0,
+            replaced: None,
         }
     }
 
@@ -170,6 +195,9 @@ impl FolderPanelDesk {
         }
         self.generations += 1;
         let generation = self.generations;
+        if let Some(lost) = self.standing.take() {
+            self.replaced = Some(lost.generation);
+        }
         self.standing = Some(StandingPanel {
             generation,
             asked_at: now,
@@ -257,6 +285,26 @@ impl FolderPanelDesk {
         Some(receipt)
     }
 
+    /// [`Self::answered`] with the word the window is told. `None` when this
+    /// generation was not the one standing, so a generation settles once.
+    pub(super) fn settle(
+        &mut self,
+        generation: u64,
+        how: FolderPanelHow,
+        now: Instant,
+    ) -> Option<(FolderPanelReceipt, FolderPanelSettled)> {
+        let receipt = self.answered(generation, now)?;
+        Some((receipt, FolderPanelSettled { generation, how }))
+    }
+
+    /// The panel a fresh ask presumed lost, to be told to the window once.
+    pub(super) fn take_replaced(&mut self) -> Option<FolderPanelSettled> {
+        self.replaced.take().map(|generation| FolderPanelSettled {
+            generation,
+            how: FolderPanelHow::Lost,
+        })
+    }
+
     /// How long the standing panel has stood, if one does and it is not yet
     /// presumed lost.
     pub(super) fn standing_for(&self, now: Instant) -> Option<Duration> {
@@ -279,6 +327,8 @@ pub(super) fn folder_panel_desk() -> std::sync::MutexGuard<'static, FolderPanelD
 /// What the window is told when the panel has stood past the bound.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(super) struct FolderPanelOverdue {
+    /// The panel this is about, so a settle of another one leaves it be.
+    pub(super) generation: u64,
     /// How long the panel had stood when this was sent.
     pub(super) after_ms: u64,
     /// Whether the window was brought forward as well: it is when it was
@@ -355,6 +405,10 @@ pub(super) async fn pick_paths(
         app,
         &format!("asked (generation {generation}, {})", request.kind.as_str()),
     );
+    let replaced = folder_panel_desk().take_replaced();
+    if let Some(lost) = replaced {
+        let _ = app.emit_to(MAIN_WINDOW_LABEL, FolderPanelSettled::EVENT, lost);
+    }
 
     let Some(program) = pick_helper_program() else {
         folder_panel_desk().abandon(generation);
@@ -442,6 +496,7 @@ pub(super) async fn pick_paths(
                     bring_main_window_forward(app);
                 }
                 let overdue = FolderPanelOverdue {
+                    generation,
                     after_ms: u64::try_from(asked_at.elapsed().as_millis()).unwrap_or(u64::MAX),
                     brought_forward: !in_front,
                     main_thread_wait_ms: main_thread_wait
@@ -465,7 +520,17 @@ pub(super) async fn pick_paths(
         }
     };
 
-    let receipt = folder_panel_desk().answered(generation, Instant::now());
+    let how = match &outcome {
+        PickOutcome::Chosen(_) => FolderPanelHow::Answered,
+        PickOutcome::Dismissed | PickOutcome::Cancelled => FolderPanelHow::Cancelled,
+        PickOutcome::TimedOut => FolderPanelHow::Lost,
+        PickOutcome::Failed(_) => FolderPanelHow::Died,
+    };
+    let settled = folder_panel_desk().settle(generation, how, Instant::now());
+    if let Some((_, notice)) = &settled {
+        let _ = app.emit_to(MAIN_WINDOW_LABEL, FolderPanelSettled::EVENT, *notice);
+    }
+    let receipt = settled.map(|(receipt, _)| receipt);
     let said = match &outcome {
         PickOutcome::Chosen(paths) => format!("{} path(s)", paths.len()),
         PickOutcome::Dismissed => "dismissed".to_string(),

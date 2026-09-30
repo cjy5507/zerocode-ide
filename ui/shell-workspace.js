@@ -2603,6 +2603,8 @@ async function chooseAndSwitchProject() {
  * that swallows their clicks, so this offers the recall door and stays until
  * the panel answers. One toast, however many times the clock rings. */
 let folderPanelToast = null;
+let folderPanelToastGeneration = null;
+let folderPanelSettledThrough = 0;
 
 function dismissFolderPanelToast() {
   const note = folderPanelToast;
@@ -2610,7 +2612,9 @@ function dismissFolderPanelToast() {
   if (note?.isConnected) closing(note, () => note.remove());
 }
 
-function showFolderPanelProgress(overdue = false) {
+function showFolderPanelProgress(overdue = false, generation = null) {
+  if (generation !== null && generation <= folderPanelSettledThrough) return;
+  folderPanelToastGeneration = generation;
   const words = () => overdue
     ? t("project.folderPanelOverdue", "폴더 선택 창이 아직 열려 있습니다. 보이지 않으면 앞으로 가져오세요.")
     : t("project.folderPanelChoosing", "시스템 창에서 폴더를 선택하세요.");
@@ -2628,16 +2632,27 @@ function showFolderPanelProgress(overdue = false) {
     cancel.className = "btn toast-action folder-panel-cancel";
     say(cancel, () => t("app.cancel", "취소"));
     cancel.addEventListener("click", () => {
-      if (pathBrowser !== owner) return;
-      if (owner?.systemAsk) closePathBrowser([]);
+      if (owner?.systemAsk && pathBrowser === owner) closePathBrowser([]);
       else void invoke("cancel_folder_panel").catch(showError);
+      dismissFolderPanelToast();
     });
     folderPanelToast.append(cancel);
   }
   say(folderPanelToast.querySelector(".toast-text"), words);
 }
 
-listen("project:folder-panel-overdue", () => showFolderPanelProgress(true));
+listen("project:folder-panel-overdue", ({ payload }) => showFolderPanelProgress(true, payload?.generation ?? null));
+
+/* Every end of a standing panel — answered, cancelled, presumed lost, helper
+ * dead — is told once with its generation; another generation's end leaves
+ * this toast alone. */
+listen("project:folder-panel-settled", ({ payload }) => {
+  const generation = payload?.generation ?? null;
+  if (generation !== null) folderPanelSettledThrough = Math.max(folderPanelSettledThrough, generation);
+  if (generation === null || folderPanelToastGeneration === null || generation === folderPanelToastGeneration) {
+    dismissFolderPanelToast();
+  }
+});
 
 /* Move to a project this window did not have to ask about — a path that is
  * already known, because it was just cloned or just created.
