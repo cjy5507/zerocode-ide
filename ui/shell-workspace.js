@@ -9323,8 +9323,12 @@ el("project-run-policy").addEventListener("change", (event) => {
  *
  * Escape and the scrim both cancel, which is what every other overlay in this
  * window does — a dialog with a different way out is a dialog people get stuck
- * in. */
-let askResolve = null;
+ * in.
+ *
+ * It is one kind of ask among the window's others (`registerAskKind`,
+ * shell-term.js): the same popup, in the same place, one at a time — a second
+ * question asked while one stands WAITS its turn, where it used to overwrite the
+ * first and leave that caller's promise parked for good. */
 
 /* The optional "don't ask again" line — Orca's `CloseTerminalDialog` carries
  * one ("Don't ask again for running terminals") and this is the same slot,
@@ -9355,61 +9359,89 @@ askDetail.hidden = true;
 const askNote = document.createElement("span");
 askNote.className = "ask-note";
 
+/* Whether the tick was on when the answer was given. Kept from the moment of
+ * the answer rather than read off the box afterwards: the popup moves on to
+ * the next ask in the same breath, and the caller reads this a turn later. */
+let askRememberedAnswer = false;
+
 function askRemembered() {
-  return !askRememberWrap.hidden && askRememberBox.checked;
+  return askRememberedAnswer;
 }
 
+registerAskKind("confirm", {
+  tone: "confirm",
+  // The window's own confirm leaves at once, as it always has: what a caller
+  // does on its answer must not wait on a fade.
+  instant: true,
+  view: (ask) => ({
+    title: ask.spec.title,
+    mono: ask.spec.body || null,
+    choices: null,
+  }),
+  paint: (ask) => {
+    const spec = ask.spec;
+    const body = el("ask-body");
+    // Setting the text dropped the note with it, which is the reset: a
+    // question that says nothing about where its check ran must not inherit
+    // the last question's sentence.
+    if (spec.note) {
+      askNote.textContent = spec.note;
+      body.append(askNote);
+    }
+    askDetail.textContent = spec.detail ?? "";
+    askDetail.hidden = !spec.detail;
+    if (!askDetail.isConnected) body.after(askDetail);
+    if (!askRememberWrap.isConnected) askDetail.after(askRememberWrap);
+    askRememberWrap.hidden = !spec.remember;
+    // Unticked when the question first stands; a repaint of the same question
+    // (a language change) leaves the person's tick where they put it.
+    if (spec.remember) {
+      askRememberSaid.textContent = spec.remember;
+      if (ask.painted !== true) askRememberBox.checked = false;
+    }
+    ask.painted = true;
+    // The destructive question wears the destructive button — Orca's Remove
+    // and its kin are `variant="destructive"` (RemoveFolderDialog.tsx:113 and
+    // the settings/automation twins), and `.btn--halt` is that variant's seat
+    // in this window (the force-delete button already sits in it).
+    el("ask-yes").classList.toggle("btn--primary", spec.danger !== true);
+    el("ask-yes").classList.toggle("btn--halt", spec.danger === true);
+    el("ask-yes").textContent = spec.confirm;
+    el("ask-no").textContent = spec.deny;
+    el("ask-cancel").hidden = spec.cancel === false;
+  },
+  clear: () => {
+    askDetail.hidden = true;
+    askRememberWrap.hidden = true;
+    askNote.remove();
+  },
+  escape: () => closeAsk(null),
+});
+
 function askConfirm(spec) {
-  const scrim = el("ask-scrim");
-  el("ask-title").textContent = spec.title;
-  const body = el("ask-body");
-  // Setting the text drops the note with it, which is the reset: a question
-  // that says nothing about where its check ran must not inherit the last
-  // question's sentence.
-  body.textContent = spec.body ?? "";
-  if (spec.note) {
-    askNote.textContent = spec.note;
-    body.append(askNote);
-  }
-  body.hidden = !spec.body;
-  askDetail.textContent = spec.detail ?? "";
-  askDetail.hidden = !spec.detail;
-  if (!askDetail.isConnected) body.after(askDetail);
-  if (!askRememberWrap.isConnected) askDetail.after(askRememberWrap);
-  askRememberWrap.hidden = !spec.remember;
-  if (spec.remember) {
-    askRememberSaid.textContent = spec.remember;
-    askRememberBox.checked = false;
-  }
-  // The destructive question wears the destructive button — Orca's Remove
-  // and its kin are `variant="destructive"` (RemoveFolderDialog.tsx:113 and
-  // the settings/automation twins), and `.btn--halt` is that variant's seat
-  // in this window (the force-delete button already sits in it).
-  el("ask-yes").classList.toggle("btn--primary", spec.danger !== true);
-  el("ask-yes").classList.toggle("btn--halt", spec.danger === true);
-  el("ask-yes").textContent = spec.confirm;
-  el("ask-no").textContent = spec.deny;
-  el("ask-cancel").hidden = spec.cancel === false;
-  showModal(scrim);
   return new Promise((settle) => {
-    askResolve = settle;
+    raiseAsk({ kind: "confirm", key: null, spec, settle });
   });
 }
 
 function closeAsk(answer) {
-  hideModal(el("ask-scrim"));
-  // Cleared before settling: a caller that opens another question from its
-  // `then` must not find the old resolver still parked here.
-  const settle = askResolve;
-  askResolve = null;
-  if (settle) settle(answer);
+  const asking = activeAsk;
+  if (asking?.kind !== "confirm") return;
+  askRememberedAnswer = !askRememberWrap.hidden && askRememberBox.checked;
+  // The popup moves on before the caller hears: a caller that asks another
+  // question from its `then` must find this one gone.
+  settleAsk(asking);
+  asking.settle(answer);
 }
 
 el("ask-yes").addEventListener("click", () => closeAsk(true));
 el("ask-no").addEventListener("click", () => closeAsk(false));
 el("ask-cancel").addEventListener("click", () => closeAsk(null));
 el("ask-scrim").addEventListener("mousedown", (event) => {
-  if (event.target === el("ask-scrim")) closeAsk(null);
+  // A click outside is the person leaving a question of the window's own. An
+  // agent's ask is not the window's to dismiss: it is answered by a key or a
+  // button, never by the person's hand missing the popup.
+  if (event.target === el("ask-scrim") && activeAsk?.kind === "confirm") closeAsk(null);
 });
 
 /* The per-repository trust gate — Orca's `OrcaYamlTrustDialog`.

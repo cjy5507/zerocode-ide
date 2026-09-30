@@ -862,11 +862,13 @@ where
         question: crate::permission::PermissionRequest,
         prompter: &dyn AsyncPermissionPrompter,
     ) -> Result<RefusalAnswer, crate::permission::PermissionError> {
+        // A question names no tool, so the payload names none: what it is
+        // about rides as its topic (t-17474).
         self.fire_lifecycle_hook(
             HookEvent::Notification,
             &serde_json::json!({
                 "message": format!("Zo asks: {}", question.reasoning),
-                "tool_name": question.tool,
+                "topic": question.question.as_ref().map(|asked| asked.topic.as_str()),
             }),
         );
         let abort = self.hook_abort_signal.clone();
@@ -1926,6 +1928,7 @@ where
                 // again only if the person keeps it.
                 if let Some(count) = self.declined_images_to_ask_about() {
                     let question = super::streaming::refusal_question(
+                        super::streaming::declined_images_prompt(),
                         format!("{count} image(s) in the declined request"),
                         core_types::retry_signal::declined_images_question(count),
                         super::streaming::declined_images_choices(),
@@ -1972,6 +1975,7 @@ where
                     match self.decide_refusal_fallback(category) {
                         RefusalDecision::Ask { to } => {
                             let question = super::streaming::refusal_question(
+                                super::streaming::refusal_switch_prompt(),
                                 format!("{from_model} → {to}"),
                                 core_types::retry_signal::refusal_switch_question(
                                     &from_model,

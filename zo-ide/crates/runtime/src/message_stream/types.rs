@@ -682,14 +682,21 @@ pub struct PermissionPrompt {
     pub id: BlockId,
     /// Tool call the prompt is gating.
     pub tool_call_id: ToolCallId,
-    /// Canonical tool name, for display.
+    /// Canonical tool name, for display. Empty for a question.
     pub tool_name: String,
     /// Human-readable justification shown to the user.
     pub reasoning: String,
-    /// Short audit line explaining risk and the explicit unblock action.
+    /// Short audit line explaining risk and the explicit unblock action. None
+    /// for a question: it has nothing to unblock.
     pub audit_hint: Option<String>,
     /// The available choices, in display order.
     pub choices: Vec<PermissionChoice>,
+    /// Set when the prompt is a question zo puts to the person itself — the
+    /// refusal ladder's "switch models?" — and not a tool call awaiting
+    /// approval (t-17474): the pane titles it and the window dresses it by its
+    /// topic, with no tool chip and no risk line. It is still answered with a
+    /// [`PermissionDecision`], on the same road.
+    pub question: Option<crate::permission::PromptQuestion>,
     /// Used by the TUI to resolve the user's decision.
     pub responder: oneshot::Sender<PermissionDecision>,
 }
