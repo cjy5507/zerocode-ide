@@ -263,6 +263,36 @@ pub struct GrepSearchOutput {
     pub applied_offset: Option<usize>,
 }
 
+/// Whether `path` is a JSON Lines file — where zo keeps a session's transcript,
+/// its vault and their copies, and where a `thinking` block (the model's own
+/// reasoning) sits on the same line as the words it said. A model that searches
+/// or reads such a file is handed the line, and the provider's classifier reads
+/// the reasoning on it as part of the next request (t-17474): the search and
+/// the read take it out, as `session_recall` does, and change nothing else.
+fn is_session_record_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+}
+
+/// The text of a session record with the reasoning taken out of every line,
+/// or the text itself when no line carried any.
+fn mask_session_record_text(content: String) -> String {
+    let masked: Vec<Option<String>> = content
+        .lines()
+        .map(crate::session::masked_record_line)
+        .collect();
+    if masked.iter().all(Option::is_none) {
+        return content;
+    }
+    content
+        .lines()
+        .zip(masked)
+        .map(|(line, masked)| masked.unwrap_or_else(|| line.to_owned()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Reads a text file and returns a line-windowed payload.
 ///
 /// PDF files (by extension or `%PDF-` magic) and notebooks (`.ipynb`, by
@@ -311,6 +341,11 @@ pub fn read_file(
     }
 
     let content = fs::read_to_string(&absolute_path)?;
+    let content = if is_session_record_file(&absolute_path) {
+        mask_session_record_text(content)
+    } else {
+        content
+    };
     let neighbours = if crate::file_neighbours::wants_neighbours(&absolute_path, offset) {
         crate::file_neighbours::neighbours_of(&absolute_path, &content)
     } else {
@@ -1322,6 +1357,7 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         let Ok(file_contents) = fs::read_to_string(file_path) else {
             return Ok(true);
         };
+        let record = is_session_record_file(file_path);
 
         if output_mode == "count" {
             let count = regex.find_iter(&file_contents).count();
@@ -1356,6 +1392,13 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
             );
             for (start, end) in ranges {
                 for (current, line) in lines.iter().enumerate().take(end).skip(start) {
+                    // A matching line and its context lines alike: the search
+                    // shows where the words are, not what the model thought.
+                    let line = if record {
+                        crate::session::mask_thinking_in_record_line(line)
+                    } else {
+                        std::borrow::Cow::Borrowed(*line)
+                    };
                     let prefix = if input.line_numbers.unwrap_or(true) {
                         format!("{}:{}:", file_path.to_string_lossy(), current + 1)
                     } else {
