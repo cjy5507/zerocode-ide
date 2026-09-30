@@ -557,11 +557,13 @@ async fn a_pane_grown_without_sigwinch_is_put_right_by_the_next_key_and_not_by_a
     // what this test is about. Wait for the "Working … esc to interrupt" row to
     // go and for the pane to say nothing for a while; then it grows and nobody
     // says so.
+    let answered_at = std::time::Instant::now();
     run.wait_until(0, SETTLE_TIMEOUT, |bytes| {
         let mut screen = Screen::new(24);
         screen.feed(bytes);
         !screen.visible().iter().any(|row| row.contains("esc to interrupt"))
     });
+    let working_left = answered_at.elapsed();
     let quiet_deadline = std::time::Instant::now() + SETTLE_TIMEOUT;
     let mut last_len = run.output_len();
     let mut quiet_since = std::time::Instant::now();
@@ -577,10 +579,26 @@ async fn a_pane_grown_without_sigwinch_is_put_right_by_the_next_key_and_not_by_a
             quiet_since = std::time::Instant::now();
         }
     }
+    let went_quiet = answered_at.elapsed();
     let before_resize = run.output_len();
+    let resized_at = std::time::Instant::now();
     run.resize_silently(44, 176).expect("resize pty silently");
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    let mut first_write = None;
+    while resized_at.elapsed() < Duration::from_secs(4) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if first_write.is_none() && run.output_len() > before_resize {
+            first_write = Some(resized_at.elapsed());
+        }
+    }
     let written_while_idle = run.output_len() - before_resize;
+    let written_head = {
+        let out = run.snapshot_output();
+        let end = out.len().min(before_resize + 240);
+        String::from_utf8_lossy(&out[before_resize..end]).escape_debug().to_string()
+    };
+    eprintln!(
+        "--- silent grow: the Working row left {working_left:?} and the pane went quiet {went_quiet:?} after the answer's last row; {written_while_idle} bytes in the four seconds after the grow (first at {first_write:?})"
+    );
 
     let before_key = run.output_len();
     run.send(b"k").expect("a key");
@@ -588,7 +606,7 @@ async fn a_pane_grown_without_sigwinch_is_put_right_by_the_next_key_and_not_by_a
     let _ = run.finish();
     assert_eq!(
         written_while_idle, 0,
-        "an idle zo wrote {written_while_idle} bytes in the four seconds after a silent grow: a timer is looking at its terminal again"
+        "an idle zo wrote {written_while_idle} bytes in the four seconds after a silent grow, the first {first_write:?} after it: a timer is looking at its terminal again; it began {written_head}"
     );
 }
 
