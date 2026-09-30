@@ -4016,6 +4016,10 @@ function agentVoice(id) {
     spinner_verbs: Array.isArray(row?.spinner_verbs) ? row.spinner_verbs : [],
     // The tool it keeps its todo list with (t-6323 A7).
     todo_tool: row?.todo_tool ?? null,
+    // Whether its CLI can stop one helper by id (t-16031): the helper page
+    // draws its stop button only then. The method itself is the core's to
+    // read (`stop_pane_helper`); the window never names it.
+    helper_stop: row?.helper_stop ?? null,
   };
 }
 
