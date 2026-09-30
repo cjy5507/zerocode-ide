@@ -42,6 +42,9 @@ pub(super) enum Did {
         words: String,
         reached: bool,
     },
+    /// Enter alone, pressed at a composer for words already on its line
+    /// (t-17037).
+    Entered(u32),
     /// A line in the window's log.
     Noted(String),
 }
@@ -125,6 +128,7 @@ impl Door {
                 Did::Started { term, seated, .. } => format!("spawn t{term} seated={seated:?}"),
                 Did::Refused(term) => format!("refused t{term}"),
                 Did::Typed { term, reached, .. } => format!("typed t{term} reached={reached}"),
+                Did::Entered(term) => format!("entered t{term}"),
                 Did::Noted(line) => format!("line {line}"),
             });
         }
@@ -411,6 +415,18 @@ impl WakeReceipts for Door {
 
     fn type_again(&self, term: u32, _agent: &str, text: &str) -> Option<Receiver<DeliveryOutcome>> {
         Some(self.answer(term, text))
+    }
+
+    fn submit_again(
+        &self,
+        term: u32,
+        _agent: &str,
+        _hand: Option<u64>,
+    ) -> Option<Receiver<DeliveryOutcome>> {
+        self.saw(Did::Entered(term));
+        let (said, heard) = std::sync::mpsc::sync_channel(1);
+        said.send(DeliveryOutcome::Delivered).expect("the answer");
+        Some(heard)
     }
 
     fn note(&self, line: &str) {

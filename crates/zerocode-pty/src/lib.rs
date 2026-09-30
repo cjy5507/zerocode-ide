@@ -45,7 +45,7 @@ pub use readers::{
     FrameReaders, Look, READER_SHARE_FRAMES, READER_SHARE_SCREENS, RENOTIFY_AFTER, ShareOf,
 };
 pub use ready::{
-    Observed, Outcome as DeliveryOutcome, PromptDelivery, Readiness, ReadySignal,
+    EnterAgain, Observed, Outcome as DeliveryOutcome, PromptDelivery, Readiness, ReadySignal,
     State as ReadyState, Step as DeliveryStep,
 };
 pub use serialize::{
