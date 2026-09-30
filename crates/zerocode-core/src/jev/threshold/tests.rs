@@ -372,9 +372,13 @@ fn a_confidence_is_read_off_the_first_choice_when_the_row_says_none() {
     use serde_json::json;
     let own = json!({"confidence": 0.8, "chosen": [{"name": "a", "confidence": 0.3}]});
     assert_eq!(answer_confidence(&own), Some(0.8));
-    let listed = json!({"chosen": [{"name": "a", "confidence": 0.3}, {"name": "b", "confidence": 0.9}]});
+    let listed =
+        json!({"chosen": [{"name": "a", "confidence": 0.3}, {"name": "b", "confidence": 0.9}]});
     assert_eq!(answer_confidence(&listed), Some(0.3));
     assert_eq!(answer_confidence(&json!({"outcome": "answered"})), None);
     assert_eq!(answer_confidence(&json!({"chosen": "effort_up"})), None);
-    assert_eq!(answer_confidence(&json!({"chosen": [{"name": "a", "confidence": 2.0}]})), None);
+    assert_eq!(
+        answer_confidence(&json!({"chosen": [{"name": "a", "confidence": 2.0}]})),
+        None
+    );
 }
