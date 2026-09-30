@@ -1,5 +1,76 @@
 # Changelog
 
+## [1.1.43] — 2026-09-30
+
+_since v1.1.42 (134 commits)_
+
+### feat
+- feat(conversation): a helper's page says whose it is (the parent conversation, one press back, the parent's other helpers in a strip), what it was asked (a card with the instruction's first sentences and its stated conditions) and what a person can do here (speak to the parent); the composer stands on the pane's own conversation (t-15683)
+- feat(computer-use): the pointer's own picture on a window list is known by three facts together (t-12979)
+- feat(summon): one request at a summons carries the difficulty and the model-and-effort pair, so Jev is asked once, not twice (t-15554)
+- feat(zo): zo's IDE channel can stop one inline helper by id while the parent's turn and the other helpers go on; the window's button is a later piece (t-16031)
+- feat(shell): a helper's page names its parent, shows what it was asked and offers only what can be done (t-15683)
+- feat(retry_signal): the provider's own server failing a request is told from the wire, the request and a capacity wall (t-15565)
+- feat(conversation): the conversation view reads as a person would read it — a step is one closed line, a kind in a row folds into one, a thought is its heading, the foot line names the step, a finished helper opens on its report; one table of tool names in the core (t-15682)
+- feat(conversation): a step is one closed line, a kind in a row folds into one, a thought is its heading, the foot line names the step, a finished helper opens on its report (t-15682)
+
+### fix
+- fix(zo): a decline that stands keeps the compaction it survived, so a second bare continue does not fold the conversation again (t-16786)
+- fix(zo mcp): `zo mcp remove <name> --project` also clears a name that an older remove left in the trust record after its server was gone (t-16536)
+- fix(shell): a long model name wraps inside its pill instead of pushing the page sideways (t-15683)
+- fix(zo): helpers started together in one message never share an id (t-16031)
+- fix(zo): a discovered alias row no longer hides the shipped row of its name, so Opus 5.5 keeps its refusal routes and a cyber decline can go to Opus 4.8 again (t-16493)
+- fix(zo): a decline the provider routes nowhere, coming back on the next turn of the same conversation, is surfaced after one request, in words that say a bare continue will be declined again (t-15890)
+- fix(computer-use): the pointer the window server lists as a window covers nothing, moves no window, and does not open the fence around ZeroCode's own window (t-12979)
+- fix(bench): the workbench's press point leaves the pointer's own picture out (t-12979)
+- fix(computer-use): a press where the pointer rests on ZeroCode's own window is refused before the helper is asked (t-12979)
+- fix(computer-use): the pointer's picture is owned by "Window Server", up to 160 points a side (t-12979)
+- fix(computer-use): a look whose only change is the pointer's picture stood still (t-12979)
+- fix(computer-use): the pointer the window server lists as a window covers nothing (t-12979)
+- fix(zo): a decline the provider routes nowhere, coming back for the same conversation, is surfaced at once — no second same-model retry, no second compaction — in words that say a bare continue will be declined again (t-15890)
+- fix(shell): the card's whole text is a region under a name of its own (t-15683)
+- fix(artifacts): a document from another project opens read-only from the gallery instead of failing with "path escapes the project", once per gesture, and the version picker reads through the store (t-16006)
+- fix(zo): the router test that reads spark's Fast from the catalog takes the env lock (t-15568)
+- fix(zo): one publish of other size words in the runtime lib tests, and the tests beside it read the shipped ones (t-15568)
+- fix(conversation): an open streaming thought's body is written once a frame, and never under a selection (t-15682)
+- fix(conversation): a thought being read stays open, with the keyboard on its line, when its words close into their turn (t-15682)
+- fix(conversation): turning the Focus view on keeps the members a reader had open and the keyboard's place (t-15682)
+- fix(shell): a helper's page, sidebar row and menu say the model the helper runs on, never its parent's (t-15625)
+- fix(zo): a 5xx that outlives its retry ladder demotes that turn one tier, as a 529 does (t-15565)
+- fix(zo mcp): `zo mcp remove <name> --project` also takes the name out of the project's trust record, so a server added later under that name asks before it runs (t-15566)
+- fix(computer-use): two screen questions asked at one moment no longer share one answer file, so a press chosen for another screen cannot land here (a0591bc4)
+- … 8 more fix commits
+
+### test
+- test(shell): the source-reading unit tests take part 2's helper page as it landed — a condition marker is a reader, and the helper page's head is a sixth speller of the tool count (t-15683)
+- test(conversation): openHelperConversation waits for a turn to be in the page, not to be seen — a finished helper folds every turn but the person's own (t-15683)
+- test(conversation): openHelperConversation waits for the first turn that is displayed, not the briefing bubble (t-15683)
+- test(zo): a second bare continue after a standing decline stands too — the decline a standing turn keeps again still carries the compaction it survived (t-16786, red)
+- test(zo): clippy on the new tests — a helper that always answers Some, and a lock guard held over the test's awaits (t-15890)
+- test(mcp): a name an older project remove left in the trust record comes out through remove (t-16536, red)
+- test(shell): the 360px page's room to read is measured before a long parent title is laid in (t-15683)
+- test(zo): the standing-decline decision tests keep the compaction the decline survived, and the seam test's changed conversation walks the whole ladder (t-15890)
+- test(shell): the 360px page also holds a long parent title, and names what sticks out (t-15683)
+- test(shell): the pane composer's Shift+Enter is pressed in the box the person has focused (t-15683)
+- test(zo): one clock reading makes ids that differ and only grow, so two Agent calls started together never share one (t-16031, red)
+- test(zo): the tests that pin the shipped opus and sonnet take the env lock (t-16493)
+- test(zo): a discovered alias row keeps the shipped duties it leaves empty (t-16493, red)
+- test(zo): the incident-shape test names the routes it stands on, so it holds before and after a discovery row stops shadowing the shipped one (t-15890, for t-16493)
+- test(shell): the pane's composer stays on screen when the pane narrows, as a helper page's composer was held to (t-15683)
+- test(shell): the composer's dock, frame and draft are measured on the pane's own conversation, as a helper's page was held to them (t-15683)
+- test(zo): the 09-29 decline in the catalog state the person's build ran with — a continue after a cyber decline routed nowhere asks once and says so (t-15890)
+- test(shell): the footer keeps a place for a second control, and "no stop" is a rule about agents without a road (t-15683)
+- test(computer-use): red — a press whose point cannot be read is refused by the window, closed (t-12979)
+- test(bench): red — the workbench presses where ZeroCode's control is, with the pointer resting on it (t-12979)
+- … 37 more test commits
+
+### style
+- style(shell): the helper page's notes say what the merged catalog says about stopping one helper (t-15683)
+- style(shell): the helper page's still-list and focus-list sit where part 1's edits to the same lists will not collide (t-15683)
+
+### other
+- … 15 more other commits
+
 ## [1.1.42] — 2026-09-29
 
 _since v1.1.40 (110 commits)_

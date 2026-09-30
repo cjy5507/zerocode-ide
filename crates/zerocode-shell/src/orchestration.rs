@@ -733,7 +733,7 @@ pub(crate) fn reseat_nudge(worker: &str, checkout: Option<&str>) -> String {
 /// landed, and words that may have landed are never said a second time.
 pub(crate) fn deliver_continuation(host: &dyn Host, term: u32, words: &str, worker: &str) -> bool {
     let idle = words.trim().is_empty();
-    let delivered = idle || host.paste(term, words);
+    let delivered = idle || host.paste_continuation(term, words);
     if let Some(root) = BLACKBOX.get() {
         if idle {
             resumed_at_rest(root, term, worker);

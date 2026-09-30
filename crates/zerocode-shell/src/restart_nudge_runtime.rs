@@ -268,12 +268,23 @@ pub(super) struct Owed {
 
 /// What a wake's delivery answered about its words (t-7812 R2). The one
 /// thing that decides whether they may be typed again: only words that never
-/// left, at a composer that was not ready, are still the wake's to place.
+/// left, at a composer that was not ready, are still the wake's to place —
+/// and only words left on the line with their Enter untaken are still the
+/// wake's to press Enter for (t-17037).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Said {
-    /// The words reached the child — its argv, or a paste its composer took,
-    /// Enter or not. Never typed again, whatever the hooks say after.
+pub(crate) enum Said {
+    /// The words reached the child — its argv, a paste its composer took
+    /// with its Enter, or one a person's hand, a parked question or a
+    /// relaunch stopped short of its Enter: those are on the line for the
+    /// person. Never typed again, whatever the hooks say after.
     Reached,
+    /// The words are on the line and their Enter was not taken, with nobody
+    /// else's hand on it (t-17037): the pane never reported taking them, or
+    /// the terminal refused the Enter's write. Never typed again — the one
+    /// fallback is an Enter alone, at the composer's next ready. Without it
+    /// the words sat in the box after a restart until a person pressed
+    /// Enter (2026-09-30, twice).
+    Unsent,
     /// Nothing was sent: the composer never said it was ready. The line is
     /// still the wake's, and the one fallback may place the words there.
     NotReady,
@@ -284,11 +295,34 @@ pub(super) enum Said {
 }
 
 impl Said {
-    pub(super) const fn of(outcome: DeliveryOutcome) -> Self {
+    pub(crate) const fn of(outcome: DeliveryOutcome) -> Self {
+        use zerocode_pty::ready::Refusal;
         match outcome {
+            DeliveryOutcome::Unsubmitted(Refusal::NotTaken | Refusal::InputRejected) => {
+                Self::Unsent
+            }
             DeliveryOutcome::Delivered | DeliveryOutcome::Unsubmitted(_) => Self::Reached,
             DeliveryOutcome::TimedOut => Self::NotReady,
             DeliveryOutcome::Refused(_) => Self::Withheld,
+        }
+    }
+}
+
+/// Which one fallback a wake spent (t-17037) — in the log, so a transcript
+/// tells an Enter pressed again from words typed again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Fallback {
+    /// The words, typed at a composer that was not ready the first time.
+    Typed,
+    /// Enter alone, for words left on the line with their Enter untaken.
+    Submitted,
+}
+
+impl Fallback {
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Typed => "typed",
+            Self::Submitted => "submitted",
         }
     }
 }
@@ -314,6 +348,12 @@ pub(super) struct PendingNudge {
     /// The launch these words were for — the pane's fingerprint when the wake
     /// armed — so a fallback never types at a program relaunched since.
     pub(super) launch: Option<u64>,
+    /// The line's hand count read before the words were placed (t-17037): an
+    /// Enter pressed again goes only on a line no hand has reached since.
+    pub(super) hand: Option<u64>,
+    /// The one fallback, once it went — typed or submitted, never both, and
+    /// never twice.
+    pub(super) fallback: Option<Fallback>,
     /// The goodbye's word to spend once the words may have reached the pane;
     /// `None` once spent, or for words that owe nobody.
     pub(super) owed: Option<Owed>,
@@ -337,6 +377,11 @@ pub(super) enum Resolution {
     /// composer that was not ready: deliver the one fallback now. The row
     /// stays, waiting for this delivery's own answer and receipt.
     FallbackDeliver(PendingNudge),
+    /// The delivery answered that the words are on the line and their Enter
+    /// was not taken (t-17037): press Enter alone, once, when the composer
+    /// next says it is ready. The row stays, for that Enter's own answer and
+    /// the pane's `working` hook.
+    FallbackSubmit(PendingNudge),
     /// A full window after the first closed and still no `working`: give up
     /// on this wake and file it `receipt=none`. Nothing is delivered — the
     /// hook's silence is not a sign the words were lost (t-7812 R2).
@@ -371,14 +416,32 @@ impl PendingNudges {
 
     /// What the delivery answered about the words (t-7812 R2). Words that
     /// reached the pane spend the goodbye's word the moment that is known.
-    pub(super) fn heard(&mut self, term: TermId, outcome: DeliveryOutcome) {
-        if let Some(pending) = self.rows.get_mut(&term) {
-            let said = Said::of(outcome);
-            pending.said = Some(said);
-            if said == Said::Reached {
-                pending.spend();
-            }
+    ///
+    /// Words left on the line with their Enter untaken arm the one fallback
+    /// on the spot (t-17037): an Enter alone, which itself waits for the
+    /// composer to say it is ready. The fallback gets a full receipt window
+    /// of its own from `now` when the first has already closed. A wake whose
+    /// one fallback already went — typed or submitted — arms nothing more.
+    pub(super) fn heard(
+        &mut self,
+        term: TermId,
+        outcome: DeliveryOutcome,
+        now: Instant,
+    ) -> Option<Resolution> {
+        let pending = self.rows.get_mut(&term)?;
+        let said = Said::of(outcome);
+        pending.said = Some(said);
+        if matches!(said, Said::Reached | Said::Unsent) {
+            pending.spend();
         }
+        if said != Said::Unsent || pending.fallback.is_some() {
+            return None;
+        }
+        pending.fallback = Some(Fallback::Submitted);
+        if pending.first_window_closed.is_some() {
+            pending.first_window_closed = Some(now);
+        }
+        Some(Resolution::FallbackSubmit(pending.clone()))
     }
 
     /// One receipt window's verdict, read on the timer's beat; `window` is
@@ -406,8 +469,11 @@ impl PendingNudges {
                     return None;
                 }
                 pending.first_window_closed = Some(now);
-                (pending.said == Some(Said::NotReady))
-                    .then(|| Resolution::FallbackDeliver(pending.clone()))
+                if pending.said != Some(Said::NotReady) || pending.fallback.is_some() {
+                    return None;
+                }
+                pending.fallback = Some(Fallback::Typed);
+                Some(Resolution::FallbackDeliver(pending.clone()))
             }
             Some(closed) => {
                 if now.saturating_duration_since(closed) < deadline {
@@ -453,6 +519,24 @@ pub(super) fn log_line(
     road: Option<zerocode_core::NudgeRoad>,
     receipt: Option<Duration>,
 ) -> String {
+    let receipt = receipt.map_or_else(
+        || "none".to_string(),
+        |elapsed| format!("working@{}s", elapsed.as_secs()),
+    );
+    format!(
+        "{} receipt={receipt}",
+        resumed_head(term, agent, session_id, road)
+    )
+}
+
+/// What every wake's line opens with: the pane, the agent, the session's
+/// first characters and the road its words took.
+fn resumed_head(
+    term: TermId,
+    agent: &str,
+    session_id: &str,
+    road: Option<zerocode_core::NudgeRoad>,
+) -> String {
     let session: String = session_id
         .chars()
         .take(RESUME_LOG_SESSION_PREFIX_CHARS)
@@ -462,11 +546,23 @@ pub(super) fn log_line(
         Some(zerocode_core::NudgeRoad::Composer) => "composer",
         None => "none",
     };
-    let receipt = receipt.map_or_else(
-        || "none".to_string(),
-        |elapsed| format!("working@{}s", elapsed.as_secs()),
-    );
-    format!("term {term} resumed {agent} {session} nudge={road} receipt={receipt}")
+    format!("term {term} resumed {agent} {session} nudge={road}")
+}
+
+/// The line a wake's one fallback leaves as it goes (t-17037): `submitted
+/// again` for an Enter alone, `typed again` for the words at a composer that
+/// was not ready — the one word a transcript tells them apart by.
+pub(super) fn fallback_line(term: TermId, pending: &PendingNudge, fallback: Fallback) -> String {
+    format!(
+        "{} {} again",
+        resumed_head(
+            term,
+            &pending.agent,
+            &pending.session_id,
+            Some(pending.road)
+        ),
+        fallback.word()
+    )
 }
 
 /// The line for a wake that found nothing to re-enter: the record's
@@ -489,6 +585,8 @@ pub(super) struct Words<'a> {
     pub(super) text: String,
     /// The launch the pane holds as the words are placed.
     pub(super) launch: Option<u64>,
+    /// The line's hand count as the words are placed (t-17037).
+    pub(super) hand: Option<u64>,
     pub(super) owed: Owed,
 }
 
@@ -524,6 +622,8 @@ pub(super) fn place_words(
         first_window_closed: None,
         said,
         launch: words.launch,
+        hand: words.hand,
+        fallback: None,
         owed: Some(words.owed),
     };
     if said == Some(Said::Reached) {
@@ -579,6 +679,15 @@ pub(crate) trait WakeReceipts {
         agent: &str,
         text: &str,
     ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>>;
+    /// Press Enter alone at `term` once its composer next says it is ready,
+    /// on a line no hand has reached since `hand` (t-17037). Answers the
+    /// delivery's own answer, when it can.
+    fn submit_again(
+        &self,
+        term: TermId,
+        agent: &str,
+        hand: Option<u64>,
+    ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>>;
     /// One line in the window's log.
     fn note(&self, line: &str);
 }
@@ -607,7 +716,17 @@ fn note_resolution(
             if window.launch(term) != pending.launch {
                 return None;
             }
+            window.note(&fallback_line(term, &pending, Fallback::Typed));
             window.type_again(term, &pending.agent, &pending.text)
+        }
+        // The Enter alone, and only at the launch the words were placed at:
+        // the delivery itself withholds it from a line a person reached.
+        Resolution::FallbackSubmit(pending) => {
+            if window.launch(term) != pending.launch {
+                return None;
+            }
+            window.note(&fallback_line(term, &pending, Fallback::Submitted));
+            window.submit_again(term, &pending.agent, pending.hand)
         }
         // A full window after the first and still no receipt: the line is
         // filed `receipt=none`, and nothing is delivered again.
@@ -624,16 +743,24 @@ fn note_resolution(
     }
 }
 
-/// Watch one marked wake through its two receipt windows (t-3058, t-7812
-/// R2), each `window` long — the product's is [`RESUME_NUDGE_RECEIPT_MS`].
+/// The most beats one wake's watch runs: the first window, a window for
+/// the one fallback, and the close that gives up. The table gives up on its
+/// own by then; this only keeps a watch from outliving its row.
+const WATCH_BEATS: usize = 3;
+
+/// Watch one marked wake through its receipt windows (t-3058, t-7812 R2,
+/// t-17037), each `window` long — the product's is
+/// [`RESUME_NUDGE_RECEIPT_MS`].
 ///
 /// `delivery` is the first delivery's own answer, for words typed at a
-/// composer; words that rode the argv come registered as already said. The
-/// first window hears that answer and then closes: words that never left a
-/// composer that was not ready get the one fallback, typed beside whatever a
-/// person has left on the line, and every other wake just waits out the
-/// second window for its `working` hook. Nothing here types because a hook
-/// was silent.
+/// composer; words that rode the argv come registered as already said. It is
+/// heard the moment it comes, however many windows that takes: words left on
+/// the line with their Enter untaken get the one fallback there and then —
+/// an Enter alone, which waits for the composer's ready. A window's close
+/// gives words that never left a composer that was not ready the one
+/// fallback, typed beside whatever a person has left on the line; every
+/// other wake waits out the window after for its `working` hook. Nothing
+/// here types, or presses, because a hook was silent.
 pub(super) fn watch(
     receipts: &dyn WakeReceipts,
     term: TermId,
@@ -641,26 +768,60 @@ pub(super) fn watch(
     window: Duration,
 ) {
     let mut delivery = delivery;
-    for _ in 0..2 {
-        let beat = Instant::now() + window;
-        if let Some(answer) = delivery.take()
-            && let Ok(outcome) = answer.recv_timeout(window)
-        {
-            receipts.rows().heard(term, outcome);
+    for _ in 0..WATCH_BEATS {
+        if !receipts.rows().holds(term) {
+            break;
         }
+        let beat = Instant::now() + window;
+        delivery = hear_until(receipts, term, delivery, beat);
         std::thread::sleep(beat.saturating_duration_since(Instant::now()));
         let resolution = receipts.rows().timeout(term, Instant::now(), window);
         match resolution {
             Some(resolution) => {
-                delivery = note_resolution(receipts, term, resolution);
-                if delivery.is_some() {
-                    receipts.rows().placed_again(term);
+                if let Some(next) = placed(receipts, term, resolution) {
+                    delivery = Some(next);
                 }
             }
             None if !receipts.rows().holds(term) => break,
             None => {}
         }
     }
+}
+
+/// Listen for a delivery's answer until `beat`, acting on each as it comes
+/// (t-17037): an answer can arm the Enter alone, whose own answer is then
+/// listened for too. Answers what is still unanswered at the beat.
+fn hear_until(
+    receipts: &dyn WakeReceipts,
+    term: TermId,
+    mut delivery: Option<std::sync::mpsc::Receiver<DeliveryOutcome>>,
+    beat: Instant,
+) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
+    while let Some(answer) = delivery.take() {
+        match answer.recv_timeout(beat.saturating_duration_since(Instant::now())) {
+            Ok(outcome) => {
+                let fallback = receipts.rows().heard(term, outcome, Instant::now());
+                delivery = fallback.and_then(|resolution| placed(receipts, term, resolution));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Some(answer),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+        }
+    }
+    None
+}
+
+/// Act on a resolution; a fallback that went leaves the row waiting on its
+/// own answer — until then nobody can say what it did.
+fn placed(
+    receipts: &dyn WakeReceipts,
+    term: TermId,
+    resolution: Resolution,
+) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
+    let delivery = note_resolution(receipts, term, resolution);
+    if delivery.is_some() {
+        receipts.rows().placed_again(term);
+    }
+    delivery
 }
 
 /// The window's own receipts: its pending table, its typed-prompt door and
@@ -689,6 +850,21 @@ impl WakeReceipts for WindowReceipts {
             true,
             Some(agent),
             crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+        )
+        .ok()
+    }
+
+    fn submit_again(
+        &self,
+        term: TermId,
+        agent: &str,
+        hand: Option<u64>,
+    ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
+        crate::cmd::terminal::press_enter_at_term(
+            &self.0.state::<AppState>(),
+            term,
+            Some(agent),
+            hand,
         )
         .ok()
     }
@@ -737,6 +913,62 @@ pub(super) fn arm_in_window(
             Duration::from_millis(RESUME_NUDGE_RECEIPT_MS),
         );
     });
+}
+
+/// A restored worker's continuation, typed by the ledger's reseat road
+/// (t-17037), answered that its words are on the line and their Enter was
+/// not taken. The words are the reseat's own and already spent
+/// (`deliver_continuation`); what is left is the same one fallback a wake's
+/// row gets — an Enter alone at the composer's next ready — so it takes the
+/// same row and the same watch. `hand` is the line's hand count read before
+/// the words were typed.
+pub(crate) fn arm_left_unsent(
+    app: &AppHandle,
+    term: TermId,
+    words: LeftUnsent<'_>,
+    outcome: DeliveryOutcome,
+) {
+    if let Some((pending, delivery)) = left_unsent(words, outcome) {
+        arm_in_window(app, term, pending, Some(delivery));
+    }
+}
+
+/// The row a reseat's continuation waits in, and its delivery's answer to
+/// be heard first, when that answer left the words unsent (t-17037).
+fn left_unsent(
+    words: LeftUnsent<'_>,
+    outcome: DeliveryOutcome,
+) -> Option<(PendingNudge, std::sync::mpsc::Receiver<DeliveryOutcome>)> {
+    if Said::of(outcome) != Said::Unsent {
+        return None;
+    }
+    let pending = PendingNudge {
+        agent: words.agent.to_string(),
+        session_id: words.session_id.to_string(),
+        road: zerocode_core::NudgeRoad::Composer,
+        text: words.text.to_string(),
+        started: Instant::now(),
+        first_window_closed: None,
+        said: None,
+        launch: words.launch,
+        hand: words.hand,
+        fallback: None,
+        owed: None,
+    };
+    let (answer, delivery) = std::sync::mpsc::sync_channel(1);
+    answer.send(outcome).ok()?;
+    Some((pending, delivery))
+}
+
+/// What the reseat road knows about the words it typed (t-17037).
+pub(crate) struct LeftUnsent<'a> {
+    pub(crate) agent: &'a str,
+    pub(crate) session_id: &'a str,
+    pub(crate) text: &'a str,
+    /// The launch and the hand count the line held before the words were
+    /// typed.
+    pub(crate) launch: Option<u64>,
+    pub(crate) hand: Option<u64>,
 }
 
 /// The first working hook is the receipt for a marked wake.
@@ -799,6 +1031,8 @@ mod tests {
             first_window_closed: None,
             said: None,
             launch: None,
+            hand: None,
+            fallback: None,
             owed: None,
         }
     }
@@ -1076,7 +1310,11 @@ mod tests {
             Said::Withheld
         );
         let mut rows = rows_for(pending("codex", composer, started));
-        rows.heard(TEST_TERM_WITHOUT_RECEIPT, DeliveryOutcome::Delivered);
+        rows.heard(
+            TEST_TERM_WITHOUT_RECEIPT,
+            DeliveryOutcome::Delivered,
+            started,
+        );
         assert!(
             rows.timeout(TEST_TERM_WITHOUT_RECEIPT, started + deadline, deadline)
                 .is_none(),
@@ -1143,17 +1381,18 @@ mod tests {
         ] {
             rows.register(term, row(worker));
         }
-        rows.heard(1, DeliveryOutcome::Delivered);
+        rows.heard(1, DeliveryOutcome::Delivered, started);
         assert!(!owed("w-heard"), "a delivered continuation is still owed");
         rows.working(2, started + Duration::from_secs(1));
         assert!(!owed("w-hook"), "a pane that took input is still owed");
-        rows.heard(4, DeliveryOutcome::TimedOut);
+        rows.heard(4, DeliveryOutcome::TimedOut, started);
         rows.heard(
             5,
             DeliveryOutcome::Refused(zerocode_pty::ready::Refusal::LaunchChanged),
+            started,
         );
         rows.register(6, row("w-unplaced"));
-        rows.heard(6, DeliveryOutcome::TimedOut);
+        rows.heard(6, DeliveryOutcome::TimedOut, started);
         for term in [3, 4, 5, 6] {
             let first = rows.timeout(term, started + deadline, deadline);
             assert_eq!(
@@ -1222,6 +1461,7 @@ mod tests {
             road,
             text: RESTART_NUDGE.to_string(),
             launch: Some(7),
+            hand: None,
             owed: Owed {
                 root: root.path().to_path_buf(),
                 worker: worker.to_string(),
@@ -1476,5 +1716,337 @@ mod tests {
             "the paste closed but no Enter followed it: {:?}",
             run.stdin
         );
+    }
+
+    /* ---- an Enter left untaken is pressed once, alone (t-17037) -------- */
+
+    /// A receipt window short enough for a test to wait out every beat.
+    const SHORT_WINDOW: Duration = Duration::from_millis(15);
+
+    /// A fake window under the product's own watch: it books every word
+    /// typed again and every Enter pressed again, answers each fallback the
+    /// way a test told it to, and keeps the log.
+    #[derive(Default)]
+    struct FakeWindow {
+        rows: std::sync::Mutex<PendingNudges>,
+        launch: Option<u64>,
+        typed: std::sync::Mutex<Vec<String>>,
+        entered: std::sync::Mutex<Vec<Option<u64>>>,
+        noted: std::sync::Mutex<Vec<String>>,
+        /// What each fallback's delivery answers, in order; `Delivered` past
+        /// the end.
+        answers: std::sync::Mutex<std::collections::VecDeque<DeliveryOutcome>>,
+    }
+
+    impl FakeWindow {
+        fn answering(answers: &[DeliveryOutcome]) -> Self {
+            Self {
+                answers: std::sync::Mutex::new(answers.iter().copied().collect()),
+                ..Self::default()
+            }
+        }
+
+        fn answer(&self) -> std::sync::mpsc::Receiver<DeliveryOutcome> {
+            let outcome = self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(DeliveryOutcome::Delivered);
+            answered_with(outcome)
+        }
+
+        /// Walk one wake on the product's watch, its first delivery having
+        /// answered `first` (or nothing, for words on the argv).
+        fn walk(&self, term: TermId, row: PendingNudge, first: Option<DeliveryOutcome>) {
+            self.rows.lock().unwrap().register(term, row);
+            watch(self, term, first.map(answered_with), SHORT_WINDOW);
+        }
+
+        fn typed(&self) -> usize {
+            self.typed.lock().unwrap().len()
+        }
+
+        fn entered(&self) -> Vec<Option<u64>> {
+            self.entered.lock().unwrap().clone()
+        }
+
+        fn noted_with(&self, words: &str) -> usize {
+            self.noted
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.contains(words))
+                .count()
+        }
+    }
+
+    impl WakeReceipts for FakeWindow {
+        fn rows(&self) -> std::sync::MutexGuard<'_, PendingNudges> {
+            self.rows.lock().unwrap()
+        }
+
+        fn launch(&self, _term: TermId) -> Option<u64> {
+            self.launch
+        }
+
+        fn type_again(
+            &self,
+            _term: TermId,
+            _agent: &str,
+            text: &str,
+        ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
+            self.typed.lock().unwrap().push(text.to_string());
+            Some(self.answer())
+        }
+
+        fn submit_again(
+            &self,
+            _term: TermId,
+            _agent: &str,
+            hand: Option<u64>,
+        ) -> Option<std::sync::mpsc::Receiver<DeliveryOutcome>> {
+            self.entered.lock().unwrap().push(hand);
+            Some(self.answer())
+        }
+
+        fn note(&self, line: &str) {
+            self.noted.lock().unwrap().push(line.to_string());
+        }
+    }
+
+    /// A delivery's answer, already given.
+    fn answered_with(outcome: DeliveryOutcome) -> std::sync::mpsc::Receiver<DeliveryOutcome> {
+        let (said, heard) = std::sync::mpsc::sync_channel(1);
+        said.send(outcome).expect("the answer");
+        heard
+    }
+
+    const NOT_TAKEN: DeliveryOutcome =
+        DeliveryOutcome::Unsubmitted(zerocode_pty::ready::Refusal::NotTaken);
+
+    /// 07:08 on 2026-09-30: the words went in, their Enter was never taken,
+    /// and they sat in the composer until a person pressed Enter. Words left
+    /// on the line with their Enter untaken get exactly one Enter alone —
+    /// never a second paste — and a pane that still reports nothing after it
+    /// is not pressed again. The line says `submitted again`.
+    #[test]
+    fn an_enter_left_untaken_is_pressed_once_and_the_words_are_never_typed_again() {
+        let window = FakeWindow::answering(&[NOT_TAKEN]);
+        let row = PendingNudge {
+            hand: Some(11),
+            ..pending("codex", zerocode_core::NudgeRoad::Composer, Instant::now())
+        };
+        window.walk(TEST_TERM_WITHOUT_RECEIPT, row, Some(NOT_TAKEN));
+        assert_eq!(
+            window.entered(),
+            vec![Some(11)],
+            "not exactly one Enter, or not on the hand count from before the words"
+        );
+        assert_eq!(window.typed(), 0, "the words were typed a second time");
+        assert_eq!(window.noted_with("submitted again"), 1);
+        assert_eq!(window.noted_with("typed again"), 0);
+        assert_eq!(
+            window.noted_with("receipt=none"),
+            1,
+            "the wake never gave up"
+        );
+        assert!(!window.rows().holds(TEST_TERM_WITHOUT_RECEIPT));
+        // The terminal refusing the Enter's write is the same state.
+        assert_eq!(
+            Said::of(DeliveryOutcome::Unsubmitted(
+                zerocode_pty::ready::Refusal::InputRejected
+            )),
+            Said::Unsent
+        );
+    }
+
+    /// A person's hand in between withdraws the Enter. Their own Enter (or
+    /// the pane taking the words late) is the pane's `working` hook, which
+    /// closes the row before any Enter is armed; a hand that only edits the
+    /// line reaches the Enter alone at its write, which the delivery then
+    /// withholds (`prompt_transaction` tests). A hand, a parked question or a
+    /// relaunch that stopped the first Enter already made the words the
+    /// person's, and no Enter is ever pressed for them.
+    #[test]
+    fn a_person_s_hand_in_between_withdraws_the_enter() {
+        use zerocode_pty::ready::Refusal;
+        let started = Instant::now();
+        let composer = zerocode_core::NudgeRoad::Composer;
+        let mut rows = PendingNudges::default();
+        rows.register(
+            TEST_TERM_WITHOUT_RECEIPT,
+            pending("claude", composer, started),
+        );
+        assert!(rows.working(TEST_TERM_WITHOUT_RECEIPT, started).is_some());
+        assert!(
+            rows.heard(TEST_TERM_WITHOUT_RECEIPT, NOT_TAKEN, started)
+                .is_none(),
+            "an Enter was armed on a pane that had already taken input"
+        );
+        for why in [
+            Refusal::HandReached,
+            Refusal::Parked,
+            Refusal::LaunchChanged,
+        ] {
+            let window = FakeWindow::default();
+            window.walk(
+                TEST_TERM_WITHOUT_RECEIPT,
+                pending("claude", composer, Instant::now()),
+                Some(DeliveryOutcome::Unsubmitted(why)),
+            );
+            assert!(window.entered().is_empty(), "{why:?}: an Enter was pressed");
+            assert_eq!(window.typed(), 0, "{why:?}");
+        }
+        // A pane relaunched since the words were placed is not pressed at.
+        let window = FakeWindow {
+            launch: Some(2),
+            ..FakeWindow::default()
+        };
+        window.walk(
+            TEST_TERM_WITHOUT_RECEIPT,
+            PendingNudge {
+                launch: Some(1),
+                ..pending("claude", composer, Instant::now())
+            },
+            Some(NOT_TAKEN),
+        );
+        assert!(
+            window.entered().is_empty(),
+            "an Enter went to another launch"
+        );
+    }
+
+    /// Words delivered with their Enter taken need nothing more; words that
+    /// never left a composer that was not ready keep today's one typing
+    /// fallback — `typed again`, and no Enter alone beside it.
+    #[test]
+    fn a_delivered_wake_is_left_alone_and_an_unready_one_is_typed_once() {
+        let composer = zerocode_core::NudgeRoad::Composer;
+        let delivered = FakeWindow::default();
+        delivered.walk(
+            TEST_TERM_WITH_RECEIPT,
+            pending("codex", composer, Instant::now()),
+            Some(DeliveryOutcome::Delivered),
+        );
+        assert!(delivered.entered().is_empty());
+        assert_eq!(delivered.typed(), 0);
+        assert_eq!(delivered.noted_with("again"), 0);
+
+        // The typed fallback's own paste lands without its Enter taken: that
+        // was the wake's one fallback, and no Enter follows it.
+        let unready = FakeWindow::answering(&[NOT_TAKEN]);
+        unready.walk(
+            TEST_TERM_WITHOUT_RECEIPT,
+            pending("codex", composer, Instant::now()),
+            Some(DeliveryOutcome::TimedOut),
+        );
+        assert_eq!(
+            unready.typed(),
+            1,
+            "the unready composer was not typed at once"
+        );
+        assert!(unready.entered().is_empty(), "a second fallback went");
+        assert_eq!(unready.noted_with("typed again"), 1);
+        assert_eq!(unready.noted_with("submitted again"), 0);
+    }
+
+    /// The fallback's line names which one went, beside the wake's own head.
+    #[test]
+    fn the_fallback_line_says_submitted_or_typed_again() {
+        let row = pending("codex", zerocode_core::NudgeRoad::Composer, Instant::now());
+        assert_eq!(
+            fallback_line(TEST_TERM_WITH_RECEIPT, &row, Fallback::Submitted),
+            "term 41 resumed codex 01234567 nudge=composer submitted again"
+        );
+        assert_eq!(
+            fallback_line(TEST_TERM_WITH_RECEIPT, &row, Fallback::Typed),
+            "term 41 resumed codex 01234567 nudge=composer typed again"
+        );
+    }
+
+    /// Every catalog row, on both roads that bring a conversation back: the
+    /// window's wake by the row's own nudge road, and the ledger's reseat,
+    /// which types every agent's continuation at its composer. Words on the
+    /// argv are never typed or pressed for; words a composer left with their
+    /// Enter untaken get exactly one Enter alone. No agent is special.
+    #[test]
+    fn every_catalog_row_gets_one_enter_for_words_left_untaken() {
+        use crate::orchestration::restart_census::{self, RestartCensus};
+        let root = tempfile::tempdir().expect("a data root");
+        restart_census::leave_cut(
+            root.path(),
+            &RestartCensus {
+                workers: Vec::new(),
+                coordinators: Vec::new(),
+                tabs: Vec::new(),
+                took_ms: 0,
+            },
+            &|_| false,
+        )
+        .expect("the goodbye");
+        for spec in &zerocode_core::AGENT_SPECS {
+            let window = FakeWindow::default();
+            let (row, first) = place_words(
+                |_| Some(answered_with(NOT_TAKEN)),
+                Words {
+                    agent: spec.id,
+                    session_id: "01234567-session",
+                    road: spec.resume_nudge,
+                    text: RESTART_NUDGE.to_string(),
+                    launch: None,
+                    hand: None,
+                    owed: Owed {
+                        root: root.path().to_path_buf(),
+                        worker: format!("w-{}", spec.id),
+                    },
+                },
+            );
+            window.rows().register(TEST_TERM_WITHOUT_RECEIPT, row);
+            watch(&window, TEST_TERM_WITHOUT_RECEIPT, first, SHORT_WINDOW);
+            let enters = match spec.resume_nudge {
+                zerocode_core::NudgeRoad::Argv => 0,
+                zerocode_core::NudgeRoad::Composer => 1,
+            };
+            assert_eq!(window.entered().len(), enters, "{}: the wake", spec.id);
+            assert_eq!(window.typed(), 0, "{}: the wake typed again", spec.id);
+
+            let reseat = FakeWindow::default();
+            let (row, first) = left_unsent(
+                LeftUnsent {
+                    agent: spec.id,
+                    session_id: "01234567-session",
+                    text: RESTART_NUDGE,
+                    launch: None,
+                    hand: Some(3),
+                },
+                NOT_TAKEN,
+            )
+            .expect("an untaken Enter is watched");
+            reseat.rows().register(TEST_TERM_WITHOUT_RECEIPT, row);
+            watch(
+                &reseat,
+                TEST_TERM_WITHOUT_RECEIPT,
+                Some(first),
+                SHORT_WINDOW,
+            );
+            assert_eq!(reseat.entered(), vec![Some(3)], "{}: the reseat", spec.id);
+            assert_eq!(reseat.typed(), 0, "{}: the reseat typed again", spec.id);
+            assert!(
+                left_unsent(
+                    LeftUnsent {
+                        agent: spec.id,
+                        session_id: "",
+                        text: RESTART_NUDGE,
+                        launch: None,
+                        hand: None,
+                    },
+                    DeliveryOutcome::Delivered,
+                )
+                .is_none(),
+                "{}: a delivered continuation was watched",
+                spec.id
+            );
+        }
     }
 }

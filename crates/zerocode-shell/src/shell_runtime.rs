@@ -2989,6 +2989,9 @@ pub(super) struct QueuedPrompt {
     /// copy so a send parked behind another keeps the guard of the door that
     /// made it. Decided at the write, like the active delivery's.
     pub(super) guard: zerocode_pty::ready::Guard,
+    /// Set when the queued delivery is the Enter alone for words already on
+    /// the line (t-17037), so the copy parked behind another stays that.
+    pub(super) enter_again: Option<zerocode_pty::EnterAgain>,
     pub(super) completion: std::sync::mpsc::SyncSender<DeliveryOutcome>,
 }
 
