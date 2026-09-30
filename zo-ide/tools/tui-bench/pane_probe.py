@@ -171,7 +171,8 @@ def run(binary: str, label: str, seconds: int, rounds: int, channels: bool, samp
               and abs(result["slept_s"]) < 0.5)
     result["judged"] = judged
     if not judged:
-        result["not_judged"] = "battery" if "AC" not in (result["power"], result["power_after"]) else "slept"
+        on_mains = result["power"] == "AC" and result["power_after"] == "AC"
+        result["not_judged"] = "slept" if on_mains else "battery"
     return result
 
 

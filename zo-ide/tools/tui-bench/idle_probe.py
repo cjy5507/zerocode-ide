@@ -109,7 +109,8 @@ def measure(binary: str, label: str, state: str, run: int, window: float, settle
               and abs(result.get("slept_s", 0)) < 0.5)
     result["judged"] = judged
     if not judged:
-        why = "battery" if "AC" not in (result.get("power"), result.get("power_after")) else "slept"
+        on_mains = result.get("power") == "AC" and result.get("power_after") == "AC"
+        why = "slept" if on_mains else "battery"
         result["not_judged"] = why
     return result
 
