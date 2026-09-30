@@ -28,7 +28,7 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * Every fixture is built from the window's own roads — `hook:agent`,
  * `ledger:changed` over `ledger_agents` — and the page dies with the suite. */
 
-/* The scene. Twelve checkouts in one repository, each one a case the person can
+/* The scene. Fourteen checkouts in one repository, each one a case the person can
  * meet: the ledger's rows are the shape `ledger_agents` sends — a seated worker
  * has a `term`, a released one whose work still stands has `settled` and the
  * checkout it left it in. */
@@ -37,6 +37,8 @@ const SCENE = [
   { path: "/r/rep", term: 8102, hook: "done", task: "wire the beat", ledger: { reported: true } },
   { path: "/r/claim", term: 8103, hook: "done", task: "claim only",
     ledger: { reported: true, review: { claimed_merged: true, author: "worker" } } },
+  { path: "/r/left", term: 8109, hook: "idle", task: "process left after reporting",
+    ledger: { reported: true } },
   { path: "/r/ver", term: 8104, hook: "done", task: "verified work",
     ledger: { reported: true, review: { verified: true, written: true, author: "coordinator" } } },
   { path: "/r/own", term: 8105, hook: "done" },
@@ -48,16 +50,19 @@ const SCENE = [
     ledger: { reported: true, failed: true } },
   { path: "/r/quiet", term: 8108, hook: "done", task: "turn ended, nothing filed",
     ledger: { reported: false } },
+  // A failed attempt whose task a sweep compacted away: no title, no task id —
+  // the failed dispatch is all the ledger has left to say there was one.
+  { path: "/r/compact", term: 8110, hook: "done", noTask: true, ledger: { reported: true, failed: true } },
   { path: "/r/lost", settled: { reported: true, failed: true, task: "released, failed" } },
   { path: "/r/idle" },
 ];
 
 const WANT_GROUPS = {
   permission: ["/r/ask"],
-  review: ["/r/rep", "/r/claim", "/r/gone"],
+  review: ["/r/rep", "/r/claim", "/r/left", "/r/gone"],
   done: ["/r/ver", "/r/own", "/r/landed"],
   working: ["/r/work"],
-  active: ["/r/failed", "/r/quiet"],
+  active: ["/r/failed", "/r/quiet", "/r/compact"],
   inactive: ["/r/lost", "/r/idle"],
 };
 
@@ -67,9 +72,10 @@ const WANT_GROUPS = {
  * whose attempt failed, is neither, and the row does not say it is done — it
  * is a session standing there, which is all that is known. */
 const WANT_INDICATOR = {
-  "/r/ask": "permission", "/r/rep": "review", "/r/claim": "review", "/r/ver": "done",
-  "/r/own": "done", "/r/work": "working", "/r/gone": "review", "/r/landed": "done",
-  "/r/failed": "active", "/r/quiet": "active", "/r/lost": "inactive", "/r/idle": "inactive",
+  "/r/ask": "permission", "/r/rep": "review", "/r/claim": "review", "/r/left": "review",
+  "/r/ver": "done", "/r/own": "done", "/r/work": "working", "/r/gone": "review", "/r/landed": "done",
+  "/r/failed": "active", "/r/quiet": "active", "/r/compact": "active", "/r/lost": "inactive",
+  "/r/idle": "inactive",
 };
 
 /* The words that stood on one tooltip before (`worktree.stateIdle`), one per
@@ -117,7 +123,8 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
         const row = (over) => ({
           run: "run-1", worker: `w-${one.path.slice(3)}`, agent: "claude", state: "working",
           ledger: "active", hearing: "pending", hearing_at: 1, checkout: one.path,
-          task: over.task ?? "", task_id: `t-${one.path.slice(3)}`, reported: false, failed: false,
+          task: one.noTask ? "" : over.task ?? "", task_id: one.noTask ? "" : `t-${one.path.slice(3)}`,
+          reported: false, failed: false,
           settled: false, session: null, at: 1, ...over, review: asked(over.review),
         });
         if (one.ledger) ledger.push(row({ ...one.ledger, term: one.term, task: one.task ?? "" }));
@@ -199,7 +206,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
         JSON.stringify(membership) === JSON.stringify(WANT_GROUPS) &&
         lanes.find((lane) => lane.id === "review")?.head === want.review &&
         lanes.find((lane) => lane.id === "done")?.head === want.done &&
-        lanes.find((lane) => lane.id === "review")?.count === "3",
+        lanes.find((lane) => lane.id === "review")?.count === "4",
       JSON.stringify({ lanes, want }),
     );
 
@@ -224,6 +231,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
     ok(
       "each row says its state in words a person can read — 검증 대기 and 완료 wear a word on the row itself, working keeps the ring alone, and no tooltip is the old 「완료 또는 대기 중」",
       marks["/r/rep"].chip === want.review && marks["/r/claim"].chip === want.review &&
+        marks["/r/left"].chip === want.review && marks["/r/compact"].chip === null &&
         marks["/r/gone"].chip === want.review && marks["/r/ver"].chip === want.done &&
         marks["/r/own"].chip === want.done && marks["/r/landed"].chip === want.done &&
         marks["/r/work"].chip === null && marks["/r/ask"].chip === null && marks["/r/idle"].chip === null &&
@@ -231,7 +239,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
         // The word carries the whole sentence as its own tooltip.
         ["/r/rep", "/r/claim", "/r/gone", "/r/ver", "/r/own", "/r/landed"]
           .every((path) => marks[path].chipTip === marks[path].tip && marks[path].chipTip !== "") &&
-        marks["/r/failed"].tip === marks["/r/quiet"].tip &&
+        marks["/r/failed"].tip === marks["/r/quiet"].tip && marks["/r/compact"].tip === marks["/r/failed"].tip &&
         !marks["/r/failed"].tip.includes(want.done) &&
         distinctTips.size === 5 &&
         tips["/r/rep"].includes(want.review) && tips["/r/ver"].includes(want.done) && tips["/r/own"].includes(want.done) &&
@@ -272,7 +280,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
           said,
         };
       };
-      return Object.fromEntries(["/r/rep", "/r/claim", "/r/ver", "/r/own", "/r/gone", "/r/landed", "/r/failed", "/r/quiet", "/r/lost"]
+      return Object.fromEntries(["/r/rep", "/r/claim", "/r/left", "/r/ver", "/r/own", "/r/gone", "/r/landed", "/r/failed", "/r/quiet", "/r/compact", "/r/lost"]
         .map((path) => [path, read(path)]));
     });
     // The failed attempt's line, as the window words it — "" where the window has none.
@@ -296,24 +304,69 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
         agents["/r/gone"].said === wantWords.awaiting &&
         agents["/r/landed"]?.glyph === "#i-circle-check" && agents["/r/landed"].klass.includes("is-verified") &&
         agents["/r/landed"].said === wantWords.merged &&
-        agents["/r/failed"]?.glyph === null && agents["/r/failed"].klass.includes("is-unsettled") &&
+        agents["/r/failed"]?.glyph === null && agents["/r/failed"].klass.includes("is-failed") &&
         agents["/r/failed"].said === wantWords.failed &&
+        // A process that left with no Stop folds as done on the card, so its row
+        // says the same: an hourglass, not a plain dot under a card's hourglass.
+        agents["/r/left"]?.glyph === "#i-hourglass" && agents["/r/left"].klass.includes("is-review") &&
+        agents["/r/left"].said === wantWords.awaiting &&
+        // A failure whose task was compacted away is still a failure, on the row
+        // and on the card.
+        agents["/r/compact"]?.glyph === null && agents["/r/compact"].klass.includes("is-failed") &&
+        agents["/r/compact"].said === wantWords.failed && agents["/r/compact"].dotTip === failedTip &&
         agents["/r/quiet"]?.glyph === null && agents["/r/quiet"].klass.includes("is-unsettled") &&
         agents["/r/quiet"].said === wantWords.idle &&
         // A failed attempt's dot says why, as far as the ledger knows — on a
         // live row and on the work a released worker left. Nothing else does.
         agents["/r/lost"]?.said === wantWords.failed && agents["/r/lost"].glyph === null &&
         failedTip !== "" && agents["/r/failed"].dotTip === failedTip && agents["/r/lost"].dotTip === failedTip &&
-        ["/r/rep", "/r/claim", "/r/ver", "/r/own", "/r/gone", "/r/landed", "/r/quiet"]
+        ["/r/rep", "/r/claim", "/r/left", "/r/ver", "/r/own", "/r/gone", "/r/landed", "/r/quiet"]
           .every((path) => agents[path].dotTip === ""),
       JSON.stringify({ agents, wantWords, failedTip }),
+    );
+
+    /* The other two places that word a workspace's state say it the same way: a
+     * folded summary row's tooltip, and the workspace board's card. */
+    const others = await page.evaluate(() => {
+      const first = (path) => worktreeAgentRows(path).find((row) => !row.sub);
+      const folded = (path) => foldedSummaryWords(first(path), agentRowState(first(path)), null).tip;
+      const card = (path) => {
+        const worktree = projects.flatMap((one) => one.worktrees).find((one) => one.path === path);
+        return workspaceBoardCardNode(worktree, 0, false)
+          .querySelector(".workspace-board-card-live strong")?.textContent ?? null;
+      };
+      // A released worker's work has no agent row: the card's repaint signature
+      // has to see the ledger move on its own.
+      const gone = projects.flatMap((one) => one.worktrees).find((one) => one.path === "/r/gone");
+      const signed = workspaceBoardCardPaintSignature(gone);
+      const held = checkoutLedger.get("/r/gone");
+      checkoutLedger.set("/r/gone", { ...held, review: { ...held.review, verified: true } });
+      const signedAfter = workspaceBoardCardPaintSignature(gone);
+      checkoutLedger.set("/r/gone", held);
+      return {
+        cardRepaints: signed !== signedAfter,
+        foldedReview: folded("/r/rep"), foldedOwn: folded("/r/own"),
+        cardReview: card("/r/rep"), cardOwn: card("/r/own"), cardVouched: card("/r/landed"),
+        want: { awaiting: t("board.awaitingReview", "검증 대기"), done: t("board.done", "완료"),
+          review: t("worktree.stateReview", "검증 대기"), idle: worktreeStateLabel("idle") },
+      };
+    });
+    ok(
+      "a folded summary and the workspace board's card word a workspace's state as the sidebar does: 검증 대기 is never called 완료 there, and an agent the ledger never seated keeps its turn's word",
+      others.foldedReview.includes(others.want.awaiting) && !others.foldedReview.includes(others.want.done) &&
+        others.foldedOwn.includes(others.want.done) &&
+        others.cardReview !== null && others.cardReview.startsWith(others.want.awaiting) &&
+        others.cardOwn === others.want.idle && others.cardVouched !== others.want.idle &&
+        others.cardRepaints,
+      JSON.stringify(others),
     );
 
     /* ---- 4. no hop under the pointer -------------------------------------- */
     const hop = await page.evaluate(async () => {
       const seen = {};
       const lane = (path) => window.__READ__.groups().find((one) => one.rows.includes(path))?.id ?? null;
-      seen.before = { lane: lane("/r/rep"), state: window.__READ__.mark("/r/rep").state };
+      const glyph = () => document.querySelector('.wt-agents[data-worktree-path="/r/rep"] .wt-agent-dot use')?.getAttribute("href") ?? null;
+      seen.before = { lane: lane("/r/rep"), state: window.__READ__.mark("/r/rep").state, glyph: glyph() };
       window.__LEDGER__ = window.__LEDGER__.map((row) => row.worker === "w-rep"
         ? { ...row, review: { ...row.review, verified: true, written: true, author: "coordinator" } } : row);
       for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 10 });
@@ -325,7 +378,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       // The ledger has moved. The dot follows at once; the row stays where it
       // stands until the reading settles.
       seen.soon = { lane: lane("/r/rep"), state: window.__READ__.mark("/r/rep").state,
-        chip: window.__READ__.mark("/r/rep").chip };
+        chip: window.__READ__.mark("/r/rep").chip, glyph: glyph() };
       const started = performance.now();
       for (let tries = 0; tries < 200 && lane("/r/rep") !== "done"; tries += 1) {
         await new Promise((done) => setTimeout(done, 50));
@@ -337,11 +390,53 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
     });
     ok(
       "a row does not hop between lanes under the pointer: when the coordinator verifies, the dot turns to 완료 at once and the row keeps its lane until the frozen reading settles, then moves to 완료",
-      hop.before.lane === "review" && hop.before.state === "review" &&
+      hop.before.lane === "review" && hop.before.state === "review" && hop.before.glyph === "#i-hourglass" &&
         hop.soon.lane === "review" && hop.soon.state === "done" && hop.soon.chip === want.done &&
+        hop.soon.glyph === "#i-circle-check" &&
         hop.after.lane === "done" && hop.after.state === "done" &&
         hop.after.waitedMs >= 1_000 && hop.after.waitedMs <= hop.settleMs + 4_000,
       JSON.stringify(hop),
+    );
+
+    /* A failed attempt's dot says why for as long as it is one. The ledger moving
+     * between "not handed in yet" and "failed" changes the row's word in place,
+     * and the line on the dot has to move with it — both ways. */
+    const turning = await page.evaluate(async () => {
+      const row = () => document.querySelector('.wt-agents[data-worktree-path="/r/quiet"] .wt-agent');
+      const read = () => ({
+        klass: row()?.className ?? "",
+        tip: row()?.querySelector(".wt-agent-dot")?.dataset.tip ?? "",
+        said: row()?.querySelector(".wt-agent-state")?.textContent ?? "",
+      });
+      const settle = async (until) => {
+        for (let tries = 0; tries < 80 && !until(); tries += 1) await new Promise((done) => setTimeout(done, 25));
+        await window.__PAINTED__();
+        await window.__PAINTED__();
+      };
+      const held = window.__LEDGER__;
+      const before = read();
+      window.__LEDGER__ = held.map((one) => one.worker === "w-quiet" ? { ...one, reported: true, failed: true } : one);
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 11 });
+      await settle(() => paneLedger.get(8108)?.failed === true);
+      const failed = read();
+      window.__LEDGER__ = held;
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 12 });
+      await settle(() => paneLedger.get(8108)?.failed === false);
+      const back = read();
+      return { before, failed, back,
+        want: typeof AGENT_FAILED_TIP === "undefined" ? "" : t(AGENT_FAILED_TIP.key, AGENT_FAILED_TIP.word),
+        failedWord: t("board.desk.stageFailed", "실패"), idleWord: t("board.idle", "대기 중") };
+    });
+    ok(
+      "a failed attempt's dot follows the ledger: it says why the moment the attempt fails and stops saying it when the ledger takes the failure back",
+      turning.want !== "" &&
+        turning.before.klass.includes("is-unsettled") && turning.before.tip === "" &&
+        turning.before.said === turning.idleWord &&
+        turning.failed.klass.includes("is-failed") && turning.failed.tip === turning.want &&
+        turning.failed.said === turning.failedWord &&
+        turning.back.klass.includes("is-unsettled") && turning.back.tip === "" &&
+        turning.back.said === turning.idleWord,
+      JSON.stringify(turning),
     );
 
     /* ---- 5. five languages ------------------------------------------------ */
@@ -401,10 +496,14 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
         await window.__PAINTED__();
       }, theme);
       for (const state of ["rest", "hover", "active", "selected"]) {
-        if (state === "hover") await page.hover('.wt-row[data-worktree-path="/r/claim"]');
+       contrast[theme][state] = {};
+       // One row at a time, so a hovered row is the row under the pointer: the
+       // word on 완료 is measured hovered too, not read off a row at rest.
+       for (const only of ["/r/claim", "/r/ver"]) {
+        if (state === "hover") await page.hover(`.wt-row[data-worktree-path="${only}"]`);
         else await page.mouse.move(2, 2);
         await page.waitForTimeout(60);
-        contrast[theme][state] = await page.evaluate((mode) => {
+        Object.assign(contrast[theme][state], await page.evaluate(({ mode, paths }) => {
           const parse = (css) => {
             const parts = css.match(/-?\d*\.?\d+(?:e-?\d+)?/gi)?.map(Number) ?? [];
             let [r = 0, g = 0, b = 0, a = 1] = parts;
@@ -433,7 +532,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
             return layers.reduceRight((under, layer) => over(layer, under), { r: 255, g: 255, b: 255, a: 1 });
           };
           const seen = {};
-          for (const path of ["/r/claim", "/r/ver"]) {
+          for (const path of paths) {
             const row = window.__READ__.row(path);
             const node = row.closest(".wt-node");
             if (mode === "active" || mode === "selected") {
@@ -460,7 +559,8 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
             node.classList.remove("is-active", "is-selected");
           }
           return seen;
-        }, state);
+        }, { mode: state, paths: [only] }));
+       }
       }
     }
     const floor = (measured, key) => Math.min(...Object.values(measured).flatMap((byState) =>
@@ -476,6 +576,56 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       "the word and the mark on 검증 대기 and 완료 rows read at 4.5:1 or better on every state a row can be in, in both treatments",
       floor(contrast, "text") >= 4.5 && floor(contrast, "mark") >= 4.5,
       JSON.stringify({ textFloor: floor(contrast, "text"), markFloor: floor(contrast, "mark"), contrast }),
+    );
+
+    /* A beat that changes nothing writes nothing: the dot and the word are
+     * corrected in place on every turn of every agent, and an attribute written
+     * to the value it already holds still costs the accessibility tree a look.
+     * The working ring's own turning (a class the JS spinner writes per step) is
+     * the one thing that moves on a still list, and it is set aside. */
+    const beat = await page.evaluate(async () => {
+      await window.__PAINTED__();
+      const records = [];
+      const watch = new MutationObserver((list) => records.push(...list));
+      watch.observe(worktreeList, { subtree: true, attributes: true, childList: true, characterData: true });
+      paintWorktreeDots();
+      paintWorktreeDots();
+      paintWorktreeAgents();
+      await window.__PAINTED__();
+      watch.takeRecords().forEach((one) => records.push(one));
+      watch.disconnect();
+      const moved = records.filter((one) => !(one.type === "attributes" && one.attributeName === "class" &&
+        one.target.classList.contains("is-working")));
+      return { count: moved.length,
+        sample: moved.slice(0, 4).map((one) => `${one.type}:${one.attributeName ?? ""}@${one.target.className ?? one.target.nodeName}`) };
+    });
+    ok(
+      "a beat that changes nothing writes nothing: repainting the dots and the agent rows twice over a still list leaves no mutation on the rows, the marks or the words",
+      beat.count === 0,
+      JSON.stringify(beat),
+    );
+
+    /* The 잠자는 워크스페이스 숨기기 sweep is for workspaces with nothing going on.
+     * A released worker's checkout has no pane in it, so it folds to empty and
+     * would go with them — but its work that waits for a coordinator is what the
+     * 검증 대기 lane is for, and it is the one thing the sweep must not take. */
+    const sweep = await page.evaluate(async () => {
+      window.__ANSWER__.set_hide_sleeping_workspaces = () => null;
+      window.__ANSWER__.set_keep_default_branch_awake = () => null;
+      setHideSleepingWorkspaces(true);
+      await refreshWorktrees();
+      await window.__PAINTED__();
+      const kept = [...document.querySelectorAll(".wt-row")].map((row) => row.dataset.worktreePath);
+      setHideSleepingWorkspaces(false);
+      await refreshWorktrees();
+      await window.__PAINTED__();
+      return { kept, all: [...document.querySelectorAll(".wt-row")].length };
+    });
+    ok(
+      "the sleeping sweep spares the work that waits for a coordinator: a released worker's unreviewed checkout stays on the list while a bare one, a released worker's failed one and a merged one go",
+      sweep.kept.includes("/r/gone") && !sweep.kept.includes("/r/idle") && !sweep.kept.includes("/r/lost") &&
+        !sweep.kept.includes("/r/landed") && sweep.kept.includes("/r/rep") && sweep.all === 14,
+      JSON.stringify(sweep),
     );
 
     /* ---- 7. narrow: the sidebar at its narrowest and a 360 px window ------- */

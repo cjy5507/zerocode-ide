@@ -2100,10 +2100,11 @@ svg.wt-agent-dot {
 
 /* The word a 검증 대기 or 완료 row wears beside its name — the lane's own name
  * (`workspaceStateWord`), so a lane and the rows under it cannot say two
- * things. It is the `.wt-default` chip's grammar (a pixel shorter, the type
- * scale's smallest, a 4px corner) in the two inks the two states already have;
- * the mark says it in shape, this says it in words, and a row in the
- * repository view has no lane header over it to say it a third time.
+ * things once the reading has settled. It is the `.wt-default` chip's grammar
+ * (a pixel shorter, the type scale's smallest, a 4px corner) in the two inks
+ * the two states already have; the mark says it in shape, this says it in
+ * words, and a row in the repository view has no lane header over it to say
+ * it a third time.
  *
  * What does not fit is cut with an ellipsis (the full word is on the dot's
  * tooltip). Empty, it is not there — a row at work, or asking, or bare, has

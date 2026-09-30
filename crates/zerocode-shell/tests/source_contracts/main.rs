@@ -7665,7 +7665,9 @@ mod tests {
         );
         assert!(
             block_after(window, "function makeAgentRow(row, gutter = false) {")
-                .contains("agentRowMark(state, agentRowPhase(row, state))")
+                .contains("const phase = agentRowPhase(row, state);")
+                && block_after(window, "function makeAgentRow(row, gutter = false) {")
+                    .contains("agentRowMark(state, phase)")
                 && block_after(
                     window,
                     "function agentRowClasses(state, here, foldedSummary, row = null) {"

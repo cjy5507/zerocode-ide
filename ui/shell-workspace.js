@@ -2212,7 +2212,11 @@ function measureSleepingWorkspaces() {
   const owned = worktreeLanes();
   for (const project of projects) {
     for (const worktree of project.worktrees) {
-      if (worktreeDotState(worktree.path, owned.get(worktree.path) ?? []) === "empty") {
+      const state = worktreeDotState(worktree.path, owned.get(worktree.path) ?? []);
+      // A released worker's checkout has no pane in it and folds to `empty`, and
+      // its work that waits for a coordinator is the one thing on this list a
+      // sweep for "nothing going on" must not take: it is what 검증 대기 is for.
+      if (state === "empty" && worktreeMark(worktree.path, state).indicator !== "review") {
         sleepingPaths.add(worktree.path);
       }
     }
@@ -3915,8 +3919,11 @@ function worktreeDotState(path, ownedLanes) {
 const WORKTREE_LEDGER_REFINES = new Set(["done", "active", "inactive"]);
 
 /* The two indicators that wear a word on the row and share the lane's own: the
- * word IS the lane's name (`WORKSPACE_STATE_GROUPS`), so a lane's head and the
- * rows under it cannot say two things. */
+ * word IS the lane's name (`WORKSPACE_STATE_GROUPS`), read from the one table.
+ * The dot and the word follow the ledger at once and the lane follows after the
+ * frozen reading settles, so for a few seconds a row may say the word of the
+ * lane it is about to move to — that is the price of a list that does not hop
+ * under the pointer. */
 const WORKTREE_WORDED = new Set(["review", "done"]);
 
 /* One workspace's MARK — the indicator its dot draws and the lane it stands in
@@ -5345,6 +5352,9 @@ function workspaceBoardCardMenuAt(worktree, x, y, opener = null) {
 function workspaceBoardCardPaintSignature(worktree) {
   const project = projectOfWorktree(worktree.path);
   const rows = workspaceBoardAgentRows.get(worktree.path) ?? [];
+  // The live line says what the ledger says of the work in the checkout, and a
+  // released worker's work has no agent row to carry that into the signature.
+  const mark = worktreeMark(worktree.path, workspaceBoardWorktreeState(worktree));
   return [
     locale,
     workspaceBoardMode,
@@ -5359,6 +5369,8 @@ function workspaceBoardCardPaintSignature(worktree) {
     worktree.path === activeWorktreePath ? "active" : "",
     workspaceBoardUnread(worktree.path) ? "unread" : "",
     workspaceBoardWorktreeState(worktree),
+    mark.said,
+    mark.phase,
     workspaceBoardCardMeta(worktree.path).pinned ? "pinned" : "",
     project?.name ?? "",
     project?.path ?? "",
@@ -5485,7 +5497,8 @@ function workspaceBoardCardNode(worktree, index, animate) {
   const liveState = workspaceBoardWorktreeState(worktree);
   live.dataset.state = liveState;
   const stateWord = document.createElement("strong");
-  stateWord.textContent = worktreeStateLabel(liveState);
+  const liveMark = worktreeMark(worktree.path, liveState);
+  stateWord.textContent = worktreeStateLabel(liveMark.said, liveMark.phase);
   live.appendChild(stateWord);
   const rowsAt = workspaceBoardAgentRows.get(worktree.path) ?? [];
   const firstActive = rowsAt.find((row) => LIVE_HOOK_STATES.has(agentRowState(row)))
