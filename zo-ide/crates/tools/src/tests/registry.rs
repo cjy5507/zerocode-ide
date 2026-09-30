@@ -103,6 +103,7 @@ fn a_searched_session_recall_runs_through_capability_invoke() {
         thought_signature: None,
         reasoning_replay: None,
         model: None,
+        updated_at_ms: None,
     }]);
     session
         .save_to_path(session_dir.join("session-r49.jsonl"))

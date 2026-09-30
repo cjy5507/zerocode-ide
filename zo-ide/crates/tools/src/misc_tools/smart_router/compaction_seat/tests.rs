@@ -43,6 +43,7 @@ fn user_text(text: &str) -> ConversationMessage {
         thought_signature: None,
         reasoning_replay: None,
         model: None,
+        updated_at_ms: None,
     }
 }
 
@@ -68,6 +69,7 @@ fn result(id: &str, tool: &str, output: &str, is_error: bool) -> ConversationMes
         thought_signature: None,
         reasoning_replay: None,
         model: None,
+        updated_at_ms: None,
     }
 }
 

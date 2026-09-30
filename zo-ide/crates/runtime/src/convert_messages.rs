@@ -1654,6 +1654,7 @@ mod tests {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         };
 
         // The exact request-build shape: reminder appended after the batch.
@@ -2418,5 +2419,37 @@ mod tests {
         let wire = serde_json::to_value(&content[0]).expect("serialize redacted to wire");
         assert_eq!(wire["type"], "redacted_thinking");
         assert_eq!(wire["data"], "ENCRYPTED");
+    }
+
+    /// The time a session stored a message at belongs to the session file, not
+    /// to what the model is sent (t-18703): the request built from stored
+    /// messages is the same bytes whether or not they carry a time.
+    #[test]
+    fn the_time_a_message_was_stored_at_never_reaches_the_wire() {
+        let plain = vec![
+            ConversationMessage::user_text("read the file"),
+            ConversationMessage::assistant(vec![crate::session::ContentBlock::ToolUse {
+                id: "tu-1".to_string(),
+                name: "read_file".to_string(),
+                input: "{}".to_string(),
+            }]),
+            ConversationMessage::tool_result("tu-1", "read_file", "contents", false),
+            ConversationMessage::assistant(vec![crate::session::ContentBlock::Text {
+                text: "done".to_string(),
+            }]),
+        ];
+        let stamped: Vec<ConversationMessage> = plain
+            .iter()
+            .cloned()
+            .map(|message| message.with_updated_at_ms(Some(1_790_000_000_000)))
+            .collect();
+        assert!(stamped.iter().all(|message| message.updated_at_ms.is_some()));
+
+        assert_eq!(
+            serde_json::to_string(&convert_messages(&stamped))
+                .expect("serialize the request built from stamped messages"),
+            serde_json::to_string(&convert_messages(&plain))
+                .expect("serialize the request built from plain messages"),
+        );
     }
 }

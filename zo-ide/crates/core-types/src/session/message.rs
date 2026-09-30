@@ -104,7 +104,7 @@ pub enum ContentBlock {
 }
 
 /// One conversation message with optional token-usage metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ConversationMessage {
     pub role: MessageRole,
     pub blocks: Vec<ContentBlock>,
@@ -134,7 +134,61 @@ pub struct ConversationMessage {
     /// (the exact forensic gap that slowed the 2026-07 cache-leak hunt).
     /// `None` on user/tool messages and on history from before this field.
     pub model: Option<String>,
+    /// When the session wrote this message's line, in epoch milliseconds: the
+    /// `updated_at_ms` key of the message's record in the session file. The
+    /// window reads how long a step took from these, so a time has to come
+    /// through every full rewrite of the file (a compaction, a rewind, a fork,
+    /// the snapshot that heals an in-place edit). It lives on the message, and
+    /// so travels with every clone of it, rather than in a list beside
+    /// [`Session::messages`](super::Session::messages): that field is assigned
+    /// wholesale, and a list beside it would then describe other messages.
+    ///
+    /// `None` for a message that never had one (history written by a zo from
+    /// before the times, or a message no session has stored). Nothing invents
+    /// a time: a rewrite writes what the message carries.
+    ///
+    /// It is the record's key and not part of the message: [`Self::to_json`]
+    /// leaves it out (so does the legacy whole-session JSON), every wire
+    /// encoder reads the fields it needs by name, so a time never reaches a
+    /// model, and equality ignores it, so the same words are the same message
+    /// whenever they were written.
+    pub updated_at_ms: Option<u64>,
 }
+
+impl PartialEq for ConversationMessage {
+    fn eq(&self, other: &Self) -> bool {
+        // Both sides are taken apart without a `..`, so a field added to the
+        // struct stops compiling here until someone decides whether it is
+        // content. `updated_at_ms` is not: it says when the line was written,
+        // not what the message says.
+        let Self {
+            role,
+            blocks,
+            usage,
+            thought_signature,
+            reasoning_replay,
+            model,
+            updated_at_ms: _,
+        } = self;
+        let Self {
+            role: other_role,
+            blocks: other_blocks,
+            usage: other_usage,
+            thought_signature: other_thought_signature,
+            reasoning_replay: other_reasoning_replay,
+            model: other_model,
+            updated_at_ms: _,
+        } = other;
+        role == other_role
+            && blocks == other_blocks
+            && usage == other_usage
+            && thought_signature == other_thought_signature
+            && reasoning_replay == other_reasoning_replay
+            && model == other_model
+    }
+}
+
+impl Eq for ConversationMessage {}
 
 impl ConversationMessage {
     #[must_use]
@@ -146,6 +200,7 @@ impl ConversationMessage {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         }
     }
 
@@ -164,6 +219,7 @@ impl ConversationMessage {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         }
     }
 
@@ -176,6 +232,7 @@ impl ConversationMessage {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         }
     }
 
@@ -188,6 +245,7 @@ impl ConversationMessage {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         }
     }
 
@@ -214,6 +272,19 @@ impl ConversationMessage {
     #[must_use]
     pub fn with_model(mut self, model: Option<String>) -> Self {
         self.model = model;
+        self
+    }
+
+    /// Attach the time this message was written at. Builder form like
+    /// [`Self::with_model`]. A writer that hands a session messages it did not
+    /// push, such as one importing another program's transcript, sets each
+    /// message's own time here and saves; the snapshot writes it as the
+    /// record's `updated_at_ms`. [`Session::push_message`](super::Session::push_message)
+    /// stamps the message it stores with the session's own clock instead, as
+    /// the line it appends carries that time. See [`Self::updated_at_ms`].
+    #[must_use]
+    pub fn with_updated_at_ms(mut self, updated_at_ms: Option<u64>) -> Self {
+        self.updated_at_ms = updated_at_ms;
         self
     }
 
@@ -258,6 +329,7 @@ impl ConversationMessage {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         }
     }
 
@@ -284,6 +356,7 @@ impl ConversationMessage {
             thought_signature: None,
             reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
         }
     }
 
@@ -382,6 +455,9 @@ impl ConversationMessage {
             thought_signature,
             reasoning_replay,
             model,
+            // The record carries the time, not the message: the record parser
+            // puts it here.
+            updated_at_ms: None,
         })
     }
 }

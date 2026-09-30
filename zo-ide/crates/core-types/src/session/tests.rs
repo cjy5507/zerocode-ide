@@ -1047,6 +1047,7 @@ fn record_compaction_rewrites_persisted_snapshot_to_compacted_state() {
         thought_signature: None,
         reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
     }];
     session.messages = std::sync::Arc::new(compacted.clone());
     session.record_compaction("summarized earlier work", 3);
@@ -1783,6 +1784,7 @@ fn make_tool_result_message(tool_use_id: &str) -> ConversationMessage {
         thought_signature: None,
         reasoning_replay: None,
             model: None,
+            updated_at_ms: None,
     }
 }
 
@@ -1886,6 +1888,7 @@ fn rewind_treats_a_cleared_reminder_as_the_annotation_it_replaced() {
         thought_signature: None,
         reasoning_replay: None,
         model: None,
+        updated_at_ms: None,
     };
     assert!(
         cleared.is_reminder_annotation(),
@@ -2753,6 +2756,7 @@ fn rewind_pops_persisted_reminder_annotations_with_their_turn() {
         thought_signature: None,
         reasoning_replay: None,
         model: None,
+        updated_at_ms: None,
     };
     let summary = ConversationMessage {
         role: MessageRole::System,
@@ -2763,6 +2767,7 @@ fn rewind_pops_persisted_reminder_annotations_with_their_turn() {
         thought_signature: None,
         reasoning_replay: None,
         model: None,
+        updated_at_ms: None,
     };
 
     let mut session = Session::new();
@@ -3543,4 +3548,276 @@ fn measure_message_times_on_a_real_segment() {
         report(&format!("after a compaction keeping the last {keep}"), &path);
     }
     let _ = fs::remove_dir_all(&scratch);
+}
+
+// --- the time a message carries: in memory, in the loader, in the JSON -------
+// (t-18703, the fix: these use what the fix adds)
+
+/// A session file whose header carries `header_ms` and whose message records
+/// carry `times`, one record per entry, `None` for a record with no time.
+fn write_file_with_times(path: &Path, header_ms: u64, times: &[Option<u64>]) {
+    let mut lines = vec![format!(
+        r#"{{"created_at_ms":1,"session_id":"session-times-0","type":"session_meta","updated_at_ms":{header_ms},"version":1}}"#
+    )];
+    for (index, time) in times.iter().enumerate() {
+        let stamp = time.map_or_else(String::new, |ms| format!(r#","updated_at_ms":{ms}"#));
+        lines.push(format!(
+            r#"{{"message":{{"blocks":[{{"text":"m{index}","type":"text"}}],"role":"user"}},"turn_index":{index},"type":"message"{stamp}}}"#
+        ));
+    }
+    fs::write(path, format!("{}\n", lines.join("\n"))).expect("write the file");
+}
+
+/// The time each message of `session` carries in memory.
+fn message_times_in_memory(session: &Session) -> Vec<Option<u64>> {
+    session
+        .messages
+        .iter()
+        .map(|message| message.updated_at_ms)
+        .collect()
+}
+
+#[test]
+fn a_pushed_message_carries_the_time_of_the_line_it_is_appended_as() {
+    let (session, path) = a_session_with_four_timed_messages("times-in-memory");
+
+    let in_memory = message_times_in_memory(&session);
+
+    assert_eq!(
+        in_memory,
+        message_times_on_disk(&path),
+        "what the session holds is what the file holds, so a rewrite writes what the append did"
+    );
+    assert_eq!(
+        in_memory.last().copied().flatten(),
+        Some(session.updated_at_ms),
+        "the newest message carries the session's own time"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_loaded_session_holds_each_records_time_on_its_message() {
+    let (session, path) = a_session_with_four_timed_messages("times-loaded");
+    let before = message_times_on_disk(&path);
+    drop(session);
+
+    let loaded = Session::load_from_path(&path).expect("load");
+
+    assert_eq!(message_times_in_memory(&loaded), before);
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_record_without_a_time_loads_as_a_message_without_one() {
+    let path = temp_session_path("times-absent");
+    write_file_with_times(&path, 9_000, &[Some(2_000), None, Some(3_000)]);
+
+    let loaded = Session::load_from_path(&path).expect("load");
+
+    assert_eq!(
+        message_times_in_memory(&loaded),
+        vec![Some(2_000), None, Some(3_000)],
+        "nothing invents a time for the record that has none"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn the_session_time_is_the_latest_of_the_header_and_the_message_records() {
+    let path = temp_session_path("times-latest");
+    let time_after_loading = |header_ms: u64, times: &[Option<u64>]| {
+        write_file_with_times(&path, header_ms, times);
+        Session::load_from_path(&path)
+            .expect("load")
+            .updated_at_ms
+    };
+
+    // Appended after the header was written: the records are newer.
+    assert_eq!(time_after_loading(1_000, &[Some(2_000), Some(3_000)]), 3_000);
+    // Rewritten by a compaction or a rewind: the header is newer than the messages it kept.
+    assert_eq!(time_after_loading(5_000, &[Some(2_000), Some(3_000)]), 5_000);
+    // Out of order: the latest wins wherever it stands.
+    assert_eq!(
+        time_after_loading(1_000, &[Some(3_000), Some(2_000), None]),
+        3_000
+    );
+    // No record has a time: the header's.
+    assert_eq!(time_after_loading(4_000, &[None, None]), 4_000);
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn equality_of_messages_ignores_the_time_they_were_written_at() {
+    let words = ConversationMessage::user_text("same words");
+
+    assert_eq!(
+        words.clone().with_updated_at_ms(Some(1)),
+        words.clone().with_updated_at_ms(Some(2))
+    );
+    assert_eq!(words.clone().with_updated_at_ms(Some(1)), words);
+    // Every other field still counts.
+    assert_ne!(
+        words.clone().with_updated_at_ms(Some(1)),
+        ConversationMessage::user_text("other words").with_updated_at_ms(Some(1))
+    );
+    assert_ne!(
+        words.clone().with_model(Some("one".to_string())),
+        words.clone().with_model(Some("two".to_string()))
+    );
+    assert_ne!(
+        words.clone().with_thought_signature(Some("one".to_string())),
+        words.with_thought_signature(Some("two".to_string()))
+    );
+}
+
+#[test]
+fn the_time_a_message_carries_never_reaches_its_json() {
+    let plain = ConversationMessage::user_text("hi");
+    let stamped = plain.clone().with_updated_at_ms(Some(1_790_000_000_000));
+
+    assert_eq!(
+        plain.to_json().render(),
+        r#"{"blocks":[{"text":"hi","type":"text"}],"role":"user"}"#,
+        "the bytes a message had before it carried a time"
+    );
+    assert_eq!(stamped.to_json().render(), plain.to_json().render());
+
+    // A message with every optional field set: the same rule.
+    let mut full = ConversationMessage::assistant_with_usage(
+        vec![ContentBlock::Text {
+            text: "answer".to_string(),
+        }],
+        Some(TokenUsage {
+            input_tokens: 10,
+            output_tokens: 4,
+            cache_creation_input_tokens: 1,
+            cache_read_input_tokens: 2,
+            output_tokens_details: None,
+        }),
+    );
+    full.model = Some("test-model".to_string());
+    full.thought_signature = Some("signature".to_string());
+    let stamped_full = full.clone().with_updated_at_ms(Some(1_790_000_000_000));
+    assert_eq!(stamped_full.to_json().render(), full.to_json().render());
+    // And it does not come back from the message JSON either: the time is the record's key.
+    let restored = ConversationMessage::from_json(&stamped_full.to_json()).expect("round trip");
+    assert_eq!(restored.updated_at_ms, None);
+}
+
+#[test]
+fn a_stamped_record_and_an_unstamped_one_differ_only_in_the_records_time_key() {
+    let mut stamped = Session::new();
+    stamped.messages = std::sync::Arc::new(vec![
+        ConversationMessage::user_text("hi").with_updated_at_ms(Some(1_790_000_000_123)),
+    ]);
+    let mut plain = stamped.clone();
+    std::sync::Arc::make_mut(&mut plain.messages)[0].updated_at_ms = None;
+
+    let stamped_lines: Vec<String> = stamped
+        .render_jsonl_snapshot()
+        .expect("render the stamped session")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let plain_lines: Vec<String> = plain
+        .render_jsonl_snapshot()
+        .expect("render the plain session")
+        .lines()
+        .map(str::to_string)
+        .collect();
+
+    assert_eq!(stamped_lines[0], plain_lines[0], "the header record");
+    assert_eq!(
+        plain_lines[1],
+        r#"{"message":{"blocks":[{"text":"hi","type":"text"}],"role":"user"},"turn_index":0,"type":"message"}"#,
+        "a record without a time is the bytes it always was"
+    );
+    assert_eq!(
+        stamped_lines[1],
+        r#"{"message":{"blocks":[{"text":"hi","type":"text"}],"role":"user"},"turn_index":0,"type":"message","updated_at_ms":1790000000123}"#,
+        "the time is one key on the record, beside the message"
+    );
+}
+
+#[test]
+fn messages_handed_to_a_session_with_their_own_times_are_saved_with_them() {
+    // What an importer of another program's transcript does: it knows when each
+    // message was written, hands the session the messages as they were, and saves.
+    let path = temp_session_path("times-imported");
+    let mut session = Session::new().with_persistence_path(path.clone());
+    session.messages = std::sync::Arc::new(vec![
+        ConversationMessage::user_text("one").with_updated_at_ms(Some(1_790_000_000_111)),
+        ConversationMessage::user_text("two"),
+        ConversationMessage::user_text("three").with_updated_at_ms(Some(1_790_000_000_333)),
+    ]);
+
+    session.save_to_path(&path).expect("save");
+
+    assert_eq!(
+        message_times_on_disk(&path),
+        vec![Some(1_790_000_000_111), None, Some(1_790_000_000_333)]
+    );
+    let loaded = Session::load_from_path(&path).expect("load");
+    assert_eq!(
+        message_times_in_memory(&loaded),
+        vec![Some(1_790_000_000_111), None, Some(1_790_000_000_333)]
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_continuation_that_arrives_with_a_time_keeps_it() {
+    let (mut session, path) = a_session_with_four_timed_messages("times-continuation-given");
+    let mut compacted = vec![continuation_message().with_updated_at_ms(Some(1_790_000_000_555))];
+    compacted.extend(session.messages[2..].iter().cloned());
+
+    session.apply_compaction_atomic(std::sync::Arc::new(compacted), "summary", 2, None);
+
+    assert_eq!(
+        message_times_on_disk(&path).first().copied().flatten(),
+        Some(1_790_000_000_555),
+        "the seam stamps a continuation only when the caller gave it no time"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_compaction_recorded_over_messages_the_caller_swapped_in_stamps_none_of_them() {
+    // `record_compaction` cannot tell which of the messages the caller swapped in,
+    // if any, is the continuation, so unlike `apply_compaction_atomic` it stamps none.
+    let (mut session, path) = a_session_with_four_timed_messages("times-recorded");
+    let mut swapped = vec![continuation_message()];
+    swapped.extend(session.messages[2..].iter().cloned());
+    session.messages = std::sync::Arc::new(swapped);
+
+    session.record_compaction("summary", 2);
+
+    let after = message_times_on_disk(&path);
+    assert_eq!(after.first().copied().flatten(), None);
+    assert!(after[1..].iter().all(Option::is_some), "the kept messages keep theirs: {after:?}");
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn the_legacy_json_form_of_a_session_carries_no_message_times() {
+    let (session, path) = a_session_with_four_timed_messages("times-legacy-json");
+
+    let json = session.to_json().expect("render the legacy form");
+    let messages = json
+        .as_object()
+        .and_then(|object| object.get("messages"))
+        .and_then(JsonValue::as_array)
+        .expect("the messages array");
+
+    assert_eq!(messages.len(), 4);
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.as_object().is_some_and(|object| !object.contains_key("updated_at_ms"))),
+        "the format stays: a time is the key of a JSONL message record only"
+    );
+    let restored = Session::from_json(&json).expect("read the legacy form back");
+    assert!(message_times_in_memory(&restored).iter().all(Option::is_none));
+    cleanup_session_file(&path);
 }
