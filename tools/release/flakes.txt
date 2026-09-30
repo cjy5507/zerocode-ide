@@ -118,3 +118,10 @@ zo:a_verifier_names_the_source_it_read_from_its_start_and_never_one_it_did_not_s
 # (2026-09-30 15:44, t-17078's job, 2523/2524) and in two earlier loaded runs; green alone on the same head
 # and in three quiet coordinator gates that day (2525/0, 2526/0, 2528/0). The branch touched no Rust.
 root:computer_use::reflex::autopilot::tests::a_stale_or_mismatched_or_late_answer_is_never_carried_out
+
+# The errand's wall test: under load the fake CLI (a shell script) has not yet written its child's pid when the
+# three-second wall ends it, so the test stops at 「the run started a child of its own」 (value/tests.rs:781) before
+# it ever asks whether that child outlived the run. Red in whole loaded runs on 5535cdee (09-28) and 543e5da8
+# (09-30, v1.1.44's gate-root), and in the coordinator's t-18551 gate beside a second lane (10-01 00:2x, 2534/2535);
+# judged solo 3/3 green each time. The product's wall and process-group end are not what goes red.
+root:computer_use::errand::value::tests::a_cli_that_outlives_its_wall_is_ended_with_everything_it_started
