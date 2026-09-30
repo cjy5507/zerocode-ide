@@ -1776,7 +1776,7 @@ pub const HOLD_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 /// The cadences of one wait. A test hands in its own so that what takes
 /// seconds in production takes milliseconds there.
 #[derive(Debug, Clone, Copy)]
-struct Pace {
+struct Cadence {
     look_every: Duration,
     safety_read_every: Duration,
     pane_ask_bare: Duration,
@@ -1784,7 +1784,7 @@ struct Pace {
     hold_after: Duration,
 }
 
-impl Pace {
+impl Cadence {
     const STANDARD: Self = Self {
         look_every: LOOK_EVERY,
         safety_read_every: SAFETY_READ_EVERY,
@@ -1838,12 +1838,11 @@ impl WaitClock for SystemWaitClock {
     }
 
     fn rest_on(&self, watch: Option<&mut ChildWatch>, interval: std::time::Duration) -> Woken {
-        match watch {
-            Some(watch) => watch.wait(interval),
-            None => {
-                self.rest(interval);
-                Woken::UNKNOWN
-            }
+        if let Some(watch) = watch {
+            watch.wait(interval)
+        } else {
+            self.rest(interval);
+            Woken::UNKNOWN
         }
     }
 }
@@ -1909,11 +1908,11 @@ pub fn wait_for_turn_result_on(
     cancelled: &dyn Fn() -> bool,
     close: &dyn Fn(),
 ) -> PaneOutcome {
-    wait_with_pace(clock, tmux, directory, pane, turn, budget, cancelled, close, Pace::STANDARD)
+    wait_with_cadence(clock, tmux, directory, pane, turn, budget, cancelled, close, Cadence::STANDARD)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one wait, one table of ways it ends
-fn wait_with_pace(
+fn wait_with_cadence(
     clock: &dyn WaitClock,
     tmux: &Tmux,
     directory: &Path,
@@ -1922,7 +1921,7 @@ fn wait_with_pace(
     budget: PaneBudget,
     cancelled: &dyn Fn() -> bool,
     close: &dyn Fn(),
-    pace: Pace,
+    cadence: Cadence,
 ) -> PaneOutcome {
     let started = clock.now();
     let mut seen = transcript_stamp(directory);
@@ -1948,7 +1947,7 @@ fn wait_with_pace(
         let read_due = watch.is_none()
             || woken.directory
             || woken.channel_closed
-            || read_at.is_none_or(|at| now.duration_since(at) >= pace.safety_read_every);
+            || read_at.is_none_or(|at| now.duration_since(at) >= cadence.safety_read_every);
         if read_due {
             read_at = Some(now);
             if let Some(outcome) = answered() {
@@ -1994,7 +1993,7 @@ fn wait_with_pace(
         // for each child. With the channel held, its ending is what says the
         // child is gone.
         let held = watch.as_ref().is_some_and(ChildWatch::holds_channel);
-        let every = if held { pace.pane_ask_held } else { pace.pane_ask_bare };
+        let every = if held { cadence.pane_ask_held } else { cadence.pane_ask_bare };
         if woken.channel_closed || pane_asked_at.is_none_or(|at| now.duration_since(at) >= every) {
             pane_asked_at = Some(now);
             if !tmux.pane_exists(pane) {
@@ -2007,8 +2006,8 @@ fn wait_with_pace(
             // a channel file that changes (a child that came up again) is read
             // again, and one that has not appeared yet is looked for now and
             // then.
-            let retry_due = channel_tried_at.is_none_or(|at| now.duration_since(at) >= pace.pane_ask_bare);
-            if ran >= pace.hold_after && (woken.directory || (!watch.holds_channel() && retry_due)) {
+            let retry_due = channel_tried_at.is_none_or(|at| now.duration_since(at) >= cadence.pane_ask_bare);
+            if ran >= cadence.hold_after && (woken.directory || (!watch.holds_channel() && retry_due)) {
                 channel_tried_at = Some(now);
                 if let Some(addr) = child_watch::channel_address(&directory.join(CHANNEL_FILE)) {
                     watch.hold_channel(addr);
@@ -2016,7 +2015,7 @@ fn wait_with_pace(
             }
         }
         let interval = if watch.is_some() {
-            pace.look_every
+            cadence.look_every
                 .min(budget.rule().remaining(ran, quiet_for))
                 .max(Duration::from_millis(1))
         } else {
@@ -3492,14 +3491,14 @@ mod tests {
         }
     }
 
-    /// The pace tests use: a channel is held from the first look, and tmux is
+    /// The cadence tests use: a channel is held from the first look, and tmux is
     /// left alone for half a minute unless something says otherwise.
-    fn watching_pace() -> Pace {
-        Pace {
+    fn watching_cadence() -> Cadence {
+        Cadence {
             hold_after: Duration::ZERO,
             pane_ask_bare: Duration::from_secs(30),
             pane_ask_held: Duration::from_secs(30),
-            ..Pace::STANDARD
+            ..Cadence::STANDARD
         }
     }
 
@@ -3516,7 +3515,7 @@ mod tests {
         let channel = DyingChannel::stand(&child);
         let (outcome, working_asks, lag) = std::thread::scope(|scope| {
             let waiting = scope.spawn(|| {
-                let outcome = wait_with_pace(
+                let outcome = wait_with_cadence(
                     &SystemWaitClock,
                     &tmux,
                     &child,
@@ -3525,7 +3524,7 @@ mod tests {
                     PaneBudget::Wall(Duration::from_secs(60)),
                     &|| false,
                     &|| {},
-                    watching_pace(),
+                    watching_cadence(),
                 );
                 (outcome, std::time::Instant::now())
             });
@@ -3558,7 +3557,7 @@ mod tests {
         let channel = DyingChannel::stand(&child);
         let outcome = std::thread::scope(|scope| {
             let waiting = scope.spawn(|| {
-                wait_with_pace(
+                wait_with_cadence(
                     &SystemWaitClock,
                     &tmux,
                     &child,
@@ -3567,7 +3566,7 @@ mod tests {
                     PaneBudget::Wall(Duration::from_secs(60)),
                     &|| false,
                     &|| {},
-                    watching_pace(),
+                    watching_cadence(),
                 )
             });
             std::thread::sleep(Duration::from_millis(500));
@@ -3598,7 +3597,7 @@ mod tests {
         std::fs::create_dir_all(&child).expect("mkdir");
         let (outcome, connections_when_up) = std::thread::scope(|scope| {
             let waiting = scope.spawn(|| {
-                wait_with_pace(
+                wait_with_cadence(
                     &SystemWaitClock,
                     &tmux,
                     &child,
@@ -3607,7 +3606,7 @@ mod tests {
                     PaneBudget::Wall(Duration::from_secs(60)),
                     &|| false,
                     &|| {},
-                    watching_pace(),
+                    watching_cadence(),
                 )
             });
             std::thread::sleep(Duration::from_millis(300));
