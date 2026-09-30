@@ -8289,6 +8289,9 @@ function artifactStripNode() {
   annotate.setAttribute("aria-pressed", "false");
   const compare = artifactStripButton("is-secondary artifact-strip-compare", "columns", ARTIFACT_LABELS.compare);
   const exporter = artifactStripButton("is-secondary artifact-strip-export", "download", ARTIFACT_LABELS.export);
+  // 누르면 형식을 고르는 메뉴가 선다(t-18558).
+  exporter.setAttribute("aria-haspopup", "menu");
+  exporter.setAttribute("aria-expanded", "false");
   const share = artifactStripButton("is-secondary artifact-strip-share", "share", ARTIFACT_LABELS.share);
   const reveal = artifactStripButton("is-secondary artifact-strip-reveal", "folder-open", ARTIFACT_LABELS.reveal);
   const more = document.createElement("button");
@@ -8387,21 +8390,26 @@ function wireArtifactStrip(strip) {
     if (strip._tab) void compareArtifactVersions(strip._tab);
   };
   strip.querySelector(".artifact-strip-export").onclick = () => {
-    if (strip._facts) void exportArtifactVersion(strip._facts);
+    if (strip._facts) void openArtifactExportMenu(strip);
   };
-  strip.querySelector(".artifact-strip-more").onclick = () => openArtifactStripMenu(strip);
+  strip.querySelector(".artifact-strip-more").onclick = () => void openArtifactStripMenu(strip);
 }
 
-/* 접힌 머리띠의 「⋯」: 가려진 행동을 같은 순서, 같은 가능·불가능으로 한 메뉴에. */
-function openArtifactStripMenu(strip) {
+/* 접힌 머리띠의 「⋯」: 가려진 행동을 같은 순서, 같은 가능·불가능으로 한 메뉴에.
+ * 「내보내기」는 형식마다 한 행으로 펴 선다(t-18558) — 메뉴 안의 메뉴 없이 한 번에 닿는다. */
+async function openArtifactStripMenu(strip) {
   const more = strip.querySelector(".artifact-strip-more");
-  const items = [...strip.querySelectorAll(".artifact-strip-act.is-secondary")]
-    .filter((button) => !button.hidden)
-    .map((button) => ({
-      label: button.textContent.trim(),
-      disabled: button.disabled,
-      run: () => button.click(),
-    }));
+  const items = [];
+  for (const button of strip.querySelectorAll(".artifact-strip-act.is-secondary")) {
+    if (button.hidden) continue;
+    if (!button.classList.contains("artifact-strip-export")) {
+      items.push({ label: button.textContent.trim(), disabled: button.disabled, run: () => button.click() });
+      continue;
+    }
+    for (const choice of await artifactExportChoices(strip)) {
+      items.push({ ...choice, label: `${button.textContent.trim()} · ${choice.label}`, disabled: button.disabled || choice.disabled });
+    }
+  }
   if (items.length === 0) return;
   const box = more.getBoundingClientRect();
   openSidebarMenu(box.left, box.bottom + 4, items, more);
@@ -8431,11 +8439,73 @@ async function compareArtifactVersions(tab) {
   }
 }
 
-/* 「내보내기」: 폴더를 묻고, 보고 있는 불변 판을 그 폴더의 새 파일로 쓴다. 쓴 것은
- * 이 기계의 파일이다 — 공개 링크가 아니고, 그렇게 부르지 않는다. */
-async function exportArtifactVersion(facts) {
+/* 「내보내기」의 형식 셋(t-18558): 순서가 메뉴의 순서다. 낱말은 `t()`가 다섯 언어로 읽는다. */
+const ARTIFACT_EXPORT_FORMATS = Object.freeze([
+  { format: "html", key: "artifacts.strip.exportHtml", word: "HTML" },
+  { format: "pdf", key: "artifacts.strip.exportPdf", word: "PDF" },
+  { format: "png", key: "artifacts.strip.exportPng", word: "이미지(PNG)" },
+]);
+/* 그리는 중인 내보내기 — 「판 id:번호」. 같은 판을 그리는 사이 다시 누른 것은 받지 않는다. */
+const artifactExporting = new Set();
+
+/* 메뉴의 행 셋: 백엔드가 형식마다 쓸 수 있는지 답한다(`artifact_export_formats`). 이 빌드에
+ * 그릴 WebKit이 없으면 PDF와 그림은 이유를 달고 꺼진다 — 추측하지 않는다. 답을 못 받으면
+ * 아는 만큼만 말한다: 끄지 않고, 문이 제 이유로 거절하게 둔다. */
+async function artifactExportChoices(strip) {
+  let asked = [];
+  try {
+    const answer = await invoke("artifact_export_formats");
+    asked = Array.isArray(answer) ? answer : [];
+  } catch {
+    asked = [];
+  }
+  return ARTIFACT_EXPORT_FORMATS.map((one) => {
+    const off = asked.find((row) => row.format === one.format)?.available === false;
+    return {
+      label: t(one.key, one.word),
+      disabled: off,
+      title: off ? t("artifacts.strip.exportNoWebkit", "이 창에는 페이지를 그릴 WebKit이 없습니다") : "",
+      run: () => (strip._facts ? exportArtifactVersion(strip._facts, one.format) : undefined),
+    };
+  });
+}
+
+/* 「내보내기」를 누르면 형식을 고르는 메뉴가 선다. 접혀서 단추가 자리를 잃은 좁은 머리띠에서는
+ * 「⋯」 아래에 선다. */
+async function openArtifactExportMenu(strip) {
+  const button = strip.querySelector(".artifact-strip-export");
+  const items = await artifactExportChoices(strip);
+  const anchor = button.getBoundingClientRect().width > 0 ? button : strip.querySelector(".artifact-strip-more");
+  const box = anchor.getBoundingClientRect();
+  openSidebarMenu(box.left, box.bottom + 4, items, anchor);
+  button.setAttribute("aria-expanded", "true");
+  const watch = new MutationObserver(() => {
+    if (!sidebarMenu.hidden && menuOpener === anchor) return;
+    button.setAttribute("aria-expanded", "false");
+    watch.disconnect();
+  });
+  watch.observe(sidebarMenu, { attributes: true, attributeFilter: ["hidden"] });
+}
+
+/* 다 쓴 내보내기가 사람에게 하는 말: 어떤 형식으로 썼는가, 그림이 상한에서 잘렸는가. */
+function artifactExportedWords(done) {
+  const n = done.version;
+  if (done.format === "pdf") return t("artifacts.strip.exportedPdf", "버전 {{n}}을 PDF 파일로 내보냈습니다", { n });
+  if (done.format !== "png") return t("artifacts.strip.exported", "버전 {{n}}을 이 기계의 파일로 내보냈습니다", { n });
+  return done.truncated
+    ? t("artifacts.strip.exportedPngCut", "버전 {{n}}을 이미지(PNG) 파일로 내보냈습니다 — 페이지가 길어 위쪽 {{height}}픽셀까지만 담았습니다", { n, height: done.height })
+    : t("artifacts.strip.exportedPng", "버전 {{n}}을 이미지(PNG) 파일로 내보냈습니다", { n });
+}
+
+/* 「내보내기」: 폴더를 한 번 묻고, 보고 있는 불변 판을 고른 형식의 새 파일로 그 폴더에 쓴다 —
+ * HTML은 복사, PDF와 그림은 창의 WebKit이 그린다(t-18558). 쓴 것은 이 기계의 파일이다 —
+ * 공개 링크가 아니고, 그렇게 부르지 않는다. 그리는 데는 몇 초 걸리니 하는 중이라고 알린다. */
+async function exportArtifactVersion(facts, format = "html") {
   const version = facts.version ?? facts.current;
-  if (version == null) return;
+  const kind = ARTIFACT_EXPORT_FORMATS.find((one) => one.format === format);
+  if (version == null || !kind) return;
+  const key = `${facts.id}:${version}`;
+  if (artifactExporting.has(key)) return;
   let folder = null;
   try {
     folder = await invoke("choose_project", { start: null });
@@ -8444,11 +8514,24 @@ async function exportArtifactVersion(facts) {
     return;
   }
   if (!folder) return;
+  artifactExporting.add(key);
+  const working = format === "html"
+    ? null
+    : toast(t("artifacts.strip.exporting", "내보내는 중… ({{format}})", { format: t(kind.key, kind.word) }), "", { sticky: true });
   try {
-    const done = await invoke("artifact_export", { id: facts.id, version, folder });
-    toast(t("artifacts.strip.exported", "버전 {{n}}을 이 기계의 파일로 내보냈습니다", { n: done.version }), "", { aux: done.path });
+    const done = await invoke("artifact_export", { id: facts.id, version, folder, format });
+    toast(artifactExportedWords(done), "", {
+      aux: done.path,
+      action: {
+        label: t("artifacts.reveal", "Finder에서 보기"),
+        run: () => invoke("artifact_export_reveal", { path: done.path }).catch((error) => showError(String(error))),
+      },
+    });
   } catch (error) {
     showError(String(error));
+  } finally {
+    artifactExporting.delete(key);
+    if (working?.isConnected) closing(working, () => working.remove());
   }
 }
 

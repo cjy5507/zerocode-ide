@@ -586,56 +586,13 @@ pub(crate) async fn snapshot_webview_png(
     {
         let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
         pane.with_webview(move |platform| {
-            use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
-            use objc2_foundation::NSDictionary;
             // Main thread, by `with_webview`'s contract — WebKit requires it.
             let view: &objc2_web_kit::WKWebView = unsafe { &*platform.inner().cast() };
-            let block = block2::RcBlock::new(
-                move |image: *mut objc2_app_kit::NSImage, error: *mut objc2_foundation::NSError| {
-                    let answer = if image.is_null() {
-                        Err(if error.is_null() {
-                            "스냅샷이 비어 왔습니다".to_string()
-                        } else {
-                            unsafe { &*error }.localizedDescription().to_string()
-                        })
-                    } else {
-                        // TIFF is the representation NSImage always holds;
-                        // the bitmap rep re-encodes it as the PNG the <img>
-                        // side of the editor actually wants.
-                        unsafe { &*image }
-                            .TIFFRepresentation()
-                            .and_then(|tiff| NSBitmapImageRep::imageRepWithData(&tiff))
-                            .and_then(|rep| unsafe {
-                                rep.representationUsingType_properties(
-                                    NSBitmapImageFileType::PNG,
-                                    &NSDictionary::new(),
-                                )
-                            })
-                            .map(|png| png.to_vec())
-                            .ok_or_else(|| "PNG 인코딩에 실패했습니다".to_string())
-                    };
-                    let _ = tx.send(answer);
-                },
-            );
-            // A width asked for is WebKit's own downscale — the thumbnail
-            // road renders a page at reading size and takes it card-sized.
-            // Main thread, by `with_webview`'s contract: the marker is the
-            // compiler's word for what the closure already knows.
+            // The marker is the compiler's word for what the closure already
+            // knows. The snapshot itself lives in `artifact_webkit`, where the
+            // artifact exports (t-18558) take theirs by the same road.
             let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
-            let configuration = width.map(|points| {
-                let configuration = unsafe { objc2_web_kit::WKSnapshotConfiguration::new(mtm) };
-                unsafe {
-                    configuration
-                        .setSnapshotWidth(Some(&objc2_foundation::NSNumber::new_f64(points)));
-                }
-                configuration
-            });
-            unsafe {
-                view.takeSnapshotWithConfiguration_completionHandler(
-                    configuration.as_deref(),
-                    &block,
-                );
-            }
+            crate::artifact_webkit::take_snapshot_png(mtm, view, width, tx);
         })
         .map_err(|error| error.to_string())?;
         let bytes = tauri::async_runtime::spawn_blocking(move || {

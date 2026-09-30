@@ -61,8 +61,10 @@ pub(crate) struct Thumb {
     pub(crate) cached: bool,
 }
 
-/// The one-at-a-time lock over the hidden pane.
-fn render_lock() -> &'static tokio::sync::Mutex<()> {
+/// The one-at-a-time lock over the hidden panes. The exports (t-18558) draw in a
+/// pane of their own but take this same lock, so at most one hidden page is ever
+/// being drawn: an export waits for the card in hand and the cards for it.
+pub(crate) fn render_lock() -> &'static tokio::sync::Mutex<()> {
     static RENDER: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     RENDER.get_or_init(|| tokio::sync::Mutex::new(()))
 }
@@ -103,11 +105,18 @@ pub(crate) fn key_of(artifact: &Artifact) -> Option<String> {
 pub(crate) fn address_of(artifact: &Artifact) -> Result<tauri::Url, String> {
     match artifact.kind {
         ArtifactKind::Web => browsable(artifact.url.as_deref().unwrap_or_default()),
-        ArtifactKind::Page => tauri::Url::from_file_path(&artifact.path)
-            .map_err(|()| "페이지 경로를 주소로 만들 수 없습니다".to_string())
-            .and_then(|url| browsable(url.as_str())),
+        ArtifactKind::Page => file_address(&artifact.path),
         _ => Err("이 종류는 썸네일을 그리지 않습니다".to_string()),
     }
+}
+
+/// The address a hidden pane loads for a page on disk — its `file://`, through
+/// the same allowlist every browser pane walks. The exports load a version's
+/// immutable file by it too.
+pub(crate) fn file_address(path: &Path) -> Result<tauri::Url, String> {
+    tauri::Url::from_file_path(path)
+        .map_err(|()| "페이지 경로를 주소로 만들 수 없습니다".to_string())
+        .and_then(|url| browsable(url.as_str()))
 }
 
 pub(crate) fn data_url_of(png: &[u8]) -> String {
@@ -246,27 +255,20 @@ async fn render(app: &AppHandle, address: &tauri::Url, limits: &Limits) -> Resul
         .unwrap_or_else(PoisonError::into_inner) = None;
     pane.navigate(address.clone())
         .map_err(|error| error.to_string())?;
-    let deadline = std::time::Instant::now() + Duration::from_millis(limits.thumb_timeout_ms);
-    loop {
-        if finished_url()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_deref()
-            .is_some_and(|held| held != blank_page().as_str())
-        {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            // Leave the pane on the blank page: a page still loading must
-            // not keep spending the person's network after its picture was
-            // given up on.
-            let _ = pane.navigate(blank_page());
-            return Err(format!(
-                "페이지가 {} ms 안에 뜨지 않았습니다",
-                limits.thumb_timeout_ms
-            ));
-        }
-        tokio::time::sleep(LOAD_POLL).await;
+    if !finished_within(
+        finished_url(),
+        Duration::from_millis(limits.thumb_timeout_ms),
+    )
+    .await
+    {
+        // Leave the pane on the blank page: a page still loading must
+        // not keep spending the person's network after its picture was
+        // given up on.
+        let _ = pane.navigate(blank_page());
+        return Err(format!(
+            "페이지가 {} ms 안에 뜨지 않았습니다",
+            limits.thumb_timeout_ms
+        ));
     }
     // One more beat for the first paint: Finished is the document, not
     // the pixels, and a snapshot taken on the same tick is often blank.
@@ -278,22 +280,56 @@ async fn render(app: &AppHandle, address: &tauri::Url, limits: &Limits) -> Resul
     png
 }
 
-/// The hidden pane, born on the first ask and kept. Sized for reading
+/// Wait for a hidden pane's page load to end — `finished` holding an address
+/// other than the blank page — until `budget` is spent. `false` when it never
+/// came. The thumbnails and the exports wait the same way, on their own panes.
+pub(crate) async fn finished_within(finished: &Mutex<Option<String>>, budget: Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if finished
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_deref()
+            .is_some_and(|held| held != blank_page().as_str())
+        {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(LOAD_POLL).await;
+    }
+}
+
+/// The thumbnail pane, born on the first ask and kept. Sized for reading
 /// (`thumb_viewport_width`, 4:3) so a page lays itself out as a page; the
 /// snapshot is asked for at card width. Parked outside the window's bounds.
 fn pane(app: &AppHandle, limits: &Limits) -> Result<tauri::Webview, String> {
-    if let Some(held) = app.get_webview(THUMB_LABEL) {
+    let width = f64::from(limits.thumb_viewport_width.max(1));
+    let height =
+        width * f64::from(limits.thumb_height.max(1)) / f64::from(limits.thumb_width.max(1));
+    hidden_pane(app, THUMB_LABEL, (width, height), finished_url())
+}
+
+/// A hidden pane of `label`, born on the first ask and kept: parked outside the
+/// window's bounds, on the browser panes' allowlist, in the default profile's
+/// session. `finished` is where its own page loads land. The thumbnails and the
+/// exports (t-18558) each keep one and share everything else.
+pub(crate) fn hidden_pane(
+    app: &AppHandle,
+    label: &'static str,
+    (width, height): (f64, f64),
+    finished: &'static Mutex<Option<String>>,
+) -> Result<tauri::Webview, String> {
+    if let Some(held) = app.get_webview(label) {
         return Ok(held);
     }
     let window = app
         .get_window("main")
         .ok_or_else(|| "창이 없습니다".to_string())?;
     let state = app.state::<AppState>();
-    let width = f64::from(limits.thumb_viewport_width.max(1));
-    let height =
-        width * f64::from(limits.thumb_height.max(1)) / f64::from(limits.thumb_width.max(1));
     let builder =
-        tauri::webview::WebviewBuilder::new(THUMB_LABEL, tauri::WebviewUrl::External(blank_page()))
+        tauri::webview::WebviewBuilder::new(label, tauri::WebviewUrl::External(blank_page()))
             // The same allowlist every browser pane walks: a page cannot send the
             // thumbnail pane somewhere the address bar would have refused.
             .on_navigation(browsable_target)
@@ -301,9 +337,8 @@ fn pane(app: &AppHandle, limits: &Limits) -> Result<tauri::Webview, String> {
             .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
             .on_page_load(move |_, payload| {
                 if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                    *finished_url()
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner) = Some(payload.url().to_string());
+                    *finished.lock().unwrap_or_else(PoisonError::into_inner) =
+                        Some(payload.url().to_string());
                 }
             });
     // The person's own browser session: the default profile's jar, so a

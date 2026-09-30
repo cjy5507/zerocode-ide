@@ -28,7 +28,7 @@ pub const ROUTE: &str = "/artifact";
 /// milliseconds, a publish never is.
 pub const STORE_LOCK_PATIENCE_MS: u64 = 250;
 pub const STORE_LOCK_RETRY_MS: u64 = 5;
-pub const USAGE: &str = "zerocode-artifact publish --file-path <absolute.html> [--title <title>] [--description <text>] [--favicon <emoji>] [--label <label>]\nzerocode-artifact list\nzerocode-artifact read --id <id>\nzerocode-artifact export <id> [--version N] --out <path>";
+pub const USAGE: &str = "zerocode-artifact publish --file-path <absolute.html> [--title <title>] [--description <text>] [--favicon <emoji>] [--label <label>]\nzerocode-artifact list\nzerocode-artifact read --id <id>\nzerocode-artifact export <id> [--version N] --out <path.html|path.pdf|path.png>";
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -74,12 +74,129 @@ pub struct ExportInput {
     pub out: PathBuf,
 }
 
+/// The kinds of file an export writes, named by the extension of `--out`
+/// (t-18558). `.htm` is another spelling of HTML, not a fourth kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Html,
+    Pdf,
+    Png,
+}
+
+/// The extensions an export can be named with, as a refusal lists them.
+pub const EXPORT_EXTENSIONS: &str = ".html, .htm, .pdf or .png";
+
+impl ExportFormat {
+    /// Every kind, in the order a menu offers them.
+    pub const ALL: [Self; 3] = [Self::Html, Self::Pdf, Self::Png];
+
+    /// The word a kind goes by on the wire and in a file name.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Html => "html",
+            Self::Pdf => "pdf",
+            Self::Png => "png",
+        }
+    }
+
+    /// The kind a wire word names — exactly `html`, `pdf` or `png`.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.word() == word)
+    }
+
+    /// The kind an extension names, in any case; `htm` is HTML.
+    #[must_use]
+    pub fn from_extension(extension: &str) -> Option<Self> {
+        match extension.to_ascii_lowercase().as_str() {
+            "html" | "htm" => Some(Self::Html),
+            "pdf" => Some(Self::Pdf),
+            "png" => Some(Self::Png),
+            _ => None,
+        }
+    }
+
+    /// The kind `--out` asks for, or the refusal that lists what an export
+    /// writes: another extension, none, and an empty one are all refused.
+    pub fn of_path(path: &Path) -> Result<Self, String> {
+        let extension = path.extension().and_then(|extension| extension.to_str());
+        extension.and_then(Self::from_extension).ok_or_else(|| {
+            let got = match extension {
+                Some(extension) if !extension.is_empty() => format!(".{extension}"),
+                _ => "no extension".to_string(),
+            };
+            format!("artifact export needs --out ending in {EXPORT_EXTENSIONS} (got {got})")
+        })
+    }
+
+    /// Whether the kind is drawn by a page renderer rather than copied.
+    #[must_use]
+    pub const fn is_drawn(self) -> bool {
+        !matches!(self, Self::Html)
+    }
+}
+
+/// What a page renderer hands back for one page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Rendered {
+    pub bytes: Vec<u8>,
+    /// The pages of a PDF, when the renderer could count them.
+    pub pages: Option<u32>,
+    /// The pixel size of a picture.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// A picture cut at the renderer's height cap: the page was taller.
+    pub truncated: bool,
+}
+
+/// The seam between an export and the window's WebKit. The core writes the
+/// files and names their kinds; a renderer draws one page. It keeps the core
+/// free of any WebKit, lets the headless catalog say plainly that it draws
+/// nothing, and lets a test stand a fake in.
+pub trait PageRenderer: Send + Sync {
+    /// Whether this renderer can draw `format` at all.
+    fn can_render(&self, format: ExportFormat) -> bool;
+
+    /// Draw the page at `page` — the absolute path of one immutable version's
+    /// HTML — as `format`.
+    ///
+    /// # Errors
+    /// Why the page could not be drawn.
+    fn render(&self, page: &Path, format: ExportFormat) -> Result<Rendered, String>;
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Serialize)]
 pub struct ExportedFile {
     pub id: String,
     pub version: u32,
     pub path: PathBuf,
     pub bytes: u64,
+    pub format: ExportFormat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pages: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub truncated: bool,
+}
+
+/// One export made ready to write: the bytes of the file, before a name is
+/// chosen for it. The window's export into a folder draws the page once and then
+/// looks for a free name; the door names its file at once.
+#[derive(Debug)]
+pub struct PreparedExport {
+    id: String,
+    version: u32,
+    format: ExportFormat,
+    rendered: Rendered,
 }
 
 pub fn validate_export(input: &ExportInput) -> Result<(), String> {
@@ -90,19 +207,43 @@ pub fn validate_export(input: &ExportInput) -> Result<(), String> {
     if !input.out.is_absolute() {
         return Err("artifact export needs an absolute output path".into());
     }
+    ExportFormat::of_path(&input.out)?;
     Ok(())
 }
 
-/// Export exactly one immutable publication snapshot. Never truncate an
-/// existing destination (including store files or a symlink into the store).
-pub fn export(root: &Path, input: &ExportInput) -> Result<ExportedFile, String> {
-    validate_export(input)?;
-    let meta = read_meta(root, &input.id)?;
-    let version = input.version.unwrap_or(meta.version);
-    let kept: Vec<u32> = versions(root, &input.id)
-        .into_iter()
-        .map(|kept| kept.n)
-        .collect();
+fn no_renderer(format: ExportFormat) -> String {
+    format!(
+        "artifact export to .{} needs the window's WebKit page renderer, and this build has none",
+        format.word()
+    )
+}
+
+/// Make ready the bytes of one immutable publication snapshot in `format`: the
+/// version's own HTML, or the page drawn by `renderer`. A drawn format with no
+/// renderer that can draw it is refused, and nothing is guessed.
+pub fn prepare_export(
+    root: &Path,
+    id: &str,
+    version: Option<u32>,
+    format: ExportFormat,
+    renderer: Option<&dyn PageRenderer>,
+) -> Result<PreparedExport, String> {
+    validate_id(id)?;
+    if version == Some(0) {
+        return Err("artifact version must be positive".into());
+    }
+    let renderer = if format.is_drawn() {
+        Some(
+            renderer
+                .filter(|one| one.can_render(format))
+                .ok_or_else(|| no_renderer(format))?,
+        )
+    } else {
+        None
+    };
+    let meta = read_meta(root, id)?;
+    let version = version.unwrap_or(meta.version);
+    let kept: Vec<u32> = versions(root, id).into_iter().map(|kept| kept.n).collect();
     if !kept.contains(&version) {
         let kept = kept
             .iter()
@@ -110,25 +251,77 @@ pub fn export(root: &Path, input: &ExportInput) -> Result<ExportedFile, String> 
             .collect::<Vec<_>>()
             .join(", ");
         return Err(format!(
-            "artifact {} version {version} is not kept (kept: {kept})",
-            input.id
+            "artifact {id} version {version} is not kept (kept: {kept})"
         ));
     }
-    let mut artifact = meta.artifact(Origin::default());
-    artifact.version = Some(version);
-    let html = read_page(root, &artifact)?;
-    let mut file = std::fs::File::create_new(&input.out).map_err(|e| e.to_string())?;
-    if let Err(error) = file.write_all(html.as_bytes()) {
+    let rendered = match renderer {
+        None => {
+            let mut artifact = meta.artifact(Origin::default());
+            artifact.version = Some(version);
+            Rendered {
+                bytes: read_page(root, &artifact)?.into_bytes(),
+                ..Rendered::default()
+            }
+        }
+        Some(renderer) => {
+            let rendered = renderer.render(&version_file(root, id, version), format)?;
+            if rendered.bytes.is_empty() {
+                return Err(format!("the renderer drew an empty .{}", format.word()));
+            }
+            rendered
+        }
+    };
+    Ok(PreparedExport {
+        id: id.to_string(),
+        version,
+        format,
+        rendered,
+    })
+}
+
+/// Write a prepared export to `out`, a file that must not exist yet. Never
+/// truncate an existing destination (including store files or a symlink into
+/// the store); a write that fails leaves no half file behind.
+pub fn write_export(out: &Path, prepared: &PreparedExport) -> Result<ExportedFile, String> {
+    let bytes = &prepared.rendered.bytes;
+    let mut file = std::fs::File::create_new(out).map_err(|e| e.to_string())?;
+    if let Err(error) = file.write_all(bytes) {
         drop(file);
-        let _ = std::fs::remove_file(&input.out);
+        let _ = std::fs::remove_file(out);
         return Err(error.to_string());
     }
     Ok(ExportedFile {
-        id: input.id.clone(),
-        version,
-        path: input.out.clone(),
-        bytes: html.len() as u64,
+        id: prepared.id.clone(),
+        version: prepared.version,
+        path: out.to_path_buf(),
+        bytes: bytes.len() as u64,
+        format: prepared.format,
+        pages: prepared.rendered.pages,
+        width: prepared.rendered.width,
+        height: prepared.rendered.height,
+        truncated: prepared.rendered.truncated,
     })
+}
+
+/// Export exactly one immutable publication snapshot, as the kind `--out`'s
+/// extension names: `.html` and `.htm` copy the version's bytes, `.pdf` and
+/// `.png` are drawn by `renderer`. Any other extension is refused with the
+/// list of kinds.
+pub fn export_with(
+    root: &Path,
+    input: &ExportInput,
+    renderer: Option<&dyn PageRenderer>,
+) -> Result<ExportedFile, String> {
+    validate_export(input)?;
+    let format = ExportFormat::of_path(&input.out)?;
+    let prepared = prepare_export(root, &input.id, input.version, format, renderer)?;
+    write_export(&input.out, &prepared)
+}
+
+/// [`export_with`] with no renderer: the copy, and a plain refusal for a kind
+/// that has to be drawn — the headless catalog's export.
+pub fn export(root: &Path, input: &ExportInput) -> Result<ExportedFile, String> {
+    export_with(root, input, None)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -446,14 +639,19 @@ pub fn read_page(root: &Path, artifact: &Artifact) -> Result<String, String> {
     }
     let path = artifact.version.map_or_else(
         || artifact.path.clone(),
-        |version| {
-            root.join(PAGES_DIR)
-                .join(&artifact.id)
-                .join(format!("v{version}"))
-                .join("index.html")
-        },
+        |version| version_file(root, &artifact.id, version),
     );
     read_bounded(&path, ARTIFACT_MAX_BYTES + ARTIFACT_TITLE_SCAN_BYTES as u64)
+}
+
+/// The immutable file of one kept version: where a copy reads it from and a
+/// renderer loads it.
+#[must_use]
+pub fn version_file(root: &Path, id: &str, version: u32) -> PathBuf {
+    root.join(PAGES_DIR)
+        .join(id)
+        .join(format!("v{version}"))
+        .join("index.html")
 }
 
 fn validate_id(id: &str) -> Result<(), String> {
@@ -961,6 +1159,262 @@ mod tests {
             .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(std::fs::read(&out).unwrap(), snapshot, "{name}");
         }
+    }
+
+    /// A renderer with a fixed answer that remembers what it was asked — the
+    /// seam's stand-in, since a unit test cannot start WebKit.
+    struct Fake {
+        can: bool,
+        answer: Result<Rendered, String>,
+        asked: std::sync::Mutex<Vec<(PathBuf, ExportFormat)>>,
+    }
+
+    impl Fake {
+        fn answering(answer: Result<Rendered, String>) -> Self {
+            Self {
+                can: true,
+                answer,
+                asked: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn drawing(bytes: &[u8]) -> Self {
+            Self::answering(Ok(Rendered {
+                bytes: bytes.to_vec(),
+                pages: Some(2),
+                ..Rendered::default()
+            }))
+        }
+
+        fn asked(&self) -> Vec<(PathBuf, ExportFormat)> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    impl PageRenderer for Fake {
+        fn can_render(&self, _: ExportFormat) -> bool {
+            self.can
+        }
+
+        fn render(&self, page: &Path, format: ExportFormat) -> Result<Rendered, String> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((page.to_path_buf(), format));
+            self.answer.clone()
+        }
+    }
+
+    /// The export names its kind by the extension, asks the renderer for the
+    /// version's own immutable file — not the mutable latest copy — writes what
+    /// it drew byte for byte, and answers the page count and the picture's size.
+    #[test]
+    fn a_drawn_export_asks_the_renderer_for_the_versions_file_and_writes_what_it_drew() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = published_page(dir.path(), "<main>first</main>");
+        std::fs::write(dir.path().join("input.html"), "<main>second</main>").unwrap();
+        publish(
+            dir.path(),
+            &PublishInput {
+                file_path: dir.path().join("input.html"),
+                ..Default::default()
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+
+        let pdf = Fake::drawing(b"%PDF-1.7 drawn");
+        let out = dir.path().join("report.pdf");
+        let done = export_with(
+            dir.path(),
+            &ExportInput {
+                id: first.id.clone(),
+                version: Some(1),
+                out: out.clone(),
+            },
+            Some(&pdf),
+        )
+        .unwrap();
+        assert_eq!(
+            pdf.asked(),
+            vec![(version_file(dir.path(), &first.id, 1), ExportFormat::Pdf)]
+        );
+        assert!(
+            version_file(dir.path(), &first.id, 1).is_file(),
+            "the renderer was pointed at a file that does not exist"
+        );
+        assert_eq!(std::fs::read(&out).unwrap(), b"%PDF-1.7 drawn");
+        assert_eq!(
+            (done.version, done.format, done.pages, done.bytes),
+            (1, ExportFormat::Pdf, Some(2), 14)
+        );
+        let json = serde_json::to_value(&done).unwrap();
+        assert_eq!(json["format"], "pdf");
+        assert_eq!(json["pages"], 2);
+        assert!(
+            json.get("truncated").is_none() && json.get("width").is_none(),
+            "a pdf answered picture fields: {json}"
+        );
+
+        let picture = Fake::answering(Ok(Rendered {
+            bytes: b"\x89PNG drawn".to_vec(),
+            width: Some(2560),
+            height: Some(16384),
+            truncated: true,
+            ..Rendered::default()
+        }));
+        let out = dir.path().join("Picture.PNG");
+        let done = export_with(
+            dir.path(),
+            &ExportInput {
+                id: first.id.clone(),
+                version: None,
+                out: out.clone(),
+            },
+            Some(&picture),
+        )
+        .unwrap();
+        assert_eq!(picture.asked()[0].1, ExportFormat::Png);
+        assert_eq!(
+            picture.asked()[0].0,
+            version_file(dir.path(), &first.id, 2),
+            "no version named asks for the newest kept one"
+        );
+        let json = serde_json::to_value(&done).unwrap();
+        assert_eq!(
+            (
+                json["format"].as_str(),
+                json["width"].as_u64(),
+                json["height"].as_u64()
+            ),
+            (Some("png"), Some(2560), Some(16384))
+        );
+        assert_eq!(json["truncated"], true);
+    }
+
+    /// A drawn export that cannot happen writes nothing: no renderer that can
+    /// draw the kind, a version retention dropped, a renderer that fails or
+    /// draws nothing, and a name already taken (the file there is left as it
+    /// was).
+    #[test]
+    fn a_drawn_export_that_cannot_happen_writes_nothing_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = published_page(dir.path(), "<main>hello</main>");
+        let export_as = |name: &str, version: Option<u32>, renderer: &Fake| {
+            let out = dir.path().join(name);
+            let answer = export_with(
+                dir.path(),
+                &ExportInput {
+                    id: meta.id.clone(),
+                    version,
+                    out: out.clone(),
+                },
+                Some(renderer),
+            );
+            (answer, out)
+        };
+
+        let mut cannot = Fake::drawing(b"%PDF-");
+        cannot.can = false;
+        let (refused, out) = export_as("a.pdf", None, &cannot);
+        assert!(refused.unwrap_err().contains("WebKit"));
+        assert!(
+            cannot.asked().is_empty(),
+            "a renderer that cannot was asked"
+        );
+        assert!(!out.exists());
+
+        let fine = Fake::drawing(b"%PDF-");
+        let (dropped, out) = export_as("b.pdf", Some(9), &fine);
+        assert!(dropped.unwrap_err().contains("version 9 is not kept"));
+        assert!(fine.asked().is_empty(), "a version not kept was drawn");
+        assert!(!out.exists());
+
+        let failing = Fake::answering(Err("the page never settled".into()));
+        let (failed, out) = export_as("c.png", None, &failing);
+        assert_eq!(failed.unwrap_err(), "the page never settled");
+        assert!(!out.exists());
+
+        let empty = Fake::answering(Ok(Rendered::default()));
+        let (nothing, out) = export_as("d.pdf", None, &empty);
+        assert!(nothing.unwrap_err().contains("empty .pdf"));
+        assert!(!out.exists());
+
+        let taken = dir.path().join("e.pdf");
+        std::fs::write(&taken, "the person's own file").unwrap();
+        let (clash, _) = export_as("e.pdf", None, &fine);
+        assert!(clash.is_err());
+        assert_eq!(
+            std::fs::read_to_string(&taken).unwrap(),
+            "the person's own file"
+        );
+    }
+
+    /// A copy never asks the renderer, whatever renderer stands behind the call.
+    #[test]
+    fn an_html_export_never_asks_the_renderer() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = published_page(dir.path(), "<title>T</title><main>hello</main>");
+        let renderer = Fake::drawing(b"%PDF-");
+        let out = dir.path().join("copy.htm");
+        let done = export_with(
+            dir.path(),
+            &ExportInput {
+                id: meta.id.clone(),
+                version: None,
+                out: out.clone(),
+            },
+            Some(&renderer),
+        )
+        .unwrap();
+        assert!(renderer.asked().is_empty());
+        assert_eq!(done.format, ExportFormat::Html);
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            std::fs::read(meta.path()).unwrap()
+        );
+        let json = serde_json::to_value(&done).unwrap();
+        assert!(
+            json.get("pages").is_none() && json.get("truncated").is_none(),
+            "{json}"
+        );
+    }
+
+    /// Kinds read from a wire word only exactly, from an extension in any case,
+    /// and a refusal says what it got.
+    #[test]
+    fn export_kinds_read_words_and_extensions_and_refuse_with_what_they_got() {
+        assert_eq!(ExportFormat::from_word("pdf"), Some(ExportFormat::Pdf));
+        for word in ["PDF", "htm", ".pdf", ""] {
+            assert_eq!(ExportFormat::from_word(word), None, "{word:?}");
+        }
+        assert_eq!(
+            ExportFormat::from_extension("HtM"),
+            Some(ExportFormat::Html)
+        );
+        assert_eq!(ExportFormat::from_extension("Png"), Some(ExportFormat::Png));
+        assert_eq!(
+            ExportFormat::ALL.map(ExportFormat::word),
+            ["html", "pdf", "png"]
+        );
+        assert!(!ExportFormat::Html.is_drawn());
+        assert!(ExportFormat::Pdf.is_drawn() && ExportFormat::Png.is_drawn());
+        let error = |name: &str| ExportFormat::of_path(Path::new(name)).unwrap_err();
+        assert!(
+            error("/x/notes.txt").ends_with("(got .txt)"),
+            "{}",
+            error("/x/notes.txt")
+        );
+        assert!(error("/x/noext").ends_with("(got no extension)"));
+        assert!(error("/x/trailing.").ends_with("(got no extension)"));
+        assert!(
+            error("/x/.pdf").ends_with("(got no extension)"),
+            "a dotfile has no extension"
+        );
+        assert_eq!(
+            ExportFormat::of_path(Path::new("/x/a.b.PDF")),
+            Ok(ExportFormat::Pdf)
+        );
     }
 
     #[test]
