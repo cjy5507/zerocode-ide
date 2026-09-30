@@ -35865,6 +35865,13 @@ mod tests {
             "the reseat's continuation left the door that waits for its program to \
              hand over, or a dispatch to a running pane began waiting for one:\n{continuing}"
         );
+        // A continuation the pane took files the window's one receipt line,
+        // so a person reading the log sees the words were taken without an
+        // Enter of theirs (t-18353).
+        assert!(
+            continuing.contains("restart_nudge_runtime::note_continuation_taken("),
+            "a continuation the pane took no longer files its receipt line:\n{continuing}"
+        );
         // The caller that blocks on the delivery budgets the door it
         // registered, settle included, or it gives up on a wait still open.
         assert!(

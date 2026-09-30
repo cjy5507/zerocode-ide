@@ -902,6 +902,12 @@ pub(crate) enum PromptReadiness {
     /// [`Self::RestingBesideADraft`] refuses, this refuses too, and it also
     /// yields to any hand that reached the line since the carried hand
     /// count, read before those words were placed.
+    ///
+    /// It waits for rest and not for a start-up's settle (t-18353), whatever
+    /// the program: the words it presses Enter for were placed behind the
+    /// settle their own door asked, some ten seconds before, so the program
+    /// is past its hand-over and the Enter is due as soon as its composer
+    /// rests.
     EnterAgain(Option<u64>),
 }
 
@@ -913,12 +919,10 @@ impl PromptReadiness {
             // Rest keeps the same glyph as a mounting wait and adds the two
             // signs a running composer actually gives: a cursor shown again,
             // or the stream settling into silence.
-            Self::Resting | Self::RestingBesideADraft => Self::rest(agent),
+            Self::Resting | Self::RestingBesideADraft | Self::EnterAgain(_) => Self::rest(agent),
             // A program just started is given its start-up to hand over
-            // first, where its row says it has one (t-18353), and the Enter
-            // pressed again for words placed at it waits behind the same
-            // door: an Enter inside the hand-over is ignored like the words.
-            Self::MountingBesideADraft | Self::EnterAgain(_) => {
+            // first, where its row says it has one (t-18353).
+            Self::MountingBesideADraft => {
                 start_settle_for(agent).map_or_else(|| Self::rest(agent), ReadySignal::Settled)
             }
         }

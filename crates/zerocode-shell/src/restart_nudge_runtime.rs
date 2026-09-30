@@ -2137,18 +2137,20 @@ mod tests {
         None
     }
 
-    /// A restored worker's continuation, and the Enter pressed again for it,
-    /// are typed at a program the window started moments ago, and wait
-    /// behind the door its row names for that (t-18353) — every catalog row
-    /// walked.
+    /// A restored worker's continuation is typed at a program the window
+    /// started moments ago, and waits behind the door its row names for that
+    /// (t-18353) — every catalog row walked. The Enter pressed again for it
+    /// does not: its words were placed behind that door some ten seconds
+    /// before, so it waits for rest, as it always did (t-17037), whatever
+    /// the row.
     ///
     /// Measured on Claude Code 2.1.285: its first frame draws the composer
     /// 30 ms after its handshake, and words placed there are lost, or left
     /// unsent with every Enter after them ignored. The door the reseat used
     /// — a running composer's rest — opens on that first glyph. A row that
     /// says it has such a hand-over (`start_settle_ms`) is typed at only
-    /// after its settle of silence, the words and the Enter alone alike; a
-    /// row that says nothing is typed at exactly as before.
+    /// after its settle; a row that says nothing is typed at exactly as
+    /// before.
     #[test]
     fn a_restored_pane_is_typed_at_only_after_its_row_says_it_has_settled() {
         use crate::cmd::terminal::{PromptReadiness, prompt_delivery_for};
@@ -2165,6 +2167,14 @@ mod tests {
             let running = door(PromptReadiness::RestingBesideADraft, "words");
             let restored = door(PromptReadiness::MountingBesideADraft, "words");
             let enter_again = door(PromptReadiness::EnterAgain(None), "");
+            // The words and the Enter alone both go on the round a running
+            // composer's door opens, so one time answers for both — for
+            // every row: the Enter pressed again never waits out a settle.
+            assert_eq!(
+                enter_again, running,
+                "{}: the Enter pressed again did not wait for rest alone",
+                spec.id
+            );
             match start_settle_for(row) {
                 Some(settle) => {
                     settled.push(spec.id);
@@ -2174,29 +2184,18 @@ mod tests {
                          ({running:?}, settle {settle:?}) — the measurement this test stands on",
                         spec.id
                     );
-                    for (road, at) in [("the words", restored), ("the Enter alone", enter_again)] {
-                        assert!(
-                            at.is_some_and(|at| at >= settle),
-                            "{}: {road} were placed at a program still handing over its \
-                             start-up ({at:?}, settle {settle:?})",
-                            spec.id
-                        );
-                    }
-                }
-                None => {
-                    assert_eq!(
-                        restored, running,
-                        "{}: a row with no hand-over was typed at differently",
-                        spec.id
-                    );
-                    // The words and the Enter alone both go on the round the
-                    // door opens, so one time answers for both.
-                    assert_eq!(
-                        enter_again, running,
-                        "{}: a row with no hand-over had its Enter pressed differently",
+                    assert!(
+                        restored.is_some_and(|at| at >= settle),
+                        "{}: the words were placed at a program still handing over its \
+                         start-up ({restored:?}, settle {settle:?})",
                         spec.id
                     );
                 }
+                None => assert_eq!(
+                    restored, running,
+                    "{}: a row with no hand-over was typed at differently",
+                    spec.id
+                ),
             }
         }
         assert_eq!(

@@ -747,8 +747,9 @@ impl TeamWindow {
     /// [`Self::pasted`] at the readiness the pane's program calls for: a
     /// restored worker's continuation is typed at a program the window
     /// started moments ago, and waits behind the door its row names for that
-    /// (t-18353) — the one door the paste and the Enter pressed again for it
-    /// share, so neither lands in a start-up that has not handed over.
+    /// (t-18353), where its row says it has a hand-over. The Enter pressed
+    /// again for those words waits for rest alone, some ten seconds after
+    /// they were placed.
     fn pasted_at(
         &self,
         term: TermId,

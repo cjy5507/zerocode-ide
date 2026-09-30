@@ -2982,9 +2982,9 @@ pub(super) fn ready_quiet_for(agent: Option<&str>) -> Duration {
 /// typed at it (t-18353): the row's measured start-up hand-over
 /// (`start_settle_ms`), or `None` where its composer takes words as soon as
 /// it is drawn. Kept beside the other readiness readers so every door that
-/// types at a pane started moments ago — a restored worker's continuation,
-/// and the Enter pressed again for it — waits for the same thing, and the
-/// row is the only place a program is said to have a hand-over.
+/// types words at a pane started moments ago — a restored worker's
+/// continuation — waits for the same thing, and the row is the only place a
+/// program is said to have a hand-over.
 pub(super) fn start_settle_for(agent: Option<&str>) -> Option<Duration> {
     agent
         .and_then(zerocode_core::agent_capabilities)
