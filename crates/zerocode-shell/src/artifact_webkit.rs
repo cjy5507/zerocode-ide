@@ -15,7 +15,7 @@ use std::sync::mpsc::Sender;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol as _};
+use objc2::runtime::{AnyObject, Bool, NSObjectProtocol as _};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSPaperOrientation, NSPrintInfo,
@@ -142,8 +142,8 @@ define_class!(
         // The selector `runOperationModalForWindow:delegate:didRunSelector:contextInfo:`
         // calls once the job is over: (operation, success, contextInfo).
         #[unsafe(method(printOperationDidRun:success:contextInfo:))]
-        fn did_run(&self, _operation: &AnyObject, success: bool, _context: *mut c_void) {
-            let _ = self.ivars().tx.send(if success {
+        fn did_run(&self, _operation: &AnyObject, success: Bool, _context: *mut c_void) {
+            let _ = self.ivars().tx.send(if success.as_bool() {
                 Ok(())
             } else {
                 Err("인쇄 작업이 실패했습니다".to_string())
