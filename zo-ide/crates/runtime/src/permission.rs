@@ -72,6 +72,25 @@ pub struct PermissionChoice {
     pub decision: PermissionDecision,
 }
 
+/// A choice zo itself puts to the person — not a tool call awaiting approval
+/// (t-17474). The refusal ladder's "switch models?" and "retry without the
+/// images?" are such questions: dressed as a tool permission they read
+/// "Allow safety-classifier decline" with a risk line in the pane, and put
+/// that string as the tool in the window's "Run this tool?" modal.
+///
+/// A request that carries one is shown as a question — its title, its words and
+/// its choices, no tool and no risk line. What the person picks still comes
+/// back as a [`PermissionDecision`], on the road every prompt answers on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptQuestion {
+    /// What is asked, as a stable word (`model_switch`, `declined_images`): the
+    /// key a window picks its own translated title by.
+    pub topic: String,
+    /// The same as a short English title ("Switch models?"): what the pane
+    /// shows, and what a window shows for a topic it has no words for.
+    pub title: String,
+}
+
 /// Neutral per-call permission request.
 ///
 /// Intentionally **does not** borrow Anthropic tool names or schemas.
@@ -79,7 +98,8 @@ pub struct PermissionChoice {
 /// to the prompter. (code-rules R1)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionRequest {
-    /// Logical tool name (e.g. `"bash"`, `"write_file"`).
+    /// Logical tool name (e.g. `"bash"`, `"write_file"`). Empty when
+    /// [`Self::question`] is set: a question names no tool.
     pub tool: String,
     /// Short display-safe command or path summary. Never the full tool payload.
     pub input_summary: String,
@@ -89,11 +109,21 @@ pub struct PermissionRequest {
     pub reasoning: String,
     /// Legal user choices (in UI display order).
     pub choices: Vec<PermissionChoice>,
-    /// Relative risk classification.
+    /// Relative risk classification. Says nothing for a question.
     pub risk_level: RiskLevel,
+    /// Set when this is a question zo puts to the person itself rather than a
+    /// tool call awaiting approval (t-17474).
+    pub question: Option<PromptQuestion>,
 }
 
 impl PermissionRequest {
+    /// The risk-and-unblock line a tool prompt shows under its name; `None`
+    /// for a question, which has nothing to unblock and no risk.
+    #[must_use]
+    pub fn prompt_audit_hint(&self) -> Option<String> {
+        self.question.is_none().then(|| self.audit_hint())
+    }
+
     #[must_use]
     pub fn audit_hint(&self) -> String {
         let allow_choices = self
@@ -318,7 +348,7 @@ impl PermissionPrompter for HeadlessPermissionPrompter {
 mod tests {
     use super::{
         HeadlessDecision, HeadlessPermissionPrompter, PermissionChoice, PermissionDecision,
-        PermissionPrompter, PermissionRequest, RiskLevel,
+        PermissionPrompter, PermissionRequest, PromptQuestion, RiskLevel,
     };
 
     fn request() -> PermissionRequest {
@@ -329,6 +359,7 @@ mod tests {
             reasoning: "run a command".to_string(),
             choices: Vec::new(),
             risk_level: RiskLevel::Medium,
+            question: None,
         }
     }
 
@@ -371,11 +402,34 @@ mod tests {
                 },
             ],
             risk_level: RiskLevel::High,
+            question: None,
         };
         let hint = request.audit_hint();
         assert!(hint.contains("risk: high"));
         assert!(hint.contains("[y] Allow"));
         assert!(hint.contains("[o] Allow once"));
         assert!(!hint.contains("[n] Deny"));
+        assert_eq!(request.prompt_audit_hint(), Some(hint), "a tool prompt carries it");
+    }
+
+    #[test]
+    fn a_question_carries_no_risk_line() {
+        let request = PermissionRequest {
+            tool: String::new(),
+            input_summary: "a → b".to_string(),
+            input_hash: "abc123".to_string(),
+            reasoning: "Switch?".to_string(),
+            choices: vec![PermissionChoice {
+                key: 'y',
+                label: "Switch".to_string(),
+                decision: PermissionDecision::Allow,
+            }],
+            risk_level: RiskLevel::Low,
+            question: Some(PromptQuestion {
+                topic: "model_switch".to_string(),
+                title: "Switch models?".to_string(),
+            }),
+        };
+        assert_eq!(request.prompt_audit_hint(), None);
     }
 }

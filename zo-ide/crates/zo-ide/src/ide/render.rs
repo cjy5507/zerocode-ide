@@ -462,7 +462,16 @@ impl<W: Write> Renderer<W> {
                 self.usage_total = Some(cumulative.total_tokens_u64());
             }
             RenderBlock::PermissionPrompt(prompt) => {
-                self.parked_line(&sanitize_inline(&prompt.tool_name), PERMISSION_KEYS);
+                match &prompt.question {
+                    // A question zo puts to the person names no tool and does
+                    // not answer to the permission vocabulary (t-17474): its
+                    // title, and the keys its own choices are answered by.
+                    Some(question) => {
+                        let keys = question_choice_keys(&prompt.choices);
+                        self.parked_line(&sanitize_inline(&question.title), &keys);
+                    }
+                    None => self.parked_line(&sanitize_inline(&prompt.tool_name), PERMISSION_KEYS),
+                }
                 return Some(PendingPrompt::Permission(prompt));
             }
             RenderBlock::UserQuestionPrompt(prompt) => {
@@ -550,10 +559,7 @@ impl<W: Write> Renderer<W> {
             // 무엇에 막혔는지 봐야 하고, 호출자는 여전히 그 요청을 처리해야
             // 한다(비대화형이면 거절로 앉는다).
             RenderBlock::PermissionPrompt(prompt) => {
-                self.json_line(&serde_json::json!({
-                    "type": "permission_request",
-                    "tool": prompt.tool_name,
-                }));
+                self.json_line(&permission_request_line(&prompt));
                 return Some(PendingPrompt::Permission(prompt));
             }
             RenderBlock::UserQuestionPrompt(prompt) => {
@@ -995,6 +1001,33 @@ impl<W: Write> Renderer<W> {
 /// 권한 프롬프트의 키 목록. 어휘는 zo TUI 의 `key_to_permission_decision` 과
 /// 같다.
 const PERMISSION_KEYS: &str = "[y]once [a]always [n]deny";
+
+/// JSON 로드가 권한 프롬프트 하나에 내는 줄. 도구 프롬프트는 이름만 싣고,
+/// zo 가 스스로 던지는 질문은 이벤트 채널의 프레임과 같은 세 키(`kind`·`topic`·
+/// `title`)를 더한다(t-17474).
+fn permission_request_line(prompt: &runtime::message_stream::PermissionPrompt) -> serde_json::Value {
+    let mut line = serde_json::json!({
+        "type": "permission_request",
+        "tool": prompt.tool_name,
+    });
+    if let (Some(question), Some(object)) = (&prompt.question, line.as_object_mut()) {
+        object.insert("kind".to_string(), serde_json::json!("question"));
+        object.insert("topic".to_string(), serde_json::json!(question.topic));
+        object.insert("title".to_string(), serde_json::json!(question.title));
+    }
+    line
+}
+
+/// 사람에게 던지는 질문(도구가 아닌 것)의 키 목록 — 그 질문의 선택지가 실제로
+/// 받는 글자와 라벨이다. 어휘는 [`crate::ide::prompt::parse_permission_answer`]
+/// 가 맞추는 `choice.key` 와 같다(t-17474).
+fn question_choice_keys(choices: &[runtime::message_stream::PermissionChoice]) -> String {
+    choices
+        .iter()
+        .map(|choice| format!("[{}] {}", choice.key, sanitize_inline(&choice.label)))
+        .collect::<Vec<_>>()
+        .join("  ")
+}
 
 /// 질문 프롬프트의 키 목록. 선택지가 없으면 자유 입력만 받는다. 어휘는
 /// `crate::ide::prompt::parse_question_answer` 가 실제로 받는 것과 같다 —

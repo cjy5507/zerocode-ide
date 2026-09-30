@@ -52,7 +52,7 @@ def self_test_evidence(task, root):
     if task == 'Q3':
         write(root, 'resume.json', {'interrupted':True,'resumed':True,'session_id':'self-test','original_prompt':'BASELINE_CONTINUITY', 'resumed_messages':[{'role':'user','content':'BASELINE_CONTINUITY'}]})
     if task == 'Q3':
-        write(root, 'window-resume.json', {'id':'self-test','interrupted':True,'restarted':True,'calm_interrupted':False})
+        write(root, 'window-resume.json', {'id':'self-test','interrupted':True,'restarted':True,'sent_mark':False})
     if task == 'Q5':
         write(root, 'browser.json', {'dom':'Build verified','command':'zerocode-browser read'})
         # Self-test uses a valid tiny PNG; scenario evidence comes from Chromium.
@@ -93,7 +93,7 @@ def verify(task, root):
             data = json.loads((root/'evidence/resume.json').read_text())
             if data['interrupted'] is not True or data['resumed'] is not True: return False
             restore = json.loads((root/'evidence/window-resume.json').read_text())
-            if restore['id'] != data['session_id'] or restore['interrupted'] is not True or restore['restarted'] is not True or restore['calm_interrupted'] is not False: return False
+            if restore['id'] != data['session_id'] or restore['interrupted'] is not True or restore['restarted'] is not True or restore['sent_mark'] is not False: return False
             if not data['original_prompt'] or not any(m['role']=='user' and data['original_prompt'] in json.dumps(m['content']) for m in data['resumed_messages']): return False
         if task == 'Q4':
             if git(main,'status','--porcelain') or git(main,'rev-parse','HEAD') != (root/'base-sha').read_text(): return False

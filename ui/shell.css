@@ -16117,8 +16117,9 @@ button.helper-sib:hover {
 
 .helper-foot-actions {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
   flex-wrap: wrap;
+  max-width: 100%;
   align-items: center;
   gap: var(--space-2);
 }
@@ -16144,7 +16145,37 @@ button.helper-sib:hover {
   background: var(--chat-pill-bg);
 }
 
-.worker-view :is(.helper-crumb-back, .helper-sib, .helper-brief-more, .helper-foot-speak):focus-visible {
+/* Stopping one helper: the same pill in the halt's ink, the one destructive
+ * door on this page. While its answer is out it takes no press (the page keeps
+ * its focus on it, so it is marked, not disabled). */
+.helper-foot-stop {
+  flex: none;
+  max-width: 100%;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--signal-halt) 55%, transparent);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--signal-halt-ink);
+  font: inherit;
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+
+.helper-foot-stop:hover:not(.is-busy) {
+  border-color: var(--signal-halt);
+  background: color-mix(in srgb, var(--signal-halt) 10%, transparent);
+}
+
+.helper-foot-stop.is-busy {
+  cursor: default;
+}
+
+.worker-view :is(.helper-crumb-back, .helper-sib, .helper-brief-more, .helper-foot-speak, .helper-foot-stop):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -16185,7 +16216,8 @@ button.helper-sib:hover {
   .helper-crumb-back,
   .helper-sib,
   .helper-brief-more,
-  .helper-foot-speak {
+  .helper-foot-speak,
+  .helper-foot-stop {
     transition: none;
   }
 
