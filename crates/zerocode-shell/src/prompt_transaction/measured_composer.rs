@@ -449,17 +449,29 @@ fn the_model_answers_what_the_pty_answered() {
 
 /// The words as one whole frame at a composer that stands, in one write —
 /// what the paste road hands over once the readiness door has opened: the
-/// words arrive, nothing else does, and the pasteboard is never read nor
-/// changed. (A frame split by the start-up hand-over or by the reader's
+/// words arrive, nothing else does, and the person's picture is never read
+/// nor attached. (A frame split by the start-up hand-over or by the reader's
 /// quiet does read the picture — `the_model_answers_what_the_pty_answered`
 /// says so — which is why the door must open only for a standing composer:
-/// t-18353 for the reseat road's door.)
-fn the_words_arrive_whole(bytes: &[u8], words: &str, road: &str) {
+/// t-18353 for the reseat road's door.) What a paste has always made the
+/// composer do is left to it: a pasted line ending in a picture file's
+/// relative name makes it look at the clipboard's FILE PATH to see whether
+/// that file is meant — a read of a path, never of the picture, and the
+/// paste's own rule since before t-17274; `WORDS` ends in one such line and
+/// the caller pins that read by count.
+fn the_words_arrive_whole(bytes: &[u8], words: &str, road: &str) -> Pasteboard {
     let composer = handed_over_at(bytes, 0);
     assert_eq!(
-        composer.pasteboard,
-        Pasteboard::holding(PICTURE),
-        "the composer read the pasteboard ({road}: {bytes:?})"
+        composer.pasteboard.picture_reads, 0,
+        "the composer read the person's picture ({road}: {bytes:?})"
+    );
+    assert_eq!(
+        composer.pictures, 0,
+        "the person's picture was attached ({road}: {bytes:?})"
+    );
+    assert_eq!(
+        composer.pasteboard.picture, PICTURE,
+        "the pasteboard was changed ({road})"
     );
     assert!(!composer.ended, "the program was ended ({road})");
     assert_eq!(
@@ -467,6 +479,7 @@ fn the_words_arrive_whole(bytes: &[u8], words: &str, road: &str) {
         letters(words),
         "not the words, or not only them ({road}: {bytes:?})"
     );
+    composer.pasteboard
 }
 
 /// The measured row, every road that hands its composer words: at a
@@ -491,7 +504,15 @@ fn every_road_hands_the_measured_composer_its_words_and_never_its_pasteboard() {
             None,
             start,
         );
-        the_words_arrive_whole(&written(delivery, start), WORDS, &format!("{readiness:?}"));
+        let board =
+            the_words_arrive_whole(&written(delivery, start), WORDS, &format!("{readiness:?}"));
+        // The one read a paste has always made: `WORDS` ends in a line naming
+        // a picture file, and the composer looked at the clipboard's file path
+        // once (the path, not the picture) — the paste's own rule, unchanged.
+        assert_eq!(
+            board.file_reads, 1,
+            "{readiness:?}: the file-path look of a pasted picture name"
+        );
     }
     let enter = crate::cmd::terminal::prompt_delivery_for(
         String::new(),
