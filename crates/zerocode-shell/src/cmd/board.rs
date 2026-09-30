@@ -1850,60 +1850,15 @@ pub(crate) fn delete_untitled_markdown(
     Ok(answer)
 }
 
-/// 클립보드에서 온 이미지를 임시 파일로 앉힌다 — 터미널에 붙는 것은 그
-/// 경로(글자)뿐이고, 실행되는 것은 없다(Orca의 "Image in clipboard ·
-/// ctrl+v to paste" 계약). 파일명에 공백이 없어 따옴표도 필요 없다.
-///
-/// The picture arrives as the request's RAW body rather than as base64 in a
-/// JSON field, and the difference is what a refusal costs. Base64 is a third
-/// again in bytes and a second full copy to decode, and both were spent before
-/// anybody asked how big the picture was: an oversized screenshot travelled as
-/// a string half again its size, was decoded whole, and only then refused.
-/// Here the size is read where the bytes already lie and the write borrows
-/// them, so a picture past the ceiling costs nothing but the arrival, and one
-/// under it is never copied at all.
-///
-/// The format rides a header because a raw body has no room for a second
-/// field. An absent or unknown one is a PNG — the same reading the JSON road
-/// gave an absent `kind`, and the format every clipboard on this platform
-/// offers.
-#[tauri::command(async)]
-pub(crate) fn save_pasted_image(
-    webview: tauri::Webview,
-    request: tauri::ipc::Request<'_>,
-) -> Result<String, String> {
-    from_the_main_webview(&webview)?;
-    // A JSON body here is a caller that did not get the memo, not a picture
-    // to be salvaged: decoding one would put back the copy this road exists
-    // to remove.
-    let tauri::ipc::InvokeBody::Raw(raw) = request.body() else {
-        return Err("붙여넣은 이미지는 원시 바이트로 보내야 합니다".to_string());
-    };
-    // Before the write, and before anything is copied. `seat_pasted_image`
-    // asks again for the clipboard road, which has no request to ask of.
-    if raw.len() > MAX_PASTED_IMAGE_BYTES {
-        return Err("이미지가 너무 큽니다 (32MB 초과)".to_string());
-    }
-    let ext = match request
-        .headers()
-        .get("x-image-kind")
-        .and_then(|kind| kind.to_str().ok())
-    {
-        Some("image/jpeg") => "jpg",
-        Some("image/gif") => "gif",
-        Some("image/webp") => "webp",
-        Some("image/tiff") => "tiff",
-        _ => "png",
-    };
-    seat_pasted_image(raw, ext)
-}
-
 /// A pasted image larger than this is refused rather than seated: the file
 /// would only be read back by an agent whose own image limit is far lower.
 const MAX_PASTED_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Seat image bytes as a temp file and answer its path — the one writer
-/// behind both roads a pasted picture takes into a terminal.
+/// behind a pasted picture (the clipboard's, read on the command's own thread:
+/// the window's `paste` event no longer carries bytes, t-19409). 파일명에 공백이
+/// 없어 따옴표도 필요 없고, 터미널에 붙는 것은 그 경로(글자)뿐이며 실행되는
+/// 것은 없다(Orca의 "Image in clipboard · ctrl+v to paste" 계약).
 fn seat_pasted_image(raw: &[u8], ext: &str) -> Result<String, String> {
     if raw.is_empty() {
         return Err("클립보드의 이미지가 비어 있습니다".to_string());
@@ -1923,13 +1878,14 @@ fn seat_pasted_image(raw: &[u8], ext: &str) -> Result<String, String> {
 }
 
 /// The picture on the clipboard, seated the way a pasted one is
-/// ([`save_pasted_image`]), or `None` when the clipboard holds no picture.
+/// ([`seat_pasted_image`]), or `None` when the clipboard holds no picture.
 ///
-/// The `paste` event road reads the image the webview was handed. The
-/// keyboard road — ⌘V with the focus on the body, which is where a click or
-/// a drag in a pane leaves it — asks the clipboard itself, and it asked for
-/// text alone: a screenshot pasted there went nowhere ("복붙도 안돼",
-/// 2026-09-03). This is that road's picture. macOS hands over the PNG the
+/// Every paste road asks for its picture here — the window's `paste` event
+/// never reads `clipboardData`, because WebKit serves that read on the UI
+/// process's main thread and a slow pasteboard owner would stop the whole
+/// window (t-19409). ⌘V with the focus on the body, which is where a click or
+/// a drag in a pane leaves it, once asked for text alone: a screenshot pasted
+/// there went nowhere ("복붙도 안돼", 2026-09-03). macOS hands over the PNG the
 /// screenshot tool wrote, or a TIFF re-encoded as PNG by the same bitmap rep
 /// the browser snapshot uses; elsewhere the clipboard plugin offers raw
 /// pixels and this crate carries no encoder, so those platforms keep the

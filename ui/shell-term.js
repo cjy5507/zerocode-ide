@@ -520,7 +520,8 @@ listen("tauri://drag-drop", (event) => {
  * 길의 배경 스레드 명령(clipboardManager.readText, save_clipboard_image)이 한다.
  *
  * 한 번에 하나: 읽는 중의 두 번째 붙여넣기는 두 번 붙이지 않고 버려진다. 주인이
- * 영영 답하지 않아도 창이 붙여넣기를 영영 잃지 않게 대기에는 상한이 있다. */
+ * 영영 답하지 않아도 창이 붙여넣기를 영영 잃지 않게 대기에는 상한이 있고, 상한을
+ * 넘겨 온 답은 버려진다 — 그때쯤 사람은 포기했거나 다시 붙였다. */
 const CLIPBOARD_SLOW_NOTICE_MS = 700;
 const CLIPBOARD_PENDING_MAX_MS = 30_000;
 let clipboardPasteStartedAt = 0;
@@ -535,8 +536,9 @@ async function pasteOnce(run) {
     () => toast(t("clipboard.pasteSlow", "클립보드가 내용을 넘겨주기를 기다리는 중입니다…")),
     CLIPBOARD_SLOW_NOTICE_MS,
   );
+  const stale = () => performance.now() - started >= CLIPBOARD_PENDING_MAX_MS;
   try {
-    return await run();
+    return await run(stale);
   } finally {
     clearTimeout(notice);
     if (clipboardPasteStartedAt === started) clipboardPasteStartedAt = 0;
@@ -547,8 +549,9 @@ async function pasteOnce(run) {
  * `landImage`)는 붙여넣기가 시작될 때 붙잡힌 것이다. 그림 자리가 없는 받는이는
  * 글자만 받는다. */
 async function pasteClipboardVia(landText, landImage) {
-  return pasteOnce(async () => {
+  return pasteOnce(async (stale) => {
     const text = await clipboardText.read({ quiet: true });
+    if (stale()) return false;
     if (text) return landText(text);
     // No words — or a clipboard the text road could not read at all, which is
     // what a clipboard holding only a picture looks like to it. The `paste`
@@ -557,6 +560,7 @@ async function pasteClipboardVia(landText, landImage) {
     // same temp file the old event road wrote.
     if (landImage) {
       const path = await invoke("save_clipboard_image").catch(() => null);
+      if (stale()) return false;
       if (typeof path === "string" && path.length > 0) return landImage(path);
     }
     if (text === null) showError(t("clipboard.readFailed", "클립보드의 텍스트를 읽지 못했습니다."));
