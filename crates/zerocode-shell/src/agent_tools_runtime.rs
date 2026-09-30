@@ -1539,7 +1539,7 @@ impl agent_teams::Host for TeamWindow {
         let Some(outcome) = self.pasted_at(
             term,
             text,
-            crate::cmd::terminal::PromptReadiness::RestingBesideADraft,
+            crate::cmd::terminal::PromptReadiness::MountingBesideADraft,
         ) else {
             return false;
         };

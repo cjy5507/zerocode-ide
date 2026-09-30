@@ -640,12 +640,22 @@ pub(super) fn place_words(
 /// `Delivered` on that report, not on the Enter's write); any other pane's
 /// delivery says nothing about the words being taken, and files no line.
 pub(crate) fn continuation_taken_line(
-    _term: TermId,
-    _agent: &str,
-    _session_id: &str,
-    _elapsed: Duration,
+    term: TermId,
+    agent: &str,
+    session_id: &str,
+    elapsed: Duration,
 ) -> Option<String> {
-    None
+    zerocode_core::agent_capabilities(agent)
+        .is_some_and(|caps| caps.submit_ack != zerocode_core::capabilities::SubmitAck::None)
+        .then(|| {
+            log_line(
+                term,
+                agent,
+                session_id,
+                Some(zerocode_core::NudgeRoad::Composer),
+                Some(elapsed),
+            )
+        })
 }
 
 /// File [`continuation_taken_line`] in the window's log.

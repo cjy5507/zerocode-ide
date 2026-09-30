@@ -426,9 +426,10 @@ impl Readiness {
             // shown again or the stream gone quiet. Its glyph is not asked
             // for — the first frame of a program just started draws it
             // before the hand-over.
-            ReadySignal::Settled(_) => {
-                seen.cursor_shows > shows_at_handshake
-                    || now.duration_since(self.spoke.max(shook_at)) >= self.quiet
+            ReadySignal::Settled(settle) => {
+                now.duration_since(shook_at) >= *settle
+                    && (seen.cursor_shows > shows_at_handshake
+                        || now.duration_since(self.spoke.max(shook_at)) >= self.quiet)
             }
             // Three doors, first one open wins. The glyph and the cursor are
             // edges measured from the handshake like their launch cousins;
