@@ -416,7 +416,7 @@ pub fn char_width(ch: char) -> usize {
 /// 다음 켜는 것 전부), 그 다음 색이 하나라도 바뀌었으면 전경·배경을 한
 /// `SetColors` SGR 로 낸다. 순서가 뒤바뀌면 캡처와 바이트가 어긋난다 —
 /// 부팅 카드 `model:` 줄의 `ESC[2mESC[39;49m` 가 속성-먼저의 증거다.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StyleWriter {
     current: Style,
     palette: Option<TerminalPalette>,
@@ -443,6 +443,41 @@ impl StyleWriter {
             current: Style::new(),
             palette,
         }
+    }
+
+    /// 터미널이 지금 아무 속성도 색도 안 켠 상태라고 이 작성기가 아는가.
+    #[must_use]
+    pub fn is_plain(&self) -> bool {
+        self.current == Style::new()
+    }
+
+    /// `ESC[0m` 이 나갔다 — 터미널은 처음 상태이고, 다음 전이는 거기서 시작한다.
+    pub fn reset(&mut self) {
+        self.current = Style::new();
+    }
+
+    /// 터미널이 지금 켜 둔 (팔레트로 옮긴) 스타일.
+    #[must_use]
+    pub const fn current(&self) -> Style {
+        self.current
+    }
+
+    /// 지금 이대로 공백을 쓰면 빈 칸이 남는가 — 공백에서는 글자색·굵기·희미함·
+    /// 기울임이 안 보이지만 배경·밑줄·취소선은 보이고, 지우기(`ESC[K`)도 지금
+    /// 켜 둔 배경으로 칠한다.
+    #[must_use]
+    pub const fn leaves_blank(&self) -> bool {
+        self.current.bg.is_none() && !self.current.underline && !self.current.strike
+    }
+
+    /// 지금 켜 둔 스타일로 쓴 공백이 `style` 로 쓴 공백과 같아 보이는가. 같으면
+    /// 그 공백을 쓰려고 스타일을 바꿀 필요가 없다.
+    #[must_use]
+    pub fn blank_looks_alike(&self, style: Style) -> bool {
+        let wanted = style.resolved_for(self.palette);
+        self.current.bg == wanted.bg
+            && self.current.underline == wanted.underline
+            && self.current.strike == wanted.strike
     }
 
     /// `style` 로 전이하는 데 필요한 바이트를 `out` 에 붙인다.

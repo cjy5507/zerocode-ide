@@ -1009,19 +1009,6 @@
         <button class="btn" id="computer-permission-recovery-close" type="button" data-i18n="app.close">닫기</button>
       </div>
     </div>
-    <div class="computer-handoff" id="computer-handoff" role="alertdialog" aria-live="assertive" hidden>
-      <p class="computer-handoff-title" data-i18n="computer.handoff.title">사람이 할 차례</p>
-      <p class="computer-handoff-text" id="computer-handoff-text"></p>
-      <span class="computer-handoff-clock" id="computer-handoff-clock"></span>
-      <button class="btn computer-handoff-cancel" id="computer-handoff-cancel" type="button" data-i18n="computer.handoff.cancel">취소</button>
-      <button class="btn computer-handoff-done" id="computer-handoff-done" type="button" data-i18n="computer.handoff.done">다 했어요</button>
-    </div>
-    <div class="computer-confirm" id="computer-confirm" role="alertdialog" aria-live="assertive" hidden>
-      <p class="computer-confirm-text" id="computer-confirm-text"></p>
-      <span class="computer-confirm-clock" id="computer-confirm-clock"></span>
-      <button class="btn computer-confirm-deny" id="computer-confirm-deny" type="button" data-i18n="computer.confirm.deny">거부</button>
-      <button class="btn computer-confirm-allow" id="computer-confirm-allow" type="button" data-i18n="computer.confirm.allow">허용</button>
-    </div>
     <div class="body" id="workbench">
       <!-- The signature: one continuous vertical lane line. -->
 
@@ -8860,20 +8847,6 @@
         </div>
       </section>
     </div>
-    <div class="scrim scrim--top" id="ask-scrim" hidden>
-      <section class="permission" role="dialog" aria-modal="true" aria-labelledby="ask-title">
-        <header>
-          <h2 id="ask-title"></h2>
-        </header>
-        <pre class="perm-cmd" id="ask-body"></pre>
-        <div class="perm-actions">
-          <button class="btn btn--primary" id="ask-yes"></button>
-          <button class="btn" id="ask-no"></button>
-          <button class="btn btn--halt-quiet" id="ask-cancel" data-i18n="app.cancel">취소</button>
-        </div>
-      </section>
-    </div>
-
     <!-- The one question a repository's own code has to answer before it runs
          on this machine. The script is shown IN FULL and scrollable rather than
          summarised, because the whole question is "have you read this" — a
@@ -9770,20 +9743,33 @@
       </section>
     </div>
 
-    <!-- Permission modal (F6): raised by a permission_prompt frame, answered
-         only through permission.respond. There is no auto-answer path. -->
-    <div class="scrim" id="perm-scrim" hidden>
-      <section class="permission" role="dialog" aria-modal="true" aria-labelledby="perm-title">
+    <!-- The ask popup: every question the window puts to the person, one at a
+         time, in the middle of the window. A tool permission, an agent's own
+         question (zo's model switch), Computer Use's confirm and hand-over,
+         and the window's confirms (`askConfirm`) are KINDS of ask that share
+         this frame, this queue and this keyboard; each kind writes its own
+         title and body (`registerAskKind`, shell-term.js). Nothing here
+         answers by itself — every answer goes back by the kind's own road.
+         Last in the body, so it stands above every other dialog. -->
+    <div class="scrim" id="ask-scrim" hidden>
+      <section class="permission ask" role="dialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-why" data-kind="" tabindex="-1">
         <header>
-          <span class="perm-agent" id="perm-agent"></span>
-          <h2 id="perm-title" data-i18n="perm.title">이 도구를 실행할까요?</h2>
+          <span class="perm-agent" id="ask-agent" hidden></span>
+          <h2 id="ask-title"></h2>
         </header>
-        <pre class="perm-cmd" id="perm-cmd"></pre>
-        <p class="perm-why" id="perm-why"></p>
-        <!-- 다른 에이전트가 동시에 물어보면 여기 그 수가 선다. 모달은 가장
-             오래된 질문 하나만 보여주고, 답하면 다음 것이 올라온다. -->
-        <p class="perm-more" id="perm-more" hidden></p>
-        <div class="perm-actions" id="perm-actions"></div>
+        <pre class="perm-cmd" id="ask-body" hidden></pre>
+        <p class="perm-why" id="ask-why" hidden></p>
+        <!-- 시계가 있는 물음(Computer Use)의 남은 시간. 시계가 없는 물음에는 없다. -->
+        <p class="ask-clock" id="ask-clock" hidden></p>
+        <!-- 다른 물음이 동시에 기다리면 여기 그 수가 선다. 팝업은 가장 오래된
+             물음 하나만 보여주고, 답하면 다음 것이 올라온다. -->
+        <p class="perm-more" id="ask-more" hidden></p>
+        <div class="perm-actions" id="ask-choices" hidden></div>
+        <div class="perm-actions" id="ask-confirm-actions">
+          <button class="btn btn--primary" id="ask-yes"></button>
+          <button class="btn" id="ask-no"></button>
+          <button class="btn btn--halt-quiet" id="ask-cancel" data-i18n="app.cancel">취소</button>
+        </div>
       </section>
     </div>
   </body>

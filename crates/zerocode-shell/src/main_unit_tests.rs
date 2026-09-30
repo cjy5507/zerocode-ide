@@ -5926,6 +5926,56 @@ fn agent_screenshots_are_bounded_png_files_not_terminal_bytes() {
     );
 }
 
+/// zo's question reaches the window by two roads (t-17474, t-17514): the popup
+/// stands off the channel's `permission_prompt` frame, and the pane's state
+/// comes off the Notification hook — the one an `AskUserQuestion` uses, with
+/// `notification_type: question`. The hook road must read it as a pane that
+/// needs a person, and never as a tool approval: an approval draws the board's
+/// allow and deny keys, and those keys answer a tool, not a question about
+/// switching models. Only a `PermissionRequest` builds an approval.
+#[test]
+fn a_question_notification_is_a_pane_asking_and_never_a_tool_approval() {
+    let heard = |payload: &str| {
+        let envelope = zerocode_core::HookEnvelope {
+            agent: zerocode_core::AgentKind::Zo,
+            pane_key: "term-3".into(),
+            tab_id: String::new(),
+            launch_token: String::new(),
+            worktree_id: String::new(),
+            env: String::new(),
+            version: "1".into(),
+            hook_event_name: String::new(),
+            payload: payload.into(),
+        };
+        crate::hooks::report_of(&envelope, None).expect("a report")
+    };
+    let question = heard(
+        r#"{"hook_event_name":"Notification","notification_type":"question","message":"question: 모델을 바꿀까요?"}"#,
+    );
+    assert_eq!(
+        question.state,
+        zerocode_core::hook::HookState::NeedsAttention
+    );
+    assert!(
+        question.approval.is_none(),
+        "a question is offered the board's allow and deny keys as though it were a tool"
+    );
+    assert_eq!(
+        question.ask.as_deref(),
+        Some("question: 모델을 바꿀까요?"),
+        "the pane's card does not carry the question's sentence"
+    );
+    // The same words on a tool's own event are the tool's approval, as ever.
+    let tool = heard(
+        r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+    );
+    assert_eq!(tool.state, zerocode_core::hook::HookState::NeedsAttention);
+    assert!(
+        tool.approval.is_some(),
+        "a tool's permission lost its approval"
+    );
+}
+
 /// No label reaches this window as a hardcoded string.
 ///
 /// The narrow gate above proves it for one row. This one proves it for the
@@ -11928,6 +11978,61 @@ fn a_pane_that_refuses_the_reload_does_not_fail_the_switch() {
     });
 
     assert_eq!(taken, 1);
+}
+
+/// The helper page's stop (t-16943): the webview names an agent, never a
+/// method. An agent whose catalog row names no road to stop one helper is
+/// refused before anything goes near a channel.
+#[test]
+fn a_helper_stop_for_an_agent_with_no_road_is_refused_before_any_channel_is_touched() {
+    let roadless: Vec<&str> = zerocode_core::AGENT_SPECS
+        .iter()
+        .map(|spec| spec.id)
+        .filter(|id| zerocode_core::agent::agent_voice(id).helper_stop.is_none())
+        .chain(["not-in-the-catalog"])
+        .collect();
+    assert!(roadless.len() > 1, "the catalog walk found no roadless row");
+    for agent in roadless {
+        let mut called = 0;
+        let answer = cmd::session::stop_helper_through(agent, "s-1", "h-1", |_, _| {
+            called += 1;
+            Ok(serde_json::json!({}))
+        });
+        assert!(answer.is_err(), "{agent}: a stop with no road was not refused");
+        assert_eq!(called, 0, "{agent}: the channel was called");
+    }
+}
+
+/// A row with a road sends that row's method, once, with exactly the session
+/// and the helper's id — and the channel's answer reaches the window as the
+/// channel gave it.
+#[test]
+fn a_helper_stop_carries_the_rows_method_the_session_and_the_helper_and_hands_back_the_answer() {
+    let roads: Vec<(&str, &str)> = zerocode_core::AGENT_SPECS
+        .iter()
+        .filter_map(|spec| Some((spec.id, zerocode_core::agent::agent_voice(spec.id).helper_stop?)))
+        .collect();
+    assert!(!roads.is_empty(), "no catalog row names a road");
+    let reply = serde_json::json!({
+        "status": "failed",
+        "agent_id": "h-7",
+        "record_key": null,
+        "detail": "@auditor: worker gone",
+        "unknown_later_field": [1, 2],
+    });
+    for (agent, road) in roads {
+        let mut sent: Vec<(String, serde_json::Value)> = Vec::new();
+        let answer = cmd::session::stop_helper_through(agent, "s-9", "h-7", |method, params| {
+            sent.push((method.to_string(), params));
+            Ok(reply.clone())
+        });
+        assert_eq!(
+            sent,
+            vec![(road.to_string(), serde_json::json!({ "id": "s-9", "agent_id": "h-7" }))],
+            "{agent}"
+        );
+        assert_eq!(answer, Ok(reply.clone()), "{agent}: the answer was changed on the way");
+    }
 }
 
 #[test]
