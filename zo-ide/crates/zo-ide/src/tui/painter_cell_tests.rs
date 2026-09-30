@@ -262,6 +262,44 @@ fn rows_the_painter_never_drew_are_written_whole() {
 }
 
 // ----------------------------------------------------------------------
+// 프레임 안에서 남이 건드린 것을 믿지 않는다.
+// ----------------------------------------------------------------------
+
+/// 어떤 스타일도 켜 두지 않았다는 것은 painter 가 낸 바이트에 대한 앎이다. 프레임에 남의
+/// 바이트가 끼어(알림 바이트가 그렇게 간다) 굵기를 켜 둔 채 두어도 그 굵기가 새로 쓰는
+/// 칸에 묻어서는 안 된다 — 칸을 쓰기 전에 리셋이 한 번 나가는 것이 그 보험이다.
+#[test]
+fn a_pen_someone_else_left_on_does_not_reach_the_cells_that_are_written() {
+    let mut rig = Rig::new(3);
+    let mut rows = plain_rows(&["", "status", "footer"]);
+    rig.frame(&rows, Some((1, 23)));
+    rig.painter.emit_raw("\u{1b}[1m");
+    rows[1] = Line::from_text("stXtus");
+    let step = rig.frame(&rows, Some((1, 23)));
+    assert!(step.contains("\u{1b}[1m\u{1b}[0m"), "the reset comes before the first cell: {step:?}");
+    rig.assert_shows(&rows);
+}
+
+/// 커서를 어디 두었다는 앎은 `paint` 가 프레임의 마지막 쓰기였을 때만 맞다. 그 뒤에 히스토리 같은
+/// 것이 바이트를 더했다면 터미널의 커서는 그 바이트가 끝난 자리에 있다.
+#[test]
+fn a_caret_is_put_back_when_something_wrote_after_the_paint() {
+    let mut rig = Rig::new(3);
+    let composer = |typed: &str| Line::new(vec![Span::raw("│› "), Span::raw(typed.to_string())]);
+    let mut rows = vec![Line::empty(), composer("ab"), Line::from_text("footer")];
+    rig.frame(&rows, Some((5, 22)));
+    rows[1] = composer("abc");
+    rig.painter.paint(&rows);
+    // The last cell written ends on the caret's column ...
+    rig.painter.insert_history(&[Line::from_text("late history")]);
+    rig.painter.end(Some((6, 22)));
+    let out = String::from_utf8(std::mem::take(&mut rig.painter.out)).expect("utf-8");
+    rig.screen.feed(&out);
+    // ... but history came after it, and the terminal's cursor is not there any more.
+    assert_eq!(rig.screen.cursor(), (6, 22), "the caret goes back to where the frame said: {out:?}");
+}
+
+// ----------------------------------------------------------------------
 // 밀린 행은 터미널이 민다.
 // ----------------------------------------------------------------------
 
