@@ -37311,8 +37311,9 @@ ok(
  * 넉넉했다. 새 상한은 셈을 그 위에 더한 2408이 아니라 실측 2290이다.
  * 같은 종류가 붙어 서는 걸음은 한 줄로 접히므로 400걸음의 실측
  * (measure-steps)은 오히려 준다. 이 검사가 돌 때마다 실측이 `HELPER_NODES`
- * 줄로 로그에 남는다. */
-const HELPER_LIST_NODES_CEILING = 2290;
+ * 줄로 로그에 남는다. 09-30(t-16914): 표식이 svg·use 대신 span 하나(마스크)가 되어
+ * 행마다 둘이 줄어 실측 2153이고 상한도 그 값이다. */
+const HELPER_LIST_NODES_CEILING = 2153;
 await page.setViewportSize({ width: 1280, height: 860 });
 const flatTranscript = await page.evaluate(async () => {
   const seen = {};
