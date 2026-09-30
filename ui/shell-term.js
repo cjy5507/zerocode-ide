@@ -206,6 +206,14 @@ async function pastePrimarySelectionInto(destination) {
   return text !== "" && destination(text);
 }
 
+/* 가운데 클릭이 방금 붙여넣기를 불렀으면 그 paste 이벤트는 주 선택의 것이다 —
+ * 일반 클립보드 붙여넣기 길(shell-input.js)은 비켜서고, 아래 `suppressNativePaste`
+ * 가 막는다. */
+function primaryPasteOwnsPasteEvent() {
+  const pending = pendingPrimarySelectionTarget;
+  return pending !== null && performance.now() <= pending.expiresAt;
+}
+
 function clearPrivatePrimarySelection() {
   privatePrimarySelectionText = "";
   pendingPrimarySelectionTarget = null;
@@ -501,24 +509,113 @@ listen("tauri://drag-drop", (event) => {
   void dropPathsIntoTerminal(target, paths);
 });
 
+/* 붙여넣기는 창의 주 스레드에서 판을 읽지 않는다 (t-19409).
+ *
+ * 웹킷의 기본 붙여넣기(⌘V·Edit ▸ Paste·우클릭)는 웹 콘텐츠 프로세스가 UI
+ * 프로세스에 동기 메시지로 판의 데이터를 달라고 하고, UI 프로세스의 주 스레드가
+ * `[NSPasteboardItem dataForType:]`에서 판의 주인이 답할 때까지 선다. 주인이
+ * 다른 기기의 Universal Clipboard나 남의 앱의 큰 그림이면 그 시간이 창 전체의
+ * 멈춤이다(2026-09-30 23:48, 2030 ms — 워치독 선은 crash.rs 의 first_ms). 그래서
+ * paste 이벤트는 `clipboardData`를 만지지 않고 막히며(shell-input.js), 읽기는 이
+ * 길의 배경 스레드 명령(clipboardManager.readText, save_clipboard_image)이 한다.
+ *
+ * 한 번에 하나: 읽는 중의 두 번째 붙여넣기는 두 번 붙이지 않고 버려진다. 주인이
+ * 영영 답하지 않아도 창이 붙여넣기를 영영 잃지 않게 대기에는 상한이 있다. */
+const CLIPBOARD_SLOW_NOTICE_MS = 700;
+const CLIPBOARD_PENDING_MAX_MS = 30_000;
+let clipboardPasteStartedAt = 0;
+
+async function pasteOnce(run) {
+  const started = performance.now();
+  if (clipboardPasteStartedAt !== 0 && started - clipboardPasteStartedAt < CLIPBOARD_PENDING_MAX_MS) {
+    return false;
+  }
+  clipboardPasteStartedAt = started;
+  const notice = setTimeout(
+    () => toast(t("clipboard.pasteSlow", "클립보드가 내용을 넘겨주기를 기다리는 중입니다…")),
+    CLIPBOARD_SLOW_NOTICE_MS,
+  );
+  try {
+    return await run();
+  } finally {
+    clearTimeout(notice);
+    if (clipboardPasteStartedAt === started) clipboardPasteStartedAt = 0;
+  }
+}
+
+/* 글자를 먼저, 글자가 없거나 읽지 못했으면 그림을 — 받는 자리(`landText`,
+ * `landImage`)는 붙여넣기가 시작될 때 붙잡힌 것이다. 그림 자리가 없는 받는이는
+ * 글자만 받는다. */
+async function pasteClipboardVia(landText, landImage) {
+  return pasteOnce(async () => {
+    const text = await clipboardText.read({ quiet: true });
+    if (text) return landText(text);
+    // No words — or a clipboard the text road could not read at all, which is
+    // what a clipboard holding only a picture looks like to it. The `paste`
+    // event no longer carries the picture (reading it is the main-thread wait
+    // above), so every road asks the backend for it and pastes its path: the
+    // same temp file the old event road wrote.
+    if (landImage) {
+      const path = await invoke("save_clipboard_image").catch(() => null);
+      if (typeof path === "string" && path.length > 0) return landImage(path);
+    }
+    if (text === null) showError(t("clipboard.readFailed", "클립보드의 텍스트를 읽지 못했습니다."));
+    return false;
+  });
+}
+
 async function pasteClipboardAt(target) {
   // Held before the read: focus/tab changes while the native clipboard call is
   // pending must not redirect text into the terminal that became active later.
   const captured = target ? { ...target } : null;
   if (!captured) return false;
-  const text = await clipboardText.read({ quiet: true });
-  if (text) return pasteTextAt(captured, text);
-  // No words — or a clipboard the text road could not read at all, which is
-  // what a clipboard holding only a picture looks like to it. The `paste`
-  // event road sees the picture the webview was handed; this road is the
-  // shortcut's, taken with the focus on the body after a click or a drag in
-  // the pane, and it read text alone — so a screenshot pasted there went
-  // nowhere. Ask the backend for the picture and paste its path: the same
-  // temp file the event road would have written.
-  const path = await invoke("save_clipboard_image").catch(() => null);
-  if (typeof path === "string" && path.length > 0) return pasteTextAt(captured, path);
-  if (text === null) showError(t("clipboard.readFailed", "클립보드의 텍스트를 읽지 못했습니다."));
-  return false;
+  return pasteClipboardVia((text) => pasteTextAt(captured, text), (path) => pasteTextAt(captured, path));
+}
+
+/* 글자를 받는 입력칸의 붙여넣기 자리 — 붙여넣기가 시작될 때 칸과 캐럿을
+ * 붙잡는다. 칸이 아직 초점이면 브라우저 자신의 삽입(`insertText`)이라 입력
+ * 이벤트와 ⌘Z가 산다; 초점이 옮겨 갔으면 초점을 훔치지 않고 칸에 그대로 끼운다.
+ * 칸이 아닌 것(에디터·contenteditable)은 가운데 클릭 붙여넣기의 자리와 같다. */
+const PASTE_INERT_INPUT_TYPES = new Set([
+  "button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit",
+]);
+
+function pasteFieldOf(node) {
+  const element = selectionElement(node);
+  if (!element) return null;
+  const field = element.closest?.("input, textarea");
+  if (field) {
+    if (field.disabled || field.readOnly) return null;
+    return field instanceof HTMLInputElement && PASTE_INERT_INPUT_TYPES.has(field.type) ? null : field;
+  }
+  const editable = element.closest?.("[contenteditable]");
+  return editable?.isContentEditable ? editable : null;
+}
+
+function capturePasteDestination(field) {
+  if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)) {
+    return capturePrimaryPasteDestination(field);
+  }
+  let start = null;
+  let end = null;
+  try {
+    start = field.selectionStart;
+    end = field.selectionEnd;
+  } catch {
+    // email/number inputs have no selection to hold; they take the caret as it is.
+  }
+  const held = typeof start === "number" && typeof end === "number";
+  return (text) => {
+    if (!field.isConnected || field.disabled || field.readOnly) return false;
+    if (document.activeElement === field) {
+      if (held) field.setSelectionRange(start, end);
+      if (document.execCommand("insertText", false, text)) return true;
+    }
+    if (!held) return false;
+    field.setRangeText(text, start, end, "end");
+    dispatchPrimarySelectionInput(field, text);
+    return true;
+  };
 }
 
 /* What was said into a keyed element, and how to say it again.

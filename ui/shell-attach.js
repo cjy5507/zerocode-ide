@@ -10,7 +10,7 @@
  *
  * 이 창에 이미 있는 길만 쓴다(§1): 파일·폴더는 t-2982의 창 안 브라우저
  * (`openPathBrowser`, attach 모드 — 두 번째 브라우저는 없다), 이미지는 창의
- * 임시 PNG 길(`save_clipboard_image` / shell-input.js `savePastedImage`),
+ * 임시 PNG 길(`save_clipboard_image`),
  * 드롭은 shell-term.js 의 `tauri://drag-drop` 리스너가 입력줄을 과녁으로 하나
  * 더 알 뿐이고, 보내기는 입력줄의 기존 `term_paste` + Enter다. 경로가 무엇인지
  * (파일·폴더·없음)는 백엔드의 `path_kinds`가 말한다 — 창은 파일을 읽지 않는다.
@@ -239,20 +239,9 @@ function composerAttachments(form, box, tools, { start = null } = {}) {
     },
   };
   plus.addEventListener("click", () => openAttachMenu(handle));
-  // ⌘V 가 상자에 떨어질 때: 글자가 있으면 글자의 길 — 상자가 제 기본 동작으로
-  // 받는다. 글자 없이 그림만 왔으면 창의 한 그림 길(shell-input.js
-  // `savePastedImage`)로 임시 파일에 앉히고 그 경로가 칩이 된다 — 판이 하는
-  // 것과 같은 계약, 자리만 다르다.
-  box.addEventListener("paste", (event) => {
-    const data = event.clipboardData;
-    if (!data || data.getData("text")) return;
-    const image = [...(data.items ?? [])]
-      .find((item) => item.kind === "file" && item.type.startsWith("image/"));
-    const file = image?.getAsFile();
-    if (!file) return;
-    event.preventDefault();
-    void savePastedImage(file).then((path) => (path ? handle.add([path]) : undefined));
-  });
+  // ⌘V 가 상자에 떨어질 때의 길은 여기 없다 — 창의 한 paste 핸들러
+  // (shell-input.js)가 `clipboardData`를 읽지 않고 붙여넣기를 받아, 글자는
+  // 상자에 넣고 그림은 `handle.add`로 칩이 되게 한다(t-19409).
   ATTACH_OF.set(form, handle);
   return handle;
 }
