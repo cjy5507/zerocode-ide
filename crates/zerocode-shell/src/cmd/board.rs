@@ -1886,8 +1886,8 @@ fn seat_pasted_image(raw: &[u8], ext: &str) -> Result<String, String> {
 /// window (t-19409). ⌘V with the focus on the body, which is where a click or
 /// a drag in a pane leaves it, once asked for text alone: a screenshot pasted
 /// there went nowhere ("복붙도 안돼", 2026-09-03). macOS hands over the PNG the
-/// screenshot tool wrote, or a TIFF re-encoded as PNG by the same bitmap rep
-/// the browser snapshot uses; elsewhere the clipboard plugin offers raw
+/// screenshot tool wrote, or a TIFF, JPEG or HEIC re-encoded as PNG by the same
+/// bitmap rep the browser snapshot uses; elsewhere the clipboard plugin offers raw
 /// pixels and this crate carries no encoder, so those platforms keep the
 /// event road only.
 #[tauri::command(async)]
@@ -1901,7 +1901,7 @@ pub(crate) fn save_clipboard_image(webview: tauri::Webview) -> Result<Option<Str
 
 /// Whether the clipboard holds a picture right now — what the composer's
 /// '+' menu enables its 이미지 붙여넣기 row by (t-2993 §2.1). Nothing is
-/// written to answer: the same two pasteboard types [`clipboard_png`] reads
+/// written to answer: the same pasteboard types [`clipboard_png`] reads
 /// are asked for by name, and the picture is seated only when the row is
 /// chosen ([`save_clipboard_image`]). Elsewhere than macOS the clipboard road
 /// has no picture (see [`clipboard_png`]), so the row stays closed there.
@@ -1921,13 +1921,24 @@ fn clipboard_holds_image() -> bool {
 #[cfg(target_os = "macos")]
 fn pasteboard_holds_image(pasteboard: &objc2_app_kit::NSPasteboard) -> bool {
     use objc2_app_kit::{NSPasteboardTypePNG, NSPasteboardTypeTIFF};
-    use objc2_foundation::NSArray;
+    use objc2_foundation::{NSArray, NSString};
     // SAFETY: the two type names are AppKit's own constants (extern statics,
     // read the way `png_from_pasteboard` reads them); the answer is a name
     // copied out, and nothing here outlives the call.
-    let wanted = unsafe { NSArray::from_slice(&[NSPasteboardTypePNG, NSPasteboardTypeTIFF]) };
+    let (jpeg, heic) = (NSString::from_str(JPEG_TYPE), NSString::from_str(HEIC_TYPE));
+    let wanted = unsafe {
+        NSArray::from_slice(&[NSPasteboardTypePNG, NSPasteboardTypeTIFF, &*jpeg, &*heic])
+    };
     pasteboard.availableTypeFromArray(&wanted).is_some()
 }
+
+/// The two pictures a phone's Universal Clipboard sends that AppKit has no
+/// named constant for (t-19409). Both decode through the same bitmap rep as a
+/// TIFF does.
+#[cfg(target_os = "macos")]
+const JPEG_TYPE: &str = "public.jpeg";
+#[cfg(target_os = "macos")]
+const HEIC_TYPE: &str = "public.heic";
 
 #[cfg(not(target_os = "macos"))]
 fn clipboard_holds_image() -> bool {
@@ -1946,21 +1957,36 @@ fn png_from_pasteboard(
     use objc2_app_kit::{
         NSBitmapImageFileType, NSBitmapImageRep, NSPasteboardTypePNG, NSPasteboardTypeTIFF,
     };
-    use objc2_foundation::NSDictionary;
-    // SAFETY (below): the two type names are AppKit's own constants and the
+    use objc2_foundation::{NSDictionary, NSString};
+    // SAFETY (below): the type names are AppKit's own constants and the
     // reads copy the bytes out; nothing here outlives the call.
     if let Some(png) = unsafe { pasteboard.dataForType(NSPasteboardTypePNG) } {
         return Ok(Some(png.to_vec()));
     }
-    let Some(tiff) = (unsafe { pasteboard.dataForType(NSPasteboardTypeTIFF) }) else {
-        return Ok(None);
-    };
-    NSBitmapImageRep::imageRepWithData(&tiff)
-        .and_then(|rep| unsafe {
+    // A screenshot tool leaves a PNG; another app leaves a TIFF; a phone's
+    // Universal Clipboard often leaves a JPEG or HEIC alone. The first one
+    // present that decodes becomes the PNG the agents are handed; one that is
+    // present and does not decode falls through to the next, and the error is
+    // only for a pasteboard that held pictures and no decodable one.
+    let (jpeg, heic) = (NSString::from_str(JPEG_TYPE), NSString::from_str(HEIC_TYPE));
+    let mut undecodable = false;
+    for kind in [unsafe { NSPasteboardTypeTIFF }, &*jpeg, &*heic] {
+        let Some(data) = (unsafe { pasteboard.dataForType(kind) }) else {
+            continue;
+        };
+        let png = NSBitmapImageRep::imageRepWithData(&data).and_then(|rep| unsafe {
             rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
-        })
-        .map(|png| Some(png.to_vec()))
-        .ok_or_else(|| "PNG 인코딩에 실패했습니다".to_string())
+        });
+        match png {
+            Some(png) => return Ok(Some(png.to_vec())),
+            None => undecodable = true,
+        }
+    }
+    if undecodable {
+        Err("PNG 인코딩에 실패했습니다".to_string())
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
