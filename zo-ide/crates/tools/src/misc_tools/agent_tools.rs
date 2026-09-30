@@ -2814,6 +2814,8 @@ fn register_agent_cancel_signal(
 ) {
     if let Ok(mut signals) = agent_cancel_signals().lock() {
         signals.insert((agent_id, generation), signal);
+        // Told from under the lock, so two changes cannot arrive out of order.
+        runtime::helper_activity::set(runtime::helper_activity::Count::Workers, signals.len());
     }
 }
 
@@ -2960,12 +2962,14 @@ fn abort_and_unregister_agent_cancel_signal(agent_id: &str, generation: u64) -> 
     };
     signal.abort();
     signals.remove(&key);
+    runtime::helper_activity::set(runtime::helper_activity::Count::Workers, signals.len());
     true
 }
 
 pub(super) fn unregister_agent_cancel_signal(agent_id: &str, generation: u64) {
     if let Ok(mut signals) = agent_cancel_signals().lock() {
         signals.remove(&(agent_id.to_string(), generation));
+        runtime::helper_activity::set(runtime::helper_activity::Count::Workers, signals.len());
     }
 }
 
@@ -3940,6 +3944,28 @@ mod agent_manifest_tests {
         assert!(agent_worker_generation_is_live(id, 2));
         unregister_agent_cancel_signal_for_tests(id, 2);
         assert!(!agent_worker_generation_is_live(id, 2));
+    }
+
+    /// The session's pulse beats while a helper worker lives or a background
+    /// mark stands (t-17057): the stall notice and a roster row's elapsed time
+    /// ride that beat, so both registries must tell `helper_activity` whenever
+    /// they change. Other tests of this process register their own, so this
+    /// reads only what they cannot undo: the count is at least the one this test
+    /// holds while it holds it.
+    #[test]
+    fn a_live_worker_and_a_background_mark_each_keep_the_session_busy_while_they_stand() {
+        use super::{
+            mark_background_agent, register_agent_cancel_signal_for_tests,
+            unregister_agent_cancel_signal_for_tests,
+        };
+
+        let busy = || *runtime::helper_activity::watch().borrow();
+        register_agent_cancel_signal_for_tests("busy-worker", 7);
+        assert!(busy() >= 1, "a registered worker did not make the session busy");
+        unregister_agent_cancel_signal_for_tests("busy-worker", 7);
+        mark_background_agent("busy-mark".to_string());
+        assert!(busy() >= 1, "a background mark did not make the session busy");
+        clear_background_agent("busy-mark");
     }
 
     #[test]

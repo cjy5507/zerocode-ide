@@ -27,9 +27,14 @@
 //! threads do. They share a DIRECTORY: the parent writes `brief.json` (what to
 //! do), the child writes `result.json` (what happened), and both are written
 //! to a temporary name and renamed, so a reader never sees half a file. The
-//! parent waits by stat'ing for the result — 250ms, no watcher crate — because
-//! the thing being waited for is a file appearing, and a `kqueue` dependency
-//! to learn that sooner would buy nothing a person could see.
+//! parent used to wait by stat'ing for the result every 250ms and asking tmux
+//! whether the pane still stood — four process spawns a second for each child
+//! for as long as it worked, which is what a `kqueue` watch on the directory
+//! buys back (t-17057): the rename that publishes the answer wakes the wait
+//! itself, and a child's death is learned from its channel closing
+//! ([`ChildWatch`]) instead of from a spawn. Where there is no such watch
+//! ([`WaitClock::listens`]) the wait still looks every 250ms, and asks tmux only
+//! every few seconds.
 //!
 //! ## What this module refuses
 //!
@@ -46,6 +51,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+mod child_watch;
+
+pub use child_watch::{ChildWatch, Woken};
 
 /// Settings key holding the sub-agent mode (`auto` | `panes` | `inline`).
 pub const SETTINGS_MODE_KEY: &str = "subagentMode";
@@ -757,6 +766,16 @@ impl AgeRule {
         match self {
             Self::Quiet(limit) => quiet_for >= limit,
             Self::Wall(limit) => ran >= limit,
+        }
+    }
+
+    /// How long until [`Self::reached`] would say yes if nothing changed:
+    /// what a wait may rest for without overshooting its limit.
+    #[must_use]
+    pub fn remaining(self, ran: Duration, quiet_for: Duration) -> Duration {
+        match self {
+            Self::Quiet(limit) => limit.saturating_sub(quiet_for),
+            Self::Wall(limit) => limit.saturating_sub(ran),
         }
     }
 
@@ -1721,21 +1740,87 @@ pub enum PaneOutcome {
     Closed(Box<TeammateResult>),
 }
 
-/// How often the parent looks for `result.json`.
+/// How often the parent looks for `result.json` when it cannot listen for it.
 ///
-/// A `stat` every quarter second for a job measured in minutes: the cost is
-/// invisible, and the alternative is a filesystem-watcher dependency to learn
-/// the same fact a few milliseconds sooner.
+/// A `stat` every quarter second for a job measured in minutes is what a wait
+/// without a watch ([`WaitClock::listens`]) does — no process is spawned by it,
+/// which is the cost the wait used to pay in tmux asks. A wait that does listen
+/// rests up to [`LOOK_EVERY`] between looks and is woken by the child itself.
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The longest a watched wait rests between two looks at what only time
+/// changes: the caller's cancel flag, the budget and the child's transcript.
+/// It is also how long an `Esc` may wait for the pane to be ended. The rest
+/// ends at the session's next beat (`helper_activity::until_next_beat`), so the
+/// waits of several helpers wake the process together.
+pub const LOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A watched wait reads the result files at least this often even when its
+/// watch said nothing, so a rename the kernel did not report — a watch that was
+/// overrun, a directory that was swapped — is still heard within it.
+pub const SAFETY_READ_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often tmux is asked whether the pane still stands when no channel is
+/// held to its child: booting, an older child, a platform with no watch.
+pub const PANE_ASK_BARE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often tmux is asked while a channel is held. The channel ending says
+/// the child's process is gone, so this is only a check that the watch is not
+/// fooling itself: a connection that reached something else, a shim whose
+/// table lost the pane while the process lives.
+pub const PANE_ASK_HELD: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A wait that has lasted this long holds a connection to the child's channel.
+/// A child that answers within moments needs no death watch, and the
+/// connection costs a socket here and an accept there.
+pub const HOLD_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The cadences of one wait. A test hands in its own so that what takes
+/// seconds in production takes milliseconds there.
+#[derive(Debug, Clone, Copy)]
+struct Cadence {
+    look_every: Duration,
+    safety_read_every: Duration,
+    pane_ask_bare: Duration,
+    pane_ask_held: Duration,
+    hold_after: Duration,
+}
+
+impl Cadence {
+    const STANDARD: Self = Self {
+        look_every: LOOK_EVERY,
+        safety_read_every: SAFETY_READ_EVERY,
+        pane_ask_bare: PANE_ASK_BARE,
+        pane_ask_held: PANE_ASK_HELD,
+        hold_after: HOLD_AFTER,
+    };
+}
 
 /// The time a wait for a child reads, and the rest it takes between looks.
 ///
-/// The live wait reads the monotonic clock and sleeps; a test hands in a clock
-/// whose rest moves time on by as much as it likes, so an hour of waiting is
-/// sixty looks rather than an hour.
+/// The live wait reads the monotonic clock and sleeps — on a watch of the
+/// child's directory and channel when it can ([`Self::listens`]); a test hands
+/// in a clock whose rest moves time on by as much as it likes, so an hour of
+/// waiting is sixty looks rather than an hour.
 pub trait WaitClock {
     fn now(&self) -> std::time::Instant;
     fn rest(&self, interval: std::time::Duration);
+
+    /// Whether a rest of this clock can end early on what the child does, so
+    /// that the wait may watch the child's directory and channel instead of
+    /// looking at them. True of the live clock; false of a stepped one, whose
+    /// rests are moves of a pretended time.
+    fn listens(&self) -> bool {
+        false
+    }
+
+    /// Rest up to `interval`, ending early when `watch` learns something. A
+    /// clock that does not listen rests the whole interval and says it cannot
+    /// tell what happened, which makes the wait look at everything.
+    fn rest_on(&self, _watch: Option<&mut ChildWatch>, interval: std::time::Duration) -> Woken {
+        self.rest(interval);
+        Woken::UNKNOWN
+    }
 }
 
 /// [`WaitClock`] on the process's own monotonic clock.
@@ -1748,6 +1833,19 @@ impl WaitClock for SystemWaitClock {
 
     fn rest(&self, interval: std::time::Duration) {
         std::thread::sleep(interval);
+    }
+
+    fn listens(&self) -> bool {
+        true
+    }
+
+    fn rest_on(&self, watch: Option<&mut ChildWatch>, interval: std::time::Duration) -> Woken {
+        if let Some(watch) = watch {
+            watch.wait(interval)
+        } else {
+            self.rest(interval);
+            Woken::UNKNOWN
+        }
     }
 }
 
@@ -1793,6 +1891,14 @@ pub fn wait_for_turn_result(
 }
 
 /// [`wait_for_turn_result`] on a clock of the caller's.
+///
+/// Where the clock listens ([`WaitClock::listens`]) the wait rests on a watch
+/// of the child's directory and channel and looks at the result files when the
+/// watch says they may have changed (and every [`SAFETY_READ_EVERY`] besides);
+/// tmux is asked once at the start and then only when the child's channel ends
+/// or, with none held, every [`PANE_ASK_BARE`]. Without a watch it looks at
+/// everything at every look, as it always did, but asks tmux no oftener than
+/// that.
 #[allow(clippy::too_many_arguments)] // one wait, one table of ways it ends
 pub fn wait_for_turn_result_on(
     clock: &dyn WaitClock,
@@ -1804,18 +1910,51 @@ pub fn wait_for_turn_result_on(
     cancelled: &dyn Fn() -> bool,
     close: &dyn Fn(),
 ) -> PaneOutcome {
+    wait_with_cadence(clock, tmux, directory, pane, turn, budget, cancelled, close, Cadence::STANDARD)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one wait, one table of ways it ends
+fn wait_with_cadence(
+    clock: &dyn WaitClock,
+    tmux: &Tmux,
+    directory: &Path,
+    pane: &str,
+    turn: u32,
+    budget: PaneBudget,
+    cancelled: &dyn Fn() -> bool,
+    close: &dyn Fn(),
+    cadence: Cadence,
+) -> PaneOutcome {
     let started = clock.now();
     let mut seen = transcript_stamp(directory);
     let mut progressed = started;
     let mut asked = started;
+    // Armed before the first read, so an answer that lands after it is an event
+    // waiting for the first rest and not one that was missed between the two.
+    let mut watch = clock.listens().then(|| ChildWatch::open(directory)).flatten();
+    let mut woken = Woken::UNKNOWN;
+    let mut read_at: Option<std::time::Instant> = None;
+    let mut pane_asked_at: Option<std::time::Instant> = None;
+    let mut channel_tried_at: Option<std::time::Instant> = None;
     let answered = || {
         TeammateResult::read_turn(directory, turn)
             .map(|result| PaneOutcome::Finished(Box::new(result)))
             .or_else(|| TeammateResult::read_final(directory).map(|result| PaneOutcome::Closed(Box::new(result))))
     };
     loop {
-        if let Some(outcome) = answered() {
-            return outcome;
+        let now = clock.now();
+        // A watched wait reads the files when the watch says they may have
+        // changed; one with none, or one whose watch cannot say, reads them at
+        // every look.
+        let read_due = watch.is_none()
+            || woken.directory
+            || woken.channel_closed
+            || read_at.is_none_or(|at| now.duration_since(at) >= cadence.safety_read_every);
+        if read_due {
+            read_at = Some(now);
+            if let Some(outcome) = answered() {
+                return outcome;
+            }
         }
         if cancelled() {
             // The door first, then the pane. A pane that is already gone
@@ -1824,7 +1963,6 @@ pub fn wait_for_turn_result_on(
             let _ = tmux.kill_pane(pane);
             return answered().unwrap_or(PaneOutcome::Cancelled);
         }
-        let now = clock.now();
         let quiet_for = match budget {
             PaneBudget::Wall(_) => Duration::ZERO,
             PaneBudget::Quiet { ask_every, ask_timeout, .. } => {
@@ -1845,16 +1983,52 @@ pub fn wait_for_turn_result_on(
                 now.duration_since(progressed)
             }
         };
-        if budget.rule().reached(now.duration_since(started), quiet_for) {
+        let ran = now.duration_since(started);
+        if budget.rule().reached(ran, quiet_for) {
             close();
             let _ = tmux.kill_pane(pane);
             return answered().unwrap_or(PaneOutcome::TimedOut);
         }
-        if !tmux.pane_exists(pane) {
-            // The child may have written between the read above and this ask.
-            return answered().unwrap_or(PaneOutcome::Vanished);
+        // Whether the pane still stands is asked at the start (the id just came
+        // from `split-window`), when the child's channel ended, and otherwise
+        // only now and then — a process spawn at every look was four a second
+        // for each child. With the channel held, its ending is what says the
+        // child is gone.
+        let held = watch.as_ref().is_some_and(ChildWatch::holds_channel);
+        let every = if held { cadence.pane_ask_held } else { cadence.pane_ask_bare };
+        if woken.channel_closed || pane_asked_at.is_none_or(|at| now.duration_since(at) >= every) {
+            pane_asked_at = Some(now);
+            if !tmux.pane_exists(pane) {
+                // The child may have written between the read above and this ask.
+                return answered().unwrap_or(PaneOutcome::Vanished);
+            }
         }
-        clock.rest(POLL_INTERVAL);
+        if let Some(watch) = watch.as_mut() {
+            // The child boots after its pane is cut and names its channel then;
+            // a channel file that changes (a child that came up again) is read
+            // again, and one that has not appeared yet is looked for now and
+            // then.
+            let retry_due = channel_tried_at.is_none_or(|at| now.duration_since(at) >= cadence.pane_ask_bare);
+            if ran >= cadence.hold_after && (woken.directory || (!watch.holds_channel() && retry_due)) {
+                channel_tried_at = Some(now);
+                if let Some(addr) = child_watch::channel_address(&directory.join(CHANNEL_FILE)) {
+                    watch.hold_channel(addr);
+                }
+            }
+        }
+        // A watched wait rests until the session's next beat (the turn of the
+        // wall clock's second), so the waits of three helpers and the idle loop
+        // wake the process once between them and not once each.
+        let interval = if watch.is_some() {
+            cadence
+                .look_every
+                .min(budget.rule().remaining(ran, quiet_for))
+                .min(crate::helper_activity::until_next_beat())
+                .max(Duration::from_millis(1))
+        } else {
+            POLL_INTERVAL
+        };
+        woken = clock.rest_on(watch.as_mut(), interval);
     }
 }
 
@@ -2477,31 +2651,90 @@ mod tests {
     /// A shell script rather than a Rust double, because the thing under test
     /// is a PROCESS BOUNDARY: the argv this module hands `Command`, and the
     /// stdout it reads back. A trait object would test neither.
+    ///
+    /// `panes` is the shell words the fake prints for `list-panes`, one id a
+    /// line (`"'%9'"`, `"'%1' '%2'"`); they are kept in the directory's `panes`
+    /// file, which a test may rewrite to take a pane out of the table.
     fn fake_tmux(directory: &Path, panes: &str) -> PathBuf {
-        let log = directory.join("tmux.log");
-        let script = directory.join("tmux");
-        std::fs::write(
-            &script,
-            format!(
+        let mut lines = String::new();
+        for word in panes.split_whitespace() {
+            lines.push_str(word.trim_matches('\''));
+            lines.push('\n');
+        }
+        std::fs::write(directory.join("panes"), lines).expect("write panes");
+        link_fake_tmux(directory)
+    }
+
+    /// The one script every fake `tmux` is: written once, run once before any
+    /// test uses it, and reached through a symlink in each test's directory,
+    /// from which it finds that test's `panes` and `tmux.log` (beside the path
+    /// it was called by).
+    ///
+    /// A script written for each test cost each test the first exec of a new
+    /// file, and this machine checks those one at a time: about 0.35 s for one,
+    /// 0.8 s for four at once, seconds for the tests of a parallel suite (a
+    /// probe in `reports/t-17057/spawn-latency-probe.txt`; a second exec of the
+    /// same script was 7 ms with 64 at once). The waits' first ask of tmux
+    /// blocked for that long, so an answer was heard a second late, a 300 ms
+    /// limit ended after three, and a channel was not held within 700 ms — in
+    /// the tests that ran together, and not in one that ran alone. Every test
+    /// gets its fake here, so the one exec that is slow is made once, before
+    /// any of them starts its clock: they wait for it inside `get_or_init`,
+    /// where nothing is being timed.
+    fn shared_fake_tmux() -> &'static Path {
+        static SCRIPT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        SCRIPT.get_or_init(|| {
+            // Kept for the life of the process (named so that one left behind is
+            // recognised); the tests' own directories are what is cleaned up.
+            let home: &'static tempfile::TempDir = Box::leak(Box::new(
+                tempfile::Builder::new()
+                    .prefix("zo-fake-tmux-")
+                    .tempdir()
+                    .expect("tempdir"),
+            ));
+            let script = home.path().join("tmux");
+            std::fs::write(
+                &script,
                 "#!/bin/sh\n\
-                 printf '%s\\n' \"$*\" >> {log}\n\
+                 here=\"${0%/*}\"\n\
+                 printf '%s\\n' \"$*\" >> \"$here/tmux.log\"\n\
                  case \"$1\" in\n\
                  split-window) echo '%9' ;;\n\
-                 list-panes) printf '%s\\n' {panes} ;;\n\
+                 list-panes) cat \"$here/panes\" ;;\n\
                  kill-pane) : ;;\n\
                  esac\n",
-                log = log.display(),
-                panes = panes,
-            ),
-        )
-        .expect("write fake tmux");
+            )
+            .expect("write fake tmux");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+            // The first exec is the slow one; do it here, while the tests that
+            // need the script wait for it, and not inside a test's wait. A
+            // file that was just written can be refused once ("text file
+            // busy") when another test's child is between its fork and its
+            // exec, so a refusal is tried again.
+            for _ in 0..50 {
+                if std::process::Command::new(&script).arg("warm").output().is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            script
+        })
+    }
+
+    /// A symlink named `tmux` in `directory` to the shared script.
+    fn link_fake_tmux(directory: &Path) -> PathBuf {
+        let link = directory.join("tmux");
+        let _ = std::fs::remove_file(&link);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
-        }
-        script
+        std::os::unix::fs::symlink(shared_fake_tmux(), &link).expect("link fake tmux");
+        #[cfg(not(unix))]
+        std::fs::copy(shared_fake_tmux(), &link).expect("copy fake tmux");
+        link
     }
 
     fn tmux_log(directory: &Path) -> Vec<String> {
@@ -2691,6 +2924,134 @@ mod tests {
             .any(|line| line == "kill-pane -t %9"));
     }
 
+    /// How many times the multiplexer was asked which panes stand: one process
+    /// spawn each.
+    fn pane_asks(directory: &Path) -> usize {
+        tmux_log(directory)
+            .iter()
+            .filter(|line| line.starts_with("list-panes"))
+            .count()
+    }
+
+    /// A pane child at work costs its parent no process spawns (t-17057).
+    ///
+    /// The wait spawned `tmux list-panes` at every 250 ms look — four spawns a
+    /// second for each child for as long as it worked, twelve `__posix_spawn`
+    /// samples in three seconds in the person's own pane (t-11961 cause 5). A
+    /// child that is working is not something to look at: its answer arrives by
+    /// itself, and so would its death.
+    #[test]
+    fn a_pane_child_at_work_costs_the_parent_no_tmux_spawns() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-20");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let outcome = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                wait_for_result(
+                    &tmux,
+                    &child,
+                    "%9",
+                    PaneBudget::Wall(Duration::from_secs(60)),
+                    &|| false,
+                )
+            });
+            std::thread::sleep(Duration::from_millis(1400));
+            TeammateResult::new("agent-20", Exit::Ok)
+                .write(&child)
+                .expect("write result");
+            waiting.join().expect("the wait")
+        });
+        assert!(matches!(outcome, PaneOutcome::Finished(_)), "{outcome:?}");
+        let asked = pane_asks(directory.path());
+        assert!(
+            asked <= 1,
+            "the parent asked tmux {asked} times while its child worked for 1.4 s: {:?}",
+            tmux_log(directory.path())
+        );
+    }
+
+    /// An answer is heard as it lands, not at the next look (t-17057).
+    ///
+    /// A wait that looks every quarter second hears a child that answered just
+    /// after a look a quarter second late. The answer is landed here the moment
+    /// after tmux was asked for the second time, which is a look that has just
+    /// been made; a wait that asks tmux once is given the same time to settle.
+    #[test]
+    fn a_result_is_heard_as_it_lands_and_not_at_the_next_look() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-21");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let (outcome, lag) = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                let outcome = wait_for_result(
+                    &tmux,
+                    &child,
+                    "%9",
+                    PaneBudget::Wall(Duration::from_secs(60)),
+                    &|| false,
+                );
+                (outcome, std::time::Instant::now())
+            });
+            let settle_until = std::time::Instant::now() + Duration::from_millis(1200);
+            while std::time::Instant::now() < settle_until && pane_asks(directory.path()) < 2 {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let landed = std::time::Instant::now();
+            TeammateResult::new("agent-21", Exit::Ok)
+                .write(&child)
+                .expect("write result");
+            let (outcome, heard) = waiting.join().expect("the wait");
+            (outcome, heard.duration_since(landed))
+        });
+        assert!(matches!(outcome, PaneOutcome::Finished(_)), "{outcome:?}");
+        assert!(
+            lag < Duration::from_millis(100),
+            "the answer was heard {lag:?} after it landed"
+        );
+    }
+
+    /// A parent's cancel is answered promptly while its child works (t-17057).
+    ///
+    /// The cancel flag is the caller's own closure, so the wait can only look at
+    /// it; how often is what this pins. It was every 250 ms, and a wait that
+    /// stops asking the world every quarter second must not stop asking this.
+    #[test]
+    fn a_cancel_raised_while_the_child_works_ends_the_pane_within_two_looks() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-23");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let raised = std::sync::atomic::AtomicBool::new(false);
+        let (outcome, lag) = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                let outcome = wait_for_result(
+                    &tmux,
+                    &child,
+                    "%9",
+                    PaneBudget::Wall(Duration::from_secs(60)),
+                    &|| raised.load(std::sync::atomic::Ordering::SeqCst),
+                );
+                (outcome, std::time::Instant::now())
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            let cancelled_at = std::time::Instant::now();
+            raised.store(true, std::sync::atomic::Ordering::SeqCst);
+            let (outcome, heard) = waiting.join().expect("the wait");
+            (outcome, heard.duration_since(cancelled_at))
+        });
+        assert_eq!(outcome, PaneOutcome::Cancelled);
+        assert!(
+            lag < Duration::from_millis(2500),
+            "a cancel took {lag:?} to end the pane"
+        );
+        assert!(
+            tmux_log(directory.path()).iter().any(|line| line == "kill-pane -t %9"),
+            "the cancelled child's pane was left standing"
+        );
+    }
+
     /// A clock that stands still until the wait rests, and then moves on by
     /// `step` — after which `on_rest` runs, the child's side of that step.
     struct SteppedClock<'a> {
@@ -2725,6 +3086,41 @@ mod tests {
             self.at.set(self.at.get() + self.step);
             (self.on_rest)(self.elapsed());
         }
+    }
+
+    /// The multiplexer is asked as the wait needs it, not at every look
+    /// (t-17057): a child that answers after twenty looks a second apart used
+    /// to cost twenty spawns.
+    #[test]
+    fn tmux_is_asked_every_few_seconds_and_not_at_every_look() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-22");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let agent = |elapsed: Duration| {
+            if elapsed >= Duration::from_secs(20) {
+                TeammateResult::new("agent-22", Exit::Ok)
+                    .write(&child)
+                    .expect("write result");
+            }
+        };
+        let clock = SteppedClock::new(Duration::from_secs(1), &agent);
+        let outcome = wait_for_turn_result_on(
+            &clock,
+            &tmux,
+            &child,
+            "%9",
+            1,
+            PaneBudget::Wall(Duration::from_secs(600)),
+            &|| false,
+            &|| {},
+        );
+        assert!(matches!(outcome, PaneOutcome::Finished(_)), "{outcome:?}");
+        let asked = pane_asks(directory.path());
+        assert!(
+            asked <= 6,
+            "twenty looks, a second apart, asked tmux {asked} times"
+        );
     }
 
     /// The child's transcript, named where a pane child names it, with one
@@ -3097,5 +3493,363 @@ mod tests {
         std::fs::write(directory.path().join(RESULT_FILE), br#"{"version": 1, "agen"#)
             .expect("write");
         assert!(TeammateResult::read(directory.path()).is_none());
+    }
+
+    /// A tmux whose panes are whatever its `panes` file holds when it is asked
+    /// — one id a line — so a test can take a pane out of the table.
+    fn fake_tmux_reading(directory: &Path) -> PathBuf {
+        link_fake_tmux(directory)
+    }
+
+    /// A child's channel whose connections end when the test says its process
+    /// ends: what a dying process does to the sockets it holds.
+    struct DyingChannel {
+        held: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+    }
+
+    impl DyingChannel {
+        fn stand(child: &Path) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            ChannelCoordinates {
+                addr: listener.local_addr().expect("addr").to_string(),
+                token: None,
+                session_id: "child-session".to_string(),
+            }
+            .write(&child.join(CHANNEL_FILE))
+            .expect("write channel file");
+            let held = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let keeping = std::sync::Arc::clone(&held);
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    keeping.lock().expect("held").push(stream);
+                }
+            });
+            Self { held }
+        }
+
+        fn connections(&self) -> usize {
+            self.held.lock().expect("held").len()
+        }
+
+        fn die(&self) {
+            self.held.lock().expect("held").clear();
+        }
+    }
+
+    /// The cadence tests use: a channel is held from the first look, and tmux is
+    /// left alone for half a minute unless something says otherwise.
+    fn watching_cadence() -> Cadence {
+        Cadence {
+            hold_after: Duration::ZERO,
+            pane_ask_bare: Duration::from_secs(30),
+            pane_ask_held: Duration::from_secs(30),
+            ..Cadence::STANDARD
+        }
+    }
+
+    /// A child that dies is learned from its channel closing, at once, with one
+    /// ask of tmux to confirm it — not from an ask at every look (t-17057).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_child_that_dies_is_learned_from_its_channel_closing_and_tmux_is_asked_to_confirm_once() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::write(directory.path().join("panes"), "%9\n").expect("panes");
+        let tmux = Tmux::at(fake_tmux_reading(directory.path()));
+        let child = directory.path().join("agent-30");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let channel = DyingChannel::stand(&child);
+        let (outcome, working_asks, lag) = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                let outcome = wait_with_cadence(
+                    &SystemWaitClock,
+                    &tmux,
+                    &child,
+                    "%9",
+                    1,
+                    PaneBudget::Wall(Duration::from_secs(60)),
+                    &|| false,
+                    &|| {},
+                    watching_cadence(),
+                );
+                (outcome, std::time::Instant::now())
+            });
+            std::thread::sleep(Duration::from_millis(700));
+            let working_asks = pane_asks(directory.path());
+            assert_eq!(channel.connections(), 1, "the parent did not hold the child's channel");
+            std::fs::write(directory.path().join("panes"), "").expect("the pane leaves the table");
+            let died = std::time::Instant::now();
+            channel.die();
+            let (outcome, heard) = waiting.join().expect("the wait");
+            (outcome, working_asks, heard.duration_since(died))
+        });
+        assert_eq!(outcome, PaneOutcome::Vanished);
+        assert_eq!(working_asks, 1, "tmux was asked while the child worked");
+        assert_eq!(pane_asks(directory.path()), 2, "the start and the confirmation, and no more");
+        assert!(lag < Duration::from_millis(500), "the death was heard {lag:?} after it");
+    }
+
+    /// A child that answers and then exits is a result, not a death: its
+    /// channel ends with its process, and the answer it wrote first is read
+    /// before anything is asked of tmux (t-17057).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_child_that_answers_and_exits_is_read_as_finished_and_not_as_dead() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::write(directory.path().join("panes"), "%9\n").expect("panes");
+        let tmux = Tmux::at(fake_tmux_reading(directory.path()));
+        let child = directory.path().join("agent-31");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let channel = DyingChannel::stand(&child);
+        let outcome = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                wait_with_cadence(
+                    &SystemWaitClock,
+                    &tmux,
+                    &child,
+                    "%9",
+                    1,
+                    PaneBudget::Wall(Duration::from_secs(60)),
+                    &|| false,
+                    &|| {},
+                    watching_cadence(),
+                )
+            });
+            std::thread::sleep(Duration::from_millis(500));
+            // A well-behaved child writes, and then its pane and process go.
+            let mut wrote = TeammateResult::new("agent-31", Exit::Ok);
+            wrote.final_message = "done".to_string();
+            wrote.write(&child).expect("write result");
+            std::fs::write(directory.path().join("panes"), "").expect("the pane leaves the table");
+            channel.die();
+            waiting.join().expect("the wait")
+        });
+        match outcome {
+            PaneOutcome::Finished(result) => assert_eq!(result.final_message, "done"),
+            other => panic!("an answered child was read as {other:?}"),
+        }
+        assert_eq!(pane_asks(directory.path()), 1, "tmux was asked after the answer was there to read");
+    }
+
+    /// A channel that appears after the wait began — the child boots after its
+    /// pane is cut — is held from the moment its file lands (t-17057).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_channel_that_appears_late_is_held_from_the_moment_its_file_lands() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::write(directory.path().join("panes"), "%9\n").expect("panes");
+        let tmux = Tmux::at(fake_tmux_reading(directory.path()));
+        let child = directory.path().join("agent-32");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let (outcome, connections_when_up) = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                wait_with_cadence(
+                    &SystemWaitClock,
+                    &tmux,
+                    &child,
+                    "%9",
+                    1,
+                    PaneBudget::Wall(Duration::from_secs(60)),
+                    &|| false,
+                    &|| {},
+                    watching_cadence(),
+                )
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            let channel = DyingChannel::stand(&child);
+            std::thread::sleep(Duration::from_millis(400));
+            let connections_when_up = channel.connections();
+            std::fs::write(directory.path().join("panes"), "").expect("the pane leaves the table");
+            channel.die();
+            (waiting.join().expect("the wait"), connections_when_up)
+        });
+        assert_eq!(connections_when_up, 1, "the channel that landed was not held");
+        assert_eq!(outcome, PaneOutcome::Vanished);
+        assert_eq!(pane_asks(directory.path()), 2, "the start and the confirmation, and no more");
+    }
+
+    /// A limit that runs out is heard when it does, not at the next look: a
+    /// watched wait rests no longer than what it has left.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_watched_wait_does_not_overshoot_a_short_limit_by_a_whole_look() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let tmux = Tmux::at(fake_tmux(directory.path(), "'%9'"));
+        let child = directory.path().join("agent-33");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let started = std::time::Instant::now();
+        let outcome = wait_for_result(
+            &tmux,
+            &child,
+            "%9",
+            PaneBudget::Wall(Duration::from_millis(300)),
+            &|| false,
+        );
+        assert_eq!(outcome, PaneOutcome::TimedOut);
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(300) && took < Duration::from_millis(900),
+            "a 300 ms limit ended after {took:?}"
+        );
+    }
+
+    /// What a wait may rest for without overshooting its limit.
+    #[test]
+    fn a_limit_says_how_long_is_left_of_it() {
+        let hour = Duration::from_secs(3600);
+        let quiet = AgeRule::Quiet(hour);
+        assert_eq!(
+            quiet.remaining(Duration::from_secs(5 * 3600), Duration::from_secs(600)),
+            Duration::from_secs(3000),
+            "a quiet limit counts from the last progress, not from the start"
+        );
+        let wall = AgeRule::Wall(hour);
+        assert_eq!(wall.remaining(Duration::from_secs(900), Duration::from_secs(3000)), Duration::from_secs(2700));
+        assert_eq!(wall.remaining(hour * 2, Duration::ZERO), Duration::ZERO, "a limit that is past has none left");
+    }
+
+    /// A child's channel as its parent meets it: it takes connections and says
+    /// nothing unasked. Each connection is read to its end on a thread of its
+    /// own, so one that is held open blocks nobody.
+    fn stand_silent_channel(child: &Path) {
+        use std::io::Read as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        ChannelCoordinates {
+            addr: listener.local_addr().expect("addr").to_string(),
+            token: None,
+            session_id: "child-session".to_string(),
+        }
+        .write(&child.join(CHANNEL_FILE))
+        .expect("write channel file");
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut sink = [0_u8; 64];
+                    while stream.read(&mut sink).is_ok_and(|read| read > 0) {}
+                });
+            }
+        });
+    }
+
+    /// A measurement, not a check: what three helpers working in panes cost
+    /// their parent, and how soon their answers are heard (t-17057).
+    /// `tools/tui-bench/pane_probe.py` runs it before and after a change to the
+    /// wait and reads the CPU of this process between the two markers it prints.
+    ///
+    /// `PANE_PROBE_DIR` is where the fake tmux keeps its log,
+    /// `PANE_PROBE_SECONDS` how long the children work (default 20),
+    /// `PANE_PROBE_ROUNDS` how many times an answer is landed at another phase
+    /// of a quarter second (default 8), and `PANE_PROBE_CHANNELS=1` gives each
+    /// child a channel, as a child of this zo has one.
+    #[test]
+    #[ignore = "a measurement: run by tools/tui-bench/pane_probe.py"]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::too_many_lines
+    )] // a percentile index over a few dozen samples; one measurement, two phases
+    fn pane_probe_three_helpers_at_work() {
+        let Some(base) = std::env::var_os("PANE_PROBE_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let number = |name: &str, default: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(default)
+        };
+        let seconds = number("PANE_PROBE_SECONDS", 20);
+        let rounds = number("PANE_PROBE_ROUNDS", 8);
+        let channels = std::env::var("PANE_PROBE_CHANNELS").is_ok_and(|value| value == "1");
+        std::fs::create_dir_all(&base).expect("mkdir");
+        let tmux = Tmux::at(fake_tmux(&base, "'%1' '%2' '%3'"));
+        let tmux = &tmux;
+        let say = |tag: &str, fields: &serde_json::Value| {
+            println!("PANE_PROBE {tag} {fields}");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        };
+        let stand = |name: String| {
+            let child = base.join(name);
+            std::fs::create_dir_all(&child).expect("mkdir child");
+            if channels {
+                stand_silent_channel(&child);
+            }
+            child
+        };
+        let hour = PaneBudget::Wall(Duration::from_secs(3600));
+
+        let children: Vec<PathBuf> = (0..3).map(|n| stand(format!("work-{n}"))).collect();
+        let asked_before = pane_asks(&base);
+        say(
+            "work_start",
+            &serde_json::json!({ "children": 3, "seconds": seconds, "channels": channels }),
+        );
+        let started = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            let waits: Vec<_> = children
+                .iter()
+                .enumerate()
+                .map(|(n, child)| {
+                    scope.spawn(move || wait_for_result(tmux, child, &format!("%{}", n + 1), hour, &|| false))
+                })
+                .collect();
+            std::thread::sleep(Duration::from_secs(seconds));
+            say(
+                "work_end",
+                &serde_json::json!({
+                    "tmux_asks": pane_asks(&base) - asked_before,
+                    "seconds": started.elapsed().as_secs_f64(),
+                }),
+            );
+            for child in &children {
+                TeammateResult::new("probe", Exit::Ok).write(child).expect("write result");
+            }
+            for wait in waits {
+                assert!(matches!(wait.join().expect("the wait"), PaneOutcome::Finished(_)));
+            }
+        });
+
+        let mut lags: Vec<f64> = Vec::new();
+        for round in 0..rounds {
+            let dirs: Vec<PathBuf> = (0..3).map(|n| stand(format!("round-{round}-{n}"))).collect();
+            std::thread::scope(|scope| {
+                let waits: Vec<_> = dirs
+                    .iter()
+                    .enumerate()
+                    .map(|(n, child)| {
+                        scope.spawn(move || {
+                            let outcome = wait_for_result(tmux, child, &format!("%{}", n + 1), hour, &|| false);
+                            (outcome, std::time::Instant::now())
+                        })
+                    })
+                    .collect();
+                std::thread::sleep(Duration::from_millis(300 + (round * 83) % 250));
+                let landed: Vec<std::time::Instant> = dirs
+                    .iter()
+                    .map(|child| {
+                        let at = std::time::Instant::now();
+                        TeammateResult::new("probe", Exit::Ok).write(child).expect("write result");
+                        at
+                    })
+                    .collect();
+                for (wait, at) in waits.into_iter().zip(landed) {
+                    let (outcome, heard) = wait.join().expect("the wait");
+                    assert!(matches!(outcome, PaneOutcome::Finished(_)), "{outcome:?}");
+                    lags.push(heard.duration_since(at).as_secs_f64() * 1000.0);
+                }
+            });
+        }
+        lags.sort_by(f64::total_cmp);
+        let at = |share: f64| lags[(((lags.len() - 1) as f64) * share).round() as usize];
+        say(
+            "latency",
+            &serde_json::json!({
+                "samples": lags.len(),
+                "p50_ms": at(0.5),
+                "p90_ms": at(0.9),
+                "max_ms": at(1.0),
+            }),
+        );
     }
 }

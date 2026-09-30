@@ -221,10 +221,17 @@ fn background_agent_ids() -> &'static Mutex<HashMap<String, BackgroundCompletion
 /// Record that `agent_id` was launched in background mode. Called by the `Agent`
 /// tool's background branch at spawn time.
 pub fn mark_background_agent(agent_id: String) {
-    background_agent_ids()
+    let mut marks = background_agent_ids()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(agent_id, BackgroundCompletionSource::Agent);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    marks.insert(agent_id, BackgroundCompletionSource::Agent);
+    tell_background_count(marks.len());
+}
+
+/// Tell whoever looks at what runs how many background marks stand, from under
+/// the lock that owns them so two changes cannot arrive out of order (t-17057).
+fn tell_background_count(count: usize) {
+    runtime::helper_activity::set(runtime::helper_activity::Count::Background, count);
 }
 
 /// Put an agent the host's pump must bring back on that road: mark it, and
@@ -255,10 +262,11 @@ pub(crate) fn hand_agent_to_background(agent_id: &str) {
 }
 
 fn mark_background_task(task_id: String, session_id: Option<String>) {
-    background_agent_ids()
+    let mut marks = background_agent_ids()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(task_id, BackgroundCompletionSource::Task(session_id));
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    marks.insert(task_id, BackgroundCompletionSource::Task(session_id));
+    tell_background_count(marks.len());
 }
 
 /// Whether a marked completion is safe to consume in `active_session_id`.
@@ -310,10 +318,11 @@ pub fn is_background_agent(agent_id: &str) -> bool {
 /// Forget a background agent id once its completion has been consumed, so the
 /// set never grows without bound across a long session.
 pub fn clear_background_agent(agent_id: &str) {
-    background_agent_ids()
+    let mut marks = background_agent_ids()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(agent_id);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    marks.remove(agent_id);
+    tell_background_count(marks.len());
 }
 
 /// Snapshot of the currently-marked background agent ids. Used by hosts

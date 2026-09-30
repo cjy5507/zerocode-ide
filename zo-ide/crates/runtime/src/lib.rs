@@ -21,6 +21,7 @@ pub mod file_ops;
 pub mod file_read_registry;
 pub mod file_search;
 pub mod git_snapshot;
+pub mod helper_activity;
 mod hooks;
 pub mod image_guard;
 pub mod jev_score;

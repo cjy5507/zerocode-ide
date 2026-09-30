@@ -47,7 +47,10 @@ pdf-extract = "0.10.0"
 
 [target.'cfg(unix)'.dependencies]
 # Safe Unix signal wrappers; workspace lints forbid direct unsafe libc calls.
-nix = { version = "0.29", features = ["fs", "process", "signal"] }
+# `event` is nix's safe `Kqueue` (rustix's `kevent` is an unsafe fn, which the
+# workspace forbids): a pane child's directory is watched with it, not looked
+# at every 250 ms (t-17057). A feature of a crate already linked, not a new one.
+nix = { version = "0.29", features = ["event", "fs", "process", "signal"] }
 rustix = { version = "1", features = ["fs", "process"] }
 
 [target.'cfg(windows)'.dependencies]
