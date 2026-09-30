@@ -1,7 +1,7 @@
 /* The ask popup, photographed — one picture per kind of question the window
  * puts to the person, taken from the window harness with fake asks.
  *
- *   node ui/tests/ask-popup-shots.mjs <folder> [--variant before|after]
+ *   node ui/tests/ask-popup-shots.mjs <folder> [--variant before|after] [--theme dark|light]
  *
  * Nothing here reads the popup's markup: it fires the same frames and events
  * the backend does and takes the whole window, so the same script draws the
@@ -14,9 +14,10 @@ import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
 
 const folder = resolve(process.argv[2] ?? "output/ask-popup");
-const variant = process.argv.includes("--variant")
-  ? process.argv[process.argv.indexOf("--variant") + 1]
-  : "after";
+const option = (name, fallback) =>
+  process.argv.includes(name) ? process.argv[process.argv.indexOf(name) + 1] : fallback;
+const variant = option("--variant", "after");
+const theme = option("--theme", "dark");
 await mkdir(folder, { recursive: true });
 
 const { files, origin } = await createWindowServer();
@@ -68,7 +69,7 @@ const COVER = { id: "handoff-2", reason: "", reasonKey: "computer.cover.ask", re
 const shots = [];
 const shoot = async (page, name) => {
   await page.waitForTimeout(450);
-  const path = resolve(folder, `${variant}-${name}.png`);
+  const path = resolve(folder, `${variant}${theme === "dark" ? "" : `-${theme}`}-${name}.png`);
   await page.screenshot({ path });
   shots.push(path);
 };
@@ -76,10 +77,11 @@ const shoot = async (page, name) => {
 /* One page per picture: a picture never inherits what the last one raised. */
 const fresh = async (setup) => {
   const { page, faults } = await openWindowTestPage(browser, origin);
-  await page.evaluate(() => {
+  await page.evaluate((one) => {
     window.__ANSWER__.respond_permission = () => null;
     window.__ANSWER__.computer_confirm_answer = () => true;
-  });
+    document.documentElement.dataset.theme = one;
+  }, theme);
   await setup(page);
   return { page, faults };
 };
