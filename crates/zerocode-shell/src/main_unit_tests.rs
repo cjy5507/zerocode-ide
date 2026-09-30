@@ -5926,6 +5926,56 @@ fn agent_screenshots_are_bounded_png_files_not_terminal_bytes() {
     );
 }
 
+/// zo's question reaches the window by two roads (t-17474, t-17514): the popup
+/// stands off the channel's `permission_prompt` frame, and the pane's state
+/// comes off the Notification hook — the one an `AskUserQuestion` uses, with
+/// `notification_type: question`. The hook road must read it as a pane that
+/// needs a person, and never as a tool approval: an approval draws the board's
+/// allow and deny keys, and those keys answer a tool, not a question about
+/// switching models. Only a `PermissionRequest` builds an approval.
+#[test]
+fn a_question_notification_is_a_pane_asking_and_never_a_tool_approval() {
+    let heard = |payload: &str| {
+        let envelope = zerocode_core::HookEnvelope {
+            agent: zerocode_core::AgentKind::Zo,
+            pane_key: "term-3".into(),
+            tab_id: String::new(),
+            launch_token: String::new(),
+            worktree_id: String::new(),
+            env: String::new(),
+            version: "1".into(),
+            hook_event_name: String::new(),
+            payload: payload.into(),
+        };
+        crate::hooks::report_of(&envelope, None).expect("a report")
+    };
+    let question = heard(
+        r#"{"hook_event_name":"Notification","notification_type":"question","message":"question: 모델을 바꿀까요?"}"#,
+    );
+    assert_eq!(
+        question.state,
+        zerocode_core::hook::HookState::NeedsAttention
+    );
+    assert!(
+        question.approval.is_none(),
+        "a question is offered the board's allow and deny keys as though it were a tool"
+    );
+    assert_eq!(
+        question.ask.as_deref(),
+        Some("question: 모델을 바꿀까요?"),
+        "the pane's card does not carry the question's sentence"
+    );
+    // The same words on a tool's own event are the tool's approval, as ever.
+    let tool = heard(
+        r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+    );
+    assert_eq!(tool.state, zerocode_core::hook::HookState::NeedsAttention);
+    assert!(
+        tool.approval.is_some(),
+        "a tool's permission lost its approval"
+    );
+}
+
 /// No label reaches this window as a hardcoded string.
 ///
 /// The narrow gate above proves it for one row. This one proves it for the

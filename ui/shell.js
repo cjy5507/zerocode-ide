@@ -17564,7 +17564,7 @@ window.__LEAKCHECK__ = () => ({
   // 답을 기다리는 물음들. 자라기만 하고 줄지 않으면 철회가 어딘가에서 끊긴
   // 것이고, 그 증상은 "아무도 안 물었는데 대화상자가 서 있다"이다.
   pinnedAsks: pinnedAsks.length,
-  permissionQueue: permissionQueue.length,
+  askQueue: askQueue.length,
   // 그리고 말해 둔 문장들.
   spokenNodes: spokenNodes.size,
 spokenStrong: [...spokenNodes].filter((held) => !(held instanceof WeakRef)).length,

@@ -643,6 +643,47 @@ impl PtyRun {
         }
     }
 
+    /// Wait until `needle` stands on a row of the screen the capture makes — a
+    /// `rows`-row pane, the bytes replayed onto [`Screen`] from the start.
+    ///
+    /// [`Self::wait_for`] looks for the bytes, which is right for words the
+    /// painter writes whole (a committed row, the first paint of a popup) and
+    /// wrong for words it completes: it writes only the cells that changed, so
+    /// a typed line arrives a letter to a frame and a moved selection is a new
+    /// marker with no spaces after it (t-17056). A person sees the screen, so
+    /// these waits ask the screen. Returns the capture's length at the moment
+    /// the screen showed the words — the offset a later
+    /// [`Self::wait_for_after`] starts from.
+    pub fn wait_for_screen(&mut self, needle: &str, rows: usize, timeout: Duration) -> usize {
+        self.wait_for_screen_after(needle, rows, 0, timeout)
+    }
+
+    /// [`Self::wait_for_screen`] for the bytes after `offset`, replayed onto a
+    /// fresh `rows`-row screen. `offset` must stand where the painter is about
+    /// to write everything again — just before a resize, whose repaint writes
+    /// every row whole — because a screen that starts halfway has none of the
+    /// cells the later frames leave alone. Returns the capture's length, not
+    /// the distance from `offset`.
+    pub fn wait_for_screen_after(
+        &mut self,
+        needle: &str,
+        rows: usize,
+        offset: usize,
+        timeout: Duration,
+    ) -> usize {
+        let mut seen = offset;
+        self.wait_until(offset, timeout, |bytes| {
+            let mut screen = Screen::new(rows);
+            screen.feed(bytes);
+            let found = screen.visible().iter().any(|row| row.contains(needle));
+            if found {
+                seen = offset + bytes.len();
+            }
+            found
+        });
+        seen
+    }
+
     /// Wait until `needle` stands in a COMMITTED history row — one the painter
     /// wrote with the `\r\n` + erase grammar `history_rows_raw` scans — not
     /// merely somewhere in the live head. A golden that compares history rows

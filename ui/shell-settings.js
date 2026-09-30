@@ -7351,9 +7351,9 @@ function setLocale(code) {
     // survive the rebuild rather than fall back to the default.
     paintAutoAgents(el("auto-agent").value || null);
   }
-  // And the modal, if one is up. The lane behind it is blocked until it is
-  // answered, so it is the last surface that can afford to be left behind.
-  paintPermission();
+  // And the ask popup, if one is up. The agent behind it is blocked until it
+  // is answered, so it is the last surface that can afford to be left behind.
+  paintAsk();
   // 근거 화면도 제 말을 직접 짓는다 — 상태 딱지, 신선도, 그리고 「시험 결과가
   // 아니다」라는 유보 문장까지. 떠 있지 않으면 아무것도 하지 않는다.
   paintWorktreeEvidence();
