@@ -37311,8 +37311,9 @@ ok(
  * 넉넉했다. 새 상한은 셈을 그 위에 더한 2408이 아니라 실측 2290이다.
  * 같은 종류가 붙어 서는 걸음은 한 줄로 접히므로 400걸음의 실측
  * (measure-steps)은 오히려 준다. 이 검사가 돌 때마다 실측이 `HELPER_NODES`
- * 줄로 로그에 남는다. */
-const HELPER_LIST_NODES_CEILING = 2290;
+ * 줄로 로그에 남는다. 09-30(t-16914): 표식이 svg·use 대신 span 하나(마스크)가 되어
+ * 행마다 둘이 줄어 실측 2153이고 상한도 그 값이다. */
+const HELPER_LIST_NODES_CEILING = 2153;
 await page.setViewportSize({ width: 1280, height: 860 });
 const flatTranscript = await page.evaluate(async () => {
   const seen = {};
@@ -37361,6 +37362,15 @@ const flatTranscript = await page.evaluate(async () => {
   // 400턴이 세우는 노드의 수 — 「동안 작업」 접힘이 도구 카드를 대신해도
   // 이 수는 오르지 않아야 한다(t-2973). 접힌 몸은 펼칠 때 짓는다.
   seen.listNodes = list.querySelectorAll("*").length;
+  // t-16914: a step's mark stands no svg and no use (each is a shadow copy of the
+  // symbol the element count does not see); it is a mask in the sprite's glyph.
+  const marks = [...list.querySelectorAll(".helper-step-icon")];
+  seen.markCount = marks.length;
+  seen.markSvgs = list.querySelectorAll(".helper-step-icon svg, .helper-step-icon use").length;
+  seen.marksMasked = marks.length > 0 && marks.every((mark) => {
+    const mask = getComputedStyle(mark, "::before").maskImage;
+    return mask && mask !== "none";
+  });
 
   // 위계의 실측 — 에이전트의 말은 창의 글꼴에 맨몸으로.
   const prose = list.querySelector(".helper-turn.is-assistant");
@@ -37634,6 +37644,11 @@ ok(
     flatTranscript.cueMono && flatTranscript.wellBound &&
     flatTranscript.noSideScroll && flatTranscript.liveTail,
   JSON.stringify(flatTranscript),
+);
+ok(
+  "a step's mark is one span with its glyph as a mask — no svg and no use under any row's line, so a page of hundreds does not stand a shadow copy of the sprite per row",
+  flatTranscript.markCount > 0 && flatTranscript.markSvgs === 0 && flatTranscript.marksMasked,
+  JSON.stringify({ marks: flatTranscript.markCount, svgs: flatTranscript.markSvgs, masked: flatTranscript.marksMasked }),
 );
 ok(
   "its skeleton is fixed — header and footer hold still, only the transcript scrolls, and the log region is named for keyboard and screen reader",
