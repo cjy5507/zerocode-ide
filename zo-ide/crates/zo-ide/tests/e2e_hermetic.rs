@@ -6189,7 +6189,9 @@ async fn e2e_a_terminal_taken_while_zo_idles_is_taken_back_within_the_idle_bound
     // command returned; by four it has, and nothing wakes zo.
     tokio::time::sleep(Duration::from_secs(4)).await;
     run.send(b"typed after the strike").expect("type after the strike");
-    run.wait_for("typed after the strike", Duration::from_secs(45));
+    // The painter writes the cells that changed, so the words are read off the
+    // screen, as the neighbouring test reads its own (t-17056).
+    run.wait_for_screen("typed after the strike", 40, Duration::from_secs(45));
     let _ = run.finish();
 }
 
