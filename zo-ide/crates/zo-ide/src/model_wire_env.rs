@@ -17,6 +17,20 @@
 //! only what the layers ahead did not declare. `zo models --refresh` leaves the
 //! whole picture — every layer in that order, the shipped seed last — as
 //! `cache/model-catalog/merged.json` (`audit_document`).
+//!
+//! A zo started by another zo — a helper, or a `zo` run from a session's shell
+//! tool — inherits the variable its parent published, and that is not an
+//! operator's decision: it is what the parent knew when it last published. A
+//! child that took it for one kept the parent's start-of-session answers
+//! ahead of its own discovery, blind to every model newer than the parent
+//! (t-17403: `sol` stayed `gpt-6-sol` after `gpt-6.1-sol` was discovered). So
+//! every publish marks what it made — the value's fingerprint, and the
+//! operator's own export, if there was one, in a companion variable each
+//! (`Bridge`) — and a process that finds a value its mark fits takes it as the
+//! LAST layer above the shipped seed, a place to start from, and the
+//! operator's export from its companion variable as the first. A value with no
+//! mark, or one whose mark no longer fits (an export made afresh in a
+//! session's shell), is an operator's export, as ever.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,7 +41,32 @@ use serde_json::{json, Map, Value};
 const OPERATOR_EXPORT_LAYER: &str = "operator export";
 const OVERLAY_LAYER: &str = "model catalog overlay";
 const DISCOVERED_LAYER: &str = "discovered model catalog";
+const PARENT_LAYER: &str = "parent zo's published catalog";
 const SHIPPED_LAYER: &str = "shipped";
+
+/// One process bridge: the variable `api` reads, and the two that travel with
+/// it so a child can tell a parent's snapshot from an operator's decision.
+struct Bridge {
+    /// The variable `api` reads.
+    variable: &'static str,
+    /// The fingerprint of what zo last published into `variable`. A value it
+    /// fits is zo's; anything else there is somebody's export.
+    published: &'static str,
+    /// The operator's own export of `variable`, verbatim, as the publishing
+    /// process first found it — present only when there was one.
+    operator: &'static str,
+}
+
+const CONTEXT_WINDOWS: Bridge = Bridge {
+    variable: api::MODEL_CONTEXT_WINDOWS_ENV,
+    published: "ZO_MODEL_CONTEXT_WINDOWS_PUBLISHED",
+    operator: "ZO_MODEL_CONTEXT_WINDOWS_OPERATOR",
+};
+const EFFORT_CEILINGS: Bridge = Bridge {
+    variable: api::MODEL_EFFORT_CEILINGS_ENV,
+    published: "ZO_MODEL_EFFORT_CEILINGS_PUBLISHED",
+    operator: "ZO_MODEL_EFFORT_CEILINGS_OPERATOR",
+};
 /// Beside the discovery cache: the merged copy a refresh leaves for audit.
 const AUDIT_FILE: &str = "merged.json";
 
@@ -39,17 +78,25 @@ pub struct Published {
     pub json: String,
 }
 
-/// What the operator had exported before zo first wrote the variable.
+/// What the environment held for one bridge before zo first wrote it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Inherited {
+    /// An operator's own export: a decision, kept first.
+    operator: Option<String>,
+    /// What a parent zo published: a place to start from, kept last.
+    snapshot: Option<String>,
+}
+
+/// [`Inherited`], or "not looked yet".
 ///
-/// Three states, not two: "not looked yet" has to stay distinguishable from
-/// "looked, and there was no export", because the answer is captured ONCE and
+/// "Not looked yet" has to stay distinguishable from "looked, and there was
+/// nothing" (`Inherited::default()`), because the answer is captured ONCE and
 /// reused. `/model` rebuilds the runtime and republishes, and re-reading the
 /// variable each time would fold zo's own previous output back into the
 /// operator half and grow it without bound.
-enum OperatorBase {
+enum Captured {
     Unread,
-    Absent,
-    Export(String),
+    Read(Inherited),
 }
 
 static PUBLISHED: Mutex<Option<Published>> = Mutex::new(None);
@@ -80,9 +127,9 @@ pub(crate) fn selection_provenance(model: &str) -> (&'static str, &'static str) 
             .is_some_and(|ids| ids.iter().any(|id| id.as_str().is_some_and(|id| id.eq_ignore_ascii_case(model))))) {
             let source = match source {
                 OPERATOR_EXPORT_LAYER => "export", OVERLAY_LAYER => "overlay",
-                DISCOVERED_LAYER => "discovered", _ => "shipped",
+                DISCOVERED_LAYER => "discovered", PARENT_LAYER => "inherited", _ => "shipped",
             };
-            let provenance = if source == "discovered" || row.get("effort_levels").is_none() {
+            let provenance = if matches!(source, "discovered" | "inherited") || row.get("effort_levels").is_none() {
                 "mixed"
             } else { "declared" };
             return (source, provenance);
@@ -91,52 +138,97 @@ pub(crate) fn selection_provenance(model: &str) -> (&'static str, &'static str) 
     ("unknown", "unknown")
 }
 
-static OPERATOR_BASE: Mutex<OperatorBase> = Mutex::new(OperatorBase::Unread);
-static EFFORT_BASE: Mutex<OperatorBase> = Mutex::new(OperatorBase::Unread);
+static OPERATOR_BASE: Mutex<Captured> = Mutex::new(Captured::Unread);
+static EFFORT_BASE: Mutex<Captured> = Mutex::new(Captured::Unread);
 
-fn captured(slot: &Mutex<OperatorBase>, key: &str) -> Option<String> {
+/// What was in the environment for `bridge` the first time anyone asked; the
+/// same answer every time after.
+fn captured(slot: &Mutex<Captured>, bridge: &Bridge) -> Inherited {
     let mut slot = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if matches!(*slot, OperatorBase::Unread) {
-        *slot = std::env::var(key)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .map_or(OperatorBase::Absent, OperatorBase::Export);
+    if matches!(*slot, Captured::Unread) {
+        *slot = Captured::Read(read_inherited(bridge));
     }
     match &*slot {
-        OperatorBase::Export(value) => Some(value.clone()),
-        OperatorBase::Unread | OperatorBase::Absent => None,
+        Captured::Read(inherited) => inherited.clone(),
+        Captured::Unread => Inherited::default(),
     }
 }
 
-fn operator_base() -> Option<String> {
-    captured(&OPERATOR_BASE, api::MODEL_CONTEXT_WINDOWS_ENV)
+/// Sort what a bridge variable holds into a decision or a snapshot: a value
+/// its fingerprint fits is what a zo published — its operator half is in the
+/// companion variable — and any other value is an operator's export.
+fn read_inherited(bridge: &Bridge) -> Inherited {
+    let text = |key: &str| std::env::var(key).ok().filter(|value| !value.trim().is_empty());
+    let Some(value) = text(bridge.variable) else {
+        return Inherited::default();
+    };
+    if text(bridge.published).is_some_and(|mark| mark == fingerprint(&value)) {
+        Inherited { operator: text(bridge.operator), snapshot: Some(value) }
+    } else {
+        Inherited { operator: Some(value), snapshot: None }
+    }
 }
 
-/// Forget the captured exports so a test can exercise both ownership modes.
+/// A fingerprint that means the same in every zo that ever ran: FNV-1a over
+/// the bytes, and their number. It is not a secret and guards nothing but a
+/// mix-up — a value someone exported afresh under a mark a session left.
+fn fingerprint(value: &str) -> String {
+    let hash = value
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3));
+    format!("{hash:016x}-{}", value.len())
+}
+
+/// Put a bridge's value in the environment. A value zo made (`authored`) goes
+/// with its fingerprint and the operator's export, so a process that inherits
+/// it can tell it from a decision; the operator's own export, restored as it
+/// was, is exactly what it was and carries neither.
+fn set_bridge(bridge: &Bridge, value: &str, operator: Option<&str>, authored: bool) {
+    std::env::set_var(bridge.variable, value);
+    if authored {
+        std::env::set_var(bridge.published, fingerprint(value));
+        match operator {
+            Some(export) => std::env::set_var(bridge.operator, export),
+            None => std::env::remove_var(bridge.operator),
+        }
+    } else {
+        std::env::remove_var(bridge.published);
+        std::env::remove_var(bridge.operator);
+    }
+}
+
+/// Forget the captured environment so a test can play a fresh process.
 #[cfg(test)]
 pub(crate) fn reset_ownership_for_tests() {
     if let Ok(mut slot) = OPERATOR_BASE.lock() {
-        *slot = OperatorBase::Unread;
+        *slot = Captured::Unread;
     }
     if let Ok(mut slot) = EFFORT_BASE.lock() {
-        *slot = OperatorBase::Unread;
+        *slot = Captured::Unread;
+    }
+    if let Ok(mut reported) = REPORTED_DIFFERENCES.lock() {
+        reported.clear();
     }
 }
 
 /// Make the overlay-declared and discovered catalogs live.
 ///
 /// `None` for both means nothing to add, which is NOT the same as an empty
-/// catalog: with no operator export there is simply nothing to publish, and
-/// the variable is left untouched (`Ok(None)`) rather than being set to an
-/// empty catalog that would read as a deliberate "no models are declared".
+/// catalog: with no operator export and nothing inherited from a parent zo
+/// there is simply nothing to publish, and the variable is left untouched
+/// (`Ok(None)`) rather than being set to an empty catalog that would read as a
+/// deliberate "no models are declared".
 pub(crate) fn publish(
     overlay_json: Option<&str>,
     discovered_json: Option<&str>,
 ) -> Result<Option<Published>, String> {
-    let base = operator_base();
+    let Inherited { operator: base, snapshot } = captured(&OPERATOR_BASE, &CONTEXT_WINDOWS);
+    // A parent's snapshot goes last: under everything this process declares or
+    // discovers, over only the shipped seed.
     let own: Vec<(&'static str, &str)> = [
         (OVERLAY_LAYER, overlay_json),
         (DISCOVERED_LAYER, discovered_json),
+        (PARENT_LAYER, snapshot.as_deref()),
     ]
     .into_iter()
     .filter_map(|(label, json)| json.map(|json| (label, json)))
@@ -148,7 +240,17 @@ pub(crate) fn publish(
         (Some(base), true) => base.to_string(),
         (base, false) => merge(base, &own)?,
     };
-    std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, &json);
+    set_bridge(&CONTEXT_WINDOWS, &json, base.as_deref(), !own.is_empty());
+    if let Some(snapshot) = snapshot.as_deref() {
+        // Everything ranked ahead of the parent's snapshot, in order.
+        let ahead: Vec<(&str, &str)> = base
+            .as_deref()
+            .map(|export| (OPERATOR_EXPORT_LAYER, export))
+            .into_iter()
+            .chain(own.iter().copied().filter(|(label, _)| *label != PARENT_LAYER))
+            .collect();
+        announce_differences(&ahead, snapshot);
+    }
     // The wire lookup re-reads the variable per call, but the alias registry is
     // built once and cached, so it has to be told. Idempotent on identical
     // bytes, which is what every rebuild-triggered republish sends.
@@ -159,6 +261,66 @@ pub(crate) fn publish(
         .chain(own.into_iter().map(|(label, json)| (label, json.to_string())))
         .collect();
     Ok(record_published(Some(Published { layers, json })))
+}
+
+/// The aliases this process resolves differently from the parent zo it
+/// inherited a snapshot from — `(alias, the parent's answer, this process's)`.
+/// `ahead` is every layer ranked above the snapshot; the first row of an alias
+/// in them answers, as it does for the catalog.
+fn differing_answers(ahead: &[(&str, &str)], snapshot: &str) -> Vec<(String, String, String)> {
+    let answers = |label: &str, raw: &str| -> Vec<(String, String)> {
+        let Ok((_, aliases)) = rows_of(label, raw) else {
+            return Vec::new();
+        };
+        aliases
+            .iter()
+            .filter_map(|row| {
+                let name = |key: &str| row.get(key).and_then(Value::as_str).map(str::to_string);
+                Some((name("alias")?, name("canonical")?))
+            })
+            .collect()
+    };
+    let mine: Vec<(String, String)> = ahead.iter().flat_map(|(label, raw)| answers(label, raw)).collect();
+    let mut seen = std::collections::HashSet::new();
+    answers(PARENT_LAYER, snapshot)
+        .into_iter()
+        .filter(|(alias, _)| seen.insert(alias.to_ascii_lowercase()))
+        .filter_map(|(alias, parents)| {
+            let (_, answer) = mine.iter().find(|(name, _)| name.eq_ignore_ascii_case(&alias))?;
+            (!answer.eq_ignore_ascii_case(&parents)).then(|| (alias, parents, answer.clone()))
+        })
+        .collect()
+}
+
+/// Names already reported in this process, lower-cased.
+static REPORTED_DIFFERENCES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Say, once per alias and on the log (stderr), what this process resolves
+/// differently from the parent zo that started it — the alias, the parent's
+/// answer, this process's. A child that knows a newer model than its parent's
+/// snapshot answers with the newer one; that is the point, and it is written
+/// down so a session and its helper naming one model differently is a line to
+/// read, not a mystery. Returns the lines it wrote.
+fn announce_differences(ahead: &[(&str, &str)], snapshot: &str) -> Vec<String> {
+    let mut reported = REPORTED_DIFFERENCES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lines: Vec<String> = differing_answers(ahead, snapshot)
+        .into_iter()
+        .filter(|(alias, _, _)| {
+            let key = alias.to_ascii_lowercase();
+            let new = !reported.contains(&key);
+            if new {
+                reported.push(key);
+            }
+            new
+        })
+        .map(|(alias, parents, mine)| {
+            format!("model catalog: {alias} resolves to {mine} here; the zo that started this one had it as {parents}")
+        })
+        .collect();
+    for line in &lines {
+        eprintln!("[zo] {line}");
+    }
+    lines
 }
 
 /// `<config home>/cache/model-catalog/merged.json`.
@@ -209,28 +371,39 @@ pub(crate) fn write_audit(path: &Path, document: &Value) -> io::Result<()> {
 /// Make discovered effort ceilings live through `api::MODEL_EFFORT_CEILINGS_ENV`.
 ///
 /// An operator export keeps every id it names; discovered ceilings fill in the
-/// rest. `None` with no export leaves the variable untouched.
+/// rest, over what a parent zo published (which fills in only what nothing
+/// else names). `None` with nothing inherited leaves the variable untouched.
 pub(crate) fn publish_effort_ceilings(discovered_json: Option<&str>) -> Result<(), String> {
-    let base = captured(&EFFORT_BASE, api::MODEL_EFFORT_CEILINGS_ENV);
-    let published = match (base.as_deref(), discovered_json) {
-        (None, None) => None,
-        (Some(base), None) => Some(base.to_string()),
-        (None, Some(discovered)) => {
+    let Inherited { operator: base, snapshot } = captured(&EFFORT_BASE, &EFFORT_CEILINGS);
+    match (base.as_deref(), discovered_json, snapshot.as_deref()) {
+        // Nothing of ours, and a parent's snapshot is already what stands.
+        (None, None, _) => Ok(()),
+        (Some(export), None, None) => {
+            set_bridge(&EFFORT_CEILINGS, export, None, false);
+            Ok(())
+        }
+        (None, Some(discovered), None) => {
             object_of("discovered effort ceilings", discovered)?;
-            Some(discovered.to_string())
+            set_bridge(&EFFORT_CEILINGS, discovered, None, true);
+            Ok(())
         }
-        (Some(base), Some(discovered)) => {
-            let mut merged = object_of("discovered effort ceilings", discovered)?;
-            for (key, value) in object_of(api::MODEL_EFFORT_CEILINGS_ENV, base)? {
-                merged.insert(key, value);
+        (base, discovered, snapshot) => {
+            // Lowest first, so a later layer's entry replaces an earlier one's.
+            let mut merged = Map::new();
+            for (label, raw) in [
+                ("parent zo's effort ceilings", snapshot),
+                ("discovered effort ceilings", discovered),
+                (api::MODEL_EFFORT_CEILINGS_ENV, base),
+            ] {
+                if let Some(raw) = raw {
+                    merged.extend(object_of(label, raw)?);
+                }
             }
-            Some(serde_json::to_string(&Value::Object(merged)).map_err(|error| error.to_string())?)
+            let merged = serde_json::to_string(&Value::Object(merged)).map_err(|error| error.to_string())?;
+            set_bridge(&EFFORT_CEILINGS, &merged, base, true);
+            Ok(())
         }
-    };
-    if let Some(published) = published {
-        std::env::set_var(api::MODEL_EFFORT_CEILINGS_ENV, published);
     }
-    Ok(())
 }
 
 fn object_of(label: &str, raw: &str) -> Result<Map<String, Value>, String> {
@@ -303,7 +476,7 @@ fn rows_of(label: &str, raw: &str) -> Result<(Vec<Value>, Vec<Value>), String> {
 mod tests {
     use super::{
         audit_document, merge, publish, publish_effort_ceilings, reset_ownership_for_tests,
-        write_audit, OVERLAY_LAYER,
+        write_audit, DISCOVERED_LAYER, OVERLAY_LAYER,
     };
 
     const OVERLAY: &str = r#"{"models":[{"provider":"google","ids":["gemini-3.7-flash"],"wire":{"low":"gemini-3.7-flash-low","high":"gemini-3.7-flash-high"}}]}"#;
@@ -892,5 +1065,66 @@ mod tests {
         publish(None, Some(CHILD_DISCOVERY)).expect("second");
         assert_eq!(std::env::var(api::MODEL_CONTEXT_WINDOWS_ENV).as_deref(), Ok(first.as_str()));
 
+    }
+
+    /// The aliases a child resolves differently from the snapshot it inherited,
+    /// read layer by layer: the first row of a name in the layers ahead of the
+    /// snapshot answers, as it does for the catalog. A name only the child
+    /// declares is not a difference (the parent had no answer), and neither is
+    /// a model row.
+    #[test]
+    fn the_aliases_a_child_resolves_differently_are_read_layer_by_layer() {
+        let ahead = [
+            ("operator export", r#"{"aliases":[{"alias":"Pinned","canonical":"model-b"}]}"#),
+            ("discovered model catalog", r#"{"aliases":[{"alias":"moved","canonical":"model-2"},{"alias":"only-mine","canonical":"model-x"},{"alias":"same","canonical":"model-1"}]}"#),
+        ];
+        let snapshot = r#"{"models":[{"ids":["model-9"]}],"aliases":[{"alias":"pinned","canonical":"model-a"},{"alias":"moved","canonical":"model-1"},{"alias":"moved","canonical":"model-0"},{"alias":"same","canonical":"MODEL-1"},{"alias":"only-parent","canonical":"model-p"}]}"#;
+        assert_eq!(
+            super::differing_answers(&ahead, snapshot),
+            [
+                ("pinned".to_string(), "model-a".to_string(), "model-b".to_string()),
+                ("moved".to_string(), "model-1".to_string(), "model-2".to_string()),
+            ],
+            "the parent's first row per name is its answer; unchanged and one-sided names are silent"
+        );
+        assert!(super::differing_answers(&[], snapshot).is_empty(), "no layer ahead, nothing differs");
+    }
+
+    /// (e) The difference is written down — the alias, the parent's answer,
+    /// the child's — once per alias, so a session and its helper naming one
+    /// model differently is a line to read and not a mystery; the same
+    /// discovery says nothing.
+    #[test]
+    fn a_child_says_once_per_alias_what_it_resolves_differently_from_its_parent() {
+        let _lock = crate::test_env_lock();
+        let _bridges = bare_bridges();
+        let _registry = RegistryBack;
+        next_process();
+
+        publish(None, Some(PARENT_DISCOVERY)).expect("the parent publishes");
+        let snapshot = std::env::var(api::MODEL_CONTEXT_WINDOWS_ENV).expect("the parent published");
+
+        // The same discovery in both: nothing to say.
+        next_process();
+        publish(None, Some(PARENT_DISCOVERY)).expect("the child publishes");
+        assert!(super::announce_differences(&[(DISCOVERED_LAYER, PARENT_DISCOVERY)], &snapshot).is_empty());
+
+        // A newer discovery: publishing says it, and says it only once.
+        next_process();
+        publish(None, Some(CHILD_DISCOVERY)).expect("the child publishes");
+        assert_eq!(google_latest(), "gemini-3.8-flash");
+        assert!(
+            super::announce_differences(&[(DISCOVERED_LAYER, CHILD_DISCOVERY)], &snapshot).is_empty(),
+            "publish had already written the line for this alias"
+        );
+
+        // A fresh process says it again, with the alias and both answers.
+        next_process();
+        let lines = super::announce_differences(&[(DISCOVERED_LAYER, CHILD_DISCOVERY)], &snapshot);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        for word in ["google-latest", "gemini-3.7-flash", "gemini-3.8-flash"] {
+            assert!(lines[0].contains(word), "{word} is missing from {:?}", lines[0]);
+        }
+        assert!(super::announce_differences(&[(DISCOVERED_LAYER, CHILD_DISCOVERY)], &snapshot).is_empty());
     }
 }
