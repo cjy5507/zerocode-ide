@@ -9,7 +9,7 @@
 //! browser row's name for the request and nothing else.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zerocode_core::branching::BranchAsk;
@@ -221,15 +221,24 @@ impl LiveJudge {
     /// answered under a risen `auto` (`routeUse: applied`). A remembered body
     /// the question's own rules refuse is a hit that no longer reads: the
     /// wire is asked after all, and the row says `schema`.
-    fn choose_remembering(&mut self, ask: &ActionAsk, stand: CacheStand) -> Judged {
+    fn choose_remembering(
+        &mut self,
+        ask: &ActionAsk,
+        stand: CacheStand,
+        deadline: Instant,
+    ) -> Judged {
         let Some(path) = memo_path(&self.wire) else {
-            return self.choose_plain(ask);
+            return self.choose_plain(ask, deadline);
         };
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Judged::Refused(crate::systemone::TIMEOUT.to_string());
+        }
         let asked = self.wire.ask_remembering(
             self.seat,
             self.workspace.as_deref(),
             request_of(ask),
-            ACTION_DEADLINE,
+            left,
             Some(Memo {
                 path: &path,
                 seat: self.seat,
@@ -288,12 +297,14 @@ impl LiveJudge {
                     row["routeUse"] = json!(zerocode_core::jev::ROUTE_USE_FALLBACK);
                     self.memo_rows.push(row);
                     // The wire after all, counted as any request.
-                    let fresh = self.wire.ask(
-                        self.seat,
-                        self.workspace.as_deref(),
-                        request_of(ask),
-                        ACTION_DEADLINE,
-                    );
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        self.spent = Some(asked.spent);
+                        return Judged::Refused(crate::systemone::TIMEOUT.to_string());
+                    }
+                    let fresh =
+                        self.wire
+                            .ask(self.seat, self.workspace.as_deref(), request_of(ask), left);
                     return self.answer_and_remember(
                         ask,
                         &fresh.answer,
@@ -348,13 +359,14 @@ impl LiveJudge {
     }
 
     /// The question as it was asked before the memo existed: the wire alone.
-    fn choose_plain(&mut self, ask: &ActionAsk) -> Judged {
-        let asked = self.wire.ask(
-            self.seat,
-            self.workspace.as_deref(),
-            request_of(ask),
-            ACTION_DEADLINE,
-        );
+    fn choose_plain(&mut self, ask: &ActionAsk, deadline: Instant) -> Judged {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Judged::Refused(crate::systemone::TIMEOUT.to_string());
+        }
+        let asked = self
+            .wire
+            .ask(self.seat, self.workspace.as_deref(), request_of(ask), left);
         self.spent = Some(asked.spent);
         match asked.answer {
             Ok(body) => read_body(ask, &body),
@@ -382,10 +394,20 @@ impl LiveJudge {
 
 impl ActionJudge for LiveJudge {
     fn choose(&mut self, ask: &ActionAsk) -> Judged {
+        self.choose_within(ask, ACTION_DEADLINE)
+    }
+
+    fn choose_within(&mut self, ask: &ActionAsk, left: Duration) -> Judged {
         self.cached = false;
+        self.spent = None;
+        let left = left.min(ACTION_DEADLINE);
+        if left.is_zero() {
+            return Judged::Refused(crate::systemone::TIMEOUT.to_string());
+        }
+        let deadline = Instant::now() + left;
         match self.cache_stand() {
-            Some(stand) => self.choose_remembering(ask, stand),
-            None => self.choose_plain(ask),
+            Some(stand) => self.choose_remembering(ask, stand, deadline),
+            None => self.choose_plain(ask, deadline),
         }
     }
 

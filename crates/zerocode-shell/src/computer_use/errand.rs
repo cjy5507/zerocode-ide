@@ -239,16 +239,26 @@ impl Pending {
         u64::try_from(self.began.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// The answer, waited for. A judge whose thread died is a wire that
-    /// never answered, in the wire's own word.
+    /// The answer, bounded by the judgment's wall from when it began.
+    /// A judge whose thread died is a wire that never answered.
     #[must_use]
     pub fn wait(self) -> Done {
-        self.done.recv().unwrap_or_else(|_| Done {
-            judged: Judged::Refused(crate::systemone::TRANSPORT.to_string()),
-            spent: None,
-            cached: false,
-            rows: Vec::new(),
-        })
+        self.done
+            .recv_timeout(ACTION_DEADLINE.saturating_sub(self.began.elapsed()))
+            .unwrap_or_else(|error| Done {
+                judged: Judged::Refused(
+                    match error {
+                        std::sync::mpsc::RecvTimeoutError::Timeout => crate::systemone::TIMEOUT,
+                        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                            crate::systemone::TRANSPORT
+                        }
+                    }
+                    .to_string(),
+                ),
+                spent: None,
+                cached: false,
+                rows: Vec::new(),
+            })
     }
 }
 
@@ -282,10 +292,8 @@ pub trait ActionJudge {
         done.judged
     }
 
-    /// [`Self::choose`], told how long the walk can wait — what a second
-    /// reader whose answer takes seconds rather than a wire's milliseconds
-    /// needs ([`Options::rescue`]). A judge with a wall of its own ignores
-    /// it; the default asks as ever.
+    /// [`Self::choose`], bounded by what the walk has left as well as the
+    /// judge's own wall. The default asks as ever.
     fn choose_within(&mut self, ask: &ActionAsk, left: Duration) -> Judged {
         let _ = left;
         self.choose(ask)
@@ -1282,15 +1290,18 @@ fn walk(
                 walked.discarded += 1;
                 drop(begun);
                 (
-                    judge.choose(&asked),
+                    judge.choose_within(&asked, Duration::from_millis(world.left_ms())),
                     Some(json!({ OVERLAP: OVERLAP_DISCARDED })),
                 )
             }
             None if std::mem::take(&mut cancelled) => (
-                judge.choose(&asked),
+                judge.choose_within(&asked, Duration::from_millis(world.left_ms())),
                 Some(json!({ OVERLAP: OVERLAP_CANCELLED })),
             ),
-            None => (judge.choose(&asked), None),
+            None => (
+                judge.choose_within(&asked, Duration::from_millis(world.left_ms())),
+                None,
+            ),
         };
         let judgment_ms = u64::try_from(judging.elapsed().as_millis()).unwrap_or(u64::MAX);
         let spent = judge.spent();
