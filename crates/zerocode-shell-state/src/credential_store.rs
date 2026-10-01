@@ -238,10 +238,9 @@ impl KeyringSecretStore {
                 ("target", target.as_str()),
                 ("persistence", "Local"),
             ]);
-            return self
-                .store
+            self.store
                 .build(&self.service, account, Some(&modifiers))
-                .map_err(classify_keyring_error);
+                .map_err(classify_keyring_error)
         }
 
         #[cfg(target_os = "macos")]

@@ -556,7 +556,7 @@ impl PtyLane {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn input_tape(&self) -> &[Vec<u8>] {
         &self.input_tape
     }
@@ -1141,8 +1141,10 @@ mod windows_processes {
         if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
             return table;
         }
-        let mut entry = PROCESSENTRY32W::default();
-        entry.dwSize = u32::try_from(std::mem::size_of::<PROCESSENTRY32W>()).unwrap_or(0);
+        let mut entry = PROCESSENTRY32W {
+            dwSize: u32::try_from(std::mem::size_of::<PROCESSENTRY32W>()).unwrap_or(0),
+            ..Default::default()
+        };
         // SAFETY: `entry` is a valid, sized PROCESSENTRY32W for the whole walk.
         let mut more = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
         while more {
