@@ -1223,6 +1223,8 @@ mod tests {
         serde_json::to_writer_pretty(&mut file, &raw).unwrap();
         file.write_all(b"\n").unwrap();
         file.sync_all().unwrap();
+        // Windows will not replace a file while a handle to it is open.
+        drop(file);
 
         let restarted = SettingsRepository::new(directory.path());
         let read = restarted.read_json::<Pair>(SETTINGS).unwrap();
@@ -1305,6 +1307,8 @@ mod tests {
         serde_json::to_writer_pretty(&mut file, &raw).unwrap();
         file.write_all(b"\n").unwrap();
         file.sync_all().unwrap();
+        // Windows will not replace a file while a handle to it is open.
+        drop(file);
 
         repository
             .mutate_json(SETTINGS, BTreeMap::<String, ProjectRow>::new, |projects| {
@@ -1359,6 +1363,8 @@ mod tests {
         serde_json::to_writer_pretty(&mut file, &raw).unwrap();
         file.write_all(b"\n").unwrap();
         file.sync_all().unwrap();
+        // Windows will not replace a file while a handle to it is open.
+        drop(file);
 
         repository
             .mutate_json(SETTINGS, BTreeMap::<String, ProjectRow>::new, |projects| {
@@ -1784,7 +1790,8 @@ mod tests {
         let mut bytes = serde_json::to_vec_pretty(&value).unwrap();
         bytes.push(b'\n');
         fs::write(path, bytes).unwrap();
-        File::open(path).unwrap().sync_all().unwrap();
+        // Windows flushes only a handle opened for writing.
+        OpenOptions::new().write(true).open(path).unwrap().sync_all().unwrap();
     }
 
     fn quarantined_paths(target: &Path) -> Vec<PathBuf> {

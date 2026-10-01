@@ -467,6 +467,13 @@ fn secure_existing_secret(path: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
+    // Windows flushes only a handle opened for writing, and the plain-file
+    // checks above already vouched for this path, so it is reopened for that.
+    #[cfg(windows)]
+    let file = {
+        drop(file);
+        OpenOptions::new().write(true).open(path)?
+    };
     file.sync_all()?;
     Ok(())
 }

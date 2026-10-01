@@ -152,6 +152,32 @@ pub fn atomic_replace(temporary: &Path, target: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 pub fn atomic_replace(temporary: &Path, target: &Path) -> io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match move_over_target(temporary, target) {
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && attempt < WINDOWS_REPLACE_RETRIES =>
+            {
+                attempt += 1;
+                std::thread::sleep(WINDOWS_REPLACE_BACKOFF * attempt);
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Windows refuses to replace a file while any handle to it is open, and a
+/// virus scanner or search indexer holds one for a few milliseconds after
+/// every write. A replace that lost that race is retried a few times before
+/// it is reported, with a wait that grows each time.
+#[cfg(windows)]
+const WINDOWS_REPLACE_RETRIES: u32 = 5;
+#[cfg(windows)]
+const WINDOWS_REPLACE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
+#[cfg(windows)]
+fn move_over_target(temporary: &Path, target: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -388,7 +414,7 @@ pub fn private_lock_file(path: &Path) -> io::Result<File> {
             verify_open_handle(path, &file, None)?;
             file
         }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+        Err(error) if create_new_met_an_entry(path, &error) => {
             open_existing_plain_file(path, true)?
         }
         Err(error) => return Err(error),
@@ -405,6 +431,23 @@ pub fn private_lock_file(path: &Path) -> io::Result<File> {
 pub struct FileIdentity {
     volume: u64,
     file: u64,
+}
+
+/// Whether a failed `create_new` found an entry already at `path`. Windows
+/// answers a create over an existing directory or reparse point with
+/// "access denied" instead of "already exists", so that case needs the entry
+/// itself to say it is there; the plain-file check that follows then rejects
+/// a directory or link with the same refusal unix gives.
+fn create_new_met_an_entry(path: &Path, error: &io::Error) -> bool {
+    match error.kind() {
+        io::ErrorKind::AlreadyExists => true,
+        #[cfg(windows)]
+        io::ErrorKind::PermissionDenied => fs::symlink_metadata(path).is_ok(),
+        _ => {
+            let _ = path;
+            false
+        }
+    }
 }
 
 fn open_existing_plain_file(path: &Path, writable: bool) -> io::Result<File> {
