@@ -1300,7 +1300,11 @@ mod tests {
         // entry, not a hanging one.
         assert!(command.starts_with("if [ -f "), "{command}");
         assert!(command.contains("command -p cat"), "{command}");
-        assert!(command.contains(".zerocode/agent-hooks/claude-hook.sh"));
+        assert!(
+            command
+                .replace('\\', "/")
+                .contains(".zerocode/agent-hooks/claude-hook.sh")
+        );
         assert!(
             command.contains("ZEROCODE_HOOK_EVENT='Stop'"),
             "the shared script cannot distinguish nested events: {command}"
@@ -1309,7 +1313,12 @@ mod tests {
 
         // And the script itself is there, executable, pointing at our slug.
         let script =
-            std::fs::read_to_string(script_path(home.path(), AgentKind::Claude)).expect("script");
+            std::fs::read_to_string(script_path_for(
+            home.path(),
+            AgentKind::Claude,
+            ScriptHost::Posix,
+        ))
+        .expect("script");
         assert!(script.contains("/hook/claude"));
         assert!(
             script.contains("DEVIN_PROJECT_DIR"),
@@ -1464,7 +1473,7 @@ mod tests {
     #[test]
     fn reinstall_replaces_an_old_script_contract_in_place() {
         let (home, paths) = paths();
-        let script = script_path(home.path(), AgentKind::Claude);
+        let script = script_path_for(home.path(), AgentKind::Claude, ScriptHost::Posix);
         std::fs::create_dir_all(script.parent().expect("script parent")).expect("mkdir");
         std::fs::write(&script, "#!/bin/sh\n# contract version 1\n").expect("old script");
 

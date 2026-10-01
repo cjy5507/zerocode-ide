@@ -10,6 +10,7 @@ use zerocode_hookd::{BridgeState, env_var, install_hook_scripts, serve};
 
 /// agy 1.2.11 rejects a PreToolUse reply without a decision, even when the
 /// status script exits successfully. Reporting must not decide permissions.
+#[cfg_attr(not(unix), ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead")]
 #[test]
 fn antigravity_status_install_does_not_deny_tools_with_an_empty_decision() {
     use zerocode_hookd::install::{InstallPaths, ScriptHost, install_agent};
@@ -109,6 +110,7 @@ fn every_agent_gets_an_executable_script() {
     }
 }
 
+#[cfg_attr(not(unix), ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead")]
 #[test]
 fn an_unconfigured_script_exits_zero_and_stays_silent() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -121,6 +123,7 @@ fn an_unconfigured_script_exits_zero_and_stays_silent() {
     assert!(output.stderr.is_empty());
 }
 
+#[cfg_attr(not(unix), ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead")]
 #[test]
 fn an_empty_payload_exits_zero_without_calling_anything() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -139,6 +142,7 @@ fn an_empty_payload_exits_zero_without_calling_anything() {
     assert!(output.status.success());
 }
 
+#[cfg_attr(not(unix), ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead")]
 #[test]
 fn a_dead_bridge_still_leaves_the_agent_healthy() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -187,6 +191,7 @@ fn a_dead_bridge_still_leaves_the_agent_healthy() {
 /// which the 503 produces) both still mark, and a window that accepts the
 /// connection and never answers is still caught by the readiness deadline —
 /// the other half of `unreachable`. Only the false word is given up here.
+#[cfg_attr(not(unix), ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delivered_payload_whose_answer_was_lost_is_not_a_broken_bridge() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -257,6 +262,7 @@ async fn a_delivered_payload_whose_answer_was_lost_is_not_a_broken_bridge() {
     holding.abort();
 }
 
+#[cfg_attr(not(unix), ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_live_bridge_receives_what_the_script_sends() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -303,6 +309,7 @@ async fn a_live_bridge_receives_what_the_script_sends() {
     assert_eq!(envelope.version, zerocode_hookd::HOOK_CONTRACT_VERSION);
 }
 
+#[cfg_attr(not(unix), ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hook_child_reads_the_bridge_token_from_the_endpoint_path() {
     let scripts = tempfile::tempdir().expect("scripts dir");
@@ -345,6 +352,7 @@ async fn a_hook_child_reads_the_bridge_token_from_the_endpoint_path() {
     assert_eq!(envelope.payload, "{\"event\":\"stop\"}");
 }
 
+#[cfg_attr(not(unix), ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead")]
 #[tokio::test(flavor = "multi_thread")]
 async fn measured_coordinator_scripts_print_the_bridge_context_as_valid_json() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -387,6 +395,7 @@ async fn measured_coordinator_scripts_print_the_bridge_context_as_valid_json() {
     }
 }
 
+#[cfg_attr(not(unix), ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead")]
 #[tokio::test(flavor = "multi_thread")]
 async fn bridge_rejections_never_become_provider_hook_output() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -434,6 +443,7 @@ async fn bridge_rejections_never_become_provider_hook_output() {
 /// that can be wrong in ways Rust cannot see: a quoting slip in the argv
 /// packing, a status read that never fires, a failure that exits 0. Everything
 /// above it is already covered by calling it.
+#[cfg_attr(not(unix), ignore = "the hook script is /bin/sh dialect; Windows installs the .cmd script instead")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_live_bridge_answers_the_tmux_shim_and_refuses_a_stranger() {
     let dir = tempfile::tempdir().expect("tempdir");
