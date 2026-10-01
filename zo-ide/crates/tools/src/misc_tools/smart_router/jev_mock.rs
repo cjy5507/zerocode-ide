@@ -216,3 +216,38 @@ fn machine_with<T>(words: &[(&str, &str)], wire: Option<&str>, body: impl FnOnce
     let _env = env;
     body(&cwd)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    use super::Mock;
+
+    /// Whether `base_url`'s port still takes a connection.
+    fn still_listening(base_url: &str) -> bool {
+        let addr = base_url.trim_start_matches("http://").parse().expect("a socket address");
+        TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+    }
+
+    /// A mock that has been dropped must have given its port back. Each one
+    /// that stayed bound held a descriptor until the process exited, and the
+    /// 109 the tools lib builds exhausted the macOS default limit of 256 for
+    /// the tests that spawn a shell (t-20571).
+    #[test]
+    fn a_dropped_mock_closes_its_port() {
+        let ports = [
+            Mock::silent().base_url.clone(),
+            Mock::slow_first(Duration::ZERO, "{}".to_string()).base_url.clone(),
+            Mock::answering(|_| (200, "{}".to_string())).base_url.clone(),
+            Mock::serving(200, "{}".to_string()).base_url.clone(),
+        ];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for base_url in &ports {
+            while still_listening(base_url) {
+                assert!(Instant::now() < deadline, "{base_url} still takes connections after its mock was dropped");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+}
