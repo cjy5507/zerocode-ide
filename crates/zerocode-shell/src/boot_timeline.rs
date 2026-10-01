@@ -78,7 +78,9 @@ impl Phase {
     /// resumes run behind the browser restore and finish whenever they do.
     pub(crate) fn rank(self) -> usize {
         match self {
-            Phase::BrowserTabsRestored | Phase::TerminalsResumed => Phase::PanesRestored.rank() + 1,
+            Phase::BrowserTabsRestored | Phase::FirstBrowserTab | Phase::TerminalsResumed => {
+                Phase::PanesRestored.rank() + 1
+            }
             other => Phase::ORDER
                 .iter()
                 .position(|held| *held == other)
