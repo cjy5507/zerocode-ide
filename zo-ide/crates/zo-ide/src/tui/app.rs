@@ -4661,6 +4661,25 @@ impl App {
                 &format!("could not tell the parent where this pane's transcript is: {error}"),
             );
         }
+        // The note a parent leaves when it gives up its split
+        // (`SPLIT_GIVEN_UP_FILE`, t-19898), looked for once more right before
+        // the first model request: a child that read its brief a moment before
+        // the parent gave up is the one the look at launch cannot catch. Nothing
+        // has been asked of a model and nobody waits for an answer, so it says
+        // why and leaves.
+        if runtime::subagent_panes::split_given_up(&lifecycle.directory) {
+            self.ui.note(SystemLevel::Info, super::strings::TEAMMATE_SPLIT_GIVEN_UP);
+            self.ui.draw();
+            lifecycle.retire_channel();
+            let summary = Box::pin(self.finish(ExitReason::UserExit)).await;
+            return Ok((
+                summary,
+                TeammateLife {
+                    reason: CloseReason::ParentLost,
+                    turns: 0,
+                },
+            ));
+        }
         let mut turn = lifecycle.first_turn;
         let mut answered = 0_u32;
         let mut prior_output_tokens = 0_u64;

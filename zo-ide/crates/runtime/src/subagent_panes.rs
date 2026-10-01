@@ -36,6 +36,15 @@
 //! ([`WaitClock::listens`]) the wait still looks every 250ms, and asks tmux only
 //! every few seconds.
 //!
+//! A third file is left when a split fails: `split-given-up`
+//! ([`SPLIT_GIVEN_UP_FILE`], t-19898). A `split-window` that tmux does not
+//! answer within [`TMUX_SPLIT_BOUND`] is ended, and the pane tmux may have cut
+//! for it is looked for and closed. Given up or refused — the window refuses
+//! after its own deadline and may still open the pane — the note is left in the
+//! child's directory for a pane that is opened later still: the child reads it
+//! before its brief and leaves without working, so that no helper runs without
+//! a waiter.
+//!
 //! ## What this module refuses
 //!
 //! `ZEROCODE_PANE_KEY` is NOT evidence of a team. The window puts it in every
@@ -53,6 +62,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 mod child_watch;
+mod split;
 mod tmux_ask;
 
 pub use child_watch::{ChildWatch, Woken};
@@ -1427,7 +1437,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 impl Brief {
     /// Put this brief in `directory`, atomically.
+    ///
+    /// A brief written is a wish renewed: it takes away the note a parent left
+    /// when it gave up an earlier split of this helper ([`SPLIT_GIVEN_UP_FILE`]),
+    /// so that a pane cut again for it — a resume — does not leave on the strength
+    /// of an attempt that is over.
     pub fn write(&self, directory: &Path) -> std::io::Result<PathBuf> {
+        let _ = std::fs::remove_file(directory.join(SPLIT_GIVEN_UP_FILE));
         let path = directory.join(BRIEF_FILE);
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -1594,32 +1610,16 @@ impl Tmux {
         &self.program
     }
 
-    fn run(&self, args: &[String]) -> Result<String, String> {
-        let output = std::process::Command::new(&self.program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|error| format!("could not run tmux: {error}"))?;
-        if output.status.success() {
-            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
-        }
-        let said = String::from_utf8_lossy(&output.stderr);
-        let said = said.trim();
-        Err(if said.is_empty() {
-            format!("tmux {} failed", args.first().map_or("", String::as_str))
-        } else {
-            said.to_string()
-        })
-    }
-
-    /// Cut a pane and start a teammate in it. Answers the new pane's id.
+    /// Cut a pane and start a teammate in it. Answers the new pane's id — or
+    /// the words of why there is none: tmux's own words for a refusal, a tmux
+    /// that could not be run, or a split that was given up at
+    /// [`TMUX_SPLIT_BOUND`] (t-19898). A split that fails after tmux may have
+    /// taken it — refused, given up, or answered with no id — withdraws its
+    /// helper ([`SPLIT_GIVEN_UP_FILE`]), and one given up or answered with no id
+    /// also looks for the pane tmux may have cut and closes it, so that no helper
+    /// runs without a waiter.
     pub fn split(&self, spec: &SplitSpec<'_>) -> Result<String, String> {
-        let answer = self.run(&split_argv(spec))?;
-        let pane = answer.trim();
-        if pane.is_empty() {
-            return Err("tmux cut a pane and did not say which".to_string());
-        }
-        Ok(pane.to_string())
+        split::split(self, spec)
     }
 
     /// End one pane. `false` when tmux refused — the pane may already be gone,

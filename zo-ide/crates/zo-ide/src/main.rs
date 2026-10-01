@@ -678,7 +678,20 @@ fn run_teammate(
     process_exit: &mut zo_ide::session::process_lifecycle::ProcessExitGuard,
 ) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
     use runtime::subagent_panes::{Brief, Exit, Limits, TeammateResult};
+    use std::io::Write as _;
 
+    // The parent gave up this helper's split and nobody waits for it
+    // (`SPLIT_GIVEN_UP_FILE`, t-19898): a pane that tmux — or a window that was
+    // busy — opened late must not start the work. Looked for before anything is
+    // read or opened, so that no model request is made and no result is written
+    // for a parent that is not there; the drive loop looks once more right before
+    // the first request. The line goes to the terminal: stderr is already zo's
+    // own log (`install_stderr_redirect`), and a pane that was closed under it
+    // is not a reason to fail.
+    if runtime::subagent_panes::split_given_up(directory) {
+        let _ = writeln!(std::io::stdout(), "{}", zo_ide::tui::strings::TEAMMATE_SPLIT_GIVEN_UP);
+        return Ok(success("teammate"));
+    }
     // This process is a child: no panes for its helpers, no host pre-analysis
     // of the brief it was handed (`runtime::subagent_panes::nested`).
     runtime::subagent_panes::declare_nested(true);
