@@ -130,3 +130,8 @@ PY
 }
 
 for at in $(seq 1 "$runs"); do run_once "$at"; done
+
+# The bundle shim holds a copy of the Chromium framework (hundreds of MB), and
+# the synthetic home grows a profile of its own: neither is wanted afterwards,
+# only the timelines are. `:?` stops the removal if --out ever came up empty.
+rm -rf "${out:?}/ZeroCode.app" "${out:?}/home"
