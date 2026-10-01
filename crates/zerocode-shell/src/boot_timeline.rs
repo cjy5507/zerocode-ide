@@ -26,6 +26,7 @@ const LOG_TAG: &str = "boot-timeline";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
+    ChromiumReady,
     SettingsRead,
     LedgerReady,
     WebviewCreated,
@@ -36,6 +37,7 @@ pub(crate) enum Phase {
     LayoutsRead,
     PanesRestored,
     BrowserTabsRestored,
+    FirstBrowserTab,
     TerminalsResumed,
 }
 
@@ -43,7 +45,8 @@ impl Phase {
     /// The order a healthy boot reaches them in. Phases the window cannot
     /// reach in the same order (a restore that finds nothing to restore still
     /// reports) are still reported in this order.
-    pub(crate) const ORDER: [Phase; 11] = [
+    pub(crate) const ORDER: [Phase; 13] = [
+        Phase::ChromiumReady,
         Phase::SettingsRead,
         Phase::LedgerReady,
         Phase::WebviewCreated,
@@ -54,6 +57,7 @@ impl Phase {
         Phase::LayoutsRead,
         Phase::PanesRestored,
         Phase::BrowserTabsRestored,
+        Phase::FirstBrowserTab,
         Phase::TerminalsResumed,
     ];
 
@@ -82,8 +86,14 @@ impl Phase {
         }
     }
 
+    /// A phase a healthy boot may never reach: no browser tab was stored.
+    pub(crate) fn optional(self) -> bool {
+        self == Phase::FirstBrowserTab
+    }
+
     pub(crate) fn key(self) -> &'static str {
         match self {
+            Phase::ChromiumReady => "chromium_ready",
             Phase::SettingsRead => "settings_read",
             Phase::LedgerReady => "ledger_ready",
             Phase::WebviewCreated => "webview_created",
@@ -94,6 +104,7 @@ impl Phase {
             Phase::LayoutsRead => "layouts_read",
             Phase::PanesRestored => "panes_restored",
             Phase::BrowserTabsRestored => "browser_tabs_restored",
+            Phase::FirstBrowserTab => "first_browser_tab",
             Phase::TerminalsResumed => "terminals_resumed",
         }
     }
@@ -131,7 +142,10 @@ impl Timeline {
     }
 
     pub(crate) fn complete(&self) -> bool {
-        Phase::ORDER.iter().all(|phase| self.at(*phase).is_some())
+        Phase::ORDER
+            .iter()
+            .filter(|phase| !phase.optional())
+            .all(|phase| self.at(*phase).is_some())
     }
 
     /// The reached phases that came earlier than a phase that must precede
@@ -282,6 +296,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "chromium_ready",
                 "settings_read",
                 "ledger_ready",
                 "webview_created",
@@ -292,6 +307,7 @@ mod tests {
                 "layouts_read",
                 "panes_restored",
                 "browser_tabs_restored",
+                "first_browser_tab",
                 "terminals_resumed",
             ]
         );

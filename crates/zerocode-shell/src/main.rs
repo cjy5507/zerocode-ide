@@ -3257,6 +3257,7 @@ fn main() -> ExitCode {
                 chromium_browser::initialize(&handle, &chromium_root)
                     .map_err(std::io::Error::other)?;
             }
+            boot_timeline::mark(boot_timeline::Phase::ChromiumReady);
             // What earlier builds' Korean-input husk wrote spelled out the
             // person's typing; it is withdrawn before anything else writes the
             // log, so the rewrite cannot race an append (t-11740).

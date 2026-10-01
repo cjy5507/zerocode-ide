@@ -1359,6 +1359,7 @@ wrap_life_span_handler! {
         fn on_after_created(&self, browser: Option<&mut Browser>) {
             let Some(browser) = browser else { return; };
             OPEN_BROWSERS.fetch_add(1, Ordering::AcqRel);
+            crate::boot_timeline::mark(crate::boot_timeline::Phase::FirstBrowserTab);
             let pending = self.inner.creation.borrow_mut().take();
             let Some(pending) = pending else {
                 if let Some(host) = browser.host() { host.close_browser(1); }
