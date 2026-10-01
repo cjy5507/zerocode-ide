@@ -297,8 +297,7 @@ fn standing_at(
 ) -> (zerocode_core::jev::JevMode, bool) {
     let mode = seat.mode_in_run(&wire.settings_root(), run);
     let raised = ledger.is_some_and(|ledger| {
-        zerocode_core::jev::promote::standing(seat, &read_rows(ledger))
-            == zerocode_core::jev::promote::Stand::Applying
+        standing::standing_of(seat, ledger) == zerocode_core::jev::promote::Stand::Applying
     });
     (mode, mode.applies_with(raised))
 }

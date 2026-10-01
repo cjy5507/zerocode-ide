@@ -106,7 +106,8 @@ fn read_on(seat: &JevUse, ledger: &Path, before: Option<Cursor>) -> (Option<Curs
             unreadable: false,
         });
     let mut appended = Vec::new();
-    if file.seek(SeekFrom::Start(cursor.offset)).is_err() || file.read_to_end(&mut appended).is_err()
+    if file.seek(SeekFrom::Start(cursor.offset)).is_err()
+        || file.read_to_end(&mut appended).is_err()
     {
         return (None, start);
     }
@@ -118,7 +119,9 @@ fn read_on(seat: &JevUse, ledger: &Path, before: Option<Cursor>) -> (Option<Curs
         .map_or(0, |last| last + 1);
     let (lines, tail) = appended.split_at(whole);
     let room = HEAD_BYTES.saturating_sub(cursor.head.len());
-    cursor.head.extend_from_slice(&lines[..room.min(lines.len())]);
+    cursor
+        .head
+        .extend_from_slice(&lines[..room.min(lines.len())]);
     match std::str::from_utf8(lines) {
         Ok(text) => cursor.said = newest_standing_in(seat, text).or(cursor.said),
         Err(_) => cursor.unreadable = true,
@@ -130,7 +133,9 @@ fn read_on(seat: &JevUse, ledger: &Path, before: Option<Cursor>) -> (Option<Curs
         start
     } else {
         match std::str::from_utf8(tail) {
-            Ok(text) => newest_standing_in(seat, text).or(cursor.said).unwrap_or(start),
+            Ok(text) => newest_standing_in(seat, text)
+                .or(cursor.said)
+                .unwrap_or(start),
             Err(_) => start,
         }
     };
@@ -256,7 +261,12 @@ mod tests {
             let home = tempfile::tempdir().expect("a folder");
             let path = home.path().join(seat.ledger);
             let check = |step: &str| {
-                assert_eq!(standing_of(seat, &path), from_scratch(seat, &path), "{} after {step}", seat.id);
+                assert_eq!(
+                    standing_of(seat, &path),
+                    from_scratch(seat, &path),
+                    "{} after {step}",
+                    seat.id
+                );
             };
             check("no file");
             append(&path, &line(&request(seat, 1)));
@@ -276,9 +286,15 @@ mod tests {
             check("a whole rise with no newline yet");
             append(&path, "\n");
             check("its newline");
-            append(&path, &line(&transition(seat, ROSE, seat.rubric_version + 1)));
+            append(
+                &path,
+                &line(&transition(seat, ROSE, seat.rubric_version + 1)),
+            );
             check("a rise of other words");
-            append(&path, &line(&request(seat, seat.rubric_version as usize + 9)));
+            append(
+                &path,
+                &line(&request(seat, seat.rubric_version as usize + 9)),
+            );
             check("more");
             let mut newer = request(seat, 3);
             newer["rubricVersion"] = json!(seat.rubric_version + 1);
@@ -286,7 +302,8 @@ mod tests {
             check("a request of newer words");
 
             // A shorter file: truncated to a rise.
-            std::fs::write(&path, line(&transition(seat, ROSE, seat.rubric_version))).expect("a truncation");
+            std::fs::write(&path, line(&transition(seat, ROSE, seat.rubric_version)))
+                .expect("a truncation");
             check("a truncation");
             // Replaced by a file of the same size, then by a longer one.
             let was = std::fs::read_to_string(&path).expect("the ledger");
@@ -294,16 +311,90 @@ mod tests {
             std::fs::write(&swapped, was.replace("rise", "fall")).expect("a same-size swap");
             std::fs::rename(&swapped, &path).expect("a replacement");
             check("a replacement of the same size");
-            std::fs::write(&swapped, format!("{}{}", line(&request(seat, 8)), line(&transition(seat, ROSE, seat.rubric_version))))
-                .expect("a longer one");
+            std::fs::write(
+                &swapped,
+                format!(
+                    "{}{}",
+                    line(&request(seat, 8)),
+                    line(&transition(seat, ROSE, seat.rubric_version))
+                ),
+            )
+            .expect("a longer one");
             std::fs::rename(&swapped, &path).expect("a replacement");
             check("a replacement by a longer file");
             std::fs::write(
                 &path,
-                line(&request(seat, 7)) + &line(&transition(seat, FELL, seat.rubric_version)) + &line(&request(seat, 4)),
+                line(&request(seat, 7))
+                    + &line(&transition(seat, FELL, seat.rubric_version))
+                    + &line(&request(seat, 4)),
             )
             .expect("a rewrite in place");
             check("a rewrite in place");
+        }
+    }
+
+    /// Lines of the synthetic ledger a cost report reads, by ledger size: a
+    /// busy day, and ten of them.
+    #[cfg(unix)]
+    const REPORT_LEDGER_LINES: [usize; 2] = [4_000, 40_000];
+    /// Hook events in a report's burst.
+    #[cfg(unix)]
+    const REPORT_EVENTS: usize = 2_000;
+
+    /// This process's user+system CPU seconds so far.
+    #[cfg(unix)]
+    fn cpu_seconds() -> f64 {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: `getrusage` fills the struct it is given and reads nothing of ours.
+        let usage = unsafe {
+            libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr());
+            usage.assume_init()
+        };
+        let seconds =
+            |time: libc::timeval| time.tv_sec as f64 + f64::from(time.tv_usec as i32) / 1e6;
+        seconds(usage.ru_utime) + seconds(usage.ru_stime)
+    }
+
+    /// The cost of one hook event's standing read, whole-file against
+    /// incremental, on a synthetic ledger in a temporary folder — never a
+    /// person's (t-19914). Run by hand: `-- --ignored --nocapture
+    /// standing_cost_report`, once plain and once under `taskpolicy -b`.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn standing_cost_report() {
+        let seat = &COVER;
+        for lines in REPORT_LEDGER_LINES {
+            let home = tempfile::tempdir().expect("a folder");
+            let path = home.path().join(seat.ledger);
+            let mut busy = String::new();
+            for number in 0..lines {
+                busy.push_str(&line(&request(seat, number)));
+                if number % 500 == 0 {
+                    busy.push_str(&line(&transition(seat, ROSE, seat.rubric_version)));
+                }
+            }
+            append(&path, &busy);
+            let mut measure = |name: &str, read: &dyn Fn() -> promote::Stand| {
+                let (parsed, cpu, wall) = (
+                    promote::lines_parsed(),
+                    cpu_seconds(),
+                    std::time::Instant::now(),
+                );
+                for event in 0..REPORT_EVENTS {
+                    append(&path, &line(&request(seat, lines + event)));
+                    std::hint::black_box(read());
+                }
+                let wall = wall.elapsed().as_secs_f64();
+                println!(
+                    "ledger {lines:>6} lines, {name:<11}: {:>8.1} us/event wall, {:>7.3} s cpu over {REPORT_EVENTS} events, {:>6} lines parsed/event",
+                    wall / REPORT_EVENTS as f64 * 1e6,
+                    cpu_seconds() - cpu,
+                    (promote::lines_parsed() - parsed) / REPORT_EVENTS as u64,
+                );
+            };
+            measure("whole read", &|| promote::standing(seat, &read_rows(&path)));
+            measure("incremental", &|| standing_of(seat, &path));
         }
     }
 }
