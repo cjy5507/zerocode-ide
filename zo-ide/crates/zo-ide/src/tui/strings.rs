@@ -19,6 +19,20 @@ pub const WORKING: &str = "Working";
 /// (t-10956) — a job that can take minutes on a large one.
 pub const COMPACTING: &str = "Compacting conversation";
 
+/// `/rewind` (t-19459): the popup row, and what the person is told.
+pub const REWIND_COMMAND_DESCRIPTION: &str = "list or restore file edits, or drop the last turn";
+pub const REWIND_USAGE: &str = "rewind: /rewind lists checkpoints · /rewind N [force] restores files · /rewind turn drops the last turn";
+pub const REWIND_NOTHING: &str = "Nothing to rewind — the conversation has no finished turn to drop";
+pub const REWIND_BLOCKED: &str = "Nothing was rewound — the last record is a summary or system notice, which a rewind does not remove";
+pub const REWIND_BUSY: &str = "'/rewind' is disabled while a task is in progress.";
+pub const REWIND_NO_RUNTIME: &str = "rewind: the session is not available";
+
+/// "Rewound 1 turn" — what `/rewind turn` took out of the conversation.
+#[must_use]
+pub fn rewound_turn(messages: usize) -> String {
+    format!("Rewound 1 turn · {messages} messages removed from the conversation and the saved transcript")
+}
+
 /// How far a `/compact` summary has come, beside its status row's clock.
 #[must_use]
 pub fn compaction_progress(streamed_chars: u64) -> String {

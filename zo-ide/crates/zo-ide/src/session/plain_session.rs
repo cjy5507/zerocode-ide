@@ -1024,6 +1024,57 @@ impl PlainSession {
         Ok(())
     }
 
+    /// `/rewind turn`: drop the last finished turn (the prompt and every
+    /// reply, tool round and tool result after it) and save the transcript.
+    /// `Ok(0)` means nothing was removed — no turn, or a summary/system
+    /// record stopped the walk.
+    pub fn rewind_last_turn(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
+        let runtime = self
+            .runtime
+            .try_runtime_mut()
+            .ok_or_else(|| std::io::Error::other("runtime not available"))?;
+        let removed = runtime.rewind_turns(1);
+        if removed > 0 {
+            self.persist()?;
+        }
+        Ok(removed)
+    }
+
+    /// Whether the newest record is a System record that is not a reminder —
+    /// a compaction summary or a notice. A rewind stops at it, so a
+    /// `rewind_last_turn` that removed nothing says so in these words.
+    #[must_use]
+    pub fn last_record_stops_rewind(&self) -> bool {
+        self.runtime
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.session().messages.last())
+            .is_some_and(|message| {
+                message.role == runtime::MessageRole::System && !message.is_reminder_annotation()
+            })
+    }
+
+    /// `/rewind` and `/rewind N [force]`: the guarded-file-write checkpoints
+    /// the file tools record — list them or restore the files to before one.
+    pub fn workspace_rewind_report(
+        &self,
+        action: &commands::WorkspaceRewindAction,
+    ) -> Result<String, String> {
+        let Some(runtime) = self.runtime.runtime.as_ref() else {
+            return Err("runtime is not available".to_string());
+        };
+        let context = runtime.tool_executor().tool_registry().context();
+        match action {
+            commands::WorkspaceRewindAction::List => Ok(
+                tools::render_workspace_checkpoint_list(&context.workspace_checkpoints()),
+            ),
+            commands::WorkspaceRewindAction::Restore { turn_index, force } => context
+                .restore_workspace_to_before(*turn_index, *force)
+                .map(|summary| tools::render_workspace_restore_summary(&summary))
+                .map_err(|error| error.to_string()),
+        }
+    }
+
     /// Give a freshly opened chat the optional display name accepted by
     /// Codex's `/new <name>` and `/clear <name>` forms.
     pub fn set_name(&mut self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
