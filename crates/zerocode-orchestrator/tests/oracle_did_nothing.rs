@@ -42,6 +42,8 @@ fn git(root: &Path, args: &[&str]) {
 fn repository() -> TempDir {
     let root = tempfile::tempdir().expect("temp repository");
     git(root.path(), &["init", "-b", "main"]);
+    // A Windows machine's global core.autocrlf would check files out as CRLF.
+    git(root.path(), &["config", "core.autocrlf", "false"]);
     git(root.path(), &["config", "user.name", "ZeroCode Test"]);
     git(
         root.path(),
@@ -141,6 +143,7 @@ fn policy(must_fail_first: bool) -> PublishPolicy {
     }
 }
 
+#[cfg_attr(not(unix), ignore = "the verification commands run through /bin/sh, an absolute path only on unix")]
 #[test]
 fn a_green_receipt_never_says_the_worker_changed_anything() {
     let workspace = tempfile::tempdir().expect("workspace");
@@ -246,6 +249,7 @@ fn a_green_receipt_never_says_the_worker_changed_anything() {
     );
 }
 
+#[cfg_attr(not(unix), ignore = "the verification commands run through /bin/sh, an absolute path only on unix")]
 #[test]
 fn a_check_that_cannot_fail_is_green_on_an_unfixed_tree() {
     let workspace = tempfile::tempdir().expect("workspace");

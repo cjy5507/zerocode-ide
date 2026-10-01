@@ -52,6 +52,10 @@ fn fixture() -> (TempDir, PathBuf, Orchestrator) {
     fs::create_dir_all(&root).expect("create project dir");
 
     git(&root, &["init", "-b", "main"]);
+
+    // A Windows machine's global core.autocrlf would check files out as CRLF.
+
+    git(&root, &["config", "core.autocrlf", "false"]);
     // Local config only: the machine running these tests may sign commits, or
     // have no identity at all.
     git(&root, &["config", "user.name", "ZeroCode Test"]);
@@ -325,6 +329,8 @@ fn a_genuine_git_failure_is_reported_instead_of_retried_under_another_name() {
     let root = dir.path().join("unborn");
     fs::create_dir_all(&root).expect("create");
     git(&root, &["init", "-b", "main"]);
+    // A Windows machine's global core.autocrlf would check files out as CRLF.
+    git(&root, &["config", "core.autocrlf", "false"]);
 
     let orchestrator = Orchestrator::open(&root)
         .expect("an empty repository is still a repository")

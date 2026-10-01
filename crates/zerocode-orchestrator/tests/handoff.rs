@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
@@ -32,6 +32,8 @@ fn git(root: &Path, args: &[&str]) {
 fn repository() -> TempDir {
     let root = tempfile::tempdir().expect("temp repository");
     git(root.path(), &["init", "-b", "main"]);
+    // A Windows machine's global core.autocrlf would check files out as CRLF.
+    git(root.path(), &["config", "core.autocrlf", "false"]);
     git(root.path(), &["config", "user.name", "ZeroCode Test"]);
     git(
         root.path(),
@@ -72,6 +74,11 @@ fn a_clean_snapshot_is_stable_and_does_not_serialize_its_private_path() {
     assert!(snapshot.changes.is_empty());
     assert!(snapshot.coverage.is_complete());
     let canonical = root.path().canonicalize().expect("canonical temp path");
+    // Windows canonicalises to a `\\?\` verbatim path; git reports the plain one.
+    let canonical = canonical
+        .to_string_lossy()
+        .strip_prefix(r"\\?\")
+        .map_or(canonical.clone(), PathBuf::from);
     assert_eq!(
         snapshot.private_path.as_ref().map(|path| path.as_path()),
         Some(canonical.as_path())
@@ -99,6 +106,8 @@ fn a_clean_snapshot_is_stable_and_does_not_serialize_its_private_path() {
 fn an_unborn_worktree_is_named_as_having_no_handoff_head() {
     let root = tempfile::tempdir().expect("empty repository");
     git(root.path(), &["init", "-b", "main"]);
+    // A Windows machine's global core.autocrlf would check files out as CRLF.
+    git(root.path(), &["config", "core.autocrlf", "false"]);
     let orchestrator = Orchestrator::open(root.path()).expect("open repository");
     assert!(matches!(
         orchestrator.handoff_snapshot(root.path(), 1_000),
