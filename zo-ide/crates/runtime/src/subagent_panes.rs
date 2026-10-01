@@ -4192,7 +4192,7 @@ mod tests {
     /// `no-start-command` (a `list-panes` that cannot print
     /// `#{pane_start_command}`, as the window's tmux cannot).
     #[cfg(target_os = "macos")]
-    const CUTTING_TMUX: &str = r##"#!/bin/sh
+    const CUTTING_TMUX: &str = r#"#!/bin/sh
 here="${0%/*}"
 printf '%s\n' "$*" >> "$here/tmux.log"
 stall() {
@@ -4246,7 +4246,7 @@ kill-pane)
   ;;
 warm) stall warm ;;
 esac
-"##;
+"#;
 
     /// The one cutting `tmux`, written once and run once before any test uses
     /// it, as [`shared_stalling_tmux`] is and for the same reason.
