@@ -77,7 +77,7 @@ kind = config['kind']
 def message(event):
     body = {'ok':config['ok'],'summary':'ledger final answer','workerId':'w-2'}
     return {'messageId':'m-' + base.name + '-' + event, 'from':'worker:w-2' if event == 'worker_done' else 'ledger', 'dispatchId':'dp-3','type':event,'source':'agent' if event == 'worker_done' else 'ledger','body':json.dumps(body)}
-event = {'observed_death':'worker_died','observed_quota':'quota_walled','observed_done':'worker_done','ack_failure':'worker_done'}.get(kind,kind)
+event = {'observed_death':'worker_died','observed_quota':'quota_walled','observed_done':'worker_done','ack_failure':'worker_done','cut_once':'worker_done'}.get(kind,kind)
 events = [message(event)] if event in ('worker_done','worker_died','quota_walled') else []
 if kind == 'quota_then_done': events = [message('quota_walled'),message('worker_done')]
 if verb == 'run-current': out = {'runId':'run-1', 'seated':False}
@@ -89,6 +89,10 @@ elif verb == 'dispatch-show':
         ended = kind in ('observed_death','observed_done') or (base/'stopped').exists()
         out = {'dispatchId':'dp-3','open':not ended,'lifecycle':events if (base/'peeked').exists() else []}
 elif verb == 'worker-start':
+    if kind == 'cut_once' and not (base/'cut').exists():
+        (base/'cut').write_text('yes')
+        print('orchestration: another pane is still being cut \u2014 ask again in a moment', file=sys.stderr)
+        sys.exit(1)
     (base/'started').write_text('yes')
     out = {'workerId':'w-2','dispatchId':'dp-3','agent':'codex','model':'exact-model','effort':'low','pane':'%2','worktree':True}
 elif verb == 'check':
@@ -232,4 +236,76 @@ fn a_separator_in_the_captured_run_is_refused_before_starting_a_process() {
     let client = Client { program: PathBuf::from("missing-ledger-fixture"), run: Some("run-1\u{1f}other".into()) };
     let failure = client.read(&["run-show"]).unwrap_err().to_string();
     assert!(failure.contains("separator byte"), "{failure}");
+}
+
+/// The ledger fills what a launch left open — Jev picks the effort, or the model,
+/// when the caller named none (t-14437) — and that choice is not a deviation: a
+/// receipt is held only to what this launch pinned. Before, every launch that
+/// named no effort was stopped as "differs from the requested" the moment its
+/// worker came up (a person's zo session, 2026-10-01).
+#[cfg(unix)]
+#[test]
+fn what_the_ledger_chose_for_an_unpinned_choice_is_honoured() {
+    let _lock = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (pinned, model) in [(json!({"agent":"codex","model":"exact-model"}), Some("exact-model")), (json!({"agent":"codex"}), None)] {
+        let root = tempfile::tempdir().unwrap();
+        let client = fake_door(root.path(), "worker_done", true);
+        let mut fields = json!({"description":"survey fixture","prompt":"report fixture"});
+        for (key, value) in pinned.as_object().unwrap() { fields[key] = value.clone(); }
+        let mut input: AgentInput = serde_json::from_value(fields).unwrap();
+        input.launch.selected = true;
+        input.registry = Some(super::super::AgentRegistry::at_root_for_tests("ledger-fixture", &root.path().join("store")));
+        let launch = input.launch.clone();
+        let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
+            move |job| spawn(&client, &launch, model.map(str::to_owned), job), None, None, None)
+            .unwrap_or_else(|failure| panic!("{pinned}: {failure}"));
+        let results = super::super::wait_for_agent_completions(std::slice::from_ref(&manifest.agent_id), Duration::from_secs(10));
+        assert_eq!(results[0].status, "completed", "{pinned}: {results:?}");
+        assert!(!root.path().join("stopped").exists(), "{pinned}: the worker the ledger chose for was stopped");
+    }
+}
+
+/// What a launch did pin stays pinned: an effort the receipt changed stops that
+/// worker, as a changed model always did.
+#[cfg(unix)]
+#[test]
+fn a_pinned_effort_the_receipt_changed_stops_that_worker() {
+    let _lock = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    let client = fake_door(root.path(), "worker_done", true);
+    let mut input: AgentInput = serde_json::from_value(json!({"description":"survey fixture","prompt":"report fixture","agent":"codex","model":"exact-model","effort":"high"})).unwrap();
+    input.launch.selected = true;
+    input.registry = Some(super::super::AgentRegistry::at_root_for_tests("ledger-fixture", &root.path().join("store")));
+    let launch = input.launch.clone();
+    let failure = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
+        move |job| spawn(&client, &launch, Some("exact-model".into()), job), None, None, None).unwrap_err();
+    assert!(failure.to_string().contains("differs from the requested"), "{failure}");
+    assert!(root.path().join("stopped").exists());
+}
+
+/// The window refuses a worker-start while it is still cutting another pane and
+/// says to ask again in a moment; nothing was started, so the launch asks again
+/// under a new request name and the worker comes up. Before, the refusal ended
+/// the spawn ("another pane is still being cut", a person's zo session).
+#[cfg(unix)]
+#[test]
+fn a_start_refused_while_another_pane_is_cut_is_asked_again() {
+    let _lock = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    let client = fake_door(root.path(), "cut_once", true);
+    let mut input: AgentInput = serde_json::from_value(json!({"description":"survey fixture","prompt":"report fixture","agent":"codex","model":"exact-model","effort":"low"})).unwrap();
+    input.launch.selected = true;
+    input.registry = Some(super::super::AgentRegistry::at_root_for_tests("ledger-fixture", &root.path().join("store")));
+    let launch = input.launch.clone();
+    let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input,
+        move |job| spawn(&client, &launch, Some("exact-model".into()), job), None, None, None)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let results = super::super::wait_for_agent_completions(std::slice::from_ref(&manifest.agent_id), Duration::from_secs(20));
+    assert_eq!(results[0].status, "completed", "{results:?}");
+    let starts: Vec<Vec<String>> = std::fs::read_to_string(root.path().join("argv.jsonl")).unwrap().lines()
+        .map(|line| serde_json::from_str::<Vec<String>>(line).unwrap())
+        .filter(|args| args[0] == "worker-start").collect();
+    assert_eq!(starts.len(), 2, "{starts:?}");
+    let retry = |args: &Vec<String>| args[args.iter().position(|word| word == "--retry-request").unwrap() + 1].clone();
+    assert_ne!(retry(&starts[0]), retry(&starts[1]), "the second ask reused the refused request's name");
 }

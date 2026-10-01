@@ -285,3 +285,22 @@ fn a_broken_head_refuses_the_whole_answer() {
     unknown[COVER_MOVE]["choice"] = json!("close_it");
     assert!(read(&unknown).is_err());
 }
+
+/// A first move the helper would not make — a raise that changed no order —
+/// is not compared, whatever cleared the place after it: the answer was
+/// never tried.
+#[test]
+fn a_first_move_not_made_is_not_compared() {
+    let raise = read(&answers("window", &RAISE_FIRST, 0.8, 0.99, 0.99)).expect("reads");
+    let rule = todays_rule(&scene(Owner::OtherApp, 0));
+    let outcome = |cleared_by| Outcome {
+        tried: vec![Move::RaiseTarget, Move::MoveTarget],
+        cleared_by,
+        not_made: vec![Move::RaiseTarget],
+    };
+    assert_eq!(marks(&raise, &rule, &outcome(None)), Err(NOT_TRIED));
+    assert_eq!(
+        marks(&raise, &rule, &outcome(Some(Move::MoveTarget))),
+        Err(NOT_TRIED)
+    );
+}

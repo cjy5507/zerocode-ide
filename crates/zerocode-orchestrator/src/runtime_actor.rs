@@ -2852,6 +2852,16 @@ struct RuntimeState {
     poison: Option<RuntimeError>,
     recovery_permits: Vec<EffectPermit>,
     repairs: Vec<String>,
+    /// The projection of the ledger as it stood at one revision, shared by
+    /// every [`RuntimeImage`] handed out for that revision (t-19506).
+    ///
+    /// An export walks every row, and the window asks for an image dozens of
+    /// times per beat, so an idle window used to export its whole ledger
+    /// dozens of times a second for a ledger that had not moved. A revision
+    /// is the generation: readers here and in the shell already treat the
+    /// same revision as the same ledger. Cleared wherever the memory changes
+    /// without a revision — a verb's tally, a rewind from the disk.
+    projection: Option<(u64, Arc<LedgerProjectionV1>)>,
 }
 
 /// Rebuild one durable generation, repairing only named historical wounds.
@@ -3005,6 +3015,7 @@ impl RuntimeState {
             revision,
             stamp: disk_stamp,
             walking: None,
+            projection: None,
             poison: None,
             recovery_permits,
             repairs,
@@ -3022,10 +3033,11 @@ impl RuntimeState {
     /// Built only when somebody asks for it. An image costs a walk of every
     /// row, so handing one back with every decision would make the price of a
     /// verb the size of the ledger.
-    fn image(&self) -> RuntimeImage {
+    fn image(&mut self) -> RuntimeImage {
+        let projection = self.projection_at_revision();
         RuntimeImage {
             revision: self.revision,
-            projection: Arc::new(self.ledger.export()),
+            projection,
             recoveries: self
                 .recovery_permits
                 .iter()
@@ -3034,6 +3046,18 @@ impl RuntimeState {
             repairs: self.repairs.clone(),
             said_goodbye: self.ledger.said_goodbye(),
         }
+    }
+
+    /// The one projection for the current revision, exported on first ask.
+    fn projection_at_revision(&mut self) -> Arc<LedgerProjectionV1> {
+        if let Some((revision, held)) = &self.projection
+            && *revision == self.revision
+        {
+            return Arc::clone(held);
+        }
+        let held = Arc::new(self.ledger.export());
+        self.projection = Some((self.revision, Arc::clone(&held)));
+        held
     }
 
     fn verify_authority(&self) -> Result<(), RuntimeError> {
@@ -4410,6 +4434,18 @@ impl RuntimeState {
         // `spoken` may have retired windows without telling anybody — that
         // is a write too, and one worth making durable so a restart does not
         // resurrect a window its worker already answered.
+        //
+        // A beat that heard nothing and told nothing changed nothing, and
+        // this runs on EVERY beat: writing through here rewrote the whole
+        // ledger and moved its revision once a second on an idle window
+        // (t-19506), and every revision is a full export, rebuild and
+        // validation for each reader downstream.
+        if spoken.is_empty() && delivery_failures.is_empty() && told == 0 {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let revision = self.write_through(now_ms)?;
         Ok(RuntimeReply::Settled {
             moved: told > 0,
@@ -5449,6 +5485,8 @@ impl RuntimeState {
          * the reads counted since — a bounded loss the tally's doc states. */
         if let Some(verb) = command.argv().first() {
             ledger.note_verb(verb, decided.reply.exit_code != 0, command.now_ms());
+            // The tally moved the memory and not the revision.
+            self.projection = None;
         }
         if let Effect::WorkerTerminal {
             seat,
@@ -5515,6 +5553,9 @@ impl RuntimeState {
             .checked_add(1)
             .ok_or(RuntimeError::RevisionMismatch)?;
         let at_ms = self.stamped(now_ms);
+        // The walk this write must make anyway is the next revision's
+        // projection: the next reader is handed it instead of a second walk.
+        let written_rows = Arc::new(self.ledger.export());
         /* One transaction, or nothing. `ledger_store::write` moves the head,
          * clears every row and re-inserts the whole ledger, and it does so on
          * whatever connection it is handed — the promise that a ledger is
@@ -5538,7 +5579,7 @@ impl RuntimeState {
                     &self.ledger_id,
                     self.revision,
                     next,
-                    &self.ledger.export(),
+                    &written_rows,
                     at_ms,
                 )
                 .map_err(runtime_error)?;
@@ -5549,6 +5590,7 @@ impl RuntimeState {
         match written {
             Ok(()) => {
                 self.revision = next;
+                self.projection = Some((next, written_rows));
                 Ok(next)
             }
             Err(why) => {
@@ -5597,6 +5639,7 @@ impl RuntimeState {
         }
         let ledger = Ledger::rebuild(held.projection).map_err(RuntimeError::LedgerInvariant)?;
         self.ledger = ledger;
+        self.projection = None;
         /* Clearing this is a cost, not a correctness: a runtime that forgot to
          * would simply read the store again on every request and answer the
          * same way. Left as one line rather than defended by a test, because a

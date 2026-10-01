@@ -348,8 +348,8 @@ pub struct Outcome {
 /// The mark one move put first earns from what followed: a move that was
 /// made is right when the place showed after it and wrong when it did not;
 /// asking the person is right when no move that was made cleared the place,
-/// and wrong when one did. A move nobody made, or a scene where nothing was
-/// made at all, is not compared.
+/// and wrong when one did. A move nobody made — never tried, or tried and
+/// not made — or a scene where nothing was made at all, is not compared.
 fn mark_of(first: Move, outcome: &Outcome) -> Result<bool, &'static str> {
     if first == Move::AskPerson {
         return if outcome.tried.iter().any(|each| *each != Move::LookAgain) {
@@ -358,7 +358,7 @@ fn mark_of(first: Move, outcome: &Outcome) -> Result<bool, &'static str> {
             Err(NOT_TRIED)
         };
     }
-    if outcome.tried.contains(&first) {
+    if outcome.tried.contains(&first) && !outcome.not_made.contains(&first) {
         Ok(outcome.cleared_by == Some(first))
     } else {
         Err(NOT_TRIED)

@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.1.46] — 2026-10-01
+
+### feat
+
+- feat(computer-use): Computer Use keeps pressing on a Mac with a rotated display or its built-in screen closed — macOS draws the pointer there as a small window of its own, the helper took it for the window a press lands on, and automation stopped at its first press; the helper now looks past the pointer's own picture, judges the press on the real window beneath, and still refuses ZeroCode's own window with the pointer resting on it. An app window that publishes no window number is found by its position and size when exactly one window fits, so it can be brought to the front and moved, and a screenshot can ask for its region at point resolution (the window does not ask for it yet). The helper's handshake, signature, permissions and its refusal to drive ZeroCode itself are unchanged (t-19369).
+
+### fix
+
+- fix(window): a paste no longer holds the whole window while the app that owns the clipboard is slow to hand it over — the window reads the clipboard off its main thread, says 「클립보드가 내용을 넘겨주기를 기다리는 중입니다…」 after 0.7 s, drops an answer that comes past 30 s, and a picture on the clipboard — PNG, TIFF, or a phone's JPEG or HEIC — is pasted as a PNG file; before, WebKit read the clipboard on the window's main thread and a slow owner froze the window for as long as it took (2.03 s in the report) (t-19409).
+- fix(board): a task that finished with nothing handed in for review reads 「완료 — 검토 기록 없음」 on the board, the worker rows and the sidebar, instead of standing for ever at 「검증 대기」 (t-19328).
+- fix(ledger): work that was folded into another task, handed over or outdated is closed as such, so the board stops calling it 실패, and a settle pass closes the open tasks nobody will ever hand in (t-19159).
+- fix(jev): a skill-search request that got no reply is recorded as unanswered, not as a refused reply, so one bad minute of the network no longer turns Jev's skill suggestion off (t-19255).
+- fix(zo): zo spawns a sub-agent through the ledger again — a launch that named no effort was stopped the moment its worker came up, with 「ledger launch receipt differs from the requested agent/model/effort」, because the effort the ledger chose for it was compared with "none"; the receipt is now held only to what the launch pinned, and a start the window refused while it was still opening another pane is asked again instead of failing (t-19774).
+- fix(zo): a helper pane's wait keeps its time limit, its cancel and an answer that has landed while tmux is slow or silent — each question to tmux now runs on a thread of its own and is ended, with its process group, after 3 s; before, the wait asked tmux inside its own loop with no time limit, so a landed answer waited, a limit ran over, a cancel went unseen and a hung tmux server hung the wait (t-18917).
+
+### perf
+
+- perf(window): a long helper conversation draws faster — a 400-step conversation in 55.0 ms instead of 62.2 ms, a mixed 400-row page in 77.7 ms instead of 87.7 ms, and 238 fewer event listeners on the 400-step one: each step's mark is a CSS mask instead of an SVG, and one listener on the list opens and closes every row (t-16914).
+- perf(window): an idle window no longer rewrites its whole task ledger every second — a beat that heard nothing writes nothing, and every reader of one ledger state shares one copy; on a large ledger an idle beat takes 19.5 ms instead of 297 ms and about 1.2 s of CPU a minute instead of 17.7 s, and on efficiency cores only (a low-spec machine) 60 ms instead of 791 ms and 3.5 s of CPU a minute instead of 45 s (t-19506).
+
+### internal
+
+- internal(tests): the errand wall test and the Google sign-in callback test prove their claims on a loaded machine, so release gates stop going red on them (t-19329).
+- internal(build): CI compiles with the toolchain the local gates run — rustc 1.94.0 in both workspaces, and zo-ide's rustfmt.
+- internal(bench): the Computer Use bench measures how long an input takes to reach the app (press→receive, appear→receive), apart from how long the hand took to press; a kept run read again gives OS delivery p50 0.86 ms / p95 6.48 ms (t-19772, first slice).
+
 ## [1.1.45] — 2026-10-01
 
 ### feat

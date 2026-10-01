@@ -2120,50 +2120,58 @@ keySink.addEventListener("input", () => {
   drainKeySink();
 });
 
-keySink.addEventListener("paste", (event) => {
-  event.preventDefault();
-  const target = keyboardTarget();
-  const emulator = emulatorKeyboardTarget();
-  if (target === null && emulator === null) return;
-  const text = event.clipboardData.getData("text");
-  if (text) {
-    if (emulator) routeText(text);
-    else void pasteTextAt({ ...target }, text);
+/* 붙여넣기 이벤트는 「판을 붙잡는 신호」일 뿐이다 (t-19409).
+ *
+ * 이 문서의 모든 paste — ⌘V, Edit ▸ Paste, 우클릭 붙여넣기 — 는 여기서 막히고
+ * `clipboardData`는 손도 대지 않는다. 웹킷은 paste 이벤트를 쏘기 전에 판의
+ * 데이터를 읽지 않으므로(`Editor::paste`는 이벤트를 먼저 쏘고, 막히면 돌아온다)
+ * 막기만 해도 UI 프로세스의 주 스레드는 판의 주인을 기다리지 않는다. 읽기 자체는
+ * 배경 스레드의 길(shell-term.js `pasteClipboardVia`)이 하고, 글자와 그림은
+ * 붙여넣기가 시작될 때 붙잡은 자리에 도착한다:
+ *  - 키 싱크(판·에뮬레이터): 판에는 글자 또는 그림 경로, 에뮬레이터에는 글자;
+ *  - 일반 입력칸·에디터: 글자, 입력줄이면 그림은 첨부 칩.
+ * 입력기 조합 중에는 끼어들지 않는다 — 조합을 끊으면 글자가 깨진다. 그 사이의
+ * 붙여넣기만 웹킷의 기본 길이 남는다. 글자 칸이 아닌 곳의 붙여넣기는 웹킷도
+ * 아무것도 읽지 않으므로 그대로 둔다. */
+let fieldComposing = false;
+document.addEventListener("compositionstart", () => { fieldComposing = true; }, true);
+document.addEventListener("compositionend", () => { fieldComposing = false; }, true);
+document.addEventListener("focusout", () => { fieldComposing = false; }, true);
+
+document.addEventListener("paste", (event) => {
+  if (composing || fieldComposing || primaryPasteOwnsPasteEvent()) return;
+  if (event.target === keySink) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const target = keyboardTarget();
+    const emulator = emulatorKeyboardTarget();
+    if (emulator) {
+      void pasteClipboardVia({
+        text: (text) => {
+          if (emulatorKeyboardTarget() !== emulator) return false;
+          routeText(text);
+          return true;
+        },
+        image: null,
+      });
+    } else if (target !== null) {
+      void pasteClipboardAt(target);
+    }
     return;
   }
-  if (emulator) return;
-  // 글자가 없으면 그림을 본다 — Orca의 계약: 이미지는 임시 파일로 앉고,
-  // 터미널에는 그 경로가 글자로 붙는다. 실행되는 것은 없다.
-  const image = [...(event.clipboardData.items ?? [])]
-    .find((item) => item.kind === "file" && item.type.startsWith("image/"));
-  const file = image?.getAsFile();
-  if (!file) return;
-  void pasteImageAt({ ...target }, file);
-});
-
-/* 클립보드 이미지 → 임시 파일 → 그 경로를 기존 paste 문(term_paste /
- * paste_input — bracketed-paste 소독은 백엔드 소유)으로.
- *
- * 바이트는 JSON 필드가 아니라 요청 본문 그대로 건넌다. base64 는 그림의
- * 4/3 크기 문자열을 이쪽에 한 벌 더 만들고 백엔드가 그것을 다시 풀어야
- * 했으며, 둘 다 그림이 얼마나 큰지 묻기도 전에 치르는 값이었다. 종류는
- * 본문에 실을 자리가 없어 헤더로 간다. */
-async function savePastedImage(file) {
-  try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    return await invoke("save_pasted_image", bytes, { headers: { "x-image-kind": file.type } });
-  } catch (error) {
-    showError(t("clipboard.imagePasteFailed", "클립보드의 이미지를 붙여넣지 못했습니다."));
-    return null;
-  }
-}
-
-/* 그림을 앉히고 그 경로를 판에 붙인다. 앉히는 반쪽(`savePastedImage`)은
- * 입력줄의 첨부(t-2993)도 쓴다 — 거기서는 경로가 붙지 않고 칩이 된다. */
-async function pasteImageAt(target, file) {
-  const path = await savePastedImage(file);
-  if (path) await pasteTextAt(target, path);
-}
+  const field = pasteFieldOf(event.target);
+  if (field === null) return;
+  const destination = capturePasteDestination(field);
+  if (destination === null) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const form = field.closest?.(".worker-composer");
+  const attachments = form ? composerAttachmentsOf(form) : null;
+  void pasteClipboardVia({
+    text: destination,
+    image: attachments ? async (path) => { await attachments.add([path]); return true; } : null,
+  });
+}, true);
 
 for (const surface of [stageView.host, floatView.host]) focusesTheKeyboard(surface);
 

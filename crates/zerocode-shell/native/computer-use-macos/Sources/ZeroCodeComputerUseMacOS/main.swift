@@ -2070,11 +2070,7 @@ private func windowMatchesCapture(
 }
 
 private func windowFramesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
-    let tolerance: CGFloat = 2
-    return abs(lhs.minX - rhs.minX) <= tolerance &&
-        abs(lhs.minY - rhs.minY) <= tolerance &&
-        abs(lhs.width - rhs.width) <= tolerance &&
-        abs(lhs.height - rhs.height) <= tolerance
+    DesktopWindowPick.framesMatch(lhs, rhs)
 }
 
 private func openBundle(_ bundleId: String) {
@@ -5333,7 +5329,8 @@ enum DesktopScreen {
     static func capture(params: [String: JSONValue]) throws -> [String: Any] {
         let frame = try frame(params: params)
         let png: BoundedPNG
-        if params["fullRes"]?.bool == true {
+        // A region at point resolution is already small: no budget ladder.
+        if params["fullRes"]?.bool == true || params["pointScale"] != nil {
             guard let encoded = encodePng(frame.image) else {
                 throw ProviderError.coded("accessibility_error", "encoding the screenshot failed")
             }
@@ -5354,6 +5351,29 @@ enum DesktopScreen {
             "origin": ["x": frame.origin.x, "y": frame.origin.y],
             "display": render(frame.display, index: frame.displayIndex),
         ]
+    }
+
+    /// `pointScale` as sent: absent is nil, a number is it, anything else is
+    /// refused rather than read as absent.
+    private static func pointScaleArgument(_ params: [String: JSONValue]) throws -> Double? {
+        guard let value = params["pointScale"] else { return nil }
+        guard let number = value.number else {
+            throw ProviderError.coded("invalid_argument", "pointScale must be a number above 0 and at most \(Int(DesktopPointCapture.maxPointScale))")
+        }
+        return number
+    }
+
+    /// What the screen shows in `rect` (global points), drawn at the pixel
+    /// size asked — the region alone, never the whole display.
+    private static func captureRegion(_ rect: CGRect, pixelWidth: Int, pixelHeight: Int) -> CGImage? {
+        guard let shown = CGWindowListCreateImage(rect, [.optionOnScreenOnly], kCGNullWindowID, [.nominalResolution]) else { return nil }
+        if shown.width == pixelWidth, shown.height == pixelHeight { return shown }
+        guard let context = CGContext(data: nil, width: pixelWidth, height: pixelHeight, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        context.interpolationQuality = .medium
+        context.draw(shown, in: CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+        return context.makeImage()
     }
 
     static func frame(params: [String: JSONValue]) throws -> Frame {
@@ -5389,6 +5409,31 @@ enum DesktopScreen {
             chosen = showing
         } else {
             chosen = all[0]
+        }
+        // Only a request that names pointScale is planned; the rest keeps the
+        // whole-display capture below, cropped, as it was (t-10424).
+        let pointScale: Double?
+        switch DesktopPointCapture.pointScale(try pointScaleArgument(params)) {
+        case let .success(value): pointScale = value
+        case let .failure(error): throw ProviderError.coded("invalid_argument", error.message)
+        }
+        if let pointScale {
+            guard case let .region(sourceRect, pixelWidth, pixelHeight)? = DesktopPointCapture.plan(
+                region: region, displayBounds: chosen.bounds, pointScale: pointScale)
+            else {
+                throw ProviderError.coded("invalid_argument", "region does not touch display \(chosen.id)")
+            }
+            guard let picture = captureRegion(sourceRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight) else {
+                throw ProviderError.coded("accessibility_error", "capturing display \(chosen.id) failed")
+            }
+            return Frame(
+                image: picture,
+                origin: sourceRect.origin,
+                pointsWidth: sourceRect.width,
+                pointsHeight: sourceRect.height,
+                display: chosen,
+                displayIndex: all.firstIndex { $0.id == chosen.id } ?? 0
+            )
         }
         guard let image = CGDisplayCreateImage(chosen.id) else {
             throw ProviderError.coded("accessibility_error", "capturing display \(chosen.id) failed")
@@ -5900,6 +5945,9 @@ private enum DesktopWindows {
                 row["layer"] = layer
                 row["alpha"] = (info[kCGWindowAlpha as String] as? Double) ?? 1
                 row["overlay"] = DesktopOverlay.isOverlay(layer: layer, bounds: bounds, displays: displays)
+                // The pointer's own picture, told once for every reader (t-12979).
+                row["pointer"] = DesktopPointerPicture.isPointerPicture(
+                    layer: layer, ownerName: (info[kCGWindowOwnerName as String] as? String) ?? "", bounds: bounds)
                 if row["overlay"] as? Bool == true {
                     let owner = AXUIElementCreateApplication(ownerPid)
                     let frames = (copyArray(owner, kAXChildrenAttribute as String) ?? []).compactMap(absoluteFrame)
@@ -5931,12 +5979,20 @@ private enum DesktopWindows {
             throw ProviderError.coded("window_not_found", "no window \(windowId) on this desktop")
         }
         let appElement = AXUIElementCreateApplication(ownerPid)
+        // Many Cocoa windows publish no AXWindowNumber: the window the list
+        // numbers is then the one numberless window at its frame, if only one
+        // stands there (t-15085); two are refused as a missing one is.
+        let listed = (CGWindowListCopyWindowInfo([.optionIncludingWindow], windowId) as? [[String: Any]])?.first
+        let targetBounds = (listed?[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) }
         guard let windows = copyArray(appElement, kAXWindowsAttribute as String),
-              let element = windows.first(where: { windowNumber($0) == windowId })
+              case let .found(at) = DesktopWindowPick.pick(
+                  target: windowId,
+                  targetBounds: targetBounds,
+                  windows: windows.map { (number: windowNumber($0), frame: absoluteFrame($0)) })
         else {
             throw ProviderError.coded("window_not_found", "window \(windowId) has no accessibility element (is Accessibility granted, and does the app publish its windows?)")
         }
-        return (element, ownerPid)
+        return (windows[at], ownerPid)
     }
 
     static func act(params: [String: JSONValue]) throws -> [String: Any] {
@@ -6281,30 +6337,18 @@ enum OperatorHandHost {
 enum DesktopSelf {
     /// Whose window a click at `point` lands on: the frontmost that hides
     /// what is under it — an overlay (`DesktopOverlay`) does not, and taking
-    /// the Dock's for one let every click through to ZeroCode's own window.
+    /// the Dock's for one let every click through to ZeroCode's own window;
+    /// nor does the pointer's own picture (`DesktopPointerPicture`), and
+    /// taking it for one let a click where the pointer rests through to
+    /// ZeroCode's own window (t-12979). The walk is `DesktopFrontOwner`'s.
     static func ownerPid(at point: CGPoint) -> pid_t? {
         guard let infos = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return nil }
-        let displays = DesktopScreen.displays().map(\.bounds)
-        for info in infos {
-            guard let layer = info[kCGWindowLayer as String] as? Int, layer >= 0,
-                  let alpha = info[kCGWindowAlpha as String] as? CGFloat, alpha > 0.01,
-                  let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
-                  bounds.contains(point),
-                  let ownerPid = info[kCGWindowOwnerPID as String] as? pid_t
-            else { continue }
-            if DesktopOverlay.isOverlay(layer: layer, bounds: bounds, displays: displays) {
-                // Its background is transparent but its icons receive input.
-                var hit: AXUIElement?
-                if AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
-                   let hit, let actual = pidAttribute(hit) {
-                    return actual
-                }
-                continue
-            }
-            return ownerPid
+        return DesktopFrontOwner.pid(at: point, infos: infos, displays: DesktopScreen.displays().map(\.bounds)) { point in
+            var hit: AXUIElement?
+            guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &hit) == .success,
+                  let hit else { return nil }
+            return pidAttribute(hit)
         }
-        return nil
     }
 
     static func refuseOwnWindow(at point: CGPoint) throws {

@@ -21,9 +21,15 @@
 //! transcript — is looked at once a second by the wait itself; this module
 //! only says what woke it.
 //!
+//! Two answers come from other threads (t-18917): a tmux ask runs on a thread
+//! of its own, whose [`Waker`] ends the wait's rest when the confirmation of a
+//! death is in, and that thread learns its tmux has exited from [`exited_by`] —
+//! the kernel's word, not a look every few milliseconds.
+//!
 //! macOS only: everywhere else [`ChildWatch::open`] answers `None` and the wait
 //! goes on as it did (a 250 ms look), except that tmux is asked every few
-//! seconds instead of at every look.
+//! seconds instead of at every look; [`exited_by`] answers `None` and the ask
+//! looks for the exit on a timer.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -54,6 +60,7 @@ impl Woken {
 }
 
 pub use imp::ChildWatch;
+pub(crate) use imp::{exited_by, Waker};
 
 #[cfg(target_os = "macos")]
 mod imp {
@@ -61,8 +68,10 @@ mod imp {
     use std::net::{SocketAddr, TcpStream};
     use std::os::fd::{AsRawFd as _, RawFd};
     use std::path::Path;
-    use std::time::Duration;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
+    use nix::errno::Errno;
     use nix::libc::{c_long, time_t, timespec};
     use nix::sys::event::{EventFilter, EventFlag, FilterFlag, KEvent, Kqueue};
 
@@ -72,12 +81,76 @@ mod imp {
     /// within this is not held.
     const CONNECT_BUDGET: Duration = Duration::from_millis(250);
 
+    /// The one user event a watch carries: another thread's word that the wait
+    /// has something to look at ([`Waker`]). User events have identities of
+    /// their own, apart from descriptors.
+    const WAKE: usize = 1;
+
     /// One kqueue over a child's directory and, once the child has a channel,
     /// one silent connection to it.
     pub struct ChildWatch {
-        queue: Kqueue,
+        queue: Arc<Kqueue>,
         directory: std::fs::File,
         channel: Option<HeldChannel>,
+    }
+
+    /// Ends a rest of the watch it came from, from another thread (t-18917).
+    /// The rest says nothing happened; the wait then looks at what the other
+    /// thread answered. A wake with nobody resting is kept for the next rest.
+    #[derive(Clone)]
+    pub(crate) struct Waker {
+        queue: Arc<Kqueue>,
+    }
+
+    impl Waker {
+        pub(crate) fn wake(&self) {
+            let poke = KEvent::new(
+                WAKE,
+                EventFilter::EVFILT_USER,
+                EventFlag::empty(),
+                FilterFlag::NOTE_TRIGGER,
+                0,
+                0,
+            );
+            let mut none: [KEvent; 0] = [];
+            let _ = self.queue.kevent(&[poke], &mut none, Some(timespec_of(Duration::ZERO)));
+        }
+    }
+
+    /// Rest until process `pid` exits or `deadline` passes, without reaping
+    /// it (t-18917): `Some(true)` once it has exited, `Some(false)` at the
+    /// deadline, `None` when the kernel will not watch it and the caller has
+    /// to look for itself. One kqueue per process asked about; it is closed
+    /// on the way out.
+    pub(crate) fn exited_by(pid: u32, deadline: Instant) -> Option<bool> {
+        let queue = Kqueue::new().ok()?;
+        let watch = KEvent::new(
+            usize::try_from(pid).ok()?,
+            EventFilter::EVFILT_PROC,
+            EventFlag::EV_ADD | EventFlag::EV_ONESHOT,
+            FilterFlag::NOTE_EXIT,
+            0,
+            0,
+        );
+        let mut none: [KEvent; 0] = [];
+        match queue.kevent(&[watch], &mut none, Some(timespec_of(Duration::ZERO))) {
+            Ok(_) => {}
+            // Exited before it could be watched: a process that has exited is
+            // not one the kernel watches.
+            Err(Errno::ESRCH) => return Some(true),
+            Err(_) => return None,
+        }
+        let mut events = [blank()];
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match queue.kevent(&[], &mut events, Some(timespec_of(left))) {
+                Ok(0) if left.is_zero() => return Some(false),
+                // The rest ran out: what is left of it is looked at again.
+                Ok(0) | Err(Errno::EINTR) => {}
+                Ok(_) => return Some(true),
+                Err(_) => return None,
+            }
+        }
     }
 
     struct HeldChannel {
@@ -123,10 +196,20 @@ mod imp {
                 0,
                 0,
             );
+            let wake = KEvent::new(
+                WAKE,
+                EventFilter::EVFILT_USER,
+                EventFlag::EV_ADD | EventFlag::EV_CLEAR,
+                FilterFlag::empty(),
+                0,
+                0,
+            );
             let mut none: [KEvent; 0] = [];
-            queue.kevent(&[change], &mut none, Some(timespec_of(Duration::ZERO))).ok()?;
+            queue
+                .kevent(&[change, wake], &mut none, Some(timespec_of(Duration::ZERO)))
+                .ok()?;
             Some(Self {
-                queue,
+                queue: Arc::new(queue),
                 directory,
                 channel: None,
             })
@@ -136,6 +219,13 @@ mod imp {
         #[must_use]
         pub fn holds_channel(&self) -> bool {
             self.channel.is_some()
+        }
+
+        /// A handle another thread ends this watch's rests with.
+        pub(crate) fn waker(&self) -> Waker {
+            Waker {
+                queue: Arc::clone(&self.queue),
+            }
         }
 
         /// Hold one silent connection to the child's channel at `addr`, so that
@@ -182,6 +272,11 @@ mod imp {
             };
             let mut woken = Woken::NOTHING;
             for event in &events[..count] {
+                // A [`Waker`]'s event only ends the rest: it says nothing
+                // about the child.
+                if matches!(event.filter(), Ok(EventFilter::EVFILT_USER)) {
+                    continue;
+                }
                 if event.ident() == ident(self.directory.as_raw_fd()) {
                     woken.directory = true;
                 } else if self
@@ -224,12 +319,25 @@ mod imp {
 mod imp {
     use std::net::SocketAddr;
     use std::path::Path;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::Woken;
 
     /// No watch on this platform: [`ChildWatch::open`] never answers one.
     pub struct ChildWatch;
+
+    /// No watch, so nothing to wake: a wait without one looks on a timer.
+    #[derive(Clone)]
+    pub(crate) struct Waker;
+
+    impl Waker {
+        pub(crate) fn wake(&self) {}
+    }
+
+    /// The kernel is not asked here: the caller looks for the exit itself.
+    pub(crate) fn exited_by(_pid: u32, _deadline: Instant) -> Option<bool> {
+        None
+    }
 
     impl ChildWatch {
         #[must_use]
@@ -244,6 +352,10 @@ mod imp {
 
         pub fn hold_channel(&mut self, _addr: SocketAddr) -> bool {
             false
+        }
+
+        pub(crate) fn waker(&self) -> Waker {
+            Waker
         }
 
         pub fn wait(&mut self, timeout: Duration) -> Woken {
@@ -368,5 +480,56 @@ mod tests {
         };
         assert!(!watch.hold_channel(closed));
         assert!(!watch.holds_channel(), "a refused channel replaced the held one with nothing held");
+    }
+
+    /// Another thread ends a rest at once, and the rest says nothing about the
+    /// child — the wait looks at what that thread answered (t-18917). A wake
+    /// with nobody resting is kept for the next rest.
+    #[test]
+    fn a_wake_from_another_thread_ends_a_rest_at_once_and_says_nothing_of_the_child() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut watch = ChildWatch::open(directory.path()).expect("watch");
+        let waker = watch.waker();
+        let waking = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            waker.wake();
+            Instant::now()
+        });
+        let woken = watch.wait(Duration::from_secs(5));
+        let seen = Instant::now();
+        let woke = waking.join().expect("waker");
+        assert_eq!(woken, Woken::NOTHING, "a wake was read as news of the child");
+        assert!(
+            seen.duration_since(woke) < Duration::from_millis(250),
+            "the rest ended {:?} after the wake",
+            seen.duration_since(woke)
+        );
+
+        watch.waker().wake();
+        let started = Instant::now();
+        assert_eq!(watch.wait(Duration::from_secs(5)), Woken::NOTHING);
+        assert!(started.elapsed() < Duration::from_millis(250), "a wake before the rest was lost");
+    }
+
+    /// The kernel says when a process exits, without reaping it, and a
+    /// deadline is kept when it does not (t-18917).
+    #[test]
+    fn an_exit_is_heard_at_once_and_a_deadline_is_kept() {
+        let mut quick = std::process::Command::new("/bin/sleep").arg("0.1").spawn().expect("spawn");
+        let started = Instant::now();
+        assert_eq!(super::exited_by(quick.id(), started + Duration::from_secs(5)), Some(true));
+        assert!(started.elapsed() < Duration::from_secs(1), "the exit was heard after {:?}", started.elapsed());
+        assert!(quick.try_wait().expect("try_wait").is_some(), "the exited process was not left to reap");
+
+        let mut slow = std::process::Command::new("/bin/sleep").arg("5").spawn().expect("spawn");
+        let started = Instant::now();
+        assert_eq!(super::exited_by(slow.id(), started + Duration::from_millis(300)), Some(false));
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(300) && took < Duration::from_millis(600),
+            "a 300 ms deadline was kept at {took:?}"
+        );
+        let _ = slow.kill();
+        let _ = slow.wait();
     }
 }

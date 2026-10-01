@@ -19,6 +19,7 @@
 //! had before it looked; under `shadow` or `off` the hand makes today's
 //! rule's moves and a `shadow` answer is only kept.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -215,21 +216,37 @@ pub(crate) fn uncover(
         Err(held) => to_person(held, Some(&cover), place, hand),
         Ok(moves) => {
             let mut now = Some(cover);
-            for next in moves {
-                let Some(standing) = &now else {
+            let mut next_moves: VecDeque<Move> = moves.into();
+            let mut cleared = false;
+            // The rule's moves go on once when the answer's made nothing.
+            let mut rule_left = rule.as_ref().ok().cloned();
+            while let Some(next) = next_moves.pop_front().or_else(|| {
+                let untried: Vec<Move> = rule_left
+                    .take()
+                    .filter(|_| {
+                        outcome
+                            .tried
+                            .iter()
+                            .all(|each| outcome.not_made.contains(each))
+                    })
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|each| !outcome.tried.contains(each))
+                    .collect();
+                next_moves.extend(untried);
+                next_moves.pop_front()
+            }) {
+                let Some(standing) = now.clone() else {
                     break;
                 };
                 outcome.tried.push(next);
-                let looked = make(next, standing, hand)
-                    .map(|made| {
+                match step(next, &standing, place, hand) {
+                    Ok((made, after)) => {
                         if !made {
                             outcome.not_made.push(next);
                         }
-                    })
-                    .and_then(|()| desktop_windows(hand.call))
-                    .map(|listed| cover_of(&listed, place.window, place.local));
-                match looked {
-                    Ok(after) => now = after,
+                        now = after;
+                    }
                     Err(refusal) => {
                         record(
                             judge,
@@ -244,17 +261,25 @@ pub(crate) fn uncover(
                     }
                 }
                 if now.as_ref().is_some_and(|after| place.needs.met(after)) {
-                    outcome.cleared_by = Some(next);
+                    cleared = true;
+                    // A move the helper would not make cleared nothing: what
+                    // shows now is the last one made, landing late.
+                    outcome.cleared_by = outcome
+                        .tried
+                        .iter()
+                        .rev()
+                        .find(|each| !outcome.not_made.contains(each))
+                        .copied();
                     break;
                 }
             }
-            match (&now, outcome.cleared_by) {
-                (_, Some(_)) => Uncovered::Clear {
+            match (&now, cleared) {
+                (_, true) => Uncovered::Clear {
                     moves: outcome.tried.clone(),
                     by_person: false,
                 },
-                (None, None) => to_person(Held::Gone, None, place, hand),
-                (Some(standing), None) => {
+                (None, false) => to_person(Held::Gone, None, place, hand),
+                (Some(standing), false) => {
                     to_person(Held::NothingCleared, Some(standing), place, hand)
                 }
             }
@@ -272,14 +297,59 @@ pub(crate) fn uncover(
     Ok(ended)
 }
 
+/// One move and the look after it: whether it was made, and what stands
+/// now. The window server's order can land after the helper's answer: a
+/// raise after which nothing in front of the target changed is looked at
+/// once more after a pause, and a raise its app's activation carried —
+/// which answers alike whether the order changed or not — that still changed
+/// nothing was not made.
+fn step(
+    next: Move,
+    standing: &Cover,
+    place: Place,
+    hand: &mut Hand<'_>,
+) -> Result<(bool, Option<Cover>), ComputerUseError> {
+    let made = make(next, standing, hand)?;
+    let look = |hand: &mut Hand<'_>| {
+        desktop_windows(hand.call).map(|listed| cover_of(&listed, place.window, place.local))
+    };
+    let mut after = look(hand)?;
+    let unchanged = |after: &Option<Cover>| {
+        after.as_ref().is_some_and(|after| {
+            !place.needs.met(after)
+                && after.window == standing.window
+                && after.in_front == standing.in_front
+        })
+    };
+    if next == Move::RaiseTarget && made != Made::Refused && unchanged(&after) {
+        (hand.pause)(Duration::from_millis(COVER_LOOK_AGAIN_MS));
+        after = look(hand)?;
+        if made == Made::ByItsApp && unchanged(&after) {
+            return Ok((false, after));
+        }
+    }
+    Ok((made != Made::Refused, after))
+}
+
+/// What the helper said to one move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Made {
+    /// It made it — or there was nothing to make.
+    Done,
+    /// It brought the window's whole app forward instead of the window: an
+    /// answer that says nothing of the order.
+    ByItsApp,
+    /// It would not make it.
+    Refused,
+}
+
 /// One move of the target's own window. A window its app does not publish
 /// to accessibility (a non-activating panel) cannot be raised or moved by
 /// the helper: it is brought forward with its whole app instead, and a move
 /// the helper refuses is a move not made — the look after it says what
 /// stands, and the next move, or the person, follows. Anything else the
-/// helper says is an error. True when the move was made (or had nothing to
-/// make), false when the helper would not make it.
-fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<bool, ComputerUseError> {
+/// helper says is an error.
+fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<Made, ComputerUseError> {
     match next {
         Move::RaiseTarget => match (hand.call)(
             "windowAction",
@@ -288,8 +358,15 @@ fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<bool, Computer
             Err(refusal) if not_its_to_move(&refusal) => not_made((hand.call)(
                 "activateApp",
                 json!({ "app": format!("pid:{}", cover.pid) }),
-            )),
-            raised => raised.map(|_| true),
+            ))
+            .map(|made| {
+                if made == Made::Done {
+                    Made::ByItsApp
+                } else {
+                    made
+                }
+            }),
+            raised => raised.map(|_| Made::Done),
         },
         Move::MoveTarget => {
             let displays = (hand.call)("displays", json!({}))?;
@@ -301,14 +378,14 @@ fn make(next: Move, cover: &Cover, hand: &mut Hand<'_>) -> Result<bool, Computer
                 )),
                 // No place on any screen clears it: the move is made of
                 // nothing, and the look after it says so.
-                None => Ok(true),
+                None => Ok(Made::Done),
             }
         }
         Move::LookAgain => {
             (hand.pause)(Duration::from_millis(COVER_LOOK_AGAIN_MS));
-            Ok(true)
+            Ok(Made::Done)
         }
-        Move::AskPerson => Ok(true),
+        Move::AskPerson => Ok(Made::Done),
     }
 }
 
@@ -319,10 +396,10 @@ fn not_its_to_move(refusal: &ComputerUseError) -> bool {
 }
 
 /// A move's answer: made, or — the helper refusing to make it — not made.
-fn not_made(answer: Result<Value, ComputerUseError>) -> Result<bool, ComputerUseError> {
+fn not_made(answer: Result<Value, ComputerUseError>) -> Result<Made, ComputerUseError> {
     match answer {
-        Err(refusal) if not_its_to_move(&refusal) => Ok(false),
-        answer => answer.map(|_| true),
+        Err(refusal) if not_its_to_move(&refusal) => Ok(Made::Refused),
+        answer => answer.map(|_| Made::Done),
     }
 }
 

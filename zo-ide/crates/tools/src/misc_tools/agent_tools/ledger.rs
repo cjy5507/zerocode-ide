@@ -178,6 +178,44 @@ fn start_args(launch: &Launch, model: Option<&str>, task: &str, prompt: &str, re
     Ok(args)
 }
 
+/// What the window says when it refuses a worker-start because it is still
+/// cutting another pane — "ask again in a moment". Nothing was started, so the
+/// launch asks again under a new request name and cannot start two.
+const PANE_CUT_REFUSAL: &str = "another pane is still being cut";
+
+/// How often and how far apart the launch asks again after that refusal: a cut
+/// takes a second or two, so eight asks a second and a half apart outlast it,
+/// and a window that never stops cutting still answers within about twelve
+/// seconds instead of hanging the spawn.
+const PANE_CUT_ASKS: u32 = 8;
+const PANE_CUT_PAUSE: Duration = Duration::from_millis(1500);
+
+/// The worker-start, asked again while the window is cutting another pane.
+fn start_worker(client: &Client, launch: &Launch, model: Option<&str>, task: &str, prompt: &str, id: &str) -> Result<Value, ToolError> {
+    let mut ask = 0;
+    loop {
+        let retry = if ask == 0 { format!("zo-start-{id}") } else { format!("zo-start-{id}-{ask}") };
+        match client.call(&start_args(launch, model, task, prompt, &retry)?) {
+            Err(failure) if ask + 1 < PANE_CUT_ASKS && failure.to_string().contains(PANE_CUT_REFUSAL) => {
+                ask += 1;
+                std::thread::sleep(PANE_CUT_PAUSE);
+            }
+            answered => return answered,
+        }
+    }
+}
+
+/// Whether a launch receipt is the worker this launch asked for: the agent and
+/// the worktree always; the model and the effort only where the launch pinned
+/// them. One left open is the ledger's to fill — Jev picks it (t-14437) — and
+/// its choice is not a deviation.
+fn receipt_honours(receipt: &Value, agent: &str, model: Option<&str>, effort: Option<&str>, worktree: bool) -> bool {
+    receipt["agent"] == agent
+        && model.is_none_or(|model| receipt["model"].as_str() == Some(model))
+        && effort.is_none_or(|effort| receipt["effort"].as_str() == Some(effort))
+        && receipt["worktree"].as_bool() == Some(worktree)
+}
+
 pub(crate) fn execute(
     mut input: AgentInput,
     parent: Option<&str>,
@@ -224,20 +262,19 @@ fn spawn(client: &Client, launch: &Launch, model: Option<String>, mut job: Agent
     if !ready["dispatchId"].is_null() {
         return Err(error(format!("ledger task {task} was assigned before this exact launch")));
     }
-    let receipt = client.call(&start_args(launch, model.as_deref(), &task, &prompt, &format!("zo-start-{id}"))?)?;
+    let receipt = start_worker(&client, launch, model.as_deref(), &task, &prompt, &id)?;
     let worker = required(&receipt, "workerId")?;
     let seat = Seat { run: client.run.clone().ok_or_else(|| error("ledger run missing"))?, worker,
         dispatch: required(&receipt, "dispatchId")?, task };
     let expected = launch.agent.as_deref().unwrap_or("zo");
-    if receipt["agent"] != expected || receipt["model"].as_str() != model.as_deref()
-        || receipt["effort"].as_str() != launch.effort.as_deref()
-        || receipt["worktree"].as_bool() != Some(launch.worktree.unwrap_or(true)) {
+    if !receipt_honours(&receipt, expected, model.as_deref(), launch.effort.as_deref(), launch.worktree.unwrap_or(true)) {
         let _ = stop(&client, &seat, "launch receipt did not honor the pinned choice");
         return Err(error(format!("ledger launch receipt differs from the requested agent/model/effort: {receipt}")));
     }
     job.manifest.pane = receipt["pane"].as_str().map(str::to_owned);
     job.manifest.model.clone_from(&model);
-    job.manifest.resolved_model = model;
+    // What actually runs: the pinned model, or the one the ledger chose.
+    job.manifest.resolved_model = model.or_else(|| receipt["model"].as_str().map(str::to_owned));
     job.manifest.lifecycle.execution = Some("ledger".into());
     job.manifest.lifecycle.ledger = Some(seat.clone());
     if let Err(failure) = super::manifest::write_agent_manifest(&job.manifest) {

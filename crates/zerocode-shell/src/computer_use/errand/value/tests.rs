@@ -360,10 +360,11 @@ pub(in crate::computer_use::errand) fn fake_cli(
     let script = format!(
         "#!/bin/sh\n\
          here=\"{here}\"\n\
+         if [ {pause} -gt 0 ]; then sleep {pause} & echo $! > \"$here.child\"; fi\n\
          printf '%s\\n' \"$@\" > \"$here.argv\"\n\
          env > \"$here.env\"\n\
          cat > \"$here.stdin\"\n\
-         if [ {pause} -gt 0 ]; then sleep {pause} & echo $! > \"$here.child\"; wait; fi\n\
+         if [ {pause} -gt 0 ]; then wait; fi\n\
          cat \"$here.answer\"\n\
          exit {rc}\n",
         here = at.display(),
@@ -758,36 +759,58 @@ fn with_no_login_on_either_road_the_refusal_names_each_roads_reason() {
     );
 }
 
+/// The fake CLI that pauses starts its child, and writes the pid, before any
+/// other work a loaded machine could stretch past the wall.
+#[cfg(unix)]
+#[test]
+fn a_pausing_fake_starts_its_child_before_anything_else() {
+    let dir = tempfile::tempdir().expect("a root");
+    let claude = fake_cli(dir.path(), "claude", "{}", 0, 30);
+    let script = std::fs::read_to_string(&claude).expect("the script");
+    let first = script.lines().nth(2).expect("the line after `here=`");
+    assert!(
+        first.contains(".child"),
+        "the child starts after other work: {first}"
+    );
+}
+
 /// A CLI that outlives its wall is ended with every process it started, and
 /// the road says it ran out of time.
 #[cfg(unix)]
 #[test]
 fn a_cli_that_outlives_its_wall_is_ended_with_everything_it_started() {
-    let dir = tempfile::tempdir().expect("a root");
-    let claude = fake_cli(dir.path(), "claude", &claude_said("late", false), 0, 30);
-    let writer = login_writer(dir.path(), GeneratorRoad::ClaudeLogin, &claude, "/nowhere");
-    let began = Instant::now();
-    assert_eq!(
-        writer
-            .ask_text("S", "U", 10, Duration::from_secs(3))
-            .map(|said| said.text)
-            .expect_err("too late"),
-        TIMEOUT
-    );
-    assert!(began.elapsed() < Duration::from_secs(8), "the wall held");
-    let child: i32 = heard(dir.path(), "claude", "child")
-        .trim()
-        .parse()
-        .expect("the run started a child of its own");
-    let gone = (0..100).any(|_| {
-        // SAFETY: signal 0 only asks whether the pid is there.
-        let there = unsafe { libc::kill(child, 0) } == 0;
-        if there {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        !there
-    });
-    assert!(gone, "the run's child outlived it");
+    // The wall counts from the spawn, so on a machine too loaded for the fake's
+    // shell to get to its first line within the wall, nothing was started and
+    // there is nothing to end. Such a run proves nothing either way and is
+    // begun again; a run that did start a child must see it gone.
+    for _ in 0..5 {
+        let dir = tempfile::tempdir().expect("a root");
+        let claude = fake_cli(dir.path(), "claude", &claude_said("late", false), 0, 30);
+        let writer = login_writer(dir.path(), GeneratorRoad::ClaudeLogin, &claude, "/nowhere");
+        let began = Instant::now();
+        assert_eq!(
+            writer
+                .ask_text("S", "U", 10, Duration::from_secs(3))
+                .map(|said| said.text)
+                .expect_err("too late"),
+            TIMEOUT
+        );
+        assert!(began.elapsed() < Duration::from_secs(8), "the wall held");
+        let Ok(child) = heard(dir.path(), "claude", "child").trim().parse::<i32>() else {
+            continue;
+        };
+        let gone = (0..100).any(|_| {
+            // SAFETY: signal 0 only asks whether the pid is there.
+            let there = unsafe { libc::kill(child, 0) } == 0;
+            if there {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            !there
+        });
+        assert!(gone, "the run's child outlived it");
+        return;
+    }
+    panic!("the fake CLI never got to start its child within the wall, five times running");
 }
 
 /// The window's memory keeps a value per identity, as many as the longest

@@ -335,6 +335,23 @@ impl PrivateWindow {
     fn boot_with_usage(
         usage: Vec<(&'static str, crate::usage::ProviderUsage)>,
     ) -> (Self, zerocode_orchestrator::workflow_store::WorkflowStore) {
+        Self::boot_with(usage, None)
+    }
+
+    /// The same private window, standing on a ledger this test built — the
+    /// road a person's real ledger takes in, so a test can hold a ledger as
+    /// large as theirs without writing it one verb at a time.
+    fn boot_seeded(
+        seeded: zerocode_core::orchestration::LedgerProjectionV1,
+    ) -> (Self, zerocode_orchestrator::workflow_store::WorkflowStore) {
+        let named = super::digest(b"zerocode.orchestration.test-seed.v1", &[b"seeded"]);
+        Self::boot_with(Vec::new(), Some(Box::new((seeded, named))))
+    }
+
+    fn boot_with(
+        usage: Vec<(&'static str, crate::usage::ProviderUsage)>,
+        legacy: Option<Box<(zerocode_core::orchestration::LedgerProjectionV1, String)>>,
+    ) -> (Self, zerocode_orchestrator::workflow_store::WorkflowStore) {
         let usage = super::UsageSource::fixed(usage);
         let turn = window_turns()
             .write()
@@ -374,10 +391,7 @@ impl PrivateWindow {
         let actor = super::RuntimeActor::start(
             &store,
             "main-ledger",
-            super::RuntimeBoot::Cutover {
-                legacy: None,
-                now_ms: 1,
-            },
+            super::RuntimeBoot::Cutover { legacy, now_ms: 1 },
             super::MAX_RUNTIME_MAILBOX,
             Box::new(super::ShellPaneTable),
             Box::new(super::LiveCatalog {
@@ -20118,6 +20132,113 @@ fn a_finished_worker_is_listed_while_its_checkout_stands() {
     );
 }
 
+/// What the board's rows say about a finished task nobody can review (t-19328,
+/// t-15558 slice 2).
+///
+/// A worker stopped before it handed anything in, on a task the coordinator
+/// then wrote down as done by hand, leaves work in a checkout that no review
+/// can ever name — no attempt has a source. Its row says so
+/// (`review.unreviewable`, the ledger's own reading and not the window's
+/// guess), beside the row of a worker whose report a coordinator can still
+/// review, which says the opposite. The window reads the flag and nothing else.
+#[test]
+fn a_finished_workers_row_says_whether_its_task_can_take_a_review() {
+    use zerocode_core::orchestration::{
+        Ending, Ledger, MessageKind, ResultAuthor, TaskStatus, worker_address,
+    };
+    let emptied = tempfile::tempdir().expect("the stopped worker's checkout");
+    let emptied = emptied.path().to_string_lossy().into_owned();
+    let handed = tempfile::tempdir().expect("the reporting worker's checkout");
+    let handed = handed.path().to_string_lossy().into_owned();
+
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("two kinds of finished", 1);
+    // Somebody still works for this run: it is in play.
+    let carrying = ledger
+        .create_task(&run, "do".into(), "still going".into(), vec![], None, 2)
+        .unwrap();
+    ledger
+        .start_worker(&run, "codex", ("team", "%9"), Some(&carrying), 3)
+        .unwrap();
+
+    // Stopped before handing anything in; the coordinator wrote the task down as done.
+    let by_hand = ledger
+        .create_task(&run, "do".into(), "by hand".into(), vec![], None, 10)
+        .unwrap();
+    let stopped = ledger
+        .start_worker(&run, "claude", ("team", "%2"), Some(&by_hand), 11)
+        .unwrap()
+        .worker;
+    assert!(ledger.worker_seated(("team", "%2"), &emptied));
+    ledger
+        .end_attempt(&stopped, Ending::Stopped, "lost", 12)
+        .unwrap();
+    ledger
+        .update_task(
+            &run,
+            &by_hand,
+            Some(TaskStatus::Completed),
+            None,
+            ResultAuthor::Coordinator {
+                seat: "team/%1".to_string(),
+                generation: Some(1),
+                attempt: None,
+                source: None,
+            },
+        )
+        .unwrap();
+
+    // A worker that reported: its report is the source a review can name.
+    let reported = ledger
+        .create_task(&run, "do".into(), "reported".into(), vec![], None, 20)
+        .unwrap();
+    let worker = ledger
+        .start_worker(&run, "claude", ("team", "%3"), Some(&reported), 21)
+        .unwrap()
+        .worker;
+    assert!(ledger.worker_seated(("team", "%3"), &handed));
+    let dispatch = ledger
+        .run(&run)
+        .unwrap()
+        .worker(&worker)
+        .unwrap()
+        .dispatch
+        .clone();
+    ledger
+        .send(
+            &run,
+            zerocode_core::orchestration::Message {
+                dispatch,
+                task: Some(reported.clone()),
+                ..relation_test_message(
+                    &worker_address(&worker),
+                    &format!("run:{run}"),
+                    MessageKind::WorkerDone,
+                    "{\"ok\":true}",
+                    22,
+                )
+            },
+        )
+        .unwrap();
+    ledger.begin_release(&worker).unwrap();
+    ledger.finish_release(&worker, None);
+
+    let rows = super::ledger_agents_for_seats(&ledger, &super::TeamSeatIndex::new());
+    let row = |task: &str| {
+        let found = rows.iter().find(|row| row.task_id == task);
+        found.unwrap_or_else(|| panic!("{task} has no row: {rows:?}"))
+    };
+    let said = |task: &str| {
+        serde_json::to_value(&row(task).review).expect("a review serializes")["unreviewable"]
+            .clone()
+    };
+    assert_eq!(said(&by_hand), true, "{:?}", row(&by_hand));
+    assert_eq!(said(&reported), false, "{:?}", row(&reported));
+    // The attempt's own ending is still said apart from the task's: the stopped
+    // worker's attempt did not succeed, and the task is done all the same.
+    assert!(row(&by_hand).reported && row(&by_hand).failed);
+}
+
 /* ---- worktree-evidence, through the door an agent uses ----------------- */
 
 /// A host that knows where it put one pane and does nothing else.
@@ -24729,5 +24850,132 @@ fn a_put_whose_record_the_disk_refused_leaves_the_homes_login_nobodys_until_a_pu
     assert_eq!(
         session_in_table(config.path(), data.path(), &a.id),
         Some(100)
+    );
+}
+
+/// A ledger the size of a long-lived machine's: this many runs, each holding
+/// this many tasks and the mail on them, so the ids run to the tens of
+/// thousands. Built here and never read from anybody's disk (t-19506).
+const IDLE_BEAT_RUNS: usize = 24;
+const IDLE_BEAT_TASKS_PER_RUN: usize = 800;
+
+fn a_ledger_as_large_as_a_long_lived_machines() -> zerocode_core::orchestration::LedgerProjectionV1
+{
+    let mut ledger = super::Ledger::new();
+    for run in 0..IDLE_BEAT_RUNS {
+        let run = ledger.create_run(&format!("long-lived run {run}"), 1);
+        for task in 0..IDLE_BEAT_TASKS_PER_RUN {
+            ledger
+                .create_task(
+                    &run,
+                    format!("spec {task} of {run}"),
+                    format!("task {task}"),
+                    Vec::new(),
+                    None,
+                    task as i64,
+                )
+                .expect("a synthetic task");
+        }
+    }
+    ledger.export()
+}
+
+/// An idle window serves one projection per ledger generation: the beat
+/// asks for the ledger many times over (every sweep reads it), and nothing
+/// is exported, rebuilt or validated for a ledger that did not change.
+#[test]
+fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
+    const BEATS: i64 = 6;
+    // The window first, then the beat: every other test takes them in this
+    // order, and the other way round two tests wait on each other for ever
+    // (the v1.1.46 lane's gate stood 50 minutes on exactly that).
+    let (_window, _store) =
+        PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
+    let _beat = one_beat_at_a_time();
+    // The first beat reads the generation the window booted on; it may pay
+    // for it once.
+    tick(&Nowhere, &[], 1_000_000);
+    let revision = || {
+        super::runtime()
+            .expect("this window's runtime")
+            .actor
+            .view()
+            .expect("the image")
+            .revision()
+    };
+    let booted_on = revision();
+    let settled = zerocode_core::orchestration::ledger_work();
+    for beat in 0..BEATS {
+        tick(&Nowhere, &[], 1_001_000 + beat * 1_000);
+    }
+    let walked = zerocode_core::orchestration::ledger_work().since(settled);
+    eprintln!(
+        "idle beats: {BEATS} beats walked the ledger {walked:?}, revision {booted_on} -> {}",
+        revision()
+    );
+    assert_eq!(
+        (walked.exports, walked.rebuilds, walked.validations),
+        (0, 0, 0),
+        "{BEATS} idle beats on an unchanged ledger walked it again"
+    );
+    // And two readers of one generation hold the one projection, not two.
+    let actor = &super::runtime().expect("this window's runtime").actor;
+    let (first, second) = (
+        actor.view().expect("an image"),
+        actor.view().expect("an image"),
+    );
+    assert!(
+        std::ptr::eq(first.projection(), second.projection()),
+        "two images of one revision were exported twice"
+    );
+}
+
+/// The idle beat's price on the ledger above, before and after a change:
+/// the cost of one beat (p50/p95) and the CPU the process spends per minute
+/// of beats — the window beats once a second, so a minute is 60 of them.
+/// Run it under `taskpolicy -b` for the low-spec profile (efficiency cores,
+/// background QoS). Private ledger, built here; nobody's disk is read.
+// getrusage is the process's own CPU clock on unix; the Windows build has none
+// to read, and the cost this measures is the same code on every platform.
+#[cfg(unix)]
+#[test]
+#[ignore = "a measurement: prints the idle beat's cost on a synthetic ledger"]
+fn measure_the_idle_beat_on_a_large_ledger() {
+    const BEATS_PER_MINUTE: i64 = 60;
+    // The window first, then the beat: every other test takes them in this
+    // order, and the other way round two tests wait on each other for ever
+    // (the v1.1.46 lane's gate stood 50 minutes on exactly that).
+    let (_window, _store) =
+        PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
+    let _beat = one_beat_at_a_time();
+    tick(&Nowhere, &[], 1_000_000);
+    let cpu = || {
+        // SAFETY: getrusage fills the struct it is handed.
+        let mut used: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut used) };
+        let micros = |t: libc::timeval| t.tv_sec as u128 * 1_000_000 + t.tv_usec as u128;
+        micros(used.ru_utime) + micros(used.ru_stime)
+    };
+    let started_cpu = cpu();
+    let started = std::time::Instant::now();
+    let mut beats = Vec::new();
+    for beat in 0..BEATS_PER_MINUTE {
+        let one = std::time::Instant::now();
+        tick(&Nowhere, &[], 1_001_000 + beat * 1_000);
+        beats.push(one.elapsed());
+    }
+    let wall = started.elapsed();
+    let cpu_used = cpu() - started_cpu;
+    beats.sort();
+    eprintln!(
+        "idle beat, {} runs x {} tasks: p50={}us p95={}us, {} beats took {}ms wall, cpu per {} beats={}ms",
+        IDLE_BEAT_RUNS,
+        IDLE_BEAT_TASKS_PER_RUN,
+        beats[beats.len() / 2].as_micros(),
+        beats[beats.len() * 95 / 100].as_micros(),
+        BEATS_PER_MINUTE,
+        wall.as_millis(),
+        BEATS_PER_MINUTE,
+        cpu_used / 1000,
     );
 }
