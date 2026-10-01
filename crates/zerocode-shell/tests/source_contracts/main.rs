@@ -9167,10 +9167,11 @@ mod tests {
     }
 
     /// Chromium copies the whole signed app into the per-user `X` folder at
-    /// every start and never deletes the copy (t-20243: 0.4 GiB a start,
-    /// thirty-one starts, 12.3 GiB on one machine). macOS itself makes none —
-    /// a plain signed app, launched and updated every way the installers do,
-    /// leaves nothing there. The copy is not waste, though: its hard link is a
+    /// every start and deletes the copy only after an orderly shutdown — the
+    /// restart road (`exit(0)`), a crash and a force quit leave it (t-20243:
+    /// 0.4 GiB each, thirty-one on one machine, 12.3 GiB). macOS itself makes
+    /// none — a plain signed app, launched and updated every way the installers
+    /// do, leaves nothing there. The copy is not waste, though: its hard link is a
     /// second name for the running executable, and without one macOS stops
     /// recognising a window whose installed bundle an update has renamed away
     /// and deleted (`codesign --verify +pid` answers "host has no guest with

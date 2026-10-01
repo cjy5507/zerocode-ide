@@ -59,8 +59,9 @@ const CEF_SWITCH_USE_MOCK_KEYCHAIN: &str = "use-mock-keychain";
 /// `MacAppCodeSignClone` is deliberately NOT in this list (t-20243). At every
 /// start Chromium copies the whole app bundle into the per-user `X` folder
 /// (`<bundle id>.code_sign_clone`) and hard-links the running executable into
-/// it, and nothing deletes the copy: 0.4 GiB per start. But that hard link is
-/// a second name for the executable, and without one macOS no longer
+/// it, and deletes the copy only after an orderly shutdown — the restart road
+/// (`exit(0)`), a crash and a force quit leave it: 0.4 GiB each. But that hard
+/// link is a second name for the executable, and without one macOS no longer
 /// recognises a window whose installed bundle an update has renamed away and
 /// deleted (`codesign --verify +pid`: "host has no guest with the requested
 /// attributes") — which is every window that outlives two installs. The

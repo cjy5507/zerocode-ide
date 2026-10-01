@@ -4,24 +4,30 @@
 //! At every start the embedded Chromium copies the whole app bundle into the
 //! user's per-user `X` folder — `<bundle id>.code_sign_clone/
 //! code_sign_clone.<random>/<name>.app.bundle`, every file an APFS clone and the
-//! running executable a hard link — and nothing deletes the copy when the
-//! window quits. The copy is not waste: the hard link is a second name for the
-//! running executable, and it is what lets macOS go on recognising a window
-//! whose installed bundle has been renamed away and deleted by an update
-//! (`codesign --verify +pid` stays "dynamically valid"; with no second name it
-//! answers "host has no guest with the requested attributes"). But an update
-//! changes the blocks of most of those files, so each leftover copy keeps a
-//! whole old version of the app on disk: 0.4 GiB per start, thirty-one starts
-//! on the machine this was measured on (deleting thirty of them freed 12.3 GiB).
+//! running executable a hard link. The copy is not waste: the hard link is a
+//! second name for the running executable, and it is what lets macOS go on
+//! recognising a window whose installed bundle has been renamed away and
+//! deleted by an update (`codesign --verify +pid` stays "dynamically valid";
+//! with no second name it answers "host has no guest with the requested
+//! attributes").
+//!
+//! Chromium deletes its copy only after an orderly shutdown (a helper, started
+//! then with `--type=code-sign-clone-cleanup`, removes it once the browser has
+//! exited). The app's one restart road — where an update is swapped in — ends
+//! in `exit(0)` without that shutdown, and so do a crash and a force quit; the
+//! copy of such a window stays. An update changes the blocks of most of those
+//! files, so each leftover copy keeps a whole old version of the app on disk:
+//! 0.4 GiB per restart, thirty-one on the machine this was measured on
+//! (deleting thirty of them freed 12.3 GiB).
 //!
 //! macOS does not make them. A plain signed app launched by `open` or by path,
 //! installed in place, by rename or quarantined, leaves nothing in that folder;
 //! the engine's `MacAppCodeSignClone` feature does. The feature therefore stays
 //! on (`chromium_browser::CEF_DISABLED_FEATURES` must not name it) and this
-//! module deletes what the engine never does: once the window has painted, on
-//! a thread of its own, this app's copies that no process runs and that are old
-//! enough for nobody to be making them. One copy per running window stays, by
-//! design. Another bundle id's copies are never looked at.
+//! module deletes what the engine's own cleanup missed: once the window has
+//! painted, on a thread of its own, this app's copies that no process runs and
+//! that are old enough for nobody to be making them. One copy per running
+//! window stays, by design. Another bundle id's copies are never looked at.
 //!
 //! Windows and Linux have no such folder, so none of this is compiled there.
 
