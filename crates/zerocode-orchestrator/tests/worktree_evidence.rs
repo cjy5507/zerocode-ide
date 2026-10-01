@@ -45,6 +45,8 @@ fn git(root: &Path, args: &[&str]) -> String {
 fn repository() -> TempDir {
     let root = tempfile::tempdir().expect("temp repository");
     git(root.path(), &["init", "-b", "main"]);
+    // A Windows machine's global core.autocrlf would check files out as CRLF.
+    git(root.path(), &["config", "core.autocrlf", "false"]);
     git(root.path(), &["config", "user.name", "ZeroCode Test"]);
     git(
         root.path(),

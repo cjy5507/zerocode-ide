@@ -513,7 +513,7 @@ mod tests {
         let both = vec![
             (
                 "HISTFILE".to_string(),
-                format!("/data/{HISTORY_DIR}/{hash}/bash_history"),
+                dir.join("bash_history").to_string_lossy().into_owned(),
             ),
             ("fish_history".to_string(), fish_session(&hash)),
         ];
@@ -583,7 +583,7 @@ mod tests {
                 .find(|(name, _)| name == "HISTFILE"),
             Some((
                 "HISTFILE".to_string(),
-                "/data/terminal-history/00112233aabbccdd/bash_history".to_string()
+                dir.join("bash_history").to_string_lossy().into_owned()
             ))
         );
     }
@@ -615,18 +615,16 @@ mod tests {
 
     #[test]
     fn a_zsh_spawn_is_pointed_at_the_wrapper_and_told_its_history() {
-        let env = zsh_history_env(
-            Path::new("/data/shell-wrapper/zsh"),
-            Path::new("/data/terminal-history/00112233aabbccdd"),
-            &nothing,
-        );
+        let wrapper = Path::new("/data/shell-wrapper/zsh");
+        let history = Path::new("/data/terminal-history/00112233aabbccdd");
+        let env = zsh_history_env(wrapper, history, &nothing);
         assert_eq!(
             env,
             vec![
                 ("ZDOTDIR".to_string(), "/data/shell-wrapper/zsh".to_string()),
                 (
                     ZSH_HISTFILE_VAR.to_string(),
-                    "/data/terminal-history/00112233aabbccdd/zsh_history".to_string()
+                    history.join("zsh_history").to_string_lossy().into_owned()
                 ),
             ]
         );
@@ -716,21 +714,25 @@ mod tests {
 
     #[test]
     fn fishs_own_data_dir_is_read_from_the_spawns_environment() {
+        let at = crate::test_paths::host_spelled;
         let xdg = |name: &str| match name {
-            "XDG_DATA_HOME" => Some("/opt/share".to_string()),
-            "HOME" => Some("/Users/dev".to_string()),
+            "XDG_DATA_HOME" => Some(at("/opt/share")),
+            "HOME" => Some(at("/Users/dev")),
             _ => None,
         };
-        assert_eq!(fish_data_dir(&xdg), Some(PathBuf::from("/opt/share/fish")));
+        assert_eq!(
+            fish_data_dir(&xdg),
+            Some(PathBuf::from(at("/opt/share")).join("fish"))
+        );
         // A relative XDG_DATA_HOME is not one fish would follow either.
         let relative = |name: &str| match name {
             "XDG_DATA_HOME" => Some("share".to_string()),
-            "HOME" => Some("/Users/dev".to_string()),
+            "HOME" => Some(at("/Users/dev")),
             _ => None,
         };
         assert_eq!(
             fish_data_dir(&relative),
-            Some(PathBuf::from("/Users/dev/.local/share/fish"))
+            Some(PathBuf::from(at("/Users/dev")).join(".local/share/fish"))
         );
         // Nowhere to guess from is answered with nothing, not with a guess.
         assert_eq!(fish_data_dir(&|_: &str| None), None);

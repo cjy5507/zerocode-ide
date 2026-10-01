@@ -686,6 +686,10 @@ fn grant_in(session: &mut Session, plan: &GrantPlan) -> Result<Grant, GrantError
 mod tests {
     use super::*;
 
+    #[cfg_attr(
+        not(unix),
+        ignore = "trust keys use the POSIX branch of Codex's path normaliser; the Windows branch is not implemented"
+    )]
     #[test]
     fn a_reported_key_folds_its_path_and_leaves_its_indices_alone() {
         assert_eq!(
@@ -753,6 +757,10 @@ mod tests {
 
     /// A hook is ours only if BOTH the command and the key say so. Either alone
     /// would let a grant give consent for something we did not write.
+    #[cfg_attr(
+        not(unix),
+        ignore = "trust keys use the POSIX branch of Codex's path normaliser; the Windows branch is not implemented"
+    )]
     #[test]
     fn a_hook_is_ours_only_when_the_command_and_the_key_agree() {
         let plan = GrantPlan {

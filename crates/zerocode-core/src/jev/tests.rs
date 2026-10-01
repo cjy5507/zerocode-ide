@@ -2393,10 +2393,11 @@ fn reflex_decide_sends_no_pixels_text_or_app_names() {
         .map(|_| json!({ "detector": long, "value": 1, "unknown": null, "track": 5, "age_ms": 3 }))
         .collect();
     let body = json!({ "state": { "sightings": sightings, "outcomes": { "done": 12 } } });
+    let any = crate::test_paths::host_spelled("/any");
     let asking = door::Asking {
         key: true,
         settings: &settings,
-        workspace: Some("/any"),
+        workspace: Some(&any),
         sent_today: 0,
     };
     let cleared = door::may_send(&REFLEX_DECIDE, &asking, body).expect("the door lets it through");

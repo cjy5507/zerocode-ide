@@ -7120,6 +7120,10 @@ mod tests {
         assert!(parse_ssh_command(&words(&["list", "--host", "a"])).is_err());
     }
 
+    #[cfg_attr(
+        not(unix),
+        ignore = "the shim is /bin/sh text and is parsed with /bin/sh"
+    )]
     #[test]
     fn the_ssh_shim_uses_the_same_guarded_bridge_with_an_owned_route() {
         let script = ssh_shim_script(

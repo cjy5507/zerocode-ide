@@ -1,0 +1,14 @@
+# Text is checked out with LF on every platform. Source files, fixtures and
+# templates are read by tests that pin their bytes, hashes or exact text (a
+# canonical wire, a frontmatter fence, a source scan), and a Windows checkout's
+# CRLF made each of them fail without any code being wrong.
+* text=auto eol=lf
+
+# Captured terminal bytes carry their own CR/LF and escapes.
+*.bin binary
+zo-ide/crates/zo-ide/tests/fixtures/codex-capture-*.txt -text
+
+# Windows scripts are read by cmd and PowerShell, which want CRLF.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf

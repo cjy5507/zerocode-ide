@@ -2259,7 +2259,20 @@ prunable gitdir file points to non-existent location
             .status()
             .expect("git init");
         assert!(status.success(), "git init failed");
+        pin_line_endings(dir.path());
         dir
+    }
+
+    /// A Windows machine's global `core.autocrlf=true` would check these
+    /// repositories's files out as CRLF; the tests compare exact bytes.
+    fn pin_line_endings(repo: &Path) {
+        let status = Command::new(GIT_EXECUTABLE)
+            .arg("-C")
+            .arg(repo)
+            .args(["config", "core.autocrlf", "false"])
+            .status()
+            .expect("git config");
+        assert!(status.success(), "git config core.autocrlf failed");
     }
 
     /// Put the working tree in the index, which is where git looks to pair
@@ -2343,6 +2356,10 @@ prunable gitdir file points to non-existent location
     /// The literal ` -> ` inside it is the second half of the trap: a reader
     /// that splits a rename on that substring cuts an ordinary filename in
     /// two.
+    #[cfg_attr(
+        not(unix),
+        ignore = "a Windows file name cannot hold the `*` or `>` this test names"
+    )]
     #[test]
     fn a_path_carrying_a_space_and_an_arrow_survives_status_intact() {
         let dir = empty_repository();
@@ -3164,6 +3181,10 @@ prunable gitdir file points to non-existent location
     /// A pathspec is a glob, so staging one file must not stage another that
     /// its name happens to match — the same trap `diff` already carries a
     /// `:(literal)` for.
+    #[cfg_attr(
+        not(unix),
+        ignore = "a Windows file name cannot hold the `*` or `>` this test names"
+    )]
     #[test]
     fn staging_a_glob_character_stages_that_file_and_no_other() {
         let repo = empty_repository();
@@ -3195,6 +3216,10 @@ prunable gitdir file points to non-existent location
     /// A pathspec is a glob unless it is told not to be, so a file honestly
     /// named `star*name.txt` would otherwise diff whatever else that pattern
     /// matched — here, a different file entirely.
+    #[cfg_attr(
+        not(unix),
+        ignore = "a Windows file name cannot hold the `*` or `>` this test names"
+    )]
     #[test]
     fn a_glob_character_in_a_filename_diffs_that_file_and_no_other() {
         let dir = empty_repository();

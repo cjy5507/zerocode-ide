@@ -42,8 +42,11 @@ fn a_reply_ranks_and_a_label_reads_the_edited_files() {
         "candidatePaths": [fingerprint_of("src/a.rs"), fingerprint_of("src/b.rs")],
         "selectedPaths": [],
     });
-    let root = Path::new("/w/project");
-    let edited = edited_fingerprints(&[root], &["/w/project/src/b.rs".to_string()]);
+    let root = crate::test_paths::absolute("/w/project");
+    let edited = edited_fingerprints(
+        &[root.as_path()],
+        &[crate::test_paths::host_spelled("/w/project/src/b.rs")],
+    );
     let label = label_row(&request, 7, &edited, None, 1);
     assert_eq!(
         (label.agreed, label.baseline_agreed, label.label.as_str()),
@@ -131,7 +134,8 @@ fn the_file_pick_label_golden_table() {
             not_compared: Some(FILE_PICK_NO_EDIT_LABEL),
         },
     ];
-    let roots = [Path::new("/w/p"), Path::new("/link/p")];
+    let roots = ["/w/p", "/link/p"].map(crate::test_paths::absolute);
+    let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
     for case in cases {
         let fingerprints = |paths: &[&str]| {
             paths
@@ -146,7 +150,11 @@ fn the_file_pick_label_golden_table() {
             "selectedPaths": [],
             "applied": false,
         });
-        let edited: Vec<String> = case.edited.iter().map(|path| (*path).to_string()).collect();
+        let edited: Vec<String> = case
+            .edited
+            .iter()
+            .map(|path| crate::test_paths::host_spelled(path))
+            .collect();
         let label = label_row(
             &request,
             9,

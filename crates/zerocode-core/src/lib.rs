@@ -108,6 +108,8 @@ pub mod summon_difficulty;
 pub mod summon_model;
 pub mod supply_chain;
 pub mod task;
+#[cfg(test)]
+pub(crate) mod test_paths;
 pub mod transcript;
 pub mod type_value;
 pub mod untrusted;
