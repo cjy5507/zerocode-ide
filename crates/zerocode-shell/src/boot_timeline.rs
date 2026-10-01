@@ -412,8 +412,9 @@ mod tests {
         assert!(paint < restore && restore < panes && panes < browsers && panes < resumed);
         // The restore's own steps are marked where they happen.
         let status = include_str!("../../../ui/shell-status.js");
-        let at = |needle: &str| status.find(needle).unwrap_or_else(|| panic!("no {needle}"));
-        assert!(at("markBootPhase(\"stage_restored\");") < at("markBootPhase(\"layouts_read\");"));
+        let term = include_str!("../../../ui/shell-term.js");
+        assert!(status.contains("markBootPhase(\"stage_restored\");"));
+        assert!(term.contains("markBootPhase(\"layouts_read\");"));
         // No restore call may precede the paint mark inside `boot`.
         for restoring in ["restoreActiveWorktreeTab()", "restoreStandingWorkspaces()"] {
             assert!(
