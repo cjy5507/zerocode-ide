@@ -24932,6 +24932,9 @@ fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
 /// of beats — the window beats once a second, so a minute is 60 of them.
 /// Run it under `taskpolicy -b` for the low-spec profile (efficiency cores,
 /// background QoS). Private ledger, built here; nobody's disk is read.
+// getrusage is the process's own CPU clock on unix; the Windows build has none
+// to read, and the cost this measures is the same code on every platform.
+#[cfg(unix)]
 #[test]
 #[ignore = "a measurement: prints the idle beat's cost on a synthetic ledger"]
 fn measure_the_idle_beat_on_a_large_ledger() {
