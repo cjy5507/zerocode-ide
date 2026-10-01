@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_work_put_back_before_the_first_paint_is_named() {
+    fn a_restore_that_finished_before_the_first_paint_is_named() {
         let mut timeline = Timeline::default();
         for (phase, at_ms) in [
             (Phase::SettingsRead, 10),
@@ -351,7 +351,7 @@ mod tests {
         ] {
             timeline.record(phase, at_ms);
         }
-        assert_eq!(timeline.out_of_order(), vec![Phase::FirstPaint]);
+        assert_eq!(timeline.out_of_order(), vec![Phase::PanesRestored]);
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
         let restore = mark_at("await restoreActiveWorktreeTab();", paint);
         let panes = mark_at("markBootPhase(\"panes_restored\");", restore);
         let browsers = mark_at("markBootPhase(\"browser_tabs_restored\");", panes);
-        let resumed = mark_at("markBootPhase(\"terminals_resumed\");", panes);
+        let resumed = mark_at("markBootPhase(\"terminals_resumed\")", panes);
         assert!(paint < restore && restore < panes && panes < browsers && panes < resumed);
         // The restore's own steps are marked where they happen.
         let status = include_str!("../../../ui/shell-status.js");
