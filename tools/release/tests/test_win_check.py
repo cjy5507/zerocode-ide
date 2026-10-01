@@ -13,7 +13,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 JUST = shutil.which("just")
 LLVM_LIB = "/opt/homebrew/opt/llvm/bin/llvm-lib"
-XWIN_ARGS = ["xwin", "check", "--workspace", "--all-targets", "--target", "x86_64-pc-windows-msvc"]
+XWIN_TARGET_ARGS = ["--workspace", "--all-targets", "--target", "x86_64-pc-windows-msvc"]
+# The root recipe lints with the CI leg's `-D warnings`; zo-ide's still only checks.
+XWIN_ARGS = {
+    "justfile": ["xwin", "clippy", *XWIN_TARGET_ARGS, "--", "-D", "warnings"],
+    "zo-ide/justfile": ["xwin", "check", *XWIN_TARGET_ARGS],
+}
 
 
 @unittest.skipUnless(os.name == "posix" and JUST, "the local cross-check uses just and a Unix shell")
@@ -72,14 +77,14 @@ class WindowsRecipeTests(unittest.TestCase):
             return result, called
 
     def check_recipes(self, *, skipped=False, failed=False, **options):
-        for source in (REPO / "justfile", REPO / "zo-ide" / "justfile"):
-            with self.subTest(recipe=str(source.relative_to(REPO)), **options):
-                result, called = self.run_recipe(source, **options)
+        for recipe, expected in XWIN_ARGS.items():
+            with self.subTest(recipe=recipe, **options):
+                result, called = self.run_recipe(REPO / recipe, **options)
                 if failed:
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                 else:
                     self.assertEqual(result.returncode, 0, result.stdout)
-                self.assertEqual(called, [] if skipped else XWIN_ARGS)
+                self.assertEqual(called, [] if skipped else expected)
                 if options.get("lane", True):
                     self.assertIn("<== verify recipe win-check rc=", result.stdout)
                     self.assertIn("after", result.stdout)
@@ -116,10 +121,10 @@ class WindowsRecipeTests(unittest.TestCase):
         self.check_recipes(llvm=False, failed=True)
 
     def test_the_lane_names_a_failed_cross_check_as_a_recipe_failure(self):
-        for source in (REPO / "justfile", REPO / "zo-ide" / "justfile"):
-            with self.subTest(recipe=str(source.relative_to(REPO))):
-                result, called = self.run_recipe(source, exit_code=23)
-                self.assertEqual(called, XWIN_ARGS)
+        for recipe, expected in XWIN_ARGS.items():
+            with self.subTest(recipe=recipe):
+                result, called = self.run_recipe(REPO / recipe, exit_code=23)
+                self.assertEqual(called, expected)
                 with tempfile.TemporaryDirectory(prefix="win-check-log-") as name:
                     log = Path(name) / "gate.log"
                     log.write_text(result.stdout)
