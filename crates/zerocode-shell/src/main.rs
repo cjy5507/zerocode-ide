@@ -72,6 +72,7 @@ mod artifact_transcripts;
 mod artifact_webkit;
 mod automation_runtime;
 mod awake;
+mod boot_timeline;
 mod browser_cookie_import;
 mod browser_cookies;
 mod browser_diagnose;
@@ -225,6 +226,7 @@ mod zsh_wrapper;
 use agent_tools_runtime::*;
 use app_paths::{artifact_file, legacy_settings_file, settings_file};
 use automation_runtime::*;
+use boot_timeline::boot_phase;
 use browser_diagnose::*;
 use browser_guest_runtime::*;
 use browser_nav_state::*;
@@ -604,6 +606,7 @@ const THEME_PREVIEW_BUDGET: Duration = Duration::from_secs(5);
 ///
 /// A missing callback must release its blocking receiver instead of holding a
 /// runtime worker forever.
+#[cfg(target_os = "macos")]
 const SNAPSHOT_BUDGET: Duration = Duration::from_secs(10);
 
 /// Agent screenshots are local artifacts, not an unbounded binary response.
@@ -2415,6 +2418,8 @@ fn single_instance_lock_bypassed(said: Option<&str>) -> bool {
 }
 
 fn main() -> ExitCode {
+    // The boot timeline's clock starts here (t-20078).
+    boot_timeline::begin();
     crumbs::register_main_thread();
     // Before anything else, and before any state is touched: what is this?
     //
@@ -2936,6 +2941,7 @@ fn main() -> ExitCode {
             hooks_report,
             set_hooks_enabled,
             install_hooks,
+            boot_phase,
             pane_sessions,
             pane_agents,
             ledger_agents,
@@ -3230,6 +3236,7 @@ fn main() -> ExitCode {
             if let Err(error) = crash::begin(crash_root) {
                 note_window_event(crash_root, &format!("crash boot: {error}"));
             }
+            boot_timeline::set_root(paths.active_root(app_paths::PathClass::LocalData));
             let state = build_app_state(paths, root.clone());
             state.set_legacy_authority(legacy_authority);
             let wants_blur = state.window_blur_active();
@@ -3247,9 +3254,11 @@ fn main() -> ExitCode {
             #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
             {
                 let chromium_root = managed.config_root().join("browser-chromium");
-                chromium_browser::initialize(&handle, &chromium_root)
-                    .map_err(std::io::Error::other)?;
+                // Not started here: the window paints first (t-20078).
+                chromium_browser::defer_initialize(&chromium_root);
             }
+            #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+            boot_timeline::mark(boot_timeline::Phase::ChromiumReady);
             // What earlier builds' Korean-input husk wrote spelled out the
             // person's typing; it is withdrawn before anything else writes the
             // log, so the rewrite cannot race an append (t-11740).
@@ -3277,6 +3286,7 @@ fn main() -> ExitCode {
                 summon_lineup::configure(handle.clone(), home, managed.config_root().to_path_buf());
             }
             crumbs::record("boot", format_args!("settings"));
+            boot_timeline::mark(boot_timeline::Phase::SettingsRead);
             if let Err(error) = managed.native_tray().sync_for_boot(
                 &handle,
                 boot_settings.show_menu_bar_icon,
@@ -3336,6 +3346,7 @@ fn main() -> ExitCode {
                     ),
                 );
             }
+            boot_timeline::mark(boot_timeline::Phase::LedgerReady);
             crumbs::record("boot", format_args!("hooks"));
             if let Some((events, teams, browser, computer, federation)) =
                 hooks::start(&local_data_root)
@@ -3528,7 +3539,22 @@ fn main() -> ExitCode {
                     );
                 }
             });
+            // Tauri builds the config's window around setup; if it is already
+            // there it is counted here, otherwise `RunEvent::Ready` below
+            // counts it. The first report wins either way.
+            if app.get_webview_window(MAIN_WINDOW_LABEL).is_some() {
+                boot_timeline::mark(boot_timeline::Phase::WebviewCreated);
+            }
             Ok(())
+        })
+        // The main page starting to load is the earliest the webview engine
+        // can be said to be up; the page's own script and paint follow.
+        .on_page_load(|webview, payload| {
+            if webview.label() == MAIN_WINDOW_LABEL
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+            {
+                boot_timeline::mark(boot_timeline::Phase::RendererUp);
+            }
         })
         .build(tauri::generate_context!());
 
@@ -3555,6 +3581,7 @@ fn main() -> ExitCode {
             note_window_event(handle.state::<AppState>().local_data_root(), &reason);
         }
         match event {
+            tauri::RunEvent::Ready => boot_timeline::mark(boot_timeline::Phase::WebviewCreated),
             tauri::RunEvent::ExitRequested { api, code, .. } => {
                 // Which road this is (t-6428), named before anything can
                 // defer it: no code is the last window gone — a close — and
@@ -3570,6 +3597,8 @@ fn main() -> ExitCode {
                     api.prevent_exit();
                     return;
                 }
+                #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+                let _ = api;
                 // The ledger hears the goodbye before any pane goes (t-3058):
                 // seated workers sleep instead of being settled by their own
                 // panes' exits on the way out.

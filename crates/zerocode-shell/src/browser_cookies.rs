@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// PBKDF2-SHA1 유도의 세 상수 (browser-cookie-import.ts:827-829). salt와
 /// 반복 수는 Chromium os_crypt의 것이라 바꾸는 순간 아무것도 못 연다.
 const PBKDF2_SALT: &[u8] = b"saltysalt";
+#[cfg(any(target_os = "macos", test))]
 const PBKDF2_ITERATIONS_MAC: u32 = 1_003;
 /// Linux v10은 고정 비밀번호 "peanuts"에 **1회** — Chromium이 그렇게 쓴다
 /// (`:1018`); v11만 keyring 비밀번호를 같은 1회로 유도한다(`:1049`).
@@ -169,6 +170,8 @@ pub fn mac_time_to_unix(mac_seconds: f64) -> Option<i64> {
 /// C2가 OS별 의식으로 얻어 온 열쇠들. CBC 쪽은 버전별 두 벌일 수 있다 —
 /// Linux의 v10(고정 비밀번호)과 v11(keyring)이 그 경우다 (`:1012-1051`).
 pub enum EncryptionKeys {
+    // macOS·Linux의 열쇠 의식에서만 지어진다 — Windows 빌드에서는 테스트만 이 갈래를 걷는다.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     Cbc {
         v10: [u8; DERIVED_KEY_LEN],
         v11: Option<[u8; DERIVED_KEY_LEN]>,
@@ -196,6 +199,7 @@ pub fn chromium_cbc_key(password: &[u8], iterations: u32) -> [u8; DERIVED_KEY_LE
 }
 
 /// macOS keychain 비밀번호용 (1003회).
+#[cfg(any(target_os = "macos", test))]
 pub fn mac_cbc_key(password: &[u8]) -> [u8; DERIVED_KEY_LEN] {
     chromium_cbc_key(password, PBKDF2_ITERATIONS_MAC)
 }

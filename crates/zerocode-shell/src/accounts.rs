@@ -629,6 +629,8 @@ fn seed_scoped_keychain_if_missing(
 /// login" and "I could not ask" are opposite facts, and treating the second as
 /// the first would put a keychain write on every launch, which is the dialog
 /// storm this road already paid for once ("키체인이 계속").
+// Only the macOS keychain reader builds these answers; the shape stays one for every caller.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) enum KeychainSays {
     /// It holds this login.
     Login(String),
@@ -793,7 +795,7 @@ const KEYCHAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 /// 2026-09-10 (a 562-byte value came back as 128). The shipped writer never
 /// takes that road; the fake tool models it so the round-trip test stays red
 /// on the prompt and green on the argument.
-#[cfg(test)]
+#[cfg(all(target_os = "macos", test))]
 const SECURITY_PROMPT_BYTES: usize = 128;
 
 /// Every keychain call goes through Apple's own tool, and the reason is the

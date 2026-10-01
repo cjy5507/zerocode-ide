@@ -305,6 +305,7 @@ pub fn run_precheck(command: &str, cwd: &Path, budget: Duration) -> PrecheckRun 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use zerocode_core::project::{ProjectScript, ScriptSource, effective_script};
 
     fn scratch() -> tempfile::TempDir {

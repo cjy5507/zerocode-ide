@@ -93,3 +93,7 @@ window API, or a process/pty/fs call, run `just win-check` in the workspace
 you touched before pushing — 2026-09-10 found seven product compile errors
 (macOS-only Tauri APIs, a stub signature, a Rust-2024 extern block) and three
 unix-only tests that the billing-blocked Windows CI leg had hidden for days.
+The root `win-check` also lints (`cargo xwin clippy … -D warnings`, the Windows
+leg's own gate), so an item only macOS code uses carries the cfg of its users
+— `target_os = "macos"`, or `any(…, test)` when a cross-platform test reads it
+— rather than waiting for CI to find it dead.

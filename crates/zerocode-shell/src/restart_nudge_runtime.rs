@@ -564,6 +564,16 @@ pub(super) fn log_line(
     )
 }
 
+/// The line a wake files for the folder it started its agent in (t-20088): the
+/// session, whole, and the workspace the pane opened in — the one a person
+/// reads to see that a conversation came back from the store it lives in.
+pub(super) fn placed_line(term: TermId, agent: &str, session_id: &str, folder: &Path) -> String {
+    format!(
+        "term {term} resumed {agent} {session_id} in {}",
+        folder.display()
+    )
+}
+
 /// How a wake's receipt reads in its line: how long the pane took to report
 /// taking the words, or that it never did.
 fn receipt_word(receipt: Option<Duration>) -> String {
@@ -1128,13 +1138,17 @@ pub(super) fn forgotten(state: &AppState, term: TermId) {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::thread;
     use zerocode_pty::DeliveryStep;
 
     const TEST_TERM_WITH_RECEIPT: TermId = 41;
     const TEST_TERM_WITHOUT_RECEIPT: TermId = 42;
+    #[cfg(unix)]
     const TEST_ROWS: u16 = 24;
+    #[cfg(unix)]
     const TEST_COLS: u16 = 80;
+    #[cfg(unix)]
     const TEST_POLL_MS: u64 = 5;
     /// A ceiling on a fake Codex's whole resume — a shell script starting in a
     /// pty, its banner, the delivery's readiness wait, the paste and the
@@ -1142,6 +1156,7 @@ mod tests {
     /// composer. Two seconds turned the v1.3.107 lane red (df529bf9,
     /// 2026-09-17, load 7) twice in the gate and once on the solo re-run, while
     /// the same run finishes in well under a second on a quiet machine.
+    #[cfg(unix)]
     const TEST_DEADLINE_SECS: u64 = 10;
 
     fn pending(agent: &str, road: zerocode_core::NudgeRoad, started: Instant) -> PendingNudge {

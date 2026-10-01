@@ -389,10 +389,6 @@ fn newest_record_ms(ledgers: &Path) -> Option<i64> {
 /// The workspace a project's sessions recorded — the newest `.cwd` sidecar
 /// beside a transcript that names one.
 fn recorded_workspace(project: &Path) -> Option<PathBuf> {
-    #[derive(Deserialize)]
-    struct Recorded {
-        cwd: String,
-    }
     let mut sidecars: Vec<(std::time::SystemTime, PathBuf)> =
         std::fs::read_dir(project.join(ZO_SESSIONS_DIR))
             .ok()?
@@ -405,12 +401,28 @@ fn recorded_workspace(project: &Path) -> Option<PathBuf> {
             .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
             .collect();
     sidecars.sort_by(|a, b| b.0.cmp(&a.0));
-    sidecars.iter().find_map(|(_, sidecar)| {
-        let recorded: Recorded =
-            serde_json::from_str(&std::fs::read_to_string(sidecar).ok()?).ok()?;
-        let cwd = recorded.cwd.trim();
-        (!cwd.is_empty()).then(|| PathBuf::from(cwd))
-    })
+    sidecars
+        .iter()
+        .find_map(|(_, sidecar)| read_session_cwd(sidecar))
+}
+
+/// The workspace one `.cwd` sidecar names (`{"cwd": …}`), when it names one.
+fn read_session_cwd(sidecar: &Path) -> Option<PathBuf> {
+    #[derive(Deserialize)]
+    struct Recorded {
+        cwd: String,
+    }
+    let recorded: Recorded = serde_json::from_str(&std::fs::read_to_string(sidecar).ok()?).ok()?;
+    let cwd = recorded.cwd.trim();
+    (!cwd.is_empty()).then(|| PathBuf::from(cwd))
+}
+
+/// The workspace zo stored this session under, from the sidecar beside its
+/// transcript (`<id>.jsonl` → `<id>.cwd`) — where `zo --resume <id>` has to be
+/// started to find it (t-20088). `None` when the transcript's place is not
+/// known or no sidecar sits beside it: the caller keeps its own folder.
+pub(crate) fn session_workspace(transcript: &Path) -> Option<PathBuf> {
+    read_session_cwd(&transcript.with_extension(SESSION_CWD_EXTENSION))
 }
 
 /// The folder this window knows whose zo state `project` is: the one zo

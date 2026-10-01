@@ -14,14 +14,17 @@
 
 /// The WebKit build every Safari has reported since Safari 11 — frozen by
 /// Apple so sites stop sniffing it.
+#[cfg(any(target_os = "macos", test))]
 const WEBKIT_BUILD: &str = "605.1.15";
 
 /// The platform token Safari reports on every macOS since Catalina, likewise
 /// frozen.
+#[cfg(any(target_os = "macos", test))]
 const MAC_PLATFORM: &str = "Macintosh; Intel Mac OS X 10_15_7";
 
 /// The Safari version the pane claims when the machine's cannot be read: the
 /// Safari of the OS this window is built and tested on.
+#[cfg(any(target_os = "macos", test))]
 const FALLBACK_SAFARI_VERSION: &str = "26.3";
 
 /// Where the installed Safari states its version, as XML text.
@@ -29,10 +32,12 @@ const FALLBACK_SAFARI_VERSION: &str = "26.3";
 const SAFARI_VERSION_PLIST: &str = "/Applications/Safari.app/Contents/version.plist";
 
 /// The plist key that carries the marketing version (`26.3.1`).
+#[cfg(any(target_os = "macos", test))]
 const VERSION_KEY: &str = "<key>CFBundleShortVersionString</key>";
 
 /// Safari's own desktop user agent for `safari_version` (`26.3.1` → `Version/26.3`,
 /// as Safari itself trims it); the table's version when none is known.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn desktop_user_agent(safari_version: Option<&str>) -> String {
     let version = safari_version
         .map(major_minor)
@@ -80,6 +85,7 @@ pub(crate) fn site_user_agent<'a>(
 
 /// The `CFBundleShortVersionString` of a version.plist, read as text: the
 /// `<string>` that follows the key.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn safari_version_in_plist(text: &str) -> Option<String> {
     let (_, after_key) = text.split_once(VERSION_KEY)?;
     let (_, after_open) = after_key.split_once("<string>")?;
@@ -90,6 +96,7 @@ pub(crate) fn safari_version_in_plist(text: &str) -> Option<String> {
 
 /// `major.minor` of a dotted version, digits only; empty when there is no
 /// leading number.
+#[cfg(any(target_os = "macos", test))]
 fn major_minor(version: &str) -> String {
     version
         .trim()

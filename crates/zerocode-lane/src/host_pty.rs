@@ -54,7 +54,9 @@ impl PtySpawner for LocalPty {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::PtyTransport;
+    #[cfg(unix)]
     use zerocode_core::host::RemotePath;
 
     /// 경계가 띄운 자식은 예전 자유 호출이 띄운 자식과 같은 자식이다.

@@ -121,7 +121,7 @@ pub(crate) fn run(
     }
     #[cfg(windows)]
     {
-        return windows::run(command, input, limits);
+        windows::run(command, input, limits)
     }
     #[cfg(unix)]
     {
@@ -362,8 +362,10 @@ mod windows {
         if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
             return table;
         }
-        let mut entry = THREADENTRY32::default();
-        entry.dwSize = u32::try_from(std::mem::size_of::<THREADENTRY32>()).unwrap_or(0);
+        let mut entry = THREADENTRY32 {
+            dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>()).unwrap_or(0),
+            ..Default::default()
+        };
         // SAFETY: `entry` is a valid, sized THREADENTRY32 for the whole walk.
         let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
         while more {
@@ -603,10 +605,10 @@ mod windows {
                 }
             }
             if status.is_some() && !stdout_open && !stderr_open {
-                if let Some(writer) = input_written {
-                    if !writer.join().unwrap_or(false) {
-                        return Err(ProcessError::Unavailable);
-                    }
+                if let Some(writer) = input_written
+                    && !writer.join().unwrap_or(false)
+                {
+                    return Err(ProcessError::Unavailable);
                 }
                 return Ok(ProcessOutput {
                     status: status.take().expect("status was checked"),

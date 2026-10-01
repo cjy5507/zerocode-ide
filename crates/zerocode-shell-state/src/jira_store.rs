@@ -1230,6 +1230,9 @@ fn atomic_write(path: &Path, bytes: &[u8], unix_mode: u32) -> StoreResult<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(unix_mode);
     }
+    // A mode is a unix permission; elsewhere there is nothing to set.
+    #[cfg(not(unix))]
+    let _ = unix_mode;
     let result = (|| {
         let mut file = options
             .open(&temporary)

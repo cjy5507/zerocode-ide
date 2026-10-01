@@ -18,6 +18,8 @@ class Signing(unittest.TestCase):
         self.env = dict(os.environ, PATH=f'{self.root}:{os.environ["PATH"]}',
                         SIGNING_TEST_LOG=str(self.log), ZEROCODE_SIGNING_KEYCHAIN=str(self.root / 'login.keychain-db'))
         self.env.pop('APPLE_SIGNING_IDENTITY', None)
+        # These tests run on build runners too, where CI is set; each one says which it is.
+        self.env.pop('CI', None)
 
     def stub(self, name, body):
         path = self.root / name
@@ -37,6 +39,23 @@ class Signing(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('import', self.log.read_text())
         self.assertIn('instead of replacing', result.stderr)
+
+    def test_a_build_runner_reuses_an_identity_but_never_creates_or_trusts_one(self):
+        runner = dict(self.env, CI='true')
+        self.stub('security', f'echo \'1) {FINGERPRINT} "ZeroCode Local Signing"\'\n')
+        reused = subprocess.run(['bash', str(SIGNING / 'ensure-local-identity.sh')], env=runner, capture_output=True, text=True)
+        self.assertEqual(reused.returncode, 0, reused.stderr)
+        self.assertEqual(reused.stdout.strip(), FINGERPRINT)
+        self.log.unlink(missing_ok=True)
+        self.stub('security', 'case "$1" in find-identity) exit 0;; *) exit 0;; esac\n')
+        refused = subprocess.run(['bash', str(SIGNING / 'ensure-local-identity.sh')], env=runner, capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(refused.stdout.strip(), '')
+        calls = self.log.read_text()
+        self.assertNotIn('import', calls)
+        self.assertNotIn('add-trusted-cert', calls)
+        self.assertNotIn('find-certificate', calls)
+        self.assertIn('build runner', refused.stderr)
 
     def test_signer_pins_certificate_and_falls_back_only_when_identity_is_unavailable(self):
         import plistlib

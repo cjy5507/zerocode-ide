@@ -34,6 +34,7 @@ pub(crate) enum ActivitySource {
 }
 
 #[must_use]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) const fn should_mark_activity(source: ActivitySource, main_visible: bool) -> bool {
     !main_visible
         && matches!(

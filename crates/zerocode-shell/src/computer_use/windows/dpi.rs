@@ -11,9 +11,7 @@
 //! nothing here touches tao's thread or any other.
 
 use windows::Win32::UI::HiDpi::{
-    AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT,
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetThreadDpiAwarenessContext,
-    SetThreadDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
 };
 
 /// The calling thread's DPI awareness, set to per-monitor-v2 for as long as
@@ -35,8 +33,13 @@ impl ThreadDpiAwareness {
     }
 
     /// Whether the calling thread is per-monitor-v2 aware right now.
+    #[cfg(test)]
     #[must_use]
     pub fn is_per_monitor_v2() -> bool {
+        use windows::Win32::UI::HiDpi::{
+            AreDpiAwarenessContextsEqual, GetThreadDpiAwarenessContext,
+        };
+
         // SAFETY: plain reads.
         unsafe {
             AreDpiAwarenessContextsEqual(
@@ -48,6 +51,7 @@ impl ThreadDpiAwareness {
     }
 
     /// The contract, for reports: what this thread's coordinates mean.
+    #[cfg(test)]
     #[must_use]
     pub fn describe() -> &'static str {
         if Self::is_per_monitor_v2() {

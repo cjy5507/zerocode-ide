@@ -72,9 +72,7 @@ fn write_wrapper(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{MARKER_TEXT, write_wrapper};
-    use zerocode_core::shell_history::{
-        ZSH_HISTFILE_VAR, ZSH_ORIG_ZDOTDIR_VAR, ZSH_WRAPPER_MARKER,
-    };
+    use zerocode_core::shell_history::ZSH_WRAPPER_MARKER;
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let at = std::env::temp_dir().join(format!("zc-zsh-{name}-{}", std::process::id()));
@@ -119,6 +117,7 @@ mod tests {
     fn a_real_zsh_takes_the_worktrees_history_and_keeps_every_file_of_theirs() {
         use std::io::Write as _;
         use std::process::Stdio;
+        use zerocode_core::shell_history::{ZSH_HISTFILE_VAR, ZSH_ORIG_ZDOTDIR_VAR};
 
         let at = scratch("live");
         let theirs = at.join("theirs");

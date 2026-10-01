@@ -366,7 +366,7 @@ pub(super) fn known_folder_workspace(
 }
 
 pub(super) enum KnownWorkspace {
-    Git(Orchestrator, Worktree),
+    Git(Box<Orchestrator>, Worktree),
     Folder(PathBuf),
 }
 
@@ -375,7 +375,7 @@ pub(super) fn known_workspace_context(
     requested: &str,
 ) -> Result<KnownWorkspace, String> {
     if let Ok((orchestrator, worktree)) = known_worktree_context(config_root, requested) {
-        return Ok(KnownWorkspace::Git(orchestrator, worktree));
+        return Ok(KnownWorkspace::Git(Box::new(orchestrator), worktree));
     }
     known_folder_workspace(config_root, requested).map(KnownWorkspace::Folder)
 }

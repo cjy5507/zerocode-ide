@@ -149,6 +149,8 @@ pub struct ProcessSample {
     counters: HashMap<u32, CpuCounter>,
     identities: HashMap<u32, String>,
     commands: HashMap<u32, String>,
+    // Only the Unix-only `owned_processes_with_args` asks whose a process is.
+    #[cfg_attr(not(unix), allow(dead_code))]
     uids: HashMap<u32, u32>,
     process_groups: HashMap<u32, u32>,
     sampled_at: Instant,
@@ -167,6 +169,7 @@ pub(crate) struct AgentCommand {
 /// One process-table row whose real uid and native-authored argv have both
 /// been checked by the sampler. This stays crate-private: it is process
 /// authority for native cleanup, never a renderer-facing process browser.
+#[cfg(unix)]
 #[derive(Debug, Clone)]
 pub(crate) struct OwnedProcessMatch {
     pub(crate) pid: u32,
@@ -212,6 +215,7 @@ impl ProcessSample {
     /// Return only same-uid processes carrying every exact argv word. The
     /// caller still has to validate its subsystem-specific unguessable marker
     /// before this becomes termination authority.
+    #[cfg(unix)]
     pub(crate) fn owned_processes_with_args(
         &self,
         uid: u32,

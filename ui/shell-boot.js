@@ -101,6 +101,19 @@ document.addEventListener(
 );
 
 
+/* The boot timeline's page side (t-20078): the backend keeps the clock, the
+ * page says when it reached each of its own phases. Fire and forget — a
+ * measurement must never be the thing that holds the boot, and a harness
+ * whose `invoke` knows no such command must not be thrown by it. The names
+ * are the backend's `Phase::FROM_PAGE` keys, pinned by a unit test there. */
+function markBootPhase(phase) {
+  try {
+    void Promise.resolve(invoke("boot_phase", { phase })).catch(() => {});
+  } catch {
+    // Measuring never fails the boot.
+  }
+}
+
 const el = (id) => document.getElementById(id);
 
 /* 이 창의 라벨 — 백엔드가 이 창 앞으로 부치는 이름의 절반.

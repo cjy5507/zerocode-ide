@@ -575,6 +575,63 @@ pub(crate) fn teammate_path(
     ))
 }
 
+/// Mint a team whose leader is `leader_term`: its id and the leader pane's
+/// capability, registered in the table and written to the pane's private token
+/// file. The one place a team is born — a launch ([`open_team`]) and the grant
+/// for an agent somebody typed into a plain shell ([`grant_team_env`]) both
+/// come through it, so neither has a second way to mint a secret.
+///
+/// `None` when the window has no bridge (the shim authenticates with the
+/// BRIDGE's token, so there is nothing for it to present) or no secret source.
+fn mint_team(leader_term: u32) -> Option<(String, String)> {
+    crate::hooks::bridge()?;
+    // The bridge already knows how to mint a secret from /dev/urandom, and
+    // this is the same kind of secret for the same listener — a second
+    // generator would be a second thing to get wrong.
+    let id = format!("team-{}", crate::hooks::random_token()?);
+    let token = crate::hooks::random_token()?;
+    teams().insert(
+        id.clone(),
+        Team::new(id.clone(), token.clone(), leader_term),
+    );
+    let _ = remember_pane_token(&id, zerocode_core::agent_teams::LEADER_PANE, token.clone());
+    Some((id, token))
+}
+
+/// The ledger seat a hand-started agent is granted (t-20088): the three words
+/// the `zerocode-orc` shim reads — team, pane, the PATH of a token file — as
+/// the pane's after-the-fact grant carries them
+/// ([`crate::hooks::grant_pane_capabilities`]).
+///
+/// Why a team of its own and not a share of a launched one: the capability is
+/// one pane's, minted for exactly this terminal, held in a 0600 file, and
+/// retired with the terminal ([`forget_term`] retires the team, the grant's
+/// revocation removes the file) — the same blast radius a launched leader has.
+/// Empty when the window cannot mint one (no bridge, no shim directory, no
+/// token file); the shim then refuses in its own words and says how to get a
+/// seat, rather than going quiet.
+pub fn grant_team_env(local_data_root: &Path, term: u32) -> Vec<(&'static str, String)> {
+    if install_shim(local_data_root).is_none() {
+        return Vec::new();
+    }
+    let Some((id, token)) = mint_team(term) else {
+        return Vec::new();
+    };
+    let pane = zerocode_core::agent_teams::LEADER_PANE;
+    let Some(file) = ensure_team_token_file(&id, pane, &token) else {
+        forget_term(term);
+        return Vec::new();
+    };
+    vec![
+        (zerocode_core::agent_teams::TEAM_ID_VAR, id),
+        (zerocode_core::agent_teams::TEAM_PANE_VAR, pane.to_string()),
+        (
+            zerocode_hookd::env_var::TEAM_TOKEN_FILE,
+            file.to_string_lossy().into_owned(),
+        ),
+    ]
+}
+
 /// Open a team for a leader about to start, and hand back the environment it
 /// has to carry.
 ///
@@ -595,21 +652,9 @@ pub fn open_team(
     let Some(installed) = install_shim(local_data_root) else {
         return Vec::new();
     };
-    // The shim authenticates with the BRIDGE's token, so a window with no
-    // bridge has nothing for it to present.
-    if crate::hooks::bridge().is_none() {
-        return Vec::new();
-    }
-    // The bridge already knows how to mint a secret from /dev/urandom, and
-    // this is the same kind of secret for the same listener — a second
-    // generator would be a second thing to get wrong.
-    let Some(id) = crate::hooks::random_token() else {
+    let Some((id, token)) = mint_team(leader_term) else {
         return Vec::new();
     };
-    let Some(token) = crate::hooks::random_token() else {
-        return Vec::new();
-    };
-    let id = format!("team-{id}");
     let dialect = Dialect::of(program);
     let dirs = dirs_for(dialect, &installed);
     let borrowed: Vec<&str> = dirs.iter().map(String::as_str).collect();
@@ -621,11 +666,6 @@ pub fn open_team(
         &std::env::var("COLORTERM").unwrap_or_default(),
         program,
     );
-    teams().insert(
-        id.clone(),
-        Team::new(id.clone(), token.clone(), leader_term),
-    );
-    let _ = remember_pane_token(&id, zerocode_core::agent_teams::LEADER_PANE, token.clone());
     // `team_launch_env` is core's provider-neutral shape and therefore still
     // contains the value. Replace that one pair at the shell boundary with
     // the path-only form used by the installed shim.
