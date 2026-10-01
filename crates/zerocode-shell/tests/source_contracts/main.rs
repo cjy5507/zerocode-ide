@@ -3115,6 +3115,11 @@ mod tests {
     /// themselves. Three copies of one rule is three chances to disagree, and
     /// the way that shows up is a pasted command appearing in a terminal the
     /// person was not looking at.
+    ///
+    /// Paste is heard once, on the document in the capture phase (t-19409: a
+    /// listener that reads `clipboardData` holds the UI process's main thread
+    /// while a slow pasteboard owner answers), and its key-sink branch still
+    /// asks `keyboardTarget()` for where the text goes.
     #[test]
     fn text_keys_and_paste_all_ask_the_same_thing() {
         let source = window_source();
@@ -3132,7 +3137,7 @@ mod tests {
         for path in [
             "function routeText(",
             "window.addEventListener(\"keydown\", (event) => {",
-            "keySink.addEventListener(\"paste\", (event) => {",
+            "document.addEventListener(\"paste\", (event) => {",
         ] {
             let body = block_after(source, path);
             assert!(
@@ -15745,18 +15750,15 @@ mod tests {
             .find("const captured = target ? { ...target } : null;")
             .expect("paste no longer captures its target");
         let via_at = at
-            .find("return pasteClipboardVia(")
+            .find("return pasteClipboardVia({")
             .expect("paste no longer goes through the one background read");
         assert!(
             capture_at < via_at
-                && at.contains("(text) => pasteTextAt(captured, text)")
-                && at.contains("(path) => pasteTextAt(captured, path)"),
+                && at.contains("text: (text) => pasteTextAt(captured, text)")
+                && at.contains("image: (path) => pasteTextAt(captured, path)"),
             "the paste target is read after the async clipboard gap:\n{at}"
         );
-        let reading = block_after(
-            window,
-            "async function pasteClipboardVia(landText, landImage) {",
-        );
+        let reading = block_after(window, "async function pasteClipboardVia(to) {");
         let read_at = reading
             .find("const text = await clipboardText.read({ quiet: true });")
             .expect("paste no longer reads through the clipboard authority");
@@ -15766,7 +15768,7 @@ mod tests {
         // writer on its own thread — never read here, and never read by
         // WebKit's paste on the main thread (t-19409).
         let words_win = reading
-            .find("if (text) return landText(text);")
+            .find("if (text) return to.text(text);")
             .expect("paste no longer prefers the clipboard's words");
         let picture_at = reading
             .find(r#"invoke("save_clipboard_image")"#)

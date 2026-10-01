@@ -1958,8 +1958,10 @@ fn png_from_pasteboard(
         NSBitmapImageFileType, NSBitmapImageRep, NSPasteboardTypePNG, NSPasteboardTypeTIFF,
     };
     use objc2_foundation::{NSDictionary, NSString};
-    // SAFETY (below): the type names are AppKit's own constants and the
-    // reads copy the bytes out; nothing here outlives the call.
+    // SAFETY (below): the unsafe blocks read AppKit's own type-name constants
+    // (extern statics) and call `representationUsingType_properties` with an
+    // empty dictionary; `dataForType` itself is safe. The reads copy the bytes
+    // out, and nothing here outlives the call.
     if let Some(png) = unsafe { pasteboard.dataForType(NSPasteboardTypePNG) } {
         return Ok(Some(png.to_vec()));
     }
@@ -1971,7 +1973,7 @@ fn png_from_pasteboard(
     let (jpeg, heic) = (NSString::from_str(JPEG_TYPE), NSString::from_str(HEIC_TYPE));
     let mut undecodable = false;
     for kind in [unsafe { NSPasteboardTypeTIFF }, &*jpeg, &*heic] {
-        let Some(data) = (unsafe { pasteboard.dataForType(kind) }) else {
+        let Some(data) = pasteboard.dataForType(kind) else {
             continue;
         };
         let png = NSBitmapImageRep::imageRepWithData(&data).and_then(|rep| unsafe {
@@ -2031,7 +2033,7 @@ mod clipboard_picture_tests {
         std::fs::create_dir_all(&dir).ok()?;
         let (from, to) = (dir.join("one.png"), dir.join("one.heic"));
         std::fs::write(&from, ONE_PIXEL_PNG).ok()?;
-        let made = std::process::Command::new("/usr/bin/sips")
+        let made = crate::proc::quiet_command("/usr/bin/sips")
             .args(["-s", "format", "heic"])
             .arg(&from)
             .arg("--out")

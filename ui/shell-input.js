@@ -2146,11 +2146,14 @@ document.addEventListener("paste", (event) => {
     const target = keyboardTarget();
     const emulator = emulatorKeyboardTarget();
     if (emulator) {
-      void pasteClipboardVia((text) => {
-        if (emulatorKeyboardTarget() !== emulator) return false;
-        routeText(text);
-        return true;
-      }, null);
+      void pasteClipboardVia({
+        text: (text) => {
+          if (emulatorKeyboardTarget() !== emulator) return false;
+          routeText(text);
+          return true;
+        },
+        image: null,
+      });
     } else if (target !== null) {
       void pasteClipboardAt(target);
     }
@@ -2164,10 +2167,10 @@ document.addEventListener("paste", (event) => {
   event.stopImmediatePropagation();
   const form = field.closest?.(".worker-composer");
   const attachments = form ? composerAttachmentsOf(form) : null;
-  void pasteClipboardVia(
-    destination,
-    attachments ? async (path) => { await attachments.add([path]); return true; } : null,
-  );
+  void pasteClipboardVia({
+    text: destination,
+    image: attachments ? async (path) => { await attachments.add([path]); return true; } : null,
+  });
 }, true);
 
 for (const surface of [stageView.host, floatView.host]) focusesTheKeyboard(surface);

@@ -545,23 +545,34 @@ async function pasteOnce(run) {
   }
 }
 
-/* 글자를 먼저, 글자가 없거나 읽지 못했으면 그림을 — 받는 자리(`landText`,
- * `landImage`)는 붙여넣기가 시작될 때 붙잡힌 것이다. 그림 자리가 없는 받는이는
- * 글자만 받는다. */
-async function pasteClipboardVia(landText, landImage) {
+/* 글자를 먼저, 글자가 없거나 읽지 못했으면 그림을 — 받는 자리(`to.text`,
+ * `to.image`)는 붙여넣기가 시작될 때 붙잡힌 것이다. 그림 자리가 없는 받는이는
+ * 글자만 받는다. 받는 자리를 매개변수 이름이 아니라 객체의 멤버로 부르는 것은
+ * 창 소스의 「정의 없는 호출」 검사(`declared_names`)가 매개변수를 정의로 세지
+ * 않기 때문이다. */
+async function pasteClipboardVia(to) {
   return pasteOnce(async (stale) => {
     const text = await clipboardText.read({ quiet: true });
     if (stale()) return false;
-    if (text) return landText(text);
+    if (text) return to.text(text);
     // No words — or a clipboard the text road could not read at all, which is
     // what a clipboard holding only a picture looks like to it. The `paste`
     // event no longer carries the picture (reading it is the main-thread wait
     // above), so every road asks the backend for it and pastes its path: the
     // same temp file the old event road wrote.
-    if (landImage) {
-      const path = await invoke("save_clipboard_image").catch(() => null);
+    if (to.image) {
+      let path = null;
+      try {
+        path = await invoke("save_clipboard_image");
+      } catch {
+        // A pasteboard that holds pictures none of which decode: the backend
+        // refuses, and the person is told — "no picture" (null) stays quiet.
+        if (stale()) return false;
+        showError(t("clipboard.imagePasteFailed", "클립보드의 이미지를 붙여넣지 못했습니다."));
+        return false;
+      }
       if (stale()) return false;
-      if (typeof path === "string" && path.length > 0) return landImage(path);
+      if (typeof path === "string" && path.length > 0) return to.image(path);
     }
     if (text === null) showError(t("clipboard.readFailed", "클립보드의 텍스트를 읽지 못했습니다."));
     return false;
@@ -573,7 +584,10 @@ async function pasteClipboardAt(target) {
   // pending must not redirect text into the terminal that became active later.
   const captured = target ? { ...target } : null;
   if (!captured) return false;
-  return pasteClipboardVia((text) => pasteTextAt(captured, text), (path) => pasteTextAt(captured, path));
+  return pasteClipboardVia({
+    text: (text) => pasteTextAt(captured, text),
+    image: (path) => pasteTextAt(captured, path),
+  });
 }
 
 /* 글자를 받는 입력칸의 붙여넣기 자리 — 붙여넣기가 시작될 때 칸과 캐럿을
