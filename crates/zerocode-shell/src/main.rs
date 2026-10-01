@@ -3254,9 +3254,10 @@ fn main() -> ExitCode {
             #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
             {
                 let chromium_root = managed.config_root().join("browser-chromium");
-                chromium_browser::initialize(&handle, &chromium_root)
-                    .map_err(std::io::Error::other)?;
+                // Not started here: the window paints first (t-20078).
+                chromium_browser::defer_initialize(&chromium_root);
             }
+            #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
             boot_timeline::mark(boot_timeline::Phase::ChromiumReady);
             // What earlier builds' Korean-input husk wrote spelled out the
             // person's typing; it is withdrawn before anything else writes the

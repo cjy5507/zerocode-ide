@@ -63,6 +63,12 @@ static LOADED: AtomicBool = AtomicBool::new(false);
 static NEXT_DEVTOOLS_ID: AtomicI32 = AtomicI32::new(1);
 static OPEN_BROWSERS: AtomicUsize = AtomicUsize::new(0);
 static PUMP: OnceLock<Arc<PumpScheduler>> = OnceLock::new();
+/// Where the engine's profile root is, kept from boot until the engine is
+/// started. Starting Chromium costs the main thread 0.3 s on an ordinary
+/// machine and about 1.5 s on a low-spec one (t-20078), and nothing on the
+/// first screen needs it, so the window starts it after its first paint — or
+/// at the first browser pane, whichever comes first.
+static DEFERRED_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 pub(crate) fn install_application() -> Result<(), String> {
     let framework = framework_path()?;
@@ -257,7 +263,38 @@ wrap_app! {
     }
 }
 
-pub(crate) fn initialize(app: &AppHandle, root_cache: &Path) -> Result<(), String> {
+/// Remember where the engine will live, without starting it.
+pub(crate) fn defer_initialize(root_cache: &Path) {
+    let _ = DEFERRED_ROOT.set(root_cache.to_path_buf());
+}
+
+/// Start the engine if it has not been started and a root was deferred. Main
+/// thread only (CEF's own rule); idempotent, so the paint's call and a pane's
+/// call cannot start it twice.
+pub(crate) fn ensure_initialized(app: &AppHandle) -> Result<(), String> {
+    if INITIALIZED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let root = DEFERRED_ROOT
+        .get()
+        .ok_or_else(|| "Chromium has no profile root to start in".to_string())?;
+    let started = initialize(app, root);
+    crate::boot_timeline::mark(crate::boot_timeline::Phase::ChromiumReady);
+    started
+}
+
+/// After the first paint: queue the engine's start on the main thread, behind
+/// whatever the paint left there.
+pub(crate) fn initialize_after_paint(app: &AppHandle) {
+    let starting = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(error) = ensure_initialized(&starting) {
+            eprintln!("zerocode-shell: Chromium을 시작할 수 없습니다: {error}");
+        }
+    });
+}
+
+fn initialize(app: &AppHandle, root_cache: &Path) -> Result<(), String> {
     if INITIALIZED.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -998,6 +1035,11 @@ fn begin_create_pane(
     ready: std::sync::mpsc::Sender<Result<(), String>>,
     created: std::sync::mpsc::Sender<Result<BrowserPane, String>>,
 ) -> Result<(), String> {
+    // `begin_create_pane` runs on the main thread: a pane asked for before the
+    // paint's own start gets the engine started right here.
+    if !INITIALIZED.load(Ordering::Acquire) {
+        ensure_initialized(&options.app)?;
+    }
     if !INITIALIZED.load(Ordering::Acquire) || EXIT_PENDING.load(Ordering::Acquire) {
         return Err("Chromium runtime is not available".to_string());
     }

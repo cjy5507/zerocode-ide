@@ -8158,9 +8158,21 @@ async function restoreWorktreeLayouts(worktree, stored, { behind = false } = {})
  * critical path, so the stage settles at the same moment it did before and
  * the spawns arrive behind it. `staged` is the tab the stage itself wakes. */
 function wakeStoredConversations(worktree, sleeping, staged) {
+  // The turns, said where each tab waits: the front tab wakes through the
+  // stage, and the rest follow one at a time in the order they stand.
+  const turns = sleeping.filter(
+    (tab) => tab.id !== staged?.id && tab.asleep && storedLayoutsHoldProgram([tab.asleep]),
+  );
+  turns.forEach((tab, at) => {
+    tab.wakeOrder = at + 1;
+  });
+  if (turns.length > 0) renderTabs();
   const eager = (async () => {
-    for (const tab of sleeping) {
-      if (tab.id === staged?.id || !tab.asleep || !storedLayoutsHoldProgram([tab.asleep])) continue;
+    for (const tab of turns) {
+      if (!tab.asleep) {
+        delete tab.wakeOrder;
+        continue;
+      }
       try {
         await wakeStoredTab(tab);
       } catch (error) {
@@ -8169,6 +8181,9 @@ function wakeStoredConversations(worktree, sleeping, staged) {
         // start is one tab's problem, and swallowing it here silently is how
         // the last one of these went unnoticed.
         showError(error);
+      } finally {
+        delete tab.wakeOrder;
+        renderTabs();
       }
     }
   })();

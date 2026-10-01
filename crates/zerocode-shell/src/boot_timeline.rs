@@ -46,13 +46,13 @@ impl Phase {
     /// reach in the same order (a restore that finds nothing to restore still
     /// reports) are still reported in this order.
     pub(crate) const ORDER: [Phase; 13] = [
-        Phase::ChromiumReady,
         Phase::SettingsRead,
         Phase::LedgerReady,
         Phase::WebviewCreated,
         Phase::RendererUp,
         Phase::PageScriptLoaded,
         Phase::FirstPaint,
+        Phase::ChromiumReady,
         Phase::StageRestored,
         Phase::LayoutsRead,
         Phase::PanesRestored,
@@ -78,13 +78,18 @@ impl Phase {
     /// resumes run behind the browser restore and finish whenever they do.
     pub(crate) fn rank(self) -> usize {
         match self {
-            Phase::BrowserTabsRestored | Phase::FirstBrowserTab | Phase::TerminalsResumed => {
-                Phase::PanesRestored.rank() + 1
-            }
-            other => Phase::ORDER
-                .iter()
-                .position(|held| *held == other)
-                .unwrap_or_default(),
+            Phase::SettingsRead => 0,
+            Phase::LedgerReady => 1,
+            Phase::WebviewCreated => 2,
+            Phase::RendererUp => 3,
+            Phase::PageScriptLoaded => 4,
+            Phase::FirstPaint => 5,
+            // Both follow the paint and neither follows the other: the engine
+            // is queued behind the paint, the restore is awaited after it.
+            Phase::ChromiumReady | Phase::StageRestored => 6,
+            Phase::LayoutsRead => 7,
+            Phase::PanesRestored => 8,
+            Phase::BrowserTabsRestored | Phase::FirstBrowserTab | Phase::TerminalsResumed => 9,
         }
     }
 
@@ -280,10 +285,18 @@ fn write_file(root: &Path, timeline: &Timeline) {
 /// The page reports its own phases here: it is the only side that knows when
 /// its script ran, when it first painted and when its panes are back.
 #[tauri::command(async)]
-pub(crate) fn boot_phase(phase: String) -> Result<(), String> {
+pub(crate) fn boot_phase(app: tauri::AppHandle, phase: String) -> Result<(), String> {
     let known = Phase::from_page_key(&phase)
         .ok_or_else(|| "that is not a phase the page reports".to_string())?;
     mark(known);
+    // The window has painted: the engine nothing on the first screen needed
+    // may start now.
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    if known == Phase::FirstPaint {
+        crate::chromium_browser::initialize_after_paint(&app);
+    }
+    #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+    let _ = app;
     Ok(())
 }
 
@@ -305,13 +318,13 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "chromium_ready",
                 "settings_read",
                 "ledger_ready",
                 "webview_created",
                 "renderer_up",
                 "page_script_loaded",
                 "first_paint",
+                "chromium_ready",
                 "stage_restored",
                 "layouts_read",
                 "panes_restored",
@@ -456,5 +469,39 @@ mod tests {
                 phase.key()
             );
         }
+    }
+
+    #[test]
+    fn the_engine_is_started_after_the_first_paint_and_never_in_setup() {
+        let at = |phase: Phase| Phase::ORDER.iter().position(|held| *held == phase);
+        assert!(at(Phase::FirstPaint) < at(Phase::ChromiumReady));
+        let main = include_str!("main.rs");
+        let setup = &main[main.find(".setup(move |app| {").expect("setup")..];
+        let setup = &setup[..setup
+            .find(".build(tauri::generate_context!())")
+            .expect("build")];
+        assert!(
+            !setup.contains("chromium_browser::initialize("),
+            "setup starts Chromium again: the first paint waits for it"
+        );
+        assert!(setup.contains("chromium_browser::defer_initialize("));
+        let this = include_str!("boot_timeline.rs");
+        assert!(this.contains("initialize_after_paint(&app)"));
+        let engine = include_str!("chromium_browser.rs");
+        let begin = &engine[engine.find("fn begin_create_pane(").expect("begin")..];
+        assert!(
+            begin[..begin.find("INITIALIZED.load").expect("check") + 200]
+                .contains("ensure_initialized(&options.app)"),
+            "a browser pane asked for before the paint no longer starts the engine"
+        );
+    }
+
+    #[test]
+    fn a_waiting_conversation_says_its_turn_and_forgets_it_when_it_wakes() {
+        let term = include_str!("../../../ui/shell-term.js");
+        let status = include_str!("../../../ui/shell-status.js");
+        assert!(term.contains("tab.wakeOrder = at + 1;"));
+        assert!(term.contains("delete tab.wakeOrder;"));
+        assert!(status.contains("tab.wakingOrder"));
     }
 }
