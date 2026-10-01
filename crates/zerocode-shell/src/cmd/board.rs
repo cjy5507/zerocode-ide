@@ -1085,6 +1085,9 @@ pub(crate) fn resume_session(
     worktree: Option<String>,
 ) -> Result<ConversationWake, String> {
     let root = wake_root(state.inner(), worktree.as_deref())?;
+    let root = session_root(&session, root, |named| {
+        wake_root(state.inner(), Some(named))
+    });
     let door = ResumeDoor {
         app: &app,
         state: state.inner(),
@@ -1127,6 +1130,30 @@ fn wake_root(state: &AppState, named: Option<&str>) -> Result<PathBuf, String> {
             "{named}은(는) 이 창이 아는 작업 공간이 아니어서 그 대화를 열지 않았습니다"
         )),
     }
+}
+
+/// The folder a conversation is resumed in: the workspace its own session is
+/// stored under, when its record names one the window knows, else `door_root`
+/// (t-20088).
+///
+/// zo files a session under the folder it started in. A pane that has since
+/// moved into a worktree is stored under that worktree's tab, so the door's
+/// folder is the wrong store for it — on 2026-10-01 the 16:59 restart left
+/// term-24 a bare shell and `zo /resume` found no sessions. The sidecar zo
+/// writes beside the transcript says where the session lives; it is resolved
+/// through `known` (the window's own catalog, [`wake_root`]) so a file cannot
+/// point a pane, or a trust mark, at a folder the window does not know.
+pub(crate) fn session_root(
+    session: &zerocode_core::ProviderSession,
+    door_root: PathBuf,
+    known: impl FnOnce(&str) -> Result<PathBuf, String>,
+) -> PathBuf {
+    session
+        .transcript_path
+        .as_deref()
+        .and_then(|path| crate::jev_scope::session_workspace(Path::new(path)))
+        .and_then(|home| known(&home.to_string_lossy()).ok())
+        .unwrap_or(door_root)
 }
 
 /// The window a conversation's wake opens its pane in (t-7812): what the
@@ -1195,6 +1222,12 @@ pub(crate) trait WakeWindow {
     fn note(&self, line: &str);
     /// Wake the pump: a pane just changed.
     fn stir(&self);
+    /// A person's conversation is back in `term`: let the ledger seat it in
+    /// the run it coordinated, so mail for that run reaches the new pane
+    /// without anyone typing a command (t-20088). A worker's seat is written
+    /// before its pane runs ([`crate::orchestration::pane_resumed`]) and a
+    /// conversation that holds no run's seat finds nothing to take.
+    fn seat_run(&self, term: TermId);
     /// Whether the program a switch's close left behind has left since
     /// (t-7538) — the window's own look at a process group the ledger holds
     /// a conversation for.
@@ -1405,6 +1438,12 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
             return Err(error);
         }
     };
+    window.note(&restart_nudge_runtime::placed_line(
+        term,
+        kind.slug(),
+        &session.id,
+        &root,
+    ));
     if fresh {
         // Not that conversation: the fresh agent's own SessionStart names
         // the one this pane now holds.
@@ -1434,6 +1473,7 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     window.record(term, session);
     // Whose word in the goodbye's note this wake speaks for: the sleeper's,
     // the coordinator's run's, or the person's tab's.
+    let reseated = reseating.is_some();
     let owed = reseating
         .or_else(|| coordinating.map(|standing| standing.address))
         .or(tab);
@@ -1474,6 +1514,9 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         }
     }
     window.attach(term, channel);
+    if !reseated {
+        window.seat_run(term);
+    }
     window.stir();
     Ok(ConversationWake::opened(term))
 }
@@ -1757,6 +1800,10 @@ impl WakeWindow for ResumeDoor<'_> {
 
     fn stir(&self) {
         self.state.cadence().wake();
+    }
+
+    fn seat_run(&self, term: TermId) {
+        crate::agent_tools_runtime::schedule_orchestration_restore(self.app, term);
     }
 
     fn exit_seen(&self, witness: &crate::agent_teams::ExitWitness) -> bool {

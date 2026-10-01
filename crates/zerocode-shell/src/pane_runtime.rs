@@ -1065,7 +1065,10 @@ pub(super) fn note_pane_state(
         .launch_tokens()
         .contains_key(&report.term)
     {
-        hooks::grant_pane_capabilities(report.term);
+        let local_data_root = app.state::<AppState>().local_data_root().to_path_buf();
+        hooks::grant_pane_capabilities(report.term, || {
+            agent_teams::grant_team_env(&local_data_root, report.term)
+        });
     }
     // A launch-time worker waits for evidence that its submitting Enter was
     // consumed, not merely written. Only providers whose catalog capability
