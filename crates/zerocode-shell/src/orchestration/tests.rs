@@ -24914,4 +24914,54 @@ fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
         (0, 0, 0),
         "{BEATS} idle beats on an unchanged ledger walked it again"
     );
+    // And two readers of one generation hold the one projection, not two.
+    let actor = &super::runtime().expect("this window's runtime").actor;
+    let (first, second) = (actor.view().expect("an image"), actor.view().expect("an image"));
+    assert!(
+        std::ptr::eq(first.projection(), second.projection()),
+        "two images of one revision were exported twice"
+    );
+}
+
+/// The idle beat's price on the ledger above, before and after a change:
+/// the cost of one beat (p50/p95) and the CPU the process spends per minute
+/// of beats — the window beats once a second, so a minute is 60 of them.
+/// Run it under `taskpolicy -b` for the low-spec profile (efficiency cores,
+/// background QoS). Private ledger, built here; nobody's disk is read.
+#[test]
+#[ignore = "a measurement: prints the idle beat's cost on a synthetic ledger"]
+fn measure_the_idle_beat_on_a_large_ledger() {
+    const BEATS_PER_MINUTE: i64 = 60;
+    let _beat = one_beat_at_a_time();
+    let (_window, _store) = PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
+    tick(&Nowhere, &[], 1_000_000);
+    let cpu = || {
+        // SAFETY: getrusage fills the struct it is handed.
+        let mut used: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut used) };
+        let micros = |t: libc::timeval| t.tv_sec as u128 * 1_000_000 + t.tv_usec as u128;
+        micros(used.ru_utime) + micros(used.ru_stime)
+    };
+    let started_cpu = cpu();
+    let started = std::time::Instant::now();
+    let mut beats = Vec::new();
+    for beat in 0..BEATS_PER_MINUTE {
+        let one = std::time::Instant::now();
+        tick(&Nowhere, &[], 1_001_000 + beat * 1_000);
+        beats.push(one.elapsed());
+    }
+    let wall = started.elapsed();
+    let cpu_used = cpu() - started_cpu;
+    beats.sort();
+    eprintln!(
+        "idle beat, {} runs x {} tasks: p50={}us p95={}us, {} beats took {}ms wall, cpu per {} beats={}ms",
+        IDLE_BEAT_RUNS,
+        IDLE_BEAT_TASKS_PER_RUN,
+        beats[beats.len() / 2].as_micros(),
+        beats[beats.len() * 95 / 100].as_micros(),
+        BEATS_PER_MINUTE,
+        wall.as_millis(),
+        BEATS_PER_MINUTE,
+        cpu_used / 1000,
+    );
 }
