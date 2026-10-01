@@ -1279,6 +1279,13 @@ pub const SHIM_DEADLINE_SECONDS: u32 = 15;
 /// payload the whole time.
 pub const SHIM_WAIT_GRACE_SECONDS: u32 = 8;
 
+/// What a shim adds when it refuses for want of a team (t-20088): the seat is
+/// granted to an agent the window recognises, after that agent's first hook
+/// report, so a refusal before it is a wait and one after it is a pane the
+/// window does not know — and either way the person is told in one line what
+/// to do, never refused in silence.
+pub const NO_SEAT_HINT: &str = " — the window grants a ledger seat once it sees the agent report in this pane; if it stays refused, start the agent from a ZeroCode agent tab";
+
 /// The fake `tmux`, as a POSIX shell script.
 ///
 /// Orca's shim re-enters its own CLI (`orca agent-teams-tmux`, :173397-173404).
@@ -1346,7 +1353,7 @@ team="${{{TEAM_ID_VAR}:-}}"
 pane="${{{TEAM_PANE_VAR}:-${{TMUX_PANE:-{LEADER_PANE}}}}}"
 pane_token="${{{TEAM_TOKEN_VAR}:-}}"
 if [ -z "$port" ] || [ -z "$token" ] || [ -z "$team" ] || [ -z "$pane_token" ]; then
-  echo "{voice}: this shell is not part of an agent team" >&2
+  echo "{voice}: this shell is not part of an agent team{NO_SEAT_HINT}" >&2
   exit 1
 fi
 if ! command -v curl >/dev/null 2>&1; then
@@ -1484,7 +1491,7 @@ if (-not $pane) {{ $pane = $env:TMUX_PANE }}
 if (-not $pane) {{ $pane = '{LEADER_PANE}' }}
 $paneToken = $env:{TEAM_TOKEN_VAR}
 if (-not $port -or -not $token -or -not $team -or -not $paneToken) {{
-  [Console]::Error.WriteLine('{voice}: this shell is not part of an agent team')
+  [Console]::Error.WriteLine('{voice}: this shell is not part of an agent team{NO_SEAT_HINT}')
   exit 1
 }}
 $sep = [string][char]0x1f

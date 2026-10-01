@@ -3559,7 +3559,24 @@ impl Run {
                 None => Err(format!("unknown worker: {id}")),
             });
         }
-        if to.starts_with(PANE_ADDRESS_PREFIX) {
+        if let Some(seat) = to.strip_prefix(PANE_ADDRESS_PREFIX) {
+            /* A pane that no longer exists is not a place a letter can be left
+             * (t-20088). The window restart at 16:59 on 2026-10-01 vacated
+             * the coordinator's seat, and two letters addressed to its old
+             * pane were accepted and reached nobody — the sender was told a
+             * message id. Refused here instead, with the address that does
+             * reach whoever sits in the seat next. Refused rather than
+             * re-routed: the letter named a pane, and quietly handing it to a
+             * different seat holder would deliver words to an agent its
+             * sender never chose; the run's address is the sender's to pick. */
+            if from != LEDGER_ITSELF && self.seat_retired(seat) {
+                return Some(Err(format!(
+                    "unroutable address: {to} — that pane no longer holds a seat in \
+                     this run (its window restarted or its pane ended); the run's \
+                     current seat is {RUN_ADDRESS_PREFIX}{}",
+                    self.id
+                )));
+            }
             let spoken = self.messages.iter().any(|held| held.from == to);
             return Some(match spoken || from == LEDGER_ITSELF {
                 true => Ok(vec![to.to_string()]),
@@ -3569,6 +3586,32 @@ impl Run {
             });
         }
         None
+    }
+
+    /// Whether `team/pane` once held a seat in this run and holds none now: the
+    /// coordinator seat its last holder vacated, or a pane whose every worker
+    /// row has left it. A pane the run never seated — an asker nobody wrote
+    /// down — is not judged here: it may be alive, and the ledger cannot say.
+    fn seat_retired(&self, team_pane: &str) -> bool {
+        if self
+            .coordinator
+            .as_ref()
+            .is_some_and(|held| held.seat == team_pane)
+        {
+            return self
+                .coordinator
+                .as_ref()
+                .is_some_and(|held| !held.is_held());
+        }
+        let Some((team, pane)) = team_pane.rsplit_once('/') else {
+            return false;
+        };
+        let mut rows = self
+            .workers
+            .iter()
+            .filter(|worker| worker.team == team && worker.pane == pane)
+            .peekable();
+        rows.peek().is_some() && self.worker_in_pane(team, pane).is_none()
     }
 
     pub fn dispatch(&self, id: &str) -> Option<&Dispatch> {

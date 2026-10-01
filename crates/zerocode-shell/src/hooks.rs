@@ -78,7 +78,20 @@ static GRANTED_PANES: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::ne
 /// recognised rather than the shell it was typed into; a pane ending takes it
 /// back ([`revoke_pane_capabilities`]). `true` when the pane holds a grant
 /// after the call.
-pub fn grant_pane_capabilities(term: u32) -> bool {
+///
+/// The ledger seat rides the same grant (t-20088): `team` is asked once, for a
+/// pane that holds no grant yet, and what it answers — team, pane and a token
+/// FILE's path, never the secret — is written beside the Computer Use and
+/// browser paths, so `zerocode-orc check` works in a pane the person started
+/// the agent in by hand. Why here and not a second door: this one already
+/// follows the AGENT the window recognised, is private (0600 in a 0700 folder),
+/// is revoked with the pane, and keeps no state a second door would have to
+/// keep in step. An empty answer is not an error — the shim says in its own
+/// words that this shell holds no seat and how to get one.
+pub fn grant_pane_capabilities(
+    term: u32,
+    team: impl FnOnce() -> Vec<(&'static str, String)>,
+) -> bool {
     let Some(bridge) = bridge() else {
         return false;
     };
@@ -89,7 +102,7 @@ pub fn grant_pane_capabilities(term: u32) -> bool {
     let Some(dir) = bridge.endpoint.as_deref().and_then(Path::parent) else {
         return false;
     };
-    let files: Vec<(&str, &Path)> = [
+    let files: Vec<(&str, String)> = [
         (
             zerocode_hookd::env_var::COMPUTER_TOKEN_FILE,
             bridge.computer_token_file.as_deref(),
@@ -100,7 +113,8 @@ pub fn grant_pane_capabilities(term: u32) -> bool {
         ),
     ]
     .into_iter()
-    .filter_map(|(name, path)| path.map(|path| (name, path)))
+    .filter_map(|(name, path)| path.map(|path| (name, path.to_string_lossy().into_owned())))
+    .chain(team())
     .collect();
     match write_pane_grant(dir, term, &files) {
         Ok(_) => {
@@ -140,20 +154,21 @@ fn pane_grant_path(dir: &Path, term: u32) -> PathBuf {
         .join(format!("{}.env", pane_key_of(term)))
 }
 
-/// Write a pane's grant: one `NAME='path'` line per capability file, single
-/// quoted because the paths under Application Support carry spaces, as a 0600
-/// file in a 0700 directory, replaced atomically.
+/// Write a pane's grant: one `NAME='value'` line per capability word — a file's
+/// path, or the team and pane the ledger seat names — single quoted because the
+/// paths under Application Support carry spaces, as a 0600 file in a 0700
+/// directory, replaced atomically.
 pub(crate) fn write_pane_grant(
     dir: &Path,
     term: u32,
-    files: &[(&str, &Path)],
+    words: &[(&str, String)],
 ) -> std::io::Result<PathBuf> {
     let grants = dir.join(PANE_GRANTS_DIR_NAME);
     std::fs::create_dir_all(&grants)?;
     set_private_mode(&grants, 0o700)?;
     let mut body = String::new();
-    for (name, path) in files {
-        let quoted = path.to_string_lossy().replace('\'', "'\\''");
+    for (name, value) in words {
+        let quoted = value.replace('\'', "'\\''");
         body.push_str(&format!("{name}='{quoted}'\n"));
     }
     let final_path = pane_grant_path(dir, term);
@@ -4416,7 +4431,7 @@ mod tests {
             7,
             &[(
                 zerocode_hookd::env_var::COMPUTER_TOKEN_FILE,
-                token_file.as_path(),
+                token_file.to_string_lossy().into_owned(),
             )],
         )
         .expect("grant");
@@ -4500,6 +4515,68 @@ mod tests {
             "secret-1234",
             "a backslash-spelled endpoint still finds the pane's grant"
         );
+    }
+
+    /// t-20088: the grant an agent typed into a plain shell receives carries
+    /// the ledger seat too — team, pane and a token FILE — and the
+    /// `zerocode-orc` shim's loader reads all three, so `check` is not refused
+    /// "this shell is not part of an agent team". The secret itself never
+    /// sits in the grant: only the path of its 0600 file does.
+    #[test]
+    fn a_hand_started_agents_grant_carries_its_ledger_seat_for_the_orc_shim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("Application Support");
+        std::fs::create_dir_all(&root).expect("root");
+        let token_file = root.join("team.token");
+        std::fs::write(&token_file, "pane-secret\n").expect("token");
+        let grant = write_pane_grant(
+            &root,
+            24,
+            &[
+                (
+                    zerocode_core::agent_teams::TEAM_ID_VAR,
+                    "team-abc".to_string(),
+                ),
+                (zerocode_core::agent_teams::TEAM_PANE_VAR, "%1".to_string()),
+                (
+                    zerocode_hookd::env_var::TEAM_TOKEN_FILE,
+                    token_file.to_string_lossy().into_owned(),
+                ),
+            ],
+        )
+        .expect("grant");
+        assert!(
+            !std::fs::read_to_string(&grant)
+                .expect("read")
+                .contains("pane-secret"),
+            "the grant names a file, never the secret"
+        );
+        let endpoint = root.join("endpoint.env");
+        std::fs::write(&endpoint, "ZEROCODE_HOOK_PORT=1\nZEROCODE_HOOK_TOKEN=h\n")
+            .expect("endpoint");
+        let script = shim_script_with_private_tokens(
+            "#!/bin/sh\nprintf '%s|%s|%s' \"${ZEROCODE_AGENT_TEAM_ID:-none}\" \
+             \"${ZEROCODE_AGENT_TEAM_PANE:-none}\" \"${ZEROCODE_AGENT_TEAM_TOKEN:-none}\"\n"
+                .to_string(),
+            &[(
+                zerocode_core::agent_teams::TEAM_TOKEN_VAR,
+                zerocode_hookd::env_var::TEAM_TOKEN_FILE,
+            )],
+        );
+        let run = |pane_key: &str| {
+            let out = crate::proc::quiet_command("/bin/sh")
+                .arg("-c")
+                .arg(&script)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("ZEROCODE_HOOK_ENDPOINT", &endpoint)
+                .env("ZEROCODE_PANE_KEY", pane_key)
+                .output()
+                .expect("sh");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        assert_eq!(run("term-24"), "team-abc|%1|pane-secret");
+        assert_eq!(run("term-25"), "none|none|none", "another pane's grant");
     }
 
     /// The agent mirror shims' Windows companions: for every resolved agent a

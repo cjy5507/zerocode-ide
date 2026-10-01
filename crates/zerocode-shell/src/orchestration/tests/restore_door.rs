@@ -47,6 +47,8 @@ pub(super) enum Did {
     Entered(u32),
     /// A line in the window's log.
     Noted(String),
+    /// The ledger was asked to seat the conversation in its run (t-20088).
+    Rebound(u32),
 }
 
 /// The team a door's pane opens, as `open_team` opens one for a resume.
@@ -130,6 +132,7 @@ impl Door {
                 Did::Typed { term, reached, .. } => format!("typed t{term} reached={reached}"),
                 Did::Entered(term) => format!("entered t{term}"),
                 Did::Noted(line) => format!("line {line}"),
+                Did::Rebound(term) => format!("rebound t{term}"),
             });
         }
         self.did.lock().unwrap().push(did);
@@ -398,6 +401,10 @@ impl WakeWindow for Door {
     }
 
     fn stir(&self) {}
+
+    fn seat_run(&self, term: u32) {
+        self.saw(Did::Rebound(term));
+    }
 
     fn exit_seen(&self, _witness: &crate::agent_teams::ExitWitness) -> bool {
         !*self.lingering.lock().unwrap()
@@ -1335,4 +1342,127 @@ fn a_sleeper_ends_at_the_grace_and_not_before_and_one_that_came_back_does_not() 
     super::super::tick(&host, &[], booted + grace + 1);
     assert_eq!(deaths_of(&left).len(), 1, "told twice");
     crate::agent_teams::forget_term(DOOR);
+}
+
+/// t-20088, red 1: the 16:59 restart brought term-24 back as a bare shell
+/// because its pane's folder (the worktree) was not the store its session
+/// lived in (the main checkout). The folder a conversation is resumed in is
+/// the workspace the session's own sidecar names — when the window knows it —
+/// and the door's folder only when the record names none.
+#[test]
+fn a_zo_conversation_resumes_in_the_workspace_its_session_is_stored_under() {
+    let home = tempfile::tempdir().expect("zo's sessions folder");
+    let main_checkout = tempfile::tempdir().expect("the main checkout");
+    let worktree = tempfile::tempdir().expect("the pane's worktree");
+    let transcript = home.path().join("session-1789537852228-0.jsonl");
+    std::fs::write(
+        home.path().join("session-1789537852228-0.cwd"),
+        serde_json::json!({ "cwd": main_checkout.path() }).to_string(),
+    )
+    .expect("the sidecar");
+    let session = zerocode_core::ProviderSession {
+        key: zerocode_core::SessionKey::SessionId,
+        id: "session-1789537852228-0".to_string(),
+        transcript_path: Some(transcript.to_string_lossy().into_owned()),
+    };
+    let known =
+        |named: &str| -> Result<std::path::PathBuf, String> { Ok(std::path::PathBuf::from(named)) };
+
+    assert_eq!(
+        crate::cmd::board::session_root(&session, worktree.path().to_path_buf(), known),
+        main_checkout.path(),
+        "the pane's folder is not where zo filed the session"
+    );
+    // A folder the window does not know is not a place to open a pane or to
+    // mark trusted: the door's folder stays.
+    assert_eq!(
+        crate::cmd::board::session_root(&session, worktree.path().to_path_buf(), |_| Err(
+            "unknown".to_string()
+        )),
+        worktree.path()
+    );
+    // A record with no transcript, or no sidecar beside it, keeps the door's.
+    let bare = zerocode_core::ProviderSession {
+        transcript_path: None,
+        ..session.clone()
+    };
+    assert_eq!(
+        crate::cmd::board::session_root(&bare, worktree.path().to_path_buf(), known),
+        worktree.path()
+    );
+}
+
+/// t-20088, red 1 and 2: the restore line names the session and the folder
+/// the pane opened in, and a person's conversation coming back is handed to
+/// the ledger to be seated in its run — no command typed, no letter lost.
+#[test]
+fn a_restored_conversation_names_its_folder_and_asks_the_ledger_for_its_seat() {
+    const DOOR: u32 = 278_600;
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the folder it comes back in");
+    let door = Door::new(checkout.path());
+
+    door.wake(DOOR, "zo", "session-1789537852228-0")
+        .expect("the wake");
+
+    let lines = door.noted("session-1789537852228-0 in ");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].ends_with(&checkout.path().display().to_string()),
+        "{lines:?}"
+    );
+    assert!(door.did.lock().unwrap().contains(&Did::Rebound(DOOR)));
+    crate::agent_teams::forget_term(DOOR);
+}
+
+/// t-20088, the numbers: a fixture restart with `N` zo conversations, one
+/// whose pane moved into a worktree. A conversation comes back as itself when
+/// the folder its pane opens in is the one its session is stored under — what
+/// `zo --resume` needs to find it.
+#[test]
+fn a_restart_brings_back_every_conversation_including_the_one_whose_pane_moved() {
+    const CONVERSATIONS: usize = 4;
+    const MOVED: usize = 3;
+    let sessions = tempfile::tempdir().expect("zo's sessions folder");
+    let homes: Vec<_> = (0..CONVERSATIONS)
+        .map(|_| tempfile::tempdir().expect("a workspace"))
+        .collect();
+    let worktree = tempfile::tempdir().expect("the worktree the moved pane sits in");
+    let known =
+        |named: &str| -> Result<std::path::PathBuf, String> { Ok(std::path::PathBuf::from(named)) };
+    let (mut before, mut after) = (0, 0);
+    for (index, home) in homes.iter().enumerate() {
+        let id = format!("session-1789537852228-{index}");
+        std::fs::write(
+            sessions.path().join(format!("{id}.cwd")),
+            serde_json::json!({ "cwd": home.path() }).to_string(),
+        )
+        .expect("the sidecar");
+        let session = zerocode_core::ProviderSession {
+            key: zerocode_core::SessionKey::SessionId,
+            id: id.clone(),
+            transcript_path: Some(
+                sessions
+                    .path()
+                    .join(format!("{id}.jsonl"))
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        };
+        // The tab the conversation was stored under: its own workspace, but
+        // for the one whose pane moved into the worktree.
+        let door_root = if index == MOVED {
+            worktree.path().to_path_buf()
+        } else {
+            home.path().to_path_buf()
+        };
+        before += usize::from(door_root == home.path());
+        after +=
+            usize::from(crate::cmd::board::session_root(&session, door_root, known) == home.path());
+    }
+    assert_eq!(
+        (before, after),
+        (CONVERSATIONS - 1, CONVERSATIONS),
+        "come back as themselves, before and after"
+    );
 }

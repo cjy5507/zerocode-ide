@@ -26149,3 +26149,69 @@ fn a_reply_inside_one_run_is_not_delivered_anywhere_else() {
     let answered = bench.json(&format!("reply --to-message {asked} --body a"));
     assert!(answered.get("deliveredTo").is_none(), "{answered}");
 }
+
+/// t-20088: two letters sent to the coordinator's pre-restart pane address
+/// (`pane:team-…/%1`) were accepted by the ledger and reached nobody. A pane
+/// whose seat the restart vacated is refused at send time, with the address
+/// that does reach the run's next seat — and a pane that still holds its seat
+/// stays routable.
+#[test]
+fn a_letter_to_a_pane_whose_seat_was_vacated_is_refused_naming_the_runs_seat() {
+    fn letter(run: &str, from: &str, to: &str) -> Draft {
+        Draft {
+            from: from.into(),
+            to: to.into(),
+            kind: MessageKind::Status,
+            body: "hello".into(),
+            subject: "".into(),
+            priority: Priority::Normal,
+            payload: "".into(),
+            thread: None,
+            task: Some(run.to_string()).filter(|_| false),
+            dispatch: None,
+        }
+    }
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("restart", 1_000);
+    ledger
+        .seat_coordinator(&run, "team-old/%1", Some("actor"), 1_001)
+        .expect("the coordinator sits");
+    let pane = "pane:team-old/%1";
+    // The pane has spoken, so a letter to it is routable while it holds the seat.
+    ledger
+        .post(&run, letter(&run, pane, &format!("run:{run}")), 1_002)
+        .expect("the pane speaks");
+    ledger
+        .post(&run, letter(&run, LEDGER_ITSELF, pane), 1_003)
+        .expect("a held seat is routable");
+    ledger
+        .post(&run, letter(&run, "worker:w-1", pane), 1_004)
+        .expect("a held seat takes a peer's letter");
+
+    ledger.window_restarted(2_000);
+
+    let refused = ledger
+        .post(&run, letter(&run, "worker:w-1", pane), 2_001)
+        .expect_err("the pane no longer exists");
+    assert!(refused.contains("no longer holds a seat"), "{refused}");
+    assert!(refused.contains(&format!("run:{run}")), "{refused}");
+    // The ledger's own notices are not turned away at a vacated seat.
+    ledger
+        .post(&run, letter(&run, LEDGER_ITSELF, pane), 2_002)
+        .expect("the ledger still files its own notice");
+    // A seat that never held anything in this run is not judged.
+    ledger
+        .post(
+            &run,
+            letter(&run, "pane:team-other/%7", &format!("run:{run}")),
+            2_003,
+        )
+        .expect("a stranger speaks");
+    ledger
+        .post(
+            &run,
+            letter(&run, "worker:w-1", "pane:team-other/%7"),
+            2_004,
+        )
+        .expect("a pane the run never seated is not judged");
+}
