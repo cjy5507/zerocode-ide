@@ -3559,24 +3559,7 @@ impl Run {
                 None => Err(format!("unknown worker: {id}")),
             });
         }
-        if let Some(seat) = to.strip_prefix(PANE_ADDRESS_PREFIX) {
-            /* A pane that no longer exists is not a place a letter can be left
-             * (t-20088). The window restart at 16:59 on 2026-10-01 vacated
-             * the coordinator's seat, and two letters addressed to its old
-             * pane were accepted and reached nobody — the sender was told a
-             * message id. Refused here instead, with the address that does
-             * reach whoever sits in the seat next. Refused rather than
-             * re-routed: the letter named a pane, and quietly handing it to a
-             * different seat holder would deliver words to an agent its
-             * sender never chose; the run's address is the sender's to pick. */
-            if from != LEDGER_ITSELF && self.seat_retired(seat) {
-                return Some(Err(format!(
-                    "unroutable address: {to} — that pane no longer holds a seat in \
-                     this run (its window restarted or its pane ended); the run's \
-                     current seat is {RUN_ADDRESS_PREFIX}{}",
-                    self.id
-                )));
-            }
+        if to.starts_with(PANE_ADDRESS_PREFIX) {
             let spoken = self.messages.iter().any(|held| held.from == to);
             return Some(match spoken || from == LEDGER_ITSELF {
                 true => Ok(vec![to.to_string()]),
@@ -3586,32 +3569,6 @@ impl Run {
             });
         }
         None
-    }
-
-    /// Whether `team/pane` once held a seat in this run and holds none now: the
-    /// coordinator seat its last holder vacated, or a pane whose every worker
-    /// row has left it. A pane the run never seated — an asker nobody wrote
-    /// down — is not judged here: it may be alive, and the ledger cannot say.
-    fn seat_retired(&self, team_pane: &str) -> bool {
-        if self
-            .coordinator
-            .as_ref()
-            .is_some_and(|held| held.seat == team_pane)
-        {
-            return self
-                .coordinator
-                .as_ref()
-                .is_some_and(|held| !held.is_held());
-        }
-        let Some((team, pane)) = team_pane.rsplit_once('/') else {
-            return false;
-        };
-        let mut rows = self
-            .workers
-            .iter()
-            .filter(|worker| worker.team == team && worker.pane == pane)
-            .peekable();
-        rows.peek().is_some() && self.worker_in_pane(team, pane).is_none()
     }
 
     pub fn dispatch(&self, id: &str) -> Option<&Dispatch> {
@@ -6760,6 +6717,39 @@ impl Ledger {
     }
 
     /// Every seat is vacated — the window restarted, and every pane with it.
+    /// The run whose coordinator seat `team/pane` held until it was vacated,
+    /// when that pane has said nothing since (t-20088): a restart vacates every
+    /// seat ([`Self::vacate_every_seat`]) and the pane it named belonged to a
+    /// window that is gone. Every run is asked, since the letter may be filed in
+    /// a run the seat never sat in. A pane some run seats now, a pane that has
+    /// spoken since the vacating (somebody is there), and a pane no run ever
+    /// seated as its coordinator are not judged — a sleeping worker's pane stays
+    /// reachable, demoted but not silenced.
+    fn vacated_pane_seat(&self, team_pane: &str) -> Option<&str> {
+        let mut vacated: Option<(&str, i64)> = None;
+        for run in &self.runs {
+            let Some(held) = run
+                .coordinator
+                .as_ref()
+                .filter(|held| held.seat == team_pane)
+            else {
+                continue;
+            };
+            let at = held.vacated_ms?;
+            if vacated.is_none_or(|(_, latest)| at > latest) {
+                vacated = Some((run.id.as_str(), at));
+            }
+        }
+        let (run, at) = vacated?;
+        let address = format!("{PANE_ADDRESS_PREFIX}{team_pane}");
+        let spoke_since = self
+            .runs
+            .iter()
+            .flat_map(|run| run.messages.iter())
+            .any(|held| held.from == address && held.created_ms >= at);
+        (!spoke_since).then_some(run)
+    }
+
     fn vacate_every_seat(&mut self, now_ms: i64) -> bool {
         let mut moved = false;
         let mut interrupted = Vec::new();
@@ -6806,6 +6796,26 @@ impl Ledger {
             return Err(format!(
                 "a question needs one answerer, and {} is a crowd — ask a worker, \
                  a seat, or the run",
+                message.to
+            ));
+        }
+        /* A pane that no longer exists is not a place a letter can be left
+         * (t-20088). The window restart at 16:59 on 2026-10-01 vacated every
+         * coordinator seat, and two letters a coordinator of ANOTHER run sent to
+         * term-24's old pane were accepted and reached nobody — the sender was
+         * told a message id. Judged here, across every run, because the seat
+         * that pane held lives in a run the letter is not filed in. Refused
+         * rather than re-routed: the letter named a pane, and quietly handing it
+         * to whoever sits in that seat next would deliver words to an agent its
+         * sender never chose; the run's address is the sender's to pick. The
+         * ledger's own notices still file. */
+        if message.from != LEDGER_ITSELF
+            && let Some(team_pane) = message.to.strip_prefix(PANE_ADDRESS_PREFIX)
+            && let Some(seat_run) = self.vacated_pane_seat(team_pane)
+        {
+            return Err(format!(
+                "unroutable address: {} — that pane no longer holds a seat (its window \
+                 restarted or its pane ended); the run it sat in is {RUN_ADDRESS_PREFIX}{seat_run}",
                 message.to
             ));
         }
