@@ -88,6 +88,10 @@ impl<'a> Seat<'a> {
 fn opened(seat: &Seat<'_>, shadow: &SummonShadow, mode: &str, now_ms: i64) -> Value {
     json!({
         "at": now_ms,
+        // What the outcome path joins a label on (t-16578): the request's
+        // own time, as the difficulty and model seats' rows carry it.
+        "requestAt": now_ms,
+        "applied": false,
         // One summons, one row: the worker is the name every later reader
         // already has for this attempt.
         "summon": seat.worker,
@@ -137,6 +141,16 @@ pub(super) fn record(
         return;
     };
     let mut row = opened(&Seat::of(prepared), &shadow, mode.key(), now_ms);
+    // The agent question rode the assign moment's one request (`--agent
+    // auto`): its answer is the receipt's, and nothing is asked again.
+    if let Some(receipt) = shadow.receipt.as_ref().and_then(Value::as_object) {
+        row["options"] = json!(offered(&shadow));
+        for (key, value) in receipt {
+            row[key] = value.clone();
+        }
+        append(&ledger, &row, now_ms);
+        return;
+    }
     let Some(ask) = summon_choice::ask(&shadow.look(), &shadow.options) else {
         row["outcome"] = json!(ONE_OPTION);
         row["options"] = json!(offered(&shadow));
@@ -260,48 +274,81 @@ fn settle(
 #[cfg(test)]
 mod tests;
 
-/// The seat's own pick for a summons typed `--agent auto`
-/// ([`zerocode_core::orchestration::Launcher::choose_agent`]): asked on the
-/// beat, because the summons waits for it, and only when the seat acts —
-/// a person's `on`, or `auto` raised by the judge its own ledger recorded.
-/// `None` is a refusal the caller names; a guess is never handed back.
-pub(crate) fn choose(
-    look: &zerocode_core::summon_choice::SummonLook<'_>,
-    options: &[zerocode_core::summon_choice::Summonable],
-    origin: [&str; 3],
-) -> Option<String> {
-    choose_with(&Wire::of_this_machine(), look, options, origin)
+/// Label the agent seat's answered rows that ran by the work they launched —
+/// the difficulty seat's own reader, over this seat's ledger (t-16578).
+pub(super) fn observations(
+    ledger: &zerocode_core::orchestration::Ledger,
+    costs: &mut super::cost_book::CostBook,
+) -> Option<(PathBuf, Vec<Value>)> {
+    super::summon_difficulty::observations_of(&SUMMON, ledger, costs)
 }
 
-/// [`choose`] on a wire handed in — the one road, which a test crosses with a
-/// socket of its own.
-///
-/// Asked under the consent the window observed for the summoning pane's own
-/// checkout ([`super::summon_difficulty::fresh_checkout`]) — the words are the
-/// coordinator's, from where it works — and never for a summons nobody
-/// observed or a handover whose launch was sealed. Asked with no workspace,
-/// the door refuses every request as not consented: until t-11989 that was
-/// this road's only answer, so a seat that acted still refused.
+pub(super) fn record_observations(observations: Option<(PathBuf, Vec<Value>)>, now_ms: i64) {
+    super::summon_difficulty::record_observations_of(&SUMMON, observations, now_ms);
+}
+
+/// The agent seat's row before any answer, on the assign moment's one
+/// request: the agents it chose among.
+pub(super) fn head(asked: &SummonAsk) -> Value {
+    json!({
+        "rubricVersion": SUMMON_CHOICE_RUBRIC_VERSION,
+        "options": asked.options(),
+        "applied": false,
+    })
+}
+
+/// What the agent question got back — `answers`, or the word nothing came
+/// back with — written onto its `row`: the agent, and whether it runs, which
+/// is only an answer the seat acts on and its act line lets through.
+pub(super) fn answered(
+    wire: &Wire,
+    asked: &SummonAsk,
+    row: &mut Value,
+    answers: Result<&Value, &str>,
+) {
+    let read = answers
+        .map_err(str::to_string)
+        .and_then(|answers| asked.read(answers).map_err(|err| err.token().to_string()));
+    match read {
+        Ok(pick) => {
+            let line = crate::systemone::act_line(wire, &SUMMON);
+            row["outcome"] = json!(ANSWERED);
+            row["chosen"] = json!(pick.chosen);
+            row["probabilities"] = json!(pick.probabilities);
+            row["confidence"] = json!(pick.confidence);
+            row["applied"] = json!(
+                crate::systemone::applies(wire, &SUMMON) && SUMMON.acts_on(pick.confidence, line)
+            );
+        }
+        Err(token) => row["outcome"] = json!(token),
+    }
+}
+
+/// The seat's own pick for a summons typed `--agent auto`, asked alone —
+/// how its own tests ask it. In the product the agent question rides the
+/// assign moment's one request (`summon_assign`, t-16578), on the beat
+/// because the summons waits for it, and only when the seat acts — a
+/// person's `on`, or `auto` raised by the judge its own ledger recorded; a
+/// pick its act line does not let through is refused as a failed one is.
+/// `None` is a refusal the caller names; a guess is never handed back.
+#[cfg(test)]
 pub(super) fn choose_with(
     wire: &Wire,
     look: &zerocode_core::summon_choice::SummonLook<'_>,
     options: &[zerocode_core::summon_choice::Summonable],
     origin: [&str; 3],
 ) -> Option<String> {
-    if !crate::systemone::applies(wire, &SUMMON) {
-        return None;
-    }
-    let checkout = super::summon_difficulty::fresh_checkout(origin)?;
     let ask = summon_choice::ask(look, options)?;
-    let body = crate::systemone::request_body(&ask.state, &ask.questions);
-    let answer = wire.ask(&SUMMON, checkout.as_deref(), body, SUMMON_CHOICE_DEADLINE);
-    let parsed: Value = serde_json::from_str(&answer.answer.ok()?).ok()?;
-    // Only an answer its act line lets act — the line its labels drew
-    // (t-9468), every answer while they drew none; under it the summons
-    // is refused as a failed one is.
-    let line = crate::systemone::act_line(wire, &SUMMON);
-    ask.read(parsed.get("answers")?)
-        .ok()
-        .filter(|pick| SUMMON.acts_on(pick.confidence, line))
-        .map(|pick| pick.chosen)
+    let receipts = super::summon_assign::choose_with(
+        wire,
+        &zerocode_core::summon_assign::AssignAsk {
+            agent: Some(ask),
+            ..Default::default()
+        },
+        origin,
+    );
+    receipts
+        .agent
+        .filter(|row| row["applied"] == true)
+        .and_then(|row| row["chosen"].as_str().map(str::to_string))
 }

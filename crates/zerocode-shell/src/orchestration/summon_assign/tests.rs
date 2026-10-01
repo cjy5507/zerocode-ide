@@ -2,7 +2,7 @@ use super::*;
 use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
 use serde_json::{Map, Value, json};
 use std::time::{Duration, Instant};
-use zerocode_core::jev::{SUMMON_DIFFICULTY, SUMMON_MODEL};
+use zerocode_core::jev::{SUMMON, SUMMON_DIFFICULTY, SUMMON_MODEL};
 use zerocode_core::summon_assign::SHARED_REQUEST_KEY;
 use zerocode_core::summon_difficulty::lineup::{self, Lineup, Seen};
 use zerocode_core::summon_difficulty::{self as difficulty, APPLY_DEADLINE_MS, LADDER, Look};
@@ -67,6 +67,7 @@ fn both() -> AssignAsk {
     AssignAsk {
         difficulty: Some(look()),
         model: Some(model_ask()),
+        ..Default::default()
     }
 }
 
@@ -91,6 +92,11 @@ fn wire(home: &tempfile::TempDir, endpoint: &Endpoint, difficulty: &str, model: 
 /// the difficulty `low`, the model `model-b` at the first effort offered for
 /// it — so one body serves a request of one question or of two.
 fn answer_every(request: &str) -> String {
+    answered(request, None)
+}
+
+/// [`answer_every`], choosing `agent` where the agent question is asked.
+fn answered(request: &str, agent: Option<&str>) -> String {
     let body: Value = request
         .split_once("\r\n\r\n")
         .and_then(|(_, body)| serde_json::from_str(body).ok())
@@ -105,6 +111,7 @@ fn answer_every(request: &str) -> String {
             .iter()
             .find(|word| {
                 word.as_str() == LADDER[0].0
+                    || Some(word.as_str()) == agent
                     || word.starts_with(&format!("model-b{}", model::PAIR_SEP))
             })
             .or(words.first())
@@ -234,6 +241,19 @@ fn a_late_answer_costs_one_wall_and_applies_nothing() {
 struct Wired<'a> {
     wire: &'a Wire,
     lineup: Lineup,
+    /// The agents installed here, when a test leaves the agent open.
+    agents: &'static [&'static str],
+    /// Each agent's own lineup, where a measurement sizes them apart; every
+    /// other agent has `lineup`.
+    lineups: &'a [(&'static str, Lineup)],
+}
+impl Wired<'_> {
+    fn lineup_of(&self, agent: &str) -> &Lineup {
+        self.lineups
+            .iter()
+            .find(|(id, _)| *id == agent)
+            .map_or(&self.lineup, |(_, lineup)| lineup)
+    }
 }
 impl zerocode_core::orchestration::Launcher for Wired<'_> {
     fn command_for(&self, agent: &str, _: &str, _: &[String]) -> Result<String, String> {
@@ -248,15 +268,35 @@ impl zerocode_core::orchestration::Launcher for Wired<'_> {
         level: &str,
         _: [&str; 3],
     ) -> Result<Option<lineup::Row>, String> {
-        lineup::row_at(&Value::Null, agent, level, Some(&self.lineup), None, 0)
+        lineup::row_at(
+            &Value::Null,
+            agent,
+            level,
+            Some(self.lineup_of(agent)),
+            None,
+            0,
+        )
     }
-    fn model_facts(&self, _: &str, _: [&str; 3]) -> Option<model::Facts> {
+    /// Which agents are here — the ones a test names (`Wired::agents`), so an
+    /// open agent has something to choose between.
+    fn presence(&self) -> Option<Vec<zerocode_core::agent::AgentPresence>> {
+        (!self.agents.is_empty()).then(|| {
+            zerocode_core::agent::agent_presence(None, "macos")
+                .into_iter()
+                .map(|mut row| {
+                    row.installed = self.agents.contains(&row.id);
+                    row
+                })
+                .collect()
+        })
+    }
+    fn model_facts(&self, agent: &str, _: [&str; 3]) -> Option<model::Facts> {
+        let lineup = self.lineup_of(agent);
         Some(model::Facts {
-            lineup: self.lineup.clone(),
+            lineup: lineup.clone(),
             seen: Seen::default(),
             // Every model with a record: no summons is a challenger's turn.
-            records: self
-                .lineup
+            records: lineup
                 .models
                 .iter()
                 .map(|held| {
@@ -291,6 +331,31 @@ fn summoned_as(
     agent: &str,
     lineup: Lineup,
 ) -> (Value, zerocode_core::orchestration::PreparedWorkerStart) {
+    summoned_among(wire, checkout, request, agent, lineup, &[])
+}
+
+/// [`summoned_as`] with `agents` installed — `agent` may be `auto`.
+fn summoned_among(
+    wire: &Wire,
+    checkout: &Path,
+    request: &str,
+    agent: &str,
+    lineup: Lineup,
+    agents: &'static [&'static str],
+) -> (Value, zerocode_core::orchestration::PreparedWorkerStart) {
+    summoned_each(wire, checkout, request, agent, lineup, agents, &[])
+}
+
+/// [`summoned_among`] with each agent's own lineup in `lineups`.
+fn summoned_each(
+    wire: &Wire,
+    checkout: &Path,
+    request: &str,
+    agent: &str,
+    lineup: Lineup,
+    agents: &'static [&'static str],
+    lineups: &[(&'static str, Lineup)],
+) -> (Value, zerocode_core::orchestration::PreparedWorkerStart) {
     let mut ledger = zerocode_core::orchestration::Ledger::new();
     let mut team = zerocode_core::agent_teams::Team::new("team-assign", "test-token", 1);
     let _origin = super::super::summon_difficulty::origin_with_for_tests(
@@ -299,7 +364,12 @@ fn summoned_as(
         true,
         wire.settings_root(),
     );
-    let launcher = Wired { wire, lineup };
+    let launcher = Wired {
+        wire,
+        lineup,
+        agents,
+        lineups,
+    };
     let mut summoned = None;
     for (at, command) in [
         (
@@ -352,6 +422,130 @@ fn a_summons_with_two_acting_seats_waits_on_one_request() {
     host.drain();
     assert_eq!(endpoint.asked().len(), 1, "receipts are not asked twice");
     assert_shared_rows(&wire, true);
+}
+
+/// [`wire`] with the agent seat at `agent` too.
+fn wire_with_agent(
+    home: &tempfile::TempDir,
+    endpoint: &Endpoint,
+    agent: &str,
+    difficulty: &str,
+    model: &str,
+) -> Wire {
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {
+            SUMMON.setting: agent,
+            SUMMON_DIFFICULTY.setting: difficulty,
+            SUMMON_MODEL.setting: model,
+            "jev": {"workspaces": ["*"]},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    Wire::at(&endpoint.base(), "test-key", Some(settings))
+}
+
+/// t-16578 A1: a summons that leaves the agent and the dials open waits on
+/// ONE request carrying the agent, difficulty and pair questions, and runs the
+/// agent it chose with that agent's pair; each seat's row names the request,
+/// and recording afterwards asks nothing more.
+#[test]
+fn an_open_agent_rides_the_one_request() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, 0);
+    let wire = wire_with_agent(&home, &endpoint, "on", "on", "on");
+    let (reply, prepared) = summoned_among(
+        &wire,
+        home.path(),
+        "agent-open",
+        "auto",
+        lineup(),
+        &["claude", "codex"],
+    );
+    let heard = endpoint.asked();
+    assert_eq!(heard.len(), 1, "one request where there were three");
+    // The words ride twice in the one body: as the work's `spec` and as the
+    // agent question's `brief` (the same head under its own cap) — never once
+    // more for the pairs.
+    assert_eq!(heard[0].matches(SPEC_WORD).count(), 2, "spec and brief");
+    for question in [
+        "\"summon\"",
+        "summon_difficulty",
+        "summon_model_claude",
+        "summon_model_codex",
+    ] {
+        assert!(heard[0].contains(question), "{question} rides");
+    }
+    assert_eq!(counted_today(&home), 1);
+    assert_eq!(prepared.agent, "claude", "the answer's agent runs: {reply}");
+    assert_eq!(reply["model"], "model-b", "{reply}");
+    let receipt = prepared
+        .summon_shadow
+        .as_ref()
+        .and_then(|s| s.receipt.clone());
+    let receipt = receipt.expect("the agent seat's receipt rode the path");
+    assert_eq!(receipt["chosen"], "claude");
+    assert_eq!(receipt["applied"], true, "{receipt}");
+    let host = super::super::summon_difficulty::tests::Deferred::on(&wire);
+    super::super::summon_choice::record(&host, &prepared, home.path().to_str(), 3);
+    record(&host, &prepared, home.path().to_str(), 3);
+    host.drain();
+    assert_eq!(endpoint.asked().len(), 1, "receipts are not asked twice");
+}
+
+/// t-16578 A1: a late answer on the one request leaves every dial to its
+/// default and the agent refused by name — after one wall, never two.
+#[test]
+fn a_late_answer_to_the_open_agent_refuses_after_one_wall() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint =
+        Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, APPLY_DEADLINE_MS + 500);
+    let wire = wire_with_agent(&home, &endpoint, "on", "on", "on");
+    let key = ["assign-team", "%1", "late-agent"];
+    let _origin = super::super::summon_difficulty::origin_with_for_tests(
+        key,
+        Some(home.path().to_path_buf()),
+        true,
+        wire.settings_root(),
+    );
+    let asked = AssignAsk {
+        agent: Some(zerocode_core::summon_choice::ask(&agent_look(), &rooms()).unwrap()),
+        difficulty: Some(look()),
+        ..Default::default()
+    };
+    let began = Instant::now();
+    let receipts = choose_with(&wire, &asked, key);
+    assert!(began.elapsed() < Duration::from_millis(APPLY_DEADLINE_MS + 400));
+    let row = receipts.agent.expect("the agent seat's row");
+    assert_eq!(row["applied"], false, "{row}");
+    assert!(row.get("chosen").is_none(), "{row}");
+}
+
+fn agent_look() -> zerocode_core::summon_choice::SummonLook<'static> {
+    zerocode_core::summon_choice::SummonLook {
+        brief: SPEC,
+        brief_chars: SPEC.len(),
+        worktree: false,
+        replaces_an_attempt: false,
+        carries_a_task: false,
+        attempts: 0,
+        failures: 0,
+        pinned_model: None,
+    }
+}
+
+fn rooms() -> Vec<zerocode_core::summon_choice::Summonable> {
+    ["claude", "codex"]
+        .into_iter()
+        .map(|id| zerocode_core::summon_choice::Summonable {
+            id: id.to_string(),
+            spent_percent: None,
+            window: None,
+            record: Default::default(),
+        })
+        .collect()
 }
 
 /// A5: two seats that only record are asked after the pane opens — one
@@ -461,6 +655,135 @@ fn assign_moment_numbers() {
     }
 }
 
+/// t-16578 A4: what a summons that leaves the agent AND the dials open waits
+/// for Jev and sends, before and after — before, the agent question asked
+/// alone and then the difficulty and pair on a second request; after, one
+/// request carrying all of it with a pair question for each agent the answer
+/// may choose — against a loopback endpoint that answers in a fixed 250 ms,
+/// per agent the answer lands on, each agent over as many models naming no
+/// efforts as its lineup held (`zo models --json`, 2026-09-29: claude 8,
+/// codex 6, zo 26) with all three installed. `joinBytes` is the bytes the pair
+/// questions put in the one request ([`AssignAsk::join_bytes`]); `pairOptions`
+/// the options the landing agent's own pair question offers, which scoping
+/// does not change. Prints one JSON line an agent; run by hand
+/// (`-- --ignored --nocapture --exact
+/// orchestration::summon_assign::tests::open_agent_numbers`).
+#[test]
+#[ignore = "a measurement, run by hand"]
+fn open_agent_numbers() {
+    const SAMPLES: usize = 30;
+    const HOLD_MS: u64 = 250;
+    let lineups: Vec<(&'static str, Lineup)> = [("claude", 8), ("codex", 6), ("zo", 26)]
+        .into_iter()
+        .map(|(agent, models)| {
+            let catalog = json!({"models": (0..models)
+                .map(|nth| json!({"provider": "synthetic", "id": format!("model-{nth}"), "builtin": true}))
+                .collect::<Vec<_>>()});
+            (agent, Lineup::from_catalog_all(&catalog).unwrap())
+        })
+        .collect();
+    let installed: &'static [&'static str] = &["claude", "codex", "zo"];
+    let bytes_of = |heard: &[String]| {
+        heard
+            .iter()
+            .map(|request| {
+                request
+                    .split_once("\r\n\r\n")
+                    .map_or(0, |(_, body)| body.len())
+            })
+            .sum::<usize>()
+    };
+    for (agent, lineup) in &lineups {
+        let agent: &'static str = agent;
+        let mut results = Vec::new();
+        for joined in [false, true] {
+            let mut waits = Vec::new();
+            let (mut requests, mut bytes) = (0, 0);
+            for nth in 0..SAMPLES {
+                let home = tempfile::tempdir().unwrap();
+                let endpoint = Endpoint::answering_each(
+                    "HTTP/1.1 200 OK",
+                    move |request| answered(request, Some(agent)),
+                    HOLD_MS,
+                );
+                let wire = wire_with_agent(&home, &endpoint, "on", "on", "on");
+                let request = format!("measure-{joined}-{nth}");
+                let began = Instant::now();
+                if joined {
+                    let _ = summoned_each(
+                        &wire,
+                        home.path(),
+                        &request,
+                        "auto",
+                        lineup.clone(),
+                        installed,
+                        &lineups,
+                    );
+                } else {
+                    // Before: the agent alone, then the dials on the agent it
+                    // chose — two requests, one after the other.
+                    let key = ["assign-team", "%1", request.as_str()];
+                    let _origin = super::super::summon_difficulty::origin_with_for_tests(
+                        key,
+                        Some(home.path().to_path_buf()),
+                        true,
+                        wire.settings_root(),
+                    );
+                    let chosen = super::super::summon_choice::choose_with(
+                        &wire,
+                        &agent_look(),
+                        &rooms_of(installed),
+                        key,
+                    );
+                    assert_eq!(chosen.as_deref(), Some(agent));
+                    let _ = summoned_each(
+                        &wire,
+                        home.path(),
+                        &request,
+                        agent,
+                        lineup.clone(),
+                        &[],
+                        &lineups,
+                    );
+                }
+                waits.push(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
+                let heard = endpoint.asked();
+                requests += heard.len();
+                bytes += bytes_of(&heard);
+            }
+            waits.sort_unstable();
+            let at = |share: f64| zerocode_core::jev::summary::percentile(&waits, share);
+            results.push(json!({
+                "shape": if joined { "after: one request" } else { "before: agent, then dials" },
+                "requestsPerSummons": requests as f64 / SAMPLES as f64,
+                "requestBytesPerSummons": bytes / SAMPLES,
+                "waitP50Ms": at(0.50), "waitP95Ms": at(0.95),
+            }));
+        }
+        let models = lineup.models.len();
+        println!(
+            "{}",
+            json!({
+                "agent": agent, "models": models, "samples": SAMPLES, "holdMs": HOLD_MS,
+                "installed": installed,
+                "results": results,
+            })
+        );
+    }
+}
+
+fn rooms_of(agents: &[&str]) -> Vec<zerocode_core::summon_choice::Summonable> {
+    agents
+        .iter()
+        .map(|id| zerocode_core::summon_choice::Summonable {
+            id: (*id).to_string(),
+            spent_percent: None,
+            window: None,
+            record: Default::default(),
+        })
+        .collect()
+}
+
 /// A6 against the real service: the path's request with the difficulty
 /// question alone, and with the model question riding beside it, asked in
 /// turn — what a summons waits for each (p50, p95) and what each sends. The
@@ -501,7 +824,7 @@ fn live_assign_moment_numbers() {
         |row: &Option<Value>| row.as_ref().is_some_and(|row| row["outcome"] == "answered");
     for _ in 0..SAMPLES {
         for (asked, held) in [
-            (both().only(true, false), &mut single),
+            (both().only(false, true, false), &mut single),
             (both(), &mut joint),
         ] {
             let receipts = ask(&wire, &asked, Some(home.path()));
@@ -665,8 +988,9 @@ fn live_difficulty_answers_alone_and_joint() {
         let asked = AssignAsk {
             difficulty: Some(look.clone()),
             model: Some(model::ask(&look, &options).unwrap()),
+            ..Default::default()
         };
-        let alone = said(ask(&wire, &asked.only(true, false), Some(home.path())).difficulty);
+        let alone = said(ask(&wire, &asked.only(false, true, false), Some(home.path())).difficulty);
         let joint = ask(&wire, &asked, Some(home.path()));
         pairs += usize::from(
             joint

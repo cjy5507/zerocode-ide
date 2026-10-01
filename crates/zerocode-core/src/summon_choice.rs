@@ -426,7 +426,7 @@ pub struct SummonLook<'a> {
 
 /// One question and the set its answer is judged against — the two travel
 /// together so they cannot drift apart at a call site.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummonAsk {
     /// The request's `state`.
     pub state: Value,

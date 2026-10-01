@@ -15,6 +15,7 @@
  * pane.
  */
 
+import { endRun } from "./end-run.mjs";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -488,4 +489,4 @@ for (const result of results) {
   console.log(`${result.pass ? "PASS" : "FAIL"}  ${result.name}${detail}`);
 }
 console.log(`\n${results.length - failed}/${results.length} passed`);
-process.exit(failed ? 1 : 0);
+endRun(failed ? 1 : 0);

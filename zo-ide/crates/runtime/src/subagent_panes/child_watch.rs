@@ -385,6 +385,40 @@ mod tests {
 
     use super::{ChildWatch, Woken};
 
+    /// How long the first connection may take to show in the listener's queue.
+    /// On loopback `connect` can return before it does, and a fresh process
+    /// under load has been seen late; a connection that is on time ends the
+    /// wait at once, so the bound costs nothing when it is met.
+    const FIRST_ACCEPT_DEADLINE: Duration = Duration::from_secs(2);
+    /// How long to keep looking for a second connection after the first. The
+    /// second `connect` would have finished inside the same `hold_channel` call
+    /// that made the first, so it only has to outlast the queue's lag.
+    const SECOND_ACCEPT_QUIET: Duration = Duration::from_millis(100);
+
+    /// The connections a non-blocking `listener` has taken: waits up to `first`
+    /// for the first (0 if none comes), then counts until `quiet` passes with
+    /// no new one.
+    fn accepted_within(listener: &std::net::TcpListener, first: Duration, quiet: Duration) -> usize {
+        let mut accepted = 0;
+        let mut last = Instant::now();
+        loop {
+            match listener.accept() {
+                Ok(_) => {
+                    accepted += 1;
+                    last = Instant::now();
+                    continue;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("accept failed: {error}"),
+            }
+            let patience = if accepted == 0 { first } else { quiet };
+            if last.elapsed() >= patience {
+                return accepted;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// A rename into the directory — how every child publishes anything —
     /// wakes the watch at once, not at the next look.
     #[test]
@@ -467,10 +501,7 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         assert!(watch.hold_channel(addr));
         assert!(watch.hold_channel(addr));
-        let mut accepted = 0;
-        while listener.accept().is_ok() {
-            accepted += 1;
-        }
+        let accepted = accepted_within(&listener, FIRST_ACCEPT_DEADLINE, SECOND_ACCEPT_QUIET);
         assert_eq!(accepted, 1, "the same channel was connected to again");
 
         // Nobody listens on a port that was just released.

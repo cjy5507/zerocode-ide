@@ -21493,6 +21493,10 @@ mod restore_door;
 /// t-9091: a closing window's beat leaves its sleepers to the next window
 /// (`tests/restore_goodbye.rs`).
 mod restore_goodbye;
+/// t-19779: a released worker stays retired — the window is told so when its
+/// checkout is opened, and no restore road brings it back
+/// (`tests/restore_retired.rs`).
+mod restore_retired;
 /// t-7812: the host seams those roads added (`tests/restore_seams.rs`).
 mod restore_seams;
 /// t-11548 and t-11537: after a restart, a worker at rest hears of its mail

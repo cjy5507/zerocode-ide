@@ -116,13 +116,18 @@ impl Launcher for Catalog {
     /// The test seat picks the first agent this catalog knows — a seat that
     /// acts, so `--agent auto` has a road to land on; a launcher with no seat
     /// keeps the trait's default and refuses.
-    fn choose_agent(
+    fn choose_assign(
         &self,
-        _look: &crate::summon_choice::SummonLook<'_>,
-        _options: &[crate::summon_choice::Summonable],
+        _asked: &crate::summon_assign::AssignAsk,
         _origin: [&str; 3],
-    ) -> Option<String> {
-        self.0.first().map(|agent| (*agent).to_string())
+    ) -> crate::summon_assign::Receipts {
+        crate::summon_assign::Receipts {
+            agent: self
+                .0
+                .first()
+                .map(|agent| serde_json::json!({"chosen": agent, "applied": true})),
+            ..Default::default()
+        }
     }
 
     fn command_for(&self, agent: &str, prompt: &str, tuning: &[String]) -> Result<String, String> {
@@ -25536,6 +25541,7 @@ fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_ef
             crate::summon_assign::Receipts {
                 difficulty: self.receipt.clone(),
                 model: None,
+                ..Default::default()
             }
         }
     }
@@ -25681,6 +25687,7 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
                     .as_ref()
                     .map(|_| serde_json::json!({"chosen":"low", "applied":true})),
                 model: None,
+                ..Default::default()
             }
         }
     }
@@ -25783,7 +25790,8 @@ fn an_open_model_dial_says_where_its_model_came_from_and_what_else_is_offered() 
                     serde_json::json!({"chosen": crate::summon_difficulty::LADDER[0].0, "applied": true})
                 }),
                 model: None,
-            }
+..Default::default()
+}
         }
     }
     let said = answered(&Lined, "agent-list --agent claude");

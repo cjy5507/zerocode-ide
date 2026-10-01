@@ -1456,13 +1456,17 @@ fn a_step_effort_question_acts_under_on_and_under_auto_once_its_evidence_stands(
 /// rode an option's sentence, which no `sends` named, until they became a
 /// field). The agent the coordinator typed is not in the table's `sends`
 /// because it is not in the state at all — a question that shows the answer
-/// somebody already wrote down is not a second opinion.
+/// somebody already wrote down is not a second opinion. The list is the assign
+/// moment's one (t-16578): the work's title and spec ride the same body when
+/// the difficulty and pair questions do, and clear under their caps there.
 #[test]
 fn a_summon_question_sends_the_brief_and_the_task_titles_and_nothing_else() {
     let sent: Vec<&str> = SUMMON.sends.iter().map(|sent| sent.at).collect();
     assert_eq!(
         sent,
         [
+            "/state/title",
+            "/state/spec",
             "/state/brief",
             "/state/agents/*/newestTasks",
             "/state/agents/*/newestTasks/*"
@@ -1472,6 +1476,8 @@ fn a_summon_question_sends_the_brief_and_the_task_titles_and_nothing_else() {
     assert_eq!(
         caps,
         [
+            Cap::Chars(crate::summon_difficulty::TITLE_CHAR_CAP),
+            Cap::Chars(crate::summon_difficulty::SPEC_CHAR_CAP),
             Cap::Chars(SUMMON_BRIEF_CHAR_CAP),
             Cap::Items(crate::summon_choice::SUMMON_RECENT_BRIEFS),
             Cap::Chars(crate::summon_choice::SUMMON_RECENT_BRIEF_CHAR_CAP),

@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.1.47] — 2026-10-02
+
+### feat
+
+- feat(zo): /rewind works in the zo that ships — `/rewind` lists the file edits zo's write tools made this session, turn by turn, `/rewind N [force]` puts turn N's files back, and `/rewind turn` drops the last turn from the conversation and its saved transcript; before, zo answered "/rewind is not in zo" (t-19459).
+
+### fix
+
+- fix(computer-use): a Computer Use judgment waits only as long as the errand has left — before, a judge that never answered could hold an errand still without end; one deadline now covers a remembered answer and the fresh ask behind it, and with no time left no request is sent (t-19772).
+- fix(zo): rewinding a session turn removes the whole turn, every tool round and zo's own Tool-role tool results included — before, a turn that used a tool lost only its final reply, or nothing when it ended in a tool result; shipped zo reaches this through /rewind only once t-19459 lands (t-19202).
+- fix(restore): after a window restart an agent conversation comes back as itself — in the workspace its session is stored under, back in its ledger seat — and an agent typed into a plain shell gets a ledger seat too, so it can read and send mail; a letter to a pane whose seat a restart vacated is refused naming the run, instead of being accepted and reaching nobody (t-20088).
+- fix(windows): three things a Windows user would hit — the lane token re-sync failed with "Access is denied" after its first call, a lock file over a junction leaked the wrong refusal, and the settings replace now retries a handle an antivirus holds for a moment — and the tests that assumed Unix paths, scripts or LF bytes no longer fail the Windows CI (t-20436).
+- fix(zo): opening a helper's pane gives tmux 12 s — past that, or when tmux refuses, the helper is withdrawn and closes without working, and a pane tmux had already cut for it is closed; before, a hung tmux held the helper's start with no time limit (t-19898).
+
+### perf
+
+- perf(window): the window paints before it starts its browser engine — the engine's start held the main thread 0.5 s on an ordinary Mac and 1.1-1.9 s on a low-spec one before the first paint; it now starts right after it, or at the first browser pane — and every start writes its own boot timeline (13 phases, in ms, no paths or text) to boot-timeline.json and one log line; a conversation tab waiting to be woken says so with its place in the line (t-20078).
+- perf(jev): a hook event reads only what was appended to the seat's Jev ledger since the last one, instead of parsing the whole ledger every time — 4,000 lines 14.6 ms -> 0.05 ms per event, 40,000 lines 135 ms -> 0.065 ms, on the low-spec profile 53 ms -> 0.14 ms (t-19914).
+- perf(conversation): a long conversation dresses the rows coming into reach together instead of one by one — on a 4x-throttled CPU scroll frames over 16.7 ms drop from 64% to 57% and the delta paint p50 from 6.4 to 5.6 ms, with nothing moved at normal speed (t-20445).
+
+### internal
+
+- internal(tests): the idle-beat tests take the shared test window before the beat lock, as every other test does, so the shell suite cannot deadlock on them (t-19506 follow-up).
+- internal(perf): a low-spec profile for every performance number the window harness gives — normal, taskpolicy -b and a 4x CPU throttle, the power state written beside each run; first finding: a long conversation's delta drawing slows 3.3x where plain script slows 1.55x (t-19683).
+- internal(windows): nine Windows-only lint sites outside the window crate are fixed, so the public CI's Windows leg passes its lint step (t-5773).
+- internal(ci): a build runner signs the Computer Use helper ad hoc instead of creating and trusting a local identity — the public macOS CI leg had waited 90 minutes on a password prompt (t-5773).
+- internal(windows): the window crate is clean under Windows clippy (106 sites to 0) and `just win-check` lints instead of only compiling, so Windows-only warnings are caught on the Mac before CI (t-20408).
+- internal(zo): five zo tests that passed only on a machine with a non-Claude provider set up and more than three cores now state the provider and helper window they test, so zo-ide-verify passes on a clean macOS CI runner (t-20300).
+- internal(ci): the window crate's tests pass on a clean macOS runner — 30 restore and account-switch tests no longer ask the machine whether the claude CLI is installed, two timing tests wait for their condition — and a restart nudge's watch now runs its beats before its time bound ends it on a slow machine (t-20432).
+
 ## [1.1.46] — 2026-10-01
 
 ### feat

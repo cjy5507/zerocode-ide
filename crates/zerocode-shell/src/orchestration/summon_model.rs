@@ -66,8 +66,8 @@ fn choose_with(wire: &Wire, asked: &ModelAsk, origin: [&str; 3]) -> Option<Value
     super::summon_assign::choose_with(
         wire,
         &zerocode_core::summon_assign::AssignAsk {
-            difficulty: None,
             model: Some(asked.clone()),
+            ..Default::default()
         },
         origin,
     )

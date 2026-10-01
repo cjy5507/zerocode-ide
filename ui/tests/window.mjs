@@ -1,3 +1,4 @@
+import { endRun } from "./end-run.mjs";
 import "./scm-notices.mjs";
 import { BOOT, chromium, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
 import { createRunner } from "./window-runner.mjs";
@@ -57438,4 +57439,4 @@ suite("wire-live-stream", async ({ browser, origin, ok }) => {
 await run({ browser, origin, faults });
 await browser.close();
 files.close();
-process.exit(report() ? 1 : 0);
+endRun(report() ? 1 : 0);

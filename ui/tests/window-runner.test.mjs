@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { spawn } from "node:child_process";
+
+import { END_GRACE_MS } from "./end-run.mjs";
 import { createRunner, legacyOnlyName, REPORT } from "./window-runner.mjs";
 
 /* The window harness's runner, on its own (t-4017). What it promises the lane
@@ -170,4 +173,35 @@ test("two suites cannot share a name", () => {
   const runner = createRunner({ log() {}, env: {}, argv: [] });
   runner.suite("twice", async () => {});
   assert.throws(() => runner.suite("twice", async () => {}), /twice/);
+});
+
+/* A report larger than a pipe holds reaches a slow reader whole, and the exit
+ * code still says it failed (end-run.mjs). The public CI's macOS leg cut the
+ * window suite's report at the pipe's 64 KiB because the harness called
+ * process.exit() with the rest still queued; the reader here sleeps first so
+ * the pipe fills the same way. */
+test("a report bigger than the pipe reaches a slow reader whole and the run still fails", async () => {
+  const lines = 2400;
+  const script = [
+    `import { endRun } from ${JSON.stringify(new URL("./end-run.mjs", import.meta.url).href)};`,
+    `const pad = "x".repeat(400);`,
+    `for (let i = 0; i < ${lines}; i += 1) console.log("PASS  check " + i + "  — " + pad);`,
+    `console.log("");`,
+    `console.log("${lines}/${lines} passed");`,
+    `endRun(1);`,
+  ].join("\n");
+  const started = Date.now();
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+  const closed = new Promise((resolve) => child.on("close", resolve));
+  child.stdout.pause();
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const chunks = [];
+  child.stdout.on("data", (chunk) => chunks.push(chunk));
+  child.stdout.resume();
+  const code = await closed;
+  const said = Buffer.concat(chunks).toString("utf8").trimEnd().split("\n");
+  assert.equal(said.filter((line) => line.startsWith("PASS  ")).length, lines);
+  assert.equal(said.at(-1), `${lines}/${lines} passed`);
+  assert.equal(code, 1);
+  assert.ok(Date.now() - started < END_GRACE_MS, "the run ended when its writes were done, not by the grace");
 });

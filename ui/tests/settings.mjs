@@ -8,6 +8,7 @@
  *   node ui/tests/settings.mjs
  */
 
+import { endRun } from "./end-run.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -2871,6 +2872,9 @@ class StatefulBackend {
       case "jev_summary":
         if (this.jevSummary === null) throw new Error("unknown argument 'jev'");
         return clone(this.jevSummary);
+      // The boot timeline's marks (t-20078, boot_timeline.rs): the window
+      // writes the phase down and answers nothing.
+      case "boot_phase": return null;
       default:
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
         throw new Error(`unknown command: ${command}`);
@@ -11470,4 +11474,4 @@ for (const result of results) {
   console.log(`${result.pass ? "PASS" : "FAIL"}  ${result.name}${detail}`);
 }
 console.log(`\n${results.length - failed}/${results.length} passed`);
-process.exit(failed ? 1 : 0);
+endRun(failed ? 1 : 0);
