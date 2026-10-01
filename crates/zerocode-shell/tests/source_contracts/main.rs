@@ -9141,11 +9141,11 @@ mod tests {
     #[test]
     fn the_embedded_chromium_loads_the_address_typed_and_never_invents_https() {
         let chromium = include_str!("../../src/chromium_browser.rs");
+        let disabled = disabled_chromium_features(chromium);
         assert!(
             chromium.contains("const CEF_SWITCH_DISABLE_FEATURES: &str = \"disable-features\";")
-                && chromium.contains(
-                    "const CEF_DISABLED_FEATURES: &str = \"HttpsUpgrades,HttpsFirstBalancedMode\";"
-                ),
+                && disabled.contains(&"HttpsUpgrades")
+                && disabled.contains(&"HttpsFirstBalancedMode"),
             "the https-upgrade features lost their named constants"
         );
         let hook = block_after(chromium, "fn on_before_command_line_processing(");
@@ -9154,6 +9154,85 @@ mod tests {
                 && hook.contains("Some(&CefString::from(CEF_DISABLED_FEATURES)),"),
             "Chromium's command line no longer turns the https upgrade off:\n{hook}"
         );
+    }
+
+    /// The features the embedded Chromium is started with turned off, as the
+    /// one named constant spells them.
+    fn disabled_chromium_features(chromium: &str) -> Vec<&str> {
+        chromium
+            .split_once("const CEF_DISABLED_FEATURES: &str = \"")
+            .and_then(|(_, rest)| rest.split_once("\";"))
+            .map(|(list, _)| list.split(',').collect())
+            .expect("the disabled-features constant")
+    }
+
+    /// Chromium copies the whole signed app into the per-user `X` folder at
+    /// every start and deletes the copy only after an orderly shutdown — the
+    /// restart road (`exit(0)`), a crash and a force quit leave it (t-20243:
+    /// 0.4 GiB each, thirty-one on one machine, 12.3 GiB). macOS itself makes
+    /// none — a plain signed app, launched and updated every way the installers
+    /// do, leaves nothing there. The copy is not waste, though: its hard link is a
+    /// second name for the running executable, and without one macOS stops
+    /// recognising a window whose installed bundle an update has renamed away
+    /// and deleted (`codesign --verify +pid` answers "host has no guest with
+    /// the requested attributes"; keychain, notifications and permissions
+    /// vet a client that way). So the engine's feature stays ON, and the
+    /// window deletes what no process runs — once, after its first paint, on a
+    /// thread of its own, on macOS only (Windows and Linux have no such folder).
+    #[test]
+    fn the_embedded_chromium_keeps_the_signed_copy_that_identifies_a_long_lived_window_and_the_first_paint_sweeps_the_old_ones()
+     {
+        let chromium = include_str!("../../src/chromium_browser.rs");
+        assert!(
+            !disabled_chromium_features(chromium).contains(&"MacAppCodeSignClone"),
+            "the engine's signed copy was turned off: a window that outlives its installed \
+             bundle is no longer recognised by macOS until it restarts"
+        );
+        let timeline = strip_rust_comments(include_str!("../../src/boot_timeline.rs"));
+        let call = "code_sign_clone::sweep_after_first_paint(";
+        assert_eq!(
+            timeline.matches(call).count(),
+            1,
+            "the first paint sweeps the old signed copies once, on a thread of its own"
+        );
+        let sweep = timeline.find(call).expect("the first paint's sweep");
+        let gate = timeline[..sweep]
+            .rfind("#[cfg(target_os = \"macos\")]")
+            .expect("the sweep's macOS-only gate");
+        let paint = timeline[..sweep]
+            .rfind("known == Phase::FirstPaint")
+            .expect("the sweep waits for the first paint");
+        assert!(
+            sweep - gate < 250 && sweep - paint < 250,
+            "the sweep call lost its macOS-only gate or its first-paint gate:\n{}",
+            &timeline[gate.min(paint)..sweep]
+        );
+        let main = strip_rust_comments(include_str!("../../src/main.rs"));
+        let module = main
+            .find("mod code_sign_clone;")
+            .expect("the module is declared");
+        assert!(
+            main[..module]
+                .trim_end()
+                .ends_with("#[cfg(target_os = \"macos\")]"),
+            "the module is compiled outside macOS, where there is no such folder"
+        );
+        let sweeper = include_str!("../../src/code_sign_clone.rs");
+        let shipped = sweeper.split("#[cfg(test)]").next().unwrap();
+        for (needle, why) in [
+            ("std::thread::Builder", "a thread of its own"),
+            ("libc::PRIO_DARWIN_BG", "the lowest priority the system has"),
+            ("const BUDGET: Duration", "a time limit"),
+            (
+                "const MIN_AGE: Duration",
+                "nothing younger than five minutes",
+            ),
+        ] {
+            assert!(
+                shipped.contains(needle),
+                "the sweep lost {why} (`{needle}`)"
+            );
+        }
     }
 
     /// A device the emulator door booted for an agent's pane goes down when

@@ -297,6 +297,13 @@ pub(crate) fn boot_phase(app: tauri::AppHandle, phase: String) -> Result<(), Str
     }
     #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
     let _ = app;
+    // And the signed copies of this app that earlier starts left behind
+    // (t-20243) are swept — once, on a thread of its own, at the lowest
+    // priority there is. Only macOS has such copies.
+    #[cfg(target_os = "macos")]
+    if known == Phase::FirstPaint {
+        crate::code_sign_clone::sweep_after_first_paint(recorder().root.get().cloned());
+    }
     Ok(())
 }
 
