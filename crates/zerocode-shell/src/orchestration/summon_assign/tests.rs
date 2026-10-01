@@ -466,11 +466,10 @@ fn an_open_agent_rides_the_one_request() {
     );
     let heard = endpoint.asked();
     assert_eq!(heard.len(), 1, "one request where there were three");
-    assert_eq!(
-        heard[0].matches(SPEC_WORD).count(),
-        1,
-        "the spec is sent once"
-    );
+    // The words ride twice in the one body: as the work's `spec` and as the
+    // agent question's `brief` (the same head under its own cap) — never once
+    // more for the pairs.
+    assert_eq!(heard[0].matches(SPEC_WORD).count(), 2, "spec and brief");
     for question in [
         "\"summon\"",
         "summon_difficulty",
