@@ -79,11 +79,13 @@ pub(crate) async fn list_worktrees(
     Ok(entries)
 }
 
-/// Which agent the orchestration ledger last seated in a checkout, if any.
+/// Which agent the orchestration ledger seated in a checkout and has not let
+/// go of, if any.
 ///
-/// `None` for a checkout no worker was ever cut for, and when the runtime is
-/// down — the window then opens what it always opened. Async: the ledger image
-/// is rebuilt to answer, and a restore is not a keystroke's thread to hold.
+/// `None` for a checkout no worker was ever cut for, one whose workers were all
+/// released (t-19779), and when the runtime is down — the window then opens
+/// what it always opened. Async: the ledger image is rebuilt to answer, and a
+/// restore is not a keystroke's thread to hold.
 #[tauri::command(async)]
 pub(crate) fn worktree_last_agent(worktree: String) -> Option<orchestration::LastAgentInCheckout> {
     orchestration::last_agent_in_checkout(&worktree)

@@ -19856,16 +19856,26 @@ mod tests {
         );
     }
 
-    /// A workspace the ledger seated a worker in comes back as THAT agent.
+    /// A workspace the ledger seated a worker in comes back as THAT seat: the
+    /// pane that stands is attached and the one that is coming back is waited
+    /// for — and the window never launches the agent the ledger names.
     ///
     /// A worker's tab is the ledger's to persist, never the pane layout's, so
     /// a checkout cut for a Codex worker restores with nothing stored — and the
     /// empty-workspace road opened the default agent: a Codex worktree wearing
     /// Claude after every restart ("원래는 codex가 작업중이였는데 재시작하면
     /// claude로 바껴있는"). The restore asks the ledger once, on the one road
-    /// that would otherwise guess; the backend answers from the newest seat.
+    /// that would otherwise guess, and the backend answers from the newest seat
+    /// somebody is coming back to. A seat the ledger LET GO of is nobody's
+    /// (t-19779): the window used to start its agent again, fresh, on every
+    /// visit, so five finished workers' checkouts each held an empty Claude a
+    /// few minutes after their last turn on 2026-10-01 — whatever the person
+    /// had chosen to open in a new workspace — and the reclaimer waited on it.
+    /// A restart puts a worker to sleep now, so the one road that needed a
+    /// launch is gone, and a checkout nobody is coming back to takes the
+    /// person's own road (`openTermTab`).
     #[test]
-    fn a_workspace_the_ledger_seated_comes_back_as_that_agent() {
+    fn a_workspace_the_ledger_seated_is_attached_or_waited_for_and_never_launched_again() {
         let window = window_source();
         let restoring = block_after(window, "async function restoreActiveWorktreeTab(");
         assert!(
@@ -19879,9 +19889,12 @@ mod tests {
             seating.contains("invoke(\"worktree_last_agent\", { worktree: activeWorktreePath })")
                 && seating.contains("if (!seated?.agent) return false;")
                 && seating.contains("if (seated.sleeping === true)")
-                && seating.contains("restoringWorkers.set(activeWorktreePath, seated.agent);")
-                && seating.contains("row.id === seated.agent"),
-            "the first terminal no longer asks who the ledger seated here, or lost its fallback:\n{seating}"
+                && seating.contains("restoringWorkers.set(activeWorktreePath, seated.agent);"),
+            "the first terminal no longer asks who the ledger seated here, or lost its answer for a reserved seat:\n{seating}"
+        );
+        assert!(
+            !seating.contains("launchAgentTab(") && !seating.contains("row.id === seated.agent"),
+            "the window launches the agent of a seat the ledger named, in a checkout nobody may be coming back to:\n{seating}"
         );
         let answering = block_after(
             include_str!("../../src/orchestration.rs"),
@@ -19893,6 +19906,10 @@ mod tests {
                 .count()
                 >= 2,
             "the ledger's answer no longer reserves a sleeping or orphaned seat before choosing the newest:\n{answering}"
+        );
+        assert!(
+            answering.contains(".filter(|(_, worker)| worker.state.still_summoned())"),
+            "the ledger's answer names a worker it let go of — the window opens its agent again on a visit:\n{answering}"
         );
     }
 

@@ -7387,19 +7387,26 @@ function fillStageLeaves(node, ids) {
 }
 
 /* The first terminal of a workspace that stored nothing, when the
- * orchestration ledger last seated an agent here. Answers whether the seat
- * was taken — launched, or refused out loud — so the caller knows not to
- * open a second thing in its place.
+ * orchestration ledger seated an agent here and has not let go of it. Answers
+ * whether the seat was taken — attached, or reserved — so the caller knows not
+ * to open a second thing in its place.
  *
  * A worker's tab is the ledger's to persist, never the pane layout's
  * (`persistPaneLayouts` skips `ledgerManaged`), so a checkout cut for a Codex
  * worker restores as an EMPTY workspace — and an empty workspace opened the
  * default agent, which is how a Codex worktree came back wearing Claude after
  * a restart ("원래는 codex가 작업중이였는데 재시작하면 claude로 바껴있는"). The
- * ledger still knows who was there, released or not; asked once, here, on the
- * one road that would otherwise guess. A checkout no worker was cut for
- * answers null — so does a runtime that is down — and the caller takes the
- * door it always took (`openTermTab`). */
+ * ledger still knows who is coming back; asked once, here, on the one road
+ * that would otherwise guess. A checkout nobody is coming back to answers null
+ * — so does one no worker was cut for, and a runtime that is down — and the
+ * caller takes the door it always took (`openTermTab`).
+ *
+ * What the ledger names is attached or waited for, never launched (t-19779).
+ * The window used to start the agent of a seat the ledger had let go of, fresh,
+ * on every visit: five finished workers' checkouts each held an empty Claude a
+ * few minutes after their last turn, 190 MB apiece, whatever the person had
+ * chosen to open in a new workspace — and the reclaimer waited on it, with the
+ * checkout and its build output. */
 async function openLedgerSeatedAgent() {
   // Restore needs current ownership, even between board snapshot publications.
   // The existing asynchronous restore command returns the seat and agent together.
@@ -7424,18 +7431,8 @@ async function openLedgerSeatedAgent() {
     // here gives this checkout two owners when its coordinator mounts later.
     return true;
   }
-  if (agentRows.length === 0) await refreshAgents();
-  const chosen = installedAgents().find((row) => row.id === seated.agent);
-  if (!chosen) return false;
-  try {
-    const term = await launchAgentTab({ agent: chosen.id, prompt: "", ...spawnGrid() });
-    mountTermTab(term, { agent: chosen.name }, {});
-  } catch (error) {
-    // Reported, and still the answer: a launch that failed is not a reason
-    // to open something else in its place — the person has been told.
-    showError(error);
-  }
-  return true;
+  // The ledger names no other seat: the caller's door is the person's own.
+  return false;
 }
 
 function recordLeafCount(node) {
