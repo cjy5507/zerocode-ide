@@ -36,6 +36,15 @@
 //! ([`WaitClock::listens`]) the wait still looks every 250ms, and asks tmux only
 //! every few seconds.
 //!
+//! A third file is left when a split fails: `split-given-up`
+//! ([`SPLIT_GIVEN_UP_FILE`], t-19898). A `split-window` that tmux does not
+//! answer within [`TMUX_SPLIT_BOUND`] is ended, and the pane tmux may have cut
+//! for it is looked for and closed. Given up or refused — the window refuses
+//! after its own deadline and may still open the pane — the note is left in the
+//! child's directory for a pane that is opened later still: the child reads it
+//! before its brief and leaves without working, so that no helper runs without
+//! a waiter.
+//!
 //! ## What this module refuses
 //!
 //! `ZEROCODE_PANE_KEY` is NOT evidence of a team. The window puts it in every
@@ -53,6 +62,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 mod child_watch;
+mod split;
 mod tmux_ask;
 
 pub use child_watch::{ChildWatch, Woken};
@@ -1373,6 +1383,19 @@ pub const BRIEF_FILE: &str = "brief.json";
 pub const RESULT_FILE: &str = "result.json";
 /// The last file a child writes: `exit: closed` and why.
 pub const RESULT_FINAL_FILE: &str = "result-final.json";
+/// What a parent leaves in a child's directory when it gives up waiting for the
+/// child's pane (t-19898): tmux never answered the split, and a pane the server
+/// opens late must not start work that nobody waits for. The child looks for it
+/// before it reads its brief, so it leaves without a model request. A brief
+/// written afterwards ([`Brief::write`]) takes it away again.
+pub const SPLIT_GIVEN_UP_FILE: &str = "split-given-up";
+
+/// Whether the parent of the child in `directory` gave up its split
+/// ([`SPLIT_GIVEN_UP_FILE`]).
+#[must_use]
+pub fn split_given_up(directory: &Path) -> bool {
+    directory.join(SPLIT_GIVEN_UP_FILE).exists()
+}
 
 /// The result file of turn `turn`. Turn 1 keeps the v1 name so an old parent
 /// waiting on `result.json` still hears its child's first answer.
@@ -1414,7 +1437,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 impl Brief {
     /// Put this brief in `directory`, atomically.
+    ///
+    /// A brief written is a wish renewed: it takes away the note a parent left
+    /// when it gave up an earlier split of this helper ([`SPLIT_GIVEN_UP_FILE`]),
+    /// so that a pane cut again for it — a resume — does not leave on the strength
+    /// of an attempt that is over.
     pub fn write(&self, directory: &Path) -> std::io::Result<PathBuf> {
+        let _ = std::fs::remove_file(directory.join(SPLIT_GIVEN_UP_FILE));
         let path = directory.join(BRIEF_FILE);
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
@@ -1538,6 +1567,9 @@ impl TeammateResult {
 #[derive(Debug, Clone)]
 pub struct Tmux {
     program: std::ffi::OsString,
+    /// How long a `split-window` is waited for: [`TMUX_SPLIT_BOUND`], but for
+    /// a test that has to end one in milliseconds.
+    split_bound: Duration,
 }
 
 impl Default for Tmux {
@@ -1550,9 +1582,7 @@ impl Tmux {
     /// Whatever `PATH` answers for `tmux`, resolved at spawn time.
     #[must_use]
     pub fn on_path() -> Self {
-        Self {
-            program: std::ffi::OsString::from("tmux"),
-        }
+        Self::at("tmux")
     }
 
     /// One named binary — a test's recorder, or a person's own tmux.
@@ -1560,7 +1590,17 @@ impl Tmux {
     pub fn at(program: impl Into<std::ffi::OsString>) -> Self {
         Self {
             program: program.into(),
+            split_bound: TMUX_SPLIT_BOUND,
         }
+    }
+
+    /// The same tmux with its own bound on a split: the one number a test
+    /// cannot afford at its production size (12 s).
+    #[cfg(all(test, target_os = "macos"))]
+    #[must_use]
+    fn with_split_bound(mut self, bound: Duration) -> Self {
+        self.split_bound = bound;
+        self
     }
 
     /// What will actually be run. A bare `tmux` is resolved by `PATH` at spawn
@@ -1570,32 +1610,16 @@ impl Tmux {
         &self.program
     }
 
-    fn run(&self, args: &[String]) -> Result<String, String> {
-        let output = std::process::Command::new(&self.program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|error| format!("could not run tmux: {error}"))?;
-        if output.status.success() {
-            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
-        }
-        let said = String::from_utf8_lossy(&output.stderr);
-        let said = said.trim();
-        Err(if said.is_empty() {
-            format!("tmux {} failed", args.first().map_or("", String::as_str))
-        } else {
-            said.to_string()
-        })
-    }
-
-    /// Cut a pane and start a teammate in it. Answers the new pane's id.
+    /// Cut a pane and start a teammate in it. Answers the new pane's id — or
+    /// the words of why there is none: tmux's own words for a refusal, a tmux
+    /// that could not be run, or a split that was given up at
+    /// [`TMUX_SPLIT_BOUND`] (t-19898). A split that fails after tmux may have
+    /// taken it — refused, given up, or answered with no id — withdraws its
+    /// helper ([`SPLIT_GIVEN_UP_FILE`]), and one given up or answered with no id
+    /// also looks for the pane tmux may have cut and closes it, so that no helper
+    /// runs without a waiter.
     pub fn split(&self, spec: &SplitSpec<'_>) -> Result<String, String> {
-        let answer = self.run(&split_argv(spec))?;
-        let pane = answer.trim();
-        if pane.is_empty() {
-            return Err("tmux cut a pane and did not say which".to_string());
-        }
-        Ok(pane.to_string())
+        split::split(self, spec)
     }
 
     /// End one pane. `false` when tmux refused — the pane may already be gone,
@@ -1804,6 +1828,24 @@ pub const TMUX_ASK_BOUND: std::time::Duration = std::time::Duration::from_secs(3
 /// [`TMUX_ASK_BOUND`], so a slow tmux delays the wait's end by this much at
 /// most, and a quick one — a few milliseconds — not at all.
 pub const PANE_KILL_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The longest one `split-window` is waited for (t-19898). More than
+/// [`TMUX_ASK_BOUND`], because a split is more than a question: besides a first
+/// exec of the tmux it is, in the window, a pane the window opens before it
+/// answers (`crates/zerocode-shell/src/agent_teams.rs`, `run`).
+///
+/// Two numbers of the window's bound it, in this order, and zo-ide cannot see
+/// either — the dependency runs the other way — so they are written here:
+///
+/// - `TEAM_DEADLINE`, 10 s (`crates/zerocode-hookd/src/lib.rs:437`): after it the
+///   window answers a refusal that says why. This bound is above it, so that
+///   sentence reaches the agent before ours does, and a split the window would
+///   still have answered is never ended.
+/// - `SHIM_DEADLINE_SECONDS`, 15 (`crates/zerocode-core/src/agent_teams.rs:1266`):
+///   the window's `tmux` hangs up on the window then. This bound is below it, so
+///   it is the one that ends a `tmux` of a person's own that hangs, and ends a
+///   shim that does not reach `curl` at all.
+pub const TMUX_SPLIT_BOUND: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// The cadences of one wait. A test hands in its own so that what takes
 /// seconds in production takes milliseconds there.
@@ -4137,6 +4179,513 @@ mod tests {
         let group = getpgid(Some(pid)).expect("the stalled tmux's group");
         assert_eq!(group, pid, "the tmux does not lead a group of its own");
         assert_ne!(group, getpgrp(), "the tmux was asked in this process's own group");
+    }
+
+    /// The script of a CUTTING `tmux` (t-19898): a server that opens the pane of
+    /// a `split-window` first — it writes the pane into its table, `panes`, with
+    /// the command the pane started with — and answers after, or never. Every
+    /// verb stalls as the stalling fake's do (a `stall-<verb>` file writes
+    /// `<verb> <pid>` to `stalled` and sleeps through `exec`), and a
+    /// `delay-<verb>` file sleeps and then answers. The other switches are one
+    /// file each beside the link: `refuse-split-window` (its words are the
+    /// refusal), `silent-split-window` (cuts, exits 0, prints no id) and
+    /// `no-start-command` (a `list-panes` that cannot print
+    /// `#{pane_start_command}`, as the window's tmux cannot).
+    #[cfg(target_os = "macos")]
+    const CUTTING_TMUX: &str = r#"#!/bin/sh
+here="${0%/*}"
+printf '%s\n' "$*" >> "$here/tmux.log"
+stall() {
+  if [ -f "$here/stall-$1" ]; then
+    read -r seconds < "$here/stall-$1"
+    printf '%s %s\n' "$1" "$$" >> "$here/stalled"
+    exec sleep "$seconds"
+  fi
+}
+delay() {
+  if [ -f "$here/delay-$1" ]; then
+    read -r seconds < "$here/delay-$1"
+    sleep "$seconds"
+  fi
+}
+case "$1" in
+split-window)
+  if [ -f "$here/refuse-split-window" ]; then
+    cat "$here/refuse-split-window" >&2
+    exit 1
+  fi
+  read -r number < "$here/next"
+  printf '%s\n' "$((number + 1))" > "$here/next"
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+  shift
+  printf '%%%s %s\n' "$number" "$*" >> "$here/panes"
+  stall split-window
+  delay split-window
+  if [ ! -f "$here/silent-split-window" ]; then
+    printf '%%%s\n' "$number"
+  fi
+  ;;
+list-panes)
+  stall list-panes
+  case "$*" in
+  *pane_start_command*)
+    if [ -f "$here/no-start-command" ]; then
+      cut -d' ' -f1 "$here/panes"
+    else
+      cat "$here/panes"
+    fi
+    ;;
+  *) cut -d' ' -f1 "$here/panes" ;;
+  esac
+  ;;
+kill-pane)
+  stall kill-pane
+  while [ "$#" -gt 0 ] && [ "$1" != "-t" ]; do shift; done
+  grep -v "^$2 " "$here/panes" > "$here/panes.next"
+  mv "$here/panes.next" "$here/panes"
+  ;;
+warm) stall warm ;;
+esac
+"#;
+
+    /// The one cutting `tmux`, written once and run once before any test uses
+    /// it, as [`shared_stalling_tmux`] is and for the same reason.
+    #[cfg(target_os = "macos")]
+    fn shared_cutting_tmux() -> &'static Path {
+        static SCRIPT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        SCRIPT.get_or_init(|| {
+            let home: &'static tempfile::TempDir = Box::leak(Box::new(
+                tempfile::Builder::new()
+                    .prefix("zo-cutting-tmux-")
+                    .tempdir()
+                    .expect("tempdir"),
+            ));
+            let script = home.path().join("tmux");
+            std::fs::write(&script, CUTTING_TMUX).expect("write cutting tmux");
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+            std::fs::write(home.path().join("stall-warm"), "0\n").expect("warm stall");
+            for _ in 0..50 {
+                if std::process::Command::new(&script).arg("warm").output().is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            script
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    impl StallingTmux {
+        /// A cutting tmux ([`shared_cutting_tmux`]) whose table holds `panes`,
+        /// one `%<id> <start command>` a line, and whose next pane is `%12`.
+        /// `stalls` are `(verb, seconds)` as for [`Self::new`]; `files` are the
+        /// other switches, `(name, contents)`.
+        fn cutting(stalls: &[(&str, u64)], panes: &str, files: &[(&str, &str)]) -> Self {
+            let directory = tempfile::tempdir().expect("tempdir");
+            std::fs::write(directory.path().join("panes"), panes).expect("panes");
+            std::fs::write(directory.path().join("next"), "12\n").expect("next pane");
+            for (verb, seconds) in stalls {
+                std::fs::write(directory.path().join(format!("stall-{verb}")), format!("{seconds}\n"))
+                    .expect("stall file");
+            }
+            for (name, contents) in files {
+                std::fs::write(directory.path().join(name), contents).expect("switch file");
+            }
+            let link = directory.path().join("tmux");
+            std::os::unix::fs::symlink(shared_cutting_tmux(), &link).expect("link cutting tmux");
+            Self {
+                tmux: Tmux::at(link),
+                directory,
+            }
+        }
+
+        /// The ids in the table of panes the cutting tmux keeps.
+        fn standing(&self) -> Vec<String> {
+            std::fs::read_to_string(self.path().join("panes"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.split(' ').next().map(str::to_string))
+                .collect()
+        }
+
+        /// Every call that stalled is gone within `within` of now: one a bound
+        /// ended is ended by then, and none was left for a wait to find.
+        fn assert_stalled_gone(&self, within: Duration, case: &str) {
+            use nix::sys::signal::kill;
+            use nix::unistd::Pid;
+            let until = std::time::Instant::now() + within;
+            for (verb, pid) in self.stalled() {
+                let pid = Pid::from_raw(pid);
+                while kill(pid, None).is_ok() && std::time::Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(kill(pid, None).is_err(), "{case}: the `{verb}` tmux (pid {pid}) still ran {within:?} after the split came back");
+            }
+        }
+    }
+
+    /// The panes of a window a split is opened in: the parent's own, and
+    /// another helper's, which a given-up split must never close.
+    #[cfg(target_os = "macos")]
+    const A_WINDOW_BEFORE_THE_SPLIT: &str =
+        "%1 /bin/zsh\n%7 /opt/zo --teammate /store/agent-other --model m\n";
+
+    /// A split bound a test can afford, and long enough that a split which
+    /// answers inside it is not taken for one that did not.
+    #[cfg(target_os = "macos")]
+    const TEST_SPLIT_BOUND: Duration = Duration::from_millis(400);
+
+    /// The first child of a wave, run by a stand-in for zo.
+    #[cfg(target_os = "macos")]
+    fn split_of<'a>(directory: &'a Path, agent_id: &'a str) -> SplitSpec<'a> {
+        SplitSpec {
+            directory,
+            agent_id,
+            program: "/opt/zo",
+            model: None,
+            effort: None,
+            wave_index: 0,
+            resume_transcript: None,
+        }
+    }
+
+    /// A split that came back, and when it began and came back.
+    #[cfg(target_os = "macos")]
+    struct SplitBack {
+        fake: StallingTmux,
+        child: PathBuf,
+        answer: Result<String, String>,
+        began: std::time::Instant,
+        ended: std::time::Instant,
+    }
+
+    /// Open a pane for `agent-60` through a cutting tmux that `stalls`, with
+    /// `bound` for the split, and hear `split` come back — or fail, as the
+    /// test it is in, when it has not come back `within` the time it began. A
+    /// split with no bound comes back when tmux does, which for a tmux that
+    /// never answers is not within any `within`.
+    #[cfg(target_os = "macos")]
+    fn split_through(
+        stalls: &[(&str, u64)],
+        files: &[(&str, &str)],
+        bound: Duration,
+        within: Duration,
+    ) -> SplitBack {
+        let fake = StallingTmux::cutting(stalls, A_WINDOW_BEFORE_THE_SPLIT, files);
+        let tmux = fake.tmux.clone().with_split_bound(bound);
+        let child = fake.path().join("agent-60");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let (tell, heard) = std::sync::mpsc::channel();
+        let began = std::time::Instant::now();
+        {
+            let child = child.clone();
+            std::thread::spawn(move || {
+                let answer = tmux.split(&split_of(&child, "agent-60"));
+                let _ = tell.send((answer, std::time::Instant::now()));
+            });
+        }
+        let (answer, ended) = heard.recv_timeout(within).unwrap_or_else(|_| {
+            panic!("a split-window that tmux never answered was still waited for {within:?} after its {bound:?} bound")
+        });
+        SplitBack {
+            fake,
+            child,
+            answer,
+            began,
+            ended,
+        }
+    }
+
+    /// A split-window that tmux never answers is given up at its bound
+    /// (t-19898), and what it started is gone with it. It ran as long as tmux
+    /// stalled: `Command::output()` has no limit, so a hung server held the
+    /// spawn of a helper for as long as it hung.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_split_that_tmux_never_answers_is_given_up_at_its_bound() {
+        let back = split_through(
+            &[("split-window", 10)],
+            &[],
+            TEST_SPLIT_BOUND,
+            TEST_SPLIT_BOUND + Duration::from_secs(2),
+        );
+        let words = back.answer.clone().expect_err("a split nobody answered was read as a pane");
+        let took = back.ended.duration_since(back.began);
+        assert!(
+            took >= TEST_SPLIT_BOUND && took < TEST_SPLIT_BOUND + Duration::from_millis(800),
+            "a split was given up after {took:?}"
+        );
+        assert!(
+            words.contains("split-window") && words.contains("400 ms"),
+            "the words do not say what was given up, or when: {words}"
+        );
+        back.fake.assert_stalled_gone(Duration::from_millis(250), "an unanswered split");
+    }
+
+    /// A pane the server had already cut for a split that was given up is
+    /// closed (t-19898): found by what it was started with — the helper's own
+    /// id, which is the last word of the directory it was told to work in — and
+    /// by that alone, so the parent's pane and another helper's stand.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_given_up_split_closes_the_pane_the_server_had_cut_for_it() {
+        let back = split_through(
+            &[("split-window", 10)],
+            &[],
+            TEST_SPLIT_BOUND,
+            TEST_SPLIT_BOUND + Duration::from_secs(2),
+        );
+        let words = back.answer.clone().expect_err("a split nobody answered was read as a pane");
+        let asked = tmux_log(back.fake.path());
+        assert!(
+            asked.iter().any(|line| line == "list-panes -F #{pane_id} #{pane_start_command}"),
+            "tmux was not asked what each pane started with: {asked:?}"
+        );
+        assert_eq!(
+            asked.iter().filter(|line| line.starts_with("kill-pane")).collect::<Vec<_>>(),
+            ["kill-pane -t %12"],
+            "the pane the server cut was not the one closed, or not the only one"
+        );
+        assert_eq!(back.fake.standing(), ["%1", "%7"], "a pane that was not this helper's was closed");
+        assert!(words.contains("%12") && words.contains("closed"), "the words do not say what was closed: {words}");
+    }
+
+    /// A split that is given up withdraws its helper (t-19898): a pane the
+    /// server opens after the parent stopped waiting finds the note before it
+    /// finds a brief. The window answers a split after it has opened the pane,
+    /// but a window that is busy opens it late — after the parent has gone — and
+    /// nothing can be looked up then.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_given_up_split_withdraws_its_helper() {
+        let back = split_through(
+            &[("split-window", 10)],
+            &[],
+            TEST_SPLIT_BOUND,
+            TEST_SPLIT_BOUND + Duration::from_secs(2),
+        );
+        assert!(
+            split_given_up(&back.child),
+            "a split that was given up left no note for a pane that opens late"
+        );
+    }
+
+    /// The next brief a parent writes takes the note away (t-19898): a child
+    /// that is cut again for the same helper — a resume — must not leave at
+    /// once on the strength of an attempt that is over.
+    #[test]
+    fn a_brief_written_renews_what_a_given_up_split_withdrew() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::write(directory.path().join(SPLIT_GIVEN_UP_FILE), "").expect("note");
+        assert!(split_given_up(directory.path()));
+        Brief {
+            version: PROTOCOL_VERSION,
+            agent_id: "agent-61".to_string(),
+            prompt: "Count the edges of the map.".to_string(),
+            ..Brief::default()
+        }
+        .write(directory.path())
+        .expect("write brief");
+        assert!(
+            !split_given_up(directory.path()),
+            "a brief written after a given-up split left the helper withdrawn"
+        );
+    }
+
+    /// A tmux that says nothing at all — to the split, to the look for the pane
+    /// it may have cut, to a `kill-pane` — leaves no tmux of ours running
+    /// (t-19898), is not asked to kill what it cannot be asked about, and the
+    /// words say so. The look is given up at [`TMUX_ASK_BOUND`], so the split
+    /// comes back one bound and one look after it began.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_tmux_that_answers_nothing_at_all_leaves_nothing_running() {
+        let back = split_through(
+            &[("split-window", 10), ("list-panes", 10), ("kill-pane", 10)],
+            &[],
+            TEST_SPLIT_BOUND,
+            TEST_SPLIT_BOUND + TMUX_ASK_BOUND + Duration::from_secs(2),
+        );
+        let words = back.answer.clone().expect_err("a split nobody answered was read as a pane");
+        let took = back.ended.duration_since(back.began);
+        // The look was waited for, whole, after the split's own wait; and no
+        // longer than that — the two bounds are all that holds the split.
+        assert!(
+            took >= TMUX_ASK_BOUND && took < TEST_SPLIT_BOUND + TMUX_ASK_BOUND + Duration::from_millis(800),
+            "a split and the look for its pane were given up after {took:?}"
+        );
+        let asked = tmux_log(back.fake.path());
+        assert!(
+            !asked.iter().any(|line| line.starts_with("kill-pane")),
+            "a pane was killed on a tmux that could not say which: {asked:?}"
+        );
+        let stalled: Vec<String> = back.fake.stalled().into_iter().map(|(verb, _)| verb).collect();
+        assert_eq!(stalled, ["split-window", "list-panes"], "tmux was not asked exactly once for each");
+        back.fake.assert_stalled_gone(Duration::from_millis(250), "a silent tmux");
+        assert!(split_given_up(&back.child), "the helper was not withdrawn");
+        assert!(words.contains("nor the look"), "the words do not say the look went unanswered: {words}");
+    }
+
+    /// A tmux that cannot say what a pane started with — the window's — gets
+    /// the look and nothing more (t-19898). A pane that is new since the split
+    /// began is not this helper's for being new: two splits run side by side, and
+    /// the other's pane stands at the same moment. The note is what keeps that
+    /// pane from working.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_tmux_that_cannot_say_what_a_pane_started_with_is_never_guessed_at() {
+        let back = split_through(
+            &[("split-window", 10)],
+            &[("no-start-command", "")],
+            TEST_SPLIT_BOUND,
+            TEST_SPLIT_BOUND + Duration::from_secs(2),
+        );
+        let words = back.answer.clone().expect_err("a split nobody answered was read as a pane");
+        let asked = tmux_log(back.fake.path());
+        assert_eq!(asked.iter().filter(|line| line.starts_with("list-panes")).count(), 1, "{asked:?}");
+        assert!(
+            !asked.iter().any(|line| line.starts_with("kill-pane")),
+            "a pane was closed that nothing said was this helper's: {asked:?}"
+        );
+        assert_eq!(back.fake.standing(), ["%1", "%7", "%12"]);
+        assert!(split_given_up(&back.child), "the helper was not withdrawn");
+        assert!(
+            words.contains("withdrawn") && !words.contains("closed"),
+            "the words claim a pane was closed: {words}"
+        );
+    }
+
+    /// A split that cuts a pane and exits without its id is cleaned up the
+    /// same way (t-19898): the pane is there and nobody holds its id, which is
+    /// the one thing a `kill-pane` needs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_split_that_cuts_a_pane_and_names_none_is_cleaned_up_too() {
+        let fake = StallingTmux::cutting(
+            &[],
+            A_WINDOW_BEFORE_THE_SPLIT,
+            &[("silent-split-window", "")],
+        );
+        let tmux = fake.tmux.clone().with_split_bound(Duration::from_secs(2));
+        let child = fake.path().join("agent-62");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let words = tmux
+            .split(&split_of(&child, "agent-62"))
+            .expect_err("a split that named no pane was read as one");
+        assert!(
+            words.starts_with("tmux cut a pane and did not say which") && words.contains("%12"),
+            "{words}"
+        );
+        assert!(
+            tmux_log(fake.path()).iter().any(|line| line == "kill-pane -t %12"),
+            "the pane that was cut with no id was left standing"
+        );
+        assert!(split_given_up(&child), "the helper was not withdrawn");
+    }
+
+    /// A refusal keeps tmux's words, asks nothing more, and withdraws its helper
+    /// (t-19898). The window says why a pane could not be opened — an unattended
+    /// login it could not confirm — and the agent that asked reads it; a tmux
+    /// that refused has cut no pane, so none is looked for. But a refusal is not
+    /// always the last word: the window's bridge refuses after its own deadline,
+    /// "tmux: timed out waiting for the window", and an effect the window had
+    /// already admitted may still finish — a pane opened after the parent was
+    /// told no, whose child would run with nobody waiting.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_refused_split_keeps_tmuxs_words_asks_nothing_more_and_withdraws_its_helper() {
+        for refusal in [
+            "tmux: could not open a pane: an unattended worker cannot start",
+            "tmux: timed out waiting for the window",
+        ] {
+            let fake = StallingTmux::cutting(
+                &[],
+                A_WINDOW_BEFORE_THE_SPLIT,
+                &[("refuse-split-window", &format!("{refusal}\n"))],
+            );
+            let tmux = fake.tmux.clone().with_split_bound(Duration::from_secs(2));
+            let child = fake.path().join("agent-63");
+            std::fs::create_dir_all(&child).expect("mkdir");
+            let words = tmux
+                .split(&split_of(&child, "agent-63"))
+                .expect_err("a refused split was read as a pane");
+            assert_eq!(words, refusal);
+            assert_eq!(tmux_log(fake.path()).len(), 1, "{refusal}: a refusal was followed by more questions");
+            assert!(split_given_up(&child), "{refusal}: a refused split left its helper to a pane that opens late");
+        }
+    }
+
+    /// A failed split leaves one note in its helper's own directory and makes no
+    /// directory of its own (t-19898). The note has one fixed name that is
+    /// written over, never added to: a refusal met three times for one helper
+    /// leaves the one file, and the directory is the one the failed spawn had
+    /// already made for the helper's brief — a directory that is not there is
+    /// not made for a note.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_split_leaves_one_note_in_its_helpers_directory_and_makes_no_directory() {
+        let fake = StallingTmux::cutting(
+            &[],
+            A_WINDOW_BEFORE_THE_SPLIT,
+            &[("refuse-split-window", "tmux: timed out waiting for the window\n")],
+        );
+        let tmux = fake.tmux.clone().with_split_bound(Duration::from_secs(2));
+        let child = fake.path().join("agent-65");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        for _ in 0..3 {
+            tmux.split(&split_of(&child, "agent-65"))
+                .expect_err("a refused split was read as a pane");
+        }
+        let left: Vec<String> = std::fs::read_dir(&child)
+            .expect("the helper's directory")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, [SPLIT_GIVEN_UP_FILE], "a refused split left more than its one note: {left:?}");
+        let nowhere = fake.path().join("agent-66");
+        tmux.split(&split_of(&nowhere, "agent-66"))
+            .expect_err("a refused split was read as a pane");
+        assert!(!nowhere.exists(), "a failed split made a directory for its note");
+    }
+
+    /// A split that answers late but inside its bound is not given up
+    /// (t-19898): a window that opens a pane in a second or two on a slow
+    /// machine is a window that works, and the bound is there for the one that
+    /// does not.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_slow_split_inside_its_bound_is_not_given_up() {
+        let fake = StallingTmux::cutting(
+            &[],
+            A_WINDOW_BEFORE_THE_SPLIT,
+            &[("delay-split-window", "0.6\n")],
+        );
+        let tmux = fake.tmux.clone().with_split_bound(Duration::from_secs(2));
+        let child = fake.path().join("agent-64");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let began = std::time::Instant::now();
+        let pane = tmux.split(&split_of(&child, "agent-64")).expect("a slow split was given up");
+        let took = began.elapsed();
+        assert_eq!(pane, "%12");
+        assert!(
+            took >= Duration::from_millis(600) && took < Duration::from_millis(1800),
+            "a slow split took {took:?}"
+        );
+        assert_eq!(tmux_log(fake.path()).len(), 1, "a split that answered was followed by more questions");
+        assert!(!split_given_up(&child), "a split that answered withdrew its helper");
+    }
+
+    /// The bound production runs a split under is the split's own, above the
+    /// bound of a question (t-19898).
+    #[test]
+    fn the_production_bound_is_a_split_bound_above_the_bound_of_a_question() {
+        assert_eq!(Tmux::on_path().split_bound, TMUX_SPLIT_BOUND);
+        assert_eq!(Tmux::at("/opt/tmux").split_bound, TMUX_SPLIT_BOUND);
+        assert!(TMUX_SPLIT_BOUND > TMUX_ASK_BOUND);
     }
 
     /// A child's channel as its parent meets it: it takes connections and says

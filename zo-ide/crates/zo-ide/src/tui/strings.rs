@@ -282,6 +282,11 @@ pub fn teammate_closing_reason(reason: runtime::subagent_panes::CloseReason) -> 
 /// pressed a key here — so it stays for them (t-11753). Esc twice still closes
 /// it, and the idle budget still does.
 pub const TEAMMATE_KEPT_FOR_PERSON: &str = "답은 부모에게 닿았다 · 여기서 손을 대서 판을 남긴다";
+/// A pane that was cut after its parent gave up waiting for it (t-19898): a
+/// tmux that answered too late, a window that was busy. Nobody waits for this
+/// helper's answer, so it starts no work and leaves — and this is the line a
+/// person who finds the pane reads, before the process ends.
+pub const TEAMMATE_SPLIT_GIVEN_UP: &str = "부모가 이 판 열기를 포기했다 · 일하지 않고 닫는다";
 
 /* ---- a background command's completion cell (t-3177) ---- */
 

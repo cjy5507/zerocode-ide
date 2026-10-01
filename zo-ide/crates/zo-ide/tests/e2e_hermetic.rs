@@ -1008,6 +1008,129 @@ async fn e2e_a_teammate_pane_runs_its_brief_once_and_writes_the_answer_back() {
     let _ = run.finish();
 }
 
+/// A pane that is cut after its parent gave up waiting for it starts no work
+/// (t-19898). The parent left a note in the child's directory, and the child
+/// looks for it before it reads its brief: no model request, no result file
+/// for a parent that is not waiting, the strings table's line on the pane, and
+/// a clean exit — the pane is not a failure of the child's. The note comes
+/// after the brief, because a brief written takes the note away again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_teammate_cut_after_its_parent_gave_up_leaves_without_working() {
+    use runtime::subagent_panes::{Brief, PROTOCOL_VERSION, SPLIT_GIVEN_UP_FILE};
+
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("nobody asked for this answer\n")
+        .await
+        .expect("start teammate script");
+    let directory = layout.root.path().join("agent-late-1");
+    fs::create_dir_all(&directory).expect("teammate directory");
+    Brief {
+        version: PROTOCOL_VERSION,
+        agent_id: "agent-late-1".to_string(),
+        prompt: "Count the edges of the map.".to_string(),
+        description: "recon".to_string(),
+        subagent_type: Some("Explore".to_string()),
+        name: Some("late".to_string()),
+        permission_mode: Some("read-only".to_string()),
+        parent_session: Some("session-parent-e2e".to_string()),
+        tool_call_id: Some("toolu_late".to_string()),
+        ..Brief::default()
+    }
+    .write(&directory)
+    .expect("write brief");
+    fs::write(directory.join(SPLIT_GIVEN_UP_FILE), "").expect("write the note");
+
+    let dir_arg = directory.to_string_lossy().into_owned();
+    let mut run = pty(&layout, service.base_url(), &["--teammate", &dir_arg]);
+    // It leaves by itself, and only then are its bytes read: a line written
+    // just before the exit is in the capture once the reader has ended.
+    let code = run.exit_code(Duration::from_secs(5));
+    let output = run.finish();
+    let shown = String::from_utf8_lossy(&output);
+    assert_eq!(code, Some(0), "a teammate whose split was given up did not leave by itself; output:\n{shown}");
+    assert!(
+        shown.contains(zo_ide::tui::strings::TEAMMATE_SPLIT_GIVEN_UP),
+        "the pane does not say why it left; output:\n{shown}"
+    );
+    assert!(
+        runtime::subagent_panes::TeammateResult::read(&directory).is_none(),
+        "a withdrawn teammate wrote a result for a parent that is not waiting"
+    );
+    assert!(
+        service.request_bodies().await.is_empty(),
+        "a withdrawn teammate asked a model for something"
+    );
+}
+
+/// The note is looked for once more right before the first model request
+/// (t-19898): a child that read its brief a moment before its parent gave up
+/// is the one the first look cannot catch. Its `SessionStart` hook runs between
+/// the two looks, in the child's own boot, and writes the note — the parent
+/// giving up at exactly that moment, which no test can time any other way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_teammate_whose_parent_gives_up_while_it_boots_leaves_before_its_first_request() {
+    use runtime::subagent_panes::{Brief, PROTOCOL_VERSION, SPLIT_GIVEN_UP_FILE};
+
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("nobody asked for this answer\n")
+        .await
+        .expect("start teammate script");
+    let directory = layout.root.path().join("agent-late-2");
+    fs::create_dir_all(&directory).expect("teammate directory");
+    Brief {
+        version: PROTOCOL_VERSION,
+        agent_id: "agent-late-2".to_string(),
+        prompt: "Count the edges of the map.".to_string(),
+        description: "recon".to_string(),
+        subagent_type: Some("Explore".to_string()),
+        name: Some("late".to_string()),
+        permission_mode: Some("read-only".to_string()),
+        parent_session: Some("session-parent-e2e".to_string()),
+        tool_call_id: Some("toolu_late".to_string()),
+        ..Brief::default()
+    }
+    .write(&directory)
+    .expect("write brief");
+    // There is no note yet: the first look finds nothing, and the child boots.
+    assert!(!runtime::subagent_panes::split_given_up(&directory));
+    let hooks = layout.root.path().join("hooks");
+    fs::create_dir_all(&hooks).expect("hook directory");
+    let hook = hooks.join("give-up.sh");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\n: > '{}'\n", directory.join(SPLIT_GIVEN_UP_FILE).display()),
+    )
+    .expect("write the hook");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod the hook");
+    }
+    layout.with_hooks(&serde_json::json!({ "SessionStart": [hook.to_string_lossy()] }));
+
+    let dir_arg = directory.to_string_lossy().into_owned();
+    let mut run = pty(&layout, service.base_url(), &["--teammate", &dir_arg]);
+    let code = run.exit_code(Duration::from_secs(10));
+    let output = run.finish();
+    let shown = String::from_utf8_lossy(&output);
+    assert!(
+        runtime::subagent_panes::split_given_up(&directory),
+        "the hook did not run, so this test says nothing; output:\n{shown}"
+    );
+    assert_eq!(code, Some(0), "a teammate whose parent gave up while it booted did not leave; output:\n{shown}");
+    assert!(
+        shown.contains(zo_ide::tui::strings::TEAMMATE_SPLIT_GIVEN_UP),
+        "the pane does not say why it left; output:\n{shown}"
+    );
+    assert!(
+        runtime::subagent_panes::TeammateResult::read(&directory).is_none(),
+        "a withdrawn teammate wrote a result for a parent that is not waiting"
+    );
+    assert!(
+        service.request_bodies().await.is_empty(),
+        "a withdrawn teammate asked a model for something"
+    );
+}
+
 /// Wait for a teammate's `result.json` the way its parent does.
 fn wait_for_teammate_result(
     directory: &std::path::Path,

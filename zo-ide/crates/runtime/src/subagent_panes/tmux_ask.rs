@@ -7,7 +7,9 @@
 //! tests took 1 to 3.4 s (`reports/t-17057`); a hung server never answers.
 //!
 //! Here a call runs on a thread of its own, which spawns the tmux, rests until
-//! it exits or [`TMUX_ASK_BOUND`] has passed, and ends it then. The caller holds
+//! it exits or its bound has passed — [`TMUX_ASK_BOUND`], or the one a caller
+//! names with [`Ask::start_within`], as the split of a helper's pane does
+//! ([`super::TMUX_SPLIT_BOUND`], t-19898) — and ends it then. The caller holds
 //! an [`Ask`] and looks at it when it likes, or waits for it a while; dropping
 //! one that has not answered ends its tmux at once. The thread rests on the
 //! kernel's word that the tmux exited ([`child_watch::exited_by`]), not on a
@@ -46,8 +48,20 @@ pub(super) enum Said {
     Yes(String),
     /// It answered with a failure.
     No,
-    /// It could not be run, or said nothing within [`TMUX_ASK_BOUND`].
+    /// It could not be run, or said nothing within its bound
+    /// ([`TMUX_ASK_BOUND`] unless the ask named another).
     Nothing,
+}
+
+/// What an ask keeps of what the tmux writes.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Capture {
+    /// Its standard output, which a success says ([`Said::Yes`]).
+    pub(super) output: bool,
+    /// Its standard error, which is how a refusal words itself
+    /// ([`Ask::refusal`]) — the window's tmux says why it could not open a
+    /// pane there.
+    pub(super) reasons: bool,
 }
 
 /// One tmux call, answered on a thread of its own.
@@ -73,6 +87,11 @@ struct State {
     /// says goes unheard.
     abandoned: bool,
     said: Option<Said>,
+    /// What a tmux that failed wrote to its standard error, when that was
+    /// asked for ([`Capture::reasons`]).
+    refusal: Option<String>,
+    /// Why no tmux could be run at all, in the error's own words.
+    could_not_run: Option<String>,
 }
 
 fn lock(shared: &Shared) -> MutexGuard<'_, State> {
@@ -82,7 +101,25 @@ fn lock(shared: &Shared) -> MutexGuard<'_, State> {
 impl Ask {
     /// Run `program` with `args` on a thread of its own. `printing` says
     /// whether what it prints is wanted; `wake` is woken once it has answered.
+    /// It is given up at [`TMUX_ASK_BOUND`].
     pub(super) fn start(program: &std::ffi::OsStr, args: &[&str], printing: bool, wake: Option<Waker>) -> Self {
+        let capture = Capture {
+            output: printing,
+            reasons: false,
+        };
+        Self::start_within(program, args, capture, wake, TMUX_ASK_BOUND)
+    }
+
+    /// [`Ask::start`] with a bound of its own: the call is ended `bound` after
+    /// it began, and what it printed, and what it said when it failed, are
+    /// kept as `capture` says (t-19898).
+    pub(super) fn start_within(
+        program: &std::ffi::OsStr,
+        args: &[&str],
+        capture: Capture,
+        wake: Option<Waker>,
+        bound: Duration,
+    ) -> Self {
         let started = Instant::now();
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
@@ -95,10 +132,11 @@ impl Ask {
         let running = std::thread::Builder::new()
             .name("zo-tmux-ask".to_string())
             .spawn(move || {
-                let said = ask(&asking, &program, &args, printing, started + TMUX_ASK_BOUND);
+                let said = ask(&asking, &program, &args, capture, started + bound);
                 settle(&asking, said);
             });
-        if running.is_err() {
+        if let Err(error) = running {
+            lock(&shared).could_not_run = Some(format!("could not run tmux: {error}"));
             settle(&shared, Said::Nothing);
         }
         Self {
@@ -107,8 +145,8 @@ impl Ask {
         }
     }
 
-    /// What the tmux said, once its thread has answered — within
-    /// [`TMUX_ASK_BOUND`] of the start, unless the spawn itself is held by
+    /// What the tmux said, once its thread has answered — within its bound
+    /// of the start, unless the spawn itself is held by
     /// the system (a first exec it checks), which nothing here can end. Until
     /// then `None`, and the asker keeps the question rather than ask again
     /// beside it: a held spawn costs one thread, not one every few seconds.
@@ -128,8 +166,26 @@ impl Ask {
         state.said.clone()
     }
 
+    /// What a tmux that failed said on its standard error — the reason it
+    /// gave, when [`Capture::reasons`] asked for it. `None` while it has not
+    /// answered, and when it said nothing.
+    pub(super) fn refusal(&self) -> Option<String> {
+        lock(&self.shared)
+            .refusal
+            .clone()
+            .map(|words| words.trim().to_string())
+            .filter(|words| !words.is_empty())
+    }
+
+    /// Why no tmux could be run at all — the error's own words — when that is
+    /// what became of the call, and `None` for a tmux that ran and said
+    /// nothing in time. Only a tmux that ran can have cut a pane.
+    pub(super) fn could_not_run(&self) -> Option<String> {
+        lock(&self.shared).could_not_run.clone()
+    }
+
     /// Stop waiting, and let the tmux finish on its own — which it does, or is
-    /// ended, within [`TMUX_ASK_BOUND`] of its start.
+    /// ended, within its bound of its start.
     pub(super) fn let_finish(mut self) {
         self.end_on_drop = false;
     }
@@ -169,25 +225,20 @@ fn settle(shared: &Shared, said: Said) {
 }
 
 /// The call itself, on its own thread.
-fn ask(shared: &Shared, program: &std::ffi::OsStr, args: &[OsString], printing: bool, deadline: Instant) -> Said {
-    // What a tmux prints goes to an unnamed file rather than a pipe: nothing
+fn ask(shared: &Shared, program: &std::ffi::OsStr, args: &[OsString], capture: Capture, deadline: Instant) -> Said {
+    // What a tmux writes goes to an unnamed file rather than a pipe: nothing
     // has to read it while the tmux runs, and a process left holding a pipe
     // cannot keep a read waiting (`probe_codex_version` does the same).
-    let printed = if printing {
-        let Ok(file) = tempfile::tempfile() else {
-            return Said::Nothing;
-        };
-        Some(file)
-    } else {
-        None
+    let (printed, stdout) = match capture_to(capture.output) {
+        Ok(pair) => pair,
+        Err(error) => return could_not_run(shared, format!("could not make a file for tmux's answer: {error}")),
     };
-    let stdout = match printed.as_ref().map(File::try_clone) {
-        Some(Ok(file)) => Stdio::from(file),
-        Some(Err(_)) => return Said::Nothing,
-        None => Stdio::null(),
+    let (reasons, stderr) = match capture_to(capture.reasons) {
+        Ok(pair) => pair,
+        Err(error) => return could_not_run(shared, format!("could not make a file for tmux's answer: {error}")),
     };
     let mut command = Command::new(program);
-    command.args(args).stdin(Stdio::null()).stdout(stdout).stderr(Stdio::null());
+    command.args(args).stdin(Stdio::null()).stdout(stdout).stderr(stderr);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -197,8 +248,9 @@ fn ask(shared: &Shared, program: &std::ffi::OsStr, args: &[OsString], printing: 
     if let Some(hold) = held_spawns::held(program, args.first()) {
         std::thread::sleep(hold);
     }
-    let Ok(mut child) = command.spawn() else {
-        return Said::Nothing;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return could_not_run(shared, format!("could not run tmux: {error}")),
     };
     let pid = child.id();
     {
@@ -223,16 +275,40 @@ fn ask(shared: &Shared, program: &std::ffi::OsStr, args: &[OsString], printing: 
         }
     };
     if !status.success() {
+        lock(shared).refusal = reasons.and_then(read_back);
         return Said::No;
     }
-    let Some(mut printed) = printed else {
-        return Said::Yes(String::new());
-    };
-    let mut bytes = Vec::new();
-    if printed.seek(SeekFrom::Start(0)).is_err() || printed.take(PRINTED_LIMIT).read_to_end(&mut bytes).is_err() {
-        return Said::Nothing;
+    match printed {
+        None => Said::Yes(String::new()),
+        Some(printed) => read_back(printed).map_or(Said::Nothing, Said::Yes),
     }
-    Said::Yes(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// No tmux could be run: the words of why, kept for whoever asks
+/// ([`Ask::could_not_run`]), and nothing said.
+fn could_not_run(shared: &Shared, words: String) -> Said {
+    lock(shared).could_not_run = Some(words);
+    Said::Nothing
+}
+
+/// An unnamed file for the tmux to write into, and the same file to read it
+/// back from — or, when it is not wanted, nothing and the null device.
+fn capture_to(wanted: bool) -> std::io::Result<(Option<File>, Stdio)> {
+    if !wanted {
+        return Ok((None, Stdio::null()));
+    }
+    let file = tempfile::tempfile()?;
+    let given = file.try_clone()?;
+    Ok((Some(file), Stdio::from(given)))
+}
+
+/// What a tmux wrote, from the start of its file, up to [`PRINTED_LIMIT`].
+fn read_back(mut file: File) -> Option<String> {
+    let mut bytes = Vec::new();
+    if file.seek(SeekFrom::Start(0)).is_err() || file.take(PRINTED_LIMIT).read_to_end(&mut bytes).is_err() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// How a rest for a tmux's exit ended.
