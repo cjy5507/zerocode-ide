@@ -1,7 +1,7 @@
 use super::{
     cleanup_rotated_logs, reconcile_tool_history, rotate_session_file_if_needed,
     seal_orphan_tool_uses, vault_path_for, AnchorSummary, ContentBlock, ConversationMessage,
-    MessageRole, Session, SessionError, SessionFork,
+    MessageRole, Session, SessionError, SessionFork, MODEL_HANDOFF_PREFIX, PROCESS_EVENT_PREFIX,
 };
 use crate::json::JsonValue;
 use crate::usage::TokenUsage;
@@ -3917,4 +3917,76 @@ fn rewind_stops_at_a_compaction_summary_after_tool_role_rounds() {
 
     assert_eq!(session.rewind_turns(3), 3);
     assert_eq!(session.messages.len(), 1);
+}
+
+fn system_text(text: &str) -> ConversationMessage {
+    let mut message = ConversationMessage::user_text(text);
+    message.role = MessageRole::System;
+    message
+}
+
+fn texts(session: &Session) -> Vec<String> {
+    session
+        .messages
+        .iter()
+        .map(|message| match message.blocks.first() {
+            Some(ContentBlock::Text { text }) => text.clone(),
+            _ => format!("{:?}", message.role),
+        })
+        .collect()
+}
+
+#[test]
+fn rewind_steps_over_a_trailing_model_handoff_note_and_keeps_it_last() {
+    let mut session = Session::new();
+    session.push_user_text("q1").unwrap();
+    session.push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+        text: "a1".to_string(),
+    }]))
+    .unwrap();
+    let handoff = format!("{MODEL_HANDOFF_PREFIX}old`. You are `new`.");
+    session.push_message(system_text(&handoff)).unwrap();
+
+    assert_eq!(session.rewind_turns(1), 2, "the turn goes, the note is not counted");
+    assert_eq!(texts(&session), vec![handoff]);
+}
+
+#[test]
+fn rewind_steps_over_a_trailing_process_event_and_keeps_it_last() {
+    let mut session = Session::new();
+    session.push_user_text("q1").unwrap();
+    session.push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+        text: "a1".to_string(),
+    }]))
+    .unwrap();
+    let event = format!("{PROCESS_EVENT_PREFIX}{{\"kind\":\"lifeline_panic\"}}");
+    session.push_message(system_text(&event)).unwrap();
+
+    assert_eq!(session.rewind_turns(1), 2);
+    assert_eq!(texts(&session), vec![event]);
+}
+
+#[test]
+fn rewind_keeps_seam_notes_in_order_across_two_turns() {
+    let mut session = Session::new();
+    let first = format!("{MODEL_HANDOFF_PREFIX}a`. You are `b`.");
+    let second = format!("{PROCESS_EVENT_PREFIX}{{}}");
+    session.push_user_text("q1").unwrap();
+    session.push_message(system_text(&first)).unwrap();
+    session.push_user_text("q2").unwrap();
+    session.push_message(system_text(&second)).unwrap();
+
+    assert_eq!(session.rewind_turns(2), 2);
+    assert_eq!(texts(&session), vec![first, second]);
+}
+
+#[test]
+fn rewind_still_stops_at_a_compaction_summary_behind_a_seam_note() {
+    let mut session = Session::new();
+    session.push_message(system_text("summary of earlier work")).unwrap();
+    let handoff = format!("{MODEL_HANDOFF_PREFIX}old`. You are `new`.");
+    session.push_message(system_text(&handoff)).unwrap();
+
+    assert_eq!(session.rewind_turns(1), 0);
+    assert_eq!(session.messages.len(), 2, "nothing moved");
 }

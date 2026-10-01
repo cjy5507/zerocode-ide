@@ -17,6 +17,16 @@ use super::json_field::{required_string, required_u32};
 /// `UserPromptSubmit` hook context).
 pub const REMINDER_TAG_OPEN: &str = "<system-reminder>";
 
+/// How a model-handoff note begins. The one producer
+/// (`runtime::model_handoff_notice`) builds its text on this constant and
+/// [`ConversationMessage::is_host_seam_note`] reads it back, so a record
+/// stored by an older build is recognized by the same fixed opening.
+pub const MODEL_HANDOFF_PREFIX: &str =
+    "Model handoff: everything above this line was produced by `";
+
+/// How a host process-event record begins (`zo-ide`'s `process_lifecycle`).
+pub const PROCESS_EVENT_PREFIX: &str = "[zo:process-event] ";
+
 /// Replacement text microcompact leaves where a byte-identical later copy has
 /// superseded a persisted reminder block.
 ///
@@ -307,6 +317,22 @@ impl ConversationMessage {
             && self.blocks.iter().all(|block| {
                 matches!(block, ContentBlock::Text { text } if is_reminder_lineage_text(text))
             })
+    }
+
+    /// Whether this is a host note about a seam between turns — a model-handoff
+    /// note or a process event: a single-text `System` record that opens with
+    /// [`MODEL_HANDOFF_PREFIX`] or [`PROCESS_EVENT_PREFIX`]. It belongs to no
+    /// turn, so history surgery ([`super::Session::rewind_turns`]) steps over it
+    /// and leaves it in place. A compaction summary is NOT one.
+    #[must_use]
+    pub fn is_host_seam_note(&self) -> bool {
+        self.role == MessageRole::System
+            && matches!(
+                self.blocks.as_slice(),
+                [ContentBlock::Text { text }]
+                    if text.starts_with(MODEL_HANDOFF_PREFIX)
+                        || text.starts_with(PROCESS_EVENT_PREFIX)
+            )
     }
 
     /// Whether this message carries a tool result, whichever role holds it.

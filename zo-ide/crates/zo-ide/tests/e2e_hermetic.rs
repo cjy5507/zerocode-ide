@@ -1989,6 +1989,34 @@ async fn e2e_rewind_n_restores_the_guarded_write_and_refuses_a_changed_file_with
     let _ = run.finish();
 }
 
+/// A `/model` switch leaves a handoff note after the last turn; `/rewind turn`
+/// steps over it and still takes the turn out (t-19459).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_rewind_turn_after_a_model_switch_still_takes_the_last_turn() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("handoff fixture answer")
+        .await
+        .expect("start text script");
+    let mut run = pty(&layout, service.base_url(), &interactive_args());
+    let timeout = Duration::from_secs(20);
+
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"remember the OKAPI-REWIND prompt\r").expect("send prompt");
+    run.wait_for_history_row("handoff fixture answer", timeout);
+    run.send(b"/model haiku\r").expect("send /model");
+    wait_until_quiet(&run, Duration::from_millis(300), timeout);
+
+    run.send(b"/rewind turn\r").expect("send /rewind turn");
+    run.wait_for_history_row("Rewound 1 turn", timeout);
+    let saved: String = transcripts(&layout.sessions)
+        .iter()
+        .map(|path| fs::read_to_string(path).unwrap_or_default())
+        .collect();
+    assert!(!saved.contains("OKAPI-REWIND"), "the turn must be gone from the saved transcript");
+    assert!(saved.contains("Model handoff"), "the handoff note stays where it was");
+    let _ = run.finish();
+}
+
 /// One turn, one spawn, four ledgers — joined by equality on the attempt key.
 ///
 /// This is the case the attempt-key contract exists for

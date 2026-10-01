@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use core_types::session::{ContentBlock, ConversationMessage, MessageRole, SessionError};
 use core_types::Session;
 
-pub(crate) const EVENT_PREFIX: &str = "[zo:process-event] ";
+pub(crate) const EVENT_PREFIX: &str = core_types::session::PROCESS_EVENT_PREFIX;
 const MAX_REASON_CHARS: usize = 768;
 const MAX_ID_CHARS: usize = 160;
 const MAX_KIND_CHARS: usize = 64;

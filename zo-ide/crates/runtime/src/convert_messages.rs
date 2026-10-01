@@ -172,10 +172,11 @@ pub fn model_handoff_notice(previous: &str, next: &str) -> Option<String> {
         return None;
     }
     let mut note = format!(
-        "Model handoff: everything above this line was produced by `{previous}`. \
+        "{prefix}{previous}`. \
          You are `{next}`. Treat that work as a colleague's — the decisions in it \
          stand unless you find a concrete reason to revisit one, and re-deriving \
-         them costs the session twice."
+         them costs the session twice.",
+        prefix = crate::session::MODEL_HANDOFF_PREFIX,
     );
     // Only say the reasoning changed shape when it actually did. Claiming it on
     // a same-provider swap would send the model looking for markers that are
