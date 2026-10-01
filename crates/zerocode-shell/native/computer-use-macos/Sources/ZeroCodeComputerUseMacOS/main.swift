@@ -2070,11 +2070,7 @@ private func windowMatchesCapture(
 }
 
 private func windowFramesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
-    let tolerance: CGFloat = 2
-    return abs(lhs.minX - rhs.minX) <= tolerance &&
-        abs(lhs.minY - rhs.minY) <= tolerance &&
-        abs(lhs.width - rhs.width) <= tolerance &&
-        abs(lhs.height - rhs.height) <= tolerance
+    DesktopWindowPick.framesMatch(lhs, rhs)
 }
 
 private func openBundle(_ bundleId: String) {
@@ -5934,12 +5930,20 @@ private enum DesktopWindows {
             throw ProviderError.coded("window_not_found", "no window \(windowId) on this desktop")
         }
         let appElement = AXUIElementCreateApplication(ownerPid)
+        // Many Cocoa windows publish no AXWindowNumber: the window the list
+        // numbers is then the one numberless window at its frame, if only one
+        // stands there (t-15085); two are refused as a missing one is.
+        let listed = (CGWindowListCopyWindowInfo([.optionIncludingWindow], windowId) as? [[String: Any]])?.first
+        let targetBounds = (listed?[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) }
         guard let windows = copyArray(appElement, kAXWindowsAttribute as String),
-              let element = windows.first(where: { windowNumber($0) == windowId })
+              case let .found(at) = DesktopWindowPick.pick(
+                  target: windowId,
+                  targetBounds: targetBounds,
+                  windows: windows.map { (number: windowNumber($0), frame: absoluteFrame($0)) })
         else {
             throw ProviderError.coded("window_not_found", "window \(windowId) has no accessibility element (is Accessibility granted, and does the app publish its windows?)")
         }
-        return (element, ownerPid)
+        return (windows[at], ownerPid)
     }
 
     static func act(params: [String: JSONValue]) throws -> [String: Any] {
