@@ -7,13 +7,28 @@ pub(crate) struct Identity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
-    #[cfg(not(unix))]
-    created: std::time::SystemTime,
+    /// The volume and the file index NTFS keeps for the object — what the
+    /// device and inode are on Unix. The creation time this once used ticks at
+    /// the system clock's granularity, so a file made in the same tick as the
+    /// one it replaced read as the same file.
+    #[cfg(windows)]
+    volume: u32,
+    #[cfg(windows)]
+    index: u64,
     is_dir: bool,
 }
 impl Identity {
     pub(crate) fn read(path: &Path) -> Result<Self, String> {
         let metadata = std::fs::symlink_metadata(path).map_err(|_| "tree.changed")?;
+        #[cfg(windows)]
+        {
+            let (volume, index) = windows_file_id(path)?;
+            Ok(Self {
+                volume,
+                index,
+                is_dir: metadata.is_dir(),
+            })
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -23,11 +38,6 @@ impl Identity {
                 is_dir: metadata.is_dir(),
             })
         }
-        #[cfg(not(unix))]
-        Ok(Self {
-            created: metadata.created().map_err(|_| "tree.changed")?,
-            is_dir: metadata.is_dir(),
-        })
     }
     pub(crate) fn check(&self, path: &Path) -> Result<(), String> {
         if &Self::read(path)? == self {
@@ -36,6 +46,52 @@ impl Identity {
             Err("tree.changed".into())
         }
     }
+}
+
+/// The volume serial and file index of the object `path` names itself — a
+/// link is read, not followed, as `symlink_metadata` reads it.
+#[cfg(windows)]
+fn windows_file_id(path: &Path) -> Result<(u32, u64), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::{
+            Foundation::CloseHandle,
+            Storage::FileSystem::{
+                BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                GetFileInformationByHandle, OPEN_EXISTING,
+            },
+        },
+        core::PCWSTR,
+    };
+    /// No access rights at all: the handle only asks the object who it is,
+    /// so it opens even a file another process holds for writing.
+    const ASK_ONLY: u32 = 0;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the handle is
+    // closed below on every road that opened it.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            ASK_ONLY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    }
+    .map_err(|_| "tree.changed")?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` is the one just opened and `info` is the struct the
+    // call fills.
+    let read = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    let _ = unsafe { CloseHandle(handle) };
+    read.map_err(|_| "tree.changed")?;
+    Ok((
+        info.dwVolumeSerialNumber,
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    ))
 }
 
 pub(crate) fn vacant(path: &Path) -> Result<(), String> {
@@ -123,6 +179,21 @@ impl TrashReceipt {
     }
 }
 
+/// Whether the recycle bin's record of where an item came from names `path`.
+///
+/// The bin spells the folder its own way — the long name where the caller
+/// held an 8.3 short one (`RUNNER~1`) — so the text is not compared: the item
+/// has the file name, and the folder it sat in is the same folder.
+#[cfg(not(target_os = "macos"))]
+fn names_this_path(recorded: &Path, path: &Path) -> bool {
+    if recorded == path {
+        return true;
+    }
+    let folder = |of: &Path| of.parent().and_then(|parent| parent.canonicalize().ok());
+    recorded.file_name() == path.file_name()
+        && folder(recorded).is_some_and(|recorded| Some(recorded) == folder(path))
+}
+
 pub(crate) fn trash_path(path: &Path) -> Result<TrashReceipt, String> {
     #[cfg(target_os = "macos")]
     {
@@ -149,7 +220,7 @@ pub(crate) fn trash_path(path: &Path) -> Result<TrashReceipt, String> {
         let item = trash::os_limited::list()
             .map_err(|_| "tree.failed")?
             .into_iter()
-            .find(|item| item.original_path() == path && !before.contains(item))
+            .find(|item| names_this_path(&item.original_path(), path) && !before.contains(item))
             .ok_or("tree.failed")?;
         Ok(TrashReceipt {
             original: path.to_path_buf(),
