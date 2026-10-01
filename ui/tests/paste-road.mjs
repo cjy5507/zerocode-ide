@@ -99,6 +99,8 @@ export async function testPasteRoad(browser, origin, ok) {
       const sink = document.getElementById("key-sink");
       const readsBefore = window.__CLIPBOARD_READS__;
       const toastsBefore = new Set(document.querySelectorAll(".toast"));
+      setLocale("en", { persist: false, refresh: false });
+      const enWords = t("clipboard.pasteSlow", "");
       window.__CLIPBOARD_TEXT__ = "slow words";
       window.__CLIPBOARD_READ_HOLD__ = true;
       const first = fire(sink);
@@ -108,10 +110,11 @@ export async function testPasteRoad(browser, origin, ok) {
       const second = fire(sink);
       seen.secondPrevented = second.defaultPrevented;
       await settle(900);
-      // 카탈로그의 말: 기본 언어(한국어)는 코드의 둘째 인자라 문구를 여기 다시 쓰지 않고,
-      // 안내 한 장이 새로 서고 그 말이 비어 있지 않은 것만 본다.
+      // 카탈로그의 말: 느린 붙여넣기를 기다리는 동안만 en 으로 바꿔 새 안내가 en 카탈로그의
+      // 말과 같은지 본다(읽기 실패 같은 다른 안내는 통과하지 못한다). 한국어 문구는 시험에 다시 쓰지 않는다.
       const slowNotes = [...document.querySelectorAll(".toast")].filter((node) => !toastsBefore.has(node));
-      seen.slowNotice = slowNotes.length === 1 && slowNotes[0].textContent.trim() !== "";
+      seen.slowNotice = slowNotes.length === 1 && enWords !== "" && slowNotes[0].textContent.trim() === enWords;
+      setLocale("ko", { persist: false, refresh: false });
       window.__CLIPBOARD_READ_HOLD__ = false;
       window.__CLIPBOARD_RELEASE__?.();
       await settle(80);
