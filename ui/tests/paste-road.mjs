@@ -193,6 +193,45 @@ export async function testPasteRoad(browser, origin, ok) {
       JSON.stringify(slowPaste),
     );
 
+
+    /* 백엔드가 그림을 거절하면(판에 그림이 있는데 하나도 풀리지 않을 때) 사람은 그
+     * 말을 본다 — 옛 길은 바이트 저장이 실패하면 clipboard.imagePasteFailed 를 보였다.
+     * 그림이 아예 없을 때(Ok(None))는 전처럼 조용하다. */
+    const refusedPicture = await page.evaluate(async () => {
+      const seen = {};
+      const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+      const term = await openTermTab();
+      const sink = document.getElementById("key-sink");
+      const pastes = [];
+      window.__ANSWER__.term_paste = (args) => (pastes.push({ ...args }), null);
+      setLocale("en", { persist: false, refresh: false });
+      const words = t("clipboard.imagePasteFailed", "");
+      window.__CLIPBOARD_TEXT__ = "";
+      window.__FAIL__.add("save_clipboard_image");
+      const before = new Set(document.querySelectorAll(".toast"));
+      sink.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true }));
+      await settle(200);
+      const notes = [...document.querySelectorAll(".toast")].filter((node) => !before.has(node));
+      seen.says = words !== "" && notes.length === 1 && notes[0].textContent.trim() === words;
+      seen.nothingPasted = pastes.length === 0;
+      window.__FAIL__.delete("save_clipboard_image");
+      window.__ANSWER__.save_clipboard_image = () => null;
+      const kept = new Set(document.querySelectorAll(".toast"));
+      sink.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true }));
+      await settle(200);
+      seen.noneIsQuiet = [...document.querySelectorAll(".toast")].every((node) => kept.has(node));
+      setLocale("ko", { persist: false, refresh: false });
+      delete window.__ANSWER__.save_clipboard_image;
+      delete window.__ANSWER__.term_paste;
+      closeTab(activeTabId);
+      await settle(120);
+      return seen;
+    });
+    ok(
+      "a picture the backend refuses says so with the catalog's words, and a clipboard with no picture stays quiet",
+      refusedPicture.says && refusedPicture.nothingPasted && refusedPicture.noneIsQuiet,
+      JSON.stringify(refusedPicture),
+    );
   } finally {
     await page.close();
   }
