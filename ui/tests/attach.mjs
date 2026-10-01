@@ -430,41 +430,54 @@ export async function testComposerAttach(page, ok, limits) {
     JSON.stringify(drop),
   );
 
-  /* ⑧ ⌘V — 그림만 든 클립보드는 창의 한 그림 길로 앉아 칩이 되고, 글자는 글자다. */
+  /* ⑧ ⌘V (t-19409) — 붙여넣기 이벤트는 clipboardData를 읽지 않는다(웹킷의 동기 읽기는
+   * 판의 주인이 느리면 창을 세운다). 그림만 든 클립보드는 백엔드의 한 그림 길
+   * (`save_clipboard_image`, 배경 스레드)로 앉아 칩이 되고, 글자는 글자로 상자에 든다. */
   const paste = await probe(async () => {
     const H = window.__ATTACH_H__;
     const seen = {};
-    let saved = 0;
-    window.__ANSWER__.save_pasted_image = (args, options) => {
-      saved += 1;
-      seen.kind = options?.headers?.["x-image-kind"];
-      seen.raw = args instanceof Uint8Array;
-      return "/tmp/zerocode-paste/paste-1.png";
-    };
+    let seated = 0;
+    let bytesSaved = 0;
+    window.__ANSWER__.save_clipboard_image = () => (seated += 1, "/tmp/zerocode-paste/paste-1.png");
+    window.__ANSWER__.save_pasted_image = () => (bytesSaved += 1, "/tmp/zerocode-paste/never.png");
     const box = H.box();
-    const image = new DataTransfer();
-    image.items.add(new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" }));
-    const first = new ClipboardEvent("paste", { clipboardData: image, bubbles: true, cancelable: true });
-    box.dispatchEvent(first);
+    const touched = [];
+    const spy = {
+      getData: () => (touched.push("getData"), ""),
+      get items() { touched.push("items"); return []; },
+      get files() { touched.push("files"); return []; },
+      get types() { touched.push("types"); return []; },
+    };
+    const fire = () => {
+      const event = new ClipboardEvent("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", { value: spy });
+      box.dispatchEvent(event);
+      return event;
+    };
+    window.__CLIPBOARD_TEXT__ = "";
+    box.focus();
+    const first = fire();
     seen.prevented = first.defaultPrevented;
     await H.settle(150);
     seen.chip = H.chips().length === 1 && H.chips()[0].dataset.path === "/tmp/zerocode-paste/paste-1.png" &&
       H.glyphs()[0] === "#i-image";
-    seen.savedOnce = saved === 1;
-    const worded = new DataTransfer();
-    worded.setData("text/plain", "echo hello");
-    worded.items.add(new File([new Uint8Array([1])], "x.png", { type: "image/png" }));
-    const second = new ClipboardEvent("paste", { clipboardData: worded, bubbles: true, cancelable: true });
-    box.dispatchEvent(second);
+    seen.savedOnce = seated === 1 && bytesSaved === 0;
+    window.__CLIPBOARD_TEXT__ = "echo hello";
+    box.value = "";
+    const second = fire();
     await H.settle(100);
-    seen.wordsFree = !second.defaultPrevented && saved === 1 && H.chips().length === 1;
+    seen.wordsLand = second.defaultPrevented && box.value === "echo hello" && seated === 1 && H.chips().length === 1;
+    seen.untouched = touched.length === 0;
+    window.__CLIPBOARD_TEXT__ = "";
+    delete window.__ANSWER__.save_clipboard_image;
     delete window.__ANSWER__.save_pasted_image;
+    box.value = "";
     await H.clearChips();
     return seen;
   });
   ok(
-    "⌘V with a picture-only clipboard on the composer seats the picture as a temp file through the window's one image road and stands one image chip; words keep pasting as words",
-    paste.prevented && paste.chip && paste.savedOnce && paste.kind === "image/png" && paste.raw && paste.wordsFree,
+    "⌘V on the composer never reads clipboardData: a picture-only clipboard seats through the backend's one picture road and stands one image chip; words land in the box",
+    paste.prevented && paste.chip && paste.savedOnce && paste.wordsLand && paste.untouched,
     JSON.stringify(paste),
   );
 

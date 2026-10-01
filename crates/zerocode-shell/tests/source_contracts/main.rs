@@ -3115,6 +3115,11 @@ mod tests {
     /// themselves. Three copies of one rule is three chances to disagree, and
     /// the way that shows up is a pasted command appearing in a terminal the
     /// person was not looking at.
+    ///
+    /// Paste is heard once, on the document in the capture phase (t-19409: a
+    /// listener that reads `clipboardData` holds the UI process's main thread
+    /// while a slow pasteboard owner answers), and its key-sink branch still
+    /// asks `keyboardTarget()` for where the text goes.
     #[test]
     fn text_keys_and_paste_all_ask_the_same_thing() {
         let source = window_source();
@@ -3132,7 +3137,7 @@ mod tests {
         for path in [
             "function routeText(",
             "window.addEventListener(\"keydown\", (event) => {",
-            "keySink.addEventListener(\"paste\", (event) => {",
+            "document.addEventListener(\"paste\", (event) => {",
         ] {
             let body = block_after(source, path);
             assert!(
@@ -15740,23 +15745,30 @@ mod tests {
             selection.contains("view.selectionStands() && view.addressKey() === key"),
             "copy can consume a selection owned by another terminal:\n{selection}"
         );
-        let reading = block_after(window, "async function pasteClipboardAt(target) {");
-        let capture_at = reading
+        let at = block_after(window, "async function pasteClipboardAt(target) {");
+        let capture_at = at
             .find("const captured = target ? { ...target } : null;")
             .expect("paste no longer captures its target");
+        let via_at = at
+            .find("return pasteClipboardVia({")
+            .expect("paste no longer goes through the one background read");
+        assert!(
+            capture_at < via_at
+                && at.contains("text: (text) => pasteTextAt(captured, text)")
+                && at.contains("image: (path) => pasteTextAt(captured, path)"),
+            "the paste target is read after the async clipboard gap:\n{at}"
+        );
+        let reading = block_after(window, "async function pasteClipboardVia(to) {");
         let read_at = reading
             .find("const text = await clipboardText.read({ quiet: true });")
             .expect("paste no longer reads through the clipboard authority");
-        assert!(
-            capture_at < read_at,
-            "the paste target is read after the async clipboard gap:\n{reading}"
-        );
         // The picture road comes second and only when the words came up
         // empty: the clipboard's text is still the one thing the shortcut
-        // pastes when there is any, and the picture is seated by the same
-        // backend writer the `paste` event road uses — never read here.
+        // pastes when there is any, and the picture is seated by the backend
+        // writer on its own thread — never read here, and never read by
+        // WebKit's paste on the main thread (t-19409).
         let words_win = reading
-            .find("if (text) return pasteTextAt(captured, text);")
+            .find("if (text) return to.text(text);")
             .expect("paste no longer prefers the clipboard's words");
         let picture_at = reading
             .find(r#"invoke("save_clipboard_image")"#)
@@ -15769,6 +15781,34 @@ mod tests {
             !reading.contains("readImage"),
             "the shortcut must not read pixels in the window; the backend seats the picture:\n{reading}"
         );
+        // A paste never stops the window's main thread (t-19409): WebKit serves
+        // `clipboardData` reads as synchronous messages on the UI process's main
+        // thread, where a slow pasteboard owner holds every window event. No
+        // window script may read it; the `paste` event only signals.
+        for (name, script) in [
+            (
+                "shell-input.js",
+                include_str!("../../../../ui/shell-input.js"),
+            ),
+            (
+                "shell-attach.js",
+                include_str!("../../../../ui/shell-attach.js"),
+            ),
+            (
+                "shell-term.js",
+                include_str!("../../../../ui/shell-term.js"),
+            ),
+        ] {
+            let in_code = script.lines().any(|line| {
+                let line = line.trim_start();
+                line.contains("clipboardData")
+                    && !(line.starts_with("//") || line.starts_with('*') || line.starts_with("/*"))
+            });
+            assert!(
+                !in_code,
+                "{name} reads clipboardData in code: a slow pasteboard owner would hold the main thread"
+            );
+        }
         let routing = block_after(window, "async function pasteTextAt(target, text) {");
         assert!(
             routing.contains(r#"invoke("term_paste"#)

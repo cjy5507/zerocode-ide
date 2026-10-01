@@ -38,6 +38,7 @@ import { testAutonomyBoard } from "./autonomy-board.mjs";
 import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
 import { testTabstripOverflow } from "./tabstrip-overflow.mjs";
+import { testPasteRoad } from "./paste-road.mjs";
 import { testStartupProjects } from "./startup-projects.mjs";
 import { testWorkspaceBoard } from "./workspace-board.mjs";
 import { testFlowConsole } from "./flow-console.mjs";
@@ -211,6 +212,8 @@ suite("connected-workbench", ({ browser, origin, ok }) => testConnectedWorkbench
 suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsive(browser, origin, ok));
 // The title bar's tab strip under sixty tabs at four widths (t-17078).
 suite("tabstrip-overflow", ({ browser, origin, ok }) => testTabstripOverflow(browser, origin, ok));
+// A paste never stops the window's main thread (t-19409).
+suite("paste-road", ({ browser, origin, ok }) => testPasteRoad(browser, origin, ok));
 suite("startup-projects", ({ browser, origin, ok }) => testStartupProjects(browser, origin, ok));
 suite("workspace-board", ({ browser, origin, ok }) => testWorkspaceBoard(browser, origin, ok));
 suite("flow-console", ({ browser, origin, ok }) => testFlowConsole(browser, origin, ok));
@@ -43815,54 +43818,6 @@ ok(
     && workspaceOpenIn.calls[1]?.applicationId === null
     && workspaceOpenIn.customizes,
   JSON.stringify(workspaceOpenIn),
-);
-
-/* 클립보드의 이미지(1-g64): 글자가 없으면 그림을 본다 — 바이트가 요청 본문
- * 그대로(base64 없이) 백엔드로 건너 임시 파일이 되고, 종류는 헤더로 가며,
- * 터미널에는 그 경로가 기존 paste 문으로 붙는다. 글자가 있으면 글자가 이긴다. */
-const imagePaste = await page.evaluate(async () => {
-  const seen = {};
-  const term = await openTermTab();
-  const saved = [];
-  const pastes = [];
-  window.__ANSWER__.save_pasted_image = (args, options) => {
-    saved.push({
-      kind: options?.headers?.["x-image-kind"],
-      raw: args instanceof Uint8Array,
-      size: args?.length,
-      first: args?.[0],
-    });
-    return "/tmp/zerocode-paste/paste-1755300000000.png";
-  };
-  window.__ANSWER__.term_paste = (args) => (pastes.push({ ...args }), null);
-  const sink = document.getElementById("key-sink");
-  const image = new DataTransfer();
-  image.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], "shot.png", { type: "image/png" }));
-  sink.dispatchEvent(new ClipboardEvent("paste", { clipboardData: image, bubbles: true, cancelable: true }));
-  await new Promise((done) => setTimeout(done, 160));
-  seen.imageLands =
-    saved.length === 1 && saved[0].kind === "image/png" && saved[0].raw &&
-    saved[0].size === 8 && saved[0].first === 137 &&
-    pastes.at(-1)?.text === "/tmp/zerocode-paste/paste-1755300000000.png" &&
-    pastes.at(-1)?.term === term;
-  // 글자가 함께 온 붙여넣기는 글자의 길 그대로 — 그림 문은 열리지 않는다.
-  const worded = new DataTransfer();
-  worded.setData("text/plain", "echo hello");
-  worded.items.add(new File([new Uint8Array([1])], "x.png", { type: "image/png" }));
-  sink.dispatchEvent(new ClipboardEvent("paste", { clipboardData: worded, bubbles: true, cancelable: true }));
-  await new Promise((done) => setTimeout(done, 120));
-  seen.textStillWins =
-    saved.length === 1 && pastes.at(-1)?.text === "echo hello";
-  delete window.__ANSWER__.save_pasted_image;
-  delete window.__ANSWER__.term_paste;
-  closeTab(activeTabId);
-  await new Promise((done) => setTimeout(done, 120));
-  return seen;
-});
-ok(
-  "a clipboard image lands as a temp-file path through the same paste door",
-  imagePaste.imageLands && imagePaste.textStillWins,
-  JSON.stringify(imagePaste),
 );
 
 /* 그림만 든 클립보드를 단축키로 붙일 때(포커스가 본문에 있을 때의 길): 글자
