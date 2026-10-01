@@ -311,13 +311,13 @@ pub(super) fn answered(
         .and_then(|answers| asked.read(answers).map_err(|err| err.token().to_string()));
     match read {
         Ok(pick) => {
+            let line = crate::systemone::act_line(wire, &SUMMON);
             row["outcome"] = json!(ANSWERED);
             row["chosen"] = json!(pick.chosen);
             row["probabilities"] = json!(pick.probabilities);
             row["confidence"] = json!(pick.confidence);
             row["applied"] = json!(
-                crate::systemone::applies(wire, &SUMMON)
-                    && SUMMON.acts_on(pick.confidence, crate::systemone::act_line(wire, &SUMMON))
+                crate::systemone::applies(wire, &SUMMON) && SUMMON.acts_on(pick.confidence, line)
             );
         }
         Err(token) => row["outcome"] = json!(token),
