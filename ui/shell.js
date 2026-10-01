@@ -17650,6 +17650,29 @@ el("crash-bundle").addEventListener("click", async () => {
 
 /* ---- boot ---- */
 
+/* How long the boot waits for its first paint before it goes on without one.
+ * A window that is hidden or covered gets no animation frames at all, and a
+ * boot that waited for a frame that never comes would never restore anything;
+ * a quarter of a second is far above the two frames (~33 ms) a visible
+ * window needs. */
+const FIRST_PAINT_WAIT_MS = 250;
+
+/* The first frame the person can see with the chrome in it: two animation
+ * frames after the strip is on the page, so the number is a paint and not a
+ * promise to paint. Answers when it has painted — or when the wait ran out —
+ * so the restore that follows starts after the paint and never before it. */
+function paintFirstFrame() {
+  const painted = new Promise((resolve) => {
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        markBootPhase("first_paint");
+        resolve();
+      }),
+    );
+  });
+  return Promise.race([painted, new Promise((resolve) => setTimeout(resolve, FIRST_PAINT_WAIT_MS))]);
+}
+
 async function boot() {
   const report = await invoke("boot_report");
   // `boot_report` flattens the same document `settings_snapshot` returns.
@@ -17701,6 +17724,7 @@ async function boot() {
   // terminal failed to open had no strip, no `＋` and no way forward but a
   // chord nobody had been told about. That is the window that was reported.
   renderTabs();
+  await paintFirstFrame();
   // The centre is a terminal. Orca's centre tab is literally `Terminal 1`
   // running a shell, and what you run in it is your business — `zo`,
   // `claude`, anything on PATH. Opening one here is what makes that true from
@@ -17718,14 +17742,19 @@ async function boot() {
   // rather than something it hides behind the copy that invites you to open
   // one yourself.
   await restoreActiveWorktreeTab();
+  markBootPhase("panes_restored");
   // And behind it, the workspaces whose conversations were running when the
   // window went — one at a time, after the front's own wakes, with nobody
   // having to click them (t-14036). Not awaited: the window is usable now.
-  restoreStandingWorkspaces().catch(showError);
+  // The last of them settling is the boot's last phase.
+  restoreStandingWorkspaces()
+    .catch(showError)
+    .finally(() => markBootPhase("terminals_resumed"));
   // Browser addresses are settings-backed and restored only when explicitly
   // enabled. They open after the workspace owns its first leaf, so no native
   // page can attach to the checkout that happened to be active before boot.
   await restoreBrowserTabs();
+  markBootPhase("browser_tabs_restored");
   // The plan segment and the agent registry, off the critical path: the
   // last snapshot paints at once and the scan renews it behind the bar.
   refreshAgents();
@@ -17971,4 +18000,5 @@ if (document.fonts?.ready) {
   });
 }
 
+if (!isPopout) markBootPhase("page_script_loaded");
 (isPopout ? bootPopout() : boot()).catch(showError);

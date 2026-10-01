@@ -8045,6 +8045,9 @@ async function storedPaneLayouts(worktree) {
     records = await invoke("pane_layouts", { worktree });
   } catch {
     return [];
+  } finally {
+    // The first read is the boot's own, the active workspace's (t-20078).
+    markBootPhase("layouts_read");
   }
   return Array.isArray(records) ? records : [];
 }

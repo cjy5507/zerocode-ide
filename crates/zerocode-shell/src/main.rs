@@ -72,6 +72,9 @@ mod artifact_transcripts;
 mod artifact_webkit;
 mod automation_runtime;
 mod awake;
+#[cfg(test)]
+mod boot_profile;
+mod boot_timeline;
 mod browser_cookie_import;
 mod browser_cookies;
 mod browser_diagnose;
@@ -2415,6 +2418,8 @@ fn single_instance_lock_bypassed(said: Option<&str>) -> bool {
 }
 
 fn main() -> ExitCode {
+    // The boot timeline's clock starts here (t-20078).
+    boot_timeline::begin();
     crumbs::register_main_thread();
     // Before anything else, and before any state is touched: what is this?
     //
@@ -2936,6 +2941,7 @@ fn main() -> ExitCode {
             hooks_report,
             set_hooks_enabled,
             install_hooks,
+            boot_timeline::boot_phase,
             pane_sessions,
             pane_agents,
             ledger_agents,
@@ -3230,6 +3236,7 @@ fn main() -> ExitCode {
             if let Err(error) = crash::begin(crash_root) {
                 note_window_event(crash_root, &format!("crash boot: {error}"));
             }
+            boot_timeline::set_root(paths.active_root(app_paths::PathClass::LocalData));
             let state = build_app_state(paths, root.clone());
             state.set_legacy_authority(legacy_authority);
             let wants_blur = state.window_blur_active();
@@ -3277,6 +3284,7 @@ fn main() -> ExitCode {
                 summon_lineup::configure(handle.clone(), home, managed.config_root().to_path_buf());
             }
             crumbs::record("boot", format_args!("settings"));
+            boot_timeline::mark(boot_timeline::Phase::SettingsRead);
             if let Err(error) = managed.native_tray().sync_for_boot(
                 &handle,
                 boot_settings.show_menu_bar_icon,
@@ -3336,6 +3344,7 @@ fn main() -> ExitCode {
                     ),
                 );
             }
+            boot_timeline::mark(boot_timeline::Phase::LedgerReady);
             crumbs::record("boot", format_args!("hooks"));
             if let Some((events, teams, browser, computer, federation)) =
                 hooks::start(&local_data_root)
@@ -3528,7 +3537,22 @@ fn main() -> ExitCode {
                     );
                 }
             });
+            // Tauri builds the config's window around setup; if it is already
+            // there it is counted here, otherwise `RunEvent::Ready` below
+            // counts it. The first report wins either way.
+            if app.get_webview_window(MAIN_WINDOW_LABEL).is_some() {
+                boot_timeline::mark(boot_timeline::Phase::WebviewCreated);
+            }
             Ok(())
+        })
+        // The main page starting to load is the earliest the webview engine
+        // can be said to be up; the page's own script and paint follow.
+        .on_page_load(|webview, payload| {
+            if webview.label() == MAIN_WINDOW_LABEL
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+            {
+                boot_timeline::mark(boot_timeline::Phase::RendererUp);
+            }
         })
         .build(tauri::generate_context!());
 
@@ -3555,6 +3579,7 @@ fn main() -> ExitCode {
             note_window_event(handle.state::<AppState>().local_data_root(), &reason);
         }
         match event {
+            tauri::RunEvent::Ready => boot_timeline::mark(boot_timeline::Phase::WebviewCreated),
             tauri::RunEvent::ExitRequested { api, code, .. } => {
                 // Which road this is (t-6428), named before anything can
                 // defer it: no code is the last window gone — a close — and

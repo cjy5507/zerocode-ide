@@ -5212,6 +5212,7 @@ async function restoreActiveWorktreeTab({ firstTerminal = true } = {}) {
   // plain first terminal: the documents in their groups under their tree,
   // then the terminal tabs with fresh shells in them.
   const docsRestored = await restoreStageLayout(activeWorktreePath);
+  markBootPhase("stage_restored");
   // …except that a stored set of nothing but PLAIN SHELLS gives way to the
   // chosen default agent, which is what opening a workspace is supposed to
   // start (Orca's initial terminal is the default agent —
