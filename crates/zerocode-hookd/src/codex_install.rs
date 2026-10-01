@@ -1875,7 +1875,7 @@ mod tests {
             "{mirrored_config}"
         );
         assert!(
-            mirrored_config.contains(&format!("'{}/logs'", system_home.to_string_lossy())),
+            mirrored_config.contains(&format!("'{}'", system_home.join("logs").to_string_lossy())),
             "{mirrored_config}"
         );
 

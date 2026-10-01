@@ -306,8 +306,8 @@ fn every_folder_consents_to_every_named_workspace_and_is_never_resolved() {
     };
     assert!(everywhere.everywhere());
     assert_eq!(everywhere.folders().count(), 0, "the word is not a folder");
-    for named in [APP, "/elsewhere/entirely", "/"] {
-        assert!(everywhere.consents(named), "{named}");
+    for named in [APP, "/elsewhere/entirely", "/"].map(crate::test_paths::host_spelled) {
+        assert!(everywhere.consents(&named), "{named}");
     }
     for unnamed in ["work/app", "", "/work/../etc"] {
         assert!(!everywhere.consents(unnamed), "{unnamed:?}");
@@ -406,7 +406,7 @@ fn one_press_on_and_one_off(enabled: Option<bool>) {
     }
     let door = JevSettings::from_root(&root);
     assert!(door.enabled && door.everywhere());
-    assert!(door.consents("/a/folder/nobody/named"));
+    assert!(door.consents(&crate::test_paths::host_spelled("/a/folder/nobody/named")));
     for kept in ["model", "providers"] {
         assert_eq!(root[kept], before[kept], "{kept} moved");
     }

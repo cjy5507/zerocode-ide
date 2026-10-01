@@ -121,6 +121,8 @@ pub mod vault;
 pub mod vault_opencode;
 pub mod worker_placement;
 pub mod worker_transcript;
+#[cfg(test)]
+pub(crate) mod test_paths;
 pub mod workitem;
 pub mod workspace_cleanup;
 pub mod workspace_space;

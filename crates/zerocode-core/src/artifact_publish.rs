@@ -1010,36 +1010,42 @@ mod tests {
             "an unknown field is still refused"
         );
         for verb in ["list", "read"] {
+            let work = crate::test_paths::absolute("/work");
+            let work = work.to_str().unwrap();
             let request =
-                request_from_argv(&argv(&[verb, "--cwd", "/work", "--pane", "term-4"])).unwrap();
+                request_from_argv(&argv(&[verb, "--cwd", work, "--pane", "term-4"])).unwrap();
             assert_eq!(request, serde_json::json!({"action": verb}));
         }
+        let work = crate::test_paths::absolute("/work");
         let export = request_from_argv(&argv(&[
-            "export", "p-1", "--out", "a.html", "--cwd", "/work", "--pane", "term-4",
+            "export",
+            "p-1",
+            "--out",
+            "a.html",
+            "--cwd",
+            work.to_str().unwrap(),
+            "--pane",
+            "term-4",
         ]))
         .unwrap();
         assert_eq!(
             export,
-            serde_json::json!({"action":"export", "id":"p-1", "out":"/work/a.html"})
+            serde_json::json!({"action":"export", "id":"p-1", "out":work.join("a.html")})
         );
         assert!(request_from_argv(&argv(&["publish", "--pane"])).is_err());
     }
 
     #[test]
     fn artifact_export_cli_carries_id_version_and_output_path() {
-        let words = [
-            "export",
-            "p-test",
-            "--version",
-            "2",
-            "--out",
-            "/tmp/share # 한.html",
-        ];
+        let out = crate::test_paths::absolute("/tmp/share # 한.html");
+        let out = out.to_str().unwrap();
+        let words = ["export", "p-test", "--version", "2", "--out", out];
         let request = request_from_argv(&words.map(str::to_owned)).unwrap();
         assert_eq!(
             request,
-            serde_json::json!({"action":"export", "id":"p-test", "version":2, "out":"/tmp/share # 한.html"})
+            serde_json::json!({"action":"export", "id":"p-test", "version":2, "out":out})
         );
+        let page = crate::test_paths::absolute("/tmp/page.html");
         for version in ["0", "-1", "1.5", "4294967296"] {
             let words = [
                 "export",
@@ -1047,7 +1053,7 @@ mod tests {
                 "--version",
                 version,
                 "--out",
-                "/tmp/page.html",
+                page.to_str().unwrap(),
             ];
             assert!(request_from_argv(&words.map(str::to_owned)).is_err());
         }
@@ -1133,7 +1139,8 @@ mod tests {
             }
             assert!(!out.exists(), "{name}: a refused export left a file behind");
         }
-        let words = ["export", "p-test", "--out", "/tmp/notes.txt"];
+        let notes = crate::test_paths::absolute("/tmp/notes.txt");
+        let words = ["export", "p-test", "--out", notes.to_str().unwrap()];
         let early = request_from_argv(&words.map(str::to_owned))
             .expect_err("the argv accepted a name the door cannot write");
         assert!(early.contains("pdf") && early.contains("png"), "{early}");

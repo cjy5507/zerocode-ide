@@ -3621,7 +3621,9 @@ mod tests {
             .iter()
             .find(|one| one.slug == "prime-agent")
             .expect("prime-agent");
-        let home = Path::new("/h");
+        let at = crate::test_paths::host_spelled;
+        let home = crate::test_paths::absolute("/h");
+        let home = home.as_path();
         let named = |set: &[(&str, &str)]| {
             let held: Vec<(String, String)> = set
                 .iter()
@@ -3642,45 +3644,45 @@ mod tests {
         assert_eq!(named(&[]), None);
         assert_eq!(
             roots(prime, home, None),
-            vec![PathBuf::from("/h/.prime/agent/sessions")]
+            vec![PathBuf::from(at("/h/.prime/agent/sessions"))]
         );
 
         // The agent directory gets `sessions` — unconditionally, so a value
         // already called `sessions` nests one deeper rather than being reused.
         assert_eq!(
-            named(&[("PRIME_AGENT_CODING_AGENT_DIR", "/w/prime")]),
-            Some(PathBuf::from("/w/prime/sessions"))
+            named(&[("PRIME_AGENT_CODING_AGENT_DIR", at("/w/prime").as_str())]),
+            Some(PathBuf::from(at("/w/prime/sessions")))
         );
         assert_eq!(
-            named(&[("PRIME_AGENT_CODING_AGENT_DIR", "/w/sessions")]),
-            Some(PathBuf::from("/w/sessions/sessions"))
+            named(&[("PRIME_AGENT_CODING_AGENT_DIR", at("/w/sessions").as_str())]),
+            Some(PathBuf::from(at("/w/sessions/sessions")))
         );
 
         // The session directory is verbatim, and outranks the agent one.
         assert_eq!(
-            named(&[("PRIME_AGENT_SESSION_DIR", "/w/transcripts")]),
-            Some(PathBuf::from("/w/transcripts"))
+            named(&[("PRIME_AGENT_SESSION_DIR", at("/w/transcripts").as_str())]),
+            Some(PathBuf::from(at("/w/transcripts")))
         );
         assert_eq!(
             named(&[
-                ("PRIME_AGENT_SESSION_DIR", "/w/transcripts"),
-                ("PRIME_AGENT_CODING_AGENT_DIR", "/w/prime"),
+                ("PRIME_AGENT_SESSION_DIR", at("/w/transcripts").as_str()),
+                ("PRIME_AGENT_CODING_AGENT_DIR", at("/w/prime").as_str()),
             ]),
-            Some(PathBuf::from("/w/transcripts")),
+            Some(PathBuf::from(at("/w/transcripts"))),
             "the agent directory was consulted while a session directory stood"
         );
         // The spelling this variable had before it was renamed still works, and
         // still loses to the current one.
         assert_eq!(
-            named(&[("PRIME_AGENT_CODING_AGENT_SESSION_DIR", "/w/legacy")]),
-            Some(PathBuf::from("/w/legacy"))
+            named(&[("PRIME_AGENT_CODING_AGENT_SESSION_DIR", at("/w/legacy").as_str())]),
+            Some(PathBuf::from(at("/w/legacy")))
         );
         assert_eq!(
             named(&[
-                ("PRIME_AGENT_SESSION_DIR", "/w/now"),
-                ("PRIME_AGENT_CODING_AGENT_SESSION_DIR", "/w/legacy"),
+                ("PRIME_AGENT_SESSION_DIR", at("/w/now").as_str()),
+                ("PRIME_AGENT_CODING_AGENT_SESSION_DIR", at("/w/legacy").as_str()),
             ]),
-            Some(PathBuf::from("/w/now"))
+            Some(PathBuf::from(at("/w/now")))
         );
     }
 
@@ -3697,7 +3699,9 @@ mod tests {
             .iter()
             .find(|one| one.slug == "pi")
             .expect("pi");
-        let home = Path::new("/home/someone");
+        let at = crate::test_paths::host_spelled;
+        let home = crate::test_paths::absolute("/home/someone");
+        let home = home.as_path();
         let named = |value: &str| {
             let held = value.to_string();
             named_home(pi, |_| Some(held.clone()), Some(home))
@@ -3705,14 +3709,14 @@ mod tests {
         for refused in ["", "   ", "sessions", ".", "..", "./agent"] {
             assert_eq!(named(refused), None, "`{refused}` became a root");
         }
-        assert_eq!(named("~"), Some(PathBuf::from("/home/someone")));
+        assert_eq!(named("~"), Some(PathBuf::from(at("/home/someone"))));
         assert_eq!(
             named("~/.pi/agent/sessions"),
-            Some(PathBuf::from("/home/someone/.pi/agent/sessions"))
+            Some(PathBuf::from(at("/home/someone/.pi/agent/sessions")))
         );
         // A trailing separator is not a different directory.
-        assert_eq!(named("/w/pi/"), Some(PathBuf::from("/w/pi")));
-        assert_eq!(named("/w/pi"), Some(PathBuf::from("/w/pi")));
+        assert_eq!(named(&at("/w/pi/")), Some(PathBuf::from(at("/w/pi"))));
+        assert_eq!(named(&at("/w/pi")), Some(PathBuf::from(at("/w/pi"))));
     }
 
     /// An override home is honoured, and the default is still looked at — a user

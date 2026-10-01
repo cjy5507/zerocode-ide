@@ -843,11 +843,13 @@ mod tests {
         let config = home.path().join("obsidian.json");
         std::fs::write(
             &config,
-            format!(
-                r#"{{"vaults":{{"one":{{"path":"{}","open":false}},"two":{{"path":"{}","open":true}},"gone":{{"path":"/gone"}}}}}}"#,
-                alpha.display(),
-                beta.display()
-            ),
+            // Built as JSON: a Windows path's backslashes need escaping.
+            serde_json::json!({"vaults": {
+                "one": {"path": alpha, "open": false},
+                "two": {"path": beta, "open": true},
+                "gone": {"path": "/gone"},
+            }})
+            .to_string(),
         )
         .unwrap();
 
