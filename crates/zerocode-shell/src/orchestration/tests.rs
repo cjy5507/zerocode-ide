@@ -24886,9 +24886,12 @@ fn a_ledger_as_large_as_a_long_lived_machines() -> zerocode_core::orchestration:
 #[test]
 fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
     const BEATS: i64 = 6;
-    let _beat = one_beat_at_a_time();
+    // The window first, then the beat: every other test takes them in this
+    // order, and the other way round two tests wait on each other for ever
+    // (the v1.1.46 lane's gate stood 50 minutes on exactly that).
     let (_window, _store) =
         PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
+    let _beat = one_beat_at_a_time();
     // The first beat reads the generation the window booted on; it may pay
     // for it once.
     tick(&Nowhere, &[], 1_000_000);
@@ -24939,9 +24942,12 @@ fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
 #[ignore = "a measurement: prints the idle beat's cost on a synthetic ledger"]
 fn measure_the_idle_beat_on_a_large_ledger() {
     const BEATS_PER_MINUTE: i64 = 60;
-    let _beat = one_beat_at_a_time();
+    // The window first, then the beat: every other test takes them in this
+    // order, and the other way round two tests wait on each other for ever
+    // (the v1.1.46 lane's gate stood 50 minutes on exactly that).
     let (_window, _store) =
         PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
+    let _beat = one_beat_at_a_time();
     tick(&Nowhere, &[], 1_000_000);
     let cpu = || {
         // SAFETY: getrusage fills the struct it is handed.
