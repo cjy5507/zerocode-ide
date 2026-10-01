@@ -1688,13 +1688,48 @@ fn stands_on(seat: &JevUse, row: &Value, start: Stand) -> Option<Stand> {
 /// cost of the transition lines alone on a ledger the seat wrote itself.
 #[must_use]
 pub fn standing_in(seat: &JevUse, text: &str) -> Stand {
+    newest_standing_in(seat, text).unwrap_or(seat.auto_starts)
+}
+
+/// What the newest line of `text` that says where `seat` stands says, and
+/// `None` for a text none of whose lines does (t-19914). [`standing_in`]
+/// with the "nothing said" case left to the caller: a ledger read in pieces
+/// takes the newest piece that said something and, when none did, the
+/// standing the pieces before it left — so an appended piece is read for
+/// what it adds and never the ledger from its first line again. The one
+/// reader of a ledger's text: the whole file and an appended tail are read
+/// by this, so they cannot read a line apart.
+#[must_use]
+pub fn newest_standing_in(seat: &JevUse, text: &str) -> Option<Stand> {
     let keys = QuotedKeys::new();
     text.lines()
         .rev()
         .filter(|line| may_speak(seat, line, &keys))
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|line| {
+            note_line_parsed();
+            serde_json::from_str::<Value>(line).ok()
+        })
         .find_map(|row| stands_on(seat, &row, seat.auto_starts))
-        .unwrap_or(seat.auto_starts)
+}
+
+thread_local! {
+    /// How many ledger lines this thread has handed the JSON parser — the
+    /// price of a standing read, which is the ledger's size and not the
+    /// event's when every read starts at the first line (t-19914). Per
+    /// thread, so a test counts its own reads whatever else runs beside it.
+    static LINES_PARSED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one ledger line handed to the JSON parser on this thread: every
+/// reader of a seat's ledger calls it where it parses a line.
+pub fn note_line_parsed() {
+    LINES_PARSED.with(|parsed| parsed.set(parsed.get() + 1));
+}
+
+/// The ledger lines this thread has parsed so far ([`note_line_parsed`]).
+#[must_use]
+pub fn lines_parsed() -> u64 {
+    LINES_PARSED.with(std::cell::Cell::get)
 }
 
 /// The keys a ledger line is searched for, each spelling in its quotes as a

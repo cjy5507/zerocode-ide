@@ -223,7 +223,10 @@ pub fn read_rows(ledger: &Path) -> Vec<Value> {
         return Vec::new();
     };
     text.lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter_map(|line| {
+            zerocode_core::jev::promote::note_line_parsed();
+            serde_json::from_str(line).ok()
+        })
         .collect()
 }
 
@@ -294,8 +297,7 @@ fn standing_at(
 ) -> (zerocode_core::jev::JevMode, bool) {
     let mode = seat.mode_in_run(&wire.settings_root(), run);
     let raised = ledger.is_some_and(|ledger| {
-        zerocode_core::jev::promote::standing(seat, &read_rows(ledger))
-            == zerocode_core::jev::promote::Stand::Applying
+        standing::standing_of(seat, ledger) == zerocode_core::jev::promote::Stand::Applying
     });
     (mode, mode.applies_with(raised))
 }
@@ -875,6 +877,8 @@ pub(crate) fn today() -> String {
         i32::try_from(crate::automation_runtime::local_offset_secs() / 60).unwrap_or(0);
     count::day_of(now_ms, offset_minutes)
 }
+
+mod standing;
 
 #[cfg(test)]
 pub(crate) mod tests;
