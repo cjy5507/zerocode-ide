@@ -1799,6 +1799,100 @@ fn timeless(row: &Value) -> Value {
     row
 }
 
+fn waiting_judgment(done: std::sync::mpsc::Receiver<Done>) -> Pending {
+    let screen = FakeWorld::showing(&[1, 2]).look_now();
+    let at = goal(2);
+    let asked = ask_with(
+        &ActionLook {
+            goal: at.goal,
+            errand: at.asked(),
+            at: screen.at.asked(),
+            tried: &[],
+            items: &screen.items,
+            pressed: &[],
+            shows: &screen.shows,
+        },
+        &screen.beside(false, &[]),
+    )
+    .expect("a question with two controls");
+    Pending::new(asked, done)
+}
+
+#[test]
+fn an_expired_pending_judgment_does_not_wait_for_a_sender_that_stays_open() {
+    let (answer, receiver) = std::sync::mpsc::channel();
+    let mut pending = waiting_judgment(receiver);
+    pending.began = std::time::Instant::now() - ACTION_DEADLINE;
+    let (finished, result) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let _ = finished.send(pending.wait());
+    });
+    let returned = result.recv_timeout(Duration::from_secs(5));
+    drop(answer);
+    waiter
+        .join()
+        .expect("the waiter exits when the sender closes");
+    let done = returned.expect("an expired judgment must finish while its sender is still open");
+    assert_eq!(
+        done.judged,
+        Judged::Refused(crate::systemone::TIMEOUT.into())
+    );
+    assert!(done.spent.is_none());
+    assert!(!done.cached);
+    assert!(done.rows.is_empty());
+}
+
+#[test]
+fn a_pending_judgment_preserves_a_ready_answer_and_a_disconnected_sender() {
+    let (answer, receiver) = std::sync::mpsc::channel();
+    let pending = waiting_judgment(receiver);
+    let expected = Done {
+        judged: pick(2),
+        spent: None,
+        cached: true,
+        rows: vec![json!({"outcome": "answered"})],
+    };
+    answer.send(expected.clone()).expect("the receiver is open");
+    assert_eq!(pending.wait(), expected);
+
+    let (answer, receiver) = std::sync::mpsc::channel();
+    let pending = waiting_judgment(receiver);
+    drop(answer);
+    assert_eq!(
+        pending.wait().judged,
+        Judged::Refused(crate::systemone::TRANSPORT.into())
+    );
+}
+
+#[test]
+fn an_in_turn_judgment_is_given_the_walks_remaining_time() {
+    #[derive(Default)]
+    struct BoundedJudge {
+        unbounded: usize,
+        walls: Vec<Duration>,
+    }
+    impl ActionJudge for BoundedJudge {
+        fn choose(&mut self, _: &ActionAsk) -> Judged {
+            self.unbounded += 1;
+            pick(1)
+        }
+        fn choose_within(&mut self, _: &ActionAsk, left: Duration) -> Judged {
+            self.walls.push(left);
+            pick(1)
+        }
+    }
+    let mut judge = BoundedJudge::default();
+    let mut world = FakeWorld::showing(&[1]);
+    let left = Duration::from_millis(world.left_ms);
+    let walked = run(Mode::On, true, &goal(1), &mut judge, &mut world);
+    assert_eq!(walked.pressed, 1);
+    assert_eq!(
+        judge.unbounded, 0,
+        "the ordinary judgment also needs the call's wall"
+    );
+    assert_eq!(judge.walls, vec![left]);
+}
+
 #[test]
 fn overlap_off_is_todays_walk_to_the_byte() {
     let mut plain_judge = FakeJudge::chose(&[1, 2, 1]);

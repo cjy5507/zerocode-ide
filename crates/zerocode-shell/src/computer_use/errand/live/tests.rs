@@ -175,6 +175,26 @@ fn a_key_the_pane_kept_is_the_key_the_wire_presents() {
 }
 
 #[test]
+fn a_judgment_with_no_time_left_does_not_open_the_wire() {
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:1"), 0);
+    let (_home, mut judge) = consented_judge(&endpoint.base());
+
+    assert_eq!(
+        judge.choose_within(&asked(), Duration::ZERO),
+        Judged::Refused(TIMEOUT.to_string())
+    );
+    assert!(endpoint.asked().is_empty(), "an expired call sends nothing");
+    assert!(judge.spent().is_none());
+    assert!(!judge.cached());
+
+    assert!(matches!(
+        judge.choose_within(&asked(), ACTION_DEADLINE),
+        Judged::Chose(_)
+    ));
+    assert_eq!(endpoint.asked().len(), 1);
+}
+
+#[test]
 fn a_real_socket_answering_the_contract_is_a_choice() {
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:2"), 0);
     let (_home, mut judge) = consented_judge(&endpoint.base());
