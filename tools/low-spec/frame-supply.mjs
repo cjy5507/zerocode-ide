@@ -8,11 +8,18 @@ const { chromium } = createRequire(import.meta.url)("playwright");
 const browser = await chromium.launch();
 const page = await browser.newPage();
 await page.setContent("<body></body>");
-const gaps = await page.evaluate(() => new Promise((done) => {
+// The first frames of a fresh page are its warm-up, not its supply; the gaps after them are the sample.
+const WARMUP_FRAMES = 30;
+const SAMPLED_GAPS = 60;
+const gaps = await page.evaluate(({ warmup, sampled }) => new Promise((done) => {
   const seen = [];
-  const tick = (at) => { seen.push(at); if (seen.length < 91) requestAnimationFrame(tick); else done(seen.slice(31).map((one, i) => one - seen[30 + i])); };
+  const tick = (at) => {
+    seen.push(at);
+    if (seen.length <= warmup + sampled) requestAnimationFrame(tick);
+    else done(seen.slice(warmup + 1).map((one, i) => one - seen[warmup + i]));
+  };
   requestAnimationFrame(tick);
-}));
+}), { warmup: WARMUP_FRAMES, sampled: SAMPLED_GAPS });
 await browser.close();
 gaps.sort((a, b) => a - b);
 const at = (q) => gaps[Math.min(gaps.length - 1, Math.floor(gaps.length * q))];

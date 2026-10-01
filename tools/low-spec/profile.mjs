@@ -39,6 +39,10 @@ import { join, resolve } from "node:path";
 
 const ROOT = resolve(new URL("../..", import.meta.url).pathname);
 const CORES = cpus().length;
+/** One probe's wall: under the build line's 900 s job cap, so a stuck probe ends as a row, not a capped job. */
+const PROBE_TIMEOUT_S = 880;
+/** One display frame at 60 Hz: a level whose empty page cannot make a frame inside it cannot judge a frame metric. */
+export const DISPLAY_FRAME_MS = 16.7;
 const WINDOW = (suite) => ({ cmd: ["node", "ui/tests/window.mjs", "--suite", suite] });
 const JSON_OUT = (script, ...more) => ({ cmd: ["node", `ui/tests/${script}`, "--rounds", "1", ...more, "--json", "{json}"], json: true });
 
@@ -68,7 +72,8 @@ export function powerState() {
   return {
     source: /AC Power/.test(batt) ? "AC" : /Battery Power/.test(batt) ? "battery" : "unknown",
     charge: (batt.match(/(\d+)%/) ?? [])[1] ?? null,
-    lowPowerMode: /lowpowermode\s+1/.test(all),
+    // Newer macOS says `powermode 1` (0 automatic, 1 low power, 2 high power); older says `lowpowermode 1`.
+    lowPowerMode: /^\s*(?:low)?powermode\s+1\b/m.test(all),
     thermalWarning: /CPU_Speed_Limit\s*=\s*(\d+)/.test(therm) ? Number(therm.match(/CPU_Speed_Limit\s*=\s*(\d+)/)[1]) < 100 : false,
     load1: Number(load.toFixed(2)),
     cores: CORES,
@@ -109,7 +114,7 @@ function runProbe(name, level, index, dir) {
   const env = { ...process.env, ...(level === "cpu4x" ? { WINDOW_CPU_THROTTLE: "4" } : {}) };
   const power = powerState();
   const started = Date.now();
-  const done = spawnSync(argv[0], argv.slice(1), { cwd: ROOT, env, encoding: "utf8", maxBuffer: 1 << 28, timeout: 880_000 });
+  const done = spawnSync(argv[0], argv.slice(1), { cwd: ROOT, env, encoding: "utf8", maxBuffer: 1 << 28, timeout: PROBE_TIMEOUT_S * 1000 });
   const log = `${done.stdout ?? ""}\n${done.stderr ?? ""}`;
   writeFileSync(join(dir, `${name}.${index}.log`), log);
   const numbers = numbersOf(log);
@@ -125,7 +130,7 @@ function runProbe(name, level, index, dir) {
     const budget = JSON.parse(readFileSync(jsonPath, "utf8")).summary?.budget ?? JSON.parse(readFileSync(jsonPath, "utf8")).budget ?? {};
     for (const [key, held] of Object.entries(budget)) if (held === false) checks.push({ pass: false, name: `budget ${key}` });
   }
-  if (done.error?.code === "ETIMEDOUT" || done.signal) checks.push({ pass: false, name: `did not finish in ${880} s (${done.signal ?? "timeout"})` });
+  if (done.error?.code === "ETIMEDOUT" || done.signal) checks.push({ pass: false, name: `did not finish in ${PROBE_TIMEOUT_S} s (${done.signal ?? "timeout"})` });
   return { probe: name, level, index, rc: done.status ?? "timeout", wallMs: Date.now() - started, power, checks, numbers };
 }
 
@@ -169,10 +174,10 @@ function report(dirs) {
   const keys = new Map();
   for (const rows of loaded) for (const row of rows) for (const key of Object.keys(row.numbers)) keys.set(`${row.probe} | ${key}`, true);
   // The control: a level whose empty page cannot make a frame inside one display frame
-  // (16.7 ms) cannot judge a frame metric.
+  // (DISPLAY_FRAME_MS) cannot judge a frame metric.
   const supply = loaded.map((rows) => median(rows.filter((r) => r.probe === "frame-supply").map((r) => r.numbers["frame supply · controlGapP50"]).filter((n) => n !== undefined)));
   const FRAME_ROW = /scroll|over16|over20|frame|프레임|놓친|gap/i;
-  const out = ["Frame supply (empty page rAF gap p50, ms): " + levels.map((l, at) => `${l} ${fmt(supply[at])}${supply[at] > 16.7 ? ` (${(1000 / supply[at]).toFixed(0)} Hz)` : ""}`).join(", "), "",
+  const out = ["Frame supply (empty page rAF gap p50, ms): " + levels.map((l, at) => `${l} ${fmt(supply[at])}${supply[at] > DISPLAY_FRAME_MS ? ` (${(1000 / supply[at]).toFixed(0)} Hz)` : ""}`).join(", "), "",
     "| probe | metric | " + levels.join(" | ") + " | budget | low-spec |", "|---|---|" + levels.map(() => "---:").join("|") + "|---|---|"];
   for (const full of keys.keys()) {
     const [probe, metric] = full.split(" | ");
@@ -180,7 +185,7 @@ function report(dirs) {
     const budget = BUDGETS.find(([pattern]) => pattern.test(metric))?.[1] ?? "none";
     const lowRows = (loaded[1] ?? []).filter((r) => r.probe === probe);
     const failing = lowRows.filter((r) => r.checks.some((c) => !c.pass)).length;
-    out.push(`| ${probe} | ${metric} | ${cells.map((n, at) => (FRAME_ROW.test(metric) && supply[at] > 16.7 ? `${fmt(n)} (판정 불가: 프레임 공급 ${(1000 / supply[at]).toFixed(0)}Hz)` : fmt(n))).join(" | ")} | ${budget} | ${lowRows.length ? (failing ? `FAIL ${failing}/${lowRows.length} runs` : "pass") : "—"} |`);
+    out.push(`| ${probe} | ${metric} | ${cells.map((n, at) => (FRAME_ROW.test(metric) && supply[at] > DISPLAY_FRAME_MS ? `${fmt(n)} (판정 불가: 프레임 공급 ${(1000 / supply[at]).toFixed(0)}Hz)` : fmt(n))).join(" | ")} | ${budget} | ${lowRows.length ? (failing ? `FAIL ${failing}/${lowRows.length} runs` : "pass") : "—"} |`);
   }
   out.push("", "Checks that fail on a level but pass on normal:");
   for (const full of new Set(loaded.flatMap((rows) => rows.map((r) => r.probe)))) {
