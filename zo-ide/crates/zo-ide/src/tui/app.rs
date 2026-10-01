@@ -5246,14 +5246,14 @@ impl App {
     fn apply_rewind_command(&mut self, arg: &str) {
         use super::strings;
         if arg == "turn" {
+            use crate::session::plain_session::RewindTurn;
             match self.session_mut().rewind_last_turn() {
-                Ok(0) if self.session().last_record_stops_rewind() => {
-                    self.ui.note(SystemLevel::Warn, strings::REWIND_BLOCKED);
-                }
-                Ok(0) => self.ui.note(SystemLevel::Info, strings::REWIND_NOTHING),
-                Ok(removed) => {
+                Ok(RewindTurn::Removed(removed)) => {
                     self.ui.note(SystemLevel::Info, &strings::rewound_turn(removed));
                 }
+                Ok(RewindTurn::Empty) => self.ui.note(SystemLevel::Info, strings::REWIND_NOTHING),
+                Ok(RewindTurn::Blocked) => self.ui.note(SystemLevel::Warn, strings::REWIND_BLOCKED),
+                Ok(RewindTurn::NotSaved) => self.ui.note(SystemLevel::Warn, strings::REWIND_NOT_SAVED),
                 Err(error) => {
                     let text = format!("session not saved: {error}");
                     self.ui.note(SystemLevel::Warn, &text);
@@ -5269,8 +5269,14 @@ impl App {
                 return;
             }
         };
-        match self.session().workspace_rewind_report(&action) {
-            Ok(report) => self.ui.note(SystemLevel::Info, &report),
+        let restores = matches!(action, commands::WorkspaceRewindAction::Restore { .. });
+        match self.session_mut().workspace_rewind_report(&action) {
+            Ok(report) => {
+                self.ui.note(SystemLevel::Info, &report);
+                if restores {
+                    self.ui.note(SystemLevel::Info, strings::REWIND_FILES_ONLY);
+                }
+            }
             Err(error) => self.ui.note(SystemLevel::Error, &format!("rewind: {error}")),
         }
     }

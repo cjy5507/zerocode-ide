@@ -136,6 +136,20 @@ pub struct StatusSnapshot {
     pub autonomy: crate::autonomy::AutonomyStatus,
 }
 
+/// What `/rewind turn` did to the conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewindTurn {
+    /// A turn left; this many messages went.
+    Removed(usize),
+    /// The conversation holds no messages.
+    Empty,
+    /// The newest record is a System record that is not a reminder.
+    Blocked,
+    /// The walk had something to remove but the save lost to a newer writer
+    /// and was rolled back.
+    NotSaved,
+}
+
 pub struct PlainSession {
     selection_origins: (&'static str, &'static str),
     pub cwd: PathBuf,
@@ -843,6 +857,7 @@ impl PlainSession {
             },
         );
         self.arm_turn_limits();
+        self.begin_workspace_checkpoint();
         // 난이도가 넓다고 하면 호스트가 먼저 갈라 읽는다(`orchestration`): 결과는
         // 이 턴의 문맥에 앉고, 모델은 그 위에서 시작한다. 예산·출석 선언 뒤라
         // 헬퍼도 같은 한도를 받는다.
@@ -881,6 +896,7 @@ impl PlainSession {
             }
             None => Err("runtime not available".to_string()),
         };
+        self.finish_workspace_checkpoint();
         TurnHarness::restore_deep_gate(&mut self.runtime, restore_reactive_gate);
         // The Jev seats' labels for this turn (t-5806): whether the route the
         // routing seat took part in stood, and whether the note the recall
@@ -1025,53 +1041,112 @@ impl PlainSession {
     }
 
     /// `/rewind turn`: drop the last finished turn (the prompt and every
-    /// reply, tool round and tool result after it) and save the transcript.
-    /// `Ok(0)` means nothing was removed — no turn, or a summary/system
-    /// record stopped the walk.
-    pub fn rewind_last_turn(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
+    /// reply, tool round and tool result after it). `Session::rewind_turns`
+    /// saves the transcript itself — the session is always bound to its file
+    /// at open — so nothing is written twice here.
+    pub fn rewind_last_turn(&mut self) -> Result<RewindTurn, Box<dyn std::error::Error>> {
         let runtime = self
             .runtime
             .try_runtime_mut()
             .ok_or_else(|| std::io::Error::other("runtime not available"))?;
         let removed = runtime.rewind_turns(1);
         if removed > 0 {
-            self.persist()?;
+            return Ok(RewindTurn::Removed(removed));
         }
-        Ok(removed)
-    }
-
-    /// Whether the newest record is a System record that is not a reminder —
-    /// a compaction summary or a notice. A rewind stops at it, so a
-    /// `rewind_last_turn` that removed nothing says so in these words.
-    #[must_use]
-    pub fn last_record_stops_rewind(&self) -> bool {
-        self.runtime
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.session().messages.last())
-            .is_some_and(|message| {
-                message.role == runtime::MessageRole::System && !message.is_reminder_annotation()
-            })
+        // Zero removed has three causes, told apart by the tail: no turn at
+        // all, a System record that stops the walk (a compaction summary, a
+        // model-handoff note, a recorded process event), or a save that lost
+        // to a newer writer, which `rewind_turns` rolls back and reports as 0.
+        let messages = &runtime.session().messages;
+        Ok(match messages.last() {
+            None => RewindTurn::Empty,
+            Some(last)
+                if last.role == runtime::MessageRole::System && !last.is_reminder_annotation() =>
+            {
+                RewindTurn::Blocked
+            }
+            Some(_) => RewindTurn::NotSaved,
+        })
     }
 
     /// `/rewind` and `/rewind N [force]`: the guarded-file-write checkpoints
     /// the file tools record — list them or restore the files to before one.
+    /// A restore that changed files leaves a reminder in the conversation, so
+    /// the model's next request says the earlier edits are gone.
     pub fn workspace_rewind_report(
-        &self,
+        &mut self,
         action: &commands::WorkspaceRewindAction,
     ) -> Result<String, String> {
-        let Some(runtime) = self.runtime.runtime.as_ref() else {
+        let Some(runtime) = self.runtime.try_runtime_mut() else {
             return Err("runtime is not available".to_string());
         };
         let context = runtime.tool_executor().tool_registry().context();
-        match action {
-            commands::WorkspaceRewindAction::List => Ok(
+        let (report, restored) = match action {
+            commands::WorkspaceRewindAction::List => (
                 tools::render_workspace_checkpoint_list(&context.workspace_checkpoints()),
+                None,
             ),
-            commands::WorkspaceRewindAction::Restore { turn_index, force } => context
-                .restore_workspace_to_before(*turn_index, *force)
-                .map(|summary| tools::render_workspace_restore_summary(&summary))
-                .map_err(|error| error.to_string()),
+            commands::WorkspaceRewindAction::Restore { turn_index, force } => {
+                let summary = context
+                    .restore_workspace_to_before(*turn_index, *force)
+                    .map_err(|error| error.to_string())?;
+                let changed = summary.restored.len() + summary.deleted.len();
+                (
+                    tools::render_workspace_restore_summary(&summary),
+                    (changed > 0).then_some((*turn_index, changed)),
+                )
+            }
+        };
+        if let Some((turn_index, changed)) = restored {
+            let text = crate::tui::strings::workspace_restored_reminder(turn_index, changed);
+            let message = runtime::ConversationMessage {
+                role: runtime::MessageRole::System,
+                blocks: vec![runtime::ContentBlock::Text { text }],
+                usage: None,
+                thought_signature: None,
+                reasoning_replay: None,
+                model: None,
+                updated_at_ms: None,
+            };
+            if let Err(error) = runtime.session_mut().push_message(message) {
+                eprintln!("zo: could not record the workspace rewind ({error})");
+            }
+        }
+        Ok(report)
+    }
+
+    /// Open this turn's file-edit checkpoint. Nothing in the file tools opens
+    /// one — they only record into an open checkpoint — so without this
+    /// `/rewind` would list nothing, ever (t-19459).
+    fn begin_workspace_checkpoint(&mut self) {
+        if let Some(runtime) = self.runtime.try_runtime_mut() {
+            let turn = runtime
+                .session()
+                .messages
+                .iter()
+                .filter(|message| message.is_user_prompt())
+                .count()
+                .saturating_add(1);
+            runtime
+                .tool_executor()
+                .tool_registry()
+                .context()
+                .begin_workspace_checkpoint(turn);
+        }
+    }
+
+    /// Seal the checkpoint [`Self::begin_workspace_checkpoint`] opened: a turn
+    /// that wrote nothing leaves none.
+    fn finish_workspace_checkpoint(&mut self) {
+        if let Some(runtime) = self.runtime.try_runtime_mut() {
+            if let Err(error) = runtime
+                .tool_executor()
+                .tool_registry()
+                .context()
+                .finish_workspace_checkpoint()
+            {
+                eprintln!("zo: could not seal the turn's file checkpoint ({error})");
+            }
         }
     }
 

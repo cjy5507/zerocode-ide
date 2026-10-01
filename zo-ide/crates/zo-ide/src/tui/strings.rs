@@ -24,8 +24,20 @@ pub const REWIND_COMMAND_DESCRIPTION: &str = "list or restore file edits, or dro
 pub const REWIND_USAGE: &str = "rewind: /rewind lists checkpoints · /rewind N [force] restores files · /rewind turn drops the last turn";
 pub const REWIND_NOTHING: &str = "Nothing to rewind — the conversation has no finished turn to drop";
 pub const REWIND_BLOCKED: &str = "Nothing was rewound — the last record is a summary or system notice, which a rewind does not remove";
+pub const REWIND_NOT_SAVED: &str = "Nothing was rewound — the saved transcript changed on disk, so the conversation was left as it was";
+pub const REWIND_FILES_ONLY: &str = "Files only — the conversation was not rewound; /rewind turn drops the last turn";
 pub const REWIND_BUSY: &str = "'/rewind' is disabled while a task is in progress.";
 pub const REWIND_NO_RUNTIME: &str = "rewind: the session is not available";
+
+/// The reminder the model reads after `/rewind N` changed files: the
+/// conversation still holds the edits the rewind undid.
+#[must_use]
+pub fn workspace_restored_reminder(turn: usize, files: usize) -> String {
+    format!(
+        "{open}\nThe person rewound the workspace to before turn {turn}: {files} file(s) were put back (or deleted) outside this conversation. Edits you made in earlier turns to those files may no longer exist — read a file again before you edit it.\n</system-reminder>",
+        open = core_types::REMINDER_TAG_OPEN,
+    )
+}
 
 /// "Rewound 1 turn" — what `/rewind turn` took out of the conversation.
 #[must_use]
