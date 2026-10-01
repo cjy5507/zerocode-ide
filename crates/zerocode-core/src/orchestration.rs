@@ -8954,6 +8954,10 @@ impl Ledger {
     pub fn validate_loaded<'a>(&'a self) -> Result<(), String> {
         use std::collections::{HashMap, HashSet};
 
+        LEDGER_WORK
+            .validations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         // Sets and not walks. This is the one function in the file whose input
         // is a FILE — anything on the disk, of any size, from any build — so a
         // linear membership test would make a large ledger quadratic on the
@@ -22733,6 +22737,52 @@ impl std::fmt::Debug for Text {
     }
 }
 
+/// How many times this process walked a whole ledger — the three walks whose
+/// price is the size of the ledger, not of the change (t-19506).
+///
+/// Three relaxed counters beside the walks themselves, so a test or a bench
+/// can say how many each beat of the window causes. Reading them moves
+/// nothing and a walk pays one uncontended atomic add.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LedgerWork {
+    pub exports: u64,
+    pub rebuilds: u64,
+    pub validations: u64,
+}
+
+impl LedgerWork {
+    /// The walks made since `earlier` was read.
+    pub const fn since(self, earlier: Self) -> Self {
+        Self {
+            exports: self.exports - earlier.exports,
+            rebuilds: self.rebuilds - earlier.rebuilds,
+            validations: self.validations - earlier.validations,
+        }
+    }
+}
+
+struct LedgerWorkCounters {
+    exports: std::sync::atomic::AtomicU64,
+    rebuilds: std::sync::atomic::AtomicU64,
+    validations: std::sync::atomic::AtomicU64,
+}
+
+static LEDGER_WORK: LedgerWorkCounters = LedgerWorkCounters {
+    exports: std::sync::atomic::AtomicU64::new(0),
+    rebuilds: std::sync::atomic::AtomicU64::new(0),
+    validations: std::sync::atomic::AtomicU64::new(0),
+};
+
+/// The whole-ledger walks this process has made so far.
+pub fn ledger_work() -> LedgerWork {
+    use std::sync::atomic::Ordering::Relaxed;
+    LedgerWork {
+        exports: LEDGER_WORK.exports.load(Relaxed),
+        rebuilds: LEDGER_WORK.rebuilds.load(Relaxed),
+        validations: LEDGER_WORK.validations.load(Relaxed),
+    }
+}
+
 /// Every semantic row of a ledger, in tables, with nothing nested that a
 /// store would have to unpack.
 ///
@@ -23370,6 +23420,9 @@ impl Ledger {
     /// prepared host effect never crosses a process restart, so a projection —
     /// which exists precisely to cross one — has nothing to say about them.
     pub fn export(&self) -> LedgerProjectionV1 {
+        LEDGER_WORK
+            .exports
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut projected = LedgerProjectionV1 {
             schema: PROJECTION_SCHEMA,
             next_id: self.next_id,
@@ -23561,6 +23614,9 @@ impl Ledger {
     /// into an impossible ledger fails exactly the way a corrupt file does.
     /// Opening a new door is not a reason to leave the old lock off it.
     pub fn rebuild(projected: LedgerProjectionV1) -> Result<Self, RebuildError> {
+        LEDGER_WORK
+            .rebuilds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if projected.schema != PROJECTION_SCHEMA {
             return Err(RebuildError::UnknownSchema(projected.schema));
         }

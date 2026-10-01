@@ -18507,7 +18507,9 @@ mod tests {
             "the shared test runtime reads the machine's disk again:\n{shared}"
         );
         // `boot()` delegates to `boot_with_usage` since t-3059 (a scenario
-        // hands its gauges over); the runtime is stood up in the latter.
+        // hands its gauges over), and that to `boot_with` since t-19506 (a
+        // test can stand the window on a ledger it seeded); the runtime is
+        // stood up in the last, so that is the block that must not measure.
         let delegating = block_after(
             orchestration,
             "fn boot() -> (Self, zerocode_orchestrator::workflow_store::WorkflowStore)",
@@ -18516,7 +18518,12 @@ mod tests {
             delegating.contains("Self::boot_with_usage(Vec::new())"),
             "the private test runtime's plain boot no longer delegates:\n{delegating}"
         );
-        let private = block_after(orchestration, "fn boot_with_usage(");
+        let usage = block_after(orchestration, "fn boot_with_usage(");
+        assert!(
+            usage.contains("Self::boot_with(usage, None)"),
+            "the private test runtime's usage boot no longer delegates:\n{usage}"
+        );
+        let private = block_after(orchestration, "fn boot_with(");
         assert!(
             private.contains("HeadroomSource::Fixed(TEST_HEADROOM_BYTES)")
                 && !private.contains("free_bytes_at"),

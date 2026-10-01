@@ -335,6 +335,23 @@ impl PrivateWindow {
     fn boot_with_usage(
         usage: Vec<(&'static str, crate::usage::ProviderUsage)>,
     ) -> (Self, zerocode_orchestrator::workflow_store::WorkflowStore) {
+        Self::boot_with(usage, None)
+    }
+
+    /// The same private window, standing on a ledger this test built — the
+    /// road a person's real ledger takes in, so a test can hold a ledger as
+    /// large as theirs without writing it one verb at a time.
+    fn boot_seeded(
+        seeded: zerocode_core::orchestration::LedgerProjectionV1,
+    ) -> (Self, zerocode_orchestrator::workflow_store::WorkflowStore) {
+        let named = super::digest(b"zerocode.orchestration.test-seed.v1", &[b"seeded"]);
+        Self::boot_with(Vec::new(), Some(Box::new((seeded, named))))
+    }
+
+    fn boot_with(
+        usage: Vec<(&'static str, crate::usage::ProviderUsage)>,
+        legacy: Option<Box<(zerocode_core::orchestration::LedgerProjectionV1, String)>>,
+    ) -> (Self, zerocode_orchestrator::workflow_store::WorkflowStore) {
         let usage = super::UsageSource::fixed(usage);
         let turn = window_turns()
             .write()
@@ -374,10 +391,7 @@ impl PrivateWindow {
         let actor = super::RuntimeActor::start(
             &store,
             "main-ledger",
-            super::RuntimeBoot::Cutover {
-                legacy: None,
-                now_ms: 1,
-            },
+            super::RuntimeBoot::Cutover { legacy, now_ms: 1 },
             super::MAX_RUNTIME_MAILBOX,
             Box::new(super::ShellPaneTable),
             Box::new(super::LiveCatalog {
@@ -24836,5 +24850,126 @@ fn a_put_whose_record_the_disk_refused_leaves_the_homes_login_nobodys_until_a_pu
     assert_eq!(
         session_in_table(config.path(), data.path(), &a.id),
         Some(100)
+    );
+}
+
+/// A ledger the size of a long-lived machine's: this many runs, each holding
+/// this many tasks and the mail on them, so the ids run to the tens of
+/// thousands. Built here and never read from anybody's disk (t-19506).
+const IDLE_BEAT_RUNS: usize = 24;
+const IDLE_BEAT_TASKS_PER_RUN: usize = 800;
+
+fn a_ledger_as_large_as_a_long_lived_machines() -> zerocode_core::orchestration::LedgerProjectionV1
+{
+    let mut ledger = super::Ledger::new();
+    for run in 0..IDLE_BEAT_RUNS {
+        let run = ledger.create_run(&format!("long-lived run {run}"), 1);
+        for task in 0..IDLE_BEAT_TASKS_PER_RUN {
+            ledger
+                .create_task(
+                    &run,
+                    format!("spec {task} of {run}"),
+                    format!("task {task}"),
+                    Vec::new(),
+                    None,
+                    task as i64,
+                )
+                .expect("a synthetic task");
+        }
+    }
+    ledger.export()
+}
+
+/// An idle window serves one projection per ledger generation: the beat
+/// asks for the ledger many times over (every sweep reads it), and nothing
+/// is exported, rebuilt or validated for a ledger that did not change.
+#[test]
+fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
+    const BEATS: i64 = 6;
+    let _beat = one_beat_at_a_time();
+    let (_window, _store) =
+        PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
+    // The first beat reads the generation the window booted on; it may pay
+    // for it once.
+    tick(&Nowhere, &[], 1_000_000);
+    let revision = || {
+        super::runtime()
+            .expect("this window's runtime")
+            .actor
+            .view()
+            .expect("the image")
+            .revision()
+    };
+    let booted_on = revision();
+    let settled = zerocode_core::orchestration::ledger_work();
+    for beat in 0..BEATS {
+        tick(&Nowhere, &[], 1_001_000 + beat * 1_000);
+    }
+    let walked = zerocode_core::orchestration::ledger_work().since(settled);
+    eprintln!(
+        "idle beats: {BEATS} beats walked the ledger {walked:?}, revision {booted_on} -> {}",
+        revision()
+    );
+    assert_eq!(
+        (walked.exports, walked.rebuilds, walked.validations),
+        (0, 0, 0),
+        "{BEATS} idle beats on an unchanged ledger walked it again"
+    );
+    // And two readers of one generation hold the one projection, not two.
+    let actor = &super::runtime().expect("this window's runtime").actor;
+    let (first, second) = (
+        actor.view().expect("an image"),
+        actor.view().expect("an image"),
+    );
+    assert!(
+        std::ptr::eq(first.projection(), second.projection()),
+        "two images of one revision were exported twice"
+    );
+}
+
+/// The idle beat's price on the ledger above, before and after a change:
+/// the cost of one beat (p50/p95) and the CPU the process spends per minute
+/// of beats — the window beats once a second, so a minute is 60 of them.
+/// Run it under `taskpolicy -b` for the low-spec profile (efficiency cores,
+/// background QoS). Private ledger, built here; nobody's disk is read.
+// getrusage is the process's own CPU clock on unix; the Windows build has none
+// to read, and the cost this measures is the same code on every platform.
+#[cfg(unix)]
+#[test]
+#[ignore = "a measurement: prints the idle beat's cost on a synthetic ledger"]
+fn measure_the_idle_beat_on_a_large_ledger() {
+    const BEATS_PER_MINUTE: i64 = 60;
+    let _beat = one_beat_at_a_time();
+    let (_window, _store) =
+        PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
+    tick(&Nowhere, &[], 1_000_000);
+    let cpu = || {
+        // SAFETY: getrusage fills the struct it is handed.
+        let mut used: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut used) };
+        let micros = |t: libc::timeval| t.tv_sec as u128 * 1_000_000 + t.tv_usec as u128;
+        micros(used.ru_utime) + micros(used.ru_stime)
+    };
+    let started_cpu = cpu();
+    let started = std::time::Instant::now();
+    let mut beats = Vec::new();
+    for beat in 0..BEATS_PER_MINUTE {
+        let one = std::time::Instant::now();
+        tick(&Nowhere, &[], 1_001_000 + beat * 1_000);
+        beats.push(one.elapsed());
+    }
+    let wall = started.elapsed();
+    let cpu_used = cpu() - started_cpu;
+    beats.sort();
+    eprintln!(
+        "idle beat, {} runs x {} tasks: p50={}us p95={}us, {} beats took {}ms wall, cpu per {} beats={}ms",
+        IDLE_BEAT_RUNS,
+        IDLE_BEAT_TASKS_PER_RUN,
+        beats[beats.len() / 2].as_micros(),
+        beats[beats.len() * 95 / 100].as_micros(),
+        BEATS_PER_MINUTE,
+        wall.as_millis(),
+        BEATS_PER_MINUTE,
+        cpu_used / 1000,
     );
 }
