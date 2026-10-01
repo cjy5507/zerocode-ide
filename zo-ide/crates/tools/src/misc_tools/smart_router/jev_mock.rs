@@ -43,19 +43,33 @@ impl Drop for Mock {
     }
 }
 
+/// A mock's loopback port as first bound: the listener for its accept thread
+/// and the parts [`Mock`] keeps.
+struct Bound {
+    listener: TcpListener,
+    base_url: String,
+    addr: SocketAddr,
+    bodies: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+}
+
 impl Mock {
-    /// The loopback port every mock listens on, with its base URL, an empty
-    /// request log and the stop flag its accept thread watches.
-    fn bind() -> (TcpListener, String, SocketAddr, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
+    fn bind() -> Bound {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the mock");
         let addr = listener.local_addr().expect("mock address");
-        (listener, format!("http://{addr}"), addr, Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicBool::new(false)))
+        Bound {
+            listener,
+            base_url: format!("http://{addr}"),
+            addr,
+            bodies: Arc::new(Mutex::new(Vec::new())),
+            stop: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// A port that accepts and never answers — a judgment that misses any
     /// wall put in front of it.
     pub(super) fn silent() -> Self {
-        let (listener, base_url, addr, bodies, stop) = Self::bind();
+        let Bound { listener, base_url, addr, bodies, stop } = Self::bind();
         let watching = Arc::clone(&stop);
         std::thread::spawn(move || {
             let mut held: Vec<TcpStream> = Vec::new();
@@ -77,7 +91,7 @@ impl Mock {
     /// holds two of them open at the same moment and a server that
     /// answered them in turn would be measuring itself.
     pub(super) fn slow_first(delay: Duration, body: String) -> Self {
-        let (listener, base_url, addr, bodies, stop) = Self::bind();
+        let Bound { listener, base_url, addr, bodies, stop } = Self::bind();
         let recorder = Arc::clone(&bodies);
         let watching = Arc::clone(&stop);
         std::thread::spawn(move || {
@@ -113,7 +127,7 @@ impl Mock {
     /// asked under. Each connection is answered on its own thread, because
     /// the shards leave together.
     pub(super) fn answering(answer: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) -> Self {
-        let (listener, base_url, addr, bodies, stop) = Self::bind();
+        let Bound { listener, base_url, addr, bodies, stop } = Self::bind();
         let recorder = Arc::clone(&bodies);
         let watching = Arc::clone(&stop);
         let answer = Arc::new(answer);
@@ -143,7 +157,7 @@ impl Mock {
     }
 
     pub(super) fn serving(status: u16, body: String) -> Self {
-        let (listener, base_url, addr, bodies, stop) = Self::bind();
+        let Bound { listener, base_url, addr, bodies, stop } = Self::bind();
         let recorder = Arc::clone(&bodies);
         let watching = Arc::clone(&stop);
         std::thread::spawn(move || {
