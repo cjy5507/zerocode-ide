@@ -506,7 +506,10 @@ mod tests {
 
     /// The key is the four parts Codex joins, with the path normalised — or the
     /// same hook acquires two trust entries and neither ever matches.
-    #[cfg_attr(not(unix), ignore = "trust keys use the POSIX branch of Codex's path normaliser; the Windows branch is not implemented")]
+    #[cfg_attr(
+        not(unix),
+        ignore = "trust keys use the POSIX branch of Codex's path normaliser; the Windows branch is not implemented"
+    )]
     #[test]
     fn the_key_is_the_normalised_path_and_the_three_indices() {
         let mut held = entry("pre_tool_use");

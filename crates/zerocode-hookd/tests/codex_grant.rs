@@ -97,7 +97,10 @@ fn requests(log: &Path) -> Vec<serde_json::Value> {
 
 /// The whole conversation, and the claim the module stands on: the hash written
 /// is the one CODEX reported.
-#[cfg_attr(not(unix), ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)")]
+#[cfg_attr(
+    not(unix),
+    ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)"
+)]
 #[test]
 fn an_untrusted_hook_is_granted_with_codexs_own_hash() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -172,7 +175,10 @@ fn an_untrusted_hook_is_granted_with_codexs_own_hash() {
 
 /// A hook already trusted is not written again — the common case after the first
 /// time, and writing anyway would touch the user's config for nothing.
-#[cfg_attr(not(unix), ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)")]
+#[cfg_attr(
+    not(unix),
+    ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)"
+)]
 #[test]
 fn an_already_trusted_hook_is_not_written_again() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -202,7 +208,10 @@ fn an_already_trusted_hook_is_not_written_again() {
 
 /// Somebody else's hooks are not granted trust, and their presence does not make
 /// ours look covered.
-#[cfg_attr(not(unix), ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)")]
+#[cfg_attr(
+    not(unix),
+    ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)"
+)]
 #[test]
 fn another_products_hooks_are_neither_granted_nor_counted() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -254,7 +263,10 @@ fn a_hook_codex_cannot_see_is_a_list_mismatch() {
 
 /// Trust written and still not trusted. This is the state that stalls an agent,
 /// so it is a failure with its own class and never a success.
-#[cfg_attr(not(unix), ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)")]
+#[cfg_attr(
+    not(unix),
+    ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)"
+)]
 #[test]
 fn a_write_that_did_not_take_is_reported_untrusted() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -353,7 +365,10 @@ fn a_server_that_never_answers_times_out_and_is_killed() {
 
 /// A server that talks before answering — notifications, other ids — is not a
 /// failure. It is entitled to.
-#[cfg_attr(not(unix), ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)")]
+#[cfg_attr(
+    not(unix),
+    ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)"
+)]
 #[test]
 fn chatter_before_the_answer_is_ignored() {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -391,7 +406,10 @@ fn chatter_before_the_answer_is_ignored() {
 /// The keys are compared folded, so a Codex that reports a path spelled
 /// differently than we planned still matches. Unfolded, the grant would report a
 /// mismatch for a hook that is right there.
-#[cfg_attr(not(unix), ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)")]
+#[cfg_attr(
+    not(unix),
+    ignore = "the fake app server and its keys are POSIX paths; Codex's Windows key spelling is not implemented (codex_trust::normalize_source_path)"
+)]
 #[test]
 fn a_differently_spelled_path_still_matches() {
     let dir = tempfile::tempdir().expect("a temp dir");

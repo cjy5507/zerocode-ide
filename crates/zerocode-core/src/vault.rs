@@ -3674,13 +3674,19 @@ mod tests {
         // The spelling this variable had before it was renamed still works, and
         // still loses to the current one.
         assert_eq!(
-            named(&[("PRIME_AGENT_CODING_AGENT_SESSION_DIR", at("/w/legacy").as_str())]),
+            named(&[(
+                "PRIME_AGENT_CODING_AGENT_SESSION_DIR",
+                at("/w/legacy").as_str()
+            )]),
             Some(PathBuf::from(at("/w/legacy")))
         );
         assert_eq!(
             named(&[
                 ("PRIME_AGENT_SESSION_DIR", at("/w/now").as_str()),
-                ("PRIME_AGENT_CODING_AGENT_SESSION_DIR", at("/w/legacy").as_str()),
+                (
+                    "PRIME_AGENT_CODING_AGENT_SESSION_DIR",
+                    at("/w/legacy").as_str()
+                ),
             ]),
             Some(PathBuf::from(at("/w/now")))
         );

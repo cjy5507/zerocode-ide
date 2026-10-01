@@ -479,7 +479,10 @@ mod tests {
         );
     }
 
-    #[cfg_attr(not(unix), ignore = "the fixture transcripts are written on a Mac and carry unix paths; a Windows transcript's drive paths are not pinned here")]
+    #[cfg_attr(
+        not(unix),
+        ignore = "the fixture transcripts are written on a Mac and carry unix paths; a Windows transcript's drive paths are not pinned here"
+    )]
     #[test]
     fn relative_writer_paths_use_the_session_root_and_cannot_traverse_outside_it() {
         // A relative `filePath` is joined to the session root, the way
@@ -617,7 +620,10 @@ mod tests {
     /// A file a `Write` created under its own cwd is a page, dated by the
     /// result that said so; one it created in a sibling directory is not, and
     /// neither is a page when no root can judge it.
-    #[cfg_attr(not(unix), ignore = "the fixture transcripts are written on a Mac and carry unix paths; a Windows transcript's drive paths are not pinned here")]
+    #[cfg_attr(
+        not(unix),
+        ignore = "the fixture transcripts are written on a Mac and carry unix paths; a Windows transcript's drive paths are not pinned here"
+    )]
     #[test]
     fn a_write_is_a_page_only_under_its_project_root() {
         let facts = extract(Speaker::Claude, CLAUDE.lines(), None);
@@ -669,7 +675,10 @@ mod tests {
     /// zo's blocks spell the output as a string; the `write_file` result that
     /// says `create` is a page, the `edit_file` and `bash` blocks are not, and
     /// the caller's root judges.
-    #[cfg_attr(not(unix), ignore = "the fixture transcripts are written on a Mac and carry unix paths; a Windows transcript's drive paths are not pinned here")]
+    #[cfg_attr(
+        not(unix),
+        ignore = "the fixture transcripts are written on a Mac and carry unix paths; a Windows transcript's drive paths are not pinned here"
+    )]
     #[test]
     fn zo_created_files_are_pages_under_the_callers_root() {
         let facts = extract(

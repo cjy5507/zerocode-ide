@@ -1791,7 +1791,12 @@ mod tests {
         bytes.push(b'\n');
         fs::write(path, bytes).unwrap();
         // Windows flushes only a handle opened for writing.
-        OpenOptions::new().write(true).open(path).unwrap().sync_all().unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .sync_all()
+            .unwrap();
     }
 
     fn quarantined_paths(target: &Path) -> Vec<PathBuf> {

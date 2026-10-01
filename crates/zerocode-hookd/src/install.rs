@@ -1312,8 +1312,7 @@ mod tests {
         assert_eq!(hooks["Stop"][0]["hooks"][0]["timeout"], 10);
 
         // And the script itself is there, executable, pointing at our slug.
-        let script =
-            std::fs::read_to_string(script_path_for(
+        let script = std::fs::read_to_string(script_path_for(
             home.path(),
             AgentKind::Claude,
             ScriptHost::Posix,

@@ -143,7 +143,10 @@ fn policy(must_fail_first: bool) -> PublishPolicy {
     }
 }
 
-#[cfg_attr(not(unix), ignore = "the verification commands run through /bin/sh, an absolute path only on unix")]
+#[cfg_attr(
+    not(unix),
+    ignore = "the verification commands run through /bin/sh, an absolute path only on unix"
+)]
 #[test]
 fn a_green_receipt_never_says_the_worker_changed_anything() {
     let workspace = tempfile::tempdir().expect("workspace");
@@ -249,7 +252,10 @@ fn a_green_receipt_never_says_the_worker_changed_anything() {
     );
 }
 
-#[cfg_attr(not(unix), ignore = "the verification commands run through /bin/sh, an absolute path only on unix")]
+#[cfg_attr(
+    not(unix),
+    ignore = "the verification commands run through /bin/sh, an absolute path only on unix"
+)]
 #[test]
 fn a_check_that_cannot_fail_is_green_on_an_unfixed_tree() {
     let workspace = tempfile::tempdir().expect("workspace");
