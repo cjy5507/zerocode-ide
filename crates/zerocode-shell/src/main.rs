@@ -228,6 +228,7 @@ mod zsh_wrapper;
 use agent_tools_runtime::*;
 use app_paths::{artifact_file, legacy_settings_file, settings_file};
 use automation_runtime::*;
+use boot_timeline::boot_phase;
 use browser_diagnose::*;
 use browser_guest_runtime::*;
 use browser_nav_state::*;
@@ -2941,7 +2942,7 @@ fn main() -> ExitCode {
             hooks_report,
             set_hooks_enabled,
             install_hooks,
-            boot_timeline::boot_phase,
+            boot_phase,
             pane_sessions,
             pane_agents,
             ledger_agents,

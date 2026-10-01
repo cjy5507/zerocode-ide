@@ -301,6 +301,10 @@ pub(crate) fn boot_phase(app: tauri::AppHandle, phase: String) -> Result<(), Str
 }
 
 #[cfg(test)]
+#[path = "boot_profile.rs"]
+mod boot_profile;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
