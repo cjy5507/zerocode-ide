@@ -109,7 +109,7 @@ function runProbe(name, level, index, dir) {
   const env = { ...process.env, ...(level === "cpu4x" ? { WINDOW_CPU_THROTTLE: "4" } : {}) };
   const power = powerState();
   const started = Date.now();
-  const done = spawnSync(argv[0], argv.slice(1), { cwd: ROOT, env, encoding: "utf8", maxBuffer: 1 << 28, timeout: 840_000 });
+  const done = spawnSync(argv[0], argv.slice(1), { cwd: ROOT, env, encoding: "utf8", maxBuffer: 1 << 28, timeout: 880_000 });
   const log = `${done.stdout ?? ""}\n${done.stderr ?? ""}`;
   writeFileSync(join(dir, `${name}.${index}.log`), log);
   const numbers = numbersOf(log);
@@ -119,7 +119,14 @@ function runProbe(name, level, index, dir) {
   }
   const spin = log.match(/CALIBRATE (\d+(?:\.\d+)?) ms/);
   if (spin) numbers["calibrate · loop ms"] = Number(spin[1]);
-  return { probe: name, level, index, rc: done.status, wallMs: Date.now() - started, power, checks: checksOf(log), numbers };
+  const checks = checksOf(log);
+  for (const [, what] of log.matchAll(/^NOT ZERO: (.+)$/gm)) checks.push({ pass: false, name: `NOT ZERO: ${what}` });
+  if (probe.json && existsSync(jsonPath)) {
+    const budget = JSON.parse(readFileSync(jsonPath, "utf8")).summary?.budget ?? JSON.parse(readFileSync(jsonPath, "utf8")).budget ?? {};
+    for (const [key, held] of Object.entries(budget)) if (held === false) checks.push({ pass: false, name: `budget ${key}` });
+  }
+  if (done.error?.code === "ETIMEDOUT" || done.signal) checks.push({ pass: false, name: `did not finish in ${880} s (${done.signal ?? "timeout"})` });
+  return { probe: name, level, index, rc: done.status ?? "timeout", wallMs: Date.now() - started, power, checks, numbers };
 }
 
 function run(argv) {
@@ -137,8 +144,11 @@ function run(argv) {
     if (!PROBES[name]) throw new Error(`unknown probe ${name}; known: ${Object.keys(PROBES).join(", ")}`);
     for (let index = first; index < first + runs; index += 1) {
       const row = runProbe(name, level, index, dir);
-      rows.push(row);
-      writeFileSync(join(dir, "runs.json"), JSON.stringify(rows, null, 1));
+      // Read again before writing: another job of the same level may have appended meanwhile
+      // (an in-flight job once wrote back its stale copy and brought stripped rows back, 2026-10-01).
+      const now = existsSync(join(dir, "runs.json")) ? JSON.parse(readFileSync(join(dir, "runs.json"), "utf8")) : [];
+      now.push(row);
+      writeFileSync(join(dir, "runs.json"), JSON.stringify(now, null, 1));
       console.log(`${level} ${name} #${index}: rc ${row.rc}, ${(row.wallMs / 1000).toFixed(1)} s, ${row.power.source}${row.power.lowPowerMode ? " LPM" : ""}, load ${row.power.load1}/${CORES}${row.power.loud ? " LOUD" : ""}, ${row.checks.filter((c) => !c.pass).length} failing`);
     }
   }
