@@ -1596,6 +1596,7 @@ pub fn shortcut_card() -> Vec<String> {
         "/new [name]           start a new chat — optional name".to_string(),
         "/resume [id]          resume a saved chat — no id opens the picker".to_string(),
         "/compact [focus]      compact the conversation".to_string(),
+        "/rewind [N|turn]      list or restore file edits · turn drops the last turn".to_string(),
         "/goal [command]       persistent goal · bounded autonomous gates".to_string(),
         "/loop [command]       bounded count · interval · file-watch loops".to_string(),
         "/status               model · permissions · effort · session · context".to_string(),
