@@ -225,6 +225,12 @@ pub struct ModelAsk {
     pub state: Value,
     pub questions: Value,
     offered: Vec<(String, String)>,
+    /// The question's own name: [`QUESTION`], or [`QUESTION`] scoped to one
+    /// agent ([`ask_for`]).
+    question: String,
+    /// The agent this question was scoped to, when the agent was still open
+    /// as it was asked.
+    scope: Option<String>,
 }
 
 /// A validated answer: a model and the effort it runs at, or `None` for
@@ -239,9 +245,50 @@ pub struct ModelPick {
 /// The question for `look` over `options`; `None` under [`FEWEST_MODELS`].
 #[must_use]
 pub fn ask(look: &Look, options: &[ModelOption]) -> Option<ModelAsk> {
+    ask_in(None, look, options)
+}
+
+/// The question for `look` over `options` as `agent`'s — asked while the
+/// agent is still open (t-16578), beside the agent question and one such
+/// question for each agent its answer may choose. Each is named and keyed
+/// for its agent ([`scoped_question`], [`scoped_models_key`]) so several ride
+/// one request without sharing a name or a `models` list; its words are
+/// [`INSTRUCTIONS`] word for word with that key spelled where they say
+/// `models`, which is why the version stands.
+#[must_use]
+pub fn ask_for(agent: &str, look: &Look, options: &[ModelOption]) -> Option<ModelAsk> {
+    ask_in(Some(agent), look, options)
+}
+
+/// The name of `agent`'s own pair question: [`QUESTION`] and the agent's id
+/// with every character a name may not carry made `_`.
+#[must_use]
+pub fn scoped_question(agent: &str) -> String {
+    format!("{QUESTION}_{}", word_of(agent))
+}
+
+/// The state key `agent`'s own pair question reads its models under.
+#[must_use]
+pub fn scoped_models_key(agent: &str) -> String {
+    format!("{MODELS_KEY}_{}", word_of(agent))
+}
+
+/// The key every pair question reads today's models under.
+const MODELS_KEY: &str = STATE_KEYS[5];
+
+fn word_of(agent: &str) -> String {
+    agent
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+fn ask_in(scope: Option<&str>, look: &Look, options: &[ModelOption]) -> Option<ModelAsk> {
     if options.len() < FEWEST_MODELS {
         return None;
     }
+    let question = scope.map_or_else(|| QUESTION.to_string(), scoped_question);
+    let models_key = scope.map_or_else(|| MODELS_KEY.to_string(), scoped_models_key);
     let mut criteria = Map::new();
     let mut models = Vec::new();
     let mut offered = Vec::new();
@@ -281,20 +328,23 @@ pub fn ask(look: &Look, options: &[ModelOption]) -> Option<ModelAsk> {
         )));
     }
     criteria.insert(ABSTAIN.to_string(), Value::from(ABSTAIN_MEANS));
-    let state = Value::Object(Map::from_iter(
-        STATE_KEYS.map(String::from).into_iter().zip([
-            Value::from(crate::jev::brief_shape(&look.title, Cap::Chars(TITLE_CHAR_CAP)).0),
-            Value::from(crate::jev::brief_shape(&look.spec, Cap::Chars(SPEC_CHAR_CAP)).0),
-            Value::from(look.attempt),
-            Value::from(look.failures),
-            Value::from(look.retry_of),
-            Value::Array(models),
-        ]),
-    ));
+    let mut keys = STATE_KEYS.map(String::from);
+    keys[5] = models_key.clone();
+    let state = Value::Object(Map::from_iter(keys.into_iter().zip([
+        Value::from(crate::jev::brief_shape(&look.title, Cap::Chars(TITLE_CHAR_CAP)).0),
+        Value::from(crate::jev::brief_shape(&look.spec, Cap::Chars(SPEC_CHAR_CAP)).0),
+        Value::from(look.attempt),
+        Value::from(look.failures),
+        Value::from(look.retry_of),
+        Value::Array(models),
+    ])));
+    let instructions = INSTRUCTIONS.replace(&format!("`{MODELS_KEY}`"), &format!("`{models_key}`"));
     Some(ModelAsk {
         state,
-        questions: choice::asked(QUESTION, INSTRUCTIONS, criteria),
+        questions: choice::asked(&question, &instructions, criteria),
         offered,
+        question,
+        scope: scope.map(str::to_string),
     })
 }
 
@@ -310,7 +360,7 @@ impl ModelAsk {
             .map(|(model, effort)| option_word(model, effort))
             .chain([ABSTAIN.to_string()])
             .collect();
-        let read = choice::read(answers, QUESTION, &words)?;
+        let read = choice::read(answers, &self.question, &words)?;
         Ok(ModelPick {
             chosen: self
                 .offered
@@ -320,6 +370,12 @@ impl ModelAsk {
             probabilities: read.probabilities,
             confidence: read.confidence,
         })
+    }
+
+    /// The agent this question was scoped to, when it was.
+    #[must_use]
+    pub fn scope(&self) -> Option<&str> {
+        self.scope.as_deref()
     }
 
     /// The models this question offered, each at its effort.

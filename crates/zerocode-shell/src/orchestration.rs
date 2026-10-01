@@ -2271,14 +2271,16 @@ pub(crate) fn refresh_board_ledger() {
         };
         let outcomes = summon_difficulty::observations(ledger, &mut costs);
         let model_outcomes = summon_model::observations(ledger, &mut costs);
+        let agent_outcomes = summon_choice::observations(ledger, &mut costs);
         costs.end();
-        (next, (outcomes, model_outcomes))
+        (next, (outcomes, model_outcomes, agent_outcomes))
     }) else {
         return;
     };
-    let (outcomes, model_outcomes) = outcomes;
+    let (outcomes, model_outcomes, agent_outcomes) = outcomes;
     summon_difficulty::record_observations(outcomes, crate::now_epoch_ms());
     summon_model::record_observations(model_outcomes, crate::now_epoch_ms());
+    summon_choice::record_observations(agent_outcomes, crate::now_epoch_ms());
     // Build, allocate and drop old rows outside the publication lock. The
     // main-thread reader holds it only long enough to clone an Arc.
     let next = Arc::new(next);
@@ -3025,15 +3027,6 @@ impl Launcher for LiveCatalog {
     /// Until t-11989 only [`Catalog`] answered this, and the actor holds a
     /// `LiveCatalog`: every `--agent auto` in the window was refused by the
     /// trait's default, whatever the seat's mode said.
-    fn choose_agent(
-        &self,
-        look: &zerocode_core::summon_choice::SummonLook<'_>,
-        options: &[zerocode_core::summon_choice::Summonable],
-        origin: [&str; 3],
-    ) -> Option<String> {
-        summon_choice::choose(look, options, origin)
-    }
-
     fn difficulty_profile(
         &self,
         agent: &str,
@@ -8325,15 +8318,6 @@ impl Catalog {
 }
 
 impl Launcher for Catalog {
-    fn choose_agent(
-        &self,
-        look: &zerocode_core::summon_choice::SummonLook<'_>,
-        options: &[zerocode_core::summon_choice::Summonable],
-        origin: [&str; 3],
-    ) -> Option<String> {
-        summon_choice::choose(look, options, origin)
-    }
-
     fn command_for(&self, agent: &str, prompt: &str, tuning: &[String]) -> Result<String, String> {
         let Some(spec) = agent_spec(agent) else {
             return Err(format!("no agent is called {agent}"));

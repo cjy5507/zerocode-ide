@@ -753,7 +753,13 @@ fn a_summons_question_leaves_no_credential_in_a_task_title() {
     .expect("two agents are a question");
     let mut body =
         json!({ "state": asked.state, "model": "jev-latest", "questions": asked.questions });
-    for sent in SUMMON.sends {
+    // The agent question alone carries no title or spec: those ride the same
+    // list for the difficulty and pair questions it joins (t-16578).
+    for sent in SUMMON
+        .sends
+        .iter()
+        .filter(|sent| !["/state/title", "/state/spec"].contains(&sent.at))
+    {
         let path: Vec<&str> = sent.at.split('/').skip(1).collect();
         let mut reached = 0;
         visit(&mut body, &path, &mut |_| reached += 1);

@@ -29,6 +29,7 @@ fn shadow() -> SummonShadow {
         carries_a_task: true,
         attempts: 1,
         failures: 0,
+        receipt: None,
         options: vec![
             Summonable {
                 id: "claude".to_string(),

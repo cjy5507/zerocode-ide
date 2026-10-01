@@ -41,6 +41,7 @@ fn one_state_carries_both_questions() {
     let asked = AssignAsk {
         difficulty: Some(look()),
         model: Some(model_ask()),
+        ..Default::default()
     };
     assert!(asked.shared());
     let state = asked.state();
@@ -59,19 +60,20 @@ fn one_state_carries_both_questions() {
         questions[crate::summon_model::QUESTION],
         model_ask().questions[crate::summon_model::QUESTION]
     );
-    let alone = asked.only(true, false);
+    let alone = asked.only(false, true, false);
     assert!(!alone.shared());
     assert_eq!(alone.state(), look().state());
-    assert!(asked.only(false, false).is_empty());
+    assert!(asked.only(false, false, false).is_empty());
 }
 
 /// The door clears one body under one seat's list of what it sends: the two
 /// seats must send the same texts under the same caps for that to be one
 /// door, not two.
 #[test]
-fn both_seats_send_the_same_texts_under_the_same_caps() {
+fn every_seat_sends_the_same_texts_under_the_same_caps() {
     assert_eq!(
         crate::jev::SUMMON_DIFFICULTY.sends,
         crate::jev::SUMMON_MODEL.sends
     );
+    assert_eq!(crate::jev::SUMMON.sends, crate::jev::SUMMON_MODEL.sends);
 }
