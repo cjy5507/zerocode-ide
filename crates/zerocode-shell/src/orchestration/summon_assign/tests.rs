@@ -466,7 +466,11 @@ fn an_open_agent_rides_the_one_request() {
     );
     let heard = endpoint.asked();
     assert_eq!(heard.len(), 1, "one request where there were three");
-    assert_eq!(heard[0].matches(SPEC).count(), 1, "the spec is sent once");
+    assert_eq!(
+        heard[0].matches(SPEC_WORD).count(),
+        1,
+        "the spec is sent once"
+    );
     for question in [
         "\"summon\"",
         "summon_difficulty",
