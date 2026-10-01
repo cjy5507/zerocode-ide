@@ -63,6 +63,8 @@ cp -R "$INSTALLED_FRAMEWORKS" "$out/ZeroCode.app/Contents/Frameworks"
 shim="$out/ZeroCode.app/Contents/MacOS/zerocode-shell"
 
 home="${home_dir:-$out/home}"
+[[ "$home" = /* && "$home" != "$HOME" && "$home" != "$HOME"/Library* && "$home" != "$HOME"/.zo* ]] \
+  || { echo "--home must be an absolute path outside the person's state folders" >&2; exit 2; }
 data="$home/Library/Application Support/$APP_ID"
 repo="$home/work/project"
 mkdir -p "$data" "$repo"
