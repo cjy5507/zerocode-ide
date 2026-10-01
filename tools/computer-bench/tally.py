@@ -315,6 +315,8 @@ def reflex_row(folder, judged):
         "wall_s": measured.get("wall_s"),
         "preparation_s": measured.get("preparation_s"),
         "reaction_ms": {name: reaction.get(name) for name in ("n", "p50", "p95", "p99")},
+        "press_to_receive_ms": measured.get("press_to_receive_ms") or {},
+        "appear_to_receive_ms": measured.get("appear_to_receive_ms") or {},
         "roads": measured.get("roads") or {},
         "floors": judged.get("floors") or {},
         # The autopilot's own columns (t-10223 R9): None for a person's plan.
@@ -370,11 +372,14 @@ def summarize_reflex(rows, values=None):
             for road, count in (row.get("roads") or {}).items():
                 roads[road] = roads.get(road, 0) + int((count or {}).get("n") or 0)
         entry["roads"] = roads
-        for name, column in (("replan_gap", "replan_gap_ms"), ("l1_rtt", "l1_rtt_ms")):
+        for name, column in (("replan_gap", "replan_gap_ms"), ("l1_rtt", "l1_rtt_ms"),
+                             ("appear_to_receive", "appear_to_receive_ms"), ("press_to_receive", "press_to_receive_ms")):
             for share in ("p50", "p95"):
                 seen = [row[column][share] for row in judged
                         if isinstance((row.get(column) or {}).get(share), (int, float))]
                 entry[f"median_{name}_{share}"] = statistics.median(seen) if seen else None
+        for name in ("appear_to_receive", "press_to_receive"):
+            entry[name + "_n"] = sum(int((row.get(name + "_ms") or {}).get("n") or 0) for row in judged)
         piloted = [row for row in judged if row.get("applied") is not None]
         entry["applied"] = {word: sum(int(row["applied"].get(word) or 0) for row in piloted)
                             for word in REFLEX_DECISIONS} if piloted else None
@@ -391,8 +396,9 @@ def summarize_reflex(rows, values=None):
 def render_reflex(summary):
     lines = ["| scenario | config | runs | pass | APM (goal) | APM (steady) | wrong | oracle | decisions | "
              "appear→press p50/p95/p99 ms | roads | goal→press ms | plans | applied c/p/r | re-plan gap ms | "
-             "L1 RTT p50/p95 ms | tokens in/out | $ |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "L1 RTT p50/p95 ms | tokens in/out | $ | appear→receive p50/p95 ms (run medians) [n] | "
+             "press→receive p50/p95 ms (run medians) [n] |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for entry in summary.values():
         roads = ", ".join(f"{road} {count}" for road, count in entry["roads"].items()) or "-"
         reaction = "/".join(fmt_n(entry["reaction_" + name]) for name in ("p50", "p95", "p99"))
@@ -402,6 +408,8 @@ def render_reflex(summary):
         rtt = "/".join(fmt_n(entry[f"median_l1_rtt_{share}"]) for share in ("p50", "p95"))
         tokens = f"{entry['tokens']['input']}/{entry['tokens']['output']}" if entry["tokens"] else "-"
         usd = f"{entry['usd']:.4f}" if isinstance(entry["usd"], float) else "-"
+        received = "/".join(fmt_n(entry[f"median_appear_to_receive_{share}"]) for share in ("p50", "p95"))
+        delivery = "/".join(fmt_n(entry[f"median_press_to_receive_{share}"]) for share in ("p50", "p95"))
         lines.append(
             f"| {entry['scenario']} | {entry['config']} | {entry['runs']} | {entry['passed']}/{entry['judged']} | "
             f"{fmt_n(entry['min_apm'] and round(entry['min_apm'], 1))} (≥{entry['apm_floor']:g}) | "
@@ -409,7 +417,8 @@ def render_reflex(summary):
             f"{fmt_n(entry['min_oracle'] and round(entry['min_oracle'], 4))} | {fmt_n(entry['min_decisions'])} | "
             f"{reaction} | {roads} | {fmt_n(entry['median_goal_to_first_press_ms'])} | "
             f"{fmt_n(entry['median_plans'])} | {applied} | {fmt_n(entry['median_replan_gap_p50'])} | {rtt} | "
-            f"{tokens} | {usd} |")
+            f"{tokens} | {usd} | {received} [{entry['appear_to_receive_n']}] | "
+            f"{delivery} [{entry['press_to_receive_n']}] |")
     return "\n".join(lines)
 
 

@@ -656,6 +656,73 @@ class Runner(unittest.TestCase):
         self.assertFalse((self.folder / "run-33").exists(), "refused before the fixture came up")
 
 
+class DeliveryTimings(unittest.TestCase):
+    def test_event_posting_and_receiving_have_separate_latency(self):
+        record = clean()
+        measured = reflex.measure(record, VALUES, LIMITS)
+        count = measured["hits"]
+        self.assertEqual(measured["press_to_receive_ms"], reflex.spread([0.5] * count))
+        self.assertEqual(measured["appear_to_receive_ms"], reflex.spread([150.5] * count))
+
+        delayed = copy.deepcopy(record)
+        for event in delayed["events"]:
+            event["rxNs"] += 75 * MS
+        slower = reflex.measure(delayed, VALUES, LIMITS)
+        self.assertEqual(slower["appear_to_press_ms"], measured["appear_to_press_ms"])
+        self.assertEqual(slower["press_to_receive_ms"], reflex.spread([75.5] * count))
+        self.assertEqual(slower["appear_to_receive_ms"], reflex.spread([225.5] * count))
+        self.assertEqual((slower["apm"], slower["verified_apm"]), (measured["apm"], measured["verified_apm"]))
+
+    def test_absent_or_invalid_receive_times_are_missing_samples_not_zero_latency(self):
+        for value in (None, 0, True, "bad", float("nan"), float("inf"), T0 - 1):
+            with self.subTest(value=value):
+                record = clean()
+                for event in record["events"]:
+                    if value is None:
+                        event.pop("rxNs")
+                    else:
+                        event["rxNs"] = value
+                measured = reflex.measure(record, VALUES, LIMITS)
+                self.assertGreater(measured["appear_to_press_ms"]["n"], 0)
+                self.assertEqual(measured["press_to_receive_ms"], reflex.spread([]))
+                self.assertEqual(measured["appear_to_receive_ms"], reflex.spread([]))
+
+    def test_actual_appearance_is_required_for_receive_reaction(self):
+        record = clean()
+        record["frames"] = []
+        measured = reflex.measure(record, VALUES, LIMITS)
+        self.assertGreater(measured["appear_to_press_ms"]["n"], 0)
+        self.assertGreater(measured["press_to_receive_ms"]["n"], 0)
+        self.assertEqual(measured["appear_to_receive_ms"], reflex.spread([]),
+                         "the scheduled appearance cannot stand in for a rendered frame")
+
+    def test_receive_timings_reach_the_json_and_rendered_summary(self):
+        record = clean()
+        judged = reflex.judged(record, VALUES, LIMITS)
+        with tempfile.TemporaryDirectory() as run:
+            pathlib.Path(run, tally.REFLEX_RUN).write_text(json.dumps(judged))
+            row = tally.measure(run)
+            summary = tally.summarize_reflex([row], VALUES)
+            entry = next(iter(summary.values()))
+            self.assertEqual(row["press_to_receive_ms"]["n"], row["hits"])
+            self.assertEqual(entry["median_press_to_receive_p50"], 0.5)
+            self.assertEqual(entry["median_appear_to_receive_p95"], 150.5)
+            self.assertEqual(entry["press_to_receive_n"], row["hits"])
+            self.assertEqual(entry["appear_to_receive_n"], row["hits"])
+            rendered = tally.render_reflex(summary)
+            self.assertEqual(len({line.count("|") for line in rendered.splitlines()}), 1)
+            for text in ("appear→receive", "press→receive", "run medians", "150.5", "0.5"):
+                self.assertIn(text, rendered)
+
+            for name in ("press_to_receive_ms", "appear_to_receive_ms"):
+                judged["measure"].pop(name)
+            pathlib.Path(run, tally.REFLEX_RUN).write_text(json.dumps(judged))
+            old = next(iter(tally.summarize_reflex([tally.measure(run)], VALUES).values()))
+            self.assertIsNone(old["median_press_to_receive_p50"])
+            self.assertIsNone(old["median_appear_to_receive_p95"])
+            self.assertEqual((old["press_to_receive_n"], old["appear_to_receive_n"]), (0, 0))
+
+
 class Autopilot(unittest.TestCase):
     """A goal in place of a plan (t-10223 R9): the autopilot's runs and plans
     judged from the files the driver and the bench home keep."""
