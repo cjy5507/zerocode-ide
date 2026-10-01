@@ -56,7 +56,7 @@ fn ask(wire: &Wire, look: &Look, checkout: Option<&Path>) -> Value {
         wire,
         &zerocode_core::summon_assign::AssignAsk {
             difficulty: Some(look.clone()),
-            model: None,
+            ..Default::default()
         },
         checkout,
     )
@@ -149,19 +149,6 @@ pub(super) fn origin_with_for_tests(
     settings: Value,
 ) -> Origin {
     origin_with(key, checkout, fresh, settings)
-}
-
-/// The checkout the window observed for a fresh summons under `origin` —
-/// the workspace a seat asked while that summons waits asks consent for.
-/// `None` for a summons nobody observed and for a handover whose launch was
-/// sealed: no seat asks on the beat for either.
-pub(super) fn fresh_checkout(origin: [&str; 3]) -> Option<Option<std::path::PathBuf>> {
-    origins()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&origin.map(str::to_string))
-        .filter(|origin| origin.fresh)
-        .map(|origin| origin.checkout.clone())
 }
 
 /// [`origin`] with the lineup handed in — how a test gives a summons a
@@ -294,7 +281,7 @@ fn choose_with(wire: &Wire, look: &Look, origin: [&str; 3]) -> Option<Value> {
         wire,
         &zerocode_core::summon_assign::AssignAsk {
             difficulty: Some(look.clone()),
-            model: None,
+            ..Default::default()
         },
         origin,
     )
@@ -346,7 +333,12 @@ pub(super) fn observations_of(
 ) -> Option<(std::path::PathBuf, Vec<Value>)> {
     let wire = Wire::of_this_machine();
     let path = crate::systemone::ledger_of(&wire, seat)?;
-    observations_in(path, seat.rubric_version, ledger, costs)
+    // A seat graded by comparison already marks its rows when it asks; only
+    // the answers that RAN carry the outcome of what they launched
+    // (t-16578), and none of them is marked by it — the rest keep the marks
+    // they have.
+    let applied_only = seat.agreement_kind == zerocode_core::jev::AgreementKind::Comparison;
+    observations_in(path, seat.rubric_version, applied_only, ledger, costs)
 }
 
 /// [`observations`] of the seat's ledger at `path`.
@@ -356,12 +348,13 @@ fn observations_at(
     ledger: &zerocode_core::orchestration::Ledger,
     costs: &mut super::cost_book::CostBook,
 ) -> Option<(std::path::PathBuf, Vec<Value>)> {
-    observations_in(path, difficulty::RUBRIC_VERSION, ledger, costs)
+    observations_in(path, difficulty::RUBRIC_VERSION, false, ledger, costs)
 }
 
 fn observations_in(
     path: std::path::PathBuf,
     rubric: u32,
+    applied_only: bool,
     ledger: &zerocode_core::orchestration::Ledger,
     costs: &mut super::cost_book::CostBook,
 ) -> Option<(std::path::PathBuf, Vec<Value>)> {
@@ -371,6 +364,7 @@ fn observations_in(
     for request in rows
         .iter()
         .filter(|row| row["outcome"] == "answered" && row["rubricVersion"] == rubric)
+        .filter(|row| !applied_only || row["applied"] == true)
     {
         let Some(run) = request["run"].as_str().and_then(|id| ledger.run(id)) else {
             continue;
@@ -414,23 +408,34 @@ fn observations_in(
         ] {
             row[key] = request[key].clone();
         }
-        if request[zerocode_core::summon_model::CHALLENGE_KEY] == true {
-            // A challenger's turn ran another model than any answer named:
-            // its outcome is the model's record, and grades no answer.
-            row[zerocode_core::jev::summary::NOT_COMPARED.canonical] =
-                json!(zerocode_core::summon_model::CHALLENGE_KEY);
-        } else if request["applied"] == true {
-            if let Some(success) = row[difficulty::outcomes::KEY]["firstAttemptSuccess"].as_bool() {
-                row[zerocode_core::jev::summary::AGREED.canonical] = json!(success);
-            }
-        } else if let Some(success) =
-            row[difficulty::outcomes::KEY]["firstAttemptSuccess"].as_bool()
-        {
-            row[zerocode_core::jev::summary::BASELINE_AGREED.canonical] = json!(success);
+        // A seat graded by comparison keeps its own marks: the outcome rides
+        // its row for the reader that grades by hindsight, and says nothing
+        // about agreement (t-16578).
+        if !applied_only {
+            mark(&request, &mut row);
         }
         changed.push(row);
     }
     Some((path, changed))
+}
+
+/// The mark a hindsight seat's outcome `row` takes for the `request` it
+/// grades: a challenger's turn grades no answer, an answer that ran is
+/// agreed with when the work passed first time, and one that did not run is
+/// the baseline's.
+fn mark(request: &Value, row: &mut Value) {
+    if request[zerocode_core::summon_model::CHALLENGE_KEY] == true {
+        // A challenger's turn ran another model than any answer named:
+        // its outcome is the model's record, and grades no answer.
+        row[zerocode_core::jev::summary::NOT_COMPARED.canonical] =
+            json!(zerocode_core::summon_model::CHALLENGE_KEY);
+    } else if request["applied"] == true {
+        if let Some(success) = row[difficulty::outcomes::KEY]["firstAttemptSuccess"].as_bool() {
+            row[zerocode_core::jev::summary::AGREED.canonical] = json!(success);
+        }
+    } else if let Some(success) = row[difficulty::outcomes::KEY]["firstAttemptSuccess"].as_bool() {
+        row[zerocode_core::jev::summary::BASELINE_AGREED.canonical] = json!(success);
+    }
 }
 
 pub(super) fn record_observations(

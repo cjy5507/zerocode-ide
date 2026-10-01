@@ -92,6 +92,11 @@ fn wire(home: &tempfile::TempDir, endpoint: &Endpoint, difficulty: &str, model: 
 /// the difficulty `low`, the model `model-b` at the first effort offered for
 /// it — so one body serves a request of one question or of two.
 fn answer_every(request: &str) -> String {
+    answered(request, None)
+}
+
+/// [`answer_every`], choosing `agent` where the agent question is asked.
+fn answered(request: &str, agent: Option<&str>) -> String {
     let body: Value = request
         .split_once("\r\n\r\n")
         .and_then(|(_, body)| serde_json::from_str(body).ok())
@@ -106,6 +111,7 @@ fn answer_every(request: &str) -> String {
             .iter()
             .find(|word| {
                 word.as_str() == LADDER[0].0
+                    || Some(word.as_str()) == agent
                     || word.starts_with(&format!("model-b{}", model::PAIR_SEP))
             })
             .or(words.first())
@@ -237,6 +243,17 @@ struct Wired<'a> {
     lineup: Lineup,
     /// The agents installed here, when a test leaves the agent open.
     agents: &'static [&'static str],
+    /// Each agent's own lineup, where a measurement sizes them apart; every
+    /// other agent has `lineup`.
+    lineups: &'a [(&'static str, Lineup)],
+}
+impl Wired<'_> {
+    fn lineup_of(&self, agent: &str) -> &Lineup {
+        self.lineups
+            .iter()
+            .find(|(id, _)| *id == agent)
+            .map_or(&self.lineup, |(_, lineup)| lineup)
+    }
 }
 impl zerocode_core::orchestration::Launcher for Wired<'_> {
     fn command_for(&self, agent: &str, _: &str, _: &[String]) -> Result<String, String> {
@@ -251,7 +268,14 @@ impl zerocode_core::orchestration::Launcher for Wired<'_> {
         level: &str,
         _: [&str; 3],
     ) -> Result<Option<lineup::Row>, String> {
-        lineup::row_at(&Value::Null, agent, level, Some(&self.lineup), None, 0)
+        lineup::row_at(
+            &Value::Null,
+            agent,
+            level,
+            Some(self.lineup_of(agent)),
+            None,
+            0,
+        )
     }
     /// Which agents are here — the ones a test names (`Wired::agents`), so an
     /// open agent has something to choose between.
@@ -266,13 +290,13 @@ impl zerocode_core::orchestration::Launcher for Wired<'_> {
                 .collect()
         })
     }
-    fn model_facts(&self, _: &str, _: [&str; 3]) -> Option<model::Facts> {
+    fn model_facts(&self, agent: &str, _: [&str; 3]) -> Option<model::Facts> {
+        let lineup = self.lineup_of(agent);
         Some(model::Facts {
-            lineup: self.lineup.clone(),
+            lineup: lineup.clone(),
             seen: Seen::default(),
             // Every model with a record: no summons is a challenger's turn.
-            records: self
-                .lineup
+            records: lineup
                 .models
                 .iter()
                 .map(|held| {
@@ -319,6 +343,19 @@ fn summoned_among(
     lineup: Lineup,
     agents: &'static [&'static str],
 ) -> (Value, zerocode_core::orchestration::PreparedWorkerStart) {
+    summoned_each(wire, checkout, request, agent, lineup, agents, &[])
+}
+
+/// [`summoned_among`] with each agent's own lineup in `lineups`.
+fn summoned_each(
+    wire: &Wire,
+    checkout: &Path,
+    request: &str,
+    agent: &str,
+    lineup: Lineup,
+    agents: &'static [&'static str],
+    lineups: &[(&'static str, Lineup)],
+) -> (Value, zerocode_core::orchestration::PreparedWorkerStart) {
     let mut ledger = zerocode_core::orchestration::Ledger::new();
     let mut team = zerocode_core::agent_teams::Team::new("team-assign", "test-token", 1);
     let _origin = super::super::summon_difficulty::origin_with_for_tests(
@@ -331,6 +368,7 @@ fn summoned_among(
         wire,
         lineup,
         agents,
+        lineups,
     };
     let mut summoned = None;
     for (at, command) in [
@@ -612,6 +650,135 @@ fn assign_moment_numbers() {
             })
         );
     }
+}
+
+/// t-16578 A4: what a summons that leaves the agent AND the dials open waits
+/// for Jev and sends, before and after — before, the agent question asked
+/// alone and then the difficulty and pair on a second request; after, one
+/// request carrying all of it with a pair question for each agent the answer
+/// may choose — against a loopback endpoint that answers in a fixed 250 ms,
+/// per agent the answer lands on, each agent over as many models naming no
+/// efforts as its lineup held (`zo models --json`, 2026-09-29: claude 8,
+/// codex 6, zo 26) with all three installed. `joinBytes` is the bytes the pair
+/// questions put in the one request ([`AssignAsk::join_bytes`]); `pairOptions`
+/// the options the landing agent's own pair question offers, which scoping
+/// does not change. Prints one JSON line an agent; run by hand
+/// (`-- --ignored --nocapture --exact
+/// orchestration::summon_assign::tests::open_agent_numbers`).
+#[test]
+#[ignore = "a measurement, run by hand"]
+fn open_agent_numbers() {
+    const SAMPLES: usize = 30;
+    const HOLD_MS: u64 = 250;
+    let lineups: Vec<(&'static str, Lineup)> = [("claude", 8), ("codex", 6), ("zo", 26)]
+        .into_iter()
+        .map(|(agent, models)| {
+            let catalog = json!({"models": (0..models)
+                .map(|nth| json!({"provider": "synthetic", "id": format!("model-{nth}"), "builtin": true}))
+                .collect::<Vec<_>>()});
+            (agent, Lineup::from_catalog_all(&catalog).unwrap())
+        })
+        .collect();
+    let installed: &'static [&'static str] = &["claude", "codex", "zo"];
+    let bytes_of = |heard: &[String]| {
+        heard
+            .iter()
+            .map(|request| {
+                request
+                    .split_once("\r\n\r\n")
+                    .map_or(0, |(_, body)| body.len())
+            })
+            .sum::<usize>()
+    };
+    for (agent, lineup) in &lineups {
+        let agent: &'static str = agent;
+        let mut results = Vec::new();
+        for joined in [false, true] {
+            let mut waits = Vec::new();
+            let (mut requests, mut bytes) = (0, 0);
+            for nth in 0..SAMPLES {
+                let home = tempfile::tempdir().unwrap();
+                let endpoint = Endpoint::answering_each(
+                    "HTTP/1.1 200 OK",
+                    move |request| answered(request, Some(agent)),
+                    HOLD_MS,
+                );
+                let wire = wire_with_agent(&home, &endpoint, "on", "on", "on");
+                let request = format!("measure-{joined}-{nth}");
+                let began = Instant::now();
+                if joined {
+                    let _ = summoned_each(
+                        &wire,
+                        home.path(),
+                        &request,
+                        "auto",
+                        lineup.clone(),
+                        installed,
+                        &lineups,
+                    );
+                } else {
+                    // Before: the agent alone, then the dials on the agent it
+                    // chose — two requests, one after the other.
+                    let key = ["assign-team", "%1", request.as_str()];
+                    let _origin = super::super::summon_difficulty::origin_with_for_tests(
+                        key,
+                        Some(home.path().to_path_buf()),
+                        true,
+                        wire.settings_root(),
+                    );
+                    let chosen = super::super::summon_choice::choose_with(
+                        &wire,
+                        &agent_look(),
+                        &rooms_of(installed),
+                        key,
+                    );
+                    assert_eq!(chosen.as_deref(), Some(agent));
+                    let _ = summoned_each(
+                        &wire,
+                        home.path(),
+                        &request,
+                        agent,
+                        lineup.clone(),
+                        &[],
+                        &lineups,
+                    );
+                }
+                waits.push(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
+                let heard = endpoint.asked();
+                requests += heard.len();
+                bytes += bytes_of(&heard);
+            }
+            waits.sort_unstable();
+            let at = |share: f64| zerocode_core::jev::summary::percentile(&waits, share);
+            results.push(json!({
+                "shape": if joined { "after: one request" } else { "before: agent, then dials" },
+                "requestsPerSummons": requests as f64 / SAMPLES as f64,
+                "requestBytesPerSummons": bytes / SAMPLES,
+                "waitP50Ms": at(0.50), "waitP95Ms": at(0.95),
+            }));
+        }
+        let models = lineup.models.len();
+        println!(
+            "{}",
+            json!({
+                "agent": agent, "models": models, "samples": SAMPLES, "holdMs": HOLD_MS,
+                "installed": installed,
+                "results": results,
+            })
+        );
+    }
+}
+
+fn rooms_of(agents: &[&str]) -> Vec<zerocode_core::summon_choice::Summonable> {
+    agents
+        .iter()
+        .map(|id| zerocode_core::summon_choice::Summonable {
+            id: (*id).to_string(),
+            spent_percent: None,
+            window: None,
+            record: Default::default(),
+        })
+        .collect()
 }
 
 /// A6 against the real service: the path's request with the difficulty

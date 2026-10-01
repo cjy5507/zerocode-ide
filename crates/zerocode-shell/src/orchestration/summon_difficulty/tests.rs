@@ -491,14 +491,6 @@ impl zerocode_core::orchestration::Launcher for Seated<'_> {
     ) -> zerocode_core::summon_assign::Receipts {
         super::super::summon_assign::choose_with(self.wire, asked, origin)
     }
-    fn choose_agent(
-        &self,
-        look: &zerocode_core::summon_choice::SummonLook<'_>,
-        options: &[zerocode_core::summon_choice::Summonable],
-        origin: [&str; 3],
-    ) -> Option<String> {
-        super::super::summon_choice::choose_with(self.wire, look, options, origin)
-    }
     fn difficulty_profile(
         &self,
         agent: &str,
@@ -894,14 +886,6 @@ fn live_the_switch_carries_out_real_answers() {
             tuning: &[String],
         ) -> Result<String, String> {
             self.0.command_for(agent, prompt, tuning)
-        }
-        fn choose_agent(
-            &self,
-            look: &zerocode_core::summon_choice::SummonLook<'_>,
-            options: &[zerocode_core::summon_choice::Summonable],
-            origin: [&str; 3],
-        ) -> Option<String> {
-            self.0.choose_agent(look, options, origin)
         }
         fn choose_assign(
             &self,

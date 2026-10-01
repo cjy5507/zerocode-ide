@@ -116,13 +116,18 @@ impl Launcher for Catalog {
     /// The test seat picks the first agent this catalog knows — a seat that
     /// acts, so `--agent auto` has a road to land on; a launcher with no seat
     /// keeps the trait's default and refuses.
-    fn choose_agent(
+    fn choose_assign(
         &self,
-        _look: &crate::summon_choice::SummonLook<'_>,
-        _options: &[crate::summon_choice::Summonable],
+        _asked: &crate::summon_assign::AssignAsk,
         _origin: [&str; 3],
-    ) -> Option<String> {
-        self.0.first().map(|agent| (*agent).to_string())
+    ) -> crate::summon_assign::Receipts {
+        crate::summon_assign::Receipts {
+            agent: self
+                .0
+                .first()
+                .map(|agent| serde_json::json!({"chosen": agent, "applied": true})),
+            ..Default::default()
+        }
     }
 
     fn command_for(&self, agent: &str, prompt: &str, tuning: &[String]) -> Result<String, String> {

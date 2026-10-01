@@ -1852,20 +1852,7 @@ pub const SUMMON: JevUse = JevUse {
     // — the coordinators' own words, both (t-9469: the titles rode each
     // option's sentence, which nothing here named, until they became a field
     // of the agent's entry).
-    sends: &[
-        Sent {
-            at: "/state/brief",
-            cap: Cap::Chars(SUMMON_BRIEF_CHAR_CAP),
-        },
-        Sent {
-            at: "/state/agents/*/newestTasks",
-            cap: Cap::Items(crate::summon_choice::SUMMON_RECENT_BRIEFS),
-        },
-        Sent {
-            at: "/state/agents/*/newestTasks/*",
-            cap: Cap::Chars(crate::summon_choice::SUMMON_RECENT_BRIEF_CHAR_CAP),
-        },
-    ],
+    sends: SUMMON_ASSIGN_SENDS,
     ledger: "summon-choice.jsonl",
     promotes: true,
     answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
@@ -1894,6 +1881,36 @@ pub const SUMMON: JevUse = JevUse {
     ),
 };
 
+/// What the assign moment's one request sends of the person's own words —
+/// the three summons seats' lists as ONE, because the door clears a body
+/// under one seat's list and the agent, difficulty and model questions ride
+/// one body (t-16578): the work's title and spec (difficulty, model), the
+/// brief's head and each offered agent's newest task titles (agent). A seat
+/// asked alone carries only some of these paths; a path a body lacks clears
+/// nothing.
+pub const SUMMON_ASSIGN_SENDS: &[Sent] = &[
+    Sent {
+        at: "/state/title",
+        cap: Cap::Chars(crate::summon_difficulty::TITLE_CHAR_CAP),
+    },
+    Sent {
+        at: "/state/spec",
+        cap: Cap::Chars(crate::summon_difficulty::SPEC_CHAR_CAP),
+    },
+    Sent {
+        at: "/state/brief",
+        cap: Cap::Chars(SUMMON_BRIEF_CHAR_CAP),
+    },
+    Sent {
+        at: "/state/agents/*/newestTasks",
+        cap: Cap::Items(crate::summon_choice::SUMMON_RECENT_BRIEFS),
+    },
+    Sent {
+        at: "/state/agents/*/newestTasks/*",
+        cap: Cap::Chars(crate::summon_choice::SUMMON_RECENT_BRIEF_CHAR_CAP),
+    },
+];
+
 /// Difficulty of new work, graded by completed executions at the same difficulty.
 pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     id: crate::summon_difficulty::QUESTION,
@@ -1901,16 +1918,7 @@ pub const SUMMON_DIFFICULTY: JevUse = JevUse {
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
     repeat: None,
-    sends: &[
-        Sent {
-            at: "/state/title",
-            cap: Cap::Chars(crate::summon_difficulty::TITLE_CHAR_CAP),
-        },
-        Sent {
-            at: "/state/spec",
-            cap: Cap::Chars(crate::summon_difficulty::SPEC_CHAR_CAP),
-        },
-    ],
+    sends: SUMMON_ASSIGN_SENDS,
     ledger: "summon-difficulty.jsonl",
     promotes: true,
     answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
@@ -1948,16 +1956,7 @@ pub const SUMMON_MODEL: JevUse = JevUse {
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
     repeat: None,
-    sends: &[
-        Sent {
-            at: "/state/title",
-            cap: Cap::Chars(crate::summon_difficulty::TITLE_CHAR_CAP),
-        },
-        Sent {
-            at: "/state/spec",
-            cap: Cap::Chars(crate::summon_difficulty::SPEC_CHAR_CAP),
-        },
-    ],
+    sends: SUMMON_ASSIGN_SENDS,
     ledger: "summon-model.jsonl",
     promotes: true,
     answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),

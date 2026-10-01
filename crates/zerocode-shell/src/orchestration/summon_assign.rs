@@ -1,5 +1,6 @@
-//! The assign moment's one request (t-15554): the difficulty seat and the
-//! model seat asked for one summons in ONE POST under one wall
+//! The assign moment's one request (t-15554, t-16578): the agent seat, the
+//! difficulty seat and the model seat asked for one summons in ONE POST
+//! under one wall
 //! ([`APPLY_DEADLINE_MS`]), each seat's row kept in its own ledger with its
 //! own words, rubric and outcome, both naming the request they shared. The
 //! questions, and which answer runs, are the core's
@@ -9,7 +10,7 @@ use crate::systemone::{Spent, Wire, request_body};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::{Duration, Instant};
-use zerocode_core::jev::{JevMode, SUMMON_DIFFICULTY, SUMMON_MODEL};
+use zerocode_core::jev::{JevMode, SUMMON, SUMMON_DIFFICULTY, SUMMON_MODEL};
 use zerocode_core::orchestration::PreparedWorkerStart;
 use zerocode_core::summon_assign::{AssignAsk, Receipts, SHARED_REQUEST_KEY};
 use zerocode_core::summon_difficulty::APPLY_DEADLINE_MS;
@@ -17,15 +18,22 @@ use zerocode_core::summon_difficulty::APPLY_DEADLINE_MS;
 /// Every question `asked` carries, in one request: each riding seat's row.
 ///
 /// The door clears the body under one seat's list of what it sends — the
-/// two seats' lists are one (the core's test says so) — and counts the day
+/// three seats' lists are one (the core's test says so) — and counts the day
 /// once. The request is written on the first riding seat's row
-/// (`requests: 1`); the other row rode it (`requests: 0`), so a count over
+/// (`requests: 1`); the other rows rode it (`requests: 0`), so a count over
 /// every ledger adds to what the door counted.
+///
+/// While the agent question rides, the pair that runs is the CHOSEN agent's
+/// (`pairs` holds one question for each agent the answer may choose): its
+/// row is written only for an agent that is chosen to run, and the other
+/// agents' pair questions leave no row — nothing was decided about them.
 pub(super) fn ask(wire: &Wire, asked: &AssignAsk, checkout: Option<&Path>) -> Receipts {
     let seat = if asked.difficulty.is_some() {
         &SUMMON_DIFFICULTY
-    } else {
+    } else if asked.model.is_some() || !asked.pairs.is_empty() {
         &SUMMON_MODEL
+    } else {
+        &SUMMON
     };
     let began = Instant::now();
     let answer = wire.ask(
@@ -47,8 +55,23 @@ pub(super) fn ask(wire: &Wire, asked: &AssignAsk, checkout: Option<&Path>) -> Re
         redacted_lines: 0,
         ..answer.spent.clone()
     };
-    let mut spent = [answer.spent, rode].into_iter();
+    let mut spent = std::iter::once(answer.spent).chain(std::iter::repeat(rode));
     let shared = asked.shared().then(|| uuid::Uuid::new_v4().to_string());
+    let agent_row = asked.agent.as_ref().map(|agent| {
+        let mut row = super::summon_choice::head(agent);
+        super::summon_choice::answered(wire, agent, &mut row, answers);
+        row
+    });
+    // The pair that runs is the chosen agent's — an agent whose answer is not
+    // to run chooses none.
+    let model_ask = match &asked.agent {
+        Some(_) => agent_row
+            .as_ref()
+            .filter(|row| row["applied"] == true)
+            .and_then(|row| row["chosen"].as_str())
+            .and_then(|chosen| asked.pair_of(chosen)),
+        None => asked.model.as_ref(),
+    };
     let mut sent = |mut row: Value| {
         row["elapsedMs"] = json!(elapsed_ms);
         row["requestBytes"] = json!(answer.request_bytes);
@@ -58,17 +81,23 @@ pub(super) fn ask(wire: &Wire, asked: &AssignAsk, checkout: Option<&Path>) -> Re
         }
         row
     };
+    // Each row takes its stamp in the order the seats' questions ride: the
+    // request counts once, on the first.
+    let agent = agent_row.map(&mut sent);
+    let difficulty = asked.difficulty.as_ref().map(|look| {
+        let mut row = sent(super::summon_difficulty::head(look));
+        super::summon_difficulty::answered(wire, &mut row, answers);
+        row
+    });
+    let model = model_ask.map(|model| {
+        let mut row = sent(super::summon_model::head(model));
+        super::summon_model::answered(wire, model, &mut row, answers);
+        row
+    });
     Receipts {
-        difficulty: asked.difficulty.as_ref().map(|look| {
-            let mut row = sent(super::summon_difficulty::head(look));
-            super::summon_difficulty::answered(wire, &mut row, answers);
-            row
-        }),
-        model: asked.model.as_ref().map(|model| {
-            let mut row = sent(super::summon_model::head(model));
-            super::summon_model::answered(wire, model, &mut row, answers);
-            row
-        }),
+        agent,
+        difficulty,
+        model,
     }
 }
 
@@ -80,8 +109,10 @@ pub(super) fn choose(asked: &AssignAsk, origin: [&str; 3]) -> Receipts {
 }
 
 pub(super) fn choose_with(wire: &Wire, asked: &AssignAsk, origin: [&str; 3]) -> Receipts {
-    let acts = asked.difficulty.is_some() && crate::systemone::applies(wire, &SUMMON_DIFFICULTY)
-        || asked.model.is_some() && crate::systemone::applies(wire, &SUMMON_MODEL);
+    let acts = asked.agent.is_some() && crate::systemone::applies(wire, &SUMMON)
+        || asked.difficulty.is_some() && crate::systemone::applies(wire, &SUMMON_DIFFICULTY)
+        || (asked.model.is_some() || !asked.pairs.is_empty())
+            && crate::systemone::applies(wire, &SUMMON_MODEL);
     if !acts {
         return Receipts::default();
     }
@@ -94,6 +125,7 @@ pub(super) fn choose_with(wire: &Wire, asked: &AssignAsk, origin: [&str; 3]) -> 
     // the person switched off is not asked.
     let settings = wire.settings_root();
     let riding = asked.only(
+        SUMMON.mode_in(&settings).asks(),
         SUMMON_DIFFICULTY.mode_in(&settings).asks(),
         SUMMON_MODEL.mode_in(&settings).asks(),
     );
@@ -173,6 +205,7 @@ pub(super) fn record(
     let checkout = checkout.map(std::path::PathBuf::from);
     host.off_the_beat(Box::new(move || {
         let asked = AssignAsk {
+            agent: None,
             difficulty: difficulty
                 .as_ref()
                 .filter(|(shadow, _)| shadow.receipt.is_none())
@@ -181,6 +214,7 @@ pub(super) fn record(
                 .as_ref()
                 .filter(|(shadow, _)| shadow.receipt.is_none())
                 .map(|(shadow, _)| shadow.ask.clone()),
+            pairs: Vec::new(),
         };
         let asked = if asked.is_empty() {
             Receipts::default()
