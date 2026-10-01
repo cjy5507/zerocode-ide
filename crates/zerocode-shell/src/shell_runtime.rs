@@ -2570,7 +2570,32 @@ pub(super) struct SubagentLog {
     /// to ask. The file knows no window, so only the count stands.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) usage: Option<zerocode_core::transcript::TranscriptUsage>,
+    /// What the vendor wrote beside a helper's transcript to say what the
+    /// helper is (`helper_about`). Only the helper's own door fills it; the
+    /// pane's transcript has no such file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) about: Option<HelperAbout>,
 }
+
+/// The two facts Claude Code writes next to a helper's transcript
+/// (`agent-<id>.meta.json`): what KIND of helper it is (`agentType`) and the
+/// short line its parent gave the job (`description`). Both are the vendor's
+/// own words, passed through as text; a helper whose vendor writes no such
+/// file has none, and the page then says nothing of either.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(super) struct HelperAbout {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) description: Option<String>,
+}
+
+/// The most the sidecar file may hold and still be read: it is a few dozen
+/// words, so a bigger one is not that file.
+pub(super) const HELPER_ABOUT_BYTES: u64 = 4 * 1024;
+/// How long each of its two words may be on the page.
+const HELPER_ABOUT_TYPE_CHARS: usize = 64;
+const HELPER_ABOUT_LINE_CHARS: usize = 200;
 
 /// How much of a helper's transcript one ask may carry.
 ///
@@ -2627,6 +2652,63 @@ pub(super) fn find_subagent_transcript(root: &Path, id: &str, depth: u8) -> Opti
     folders
         .into_iter()
         .find_map(|folder| find_subagent_transcript(&folder, id, depth - 1))
+}
+
+/// What the vendor says a helper is, read from the file it writes beside the
+/// helper's transcript — `agent-<id>.meta.json` next to `agent-<id>.jsonl`.
+///
+/// The path is derived from the transcript this window already found for a
+/// validated helper id, never from anything the page names. The file is opened
+/// the way the window opens every file it owns (`durable_file::open_plain_file`):
+/// without following a link in the last place, without blocking on a pipe or a
+/// device, and with the opened handle checked against the path before and after,
+/// so a file swapped for something else between the look and the read answers
+/// nothing instead of being read. Only the first [`HELPER_ABOUT_BYTES`] of that
+/// handle are read; a missing, larger, broken or odd file answers nothing, and
+/// the page then shows no kind and no line, which is the truth.
+pub(super) fn helper_about(transcript: &Path) -> Option<HelperAbout> {
+    let name = transcript.file_name()?.to_str()?;
+    let id = name.strip_prefix("agent-")?.strip_suffix(".jsonl")?;
+    if !is_subagent_id(id) {
+        return None;
+    }
+    let beside = transcript.with_file_name(format!("agent-{id}.meta.json"));
+    let file = crate::durable_file::open_plain_file(&beside).ok()?;
+    // The size of the file that was opened, not of the path it was found by.
+    if file.metadata().ok()?.len() > HELPER_ABOUT_BYTES {
+        return None;
+    }
+    let mut text = String::new();
+    let mut bounded = std::io::Read::take(file, HELPER_ABOUT_BYTES);
+    std::io::Read::read_to_string(&mut bounded, &mut text).ok()?;
+    helper_about_in(&text)
+}
+
+/// The two words out of the sidecar's text: strings only, whitespace folded to
+/// single spaces, control characters dropped, each cut to its length. Anything
+/// else in the file — and a file that is not an object — is not read.
+pub(super) fn helper_about_in(text: &str) -> Option<HelperAbout> {
+    let file: serde_json::Value = serde_json::from_str(text).ok()?;
+    let word = |key: &str, chars: usize| -> Option<String> {
+        let said: String = file
+            .get(key)?
+            .as_str()?
+            .chars()
+            .filter(|glyph| glyph.is_whitespace() || !glyph.is_control())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(chars)
+            .collect();
+        (!said.is_empty()).then_some(said)
+    };
+    let about = HelperAbout {
+        agent_type: word("agentType", HELPER_ABOUT_TYPE_CHARS),
+        description: word("description", HELPER_ABOUT_LINE_CHARS),
+    };
+    (about.agent_type.is_some() || about.description.is_some()).then_some(about)
 }
 
 /// Everything this process remembers ABOUT a shell, forgotten in one door.

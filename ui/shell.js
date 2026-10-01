@@ -2323,6 +2323,59 @@ function openBoardCard(card, bucket) {
   focusLane(id);
 }
 
+/* The board's door to READING a card, beside the look at its screen and the way
+ * to its tab: the conversation of the pane the card stands for (the pane's own
+ * 「대화」 view), or — for a helper, which has no screen of its own — the helper's
+ * page. What it says is the catalog's: the same words the title bar's toggle and the
+ * sidebar's hand speak. A card the ledger alone knows (`worker:`) has no
+ * transcript this window can read, and its door says that instead of opening
+ * something else; a pop-out has no stage to open a page on, so it has none.
+ * `null`: no door. */
+function boardConversationDoor(card) {
+  const { kind, term, valid } = boardCardDestination(card);
+  if (!valid || isPopout) return null;
+  if (kind === "worker") {
+    return { open: false, key: "board.graph.noConversation", words: "대화 기록 없음 — 원장에만 있는 실행입니다" };
+  }
+  if (term === null || !tabOfTerm(term)) return null;
+  if (kind === "sub") {
+    return boardHelperOf(card)
+      ? { open: true, key: "session.subagentOpenTranscript", words: "헬퍼 대화 보기" }
+      : null;
+  }
+  return kind === "term" && paneAgents.has(term)
+    ? { open: true, key: "view.conversationTip", words: "대화로 보기" }
+    : null;
+}
+
+/* The roster row a helper's card (`sub:<term>:<id>`) stands for. */
+function boardHelperOf(card) {
+  const { kind, id, term } = boardCardDestination(card);
+  if (kind !== "sub" || term === null) return null;
+  const helper = id.slice(id.indexOf(":") + 1);
+  return (paneSubagents.get(term) ?? []).find((row) => row.id === helper) ?? null;
+}
+
+/* Open the door: a helper's page — its fallback is the helper page's own, the
+ * parent's pane and a word why when the vendor left no transcript — or the pane
+ * with its conversation up. The pane's tab is staged first, in its own
+ * worktree (`openPaneFromBoard`). */
+async function openBoardConversation(card) {
+  const { kind, term } = boardCardDestination(card);
+  const tab = term === null ? null : tabOfTerm(term);
+  if (!tab) return;
+  if (kind === "sub") {
+    const sub = boardHelperOf(card);
+    if (!sub) return;
+    if (tab.worktree !== activeWorktreePath && !(await activateWorktree(tab.worktree))) return;
+    await openHelperPage({ term, agent: paneAgents.get(term) ?? card.agent, worktree: tab.worktree, tab }, sub);
+    return;
+  }
+  // A look, not a hand-over: the title bar's toggle is what moves a pane to its wire.
+  await openPaneFromBoard(term);
+  await setPaneChat(term, true, { wire: false });
+}
+
 /* ---- the look without leaving ----
  *
  * The pane's own screen, BORROWED. Orca's `AgentTerminalDialog` holds the
@@ -2349,6 +2402,8 @@ let peekHome = null;
 /* 어느 카드였는가. 팝아웃의 "워크스페이스 열기"는 term 번호가 아니라 이
  * 이름을 메인 창으로 건넨다 — 그쪽에서 탭을 찾는 것은 그쪽의 일이다. */
 let peekPane = null;
+/* And the card itself, for the footer's conversation door. */
+let peekCard = null;
 
 async function openBoardPeek(card, term, bucket) {
   // Looking IS acknowledging — the same meaning a tab gives it, written
@@ -2359,12 +2414,14 @@ async function openBoardPeek(card, term, bucket) {
   if (isPopout) void invoke("ack_board_agent", { pane: card.pane }).catch(() => {});
   peekTerm = term;
   peekPane = card.pane;
+  peekCard = card;
   el("peek-title").textContent = agentGraphIdentity(card);
   // Who is working and how it is going, in one muted line — the header says
   // what the card said, so the dialog does not have to be closed to re-read
   // it. A caller with no bucket to offer says only who.
   el("peek-agent").textContent =
     bucket === undefined ? card.agent : `${card.agent} · ${bucketWord(bucket)}`;
+  paintBoardConversationDoor(el("peek-chat"), card);
   // 이 창이 이 셸의 화면을 이미 들고 있었는가. 들고 있지 않았다면 방금
   // 만들어진 뷰이고 — 팝아웃의 미리보기는 언제나 이쪽이다 — 그 뷰의 바닥은
   // 아래의 선언이 새로 읽기 시작한 셸의 스냅샷 빚으로 받는다. 그 답이 이 셸을
@@ -2421,6 +2478,7 @@ el("peek-body").addEventListener("mousedown", () => keySink.focus());
 
 function closeBoardPeek() {
   hideModal(el("peek-scrim"));
+  peekCard = null;
   // Escape and the X can both arrive, and the second one must find nothing
   // left to give back.
   if (peekTerm === null || peekHome === null) {
@@ -2492,6 +2550,26 @@ async function openPaneFromBoard(term) {
   if (tab.worktree !== activeWorktreePath && !(await activateWorktree(tab.worktree))) return;
   setActiveTab(tab.id);
 }
+
+/* A footer door and the inspector's third button wear the same door
+ * (`boardConversationDoor`): its words from the catalog, hidden where there is none, and a door
+ * that cannot open says why in its own words and takes no press. Said on every paint and not
+ * through `data-i18n`: the words are born in the language in force, and a source captured then
+ * would be read back as the Korean fallback by the next language swap. */
+function paintBoardConversationDoor(button, card) {
+  const door = card ? boardConversationDoor(card) : null;
+  writeHidden(button, door === null);
+  if (door === null) return;
+  writeTextContent(button, t(door.key, door.words));
+  writeAttribute(button, "aria-disabled", door.open ? "false" : "true");
+}
+
+el("peek-chat").addEventListener("click", () => {
+  const card = peekCard;
+  if (card === null || !boardConversationDoor(card)?.open) return;
+  closeBoardPeek();
+  void openBoardConversation(card);
+});
 
 el("peek-open").addEventListener("click", () => {
   const term = peekTerm;
@@ -5471,6 +5549,11 @@ function paintAgentInspectorDestinations(view, entity) {
   writeAttribute(preview, "data-i18n", worker ? "board.graph.ackRecord" : "board.graph.preview");
   writeTextContent(preview, worker ? t("board.graph.ackRecord", "확인했어요") : t("board.graph.preview", "미리보기"));
   preview.onclick = destination.valid ? () => openBoardCard(card, entity.bucket) : null;
+  const chat = view.querySelector(".agent-inspector-chat");
+  if (chat) {
+    paintBoardConversationDoor(chat, card);
+    chat.onclick = boardConversationDoor(card)?.open ? () => void openBoardConversation(card) : null;
+  }
   open.hidden = worker || !destination.valid;
   open.disabled = !isPopout && destination.term !== null && !tabOfTerm(destination.term);
   writeAttribute(open, "data-i18n", destination.kind === "lane" ? "board.graph.openExecution" : "board.graph.openTerminal");
@@ -11731,6 +11814,19 @@ function holdHelperTurns(held, turns) {
   }
 }
 
+/* What the vendor wrote beside a helper's transcript to say what the helper is
+ * (`subagent_log` → `about`): its kind and the short line its parent gave the job.
+ * Kept as the backend bounded it, written to the page as text only, and never
+ * taken back once a read has brought it. Whether it moved. */
+function holdHelperAbout(held, about) {
+  const word = (one) => (typeof one === "string" ? one.trim() : "");
+  const next = { type: word(about?.agent_type), line: word(about?.description) };
+  if (next.type === "" && next.line === "") return false;
+  if (held.about?.type === next.type && held.about?.line === next.line) return false;
+  held.about = next;
+  return true;
+}
+
 /* 이 헬퍼의 페이지를 연다 — 벤더가 전사를 남겼을 때에만.
  *
  * 남기지 않았으면 부모 판으로 가고, 왜 그것뿐인지 한 줄로 말한다(t-11827):
@@ -11757,6 +11853,7 @@ async function openHelperPage(row, sub) {
   }
   const helper = { id: sub.id, next: first.next ?? 0, turns: [], seq: 0, skipped: first.skipped === true };
   holdHelperTurns(helper, first.turns ?? []);
+  holdHelperAbout(helper, first.about);
   openTab({
     id: tabId,
     kind: "worker",
@@ -12163,21 +12260,22 @@ function paneChatOn(term) {
   return paneChats.get(term)?.on === true;
 }
 
-async function setPaneChat(term, on) {
+async function setPaneChat(term, on, { wire = true } = {}) {
   const held = paneChatOf(term);
   if (held.on === on) {
     // 「대화」 pressed on a conversation already standing as the transcript
     // view: the wire is asked for again — a session the hooks had not yet
     // named, a wire that was refused, may be there now. Until 2026-09-21 a
     // pane that once fell to the transcript view never tried the wire again.
-    if (on && !held.handing) void handPaneToWire(term);
+    if (on && wire && !held.handing) void handPaneToWire(term);
     return;
   }
   if (!on) held.wireRefusal = null;
   // A pane whose agent can be driven on a wire is handed over to it: the
   // conversation view IS the wire then, streaming. Otherwise — or until the
-  // turn ends — the transcript view stands.
-  if (on && await handPaneToWire(term)) return;
+  // turn ends, or when the caller only wants to read (`wire: false`: the
+  // pane's CLI is left running as it is) — the transcript view stands.
+  if (on && wire && await handPaneToWire(term)) return;
   held.on = on;
   held.arriving = on ? "chat" : "term";
   updateStage();
@@ -12480,6 +12578,8 @@ async function pollHelperPages() {
     return;
   }
   held.found = true;
+  // Only a helper's own file has a sidecar to say what it is.
+  const aboutMoved = held.id !== PANE_LOG_ID && held.id !== WIRE_LOG_ID && holdHelperAbout(held, more.about);
   // 전사가 말한 컨텍스트 사용량. 판의 길에서만 담는다 — 헬퍼의 전사는
   // 부모 판이 서 있는 자리가 아니고, 그것을 판의 값으로 적으면 칩이 남의
   // 수를 이 판의 것이라 말하게 된다.
@@ -12521,7 +12621,7 @@ async function pollHelperPages() {
   // A pane's page shows its hooks as well as its file (`paneChatKey`): a read
   // that brought no new line repaints once when a hook moved since the paint.
   const hooksMoved = held.id === PANE_LOG_ID && held.hookKey !== paneChatKey(tab.worker.term);
-  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved && !hooksMoved) return;
+  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved && !hooksMoved && !aboutMoved) return;
   if (wireChanged) syncWorkerComposers(tab.worker);
   if (wireChanged) settleComposerQueue(tab.worker);
   // 컨텍스트가 움직였다 — 미터만 갈아입는다(턴은 그대로일 수 있다).
@@ -13545,7 +13645,7 @@ function syncHelperTurns(list, run) {
     list.insertBefore(row, streaming ?? helperListTail(list));
     // The words a thought was streaming are this turn: what a reader had of
     // the streaming row passes to this one when that row goes.
-    if (turn.role === "thinking" && streaming) noteThoughtSettled(streaming, turn, row);
+    if (turn.role === "thinking" && streaming) noteThoughtSettled(list, turn, row);
     // Its pictures are watched once it stands in the list (A8), and so is
     // the row itself, whose body goes when it is far from view (B1).
     if (row.querySelector(":scope > .helper-images")) watchImagePills(list, row);
@@ -13616,35 +13716,30 @@ function syncHelperTurns(list, run) {
  * turn at a time — and a pane with neither wire nor channel draws nothing
  * here. */
 function syncStreamingTurns(list, run) {
-  const live = run.wire ? run.wireLog?.live ?? [] : paneLiveOf(run);
+  const live = (run.wire ? run.wireLog?.live ?? [] : paneLiveOf(run)).filter(liveWords);
   const rows = [...list.querySelectorAll(":scope > .is-streaming")];
-  live.forEach((piece, index) => {
-    let row = rows[index];
-    if (row && row.dataset.role !== piece.role) {
-      for (const stale of rows.splice(index)) removeStreamingRow(stale, run);
-      row = null;
-    }
+  const claimed = new Set();
+  for (const piece of live) {
+    let row = streamingRowOf(rows, claimed, piece);
     if (!row) {
       row = streamingTurnNode(piece.role);
       list.insertBefore(row, helperListTail(list));
-      rows[index] = row;
     }
-    if (row.__text === piece.text) return;
-    row.__text = piece.text;
-    // A row that goes on with newer words is not the one a turn replaced.
-    row.__settled = undefined;
-    if (piece.role === "thinking") {
-      // Nothing to say until a sentence has closed: the row keeps its word.
-      const heading = thoughtHeading(piece.text);
-      if (heading !== null) writeTextContent(row.querySelector(".helper-step-target"), heading);
-      if (row.open) paintLiveThought(row);
-    } else {
-      paintLiveAnswer(row, piece.text, run);
+    claimed.add(row);
+    const grew = row.__text !== piece.text;
+    if (!grew && row.__over === (piece.done === true)) continue;
+    row.__over = piece.done === true;
+    if (grew) {
+      row.__text = piece.text;
+      // A row that goes on with newer words is not the one a turn replaced.
+      row.__settled = undefined;
     }
-  });
-  // Rows the live list no longer names: the words closed into a turn, which
-  // the same paint stood above them.
-  for (const stale of rows.slice(live.length)) removeStreamingRow(stale, run);
+    if (piece.role === "thinking") dressStreamingThought(row, piece);
+    else if (grew) paintLiveAnswer(row, piece.text, run);
+  }
+  // Rows no live piece names: the words closed into a turn, which the same
+  // paint stood above them.
+  for (const stale of rows) if (!claimed.has(stale)) removeStreamingRow(stale, run);
 }
 
 /* Where the settled part of a streaming answer ends: after the last blank
@@ -14201,6 +14296,13 @@ const HELPER_CONDITION_MARKERS = [
   /ないでください|ないこと|てはいけ|禁止|読み取り専用/,
   /不要|不得|禁止|切勿|请勿|只读/,
   /^(?:por\s+favor,?\s+)?(?:no\s+\p{L}+(?:es|as)\b|nunca\b|evita\b|solo\s+(?:lectura|lee|revisa|consulta|mira)\b)/iu,
+  // The language the report is to be written in is a condition too: 「Report back in Korean」,
+  // 「한국어로 보고」, 「日本語で報告」, 「用中文回复」, 「informa en español」.
+  /\b(?:report|reply|respond|answer|write|summari[sz]e)\b[^.!?\n]*\b(?:in|using)\s+(?:korean|english|japanese|chinese|spanish)\b/i,
+  /(?:한국어|영어|일본어|중국어|스페인어)\s?(?:로|으로)\s?(?:만\s?)?(?:보고|답변|답|작성|말|쓰|출력|요약)/,
+  /(?:韓国語|英語|日本語|中国語|スペイン語)で(?:報告|回答|答え|書い|出力|要約)/,
+  /(?:用|以)(?:韩语|韩文|英语|英文|日语|日文|中文|西班牙语)(?:汇报|报告|回答|回复|书写|输出|总结)/,
+  /\b(?:informa|reporta|responde|contesta|escribe|resume)\b[^.!?\n]*\ben\s+(?:coreano|inglés|ingles|japonés|japones|chino|español|espanol)\b/i,
 ];
 
 /* What the helper was asked: its first turn, said by a person (the parent's
@@ -14215,51 +14317,70 @@ function helperBriefOf(run) {
   return run.brief ?? "";
 }
 
-/* The instruction as the card shows it: the first whole sentences that fit
- * `HELPER_BRIEF_LIMIT`, or — when the first sentence alone is longer — a cut at
- * a word that says it cut; and the conditions it states, each one a clause
- * copied out of it, at most `HELPER_TAG_MAX`, each at most `HELPER_TAG_LIMIT`
- * letters (a longer clause is cut with a mark and keeps the whole one for its
- * tip). Nothing is written that is not in the text. */
+/* The instruction as the card shows it. The conditions it states are the tags — each one a clause
+ * copied out of it, at most `HELPER_TAG_MAX`, each at most `HELPER_TAG_LIMIT` letters (a longer
+ * clause is cut with a mark and keeps the whole one for its tip) — so the summary is the rest: the
+ * first whole sentences of what is NOT a tag that fit `HELPER_BRIEF_LIMIT`, or — when the first
+ * such sentence alone is longer — a cut at a word that says it cut. An instruction that is nothing
+ * but conditions has no other sentence, and is told as it stands. Nothing is written that is not in
+ * the text, and the whole text is one press away whenever the summary is less than it. */
 function helperBriefParts(text) {
   const body = text.trim();
-  const ends = [];
-  for (const one of body.matchAll(/[.!?]+(?=\s|$)|[。！？]+|\n+/g)) ends.push(one.index + one[0].length);
-  let said = body;
-  let cut = false;
-  if (body.length > HELPER_BRIEF_LIMIT) {
-    const fits = ends.filter((end) => end <= HELPER_BRIEF_LIMIT);
-    if (fits.length > 0) {
-      said = body.slice(0, fits.at(-1)).trimEnd();
-    } else {
-      let end = HELPER_BRIEF_LIMIT;
-      if (!/\s/.test(body[end] ?? "")) {
-        const space = body.slice(0, end).search(/\s\S*$/);
-        if (space > 0) end = space;
-      }
-      said = body.slice(0, end).trimEnd().replace(/[\uD800-\uDBFF]$/, "");
-      cut = true;
-    }
+  const clauses = [];
+  let from = 0;
+  const ends = [...body.matchAll(/[.!?]+(?=\s|$)|[。！？]+|\n+/g)].map((one) => one.index + one[0].length);
+  for (const end of [...ends, body.length]) {
+    const raw = body.slice(from, end);
+    const start = from + raw.length - raw.trimStart().length;
+    from = Math.max(from, end);
+    if (raw.trim() === "") continue;
+    // What stood between this sentence and the one before it in the text: a line break, a space, or — in
+    // Japanese and Chinese — nothing. A summary that leaves a sentence out keeps the gap the next one had.
+    const gap = /\s*$/.exec(body.slice(0, start))[0];
+    clauses.push({
+      raw: raw.trim(),
+      lead: gap.includes("\n") ? "\n" : gap === "" ? "" : " ",
+      clause: raw.trim()
+        .replace(/^(?:[-*•·]\s+|\d+[.)]\s+)/, "")
+        .replace(/[\s.!?。！？;；:：]+$/u, ""),
+    });
   }
   const tags = [];
-  let from = 0;
-  for (const end of [...ends, body.length]) {
-    const clause = body.slice(from, end).trim()
-      .replace(/^(?:[-*•·]\s+|\d+[.)]\s+)/, "")
-      .replace(/[\s.!?。！？;；:：]+$/u, "");
-    from = Math.max(from, end);
-    if (!clause || tags.some((one) => one.whole === clause)) continue;
-    if (!HELPER_CONDITION_MARKERS.some((marker) => marker.test(clause))) continue;
-    const letters = [...clause];
+  for (const one of clauses) {
+    if (!one.clause || tags.some((held) => held.whole === one.clause)) continue;
+    if (!HELPER_CONDITION_MARKERS.some((marker) => marker.test(one.clause))) continue;
+    const letters = [...one.clause];
+    one.tagged = true;
     tags.push({
-      whole: clause,
+      whole: one.clause,
       words: letters.length > HELPER_TAG_LIMIT
         ? `${letters.slice(0, HELPER_TAG_LIMIT).join("").trimEnd()}…`
-        : clause,
+        : one.clause,
     });
     if (tags.length === HELPER_TAG_MAX) break;
   }
-  return { body, size: [...body].length, said, cut, more: body.length > said.length, tags };
+  const rest = clauses.filter((one) => one.tagged !== true);
+  const told = rest.length > 0 ? rest : clauses;
+  const joined = (list) => list.map((one, at) => (at === 0 ? "" : one.lead) + one.raw).join("");
+  let said = joined(told);
+  let cut = false;
+  if (said.length > HELPER_BRIEF_LIMIT) {
+    let fit = told.length;
+    while (fit > 0 && joined(told.slice(0, fit)).length > HELPER_BRIEF_LIMIT) fit -= 1;
+    if (fit > 0) {
+      said = joined(told.slice(0, fit));
+    } else {
+      let end = HELPER_BRIEF_LIMIT;
+      if (!/\s/.test(said[end] ?? "")) {
+        const space = said.slice(0, end).search(/\s\S*$/);
+        if (space > 0) end = space;
+      }
+      said = said.slice(0, end).trimEnd().replace(/[\uD800-\uDBFF]$/, "");
+      cut = true;
+    }
+  }
+  const whole = (one) => one.replace(/\s+/g, " ");
+  return { body, size: [...body].length, said, cut, more: whole(said) !== whole(body), tags };
 }
 
 /* The crumb: the conversation this helper belongs to (one press back) and
@@ -14305,6 +14426,11 @@ function helperPageHeadNode(run, owner) {
   mark.setAttribute("role", "img");
   const name = document.createElement("span");
   name.className = "worker-name";
+  // What kind of helper the vendor says it is (`helper.about`), shown only when
+  // the name does not already say it.
+  const role = document.createElement("span");
+  role.className = "helper-role";
+  role.hidden = true;
   const meta = document.createElement("span");
   meta.className = "worker-meta";
   const model = document.createElement("span");
@@ -14322,7 +14448,7 @@ function helperPageHeadNode(run, owner) {
   const uses = document.createElement("span");
   uses.className = "worker-uses";
   meta.append(focusViewButtonNode(), model, state, uses);
-  row.append(mark, name, meta);
+  row.append(mark, name, role, meta);
   head.append(helperPageCrumbNode(run, owner), row);
   updateHelperPageHead(head, run, owner);
   return head;
@@ -14335,6 +14461,7 @@ function updateHelperPageHead(head, run, owner) {
   const focus = head.querySelector(".worker-focus");
   if (focus) writeAttribute(focus, "aria-pressed", focusViewOn() ? "true" : "false");
   writeTextContent(head.querySelector(".worker-name"), run.name);
+  updateHelperPageRole(head.querySelector(".helper-role"), run);
   updateHelperPageModel(head.querySelector(".helper-model"), run);
   const state = head.querySelector(".helper-state");
   const running = run.status === "running";
@@ -14360,6 +14487,18 @@ function updateHelperPageHead(head, run, owner) {
     writeTextContent(back.querySelector(".helper-crumb-parent"), tabLabel(owner));
     writeAttribute(back, "aria-label", t("helper.crumb.back", "{{parent}} 대화로 돌아가기", { parent: tabLabel(owner) }));
   }
+}
+
+/* The helper's kind, in the vendor's own word (`agentType` out of the file Claude Code writes
+ * beside the helper's transcript — nothing is translated or guessed), beside the name. A helper
+ * whose name already is that word, or whose vendor wrote none, wears no badge. */
+function updateHelperPageRole(badge, run) {
+  const kind = run.helper?.about?.type ?? "";
+  const shown = kind !== "" && kind.toLowerCase() !== String(run.name ?? "").trim().toLowerCase();
+  writeHidden(badge, !shown);
+  writeTextContent(badge, shown ? kind : "");
+  if (shown) writeAttribute(badge, "aria-label", t("helper.role.label", "도우미 종류: {{kind}}", { kind }));
+  else badge.removeAttribute("aria-label");
 }
 
 /* The model THIS helper ran on (never its parent's: the parent's is not on the
@@ -14488,7 +14627,7 @@ function paintHelperPageTally(strip, run) {
   const sig = `${run.helper.seq}|${locale}`;
   if (strip.__sig === sig) return;
   strip.__sig = sig;
-  const { total, failed, kinds } = helperTally(run);
+  const { total, failed, kinds, partial } = helperTally(run);
   writeHidden(strip, total === 0);
   if (total === 0) {
     strip.replaceChildren();
@@ -14496,7 +14635,14 @@ function paintHelperPageTally(strip, run) {
   }
   const whole = document.createElement("b");
   whole.className = "helper-tally-total";
-  whole.textContent = t("worker.tallyTotal", "도구 {{n}}", { n: total });
+  // Said as what it counts: the whole of the helper's steps, or — once the page
+  // has let its oldest turns go — the recent ones, with the tip saying why the
+  // head's count is a bigger number.
+  whole.textContent = partial
+    ? t("worker.tallyRecent", "최근 도구 {{n}}", { n: total })
+    : t("worker.tallyTotal", "도구 {{n}}", { n: total });
+  if (partial) strip.dataset.tip = t("worker.tallyRecentTip", "이 화면은 도우미 기록의 마지막 {{cap}}줄만 들고 있어, 도구 수는 그 안의 것입니다 — 머리의 횟수는 처음부터의 전체입니다", { cap: HELPER_TURN_CAP });
+  else delete strip.dataset.tip;
   const parts = [...kinds].map(([kind, count]) => {
     const one = document.createElement("span");
     one.className = "helper-tally-kind";
@@ -14555,7 +14701,17 @@ function helperPageBriefBuild(card, run, parts) {
     gone.textContent = ` ${t("helper.brief.cut", "(이하 생략)")}`;
     text.append(mark, gone);
   }
-  const rows = [label, text];
+  const rows = [label];
+  // The short line the parent gave the job, in the vendor's words, above the
+  // instruction's own: a person's name for the work, when the vendor kept one.
+  const given = run.helper.about?.line ?? "";
+  if (given !== "") {
+    const title = document.createElement("p");
+    title.className = "helper-brief-title";
+    title.textContent = given;
+    rows.push(title);
+  }
+  rows.push(text);
   if (parts.tags.length > 0) {
     const list = document.createElement("ul");
     list.className = "helper-brief-tags";
@@ -14612,8 +14768,10 @@ function paintHelperPageBrief(card, run) {
   const text = helperBriefOf(run);
   writeHidden(card, text.trim() === "");
   if (text.trim() === "") return;
-  if (card.__text !== text) {
+  const given = run.helper.about?.line ?? "";
+  if (card.__text !== text || card.__given !== given) {
     card.__text = text;
+    card.__given = given;
     helperPageBriefBuild(card, run, helperBriefParts(text));
   }
   syncHelperPageBrief(card, run);
@@ -16123,14 +16281,21 @@ listen("session:frame", (event) => {
  * whose conversation is not up keeps the words for when it is. */
 function notePaneLive(session, frame) {
   const role = frame.type === "reasoning" ? "thinking" : "assistant";
+  const words = frame.text ?? "";
   for (const term of paneTermsBySession(session)) {
     const pieces = paneLive.get(term) ?? [];
     const last = pieces.at(-1);
     if (last && last.role === role && last.id === frame.id && !last.done) {
-      last.text += frame.text ?? "";
+      last.text += words;
       last.done = frame.done === true;
+    } else if (words !== "") {
+      // Whitespace is kept as it came: the first delta of an answer may be its indentation or the
+      // blank lines before a fence, and it is the start of what follows. `liveWords` is what leaves a
+      // piece with nothing but blanks undrawn.
+      pieces.push({ role, id: frame.id, text: words, done: frame.done === true });
     } else {
-      pieces.push({ role, id: frame.id, text: frame.text ?? "", done: frame.done === true });
+      // A block opened or closed with no text at all leaves nothing to keep.
+      continue;
     }
     paneLive.set(term, pieces);
     paintPaneLive(term);
@@ -16173,12 +16338,19 @@ function paintPaneLive(term) {
   if (!list) return;
   const follow = chatFollows(list);
   syncStreamingTurns(list, held.tab.worker);
+  // The foot line names the thought that is going, so it follows these rows.
+  const status = helperStatusOf(held.tab);
+  if (status) updateHelperStatus(status, held.tab.worker);
   if (follow) scrollHelperToBottom(list);
 }
 
-/* The live pieces a pane's page draws — none for a run with no pane. */
+/* The live pieces a pane's page draws — none for a run with no pane, and none for a helper's page: it
+ * carries its lead's term to find its lead (the crumb, the roster), but the words the lead is saying
+ * on its channel are the lead's, not the helper's — drawn in the helper's list they were another
+ * conversation's thoughts, and settled by the helper's own turns they were taken from the lead. */
 function paneLiveOf(run) {
-  return run.term === undefined || run.term === null ? [] : paneLive.get(run.term) ?? [];
+  if (run.term === undefined || run.term === null || isHelperPage(run)) return [];
+  return paneLive.get(run.term) ?? [];
 }
 
 /* A turn of `role` arrived from the transcript: the finished pieces of that

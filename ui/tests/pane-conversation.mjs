@@ -170,6 +170,127 @@ export async function testPaneConversation(browser, origin, ok) {
       streamed.settled && streamed.leftover === 1 && streamed.clearedOnTurnStart,
       JSON.stringify(streamed));
 
+    // ---------------------------------------- the lifetime of the streaming rows (the pane's own channel)
+    // zo opens and closes blocks it says nothing in, and ends a thought with a frame of its own: a block with no
+    // word leaves no piece and no row, a thought that is over is a thought and not 「생각 중…」, and the foot line
+    // follows the newest thought that goes — on the frame, not on the next poll.
+    const lifetime = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const term = window.__TERM__;
+      const list = document.querySelector(".helper-turns");
+      const thoughts = () => [...list.querySelectorAll(":scope > .is-streaming.is-thinking")];
+      const part = (row, name) => row.firstElementChild.querySelector(name)?.textContent ?? null;
+      const now = () => list.querySelector(":scope > .helper-status .helper-status-now")?.textContent ?? "";
+      const say = (body) => tell("session:frame", { session: "s-zo-live", frame: body });
+      const going = t("worker.thinking", "생각 중…");
+      const over = t("worker.thought", "생각");
+      const seen = { going, over };
+      say({ type: "turn", turn_id: 40, phase: "start" });
+      await frame();
+      say({ type: "reasoning", id: 1, text: "Gathering task details", done: false });
+      say({ type: "reasoning", id: 1, text: "", done: true });
+      for (let id = 2; id <= 21; id += 1) {
+        say({ type: "reasoning", id, text: "", done: false });
+        say({ type: "reasoning", id, text: "", done: true });
+      }
+      say({ type: "reasoning", id: 22, text: "ok", done: true });
+      await frame();
+      await frame();
+      seen.kept = (paneLive.get(term) ?? []).length;
+      seen.finished = {
+        rows: thoughts().length,
+        titles: thoughts().map((row) => part(row, ".helper-step-target")),
+        labels: thoughts().map((row) => part(row, ".helper-step-res")),
+        now: now(),
+      };
+      say({ type: "reasoning", id: 23, text: "**Checking the current task**\nThen the cells.", done: false });
+      await frame();
+      await frame();
+      seen.fresh = { rows: thoughts().length, now: now(), label: part(thoughts().at(-1), ".helper-step-res") };
+      say({ type: "reasoning", id: 23, text: " One more look.", done: true });
+      await frame();
+      await frame();
+      seen.ended = { rows: thoughts().length, now: now(), label: part(thoughts().at(-1), ".helper-step-res") };
+      say({ type: "reasoning", id: 24, text: "**Checking the cells**\nSlowly.", done: false });
+      await frame();
+      await frame();
+      seen.next = { rows: thoughts().length, now: now() };
+      // The transcript brings the thoughts that were over: their rows go on that paint, the one that goes stays.
+      window.__LOG__ = { next: 5, turns: [{ role: "thinking", text: "Gathering task details" }, { role: "thinking", text: "ok" }] };
+      await pollHelperPages();
+      window.__LOG__ = { next: 5, turns: [] };
+      await frame();
+      await frame();
+      seen.settled = {
+        rows: thoughts().length,
+        titles: thoughts().map((row) => part(row, ".helper-step-target")),
+        now: now(),
+        pieces: (paneLive.get(term) ?? []).map((piece) => piece.id),
+      };
+      // The words of a finished answer stand while the transcript is late.
+      say({ type: "text_delta", id: 25, text: "Final words.", done: true });
+      await frame();
+      await pollHelperPages();
+      await frame();
+      await frame();
+      const answers = [...list.querySelectorAll(':scope > .is-streaming[data-role="assistant"]')];
+      seen.answer = answers.length === 1 && answers[0].textContent.includes("Final words.");
+      say({ type: "turn", turn_id: 41, phase: "start" });
+      await frame();
+      // What a delta carries is kept as it came — the indentation or the blank lines that open an answer
+      // are its start, a space between two deltas is a space — and a piece of nothing but blanks is not drawn.
+      // This runs on the page the turn's start left empty: the rows it draws are the only streaming ones.
+      say({ type: "text_delta", id: 30, text: "    ", done: false });
+      say({ type: "text_delta", id: 30, text: "const x = 1;", done: false });
+      say({ type: "text_delta", id: 31, text: "\n\n", done: false });
+      say({ type: "text_delta", id: 31, text: "```js\ncode\n```", done: true });
+      say({ type: "text_delta", id: 32, text: "hello", done: false });
+      say({ type: "text_delta", id: 32, text: " ", done: false });
+      say({ type: "text_delta", id: 32, text: "world", done: true });
+      say({ type: "text_delta", id: 33, text: "  ", done: true });
+      say({ type: "text_delta", id: 34, text: "", done: true });
+      await frame();
+      await frame();
+      const byId = (id) => (paneLive.get(term) ?? []).find((piece) => piece.id === id)?.text ?? null;
+      seen.raw = {
+        indented: byId(30), fenced: byId(31), spaced: byId(32), blank: byId(33), empty: byId(34),
+        drawn: list.querySelectorAll(':scope > .is-streaming[data-role="assistant"]').length,
+        streaming: list.querySelectorAll(":scope > .is-streaming").length,
+      };
+      say({ type: "turn", turn_id: 42, phase: "start" });
+      await frame();
+      return seen;
+    });
+    ok(
+      "a zo pane's blocks that said nothing leave no piece and no row — twenty of them beside two thoughts leave two pieces, two rows, each in its own words and called 「생각」, and the foot line names none of them",
+      lifetime.kept === 2 && lifetime.finished.rows === 2 &&
+        lifetime.finished.titles.join("|") === "Gathering task details|ok" &&
+        lifetime.finished.labels.every((label) => label === lifetime.over) && !/Gathering|ok$/.test(lifetime.finished.now),
+      JSON.stringify(lifetime.finished),
+    );
+    ok(
+      "the foot line follows the thought that goes on the frame it began — its heading — and drops it on the frame it ended; the next one that goes is the one it names, never an older one",
+      lifetime.fresh.rows === 3 && lifetime.fresh.label === lifetime.going && lifetime.fresh.now.endsWith("Checking the current task") &&
+        lifetime.ended.rows === 3 && lifetime.ended.label === lifetime.over && !/Gathering|Checking/.test(lifetime.ended.now) &&
+        lifetime.next.rows === 4 && lifetime.next.now.endsWith("Checking the cells") && !lifetime.next.now.includes("Gathering"),
+      JSON.stringify({ fresh: lifetime.fresh, ended: lifetime.ended, next: lifetime.next }),
+    );
+    ok(
+      "a delta's whitespace is kept as it came — indentation, the blank lines before a fence, a lone space between two words — a piece of nothing but blanks is kept but not drawn, and a delta with no text at all is not kept",
+      lifetime.raw.indented === "    const x = 1;" && lifetime.raw.fenced === "\n\n```js\ncode\n```" && lifetime.raw.spaced === "hello world" &&
+        lifetime.raw.blank === "  " && lifetime.raw.empty === null && lifetime.raw.drawn === 3 && lifetime.raw.streaming === 3,
+      JSON.stringify(lifetime.raw),
+    );
+    ok(
+      "the transcript's thoughts take the rows of the thoughts that were over in that paint — the one that goes stays, named — and the words of a finished answer stand until its turn comes",
+      lifetime.settled.rows === 1 && lifetime.settled.titles[0] === "Checking the cells" &&
+        lifetime.settled.now.endsWith("Checking the cells") && lifetime.settled.pieces.join() === "24" && lifetime.answer === true,
+      JSON.stringify({ settled: lifetime.settled, answer: lifetime.answer }),
+    );
+
     // ---------------------------------------------------------------- the dock
     const dock = await page.evaluate(async () => {
       const frame = () => new Promise((done) => requestAnimationFrame(done));

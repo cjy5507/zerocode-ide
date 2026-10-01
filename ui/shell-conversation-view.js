@@ -1840,13 +1840,56 @@ function paintLiveThought(row) {
   });
 }
 
+/* A piece of live text with nothing in it is no row: a voice that opens and
+ * closes a block without a word (a thought it keeps to itself) said nothing
+ * to show. */
+function liveWords(piece) {
+  return typeof piece.text === "string" && piece.text.trim() !== "";
+}
+
+/* The row that already stands for a piece of live text: the same voice, and
+ * the words it shows — or the beginning of the piece's newer ones, for live
+ * text only ever grows. A piece the transcript has carried leaves the live
+ * list while its neighbours stay, so the row left over is the one that stood
+ * for it, wherever it stands — not the last. */
+function streamingRowOf(rows, claimed, piece) {
+  const free = rows.filter((row) => !claimed.has(row) && row.dataset.role === piece.role);
+  return free.find((row) => row.__text === piece.text) ??
+    free.find((row) => piece.text.startsWith(row.__text ?? "")) ?? null;
+}
+
+/* The line of a thought that streams: what it has said so far while it goes
+ * (`thoughtHeading` keeps the row's word until a sentence has closed), and
+ * once it is over the newest sentence it ended on, under the bare word — 「생각
+ * 중…」 is for a thought that goes. The row is the same node either way, so a
+ * body being read and the keyboard stay where they are until its turn takes
+ * its place. */
+function dressStreamingThought(row, piece) {
+  const over = piece.done === true;
+  const heading = thoughtHeading(piece.text, over);
+  if (heading !== null) writeTextContent(row.querySelector(".helper-step-target"), heading);
+  writeClass(row, "is-done", over);
+  writeTextContent(
+    row.querySelector(":scope > .helper-step-line > .helper-step-res"),
+    over ? thoughtLabel(piece) : t("worker.thinking", "생각 중…"),
+  );
+  if (row.open) paintLiveThought(row);
+}
+
 /* The words a streaming thought was saying are this turn: the row that will
  * stand for the turn is noted on the streaming row it replaces, so that what a
- * reader had of the streaming row can pass to it when that row goes. */
-function noteThoughtSettled(streaming, turn, row) {
-  if (streaming.dataset.role !== "thinking") return;
-  const said = (streaming.__text ?? "").trim();
-  if (said !== "" && turn.text.trim().startsWith(said)) streaming.__settled = row;
+ * reader had of the streaming row can pass to it when that row goes. A turn
+ * names the first thought not yet taken whose words it begins with, wherever
+ * that row stands among the streaming ones. */
+function noteThoughtSettled(list, turn, row) {
+  const words = turn.text.trim();
+  for (const streaming of list.querySelectorAll(":scope > .is-streaming.is-thinking")) {
+    const said = (streaming.__text ?? "").trim();
+    if (streaming.__settled === undefined && said !== "" && words.startsWith(said)) {
+      streaming.__settled = row;
+      return;
+    }
+  }
 }
 
 /* A streaming row goes. A thought that was being read — its line open, or the
@@ -1868,8 +1911,10 @@ function removeStreamingRow(stale, run) {
 /* ---- the foot line says what is going on (t-15682) ---------------------------
  *
  * While the turn is out the line at the foot names what the agent is doing
- * now, in the words the rows above wear: the step that is out, else the thought
- * that is going. Nothing to name, and it keeps the CLI's own verb. */
+ * now, in the words the rows above wear: the step that is out, else the newest
+ * thought that is going. A thought that is over (`is-done`) is history, and the
+ * first of several streaming ones is not the one going. Nothing to name, and it
+ * keeps the CLI's own verb. */
 function nowWordsOf(list) {
   if (!list) return "";
   const out = [...list.querySelectorAll(":scope > .is-tool.is-live")].at(-1);
@@ -1877,7 +1922,8 @@ function nowWordsOf(list) {
     const line = out.firstElementChild;
     return `${line.querySelector(".helper-step-kind").textContent} ${line.querySelector(".helper-step-target").textContent}`.trim();
   }
-  return list.querySelector(":scope > .is-streaming.is-thinking .helper-step-target")?.textContent ?? "";
+  const going = [...list.querySelectorAll(":scope > .is-streaming.is-thinking:not(.is-done)")].at(-1);
+  return going?.querySelector(".helper-step-target")?.textContent ?? "";
 }
 
 /* ---- the foot line, when no row is out to name (t-18702) ----------------------------
@@ -1951,8 +1997,24 @@ function nowSaidOf(list, run, voice) {
 function helperReportOf(run) {
   const id = run.helper?.id;
   if (run.status !== "done" || id === WIRE_LOG_ID || id === PANE_LOG_ID) return null;
-  const last = run.helper.turns.at(-1);
-  return last?.role === "assistant" && cleanseAssistantText(last.text) !== "" ? last : null;
+  // The report is the last thing the helper SAID. What it did after saying it — a
+  // hand-in call, a closing thought — leaves it standing, so long as every call
+  // came back and no person cut the helper short: a call with no answer, or the
+  // person's stop, means it was cut off in the middle of its work, and what it
+  // said before was not its last word. A last answer with nothing in it is no
+  // report, and an earlier answer is never looked back for in its place.
+  const turns = run.helper.turns;
+  let closing = false;
+  for (let at = turns.length - 1; at >= 0; at -= 1) {
+    const turn = turns[at];
+    if (turn.role === "assistant") {
+      if (cleanseAssistantText(turn.text) === "") return null;
+      return closing && run.helper.stopRecord === "stopped_by_person" ? null : turn;
+    }
+    if (turn.role === "user" || (turn.role === "tool" && turn.output === undefined)) return null;
+    closing = true;
+  }
+  return null;
 }
 
 function helperStepCount(run) {
@@ -1973,7 +2035,11 @@ function helperTally(run) {
     kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
     if (turn.outputError === true) failed += 1;
   }
-  return { total, failed, kinds };
+  // The page holds the helper's last turns only (`HELPER_TURN_CAP`): once the
+  // first it holds is not the file's first, the strip counts the recent steps,
+  // and the head's whole count (the roster's) is a bigger number.
+  const partial = run.helper.turns.length > 0 && run.helper.turns[0].seq > 0;
+  return { total, failed, kinds, partial };
 }
 
 function paintReportDoor(list, card) {
