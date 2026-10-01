@@ -439,6 +439,12 @@ mod tests {
 
     /// A copy shaped like Chromium's, with one file of its own — a fresh inode
     /// no process runs.
+    /// A system program every Mac has, copied for a child to run — any
+    /// Mach-O works; this one does nothing until it is killed.
+    const SLEEPER: &str = "/bin/sleep";
+    /// Longer than any sweep in these tests; the child is killed at the end.
+    const SLEEPER_SECONDS: &str = "30";
+
     fn copy_in(x: &Path, id: &str, name: &str) -> PathBuf {
         let clone = x
             .join(format!("{id}{FOLDER_SUFFIX}"))
@@ -693,22 +699,39 @@ mod tests {
     }
 
     #[test]
-    fn the_executable_this_process_runs_keeps_a_copy_that_hard_links_it() {
+    fn the_executable_a_process_runs_keeps_a_copy_that_hard_links_it() {
         // Chromium hard-links the running executable into its copy, so this is
         // the real shape: the copy's only file a process runs is another name
-        // for the one it came in by. Beside the test binary, so the link
+        // for the one it came in by. The process is a child running a copy of
+        // a system program, never this test binary: the kernel names a
+        // hard-linked executable by the last name looked up, so a link to the
+        // test binary moved `current_exe()` into a folder this test deletes,
+        // and every later test that starts the test binary as its helper
+        // started a file that was gone (10-02: nine tests failed in full runs
+        // only). One folder for the program and the copies, so the link
         // cannot cross a volume.
-        let exe = std::env::current_exe().unwrap();
-        let x = tempfile::tempdir_in(exe.parent().unwrap()).unwrap();
+        let x = tempfile::tempdir().unwrap();
+        let program = x.path().join("sleeper");
+        std::fs::copy(SLEEPER, &program).unwrap();
         let running = copy_in(x.path(), ID, "RRRRRR");
-        std::fs::hard_link(exe, running.join("Demo.app.bundle/Contents/MacOS/linked")).unwrap();
+        std::fs::hard_link(
+            &program,
+            running.join("Demo.app.bundle/Contents/MacOS/linked"),
+        )
+        .unwrap();
+        let mut child = std::process::Command::new(&program)
+            .arg(SLEEPER_SECONDS)
+            .spawn()
+            .unwrap();
         let stale = copy_in(x.path(), ID, "SSSSSS");
         let report = sweep_under(x.path(), ID, later(), unhurried(), running_processes);
+        let _ = child.kill();
+        let _ = child.wait();
         assert_eq!(report.removed, 1);
         assert_eq!(report.in_use, 1);
         assert!(
             running.exists(),
-            "the copy this very process runs from was deleted"
+            "the copy a running process's executable is linked into was deleted"
         );
         assert!(!stale.exists());
     }
