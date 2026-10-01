@@ -2871,6 +2871,9 @@ class StatefulBackend {
       case "jev_summary":
         if (this.jevSummary === null) throw new Error("unknown argument 'jev'");
         return clone(this.jevSummary);
+      // The boot timeline's marks (t-20078, boot_timeline.rs): the window
+      // writes the phase down and answers nothing.
+      case "boot_phase": return null;
       default:
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
         throw new Error(`unknown command: ${command}`);
