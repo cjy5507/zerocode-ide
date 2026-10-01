@@ -916,7 +916,7 @@ pub(crate) fn restore_workspace_checkpoint(
         if entry.desired.is_oversized() || entry.expected_current.is_oversized() {
             summary.skipped.push(crate::WorkspaceRestoreSkippedPath {
                 path: entry.path,
-                reason: "checkpoint snapshot exceeded the per-file size cap".to_string(),
+                reason: "checkpoint snapshot exceeded the size cap (per file or per session)".to_string(),
             });
             continue;
         }
@@ -996,7 +996,10 @@ pub(crate) fn restore_workspace_checkpoint(
         match result {
             Ok(deleted) => {
                 ctx.record_workspace_checkpoint_write(&restore.path);
-                record_file_observation(&ctx.file_reads, &restore.path.to_string_lossy());
+                // The model's conversation still holds the content this
+                // restore undid, so the file counts as not read: the next
+                // edit or write must read it again first (t-19459).
+                forget_file_observation(&ctx.file_reads, &restore.path.to_string_lossy());
                 if deleted {
                     summary.deleted.push(restore.path);
                 } else {
@@ -1056,6 +1059,18 @@ pub(crate) fn record_file_observation(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .record_from_disk(Path::new(path));
+}
+
+/// Drop what the read-before-edit guard knows of `path`, so the next edit or
+/// write of it is refused until it is read again.
+pub(crate) fn forget_file_observation(
+    file_reads: &std::sync::Mutex<FileReadRegistry>,
+    path: &str,
+) {
+    file_reads
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .forget(Path::new(path));
 }
 
 /// Debug mode: insert a temporary instrumentation probe and record it in the
@@ -1826,8 +1841,9 @@ mod read_image_tests {
 #[cfg(test)]
 mod boundary_tests {
     use super::{
-        restore_workspace_checkpoint, run_edit_file, run_grep_search, run_read_file,
-        run_write_file, EditFileInput, ReadFileInput, WriteFileInput,
+        enforce_read_before_write, record_file_observation, restore_workspace_checkpoint,
+        run_edit_file, run_grep_search, run_read_file, run_write_file, EditFileInput,
+        ReadFileInput, WriteFileInput,
     };
     use crate::{error::ToolError, ToolContext};
     use runtime::permission_enforcer::PermissionEnforcer;
@@ -1938,6 +1954,38 @@ mod boundary_tests {
 
         let _ = std::fs::remove_dir_all(&workspace);
         let _ = std::fs::remove_dir_all(&external_dir);
+    }
+
+    #[test]
+    fn a_restored_file_must_be_read_again_before_it_is_written() {
+        let workspace = temp_dir("restore-forgets-reads");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let file = workspace.join("tracked.txt");
+        std::fs::write(&file, "A").expect("seed content A");
+        let ctx = context(Some(&workspace));
+        let enforcer = workspace_write_enforcer();
+        let path = file.to_string_lossy().to_string();
+
+        let turn = ctx.begin_workspace_checkpoint(0);
+        ctx.record_workspace_checkpoint_before(&file).expect("record before");
+        std::fs::write(&file, "B").expect("write content B");
+        ctx.record_workspace_checkpoint_write(&file);
+        ctx.finish_workspace_checkpoint().expect("finish checkpoint");
+        // The model read B (its own write counts as read).
+        record_file_observation(&ctx.file_reads, &path);
+        assert!(enforce_read_before_write(&ctx.file_reads, "write_file", &path).is_ok());
+
+        let summary = restore_workspace_checkpoint(&ctx, Some(&enforcer), turn, false)
+            .expect("restore runs");
+        assert_eq!(summary.restored.len(), 1);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "A");
+
+        let refused = enforce_read_before_write(&ctx.file_reads, "write_file", &path)
+            .expect_err("a write before a re-read is refused");
+        assert!(format!("{refused}").contains("has not been read"), "{refused}");
+        record_file_observation(&ctx.file_reads, &path);
+        assert!(enforce_read_before_write(&ctx.file_reads, "write_file", &path).is_ok());
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]

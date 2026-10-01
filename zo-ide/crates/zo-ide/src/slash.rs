@@ -6,7 +6,7 @@
 
 use crate::tui::fast;
 
-/// zo 가 실제로 처리하는 슬래시 열넷.
+/// zo 가 실제로 처리하는 슬래시 열다섯.
 ///
 /// 순서는 팝업이 그리는 순서다. `/new` 는 codex `SlashCommand` 열거와 같이
 /// `/permissions` 와 `/resume` 사이에, `/clear` 는 종료 명령 뒤에 선다.
@@ -31,6 +31,10 @@ pub enum Slash {
     New,
     Resume,
     Compact,
+    /// `/rewind`: list the workspace checkpoints, restore guarded file
+    /// writes (`/rewind 12 [force]`) or drop the last finished turn
+    /// (`/rewind turn`) — the words `commands`' help already prints (t-19459).
+    Rewind,
     Goal,
     Loop,
     Status,
@@ -83,6 +87,7 @@ impl Slash {
         Self::New,
         Self::Resume,
         Self::Compact,
+        Self::Rewind,
         Self::Goal,
         Self::Loop,
         Self::Status,
@@ -103,6 +108,7 @@ impl Slash {
             Self::New => "/new",
             Self::Resume => "/resume",
             Self::Compact => "/compact",
+            Self::Rewind => "/rewind",
             Self::Goal => "/goal",
             Self::Loop => "/loop",
             Self::Status => "/status",
@@ -134,6 +140,7 @@ impl Slash {
             // `codex-tui-v0.149.1-resume-picker.bin` 의 26.07s 프레임.
             Self::Resume => "resume a saved chat",
             Self::Compact => "compact the conversation to free context",
+            Self::Rewind => crate::tui::strings::REWIND_COMMAND_DESCRIPTION,
             Self::Goal => "persist a goal and run bounded autonomous checks",
             Self::Loop => "repeat a prompt on a bounded session schedule",
             Self::Status => "model, account, limits, session and context",
@@ -147,7 +154,9 @@ impl Slash {
 
     /// 파이프 프런트엔드(`zo -p`, `ide/run_loop`)가 이 명령을 처리하는가.
     ///
-    /// 여섯이 빠진다. `/resume` 는 뷰포트를 가져가는 피커가 정본이라 append-only
+    /// 일곱이 빠진다. `/rewind` 는 여러 턴을 오가는 대화형 명령이라 한 번 실행하고
+    /// 끝나는 파이프에는 없다.
+    /// (이어지는 여섯은 아래와 같다.) `/resume` 는 뷰포트를 가져가는 피커가 정본이라 append-only
     /// 스트림에는 그릴 자리가 없고, `/warnings` 도 뷰포트를 가져가는 뷰어라 같다
     /// (파이프의 경고는 이미 스트림에 한 줄씩 남는다). `/fast` 와 `/thinking` 은
     /// 맨 터미널 TUI 에만 붙은 토글이다(파이프는 `--show-thinking` 플래그가 같은
@@ -165,6 +174,7 @@ impl Slash {
             self,
             Self::Fast
                 | Self::Thinking
+                | Self::Rewind
                 | Self::New
                 | Self::Resume
                 | Self::Warnings
@@ -217,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn the_keep_list_is_the_fourteen_commands_zo_handles() {
+    fn the_keep_list_is_the_fifteen_commands_zo_handles() {
         let names: Vec<&str> = Slash::CATALOG.iter().map(|command| command.name()).collect();
         assert_eq!(
             names,
@@ -229,6 +239,7 @@ mod tests {
                 "/new",
                 "/resume",
                 "/compact",
+                "/rewind",
                 "/goal",
                 "/loop",
                 "/status",

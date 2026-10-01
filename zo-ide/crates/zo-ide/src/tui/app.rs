@@ -3624,6 +3624,9 @@ impl Ui {
                 let text = "'/compact' is disabled while a task is in progress.";
                 self.note(SystemLevel::Error, text);
             }
+            Some(Slash::Rewind) => {
+                self.note(SystemLevel::Error, super::strings::REWIND_BUSY);
+            }
             Some(Slash::Goal) => {
                 self.deferred.push(Deferred::Slash(command.to_string()));
                 self.note(SystemLevel::Info, "↳ /goal runs when this turn ends");
@@ -5128,6 +5131,7 @@ impl App {
             Some(Slash::Compact) => {
                 self.asked = Some(Work::Compact((!arg.is_empty()).then(|| arg.to_string())));
             }
+            Some(Slash::Rewind) => self.apply_rewind_command(arg),
             Some(Slash::Goal) => self.apply_goal_command(arg),
             Some(Slash::Loop) => self.apply_loop_command(arg),
             Some(Slash::Clear) => {
@@ -5232,6 +5236,49 @@ impl App {
                 let text = format!("session not saved: {error}");
                 self.ui.note(SystemLevel::Warn, &text);
             }
+        }
+    }
+
+    /// `/rewind` (t-19459): `turn` drops the last finished turn from the
+    /// conversation and the saved transcript; everything else is the
+    /// commands crate's grammar — a bare `/rewind` lists the guarded-write
+    /// checkpoints, `/rewind N [force]` restores the files to before one.
+    fn apply_rewind_command(&mut self, arg: &str) {
+        use super::strings;
+        if arg == "turn" {
+            use crate::session::plain_session::RewindTurn;
+            match self.session_mut().rewind_last_turn() {
+                Ok(RewindTurn::Removed(removed)) => {
+                    self.ui.note(SystemLevel::Info, &strings::rewound_turn(removed));
+                }
+                Ok(RewindTurn::Empty) => self.ui.note(SystemLevel::Info, strings::REWIND_NOTHING),
+                Ok(RewindTurn::Blocked) => self.ui.note(SystemLevel::Warn, strings::REWIND_BLOCKED),
+                Ok(RewindTurn::NotSaved) => self.ui.note(SystemLevel::Warn, strings::REWIND_NOT_SAVED),
+                Err(error) => {
+                    let text = format!("session not saved: {error}");
+                    self.ui.note(SystemLevel::Warn, &text);
+                }
+            }
+            return;
+        }
+        let line = format!("/rewind {arg}");
+        let Ok(Some(commands::SlashCommand::Rewind { action })) =
+            commands::SlashCommand::parse(line.trim_end())
+        else {
+            self.ui.note(SystemLevel::Info, strings::REWIND_USAGE);
+            return;
+        };
+        let restores = matches!(action, commands::WorkspaceRewindAction::Restore { .. });
+        match self.session_mut().workspace_rewind_report(&action) {
+            Ok(report) => {
+                self.ui.note(SystemLevel::Info, &report);
+                if restores {
+                    self.ui.note(SystemLevel::Info, strings::REWIND_FILES_ONLY);
+                } else {
+                    self.ui.note(SystemLevel::Info, strings::REWIND_LIST_NOTE);
+                }
+            }
+            Err(error) => self.ui.note(SystemLevel::Error, &format!("rewind: {error}")),
         }
     }
 

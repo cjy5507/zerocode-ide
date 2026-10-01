@@ -244,6 +244,14 @@ impl FileReadRegistry {
         self.entries.is_empty()
     }
 
+    /// 한 파일의 기록만 지운다 — 디스크 내용이 대화가 아는 것과 달라졌을 때
+    /// (워크스페이스 되돌리기) 다음 편집이 [`FileFreshness::NeverRead`]로
+    /// 재읽기를 유도하게 한다.
+    pub fn forget(&mut self, path: &Path) {
+        self.entries.remove(&Self::key(path));
+        self.persist_sidecar();
+    }
+
     /// 모든 기록 제거 — 대화 리셋(/clear류) 배선용. 사이드카에도 반영해
     /// 다음 resume가 클리어 이전 상태를 부활시키지 못하게 한다.
     pub fn clear(&mut self) {

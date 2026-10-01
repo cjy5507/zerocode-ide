@@ -13,6 +13,15 @@ pub const MAX_CHECKPOINT_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// Maximum number of workspace checkpoints retained for one session.
 pub const MAX_WORKSPACE_CHECKPOINTS: usize = 50;
 
+/// Maximum bytes of file content (before and after states together) the
+/// retained checkpoints of one session hold in memory, the turn in progress
+/// included. The oldest checkpoints go first; a file state that would push the
+/// total over the line is not kept — it is recorded as skipped (the same mark
+/// an over-size file gets), so the list and a restore say it cannot be put
+/// back. A zo process holds at most this much, so eight panes hold at most
+/// 512 MiB, and only if each wrote that much (t-19459).
+pub const MAX_WORKSPACE_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+
 const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
@@ -95,6 +104,15 @@ impl Default for WorkspaceCheckpoint {
 }
 
 impl WorkspaceCheckpoint {
+    /// Bytes of file content this checkpoint holds in memory.
+    #[must_use]
+    pub fn content_bytes(&self) -> u64 {
+        self.files
+            .iter()
+            .map(|file| snapshot_bytes(&file.before) + snapshot_bytes(&file.after))
+            .sum()
+    }
+
     #[must_use]
     pub fn has_oversized_files(&self) -> bool {
         self.files
@@ -157,7 +175,9 @@ fn render_workspace_checkpoint_list_at(
             checkpoint.files.len(),
         );
     }
-    output.push_str("\n  Restore with /rewind <turn> [force].");
+    output.push_str(
+        "\n  Restore with /rewind <Turn number> [force] — the Turn number in a row, not its position in the list.",
+    );
     output
 }
 
@@ -247,6 +267,8 @@ struct ActiveCheckpoint {
     created_at_epoch_secs: u64,
     incomplete: bool,
     files: BTreeMap<PathBuf, TouchedFile>,
+    /// Content bytes this turn's captured states hold so far.
+    bytes: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -254,6 +276,8 @@ pub(crate) struct WorkspaceCheckpointStore {
     checkpoints: VecDeque<WorkspaceCheckpoint>,
     active: Option<ActiveCheckpoint>,
     durable_dir: Option<PathBuf>,
+    /// Test seam: a smaller byte budget than [`MAX_WORKSPACE_CHECKPOINT_BYTES`].
+    byte_cap: Option<u64>,
 }
 
 impl WorkspaceCheckpointStore {
@@ -269,6 +293,7 @@ impl WorkspaceCheckpointStore {
             created_at_epoch_secs: now_epoch_secs(),
             incomplete: false,
             files: BTreeMap::new(),
+            bytes: 0,
         });
         next_index
     }
@@ -280,20 +305,44 @@ impl WorkspaceCheckpointStore {
     }
 
     pub(crate) fn record_before(&mut self, path: &Path) -> io::Result<()> {
+        match self.active.as_ref() {
+            None => return Ok(()),
+            Some(active) if active.files.contains_key(path) => return Ok(()),
+            Some(_) => {}
+        }
+        let before = capture_snapshot(path)?;
+        let in_turn = self.active.as_ref().map_or(0, |active| active.bytes);
+        let before = self.within_budget(before, in_turn);
+        let held = snapshot_bytes(&before);
         let Some(active) = self.active.as_mut() else {
             return Ok(());
         };
-        if active.files.contains_key(path) {
-            return Ok(());
-        }
+        active.bytes += held;
         active.files.insert(
             path.to_path_buf(),
             TouchedFile {
-                before: capture_snapshot(path)?,
+                before,
                 write_succeeded: false,
             },
         );
         Ok(())
+    }
+
+    /// The snapshot as it may be kept: unchanged while the retained
+    /// checkpoints and the turn in progress still fit the byte budget, else a
+    /// skipped mark that keeps only its size.
+    fn within_budget(&self, snapshot: WorkspaceFileSnapshot, in_turn: u64) -> WorkspaceFileSnapshot {
+        let size = snapshot_bytes(&snapshot);
+        let retained: u64 = self
+            .checkpoints
+            .iter()
+            .map(WorkspaceCheckpoint::content_bytes)
+            .sum();
+        if retained + in_turn + size > self.byte_cap.unwrap_or(MAX_WORKSPACE_CHECKPOINT_BYTES) {
+            WorkspaceFileSnapshot::skipped_size(size)
+        } else {
+            snapshot
+        }
     }
 
     pub(crate) fn record_write_success(&mut self, path: &Path) {
@@ -310,18 +359,20 @@ impl WorkspaceCheckpointStore {
         let Some(active) = self.active.take() else {
             return Ok(None);
         };
-        let files = active
-            .files
-            .into_iter()
-            .filter(|(_, touched)| touched.write_succeeded)
-            .map(|(path, touched)| {
-                capture_snapshot(&path).map(|after| WorkspaceCheckpointFile {
-                    path,
-                    before: touched.before,
-                    after,
-                })
-            })
-            .collect::<io::Result<Vec<_>>>()?;
+        let mut files = Vec::new();
+        let mut in_turn = active.bytes;
+        for (path, touched) in active.files {
+            if !touched.write_succeeded {
+                continue;
+            }
+            let after = self.within_budget(capture_snapshot(&path)?, in_turn);
+            in_turn += snapshot_bytes(&after);
+            files.push(WorkspaceCheckpointFile {
+                path,
+                before: touched.before,
+                after,
+            });
+        }
         if files.is_empty() {
             return Ok(None);
         }
@@ -338,10 +389,28 @@ impl WorkspaceCheckpointStore {
                 self.remove_durable_checkpoint(evicted.turn_index);
             }
         }
+        self.evict_over_budget(MAX_WORKSPACE_CHECKPOINT_BYTES);
         if let Some(dir) = self.durable_dir.as_ref() {
             persist_checkpoint(dir, &checkpoint)?;
         }
         Ok(Some(checkpoint))
+    }
+
+    /// Drop the oldest checkpoints until the retained content fits
+    /// `byte_cap`; the newest one stays whatever its size.
+    fn evict_over_budget(&mut self, byte_cap: u64) {
+        let mut held: u64 = self
+            .checkpoints
+            .iter()
+            .map(WorkspaceCheckpoint::content_bytes)
+            .sum();
+        while held > byte_cap && self.checkpoints.len() > 1 {
+            let Some(evicted) = self.checkpoints.pop_front() else {
+                break;
+            };
+            held = held.saturating_sub(evicted.content_bytes());
+            self.remove_durable_checkpoint(evicted.turn_index);
+        }
     }
 
     pub(crate) fn checkpoints(&self) -> Vec<WorkspaceCheckpoint> {
@@ -485,6 +554,14 @@ fn capture_snapshot_with_cap(path: &Path, cap: u64) -> io::Result<WorkspaceFileS
         return Ok(WorkspaceFileSnapshot::skipped_size(size_bytes));
     }
     Ok(WorkspaceFileSnapshot::bytes(content))
+}
+
+/// Content bytes a snapshot holds in memory: a skipped or missing file holds none.
+fn snapshot_bytes(snapshot: &WorkspaceFileSnapshot) -> u64 {
+    snapshot
+        .content
+        .as_ref()
+        .map_or(0, |content| content.len() as u64)
 }
 
 fn now_epoch_secs() -> u64 {
@@ -678,6 +755,82 @@ mod tests {
     }
 
     #[test]
+    fn the_turn_number_a_list_row_shows_is_the_one_rewind_accepts() {
+        let (dir, context) = history("numbers");
+        let listing = render_workspace_checkpoint_list(&context.workspace_checkpoints());
+        let shown: Vec<usize> = listing
+            .lines()
+            .filter_map(|line| line.split("Turn ").nth(1))
+            .filter_map(|rest| rest.split_whitespace().next()?.parse().ok())
+            .collect();
+        assert!(shown.len() >= 2, "{listing}");
+        for turn in shown {
+            context
+                .restore_workspace_to_before(turn, true)
+                .unwrap_or_else(|error| panic!("/rewind {turn} refused: {error}"));
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_state_past_the_budget_is_marked_skipped_not_kept() {
+        let dir = temp_dir("active-budget");
+        let small = dir.join("small.bin");
+        let big = dir.join("big.bin");
+        fs::write(&small, vec![1u8; 10]).unwrap();
+        fs::write(&big, vec![2u8; 50]).unwrap();
+        let mut store = WorkspaceCheckpointStore {
+            byte_cap: Some(40),
+            ..WorkspaceCheckpointStore::default()
+        };
+        store.begin_turn(1);
+        store.record_before(&small).unwrap();
+        store.record_before(&big).unwrap();
+        fs::write(&small, vec![3u8; 10]).unwrap();
+        fs::write(&big, vec![4u8; 50]).unwrap();
+        store.record_write_success(&small);
+        store.record_write_success(&big);
+        let checkpoint = store.finish_turn().unwrap().expect("a checkpoint");
+        let by_name = |name: &str| {
+            checkpoint
+                .files
+                .iter()
+                .find(|file| file.path.file_name().is_some_and(|n| n == name))
+                .expect("file recorded")
+        };
+        assert!(!by_name("small.bin").before.is_oversized());
+        assert!(by_name("big.bin").before.is_oversized(), "past the budget: skipped");
+        assert!(checkpoint.has_oversized_files());
+        assert!(checkpoint.content_bytes() <= 40);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retained_checkpoints_stay_under_the_byte_budget_and_keep_the_newest() {
+        let dir = temp_dir("budget");
+        let path = dir.join("big.bin");
+        fs::write(&path, vec![0u8; 100]).unwrap();
+        let mut store = WorkspaceCheckpointStore::default();
+        for turn in 1..=3 {
+            store.begin_turn(turn);
+            store.record_before(&path).unwrap();
+            fs::write(&path, vec![u8::try_from(turn).unwrap(); 100]).unwrap();
+            store.record_write_success(&path);
+            store.finish_turn().unwrap();
+        }
+        assert_eq!(store.checkpoints().len(), 3);
+        // Each checkpoint holds 200 bytes (before + after): a 450-byte budget
+        // keeps two, a 10-byte budget still keeps the newest one.
+        store.evict_over_budget(450);
+        let kept: Vec<usize> = store.checkpoints().iter().map(|c| c.turn_index).collect();
+        assert_eq!(kept, vec![2, 3]);
+        store.evict_over_budget(10);
+        let kept: Vec<usize> = store.checkpoints().iter().map(|c| c.turn_index).collect();
+        assert_eq!(kept, vec![3]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn restore_composes_overlapping_paths_to_each_turn_boundary() {
         for (target, expected_a, expected_b, expected_c) in [
             (3, b"a2".as_slice(), b"b2".as_slice(), Some(b"c1".as_slice())),
@@ -772,7 +925,7 @@ mod tests {
 
         assert!(rendered.contains("1. Turn 8 · 1m ago · 1 file(s) [incomplete, skipped-oversized]"));
         assert!(rendered.contains("2. Turn 4 · 2m ago · 1 file(s)"));
-        assert!(rendered.contains("/rewind <turn> [force]"));
+        assert!(rendered.contains("/rewind <Turn number> [force]"));
     }
 
     #[test]

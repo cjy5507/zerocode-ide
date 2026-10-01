@@ -1906,6 +1906,120 @@ async fn e2e_headerless_thinking_names_the_status_row_and_commits_a_titled_cell(
     let _ = run.finish();
 }
 
+/// `/rewind` is in the help the commands crate prints, and the shipped zo
+/// answered "/rewind is not in zo" (t-19459). Now a bare `/rewind` lists the
+/// workspace checkpoints, and `/rewind turn` takes the last finished turn out
+/// of the conversation AND out of the saved transcript.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_rewind_command_works_in_the_shipped_tui() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("rewind fixture answer")
+        .await
+        .expect("start text script");
+    let mut run = pty(&layout, service.base_url(), &interactive_args());
+    let timeout = Duration::from_secs(20);
+
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"remember the ZEBRA-REWIND prompt\r").expect("send prompt");
+    run.wait_for_history_row("rewind fixture answer", timeout);
+    wait_until_quiet(&run, Duration::from_millis(300), timeout);
+
+    run.send(b"/rewind\r").expect("send /rewind");
+    run.wait_for_history_row("Workspace checkpoints", timeout);
+    let mut screen = Screen::new(40);
+    screen.feed(&run.snapshot_output());
+    assert!(
+        !screen.transcript().iter().any(|row| row.contains("is not in zo")),
+        "/rewind must not fall through to the unknown-command note: {:#?}",
+        screen.transcript()
+    );
+
+    run.send(b"/rewind turn\r").expect("send /rewind turn");
+    run.wait_for_history_row("Rewound 1 turn", timeout);
+    let saved: String = transcripts(&layout.sessions)
+        .iter()
+        .map(|path| fs::read_to_string(path).unwrap_or_default())
+        .collect();
+    assert!(
+        !saved.contains("ZEBRA-REWIND"),
+        "the rewound prompt must be gone from the saved transcript"
+    );
+
+    run.send(b"/rewind turn\r").expect("send second /rewind turn");
+    run.wait_for_history_row("Nothing to rewind", timeout);
+    let _ = run.finish();
+}
+
+/// `/rewind N` puts a guarded write back (file content asserted), refuses
+/// without `force` when the file changed after the checkpoint, and says in
+/// words that the conversation was not rewound (t-19459).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_rewind_n_restores_the_guarded_write_and_refuses_a_changed_file_without_force() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::writes_then_bash(
+        vec![("rewound.txt".to_string(), "written by the turn\n".to_string())],
+        None,
+        Duration::ZERO,
+        "### Done\n\n- one file written\n",
+    )
+    .await
+    .expect("start write script");
+    let mut run = pty(&layout, service.base_url(), &interactive_args());
+    let timeout = Duration::from_secs(20);
+    let file = layout.cwd.join("rewound.txt");
+
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"write one file\r").expect("send prompt");
+    run.wait_for_history_row("one file written", timeout);
+    wait_until_quiet(&run, Duration::from_millis(300), timeout);
+    assert_eq!(fs::read_to_string(&file).expect("the turn wrote the file"), "written by the turn\n");
+
+    // The turn left a checkpoint: the list names it.
+    run.send(b"/rewind\r").expect("send /rewind");
+    run.wait_for_history_row("1 file(s)", timeout);
+
+    // The file changed after the checkpoint: refused, content untouched.
+    fs::write(&file, "changed by hand\n").expect("change the file");
+    run.send(b"/rewind 1\r").expect("send /rewind 1");
+    run.wait_for_history_row("Retry with /rewind 1 force", timeout);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "changed by hand\n");
+
+    // With force the write is undone — the file did not exist before the turn.
+    run.send(b"/rewind 1 force\r").expect("send /rewind 1 force");
+    run.wait_for_history_row("Conflicted       0", timeout);
+    assert!(!file.exists(), "the restore must delete the file the turn created");
+    let _ = run.finish();
+}
+
+/// A `/model` switch leaves a handoff note after the last turn; `/rewind turn`
+/// steps over it and still takes the turn out (t-19459).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_rewind_turn_after_a_model_switch_still_takes_the_last_turn() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("handoff fixture answer")
+        .await
+        .expect("start text script");
+    let mut run = pty(&layout, service.base_url(), &interactive_args());
+    let timeout = Duration::from_secs(20);
+
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"remember the OKAPI-REWIND prompt\r").expect("send prompt");
+    run.wait_for_history_row("handoff fixture answer", timeout);
+    wait_until_quiet(&run, Duration::from_millis(300), timeout);
+    run.send(b"/model haiku\r").expect("send /model");
+    wait_until_quiet(&run, Duration::from_millis(300), timeout);
+
+    run.send(b"/rewind turn\r").expect("send /rewind turn");
+    run.wait_for_history_row("Rewound 1 turn", timeout);
+    let saved: String = transcripts(&layout.sessions)
+        .iter()
+        .map(|path| fs::read_to_string(path).unwrap_or_default())
+        .collect();
+    assert!(!saved.contains("OKAPI-REWIND"), "the turn must be gone from the saved transcript");
+    assert!(saved.contains("Model handoff"), "the handoff note stays where it was");
+    let _ = run.finish();
+}
+
 /// One turn, one spawn, four ledgers — joined by equality on the attempt key.
 ///
 /// This is the case the attempt-key contract exists for

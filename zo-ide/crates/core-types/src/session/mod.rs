@@ -38,7 +38,7 @@ pub use mask::{
 };
 pub use message::{
     is_reminder_lineage_text, ContentBlock, ConversationMessage, MessageRole,
-    CLEARED_REMINDER_PLACEHOLDER, REMINDER_TAG_OPEN,
+    CLEARED_REMINDER_PLACEHOLDER, MODEL_HANDOFF_PREFIX, PROCESS_EVENT_PREFIX, REMINDER_TAG_OPEN,
 };
 
 use json_field::{
@@ -1764,7 +1764,22 @@ impl Session {
         let mut removed = 0usize;
         let mut turns_removed = 0usize;
 
+        // Host notes about a seam (a model handoff, a process event) belong to
+        // no turn: lift them off the tail, rewind the turn beneath, and put
+        // them back in their order — so a `/model` after the last turn does
+        // not make the turn unreachable.
+        let mut seam_notes: Vec<ConversationMessage> = Vec::new();
+
         while turns_removed < steps && !self.messages.is_empty() {
+            while self
+                .messages
+                .last()
+                .is_some_and(ConversationMessage::is_host_seam_note)
+            {
+                if let Some(note) = Arc::make_mut(&mut self.messages).pop() {
+                    seam_notes.push(note);
+                }
+            }
             // Walk backward over everything the turn holds: the assistant
             // replies of every tool round, the tool results (zo writes them
             // in the Tool role, other writers in the User role) and the
@@ -1790,6 +1805,10 @@ impl Session {
                 removed += 1;
             }
             turns_removed += 1;
+        }
+        // Newest was lifted first; the oldest goes back first.
+        while let Some(note) = seam_notes.pop() {
+            Arc::make_mut(&mut self.messages).push(note);
         }
 
         if removed > 0 {

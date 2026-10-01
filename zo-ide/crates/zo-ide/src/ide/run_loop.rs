@@ -620,6 +620,7 @@ fn handle_slash<W: Write>(
             | Slash::New
             | Slash::Resume
             | Slash::Warnings
+            | Slash::Rewind
             | Slash::Clear,
         )
         | None => {
