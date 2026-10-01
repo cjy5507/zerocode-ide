@@ -194,6 +194,13 @@ impl Timeline {
                 None => line.push_str(&format!(" {}=-", phase.key())),
             }
         }
+        // A phase reached before something it must follow is named in the
+        // line, so a boot that put work back in front of the paint says so in
+        // the log without anybody having to read the numbers.
+        let early: Vec<&str> = self.out_of_order().into_iter().map(Phase::key).collect();
+        if !early.is_empty() {
+            line.push_str(&format!(" out_of_order={}", early.join(",")));
+        }
         line
     }
 }
