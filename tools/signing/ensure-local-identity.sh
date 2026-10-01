@@ -12,6 +12,14 @@ identity() {
 }
 found=$(identity)
 if [[ $found =~ ^[A-Fa-f0-9]{40}$ ]]; then printf '%s\n' "$found"; exit; fi
+# A build runner has no one to answer the prompts creating an identity raises —
+# `security add-trusted-cert` asks for a password to change trust settings, and the
+# first public macOS CI run sat on it for 90 minutes (2026-10-01). Where CI is set
+# (GitHub Actions sets it) no identity is created: the caller signs the helper ad hoc.
+if [[ -n ${CI:-} ]]; then
+  echo 'no local signing identity is created on a build runner (CI is set)' >&2
+  exit 1
+fi
 # Serialise first use across worktrees. A stale lock fails closed; it must never
 # cause a second certificate to replace this machine's existing TCC identity.
 lock="$KEYCHAIN.zerocode-signing.lock"
