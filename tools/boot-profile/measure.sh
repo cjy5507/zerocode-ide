@@ -29,7 +29,7 @@ INSTALLED_FRAMEWORKS="/Applications/ZeroCode.app/Contents/Frameworks"
 TIMELINE_FILE="boot-timeline.json"
 APP_ID="dev.zerocode.app"
 
-binary="" profile="" out="" low=false runs=1
+binary="" profile="" out="" low=false runs=1 home_dir="" save_data="" warm_data=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary) binary="$2"; shift 2 ;;
@@ -37,6 +37,15 @@ while [[ $# -gt 0 ]]; do
     --out) out="$2"; shift 2 ;;
     --low-spec) low=true; shift ;;
     --runs) runs="$2"; shift 2 ;;
+    # A fixed home path, so the checkouts the layouts name keep their paths
+    # from one invocation to the next.
+    --home) home_dir="$2"; shift 2 ;;
+    # After run 1 (the cutover boot) keep the data folder here...
+    --save-data) save_data="$2"; shift 2 ;;
+    # ...and start from it: every run is then an ordinary warm start, and one
+    # launch each. A launch of a copied bundle leaves macOS a code-sign clone
+    # behind (about 0.2 GiB), so launches are counted, not free.
+    --warm-data) warm_data="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -53,7 +62,7 @@ cp "$binary" "$out/ZeroCode.app/Contents/MacOS/zerocode-shell"
 cp -R "$INSTALLED_FRAMEWORKS" "$out/ZeroCode.app/Contents/Frameworks"
 shim="$out/ZeroCode.app/Contents/MacOS/zerocode-shell"
 
-home="$out/home"
+home="${home_dir:-$out/home}"
 data="$home/Library/Application Support/$APP_ID"
 repo="$home/work/project"
 mkdir -p "$data" "$repo"
@@ -80,7 +89,9 @@ run_once() {
   # Run 1 is the cutover boot (the legacy ledger becomes the store); later
   # runs start on the store the run before left, which is the ordinary start.
   rm -f "$data/$TIMELINE_FILE"
-  if [[ "$at" = 1 ]]; then
+  if [[ -n "$warm_data" ]]; then
+    rm -rf "$data"; mkdir -p "$(dirname "$data")"; cp -R "$warm_data" "$data"
+  elif [[ "$at" = 1 ]]; then
     rm -rf "$data"; mkdir -p "$data"
     cp "$profile/pane-layouts.json" "$data/pane-layouts.json"
     cp "$profile/orchestration.json" "$data/orchestration.json"
@@ -126,6 +137,10 @@ PY
   # throwaway profile whose end state nobody wants.
   kill -KILL "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  if [[ -n "$save_data" && "$at" = 1 ]]; then
+    rm -rf "$save_data"; cp -R "$data" "$save_data"
+    rm -f "$save_data/$TIMELINE_FILE"
+  fi
   cat "$out/timeline-$at.json"; echo
 }
 
@@ -134,4 +149,4 @@ for at in $(seq 1 "$runs"); do run_once "$at"; done
 # The bundle shim holds a copy of the Chromium framework (hundreds of MB), and
 # the synthetic home grows a profile of its own: neither is wanted afterwards,
 # only the timelines are. `:?` stops the removal if --out ever came up empty.
-rm -rf "${out:?}/ZeroCode.app" "${out:?}/home"
+rm -rf "${out:?}/ZeroCode.app" "${home:?}"
