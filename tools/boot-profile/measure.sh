@@ -13,8 +13,9 @@
 # `taskpolicy -b`, the efficiency-core profile: wall-clock startup is valid
 # there, frame-rate numbers are not (the throttle holds animation at ~10 Hz).
 #
-# The Chromium helpers are not rebuilt: a bundle shim symlinks the installed
-# app's Frameworks read-only, which is all the window needs to find them.
+# The Chromium helpers are not rebuilt: a bundle shim holds a copy of the
+# installed app's Frameworks (read, never written), which is all the window
+# needs to find them.
 set -euo pipefail
 
 # How long one start may take before it is called stuck, and how often the
@@ -22,6 +23,8 @@ set -euo pipefail
 # about a hundred, so three times that is "stuck".
 START_TIMEOUT=300
 POLL_INTERVAL=0.25
+# Browser tabs stored for the restore: the person's window held a few.
+BROWSER_TABS=3
 INSTALLED_FRAMEWORKS="/Applications/ZeroCode.app/Contents/Frameworks"
 TIMELINE_FILE="boot-timeline.json"
 APP_ID="dev.zerocode.app"
@@ -45,7 +48,9 @@ done
 
 mkdir -p "$out/home" "$out/ZeroCode.app/Contents/MacOS"
 cp "$binary" "$out/ZeroCode.app/Contents/MacOS/zerocode-shell"
-ln -s "$INSTALLED_FRAMEWORKS" "$out/ZeroCode.app/Contents/Frameworks"
+# A copy, not a link: the helpers find the framework by a path relative to
+# themselves, and through a link that path leads back into the installed app.
+cp -R "$INSTALLED_FRAMEWORKS" "$out/ZeroCode.app/Contents/Frameworks"
 shim="$out/ZeroCode.app/Contents/MacOS/zerocode-shell"
 
 home="$out/home"
@@ -57,6 +62,15 @@ git -C "$repo" -c user.name=probe -c user.email=probe@example.invalid commit -q 
 for name in a b; do
   git -C "$repo" worktree add -q "$home/work/project-$name" -b "probe-$name"
 done
+# The conversations the layouts wake run these stand-ins, not the person's real
+# agents: each is a process that stays up, which is what a woken agent is to
+# the window. They sit in the synthetic home, found through its own PATH.
+mkdir -p "$home/.local/bin"
+for agent in claude codex zo; do
+  printf '#!/bin/sh\nexec sleep 86400\n' > "$home/.local/bin/$agent"
+  chmod +x "$home/.local/bin/$agent"
+done
+printf 'export PATH="$HOME/.local/bin:$PATH"\n' > "$home/.zshenv"
 canon() { (cd "$1" && pwd -P); }
 worktrees="$(canon "$repo"):$(canon "$home/work/project-a"):$(canon "$home/work/project-b")"
 printf '%s\n' "$worktrees" > "$out/worktrees.txt"
@@ -70,6 +84,16 @@ run_once() {
     rm -rf "$data"; mkdir -p "$data"
     cp "$profile/pane-layouts.json" "$data/pane-layouts.json"
     cp "$profile/orchestration.json" "$data/orchestration.json"
+    # Browser tabs to put back, so the Chromium side has its restore to do. The
+    # address is a closed local port: a tab opens and fails fast, no network.
+    python3 - "$data/preferences.json" "$BROWSER_TABS" <<'PY'
+import json, sys
+path, count = sys.argv[1], int(sys.argv[2])
+tabs = [{"url": f"http://127.0.0.1:9/probe-{n}"} for n in range(count)]
+json.dump({"_meta": {"format": 1, "revision": 1},
+           "data": {"browser": {"restore_tabs": True, "open_tabs": tabs}}},
+          open(path, "w"))
+PY
     # Re-key the layouts onto this run's real checkouts.
     python3 - "$data/pane-layouts.json" "$worktrees" <<'PY'
 import json, sys
@@ -98,7 +122,9 @@ PY
   done
   cp "$data/$TIMELINE_FILE" "$out/timeline-$at.json" 2>/dev/null || echo '{}' > "$out/timeline-$at.json"
   # Our own child only: the pid this script started.
-  kill "$pid" 2>/dev/null || true
+  # SIGKILL: the window answers SIGTERM with its goodbye walk, and this is a
+  # throwaway profile whose end state nobody wants.
+  kill -KILL "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   cat "$out/timeline-$at.json"; echo
 }

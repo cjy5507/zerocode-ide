@@ -16,7 +16,7 @@ use zerocode_core::SessionKey;
 use zerocode_core::agent_teams::{LEADER_PANE, Team};
 use zerocode_core::orchestration::{Launcher, Ledger, plan, receipt_actor};
 
-use crate::pane_layout::{PaneNode, SplitDirection, TabLayout};
+use crate::pane_layout::{PaneNode, SplitDirection, TabLayout, WakeAgent};
 
 /// The folder the profile is written into. Unset means the test does nothing:
 /// a plain `cargo test` must never write a profile anywhere.
@@ -65,7 +65,18 @@ fn scrollback() -> String {
         .collect()
 }
 
-fn tab(awake: bool, buffers: usize) -> TabLayout {
+/// The programs the conversations were running, alternated: the person's
+/// restart woke a mix, and each wake is one more process the boot starts.
+const WAKE_AGENTS: [&str; 2] = ["claude", "codex"];
+
+/// A session id in the shape the wake accepts (a UUID); the number makes each
+/// tab's conversation its own.
+fn session_id(number: usize) -> String {
+    format!("00000000-0000-4000-8000-{number:012}")
+}
+
+fn tab(number: usize, awake: bool, buffers: usize) -> TabLayout {
+    let agent = WAKE_AGENTS[number % WAKE_AGENTS.len()];
     TabLayout {
         id: None,
         root: PaneNode::Split {
@@ -76,8 +87,17 @@ fn tab(awake: bool, buffers: usize) -> TabLayout {
         },
         titles: HashMap::new(),
         names: HashMap::new(),
-        agents: HashMap::new(),
-        running: HashMap::new(),
+        agents: HashMap::from([(
+            0,
+            WakeAgent {
+                agent: agent.to_string(),
+                key: "session_id".to_string(),
+                id: session_id(number),
+                transcript_path: None,
+                interrupted: false,
+            },
+        )]),
+        running: HashMap::from([(0, agent.to_string())]),
         active: 0,
         expanded: None,
         pinned: false,
@@ -102,7 +122,7 @@ fn layouts(worktrees: &[String]) -> HashMap<String, Vec<TabLayout>> {
         filed
             .entry(worktree)
             .or_default()
-            .push(tab(at >= worktrees.len(), LEAVES_PER_TAB));
+            .push(tab(at, at >= worktrees.len(), LEAVES_PER_TAB));
     }
     filed
 }
