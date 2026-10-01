@@ -1126,8 +1126,19 @@ function dressCodeCopies(host) {
  * (`root: list`), so it goes with the list; a list that is not laid out (a
  * page behind another tab) answers nothing, and its rows are asked again when
  * it is. */
-const CHAT_SHELF = Object.freeze({ screens: 2, warm: 30 });
+const CHAT_SHELF = Object.freeze({ screens: 2, warm: 30, frameMs: 8, gapMs: 100 });
 
+/* A row dressed is a layout: the list is a column of some 400 flex items, and
+ * the height read that keeps the view's place makes the page lay all of them
+ * out — about 6 ms at a 4x CPU for one row, the same for three (t-20445; the
+ * prose itself is 1.7 ms a row). Dressed one row a callback, a scroll paid it
+ * 33 times a second, and the frames it landed in missed 16.7 ms.
+ *  - `gapMs`: rows that came within reach wait for one another and are dressed
+ *    together, at most this often. A row is two screens from the view when it
+ *    comes within reach — over 100 ms of a fast wheel — so it is dressed
+ *    before it is seen; one already in the view is never made to wait.
+ *  - `frameMs`: what one such batch spends before the rest wait a frame more
+ *    (a page's first answer 92 rows at once passed the frame). */
 function shelfWatch(list) {
   list.__shelf ??= new IntersectionObserver((entries) => judgeShelf(list, entries), {
     root: list,
@@ -1156,6 +1167,7 @@ function watchShelf(list, row) {
 
 function forgetShelf(list, row) {
   list.__shelf?.unobserve(row);
+  list.__shelfWaiting?.delete(row);
 }
 
 /* Whether words in `node` are chosen — a write into it would collapse them. */
@@ -1198,13 +1210,64 @@ function judgeShelf(list, entries) {
       if (row.__shelved) back.push({ row, kept: entry.boundingClientRect.height, above: entry.boundingClientRect.bottom <= view });
     } else if (!row.__shelved && mayShelve(row)) {
       shelveRow(list, row, entry.boundingClientRect.height);
+    } else {
+      // Left reach while still waiting for its body: nothing to dress now.
+      list.__shelfWaiting?.delete(row);
     }
   }
   if (back.length === 0) return;
-  for (const one of back) unshelveRow(one.row, run);
+  const waiting = (list.__shelfWaiting ??= new Map());
+  for (const one of back) waiting.set(one.row, one);
+  dressWaiting(list);
+}
+
+/* Dress the rows that came back, the ones in the view first and as many of the
+ * rest as `CHAT_SHELF.frameMs` allows (at least one), then ask again next
+ * frame for what is left. A row's `above` is read again here: the list may have
+ * moved since the watcher answered. */
+function dressWaiting(list) {
+  const waiting = list.__shelfWaiting;
+  const run = list.__run;
+  if (!waiting || waiting.size === 0 || !run || !list.isConnected) return;
+  const frame = list.getBoundingClientRect();
+  const rows = [];
+  for (const [row, one] of waiting) {
+    if (!row.isConnected || !row.__shelved) {
+      waiting.delete(row);
+      continue;
+    }
+    const box = row.getBoundingClientRect();
+    one.above = box.bottom <= frame.top;
+    one.inView = box.bottom > frame.top && box.top < frame.bottom;
+    one.away = one.inView ? 0 : Math.min(Math.abs(box.bottom - frame.top), Math.abs(box.top - frame.bottom));
+    rows.push(one);
+  }
+  rows.sort((a, b) => a.away - b.away);
+  const started = performance.now();
+  if (rows.length > 0 && rows[0].away > 0 && started - (list.__shelfDressedAt ?? 0) < CHAT_SHELF.gapMs) {
+    askShelfFrame(list);
+    return;
+  }
+  list.__shelfDressedAt = started;
+  const dressed = [];
+  for (const one of rows) {
+    if (!one.inView && dressed.length > 0 && performance.now() - started >= CHAT_SHELF.frameMs) break;
+    unshelveRow(one.row, run);
+    waiting.delete(one.row);
+    dressed.push(one);
+  }
   let moved = 0;
-  for (const one of back) if (one.above) moved += one.row.offsetHeight - one.kept;
+  for (const one of dressed) if (one.above) moved += one.row.offsetHeight - one.kept;
   if (moved !== 0) list.scrollTop += moved;
+  if (waiting.size > 0) askShelfFrame(list);
+}
+
+function askShelfFrame(list) {
+  if (list.__shelfFrame) return;
+  list.__shelfFrame = requestAnimationFrame(() => {
+    list.__shelfFrame = 0;
+    dressWaiting(list);
+  });
 }
 
 /* A row gives up its body and keeps its height — as its least height: the
