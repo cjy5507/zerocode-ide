@@ -3735,12 +3735,13 @@ impl exit_runtime::Terminating for ExitSteps<'_> {
     }
 }
 
-// Declared down here, after the shipped code: the source contracts read
-// main.rs only up to its first `#[cfg(test)]`.
-#[cfg(test)]
-mod test_host;
-
 #[cfg(test)]
 mod tests {
     include!("main_unit_tests.rs");
 }
+
+// Declared after the tests module, never above it: the source contracts read
+// this file's shipped half up to the tests module's fence, and that fence must
+// be the first test-only item here.
+#[cfg(test)]
+mod test_host;

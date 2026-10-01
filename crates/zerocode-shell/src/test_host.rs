@@ -21,7 +21,7 @@ const TEST_DRIVE: &str = "C:";
 const WINDOWS_SH: &str = "sh";
 
 /// The `pwd` that prints the directory as the host itself spells it: the
-/// runner's `sh` otherwise answers with an `/c/Users/..` the host cannot open.
+/// runner's `sh` otherwise answers with an MSYS path (`/c/…`) the host cannot open.
 #[cfg(windows)]
 pub(crate) const SH_PHYSICAL_PWD: &str = "pwd -W";
 #[cfg(not(windows))]
@@ -140,8 +140,9 @@ pub(crate) fn script_that_creates(marker: &Path) -> String {
 }
 
 /// `path` resolved to the one spelling the host gives a place: git answers
-/// `C:/Users/runneradmin/…` where the test holds `C:\Users\RUNNER~1\…`, and
-/// both name the folder `canonicalize` reads back the same way.
+/// the long name (`C:/Users/dev/…`) where the test holds the 8.3 short one
+/// (with a `~1` in it), and both name the folder `canonicalize` reads back the
+/// same way.
 pub(crate) fn canonical(path: impl AsRef<Path>) -> PathBuf {
     std::fs::canonicalize(path.as_ref()).expect("a place that exists")
 }
