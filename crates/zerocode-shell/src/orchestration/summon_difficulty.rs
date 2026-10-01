@@ -412,7 +412,7 @@ fn observations_in(
         // its row for the reader that grades by hindsight, and says nothing
         // about agreement (t-16578).
         if !applied_only {
-            mark(&request, &mut row);
+            mark(request, &mut row);
         }
         changed.push(row);
     }
