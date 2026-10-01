@@ -5329,7 +5329,8 @@ enum DesktopScreen {
     static func capture(params: [String: JSONValue]) throws -> [String: Any] {
         let frame = try frame(params: params)
         let png: BoundedPNG
-        if params["fullRes"]?.bool == true {
+        // A region at point resolution is already small: no budget ladder.
+        if params["fullRes"]?.bool == true || params["pointScale"] != nil {
             guard let encoded = encodePng(frame.image) else {
                 throw ProviderError.coded("accessibility_error", "encoding the screenshot failed")
             }
@@ -5350,6 +5351,29 @@ enum DesktopScreen {
             "origin": ["x": frame.origin.x, "y": frame.origin.y],
             "display": render(frame.display, index: frame.displayIndex),
         ]
+    }
+
+    /// `pointScale` as sent: absent is nil, a number is it, anything else is
+    /// refused rather than read as absent.
+    private static func pointScaleArgument(_ params: [String: JSONValue]) throws -> Double? {
+        guard let value = params["pointScale"] else { return nil }
+        guard let number = value.number else {
+            throw ProviderError.coded("invalid_argument", "pointScale must be a number above 0 and at most \(Int(DesktopPointCapture.maxPointScale))")
+        }
+        return number
+    }
+
+    /// What the screen shows in `rect` (global points), drawn at the pixel
+    /// size asked — the region alone, never the whole display.
+    private static func captureRegion(_ rect: CGRect, pixelWidth: Int, pixelHeight: Int) -> CGImage? {
+        guard let shown = CGWindowListCreateImage(rect, [.optionOnScreenOnly], kCGNullWindowID, [.nominalResolution]) else { return nil }
+        if shown.width == pixelWidth, shown.height == pixelHeight { return shown }
+        guard let context = CGContext(data: nil, width: pixelWidth, height: pixelHeight, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return nil
+        }
+        context.interpolationQuality = .medium
+        context.draw(shown, in: CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+        return context.makeImage()
     }
 
     static func frame(params: [String: JSONValue]) throws -> Frame {
@@ -5385,6 +5409,31 @@ enum DesktopScreen {
             chosen = showing
         } else {
             chosen = all[0]
+        }
+        // Only a request that names pointScale is planned; the rest keeps the
+        // whole-display capture below, cropped, as it was (t-10424).
+        let pointScale: Double?
+        switch DesktopPointCapture.pointScale(try pointScaleArgument(params)) {
+        case let .success(value): pointScale = value
+        case let .failure(error): throw ProviderError.coded("invalid_argument", error.message)
+        }
+        if let pointScale {
+            guard case let .region(sourceRect, pixelWidth, pixelHeight)? = DesktopPointCapture.plan(
+                region: region, displayBounds: chosen.bounds, pointScale: pointScale)
+            else {
+                throw ProviderError.coded("invalid_argument", "region does not touch display \(chosen.id)")
+            }
+            guard let picture = captureRegion(sourceRect, pixelWidth: pixelWidth, pixelHeight: pixelHeight) else {
+                throw ProviderError.coded("accessibility_error", "capturing display \(chosen.id) failed")
+            }
+            return Frame(
+                image: picture,
+                origin: sourceRect.origin,
+                pointsWidth: sourceRect.width,
+                pointsHeight: sourceRect.height,
+                display: chosen,
+                displayIndex: all.firstIndex { $0.id == chosen.id } ?? 0
+            )
         }
         guard let image = CGDisplayCreateImage(chosen.id) else {
             throw ProviderError.coded("accessibility_error", "capturing display \(chosen.id) failed")
