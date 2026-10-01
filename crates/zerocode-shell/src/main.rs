@@ -72,8 +72,6 @@ mod artifact_transcripts;
 mod artifact_webkit;
 mod automation_runtime;
 mod awake;
-#[cfg(test)]
-mod boot_profile;
 mod boot_timeline;
 mod browser_cookie_import;
 mod browser_cookies;
