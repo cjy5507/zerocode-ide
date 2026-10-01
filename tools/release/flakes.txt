@@ -67,7 +67,6 @@ zo:lsp_client::tests::sync_and_collect_diagnostics_returns_did_change_diagnostic
 # 2026-09-22 (coordinator gate for t-5961, `just shell-test` at load 20-27 beside a release-lane build): the ephemeral
 # port the test frees and rebinds was taken by a neighbour between the two binds (`EADDRINUSE` from bind_seat(port)),
 # not by our own lingering connection — SO_REUSEADDR covers only the latter. Green solo ×3 in 0.00 s.
-root:google_login::tests::the_callback_seat_can_be_retaken_while_the_last_one_lingers
 # 2026-09-23 coordinator gate for t-6269 (zo-test, 49 binaries side by side, load 46-120 with three worker builds and a
 # container beside them): the 2,000-session search overran its time bound (`bounds.session_recall_search`) with
 # session_recall untouched by the branch; green solo x3 (1.5-1.8 s each).
@@ -124,4 +123,4 @@ root:computer_use::reflex::autopilot::tests::a_stale_or_mismatched_or_late_answe
 # it ever asks whether that child outlived the run. Red in whole loaded runs on 5535cdee (09-28) and 543e5da8
 # (09-30, v1.1.44's gate-root), and in the coordinator's t-18551 gate beside a second lane (10-01 00:2x, 2534/2535);
 # judged solo 3/3 green each time. The product's wall and process-group end are not what goes red.
-root:computer_use::errand::value::tests::a_cli_that_outlives_its_wall_is_ended_with_everything_it_started
+# t-19329 (10-01): the callback-seat test and the errand wall test were taken off this list — the seat test starts over on a new port when a neighbour took the first, the wall test's fake starts its child before any other work and a run whose fake never started is begun again; 16/16 green beside 12 CPU loops, 10/10 alone.
