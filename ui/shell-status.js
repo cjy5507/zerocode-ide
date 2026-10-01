@@ -4608,7 +4608,12 @@ function paintTabNode(node, tab) {
   const closing = t("tab.close", "탭 닫기");
   if (close && close.getAttribute("aria-label") !== closing) close.setAttribute("aria-label", closing);
   const label = node.querySelector(".tab-label");
-  const wording = tabLabel(tab);
+  // A conversation waiting its turn to be woken says which turn (t-20078):
+  // the wakes run one at a time and the last of twenty can be minutes away.
+  const turn = tab.asleep && tab.wakeOrder
+    ? ` \u00b7 ${t("tab.wakingOrder", "깨우는 중 — {{n}}번째", { n: tab.wakeOrder })}`
+    : "";
+  const wording = tabLabel(tab) + turn;
   if (label.textContent !== wording) label.textContent = wording;
   // 이 탭의 판이 발행하고 아직 아무도 열지 않은 페이지(t-11958).
   paintTabUnseen(node, tab);
@@ -5212,6 +5217,7 @@ async function restoreActiveWorktreeTab({ firstTerminal = true } = {}) {
   // plain first terminal: the documents in their groups under their tree,
   // then the terminal tabs with fresh shells in them.
   const docsRestored = await restoreStageLayout(activeWorktreePath);
+  markBootPhase("stage_restored");
   // …except that a stored set of nothing but PLAIN SHELLS gives way to the
   // chosen default agent, which is what opening a workspace is supposed to
   // start (Orca's initial terminal is the default agent —

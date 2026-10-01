@@ -8045,6 +8045,9 @@ async function storedPaneLayouts(worktree) {
     records = await invoke("pane_layouts", { worktree });
   } catch {
     return [];
+  } finally {
+    // The first read is the boot's own, the active workspace's (t-20078).
+    markBootPhase("layouts_read");
   }
   return Array.isArray(records) ? records : [];
 }
@@ -8154,21 +8157,48 @@ async function restoreWorktreeLayouts(worktree, stored, { behind = false } = {})
  * keeps opening a project of nine terminals cheap. One at a time and off the
  * critical path, so the stage settles at the same moment it did before and
  * the spawns arrive behind it. `staged` is the tab the stage itself wakes. */
+/* How many stored conversations wake at once behind the one in front. One:
+ * t-14036 put them back one at a time on purpose, so the front's own wakes
+ * settle first and a conversation that cannot come back says so in its own
+ * pane. The number is named so a measurement can move it and a pin can hold it
+ * (t-20078 measured 1, 2 and 3 on the synthetic profile). */
+const STORED_WAKE_CONCURRENCY = 1;
+
 function wakeStoredConversations(worktree, sleeping, staged) {
-  const eager = (async () => {
-    for (const tab of sleeping) {
-      if (tab.id === staged?.id || !tab.asleep || !storedLayoutsHoldProgram([tab.asleep])) continue;
-      try {
-        await wakeStoredTab(tab);
-      } catch (error) {
-        // A wake that throws must not take the wakes behind it. Each stored
-        // conversation is its own pane and its own process; one that cannot
-        // start is one tab's problem, and swallowing it here silently is how
-        // the last one of these went unnoticed.
-        showError(error);
-      }
+  // The turns, said where each tab waits: the front tab wakes through the
+  // stage, and the rest follow one at a time in the order they stand.
+  const turns = sleeping.filter(
+    (tab) => tab.id !== staged?.id && tab.asleep && storedLayoutsHoldProgram([tab.asleep]),
+  );
+  turns.forEach((tab, at) => {
+    tab.wakeOrder = at + 1;
+  });
+  if (turns.length > 0) renderTabs();
+  const wakeTurn = async (tab) => {
+    if (!tab.asleep) {
+      delete tab.wakeOrder;
+      return;
     }
-  })();
+    try {
+      await wakeStoredTab(tab);
+    } catch (error) {
+      // A wake that throws must not take the wakes behind it. Each stored
+      // conversation is its own pane and its own process; one that cannot
+      // start is one tab's problem, and swallowing it here silently is how
+      // the last one of these went unnoticed.
+      showError(error);
+    } finally {
+      delete tab.wakeOrder;
+      renderTabs();
+    }
+  };
+  let next = 0;
+  const wakeLane = async () => {
+    while (next < turns.length) await wakeTurn(turns[next++]);
+  };
+  const eager = Promise.all(Array.from({ length: STORED_WAKE_CONCURRENCY }, wakeLane)).then(
+    () => {},
+  );
   // Held until it settles, for a door that opened this workspace to reach one
   // of these conversations (`storedWakesSettled`).
   eagerWakes.set(worktree, eager);
