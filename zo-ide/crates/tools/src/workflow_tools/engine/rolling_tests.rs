@@ -97,6 +97,8 @@ impl AgentBackend for VirtualBackend<'_> {
 
     fn allows_readonly_refill(&self) -> bool { self.readonly }
 
+    fn concurrency_window(&self) -> usize { self.width }
+
     fn wait(&self, ids: &[String], _timeout: Duration) -> Vec<AgentCompletion> {
         self.barrier_calls.set(self.barrier_calls.get() + 1);
         if let Some(end) = ids.iter().map(|id| self.job(id).done).max() {
@@ -333,7 +335,7 @@ fn readonly_refill_handles_spawn_error_and_unknown_cost_without_budget() {
 
 #[test]
 fn readonly_refill_production_dispatch_requires_backend_opt_in() {
-    let width = crate::misc_tools::workflow_concurrency_limit().max(1);
+    let width = 2;
     let durations = vec![1; width + 1];
     for readonly in [false, true] {
         let (phase, units) = phase_and_units(durations.len());
@@ -356,7 +358,7 @@ fn readonly_refill_isolation_keeps_the_batch_path_even_when_creation_fails() {
             Err("fixture unavailable".to_string())
         }
     }
-    let width = crate::misc_tools::workflow_concurrency_limit().max(1);
+    let width = 2;
     let durations = vec![1; width + 1];
     let (phase, units) = phase_and_units(durations.len());
     let mut backend = VirtualBackend::new(&durations, width);

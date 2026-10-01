@@ -41,6 +41,10 @@ struct RecordedSpawn {
 /// Decides each mock spawn's eventual outcome from its call index + record.
 type Responder = Box<dyn FnMut(usize, &RecordedSpawn) -> Outcome>;
 
+/// How many agents of a phase the mock lets run at once, whatever the cores of
+/// the machine running the test: the tests below count on a window of two.
+const MOCK_WINDOW: usize = 2;
+
 struct MockBackend {
     next: usize,
     spawns: Vec<RecordedSpawn>,
@@ -113,6 +117,10 @@ impl MockBackend {
 }
 
 impl AgentBackend for MockBackend {
+    fn concurrency_window(&self) -> usize {
+        MOCK_WINDOW
+    }
+
     fn spawn(&mut self, input: AgentInput) -> Result<String, ToolError> {
         let record = RecordedSpawn {
             description: input.description,
@@ -783,7 +791,7 @@ fn stopped_cost_receipt_is_labelled_as_a_snapshot() {
 
 #[test]
 fn cost_budget_is_rechecked_between_batches_of_one_phase() {
-    let window = crate::misc_tools::workflow_concurrency_limit().max(1);
+    let window = MOCK_WINDOW;
     let items: Vec<String> = (0..=window).map(|index| index.to_string()).collect();
     let wf = workflow(&json!({
         "name": "batch-cost", "phases": [{"id": "p", "fanout": items, "prompt": "do {item}"}],

@@ -411,8 +411,13 @@ pub(crate) fn decompose_model(parent_model: Option<&str>) -> String {
         .map(str::trim)
         .filter(|model| !model.is_empty())
         .unwrap_or(api::ANTHROPIC_LATEST_MODEL_ALIAS);
-    fast_tier_triage_model(parent, api::detect_provider_kind(parent))
-        .unwrap_or_else(|| parent.to_string())
+    decompose_model_on(parent, api::detect_provider_kind(parent))
+}
+
+/// [`decompose_model`] once the parent's provider is known: the catalog's pick
+/// for that provider, else the parent itself.
+fn decompose_model_on(parent: &str, provider: api::ProviderKind) -> String {
+    fast_tier_triage_model(parent, provider).unwrap_or_else(|| parent.to_string())
 }
 
 /// Decomposition/triage's model, derived from the connected catalog instead
@@ -1310,7 +1315,9 @@ mod tests {
         // Unknown/non-GPT providers still inherit the active provider model
         // (xAI's catalog has no Fast-tier entry, so the inventory-derived
         // lookup returns `None` and the caller keeps the verbatim model).
-        assert_eq!(decompose_model(Some("grok-3")), "grok-3");
+        // The provider is given, not detected: grok routes only on a machine
+        // with an adapter gate or an xAI-side credential.
+        assert_eq!(decompose_model_on("grok-3", api::ProviderKind::Xai), "grok-3");
         // No active model (non-live harness) → the Anthropic head's fast tier.
         assert_eq!(decompose_model(None), anthropic_fast);
         assert_eq!(decompose_model(Some("  ")), anthropic_fast);

@@ -1442,7 +1442,7 @@ pub(super) fn spawn_and_collect(
     state: &mut EngineState,
     iso: Option<IsolationCtx>,
 ) -> Vec<ItemResult> {
-    let window = crate::misc_tools::workflow_concurrency_limit().max(1);
+    let window = backend.concurrency_window().max(1);
     let refill = iso.is_none() && backend.allows_readonly_refill();
     let mut items = if refill {
         super::rolling::spawn_and_collect(phase, units, backend, opts, state, window)

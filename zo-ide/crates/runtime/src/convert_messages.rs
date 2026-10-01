@@ -78,7 +78,14 @@ impl ReasoningReplay {
     /// What the model this request is going to can do with stored reasoning.
     #[must_use]
     pub fn for_model(model: &str) -> Self {
-        if api::detect_provider_kind(model) == api::ProviderKind::Anthropic {
+        Self::for_provider(api::detect_provider_kind(model))
+    }
+
+    /// The same decision once the provider is known — the part that does not
+    /// depend on which credentials this machine holds.
+    #[must_use]
+    pub fn for_provider(provider: api::ProviderKind) -> Self {
+        if provider == api::ProviderKind::Anthropic {
             Self::Native
         } else {
             Self::AsText
@@ -2245,13 +2252,20 @@ mod tests {
                 "{anthropic}"
             );
         }
-        for other in ["gpt-5.6-sol", "gemini-3-pro", "grok-3"] {
+        for other in ["gpt-5.6-sol", "gemini-3-pro"] {
             assert_eq!(
                 ReasoningReplay::for_model(other),
                 ReasoningReplay::AsText,
                 "{other}"
             );
         }
+        // grok is routed only once an adapter gate or an xAI-side credential
+        // exists on the machine, so the model-to-provider step is not this
+        // test's to decide: ask what a Grok provider replays, not the host.
+        assert_eq!(
+            ReasoningReplay::for_provider(api::ProviderKind::Xai),
+            ReasoningReplay::AsText
+        );
     }
 
     /// Determinism pin: the smart-AUTO cache-collapse incident traced back to a
