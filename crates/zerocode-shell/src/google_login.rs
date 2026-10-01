@@ -952,16 +952,33 @@ mod tests {
     /// real callback seat or for a zo sign-in in flight.
     #[test]
     fn the_callback_seat_can_be_retaken_while_the_last_one_lingers() {
-        let first = bind_seat(0).expect("a seat");
-        let port = first.local_addr().expect("its address").port();
-        let client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("a browser");
-        let (accepted, _) = first.accept().expect("the redirect");
-        // Closed from THIS side first, so it is our end of that connection
-        // that lingers on the port a second sign-in needs.
-        drop(accepted);
-        drop(first);
-        drop(client);
-        bind_seat(port).expect("the seat could not be retaken while the last one lingered");
+        // The port is released before it is bound again, so in a parallel run
+        // another test can take it in between. Such a refusal is told from the
+        // one under test by asking who answers on the port: a thief listens,
+        // a lingering connection does not. A stolen port starts over on a new
+        // one; a refusal with nobody listening is the claim failing.
+        for _ in 0..20 {
+            let first = bind_seat(0).expect("a seat");
+            let port = first.local_addr().expect("its address").port();
+            let client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("a browser");
+            let (accepted, _) = first.accept().expect("the redirect");
+            // Closed from THIS side first, so it is our end of that connection
+            // that lingers on the port a second sign-in needs.
+            drop(accepted);
+            drop(first);
+            drop(client);
+            match bind_seat(port) {
+                Ok(_) => return,
+                Err(error) => {
+                    let stolen = std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
+                    assert!(
+                        stolen,
+                        "the seat could not be retaken while the last one lingered: {error}"
+                    );
+                }
+            }
+        }
+        panic!("twenty ports in a row were taken by other tests");
     }
 
     /// A redirect is accepted only when it is THIS attempt's answer.
