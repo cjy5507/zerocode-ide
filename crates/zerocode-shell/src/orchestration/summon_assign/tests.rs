@@ -2,7 +2,7 @@ use super::*;
 use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
 use serde_json::{Map, Value, json};
 use std::time::{Duration, Instant};
-use zerocode_core::jev::{SUMMON_DIFFICULTY, SUMMON_MODEL};
+use zerocode_core::jev::{SUMMON, SUMMON_DIFFICULTY, SUMMON_MODEL};
 use zerocode_core::summon_assign::SHARED_REQUEST_KEY;
 use zerocode_core::summon_difficulty::lineup::{self, Lineup, Seen};
 use zerocode_core::summon_difficulty::{self as difficulty, APPLY_DEADLINE_MS, LADDER, Look};
@@ -67,6 +67,7 @@ fn both() -> AssignAsk {
     AssignAsk {
         difficulty: Some(look()),
         model: Some(model_ask()),
+        ..Default::default()
     }
 }
 
@@ -234,6 +235,8 @@ fn a_late_answer_costs_one_wall_and_applies_nothing() {
 struct Wired<'a> {
     wire: &'a Wire,
     lineup: Lineup,
+    /// The agents installed here, when a test leaves the agent open.
+    agents: &'static [&'static str],
 }
 impl zerocode_core::orchestration::Launcher for Wired<'_> {
     fn command_for(&self, agent: &str, _: &str, _: &[String]) -> Result<String, String> {
@@ -249,6 +252,19 @@ impl zerocode_core::orchestration::Launcher for Wired<'_> {
         _: [&str; 3],
     ) -> Result<Option<lineup::Row>, String> {
         lineup::row_at(&Value::Null, agent, level, Some(&self.lineup), None, 0)
+    }
+    /// Which agents are here — the ones a test names (`Wired::agents`), so an
+    /// open agent has something to choose between.
+    fn presence(&self) -> Option<Vec<zerocode_core::agent::AgentPresence>> {
+        (!self.agents.is_empty()).then(|| {
+            zerocode_core::agent::agent_presence(None, "macos")
+                .into_iter()
+                .map(|mut row| {
+                    row.installed = self.agents.contains(&row.id);
+                    row
+                })
+                .collect()
+        })
     }
     fn model_facts(&self, _: &str, _: [&str; 3]) -> Option<model::Facts> {
         Some(model::Facts {
@@ -291,6 +307,18 @@ fn summoned_as(
     agent: &str,
     lineup: Lineup,
 ) -> (Value, zerocode_core::orchestration::PreparedWorkerStart) {
+    summoned_among(wire, checkout, request, agent, lineup, &[])
+}
+
+/// [`summoned_as`] with `agents` installed — `agent` may be `auto`.
+fn summoned_among(
+    wire: &Wire,
+    checkout: &Path,
+    request: &str,
+    agent: &str,
+    lineup: Lineup,
+    agents: &'static [&'static str],
+) -> (Value, zerocode_core::orchestration::PreparedWorkerStart) {
     let mut ledger = zerocode_core::orchestration::Ledger::new();
     let mut team = zerocode_core::agent_teams::Team::new("team-assign", "test-token", 1);
     let _origin = super::super::summon_difficulty::origin_with_for_tests(
@@ -299,7 +327,11 @@ fn summoned_as(
         true,
         wire.settings_root(),
     );
-    let launcher = Wired { wire, lineup };
+    let launcher = Wired {
+        wire,
+        lineup,
+        agents,
+    };
     let mut summoned = None;
     for (at, command) in [
         (
@@ -352,6 +384,127 @@ fn a_summons_with_two_acting_seats_waits_on_one_request() {
     host.drain();
     assert_eq!(endpoint.asked().len(), 1, "receipts are not asked twice");
     assert_shared_rows(&wire, true);
+}
+
+/// [`wire`] with the agent seat at `agent` too.
+fn wire_with_agent(
+    home: &tempfile::TempDir,
+    endpoint: &Endpoint,
+    agent: &str,
+    difficulty: &str,
+    model: &str,
+) -> Wire {
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {
+            SUMMON.setting: agent,
+            SUMMON_DIFFICULTY.setting: difficulty,
+            SUMMON_MODEL.setting: model,
+            "jev": {"workspaces": ["*"]},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    Wire::at(&endpoint.base(), "test-key", Some(settings))
+}
+
+/// t-16578 A1: a summons that leaves the agent and the dials open waits on
+/// ONE request carrying the agent, difficulty and pair questions, and runs the
+/// agent it chose with that agent's pair; each seat's row names the request,
+/// and recording afterwards asks nothing more.
+#[test]
+fn an_open_agent_rides_the_one_request() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, 0);
+    let wire = wire_with_agent(&home, &endpoint, "on", "on", "on");
+    let (reply, prepared) = summoned_among(
+        &wire,
+        home.path(),
+        "agent-open",
+        "auto",
+        lineup(),
+        &["claude", "codex"],
+    );
+    let heard = endpoint.asked();
+    assert_eq!(heard.len(), 1, "one request where there were three");
+    assert_eq!(heard[0].matches(SPEC).count(), 1, "the spec is sent once");
+    for question in [
+        "\"summon\"",
+        "summon_difficulty",
+        "summon_model_claude",
+        "summon_model_codex",
+    ] {
+        assert!(heard[0].contains(question), "{question} rides");
+    }
+    assert_eq!(counted_today(&home), 1);
+    assert_eq!(prepared.agent, "claude", "the answer's agent runs: {reply}");
+    assert_eq!(reply["model"], "model-b", "{reply}");
+    let receipt = prepared
+        .summon_shadow
+        .as_ref()
+        .and_then(|s| s.receipt.clone());
+    let receipt = receipt.expect("the agent seat's receipt rode the path");
+    assert_eq!(receipt["chosen"], "claude");
+    assert_eq!(receipt["applied"], true, "{receipt}");
+    let host = super::super::summon_difficulty::tests::Deferred::on(&wire);
+    super::super::summon_choice::record(&host, &prepared, home.path().to_str(), 3);
+    record(&host, &prepared, home.path().to_str(), 3);
+    host.drain();
+    assert_eq!(endpoint.asked().len(), 1, "receipts are not asked twice");
+}
+
+/// t-16578 A1: a late answer on the one request leaves every dial to its
+/// default and the agent refused by name — after one wall, never two.
+#[test]
+fn a_late_answer_to_the_open_agent_refuses_after_one_wall() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint =
+        Endpoint::answering_each("HTTP/1.1 200 OK", answer_every, APPLY_DEADLINE_MS + 500);
+    let wire = wire_with_agent(&home, &endpoint, "on", "on", "on");
+    let key = ["assign-team", "%1", "late-agent"];
+    let _origin = super::super::summon_difficulty::origin_with_for_tests(
+        key,
+        Some(home.path().to_path_buf()),
+        true,
+        wire.settings_root(),
+    );
+    let asked = AssignAsk {
+        agent: Some(zerocode_core::summon_choice::ask(&agent_look(), &rooms()).unwrap()),
+        difficulty: Some(look()),
+        ..Default::default()
+    };
+    let began = Instant::now();
+    let receipts = choose_with(&wire, &asked, key);
+    assert!(began.elapsed() < Duration::from_millis(APPLY_DEADLINE_MS + 400));
+    let row = receipts.agent.expect("the agent seat's row");
+    assert_eq!(row["applied"], false, "{row}");
+    assert!(row.get("chosen").is_none(), "{row}");
+}
+
+fn agent_look() -> zerocode_core::summon_choice::SummonLook<'static> {
+    zerocode_core::summon_choice::SummonLook {
+        brief: SPEC,
+        brief_chars: SPEC.len(),
+        worktree: false,
+        replaces_an_attempt: false,
+        carries_a_task: false,
+        attempts: 0,
+        failures: 0,
+        pinned_model: None,
+    }
+}
+
+fn rooms() -> Vec<zerocode_core::summon_choice::Summonable> {
+    ["claude", "codex"]
+        .into_iter()
+        .map(|id| zerocode_core::summon_choice::Summonable {
+            id: id.to_string(),
+            spent_percent: None,
+            window: None,
+            record: Default::default(),
+        })
+        .collect()
 }
 
 /// A5: two seats that only record are asked after the pane opens — one
@@ -501,7 +654,7 @@ fn live_assign_moment_numbers() {
         |row: &Option<Value>| row.as_ref().is_some_and(|row| row["outcome"] == "answered");
     for _ in 0..SAMPLES {
         for (asked, held) in [
-            (both().only(true, false), &mut single),
+            (both().only(false, true, false), &mut single),
             (both(), &mut joint),
         ] {
             let receipts = ask(&wire, &asked, Some(home.path()));
@@ -665,8 +818,9 @@ fn live_difficulty_answers_alone_and_joint() {
         let asked = AssignAsk {
             difficulty: Some(look.clone()),
             model: Some(model::ask(&look, &options).unwrap()),
+            ..Default::default()
         };
-        let alone = said(ask(&wire, &asked.only(true, false), Some(home.path())).difficulty);
+        let alone = said(ask(&wire, &asked.only(false, true, false), Some(home.path())).difficulty);
         let joint = ask(&wire, &asked, Some(home.path()));
         pairs += usize::from(
             joint
