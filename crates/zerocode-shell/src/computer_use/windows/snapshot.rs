@@ -65,10 +65,6 @@ impl Snapshot {
         Ok((record, element))
     }
 
-    pub fn focused(&self) -> Option<(&RenderedRecord<usize>, &IUIAutomationElement)> {
-        self.element(self.focused_element_id?).ok()
-    }
-
     /// The screen point at the middle of a record's frame.
     pub fn center_of(&self, record: &RenderedRecord<usize>) -> Option<(f64, f64)> {
         let frame = record.local_frame?;

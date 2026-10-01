@@ -20,11 +20,14 @@ use crate::browser_cookies::{self, DecryptOutcome, EncryptionKeys, SameSite, Val
 struct ChromiumBrowserDef {
     family: &'static str,
     label: &'static str,
-    keychain_service: &'static str,
-    keychain_account: &'static str,
-    mac_root: Option<&'static str>,
-    // 이 빌드가 아닌 OS의 뿌리는 cfg 갈래 밖에서 죽은 글자로 보인다 —
+    // 이 빌드가 아닌 OS의 열쇠 이름과 뿌리는 cfg 갈래 밖에서 죽은 글자로 보인다 —
     // 표는 세 OS 것을 다 들고, 읽는 갈래만 컴파일된다.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    keychain_service: &'static str,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    keychain_account: &'static str,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    mac_root: Option<&'static str>,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     win_root: Option<&'static str>,
     #[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
@@ -333,6 +336,7 @@ pub fn cookie_database_path(family: &str, profile: &str, home: &Path) -> Option<
     }
 }
 
+#[cfg(unix)]
 pub fn keychain_names(family: &str) -> Option<(&'static str, &'static str)> {
     CHROMIUM_BROWSERS
         .iter()
@@ -887,6 +891,7 @@ impl Dropped {
     }
 
     /// 아무것도 버리지 않았다.
+    #[cfg(any(all(target_os = "macos", feature = "chromium-browser"), test))]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.total() == 0
@@ -973,6 +978,8 @@ pub fn discard_staged_cookies(config_root: &Path, profile_id: &str) {
 /// 주입을 죽이면 안 된다.
 #[derive(Debug, Default, Deserialize)]
 pub struct StagedCookie {
+    // 쿠키를 앉히는 macOS 갈래(`chromium_browser`)만 읽는다 — 파일 모양은 어느 OS에서나 같다.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     #[serde(default)]
     pub url: String,
     #[serde(default)]
@@ -987,6 +994,8 @@ pub struct StagedCookie {
     pub secure: bool,
     #[serde(default)]
     pub http_only: bool,
+    // `url`과 같은 이유로 macOS 갈래만 읽는다.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     #[serde(default)]
     pub same_site: Option<SameSite>,
     #[serde(default)]

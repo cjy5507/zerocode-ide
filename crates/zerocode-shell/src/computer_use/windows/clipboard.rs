@@ -195,22 +195,20 @@ impl Snapshot {
 
     /// The formats that could not be read, by name — the reason a paste
     /// leaves the clipboard alone.
+    #[cfg(test)]
     #[must_use]
     pub fn unpreserved(&self) -> &[String] {
         &self.unpreserved
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn entry(&self, format: u32) -> Option<&Entry> {
         self.entries.iter().find(|entry| entry.format == format)
     }
 
-    #[must_use]
-    pub fn formats(&self) -> Vec<u32> {
-        self.entries.iter().map(|entry| entry.format).collect()
-    }
-
     /// The Unicode text on the clipboard, if any.
+    #[cfg(test)]
     #[must_use]
     pub fn text(&self) -> Option<String> {
         let entry = self.entry(UNICODE_TEXT)?;

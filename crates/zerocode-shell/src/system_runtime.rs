@@ -167,6 +167,7 @@ pub(super) fn parse_lsof_listeners(raw: &str) -> Vec<LsofRow> {
 }
 
 /// The same format, for the working-directory query: `p` then the `n` under it.
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn parse_lsof_cwds(raw: &str) -> HashMap<u32, String> {
     let mut cwds = HashMap::new();
     let mut pid = None;

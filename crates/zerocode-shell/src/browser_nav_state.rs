@@ -87,6 +87,7 @@ impl NavRecord {
         self.started_at = None;
     }
 
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     pub(super) fn failed(&mut self) {
         self.state = NavState::Dead;
     }

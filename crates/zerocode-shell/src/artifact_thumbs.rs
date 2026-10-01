@@ -34,7 +34,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager as _};
 use zerocode_core::artifact::{Artifact, ArtifactKind, Limits};
 
+#[cfg(target_os = "macos")]
 use crate::AppState;
+#[cfg(target_os = "macos")]
 use crate::ShellStateExt as _;
 use crate::artifact_runtime::{Store, THUMBS_DIR_NAME};
 use crate::browser_runtime::{blank_page, browsable, browsable_target};
@@ -327,6 +329,7 @@ pub(crate) fn hidden_pane(
     let window = app
         .get_window("main")
         .ok_or_else(|| "창이 없습니다".to_string())?;
+    #[cfg(target_os = "macos")]
     let state = app.state::<AppState>();
     let builder =
         tauri::webview::WebviewBuilder::new(label, tauri::WebviewUrl::External(blank_page()))

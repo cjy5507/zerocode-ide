@@ -2251,9 +2251,9 @@ pub(super) fn installed_windows_git_bash() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         let environment = std::env::vars().collect::<BTreeMap<_, _>>();
-        return windows_git_bash_candidate_paths(&environment)
+        windows_git_bash_candidate_paths(&environment)
             .into_iter()
-            .find(|path| is_runnable(path));
+            .find(|path| is_runnable(path))
     }
     #[cfg(not(windows))]
     {
@@ -2313,7 +2313,7 @@ pub(super) fn terminal_user_shell_candidates(prefs: &TerminalPrefs) -> Vec<(Stri
     #[cfg(windows)]
     {
         let git_bash = installed_windows_git_bash();
-        return windows_terminal_shell_candidates(
+        windows_terminal_shell_candidates(
             prefs.windows_shell,
             prefs.windows_powershell_implementation,
             program_exists(POWERSHELL_7),
@@ -2321,7 +2321,7 @@ pub(super) fn terminal_user_shell_candidates(prefs: &TerminalPrefs) -> Vec<(Stri
         )
         .into_iter()
         .map(|program| (program.to_string(), Vec::new()))
-        .collect();
+        .collect()
     }
     #[cfg(not(windows))]
     {

@@ -123,14 +123,10 @@ pub(super) struct Fixture {
 }
 
 impl Fixture {
-    /// Stand the window up on its own thread and wait until it exists.
-    pub fn launch(title: &str) -> Self {
-        Self::launch_with_rows(title, 0)
-    }
-
-    /// The same window with a list box of `rows` rows beside the controls —
-    /// the large-tree fixture (`rows` in the thousands) the truncation and
-    /// acquisition budget are proved against.
+    /// Stand the window up on its own thread and wait until it exists, with a
+    /// list box of `rows` rows beside the controls — the large-tree fixture
+    /// (`rows` in the thousands) the truncation and acquisition budget are
+    /// proved against.
     pub fn launch_with_rows(title: &str, rows: usize) -> Self {
         let (ready, readiness) = mpsc::channel::<(isize, u32)>();
         let title = wide(title);

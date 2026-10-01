@@ -113,6 +113,7 @@ pub(super) fn standard_name(format: u32) -> Option<&'static str> {
 /// back without losing anything: every GDI handle on it has its global twin
 /// there too, and nothing on it is owner-only. This is the decision
 /// `paste-text` makes before it touches the clipboard at all.
+#[cfg(test)]
 #[must_use]
 pub(super) fn fully_preservable(formats: &[u32]) -> bool {
     formats.iter().all(|format| match classify(*format) {

@@ -3741,6 +3741,8 @@ pub(super) struct LastRing {
     pub(super) worktree: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) term: Option<TermId>,
+    // Only the macOS `Reopen` handler reads it; the bell writes it on every platform.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     #[serde(skip)]
     pub(super) at: i64,
 }
@@ -3752,6 +3754,7 @@ pub(super) struct LastRing {
 /// 듣는 Orca에는 없는 저울이다. 분 단위는 이 리포가 "사람이 이어서
 /// 행동하는 한 호흡"에 쓰는 눈금(`MIN_REPORTABLE_SUSPEND`,
 /// `STRAY_JAMO_REPORT_EVERY_MS`와 같은 60초)과 정렬했다.
+#[cfg(any(target_os = "macos", test))]
 pub(super) const RING_CLICK_WINDOW_MS: i64 = 60_000;
 
 /// `(mode, active)` the way the wire speaks it — Orca's
