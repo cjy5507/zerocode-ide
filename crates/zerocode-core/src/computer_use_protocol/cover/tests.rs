@@ -133,6 +133,62 @@ fn no_clear_place_when_the_screen_is_covered() {
     assert_eq!(clear_place(&cover, &[SCREEN]), None);
 }
 
+/// The screens of a desk that is not one screen at the origin: the main one,
+/// one left of it reaching above its top edge, one above it, one to its
+/// right — all in the window list's global top-left points, whatever each
+/// screen's scale (a 3008×1692-point screen is a Retina one at scale 2).
+const MAIN: Rect = Rect::new(0.0, 0.0, 1_920.0, 1_080.0);
+const LEFT: Rect = Rect::new(-3_008.0, -300.0, 3_008.0, 1_692.0);
+const ABOVE: Rect = Rect::new(0.0, -1_692.0, 3_008.0, 1_692.0);
+const RIGHT: Rect = Rect::new(1_920.0, 0.0, 1_512.0, 982.0);
+
+/// A window on a screen left of the main one, whose origin is negative on
+/// both axes: the shortest clear move keeps it whole on that screen.
+#[test]
+fn a_clear_place_on_a_screen_left_of_the_main_one_stays_on_it() {
+    let windows = [
+        window(7, 20, 0, (-1_760.0, 320.0, 120.0, 160.0)),
+        window(5, 10, 0, (-2_000.0, 200.0, 600.0, 400.0)),
+    ];
+    let cover = cover_of(&windows, 5, None).expect("listed");
+    assert!(cover.hides_any());
+    let [x, y] = clear_place(&cover, &[MAIN, LEFT]).expect("a place exists");
+    assert_eq!([x, y], [-2_000.0, -80.0], "up past the cover, 280 points");
+    assert!(LEFT.contains_rect(&Rect::new(x, y, 600.0, 400.0)));
+}
+
+/// A window standing across two screens is moved whole onto one — never
+/// left across the seam.
+#[test]
+fn a_window_across_two_screens_is_moved_whole_onto_one() {
+    let windows = [
+        window(7, 20, 0, (1_800.0, 150.0, 200.0, 200.0)),
+        window(5, 10, 0, (1_700.0, 100.0, 500.0, 300.0)),
+    ];
+    let cover = cover_of(&windows, 5, None).expect("listed");
+    let [x, y] = clear_place(&cover, &[MAIN, RIGHT]).expect("a place exists");
+    let moved = Rect::new(x, y, 500.0, 300.0);
+    assert_eq!([x, y], [2_000.0, 100.0]);
+    assert!(RIGHT.contains_rect(&moved) && !MAIN.intersects(&moved));
+    assert!(cover.in_front.iter().all(|over| !over.intersects(&moved)));
+}
+
+/// A place in a window on a screen above the main one, at negative y: the
+/// place follows the window, and the shortest move clears the place alone —
+/// the window may stay under the cover elsewhere.
+#[test]
+fn a_place_on_a_screen_above_the_main_one_clears_with_the_shortest_move() {
+    let windows = [
+        window(7, 20, 0, (600.0, -700.0, 300.0, 300.0)),
+        window(5, 10, 0, (400.0, -900.0, 700.0, 500.0)),
+    ];
+    let cover = cover_of(&windows, 5, Some(Rect::new(250.0, 250.0, 40.0, 20.0))).expect("listed");
+    assert_eq!(cover.spot, Rect::new(650.0, -650.0, 40.0, 20.0));
+    assert!(cover.blocks_a_press());
+    let [x, y] = clear_place(&cover, &[MAIN, ABOVE]).expect("a place exists");
+    assert_eq!([x, y], [400.0, -970.0], "up 70 points");
+}
+
 /// The pointer's own picture, as the window server lists it when it draws
 /// the cursor as a window (a rotated display, 09-30): a 23×22 window of the
 /// window server's at the cursor's level (kCGCursorWindowLevel), in front of
