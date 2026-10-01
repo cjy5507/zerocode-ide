@@ -347,8 +347,7 @@ mod tests {
             libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr());
             usage.assume_init()
         };
-        let seconds =
-            |time: libc::timeval| time.tv_sec as f64 + f64::from(time.tv_usec) / 1e6;
+        let seconds = |time: libc::timeval| time.tv_sec as f64 + f64::from(time.tv_usec) / 1e6;
         seconds(usage.ru_utime) + seconds(usage.ru_stime)
     }
 
