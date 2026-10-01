@@ -46,6 +46,11 @@ CALM_WAIT_SECS=900          # …waiting at most this long; a machine still loud
 CALM_POLL_SECS=30           # how often the wait looks at the load
 PHASES="archive gate-root gate-zo flakes push build-app swap-app build-zo swap-zo bundle-updater publish sweep"
 TARGET_LANES="root-gate zo-gate root-release zo-release"
+export CARGO_INCREMENTAL=0  # every cargo the lane runs, gates and solo judgments alike (their fingerprints must agree): a
+                            # gate rebuilds the workspace crates every run (a new version, a new scratch), and the cache
+                            # it leaves is the disk — root-gate held 11–12 G of its 18–26 G as incremental/, 7–8 folders a
+                            # crate (one per way it is built: lib, test, clippy, doc…), and on 2026-10-01 a 22 G root-gate
+                            # left 6 G free mid-lane; zo-ide's own profiles already say incremental = false (t-19990)
 # The files a release commit always touches (bump.sh): a diff that changes only
 # their version lines is the stamp, not a change to either tree.
 RELEASE_STAMP_FILES="Cargo.toml Cargo.lock crates/zerocode-shell/tauri.conf.json zo-ide/Cargo.toml zo-ide/Cargo.lock"
@@ -117,7 +122,7 @@ UNLISTED=$RELEASE_HOME/unlisted.txt   # every unlisted red the lane judged solo,
 
 if [ "${1:-}" = "--table" ]; then
   for k in DISK_FLOOR_GB TARGET_CAP_GB RECLAIM_BELOW_GB POLL_SECS THROTTLE_SECS ZO_PROFILE SOLO_RUNS CALM_LOAD CALM_WAIT_SECS \
-           CALM_POLL_SECS PHASES TARGET_LANES TOOLS \
+           CALM_POLL_SECS PHASES TARGET_LANES CARGO_INCREMENTAL TOOLS \
            LAUNCHD_LABEL LAUNCHD_PATH APP_NAME RELEASE_REPO RELEASE_HOME RELEASE_SCRATCH_ROOT RELEASE_APP_DIR \
            RELEASE_ZO_BIN RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED UI_SUITE_CHOOSER \
            RELEASE_GITHUB_REPO RELEASE_PUBLISH RELEASE_CHANNEL RELEASE_LEGACY_MANIFEST UPDATER_KEY \
@@ -307,10 +312,23 @@ release_gate_target() {
   log "released $1 — ${DISK_FREE_GB}G free < ${RECLAIM_BELOW_GB}G after its last use in this run"
   clean_target "$1"
 }
+# drop_incremental LANE — the incremental caches earlier runs left in LANE's target
+# (<profile>/incremental, and <triple>/<profile>/incremental for a cross build such as
+# win-check's): under CARGO_INCREMENTAL=0 nothing reads or writes them again.
+drop_incremental() {
+  local dir kb; dir=$(target_dir "$1")
+  kb=$(find "$dir" -mindepth 2 -maxdepth 3 -type d -name incremental -prune -exec du -sk {} + 2>/dev/null \
+         | awk '{ s += $1 } END { print s + 0 }')
+  [ "$kb" -gt 0 ] || return 0
+  find "$dir" -mindepth 2 -maxdepth 3 -type d -name incremental -prune -exec rm -rf {} + 2>/dev/null
+  stub_log "drop-incremental $1"
+  log "target $1: removed $(( kb / 1024 ))M of incremental cache nothing reads (CARGO_INCREMENTAL=$CARGO_INCREMENTAL)"
+}
 trim_targets() {
   local lane kb cap_kb=$(( TARGET_CAP_GB * 1024 * 1024 ))
   for lane in $TARGET_LANES; do
     mkdir -p "$(target_dir "$lane")"
+    drop_incremental "$lane"
     kb=$(target_kb "$lane"); kb=${kb:-0}
     if [ "$kb" -gt "$cap_kb" ]; then
       log "target $lane is $(( kb / 1024 / 1024 ))G > ${TARGET_CAP_GB}G cap — cleaning that one"
@@ -339,7 +357,7 @@ run_gate() {
   local lane=$1 t0 rc log="$OUT/gate-$1-$SHA8.log" target
   target=$(target_dir "$lane-gate"); t0=$(now_s)
   if is_dry; then
-    stub_log "gate $lane target=$target"
+    stub_log "gate $lane target=$target incremental=${CARGO_INCREMENTAL-unset}"
     sleep "$(stub "GATE_$(upper "$lane")_SLEEP" 0)"
     rc=$(stub "GATE_$(upper "$lane")_RC" 0)
     { echo "stub gate $lane"; if [ "$rc" != 0 ]; then echo "==> verify recipe test"; echo "failures:"; local f; for f in $(stub "GATE_$(upper "$lane")_FAILS"); do echo "    $f"; done; echo "test result: FAILED."; fi

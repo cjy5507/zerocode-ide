@@ -739,6 +739,47 @@ class Cap(LaneCase):
         self.assertEqual(len(solos), 3)
         self.assertLess(max(solos), events.index("clean root-gate"), "the solo runs used the warm target")
 
+    def test_a_gate_runs_without_cargos_incremental_cache_and_the_stale_one_is_removed(self):
+        # t-19990: a gate rebuilds the workspace crates every run, and the
+        # incremental cache it leaves is the disk — on 2026-10-02 root-gate
+        # held 11–12 G of its 18–26 G as incremental/ (7–8 folders a crate, one
+        # per way it is built), and on 2026-10-01 a 22 G root-gate left 6 G
+        # free mid-lane. Every cargo the lane runs goes without the cache (a
+        # solo judgment too, or its fingerprints would differ from the gate's),
+        # and what earlier runs left — a cross build's included — is gone
+        # before the gates.
+        self.warm_all()
+        stale = ("debug/incremental/zerocode_shell-0abc/s-1",
+                 "x86_64-pc-windows-msvc/debug/incremental/zerocode_pty-0def/s-1")
+        for lane in TARGET_LANES:
+            for rel in stale:
+                d = self.lane.target(lane) / rel
+                d.mkdir(parents=True)
+                (d / "query-cache.bin").write_text("never read again")
+        product = self.lane.target("root-gate") / "debug" / "deps" / "libzerocode_core-0abc.rlib"
+        product.parent.mkdir(parents=True)
+        product.write_text("a build product")
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(DISK_FREE_GB=100, GATE_ROOT_RC=101, GATE_ROOT_FAILS=FLAKE_ROOT)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        for lane in TARGET_LANES:
+            left = sorted(str(p.relative_to(self.lane.target(lane))) for p in self.lane.target(lane).rglob("incremental"))
+            self.assertEqual(left, [], f"{lane} keeps a stale incremental cache")
+            self.assertTrue((self.lane.target(lane) / "warm").exists(), f"{lane} must stay warm otherwise")
+        self.assertTrue(product.exists(), "a build product stays")
+        # The setting is the lane's own, exported once: the gates (background
+        # subshells) show it, and the solo runs share the same environment.
+        gates = [l for l in self.lane.stub_lines() if " gate " in l and "target=" in l]
+        self.assertEqual(len(gates), 2, gates)
+        for line in gates:
+            self.assertIn("incremental=0", line)
+        self.assertEqual(len(self.solos_run()), 3, "the red gate was judged solo on the warm target")
+        out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
+        self.assertIn("CARGO_INCREMENTAL='0'", out.stdout.splitlines())
+
+    def solos_run(self):
+        return [l for l in self.lane.stub_lines() if " solo " in l]
+
     def test_targets_are_persistent_and_per_lane(self):
         self.lane.enqueue(SHA_A)
         self.assertEqual(self.lane.run().returncode, 0)
