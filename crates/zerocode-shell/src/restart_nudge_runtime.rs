@@ -905,13 +905,20 @@ pub(super) fn watch(
 ) {
     let mut delivery = delivery;
     let began = Instant::now();
+    let mut beats = 0;
     loop {
         // A row that presses Enter again keeps its watch as long as its
-        // horizon, and one that does not keeps it for the beats it always had.
+        // horizon, and one that does not keeps it for the beats it always had
+        // — all of them: a thread the machine did not schedule for a window
+        // or two still owes the table the beats that close its windows, or the
+        // row outlives the watch and the wake never gives up (t-20432).
         let horizon = receipts.rows().retry_for(term).unwrap_or_default();
-        if !receipts.rows().holds(term) || began.elapsed() >= window * WATCH_BEATS + horizon {
+        if !receipts.rows().holds(term)
+            || (beats >= WATCH_BEATS && began.elapsed() >= window * WATCH_BEATS + horizon)
+        {
             break;
         }
+        beats += 1;
         let beat = Instant::now() + window;
         delivery = hear_until(receipts, term, delivery, beat);
         std::thread::sleep(beat.saturating_duration_since(Instant::now()));
