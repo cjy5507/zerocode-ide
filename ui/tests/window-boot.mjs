@@ -2374,6 +2374,10 @@ export async function openWindowTestPage(browser, origin, { faults = [], before 
   await standBackend(page);
   await installHarnessHands(page);
   await lagFrames(page);
+  /* `WINDOW_CPU_THROTTLE=4`: the page's CPU slowed 4x over CDP — the cpu4x level of
+   * the low-spec profile (tools/low-spec/profile.mjs). Chromium only. */
+  const throttle = Number(process.env.WINDOW_CPU_THROTTLE ?? 0);
+  if (throttle > 1) await (await context.newCDPSession(page)).send("Emulation.setCPUThrottlingRate", { rate: throttle });
   if (before) await before(page);
   await page.goto(`${origin}/index.html`);
   try {
