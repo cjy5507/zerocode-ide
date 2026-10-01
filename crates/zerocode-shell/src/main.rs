@@ -191,8 +191,6 @@ mod systemone;
 mod terminal_prefs_runtime;
 mod terminal_registry;
 mod terminal_theme_import;
-#[cfg(test)]
-mod test_host;
 mod token_scan;
 mod type_value_keys;
 mod typesafe_settings;
@@ -3736,6 +3734,11 @@ impl exit_runtime::Terminating for ExitSteps<'_> {
         }
     }
 }
+
+// Declared down here, after the shipped code: the source contracts read
+// main.rs only up to its first `#[cfg(test)]`.
+#[cfg(test)]
+mod test_host;
 
 #[cfg(test)]
 mod tests {
