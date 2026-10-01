@@ -466,6 +466,15 @@ def measure(record, values, limits):
             shown.setdefault(name, frame["ns"])
     reaction = [(event["evNs"] - shown.get(event["judged"]["hit"], at_ns(record, targets[event["judged"]["hit"]]["appearMs"])))
                 / 1e6 for event in judged_hits if event["judged"]["hit"] in targets]
+    delivery, received_reaction = [], []
+    for event in judged_hits:
+        posted, received = event.get("evNs"), event.get("rxNs")
+        if type(posted) is not int or type(received) is not int or not 0 < posted <= received:
+            continue
+        delivery.append((received - posted) / 1e6)
+        appeared = shown.get(event["judged"]["hit"])
+        if type(appeared) is int and 0 < appeared <= posted:
+            received_reaction.append((received - appeared) / 1e6)
     decided = 0
     for index in facts["transitions"]:
         phase = record["schedule"]["phases"][index]
@@ -522,6 +531,8 @@ def measure(record, values, limits):
         "decisions_due": len(facts["transitions"]),
         "claims": claims(record, limits),
         "appear_to_press_ms": spread(reaction),
+        "press_to_receive_ms": spread(delivery),
+        "appear_to_receive_ms": spread(received_reaction),
         "leaves": leaves,
         "roads": roads(fires, piloted),
         "autopilot": piloted,
