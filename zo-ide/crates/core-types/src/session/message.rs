@@ -309,6 +309,25 @@ impl ConversationMessage {
             })
     }
 
+    /// Whether this message carries a tool result, whichever role holds it.
+    /// zo writes results in the Tool role ([`Self::tool_result`]); other
+    /// writers put them in the User role.
+    #[must_use]
+    pub fn holds_tool_result(&self) -> bool {
+        self.blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+    }
+
+    /// Whether this message is a real prompt from the person: a User-role
+    /// message that is not a User-role tool result. The one definition
+    /// history surgery ([`super::Session::rewind_turns`]) uses for where a
+    /// turn begins.
+    #[must_use]
+    pub fn is_user_prompt(&self) -> bool {
+        self.role == MessageRole::User && !self.holds_tool_result()
+    }
+
     #[must_use]
     pub fn tool_result(
         tool_use_id: impl Into<String>,
