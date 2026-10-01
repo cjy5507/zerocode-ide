@@ -26,66 +26,402 @@
 //! Windows and Linux have no such folder, so none of this is compiled there.
 
 use std::collections::HashSet;
+use std::ffi::{CStr, OsStr};
+use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 /// A bundle id's copies live in `<id>` plus this, inside the per-user folder.
 const FOLDER_SUFFIX: &str = ".code_sign_clone";
 /// Each copy is a directory in that folder, named like this plus random letters.
 const CLONE_PREFIX: &str = "code_sign_clone.";
-/// A copy younger than this stays whatever else is known.
+/// A copy younger than this stays whatever else is known: a second window of
+/// ours may be making it this very minute.
 const MIN_AGE: Duration = Duration::from_secs(5 * 60);
+/// How long one sweep may run. It deletes between copies and checks the clock
+/// there, so what is left past this waits for the next start; the sweep is on
+/// the lowest priority the system has, so on a slow machine it may take its
+/// time but never the person's.
+const BUDGET: Duration = Duration::from_secs(10);
+/// `proc_pidinfo`'s flavor for "the memory region at or after this address,
+/// with the file behind it" (`PROC_PIDREGIONPATHINFO`, `<sys/proc_info.h>`).
+/// libc carries the file half of that answer, not the flavor or the region half.
+const PROC_PIDREGIONPATHINFO: libc::c_int = 8;
+/// How many regions to look through, per process, for the first one a file
+/// backs. The executable's own code is region zero on every process this was
+/// measured on (659 of the 659 this user may read, t-20243); a few more cost
+/// nothing and cover a process whose first region is not a file.
+const REGIONS_LOOKED_AT: usize = 4;
 
-/// A file as the kernel names it for good: device and inode.
+/// A file as the kernel names it for good: device and inode. A hard-linked
+/// executable answers to whichever of its paths was looked up last, so its
+/// path says nothing about which copy a process came from; this does.
 type Image = (u32, u64);
 
-/// What one pass did.
+/// `struct proc_regionwithpathinfo` (`<sys/proc_info.h>`): the region's own
+/// numbers, then the file behind it. The kernel fills all of it; only the
+/// region's extent and the file's identity are read.
+#[repr(C)]
+struct RegionWithPath {
+    /// `struct proc_regioninfo`'s first 80 bytes: protections, share modes and
+    /// page counts nobody here reads.
+    _unread: [u64; 10],
+    address: u64,
+    size: u64,
+    vnode: libc::vnode_info_path,
+}
+
+// The kernel refuses a buffer smaller than its struct, so a layout slip would
+// show as no process answering at all — and nothing ever deleted. Better the
+// compile stops.
+const _: () = assert!(size_of::<RegionWithPath>() == 1272);
+
+/// What one pass did. The window's log says the first two and nothing else;
+/// the rest is what the tests read.
 #[derive(Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct Report {
+    /// Copies deleted.
     pub(crate) removed: usize,
+    /// What those copies held, in bytes (the sum of their files' lengths).
     pub(crate) removed_bytes: u64,
+    /// Copies kept because a process runs a file in them — or because the
+    /// process list could not be read, so none could be ruled out.
     pub(crate) in_use: usize,
+    /// Copies kept because they are younger than [`MIN_AGE`].
     pub(crate) too_new: usize,
+    /// Copies left for the next start because the time budget ran out.
     pub(crate) postponed: usize,
+    /// Copies the file system would not let go of.
     pub(crate) failed: usize,
 }
 
 impl Report {
+    /// The one line the window keeps: how many, how big, and no path.
     fn line(&self) -> String {
-        String::new()
+        format!(
+            "swept stale code-sign clones of this app: {} removed, {} bytes",
+            self.removed, self.removed_bytes
+        )
     }
 }
 
-/// What the live processes run.
+/// What the live processes run: the files their executables are, and the
+/// paths those executables are at. A copy is in use if either names it.
 #[derive(Debug, Default)]
 struct Running {
     images: HashSet<Image>,
     paths: Vec<PathBuf>,
 }
 
-// Nothing is implemented yet: this is the state the tests below are written
-// against, so a run of them shows each rule missing before it is added.
-
+/// The per-user folder Chromium keeps its copies in: the `X` beside the
+/// temporary folder `getconf DARWIN_USER_TEMP_DIR` names — that command is
+/// this very `confstr` call. Not `$TMPDIR`: a window started with another one
+/// (the CEF smoke does) still shares the folder.
 fn x_dir() -> Option<PathBuf> {
+    let mut buffer = [0 as libc::c_char; libc::PATH_MAX as usize];
+    // SAFETY: `confstr` writes at most `len` bytes, the terminating NUL
+    // included, and returns the length it needs, NUL included.
+    let needed = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+        )
+    };
+    if needed == 0 || needed > buffer.len() {
+        return None;
+    }
+    // SAFETY: a call that fit its buffer left a NUL-terminated string in it.
+    let temp = unsafe { CStr::from_ptr(buffer.as_ptr()) };
+    Some(
+        Path::new(OsStr::from_bytes(temp.to_bytes()))
+            .parent()?
+            .join("X"),
+    )
+}
+
+/// The identifier of the bundle this process runs from, as Chromium names its
+/// folder after it. `None` for a window with no bundle (a `cargo run` binary),
+/// which has nothing of ours to sweep.
+fn own_bundle_id() -> Option<String> {
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    let class = AnyClass::get(c"NSBundle")?;
+    // SAFETY: `mainBundle` is a class method returning an autoreleased
+    // NSBundle and `bundleIdentifier` returns an NSString or nil; neither
+    // throws, and both are safe to ask from any thread.
+    unsafe {
+        let bundle: *mut AnyObject = objc2::msg_send![class, mainBundle];
+        if bundle.is_null() {
+            return None;
+        }
+        let id: *mut AnyObject = objc2::msg_send![bundle, bundleIdentifier];
+        if id.is_null() {
+            return None;
+        }
+        Some((*(id as *const objc2_foundation::NSString)).to_string())
+    }
+}
+
+/// A reverse-DNS name and nothing else. The id becomes part of a path that is
+/// then emptied, so anything that could point elsewhere — empty (which is the
+/// nameless folder, nobody's), a separator, `..` — sweeps nothing.
+fn is_bundle_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 255
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+/// The file behind a process's first file-backed memory region: its
+/// executable. `None` for a process this user may not look into.
+fn image_of(pid: libc::pid_t) -> Option<Image> {
+    let size = libc::c_int::try_from(size_of::<RegionWithPath>()).ok()?;
+    let mut address = 0u64;
+    for _ in 0..REGIONS_LOOKED_AT {
+        let mut region = std::mem::MaybeUninit::<RegionWithPath>::zeroed();
+        // SAFETY: the buffer is exactly the size declared to the kernel, which
+        // fills it whole or says it did not by returning less.
+        let wrote = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                PROC_PIDREGIONPATHINFO,
+                address,
+                region.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if wrote != size {
+            return None;
+        }
+        // SAFETY: zeroed plain integers, filled by the kernel, a full write
+        // having been checked above.
+        let region = unsafe { region.assume_init() };
+        let file = &region.vnode.vip_vi.vi_stat;
+        if file.vst_ino != 0 {
+            return Some((file.vst_dev, file.vst_ino));
+        }
+        address = region.address.checked_add(region.size)?;
+    }
     None
 }
 
+/// The path the kernel reports for a process's executable. It is the name
+/// looked up last, so it can be the installed bundle's or a copy's; that is why
+/// the file's identity is read too.
+fn path_of(pid: libc::pid_t) -> Option<PathBuf> {
+    let mut buffer = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let size = u32::try_from(buffer.len()).ok()?;
+    // SAFETY: the buffer is exactly the size declared; `proc_pidpath` writes at
+    // most that many bytes and returns how many, or 0 or less when it cannot.
+    let wrote = unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), size) };
+    let length = usize::try_from(wrote).ok().filter(|length| *length > 0)?;
+    Some(PathBuf::from(OsStr::from_bytes(&buffer[..length])))
+}
+
+/// Every pid there is. `None` when the kernel will not say.
+fn list_pids() -> Option<Vec<libc::pid_t>> {
+    // SAFETY: with no buffer `proc_listallpids` only counts.
+    let counted = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let capacity = usize::try_from(counted).ok().filter(|count| *count > 0)?;
+    // Processes start between the two calls: room for sixty-four more.
+    let mut pids: Vec<libc::pid_t> = vec![0; capacity + 64];
+    let bytes = libc::c_int::try_from(pids.len() * size_of::<libc::pid_t>()).ok()?;
+    // SAFETY: the buffer holds exactly `bytes` bytes of pids.
+    let listed = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    let listed = usize::try_from(listed).ok().filter(|count| *count > 0)?;
+    pids.truncate(listed);
+    pids.retain(|pid| *pid > 0);
+    Some(pids)
+}
+
+/// What every live process runs. `None` when the process list cannot be read
+/// at all, which the caller treats as "might be anything"; processes this user
+/// may not look into (other users', the system's) simply add nothing.
 fn running_processes() -> Option<Running> {
-    None
+    let mut running = Running::default();
+    for pid in list_pids()? {
+        running.images.extend(image_of(pid));
+        running.paths.extend(path_of(pid));
+    }
+    Some(running)
 }
 
+/// What looking through one copy found.
+struct Inspected {
+    /// A process runs a file in it.
+    in_use: bool,
+    /// The lengths of its files, added up (only meaningful when not in use).
+    bytes: u64,
+}
+
+/// Look through the copy at `dir` against what runs. A process is in it when
+/// its executable's path is under it, or when its executable is one of the
+/// copy's files — by inode, so it does not matter which hard link of the file
+/// the process went in by. Symlinks are never followed. `None` when the copy
+/// cannot be named (it went while we looked).
+fn inspect(dir: &Path, running: &Running) -> Option<Inspected> {
+    let canonical = std::fs::canonicalize(dir).ok()?;
+    if running
+        .paths
+        .iter()
+        .any(|path| path.starts_with(&canonical))
+    {
+        return Some(Inspected {
+            in_use: true,
+            bytes: 0,
+        });
+    }
+    let mut bytes = 0u64;
+    let mut pending = vec![canonical];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                pending.push(entry.path());
+            } else if meta.is_file() {
+                if running.images.contains(&(meta.dev() as u32, meta.ino())) {
+                    return Some(Inspected {
+                        in_use: true,
+                        bytes: 0,
+                    });
+                }
+                bytes = bytes.saturating_add(meta.len());
+            }
+        }
+    }
+    Some(Inspected {
+        in_use: false,
+        bytes,
+    })
+}
+
+/// Delete the copies of `bundle_id` under `x_dir` that nothing runs and that
+/// were made at least [`MIN_AGE`] before `now`, until `deadline`. `running`
+/// says what processes run; it is asked at most once, and only when some copy
+/// is old enough to matter, so a clean machine pays for one directory read.
 fn sweep_under(
-    _x_dir: &Path,
-    _bundle_id: &str,
-    _now: SystemTime,
-    _deadline: Instant,
-    _running: impl FnOnce() -> Option<Running>,
+    x_dir: &Path,
+    bundle_id: &str,
+    now: SystemTime,
+    deadline: Instant,
+    running: impl FnOnce() -> Option<Running>,
 ) -> Report {
-    Report::default()
+    let mut report = Report::default();
+    if !is_bundle_id(bundle_id) {
+        return report;
+    }
+    let folder = x_dir.join(format!("{bundle_id}{FOLDER_SUFFIX}"));
+    // Not followed: a symlink standing where the folder should be leads
+    // somewhere that is not ours.
+    if !std::fs::symlink_metadata(&folder).is_ok_and(|meta| meta.is_dir()) {
+        return report;
+    }
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return report;
+    };
+    let mut old = Vec::new();
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .as_bytes()
+            .starts_with(CLONE_PREFIX.as_bytes())
+        {
+            continue;
+        }
+        // Not followed: a symlink named like a copy is not one.
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let age = meta
+            .modified()
+            .ok()
+            .and_then(|made| now.duration_since(made).ok());
+        match age {
+            Some(age) if age >= MIN_AGE => old.push(entry.path()),
+            _ => report.too_new += 1,
+        }
+    }
+    if old.is_empty() {
+        return report;
+    }
+    let Some(running) = running() else {
+        report.in_use += old.len();
+        return report;
+    };
+    let total = old.len();
+    for (done, clone) in old.into_iter().enumerate() {
+        if Instant::now() >= deadline {
+            report.postponed = total - done;
+            break;
+        }
+        match inspect(&clone, &running) {
+            None => report.failed += 1,
+            Some(Inspected { in_use: true, .. }) => report.in_use += 1,
+            Some(Inspected { bytes, .. }) => match std::fs::remove_dir_all(clone) {
+                Ok(()) => {
+                    report.removed += 1;
+                    report.removed_bytes = report.removed_bytes.saturating_add(bytes);
+                }
+                // Another window's sweep got there first: it is gone either way.
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(_) => report.failed += 1,
+            },
+        }
+    }
+    report
 }
 
-pub(crate) fn sweep_after_first_paint(_log_root: Option<PathBuf>) {}
+/// One pass over this app's own folder, within [`BUDGET`]. The window-log line
+/// it returns is `None` when nothing was deleted.
+fn sweep_now() -> Option<String> {
+    let x_dir = x_dir()?;
+    let bundle_id = own_bundle_id()?;
+    let deadline = Instant::now() + BUDGET;
+    let report = sweep_under(
+        &x_dir,
+        &bundle_id,
+        SystemTime::now(),
+        deadline,
+        running_processes,
+    );
+    (report.removed > 0).then(|| report.line())
+}
+
+/// The window has painted: sweep, once, on a thread of its own at the lowest
+/// priority the system has (CPU and disk), and say in the window log how many
+/// copies went and how many bytes they held. Nothing the person is waiting on
+/// waits for this.
+pub(crate) fn sweep_after_first_paint(log_root: Option<PathBuf>) {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("code-sign-clone-sweep".into())
+        .spawn(move || {
+            // SAFETY: lowers only the calling thread's own priority.
+            let _ = unsafe { libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, libc::PRIO_DARWIN_BG) };
+            if let (Some(root), Some(line)) = (log_root, sweep_now()) {
+                crate::note_window_event(&root, &line);
+            }
+        });
+}
 
 #[cfg(test)]
 mod tests {

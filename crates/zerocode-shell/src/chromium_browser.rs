@@ -55,6 +55,17 @@ const CEF_SWITCH_USE_MOCK_KEYCHAIN: &str = "use-mock-keychain";
 /// pane `ERR_TIMED_OUT` on the https it invented) never falls back and
 /// never loads. This browser exists for exactly those signed-in company pages,
 /// so the address a person types is the address the pane loads.
+///
+/// `MacAppCodeSignClone` is deliberately NOT in this list (t-20243). At every
+/// start Chromium copies the whole app bundle into the per-user `X` folder
+/// (`<bundle id>.code_sign_clone`) and hard-links the running executable into
+/// it, and nothing deletes the copy: 0.4 GiB per start. But that hard link is
+/// a second name for the executable, and without one macOS no longer
+/// recognises a window whose installed bundle an update has renamed away and
+/// deleted (`codesign --verify +pid`: "host has no guest with the requested
+/// attributes") — which is every window that outlives two installs. The
+/// copies nothing runs are swept instead, once the window has painted
+/// (`code_sign_clone::sweep_after_first_paint`).
 const CEF_SWITCH_DISABLE_FEATURES: &str = "disable-features";
 const CEF_DISABLED_FEATURES: &str = "HttpsUpgrades,HttpsFirstBalancedMode";
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
