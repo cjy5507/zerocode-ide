@@ -604,6 +604,7 @@ const THEME_PREVIEW_BUDGET: Duration = Duration::from_secs(5);
 ///
 /// A missing callback must release its blocking receiver instead of holding a
 /// runtime worker forever.
+#[cfg(target_os = "macos")]
 const SNAPSHOT_BUDGET: Duration = Duration::from_secs(10);
 
 /// Agent screenshots are local artifacts, not an unbounded binary response.
@@ -3570,6 +3571,8 @@ fn main() -> ExitCode {
                     api.prevent_exit();
                     return;
                 }
+                #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+                let _ = api;
                 // The ledger hears the goodbye before any pane goes (t-3058):
                 // seated workers sleep instead of being settled by their own
                 // panes' exits on the way out.
