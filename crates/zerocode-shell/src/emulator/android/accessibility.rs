@@ -437,26 +437,52 @@ mod tests {
     }
 
     /// A command is answered the moment it exits (t-6385): the 25 ms poll it
-    /// replaced answered a 30 ms command at its second wake, never before
-    /// 50 ms from its start. The clock starts once the command has started,
-    /// and the quickest of five is held to that, so a busy machine that slows
-    /// every start cannot turn a waiter into a poll.
+    /// replaced answered a 30 ms command at its second wake, 20 ms after it
+    /// ended. The test ends the command itself — it holds the command's stdin
+    /// for 30 ms after the command has said it is running, then lets go — and
+    /// times the answer from that instant, so how long a runner takes to
+    /// start a process (a clean macOS runner took 100 ms, t-20432) is not in
+    /// the number. The quickest of five is held to half a poll period, so a
+    /// busy machine that delays one answer cannot turn a waiter into a poll.
     #[cfg(unix)]
     #[test]
     fn a_finished_command_is_answered_without_waiting_for_a_poll() {
-        let millis: Vec<u128> = (0..5)
+        use std::io::BufRead;
+        use std::process::Stdio;
+        /// How long the command is held after it is running: past the first
+        /// wake of the 25 ms poll, before its second.
+        const HELD: Duration = Duration::from_millis(30);
+        /// The answer a waiter gives after the command ends; the poll's was
+        /// 20 ms late at best (it woke at 25 ms and at 50 ms).
+        const ANSWER_BUDGET: Duration = Duration::from_millis(10);
+        let lags: Vec<Duration> = (0..5)
             .map(|_| {
-                let child = crate::proc::quiet_command("/bin/sleep")
-                    .arg("0.03")
+                let mut child = crate::proc::quiet_command("/bin/sh")
+                    .args(["-c", "echo running; read _"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
                     .spawn()
-                    .expect("sleep starts");
-                let began = Instant::now();
-                wait_within(child, COMMAND_TIMEOUT).expect("sleep answers");
-                began.elapsed().as_millis()
+                    .expect("sh starts");
+                let held = child.stdin.take().expect("its stdin");
+                let mut running = String::new();
+                std::io::BufReader::new(child.stdout.take().expect("its stdout"))
+                    .read_line(&mut running)
+                    .expect("it says it runs");
+                let release = std::thread::spawn(move || {
+                    std::thread::sleep(HELD);
+                    drop(held);
+                    Instant::now()
+                });
+                wait_within(child, COMMAND_TIMEOUT).expect("sh answers");
+                let answered = Instant::now();
+                answered.saturating_duration_since(release.join().expect("the release"))
             })
             .collect();
-        let quickest = millis.iter().min().copied().unwrap_or(u128::MAX);
-        assert!(quickest < 45, "a 30 ms command answered in {millis:?} ms");
+        let quickest = lags.iter().min().copied().unwrap_or(Duration::MAX);
+        assert!(
+            quickest < ANSWER_BUDGET,
+            "a command ended and was answered {lags:?} later"
+        );
     }
 
     /// A command past its time is ended and answered with nothing, however

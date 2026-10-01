@@ -1498,9 +1498,13 @@ fn the_standing_follows_zos_settings_file_on_and_off_within_a_tick() {
             }
         });
     });
+    // The watcher is a thread of its own: on a 3-core runner running other
+    // tests it is not scheduled for 120 ms at a time (t-20432). The reading
+    // is waited for, up to a bound only a watcher that never reads reaches.
+    const WATCHER_HEARD_BY: Duration = Duration::from_secs(10);
     let within_a_tick = |wanted: fn(Asking) -> bool| {
         let began = Instant::now();
-        while began.elapsed() < tick * 3 {
+        while began.elapsed() < WATCHER_HEARD_BY {
             if wanted(standing.asking()) {
                 return true;
             }

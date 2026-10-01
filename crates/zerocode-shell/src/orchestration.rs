@@ -499,11 +499,7 @@ fn reseat_sleeping_in_line(
         .collect();
     sleeping.sort_by_key(|(started, ..)| *started);
     drop(ledger);
-    let installed: std::collections::HashSet<String> = crate::detected_agents(false)
-        .into_iter()
-        .filter(|agent| agent.installed)
-        .map(|agent| agent.id.to_string())
-        .collect();
+    let installed = installed_agent_ids();
     let mut restored = 0;
     for (_, worker, agent, checkout, _taken_over) in sleeping {
         /* Three roads end here without a pane being cut, each with its own
@@ -1336,13 +1332,35 @@ pub(crate) fn switch_move_ready(
     if !Path::new(checkout).is_dir() {
         return Err(format!("worker {worker}'s checkout is gone"));
     }
-    if !crate::detected_agents(false)
-        .into_iter()
-        .any(|agent| agent.installed && agent.id == row.agent)
-    {
+    if !installed_agent_ids().contains(&row.agent) {
         return Err(format!("{} is not installed on this machine", row.agent));
     }
     Ok(())
+}
+
+/// The agents this machine can run — what a restore and a pane move ask
+/// before they cut a pane for one. A test window has no PATH of its own to
+/// speak for: the fixtures seat claude and codex workers, and a clean CI
+/// runner has neither CLI installed, so a verdict read off the machine made
+/// thirty tests pass on a developer's Mac and fail on the runner (t-20432).
+/// Under test every registered agent is installed; the verdict itself is
+/// `agent_presence`'s, tested in `zerocode-core`.
+fn installed_agent_ids() -> std::collections::HashSet<String> {
+    #[cfg(test)]
+    {
+        zerocode_core::AGENT_SPECS
+            .iter()
+            .map(|spec| spec.id.to_string())
+            .collect()
+    }
+    #[cfg(not(test))]
+    {
+        crate::detected_agents(false)
+            .into_iter()
+            .filter(|agent| agent.installed)
+            .map(|agent| agent.id.to_string())
+            .collect()
+    }
 }
 
 /// The receipt for one account move, in the ledger's own voice. Answers
