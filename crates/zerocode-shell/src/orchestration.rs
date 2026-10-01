@@ -1435,19 +1435,28 @@ pub(crate) fn leader_term_of_team(team: &str) -> Option<u32> {
 /// specs, capabilities and receipts deliberately stay behind the native
 /// boundary; this report exists for status/ownership observability, not audit
 /// transcript export.
-/// The agent the ledger last seated in a checkout, whatever became of it.
+/// The agent the ledger seated in a checkout and has not let go of.
 ///
 /// Asked by the window when a workspace comes back with nothing stored for it.
 /// A worker's tab is the ledger's to persist, never the pane layout's
 /// (`persistPaneLayouts` skips `ledgerManaged`), so a checkout cut for a Codex
 /// worker restores as an EMPTY workspace — and an empty workspace opened the
 /// default agent, which is how a Codex worktree came back wearing Claude after
-/// a restart. The ledger still knows who was there; `released` counts, because
-/// the restart is exactly what released it. A sleeping OR orphaned seat wins
-/// over all history because both reserve the checkout against a generic
-/// launch: a sleeper will be restored, while an orphan may still be running
-/// there and must not be given a second owner. Among seats with the same
-/// reservation state, the newest wins when a checkout was handed on.
+/// a restart. The ledger still knows who is coming back. A sleeping OR orphaned
+/// seat wins over all history because both reserve the checkout against a
+/// generic launch: a sleeper will be restored, while an orphan may still be
+/// running there and must not be given a second owner. Among seats with the
+/// same reservation state, the newest wins when a checkout was handed on.
+///
+/// A worker the ledger released is nobody's seat (t-19779). A restart puts a
+/// worker whose attempt still stands to sleep rather than releasing it, so a
+/// released row is one the ledger is finished with — its work handed in, or its
+/// attempt ended and its coordinator told — and a checkout with no other seat
+/// answers nothing, which leaves the window to open what the person chose for a
+/// new workspace. This used to answer the released worker's agent, and the
+/// window launched that agent again on every visit: five finished workers'
+/// checkouts each held an empty Claude a few minutes after their last turn, and
+/// the reclaimer waited on it with the checkout and its build output.
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct LastAgentInCheckout {
     agent: String,
@@ -1471,6 +1480,7 @@ pub(crate) fn last_agent_in_checkout(checkout: &str) -> Option<LastAgentInChecko
         .runs()
         .iter()
         .flat_map(|run| run.workers.iter().map(move |worker| (run, worker)))
+        .filter(|(_, worker)| worker.state.still_summoned())
         .filter(|(_, worker)| {
             worker
                 .checkout
@@ -1481,7 +1491,6 @@ pub(crate) fn last_agent_in_checkout(checkout: &str) -> Option<LastAgentInChecko
         .max_by_key(|(_, worker)| {
             (
                 matches!(worker.state, WorkerState::Sleeping | WorkerState::Orphaned),
-                worker.state.still_summoned(),
                 worker.started_ms,
             )
         })
@@ -1491,15 +1500,13 @@ pub(crate) fn last_agent_in_checkout(checkout: &str) -> Option<LastAgentInChecko
                 .and_then(|team| team.get(&worker.pane))
                 .copied()
                 .filter(|_| {
-                    worker.state.still_summoned()
-                        && run
-                            .worker_in_pane(&worker.team, &worker.pane)
-                            .is_some_and(|current| current.id == worker.id)
+                    run.worker_in_pane(&worker.team, &worker.pane)
+                        .is_some_and(|current| current.id == worker.id)
                 });
             LastAgentInCheckout {
                 agent: worker.agent.clone(),
                 sleeping: matches!(worker.state, WorkerState::Sleeping | WorkerState::Orphaned)
-                    || (worker.state.still_summoned() && term.is_none()),
+                    || term.is_none(),
                 term,
             }
         })
