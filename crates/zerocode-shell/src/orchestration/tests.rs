@@ -24853,14 +24853,14 @@ fn a_put_whose_record_the_disk_refused_leaves_the_homes_login_nobodys_until_a_pu
     );
 }
 
-
 /// A ledger the size of a long-lived machine's: this many runs, each holding
 /// this many tasks and the mail on them, so the ids run to the tens of
 /// thousands. Built here and never read from anybody's disk (t-19506).
 const IDLE_BEAT_RUNS: usize = 24;
 const IDLE_BEAT_TASKS_PER_RUN: usize = 800;
 
-fn a_ledger_as_large_as_a_long_lived_machines() -> zerocode_core::orchestration::LedgerProjectionV1 {
+fn a_ledger_as_large_as_a_long_lived_machines() -> zerocode_core::orchestration::LedgerProjectionV1
+{
     let mut ledger = super::Ledger::new();
     for run in 0..IDLE_BEAT_RUNS {
         let run = ledger.create_run(&format!("long-lived run {run}"), 1);
@@ -24887,7 +24887,8 @@ fn a_ledger_as_large_as_a_long_lived_machines() -> zerocode_core::orchestration:
 fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
     const BEATS: i64 = 6;
     let _beat = one_beat_at_a_time();
-    let (_window, _store) = PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
+    let (_window, _store) =
+        PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
     // The first beat reads the generation the window booted on; it may pay
     // for it once.
     tick(&Nowhere, &[], 1_000_000);
@@ -24916,7 +24917,10 @@ fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
     );
     // And two readers of one generation hold the one projection, not two.
     let actor = &super::runtime().expect("this window's runtime").actor;
-    let (first, second) = (actor.view().expect("an image"), actor.view().expect("an image"));
+    let (first, second) = (
+        actor.view().expect("an image"),
+        actor.view().expect("an image"),
+    );
     assert!(
         std::ptr::eq(first.projection(), second.projection()),
         "two images of one revision were exported twice"
@@ -24933,7 +24937,8 @@ fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
 fn measure_the_idle_beat_on_a_large_ledger() {
     const BEATS_PER_MINUTE: i64 = 60;
     let _beat = one_beat_at_a_time();
-    let (_window, _store) = PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
+    let (_window, _store) =
+        PrivateWindow::boot_seeded(a_ledger_as_large_as_a_long_lived_machines());
     tick(&Nowhere, &[], 1_000_000);
     let cpu = || {
         // SAFETY: getrusage fills the struct it is handed.

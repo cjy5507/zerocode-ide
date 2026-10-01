@@ -8954,7 +8954,9 @@ impl Ledger {
     pub fn validate_loaded<'a>(&'a self) -> Result<(), String> {
         use std::collections::{HashMap, HashSet};
 
-        LEDGER_WORK.validations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        LEDGER_WORK
+            .validations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Sets and not walks. This is the one function in the file whose input
         // is a FILE — anything on the disk, of any size, from any build — so a
@@ -23418,7 +23420,9 @@ impl Ledger {
     /// prepared host effect never crosses a process restart, so a projection —
     /// which exists precisely to cross one — has nothing to say about them.
     pub fn export(&self) -> LedgerProjectionV1 {
-        LEDGER_WORK.exports.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        LEDGER_WORK
+            .exports
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut projected = LedgerProjectionV1 {
             schema: PROJECTION_SCHEMA,
             next_id: self.next_id,
@@ -23610,7 +23614,9 @@ impl Ledger {
     /// into an impossible ledger fails exactly the way a corrupt file does.
     /// Opening a new door is not a reason to leave the old lock off it.
     pub fn rebuild(projected: LedgerProjectionV1) -> Result<Self, RebuildError> {
-        LEDGER_WORK.rebuilds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        LEDGER_WORK
+            .rebuilds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if projected.schema != PROJECTION_SCHEMA {
             return Err(RebuildError::UnknownSchema(projected.schema));
         }
