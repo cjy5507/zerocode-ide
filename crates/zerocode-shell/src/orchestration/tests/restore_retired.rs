@@ -108,6 +108,64 @@ fn a_live_worker_in_the_checkout_is_still_named_after_a_released_one() {
     }
 }
 
+/// t-19779: the lifecycle a worker's own briefing names — it reports done from
+/// its own pane, then its coordinator releases it — leaves the same answer as
+/// the stop above. After the report the pane is idle and reusable and its seat
+/// is still the one the window names; after the release nobody is, and the
+/// checkout is the reclaimer's.
+#[test]
+fn a_worker_that_reported_and_was_released_by_its_coordinator_leaves_no_seat_for_the_window() {
+    const LEADER: u32 = 279_130;
+    const WORKER: u32 = 279_131;
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the worker's checkout");
+    let host = Restoring::new(checkout.path(), WORKER, (0, test_actor(LEADER)));
+    let (team, _run) = a_run(&host, LEADER, "reported");
+    let (_task, worker, term) = a_worker(
+        &host,
+        &team,
+        "--agent claude",
+        Some("19779d0c-0000-4000-8000-000000000001"),
+    );
+    let at = checkout.path().to_string_lossy().into_owned();
+    let seat = row(&worker);
+    let held = crate::agent_teams::current_pane_capability(&seat.team, &seat.pane)
+        .expect("the split minted the worker a capability");
+
+    // It reports from its own pane, presenting its own capability.
+    let done = run(
+        &host,
+        Vec::new(),
+        &seat.team,
+        &seat.pane,
+        &held,
+        &words(&format!(
+            "send --type worker_done --body {{\"ok\":true}} --retry-request done-{worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(done.exit_code, 0, "{}", done.stderr);
+    let reported = the_visit_answer(&at);
+    assert_eq!(reported["term"], term, "{reported}");
+    assert!(!super::super::checkout_is_settled(&at));
+
+    // Its coordinator releases it.
+    say(
+        &host,
+        &team,
+        &format!("worker-release --worker {worker} --retry-request rel-{worker}"),
+    );
+    assert_eq!(row(&worker).state, WorkerState::Released);
+    let released = the_visit_answer(&at);
+    assert!(
+        released.is_null(),
+        "the window is still told an agent is seated in a checkout its coordinator released: {released}"
+    );
+    assert!(super::super::checkout_is_settled(&at));
+    crate::agent_teams::forget_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+}
+
 /// t-19779: no road that brings a conversation back treats a released worker
 /// as one to bring back. The retire step closes its pane and nothing opens
 /// another: the restart census does not count it, the next boot's reseat seats
