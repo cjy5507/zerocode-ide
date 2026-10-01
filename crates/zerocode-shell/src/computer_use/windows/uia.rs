@@ -611,13 +611,22 @@ pub(super) fn scroll_page(
 
 /// The primary press: `Invoke`, else `Toggle`, else `Select` — the order a
 /// click means on a button, a checkbox, a list item (the core's table, which
-/// the marks read too).
+/// the marks read too) — except that a control holding a toggle state is
+/// pressed through it. Some Windows builds hand a check box an `Invoke` beside
+/// its `Toggle` (the public runner's did, 2026-10-01), and the answer should
+/// name the press that is the control's own.
 pub(super) fn primary_click_action(actions: &[String]) -> Option<&'static str> {
-    zerocode_core::computer_use::WINDOWS_PRESS_PATTERNS
+    let table = zerocode_core::computer_use::WINDOWS_PRESS_PATTERNS;
+    let held = |candidate: &&str| actions.iter().any(|action| action == candidate);
+    table
         .iter()
         .copied()
-        .find(|candidate| actions.iter().any(|action| action == candidate))
+        .find(|candidate| *candidate == STATE_PRESS && held(candidate))
+        .or_else(|| table.iter().copied().find(|candidate| held(candidate)))
 }
+
+/// The press that reads and flips a state, taken before the table's order.
+const STATE_PRESS: &str = "Toggle";
 
 /// What a value-bearing element holds right now.
 #[derive(Debug, Clone, PartialEq)]

@@ -541,11 +541,15 @@ fn history(root: &Path) -> Vec<HistoryRow> {
         .ok()
         .is_none_or(|meta| meta.len() > Limits::REPORT_BYTES)
     {
+        // Closed first: Windows will not replace a file this handle holds.
+        drop(file);
         let _ = durable_file::replace_bytes(&path, b"");
         return Vec::new();
     }
     let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
+    let read = file.read_to_end(&mut bytes);
+    drop(file);
+    if read.is_err() {
         return Vec::new();
     }
     let mut rows: Vec<HistoryRow> = String::from_utf8_lossy(&bytes)
