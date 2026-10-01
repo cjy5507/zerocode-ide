@@ -252,16 +252,16 @@ fn a_server_slower_than_the_deadline_is_a_timeout_not_a_hang() {
 
 #[test]
 fn a_socket_that_answers_nothing_is_transport() {
-    // A seat nobody is sitting in: the connection is refused at once.
+    // A seat nobody is sitting in: the connection is refused at once — on
+    // Windows after the stack's own SYN retries (about two seconds, measured
+    // on the public runner), which the call's deadline answers first.
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback seat");
     let addr = listener.local_addr().expect("its address");
     drop(listener);
     let (_home, mut judge) = consented_judge(&format!("http://{addr}"));
 
-    assert_eq!(
-        judge.choose(&asked()),
-        Judged::Refused(TRANSPORT.to_string())
-    );
+    let refused = if cfg!(windows) { TIMEOUT } else { TRANSPORT };
+    assert_eq!(judge.choose(&asked()), Judged::Refused(refused.to_string()));
 }
 
 /// A walk in a workspace nobody consented to asks nothing: the door refuses

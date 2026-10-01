@@ -1103,6 +1103,13 @@ mod tests {
         std::fs::write(path, text).expect("write");
     }
 
+    /// A path as it is written between the quotes of a JSON string — a
+    /// Windows path's backslashes are escapes there, not letters.
+    fn in_json(path: &Path) -> String {
+        let quoted = serde_json::to_string(&path.display().to_string()).expect("a path is text");
+        quoted[1..quoted.len() - 1].to_string()
+    }
+
     /// A Claude transcript in the shape the vendor writes it, with the page
     /// it created present on disk under a project root the lines name — and
     /// the two files it only edited or overwrote present too, so a road that
@@ -1113,7 +1120,7 @@ mod tests {
         touch(&page, "# Decisions\n\nfixture body\n");
         touch(&project.join("ui/index.html"), "<title>Project</title>");
         touch(&project.join("README.md"), "# Project\n");
-        let text = CLAUDE.replace("/Users/someone/project", &project.display().to_string());
+        let text = CLAUDE.replace("/Users/someone/project", &in_json(&project));
         let transcript = dir
             .join("home/.claude/projects/-Users-someone-project/33333333-4444-4555-8666-777777777777.jsonl");
         touch(&transcript, &text);
@@ -1133,7 +1140,7 @@ mod tests {
         let zo = home.join(".zo/sessions/session-1780878278884-0.jsonl");
         touch(
             &zo,
-            &ZO.replace("/Users/someone/project", &zo_project.display().to_string()),
+            &ZO.replace("/Users/someone/project", &in_json(&zo_project)),
         );
         let store = Store::open(&dir.path().join("data"), Limits::default());
         let roots = roots(&home, &dir.path().join("window-home"));
@@ -1298,10 +1305,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (transcript, _) = claude_fixture(dir.path());
         let store = Store::open(&dir.path().join("data"), Limits::default());
-        let payload = format!(
-            r#"{{"hook_event_name":"Stop","session_id":"s-1","transcript_path":"{}"}}"#,
-            transcript.display()
-        );
+        let payload = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "s-1",
+            "transcript_path": transcript.display().to_string(),
+        })
+        .to_string();
         assert!(note_hook(
             &store,
             &envelope(AgentKind::Claude, &payload),

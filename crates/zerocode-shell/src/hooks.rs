@@ -3123,7 +3123,8 @@ mod tests {
     #[test]
     fn every_pane_is_told_where_the_second_brain_is_and_only_while_there_is_one() {
         bridge_for_tests();
-        let vault = "/Users/fixture/Knowledge";
+        let vault = crate::test_host::absolute_text("/Users/fixture/Knowledge");
+        let vault = vault.as_str();
         let carried = |env: &[(String, String)]| {
             env.iter()
                 .find(|(name, _)| name == zerocode_hookd::env_var::SECOND_BRAIN)
@@ -3183,7 +3184,10 @@ mod tests {
         );
         let measurable = pty_env("term-7", None, Path::new("/workspace"), None);
         assert!(measurable.iter().any(|(name, value)| {
-            name == zerocode_hookd::env_var::DELIVERY_FAILURE_MARKER && value.ends_with("/term-7")
+            name == zerocode_hookd::env_var::DELIVERY_FAILURE_MARKER
+                && Path::new(value)
+                    .file_name()
+                    .is_some_and(|last| last == "term-7")
         }));
         for name in [
             zerocode_hookd::env_var::BROWSER_TOKEN,
@@ -4419,6 +4423,10 @@ mod tests {
     /// for the spaces under Application Support, and the shim loader reads it
     /// only when its environment carries none — and only for a pane key of
     /// the window's own spelling.
+    // Gated: this pins the POSIX shim the window writes for an agent started
+    // by hand (`#!/bin/sh`, run with `/usr/bin:/bin` as its whole PATH); Windows
+    // agents are started through a launcher of their own, not this script.
+    #[cfg(unix)]
     #[test]
     fn a_hand_started_agents_pane_is_granted_by_file_and_the_shim_reads_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4522,6 +4530,10 @@ mod tests {
     /// `zerocode-orc` shim's loader reads all three, so `check` is not refused
     /// "this shell is not part of an agent team". The secret itself never
     /// sits in the grant: only the path of its 0600 file does.
+    // Gated: this pins the POSIX shim the window writes for an agent started
+    // by hand (`#!/bin/sh`, run with `/usr/bin:/bin` as its whole PATH); Windows
+    // agents are started through a launcher of their own, not this script.
+    #[cfg(unix)]
     #[test]
     fn a_hand_started_agents_grant_carries_its_ledger_seat_for_the_orc_shim() {
         let dir = tempfile::tempdir().expect("tempdir");

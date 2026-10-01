@@ -239,6 +239,26 @@ mod tests {
         assert_eq!(stamp(951_782_400_000), "20000229-000000", "a leap day");
     }
 
+    /// Set a folder's modified time. `File::open` on a folder is refused on
+    /// Windows ("Access is denied"): it must be opened with backup semantics
+    /// and the one right the call needs.
+    fn age_folder(folder: &Path, modified: SystemTime) {
+        let mut open = std::fs::OpenOptions::new();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            /// `FILE_FLAG_BACKUP_SEMANTICS`: the flag that lets a folder be opened.
+            const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            /// `FILE_WRITE_ATTRIBUTES`: the right `SetFileTime` asks for.
+            const WRITE_ATTRIBUTES: u32 = 0x0100;
+            open.access_mode(WRITE_ATTRIBUTES)
+                .custom_flags(BACKUP_SEMANTICS);
+        }
+        #[cfg(not(windows))]
+        open.read(true);
+        open.open(folder).unwrap().set_modified(modified).unwrap();
+    }
+
     #[test]
     fn old_sessions_are_pruned_and_the_frame_cap_holds() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -248,10 +268,7 @@ mod tests {
         std::fs::create_dir_all(&old).unwrap();
         std::fs::create_dir_all(&fresh).unwrap();
         let ancient = SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_836_800);
-        std::fs::File::open(&old)
-            .unwrap()
-            .set_modified(ancient)
-            .unwrap();
+        age_folder(&old, ancient);
         prune(&sessions, SystemTime::now());
         assert!(!old.exists(), "a session older than the table is gone");
         assert!(fresh.exists(), "a fresh session stays");

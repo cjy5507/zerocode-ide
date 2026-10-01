@@ -914,7 +914,10 @@ mod tests {
         let trunk = filed("worktree:/work/repo");
         assert!(trunk.ours);
         assert_eq!(trunk.label.as_deref(), Some("main"));
-        let away = filed("cwd:/Users/someone/2026/elsewhere");
+        let away = filed(&format!(
+            "cwd:{}",
+            crate::usage_places::normalize(Path::new("/Users/someone/2026/elsewhere"))
+        ));
         assert!(!away.ours, "a stranger's directory was counted as ours");
         assert_eq!(
             away.label.as_deref(),

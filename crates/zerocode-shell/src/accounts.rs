@@ -3313,15 +3313,9 @@ JSON
         let root = tempfile::tempdir().expect("no temp dir");
         let dir = root.path();
         let fake = |name: &str, body: &str| {
-            let path = dir.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake cli");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                    .expect("chmod fake cli");
-            }
-            path.to_string_lossy().into_owned()
+            crate::test_host::fake_program(dir, name, body)
+                .to_string_lossy()
+                .into_owned()
         };
 
         let said_yes = fake("yes-cli", "printf '{\"loggedIn\":true}'");
@@ -4974,6 +4968,10 @@ JSON
     /// `LOGNAME` is deliberately not in the chain for exactly that reason — it
     /// was the variable that DID answer, and it answered with the wrong
     /// account. A third guess is not a third chance at the truth.
+    // Gated: the uid's account is the password database's answer, and Windows
+    // has no uid — `account_of_this_uid` is `None` there by construction, and
+    // the keychain it feeds is a macOS item.
+    #[cfg(unix)]
     #[test]
     fn an_environment_that_names_nobody_still_asks_this_uids_own_account() {
         let uid_account = account_of_this_uid().expect("this uid has an account of its own");

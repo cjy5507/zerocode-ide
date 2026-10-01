@@ -176,7 +176,7 @@ impl Places {
 /// platform folds it — Orca's `normalizeComparablePath` (`:38-41`), whose
 /// Windows branch exists because two spellings of one directory are one
 /// directory there and two rows here.
-fn normalize(path: &Path) -> String {
+pub(crate) fn normalize(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
     let trimmed = text.trim_end_matches('/');
     let held = if trimmed.is_empty() { &text } else { trimmed };
@@ -254,7 +254,15 @@ mod tests {
     fn a_place_nobody_claims_is_filed_under_its_own_last_two_segments() {
         let mut known = places();
         let outside = known.of(Some("/Users/someone/2026/zerocode"));
-        assert_eq!(known.at(outside).key, "cwd:/Users/someone/2026/zerocode");
+        // Keyed the way the module compares paths: lower-cased on Windows,
+        // where two spellings of one directory are one directory.
+        assert_eq!(
+            known.at(outside).key,
+            format!(
+                "cwd:{}",
+                normalize(Path::new("/Users/someone/2026/zerocode"))
+            )
+        );
         assert_eq!(known.at(outside).label.as_deref(), Some("2026/zerocode"));
         let nowhere = known.of(None);
         assert_eq!(nowhere, UNSCOPED_AT);

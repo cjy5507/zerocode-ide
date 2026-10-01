@@ -191,6 +191,8 @@ mod systemone;
 mod terminal_prefs_runtime;
 mod terminal_registry;
 mod terminal_theme_import;
+#[cfg(test)]
+mod test_host;
 mod token_scan;
 mod type_value_keys;
 mod typesafe_settings;

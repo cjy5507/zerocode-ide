@@ -1566,6 +1566,10 @@ fn every_seat_off_files_nothing_and_spawns_nothing() {
 /// process — its physical path, as `pwd -P` prints it — so a worker's
 /// worktree, reached through a path with a link in it, files its rows in
 /// the very file zo writes there.
+// Gated: the physical name is what `/bin/pwd -P` prints through a symlinked
+// folder, a Unix notion zo reads from inside its process; Windows has no
+// `pwd`, and its folders are not reached through `/var`-style links.
+#[cfg(unix)]
 #[test]
 fn a_panes_folder_is_named_as_zo_names_it_from_inside() {
     let base = tempfile::tempdir().expect("a folder");

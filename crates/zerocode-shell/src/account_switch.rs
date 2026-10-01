@@ -2384,37 +2384,39 @@ mod tests {
     /// the real CLI refreshes its own. Its answer is the headless result of
     /// a slash command: no turn, no token.
     fn fake_claude(dir: &Path, renews: bool) -> PathBuf {
-        let path = dir.join(if renews {
+        let name = if renews {
             "renewing-claude"
         } else {
             "dead-claude"
-        });
+        };
         let renewal = if renews {
             "printf '%s' '{\"claudeAiOauth\":{\"accessToken\":\"renewed-login\",\"expiresAt\":1}}' \
              > \"$CLAUDE_SECURESTORAGE_CONFIG_DIR/.credentials.json\""
         } else {
             ":"
         };
-        std::fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\n\
+        // Where it writes down what it was started with: beside the program
+        // under the name the test reads, not `$0`, which on Windows is the
+        // `.sh` the launcher hands to the shell.
+        let said = format!(
+            "{}.said",
+            crate::test_host::program_path(dir, name).display()
+        );
+        let pwd = crate::test_host::SH_PHYSICAL_PWD;
+        crate::test_host::fake_program(
+            dir,
+            name,
+            &format!(
+                "\
                  {{ printf 'config=%s\\n' \"$CLAUDE_CONFIG_DIR\"; \
                  printf 'store=%s\\n' \"$CLAUDE_SECURESTORAGE_CONFIG_DIR\"; \
-                 printf 'cwd=%s\\n' \"$(pwd -P)\"; \
+                 printf 'cwd=%s\\n' \"$({pwd})\"; \
                  printf 'argv='; for word in \"$@\"; do printf '[%s]' \"$word\"; done; printf '\\n'; \
-                 printf 'stdin=%s\\n' \"$(cat)\"; }} >> \"$0.said\"\n\
+                 printf 'stdin=%s\\n' \"$(cat)\"; }} >> '{said}'\n\
                  {renewal}\n\
                  printf '%s\\n' '{{\"type\":\"result\",\"is_error\":false,\"num_turns\":0,\"result\":\"plan\",\"usage\":{{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}}}'\n"
             ),
         )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        path
     }
 
     /// The endpoint as the account's login meets it: the renewed login
@@ -2512,7 +2514,10 @@ mod tests {
         let empty = crate::computer_use::errand::value::one_shot_dir()
             .and_then(|dir| dir.canonicalize().ok())
             .unwrap();
-        assert_eq!(Path::new(&line("cwd")), empty.as_path());
+        assert_eq!(
+            Path::new(&line("cwd")).canonicalize().unwrap(),
+            empty.as_path()
+        );
         // The log line carries a word, a duration and a count — no login.
         let words = renewal.words();
         assert!(words.contains("renewal=ran") && words.contains("renew_tokens=0"));

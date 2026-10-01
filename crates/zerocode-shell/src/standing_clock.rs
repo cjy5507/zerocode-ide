@@ -56,8 +56,19 @@ pub(crate) struct Stood(());
 /// Stand this thread's clock still at the present instant.
 #[cfg(test)]
 pub(crate) fn stand_still() -> Stood {
-    let stood = Instant::now();
-    STANDING.with(|held| held.set(Some((stood, stood + HANG_GUARD))));
+    stand_still_ahead(std::time::Duration::ZERO)
+}
+
+/// Stand it still `lead` after the present instant.
+///
+/// For a test that needs an instant long before "now" (a turn heard twice the
+/// stale bound ago): an `Instant` counts from the machine's boot, so a runner
+/// that came up minutes ago has no such instant before the real now, while one
+/// before a later "now" always exists.
+#[cfg(test)]
+pub(crate) fn stand_still_ahead(lead: std::time::Duration) -> Stood {
+    let stood = Instant::now() + lead;
+    STANDING.with(|held| held.set(Some((stood, Instant::now() + HANG_GUARD))));
     Stood(())
 }
 

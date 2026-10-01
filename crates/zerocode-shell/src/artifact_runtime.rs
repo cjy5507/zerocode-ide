@@ -2542,7 +2542,9 @@ pub(crate) fn report_path_in(payload: Option<&str>, body: &str) -> Option<PathBu
         return Some(PathBuf::from(path));
     }
     body.split(|ch: char| ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | '(' | ')' | ','))
-        .find(|word| word.starts_with('/') && word.ends_with(".md"))
+        .find(|word| {
+            word.ends_with(".md") && (word.starts_with('/') || Path::new(word).is_absolute())
+        })
         .map(PathBuf::from)
 }
 
@@ -4984,16 +4986,20 @@ mod tests {
     /// The report path a `worker_done` names, from the payload or the body.
     #[test]
     fn a_worker_done_names_its_report_in_the_payload_or_the_body() {
+        // The path the host spells: `C:\tmp\…` is where a Windows worker's
+        // report is, in the payload (escaped) and in the body (as written).
+        let report = crate::test_host::absolute("/tmp/t-9-report.md");
+        let payload = serde_json::json!({ "reportPath": report, "lifetime": "ephemeral" });
         assert_eq!(
-            report_path_in(
-                Some(r#"{"reportPath":"/tmp/t-9-report.md","lifetime":"ephemeral"}"#),
-                "done"
-            ),
-            Some(PathBuf::from("/tmp/t-9-report.md"))
+            report_path_in(Some(&payload.to_string()), "done"),
+            Some(report.clone())
         );
         assert_eq!(
-            report_path_in(None, "landed; report at `/tmp/t-9-report.md` (ephemeral)"),
-            Some(PathBuf::from("/tmp/t-9-report.md"))
+            report_path_in(
+                None,
+                &format!("landed; report at `{}` (ephemeral)", report.display())
+            ),
+            Some(report)
         );
         assert_eq!(report_path_in(None, "done, nothing to read"), None);
         assert_eq!(

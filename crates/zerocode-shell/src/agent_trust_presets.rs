@@ -858,8 +858,11 @@ mod tests {
         std::fs::write(
             &config,
             format!(
-                "{{\"{}\":\"prompt\",\"/kept\":\"workspace-write\"}}\n",
-                canonical_or_raw(&first).display()
+                "{}\n",
+                serde_json::json!({
+                    (canonical_or_raw(&first).to_string_lossy().into_owned()): "prompt",
+                    "/kept": "workspace-write",
+                })
             ),
         )
         .expect("seed");
