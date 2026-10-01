@@ -149,7 +149,10 @@ fn fake_ledger_launch_settles_the_existing_completion_channel_and_acks_afterward
         }
         let args = std::fs::read_to_string(root.path().join("argv.jsonl")).unwrap();
         assert!(args.contains("--worktree"));
-        assert!(!args.contains("tmux"));
+        // The ledger road never reaches for tmux: no word of any call is tmux or a tmux flag. Words, not the
+        // file's text — a checkout's folder can spell tmux (t-18917-zo-tmux-tmux went red on that alone).
+        let calls: Vec<Vec<String>> = args.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert!(calls.iter().flatten().all(|word| word != "tmux" && !word.starts_with("--tmux")), "{calls:?}");
         assert_eq!(manifest.lifecycle.execution.as_deref(), Some("ledger"));
     }
 }
