@@ -5262,12 +5262,11 @@ impl App {
             return;
         }
         let line = format!("/rewind {arg}");
-        let action = match commands::SlashCommand::parse(line.trim_end()) {
-            Ok(Some(commands::SlashCommand::Rewind { action })) => action,
-            _ => {
-                self.ui.note(SystemLevel::Info, strings::REWIND_USAGE);
-                return;
-            }
+        let Ok(Some(commands::SlashCommand::Rewind { action })) =
+            commands::SlashCommand::parse(line.trim_end())
+        else {
+            self.ui.note(SystemLevel::Info, strings::REWIND_USAGE);
+            return;
         };
         let restores = matches!(action, commands::WorkspaceRewindAction::Restore { .. });
         match self.session_mut().workspace_rewind_report(&action) {
