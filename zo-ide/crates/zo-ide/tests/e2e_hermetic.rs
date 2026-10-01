@@ -1949,6 +1949,46 @@ async fn e2e_rewind_command_works_in_the_shipped_tui() {
     let _ = run.finish();
 }
 
+/// `/rewind N` puts a guarded write back (file content asserted), refuses
+/// without `force` when the file changed after the checkpoint, and says in
+/// words that the conversation was not rewound (t-19459).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_rewind_n_restores_the_guarded_write_and_refuses_a_changed_file_without_force() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::writes_then_bash(
+        vec![("rewound.txt".to_string(), "written by the turn\n".to_string())],
+        None,
+        Duration::ZERO,
+        "### Done\n\n- one file written\n",
+    )
+    .await
+    .expect("start write script");
+    let mut run = pty(&layout, service.base_url(), &interactive_args());
+    let timeout = Duration::from_secs(20);
+    let file = layout.cwd.join("rewound.txt");
+
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"write one file\r").expect("send prompt");
+    run.wait_for_history_row("one file written", timeout);
+    assert_eq!(fs::read_to_string(&file).expect("the turn wrote the file"), "written by the turn\n");
+
+    // The turn left a checkpoint: the list names it.
+    run.send(b"/rewind\r").expect("send /rewind");
+    run.wait_for_history_row("1 file(s)", timeout);
+
+    // The file changed after the checkpoint: refused, content untouched.
+    fs::write(&file, "changed by hand\n").expect("change the file");
+    run.send(b"/rewind 1\r").expect("send /rewind 1");
+    run.wait_for_history_row("Retry with /rewind 1 force", timeout);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "changed by hand\n");
+
+    // With force the write is undone — the file did not exist before the turn.
+    run.send(b"/rewind 1 force\r").expect("send /rewind 1 force");
+    run.wait_for_history_row("the conversation was not rewound", timeout);
+    assert!(!file.exists(), "the restore must delete the file the turn created");
+    let _ = run.finish();
+}
+
 /// One turn, one spawn, four ledgers — joined by equality on the attempt key.
 ///
 /// This is the case the attempt-key contract exists for

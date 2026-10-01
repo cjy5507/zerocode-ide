@@ -35,7 +35,7 @@ pub const REWIND_NO_RUNTIME: &str = "rewind: the session is not available";
 pub fn workspace_restored_reminder(turn: usize, files: usize) -> String {
     format!(
         "{open}\nThe person rewound the workspace to before turn {turn}: {files} file(s) were put back (or deleted) outside this conversation. Edits you made in earlier turns to those files may no longer exist — read a file again before you edit it.\n</system-reminder>",
-        open = core_types::REMINDER_TAG_OPEN,
+        open = core_types::session::REMINDER_TAG_OPEN,
     )
 }
 
