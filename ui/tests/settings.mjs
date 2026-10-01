@@ -8,6 +8,7 @@
  *   node ui/tests/settings.mjs
  */
 
+import { endRun } from "./end-run.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -11473,4 +11474,4 @@ for (const result of results) {
   console.log(`${result.pass ? "PASS" : "FAIL"}  ${result.name}${detail}`);
 }
 console.log(`\n${results.length - failed}/${results.length} passed`);
-process.exit(failed ? 1 : 0);
+endRun(failed ? 1 : 0);

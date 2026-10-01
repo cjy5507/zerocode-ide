@@ -17,6 +17,7 @@
  *   node ui/tests/browser-door.mjs
  */
 
+import { endRun } from "./end-run.mjs";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -699,4 +700,4 @@ for (const result of results) {
   console.log(`${result.pass ? "PASS" : "FAIL"}  ${result.name}${detail}`);
 }
 console.log(`\n${results.length - failed}/${results.length} passed`);
-process.exit(failed ? 1 : 0);
+endRun(failed ? 1 : 0);
