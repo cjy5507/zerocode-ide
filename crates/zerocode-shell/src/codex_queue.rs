@@ -6,11 +6,14 @@
 //! Routes are process-local hints and carry only [`PointerNotice`].
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use thiserror::Error;
 use zerocode_core::ProviderSession;
@@ -77,6 +80,7 @@ impl LaunchBudget {
 
     /// Ask a machine that keeps failing to answer less and less often,
     /// without the silence ever hardening into a verdict about the CLI.
+    #[cfg(unix)]
     fn retry_after(self, attempts: u32) -> Duration {
         self.probe_retry_delay
             * 2u32.saturating_pow(attempts.saturating_sub(1).min(self.probe_retry_doublings))
@@ -85,6 +89,7 @@ impl LaunchBudget {
 
 /// Launch overrides can name different Codex executables, but a long-lived
 /// window must not retain an unbounded path-keyed probe cache.
+#[cfg(unix)]
 const CAPABILITY_CACHE_MAX: usize = 16;
 
 /// Crash residue is bounded per boot. More owned routes remain for the next
@@ -101,6 +106,7 @@ const QUEUE_TIMEOUT: Duration = Duration::from_secs(3);
 /// A retained Child handle is exact process authority. Give app-server two
 /// seconds to honor TERM, then reap it with KILL instead of running repeated
 /// process-table samplers on the terminal cleanup path.
+#[cfg(unix)]
 const SIDECAR_TERM_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Short polling keeps process and socket waits responsive without spinning.
@@ -128,8 +134,10 @@ const OWNERSHIP_MARKER_HEX_LEN: usize = 32;
 /// managed home it reads, so they are also what a capability answer belongs
 /// to. Measured: the four `--help` probes need nothing else, through the
 /// mirror shim or straight at the installed binary.
+#[cfg(any(unix, test))]
 const CODEX_ENV_ALLOWLIST: &[&str] = &["CODEX_HOME", "PATH"];
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CodexQueueCapability {
     Supported,
@@ -151,6 +159,8 @@ enum CodexQueueCapability {
 /// A starved machine, a hung executable and a broken wait have three different
 /// cures, and spending one word on all three is what sent a person hunting
 /// through a CLI that was working the whole time.
+// Built only by the Unix capability probe; kept whole so a refusal reads alike everywhere.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProbeStall {
     Unspawnable,
@@ -174,18 +184,21 @@ impl std::fmt::Display for ProbeStall {
 /// the bare word it was written with, and which executable that word reaches
 /// is decided by the launch environment — so an answer keyed on the name alone
 /// lets one worker's environment answer for another's.
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CapabilityKey {
     program: PathBuf,
     env: Vec<(String, String)>,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy)]
 struct CachedCapability {
     capability: CodexQueueCapability,
     retry_at: Option<Instant>,
 }
 
+#[cfg(unix)]
 impl CachedCapability {
     fn current(self, now: Instant) -> Option<CodexQueueCapability> {
         self.retry_at
@@ -219,11 +232,14 @@ enum CommandResult {
 impl CommandResult {
     /// Whether this is the MACHINE declining to answer rather than a verdict
     /// about the program. Only silence is worth re-asking.
+    #[cfg(unix)]
     const fn is_stall(self) -> bool {
         matches!(self, Self::SpawnFailed | Self::TimedOut | Self::WaitFailed)
     }
 }
 
+// Off Unix only `UnsupportedPlatform` is built; the other refusals are the Unix road's.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum CodexQueueError {
     #[cfg(not(unix))]
@@ -448,6 +464,20 @@ impl std::fmt::Debug for CodexNotifier {
     }
 }
 
+/// Whether something is listening on a sidecar's socket. Nothing is off Unix, where no sidecar
+/// starts, so a wake-up there is definitely unsent.
+fn socket_answers(socket: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(socket).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket;
+        false
+    }
+}
+
 impl SessionNotifier for CodexNotifier {
     fn notify(&self, notice: &PointerNotice) -> NotificationOutcome {
         let thread_id = self
@@ -458,16 +488,7 @@ impl SessionNotifier for CodexNotifier {
         let Some(thread_id) = thread_id else {
             return NotificationOutcome::DefinitelyUnsent;
         };
-        #[cfg(unix)]
-        {
-            use std::os::unix::net::UnixStream;
-
-            if UnixStream::connect(&self.socket).is_err() {
-                return NotificationOutcome::DefinitelyUnsent;
-            }
-        }
-        #[cfg(not(unix))]
-        {
+        if !socket_answers(&self.socket) {
             return NotificationOutcome::DefinitelyUnsent;
         }
         let args = queue_args(&self.endpoint, &thread_id, notice.text());
@@ -589,6 +610,7 @@ fn past_the_shims(program: &Path, env: &[(String, String)]) -> PathBuf {
 /// Split out for the same reason the shim installer splits its own: a
 /// decision this quiet needs to be checkable without moving the running
 /// process's environment underneath every other test in the file.
+#[cfg(unix)]
 fn past_the_shims_in(
     program: &Path,
     path: Option<&std::ffi::OsStr>,
@@ -642,7 +664,7 @@ fn prepare_with(
     #[cfg(not(unix))]
     {
         let _ = (program, args, cwd, env, budget);
-        return Err(CodexQueueError::UnsupportedPlatform);
+        Err(CodexQueueError::UnsupportedPlatform)
     }
     #[cfg(unix)]
     {
@@ -749,6 +771,7 @@ pub(crate) fn shutdown_all() {
     });
 }
 
+#[cfg(any(unix, test))]
 fn has_remote(args: &[String]) -> bool {
     args.iter()
         .any(|arg| arg == "--remote" || arg.starts_with("--remote="))
@@ -756,6 +779,7 @@ fn has_remote(args: &[String]) -> bool {
 
 /// Whether this launch line re-enters an existing thread (`codex … resume
 /// <id>`, the core's own spelling of it).
+#[cfg(unix)]
 fn resumes_a_thread(args: &[String]) -> bool {
     args.iter()
         .any(|arg| arg == zerocode_core::provider_session::CODEX_RESUME_SUBCOMMAND)
@@ -771,6 +795,7 @@ impl CodexQueueError {
     }
 }
 
+#[cfg(any(unix, test))]
 fn prepend_remote(args: &mut Vec<String>, endpoint: &str) {
     args.insert(0, endpoint.to_string());
     args.insert(0, "--remote".to_string());
@@ -788,6 +813,7 @@ fn queue_args(endpoint: &str, thread_id: &str, pointer: &str) -> Vec<String> {
     ]
 }
 
+#[cfg(any(unix, test))]
 fn minimal_codex_env(env: &[(String, String)]) -> Vec<(String, String)> {
     CODEX_ENV_ALLOWLIST
         .iter()
@@ -818,6 +844,7 @@ fn classify_queue_result(result: CommandResult) -> NotificationOutcome {
 /// anything at all. Every Codex worker on a machine with a working, installed
 /// CLI fell to PTY, and the fifteen-second retry re-measured the one PATH that
 /// was never going to change.
+#[cfg(unix)]
 fn capability(
     program: &Path,
     env: &[(String, String)],
@@ -839,6 +866,7 @@ fn capability(
 }
 
 /// One more measurement that left the surface unmeasured.
+#[cfg(unix)]
 fn unmeasured(stall: ProbeStall, stalled: u32) -> CodexQueueCapability {
     CodexQueueCapability::Indeterminate {
         stall,
@@ -849,6 +877,7 @@ fn unmeasured(stall: ProbeStall, stalled: u32) -> CodexQueueCapability {
 /// Ask one surface, and re-ask while it is the machine that is not
 /// answering. A verdict — the CLI saying yes or no — is taken the first time
 /// it is given, and the try count is a bound rather than a loop.
+#[cfg(unix)]
 fn measure(
     run_probe: &mut impl FnMut(&Path, &[String], Duration) -> CommandResult,
     program: &Path,
@@ -865,6 +894,7 @@ fn measure(
     result
 }
 
+#[cfg(unix)]
 fn capability_with(
     key: &CapabilityKey,
     cache: &Mutex<HashMap<CapabilityKey, CachedCapability>>,
@@ -1465,7 +1495,9 @@ mod tests {
     use super::*;
 
     /// The production table, under the names the assertions below read with.
+    #[cfg(unix)]
     const PRODUCTION: LaunchBudget = LaunchBudget::PRODUCTION;
+    #[cfg(unix)]
     const RETRY_DELAY: Duration = PRODUCTION.probe_retry_delay;
 
     /// The budget a test on a shared machine gets.
@@ -1486,6 +1518,7 @@ mod tests {
     /// test machine needs is not the bound a person waiting on a worker
     /// launch should pay, so the patience lives here and
     /// [`LaunchBudget::PRODUCTION`] keeps its two seconds.
+    #[cfg(unix)]
     const LOADED_MACHINE: LaunchBudget = LaunchBudget {
         probe_timeout: Duration::from_secs(20),
         probe_tries: 2,

@@ -442,7 +442,7 @@ impl PinnedTap {
     /// [`Self::perform_at_centre`] inside the device gate, as
     /// [`Self::perform_in`] is: the stream the look was taken on must still
     /// be alive at the tap.
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(target_os = "macos")]
     pub fn perform_at_centre_in(
         &self,
         input: &super::session::SessionInput<'_>,
@@ -548,6 +548,8 @@ fn lineage_ends(signature: &str) -> Option<(Value, Value)> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Proof {
     /// The element on top at the one point the press lands on.
+    // Only the iOS road proves a press at a point, and that road is macOS's.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Point,
     /// The whole tree, read again.
     Tree,

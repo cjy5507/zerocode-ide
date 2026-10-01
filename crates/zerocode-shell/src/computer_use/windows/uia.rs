@@ -280,7 +280,6 @@ pub(super) struct ElementFacts {
     pub name: Option<String>,
     pub help_text: Option<String>,
     pub value: Option<String>,
-    pub is_password: bool,
     pub enabled: bool,
     pub has_focus: bool,
     pub frame: Option<Rect>,
@@ -288,7 +287,6 @@ pub(super) struct ElementFacts {
     pub selected: bool,
     pub expanded: bool,
     pub settable: bool,
-    pub class_name: String,
 }
 
 fn cached_string(value: windows::core::Result<BSTR>) -> Option<String> {
@@ -493,7 +491,6 @@ pub(super) fn describe(element: &IUIAutomationElement, browser: bool) -> Element
             name,
             help_text,
             value,
-            is_password,
             enabled: cached_bool(element.CachedIsEnabled()).unwrap_or(true),
             has_focus: cached_bool(element.CachedHasKeyboardFocus()).unwrap_or(false),
             frame,
@@ -501,7 +498,6 @@ pub(super) fn describe(element: &IUIAutomationElement, browser: bool) -> Element
             selected,
             expanded,
             settable,
-            class_name,
         }
     }
 }

@@ -214,6 +214,7 @@ fn obsidian_is_installed(home: &Path) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
+        let _ = home;
         std::env::var_os("LOCALAPPDATA")
             .is_some_and(|root| PathBuf::from(root).join("Obsidian/Obsidian.exe").is_file())
     }

@@ -756,6 +756,7 @@ pub(crate) fn load_average() -> Option<LoadAverage> {
     }
 }
 
+#[cfg(any(unix, test))]
 fn load_reading(one_minute: f64, cores: usize) -> LoadAverage {
     let capacity = f64::from(u32::try_from(cores).unwrap_or(u32::MAX));
     LoadAverage {

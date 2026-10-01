@@ -165,14 +165,18 @@ package-macos:
     npm run check:package -- macos
     scripts/native-package-smoke.macos.sh
 
-# Windows cross-compile of the whole workspace — the only place `cfg(windows)` /
-# `cfg(not(unix))` code compiles on this Mac (the Windows CI leg builds it for
-# real; when that leg is dark this is what stands in). Needs `cargo install
-# cargo-xwin` and `brew install llvm` (`llvm-lib`), like zo-ide's `win-check`.
+# Windows cross-compile of the whole workspace, linted — the only place
+# `cfg(windows)` / `cfg(not(unix))` code compiles and meets clippy on this Mac
+# (the Windows CI leg builds and lints it for real; when that leg is dark this is
+# what stands in). Needs `cargo install cargo-xwin` and `brew install llvm`
+# (`llvm-lib`), like zo-ide's `win-check`.
 # 2026-09-10: found 7 product compile errors nobody had seen (tauri macOS-only
 # APIs, a stub signature, a Rust-2024 extern block) and 3 unix-only tests.
+# 2026-10-01: it only checked, so the first public run's Windows leg was the
+# first to stop on lints that exist on Windows alone (items only macOS uses,
+# needless returns, unused variables); it lints with the CI leg's `-D warnings`.
 win-check:
-    PATH="/opt/homebrew/opt/llvm/bin:$PATH" cargo xwin check --workspace --all-targets --target x86_64-pc-windows-msvc
+    PATH="/opt/homebrew/opt/llvm/bin:$PATH" cargo xwin clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 
 # The same cross-compile as a `verify` member: runs where cargo-xwin and
 # llvm-lib are installed (this Mac, the release lane) and says SKIPPED aloud

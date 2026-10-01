@@ -201,6 +201,7 @@ pub(crate) fn register_main_thread() {
     let _ = MAIN_THREAD.set(std::thread::current().id());
 }
 
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
 pub(crate) fn is_main_thread() -> bool {
     MAIN_THREAD.get() == Some(&std::thread::current().id())
 }

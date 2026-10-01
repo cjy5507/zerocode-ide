@@ -1540,7 +1540,7 @@ pub(crate) fn set_active_worktree(
                 state.config_root(),
                 orchestrator.repo_root(),
             );
-            state.set_active_context(chosen.path, Some(orchestrator));
+            state.set_active_context(chosen.path, Some(*orchestrator));
             Ok(branch)
         }
         KnownWorkspace::Folder(folder) => {

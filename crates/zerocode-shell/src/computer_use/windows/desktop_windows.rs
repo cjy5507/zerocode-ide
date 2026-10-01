@@ -24,10 +24,10 @@ use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GetAncestor, GetClassNameW,
     GetForegroundWindow, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SM_CMONITORS,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE,
-    SetForegroundWindow, ShowWindow, WINDOW_EX_STYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WindowFromPoint,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, SetForegroundWindow,
+    ShowWindow, WINDOW_EX_STYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WindowFromPoint,
 };
 use windows::core::BOOL;
 use zerocode_core::computer_use_protocol::click_plan::Recipient;
@@ -197,7 +197,10 @@ fn app_pid_of(hwnd: HWND, host_pid: u32) -> u32 {
 }
 
 /// How many monitors the desktop spans.
+#[cfg(test)]
 pub(super) fn monitor_count() -> i32 {
+    use windows::Win32::UI::WindowsAndMessaging::SM_CMONITORS;
+
     // SAFETY: a plain metric read.
     unsafe { GetSystemMetrics(SM_CMONITORS) }
 }

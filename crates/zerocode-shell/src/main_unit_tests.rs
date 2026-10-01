@@ -17916,7 +17916,10 @@ fn the_composer_learns_what_each_attached_path_is() {
             .expect("symlink");
     }
     let ask = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+    // The symlink rows below are pushed on Unix only.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut asked = vec![ask("note.md"), ask("folder"), ask("gone.md"), String::new()];
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut want = vec![
         PathKind::File,
         PathKind::Folder,
@@ -18050,13 +18053,17 @@ fn a_typed_tilde_expands_to_the_home_folder_and_nothing_else_does() {
 /// its argv into, standing for as long as it is told and answering what
 /// it is told to. The real helper is a Rust binary; this is the same
 /// contract with the panel taken out.
+#[cfg(unix)]
 struct FakeHelper {
     dir: tempfile::TempDir,
     program: PathBuf,
 }
 
+#[cfg(unix)]
 impl FakeHelper {
     fn standing_for(seconds: &str, answer: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let dir = tempfile::tempdir().expect("tempdir");
         let program = dir.path().join(zerocode_core::pick::HELPER_NAME);
         let argv_file = dir.path().join("argv");
@@ -18068,12 +18075,7 @@ impl FakeHelper {
             ),
         )
         .expect("script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
-        }
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         Self { dir, program }
     }
 
@@ -18220,6 +18222,7 @@ fn a_cancel_kills_the_helper() {
 /// The bench's bound (design §3): 「폴더 찾아보기 명령이 50 ms 안에 async
 /// 런타임으로 돌아온다」. Named beside the bench that reads it — it is the
 /// bench's own number, not the road's.
+#[cfg(unix)]
 const PICK_BENCH_RETURN_BUDGET: Duration = Duration::from_millis(50);
 
 /// Bench (t-2982 §3): while the helper's panel stands, the ask has already

@@ -1138,13 +1138,17 @@ pub(super) fn forgotten(state: &AppState, term: TermId) {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::thread;
     use zerocode_pty::DeliveryStep;
 
     const TEST_TERM_WITH_RECEIPT: TermId = 41;
     const TEST_TERM_WITHOUT_RECEIPT: TermId = 42;
+    #[cfg(unix)]
     const TEST_ROWS: u16 = 24;
+    #[cfg(unix)]
     const TEST_COLS: u16 = 80;
+    #[cfg(unix)]
     const TEST_POLL_MS: u64 = 5;
     /// A ceiling on a fake Codex's whole resume — a shell script starting in a
     /// pty, its banner, the delivery's readiness wait, the paste and the
@@ -1152,6 +1156,7 @@ mod tests {
     /// composer. Two seconds turned the v1.3.107 lane red (df529bf9,
     /// 2026-09-17, load 7) twice in the gate and once on the solo re-run, while
     /// the same run finishes in well under a second on a quiet machine.
+    #[cfg(unix)]
     const TEST_DEADLINE_SECS: u64 = 10;
 
     fn pending(agent: &str, road: zerocode_core::NudgeRoad, started: Instant) -> PendingNudge {

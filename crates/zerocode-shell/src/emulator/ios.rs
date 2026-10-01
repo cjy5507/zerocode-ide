@@ -75,6 +75,7 @@ const FALLBACK_FRAME_CEILING: Duration = Duration::from_millis(16);
 /// content a phone screen is made of: text, icon edges, thin strokes. The bytes
 /// this costs are bytes the push socket and the raw IPC channel were already
 /// built to carry.
+#[cfg(target_os = "macos")]
 const FRAME_JPEG_QUALITY: f64 = 0.82;
 
 /// The most pictures a second the helper is allowed to push while the pane is
@@ -118,6 +119,7 @@ const fn frame_rate_for(active: bool) -> u32 {
 /// Not a frame interval — a still screen legitimately pushes nothing for
 /// minutes. It is how often a pump on the fast road re-reads the things only it
 /// can act on: a pause, a resize, a stream that has died.
+#[cfg(target_os = "macos")]
 const FRAME_WAIT_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// The long edge a pane gets before it has said how big it is.
@@ -177,6 +179,7 @@ const WINDOW_LOOK_EVERY: Duration = Duration::from_secs(1);
 /// the first time spends minutes — and minutes of "the device is waking" is a
 /// true sentence, where five of them is a pane nobody should still be looking
 /// at.
+#[cfg(target_os = "macos")]
 const BOOT_WAIT: Duration = Duration::from_secs(300);
 
 /// How often the helper is asked for again while the device is still coming
@@ -535,6 +538,7 @@ impl BootWatch {
         })
     }
 
+    #[cfg(target_os = "macos")]
     fn waking() -> Arc<Self> {
         Arc::new(Self {
             finished: std::sync::atomic::AtomicBool::new(false),
@@ -545,6 +549,7 @@ impl BootWatch {
         !self.finished.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    #[cfg(target_os = "macos")]
     fn finished(&self) {
         self.finished
             .store(true, std::sync::atomic::Ordering::Release);
@@ -665,10 +670,14 @@ struct HelperPicture {
     /// that tells a live surface from a cached dead one (main.swift warns that
     /// a surface already held keeps answering its last pixels forever), so the
     /// one line this road writes carries it.
+    // Only `arrived` reports it, and that line is the macOS road's (or a test's).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     seed: u32,
 }
 
 /// What the helper had to say about the screen this turn.
+// Only the macOS road, which asks the helper, builds the other two; every pump matches all three.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum HelperFrameAnswer {
     /// This machine has no helper road — the roads below answer instead.
     Absent,
@@ -680,9 +689,11 @@ enum HelperFrameAnswer {
 }
 
 /// Consecutive helper failures before the pump rests the road.
+#[cfg(any(target_os = "macos", test))]
 const HELPER_MISSES_BEFORE_GIVING_UP: u32 = 3;
 
 /// How long a rested helper road waits before it is tried as if new.
+#[cfg(any(target_os = "macos", test))]
 const HELPER_ROAD_RETRY: Duration = Duration::from_secs(5);
 
 /// The helper's push road, and what the pump remembers about it.
@@ -697,6 +708,8 @@ const HELPER_ROAD_RETRY: Duration = Duration::from_secs(5);
 /// floor is where "iOS 속도가 너무 느리고 화면이동시 파란색" lives: at five
 /// frames a second a transition is one or two of the device's own blur frames,
 /// each standing for hundreds of milliseconds.
+// What it remembers is what the macOS road reads; off macOS the pump only holds one.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct HelperRoad {
     /// The long edge and the rate the helper was last told to push at, and
     /// `None` when it is not pushing. Comparing the pane's current ask against
@@ -720,6 +733,8 @@ struct HelperRoad {
 /// One value rather than four more arguments because they arrive together and
 /// say one thing: this is the picture this pane wants right now, and this is
 /// what the road may conclude from failing to hand one over.
+// Only the macOS road reads the ask; the pump builds one per turn everywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy)]
 struct Turn {
     /// The long edge the pane can actually paint.
@@ -758,6 +773,8 @@ struct Turn {
 /// would otherwise forgive itself forever and never rest. It is a PICTURE that
 /// buys the next free pass, because a picture is the only proof the road was
 /// healthy in between.
+// The macOS road (and the tests) open and spend the free pass; elsewhere only `Closed` is built.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Seam {
     /// Nothing has been asked for that would close a stream.
@@ -768,6 +785,7 @@ enum Seam {
     Spent,
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Stumble {
     /// The device is still coming up.
@@ -791,6 +809,7 @@ impl HelperRoad {
 
     /// What this turn's failure counts as — and where a re-negotiation's one
     /// free pass is spent.
+    #[cfg(any(target_os = "macos", test))]
     fn why(&mut self, booting: bool) -> Stumble {
         if booting {
             return Stumble::Booting;
@@ -804,6 +823,7 @@ impl HelperRoad {
 
     /// Answer one failure: count it only when nothing explains it, and put the
     /// road down once the unexplained ones stop being hiccups.
+    #[cfg(any(target_os = "macos", test))]
     fn stumbled(
         &mut self,
         why: Stumble,
@@ -843,6 +863,7 @@ impl HelperRoad {
     }
 
     /// Take one picture, saying once per stream which road carried it.
+    #[cfg(any(target_os = "macos", test))]
     fn arrived(
         &mut self,
         picture: HelperPicture,
@@ -1360,6 +1381,7 @@ pub(crate) async fn start_emulator_stream(
         // way to a picture — so paying it before the pump exists spends the
         // whole of it as blank pane. `release` is safe on a udid that was
         // never retained, so the cleanup can be attached before anything is.
+        #[cfg(target_os = "macos")]
         let release_udid = chosen.udid.clone();
         let stream_id = crate::hooks::random_token().ok_or("스트림 id를 만들 수 없습니다")?;
         let descriptor = EmulatorStream {

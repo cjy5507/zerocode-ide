@@ -35,7 +35,10 @@ pub enum PermissionId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionStatus {
+    // Only macOS's probes (and a test) build these two; nothing else answers yes or no.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Granted,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Denied,
     Unknown,
     Ready,

@@ -26,7 +26,7 @@ pub(super) fn missing_permissions() -> Vec<ComputerPermissionState> {
 }
 
 /// The report of a platform that has no provider at all.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
 #[must_use]
 pub(super) fn unsupported_permissions() -> ComputerPermissionReport {
     ComputerPermissionReport {

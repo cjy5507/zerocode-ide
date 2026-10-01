@@ -906,6 +906,8 @@ fn copy_plain_file(source: &Path, destination: &Path, metadata: &fs::Metadata) -
     }
     #[cfg(unix)]
     preserve_private_executable_bit(metadata, destination)?;
+    #[cfg(not(unix))]
+    let _ = metadata;
     Ok(())
 }
 
