@@ -55,6 +55,15 @@ const SCENE = [
   { path: "/r/compact", term: 8110, hook: "done", noTask: true, ledger: { reported: true, failed: true } },
   { path: "/r/lost", settled: { reported: true, failed: true, task: "released, failed" } },
   { path: "/r/idle" },
+  // Done by hand after attempts that handed nothing in (t-19328): no review
+  // record can ever be written for it, the ledger says so (`unreviewable`), and
+  // it waits on nobody — not 검증 대기, and not a verified 완료 either.
+  { path: "/r/norec", settled: { reported: true, task: "released, done by hand",
+    review: { unreviewable: true } } },
+  { path: "/r/norecfail", settled: { reported: true, failed: true, task: "released, done by hand after a failure",
+    review: { unreviewable: true } } },
+  { path: "/r/norecseat", term: 8111, hook: "done", task: "seated, done by hand",
+    ledger: { reported: true, review: { unreviewable: true } } },
 ];
 
 const WANT_GROUPS = {
@@ -63,7 +72,7 @@ const WANT_GROUPS = {
   done: ["/r/ver", "/r/own", "/r/landed"],
   working: ["/r/work"],
   active: ["/r/failed", "/r/quiet", "/r/compact"],
-  inactive: ["/r/lost", "/r/idle"],
+  inactive: ["/r/lost", "/r/idle", "/r/norec", "/r/norecfail", "/r/norecseat"],
 };
 
 /* What each row's dot should read, by the indicator the window draws. 완료 is
@@ -75,7 +84,7 @@ const WANT_INDICATOR = {
   "/r/ask": "permission", "/r/rep": "review", "/r/claim": "review", "/r/left": "review",
   "/r/ver": "done", "/r/own": "done", "/r/work": "working", "/r/gone": "review", "/r/landed": "done",
   "/r/failed": "active", "/r/quiet": "active", "/r/compact": "active", "/r/lost": "inactive",
-  "/r/idle": "inactive",
+  "/r/idle": "inactive", "/r/norec": "inactive", "/r/norecfail": "inactive", "/r/norecseat": "inactive",
 };
 
 /* The words that stood on one tooltip before (`worktree.stateIdle`), one per
@@ -93,6 +102,7 @@ const TALL = 2400;
 const WANT_PHASE = {
   reported: "review", "claimed-verified": "review", "claimed-merged": "review", "claimed-deployed": "review",
   verified: "vouched", merged: "vouched", deployed: "vouched", failed: "", closed: "closed",
+  unreviewable: "unreviewable",
 };
 
 export async function testSidebarReviewState({ browser, origin, ok, faults }) {
@@ -210,6 +220,42 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       JSON.stringify({ lanes, want }),
     );
 
+    /* The number: the 검증 대기 lane counts only work a coordinator can still
+     * review. The same ledger as an older window's rows carried it — no
+     * `unreviewable` anywhere — puts six checkouts there, exactly as it always
+     * did; with the ledger's own fact the two reported ones whose task was done
+     * by hand with nothing handed in leave it (the third was a failed attempt,
+     * which the old reading called 실패, not waiting), and nothing that can be
+     * reviewed does. */
+    const counted = await page.evaluate(async () => {
+      const count = () => window.__READ__.groups().find((lane) => lane.id === "review")?.rows.length ?? 0;
+      const follow = async (want, payload) => {
+        for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload });
+        for (let tries = 0; tries < 80 && !(want()); tries += 1) await new Promise((done) => setTimeout(done, 25));
+        freezeWorkspaceActivity();
+        await refreshWorktrees();
+        await window.__PAINTED__();
+      };
+      const after = count();
+      const held = window.__LEDGER__;
+      window.__LEDGER__ = held.map((row) => {
+        const { unreviewable, ...review } = row.review;
+        return { ...row, review };
+      });
+      await follow(() => paneLedger.get(8111)?.review?.unreviewable === undefined
+        && checkoutLedger.get("/r/norec")?.review?.unreviewable === undefined, 30);
+      const before = count();
+      window.__LEDGER__ = held;
+      await follow(() => paneLedger.get(8111)?.review?.unreviewable === true
+        && checkoutLedger.get("/r/norec")?.review?.unreviewable === true, 31);
+      return { before, after, restored: count() };
+    });
+    ok(
+      "the 검증 대기 lane counts only what a coordinator can still review: the same ledger without the fact (an older ledger's rows) puts six checkouts there, with it four — the two reported ones whose task was done by hand with nothing handed in leave it",
+      counted.before === 6 && counted.after === 4 && counted.restored === 4,
+      JSON.stringify(counted),
+    );
+
     /* ---- 2. every row, in shape and in words ------------------------------- */
     const marks = await page.evaluate((paths) => Object.fromEntries(paths.map((path) => [path, window.__READ__.mark(path)])),
       SCENE.map((one) => one.path));
@@ -280,8 +326,8 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
           said,
         };
       };
-      return Object.fromEntries(["/r/rep", "/r/claim", "/r/left", "/r/ver", "/r/own", "/r/gone", "/r/landed", "/r/failed", "/r/quiet", "/r/compact", "/r/lost"]
-        .map((path) => [path, read(path)]));
+      return Object.fromEntries(["/r/rep", "/r/claim", "/r/left", "/r/ver", "/r/own", "/r/gone", "/r/landed", "/r/failed", "/r/quiet", "/r/compact", "/r/lost",
+        "/r/norec", "/r/norecfail", "/r/norecseat"].map((path) => [path, read(path)]));
     });
     // The failed attempt's line, as the window words it — "" where the window has none.
     const failedTip = await page.evaluate(() =>
@@ -290,6 +336,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       awaiting: t("board.awaitingReview", "검증 대기"), claimed: t("board.claimedMerged", "병합됐다 함"),
       verified: t("board.verified", "검증됨"), merged: t("board.merged", "병합됨"), done: t("board.done", "완료"),
       failed: t("board.desk.stageFailed", "실패"), idle: t("board.idle", "대기 중"),
+      noRecord: t("board.noReviewRecord", "완료 — 검토 기록 없음"),
     }));
     ok(
       "the agent rows hung under a card wear the same distinction: an hourglass and 검증 대기 while the coordinator has not vouched, a check and the ledger's word once it has, a plain 완료 for an agent the ledger never seated, and a plain dot at rest — never a check — for a turn that ended before its report or a failed attempt",
@@ -323,6 +370,76 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
         ["/r/rep", "/r/claim", "/r/left", "/r/ver", "/r/own", "/r/gone", "/r/landed", "/r/quiet"]
           .every((path) => agents[path].dotTip === ""),
       JSON.stringify({ agents, wantWords, failedTip }),
+    );
+    // Work nothing can review says so in its own word — on a seated row whose turn
+    // ended and on the work a released worker left, even after a failed attempt —
+    // with a quiet check (nothing is hourglassed for a coordinator, and nothing
+    // vouches for it either) and no failure tip.
+    ok(
+      "work a coordinator can never review wears its own word on the agent rows — 완료 — 검토 기록 없음, a quiet check, never the hourglass and 검증 대기, never green and 검증됨, and not 실패 after a failed attempt",
+      ["/r/norec", "/r/norecfail", "/r/norecseat"].every((path) =>
+        agents[path]?.said === wantWords.noRecord && agents[path].said !== wantWords.awaiting &&
+        agents[path].glyph === "#i-circle-check" && !agents[path].klass.includes("is-review") &&
+        !agents[path].klass.includes("is-verified") && !agents[path].klass.includes("is-failed") &&
+        !agents[path].klass.includes("is-unsettled") && agents[path].dotTip === ""),
+      JSON.stringify({ agents: [agents["/r/norec"], agents["/r/norecfail"], agents["/r/norecseat"]], wantWords }),
+    );
+
+    /* A finished child pane folds into 완료 N개 unless the ledger still owes it a
+     * coordinator's look — a report nobody vouched for, a claim, an attempt that
+     * failed. Work nothing can ever review (and work closed) owes nobody anything,
+     * so its pane folds like a vouched one instead of standing for ever as if a
+     * coordinator had something left to do on it (t-19328). */
+    const kids = await page.evaluate(() => {
+      const path = "/r/kids";
+      const tab = { kind: "term", worktree: path, id: "kids-tab",
+        layout: { type: "split", first: { type: "leaf", term: 8201 }, second: { type: "leaf", term: 8202 } } };
+      tabs.push(tab);
+      hookStates.set(8201, "done");
+      hookStates.set(8202, "done");
+      paneAgents.set(8201, "claude");
+      paneAgents.set(8202, "codex");
+      paneParents.set(8202, 8201);
+      agentFolded.delete(8201);
+      const old = { verified: false, merged: false, deployed: false, written: false };
+      const facts = (review, over = {}) => ({ run: "run-1", worker: "w-kid", agent: "codex", task: "a child's task",
+        taskId: "t-kid", ledger: "active", reported: true, failed: false, review, closed: null, ...over });
+      const seen = {};
+      try {
+        for (const [name, review, over] of [
+          ["waiting", old, {}],
+          ["claimed", { ...old, claimed_verified: true, author: "worker" }, {}],
+          ["failedAttempt", old, { failed: true }],
+          ["vouched", { ...old, verified: true, written: true, author: "coordinator" }, {}],
+          ["unreviewable", { ...old, unreviewable: true }, {}],
+          ["afterFailure", { ...old, unreviewable: true }, { failed: true }],
+          ["closed", old, { closed: { kind: "outdated", why: "x" } }],
+        ]) {
+          paneLedger.set(8202, facts(review, over));
+          const rows = worktreeAgentRows(path);
+          seen[name] = { stands: rows.some((row) => row.term === 8202 && !row.sub && !row.history),
+            folded: rows.find((row) => row.history)?.history ?? 0 };
+        }
+      } finally {
+        tabs.splice(tabs.indexOf(tab), 1);
+        for (const term of [8201, 8202]) {
+          hookStates.delete(term);
+          paneAgents.delete(term);
+          paneLedger.delete(term);
+        }
+        paneParents.delete(8202);
+      }
+      return seen;
+    });
+    ok(
+      "a child pane whose work nothing can review (or that was closed) folds into 완료 N개 like a vouched one — a coordinator has nothing left to do on it — while a child that waits for review, claims a result or failed still stands",
+      kids.waiting.stands && kids.waiting.folded === 0 && kids.claimed.stands && kids.claimed.folded === 0 &&
+        kids.failedAttempt.stands && kids.failedAttempt.folded === 0 &&
+        !kids.vouched.stands && kids.vouched.folded === 1 &&
+        !kids.unreviewable.stands && kids.unreviewable.folded === 1 &&
+        !kids.afterFailure.stands && kids.afterFailure.folded === 1 &&
+        !kids.closed.stands && kids.closed.folded === 1,
+      JSON.stringify(kids),
     );
 
     /* The other two places that word a workspace's state say it the same way: a
@@ -452,6 +569,8 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
           failedTip: { want: typeof AGENT_FAILED_TIP === "undefined" ? "" : t(AGENT_FAILED_TIP.key, AGENT_FAILED_TIP.word),
             live: dotTip("/r/failed"), settled: dotTip("/r/lost") },
           review: t("board.awaitingReview", "검증 대기"), done: t("sidebar.stateDone", "완료"),
+          noRecord: t("board.noReviewRecord", "완료 — 검토 기록 없음"), verified: t("board.verified", "검증됨"),
+          seatedNoRecord: document.querySelector('.wt-agents[data-worktree-path="/r/norecseat"] .wt-agent-state')?.textContent ?? "",
           heads: window.__READ__.groups().map((lane) => lane.head),
           gone: words("/r/gone"), landed: words("/r/landed"), own: words("/r/own"),
           shapes: [words("/r/gone").shape, words("/r/landed").shape],
@@ -459,6 +578,16 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       }, code);
     }
     await page.evaluate(() => setLocale("ko", { persist: false }));
+    ok(
+      "the five languages each say 완료 — 검토 기록 없음 in a word of their own: not 검증 대기, not the verified word, not Korean, and the seated row follows the language",
+      LOCALES.every((code) => {
+        const one = languages[code];
+        return one.noRecord !== one.review && one.noRecord !== one.verified && one.noRecord !== one.done &&
+          one.seatedNoRecord === one.noRecord &&
+          (code === "ko" || one.noRecord !== languages.ko.noRecord);
+      }),
+      JSON.stringify(Object.fromEntries(LOCALES.map((code) => [code, [languages[code].noRecord, languages[code].seatedNoRecord]]))),
+    );
     const conflatedTip = (one) => CONFLATED.includes(one.gone.tip) || CONFLATED.includes(one.landed.tip) || CONFLATED.includes(one.own.tip);
     ok(
       "the five languages each say 검증 대기 and 완료 on the lane heads, on the row and in the tooltip — the words differ from each other, and none falls back to Korean",
@@ -622,9 +751,11 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       return { kept, all: [...document.querySelectorAll(".wt-row")].length };
     });
     ok(
-      "the sleeping sweep spares the work that waits for a coordinator: a released worker's unreviewed checkout stays on the list while a bare one, a released worker's failed one and a merged one go",
+      "the sleeping sweep spares the work that waits for a coordinator: a released worker's unreviewed checkout stays on the list while a bare one, a released worker's failed one, a merged one and one nothing can review go",
       sweep.kept.includes("/r/gone") && !sweep.kept.includes("/r/idle") && !sweep.kept.includes("/r/lost") &&
-        !sweep.kept.includes("/r/landed") && sweep.kept.includes("/r/rep") && sweep.all === 14,
+        !sweep.kept.includes("/r/landed") && sweep.kept.includes("/r/rep") && sweep.all === 17 &&
+        // Work nothing can review waits on nobody: the sweep takes it like a failed one.
+        !sweep.kept.includes("/r/norec") && !sweep.kept.includes("/r/norecfail"),
       JSON.stringify(sweep),
     );
 
@@ -755,14 +886,22 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
         return [one.stage, ledgerReviewPhaseOf(row)];
       }));
       return { stages, placed, none: ledgerReviewPhaseOf({ reported: false, review: null }),
-        claimNotVouched: ledgerReviewPhaseOf(facts({ claimed_verified: true, verified: false })) };
+        claimNotVouched: ledgerReviewPhaseOf(facts({ claimed_verified: true, verified: false })),
+        // The attempt failed and the task was done by hand: the task's reading wins.
+        unreviewableAfterFailure: ledgerReviewPhaseOf(facts({ unreviewable: true }, { failed: true })),
+        // Between closed and vouched: something a coordinator vouched for is not
+        // hidden by it, and it never hides what still waits.
+        ranked: [WORKTREE_PHASE_RANK.closed, WORKTREE_PHASE_RANK.unreviewable, WORKTREE_PHASE_RANK.vouched,
+          WORKTREE_PHASE_RANK.unsettled, WORKTREE_PHASE_RANK.review] };
     });
     ok(
       "the sidebar reads the board's own review stages: a worker's report or claim waits for review, a coordinator's verify, merge or deploy is 완료, and a failed or unreported one keeps the old rule — every stage the board can name is placed",
       seam.missing !== true &&
         JSON.stringify([...seam.stages].sort()) === JSON.stringify(Object.keys(WANT_PHASE).sort()) &&
         Object.entries(WANT_PHASE).every(([stage, phase]) => seam.placed[stage] === phase) &&
-        seam.none === "" && seam.claimNotVouched === "review",
+        seam.none === "" && seam.claimNotVouched === "review" &&
+        seam.unreviewableAfterFailure === "unreviewable" &&
+        seam.ranked.every((rank, at) => Number.isInteger(rank) && (at === 0 || rank > seam.ranked[at - 1])),
       JSON.stringify(seam),
     );
 

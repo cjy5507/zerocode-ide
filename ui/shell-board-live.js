@@ -848,7 +848,9 @@ function dressAgentGraphWait(chip, wait) {
  * 단계로 되읽을 때가 같은 표를 읽는다. 낱말은 t-6815의 seam
  * (`ledgerReviewWord`)이 쓰는 그 키들이다 — 코디네이터가 적은 사실 셋, 워커가
  * 적은 **주장** 셋(원장이 사실과 떼어 둔 것), 그리고 보고. 주장은 제 낱말로만
- * 서고 사실의 단계가 되지 않는다.
+ * 서고 사실의 단계가 되지 않는다. 검토 기록을 영영 받을 수 없는 일(`unreviewable`,
+ * 모든 시도가 아무것도 넘기지 않고 끝난 완료 과업)은 원장이 그렇게 읽어 보낸
+ * 칸이고 — 보고로 세지 않는다.
  *
  * `flag`는 그 seam이 그 낱말을 고를 때 읽는 원장 행의 칸이다(`reported`는 행의
  * 보고, `failed`는 그 보고가 실패였다는 행의 칸(t-10993), 나머지는 `review`의 칸).
@@ -862,6 +864,7 @@ const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
   { stage: "claimed-deployed", flag: "claimed_deployed", key: "board.claimedDeployed", word: "배포됐다 함" },
   { stage: "claimed-merged", flag: "claimed_merged", key: "board.claimedMerged", word: "병합됐다 함" },
   { stage: "claimed-verified", flag: "claimed_verified", key: "board.claimedVerified", word: "검증됐다 함" },
+  { stage: "unreviewable", flag: "unreviewable", key: "board.noReviewRecord", word: "완료 — 검토 기록 없음" },
   { stage: "failed", flag: "failed", key: "board.desk.stageFailed", word: "실패" },
   { stage: "reported", flag: "reported", key: "board.awaitingReview", word: "검증 대기" },
 ]);

@@ -905,6 +905,16 @@ take a review record. `task-settle --apply --retry-request settle-<run>` closes
 the first pile `outdated`, from the coordinator seat only; a completed task is
 never changed by it. Run it without `--apply` first and read both counts.
 
+The board does not wait on those completed tasks either. A completed task whose
+every attempt ended handing nothing in has no source a review could name —
+`task-update` refuses any review of it — so `task-list` carries
+`review.unreviewable: true` on its row, and the board, the worker rows and the
+sidebar read 완료 — 검토 기록 없음 instead of 검증 대기 from the moment it is so,
+without the quiet week `task-settle` waits. It is the ledger's reading of the
+attempts each time it is asked and is never written down: a new attempt that
+hands something in takes it back, and a task with a review written, a decision
+standing or an attempt still open is never read this way.
+
 ## Decision gates
 
 When a slice reaches a decision that is a person's or the coordinator's to
