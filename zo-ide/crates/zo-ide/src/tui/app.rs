@@ -5275,6 +5275,8 @@ impl App {
                 self.ui.note(SystemLevel::Info, &report);
                 if restores {
                     self.ui.note(SystemLevel::Info, strings::REWIND_FILES_ONLY);
+                } else {
+                    self.ui.note(SystemLevel::Info, strings::REWIND_LIST_NOTE);
                 }
             }
             Err(error) => self.ui.note(SystemLevel::Error, &format!("rewind: {error}")),

@@ -13,6 +13,11 @@ pub const MAX_CHECKPOINT_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// Maximum number of workspace checkpoints retained for one session.
 pub const MAX_WORKSPACE_CHECKPOINTS: usize = 50;
 
+/// Maximum bytes of file content (before and after states together) the
+/// retained checkpoints of one session hold in memory. The oldest go first;
+/// the newest checkpoint always stays, however large (t-19459).
+pub const MAX_WORKSPACE_CHECKPOINT_BYTES: u64 = 128 * 1024 * 1024;
+
 const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
@@ -95,6 +100,21 @@ impl Default for WorkspaceCheckpoint {
 }
 
 impl WorkspaceCheckpoint {
+    /// Bytes of file content this checkpoint holds in memory.
+    #[must_use]
+    pub fn content_bytes(&self) -> u64 {
+        let held = |snapshot: &WorkspaceFileSnapshot| {
+            snapshot
+                .content
+                .as_ref()
+                .map_or(0, |content| content.len() as u64)
+        };
+        self.files
+            .iter()
+            .map(|file| held(&file.before) + held(&file.after))
+            .sum()
+    }
+
     #[must_use]
     pub fn has_oversized_files(&self) -> bool {
         self.files
@@ -157,7 +177,9 @@ fn render_workspace_checkpoint_list_at(
             checkpoint.files.len(),
         );
     }
-    output.push_str("\n  Restore with /rewind <turn> [force].");
+    output.push_str(
+        "\n  Restore with /rewind <Turn number> [force] — the Turn number in a row, not its position in the list.",
+    );
     output
 }
 
@@ -338,10 +360,28 @@ impl WorkspaceCheckpointStore {
                 self.remove_durable_checkpoint(evicted.turn_index);
             }
         }
+        self.evict_over_budget(MAX_WORKSPACE_CHECKPOINT_BYTES);
         if let Some(dir) = self.durable_dir.as_ref() {
             persist_checkpoint(dir, &checkpoint)?;
         }
         Ok(Some(checkpoint))
+    }
+
+    /// Drop the oldest checkpoints until the retained content fits
+    /// `byte_cap`; the newest one stays whatever its size.
+    fn evict_over_budget(&mut self, byte_cap: u64) {
+        let mut held: u64 = self
+            .checkpoints
+            .iter()
+            .map(WorkspaceCheckpoint::content_bytes)
+            .sum();
+        while held > byte_cap && self.checkpoints.len() > 1 {
+            let Some(evicted) = self.checkpoints.pop_front() else {
+                break;
+            };
+            held = held.saturating_sub(evicted.content_bytes());
+            self.remove_durable_checkpoint(evicted.turn_index);
+        }
     }
 
     pub(crate) fn checkpoints(&self) -> Vec<WorkspaceCheckpoint> {
@@ -674,6 +714,49 @@ mod tests {
         store.record_before(&path).unwrap();
         assert!(store.finish_turn().unwrap().is_none());
         assert!(store.checkpoints().is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_turn_number_a_list_row_shows_is_the_one_rewind_accepts() {
+        let (dir, context) = history("numbers");
+        let listing = render_workspace_checkpoint_list(&context.workspace_checkpoints());
+        let shown: Vec<usize> = listing
+            .lines()
+            .filter_map(|line| line.split("Turn ").nth(1))
+            .filter_map(|rest| rest.split_whitespace().next()?.parse().ok())
+            .collect();
+        assert!(shown.len() >= 2, "{listing}");
+        for turn in shown {
+            context
+                .restore_workspace_to_before(turn, true)
+                .unwrap_or_else(|error| panic!("/rewind {turn} refused: {error}"));
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retained_checkpoints_stay_under_the_byte_budget_and_keep_the_newest() {
+        let dir = temp_dir("budget");
+        let path = dir.join("big.bin");
+        fs::write(&path, vec![0u8; 100]).unwrap();
+        let mut store = WorkspaceCheckpointStore::default();
+        for turn in 1..=3 {
+            store.begin_turn(turn);
+            store.record_before(&path).unwrap();
+            fs::write(&path, vec![u8::try_from(turn).unwrap(); 100]).unwrap();
+            store.record_write_success(&path);
+            store.finish_turn().unwrap();
+        }
+        assert_eq!(store.checkpoints().len(), 3);
+        // Each checkpoint holds 200 bytes (before + after): a 450-byte budget
+        // keeps two, a 10-byte budget still keeps the newest one.
+        store.evict_over_budget(450);
+        let kept: Vec<usize> = store.checkpoints().iter().map(|c| c.turn_index).collect();
+        assert_eq!(kept, vec![2, 3]);
+        store.evict_over_budget(10);
+        let kept: Vec<usize> = store.checkpoints().iter().map(|c| c.turn_index).collect();
+        assert_eq!(kept, vec![3]);
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -26,6 +26,7 @@ pub const REWIND_NOTHING: &str = "Nothing to rewind — the conversation has no 
 pub const REWIND_BLOCKED: &str = "Nothing was rewound — the last record is a summary or system notice, which a rewind does not remove";
 pub const REWIND_NOT_SAVED: &str = "Nothing was rewound — the saved transcript changed on disk, so the conversation was left as it was";
 pub const REWIND_FILES_ONLY: &str = "Files only — the conversation was not rewound; /rewind turn drops the last turn";
+pub const REWIND_LIST_NOTE: &str = "Checkpoints live in memory: none survive /resume or a restart, and only file edits made through zo's write tools since this session was opened are listed — not shell commands, and not edits by helper agents.";
 pub const REWIND_BUSY: &str = "'/rewind' is disabled while a task is in progress.";
 pub const REWIND_NO_RUNTIME: &str = "rewind: the session is not available";
 
