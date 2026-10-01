@@ -53,8 +53,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 mod child_watch;
+mod tmux_ask;
 
 pub use child_watch::{ChildWatch, Woken};
+use tmux_ask::Said;
 
 /// Settings key holding the sub-agent mode (`auto` | `panes` | `inline`).
 pub const SETTINGS_MODE_KEY: &str = "subagentMode";
@@ -1597,34 +1599,48 @@ impl Tmux {
     }
 
     /// End one pane. `false` when tmux refused — the pane may already be gone,
-    /// which is the same outcome.
+    /// which is the same outcome — or has not answered within
+    /// [`PANE_KILL_WAIT`]; a `kill-pane` that slow is left to finish on its
+    /// own, within [`TMUX_ASK_BOUND`] (t-18917).
     #[must_use]
     pub fn kill_pane(&self, pane: &str) -> bool {
-        self.run(&[
-            "kill-pane".to_string(),
-            "-t".to_string(),
-            pane.to_string(),
-        ])
-        .is_ok()
+        let ask = tmux_ask::Ask::start(&self.program, &["kill-pane", "-t", pane], false, None);
+        let Some(said) = ask.answer_within(PANE_KILL_WAIT) else {
+            ask.let_finish();
+            return false;
+        };
+        matches!(said, Said::Yes(_))
     }
 
     /// Is this pane still one of the team's?
     ///
     /// The question a parent asks about a child that has written nothing: a
     /// pane that is gone with no `result.json` is a child that died, and
-    /// waiting out the whole budget for it would hide that for an hour.
+    /// waiting out the whole budget for it would hide that for an hour. Asked
+    /// and waited for here, within [`TMUX_ASK_BOUND`] (t-18917); a wait on a
+    /// clock that listens asks without waiting, and looks at the answer when
+    /// it is in.
     #[must_use]
     pub fn pane_exists(&self, pane: &str) -> bool {
-        let Ok(listed) = self.run(&[
-            "list-panes".to_string(),
-            "-F".to_string(),
-            "#{pane_id}".to_string(),
-        ]) else {
-            // tmux could not be asked. That is not evidence the pane died, and
-            // treating it as such would end a child that is still working.
-            return true;
-        };
-        listed.lines().any(|line| line.trim() == pane)
+        self.ask_panes(None)
+            .answer_within(TMUX_ASK_BOUND)
+            .is_none_or(|said| stands(&said, pane))
+    }
+
+    /// Ask which panes stand, on a thread of its own: `wake` ends the asking
+    /// wait's rest once tmux has answered.
+    fn ask_panes(&self, wake: Option<child_watch::Waker>) -> tmux_ask::Ask {
+        tmux_ask::Ask::start(&self.program, &["list-panes", "-F", "#{pane_id}"], true, wake)
+    }
+}
+
+/// Whether what tmux said leaves `pane` standing. A tmux that could not be
+/// asked, or said nothing in time, is not evidence the pane died, and treating
+/// it as such would end a child that is still working.
+fn stands(said: &Said, pane: &str) -> bool {
+    match said {
+        Said::Yes(listed) => listed.lines().any(|line| line.trim() == pane),
+        Said::No | Said::Nothing => true,
     }
 }
 
@@ -1775,6 +1791,20 @@ pub const PANE_ASK_HELD: std::time::Duration = std::time::Duration::from_secs(60
 /// connection costs a socket here and an accept there.
 pub const HOLD_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// The longest one tmux call — `list-panes`, `kill-pane` — is waited for or
+/// left running (t-18917). A call runs on a thread of its own and the wait
+/// looks at it between its other looks, so a slow tmux delays nothing but its
+/// own answer; past this the call is ended, and the pane is taken as standing,
+/// as a tmux that cannot be asked always was. A first exec of a tmux took 1 to
+/// 3.4 s under parallel tests (`reports/t-17057`); a hung server never answers.
+pub const TMUX_ASK_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long the end of a wait — a cancel, a limit — waits for tmux to end the
+/// pane. A `kill-pane` that has not answered by then finishes on its own within
+/// [`TMUX_ASK_BOUND`], so a slow tmux delays the wait's end by this much at
+/// most, and a quick one — a few milliseconds — not at all.
+pub const PANE_KILL_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// The cadences of one wait. A test hands in its own so that what takes
 /// seconds in production takes milliseconds there.
 #[derive(Debug, Clone, Copy)]
@@ -1898,7 +1928,10 @@ pub fn wait_for_turn_result(
 /// tmux is asked once at the start and then only when the child's channel ends
 /// or, with none held, every [`PANE_ASK_BARE`]. Without a watch it looks at
 /// everything at every look, as it always did, but asks tmux no oftener than
-/// that.
+/// that. No ask of tmux holds the wait past [`TMUX_ASK_BOUND`]: each runs on a
+/// thread of its own, which a wait on a clock that listens does not wait for,
+/// and the end's `kill-pane` is waited for [`PANE_KILL_WAIT`] at most
+/// (t-18917).
 #[allow(clippy::too_many_arguments)] // one wait, one table of ways it ends
 pub fn wait_for_turn_result_on(
     clock: &dyn WaitClock,
@@ -1936,6 +1969,10 @@ fn wait_with_cadence(
     let mut read_at: Option<std::time::Instant> = None;
     let mut pane_asked_at: Option<std::time::Instant> = None;
     let mut channel_tried_at: Option<std::time::Instant> = None;
+    // The pane question out on a thread of its own. Dropped with the wait, a
+    // question still out ends its tmux.
+    let mut asking: Option<tmux_ask::Ask> = None;
+    let waker = watch.as_ref().map(ChildWatch::waker);
     let answered = || {
         TeammateResult::read_turn(directory, turn)
             .map(|result| PaneOutcome::Finished(Box::new(result)))
@@ -1958,8 +1995,10 @@ fn wait_with_cadence(
         }
         if cancelled() {
             // The door first, then the pane. A pane that is already gone
-            // answers `false`, which is the same outcome as one this ended.
+            // answers `false`, which is the same outcome as one this ended. A
+            // question still out is moot, and its tmux goes first.
             close();
+            drop(asking.take());
             let _ = tmux.kill_pane(pane);
             return answered().unwrap_or(PaneOutcome::Cancelled);
         }
@@ -1986,6 +2025,7 @@ fn wait_with_cadence(
         let ran = now.duration_since(started);
         if budget.rule().reached(ran, quiet_for) {
             close();
+            drop(asking.take());
             let _ = tmux.kill_pane(pane);
             return answered().unwrap_or(PaneOutcome::TimedOut);
         }
@@ -1993,12 +2033,35 @@ fn wait_with_cadence(
         // from `split-window`), when the child's channel ended, and otherwise
         // only now and then — a process spawn at every look was four a second
         // for each child. With the channel held, its ending is what says the
-        // child is gone.
+        // child is gone. A wait on a clock that listens asks without waiting
+        // and reads the answer at a later look, and asks nothing more while a
+        // question is out — a spawn the system holds is one thread, not one
+        // every few seconds; one on a clock that does not — a test's pretended
+        // time, whose steps take no real time — waits for the answer where it
+        // asks, within the same bound.
         let held = watch.as_ref().is_some_and(ChildWatch::holds_channel);
         let every = if held { cadence.pane_ask_held } else { cadence.pane_ask_bare };
-        if woken.channel_closed || pane_asked_at.is_none_or(|at| now.duration_since(at) >= every) {
+        if woken.channel_closed {
+            // What a question already out says may be from before the child
+            // died: it is dropped, and its tmux with it, for one asked now —
+            // the one question asked beside another.
+            drop(asking.take());
+        }
+        if let Some(said) = asking.as_ref().and_then(tmux_ask::Ask::heard) {
+            asking = None;
+            if !stands(&said, pane) {
+                // The child may have written since the read above.
+                return answered().unwrap_or(PaneOutcome::Vanished);
+            }
+        }
+        if asking.is_none() && (woken.channel_closed || pane_asked_at.is_none_or(|at| now.duration_since(at) >= every)) {
             pane_asked_at = Some(now);
-            if !tmux.pane_exists(pane) {
+            if clock.listens() {
+                // Only the confirmation of a death wakes the wait when tmux
+                // has answered. Any other answer is read at the next look,
+                // which costs the wait no wake-up of its own.
+                asking = Some(tmux.ask_panes(if woken.channel_closed { waker.clone() } else { None }));
+            } else if !tmux.pane_exists(pane) {
                 // The child may have written between the read above and this ask.
                 return answered().unwrap_or(PaneOutcome::Vanished);
             }
@@ -3705,6 +3768,375 @@ mod tests {
         let wall = AgeRule::Wall(hour);
         assert_eq!(wall.remaining(Duration::from_secs(900), Duration::from_secs(3000)), Duration::from_secs(2700));
         assert_eq!(wall.remaining(hour * 2, Duration::ZERO), Duration::ZERO, "a limit that is past has none left");
+    }
+
+    /// The one script every stalling `tmux` is (t-18917): the shared fake's
+    /// verbs, except that a verb with a `stall-<verb>` file beside the link
+    /// writes `<verb> <pid>` to `stalled` and then sleeps for as many seconds as
+    /// the file says — through `exec`, so the pid it wrote is the process that
+    /// sleeps. Written once and run once before any test uses it, as
+    /// [`shared_fake_tmux`] is and for the same reason; the warm run goes down
+    /// the stalling road too, so that `sleep`'s own first exec is not inside a
+    /// timed wait either. The shared fake is left as it is: the pane probe
+    /// measures with it.
+    #[cfg(target_os = "macos")]
+    fn shared_stalling_tmux() -> &'static Path {
+        static SCRIPT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        SCRIPT.get_or_init(|| {
+            let home: &'static tempfile::TempDir = Box::leak(Box::new(
+                tempfile::Builder::new()
+                    .prefix("zo-stalling-tmux-")
+                    .tempdir()
+                    .expect("tempdir"),
+            ));
+            let script = home.path().join("tmux");
+            std::fs::write(
+                &script,
+                "#!/bin/sh\n\
+                 here=\"${0%/*}\"\n\
+                 printf '%s\\n' \"$*\" >> \"$here/tmux.log\"\n\
+                 if [ -f \"$here/stall-$1\" ]; then\n\
+                 read -r seconds < \"$here/stall-$1\"\n\
+                 printf '%s %s\\n' \"$1\" \"$$\" >> \"$here/stalled\"\n\
+                 exec sleep \"$seconds\"\n\
+                 fi\n\
+                 case \"$1\" in\n\
+                 split-window) echo '%9' ;;\n\
+                 list-panes) cat \"$here/panes\" ;;\n\
+                 kill-pane) : ;;\n\
+                 esac\n",
+            )
+            .expect("write stalling tmux");
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+            std::fs::write(home.path().join("stall-warm"), "0\n").expect("warm stall");
+            for _ in 0..50 {
+                if std::process::Command::new(&script).arg("warm").output().is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            script
+        })
+    }
+
+    /// A tmux whose `list-panes` takes five seconds — a first exec on a loaded
+    /// machine — and one that answers nothing within any of these tests: a hung
+    /// server (t-18917).
+    #[cfg(target_os = "macos")]
+    const STALLS: [(&str, &[(&str, u64)]); 2] = [
+        ("a slow list-panes", &[("list-panes", 5)]),
+        ("a silent tmux", &[("list-panes", 10), ("kill-pane", 10)]),
+    ];
+
+    /// A test's own stalling `tmux`, in a directory of its own where `%9`
+    /// stands; each `(verb, seconds)` of its stalls sleeps that long before it
+    /// answers.
+    ///
+    /// Dropping it ends whatever stalled and is still this process's child, so
+    /// that a test that failed — or ran before the fix — leaves nothing
+    /// sleeping beside the tests that run with it. Only an unreaped child is
+    /// signalled: `waitpid` answers for nothing else, so a pid the system has
+    /// handed on since is never touched.
+    #[cfg(target_os = "macos")]
+    struct StallingTmux {
+        tmux: Tmux,
+        directory: tempfile::TempDir,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl StallingTmux {
+        fn new(stalls: &[(&str, u64)]) -> Self {
+            let directory = tempfile::tempdir().expect("tempdir");
+            std::fs::write(directory.path().join("panes"), "%9\n").expect("panes");
+            for (verb, seconds) in stalls {
+                std::fs::write(directory.path().join(format!("stall-{verb}")), format!("{seconds}\n"))
+                    .expect("stall file");
+            }
+            let link = directory.path().join("tmux");
+            std::os::unix::fs::symlink(shared_stalling_tmux(), &link).expect("link stalling tmux");
+            Self {
+                tmux: Tmux::at(link),
+                directory,
+            }
+        }
+
+        fn path(&self) -> &Path {
+            self.directory.path()
+        }
+
+        /// Every call that stalled, as `(verb, pid)`.
+        fn stalled(&self) -> Vec<(String, i32)> {
+            std::fs::read_to_string(self.path().join("stalled"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| {
+                    let (verb, pid) = line.split_once(' ')?;
+                    Some((verb.to_string(), pid.trim().parse().ok()?))
+                })
+                .collect()
+        }
+
+        /// The pid of the first `verb` call that stalled, once there is one.
+        fn stalled_on(&self, verb: &str) -> i32 {
+            let until = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Some((_, pid)) = self.stalled().into_iter().find(|(asked, _)| asked == verb) {
+                    return pid;
+                }
+                assert!(std::time::Instant::now() < until, "tmux was not asked `{verb}` within 2 s");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        /// Every call that stalled is gone soon after `ended`: one the wait was
+        /// still waiting for ends with the wait, and a `kill-pane` it stopped
+        /// waiting for ends within its own bound.
+        fn assert_nothing_outlives(&self, ended: std::time::Instant, case: &str) {
+            use nix::sys::signal::kill;
+            use nix::unistd::Pid;
+            let slack = Duration::from_millis(250);
+            for (verb, pid) in self.stalled() {
+                let bound = if verb == "kill-pane" { TMUX_ASK_BOUND + slack } else { slack };
+                let pid = Pid::from_raw(pid);
+                while kill(pid, None).is_ok() && ended.elapsed() < bound {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(
+                    kill(pid, None).is_err(),
+                    "{case}: the `{verb}` tmux (pid {pid}) still ran {:?} after the wait ended",
+                    ended.elapsed()
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for StallingTmux {
+        fn drop(&mut self) {
+            use nix::sys::signal::{kill, Signal};
+            use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+            use nix::unistd::Pid;
+            for (_, pid) in self.stalled() {
+                let pid = Pid::from_raw(pid);
+                if matches!(waitpid(pid, Some(WaitPidFlag::WNOHANG)), Ok(WaitStatus::StillAlive)) {
+                    let _ = kill(pid, Signal::SIGKILL);
+                }
+            }
+        }
+    }
+
+    /// [`wait_for_result`] on a thread of its own, heard on a channel, so that a
+    /// test can stop waiting for a wait that does not end — which is what a
+    /// wait on a silent tmux did — and fail instead of hanging.
+    #[cfg(target_os = "macos")]
+    fn wait_aside(
+        tmux: &Tmux,
+        child: &Path,
+        budget: PaneBudget,
+        cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::sync::mpsc::Receiver<(PaneOutcome, std::time::Instant)> {
+        let (tmux, child, cancel) = (tmux.clone(), child.to_path_buf(), std::sync::Arc::clone(cancel));
+        let (tell, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = wait_for_result(&tmux, &child, "%9", budget, &|| {
+                cancel.load(std::sync::atomic::Ordering::SeqCst)
+            });
+            let _ = tell.send((outcome, std::time::Instant::now()));
+        });
+        heard
+    }
+
+    /// A limit is kept whatever tmux does (t-18917). The wait asked tmux from
+    /// inside its own loop with no limit on the ask, so a limit ended when the
+    /// ask did: a 300 ms one at 3.26 s in the tests that ran together, and
+    /// never with a tmux that does not answer.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_limit_is_kept_while_tmux_is_slow_or_silent() {
+        for (case, stalls) in STALLS {
+            let stalling = StallingTmux::new(stalls);
+            let child = stalling.path().join("agent-40");
+            std::fs::create_dir_all(&child).expect("mkdir");
+            let never = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let started = std::time::Instant::now();
+            let waiting = wait_aside(&stalling.tmux, &child, PaneBudget::Wall(Duration::from_millis(300)), &never);
+            let (outcome, ended) = waiting
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap_or_else(|_| panic!("{case}: a 300 ms limit had not ended the wait 3 s after it began"));
+            assert_eq!(outcome, PaneOutcome::TimedOut, "{case}");
+            let took = ended.duration_since(started);
+            assert!(
+                took >= Duration::from_millis(300) && took < Duration::from_millis(900),
+                "{case}: a 300 ms limit ended after {took:?}"
+            );
+            stalling.assert_nothing_outlives(ended, case);
+        }
+    }
+
+    /// An answer that lands while tmux is being asked is heard as it lands
+    /// (t-18917), not when the ask ends: it was heard 1.69 s late in the tests
+    /// that ran together, and never with a tmux that does not answer.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_answer_that_lands_while_tmux_is_asked_is_heard_at_once() {
+        for (case, stalls) in STALLS {
+            let stalling = StallingTmux::new(stalls);
+            let child = stalling.path().join("agent-41");
+            std::fs::create_dir_all(&child).expect("mkdir");
+            let never = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let waiting = wait_aside(&stalling.tmux, &child, PaneBudget::Wall(Duration::from_secs(60)), &never);
+            stalling.stalled_on("list-panes");
+            let landed = std::time::Instant::now();
+            TeammateResult::new("agent-41", Exit::Ok)
+                .write(&child)
+                .expect("write result");
+            let (outcome, heard) = waiting
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap_or_else(|_| panic!("{case}: an answer that landed was not heard within 3 s"));
+            assert!(matches!(outcome, PaneOutcome::Finished(_)), "{case}: {outcome:?}");
+            let lag = heard.duration_since(landed);
+            assert!(
+                lag < Duration::from_millis(100),
+                "{case}: the answer was heard {lag:?} after it landed"
+            );
+            stalling.assert_nothing_outlives(heard, case);
+        }
+    }
+
+    /// A cancel raised while tmux is being asked ends the wait within one look
+    /// (t-18917): the cancel is looked at every [`LOOK_EVERY`] at most, and the
+    /// end's own `kill-pane` is waited for [`PANE_KILL_WAIT`] at most. It used to
+    /// wait for the ask: five seconds for a slow tmux, for ever for a silent one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_cancel_while_tmux_is_asked_ends_the_wait_within_a_look() {
+        for (case, stalls) in STALLS {
+            let stalling = StallingTmux::new(stalls);
+            let child = stalling.path().join("agent-42");
+            std::fs::create_dir_all(&child).expect("mkdir");
+            let raised = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let waiting = wait_aside(&stalling.tmux, &child, PaneBudget::Wall(Duration::from_secs(60)), &raised);
+            stalling.stalled_on("list-panes");
+            let cancelled_at = std::time::Instant::now();
+            raised.store(true, std::sync::atomic::Ordering::SeqCst);
+            let (outcome, ended) = waiting
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap_or_else(|_| panic!("{case}: a cancel had not ended the wait 3 s after it was raised"));
+            assert_eq!(outcome, PaneOutcome::Cancelled, "{case}");
+            let lag = ended.duration_since(cancelled_at);
+            let one_look = LOOK_EVERY + PANE_KILL_WAIT + Duration::from_millis(250);
+            assert!(lag < one_look, "{case}: a cancel took {lag:?} to end the wait");
+            assert!(
+                tmux_log(stalling.path()).iter().any(|line| line == "kill-pane -t %9"),
+                "{case}: the cancelled child's pane was not ended"
+            );
+            stalling.assert_nothing_outlives(ended, case);
+        }
+    }
+
+    /// A silent tmux holds a question no longer than its bound (t-18917). The
+    /// question whether the pane stands — which a clock that does not listen
+    /// asks where it is — is given up at [`TMUX_ASK_BOUND`] with the pane taken
+    /// as standing, and a `kill-pane` is waited for [`PANE_KILL_WAIT`] and then
+    /// left to finish within its own bound. Both used to wait as long as tmux
+    /// took.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_silent_tmux_holds_a_question_no_longer_than_its_bound() {
+        let stalling = StallingTmux::new(STALLS[1].1);
+        let asking = stalling.tmux.clone();
+        let (tell, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let stands = asking.pane_exists("%9");
+            let _ = tell.send((stands, started.elapsed(), std::time::Instant::now()));
+        });
+        let (stands, took, ended) = heard
+            .recv_timeout(TMUX_ASK_BOUND + Duration::from_secs(2))
+            .expect("a silent tmux held the question past its bound");
+        assert!(stands, "a tmux that said nothing was read as a pane that is gone");
+        assert!(
+            took >= TMUX_ASK_BOUND && took < TMUX_ASK_BOUND + Duration::from_millis(500),
+            "the question was given up after {took:?}"
+        );
+        stalling.assert_nothing_outlives(ended, "list-panes");
+
+        let killing = stalling.tmux.clone();
+        let (tell, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let ended_it = killing.kill_pane("%9");
+            let _ = tell.send((ended_it, started.elapsed(), std::time::Instant::now()));
+        });
+        let (ended_it, took, ended) = heard
+            .recv_timeout(PANE_KILL_WAIT + Duration::from_secs(1))
+            .expect("a silent tmux held kill-pane past its wait");
+        assert!(!ended_it, "a kill-pane nobody answered was read as done");
+        assert!(
+            took >= PANE_KILL_WAIT && took < PANE_KILL_WAIT + Duration::from_millis(250),
+            "kill-pane was waited for {took:?}"
+        );
+        stalling.assert_nothing_outlives(ended, "kill-pane");
+    }
+
+    /// A spawn the system holds — a first exec it checks, a stuck
+    /// `syspolicyd` — is not given up on and asked again beside itself
+    /// (t-18917): a wait has one tmux question out at a time, so a held spawn
+    /// costs it one thread, not one every few seconds. Given up at
+    /// [`TMUX_ASK_BOUND`], the question was asked again at the next look that
+    /// was due; with tmux asked every half second, five seconds would have
+    /// asked it twice. No test can make the system hold a spawn, so the hold
+    /// is stood in for by the ask itself (`held_spawns`, tests only).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_held_spawn_is_not_asked_again_beside_itself() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let program = fake_tmux(directory.path(), "'%9'");
+        tmux_ask::held_spawns::hold(program.as_os_str(), Duration::from_secs(12));
+        let tmux = Tmux::at(&program);
+        let child = directory.path().join("agent-43");
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let cadence = Cadence {
+            pane_ask_bare: Duration::from_millis(500),
+            ..Cadence::STANDARD
+        };
+        let outcome = wait_with_cadence(
+            &SystemWaitClock,
+            &tmux,
+            &child,
+            "%9",
+            1,
+            PaneBudget::Wall(Duration::from_secs(5)),
+            &|| false,
+            &|| {},
+            cadence,
+        );
+        assert_eq!(outcome, PaneOutcome::TimedOut);
+        assert_eq!(
+            tmux_ask::held_spawns::asked(program.as_os_str(), "list-panes"),
+            1,
+            "a held question was asked again beside itself"
+        );
+    }
+
+    /// A tmux is asked in a process group of its own (t-18917), so that ending
+    /// it ends what it started — the window's tmux is `sh` running `curl` in a
+    /// subshell — and never this process's own group.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_tmux_is_asked_in_a_process_group_of_its_own() {
+        use nix::unistd::{getpgid, getpgrp, Pid};
+        let stalling = StallingTmux::new(STALLS[1].1);
+        let asking = stalling.tmux.clone();
+        std::thread::spawn(move || asking.pane_exists("%9"));
+        let pid = Pid::from_raw(stalling.stalled_on("list-panes"));
+        let group = getpgid(Some(pid)).expect("the stalled tmux's group");
+        assert_eq!(group, pid, "the tmux does not lead a group of its own");
+        assert_ne!(group, getpgrp(), "the tmux was asked in this process's own group");
     }
 
     /// A child's channel as its parent meets it: it takes connections and says
