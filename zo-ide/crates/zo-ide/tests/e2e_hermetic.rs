@@ -1906,6 +1906,49 @@ async fn e2e_headerless_thinking_names_the_status_row_and_commits_a_titled_cell(
     let _ = run.finish();
 }
 
+/// `/rewind` is in the help the commands crate prints, and the shipped zo
+/// answered "/rewind is not in zo" (t-19459). Now a bare `/rewind` lists the
+/// workspace checkpoints, and `/rewind turn` takes the last finished turn out
+/// of the conversation AND out of the saved transcript.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_rewind_command_works_in_the_shipped_tui() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("rewind fixture answer")
+        .await
+        .expect("start text script");
+    let mut run = pty(&layout, service.base_url(), &interactive_args());
+    let timeout = Duration::from_secs(20);
+
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"remember the ZEBRA-REWIND prompt\r").expect("send prompt");
+    run.wait_for_history_row("rewind fixture answer", timeout);
+
+    run.send(b"/rewind\r").expect("send /rewind");
+    run.wait_for_history_row("Workspace checkpoints", timeout);
+    let mut screen = Screen::new(40);
+    screen.feed(&run.snapshot_output());
+    assert!(
+        !screen.transcript().iter().any(|row| row.contains("is not in zo")),
+        "/rewind must not fall through to the unknown-command note: {:#?}",
+        screen.transcript()
+    );
+
+    run.send(b"/rewind turn\r").expect("send /rewind turn");
+    run.wait_for_history_row("Rewound 1 turn", timeout);
+    let saved: String = transcripts(&layout.sessions)
+        .iter()
+        .map(|path| fs::read_to_string(path).unwrap_or_default())
+        .collect();
+    assert!(
+        !saved.contains("ZEBRA-REWIND"),
+        "the rewound prompt must be gone from the saved transcript"
+    );
+
+    run.send(b"/rewind turn\r").expect("send second /rewind turn");
+    run.wait_for_history_row("Nothing to rewind", timeout);
+    let _ = run.finish();
+}
+
 /// One turn, one spawn, four ledgers — joined by equality on the attempt key.
 ///
 /// This is the case the attempt-key contract exists for
