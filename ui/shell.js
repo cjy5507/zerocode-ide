@@ -17652,10 +17652,13 @@ el("crash-bundle").addEventListener("click", async () => {
 
 /* How long the boot waits for its first paint before it goes on without one.
  * A window that is hidden or covered gets no animation frames at all, and a
- * boot that waited for a frame that never comes would never restore anything;
- * a quarter of a second is far above the two frames (~33 ms) a visible
- * window needs. */
-const FIRST_PAINT_WAIT_MS = 250;
+ * boot that waited for a frame that never comes would never restore anything.
+ * A visible window needs two frames (~33 ms) — but on an efficiency core
+ * (`taskpolicy -b`, the low-spec profile of t-20078) they came 0.3–1 s after
+ * the strip was drawn, and a 250 ms wait let the restore run in front of the
+ * paint it was meant to follow. A second covers that; the cost is one second
+ * of waiting for a window nobody can see. */
+const FIRST_PAINT_WAIT_MS = 1000;
 
 /* The first frame the person can see with the chrome in it: two animation
  * frames after the strip is on the page, so the number is a paint and not a
