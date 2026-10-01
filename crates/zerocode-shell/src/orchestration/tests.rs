@@ -24891,12 +24891,24 @@ fn an_idle_beat_walks_the_ledger_once_per_generation_not_once_per_sweep() {
     // The first beat reads the generation the window booted on; it may pay
     // for it once.
     tick(&Nowhere, &[], 1_000_000);
+    let revision = || {
+        super::runtime()
+            .expect("this window's runtime")
+            .actor
+            .view()
+            .expect("the image")
+            .revision()
+    };
+    let booted_on = revision();
     let settled = zerocode_core::orchestration::ledger_work();
     for beat in 0..BEATS {
         tick(&Nowhere, &[], 1_001_000 + beat * 1_000);
     }
     let walked = zerocode_core::orchestration::ledger_work().since(settled);
-    eprintln!("idle beats: {BEATS} beats walked the ledger {walked:?}");
+    eprintln!(
+        "idle beats: {BEATS} beats walked the ledger {walked:?}, revision {booted_on} -> {}",
+        revision()
+    );
     assert_eq!(
         (walked.exports, walked.rebuilds, walked.validations),
         (0, 0, 0),
