@@ -185,6 +185,7 @@ impl zerocode_core::orchestration::Launcher for Lined {
                 .as_ref()
                 .map(|_| json!({"chosen": LADDER[0].0, "applied": true})),
             model,
+            ..Default::default()
         }
     }
 }

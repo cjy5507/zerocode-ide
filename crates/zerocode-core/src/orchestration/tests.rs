@@ -25541,6 +25541,7 @@ fn summon_difficulty_preserves_pins_and_defaults_and_applies_only_the_omitted_ef
             crate::summon_assign::Receipts {
                 difficulty: self.receipt.clone(),
                 model: None,
+                ..Default::default()
             }
         }
     }
@@ -25686,6 +25687,7 @@ fn summon_profiles_fill_omitted_model_and_effort_but_preserve_each_explicit_pin(
                     .as_ref()
                     .map(|_| serde_json::json!({"chosen":"low", "applied":true})),
                 model: None,
+                ..Default::default()
             }
         }
     }
@@ -25788,7 +25790,8 @@ fn an_open_model_dial_says_where_its_model_came_from_and_what_else_is_offered() 
                     serde_json::json!({"chosen": crate::summon_difficulty::LADDER[0].0, "applied": true})
                 }),
                 model: None,
-            }
+..Default::default()
+}
         }
     }
     let said = answered(&Lined, "agent-list --agent claude");

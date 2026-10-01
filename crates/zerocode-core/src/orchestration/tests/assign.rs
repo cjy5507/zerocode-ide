@@ -111,6 +111,7 @@ impl Launcher for Assigned {
         Receipts {
             difficulty: asked.difficulty.as_ref().map(|_| self.difficulty.clone()),
             model: asked.model.as_ref().map(|_| self.model.clone()),
+            ..Default::default()
         }
     }
 }
