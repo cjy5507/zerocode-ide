@@ -2177,7 +2177,14 @@ async fn e2e_workflow_first_tool_frame_shows_both_live_helpers() {
     )
     .await
     .expect("start workflow script");
-    let mut run = pty(&layout, service.base_url(), &interactive_args());
+    // Both helpers must be live together, which is the cap the child reads:
+    // cores minus two, one on a 3-core CI runner. Hand the child its own two.
+    let mut run = pty_with_env(
+        &layout,
+        service.base_url(),
+        &interactive_args(),
+        &[("ZO_WORKFLOW_MAX_CONCURRENCY", "2")],
+    );
     let timeout = Duration::from_secs(20);
 
     run.wait_for("directory:", TEST_TIMEOUT);
