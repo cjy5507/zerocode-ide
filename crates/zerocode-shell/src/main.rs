@@ -87,6 +87,8 @@ mod chromium_browser;
 mod claude_tokens;
 mod cli_login;
 mod cmd;
+#[cfg(target_os = "macos")]
+mod code_sign_clone;
 mod codex_accounts;
 mod codex_queue;
 mod codex_tokens;
