@@ -1605,13 +1605,11 @@ impl Tmux {
     #[must_use]
     pub fn kill_pane(&self, pane: &str) -> bool {
         let ask = tmux_ask::Ask::start(&self.program, &["kill-pane", "-t", pane], false, None);
-        match ask.answer_within(PANE_KILL_WAIT) {
-            Some(said) => matches!(said, Said::Yes(_)),
-            None => {
-                ask.let_finish();
-                false
-            }
-        }
+        let Some(said) = ask.answer_within(PANE_KILL_WAIT) else {
+            ask.let_finish();
+            return false;
+        };
+        matches!(said, Said::Yes(_))
     }
 
     /// Is this pane still one of the team's?
