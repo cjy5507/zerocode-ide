@@ -719,7 +719,7 @@ mod tests {
             running.join("Demo.app.bundle/Contents/MacOS/linked"),
         )
         .unwrap();
-        let mut child = std::process::Command::new(&program)
+        let mut child = crate::proc::quiet_command(&program)
             .arg(SLEEPER_SECONDS)
             .spawn()
             .unwrap();
