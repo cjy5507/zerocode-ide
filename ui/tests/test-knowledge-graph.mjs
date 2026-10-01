@@ -1,3 +1,4 @@
+import { endRun } from "./end-run.mjs";
 import { createRequire } from "node:module";
 import { frameBudgetHolds, loadNote, machineIsLoudNow } from "./machine-load.mjs";
 import { createServer } from "node:http";
@@ -6096,8 +6097,8 @@ files.close();
 const failed = results.filter((r) => !r.pass);
 if (failed.length > 0) {
   console.error(`\nFAILED ${failed.length} / ${results.length} tests`);
-  process.exit(1);
+  endRun(1);
 } else {
   console.log(`\nALL ${results.length} TESTS PASSED!`);
-  process.exit(0);
+  endRun(0);
 }
