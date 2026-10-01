@@ -925,7 +925,7 @@ mod tests {
 
         assert!(rendered.contains("1. Turn 8 · 1m ago · 1 file(s) [incomplete, skipped-oversized]"));
         assert!(rendered.contains("2. Turn 4 · 2m ago · 1 file(s)"));
-        assert!(rendered.contains("/rewind <turn> [force]"));
+        assert!(rendered.contains("/rewind <Turn number> [force]"));
     }
 
     #[test]

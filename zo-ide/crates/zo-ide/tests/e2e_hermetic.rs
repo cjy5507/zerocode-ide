@@ -1922,6 +1922,7 @@ async fn e2e_rewind_command_works_in_the_shipped_tui() {
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(b"remember the ZEBRA-REWIND prompt\r").expect("send prompt");
     run.wait_for_history_row("rewind fixture answer", timeout);
+    wait_until_quiet(&run, Duration::from_millis(300), timeout);
 
     run.send(b"/rewind\r").expect("send /rewind");
     run.wait_for_history_row("Workspace checkpoints", timeout);
@@ -1970,6 +1971,7 @@ async fn e2e_rewind_n_restores_the_guarded_write_and_refuses_a_changed_file_with
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(b"write one file\r").expect("send prompt");
     run.wait_for_history_row("one file written", timeout);
+    wait_until_quiet(&run, Duration::from_millis(300), timeout);
     assert_eq!(fs::read_to_string(&file).expect("the turn wrote the file"), "written by the turn\n");
 
     // The turn left a checkpoint: the list names it.
@@ -1984,7 +1986,7 @@ async fn e2e_rewind_n_restores_the_guarded_write_and_refuses_a_changed_file_with
 
     // With force the write is undone — the file did not exist before the turn.
     run.send(b"/rewind 1 force\r").expect("send /rewind 1 force");
-    run.wait_for_history_row("the conversation was not rewound", timeout);
+    run.wait_for_history_row("Conflicted       0", timeout);
     assert!(!file.exists(), "the restore must delete the file the turn created");
     let _ = run.finish();
 }
@@ -2003,6 +2005,7 @@ async fn e2e_rewind_turn_after_a_model_switch_still_takes_the_last_turn() {
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(b"remember the OKAPI-REWIND prompt\r").expect("send prompt");
     run.wait_for_history_row("handoff fixture answer", timeout);
+    wait_until_quiet(&run, Duration::from_millis(300), timeout);
     run.send(b"/model haiku\r").expect("send /model");
     wait_until_quiet(&run, Duration::from_millis(300), timeout);
 
