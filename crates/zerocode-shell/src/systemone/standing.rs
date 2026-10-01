@@ -199,7 +199,7 @@ mod tests {
         json!({"request": number, "rubricVersion": seat.rubric_version, "ms": 1_700_000_000 + number})
     }
 
-    fn transition(seat: &JevUse, word: &str, rubric: u32) -> Value {
+    fn transition(word: &str, rubric: u32) -> Value {
         json!({(TRANSITION.canonical): word, "rubricVersions": [rubric]})
     }
 
@@ -236,7 +236,7 @@ mod tests {
         for number in 0..BUSY_DAY_LINES {
             busy.push_str(&line(&request(&COVER, number)));
         }
-        busy.push_str(&line(&transition(&COVER, ROSE, COVER.rubric_version)));
+        busy.push_str(&line(&transition(ROSE, COVER.rubric_version)));
         append(&ledger, &busy);
 
         let before = promote::lines_parsed();
@@ -271,25 +271,22 @@ mod tests {
             check("no file");
             append(&path, &line(&request(seat, 1)));
             check("a request");
-            append(&path, &line(&transition(seat, ROSE, seat.rubric_version)));
+            append(&path, &line(&transition(ROSE, seat.rubric_version)));
             check("a rise");
             append(&path, &line(&request(seat, 2)));
             check("a request after the rise");
-            let fall = line(&transition(seat, FELL, seat.rubric_version));
+            let fall = line(&transition(FELL, seat.rubric_version));
             let (first, rest) = fall.split_at(fall.len() / 2);
             append(&path, first);
             check("half a fall");
             append(&path, rest);
             check("the fall finished");
-            let whole_without_newline = transition(seat, ROSE, seat.rubric_version).to_string();
+            let whole_without_newline = transition(ROSE, seat.rubric_version).to_string();
             append(&path, &whole_without_newline);
             check("a whole rise with no newline yet");
             append(&path, "\n");
             check("its newline");
-            append(
-                &path,
-                &line(&transition(seat, ROSE, seat.rubric_version + 1)),
-            );
+            append(&path, &line(&transition(ROSE, seat.rubric_version + 1)));
             check("a rise of other words");
             append(
                 &path,
@@ -302,7 +299,7 @@ mod tests {
             check("a request of newer words");
 
             // A shorter file: truncated to a rise.
-            std::fs::write(&path, line(&transition(seat, ROSE, seat.rubric_version)))
+            std::fs::write(&path, line(&transition(ROSE, seat.rubric_version)))
                 .expect("a truncation");
             check("a truncation");
             // Replaced by a file of the same size, then by a longer one.
@@ -316,7 +313,7 @@ mod tests {
                 format!(
                     "{}{}",
                     line(&request(seat, 8)),
-                    line(&transition(seat, ROSE, seat.rubric_version))
+                    line(&transition(ROSE, seat.rubric_version))
                 ),
             )
             .expect("a longer one");
@@ -325,7 +322,7 @@ mod tests {
             std::fs::write(
                 &path,
                 line(&request(seat, 7))
-                    + &line(&transition(seat, FELL, seat.rubric_version))
+                    + &line(&transition(FELL, seat.rubric_version))
                     + &line(&request(seat, 4)),
             )
             .expect("a rewrite in place");
@@ -351,7 +348,7 @@ mod tests {
             usage.assume_init()
         };
         let seconds =
-            |time: libc::timeval| time.tv_sec as f64 + f64::from(time.tv_usec as i32) / 1e6;
+            |time: libc::timeval| time.tv_sec as f64 + f64::from(time.tv_usec) / 1e6;
         seconds(usage.ru_utime) + seconds(usage.ru_stime)
     }
 
@@ -371,11 +368,11 @@ mod tests {
             for number in 0..lines {
                 busy.push_str(&line(&request(seat, number)));
                 if number % 500 == 0 {
-                    busy.push_str(&line(&transition(seat, ROSE, seat.rubric_version)));
+                    busy.push_str(&line(&transition(ROSE, seat.rubric_version)));
                 }
             }
             append(&path, &busy);
-            let mut measure = |name: &str, read: &dyn Fn() -> promote::Stand| {
+            let measure = |name: &str, read: &dyn Fn() -> promote::Stand| {
                 let (parsed, cpu, wall) = (
                     promote::lines_parsed(),
                     cpu_seconds(),
