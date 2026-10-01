@@ -2251,7 +2251,7 @@ mod tests {
             proven += 1;
         }
         assert!(
-            open_fd_count() <= before_fds + 2,
+            fd_count_settles_at(before_fds + 2),
             "escaped writers leaked process pipe descriptors"
         );
     }
@@ -2427,6 +2427,32 @@ mod tests {
         fs::read_dir("/dev/fd")
             .expect("open descriptor directory")
             .count()
+    }
+
+    /// How long the process-wide descriptor count is given to come back.
+    /// `/dev/fd` counts every thread's descriptors, and the other tests of this
+    /// binary open and close theirs (clones, git children, temporary stores)
+    /// while this one runs: a single reading after the last attempt went red
+    /// on the public CI's macOS runner (run 36913442045) while it passed here
+    /// and in the release lane's gate. A descriptor this test leaked never
+    /// closes; a neighbour's does.
+    const FD_SETTLE: Duration = Duration::from_secs(10);
+    /// How often the count is read while it settles.
+    const FD_POLL: Duration = Duration::from_millis(50);
+
+    /// Whether the descriptor count is at or under `ceiling` at some reading
+    /// within [`FD_SETTLE`].
+    fn fd_count_settles_at(ceiling: usize) -> bool {
+        let deadline = std::time::Instant::now() + FD_SETTLE;
+        loop {
+            if open_fd_count() <= ceiling {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(FD_POLL);
+        }
     }
 
     fn wait_until_gone(process: i32) {
