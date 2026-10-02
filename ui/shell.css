@@ -13510,6 +13510,15 @@ body.mod-held .term-link,
   border-bottom: var(--rule-width) solid var(--chat-divider);
 }
 
+/* One row however long the name: the name gives way first, then the tally. */
+.chat-head > .worker-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-head > .worker-meta {
   flex: 1 1 auto;
   flex-wrap: nowrap;
