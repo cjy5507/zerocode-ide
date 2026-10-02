@@ -284,8 +284,12 @@ fn hang_evidence_names_the_observed_main_scope_and_samples_that_thread() {
     assert!(watchdog.contains("crate::crumbs::main_scope()"));
     assert!(watchdog.contains("if answered.is_none()"));
     assert!(watchdog.contains("sample_main_thread()"));
-    assert!(watchdog.contains("main_sample_after_detection"));
+    // The sample's frames are crumbs of one kind, which the watchdog names by the
+    // sampler's own constant: the crash task leaves that kind out of its `crumbs:`
+    // because the frames are its `frames:` already (t-20972).
+    assert!(watchdog.contains("crate::hang_sample::SAMPLE_CRUMB"));
     let sampler = std::fs::read_to_string(src.join("hang_sample.rs")).unwrap();
+    assert!(sampler.contains("const SAMPLE_CRUMB: &str = \"main_sample_after_detection\";"));
     assert!(sampler.contains("Limits::SAMPLE_TIMEOUT_MS"));
     assert!(!sampler.contains("thread::spawn"));
     assert!(!watchdog.contains("Backtrace::"));

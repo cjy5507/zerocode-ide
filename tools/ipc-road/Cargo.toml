@@ -1,0 +1,121 @@
+[package]
+name = "ipc-road"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+publish = false
+description = "Measures the window's custom-scheme road (what the main thread pays per ipc:// request) on its own."
+
+# Its own workspace root: this tool is not part of the product's build, `just
+# verify` never compiles it, and it must not ride the product's lock — it is
+# built from a scratch copy by `tools/ipc-road/README.md`'s one command, with
+# the root Cargo.lock beside it, so the webview stack it measures is the exact
+# one the window ships (wry and tao at the versions that lock names).
+[workspace]
+
+[dependencies]
+# `tracing` turns on the spans wry puts around `start_task` — the function the
+# main thread runs for every custom-scheme request — so its time is read from
+# wry itself, with nothing patched.
+wry = { version = "=0.55.1", features = ["tracing"] }
+tao = "=0.35.3"
+tracing = "0.1"
+serde_json = "1"
+
+# The thumbnail mode runs the window's own snapshot code (`artifact_webkit.rs`,
+# raw objc2 on one WKWebView, with nothing of the product around it), so it
+# declares what the shell declares for it: the same crates, the same features.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-app-kit",
+    "block2",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKUserContentController",
+    "WKUserScript",
+    "WKSnapshotConfiguration",
+    # The page renderer (t-18558): the view's own preferences decide whether a
+    # PDF keeps the page's backgrounds.
+    "WKPreferences",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSImage",
+    "NSImageRep",
+    "NSBitmapImageRep",
+    "NSRunningApplication",
+    "NSPasteboard",
+    "objc2-core-graphics",
+    # The `zerocode-pick` helper asks to be the active application before its
+    # panel opens (`NSApplication`, which needs its `NSResponder` parent), and
+    # the window brings that helper forward by pid (`NSRunningApplication`,
+    # above). Both classes are compiled into this binary through wry already.
+    "NSApplication",
+    "NSResponder",
+    # The hang report's view census walks the main window's `NSView` tree and
+    # counts its `NSTrackingArea`s (`view_census.rs`); all three classes are
+    # already compiled into this binary through wry.
+    "NSWindow",
+    "NSView",
+    "NSTrackingArea",
+    # `runningApplicationWithProcessIdentifier` takes a `pid_t`, which the
+    # crate gates behind its `libc` feature; `libc` itself is already a
+    # dependency of this crate.
+    "libc",
+    # The page renderer (t-18558) prints a page to a PDF with WebKit's print
+    # operation on A4 paper, and asks the window for its backing scale; the
+    # margins and the scale are `CGFloat`s, which the crate gates behind
+    # `objc2-core-foundation` (already a dependency of this crate).
+    "NSPrintInfo",
+    "NSPrintOperation",
+    "objc2-core-foundation",
+    # The print job is run modal for a window of its own, never the person's:
+    # `NSWindow`'s initializer and `NSBackingStoreType` live behind `NSGraphics`.
+    "NSGraphics",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    # The `zerocode-pick` helper lifts its standing panel from a timer on the
+    # modal run loop (`NSTimer` with a block, `NSRunLoop`, `NSDate` for the
+    # interval); all three classes are compiled into this binary through wry.
+    "NSTimer",
+    "NSRunLoop",
+    "NSDate",
+    "block2",
+    "NSData",
+    "NSDictionary",
+    "NSArray",
+    "NSError",
+    "NSString",
+    "NSValue",
+    # The page renderer (t-18558): the PDF's paper and print view are `NSSize`
+    # and `NSRect`, and its temp file is an `NSURL`.
+    "NSGeometry",
+    "NSURL",
+    "NSObject",
+] }
+# The emulator pane's fast road: the window server will hand over the picture
+# the Simulator is already drawing for a tenth of what CoreSimulator charges
+# for a fresh screenshot. Both crates are compiled into this binary already —
+# these lines add the two window features nothing else needed.
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGWindow",
+    "CGImage",
+    "CGGeometry",
+    # The hang watchdog asks whether any screen is awake before it judges
+    # (`hang_watchdog::screens_awake`, t-6388): `CGGetActiveDisplayList` and
+    # the `CGError` it answers with. Both pull only features already on.
+    "CGDirectDisplay",
+    "CGError",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }

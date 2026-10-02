@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { standIpcCensus } from "./ipc-census.mjs";
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /* The primary modifier as a synthetic-event spread — ⌘ on macOS, Ctrl
  * elsewhere. `shell.js` reads the same platform; a test that builds a ⌘/Ctrl
@@ -2205,6 +2206,9 @@ const stubBackend = ({ boot, pollers }) => {
         // so a test cannot wrap it from the outside afterwards. What a gesture
         // costs in subprocesses is a fact worth being able to assert.
         window.__COUNTS__[command] = (window.__COUNTS__[command] ?? 0) + 1;
+        // The IPC census (`ipc-census.mjs`), when a run turned it on: what this
+        // request's body would weigh on the wire. Absent, it costs nothing.
+        window.__IPC_LOG__?.(command, args, options);
         // 순서까지 물어야 하는 시험 하나를 위해 (1-ep: 먼저 지켜본다고 말하고,
         // 그 다음에 스냅샷). 켠 시험만 기록하므로 나머지에는 값이 없다.
         window.__ORDER__?.push(command);
@@ -2244,8 +2248,10 @@ const stubBackend = ({ boot, pollers }) => {
 
 /* 목과, 그 목이 주차할 폴러 이름표를 함께 건다 — 판이 여럿이라 한 문으로
  * 모은다(팝아웃도 같은 백엔드 위에 서야 한다). */
-const standBackend = (surface, boot = BOOT) =>
-  surface.addInitScript(stubBackend, { boot, pollers: POLLER_COMMANDS });
+const standBackend = async (surface, boot = BOOT) => {
+  await standIpcCensus(surface);
+  return surface.addInitScript(stubBackend, { boot, pollers: POLLER_COMMANDS });
+};
 
 
 /* The harness's hands on a page — one set, installed on every page this door

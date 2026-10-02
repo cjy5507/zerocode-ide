@@ -206,16 +206,63 @@ function describeWindowFault(event) {
   return `${event.message} (${event.filename}:${event.lineno})`;
 }
 
+/* The one door from this window's scripts into the backend's window log
+ * (`log_window_error`) for anything that says itself "a fault": the uncaught
+ * errors and rejections below, and the Korean-input husk (`shell-input.js`).
+ *
+ * Two rules live here and nowhere else.
+ *
+ * A report is a request, and the backend may refuse it — it refuses every
+ * command of a webview it does not know — so the report's own rejection is
+ * taken here. An uncaught one is a fault, which is reported, which is refused,
+ * which is a fault again: a request chain for as long as the page lives, one
+ * chain for every fault the page's boot throws. The 7.4 s hang of 2026-10-01
+ * 17:28 ended with the thumbnail of this window's own page, taken in the
+ * artifact gallery's hidden pane, a webview the backend does not know
+ * (`tools/ipc-road`, its `storm` page: such a page asks about ten thousand
+ * times a second).
+ *
+ * And a fault that repeats every frame (a listener that throws on each
+ * mousemove) must not be one request and one log line every frame. Ten at once
+ * cover a boot's cascade; one more a second keeps a recurring fault in the log
+ * for as long as it recurs, at a thousandth of that rate; what was held back is
+ * counted and said with the next report that goes. */
+const FAULT_REPORT_BURST = 10;
+const FAULT_REPORT_REFILL_MS = 1000;
+let faultReportAllowance = FAULT_REPORT_BURST;
+let faultReportRefilledAt = performance.now();
+let faultReportsHeldBack = 0;
+
+function tellWindowLog(message) {
+  const earned = Math.floor((performance.now() - faultReportRefilledAt) / FAULT_REPORT_REFILL_MS);
+  if (earned > 0) {
+    faultReportAllowance = Math.min(FAULT_REPORT_BURST, faultReportAllowance + earned);
+    faultReportRefilledAt += earned * FAULT_REPORT_REFILL_MS;
+  }
+  if (faultReportAllowance === 0) {
+    faultReportsHeldBack += 1;
+    return;
+  }
+  faultReportAllowance -= 1;
+  const heldBack = faultReportsHeldBack;
+  faultReportsHeldBack = 0;
+  try {
+    window.__TAURI__.core
+      .invoke("log_window_error", {
+        message: heldBack > 0 ? `${message} (+${heldBack} like it not reported)` : message,
+      })
+      .catch(() => {});
+  } catch {
+    // Reporting must never be the thing that fails.
+  }
+}
+
+function reportWindowFault(event) {
+  tellWindowLog(describeWindowFault(event));
+}
+
 for (const fault of ["error", "unhandledrejection"]) {
-  window.addEventListener(fault, (event) => {
-    try {
-      window.__TAURI__.core.invoke("log_window_error", {
-        message: describeWindowFault(event),
-      });
-    } catch {
-      // Reporting must never be the thing that fails.
-    }
-  });
+  window.addEventListener(fault, reportWindowFault);
 }
 /* One idle-aware poller for every background beat this window keeps.
  *

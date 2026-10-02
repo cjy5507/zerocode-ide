@@ -3471,6 +3471,12 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
    * The bytes are still the backend's to write. This decides whether there is
    * anything worth sending, never what it says. */
   let holding = 3;
+  /* The position the program was last told about: the cell, the button and the
+   * modifiers of the last report that went out. Motion inside it is not told
+   * again (see `report`). Set where a report is SENT, not where it is made, so
+   * a report held back by a link gesture and then dropped never counts as
+   * told. */
+  let lastReported = null;
   let pressOwnedByProgram = false;
   // Shift reserves a gesture for the terminal even while a program is tracking
   // the mouse — the xterm convention this window already keeps for the wheel
@@ -3571,6 +3577,14 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     }
     const cell = cellUnder(event);
     if (cell === null) return false;
+    /* A program that asked for motion is told when the pointer enters another
+     * cell — as xterm tells it, and every terminal that copied xterm — not for
+     * every pixel the pointer travels inside one. `claude` asks for every move
+     * (`?1003h`), and this reporter sent one request, one pty write and one
+     * redraw of the program per `mousemove`: a sweep across a pane was hundreds
+     * (t-20972). A press and a release are not positions and always go. */
+    const position = `${address.key}|${held.tracking}|${button}|${cell.row}|${cell.col}|${event.shiftKey}|${event.altKey}|${event.ctrlKey}`;
+    if (kind === "move" && position === lastReported) return true;
     const payload = {
       row: cell.row,
       col: cell.col,
@@ -3581,6 +3595,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       ctrl: event.ctrlKey,
     };
     const send = () => {
+      lastReported = position;
       if (address.kind === "term") {
         invoke("term_mouse", { term: address.term, event: payload }).catch(() => {});
       } else {

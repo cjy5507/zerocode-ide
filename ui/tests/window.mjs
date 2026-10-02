@@ -40,6 +40,8 @@ import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
 import { testTabstripOverflow } from "./tabstrip-overflow.mjs";
 import { testPasteRoad } from "./paste-road.mjs";
+import { testTermMouseMotion } from "./term-mouse-motion.mjs";
+import { testFaultReportStorm } from "./fault-report-storm.mjs";
 import { testStartupProjects } from "./startup-projects.mjs";
 import { testWorkspaceBoard } from "./workspace-board.mjs";
 import { testFlowConsole } from "./flow-console.mjs";
@@ -216,6 +218,9 @@ suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsi
 suite("tabstrip-overflow", ({ browser, origin, ok }) => testTabstripOverflow(browser, origin, ok));
 // A paste never stops the window's main thread (t-19409).
 suite("paste-road", ({ browser, origin, ok }) => testPasteRoad(browser, origin, ok));
+// A pointer over a program that asked for motion is reported once per cell (t-20972).
+suite("term-mouse-motion", ({ browser, origin, ok }) => testTermMouseMotion(browser, origin, ok));
+suite("fault-report-storm", ({ browser, origin, ok }) => testFaultReportStorm(browser, origin, ok));
 suite("startup-projects", ({ browser, origin, ok }) => testStartupProjects(browser, origin, ok));
 suite("workspace-board", ({ browser, origin, ok }) => testWorkspaceBoard(browser, origin, ok));
 suite("flow-console", ({ browser, origin, ok }) => testFlowConsole(browser, origin, ok));
