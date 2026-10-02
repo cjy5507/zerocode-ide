@@ -11,8 +11,8 @@ import { FIXTURE_PNG, MIXED_STREAM_FENCES, conversationFixture, openFixtureConve
 
 /* A wire session's page opened on `history` — the page with the most roads
  * on it (turns, a live answer, the composer's wire) — painted once. */
-export async function openConversation(page, history, { status = "idle", live = [] } = {}) {
-  await page.evaluate(async ({ history, status, live }) => {
+export async function openConversation(page, history, { status = "idle", live = [], cwd = "/tmp/zerocode-window-test" } = {}) {
+  await page.evaluate(async ({ history, status, live, cwd }) => {
     window.__CONVERSATION__ = { status, live, turns: [] };
     window.__ANSWER__.wire_start = (args) => ({ id: 41, agent: args.agent, protocol: "claude-stream", version: "2.1.280", model: null, session: null });
     window.__ANSWER__.wire_log = (args) => {
@@ -25,10 +25,10 @@ export async function openConversation(page, history, { status = "idle", live = 
       };
     };
     window.__ANSWER__.wire_stop = () => null;
-    await openWirePage("claude", "/tmp/zerocode-window-test", { history });
+    await openWirePage("claude", cwd, { history });
     await pollHelperPages();
     await window.__PAINTED__();
-  }, { history, status, live });
+  }, { history, status, live, cwd });
 }
 
 /* The faces the engine drew a node's text with (CDP, the renderer's own
@@ -1837,13 +1837,18 @@ async function stepsOnTheWire(browser, origin, ok) {
       const standing = steps();
       seen.stepCount = standing.length;
       seen.tags = standing.map((row) => `${row.tagName}${row.open ? "+open" : ""}`);
-      seen.heights = standing.map(tall);
+      // A shell step's first lines stand under its line (t-22100): the line itself is the one line.
+      const outOf = (row) => lineOf(row)?.querySelector(":scope > .helper-step-out") ?? null;
+      const lineTall = (row) => tall(row) - Math.round(outOf(row)?.getBoundingClientRect().height ?? 0);
+      seen.heights = standing.map(lineTall);
       seen.parts = standing.map((row) => row.getElementsByTagName("*").length);
       const bash = standing.find((row) => wordsOf(lineOf(row)).includes("SCREEN_WIDTH"));
       const web = standing.find((row) => wordsOf(lineOf(row)).includes("example.com/products"));
       seen.bashLine = wordsOf(lineOf(bash));
       seen.webLine = wordsOf(lineOf(web));
-      seen.sameHeight = bash !== undefined && web !== undefined && Math.abs(tall(bash) - tall(web)) <= 1;
+      seen.sameHeight = bash !== undefined && web !== undefined && Math.abs(lineTall(bash) - tall(web)) <= 1;
+      seen.bashOutLines = (outOf(bash)?.textContent ?? "").split("\n").length;
+      seen.outsOnlyShell = standing.filter((row) => outOf(row)).every((row) => row === bash);
       // Six reads in a row are one row; the read that failed stands apart, in
       // the failure ink; the two after it are a row of their own.
       const [run, failed, tail] = standing;
@@ -1869,9 +1874,9 @@ async function stepsOnTheWire(browser, origin, ok) {
       return seen;
     }, { first: READ_FIRST, later: READ_LATER });
     ok(
-      "C1: a step is one closed line — each row the fixture's steps come to is a closed details no taller than one line of the extension's row (44px), as tall for a 260-character address as for a short command, with a handful of elements behind it, no body built for every row",
+      "C1: a step is one closed line — each row the fixture's steps come to is a closed details whose line is no taller than one line of the extension's row (44px), as tall for a 260-character address as for a short command, with a handful of elements behind it, no body built for every row; a shell step's first lines (t-22100) stand under its line, and no other step's",
       shape.stepCount === 6 && shape.tags.every((tag) => tag === "DETAILS") && shape.heights.every((height) => height <= 44) &&
-        shape.parts.every((count) => count <= 12) && shape.sameHeight,
+        shape.parts.every((count) => count <= 12) && shape.sameHeight && shape.bashOutLines === 3 && shape.outsOnlyShell,
       JSON.stringify(shape),
     );
     ok(
@@ -1909,12 +1914,14 @@ async function stepsOnTheWire(browser, origin, ok) {
       if (!bash) return { missing: true, copies: 0, written: [] };
       const at = rows().indexOf(bash);
       const before = { top: bash.offsetTop, height: tall(bash), next: rows()[at + 1]?.offsetTop };
-      seen.rawHidden = !shown(bash, "MARK_TWO_BASH");
+      // Its first lines stand under its line (t-22100); a line past them does not until it is opened.
+      const pastFirst = `${READ_FIRST[5]}:16`;
+      seen.rawHidden = !shown(bash, pastFirst) && shown(bash, "MARK_TWO_BASH");
       lineOf(bash).click();
       await settle();
       const after = { top: bash.offsetTop, height: tall(bash), next: rows()[at + 1]?.offsetTop };
       seen.opened = bash.open === true;
-      seen.rawShown = shown(bash, "MARK_TWO_BASH");
+      seen.rawShown = shown(bash, pastFirst);
       seen.inPlace = rows()[at] === bash && after.top === before.top && after.height > before.height &&
         Math.abs((after.next - before.next) - (after.height - before.height)) <= 1;
       // The words are the person's to copy: the command and what it printed,
@@ -1946,7 +1953,7 @@ async function stepsOnTheWire(browser, origin, ok) {
       return seen;
     });
     ok(
-      "C2: the raw words are one press away — a closed step keeps its input and output out of sight, pressing its line opens the row in place (the same row, the same top, the rows below moved down by what it grew), and the command and what it printed each have their own copy",
+      "C2: the raw words are one press away — a closed step keeps its input and its output out of sight, past a shell step's first lines (t-22100), pressing its line opens the row in place (the same row, the same top, the rows below moved down by what it grew), and the command and what it printed each have their own copy",
       opened.rawHidden && opened.opened && opened.rawShown && opened.inPlace && opened.copies >= 2 &&
         opened.written.includes(BASH_COMMAND) && opened.written.includes(BASH_OUTPUT),
       JSON.stringify(opened),
@@ -3761,7 +3768,7 @@ async function stepsWebResults(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "D7: a page fetched says the HTTP status and the size the CLI recorded — 「200 · 2 KB」 in the done ink, 「404 · 2 KB」 in the failure's — and nothing when the CLI recorded neither",
+      "D7: a page fetched says the HTTP status and the size the CLI recorded — 「200 · 2 KB」 in the ready ink, 「404 · 2 KB」 in the halt's — and nothing when the CLI recorded neither",
       seen.fetched === `200 · ${seen.size}` && seen.fetchedInk && seen.gone === `404 · ${seen.size}` && seen.goneInk && seen.fetch === "",
       JSON.stringify(seen),
     );
@@ -3807,7 +3814,8 @@ async function stepsStreamingLifetime(browser, origin, ok) {
       const over = t("worker.thought", "생각");
       const OLD = "Gathering task details";
       const FRESH = "**Checking the current task**\nThen the cells.";
-      const seen = { going, over };
+      // What the line says when it names nothing (t-22100): the window's word that the agent works.
+      const seen = { going, over, busy: t("worker.busy", "작업 중…") };
       // An old thought, twenty blocks that said nothing, one short one: all of them over.
       const finished = [piece(OLD), ...Array.from({ length: 20 }, () => piece("")), piece("ok")];
       await bring(finished);
@@ -3870,22 +3878,22 @@ async function stepsStreamingLifetime(browser, origin, ok) {
     }, { at: CLOCK + 300_000 });
     const noBlank = (titles) => titles.every((title) => title !== null && title !== "");
     ok(
-      "D8: finished thoughts stand as rows of their own words — twenty blocks that said nothing leave no row, the rest are called 「생각」 and not 「생각 중…」, and the foot line names none of them",
+      "D8: finished thoughts stand as rows of their own words — twenty blocks that said nothing leave no row, the rest are called 「생각」 and not 「생각 중…」, and the foot line names none of them (it says the window's 「작업 중…」)",
       seen.finished.rows === 2 && noBlank(seen.finished.titles) && seen.finished.titles.join("|") === "Gathering task details|ok" &&
-        seen.finished.labels.every((label) => label === seen.over) && seen.finished.now === "",
+        seen.finished.labels.every((label) => label === seen.over) && seen.finished.now === seen.busy,
       JSON.stringify(seen.finished),
     );
     ok(
       "D8: a new thought that goes is the one the foot line names — its heading, not the old thought's — and wears 「생각 중…」; with no sentence closed yet the line names nothing, and never an older thought in its place",
       seen.fresh.rows === 3 && seen.fresh.title === "Checking the current task" && seen.fresh.label === seen.going &&
         seen.fresh.now.endsWith("Checking the current task") && !seen.fresh.now.includes("Gathering") &&
-        seen.unclosed.rows === 3 && seen.unclosed.now === "" && !seen.unclosed.now.includes("Gathering"),
+        seen.unclosed.rows === 3 && seen.unclosed.now === seen.busy && !seen.unclosed.now.includes("Gathering"),
       JSON.stringify({ fresh: seen.fresh, unclosed: seen.unclosed }),
     );
     ok(
       "D8: a thought that goes and then ends is the same row — 「생각 중…」 turns 「생각」, it takes the end class, and the foot line stops naming it",
       seen.flip.before.label === seen.going && seen.flip.before.now.endsWith("Same node") && seen.flip.rows === 1 && seen.flip.same &&
-        seen.flip.label === seen.over && seen.flip.done && seen.flip.now === "",
+        seen.flip.label === seen.over && seen.flip.done && seen.flip.now === seen.busy,
       JSON.stringify(seen.flip),
     );
     ok(
@@ -3942,13 +3950,14 @@ async function stepsNewestStepNamed(browser, origin, ok) {
       seen.afterSecond = now();
       await feed(back("n1", T + 3000));
       seen.afterBoth = now();
+      seen.busy = t("worker.busy", "작업 중…");
       return seen;
     }, { dir: PROFILE });
     ok(
-      "D9: two calls out — the foot line names the later one; when it comes back, the earlier one; when both are back it names nothing",
+      "D9: two calls out — the foot line names the later one; when it comes back, the earlier one; when both are back it names no call (the window's 「작업 중…」, t-22100)",
       seen.both.includes("Second.tsx") && !seen.both.includes("First.tsx") &&
         seen.afterSecond.includes("First.tsx") && !seen.afterSecond.includes("Second.tsx") &&
-        seen.afterBoth === "",
+        seen.afterBoth === seen.busy,
       JSON.stringify(seen),
     );
     ok("D9: the foot line raised no page errors", faults.length === 0, faults.join("\n"));

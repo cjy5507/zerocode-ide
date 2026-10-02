@@ -67,13 +67,15 @@ async function openMockup(page, { ago = 41_000, status = "working" } = {}) {
   await installStepsProbe(page);
 }
 
-/* A colour the page resolves for a token, through a probe of the same property. */
+/* A value the page resolves for a token, through a probe of the same property (its camel-case name,
+ * which the style object takes and `setProperty` does not), stood where the token is read — the page
+ * re-binds some per agent (`--chat-accent` on a Claude page is Claude's). */
 const PROBE = `
-  window.__PROBE__ = (name, property = "color") => {
+  window.__PROBE__ = (name, property = "color", host = document.body) => {
     const probe = document.createElement("span");
-    probe.style.setProperty(property === "color" ? "color" : property, \`var(\${name})\`);
-    document.body.appendChild(probe);
-    const said = getComputedStyle(probe)[property === "color" ? "color" : property];
+    probe.style[property] = \`var(\${name})\`;
+    host.appendChild(probe);
+    const said = getComputedStyle(probe)[property];
     probe.remove();
     return said;
   };
@@ -269,7 +271,7 @@ async function redesignRows(browser, origin, ok) {
           t("worker.stepFound", "{{n}}줄 찾음", { n: 3 }),
         ],
         statusInk: getComputedStyle(lineOf(rows[0])?.querySelector(".helper-step-status") ?? document.body).color,
-        wantStatusInk: probe("--chat-dot-done"),
+        wantStatusInk: probe("--signal-ready-ink"),
         dots: rows.map((row) => Boolean(dot(row))),
         doneInk: dot(rows[0]) ? getComputedStyle(dot(rows[0])).backgroundColor : null,
         wantDoneInk: probe("--chat-dot-done", "backgroundColor"),
@@ -324,7 +326,7 @@ async function redesignRows(browser, origin, ok) {
       JSON.stringify(seen.steps),
     );
     ok(
-      "R4: what came of a step means something — a page read says its HTTP status and size (「200 · 256 KB」, the status in the done ink), a search how many results it found (「결과 8개」, not a byte count), a grep in the shell how many lines it found (「3줄 찾음」)",
+      "R4: what came of a step means something — a page read says its HTTP status and size (「200 · 256 KB」, the status in the ready signal's text ink), a search how many results it found (「결과 8개」, not a byte count), a grep in the shell how many lines it found (「3줄 찾음」)",
       JSON.stringify(seen.steps.results.slice(0, 3)) === JSON.stringify(seen.steps.wantResults) &&
         seen.steps.statusInk === seen.steps.wantStatusInk,
       JSON.stringify({ results: seen.steps.results, want: seen.steps.wantResults, ink: seen.steps.statusInk }),
@@ -521,7 +523,7 @@ async function redesignRail(browser, origin, ok) {
       seen.current = ticks().filter((tick) => tick.classList.contains("is-current")).length;
       const current = ticks().find((tick) => tick.classList.contains("is-current"));
       seen.currentInk = current ? getComputedStyle(current).backgroundColor : null;
-      seen.wantInk = window.__PROBE__("--chat-accent", "backgroundColor");
+      seen.wantInk = window.__PROBE__("--chat-accent", "backgroundColor", document.querySelector("#worker-view"));
       // A press on the first tick brings the first row to the list's top.
       ticks()[0]?.click();
       await settle();
@@ -645,7 +647,9 @@ async function redesignStack(browser, origin, ok) {
       toggle?.click();
       await settle();
       seen.openItems = stack()?.querySelectorAll(".chat-stack-item").length ?? 0;
-      seen.expanded = toggle?.getAttribute("aria-expanded");
+      // The stack stands anew when what it says moves; its button is the one standing now, and it kept the keyboard.
+      seen.expanded = stack()?.querySelector(".chat-stack-toggle")?.getAttribute("aria-expanded");
+      seen.focusKept = document.activeElement === stack()?.querySelector(".chat-stack-toggle");
       // Kept per conversation: away to another tab and back.
       const here = activeTabId;
       const other = await openTermTab({ placement: "tab" });
@@ -679,7 +683,7 @@ async function redesignStack(browser, origin, ok) {
     );
     ok(
       "R9: the stack opens to the items by its own button (the keyboard reaches it), keeps that choice for this conversation across tabs, and counts a waiting message",
-      seen.toggleFocus && seen.openItems === 3 && seen.expanded === "true" && seen.keptOpen && seen.queued === seen.wantQueued,
+      seen.toggleFocus && seen.openItems === 3 && seen.expanded === "true" && seen.focusKept && seen.keptOpen && seen.queued === seen.wantQueued,
       JSON.stringify(seen),
     );
     ok(
@@ -693,7 +697,8 @@ async function redesignStack(browser, origin, ok) {
   }
   const bare = await openWindowTestPage(browser, origin);
   try {
-    await openConversation(bare.page, [{ role: "user", text: "안녕" }, { role: "assistant", text: "안녕하세요." }]);
+    // A session in a folder no worktree the window lists stands in.
+    await openConversation(bare.page, [{ role: "user", text: "안녕" }, { role: "assistant", text: "안녕하세요." }], { cwd: "/tmp/zerocode-window-elsewhere" });
     const seen = await bare.page.evaluate(() => {
       const stack = document.querySelector("#worker-view .chat-stack");
       return { stands: Boolean(stack), hidden: stack?.hidden ?? null };

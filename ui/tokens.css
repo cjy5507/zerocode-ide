@@ -2385,7 +2385,6 @@
   --chat-bubble-pad-y: 4px;
   --chat-bubble-gap: 4px;
   --chat-radius-composer: 8px;
-  --chat-bubble-max: 100%;
   --chat-prose-size: var(--text-sm);
   --chat-prose-leading: 1.5;
   --chat-dot: 7px;
@@ -2432,8 +2431,7 @@
    * dock's own height, and fades its last 150px under the dock. The
    * person's words are a sticky header 14px above the box and 12px below,
    * the last 12px fading to the ground. The spinner row (`spinnerRow`) is
-   * 1.85em tall; its mark is a 1.5em mono glyph in a 1.5em column, which
-   * puts it where the rail's dots stand; it fades in over 300ms. An
+   * at least 1.85em tall and fades in over 300ms. An
    * answer's action row is 16px tall with a 20px copy padded 2px. The
    * composer's box pads 10×14 and grows to 200px; its footer pads 5px and
    * gaps 6px. Meta lines (`metaMessage`) pad 8px, sit 4px off their
@@ -2460,15 +2458,13 @@
   --chat-sticky-pad-bottom: 12px;
   --chat-sticky-fade: 12px;
   --chat-status-h: 1.85em;
-  --chat-status-mark-w: 1.5em;
-  --chat-status-mark-size: 1.5em;
   --chat-status-in: 300ms;
-  /* A step is one line (t-15682): a 30px row whose mark is a 22px box with
-   * the glyph 4px inside it, its opened body indented to stand under the
-   * words, and the foot line's spinner ring 12px across, 2px thick. */
+  /* A step is one line (t-15682): a 30px row whose state dot stands centred in
+   * the 22px column its kind's mark stood in (t-22100), its opened body
+   * indented to stand under the words, and the foot line's spinner ring 12px
+   * across, 2px thick. */
   --chat-step-h: 30px;
   --chat-step-icon: 22px;
-  --chat-step-icon-pad: 4px;
   --chat-step-body-indent: 38px;
   --chat-status-ring: 12px;
   --chat-status-ring-stroke: 2px;

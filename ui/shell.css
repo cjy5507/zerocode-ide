@@ -13551,16 +13551,26 @@ body.mod-held .term-link,
   width: var(--chat-run-dot);
   height: var(--chat-run-dot);
   border-radius: 50%;
-  background: currentColor;
+  background: var(--ink-mist);
 }
 
+/* Running: the dot in the done ink, the words in the ready signal's text ink
+ * (4.5:1 in both treatments); failed, the halt's. */
 .chat-run.is-running {
   border-color: color-mix(in srgb, var(--chat-dot-done) 40%, transparent);
-  color: var(--chat-dot-done);
+  color: var(--signal-ready-ink);
+}
+
+.chat-run.is-running > .chat-run-dot {
+  background: var(--chat-dot-done);
 }
 
 .chat-run.is-failed {
-  color: var(--chat-dot-failed);
+  color: var(--signal-halt-ink);
+}
+
+.chat-run.is-failed > .chat-run-dot {
+  background: var(--chat-dot-failed);
 }
 
 /* What it did, counted: the whole, each family, how many failed — at the
@@ -13586,7 +13596,7 @@ body.mod-held .term-link,
 }
 
 .chat-tally-failed.is-failed {
-  color: var(--chat-dot-failed);
+  color: var(--signal-halt-ink);
 }
 
 .is-chat-page .worker-where {
@@ -14703,23 +14713,26 @@ details[open] > .helper-step-line::after {
 }
 
 /* What came of it and how long it took read as one phrase — 「200 · 256 KB ·
- * 3.9초」 — and a page read's status wears the ink of how it went. */
+ * 3.9초」 — and a page read's status wears the ink of how it went: the
+ * signals' text inks, which read at 4.5:1 in both treatments (the dots' own
+ * colours are for marks, not words). */
 .helper-step-res:not(:empty) + .helper-step-meta:not(:empty)::before {
   content: "· ";
 }
 
 .helper-step-status.is-ok {
-  color: var(--chat-dot-done);
+  color: var(--signal-ready-ink);
 }
 
 .helper-step-status.is-bad {
-  color: var(--chat-dot-failed);
+  color: var(--signal-halt-ink);
 }
 
 /* A shell step's first lines (`dressStepOut`, t-22100): under its line, on a
  * hairline at the words' axis, in the machine's mono at a reading leading;
  * each line cut at the list's edge rather than wrapped, and each `path:line`
- * a door in the link's ink. */
+ * a door in the argument's ink — the link's colour leaning to the words', so
+ * it reads at 4.5:1 on the light ground too (the bare link read 4.4). */
 .helper-step-out {
   order: 1;
   flex: 1 0 100%;
@@ -14738,7 +14751,7 @@ details[open] > .helper-step-line::after {
 
 .helper-out-path {
   border-radius: var(--radius-xs);
-  color: var(--chat-link);
+  color: var(--chat-arg-ink);
   cursor: pointer;
 }
 

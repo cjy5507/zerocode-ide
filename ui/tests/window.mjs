@@ -56021,7 +56021,11 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       seen.cardTool = card?.querySelector(".board-approve-title")?.textContent ?? "";
       seen.wantCardTool = t("board.approve.title", "{{tool}} 허용할까요?", { tool: "Edit" });
       seen.cardDiff = card?.querySelectorAll(".helper-tool-diff .diff-line").length ?? 0;
-      seen.cardBeforeComposer = card?.nextElementSibling?.classList.contains("worker-composer") === true;
+      // The card stands over the composer — over the conversation's state, which stands joined to the
+      // composer's top when it has something to say (t-22100).
+      const underCard = card?.nextElementSibling;
+      seen.cardBeforeComposer = underCard?.classList.contains("worker-composer") === true ||
+        (underCard?.classList.contains("chat-stack") === true && underCard.nextElementSibling?.classList.contains("worker-composer") === true);
       seen.cardActs = [...(card?.querySelectorAll(".board-approve-act") ?? [])].map((act) => act.className.replace("board-approve-act ", "")).join(",");
       // The card stands in the dock with the composer, as the extension's
       // does in its `inputContainer` — no accent rail of its own.
