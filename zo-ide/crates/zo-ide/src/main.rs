@@ -645,8 +645,6 @@ fn open_events_channel(
     // 진실을 말하도록, 상태와 히스토리를 세우는 자리에서 한 번 밀어 넣는다.
     channel.publish_status(&session.status(), &session.cwd);
     channel.set_history(&session.replay_items());
-    // Only now do the address and discovery files appear and requests get
-    // read: the first subscriber hydrates from the state built above.
     tokio_rt.block_on(async { channel.serve(&config) })?;
     let discovery_file = config.discovery_file.clone();
     events::install(channel);

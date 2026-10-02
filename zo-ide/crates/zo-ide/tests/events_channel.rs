@@ -585,3 +585,51 @@ async fn a_push_notification_reaches_the_subscribed_window_as_a_notify_frame() {
         "a render frame never wears the JSON-RPC envelope"
     );
 }
+
+/// A client that already knows the bound address is not answered before the
+/// channel serves, and its first subscribe then hydrates the state installed
+/// in between. Neither the address file nor the discovery record exists
+/// until then.
+#[tokio::test]
+async fn a_client_at_a_bound_address_hears_the_installed_state_once_the_channel_serves() {
+    let dir = tempfile::tempdir().expect("scratch directory");
+    let config = EventsConfig {
+        bind: "127.0.0.1:0".to_string(),
+        token: Some("serve-token".to_string()),
+        session_id: SESSION.to_string(),
+        addr_file: Some(dir.path().join("events.addr")),
+        discovery_file: Some(dir.path().join("zo-events-1.addr")),
+    };
+    let mut channel = EventsChannel::bind(&config).await.expect("bind");
+    assert!(!dir.path().join("events.addr").exists(), "address published before serve");
+    assert!(!dir.path().join("zo-events-1.addr").exists(), "discovery published before serve");
+
+    let address = channel.local_addr().to_string();
+    let waiting = async {
+        let mut client = Client::connect(&address, Some("serve-token".to_string()))
+            .await
+            .expect("connect");
+        client.subscribe(SESSION, true).await.expect("subscribe")
+    };
+    tokio::pin!(waiting);
+    // A bounded negative wait: nothing reads this connection yet.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut waiting).await.is_err(),
+        "a request was answered before the channel served"
+    );
+
+    let turn = channel.begin_turn();
+    channel.serve(&config).expect("serve");
+    assert!(dir.path().join("events.addr").exists());
+    assert!(dir.path().join("zo-events-1.addr").exists());
+    assert!(channel.serve(&config).is_err(), "a channel serves once");
+
+    let hydrated = tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .expect("the waiting client was answered after serve");
+    let history = hydrated["history"].as_array().expect("history");
+    assert!(
+        history.iter().any(|frame| frame["type"] == "turn"),
+        "the first subscribe missed the state installed before serve (turn {turn}): {history:?}"
+    );
+}
