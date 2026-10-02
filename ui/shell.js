@@ -12306,6 +12306,7 @@ function forgetPaneChat(term) {
   const held = paneChats.get(term);
   if (!held) return;
   dropWorkerScreen(held.tab.pane);
+  if (held.host) forgetCodeColours(held.host);
   held.host?.remove();
   // 기다리던 글들은 이 대화의 것이었다 — 대화가 사라지면 같이 사라진다.
   held.run.queue = null;
@@ -13072,8 +13073,10 @@ function stopStatusCycle(line) {
  * checkout (`mdWhere.base`), so a relative path in the answer opens the file
  * it names there; an image stays its caption; and a renderer that trips on a
  * line leaves the words standing as text rather than a blank turn. Bare paths
- * and addresses become the same doors a markdown link is (t-2973). */
-function paintHelperProse(host, text, base) {
+ * and addresses become the same doors a markdown link is (t-2973). Its code
+ * takes its colours (`colourCodeIn`, t-22095) — unless `colour` is false: the
+ * block still being written, which the next frame draws again. */
+function paintHelperProse(host, text, base, { colour = true } = {}) {
   const previous = mdWhere;
   mdWhere = { base, page: null };
   try {
@@ -13087,6 +13090,7 @@ function paintHelperProse(host, text, base) {
   } finally {
     mdWhere = previous;
   }
+  if (colour) colourCodeIn(host);
 }
 
 /* 답이 이름한 파일과 주소(t-2973) — 「완성했습니다: index.html」의 그 낱말.
@@ -13810,6 +13814,7 @@ function paintLiveAnswerNow(row, text, run) {
   const follow = chatFollows(list);
   const cut = settledCut(text, text.length);
   if (cut > row.__settledEnd) {
+    forgetCodeColours(settled);
     settled.replaceChildren();
     paintHelperProse(settled, text.slice(0, cut), helperBase(run));
     row.__settledEnd = cut;
@@ -13818,7 +13823,7 @@ function paintLiveAnswerNow(row, text, run) {
   if (rest !== row.__tailText) {
     row.__tailText = rest;
     tail.replaceChildren();
-    if (rest.trim() !== "") paintHelperProse(tail, rest, helperBase(run));
+    if (rest.trim() !== "") paintHelperProse(tail, rest, helperBase(run), { colour: false });
   }
   if (follow) carryToFoot(list);
 }
@@ -14993,6 +14998,7 @@ function paintHelperPageOwn(host, tab, run, owner) {
   // (`rearmKeySink`) and never reaches the page.
   host.dataset.keyboardOwner = "true";
   host.style.removeProperty("--chat-dock-h");
+  forgetCodeColours(host);
   host.replaceChildren();
   const turns = helperTurnsNode(run);
   const status = helperStatusNode(run);
@@ -15056,6 +15062,7 @@ function paintHelperPage(host, tab) {
   host.classList.add("is-chat-page");
   host.classList.remove("is-helper-page");
   delete host.dataset.keyboardOwner;
+  forgetCodeColours(host);
   host.replaceChildren();
   const head = workerHeadNode(run);
   const turns = helperTurnsNode(run);
@@ -15105,6 +15112,7 @@ function releaseWorkerPage(tab) {
   host.__helperPage = null;
   host.classList.remove("is-chat-page", "is-helper-page");
   delete host.dataset.keyboardOwner;
+  forgetCodeColours(host);
   host.replaceChildren();
 }
 
@@ -15154,6 +15162,7 @@ function paintWorkerView(tab) {
   host.classList.remove("is-chat-page", "is-helper-page");
   delete host.dataset.keyboardOwner;
   writeAttribute(host, "data-agent", run.agent ?? "");
+  forgetCodeColours(host);
   host.replaceChildren();
   host.appendChild(workerHeadNode(run));
   const owner = tabOfTerm(run.term);

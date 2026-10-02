@@ -13810,6 +13810,29 @@ details.worker-command {
   margin: 0;
 }
 
+/* The code in a fence, coloured by the editor's own ramp (t-22095): each
+ * role `editorHighlightStyle` colours is a highlight the engine paints over
+ * the words (`colourCodeIn`), so the fence holds no node more than plain
+ * code does. Colours only — weight and slant stay the words' own — and both
+ * treatments, because every role is a token of the ramp. */
+::highlight(chat-code-keyword) { color: var(--syntax-keyword); }
+::highlight(chat-code-string) { color: var(--syntax-string); }
+::highlight(chat-code-number) { color: var(--syntax-number); }
+::highlight(chat-code-comment) { color: var(--syntax-comment); }
+::highlight(chat-code-function) { color: var(--syntax-function); }
+::highlight(chat-code-type) { color: var(--syntax-type); }
+::highlight(chat-code-variable) { color: var(--syntax-variable); }
+::highlight(chat-code-constant) { color: var(--syntax-constant); }
+::highlight(chat-code-operator) { color: var(--syntax-operator); }
+::highlight(chat-code-punctuation) { color: var(--syntax-punctuation); }
+::highlight(chat-code-tag) { color: var(--syntax-tag); }
+::highlight(chat-code-attribute) { color: var(--syntax-attribute); }
+::highlight(chat-code-meta) { color: var(--syntax-meta); }
+::highlight(chat-code-link) { color: var(--syntax-link); }
+::highlight(chat-code-invalid) { color: var(--syntax-invalid); }
+::highlight(chat-code-inserted) { color: var(--syntax-inserted); }
+::highlight(chat-code-deleted) { color: var(--syntax-deleted); }
+
 .helper-code-copy {
   position: absolute;
   top: var(--chat-code-copy-inset);
