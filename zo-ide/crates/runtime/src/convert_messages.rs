@@ -66,9 +66,19 @@ fn newest_tool_run_start(messages: &[ConversationMessage]) -> usize {
 /// every earlier turn's reasoning from what the next model was shown — the
 /// text and the tool calls survived, the *why* did not. See
 /// `reasoning_passport`.
+///
+/// An Anthropic target is the exception that keeps the drop: reasoning without
+/// an Anthropic signature (another provider's) is not carried to it at all.
+/// Anthropic's safety classifier reads assistant turns that write reasoning out
+/// as text as `reasoning_extraction` and declines the whole conversation — a
+/// category the provider routes to no other model. On 2026-10-02 a session run
+/// on gpt-6-astra and switched to claude-opus-5-5 carried 144 such passports and
+/// every request was declined: with its images withheld, on the retry, and
+/// again after compaction kept the recent turns verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningReplay {
-    /// Signed blocks ride the wire verbatim (Anthropic).
+    /// Signed blocks ride the wire verbatim (Anthropic); reasoning without an
+    /// Anthropic signature is not carried.
     Native,
     /// The target cannot verify a signature, so reasoning is carried as text.
     AsText,
@@ -186,9 +196,11 @@ pub fn model_handoff_notice(previous: &str, next: &str) -> Option<String> {
         prefix = crate::session::MODEL_HANDOFF_PREFIX,
     );
     // Only say the reasoning changed shape when it actually did. Claiming it on
-    // a same-provider swap would send the model looking for markers that are
-    // not there.
-    if ReasoningReplay::for_model(previous) != ReasoningReplay::for_model(next) {
+    // a same-provider swap — or on a switch to Anthropic, which is carried no
+    // earlier reasoning at all — would send the model looking for markers that
+    // are not there.
+    let carried_as_text = ReasoningReplay::for_model(next) == ReasoningReplay::AsText;
+    if carried_as_text && ReasoningReplay::for_model(previous) != ReasoningReplay::for_model(next) {
         use std::fmt::Write as _;
         let _ = write!(
             note,
@@ -317,7 +329,7 @@ fn convert_blocks(
                         text: text.clone(),
                         cache_control: None,
                     }),
-                    // Reasoning has two ways onto the wire, and exactly one of
+                    // Reasoning has two ways onto the wire, and at most one of
                     // them is available per target.
                     //
                     // Signed + Anthropic: re-send VERBATIM so interleaved
@@ -325,27 +337,33 @@ fn convert_blocks(
                     // signature is the whole point — Anthropic 400s on a
                     // modified or unsigned thinking block.
                     //
-                    // Everything else — a different provider, or a block this
-                    // session's earlier (non-Anthropic) model produced with no
-                    // signature — is carried as attributed TEXT. It used to be
-                    // dropped, which is why switching models mid-session
-                    // handed the next model a conversation with every "why"
-                    // removed while the "what" stayed. Text cannot be rejected
-                    // as an unverified signature, and it is what the receiving
-                    // model can actually read.
-                    ContentBlock::Thinking { thinking, signature } => {
-                        if reasoning == ReasoningReplay::Native && !signature.is_empty() {
+                    // Unsigned + Anthropic (another provider's reasoning): not
+                    // carried. Written out as text it reads to Anthropic's
+                    // classifier as reasoning extraction, and the decline
+                    // stands for the whole conversation (see `ReasoningReplay`).
+                    // The answers and the tool calls still cross.
+                    //
+                    // A non-Anthropic target is carried the reasoning as
+                    // attributed TEXT. It used to be dropped, which is why
+                    // switching models mid-session handed the next model a
+                    // conversation with every "why" removed while the "what"
+                    // stayed. Text cannot be rejected as an unverified
+                    // signature, and it is what the receiving model can read.
+                    ContentBlock::Thinking { thinking, signature } => match reasoning {
+                        ReasoningReplay::Native if !signature.is_empty() => {
                             Some(InputContentBlock::Thinking {
                                 thinking: thinking.clone(),
                                 signature: signature.clone(),
                             })
-                        } else {
+                        }
+                        ReasoningReplay::Native => None,
+                        ReasoningReplay::AsText => {
                             reasoning_passport(thinking).map(|text| InputContentBlock::Text {
                                 text,
                                 cache_control: None,
                             })
                         }
-                    }
+                    },
                     // Redacted reasoning is an opaque blob: only the provider
                     // that sealed it can read it, so there is nothing to carry
                     // anywhere else. Replayed natively, omitted otherwise.
@@ -1437,8 +1455,8 @@ mod passport_label_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_wire_reminders, convert_messages, convert_messages_for, ReasoningReplay,
-        REASONING_PASSPORT_LABEL,
+        append_wire_reminders, convert_messages, convert_messages_for, is_reasoning_passport_text,
+        ReasoningReplay, REASONING_PASSPORT_LABEL,
     };
     use crate::ConversationMessage;
     use api::{InputContentBlock, ToolResultContentBlock};
@@ -2060,12 +2078,13 @@ mod tests {
         assert_eq!(wire["signature"], "SIG-xyz");
     }
 
-    /// An unsigned thinking block never reaches the wire AS a thinking block —
-    /// the API 400s on one — but its content is no longer thrown away. GPT
-    /// reasoning is stored exactly this way (empty signature), so dropping it
-    /// silently deleted the reasoning of every non-Anthropic turn.
+    /// An unsigned thinking block (GPT reasoning is stored exactly this way)
+    /// never reaches an Anthropic wire — not as a thinking block (the API 400s
+    /// on one) and not as text either: Anthropic's classifier reads assistant
+    /// turns that write reasoning out as `reasoning_extraction` and declines the
+    /// whole conversation, with no other model to route it to.
     #[test]
-    fn unsigned_thinking_is_carried_as_text_never_sent_unsigned() {
+    fn an_anthropic_target_never_receives_another_models_reasoning_in_any_form() {
         let message = ConversationMessage::assistant(vec![
             crate::session::ContentBlock::Thinking {
                 thinking: "legacy reasoning".to_string(),
@@ -2075,7 +2094,7 @@ mod tests {
                 text: "answer".to_string(),
             },
         ]);
-        let converted = convert_messages(&[message]);
+        let converted = convert_messages_for(&[message], ReasoningReplay::Native);
         let content = &converted[0].content;
         assert!(
             !content
@@ -2083,7 +2102,38 @@ mod tests {
                 .any(|block| matches!(block, InputContentBlock::Thinking { .. })),
             "no unsigned thinking may reach the wire: {content:?}"
         );
-        let carried = content
+        assert!(
+            !content.iter().any(|block| matches!(
+                block,
+                InputContentBlock::Text { text, .. } if text.contains("legacy reasoning")
+            )),
+            "another model's reasoning is not written out as text to Claude: {content:?}"
+        );
+        assert!(
+            content.iter().any(|block| matches!(
+                block,
+                InputContentBlock::Text { text, .. } if text == "answer"
+            )),
+            "the answer still crosses: {content:?}"
+        );
+    }
+
+    /// The other half: a target that is not Anthropic still reads the earlier
+    /// reasoning, carried as attributed text.
+    #[test]
+    fn a_non_anthropic_target_still_carries_unsigned_reasoning_as_text() {
+        let message = ConversationMessage::assistant(vec![
+            crate::session::ContentBlock::Thinking {
+                thinking: "legacy reasoning".to_string(),
+                signature: String::new(),
+            },
+            crate::session::ContentBlock::Text {
+                text: "answer".to_string(),
+            },
+        ]);
+        let converted = convert_messages_for(&[message], ReasoningReplay::AsText);
+        let carried = converted[0]
+            .content
             .iter()
             .find_map(|block| match block {
                 InputContentBlock::Text { text, .. }
@@ -2095,12 +2145,57 @@ mod tests {
             })
             .expect("the reasoning is carried as text, not deleted");
         assert!(carried.contains("legacy reasoning"), "{carried}");
-        assert!(
-            content.iter().any(|block| matches!(
-                block,
-                InputContentBlock::Text { text, .. } if text == "answer"
-            )),
-            "the answer still follows the carried reasoning"
+    }
+
+    /// The person's conversation (2026-10-02), by its shape: a long session on
+    /// a GPT model — every assistant turn opens with an unsigned reasoning
+    /// summary, then a tool call — switched to Claude with `/model`. Each of
+    /// those summaries went out as `[earlier reasoning]` text, and Anthropic's
+    /// classifier declined every request as `reasoning_extraction`, compaction
+    /// included. Counted on the wire the production path builds for Claude.
+    #[test]
+    fn a_long_gpt_session_switched_to_claude_sends_no_reasoning_passports() {
+        let turns = 144;
+        let history: Vec<ConversationMessage> = (0..turns)
+            .flat_map(|turn| {
+                let id = format!("call_{turn}");
+                [
+                    ConversationMessage::assistant(vec![
+                        crate::session::ContentBlock::Thinking {
+                            thinking: format!("**Checking step {turn}**"),
+                            signature: String::new(),
+                        },
+                        crate::session::ContentBlock::ToolUse {
+                            id: id.clone(),
+                            name: "read_file".to_string(),
+                            input: "{}".to_string(),
+                        },
+                    ]),
+                    ConversationMessage::tool_result(&id, "read_file", "ok", false),
+                ]
+            })
+            .collect();
+        let count_passports = |wire: &[api::InputMessage]| {
+            wire.iter()
+                .flat_map(|message| &message.content)
+                .filter(|block| matches!(
+                    block,
+                    InputContentBlock::Text { text, .. } if is_reasoning_passport_text(text)
+                ))
+                .count()
+        };
+        let to_claude =
+            convert_messages_for(&history, ReasoningReplay::for_model("claude-opus-5-5"));
+        assert_eq!(
+            count_passports(&to_claude),
+            0,
+            "{turns} turns of GPT reasoning must not reach Claude as text"
+        );
+        let to_gpt = convert_messages_for(&history, ReasoningReplay::for_model("gpt-6-astra"));
+        assert_eq!(
+            count_passports(&to_gpt),
+            turns,
+            "a GPT target keeps reading every turn's reasoning"
         );
     }
 
@@ -2234,6 +2329,15 @@ mod tests {
         assert!(
             crossed.contains(REASONING_PASSPORT_LABEL) && crossed.contains("session_recall"),
             "a crossed switch must explain what the model is looking at: {crossed}"
+        );
+
+        // A switch TO Claude carries no earlier reasoning at all (see
+        // `convert_blocks`), so the note must not send the model looking for it.
+        let into_claude =
+            super::model_handoff_notice("gpt-6-astra", "claude-opus-5-5").expect("a switch");
+        assert!(
+            !into_claude.contains(REASONING_PASSPORT_LABEL),
+            "nothing is carried to an Anthropic target, so nothing is announced: {into_claude}"
         );
 
         assert!(
