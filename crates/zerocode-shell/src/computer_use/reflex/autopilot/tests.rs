@@ -12,6 +12,7 @@ use super::super::tests::{answer_naming, open, reading_handshake};
 use super::*;
 use crate::systemone::Spent;
 use crate::systemone::tests::ANSWERING_VERSION;
+use zerocode_core::computer_use::REFLEX_SETTLE_MS;
 
 /// The epoch milliseconds the test's steady clock starts at.
 const WALL: i64 = 1_790_000_000_000;
@@ -415,6 +416,12 @@ impl Fake {
 
     fn tick(&mut self, autopilot: &mut Autopilot) -> bool {
         self.with(None, |world| autopilot.tick(world))
+    }
+
+    /// One settle between collects, the clock moved on by one settle.
+    fn settle(&mut self, autopilot: &mut Autopilot) {
+        self.now += REFLEX_SETTLE_MS;
+        self.with(None, |world| autopilot.settle(world));
     }
 
     /// The rows every settled question left, in order.
@@ -1172,5 +1179,108 @@ fn a_sliver_over_the_windows_edge_leaves_the_run_standing() {
             .calls
             .iter()
             .all(|(method, _)| method != "windowAction")
+    );
+}
+
+/// One autopilot whose teacher's pause is held until the test lets it go
+/// (t-22110): the collect that asked has passed, the answer comes back
+/// between collects, and settles alone — nothing read from the helper — are
+/// given `settles` chances to carry it out before the next collect does —
+/// few enough (ten) that the collect's reading is still young when the next
+/// collect reads the answer instead, on the test's clock.
+/// What stopped the hand, how long the answer waited for the window after it
+/// came back (the row's own number) and how many settles it took.
+fn a_pause_answered_between_collects(settles: usize) -> (String, u64, usize) {
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good()]);
+    let open = fake.teacher.holds(PAUSE);
+    let (mut pilot, answer) = fake.start(asked(None)).expect("started");
+    let run = answer["runId"].as_str().expect("a run").to_string();
+    // The collect that asks: the reading is new, so the question goes out
+    // and waits on the test's gate.
+    fake.now += REFLEX_COLLECT_MS;
+    fake.tick(&mut pilot);
+    assert!(fake.asked_rows().is_empty(), "the question is in flight");
+    assert_eq!(fake.teacher.heard.load(Ordering::SeqCst), 1);
+    open.send(()).expect("the teacher answers");
+    let reads = |fake: &Fake| {
+        fake.helper
+            .calls
+            .iter()
+            .filter(|(method, _)| method == "reflexReceipts")
+            .count()
+    };
+    let read_before = reads(&fake);
+    let mut taken = 0;
+    for _ in 0..settles {
+        fake.settle(&mut pilot);
+        taken += 1;
+        if !fake.helper.stops().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        reads(&fake),
+        read_before,
+        "a settle reads nothing from the helper"
+    );
+    let stopped_by = if fake.helper.stops().is_empty() {
+        // The next collect reads the answer, as every collect did before.
+        fake.now += REFLEX_COLLECT_MS;
+        fake.until_settled(&mut pilot);
+        "collect"
+    } else {
+        "settle"
+    };
+    assert_eq!(fake.helper.stops(), std::slice::from_ref(&run));
+    let rows = fake.asked_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["chosen"], json!(PAUSE));
+    assert_eq!(rows[0]["applied"], json!(true));
+    assert_eq!(
+        pilot.ended().map(|ended| ended["reason"].clone()),
+        Some(json!(PAUSED))
+    );
+    let waited = rows[0]["waitedMs"]
+        .as_u64()
+        .expect("how long the answer waited for the window after it came back");
+    (stopped_by.to_string(), waited, taken)
+}
+
+/// An answer that comes back between two collects is carried out before the
+/// next collect, by a settle that reads nothing from the helper, and its row
+/// says the answer waited a settle at most (t-22110). Before, the stop
+/// waited for the next collect, up to a whole one, and the hand went on
+/// pressing on a premise the teacher had already refused.
+#[test]
+fn an_answer_that_came_back_between_collects_is_carried_out_before_the_next_collect() {
+    let (stopped_by, waited, _) = a_pause_answered_between_collects(10);
+    assert_eq!(
+        stopped_by, "settle",
+        "the pause is carried out between collects"
+    );
+    assert!(
+        waited <= REFLEX_SETTLE_MS,
+        "waited {waited} ms; a settle at most"
+    );
+}
+
+/// Printed, never asserted: what stopped the hand and how long the answer
+/// waited for the window, on the test's own clock (one collect a tick, one
+/// settle a settle). Fake only — no input, no frames, no live model.
+#[test]
+#[ignore = "a measurement printed by the line, fake only"]
+fn measure_how_long_an_answer_waits_for_the_window() {
+    let (stopped_by, waited, settles) = a_pause_answered_between_collects(10);
+    println!(
+        "{}",
+        json!({
+            "basis": "fake helper, fake teacher, the test's clock: no input, no frame, no live model",
+            "stoppedBy": stopped_by,
+            "waitedMs": waited,
+            "settlesUntilStop": settles,
+            "collectMs": REFLEX_COLLECT_MS,
+            "settleMs": REFLEX_SETTLE_MS,
+        })
     );
 }

@@ -1035,6 +1035,13 @@ impl Autopilot {
         done
     }
 
+    /// Between two collects (t-22110, every `REFLEX_SETTLE_MS`): a reflex
+    /// decision's answer that came back since the last collect is judged and
+    /// carried out now, and a plan a model finished writing since is started
+    /// now — nothing is read from the helper, and the run's reading stays the
+    /// last collect's. Answers nothing yet (red).
+    pub(crate) fn settle(&mut self, _world: &mut World<'_>) {}
+
     fn pass_every_run(&mut self, world: &mut World<'_>) {
         let running = self
             .current
