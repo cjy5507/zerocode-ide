@@ -1118,6 +1118,33 @@ mod tests {
         }
     }
 
+    /// `loop_schedule` rides a process-wide scope counter, so any test that
+    /// reads the advertised tools must hold the env lock like the loop test
+    /// does. While another thread holds the lock inside a loop scope, the
+    /// identity check must wait rather than read the scoped extra tool
+    /// (t-21349: CI saw 13 vs 12 names, the difference `loop_schedule`).
+    #[test]
+    fn the_advertisement_identity_check_waits_out_a_loop_scope() {
+        let lock = crate::test_env_lock();
+        let scope = crate::autonomy::wakeup::begin_scope();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let checker = std::thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(
+                builtin_advertisement_is_identical_across_a_model_swap,
+            );
+            let _ = done_tx.send(());
+            outcome
+        });
+        // Bounded negative wait: a checker that honours the lock cannot finish.
+        assert!(
+            done_rx.recv_timeout(std::time::Duration::from_millis(500)).is_err(),
+            "the identity check read the advertisement while a loop scope was open"
+        );
+        drop(scope);
+        drop(lock);
+        assert!(checker.join().expect("checker thread").is_ok());
+    }
+
     /// The quiet-reasoning heartbeat must read as information, never as a
     /// reconnect warning — its whole point is "nothing is wrong".
     #[test]
