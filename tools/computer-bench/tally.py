@@ -317,6 +317,9 @@ def reflex_row(folder, judged):
         "reaction_ms": {name: reaction.get(name) for name in ("n", "p50", "p95", "p99")},
         "press_to_receive_ms": measured.get("press_to_receive_ms") or {},
         "appear_to_receive_ms": measured.get("appear_to_receive_ms") or {},
+        "observation": measured.get("observation"),
+        "first_event_freshness": measured.get("first_event_freshness"),
+        "effect": measured.get("effect"),
         "roads": measured.get("roads") or {},
         "floors": judged.get("floors") or {},
         # The autopilot's own columns (t-10223 R9): None for a person's plan.
