@@ -462,6 +462,10 @@ mod tests {
                             // the refusals, the option set it may not widen
                             // and the apply it cannot claim are all one file's.
                             | "cmd/worker_room.rs"
+                            // t-21017: a provider's done report reaches the
+                            // human-input line through the one door
+                            // `note_pane_state` calls, tested beside that door.
+                            | "pane_runtime.rs"
                     ),
                 "`{name}` acquired a test fence; only the shell and command crates \
                  may own source-contract fences"

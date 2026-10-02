@@ -57,7 +57,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The most SETTLED panes this tracker remembers a hand in.
 ///
@@ -67,6 +67,31 @@ use std::time::Instant;
 /// and never a pending one, whatever its age, for the reason the module
 /// documentation gives.
 const TRACKED_PANES: usize = 256;
+
+/// How long a provider that reports every prompt it takes has to report the
+/// one an Enter closed over, before that Enter is read as NOT having been a
+/// prompt (t-21017).
+///
+/// A slash command or a picker's keys are hands and an Enter with no prompt
+/// event after them: the provider took them as commands, and the line they
+/// leave is empty. The provider's hook reaches the window within a beat of the
+/// Enter (it is the receipt a delivery's own Enter waits for), so a pane whose
+/// provider has stayed silent this long, and says it is idle, took nothing
+/// into a prompt.
+const PROMPT_REPORT_GRACE: Duration = Duration::from_secs(15);
+
+/// What a pane's provider last said about itself, as far as this tracker
+/// needs: whether it reports the prompts it takes, and whether it is at rest.
+#[derive(Debug, Clone, Copy)]
+struct Provider {
+    /// The agent row's `submit_ack` is not none — a prompt it takes is always
+    /// reported, so silence after an Enter is evidence.
+    reports_prompts: bool,
+    /// Its last state was done or idle: no turn running, no question or
+    /// approval on screen (a picker the provider itself parks on is
+    /// `needs-attention`, and its keys answer it rather than leave words).
+    at_rest: bool,
+}
 
 /// One pane's unsent words.
 #[derive(Debug, Clone, Copy)]
@@ -85,12 +110,15 @@ struct Typed {
     /// delivery's — and `None` once a prompt event has answered it or nothing
     /// has been entered since the last hand.
     entered_at: Option<u64>,
+    /// When that Enter reached the pane, for [`PROMPT_REPORT_GRACE`].
+    entered_when: Option<Instant>,
     at: Instant,
 }
 
 #[derive(Default)]
 struct Hands {
     typed: Mutex<HashMap<u32, Typed>>,
+    providers: Mutex<HashMap<u32, Provider>>,
     next: Mutex<u64>,
 }
 
@@ -166,6 +194,7 @@ pub(crate) fn typed(term: u32) {
             // A new hand after an Enter is a new draft; the Enter before it
             // is no longer what the next prompt event answers.
             entered_at: None,
+            entered_when: None,
             at: Instant::now(),
         },
     );
@@ -187,7 +216,26 @@ pub(crate) fn entered(term: u32) {
         .get_mut(&term)
     {
         held.entered_at = Some(held.generation);
+        held.entered_when = Some(Instant::now());
     }
+}
+
+/// What the pane's provider just said about itself (t-21017): the state its
+/// hook or channel reported, and whether its agent row reports the prompts it
+/// takes. The only other evidence besides a prompt event that a line is
+/// empty again — see [`line_at`].
+pub(crate) fn provider_said(term: u32, reports_prompts: bool, at_rest: bool) {
+    hands()
+        .providers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            term,
+            Provider {
+                reports_prompts,
+                at_rest,
+            },
+        );
 }
 
 /// The provider reports a prompt went in at this pane.
@@ -227,6 +275,11 @@ pub(crate) fn forget_term(term: u32) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(&term);
+    hands()
+        .providers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&term);
     taken_counts()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -239,12 +292,7 @@ pub(crate) fn forget_term(term: u32) {
 /// look; this is the tests' shorter question.
 #[cfg(test)]
 pub(crate) fn holds_a_draft(term: u32) -> bool {
-    hands()
-        .typed
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&term)
-        .is_some_and(|held| held.pending)
+    line_of(term).0
 }
 
 /// How many times a hand has reached this line, ever.
@@ -282,12 +330,44 @@ pub(crate) fn holds_own_words(term: u32) -> bool {
 /// What the window knows about this pane's line, in the delivery's words —
 /// the two facts a guarded write reads at the moment it is due.
 pub(crate) fn line_of(term: u32) -> (bool, Option<u64>) {
-    hands()
-        .typed
+    line_at(term, Instant::now())
+}
+
+/// [`line_of`] at a given moment.
+///
+/// A mark whose last hand was closed by an Enter that no prompt event ever
+/// answered stands only while that could still change. Once
+/// [`PROMPT_REPORT_GRACE`] has passed since that Enter, the pane's provider
+/// reports every prompt it takes, and it says it is at rest, the Enter was a
+/// slash command or a picker's key and nothing is on the line: the mark is
+/// settled here, the one place every reader asks. A line with words typed
+/// after the Enter, a provider that does not report prompts, one mid-turn or
+/// waiting on a question, and an Enter inside the grace all keep the mark.
+pub(crate) fn line_at(term: u32, now: Instant) -> (bool, Option<u64>) {
+    let provider = hands()
+        .providers
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&term)
-        .map_or((false, None), |held| (held.pending, Some(held.generation)))
+        .copied();
+    let mut typed = hands()
+        .typed
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(held) = typed.get_mut(&term) else {
+        return (false, None);
+    };
+    let unanswered = held.pending
+        && held.entered_at == Some(held.generation)
+        && held
+            .entered_when
+            .is_some_and(|when| now.saturating_duration_since(when) >= PROMPT_REPORT_GRACE);
+    if unanswered && provider.is_some_and(|said| said.reports_prompts && said.at_rest) {
+        held.pending = false;
+        held.entered_at = None;
+        held.entered_when = None;
+    }
+    (held.pending, Some(held.generation))
 }
 
 #[cfg(test)]
@@ -460,5 +540,63 @@ mod tests {
             forget_term(BASE + 200_000 + term);
         }
         forget_term(DRAFTING);
+    }
+
+    /// t-21017: a slash command or a picker is a hand and an Enter no prompt
+    /// event answers. Walked through the catalog: every agent whose row
+    /// reports the prompts it takes settles the mark once it rests past the
+    /// grace; every one that does not keeps failing closed.
+    #[test]
+    fn a_command_or_picker_enter_the_provider_never_reported_settles_the_mark() {
+        const TERM: u32 = 7_710;
+        let grace = PROMPT_REPORT_GRACE;
+        for agent in zerocode_core::ALL_AGENTS {
+            forget_term(TERM);
+            typed(TERM);
+            entered(TERM);
+            provider_said(TERM, agent.reports_prompt_submit(), true);
+            let sent = Instant::now();
+            assert!(
+                line_at(TERM, sent).0,
+                "{agent:?}: the mark settled inside the grace"
+            );
+            let later = sent + grace + Duration::from_secs(1);
+            assert_eq!(
+                line_at(TERM, later).0,
+                !agent.reports_prompt_submit(),
+                "{agent:?}: the mark after a silent Enter and a rested provider"
+            );
+        }
+        forget_term(TERM);
+    }
+
+    /// The fail-closed rest of it: words typed after the Enter, a provider
+    /// mid-turn or on a question, and a pane that never reported keep the mark.
+    #[test]
+    fn the_mark_stands_for_a_half_typed_line_a_busy_provider_and_a_silent_one() {
+        const TERM: u32 = 7_711;
+        let long_after = Instant::now() + PROMPT_REPORT_GRACE * 4;
+        forget_term(TERM);
+        typed(TERM);
+        entered(TERM);
+        typed(TERM);
+        provider_said(TERM, true, true);
+        assert!(line_at(TERM, long_after).0, "a half-typed line was settled");
+        assert!(holds_own_words(TERM));
+
+        forget_term(TERM);
+        typed(TERM);
+        entered(TERM);
+        provider_said(TERM, true, false);
+        assert!(line_at(TERM, long_after).0, "a working provider settled it");
+
+        forget_term(TERM);
+        typed(TERM);
+        entered(TERM);
+        assert!(
+            line_at(TERM, long_after).0,
+            "a provider never heard settled it"
+        );
+        forget_term(TERM);
     }
 }
