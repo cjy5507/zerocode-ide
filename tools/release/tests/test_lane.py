@@ -317,6 +317,100 @@ class Syntax(LaneCase):
         self.assertGreaterEqual(r.returncode, 128, r.stdout + r.stderr)
         self.assertEqual((work / "ran.txt").read_text().split(), ["first", "killed"])
 
+    def test_the_end_names_every_red_recipe(self):
+        # t-21326: a CI leg's log is read from its end. One run must say every
+        # recipe that went red, not only the first — and a GitHub run also
+        # carries each as an annotation on the job.
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        work = Path(self._tmp) / "justdir"
+        work.mkdir()
+        (work / "justfile").write_text(
+            "verify: early middle late\n\n"
+            "early:\n    exit 1\n\n"
+            "middle:\n    true\n\n"
+            "late:\n    exit 3\n"
+        )
+        for github in (False, True):
+            with self.subTest(github=github):
+                env = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS"}
+                if github:
+                    env["GITHUB_ACTIONS"] = "true"
+                r = subprocess.run([str(RELEASE / "verify-every-recipe.sh")], cwd=work, env=env,
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertEqual(r.stdout.splitlines()[-1], "verify: red recipes: early late", r.stdout)
+                notes = [l for l in r.stdout.splitlines() if l.startswith("::error")]
+                self.assertEqual(notes, [
+                    "::error title=verify::recipe early failed (rc=1)",
+                    "::error title=verify::recipe late failed (rc=3)",
+                ] if github else [], r.stdout)
+
+    def test_the_closing_summary_is_nothing_to_the_lane_parser(self):
+        # The summary and the annotations follow the last recipe's mark; the
+        # lane's failed_tests must name exactly what it names without them.
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        work = Path(self._tmp) / "justdir"
+        work.mkdir()
+        (work / "justfile").write_text(
+            "verify: quiet green\n\nquiet:\n    exit 1\n\ngreen:\n    true\n")
+        log = work / "gate.log"
+        env = dict(os.environ, GITHUB_ACTIONS="true")
+        with log.open("w") as out:
+            subprocess.run([str(RELEASE / "verify-every-recipe.sh")], cwd=work, env=env,
+                           stdout=out, stderr=subprocess.STDOUT)
+        text = log.read_text()
+        self.assertIn("verify: red recipes: quiet", text)
+        bare = work / "bare.log"
+        bare.write_text("".join(l for l in text.splitlines(True)
+                                if not l.startswith(("verify: red recipes:", "::error"))))
+        parse = ('eval "$(sed -n \'/^failed_tests()/,/^}/p\' "$0")"; failed_tests "$1"')
+
+        def failed(path):
+            return subprocess.run(["bash", "-c", parse, str(LANE), str(path)],
+                                  capture_output=True, text=True, check=True).stdout.split()
+
+        self.assertEqual(failed(log), ["recipe:quiet"])
+        self.assertEqual(failed(log), failed(bare))
+
+    def test_a_ci_leg_runs_the_recipes_as_written(self):
+        # The lane holds the cross-check to the strict `win-check`; a CI leg
+        # has no cargo-xwin, and its `win-check-if-available` must stay the
+        # recipe the justfile wrote — its SKIPPED said aloud (t-21326).
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        work = Path(self._tmp) / "justdir"
+        work.mkdir()
+        (work / "justfile").write_text(
+            "verify: first win-check-if-available\n\n"
+            "first:\n    true\n\n"
+            "win-check-if-available:\n    echo as-written >> ran.txt\n\n"
+            "win-check:\n    echo strict >> ran.txt\n"
+        )
+        for args, ran in (([], "strict"), (["--as-written"], "as-written")):
+            with self.subTest(args=args):
+                (work / "ran.txt").unlink(missing_ok=True)
+                r = subprocess.run([str(RELEASE / "verify-every-recipe.sh"), *args], cwd=work,
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual((work / "ran.txt").read_text().split(), [ran])
+
+    def test_every_ci_leg_runs_every_recipe(self):
+        # `just verify` stops at its first red recipe: on Windows a flaky test
+        # in `test` hid the window crate's own tests for days (t-21326). Each
+        # CI leg runs its justfile's verify list through the script instead,
+        # as written, and no leg calls `just verify` any more.
+        workflow = (REPO / ".github" / "workflows" / "verify.yml").read_text()
+        runs = [l.strip() for l in workflow.splitlines() if l.strip().startswith("- run:")]
+        self.assertNotIn("- run: just verify", runs)
+        self.assertEqual(
+            [r for r in runs if "verify-every-recipe.sh" in r],
+            ["- run: bash tools/release/verify-every-recipe.sh --as-written",
+             "- run: bash ../tools/release/verify-every-recipe.sh --as-written"],
+            "the root matrix leg (macOS and Windows) and the zo leg",
+        )
+
     def test_table_is_the_one_place(self):
         out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
         self.assertEqual(out.returncode, 0, out.stderr)

@@ -57,9 +57,13 @@ jobs:
       - run: npm ci
       - run: npx playwright install chromium
 
-      # The same gate a developer runs. If this and `just verify` ever drift,
-      # the justfile is the one that is right.
-      - run: just verify
+      # The same gate a developer runs: the recipes the justfile's `verify`
+      # names, read from the justfile. Unlike `just verify`, every recipe runs
+      # even after an earlier one fails — a Windows flake in `test` hid the
+      # window crate's own tests for days (t-21326). The job is still red when
+      # any recipe is, and the log's last line names every red recipe.
+      - run: bash tools/release/verify-every-recipe.sh --as-written
+        shell: bash
         env:
           SETTINGS_QUALITY_REPORT: ${{ runner.temp }}/settings-quality.json
 
@@ -121,7 +125,9 @@ jobs:
 
       - uses: taiki-e/install-action@9d3c324c3d96aa345b0602e11b7ca196bcd2d282 # just
 
-      - run: just verify
+      # Every recipe of zo-ide's `verify`, as the root leg runs its own.
+      - run: bash ../tools/release/verify-every-recipe.sh --as-written
+        shell: bash
 
   # Quality measurements are evidence, never a merge or release gate.
   quality-baseline:
