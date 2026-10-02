@@ -3261,6 +3261,11 @@ async fn e2e_the_person_stops_one_helper_by_id_and_the_parent_and_the_other_help
         || helper_in_a_step(&stopping.frames, &alpha).then_some(()),
     )
     .await;
+    assert_eq!(
+        open_turn(&stopping.frames),
+        Some(turn),
+        "the main's turn ended before the first helper went into its step"
+    );
     let session = stopping.session.clone();
 
     // Another session's id is refused, and stops nothing.
