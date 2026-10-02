@@ -928,6 +928,20 @@ pub struct ToolFacts {
     pub bytes: Option<u64>,
 }
 
+/// The status codes HTTP defines: three digits, 100 through 599 (RFC 9110 §15).
+const HTTP_STATUS_CODES: std::ops::Range<u64> = 100..600;
+
+/// The facts a result line recorded of its result ([`ToolFacts`]), or `None`.
+fn facts_in(record: Option<&serde_json::Value>) -> Option<ToolFacts> {
+    let record = record?.as_object()?;
+    let status = record
+        .get("code")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|code| HTTP_STATUS_CODES.contains(code))
+        .and_then(|code| u16::try_from(code).ok());
+    let bytes = record.get("bytes").and_then(serde_json::Value::as_u64);
+    (status.is_some() || bytes.is_some()).then_some(ToolFacts { status, bytes })
+}
 
 /// The file a tool call read or wrote, and where in it — what the Claude
 /// Code extension's tool header links (`fileToolHeader`, 2.1.280): a read
@@ -2009,6 +2023,25 @@ pub fn turns_in_with(chunk: &str, detail: Detail) -> Vec<TranscriptTurn> {
         // The parts of the message: `content` for Claude Code, `blocks` for zo.
         let content = message.get("content").or_else(|| message.get("blocks"));
         let at_ms = moment_of(&row);
+        // What the line recorded of its result ([`ToolFacts`]) is the line's,
+        // not one part's: it is read for a line that carries one result, as
+        // Claude Code writes them, and for no other.
+        let results = content
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|part| {
+                part.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+            })
+            .count();
+        let facts = if results == 1 {
+            facts_in(
+                row.get("toolUseResult")
+                    .or_else(|| row.get("tool_use_result")),
+            )
+        } else {
+            None
+        };
         // Reasoning first — it precedes the answer it led to — as its own
         // turns; the answer's text is read from the parts that are not it.
         let mut spoken = Vec::new();
@@ -2018,7 +2051,11 @@ pub fn turns_in_with(chunk: &str, detail: Detail) -> Vec<TranscriptTurn> {
             .flatten()
         {
             if part.get("type").and_then(serde_json::Value::as_str) == Some("tool_result") {
-                turns.push(tool_result_turn(part, at_ms, detail));
+                let mut turn = tool_result_turn(part, at_ms, detail);
+                if let Some(tool) = turn.tool.as_mut() {
+                    tool.facts.clone_from(&facts);
+                }
+                turns.push(turn);
                 continue;
             }
             match reasoning_text(part) {
