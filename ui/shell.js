@@ -2421,7 +2421,7 @@ async function openBoardPeek(card, term, bucket) {
   // it. A caller with no bucket to offer says only who.
   el("peek-agent").textContent =
     bucket === undefined ? card.agent : `${card.agent} · ${bucketWord(bucket)}`;
-  paintBoardConversationDoor(el("peek-chat"), card);
+  paintBoardConversationDoor(peekChatButton(), card);
   // 이 창이 이 셸의 화면을 이미 들고 있었는가. 들고 있지 않았다면 방금
   // 만들어진 뷰이고 — 팝아웃의 미리보기는 언제나 이쪽이다 — 그 뷰의 바닥은
   // 아래의 선언이 새로 읽기 시작한 셸의 스냅샷 빚으로 받는다. 그 답이 이 셸을
@@ -2564,12 +2564,24 @@ function paintBoardConversationDoor(button, card) {
   writeAttribute(button, "aria-disabled", door.open ? "false" : "true");
 }
 
-el("peek-chat").addEventListener("click", () => {
-  const card = peekCard;
-  if (card === null || !boardConversationDoor(card)?.open) return;
-  closeBoardPeek();
-  void openBoardConversation(card);
-});
+/* The footer's door is made the first time a look opens, not carried hidden in the page. */
+function peekChatButton() {
+  let button = document.getElementById("peek-chat");
+  if (button === null) {
+    button = document.createElement("button");
+    button.className = "btn";
+    button.id = "peek-chat";
+    button.type = "button";
+    button.addEventListener("click", () => {
+      const card = peekCard;
+      if (card === null || !boardConversationDoor(card)?.open) return;
+      closeBoardPeek();
+      void openBoardConversation(card);
+    });
+    el("peek-open").before(button);
+  }
+  return button;
+}
 
 el("peek-open").addEventListener("click", () => {
   const term = peekTerm;
@@ -5549,11 +5561,15 @@ function paintAgentInspectorDestinations(view, entity) {
   writeAttribute(preview, "data-i18n", worker ? "board.graph.ackRecord" : "board.graph.preview");
   writeTextContent(preview, worker ? t("board.graph.ackRecord", "확인했어요") : t("board.graph.preview", "미리보기"));
   preview.onclick = destination.valid ? () => openBoardCard(card, entity.bucket) : null;
-  const chat = view.querySelector(".agent-inspector-chat");
-  if (chat) {
-    paintBoardConversationDoor(chat, card);
-    chat.onclick = boardConversationDoor(card)?.open ? () => void openBoardConversation(card) : null;
+  let chat = view.querySelector(".agent-inspector-chat");
+  if (!chat) {
+    chat = document.createElement("button");
+    chat.className = "btn agent-inspector-chat";
+    chat.type = "button";
+    preview.after(chat);
   }
+  paintBoardConversationDoor(chat, card);
+  chat.onclick = boardConversationDoor(card)?.open ? () => void openBoardConversation(card) : null;
   open.hidden = worker || !destination.valid;
   open.disabled = !isPopout && destination.term !== null && !tabOfTerm(destination.term);
   writeAttribute(open, "data-i18n", destination.kind === "lane" ? "board.graph.openExecution" : "board.graph.openTerminal");

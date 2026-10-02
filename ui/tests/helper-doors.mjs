@@ -33,6 +33,12 @@ export async function testHelperDoors(browser, origin, ok) {
       const standing = (node) => Boolean(node) && !node.hidden;
       const term = await openTermTab({ placement: "tab" });
       const owner = tabOfTerm(term);
+      // Before any card is pressed: the page carries neither door. They are made the first time a card wants
+      // one, so the page's own element and listener counts are what they were without the doors.
+      seen.boot = {
+        peek: document.getElementById("peek-chat") === null,
+        inspector: document.querySelector(".agent-inspector-chat") === null,
+      };
       paneAgents.set(term, "zo");
       tell("hook:agent", { term, state: "working", agent: "zo", session: "s-doors" });
       // The ledger seated a worker in this pane: its task is the card's heading.
@@ -211,6 +217,11 @@ export async function testHelperDoors(browser, origin, ok) {
       for (const at of [...termViews.keys()]) dropTermView(at);
       return seen;
     });
+    ok(
+      "the page carries neither conversation door until a card wants one — no button in the look's footer and none in the inspector's — so its own element and listener counts stay what they were without the doors",
+      seen.boot.peek && seen.boot.inspector,
+      JSON.stringify(seen.boot),
+    );
     ok(
       "a board card for a pane the ledger seated a worker in still opens the look at its screen, and the look's footer carries 「대화로 보기」 — pressed, the look closes and the pane's tab stands with its conversation up",
       seen.term.peeked && seen.term.open && seen.term.shown && seen.term.words === seen.term.want &&
