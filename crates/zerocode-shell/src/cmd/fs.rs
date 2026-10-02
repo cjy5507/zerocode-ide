@@ -587,6 +587,9 @@ pub(crate) async fn snapshot_webview_png(
         let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
         pane.with_webview(move |platform| {
             // Main thread, by `with_webview`'s contract — WebKit requires it.
+            // Named for the hang watchdog, which otherwise reads this stretch as
+            // `native_event_loop` like any other.
+            let _scope = crate::crumbs::MainScope::enter("pane_snapshot");
             let view: &objc2_web_kit::WKWebView = unsafe { &*platform.inner().cast() };
             // The marker is the compiler's word for what the closure already
             // knows. The snapshot itself lives in `artifact_webkit`, where the

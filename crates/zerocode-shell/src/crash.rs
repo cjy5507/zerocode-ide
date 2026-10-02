@@ -1106,6 +1106,49 @@ mod tests {
         report
     }
 
+    /// The hang of 2026-10-01 filed the sample's frames twice: as `frames:` and
+    /// as its last 24 crumbs, so no command or hook around the hang reached the
+    /// task. The task's crumbs are the story, with the sample left to `frames:`.
+    #[test]
+    fn a_hang_tasks_crumbs_are_the_story_and_not_the_sample_it_carries_as_frames() {
+        let root = tempfile::tempdir().unwrap();
+        let mut report = a_loud_panic(root.path());
+        let ring = crumbs::RingStorage::<{ Limits::LAST_CRUMBS }>::new();
+        for index in 0..(Limits::TASK_CRUMBS * 2) {
+            ring.write(
+                index as u64,
+                &format!("command enter ledger_agents n={index}"),
+            );
+        }
+        for index in 0..Limits::SAMPLE_FRAMES {
+            ring.write(
+                1_000 + index as u64,
+                &format!(
+                    "{} {index}: native::samples_1::frame_{index}",
+                    crate::hang_sample::SAMPLE_CRUMB
+                ),
+            );
+        }
+        report.crumbs = ring.snapshot();
+        let body = task_body(&report, 1);
+        let story: Vec<&str> = body
+            .lines()
+            .filter(|line| line.contains("command enter ledger_agents"))
+            .collect();
+        assert_eq!(story.len(), Limits::TASK_CRUMBS, "{body}");
+        assert!(
+            story
+                .last()
+                .unwrap()
+                .ends_with(&format!("n={}", Limits::TASK_CRUMBS * 2 - 1)),
+            "the last of the story travels: {story:?}"
+        );
+        assert!(
+            !body.contains(crate::hang_sample::SAMPLE_CRUMB),
+            "the sample is listed twice:\n{body}"
+        );
+    }
+
     #[test]
     fn a_crash_task_inherits_the_reports_mask_and_bounds() {
         let root = tempfile::tempdir().unwrap();

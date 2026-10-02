@@ -34,6 +34,16 @@ const FRAMEWORK: &str = "Chromium Embedded Framework.framework/Chromium Embedded
 const HELPER_APP: &str = "ZeroCode Helper.app/Contents/MacOS/ZeroCode Helper";
 const UI_WAIT: Duration = Duration::from_secs(10);
 const DEVTOOLS_DEADLINE: Duration = Duration::from_secs(30);
+/// What the hang watchdog names the main thread while it runs Chromium's work
+/// (`crumbs::MainScope`). Without a name that time reads `native_event_loop`,
+/// which is also what WebKit's and AppKit's own work reads, so a main thread
+/// held by the message pump, the engine's start, a pane operation or a cookie
+/// flush could not be told from any other native stretch (the 7.4 s hang of
+/// 2026-10-01 17:28 was filed as `main_scope=native_event_loop`).
+const SCOPE_PUMP: &str = "cef_message_loop";
+const SCOPE_START: &str = "cef_initialize";
+const SCOPE_OPERATION: &str = "cef_pane_operation";
+const SCOPE_COOKIES: &str = "cef_cookie_flush";
 /// Chromium's cookie key normally lives in the login keychain under one
 /// generic "Chromium Safe Storage" item shared with every Chromium-based app
 /// on the machine. macOS lets a caller read it silently only when the
@@ -219,6 +229,7 @@ impl PumpScheduler {
                         return;
                     }
                     if INITIALIZED.load(Ordering::Acquire) {
+                        let _scope = crate::crumbs::MainScope::enter(SCOPE_PUMP);
                         objc2::rc::autoreleasepool(|_| cef::do_message_loop_work());
                     }
                     scheduler.in_work.store(false, Ordering::Release);
@@ -300,6 +311,7 @@ pub(crate) fn ensure_initialized(app: &AppHandle) -> Result<(), String> {
 pub(crate) fn initialize_after_paint(app: &AppHandle) {
     let starting = app.clone();
     let _ = app.run_on_main_thread(move || {
+        let _scope = crate::crumbs::MainScope::enter(SCOPE_START);
         if let Err(error) = ensure_initialized(&starting) {
             eprintln!("zerocode-shell: Chromium을 시작할 수 없습니다: {error}");
         }
@@ -683,6 +695,7 @@ impl CookieBatch {
         let batch = self.clone();
         let app = self.app.clone();
         let _ = app.run_on_main_thread(move || {
+            let _scope = crate::crumbs::MainScope::enter(SCOPE_COOKIES);
             let manager = PANES.with(|panes| {
                 panes
                     .borrow()
@@ -1186,6 +1199,7 @@ where
     }
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
+        let _scope = crate::crumbs::MainScope::enter(SCOPE_OPERATION);
         let _ = sender.send(operation());
     })
     .map_err(|error| error.to_string())?;

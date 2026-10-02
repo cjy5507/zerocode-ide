@@ -28,7 +28,7 @@
 
 use std::path::Path;
 use std::sync::{Mutex, OnceLock, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager as _};
@@ -52,6 +52,13 @@ const PARKED_AT: f64 = -20_000.0;
 const LOAD_POLL: Duration = Duration::from_millis(50);
 /// The mark a failed render leaves in its key file.
 const FAILED_MARK: &str = " !failed";
+/// How long a hidden pane may take to be born before the window's log says so.
+/// A pane is made on the main thread, and the hang of 2026-10-01 17:28 (7.4 s)
+/// began about half a second after the first one of its process was — the
+/// thumbnail written at its end — so a birth that takes this long is the
+/// evidence that road needs the next time.
+#[cfg(target_os = "macos")]
+const SLOW_BIRTH: Duration = Duration::from_millis(500);
 
 /// What the window is answered: the picture, or nothing — and nothing is
 /// final for this key.
@@ -251,10 +258,16 @@ pub(crate) async fn thumbnail(app: &AppHandle, store: &Store, id: &str) -> Resul
 /// Load `address` in the hidden pane, wait for its Finished inside the
 /// table's timeout, and take the picture at the table's width.
 async fn render(app: &AppHandle, address: &tauri::Url, limits: &Limits) -> Result<Vec<u8>, String> {
+    let asked = Instant::now();
     let pane = pane(app, limits)?;
+    crate::crumbs::record(
+        "artifact_thumb",
+        format_args!("pane ready ms={}", asked.elapsed().as_millis()),
+    );
     *finished_url()
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = None;
+    let loading = Instant::now();
     pane.navigate(address.clone())
         .map_err(|error| error.to_string())?;
     if !finished_within(
@@ -272,12 +285,21 @@ async fn render(app: &AppHandle, address: &tauri::Url, limits: &Limits) -> Resul
             limits.thumb_timeout_ms
         ));
     }
+    crate::crumbs::record(
+        "artifact_thumb",
+        format_args!("loaded ms={}", loading.elapsed().as_millis()),
+    );
     // One more beat for the first paint: Finished is the document, not
     // the pixels, and a snapshot taken on the same tick is often blank.
     tokio::time::sleep(LOAD_POLL).await;
+    let snapping = Instant::now();
     let png =
         crate::cmd::fs::snapshot_webview_png(pane.clone(), Some(f64::from(limits.thumb_width)))
             .await;
+    crate::crumbs::record(
+        "artifact_thumb",
+        format_args!("snapshot ms={}", snapping.elapsed().as_millis()),
+    );
     let _ = pane.navigate(blank_page());
     png
 }
@@ -358,6 +380,7 @@ pub(crate) fn hidden_pane(
         Some(name) => builder.user_agent(&name),
         None => builder,
     };
+    let born = Instant::now();
     let pane = window
         .add_child(
             builder,
@@ -365,6 +388,21 @@ pub(crate) fn hidden_pane(
             tauri::LogicalSize::new(width, height),
         )
         .map_err(|error| error.to_string())?;
+    let took = born.elapsed();
+    crate::crumbs::record(
+        "hidden_pane",
+        format_args!("born {label} ms={}", took.as_millis()),
+    );
+    #[cfg(target_os = "macos")]
+    if took >= SLOW_BIRTH {
+        crate::system_runtime::note_window_event(
+            state.local_data_root(),
+            &format!(
+                "hidden pane {label} took {} ms to be born",
+                took.as_millis()
+            ),
+        );
+    }
     // A native pane being born can take the window's first responder with
     // it; the keyboard goes back to the main webview (the same mercy
     // `browser_place` shows when it hides a pane).

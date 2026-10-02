@@ -338,7 +338,7 @@ impl Monitor {
                 Ok(frames) => {
                     for frame in &frames {
                         crate::crumbs::record(
-                            "main_sample_after_detection",
+                            crate::hang_sample::SAMPLE_CRUMB,
                             format_args!("{frame}"),
                         );
                     }

@@ -13990,14 +13990,23 @@ mod tests {
         );
         let report = block_after(window, "function reportStrayJamo(road, text) {");
         assert!(
-            report.contains("message: imeDump(road, text)"),
+            report.contains("tellWindowLog(imeDump(road, text))"),
             "the husk writes a sentence the shaping function did not build:\n{report}"
         );
+        // The window log has one door for what a window says of itself, in the
+        // boot script: it takes the report's own refusal and holds a storm to an
+        // allowance (t-20972). The input file speaks through it and names no
+        // command of its own.
         let input = include_str!("../../../../ui/shell-input.js");
         assert_eq!(
             input.matches("log_window_error").count(),
-            1,
+            0,
             "a second door from the input file into the window log"
+        );
+        assert_eq!(
+            input.matches("tellWindowLog(").count(),
+            1,
+            "the husk is the input file's one way into the window log"
         );
         // The boot pass knows the header by the words the window sends.
         let withdrawal = include_str!("../../src/ime_trace_withdrawal.rs");
@@ -36958,6 +36967,14 @@ mod tests {
         assert!(
             thumbs.contains("cmd::fs::snapshot_webview_png("),
             "the thumbnail takes its picture on a road other than the browser snapshot"
+        );
+        // A hidden pane's page is told there is no backend before its first
+        // script runs (t-20972): an artifact may be this window's own page, which
+        // boots a second window whose every request is refused.
+        assert!(
+            thumbs.contains("include_str!(\"../../../ui/hidden-pane-no-bridge.js\")")
+                && thumbs.contains(".initialization_script(NO_BRIDGE_JS)"),
+            "a hidden pane's page is handed the window's backend bridge"
         );
 
         let window = window_source();

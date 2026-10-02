@@ -4,6 +4,13 @@ use crate::crash::Limits;
 #[cfg(any(target_os = "macos", test))]
 use std::time::Instant;
 
+/// The crumb kind the watchdog writes for every frame of the sample. The crash
+/// task carries those frames as its `frames:` already, so it leaves them out of
+/// its `crumbs:` (`crash::task_body`): the last crumbs are the story before and
+/// during the hang, and 64 sample lines written after it must not push that
+/// story out of them.
+pub(crate) const SAMPLE_CRUMB: &str = "main_sample_after_detection";
+
 /// The sampler is a bounded child of the existing resume/watchdog lane. It
 /// never samples the observer's Rust stack and never starts another thread.
 #[cfg(target_os = "macos")]
@@ -185,20 +192,41 @@ mod tests {
         assert_eq!(
             main_sample_frames(sample),
             [
-                "0: native::samples_8::__NSApplication_run_",
-                "1: native::samples_8::__CFRunLoopRun",
-                "2: native::samples_10::start",
+                "0: native::self_8::__NSApplication_run_",
+                "1: native::self_2::start",
+                "2: native::samples_8::__NSApplication_run_",
+                "3: native::samples_8::__CFRunLoopRun",
+                "4: native::samples_10::start",
             ]
         );
     }
 
     #[test]
     fn hang_sample_bounds_the_call_tree_and_never_guesses_a_missing_main_thread() {
+        // One deep stack, twice the budget: the leaf end is what is kept.
         let mut sample = "1 Thread_1 com.apple.main-thread\n".to_string();
-        for _ in 0..Limits::SAMPLE_FRAMES * 2 {
-            sample.push_str(" + 1 public::frame  (in window) + 1\n");
+        let depth = Limits::SAMPLE_FRAMES * 2;
+        for level in 0..depth {
+            let indent = " ".repeat(2 * level);
+            sample.push_str(&format!(
+                " +{indent} 1 public::frame_{level}  (in window) + 1\n"
+            ));
         }
-        assert_eq!(main_sample_frames(&sample).len(), Limits::SAMPLE_FRAMES);
+        // One sample each is inside the sampler's own noise, so no frame leads:
+        // the path itself is the report, leaf first.
+        let frames = main_sample_frames(&sample);
+        assert_eq!(frames.len(), Limits::SAMPLE_FRAMES);
+        assert!(
+            frames[0].ends_with(&format!("public::frame_{}", depth - 1)),
+            "{frames:?}"
+        );
+        assert!(
+            frames
+                .last()
+                .unwrap()
+                .ends_with(&format!("public::frame_{}", depth - frames.len())),
+            "{frames:?}"
+        );
         assert!(main_sample_frames("1 Thread_2 background\n + 1 wait  (in window)").is_empty());
     }
 
@@ -212,11 +240,12 @@ mod tests {
         assert_eq!(
             main_sample_frames(sample),
             [
-                "0: native::samples_87::sleep",
-                "1: native::samples_87::_dispatch_client_callout",
-                "2: native::samples_87::_dispatch_lane_barrier_sync_invoke_and_complete",
-                "3: native::samples_87::main",
-                "4: native::samples_87::start",
+                "0: native::self_87::sleep",
+                "1: native::samples_87::sleep",
+                "2: native::samples_87::_dispatch_client_callout",
+                "3: native::samples_87::_dispatch_lane_barrier_sync_invoke_and_complete",
+                "4: native::samples_87::main",
+                "5: native::samples_87::start",
             ]
         );
     }
@@ -224,20 +253,77 @@ mod tests {
     /// The same probe moving between the main queue and another one: the
     /// header says `Main Thread` and `DispatchQueue_<multiple>`. The totals
     /// after the graph's blank line are not frames even when the main
-    /// thread is the graph's last section.
+    /// thread is the graph's last section. The thread stood in two stacks, and
+    /// the heavier one (54 samples) is named before the lighter (34).
     #[test]
     fn a_main_thread_between_queues_is_named_main_thread() {
         let sample = "Call graph:\n    88 Thread_51466000: Main Thread   DispatchQueue_<multiple>\n      88 start  (in dyld) + 7184  [0x1]\n        54 main  (in probe) + 72  [0x2]\n        + 54 _dispatch_lane_barrier_sync_invoke_and_complete  (in libdispatch.dylib) + 56  [0x3]\n        34 main  (in probe) + 60  [0x4]\n          34 usleep  (in libsystem_c.dylib) + 68  [0x5]\n\nTotal number in stack (recursive counted multiple, when >=5):\n        88       __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x6]\n";
         assert_eq!(
             main_sample_frames(sample),
             [
-                "0: native::samples_34::usleep",
-                "1: native::samples_34::main",
+                "0: native::self_54::_dispatch_lane_barrier_sync_invoke_and_complete",
+                "1: native::self_34::usleep",
                 "2: native::samples_54::_dispatch_lane_barrier_sync_invoke_and_complete",
                 "3: native::samples_54::main",
                 "4: native::samples_88::start",
             ]
         );
+    }
+
+    /// The shape of the 2026-10-01 17:28 hang's sample (symbols made generic):
+    /// one heavy branch, which `sample` prints first, and then a tail of
+    /// one-sample branches longer than the frame budget. The report kept the
+    /// last `SAMPLE_FRAMES` lines of the tree — the tail — so a busy main
+    /// thread was reported by the scatter it stood in once each, and the
+    /// branch that held the second was not in the report at all.
+    #[test]
+    fn a_busy_main_thread_names_what_cost_the_most_not_the_scatter_at_the_tail() {
+        let mut sample = String::from(
+            "Call graph:\n    100 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)\n    + 100 start  (in dyld) + 1  [0x1]\n    +   100 main  (in window) + 1  [0x2]\n    +     30 heavy_pump  (in window) + 1  [0x3]\n    +       30 heavy_leaf  (in window) + 1  [0x4]\n",
+        );
+        // The tail outruns the frame budget, so a keep-the-last-lines rule
+        // cannot have the heavy branch in what it keeps.
+        const TAIL: usize = 70;
+        const _: () = assert!(TAIL > Limits::SAMPLE_FRAMES);
+        for at in 0..TAIL {
+            sample.push_str(&format!(
+                "    +     1 one_sample_{at}  (in window) + 1  [0x5]\n"
+            ));
+        }
+        let frames = main_sample_frames(&sample);
+        assert_eq!(
+            frames,
+            [
+                "0: native::self_30::heavy_leaf",
+                "1: native::samples_30::heavy_leaf",
+                "2: native::samples_30::heavy_pump",
+                "3: native::samples_100::main",
+                "4: native::samples_100::start",
+            ]
+        );
+    }
+
+    /// A symbol the thread stood in under several callers is one leader, with
+    /// the samples of all of them — the main thread's time in `memmove` is not
+    /// the largest single stack it was in.
+    #[test]
+    fn a_symbol_under_several_callers_is_ranked_by_all_its_samples() {
+        let sample = "Call graph:\n    60 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)\n    + 60 start  (in dyld) + 1  [0x1]\n    +   35 a  (in window) + 1  [0x2]\n    +     35 memmove  (in libsystem_platform.dylib) + 1  [0x3]\n    +   25 b  (in window) + 1  [0x4]\n    +     25 memmove  (in libsystem_platform.dylib) + 1  [0x5]\n";
+        let frames = main_sample_frames(sample);
+        assert_eq!(frames[0], "0: native::self_60::memmove");
+        assert_eq!(frames[1], "1: native::samples_35::memmove");
+    }
+
+    /// A main thread that had recovered by the time the sample began (the
+    /// 2026-09-24 06:09 report: 79 of 82 samples waiting in the run loop) says
+    /// so in its first frame, instead of leaving a reader to find the wait among
+    /// one-sample lines.
+    #[test]
+    fn an_idle_main_thread_says_so_first() {
+        let sample = "Call graph:\n    82 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)\n    + 82 start  (in dyld) + 1  [0x1]\n    +   82 CFRunLoopRun  (in CoreFoundation) + 1  [0x2]\n    +     79 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x3]\n    +     3 handle_event  (in window) + 1  [0x4]\n";
+        let frames = main_sample_frames(sample);
+        assert_eq!(frames[0], "0: native::self_79::mach_msg2_trap");
+        assert_eq!(frames[1], "1: native::self_3::handle_event");
     }
 
     #[test]
