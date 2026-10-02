@@ -1073,6 +1073,18 @@ pub(super) fn note_pane_state(
     // A launch-time worker waits for evidence that its submitting Enter was
     // consumed, not merely written. Only providers whose catalog capability
     // reports prompt submission arm this one-shot channel.
+    // What the provider says of itself is the other evidence a line is empty
+    // (t-21017): one that reports every prompt it takes, and rests, took
+    // nothing from an Enter it stayed silent about. Told before the prompt
+    // branch so a report carrying both reads the state it carries.
+    crate::human_input::provider_said(
+        report.term,
+        report.agent.reports_prompt_submit(),
+        matches!(
+            report.state,
+            zerocode_core::hook::HookState::Done | zerocode_core::hook::HookState::Idle
+        ),
+    );
     if report.prompt.is_some() {
         // A prompt going in is the line being emptied, whoever wrote it. The
         // door that types at a pane on somebody else's behalf reads this mark
