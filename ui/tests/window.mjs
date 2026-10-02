@@ -85,6 +85,7 @@ import { testSidebarAgents } from "./sidebar-agents.mjs";
 import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
+import { testConversationRedesign } from "./conversation-redesign.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -317,6 +318,9 @@ suite("conversation-stream-work", ({ browser, origin, ok }) => testConversationS
 /* 키의 값 — 줄이 넘어가 도크가 자라도 그 높이는 그것을 읽는 둘(목록의 발밑 여백,
  * 맨 아래로 단추)에만 닿고 행마다 닿지 않는다 (t-22095). */
 suite("conversation-typing-work", ({ browser, origin, ok }) => testConversationTypingWork(browser, origin, ok));
+/* 사람이 승인한 대화창 (2026-10-02 23:4x, t-22100) — 머리줄·사람의 말·생각·걸음·셸의 첫 줄·울타리·지금
+ * 줄·턴 레일·입력창 위 상태 묶음·입력창, 평평하게, 두 테마와 줄인 움직임에서. */
+suite("conversation-redesign", ({ browser, origin, ok }) => testConversationRedesign(browser, origin, ok));
 /* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
  * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
  * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs

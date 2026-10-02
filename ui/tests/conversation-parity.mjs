@@ -20,7 +20,7 @@ export async function openConversation(page, history, { status = "idle", live = 
       return {
         found: true, skipped: false, next: held.turns.length, turns: held.turns.slice(args.after ?? 0),
         status: held.status, asks: held.asks ?? [], live: held.live, agent: "claude", protocol: "claude-stream",
-        models: [], mode: held.mode ?? null, modes: held.modes ?? [], commands: [], version: "2.1.280",
+        model: held.model ?? null, models: [], mode: held.mode ?? null, modes: held.modes ?? [], commands: [], version: "2.1.280",
         tasks: held.tasks ?? [],
       };
     };
@@ -1675,7 +1675,7 @@ const fileBody = (name) => [
  * thought with none, a search, a page fetched, an edit and the answer — every
  * turn stamped, so how long a thought lasted (12 s, then 4 s) and how long a
  * call took are the file's own. */
-function stepsFixture() {
+export function stepsFixture() {
   const turns = [];
   let clock = CLOCK;
   const say = (role, text, gap) => turns.push({ role, text, at_ms: (clock += gap) });
@@ -1707,7 +1707,7 @@ function stepsFixture() {
 /* What every case below asks of the page, put on it once: the rows, the row's
  * own line (a step's `summary`; the old page's call line), the words a person
  * could read (a closed row's body is not among them) and a frame to settle. */
-async function installStepsProbe(page) {
+export async function installStepsProbe(page) {
   await page.evaluate(() => {
     const texts = (root) => {
       const found = [];
@@ -1741,7 +1741,7 @@ async function installStepsProbe(page) {
 
 /* A helper's page, opened the way the sidebar opens it: its transcript read
  * from the parent's record, `state` the helper's own, `agent` the parent's. */
-async function openHelperConversation(page, turns, state, { agent = "claude", about = null, sub = {} } = {}) {
+export async function openHelperConversation(page, turns, state, { agent = "claude", about = null, sub = {} } = {}) {
   await page.evaluate(async ({ turns, state, agent, about, sub }) => {
     const term = await openTermTab({ placement: "tab" });
     const owner = tabOfTerm(term);
@@ -1779,11 +1779,12 @@ export async function standZo(page) {
   }, ZO_ROW);
 }
 
-/* A pane whose agent has no wire, its conversation view open on `turns`. */
-async function openPaneConversation(page, turns) {
-  await page.evaluate(async (turns) => {
+/* A pane whose agent has no wire, its conversation view open on `turns` — zo's unless `agent` says
+ * whose. */
+export async function openPaneConversation(page, turns, { agent = "zo" } = {}) {
+  await page.evaluate(async ({ turns, agent }) => {
     const term = await openTermTab({ placement: "tab" });
-    paneAgents.set(term, "zo");
+    paneAgents.set(term, agent);
     hookStates.set(term, "working");
     window.__ANSWER__.pane_log = (args) => ({
       found: true, next: turns.length, turns: args.after == null ? turns : turns.slice(args.after),
@@ -1792,7 +1793,7 @@ async function openPaneConversation(page, turns) {
     await setPaneChat(term, true);
     await pollHelperPages();
     await window.__PAINTED__();
-  }, turns);
+  }, { turns, agent });
   await page.waitForSelector(".pane-chat .helper-turns .helper-turn");
 }
 
