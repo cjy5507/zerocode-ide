@@ -439,11 +439,15 @@ mod tests {
 
     /// A copy shaped like Chromium's, with one file of its own — a fresh inode
     /// no process runs.
-    /// A system program every Mac has, copied for a child to run — any
-    /// Mach-O works; this one does nothing until it is killed.
-    const SLEEPER: &str = "/bin/sleep";
+    /// The test a child runs to hold its executable open: it only sleeps. The
+    /// child runs a clone of this test binary (its own inode, never a link to
+    /// the running one) started on this test alone. A system program does not
+    /// do: macOS kills a copy of a platform binary at launch (10-02 23:09 a
+    /// copied `/bin/sleep` exited 137 at once), so the child was never seen
+    /// running and the sweep removed the copy it should have held.
+    const SLEEPER_TEST: &str = "code_sign_clone::tests::a_child_that_only_sleeps";
     /// Longer than any sweep in these tests; the child is killed at the end.
-    const SLEEPER_SECONDS: &str = "30";
+    const SLEEPER_SECONDS: u64 = 30;
 
     fn copy_in(x: &Path, id: &str, name: &str) -> PathBuf {
         let clone = x
@@ -727,17 +731,18 @@ mod tests {
     fn the_executable_a_process_runs_keeps_a_copy_that_hard_links_it() {
         // Chromium hard-links the running executable into its copy, so this is
         // the real shape: the copy's only file a process runs is another name
-        // for the one it came in by. The process is a child running a copy of
-        // a system program, never this test binary: the kernel names a
-        // hard-linked executable by the last name looked up, so a link to the
-        // test binary moved `current_exe()` into a folder this test deletes,
-        // and every later test that starts the test binary as its helper
-        // started a file that was gone (10-02: nine tests failed in full runs
-        // only). One folder for the program and the copies, so the link
-        // cannot cross a volume.
+        // for the one it came in by. The process is a child running a clone
+        // of this test binary, never the running binary linked: the kernel
+        // names a hard-linked executable by the last name looked up, so a link
+        // to the test binary moved `current_exe()` into a folder this test
+        // deletes, and every later test that starts the test binary as its
+        // helper started a file that was gone (10-02: nine tests failed in
+        // full runs only). The clone is a file of its own; one folder holds it
+        // and the copies, so the link cannot cross a volume (and the clone
+        // takes no space on APFS).
         let x = tempfile::tempdir().unwrap();
         let program = x.path().join("sleeper");
-        std::fs::copy(SLEEPER, &program).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), &program).unwrap();
         let running = copy_in(x.path(), ID, "RRRRRR");
         std::fs::hard_link(
             &program,
@@ -745,7 +750,9 @@ mod tests {
         )
         .unwrap();
         let mut child = crate::proc::quiet_command(&program)
-            .arg(SLEEPER_SECONDS)
+            .args(["--exact", SLEEPER_TEST, "--ignored", "--test-threads=1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
         wait_until_running(child.id(), &program);
@@ -760,6 +767,14 @@ mod tests {
             "the copy a running process's executable is linked into was deleted"
         );
         assert!(!stale.exists());
+    }
+
+    /// The child the hard-link test runs (see [`SLEEPER_TEST`]); never part of
+    /// a normal run.
+    #[test]
+    #[ignore = "a child process for the hard-link sweep test; it only sleeps"]
+    fn a_child_that_only_sleeps() {
+        std::thread::sleep(Duration::from_secs(SLEEPER_SECONDS));
     }
 
     #[test]
