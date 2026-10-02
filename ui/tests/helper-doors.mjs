@@ -181,7 +181,58 @@ export async function testHelperDoors(browser, origin, ok) {
       paintAgentInspectorDestinations(view, entityOf(cardOf("lane:L-1", "a lane")));
       seen.lane = { shown: standing(chat()) };
 
-      // 5. A pane whose agent can be driven on a wire (the catalog's Claude Code): the door is a look. Its CLI keeps
+      // 5. Made once, and worn in the language in force. The look opened over and over leaves one footer door that
+      //    answers a press once; the inspector painted over and over leaves one button; and a change of language is
+      //    worn by the doors — the look's, the helper's, and the one that takes no press — in the catalog's words.
+      let opened = 0;
+      const openedBy = typeof openBoardConversation === "function" ? openBoardConversation : null;
+      if (openedBy) {
+        openBoardConversation = (card) => {
+          opened += 1;
+          return openedBy(card);
+        };
+      }
+      for (let time = 0; time < 3; time += 1) {
+        await press(termCard);
+        shut();
+      }
+      const again = await press(termCard);
+      const footDoors = document.querySelectorAll("#peek-chat").length;
+      again.door?.click();
+      await wait(200);
+      shut();
+      reset();
+      leavePagesForStage();
+      openBoard();
+      await paintBoardView(boardTab(), { force: true });
+      for (let time = 0; time < 3; time += 1) {
+        paintAgentInspectorDestinations(view, entityOf(termCard));
+        paintAgentInspectorDestinations(view, entityOf(helperCard));
+      }
+      seen.again = { footDoors, opened, inspectorDoors: view.querySelectorAll(".agent-inspector-chat").length };
+      if (openedBy) openBoardConversation = openedBy;
+      const wore = locale;
+      const worn = async (code) => {
+        setLocale(code, { refresh: false, persist: false });
+        const looked = await press(termCard);
+        const peek = looked.door?.textContent ?? null;
+        shut();
+        paintAgentInspectorDestinations(view, entityOf(helperCard));
+        const sub = chat()?.textContent ?? null;
+        paintAgentInspectorDestinations(view, entityOf(ledgerOnly));
+        return {
+          peek, sub, ledger: chat()?.textContent ?? null, disabled: chat()?.getAttribute("aria-disabled") ?? null,
+          wantPeek: t("view.conversationTip", "대화로 보기"),
+          wantSub: t("session.subagentOpenTranscript", "헬퍼 대화 보기"),
+          wantLedger: t("board.graph.noConversation", "대화 기록 없음 — 원장에만 있는 실행입니다"),
+        };
+      };
+      seen.lang = { ko: await worn("ko") };
+      for (const code of ["en", "ja", "zh", "es"]) seen.lang[code] = await worn(code);
+      setLocale(wore, { refresh: false, persist: false });
+      reset();
+
+      // 6. A pane whose agent can be driven on a wire (the catalog's Claude Code): the door is a look. Its CLI keeps
       //    running — no wire starts and the pane's tab stays — where the title bar's toggle would have handed it over.
       const wired = await openTermTab({ placement: "tab" });
       paneAgents.set(wired, "claude");
@@ -256,6 +307,18 @@ export async function testHelperDoors(browser, origin, ok) {
       "the board's door on a pane that can be driven on a wire is a look — the pane's conversation stands up in its own tab, the pane's CLI is left running, no wire is started",
       seen.wired.shown && seen.wired.chatOn && seen.wired.wireStarts === 0 && seen.wired.paneStays && seen.wired.noWireTab,
       JSON.stringify(seen.wired),
+    );
+    ok(
+      "the doors are made once — the look opened four times leaves one footer door that answers a press once, and the inspector painted over and over leaves one button",
+      seen.again.footDoors === 1 && seen.again.opened === 1 && seen.again.inspectorDoors === 1,
+      JSON.stringify(seen.again),
+    );
+    ok(
+      "a change of language is worn by the doors in the catalog's words — the look's, the helper's and the one that takes no press — and none is left in the language it was made in",
+      Object.entries(seen.lang).every(([code, one]) =>
+        one.peek === one.wantPeek && one.sub === one.wantSub && one.ledger === one.wantLedger && one.disabled === "true" &&
+        (code === "ko" || (one.peek !== seen.lang.ko.peek && one.sub !== seen.lang.ko.sub && one.ledger !== seen.lang.ko.ledger))),
+      JSON.stringify(seen.lang),
     );
     ok("the board's doors raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
