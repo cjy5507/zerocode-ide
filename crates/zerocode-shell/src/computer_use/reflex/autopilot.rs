@@ -80,6 +80,19 @@ pub(crate) const NO_TIME: &str = "deadline";
 /// uncovered it (t-12979): the person's.
 pub(crate) const COVERED: &str = zerocode_core::computer_use_protocol::error_code::COVERED;
 
+/// The least of the wall a plan is asked for: one second, the unit the run's
+/// policy counts its wall in — with less left there is no run for a plan to
+/// have.
+const LEAST_PLAN_WALL_MS: u64 = 1_000;
+
+/// The wall's refusal of another plan.
+fn no_time() -> ComputerUseError {
+    ComputerUseError::new(
+        NO_TIME,
+        "no second of the run's wall is left for another plan",
+    )
+}
+
 /// Where one autopilot stands, for a status and for its end (§2.4).
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Tally {
@@ -513,6 +526,10 @@ impl Carrier for Seat<'_> {
     }
 }
 
+/// A plan being written while a run stands: its answer, polled; the run it
+/// was asked beside and the scene that run's reading showed, both of which
+/// must still stand for the answer to run; whether the reflex decision asked
+/// for it — the seat must still apply when it comes — and when it was asked.
 struct Replanning {
     answer: plan::PendingPlan,
     run: Option<String>,
@@ -734,13 +751,7 @@ impl Autopilot {
         world: &mut World<'_>,
         previous: Option<Previous<'_>>,
     ) -> Result<Value, ComputerUseError> {
-        let no_time = || {
-            ComputerUseError::new(
-                NO_TIME,
-                "no second of the run's wall is left for another plan",
-            )
-        };
-        if self.deadline_ms.saturating_sub(world.now_ms) < 1_000 {
+        if self.deadline_ms.saturating_sub(world.now_ms) < LEAST_PLAN_WALL_MS {
             return Err(no_time());
         }
         let written = plan::write_plan(
@@ -768,12 +779,6 @@ impl Autopilot {
         written_at: u64,
         request_at: i64,
     ) -> Result<Value, ComputerUseError> {
-        let no_time = || {
-            ComputerUseError::new(
-                NO_TIME,
-                "no second of the run's wall is left for another plan",
-            )
-        };
         if self.epoch == 0 {
             self.deadline_ms = written_at.saturating_add(self.asked.seconds.saturating_mul(1_000));
         }
@@ -1112,12 +1117,9 @@ impl Autopilot {
             return;
         }
         let left_ms = self.deadline_ms.saturating_sub(world.now_ms);
-        if left_ms < 1_000 {
-            self.end(
-                world,
-                NO_TIME,
-                "no second of the run's wall is left for another plan",
-            );
+        if left_ms < LEAST_PLAN_WALL_MS {
+            let refused = no_time();
+            self.end(world, &refused.code, &refused.message);
             return;
         }
         let answer = world.generator.plan_later(

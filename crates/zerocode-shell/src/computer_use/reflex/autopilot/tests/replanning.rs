@@ -91,8 +91,10 @@ fn held_replan(case: &'static str) {
         let mut fake = Fake::new((JevMode::Auto, true), Vec::new());
         fake.teacher.says(REPLAN);
         let first = delayed.clone();
-        let mut generator =
-            plan::Background::new(Box::new(first), Box::new(move || Box::new(delayed)));
+        let mut generator = plan::Background::new(
+            Box::new(first),
+            Box::new(move || Box::new(delayed) as Box<dyn Generator>),
+        );
         let (mut pilot, answer) = fake
             .with(Some(&mut generator), |world| {
                 Autopilot::start(asked(None), open(), None, world)

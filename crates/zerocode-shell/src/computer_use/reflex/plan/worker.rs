@@ -1,22 +1,32 @@
-//! A re-plan's writer lives off the collector thread. Its key store is
-//! constructed there, not sent across threads. Dropping its pending answer
-//! cancels further requests, without waiting for a wire already answering.
+//! A re-plan's writer, off the collector's thread (t-21494): the collector
+//! asks for a later plan and polls for it each collect, so the valid run it
+//! stands on keeps being read and judged while the model thinks. The writer
+//! is made on its own thread — a key store is read where it is asked from —
+//! and a pending answer dropped is a request withdrawn: no further request
+//! of it reaches the model, and a wire already answering is not waited on.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 
 use super::*;
 use crate::computer_use::errand::value::Setup;
 
+/// How a writer is made, on the thread that asks it.
 type Factory = Box<dyn FnOnce() -> Box<dyn Generator> + Send>;
 
+/// The name the writer's thread carries.
+const WRITER_THREAD: &str = "reflex-plan";
+
+/// A plan asked for and not yet answered: polled by the collector, never
+/// waited on; dropped, it is withdrawn.
 pub(crate) struct PendingPlan {
     answer: Receiver<Written>,
     cancelled: Arc<AtomicBool>,
 }
 
 impl PendingPlan {
+    /// A plan already written — a scripted writer's, answered at once.
     pub(super) fn ready(written: Written) -> Self {
         let (answer, received) = mpsc::channel();
         let _ = answer.send(written);
@@ -26,6 +36,12 @@ impl PendingPlan {
         }
     }
 
+    /// The plan once it is written; `None` while the writer works.
+    ///
+    /// # Errors
+    ///
+    /// [`NO_GENERATOR`]: the writer went without answering — its thread
+    /// ended, or never began.
     pub(crate) fn poll(&self) -> Result<Option<Written>, String> {
         match self.answer.try_recv() {
             Ok(written) => Ok(Some(written)),
@@ -41,6 +57,8 @@ impl Drop for PendingPlan {
     }
 }
 
+/// One plan asked of the writer's thread: the ask, owned; the wall it has
+/// from the moment it was asked; its withdrawal; and where its answer goes.
 struct Request {
     goal: String,
     scope: Scope,
@@ -50,9 +68,14 @@ struct Request {
     began: Instant,
     left: Duration,
     cancelled: Arc<AtomicBool>,
-    answer: mpsc::Sender<Written>,
+    answer: Sender<Written>,
 }
 
+/// The window's writer for an autopilot: the first plan is written here, on
+/// the collector's thread, before any hand moves; every later plan goes to a
+/// writer of the same making on a thread of its own, started at the first
+/// later plan and kept until this generator is dropped. One request waits
+/// behind the writer; a withdrawn one is skipped.
 pub(crate) struct Background {
     first: Box<dyn Generator>,
     factory: Option<Factory>,
@@ -60,10 +83,11 @@ pub(crate) struct Background {
 }
 
 impl Background {
+    /// The window's own writers, on the road the person set up.
     pub(crate) fn window(setup: Setup) -> Self {
         Self::new(
             Box::new(LiveWriter::window(setup.clone())),
-            Box::new(move || Box::new(LiveWriter::window(setup))),
+            Box::new(move || Box::new(LiveWriter::window(setup)) as Box<dyn Generator>),
         )
     }
 
@@ -74,35 +98,15 @@ impl Background {
             requests: None,
         }
     }
-}
 
-impl Generator for Background {
-    fn unready(&self) -> Option<String> {
-        self.first.unready()
-    }
-
-    fn model(&self) -> Option<String> {
-        self.first.model()
-    }
-
-    fn source(&self) -> &'static str {
-        self.first.source()
-    }
-
-    fn ask(&mut self, system: &str, user: &str, left: Duration) -> Result<Said, String> {
-        self.first.ask(system, user, left)
-    }
-
-    fn pass_over(&mut self, why: &str) -> bool {
-        self.first.pass_over(why)
-    }
-
-    fn plan_later(&mut self, ask: &Ask<'_>, left: Duration) -> PendingPlan {
+    /// The writer's thread, started at the first later plan. `None` once it
+    /// could not be started: a request then goes unanswered, and its poll
+    /// says so.
+    fn writer(&mut self) -> Option<&SyncSender<Request>> {
         if let Some(factory) = self.factory.take() {
             let (send, requests) = mpsc::sync_channel::<Request>(1);
-            self.requests = Some(send);
-            let _ = std::thread::Builder::new()
-                .name("reflex-plan".into())
+            let started = std::thread::Builder::new()
+                .name(WRITER_THREAD.into())
                 .spawn(move || {
                     let mut generator = factory();
                     while let Ok(request) = requests.recv() {
@@ -129,7 +133,34 @@ impl Generator for Background {
                         let _ = request.answer.send(written);
                     }
                 });
+            self.requests = started.ok().map(|_| send);
         }
+        self.requests.as_ref()
+    }
+}
+
+impl Generator for Background {
+    fn unready(&self) -> Option<String> {
+        self.first.unready()
+    }
+
+    fn model(&self) -> Option<String> {
+        self.first.model()
+    }
+
+    fn source(&self) -> &'static str {
+        self.first.source()
+    }
+
+    fn ask(&mut self, system: &str, user: &str, left: Duration) -> Result<Said, String> {
+        self.first.ask(system, user, left)
+    }
+
+    fn pass_over(&mut self, why: &str) -> bool {
+        self.first.pass_over(why)
+    }
+
+    fn plan_later(&mut self, ask: &Ask<'_>, left: Duration) -> PendingPlan {
         let (answer, received) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let request = Request {
@@ -146,8 +177,10 @@ impl Generator for Background {
             cancelled: Arc::clone(&cancelled),
             answer,
         };
-        if let Some(requests) = &self.requests {
-            let _ = requests.try_send(request);
+        // A writer that went, or never began, drops the request with the
+        // sender of its answer: the poll says so.
+        if let Some(writer) = self.writer() {
+            let _ = writer.try_send(request);
         }
         PendingPlan {
             answer: received,
@@ -156,6 +189,9 @@ impl Generator for Background {
     }
 }
 
+/// A writer held to a request's wall and its withdrawal: a request asked
+/// after either is refused before it reaches the model, and no further road
+/// is asked for it.
 struct Bounded<'a> {
     generator: &'a mut dyn Generator,
     began: Instant,
@@ -196,6 +232,7 @@ impl Generator for Bounded<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::Scripted;
     use super::*;
 
     #[test]
@@ -215,7 +252,7 @@ mod tests {
 
     #[test]
     fn expired_or_cancelled_requests_never_reach_the_generator() {
-        let mut generator = super::super::tests::Scripted {
+        let mut generator = Scripted {
             answers: Vec::new().into(),
             asked: Vec::new(),
         };
