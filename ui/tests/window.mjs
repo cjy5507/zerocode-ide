@@ -81,7 +81,7 @@ import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testWorkers } from "./workers.mjs";
 import { testSidebarAgents } from "./sidebar-agents.mjs";
 import { testSidebarReviewState } from "./sidebar-review-state.mjs";
-import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps } from "./conversation-parity.mjs";
+import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -284,6 +284,16 @@ suite("conversation-release", ({ browser, origin, ok }) => testConversationRelea
  * 발밑 줄은 지금 나간 걸음을 말하고, 끝난 헬퍼의 페이지는 보고로 열린다
  * (t-15682). */
 suite("conversation-steps", ({ browser, origin, ok }) => testConversationSteps(browser, origin, ok));
+/* 울타리의 코드가 편집기의 색을 입는다 — 역할마다 하이라이트 하나, 노드는 그대로,
+ * 쓰는 중인 울타리는 평문, 선반의 행은 색을 내려놓고, 조각은 4 ms를 넘지 않는다
+ * (t-22095). */
+suite("conversation-code-colours", ({ browser, origin, ok }) => testConversationCodeColours(browser, origin, ok));
+/* 흐르는 답의 값 — 닫힌 블록은 한 번씩만 그리고, 글자만 움직이는 델타는 입력창을
+ * 건드리지 않는다 (t-22095). */
+suite("conversation-stream-work", ({ browser, origin, ok }) => testConversationStreamWork(browser, origin, ok));
+/* 키의 값 — 줄이 넘어가 도크가 자라도 그 높이는 그것을 읽는 둘(목록의 발밑 여백,
+ * 맨 아래로 단추)에만 닿고 행마다 닿지 않는다 (t-22095). */
+suite("conversation-typing-work", ({ browser, origin, ok }) => testConversationTypingWork(browser, origin, ok));
 /* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
  * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
  * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs
