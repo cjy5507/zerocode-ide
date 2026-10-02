@@ -101,9 +101,32 @@ pub(super) fn resolve_landing_base(
     }
 }
 
+/// How long a row's "unsaved changes" answer stands. The one thing the landing
+/// reads that no git ref can key is the working tree, and it costs a `status`
+/// per row; the catalog is re-read on every workspace click, so within this
+/// window a refresh starts no git process for a row it already knows.
+const LANDING_DIRTY_TTL: Duration = Duration::from_secs(5);
+
+struct HeldLanding {
+    key: String,
+    landing: WorktreeLanding,
+    dirty_at: Instant,
+}
+
+type LandingCache = Mutex<HashMap<PathBuf, HeldLanding>>;
+
+/// (head, 비교 ref oid, 브랜치)가 같으면 분류는 같다 — 분류가 읽는 것은 그
+/// 셋과 불변의 생성 지점뿐이다. 저장 안 한 변경만 그 밖이라 따로 시각을
+/// 들고 다닌다.
+fn landing_cache() -> &'static LandingCache {
+    static CACHE: OnceLock<LandingCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Stamp every row of one repository with its landing. The rows are
 /// independent and each one's `status` is a process, so they are asked side by
-/// side; a row whose (head, ref, branch) is unchanged costs that one `status`.
+/// side; a row whose (head, ref, branch) is unchanged and whose unsaved-changes
+/// answer is under [`LANDING_DIRTY_TTL`] old costs no process at all.
 pub(super) fn attach_landings(
     entries: &mut [WorktreeEntry],
     repo_root: &Path,
@@ -113,7 +136,7 @@ pub(super) fn attach_landings(
     let pinned = stored_project_settings_at(repository, &project_settings_key(repo_root))
         .ok()
         .and_then(|stored| stored.worktree_base_ref);
-    let base = resolve_landing_base(&host, repo_root, pinned.as_deref());
+    let base = landing_base(&host, repo_root, pinned.as_deref());
     let landings: Vec<Option<WorktreeLanding>> = std::thread::scope(|scope| {
         let handles: Vec<_> = entries
             .iter()
@@ -143,18 +166,8 @@ pub(super) fn attach_landings(
     }
 }
 
-type LandingCache = Mutex<HashMap<PathBuf, (String, WorktreeLanding)>>;
-
-/// (head, 비교 ref oid, 브랜치)가 같으면 분류는 같다 — 분류가 읽는 것은 그
-/// 셋과 불변의 생성 지점뿐이다. 저장 안 한 변경은 거기에 없으므로 캐시된 답에
-/// 매번 새로 얹는다.
-fn landing_cache() -> &'static LandingCache {
-    static CACHE: OnceLock<LandingCache> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// 한 작업 폴더의 분류. 바뀐 행만 git을 몇 번 부르고, 같은 행은 `status` 한
-/// 번이다.
+/// 한 작업 폴더의 분류. 바뀐 행만 git을 몇 번 부르고, 같은 행은 TTL 안에서
+/// 한 번도 부르지 않는다.
 pub(super) fn worktree_landing(
     host: &Host,
     path: &Path,
@@ -162,33 +175,125 @@ pub(super) fn worktree_landing(
     head: Option<&str>,
     base: &LandingBase,
 ) -> WorktreeLanding {
-    let dirty = optional_git_text(host, path, &["status", "--porcelain", "--untracked-files=no"])
-        .is_some();
+    worktree_landing_within(host, path, branch, head, base, LANDING_DIRTY_TTL)
+}
+
+fn worktree_landing_within(
+    host: &Host,
+    path: &Path,
+    branch: Option<&str>,
+    head: Option<&str>,
+    base: &LandingBase,
+    dirty_ttl: Duration,
+) -> WorktreeLanding {
     let key = format!(
         "{}|{}|{}",
         head.unwrap_or(""),
         base.oid.as_deref().unwrap_or(""),
         branch.unwrap_or("")
     );
-    if let Ok(cache) = landing_cache().lock()
-        && let Some((held, landing)) = cache.get(path)
-        && *held == key
-    {
-        return WorktreeLanding {
-            dirty,
-            compare_ref: base.name.clone(),
-            ref_updated_ms: base.updated_ms,
-            ..landing.clone()
-        };
-    }
-    let landing = WorktreeLanding {
-        dirty,
-        ..classify_landing(host, path, branch, head, base)
+    let held = landing_cache().lock().ok().and_then(|cache| {
+        cache
+            .get(path)
+            .filter(|held| held.key == key)
+            .map(|held| (held.landing.clone(), held.dirty_at))
+    });
+    let (mut landing, dirty_at) = match held {
+        Some((landing, at)) => (
+            WorktreeLanding {
+                compare_ref: base.name.clone(),
+                ref_updated_ms: base.updated_ms,
+                ..landing
+            },
+            Some(at),
+        ),
+        None => (classify_landing(host, path, branch, head, base), None),
     };
+    let fresh = dirty_at.filter(|at| at.elapsed() < dirty_ttl);
+    if fresh.is_none() {
+        landing.dirty =
+            optional_git_text(host, path, &["status", "--porcelain", "--untracked-files=no"])
+                .is_some();
+    }
     if let Ok(mut cache) = landing_cache().lock() {
-        cache.insert(path.to_path_buf(), (key, landing.clone()));
+        cache.insert(
+            path.to_path_buf(),
+            HeldLanding {
+                key,
+                landing: landing.clone(),
+                dirty_at: fresh.unwrap_or_else(Instant::now),
+            },
+        );
     }
     landing
+}
+
+struct HeldBase {
+    pinned: Option<String>,
+    stamp: Vec<Option<std::time::SystemTime>>,
+    base: LandingBase,
+}
+
+fn base_cache() -> &'static Mutex<HashMap<PathBuf, HeldBase>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, HeldBase>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The files a fetch or a branch move writes, as modification times: the
+/// packed refs, the origin/HEAD pointer, the ref compared with and its
+/// reflog, and the two directories a new ref appears in. Reading them is a
+/// handful of `stat`s, so an unchanged repository asks git nothing.
+fn base_stamp(git_dir: &Path, name: Option<&str>) -> Vec<Option<std::time::SystemTime>> {
+    let mut files = vec![
+        "packed-refs".to_string(),
+        "refs/remotes/origin/HEAD".to_string(),
+        "refs/remotes".to_string(),
+        "refs/heads".to_string(),
+    ];
+    if let Some(name) = name {
+        files.push(format!("refs/remotes/{name}"));
+        files.push(format!("refs/heads/{name}"));
+        files.push(format!("logs/refs/remotes/{name}"));
+    }
+    files
+        .iter()
+        .map(|file| {
+            std::fs::metadata(git_dir.join(file))
+                .and_then(|meta| meta.modified())
+                .ok()
+        })
+        .collect()
+}
+
+/// [`resolve_landing_base`], asked of git only when the stamp of the files it
+/// reads has moved. A checkout whose `.git` is not a directory (a linked one
+/// opened as the project) is asked every time rather than guessed at.
+pub(super) fn landing_base(host: &Host, repo_root: &Path, pinned: Option<&str>) -> LandingBase {
+    let git_dir = repo_root.join(".git");
+    if !git_dir.is_dir() {
+        return resolve_landing_base(host, repo_root, pinned);
+    }
+    let pinned = pinned.map(str::to_string);
+    if let Ok(held) = base_cache().lock()
+        && let Some(held) = held.get(repo_root)
+        && held.pinned == pinned
+        && held.stamp == base_stamp(&git_dir, held.base.name.as_deref())
+    {
+        return held.base.clone();
+    }
+    let base = resolve_landing_base(host, repo_root, pinned.as_deref());
+    let stamp = base_stamp(&git_dir, base.name.as_deref());
+    if let Ok(mut held) = base_cache().lock() {
+        held.insert(
+            repo_root.to_path_buf(),
+            HeldBase {
+                pinned,
+                stamp,
+                base: base.clone(),
+            },
+        );
+    }
+    base
 }
 
 fn classify_landing(
@@ -423,7 +528,9 @@ mod tests {
             let base = resolve_landing_base(&host, &self.repo, None);
             let head = git(at, &["rev-parse", "HEAD"]);
             let branch = git(at, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
-            worktree_landing(&host, at, Some(&branch), Some(&head), &base)
+            // A zero TTL: these tests change the working tree between asks and
+            // want the answer of that moment, not of five seconds ago.
+            worktree_landing_within(&host, at, Some(&branch), Some(&head), &base, Duration::ZERO)
         }
     }
 
@@ -612,5 +719,38 @@ mod tests {
         // `unknown`; the cached one is keyed on (head, ref, branch) and holds.
         git(&bench.repo, &["reflog", "expire", "--expire=now", "--all"]);
         assert_eq!(bench.landing(&wt).state, "no_commits");
+    }
+
+    #[test]
+    fn the_unsaved_answer_stands_for_its_ttl_and_the_row_starts_no_process_inside_it() {
+        let bench = Bench::open();
+        let wt = bench.worktree("ttl");
+        let host = Host::for_workspace(&bench.repo);
+        let base = resolve_landing_base(&host, &bench.repo, None);
+        let head = git(&wt, &["rev-parse", "HEAD"]);
+        let ask = |ttl| worktree_landing_within(&host, &wt, Some("wt/ttl"), Some(&head), &base, ttl);
+        assert!(!ask(Duration::ZERO).dirty);
+        std::fs::write(wt.join("a.txt"), "changed\n").expect("tracked");
+        // Inside the TTL nothing is asked of git, so the edit is not seen yet.
+        assert!(!ask(Duration::from_secs(3600)).dirty);
+        // Past it, the one `status` runs and the edit is seen.
+        assert!(ask(Duration::ZERO).dirty);
+    }
+
+    #[test]
+    fn the_compare_ref_is_asked_of_git_again_only_when_its_files_moved() {
+        let bench = Bench::open();
+        let host = Host::for_workspace(&bench.repo);
+        let first = landing_base(&host, &bench.repo, None);
+        assert_eq!(landing_base(&host, &bench.repo, None), first);
+        bench.commit(&bench.repo, "m.txt", "main moves\n");
+        bench.publish();
+        let moved = landing_base(&host, &bench.repo, None);
+        assert_ne!(moved.oid, first.oid);
+        assert_eq!(moved.oid, Some(git(&bench.repo, &["rev-parse", "main"])));
+        // A different pin is a different question even with no file moving.
+        let pinned = landing_base(&host, &bench.repo, Some("origin/gone"));
+        assert_eq!(pinned.name.as_deref(), Some("origin/gone"));
+        assert_eq!(pinned.oid, None);
     }
 }
