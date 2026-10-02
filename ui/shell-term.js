@@ -5842,6 +5842,35 @@ function paintPreviewScreen(term) {
  * 당김 프레임(`term_pull`)의 델타 경로를 타지 않는다. 이것은 **스냅샷**이고 —
  * 델타는 가져가면서 비우므로 느린 박자로 델타를 보낼 방법은 없다 — 받는 쪽도
  * 누적하지 않고 통째로 갈아 끼운다. */
+/* 우편이 왔는데 창이 그 판에 안내문을 치지 못했다 (t-21017). 사람이 그 판에서
+ * 이유를 읽는다 — 사유는 가드의 토큰(`why`)이고 문장은 창의 표다. */
+const MAIL_WAITING_WORDS = Object.freeze({
+  holds_a_draft: (term) =>
+    t(
+      "term.mailWaiting.holds_a_draft",
+      "터미널 {{term}}의 에이전트에게 온 우편을 입력하지 않았습니다: 입력줄에 직접 쓰고 보내지 않은 글이 있습니다. 우편함에 안전하게 있고, 보내거나 지우면 안내됩니다.",
+      { term },
+    ),
+  parked: (term) =>
+    t(
+      "term.mailWaiting.parked",
+      "터미널 {{term}}의 에이전트에게 온 우편을 입력하지 않았습니다: 그 판에서 당신을 기다리는 질문이나 승인이 있습니다.",
+      { term },
+    ),
+  other: (term) =>
+    t(
+      "term.mailWaiting.other",
+      "터미널 {{term}}의 에이전트에게 온 우편을 입력하지 않았습니다. 우편함에 안전하게 있고, 에이전트가 다음 확인에서 읽습니다.",
+      { term },
+    ),
+});
+listen("term:mail-waiting", (event) => {
+  const { term, why } = event.payload ?? {};
+  if (typeof term !== "number") return;
+  const known = Object.prototype.hasOwnProperty.call(MAIL_WAITING_WORDS, why);
+  toast(MAIL_WAITING_WORDS[known ? why : "other"](term));
+});
+
 listen("term:preview", (event) => {
   const { term, rows } = event.payload ?? {};
   if (typeof term !== "number" || !Array.isArray(rows)) return;

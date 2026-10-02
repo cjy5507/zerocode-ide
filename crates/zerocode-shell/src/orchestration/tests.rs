@@ -11394,7 +11394,7 @@ fn unsubmitted_pointer_never_acquires_a_durable_delivery_watermark() {
         zerocode_pty::ready::Refusal::HandReached,
     ))
     .unwrap();
-    let _ = super::advice_standing(run, address, 11_009, newest, false);
+    let _ = super::advice_standing(&Nowhere, run, address, 11_009, newest, false);
     assert!(
         !super::delivered_before(run, address, newest),
         "an Enter that was withheld permanently silenced unread mail"
@@ -13854,6 +13854,9 @@ struct BesideADraft {
     /// offer is one settled delivery, which is one `term:prompt` the window
     /// hears and, refused, one notice it may raise.
     offered: Mutex<Vec<(u32, zerocode_pty::DeliveryOutcome)>>,
+    /// Every notice the person at a pane was given that mail waits unpointed
+    /// (t-21017): the terminal and the guard's token.
+    told: Mutex<Vec<(u32, String)>>,
 }
 
 impl BesideADraft {
@@ -13921,6 +13924,12 @@ impl Host for BesideADraft {
     fn agent_of(&self, _term: u32) -> Option<String> {
         Some(zerocode_core::AgentKind::Claude.slug().to_string())
     }
+    fn mail_waiting_not_typed(&self, term: u32, why: &str) {
+        self.told
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push((term, why.to_string()));
+    }
 }
 
 /// Mail waiting behind a person's draft is offered once per watermark, and
@@ -13947,6 +13956,7 @@ fn mail_behind_a_persons_draft_is_offered_once_per_watermark_until_the_draft_goe
     let host = BesideADraft {
         term: LEADER,
         offered: Mutex::new(Vec::new()),
+        told: Mutex::new(Vec::new()),
     };
     let held = crate::agent_teams::current_pane_capability(&team, &pane)
         .expect("the split minted the worker a capability");
@@ -25065,4 +25075,71 @@ fn measure_the_idle_beat_on_a_large_ledger() {
         BEATS_PER_MINUTE,
         cpu_used / 1000,
     );
+}
+
+/// t-21017: a pointer that cannot be typed is told on both sides, once per
+/// waiting message — the person at the pane in the window's words, the
+/// sender in a letter from the ledger — and never with the message's body.
+#[test]
+fn an_unpointed_message_is_told_to_the_person_and_to_its_sender_once() {
+    const LEADER: u32 = 21_017;
+    const WORKER: u32 = 21_018;
+    const BEATS: usize = 30;
+    const SECRET: &str = "the-body-nobody-else-may-read";
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let team = format!("team-unpointed-{LEADER}");
+    let (_run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    super::pane_turn_began(WORKER, clock());
+    crate::human_input::forget_term(LEADER);
+    let host = BesideADraft {
+        term: LEADER,
+        offered: Mutex::new(Vec::new()),
+        told: Mutex::new(Vec::new()),
+    };
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let sent = run(
+        &host,
+        Vec::new(),
+        &team,
+        &pane,
+        &held,
+        &words(&format!(
+            "send --type status --body {SECRET} --retry-request unpointed-{worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(sent.exit_code, 0, "{}", sent.stderr);
+    super::pane_turn_began(LEADER, clock());
+    super::pane_turn_ended(LEADER, clock(), false, clock());
+    crate::human_input::typed(LEADER);
+    for _ in 0..BEATS {
+        super::tick(&host, &[], clock());
+    }
+    assert_eq!(
+        host.told.lock().unwrap().as_slice(),
+        [(LEADER, "holds_a_draft".to_string())],
+        "the person at the pane was not told exactly once that mail waits"
+    );
+    let letters = run(
+        &host,
+        Vec::new(),
+        &team,
+        &pane,
+        &held,
+        &words("check --peek"),
+        clock(),
+    );
+    assert_eq!(
+        letters.stdout.matches("was NOT pointed").count(),
+        1,
+        "the sender was not told exactly once: {}",
+        letters.stdout
+    );
+    assert!(
+        !letters.stdout.contains(SECRET),
+        "the letter carried the message's body"
+    );
+    crate::human_input::forget_term(LEADER);
 }
