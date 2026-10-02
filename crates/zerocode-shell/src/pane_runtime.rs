@@ -3772,7 +3772,7 @@ fn tell_human_input(
 }
 
 #[cfg(test)]
-mod human_input_road_tests {
+mod tests {
     use super::tell_human_input;
     use std::time::{Duration, Instant};
     use zerocode_core::AgentKind;
