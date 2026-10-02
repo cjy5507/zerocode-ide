@@ -211,9 +211,12 @@ fn worktree_landing_within(
     };
     let fresh = dirty_at.filter(|at| at.elapsed() < dirty_ttl);
     if fresh.is_none() {
-        landing.dirty =
-            optional_git_text(host, path, &["status", "--porcelain", "--untracked-files=no"])
-                .is_some();
+        landing.dirty = optional_git_text(
+            host,
+            path,
+            &["status", "--porcelain", "--untracked-files=no"],
+        )
+        .is_some();
     }
     if let Ok(mut cache) = landing_cache().lock() {
         cache.insert(
@@ -728,7 +731,8 @@ mod tests {
         let host = Host::for_workspace(&bench.repo);
         let base = resolve_landing_base(&host, &bench.repo, None);
         let head = git(&wt, &["rev-parse", "HEAD"]);
-        let ask = |ttl| worktree_landing_within(&host, &wt, Some("wt/ttl"), Some(&head), &base, ttl);
+        let ask =
+            |ttl| worktree_landing_within(&host, &wt, Some("wt/ttl"), Some(&head), &base, ttl);
         assert!(!ask(Duration::ZERO).dirty);
         std::fs::write(wt.join("a.txt"), "changed\n").expect("tracked");
         // Inside the TTL nothing is asked of git, so the edit is not seen yet.
