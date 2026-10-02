@@ -80,9 +80,9 @@ struct Request {
 }
 
 impl Request {
-    /// Withdrawn by whoever asked.
+    /// Withdrawn by whoever asked, or passed by a newer request.
     fn withdrawn(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.cancelled.load(Ordering::SeqCst) || self.newest.load(Ordering::SeqCst) != self.stamp
     }
 }
 
