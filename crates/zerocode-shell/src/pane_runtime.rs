@@ -1077,14 +1077,7 @@ pub(super) fn note_pane_state(
     // (t-21017): one that reports every prompt it takes, and rests, took
     // nothing from an Enter it stayed silent about. Told before the prompt
     // branch so a report carrying both reads the state it carries.
-    crate::human_input::provider_said(
-        report.term,
-        report.agent.reports_prompt_submit(),
-        matches!(
-            report.state,
-            zerocode_core::hook::HookState::Done | zerocode_core::hook::HookState::Idle
-        ),
-    );
+    tell_human_input(report.term, report.agent, report.state);
     if report.prompt.is_some() {
         // A prompt going in is the line being emptied, whoever wrote it. The
         // door that types at a pane on somebody else's behalf reads this mark
@@ -3756,6 +3749,58 @@ impl ScmSubmodule {
             // 원본은 `area === 'unstaged'`로 묻는다. 우리 행은 두 칸을 한 줄에
             // 들고 다니므로 같은 질문의 우리 철자는 "스테이지된 반쪽이 아니다"다.
             stage_inside: !staged && !found.commit_changed,
+        }
+    }
+}
+
+/// Tell the line tracker what a provider's own report says of its state
+/// (t-21017). A door of its own so the road from a report to the tracker can
+/// be walked without a window: [`note_pane_state`] is its only caller.
+fn tell_human_input(
+    term: u32,
+    agent: zerocode_core::AgentKind,
+    state: zerocode_core::hook::HookState,
+) {
+    crate::human_input::provider_said(
+        term,
+        agent.reports_prompt_submit(),
+        matches!(
+            state,
+            zerocode_core::hook::HookState::Done | zerocode_core::hook::HookState::Idle
+        ),
+    );
+}
+
+#[cfg(test)]
+mod human_input_road_tests {
+    use super::tell_human_input;
+    use std::time::{Duration, Instant};
+    use zerocode_core::AgentKind;
+    use zerocode_core::hook::HookState;
+
+    /// A person's slash command leaves a mark no prompt event answers; the
+    /// provider's own done report, through the door `note_pane_state` calls,
+    /// is what lets the line settle — for the Claude row and the zo row, and
+    /// not while the same provider says it is working.
+    #[test]
+    fn a_done_report_settles_a_slash_command_line_for_claude_and_zo() {
+        for (term, agent) in [(7_720_u32, AgentKind::Claude), (7_721, AgentKind::Zo)] {
+            crate::human_input::forget_term(term);
+            crate::human_input::typed(term);
+            crate::human_input::entered(term);
+            let long_after = Instant::now() + Duration::from_secs(600);
+
+            tell_human_input(term, agent, HookState::Working);
+            assert!(
+                crate::human_input::line_at(term, long_after).0,
+                "{agent:?}: a working report settled the line"
+            );
+            tell_human_input(term, agent, HookState::Done);
+            assert!(
+                !crate::human_input::line_at(term, long_after).0,
+                "{agent:?}: a done report left the slash command's mark standing"
+            );
+            crate::human_input::forget_term(term);
         }
     }
 }
