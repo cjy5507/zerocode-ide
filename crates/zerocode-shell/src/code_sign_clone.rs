@@ -460,6 +460,31 @@ mod tests {
         (meta.dev() as u32, meta.ino())
     }
 
+    /// How long a child just spawned may take before the kernel reports the
+    /// file it runs. A test that sweeps against a running process must not
+    /// look before the process can be seen running its file: on a loaded Mac
+    /// on battery (10-02 20:5x, a full suite beside other work) the sweep once
+    /// looked first and removed the copy the child ran (`removed` 2, not 1).
+    const CHILD_SHOWS_ITS_IMAGE_WITHIN: Duration = Duration::from_secs(10);
+
+    /// Wait until the kernel reports `pid` running `file`, or fail saying so —
+    /// the precondition of every sweep a running child should hold back.
+    fn wait_until_running(pid: u32, file: &Path) {
+        let pid = libc::pid_t::try_from(pid).unwrap();
+        let wanted = image_of_file(file);
+        let deadline = Instant::now() + CHILD_SHOWS_ITS_IMAGE_WITHIN;
+        while image_of(pid) != Some(wanted) {
+            assert!(
+                Instant::now() < deadline,
+                "the child {pid} was never seen running {} within {:?}: the sweep below would \
+                 judge against a process the kernel does not show yet",
+                file.display(),
+                CHILD_SHOWS_ITS_IMAGE_WITHIN
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// A moment far enough on that every copy made by now is old enough.
     fn later() -> SystemTime {
         SystemTime::now() + MIN_AGE + Duration::from_secs(60)
@@ -723,6 +748,7 @@ mod tests {
             .arg(SLEEPER_SECONDS)
             .spawn()
             .unwrap();
+        wait_until_running(child.id(), &program);
         let stale = copy_in(x.path(), ID, "SSSSSS");
         let report = sweep_under(x.path(), ID, later(), unhurried(), running_processes);
         let _ = child.kill();
