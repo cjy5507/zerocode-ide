@@ -5,6 +5,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
+use std::time::Instant;
 
 use super::super::plan::tests::{Named, Scripted, answer_for, capture, scope};
 use super::super::tests::{answer_naming, open, reading_handshake};
@@ -31,6 +32,8 @@ struct Held {
 /// one capture of it — and every run it was started on.
 struct Helper {
     calls: Vec<(String, Value)>,
+    /// When each call came, beside [`Self::calls`].
+    called_at: Vec<Instant>,
     runs: Vec<String>,
     held: BTreeMap<String, Held>,
     kernel: bool,
@@ -53,6 +56,7 @@ impl Helper {
     fn new() -> Self {
         Self {
             calls: Vec::new(),
+            called_at: Vec::new(),
             runs: Vec::new(),
             held: BTreeMap::new(),
             kernel: true,
@@ -69,6 +73,7 @@ impl Helper {
     fn call(&mut self, method: &str, params: Value) -> Result<Value, ComputerUseError> {
         use base64::Engine as _;
         self.calls.push((method.to_string(), params.clone()));
+        self.called_at.push(Instant::now());
         let run = params["run"].as_str().unwrap_or_default().to_string();
         Ok(match method {
             "displays" => json!({ "displays": [

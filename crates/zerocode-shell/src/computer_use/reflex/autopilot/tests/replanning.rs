@@ -3,8 +3,6 @@
 //! must keep being read and judged; only an answer whose premises still
 //! stand replaces that run, under the same door every plan passes.
 
-use std::time::Instant;
-
 use super::*;
 
 #[derive(Clone)]
@@ -471,9 +469,11 @@ impl Generator for Thinking {
 
 /// Printed, for the report (t-21494 §5): how the collector fares while a
 /// re-plan's model thinks, against a fake helper and a fake teacher, on a
-/// clock the test moves — the collects it completes and the questions it
-/// asks during the think, its longest collect, the time it itself waited on
-/// the model, and the share of its collects made while a plan was pending.
+/// clock the test moves — how long of the think the old run kept standing
+/// (the hand has a run to evaluate only while one stands), the collects it
+/// completes and the questions it asks during the think, its longest
+/// collect, the time it itself waited on the model, and the share of its
+/// collects made while a plan was pending.
 /// No hand, no screen, no model: a leaf's first-input age and a press's
 /// confirmed effect are the fixture round's to measure
 /// (`tools/computer-bench/fixture_reflex.py`), never this fake's.
@@ -542,12 +542,24 @@ fn measure_the_collector_while_a_replan_is_written() {
         .fold(0.0_f64, f64::max);
     let while_planning = collects.iter().filter(|(_, _, planning)| *planning).count();
     let think_s = answered.duration_since(entered).as_secs_f64();
+    // The old run stands until its stop: before the model is asked when the
+    // plan is written on the collector, with the handoff when it is not.
+    let stopped_at = fake
+        .helper
+        .calls
+        .iter()
+        .zip(&fake.helper.called_at)
+        .find(|((method, _), _)| method == "reflexStop")
+        .map_or(answered, |(_, at)| (*at).clamp(entered, answered));
+    let stood_s = stopped_at.duration_since(entered).as_secs_f64();
     println!(
         "{}",
         json!({
             "basis": "fake helper, fake teacher, a model that sleeps: no input, no frame, no live model",
             "holdMs": HOLD_MS, "tickMs": TICK_MS,
             "modelThinkMs": think_s * 1_000.0,
+            "runStandingDuringModelMs": stood_s * 1_000.0,
+            "runStandingShare": stood_s / think_s,
             "evaluation": {
                 "collectsDuringModel": during,
                 "hzDuringModel": during as f64 / think_s,
