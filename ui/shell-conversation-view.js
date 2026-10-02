@@ -222,119 +222,6 @@ function dressToolFile(row, turn, run) {
   body.prepend(line);
 }
 
-/* ---- the spinner's verb (t-6323 A4) -----------------------------------------
- *
- * The extension's spinner row (`Ke`, 2.1.280): while the turn is out the word
- * is one of the CLI's own verbs (`spinner_verbs` on its catalog row — Claude
- * Code's 84, the list its screen says) picked at random, picked again after
- * 2 s, 3 s more, 5 s more and every 5 s after (`cx`), and written `Verb...`;
- * each new verb is revealed by a sweep (`j75`): every 40 ms a window four
- * letters wide moves right — its lead is `▌`, then two of `.`/`_`/the letter,
- * then the letter — writing the new word over the old, across a field as wide
- * as the longest verb and its dots, which starts blank. A CLI with no verbs
- * keeps its one word. The numbers are the panel's own, held to its snapshot
- * by `the_conversation_wears_the_extensions_own_measures`. */
-const STATUS_VERB = Object.freeze({ after: [2000, 3000, 5000], every: 5000, step: 40, tail: 3, suffix: "..." });
-
-/* How long the verb stands after its `picks`-th pick. */
-function statusVerbDelay(picks) {
-  return STATUS_VERB.after[picks] ?? STATUS_VERB.every;
-}
-
-function randomOf(choices) {
-  return choices[Math.floor(Math.random() * choices.length)];
-}
-
-/* One step of the sweep at `at`, over `text` toward `target` (both padded to
- * one width): the window's four letters, lead first. */
-function statusRevealAdvance(text, target, at, pick) {
-  let written = text;
-  for (let back = 0; back <= STATUS_VERB.tail; back += 1) {
-    const index = at - back;
-    if (index < 0 || index >= target.length) continue;
-    const letter = target[index];
-    const glyph = letter === " " ? " " : back === STATUS_VERB.tail ? letter : back === 0 ? "▌" : pick([".", "_", letter]);
-    written = written.slice(0, index) + glyph + written.slice(index + 1);
-  }
-  return written;
-}
-
-/* The text once the sweep from `from` to `to` has taken its steps 0…`at` —
- * the whole reveal as one pure answer (what the page draws frame by frame) —
- * over a field at least `width` wide. */
-function statusRevealStep(from, to, at, pick = randomOf, width = 0) {
-  width = Math.max(width, from.length, to.length);
-  const target = to.padEnd(width, " ");
-  let text = from.padEnd(width, " ");
-  for (let step = 0; step <= at; step += 1) text = statusRevealAdvance(text, target, step, pick);
-  return text;
-}
-
-/* Keep `word` turning through `verbs` while its line is out; once started it
- * runs on its own clock and stops when the line leaves the page or is hidden
- * (`stopStatusVerb`). */
-function turnStatusVerb(word, verbs) {
-  if (word.__verbs === verbs) return;
-  stopStatusVerb(word);
-  word.__verbs = verbs;
-  const width = Math.max(...verbs.map((verb) => verb.length)) + STATUS_VERB.suffix.length;
-  writeTextContent(word, "");
-  let picks = 0;
-  const pick = () => {
-    if (!word.isConnected) {
-      stopStatusVerb(word);
-      return;
-    }
-    revealStatusVerb(word, `${randomOf(verbs)}${STATUS_VERB.suffix}`, width);
-    word.__verbTimer = setTimeout(pick, statusVerbDelay(picks));
-    picks += 1;
-  };
-  pick();
-}
-
-function stopStatusVerb(word) {
-  clearTimeout(word.__verbTimer);
-  if (word.__revealFrame) cancelAnimationFrame(word.__revealFrame);
-  word.__verbTimer = null;
-  word.__revealFrame = null;
-  word.__verbs = null;
-}
-
-/* The sweep, one step per 40 ms on the frame clock, over a field `width`
- * wide; a page that asks for less motion — or one nobody can see — takes the
- * word at once. */
-function revealStatusVerb(word, to, width) {
-  if (word.__revealFrame) cancelAnimationFrame(word.__revealFrame);
-  word.__revealFrame = null;
-  if (document.hidden || motionReduced()) {
-    writeTextContent(word, to);
-    return;
-  }
-  width = Math.max(width, word.textContent.length, to.length);
-  const target = to.padEnd(width, " ");
-  let text = word.textContent.padEnd(width, " ");
-  let at = 0;
-  let last = -Infinity;
-  const frame = (now) => {
-    if (!word.isConnected) return;
-    if (now - last < STATUS_VERB.step) {
-      word.__revealFrame = requestAnimationFrame(frame);
-      return;
-    }
-    last = now;
-    if (at - STATUS_VERB.tail >= width) {
-      word.__revealFrame = null;
-      writeTextContent(word, to);
-      return;
-    }
-    text = statusRevealAdvance(text, target, at, randomOf);
-    writeTextContent(word, text);
-    at += 1;
-    word.__revealFrame = requestAnimationFrame(frame);
-  };
-  word.__revealFrame = requestAnimationFrame(frame);
-}
-
 /* ---- the list keeps to its foot until the person leaves it (t-6323 A5) -----
  *
  * The extension's list (2.1.280 `VG0`, `lF1`): standing within 50px of its
@@ -605,6 +492,23 @@ function keepToFoot(list) {
     const row = event.target;
     if (row.open && row.__paint && list.__run) row.__paint(row, list.__run);
   }, true);
+  // The doors in shell steps' first lines (t-22100), every one of them by these
+  // two: a press, or Enter or Space on one the keyboard reached, opens its file
+  // — and is no press on the row whose line it stands in.
+  const outDoor = (event) => (event.target instanceof Element ? event.target.closest(".helper-out-path") : null);
+  list.addEventListener("click", (event) => {
+    const door = outDoor(event);
+    if (!door) return;
+    event.preventDefault();
+    openStepOutDoor(list, door);
+  });
+  list.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const door = outDoor(event);
+    if (!door) return;
+    event.preventDefault();
+    openStepOutDoor(list, door);
+  });
   list.addEventListener("scroll", () => {
     noteChatScroll(list, state);
     paintFootDoor(list);
@@ -621,6 +525,8 @@ function keepToFoot(list) {
       if (!state.placed) standChatPlace(list);
       else if (!state.away) carryToFoot(list);
       paintFootDoor(list);
+      // The rail beside it changed its height with it (t-22100).
+      askTurnRail(list);
     });
     list.__footWatch.observe(list, { box: "border-box" });
   }
@@ -1050,18 +956,19 @@ async function openImagePreview(pill) {
 /* ---- copying (t-6323 A9) ------------------------------------------------------
  *
  * The extension's copy button (2.1.280 `gN`): a press writes the text, and the
- * icon turns to a check for 2 s — no word appears and the name stays. Two of
- * them stand in the conversation: under each answer (`Copy response`, the
- * action row the page already carries — `helperActionsNode`), and over the
- * top right corner of each code block (`Copy code`, `codeBlockWrapper`),
- * shown while the block is under the pointer, copying the block's text as it
- * stands. The page's one clipboard door is `clipboardText`; the 2 s is the
- * panel's own, held to its snapshot. */
+ * icon turns to a check for 2 s — the name stays. It stands under each answer
+ * (`Copy response`, the action row the page already carries —
+ * `helperActionsNode`) and over a tool's IN and OUT. A code block's copy is a
+ * word on the bar over the block (t-22100, the approved conversation): 「복사」,
+ * the document viewer's own (`dressMarkdownFences`), there without hovering,
+ * which says 「복사됨」 for the same 2 s. The page's one clipboard door is
+ * `clipboardText`; the 2 s is the panel's own, held to its snapshot. */
 const CHAT_COPIED_MS = 2000;
 
-/* A press on `button` writes what `text()` says then, and says so with the
- * check for a moment. */
-function copyOnPress(button, text) {
+/* A press on `button` writes what `text()` says then, and says so for a
+ * moment: an icon's button with the check, a word's (`words`: what it says,
+ * and what it says once it copied) with its other word. */
+function copyOnPress(button, text, words = null) {
   button.addEventListener("click", async (event) => {
     event.stopPropagation();
     try {
@@ -1071,30 +978,42 @@ function copyOnPress(button, text) {
       return;
     }
     clearTimeout(button.__copied);
-    button.replaceChildren(iconNode("check"));
+    if (words) writeTextContent(button, words.copied);
+    else button.replaceChildren(iconNode("check"));
     button.classList.add("is-copied");
     button.__copied = setTimeout(() => {
-      button.replaceChildren(iconNode("copy"));
+      if (words) writeTextContent(button, words.copy);
+      else button.replaceChildren(iconNode("copy"));
       button.classList.remove("is-copied");
     }, CHAT_COPIED_MS);
   });
 }
 
-/* Every code block the prose drew stands in the extension's wrapper with its
- * copy over its corner. */
+/* Every code block the prose drew stands on a flat panel (t-22100): a bar over
+ * the code with the fence's language — the document viewer's word for it
+ * (`fenceLanguageWords`) — and its copy, then the code. The colours inside the
+ * code are the fence's own (`colourCodeIn`, t-22095). */
 function dressCodeCopies(host) {
   for (const block of host.querySelectorAll("pre.md-block")) {
     if (block.parentElement?.classList.contains("helper-code")) continue;
     const frame = document.createElement("div");
     frame.className = "helper-code";
+    const bar = document.createElement("div");
+    bar.className = "helper-code-bar";
+    const language = document.createElement("span");
+    language.className = "helper-code-lang";
+    language.textContent = fenceLanguageWords(block);
     const copy = document.createElement("button");
     copy.type = "button";
     copy.className = "helper-code-copy";
-    copy.appendChild(iconNode("copy"));
-    labelButton(copy, t("worker.copyCode", "코드 복사"));
-    copyOnPress(copy, () => block.textContent);
+    const words = { copy: t("mdview.copy", "복사"), copied: t("worker.copied", "복사됨") };
+    copy.textContent = words.copy;
+    // Named for what it copies; the word it shows is part of that name.
+    copy.setAttribute("aria-label", t("worker.copyCode", "코드 복사"));
+    copyOnPress(copy, () => block.textContent, words);
+    bar.append(language, copy);
     block.replaceWith(frame);
-    frame.append(copy, block);
+    frame.append(bar, block);
   }
 }
 
@@ -1613,10 +1532,12 @@ function shelveBorn(row) {
   row.classList.add("is-shelved");
 }
 
-/* A row the watcher should judge: an answer with a turn behind it. A step is
+/* A row the watcher should judge: an answer with a turn behind it, or a shell
+ * step that shows its first lines (`dressStepOut`, t-22100). Any other step is
  * one line until it is opened and has no body to give up. */
 function shelvable(row) {
-  return row.__turn !== undefined && row.classList.contains("is-assistant") && !row.classList.contains("is-streaming");
+  if (row.__turn === undefined || row.classList.contains("is-streaming")) return false;
+  return row.classList.contains("is-assistant") || row.__outText !== undefined;
 }
 
 function watchShelf(list, row) {
@@ -1634,9 +1555,10 @@ function wordsChosenIn(node) {
   return Boolean(selection && selection.rangeCount > 0 && !selection.isCollapsed && selection.containsNode(node, true));
 }
 
-/* Whether `row` may give up its body now. */
+/* Whether `row` may give up its body now — an opened step neither: the
+ * height it would keep is its body's, which the person may close. */
 function mayShelve(row) {
-  if (row.classList.contains("is-live") || row.querySelector(".is-open") || row.contains(document.activeElement)) return false;
+  if (row.classList.contains("is-live") || row.open || row.querySelector(".is-open") || row.contains(document.activeElement)) return false;
   return !wordsChosenIn(row);
 }
 
@@ -1735,18 +1657,22 @@ function shelveRow(list, row, height) {
   row.__shelved = { height };
   row.style.minHeight = `${height}px`;
   row.classList.add("is-shelved");
+  // A shell step's body is its first lines (t-22100).
+  row.firstElementChild?.querySelector(":scope > .helper-step-out")?.remove();
   const said = row.querySelector(":scope > .helper-said");
   if (!said) return;
   // Its fences' colours go with the body (t-22095).
   said.replaceChildren();
 }
 
-/* A row takes its body back from its turn. */
+/* A row takes its body back from its turn — an answer its prose, a shell step
+ * its first lines. */
 function unshelveRow(row, run) {
   row.__shelved = null;
   row.style.minHeight = "";
   row.classList.remove("is-shelved");
-  paintAnswerProse(row.querySelector(":scope > .helper-said"), row.__turn, run);
+  if (row.classList.contains("is-tool")) dressStepOut(row, row.__outText ?? "");
+  else paintAnswerProse(row.querySelector(":scope > .helper-said"), row.__turn, run);
 }
 
 /* Rows that were not laid out when the watcher looked, asked again once they
@@ -1768,9 +1694,11 @@ function askShelfAgain(list) {
 
 /* ---- steps (t-15682) -------------------------------------------------------
  *
- * What an agent did stands as steps, one closed line each: the mark of what
- * kind of thing it was, the kind in words and what it touched, what came of
- * it, how long it took. The raw input and output are one press away — a step
+ * What an agent did stands as steps, one closed line each: a dot for how it
+ * stands, the kind in words and what it touched, what came of it, how long it
+ * took (t-22100: the approved conversation's flat rows, a state dot where the
+ * kind's icon stood — the kind's words already say what it was). The raw
+ * input and output are one press away — a step
  * is a `<details>`, so its line is a summary the keyboard reaches by itself
  * (Tab; Enter and Space press it) and the engine announces closed or open —
  * and the body is built the first time the row opens, so a page of hundreds of
@@ -1780,28 +1708,41 @@ function askShelfAgain(list) {
  * before it may join. The Focus view folds by turn instead and keeps its rows
  * single (`applyFocusView`). */
 
-/* A kind's mark (the window's own sprite) and its words, keyed by the words
- * the core reduces a tool's name to (`hook::Tool::as_str`): a turn carries its
- * call's as `tool.kind`, and the page keeps no list of vendor names to read the
- * name by — one table, the core's. A tool the core has no word for travels as its
- * own name. */
+/* A kind's words and the family the head counts it in (t-22100), keyed by the
+ * words the core reduces a tool's name to (`hook::Tool::as_str`): a turn
+ * carries its call's as `tool.kind`, and the page keeps no list of vendor
+ * names to read the name by — one table, the core's. A tool the core has no
+ * word for travels as its own name. */
 const STEP_LOOKS = new Map(Object.entries({
-  read: { icon: "file", word: () => t("worker.stepRead", "파일 읽기") },
-  edit: { icon: "pencil", word: () => t("worker.stepEdit", "파일 수정") },
-  write: { icon: "pencil", word: () => t("worker.stepWrite", "파일 쓰기") },
-  bash: { icon: "terminal", word: () => t("worker.stepShell", "셸") },
-  grep: { icon: "search", word: () => t("worker.stepSearch", "검색") },
-  web: { icon: "globe", word: () => t("worker.stepWeb", "웹 읽기") },
-  websearch: { icon: "globe", word: () => t("worker.stepWebSearch", "웹 검색") },
-  task: { icon: "bot", word: () => t("worker.stepTask", "헬퍼 호출") },
+  read: { family: "file", word: () => t("worker.stepRead", "파일 읽기") },
+  edit: { family: "file", word: () => t("worker.stepEdit", "파일 수정") },
+  write: { family: "file", word: () => t("worker.stepWrite", "파일 쓰기") },
+  bash: { family: "shell", word: () => t("worker.stepShell", "셸") },
+  grep: { family: "search", word: () => t("worker.stepSearch", "검색") },
+  web: { family: "web", word: () => t("worker.stepWeb", "웹 읽기") },
+  websearch: { family: "web", word: () => t("worker.stepWebSearch", "웹 검색") },
+  task: { family: "helper", word: () => t("worker.stepTask", "헬퍼 호출") },
 }));
 
-/* The two rows that are not a call the core has a word for: a todo list (the
- * catalog's own `todo_tool`) and a thought. */
+/* The one row that is not a call the core has a word for: a todo list (the
+ * catalog's own `todo_tool`). */
 const STEP_OWN_LOOKS = new Map(Object.entries({
-  todo: { icon: "list-todo", word: () => t("worker.todoHead", "할 일 갱신") },
-  thought: { icon: "brain", word: () => "" },
+  todo: { family: "todo", word: () => t("worker.todoHead", "할 일 갱신") },
 }));
+
+/* The families the head's tally counts by (t-22100, the approved mockup's
+ * 「웹 2 · 셸 1 · 파일 6」): a page read and a search are the web, a read, an
+ * edit and a write are files — a step's own row still says which. A tool the
+ * core has no word for is counted with the others. */
+const STEP_FAMILY_WORDS = Object.freeze({
+  web: () => t("worker.familyWeb", "웹"),
+  shell: () => t("worker.familyShell", "셸"),
+  file: () => t("worker.familyFile", "파일"),
+  search: () => t("worker.familySearch", "검색"),
+  helper: () => t("worker.familyHelper", "헬퍼"),
+  todo: () => t("worker.familyTodo", "할 일"),
+  other: () => t("worker.familyOther", "기타"),
+});
 
 /* The kind a step is drawn by: the catalog's todo tool; else the word the core
  * reduced the call's tool to. A kind the page has no look for — a tool the core
@@ -1815,7 +1756,7 @@ function stepKindOf(turn, run) {
 }
 
 function stepLook(kind) {
-  return STEP_LOOKS.get(kind) ?? STEP_OWN_LOOKS.get(kind) ?? { icon: "wrench", word: () => kind.slice(5) };
+  return STEP_LOOKS.get(kind) ?? STEP_OWN_LOOKS.get(kind) ?? { family: "other", word: () => kind.slice(5) };
 }
 
 /* A target as the line says it: an address without its scheme, a long path
@@ -1880,9 +1821,47 @@ function stepEditTally(turn) {
   return added + removed > 0 ? `+${added} −${removed}` : "";
 }
 
+/* A line a search printed, `path:line:` or `path:line-` (grep -n, rg -n, and
+ * their context lines): the path one token with a folder or an extension in
+ * it, the line a number. What a shell step found, and the doors in its lines
+ * (`dressStepOut`), are read by this one rule. */
+const STEP_HIT_RE = /^([^\s:]*[./][^\s:]*):(\d+)(?=[:-])/;
+
+/* How many lines a shell step found: every line it printed is a search's hit,
+ * or it found nothing it can be said to have found (0) — a build's errors
+ * name files too, among lines that do not. */
+function stepFoundLines(output) {
+  const lines = output.split("\n").filter((line) => line.trim() !== "");
+  return lines.length > 0 && lines.every((line) => STEP_HIT_RE.test(line)) ? lines.length : 0;
+}
+
+/* How many results a web search brought back (t-22100): the distinct
+ * addresses in what it answered. Every road's search hands its results back as
+ * links — Claude Code's `Links: [{title, url}, …]`, a list of sources — and an
+ * answer with none says no count: its size in bytes was no answer to "what
+ * did it find" (「결과 5 B」). */
+const STEP_URL_RE = /https?:\/\/[^\s"'<>()[\]{}]+/g;
+
+function stepSearchCount(output) {
+  return new Set(output.match(STEP_URL_RE) ?? []).size;
+}
+
+/* What a page read said of itself (t-22100): the HTTP status and the size the
+ * fetch got, as the CLI recorded them beside its answer (`tool.facts`, read by
+ * the backend off the line's `toolUseResult`) — never the length of the words
+ * the model wrote about the page. `null` when the CLI recorded neither. */
+function stepFetchFacts(turn) {
+  const facts = turn.role === "tool_result" ? turn.tool?.facts : turn.outputFacts;
+  const status = Number.isInteger(facts?.status) && facts.status > 0 ? facts.status : null;
+  const bytes = Number.isFinite(facts?.bytes) && facts.bytes >= 0 ? facts.bytes : null;
+  return status === null && bytes === null ? null : { status, bytes };
+}
+
 /* What came of a step, in a few words, by its kind: a failure says how in the
  * first line it printed, a read how long the file was, a search how many
- * lines it found, a command how many it printed. */
+ * lines it found, a command how many it printed — or found, when what it
+ * printed are a search's hits — a page read its status and size, a web search
+ * how many results it found. */
 function stepResultWords(kind, turn, output, failed, row) {
   if (failed) {
     return t("worker.stepFailed", "실패: {{why}}", { why: stepFirstLine(output) || t("worker.noOutput", "출력 없음") });
@@ -1896,12 +1875,20 @@ function stepResultWords(kind, turn, output, failed, row) {
       const found = output.trim() === "" ? 0 : stepLineCount(output.trim());
       return found > 0 ? t("worker.stepFound", "{{n}}줄 찾음", { n: found }) : t("worker.stepNoMatch", "찾은 것 없음");
     }
-    case "bash":
-      return t("worker.stepPrinted", "{{n}}줄 출력", { n: stepLineCount(output) });
-    case "web":
-      return output === "" ? "" : bytesLabel(output.length);
-    case "websearch":
-      return output === "" ? "" : t("worker.stepResultSize", "결과 {{size}}", { size: bytesLabel(output.length) });
+    case "bash": {
+      const found = stepFoundLines(output);
+      return found > 0
+        ? t("worker.stepFound", "{{n}}줄 찾음", { n: found })
+        : t("worker.stepPrinted", "{{n}}줄 출력", { n: stepLineCount(output) });
+    }
+    case "web": {
+      const facts = stepFetchFacts(turn);
+      return facts === null ? "" : [facts.status, facts.bytes === null ? null : bytesLabel(facts.bytes)].filter((one) => one !== null).join(" · ");
+    }
+    case "websearch": {
+      const found = stepSearchCount(output);
+      return found > 0 ? t("worker.stepResults", "결과 {{n}}개", { n: found, s: found === 1 ? "" : "s" }) : "";
+    }
     case "edit":
     case "write":
       return stepEditTally(turn);
@@ -1935,47 +1922,22 @@ function stepTook(from, to) {
   return t("worker.elapsedShort", "{{s}}초", { s: (took / 1000).toFixed(1) });
 }
 
-/* A step's mark is one `span` whose `::before` is the sprite's glyph as a CSS
- * mask — not an `<svg><use>`, which stands an svg, a use and a shadow copy of
- * the symbol (about a dozen nodes the element count does not see) for every
- * row of a page of hundreds. The glyph's source is the window's own sprite
- * symbol, read once per mark into one rule of one sheet; its strokes are
- * `.icon`'s (`shell.css`), on the same 24 grid. */
-const STEP_MARK_GRID = "viewBox='0 0 24 24' fill='none' stroke='#000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'";
-let stepMarkSheet = null;
-const stepMarksMade = new Set();
-
-function stepMarkNode(name) {
-  if (!stepMarksMade.has(name)) {
-    stepMarksMade.add(name);
-    const symbol = document.getElementById(`i-${name}`);
-    if (symbol) {
-      if (!stepMarkSheet) {
-        const style = document.createElement("style");
-        document.head.appendChild(style);
-        stepMarkSheet = style.sheet;
-      }
-      const svg = `<svg xmlns='http://www.w3.org/2000/svg' ${STEP_MARK_GRID}>${symbol.innerHTML}</svg>`;
-      stepMarkSheet.insertRule(`.helper-step-icon[data-mark="${name}"]::before { mask-image: url("data:image/svg+xml,${encodeURIComponent(svg)}"); }`, stepMarkSheet.cssRules.length);
-    }
-  }
-  const icon = document.createElement("span");
-  icon.className = "helper-step-icon";
-  icon.dataset.mark = name;
-  icon.setAttribute("aria-hidden", "true");
-  return icon;
-}
-
-/* One step's line: its mark, what it was and touched, what came of it, how
- * long it took — the summary of the row. A summary holds no controls, so the
- * file's door and the copies stand in the body. Its Tab, Enter and Space, while
- * it has focus, are its own — the window's key sink (`rearmKeySink`) would
- * otherwise take them for the terminal. */
-function stepLineNode(look) {
+/* One step's line: a dot for how it stands, what it was and touched, what
+ * came of it, how long it took — the summary of the row (t-22100). The dot is
+ * one empty `span` the row's state colours (`shell.css`): quiet before its
+ * answer, the done ink once it came back, the failure's ink when it failed,
+ * the agent's accent beating while it is out. A summary holds no controls, so
+ * the file's door and the copies stand in the body — the doors a shell step's
+ * first lines carry are the one exception (`dressStepOut`). Its Tab, Enter and
+ * Space, while it has focus, are its own — the window's key sink
+ * (`rearmKeySink`) would otherwise take them for the terminal. */
+function stepLineNode() {
   const line = document.createElement("summary");
   line.className = "helper-step-line";
   line.dataset.keyboardOwner = "true";
-  const icon = stepMarkNode(look.icon);
+  const dot = document.createElement("span");
+  dot.className = "helper-step-dot";
+  dot.setAttribute("aria-hidden", "true");
   const what = document.createElement("span");
   what.className = "helper-step-what";
   const kind = document.createElement("span");
@@ -1987,8 +1949,22 @@ function stepLineNode(look) {
   res.className = "helper-step-res";
   const meta = document.createElement("span");
   meta.className = "helper-step-meta";
-  line.append(icon, what, res, meta);
+  line.append(dot, what, res, meta);
   return line;
+}
+
+/* A page read's result as the approved mockup draws it, 「200 · 256 KB」: the
+ * status in the ink of how it went — the done ink for a success, the
+ * failure's for anything else — and the size beside it. Written only when the
+ * facts move. */
+function dressFetchResult(node, facts) {
+  const said = `${facts.status}|${facts.bytes ?? ""}|${locale}`;
+  if (node.__fetch === said) return;
+  node.__fetch = said;
+  const status = document.createElement("span");
+  status.className = `helper-step-status ${facts.status >= 200 && facts.status < 300 ? "is-ok" : "is-bad"}`;
+  status.textContent = String(facts.status);
+  node.replaceChildren(status, ...(facts.bytes === null ? [] : [` · ${bytesLabel(facts.bytes)}`]));
 }
 
 /* A step's line from its turn — at birth, and again while it is out. Every
@@ -2000,8 +1976,96 @@ function dressStepLine(row, turn, words, state) {
   let res = "";
   if (state.live) res = t("worker.stepLive", "진행 중");
   else if (state.output !== undefined) res = stepResultWords(row.__kind, turn, state.output, state.failed, row);
-  writeTextContent(line.querySelector(".helper-step-res"), res);
+  const resNode = line.querySelector(".helper-step-res");
+  const facts = row.__kind === "web" && state.output !== undefined && !state.failed ? stepFetchFacts(turn) : null;
+  if (facts?.status !== null && facts?.status !== undefined) {
+    dressFetchResult(resNode, facts);
+  } else {
+    resNode.__fetch = undefined;
+    writeTextContent(resNode, res);
+  }
   writeTextContent(line.querySelector(".helper-step-meta"), stepTook(turn, turn));
+  // A shell step's first lines stand under its line (t-22100); a failed one's
+  // too — they are what it said when it failed.
+  if (row.__kind === "bash" && !state.live && state.output !== undefined) dressStepOut(row, state.output);
+}
+
+/* ---- a shell step's first lines (t-22100) ------------------------------------
+ *
+ * The approved conversation shows what a shell step printed under its line,
+ * the way a person glances at a terminal: as many lines as make a tool's
+ * words long (`CHAT_CLIP.lines`), the rest behind the row's chevron, in its
+ * body. They stand inside the summary — a closed `details` shows nothing else
+ * — as one block of preformatted words, so a page of steps pays one node a
+ * shell step and one more for each `path:line` in its lines, which is a door
+ * to the file at that line (`openStepOutDoor`; one listener on the list for
+ * all of them, `keepToFoot`). A row born far from view takes its lines when
+ * it comes within reach, as an answer takes its prose (`shelvable`, B1). */
+function stepOutLines(output) {
+  return output.replace(/\n+$/, "").split("\n").slice(0, CHAT_CLIP.lines).join("\n");
+}
+
+/* The lines as words and doors: a line that opens with `path:line` stands as
+ * its door, then the rest of the line after two spaces (the mockup's
+ * 「Carousel.tsx:16  const …」). */
+function stepOutParts(text) {
+  const parts = [];
+  let plain = "";
+  text.split("\n").forEach((line, at) => {
+    if (at > 0) plain += "\n";
+    const hit = STEP_HIT_RE.exec(line);
+    if (!hit) {
+      plain += line;
+      return;
+    }
+    if (plain !== "") parts.push(plain);
+    plain = "";
+    const door = document.createElement("span");
+    door.className = "helper-out-path";
+    door.tabIndex = 0;
+    door.setAttribute("role", "link");
+    door.dataset.path = hit[1];
+    door.dataset.line = hit[2];
+    door.textContent = `${hit[1]}:${hit[2]}`;
+    parts.push(door);
+    plain += `  ${line.slice(hit[0].length + 1)}`;
+  });
+  if (plain !== "") parts.push(plain);
+  return parts;
+}
+
+/* Keep a shell step's lines as its output says — a row away on the shelf
+ * only remembers them. */
+function dressStepOut(row, output) {
+  if (row.__outText === undefined && row.__cold) shelveBorn(row);
+  row.__cold = false;
+  row.__outText = output;
+  if (row.__shelved) return;
+  const line = row.firstElementChild;
+  const shown = stepOutLines(output);
+  let out = line.querySelector(":scope > .helper-step-out");
+  if (shown.trim() === "") {
+    out?.remove();
+    writeClass(row, "has-out", false);
+    return;
+  }
+  writeClass(row, "has-out", true);
+  if (out?.__said === shown) return;
+  if (!out) {
+    out = document.createElement("span");
+    out.className = "helper-step-out";
+    line.appendChild(out);
+  }
+  out.__said = shown;
+  out.replaceChildren(...stepOutParts(shown));
+}
+
+/* A door in a shell step's lines, pressed: the file at that line, measured
+ * from the session's checkout as every door on this page is (`helperBase`). */
+function openStepOutDoor(list, door) {
+  const run = list.__run;
+  if (!run) return;
+  openPath(resolveDocPath(helperBase(run), door.dataset.path), { preview: true, line: Number(door.dataset.line) });
 }
 
 /* A step's body, built the first time its row opens and followed from then
@@ -2044,14 +2108,17 @@ function dressStepBody(row, turn, run) {
 
 /* A step's row — a closed details with its line; its body waits for the
  * first press. */
-function stepRowNode(run, turn, spoken) {
+function stepRowNode(run, turn, spoken, cold = false) {
   const row = document.createElement("details");
   row.className = "helper-turn is-tool";
   row.dataset.turn = String(turn.seq);
   row.__turn = turn;
   row.__kind = stepKindOf(turn, run);
-  row.appendChild(stepLineNode(stepLook(row.__kind)));
+  row.appendChild(stepLineNode());
   row.__paint = paintStepBody;
+  // A shell step born far from view keeps no lines of its own until it is in
+  // reach (B1, `dressStepOut`).
+  row.__cold = cold;
   dressToolTurn(row, turn, run, spoken);
   return row;
 }
@@ -2070,7 +2137,7 @@ function runRowNode(run, turns) {
   row.__members = [...turns];
   row.__turn = turns.at(-1);
   row.dataset.turn = String(row.__turn.seq);
-  row.appendChild(stepLineNode(stepLook(row.__kind)));
+  row.appendChild(stepLineNode());
   row.__paint = paintRunBody;
   dressRunLine(row);
   return row;
@@ -2123,10 +2190,19 @@ function stepJoins(before, turn, kind) {
 
 /* `turn` joins `before` — a step, which becomes a row of two, or a row of
  * steps already. Returns the row that stands. */
+/* A step leaving the list for the row that folds it: the shelf forgets it
+ * first — a shell step's lines are watched (t-22100), and a row the watcher
+ * still holds is a row the page keeps alive. */
+function dropStep(row) {
+  if (row.parentElement) forgetShelf(row.parentElement, row);
+  row.remove();
+}
+
 function absorbStep(run, before, turn) {
   let row = before;
   if (!before.classList.contains("is-run")) {
     row = runRowNode(run, [before.__turn]);
+    if (before.parentElement) forgetShelf(before.parentElement, before);
     before.replaceWith(row);
   }
   row.__members.push(turn);
@@ -2147,11 +2223,11 @@ function foldSettledStep(row, run) {
   const before = row.previousElementSibling;
   if (before && stepReceives(before, kind)) {
     at = absorbStep(run, before, row.__turn);
-    row.remove();
+    dropStep(row);
   }
   for (let next = at.nextElementSibling; next && stepFolds(next, kind); next = at.nextElementSibling) {
     for (const turn of next.__members ?? [next.__turn]) at = absorbStep(run, at, turn);
-    next.remove();
+    dropStep(next);
   }
 }
 
@@ -2192,7 +2268,7 @@ function regroupSteps(list, run) {
     const kind = row.__kind;
     if (before && kind !== undefined && stepFolds(row, kind) && stepReceives(before, kind)) {
       before = absorbStep(run, before, row.__turn);
-      row.remove();
+      dropStep(row);
       continue;
     }
     before = row.classList.contains("is-tool") ? row : null;
@@ -2266,13 +2342,33 @@ function thoughtHeading(text, finished = false) {
   return finished || open.length > THOUGHT_LINE_MAX ? thoughtFit(open) : null;
 }
 
+/* A thought's line (t-22100): how long it thought, then what it was about —
+ * the label leads, as the approved conversation draws it (「생각 2초 목록
+ * 화면부터 ›」), and no mark stands before it: a thought is no step. The
+ * label is the line's word for what came of the thought, so it wears the
+ * class a step's result wears (`helper-step-res`) and is read there. */
+function thoughtLineNode() {
+  const line = document.createElement("summary");
+  line.className = "helper-step-line";
+  line.dataset.keyboardOwner = "true";
+  const label = document.createElement("span");
+  label.className = "helper-step-res helper-thought-lead";
+  const what = document.createElement("span");
+  what.className = "helper-step-what";
+  const target = document.createElement("span");
+  target.className = "helper-step-target";
+  what.appendChild(target);
+  line.append(label, what);
+  return line;
+}
+
 /* A thought's row — closed, one line, the body painted the first time it
  * opens: a long run thinks often, and a page that rendered every thought up
  * front would pay for words nobody unfolded. */
 function thoughtRowNode(className, run) {
   const row = document.createElement("details");
   row.className = className;
-  row.appendChild(stepLineNode(STEP_OWN_LOOKS.get("thought")));
+  row.appendChild(thoughtLineNode());
   const body = document.createElement("div");
   body.className = "helper-thought-body";
   row.appendChild(body);
@@ -2384,18 +2480,22 @@ function nowWordsOf(list) {
     return `${line.querySelector(".helper-step-kind").textContent} ${line.querySelector(".helper-step-target").textContent}`.trim();
   }
   const going = [...list.querySelectorAll(":scope > .is-streaming.is-thinking:not(.is-done)")].at(-1);
-  return going?.querySelector(".helper-step-target")?.textContent ?? "";
+  const thinking = going?.querySelector(".helper-step-target")?.textContent ?? "";
+  if (thinking !== "") return thinking;
+  // The answer is being written (t-22100): the phase the provider's own stream
+  // says it is in, in the window's words.
+  return list.querySelector(":scope > .is-streaming.is-assistant") ? t("worker.nowWriting", "답을 쓰는 중") : "";
 }
 
 /* ---- the foot line, when no row is out to name (t-18702) ----------------------------
  *
- * The line names the step or thought that is going (`nowWordsOf`). With none, it says what the page's
- * card last said it was doing: a helper's page reads its own card — the activity zo's `subagents`
- * frame names for each helper, filed under `sub:<term>:<id>` — and a pane's conversation reads what its
- * own channel's `session_status` says (`paneNow`). A wire page names its own live rows. With nothing
- * known the line falls back by the agent's voice: a voice that turns through verbs (Claude Code's)
- * keeps its own line, a voice with one static word — zo's English 「Working…」, which a Korean page
- * must not say aloud — gives way to the window's own word. */
+ * The line names the step or thought that is going, or the answer being written (`nowWordsOf`). With
+ * none, it says what the page's card last said it was doing: a helper's page reads its own card — the
+ * activity zo's `subagents` frame names for each helper, filed under `sub:<term>:<id>` — and a pane's
+ * conversation reads what its own channel's `session_status` says (`paneNow`). A wire page names its
+ * own live rows. With nothing known it says the window's own word that the agent is working — for every
+ * agent (t-22100): a CLI's turning verbs (Claude Code's 「Pondering…」) and a static English word (zo's
+ * 「Working…」) are filler the window would be reading aloud, not what the agent is doing. */
 function helperCardOf(run) {
   return `sub:${run.term}:${run.helper.id}`;
 }
@@ -2440,10 +2540,8 @@ function nowActivityWords(activity, run) {
   return `${stepLook(kind).word()} ${stepTitleWords(kind, target)}`.trim();
 }
 
-function nowSaidOf(list, run, voice) {
-  const named = nowWordsOf(list) || nowActivityWords(nowActivityOf(run), run);
-  if (named !== "") return named;
-  return voice.spinner_verbs.length > 0 ? "" : t("worker.busy", "작업 중…");
+function nowSaidOf(list, run) {
+  return nowWordsOf(list) || nowActivityWords(nowActivityOf(run), run) || t("worker.busy", "작업 중…");
 }
 
 /* ---- a finished helper opens on its report (t-15682) --------------------------
@@ -2504,6 +2602,8 @@ function helperTally(run) {
 }
 
 function paintReportDoor(list, card) {
+  // What the report folds is what the rail stands for (t-22100).
+  askTurnRail(list);
   const door = card.__door;
   const n = helperStepCount(card.__run);
   const open = list.classList.contains("is-unfolded");
@@ -2576,4 +2676,413 @@ function syncHelperReport(list, run) {
   chatFollowState(list).away = chatFootGap(list) >= CHAT_FOLLOW.slack;
   paintFootDoor(list);
   return true;
+}
+
+/* ---- the turn rail (t-22100) --------------------------------------------------
+ *
+ * The approved conversation stands a rail of its rows at the list's left: a
+ * tick for each row the list shows — the person's longer, the ones in the view
+ * on the accent, a step that failed in the failure's ink — so a long
+ * conversation is a length a person can see and go along. A press anywhere on
+ * the rail goes to the row of the tick nearest it; the rail's handle takes the
+ * keyboard (Up and Down a row, Page Up and Down a rail's worth, Home and End
+ * the ends) and is announced as a slider over the rows. A long conversation
+ * keeps in the page only the ticks the rail has room for — the stretch of them
+ * around the rows in view — so 400 rows stand some seventy ticks, not 400.
+ *
+ * It is asked again when the rows change (`syncHelperTurns`), when the list
+ * scrolls (once a frame) and when its box changes; it writes only what
+ * changed, and never for a word that streams — a streaming row is no row of
+ * the list's, and words move no row while the reader is up the list. Every
+ * paint that wrote is counted (`__paints`), so that promise is a number a test
+ * reads. The rows in view are found by halving the list, not by a watcher on
+ * every row: an observer of 400 rows is asked about all of them on every
+ * frame a stream changes the page. */
+function turnRailNode(list) {
+  const rail = document.createElement("div");
+  rail.className = "chat-rail";
+  const handle = document.createElement("div");
+  handle.className = "chat-rail-handle";
+  handle.setAttribute("role", "slider");
+  handle.setAttribute("aria-orientation", "vertical");
+  handle.setAttribute("aria-label", t("worker.railLabel", "대화의 행"));
+  handle.setAttribute("aria-valuemin", "1");
+  handle.tabIndex = 0;
+  // Its keys are its own — the window's key sink (`rearmKeySink`) would
+  // otherwise take them for the terminal.
+  handle.dataset.keyboardOwner = "true";
+  rail.appendChild(handle);
+  rail.__list = list;
+  rail.__paints = 0;
+  list.__rail = rail;
+  rail.addEventListener("click", (event) => {
+    const tick = event.target instanceof Element ? event.target.closest(".chat-rail-tick") : null;
+    const row = (tick ?? nearestRailTick(rail, event.clientY))?.__row;
+    if (row?.isConnected) railJump(list, row);
+  });
+  handle.addEventListener("keydown", (event) => {
+    const rows = railRows(list);
+    if (rows.length === 0) return;
+    const at = railAt(list, rows);
+    const page = Math.max(1, railRoom(rail) - 1);
+    const to = {
+      ArrowUp: at - 1, ArrowDown: at + 1, PageUp: at - page, PageDown: at + page, Home: 0, End: rows.length - 1,
+    }[event.key];
+    if (to === undefined) return;
+    event.preventDefault();
+    const index = Math.min(rows.length - 1, Math.max(0, to));
+    list.__railAt = rows[index];
+    railJump(list, rows[index]);
+  });
+  // The list's own scroll asks the rail once a frame; a press that left the
+  // handle on a row keeps that row its value until the person moves the list.
+  list.addEventListener("scroll", () => askTurnRail(list), { passive: true });
+  for (const kind of ["wheel", "touchmove"]) list.addEventListener(kind, () => { list.__railAt = null; }, { passive: true });
+  return rail;
+}
+
+/* The rows the rail stands for: the list's own rows that are shown — not a row
+ * the Focus view folded away, and, while a finished helper's report stands
+ * folded over what it did, only the person's (`is-reported`, shell.css). */
+function railRows(list) {
+  const folded = list.classList.contains("is-reported") && !list.classList.contains("is-unfolded");
+  return [...list.querySelectorAll(":scope > [data-turn]")].filter((row) =>
+    !row.hidden && !row.classList.contains("is-said-above") && (!folded || row.classList.contains("is-user")));
+}
+
+/* How many ticks the rail has room for: its height over a tick and the gap
+ * after it, read off the rail's own tokens once per box. */
+function railRoom(rail) {
+  const height = rail.clientHeight;
+  if (rail.__room?.height === height) return rail.__room.ticks;
+  const style = getComputedStyle(rail);
+  const gap = parseFloat(style.rowGap) || 0;
+  const tick = parseFloat(style.getPropertyValue("--chat-turn-tick-h")) || 0;
+  const inner = height - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+  const ticks = tick + gap > 0 ? Math.max(0, Math.floor((inner + gap) / (tick + gap))) : 0;
+  rail.__room = { height, ticks };
+  return ticks;
+}
+
+/* The rows in view, as a stretch of `rows`: the first whose box reaches below
+ * the list's top and the last whose box starts above its foot, found by halving
+ * (a person's row stuck at the top stands in its turn's first rows' place, and
+ * is not looked at). `null` while the list has no box. */
+function railInView(list, rows) {
+  const view = list.getBoundingClientRect();
+  if (view.height === 0 || rows.length === 0) return null;
+  const plain = rows.filter((row) => !row.classList.contains("is-user"));
+  const firstBelow = (top) => {
+    let low = 0;
+    let high = plain.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (plain[mid].getBoundingClientRect().bottom > top) high = mid;
+      else low = mid + 1;
+    }
+    return low;
+  };
+  const from = plain.length > 0 ? firstBelow(view.top) : 0;
+  const to = plain.length > 0 ? firstBelow(view.bottom) : 0;
+  const first = plain[Math.min(from, plain.length - 1)];
+  const last = plain[Math.max(0, Math.min(to, plain.length - 1))];
+  let start = first ? rows.indexOf(first) : 0;
+  let end = last ? rows.indexOf(last) : rows.length - 1;
+  if (last && last.getBoundingClientRect().top >= view.bottom) end -= 1;
+  // The person's row that heads the first row in view stands at the top.
+  while (start > 0 && rows[start - 1].classList.contains("is-user")) start -= 1;
+  if (plain.length === 0) end = rows.length - 1;
+  return { start, end: Math.max(start, end) };
+}
+
+/* The row the handle stands on: the one a press or a key went to, while it is
+ * still in view; else the first row in view. */
+function railAt(list, rows) {
+  const seen = railInView(list, rows);
+  const held = list.__railAt ? rows.indexOf(list.__railAt) : -1;
+  if (held >= 0 && seen && held >= seen.start && held <= seen.end) return held;
+  return seen ? seen.start : rows.length - 1;
+}
+
+/* Ask the rail for a paint on the next frame — one a frame however often it is
+ * asked. */
+function askTurnRail(list) {
+  const rail = list?.__rail;
+  if (!rail || rail.__frame) return;
+  rail.__frame = requestAnimationFrame(() => {
+    rail.__frame = 0;
+    if (rail.isConnected) paintTurnRail(rail);
+  });
+}
+
+/* The rail as the list stands: the stretch of ticks it has room for, around
+ * the rows in view, each tick worn as its row is. Writes only what changed. */
+function paintTurnRail(rail) {
+  const list = rail.__list;
+  const rows = railRows(list);
+  const room = railRoom(rail);
+  const seen = railInView(list, rows) ?? { start: 0, end: -1 };
+  const count = Math.min(rows.length, room);
+  const middle = Math.floor((count - (seen.end - seen.start + 1)) / 2);
+  const from = Math.max(0, Math.min(rows.length - count, seen.start - Math.max(0, middle)));
+  let wrote = false;
+  const handle = rail.firstElementChild;
+  const ticks = rail.getElementsByClassName("chat-rail-tick");
+  while (ticks.length > count) {
+    ticks[ticks.length - 1].remove();
+    wrote = true;
+  }
+  while (ticks.length < count) {
+    const tick = document.createElement("i");
+    tick.className = "chat-rail-tick";
+    rail.appendChild(tick);
+    wrote = true;
+  }
+  for (let at = 0; at < count; at += 1) {
+    const tick = ticks[at];
+    const index = from + at;
+    const row = rows[index];
+    tick.__row = row;
+    const wear = `chat-rail-tick${row.classList.contains("is-user") ? " is-user" : ""}${row.classList.contains("is-failed") ? " is-failed" : ""}${index >= seen.start && index <= seen.end ? " is-current" : ""}`;
+    if (tick.className !== wear) {
+      tick.className = wear;
+      wrote = true;
+    }
+  }
+  const at = rows.length > 0 ? railAt(list, rows) : -1;
+  const value = String(at + 1);
+  if (handle.getAttribute("aria-valuemax") !== String(rows.length) || handle.getAttribute("aria-valuenow") !== value) {
+    writeAttribute(handle, "aria-valuemax", String(rows.length));
+    writeAttribute(handle, "aria-valuenow", value);
+    writeAttribute(handle, "aria-valuetext", at < 0 ? "" : t("worker.railAt", "{{n}} / {{total}} · {{what}}", {
+      n: at + 1, total: rows.length, what: railRowWords(rows[at]),
+    }));
+    wrote = true;
+  }
+  if (wrote) rail.__paints += 1;
+}
+
+/* What a row is, in a few words, for the handle's value: the person's words,
+ * what a step or a thought was (not a shell step's lines), an answer's first
+ * words. */
+function railRowWords(row) {
+  const words = row.querySelector(":scope > .helper-step-line > .helper-step-what") ?? row.querySelector(":scope > .helper-said");
+  return stepFirstLine(words?.textContent ?? row.getAttribute("aria-label") ?? "");
+}
+
+/* The tick nearest a height on the rail, for a press between ticks. */
+function nearestRailTick(rail, y) {
+  let best = null;
+  let gap = Number.POSITIVE_INFINITY;
+  for (const tick of rail.getElementsByClassName("chat-rail-tick")) {
+    const box = tick.getBoundingClientRect();
+    const away = Math.abs(box.top + box.height / 2 - y);
+    if (away < gap) {
+      gap = away;
+      best = tick;
+    }
+  }
+  return best;
+}
+
+/* Go to `row`: it stands at the list's top — under the person's words of its
+ * turn, which stick there — and the list stops following its foot unless the
+ * row is the last one. */
+function railJump(list, row) {
+  const view = list.getBoundingClientRect();
+  let header = null;
+  if (!row.classList.contains("is-user")) {
+    for (let at = row.previousElementSibling; at; at = at.previousElementSibling) {
+      if (at.classList.contains("is-user")) {
+        header = at;
+        break;
+      }
+    }
+  }
+  const cover = header ? header.getBoundingClientRect().height : 0;
+  const state = chatFollowState(list);
+  state.intent = "up";
+  state.at = Date.now();
+  list.scrollTop += row.getBoundingClientRect().top - view.top - cover;
+  state.away = chatFootGap(list) >= CHAT_FOLLOW.slack;
+  paintFootDoor(list);
+  askTurnRail(list);
+}
+
+/* ---- the conversation's state, over the composer (t-22100) --------------------
+ *
+ * The approved conversation keeps what a person would otherwise ask about
+ * over the composer, in one flat stack joined to it: the agent's todo list
+ * (「할 일 2/3」 and its items), the work going on in the background (the
+ * helpers at work, `helperTasksOf`), the messages waiting for the turn to end
+ * (the composer's own queue), and the checkout's branch and how many files
+ * changed. Only facts the window already holds — the page's turns, the
+ * helper roster, the queue, the worktree list and the last `git status` of
+ * the checkout in front — and a fact the window does not hold is left out,
+ * never guessed: a checkout other than the one in front has a branch here,
+ * not a count. With nothing to say the stack is not there.
+ *
+ * Its button opens it to the items, one row each with its state, and the
+ * choice is the conversation's (`run.stackOpen`): another tab and back, or
+ * another conversation beside it, keeps each its own. It paints when the
+ * page paints, when the composer's state moves and when the checkout's status
+ * lands — never for a streamed word — and only when what it says changed;
+ * every paint that wrote is counted (`__paints`). */
+function chatStackNode(run) {
+  const stack = document.createElement("section");
+  stack.className = "chat-stack";
+  stack.hidden = true;
+  stack.setAttribute("aria-label", t("worker.stackLabel", "이 대화의 상태"));
+  stack.__run = run;
+  stack.__paints = 0;
+  return stack;
+}
+
+/* The newest todo list the conversation's turns hold — the newest call of the
+ * catalog's todo tool that did not fail — or none. */
+function latestTodos(run) {
+  for (let at = run.helper.turns.length - 1; at >= 0; at -= 1) {
+    const turn = run.helper.turns[at];
+    if (turn.role !== "tool" || turn.outputError === true) continue;
+    const todos = todosOf(turn, run.agent);
+    if (todos !== null) return todos;
+  }
+  return [];
+}
+
+/* The checkout the conversation works in: its branch from the window's
+ * worktree list, and how many files changed when that checkout is the one the
+ * window last asked git about (`scmStatusOf`) — `null` for a count the window
+ * does not hold. No branch the window knows, no git line. */
+function chatGitFacts(run) {
+  const path = run.wire ? run.cwd : tabOfTerm(run.term)?.worktree ?? null;
+  const worktree = worktreeAt(path);
+  if (!worktree?.branch) return null;
+  const changes = path === scmStatusOf ? (scmCapState?.total ?? scmEntries.length) : null;
+  return { branch: worktree.branch, changes };
+}
+
+function chatStackFacts(run) {
+  return {
+    todos: latestTodos(run),
+    helpers: helperTasksOf(run).map((task) => ({ key: task.key, label: helperTaskLabel(task) })),
+    queued: run.queue?.length ?? 0,
+    git: chatGitFacts(run),
+    open: run.stackOpen === true,
+  };
+}
+
+/* One item of the open stack: its box (the todo list's own checkbox, read out
+ * as checked, mixed or empty) and its words. */
+function chatStackItemNode(words, todo = null) {
+  const item = document.createElement("li");
+  item.className = todo ? `chat-stack-item${todo.status === "completed" ? " is-done" : ""}` : "chat-stack-item is-work";
+  if (todo) {
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "chat-stack-box";
+    box.disabled = true;
+    box.checked = todo.status === "completed";
+    box.indeterminate = todo.status === "in_progress";
+    item.appendChild(box);
+  } else {
+    const dot = document.createElement("span");
+    dot.className = "chat-stack-work-dot";
+    dot.setAttribute("aria-hidden", "true");
+    item.appendChild(dot);
+  }
+  const said = document.createElement("span");
+  said.className = "chat-stack-item-words";
+  said.textContent = words;
+  item.appendChild(said);
+  return item;
+}
+
+function chatStackSpan(className, words) {
+  const span = document.createElement("span");
+  span.className = className;
+  span.textContent = words;
+  return span;
+}
+
+/* The stack as the facts stand — rebuilt only when they moved (it is a few
+ * rows), the keyboard kept on its button across a rebuild. */
+function paintChatStack(stack, run) {
+  const facts = chatStackFacts(run);
+  const said = JSON.stringify([facts, locale]);
+  if (stack.__said === said) return;
+  stack.__said = said;
+  stack.__paints += 1;
+  const { todos, helpers, queued, git, open } = facts;
+  const shown = todos.length > 0 || helpers.length > 0 || queued > 0 || git !== null;
+  writeHidden(stack, !shown);
+  const kept = stack.contains(document.activeElement);
+  if (!shown) {
+    stack.replaceChildren();
+    return;
+  }
+  const rows = [];
+  if (todos.length > 0) {
+    const done = todos.filter((todo) => todo.status === "completed").length;
+    const row = document.createElement("div");
+    row.className = "chat-stack-row is-todos";
+    const box = document.createElement("span");
+    box.className = `chat-stack-mark${done === todos.length ? " is-done" : done > 0 ? " is-going" : ""}`;
+    box.setAttribute("aria-hidden", "true");
+    row.append(
+      box,
+      chatStackSpan("chat-stack-todo-count", t("worker.stackTodos", "할 일 {{done}}/{{total}}", { done, total: todos.length })),
+      chatStackSpan("chat-stack-todo-words", todos.map((todo) => todo.content).join(" · ")),
+    );
+    rows.push(row);
+  }
+  const factsRow = document.createElement("div");
+  factsRow.className = "chat-stack-row is-facts";
+  factsRow.append(
+    chatStackSpan("chat-stack-work", helpers.length === 0
+      ? t("worker.stackNoWork", "배경 작업 없음")
+      : t("worker.stackWork", "배경 작업 {{n}}", { n: helpers.length })),
+    chatStackSpan("chat-stack-sep", "·"),
+    chatStackSpan("chat-stack-queue", t("worker.stackQueue", "대기 메시지 {{n}}", { n: queued })),
+  );
+  if (git) {
+    const changes = git.changes === null ? "" : ` · ${t("worker.stackChanges", "변경 {{n}}", { n: git.changes })}`;
+    factsRow.appendChild(chatStackSpan("chat-stack-git", `git ${git.branch}${changes}`));
+  }
+  rows.push(factsRow);
+  if (todos.length > 0 || helpers.length > 0) {
+    const items = document.createElement("ul");
+    items.className = "chat-stack-items";
+    items.id = stack.__itemsId ??= `chat-stack-items-${++chatStackSeq}`;
+    items.hidden = !open;
+    for (const todo of todos) items.appendChild(chatStackItemNode(todo.content, todo));
+    for (const helper of helpers) items.appendChild(chatStackItemNode(helper.label));
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "chat-stack-toggle";
+    toggle.dataset.keyboardOwner = "true";
+    toggle.setAttribute("aria-controls", items.id);
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    toggle.setAttribute("aria-label", open ? t("worker.stackClose", "상태 접기") : t("worker.stackOpen", "상태 펼치기"));
+    // One chevron, turned by the rule for its state (shell.css): up while the
+    // items wait above, down once they stand.
+    toggle.appendChild(iconNode("chevron"));
+    toggle.addEventListener("click", () => {
+      run.stackOpen = run.stackOpen !== true;
+      paintChatStack(stack, run);
+    });
+    rows[0].appendChild(toggle);
+    rows.unshift(items);
+  }
+  stack.replaceChildren(...rows);
+  if (kept) stack.querySelector(".chat-stack-toggle")?.focus({ preventScroll: true });
+}
+
+let chatStackSeq = 0;
+
+/* Every stack on screen, again — the checkout's status landed. */
+function paintChatStacks() {
+  for (const stack of document.querySelectorAll(".chat-stack")) {
+    if (stack.__run) paintChatStack(stack, stack.__run);
+  }
 }

@@ -36271,13 +36271,15 @@ const chatFace = await page.evaluate(async () => {
   seen.count = turns.length;
   seen.assistantNamed = [turns[1]?.getAttribute("aria-label"), agentName("claude")];
   seen.toolNamed = [turns[3]?.getAttribute("aria-label"), t("worker.toolRow", "{{name}} 도구", { name: "Read" })];
-  // The first user turn is the briefing box — the extension's `userMessage`:
-  // a bordered box on the left, in a row that sticks to the top while its
-  // answer scrolls under it, with every other thing the person said, whole.
+  // The first user turn is the briefing box: the person's words on the soft
+  // fill with no edge (t-22100, the approved conversation), on the left, in a
+  // row that sticks to the top while its answer scrolls under it, with every
+  // other thing the person said, whole.
   const briefingSaid = turns[0]?.querySelector(":scope > .helper-said") ?? null;
   seen.briefingBubble = turns[0]?.tagName === "ARTICLE" &&
     turns[0]?.classList.contains("is-briefing") && getComputedStyle(turns[0]).position === "sticky" &&
-    briefingSaid !== null && getComputedStyle(briefingSaid).borderTopWidth === "1px" &&
+    briefingSaid !== null && getComputedStyle(briefingSaid).borderTopWidth === "0px" &&
+    getComputedStyle(briefingSaid).backgroundColor !== "rgba(0, 0, 0, 0)" &&
     Math.abs(briefingSaid.getBoundingClientRect().left - turns[0].getBoundingClientRect().left) <= 2;
   seen.briefingSaid = turns[0]?.querySelector(".helper-said")?.textContent?.split("\n", 1)[0];
   seen.briefingWho = turns[0]?.querySelector(".helper-who") === null
@@ -36319,8 +36321,9 @@ const chatFace = await page.evaluate(async () => {
   seen.readArg = turns[3]?.querySelector(".helper-step-target")?.textContent;
   seen.readBare = turns[3]?.querySelector(".helper-tool-body") === null &&
     turns[3]?.querySelector(".helper-step-res")?.textContent === t("worker.stepLive", "진행 중");
-  const mark = turns[3]?.querySelector(".helper-step-icon");
-  seen.liveMark = mark ? getComputedStyle(mark).color === probe("--agent-accent-claude") : false;
+  // The step that is out wears the agent's accent on its dot (t-22100: a dot where its mark stood).
+  const mark = turns[3]?.querySelector(".helper-step-dot");
+  seen.liveMark = mark ? getComputedStyle(mark).backgroundColor === probe("--agent-accent-claude", "backgroundColor") : false;
   // The page wears the agent: its accent, its mark before the name, its own
   // busy word under the transcript.
   seen.agent = face.dataset.agent;
@@ -36330,13 +36333,14 @@ const chatFace = await page.evaluate(async () => {
   seen.headMarkAccent = headMark ? getComputedStyle(headMark).color === probe("--agent-accent-claude") : false;
   const status = face.querySelector(".helper-status");
   seen.statusShown = status ? !status.hidden : false;
-  seen.statusMark = status?.querySelector(".helper-status-mark")?.textContent;
-  // The CLI's one word stays on the line; the verb the eye sees turns
-  // (t-6323 A4) and is hidden from the reader, who is told aloud what is going
-  // on — the step that is out, in the words of its row (t-15682).
-  seen.statusWord = status?.querySelector(".helper-status-word")?.textContent;
+  // The live line (t-22100): 「지금」 and the step that is out, in the words of
+  // its row (t-15682) — for the eye, and once, as one sentence, aloud.
+  seen.statusLead = status?.querySelector(".helper-status-lead")?.textContent;
+  seen.statusNow = status?.querySelector(".helper-status-now")?.textContent;
   seen.statusSaid = status?.querySelector(".helper-status-said")?.textContent;
-  seen.statusTurns = status?.querySelector(".helper-status-word")?.getAttribute("aria-hidden") === "true";
+  seen.statusHidden = [".helper-status-lead", ".helper-status-now"]
+    .every((part) => status?.querySelector(part)?.getAttribute("aria-hidden") === "true");
+  seen.wantNow = t("worker.now", "지금");
   seen.statusVoice = agentVoice("claude");
   // 입력줄: 부모 판이 서 있으니 composer가 서고, 보내면 부모 판으로
   // 붙여넣기 → 한 숨 → Enter가 그 순서로 간다. 상자는 비워진다.
@@ -36476,14 +36480,13 @@ ok(
   JSON.stringify(chatFace),
 );
 ok(
-  "the page wears its agent: data-agent picks the accent, the head and the chip carry the agent's own mark, and the status line under the transcript keeps the CLI's own busy word while the run is out and says aloud the step that is out",
+  "the page wears its agent: data-agent picks the accent, the head and the chip carry the agent's own mark, and the live line under the transcript says 「지금」 and the step that is out while the run is out — for the eye, and aloud as one sentence",
   chatFace.agent === "claude" && chatFace.pageAccent !== "" &&
     chatFace.headMark === chatFace.statusVoice.glyph && chatFace.headMark !== "" && chatFace.headMarkAccent &&
     chatFace.statusShown &&
-    (chatFace.statusMark === chatFace.statusVoice.glyph || chatFace.statusVoice.glyph_cycle.includes(chatFace.statusMark)) &&
-    chatFace.statusWord === chatFace.statusVoice.busy_word && chatFace.statusWord === "Pondering…" &&
-    chatFace.statusSaid === `${chatFace.wantReadName} one line` &&
-    chatFace.statusTurns &&
+    chatFace.statusLead === chatFace.wantNow && chatFace.statusNow === `${chatFace.wantReadName} one line` &&
+    chatFace.statusSaid === `${chatFace.wantNow} ${chatFace.wantReadName} one line` &&
+    chatFace.statusHidden &&
     chatFace.focusEdge && chatFace.modelMark === chatFace.statusVoice.glyph,
   JSON.stringify(chatFace),
 );
@@ -36569,7 +36572,8 @@ const helperGrammar = await page.evaluate(async () => {
   seen.headNoRule = head ? getComputedStyle(head).borderBottomWidth === "0px" : false;
   seen.ground = getComputedStyle(face).backgroundColor === probe("--chat-ground", "backgroundColor");
   // Two tool rows under their kind's word, closed by the answer after them:
-  // the mark quiet, not on the accent, the target in mono beside the word.
+  // the dot in the done ink, not on the accent (t-22100: a dot where the mark
+  // stood), the target in mono beside the word.
   const tools = turns.filter((one) => one.classList.contains("is-tool"));
   seen.toolCount = `×${tools.length}`;
   seen.toolBody = tools
@@ -36579,7 +36583,7 @@ const helperGrammar = await page.evaluate(async () => {
   seen.toolNames = tools.map((row) => row.getAttribute("aria-label")).join(",");
   seen.wantToolNames = ["read_file", "grep_search"].map((name) => t("worker.toolRow", "{{name}} 도구", { name })).join(",");
   seen.toolsSettled = tools.every((row) => !row.classList.contains("is-live")) &&
-    tools.every((row) => getComputedStyle(row.querySelector(".helper-step-icon")).color === probe("--ink-mist"));
+    tools.every((row) => getComputedStyle(row.querySelector(".helper-step-dot")).backgroundColor === probe("--chat-dot-done", "backgroundColor"));
   seen.argMono = tools[0] ? /mono/i.test(getComputedStyle(tools[0].querySelector(".helper-step-target")).fontFamily) : false;
   // zo has an accent of its own but the harness catalog gives it no voice: the
   // page wears zo's accent and the window's one mark and word — what every
@@ -36588,8 +36592,9 @@ const helperGrammar = await page.evaluate(async () => {
   seen.zoAccent = getComputedStyle(face.querySelector(".worker-mark")).color === probe("--agent-accent-zo");
   const status = face.querySelector(".helper-status");
   seen.statusShown = status ? !status.hidden : false;
-  seen.statusMark = status?.querySelector(".helper-status-mark")?.textContent;
-  seen.statusWord = status?.querySelector(".helper-status-word")?.textContent;
+  seen.statusLead = status?.querySelector(".helper-status-lead")?.textContent;
+  seen.statusNow = status?.querySelector(".helper-status-now")?.textContent;
+  seen.wantLead = t("worker.now", "지금");
   seen.wantBusy = t("worker.busy", "작업 중…");
   seen.headMark = face.querySelector(".worker-mark")?.textContent;
   // 묶음 뒤의 말은 제 턴으로 이어진다.
@@ -36614,7 +36619,7 @@ ok(
   JSON.stringify(helperGrammar),
 );
 ok(
-  "the prose wears the grammar's type — --chat-prose-size at --chat-prose-leading, inline code a rounded chip from --chat-chip-bg — the head is a 600 name with one quiet meta cluster and no rule, the page stands on one --chat-ground, and an agent the catalog does not voice wears the window's one mark and word",
+  "the prose wears the grammar's type — --chat-prose-size at --chat-prose-leading, inline code a rounded chip from --chat-chip-bg — the head is a 600 name with one quiet meta cluster and no rule, the page stands on one --chat-ground, an agent the catalog does not voice wears the window's one mark, and the live line says the window's 「지금 작업 중…」",
   helperGrammar.proseSize === helperGrammar.wantProseSize &&
     helperGrammar.proseLeading === helperGrammar.wantProseLeading &&
     helperGrammar.chipBg === helperGrammar.wantChipBg && helperGrammar.chipBg !== "rgba(0, 0, 0, 0)" &&
@@ -36622,8 +36627,8 @@ ok(
     helperGrammar.nameSize && helperGrammar.metaHolds && helperGrammar.headNoRule &&
     helperGrammar.ground &&
     helperGrammar.agent === "zo" && helperGrammar.zoAccent &&
-    helperGrammar.statusShown && helperGrammar.statusMark === "●" && helperGrammar.headMark === "●" &&
-    helperGrammar.statusWord === helperGrammar.wantBusy,
+    helperGrammar.statusShown && helperGrammar.headMark === "●" &&
+    helperGrammar.statusLead === helperGrammar.wantLead && helperGrammar.statusNow === helperGrammar.wantBusy,
   JSON.stringify(helperGrammar),
 );
 
@@ -36676,7 +36681,8 @@ const toolStates = await page.evaluate(async () => {
     span.remove();
     return value;
   };
-  const markOf = (row) => getComputedStyle(row.querySelector(".helper-step-icon"));
+  // A step's state is worn on its dot (t-22100: the dot stands where the mark stood).
+  const markOf = (row) => getComputedStyle(row.querySelector(".helper-step-dot"));
   const tools = [...list.querySelectorAll(".helper-turn.is-tool")];
   // The turns alone — the status row is the list's last child, never a turn.
   seen.rowsTotal = list.querySelectorAll(":scope > .helper-turn").length;
@@ -36686,7 +36692,7 @@ const toolStates = await page.evaluate(async () => {
   seen.wantFourNames = [t("worker.stepRead", "파일 읽기"), t("worker.stepSearch", "검색"),
     t("worker.stepEdit", "파일 수정"), t("worker.stepShell", "셸")].join(",");
   seen.fourPlain = tools.slice(0, 4).every((row) => !row.classList.contains("is-live") &&
-    markOf(row).color === probe("--ink-mist"));
+    markOf(row).backgroundColor === probe("--ink-mist", "backgroundColor"));
   // The one still out: the mark on the accent, "in progress" where its result
   // will be, and the status line. Its target is the transcript line's, not
   // the first line of the argument object ("{").
@@ -36695,14 +36701,14 @@ const toolStates = await page.evaluate(async () => {
   seen.wantOutWords = `${t("worker.stepRead", "파일 읽기")} · /repo/c.rs`;
   seen.outRes = out?.querySelector(".helper-step-res")?.textContent;
   seen.wantOutRes = t("worker.stepLive", "진행 중");
-  seen.oneLive = out?.classList.contains("is-live") === true && markOf(out).color === probe("--agent-accent-claude");
+  seen.oneLive = out?.classList.contains("is-live") === true &&
+    markOf(out).backgroundColor === probe("--agent-accent-claude", "backgroundColor");
   const status = face.querySelector(".helper-status");
   seen.statusShown = status ? !status.hidden : false;
-  seen.statusMark = status?.querySelector(".helper-status-mark")?.textContent;
-  seen.statusWord = status?.querySelector(".helper-status-word")?.textContent;
+  seen.statusNow = status?.querySelector(".helper-status-now")?.textContent;
+  seen.wantStatusNow = `${t("worker.stepRead", "파일 읽기")} /repo/c.rs`;
   seen.statusSaid = status?.querySelector(".helper-status-said")?.textContent;
-  seen.wantStatusSaid = `${t("worker.stepRead", "파일 읽기")} /repo/c.rs`;
-  seen.voice = agentVoice("claude");
+  seen.wantStatusSaid = `${t("worker.now", "지금")} ${seen.wantStatusNow}`;
   // Its result joins by call id: the same row, now done, saying what came of
   // it on its line and the two raw sides one press away.
   const tab = tabs.find((one) => one.id === `helper:${term}:folds`);
@@ -36713,7 +36719,7 @@ const toolStates = await page.evaluate(async () => {
   const after = [...list.querySelectorAll(".helper-turn.is-tool")];
   seen.sameRow = after[4] === out && after.length === 5;
   seen.doneMark = out.classList.contains("is-done") && !out.classList.contains("is-live") &&
-    markOf(out).color === probe("--ink-mist");
+    markOf(out).backgroundColor === probe("--chat-dot-done", "backgroundColor");
   const result = out.querySelector(".helper-step-res");
   seen.resultLine = result?.textContent;
   seen.wantResultLine = t("worker.stepLines", "{{n}}줄", { n: 2 });
@@ -36739,7 +36745,7 @@ const toolStates = await page.evaluate(async () => {
   const failed = lastTurnOf(list);
   seen.failedRow = failed.classList.contains("is-tool") && failed.classList.contains("is-failed") &&
     !failed.classList.contains("is-done") && !failed.classList.contains("is-live") &&
-    markOf(failed).color === probe("--signal-halt-ink");
+    markOf(failed).backgroundColor === probe("--chat-dot-failed", "backgroundColor");
   seen.failedLine = failed.querySelector(".helper-step-res")?.textContent;
   seen.wantFailedLine = t("worker.stepFailed", "실패: {{why}}", { why: "exit 1" });
   seen.failedInk = failed.querySelector(".helper-step-res")
@@ -36809,13 +36815,11 @@ const toolStates = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a step's mark is the call's state: calls the answer closed stand plain under their kinds' words, the one still out wears the accent and says \"in progress\" while the status line says what it is, a result joining by call id says what came of it on the same row with both raw sides one press away (short sides whole, no door), a failed result wears the halt ink, an edit's row wears the inline diff cut from its input once opened (the review rows and word marks, blank gutters for a snippet, the rows past the ceiling counted, no input well, a path over each file of a patch), a quiet paint touches nothing, and the roster's done takes the accent and the status away",
+  "a step's dot is the call's state: calls the answer closed stand plain under their kinds' words, the one still out wears the accent and says \"in progress\" while the live line says what it is, a result joining by call id turns the dot to the done ink and says what came of it on the same row with both raw sides one press away (short sides whole, no door), a failed result wears the failure's dot and its words the halt ink, an edit's row wears the inline diff cut from its input once opened (the review rows and word marks, blank gutters for a snippet, the rows past the ceiling counted, no input well, a path over each file of a patch), a quiet paint touches nothing, and the roster's done takes the accent and the status away",
   toolStates.rowsTotal === 8 && toolStates.toolCount === 5 &&
     toolStates.fourNames === toolStates.wantFourNames && toolStates.fourPlain &&
     toolStates.oneLive && toolStates.outRes === toolStates.wantOutRes && toolStates.statusShown &&
-    (toolStates.statusMark === toolStates.voice.glyph || toolStates.voice.glyph_cycle.includes(toolStates.statusMark)) &&
-    toolStates.statusWord === toolStates.voice.busy_word && toolStates.statusWord === "Pondering…" &&
-    toolStates.statusSaid === toolStates.wantStatusSaid &&
+    toolStates.statusNow === toolStates.wantStatusNow && toolStates.statusSaid === toolStates.wantStatusSaid &&
     toolStates.sameRow && toolStates.doneMark &&
     toolStates.resultLine === toolStates.wantResultLine && !toolStates.resultMono &&
     toolStates.outWords === toolStates.wantOutWords &&
@@ -37430,15 +37434,13 @@ const flatTranscript = await page.evaluate(async () => {
   // 400턴이 세우는 노드의 수 — 「동안 작업」 접힘이 도구 카드를 대신해도
   // 이 수는 오르지 않아야 한다(t-2973). 접힌 몸은 펼칠 때 짓는다.
   seen.listNodes = list.querySelectorAll("*").length;
-  // t-16914: a step's mark stands no svg and no use (each is a shadow copy of the
-  // symbol the element count does not see); it is a mask in the sprite's glyph.
-  const marks = [...list.querySelectorAll(".helper-step-icon")];
+  // t-16914: a step's mark stood no svg and no use (each is a shadow copy of the
+  // symbol the element count does not see); since t-22100 it is a dot — one
+  // empty round span, no glyph at all.
+  const marks = [...list.querySelectorAll(".helper-step-dot")];
   seen.markCount = marks.length;
-  seen.markSvgs = list.querySelectorAll(".helper-step-icon svg, .helper-step-icon use").length;
-  seen.marksMasked = marks.length > 0 && marks.every((mark) => {
-    const mask = getComputedStyle(mark, "::before").maskImage;
-    return mask && mask !== "none";
-  });
+  seen.markSvgs = list.querySelectorAll(".helper-step-dot svg, .helper-step-dot use").length;
+  seen.marksMasked = marks.length > 0 && marks.every((mark) => mark.childElementCount === 0 && getComputedStyle(mark).borderRadius === "50%");
 
   // 위계의 실측 — 에이전트의 말은 창의 글꼴에 맨몸으로.
   const prose = list.querySelector(".helper-turn.is-assistant");
@@ -37455,8 +37457,8 @@ const flatTranscript = await page.evaluate(async () => {
   document.body.appendChild(probe);
   seen.inkFromToken = proseStyle.color === getComputedStyle(probe).color;
   probe.remove();
-  // 브리핑도 그 뒤 사람의 말도 같은 왼쪽 상자(확장 2.1.278의 `userMessage`)
-  // — 라벨 없이, 1px 테두리, 이름은 aria-label이 말한다.
+  // 브리핑도 그 뒤 사람의 말도 같은 왼쪽 상자 — 라벨 없이, 테두리 없이 부드러운
+  // 바탕 위에(t-22100), 이름은 aria-label이 말한다.
   // The row is the extension's sticky header; the box with the words is
   // its child (2.1.278 `stickyHeader` > `userMessage`, 09-21).
   const brief = list.querySelector(".helper-turn.is-briefing");
@@ -37471,7 +37473,7 @@ const flatTranscript = await page.evaluate(async () => {
   seen.userQuiet = personStyle.position === briefStyle.position &&
     personBox.backgroundColor === briefBox.backgroundColor &&
     personBox.borderRadius === briefBox.borderRadius &&
-    personBox.borderLeftWidth === "1px" && briefBox.borderLeftWidth === "1px" &&
+    personBox.borderLeftWidth === "0px" && briefBox.borderLeftWidth === "0px" &&
     person.className === brief.className.replace(" is-briefing", "") &&
     !brief.querySelector(".helper-who") && !person.querySelector(".helper-who") &&
     brief.getAttribute("aria-label") === t("worker.briefing", "브리핑") &&
@@ -37714,7 +37716,7 @@ ok(
   JSON.stringify(flatTranscript),
 );
 ok(
-  "a step's mark is one span with its glyph as a mask — no svg and no use under any row's line, so a page of hundreds does not stand a shadow copy of the sprite per row",
+  "a step's dot is one empty round span — no svg, no use and no glyph under any row's line, so a page of hundreds stands no shadow copy of the sprite per row",
   flatTranscript.markCount > 0 && flatTranscript.markSvgs === 0 && flatTranscript.marksMasked,
   JSON.stringify({ marks: flatTranscript.markCount, svgs: flatTranscript.markSvgs, masked: flatTranscript.marksMasked }),
 );
@@ -55653,7 +55655,8 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       const composer = chat?.querySelector(".worker-composer");
       const box = composer?.querySelector(".worker-composer-box");
       seen.placeholder = box?.placeholder;
-      seen.wantPlaceholder = t("worker.sayTo", "{{name}}에게 보내기…", { name: agentName("claude") });
+      // A conversation's own box says one sentence, working or resting (t-22100).
+      seen.wantPlaceholder = t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다");
       seen.noDoorOnOwnPane = composer?.querySelector(".worker-composer-door") === null;
       // The tool row, left to right: + · agent chip · mode chip … / · send.
       const tools = composer?.querySelector(".worker-composer-tools");
@@ -56468,7 +56471,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       seen.wantHead = agentName("codex");
       seen.composer = Boolean(face?.querySelector(".worker-composer"));
       seen.placeholder = face?.querySelector(".worker-composer-box")?.placeholder ?? "";
-      seen.wantPlaceholder = t("worker.sayTo", "{{name}}에게 보내기…", { name: agentName("codex") });
+      seen.wantPlaceholder = t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다");
       seen.noDoor = !face?.querySelector(".worker-composer-door");
       seen.chipModel = face?.querySelector(".worker-composer-model-words")?.textContent ?? "";
       seen.idleWords = face?.querySelector(".worker-state")?.textContent ?? "";
@@ -56709,9 +56712,10 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
       const box = composer?.querySelector(".worker-composer-box");
       const items = () => [...(composer?.querySelectorAll(".composer-queue-item") ?? [])]
         .map((item) => item.querySelector(".composer-queue-words")?.textContent);
-      // 실행 중에는 상자가 대기열이라고 말한다.
+      // 실행 중에도 쉬는 동안에도 상자는 한 문장 — 일하는 중이면 대기열에 든다고 —
+      // 을 말한다(t-22100).
       seen.workingPlaceholder = box?.placeholder;
-      seen.wantWorkingPlaceholder = t("composer.queue.placeholder", "다음 메시지 대기열에 추가…");
+      seen.wantWorkingPlaceholder = t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다");
       const before = calls.length;
       type(box, "첫째");
       await settle();
@@ -56755,7 +56759,7 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
       seen.straightOut = JSON.stringify(calls.slice(straight));
       seen.wantStraightOut = JSON.stringify([["paste", term, "지금"], ["key", term, "Enter"]]);
       seen.idlePlaceholder = box?.placeholder;
-      seen.wantIdlePlaceholder = t("worker.sayTo", "{{name}}에게 보내기…", { name: agentName("claude") });
+      seen.wantIdlePlaceholder = t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다");
       // 훅만으로 입력줄이 옷을 갈아입는다 — 제출 없이도 중지↔보내기, 자리말도
       // 제 것으로. 상태가 움직인 뒤에 그려야 옛 낱말을 입지 않는다.
       const send = () => composer?.querySelector(".worker-composer-send");

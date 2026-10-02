@@ -569,16 +569,11 @@ export async function testConversationKeys(browser, origin, ok) {
   }
 }
 
-/* A4 — while the turn is out. The extension's spinner row (`Ke`, 2.1.280):
- * the glyph turns every 120 ms, and the word is one of the CLI's own verbs
- * (84 of them, `tD1` — the CLI's screen carries the same list) picked at
- * random and picked again at 2 s, 5 s, 10 s and every 5 s after, written
- * `Verb...`; each new verb is revealed by a sweep (`j75`: every 40 ms a
- * four-character window moves right — `▌`, two of `.`/`_`/the letter, then
- * the letter). No elapsed time and no token count stand beside it — the head
- * carries the time, the meter the context — and no caret trails the answer:
- * the extension's only `▌` is this sweep. A CLI the catalog gives no verbs
- * keeps its one word. */
+/* A4 — while the turn is out (t-22100, the approved conversation's live line). The extension's spinner
+ * row turned the CLI's own verbs (`Ke`, 2.1.280 — Claude Code's 84) with a sweep; the person approved a
+ * line that says 「지금」 and what the agent is doing, in the window's words, instead: no filler verb, no
+ * invented text, and with nothing known, that it is working. Still no elapsed time and no token count
+ * beside it — the head carries the time, the meter the context — and no caret trails the answer. */
 export async function testConversationStatus(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -586,32 +581,22 @@ export async function testConversationStatus(browser, origin, ok) {
     const seen = await page.evaluate(async () => {
       const seen = {};
       const face = document.querySelector("#worker-view");
-      const word = () => face.querySelector(".helper-status-word")?.textContent ?? "";
+      const status = () => face.querySelector(".helper-status");
+      const line = () => [".helper-status-lead", ".helper-status-now"]
+        .map((part) => (status()?.querySelector(part)?.textContent ?? "").trim()).join(" ");
       const verbs = installedAgents().find((row) => row.id === "claude")?.spinner_verbs ?? [];
       seen.verbCount = verbs.length;
-      // The first verb sweeps in over a blank field; wait for it to settle.
-      const isVerb = (text) => verbs.some((verb) => text === `${verb}...`);
-      for (let beat = 0; beat < 240 && !isVerb(word()); beat += 1) await window.__PAINTED__();
-      const first = word();
-      seen.firstIsVerb = isVerb(first);
-      // The sweep, as a pure step: the window's lead is the bar, its tail
-      // the target, and what the window has passed is the new word.
-      const step = (from, to, at) => (typeof statusRevealStep === "function"
-        ? statusRevealStep(from, to, at, (choices) => choices[0])
-        : null);
-      seen.sweep = [0, 1, 2, 3, 4, 7].map((at) => step("Old...", "New...", at));
-      // A new pick within the extension's first beat (2 s), revealed by the
-      // sweep — a pick may land on the same verb, as the extension's may.
-      const bars = [];
+      // Past the extension's first beat (2 s), where its verb turned: the line holds.
+      const said = new Set();
       const started = performance.now();
-      while (performance.now() - started < 2600 && bars.length === 0) {
+      while (performance.now() - started < 2600) {
         await new Promise((done) => requestAnimationFrame(done));
-        if (word().includes("▌")) bars.push(word());
+        said.add(line());
       }
-      for (let beat = 0; beat < 240 && !isVerb(word()); beat += 1) await window.__PAINTED__();
-      seen.swept = bars.length > 0;
-      seen.secondIsVerb = isVerb(word());
-      seen.delays = [0, 1, 2, 3, 9].map((picks) => (typeof statusVerbDelay === "function" ? statusVerbDelay(picks) : null));
+      seen.said = [...said];
+      seen.want = `${t("worker.now", "지금")} ${t("worker.busy", "작업 중…")}`;
+      seen.spoke = verbs.filter((verb) => (status()?.textContent ?? "").includes(verb)).length;
+      seen.swept = (status()?.textContent ?? "").includes("▌");
       // No caret trails a streaming answer.
       window.__CONVERSATION__.live = [{ role: "assistant", text: "흐르는 답" }];
       await pollHelperPages();
@@ -620,10 +605,8 @@ export async function testConversationStatus(browser, origin, ok) {
       return seen;
     });
     ok(
-      "A4: while the turn is out the status says one of Claude Code's own 84 verbs as `Verb...`, picks again at the extension's beats (2 s, 5 s, 10 s, then every 5 s) and reveals each new verb with the sweep — `▌`, two of `.`/`_`/the letter, then the letter — and no caret trails the answer",
-      seen.verbCount === 84 && seen.firstIsVerb && seen.swept && seen.secondIsVerb &&
-        JSON.stringify(seen.delays) === JSON.stringify([2000, 3000, 5000, 5000, 5000]) &&
-        JSON.stringify(seen.sweep) === JSON.stringify(["▌ld...", ".▌d...", "..▌...", "N..▌..", "Ne..▌.", "New..."]) &&
+      "A4: while the turn is out and nothing is known the live line says 「지금 작업 중…」 and holds it past the extension's beat — none of Claude Code's 84 turning verbs, no sweep — and no caret trails the answer",
+      seen.verbCount === 84 && seen.said.length === 1 && seen.said[0] === seen.want && seen.spoke === 0 && !seen.swept &&
         seen.noCaret,
       JSON.stringify(seen),
     );
@@ -1390,44 +1373,46 @@ export async function testConversationCopies(browser, origin, ok) {
       {
         const frames = [...answer.querySelectorAll(".helper-said .helper-code")];
         seen.frames = frames.length;
-        const copies = frames.map((frame) => frame.querySelector(":scope > .helper-code-copy"));
+        const copies = frames.map((frame) => frame.querySelector(":scope > .helper-code-bar > .helper-code-copy"));
         seen.names = copies.map((copy) => copy?.getAttribute("aria-label"));
         seen.want = t("worker.copyCode", "코드 복사");
-        seen.hiddenAtRest = copies.every((copy) => getComputedStyle(copy).opacity === "0");
-        const box = frames[0].getBoundingClientRect();
-        const corner = copies[0].getBoundingClientRect();
-        seen.corner = [Math.round(box.right - corner.right), Math.round(corner.top - box.top)];
-        seen.inset = parseFloat(getComputedStyle(face).getPropertyValue("--chat-code-copy-inset"));
+        seen.word = t("mdview.copy", "복사");
+        seen.copiedWord = t("worker.copied", "복사됨");
+        seen.shownAtRest = copies.every((copy) => getComputedStyle(copy).opacity === "1" && copy.textContent === seen.word);
+        // The bar's right end, beside the fence's language at its left.
+        const bar = frames[0].querySelector(":scope > .helper-code-bar");
+        seen.atEnd = Math.round(bar.getBoundingClientRect().right - parseFloat(getComputedStyle(bar).paddingRight)) ===
+          Math.round(copies[0].getBoundingClientRect().right);
+        seen.language = bar.querySelector(".helper-code-lang")?.textContent;
         seen.blockText = frames[0].querySelector("pre").textContent;
         copies[0].click();
         await window.__PAINTED__();
         seen.codeWritten = written.at(-1);
-        seen.checked = copies[0].querySelector("use")?.getAttribute("href");
-        seen.nameKept = copies[0].getAttribute("aria-label") === seen.want && copies[0].textContent.trim() === "";
+        seen.checked = copies[0].textContent;
+        seen.nameKept = copies[0].getAttribute("aria-label") === seen.want;
         // The answer's copy: the words the answer shows, then the check.
         const copy = answer.querySelector(".helper-actions .helper-copy");
         copy.click();
         await window.__PAINTED__();
         seen.answerWritten = written.at(-1);
         seen.answerChecked = copy.querySelector("use")?.getAttribute("href");
-        // Back to the copy icon after the panel's 2 s.
+        // Back to the copy's word, and the answer's icon, after the panel's 2 s.
         await new Promise((done) => setTimeout(done, CHAT_COPIED_MS + 150));
-        seen.backAfter = [copies[0].querySelector("use")?.getAttribute("href"), copy.querySelector("use")?.getAttribute("href")];
+        seen.backAfter = [copies[0].textContent, copy.querySelector("use")?.getAttribute("href")];
       }
       return seen;
     });
     ok(
-      "A9: every code block in an answer wears the extension's copy over its top right corner, 4px in (a token), unseen until the block is under the pointer; a press writes the block as it stands and turns the icon to a check, the name unchanged",
-      seen.frames === 2 && seen.names.every((name) => name === seen.want) && seen.hiddenAtRest &&
-        JSON.stringify(seen.corner) === JSON.stringify([seen.inset, seen.inset]) && seen.inset === 4 &&
-        seen.codeWritten === seen.blockText && seen.blockText.startsWith("fn main()") &&
-        seen.checked === "#i-check" && seen.nameKept,
+      "A9: every code block in an answer stands on its bar with its language and the word 「복사」 at the bar's right end, there without hovering (t-22100, the approved fence); a press writes the block as it stands and says 「복사됨」, its name unchanged",
+      seen.frames === 2 && seen.names.every((name) => name === seen.want) && seen.shownAtRest && seen.atEnd &&
+        seen.language === "rust" && seen.codeWritten === seen.blockText && seen.blockText.startsWith("fn main()") &&
+        seen.checked === seen.copiedWord && seen.nameKept,
       JSON.stringify(seen),
     );
     ok(
       "A9: the answer's copy writes the words the answer shows — without the CLI's own plumbing — turns to a check, and both copies turn back after the panel's 2 s",
       typeof seen.answerWritten === "string" && seen.answerWritten.startsWith("고쳤습니다.") && !seen.answerWritten.includes("system-reminder") &&
-        seen.answerChecked === "#i-check" && JSON.stringify(seen.backAfter) === JSON.stringify(["#i-copy", "#i-copy"]),
+        seen.answerChecked === "#i-check" && JSON.stringify(seen.backAfter) === JSON.stringify([seen.word, "#i-copy"]),
       JSON.stringify(seen),
     );
     ok("A9: the copies raised no page errors", faults.length === 0, faults.join("\n"));
@@ -2430,31 +2415,29 @@ async function stepsByKind(browser, origin, ok) {
       await settle();
       return {
         rows: steps().map((row) => ({
-          mark: lineOf(row).querySelector(".helper-step-icon")?.dataset.mark ?? null,
           word: lineOf(row).querySelector(".helper-step-kind")?.textContent ?? null,
           folded: row.classList.contains("is-run"),
         })),
+        // Every step wears its state's dot and no kind's mark (t-22100): the words say the kind.
+        dotted: steps().every((row) => lineOf(row).querySelector(":scope > .helper-step-dot") && !lineOf(row).querySelector("[data-mark]")),
         looks: {
-          read: ["file", t("worker.stepRead", "파일 읽기")],
-          grep: ["search", t("worker.stepSearch", "검색")],
-          bash: ["terminal", t("worker.stepShell", "셸")],
-          web: ["globe", t("worker.stepWeb", "웹 읽기")],
-          websearch: ["globe", t("worker.stepWebSearch", "웹 검색")],
-          task: ["bot", t("worker.stepTask", "헬퍼 호출")],
+          read: t("worker.stepRead", "파일 읽기"),
+          grep: t("worker.stepSearch", "검색"),
+          bash: t("worker.stepShell", "셸"),
+          web: t("worker.stepWeb", "웹 읽기"),
+          websearch: t("worker.stepWebSearch", "웹 검색"),
+          task: t("worker.stepTask", "헬퍼 호출"),
         },
         table: typeof STEP_NAMES,
         sidebar: [activityWord("websearch"), t("activity.websearch", "웹 검색"), agentActivityKind("websearch"), agentActivityKind("web")],
       };
     });
-    const wanted = KIND_CALLS.map((call) => {
-      const [mark, word] = call.look ? seen.looks[call.look] : ["wrench", call.kind ?? call.name];
-      return { mark, word, folded: false };
-    });
+    const wanted = KIND_CALLS.map((call) => ({ word: call.look ? seen.looks[call.look] : call.kind ?? call.name, folded: false }));
     const wrong = KIND_CALLS.filter((call, at) => JSON.stringify(seen.rows[at]) !== JSON.stringify(wanted[at]))
       .map((call) => `${call.name}/${call.kind}`);
     ok(
-      "C11: the page draws a call by the kind the core reduced its tool to, not by a name it knows — a name only the core knows (OpenDocument, ripgrep, LocalShell, GoogleWebSearch, UrlFetch, SubAgent) wears its kind's mark and words, a call whose kind contradicts its name wears the kind's look, a tool with no word keeps its own spelling with the wrench, and a call that carries no kind says its own name",
-      seen.rows.length === KIND_CALLS.length && wrong.length === 0,
+      "C11: the page draws a call by the kind the core reduced its tool to, not by a name it knows — a name only the core knows (OpenDocument, ripgrep, LocalShell, GoogleWebSearch, UrlFetch, SubAgent) wears its kind's words, a call whose kind contradicts its name wears the kind's, a tool with no word keeps its own spelling, a call that carries no kind says its own name — and every one wears its state's dot, no kind's mark",
+      seen.rows.length === KIND_CALLS.length && wrong.length === 0 && seen.dotted,
       JSON.stringify({ wrong, rows: seen.rows, wanted }),
     );
     ok(
@@ -2982,10 +2965,10 @@ async function stepsSpaceBesideTheGraph(browser, origin, ok) {
   }
 }
 
-/* C16 — asked for less motion, the whole page holds still, and the mark of a
+/* C16 — asked for less motion, the whole page holds still, and the dot of a
  * step that is still out with it (C6 holds the foot line to it): swept over
- * the page, the pulse of the mark on a step's line, the foot line's ring, the
- * fades and the dots. The same page is swept again with motion allowed and
+ * the page, the pulse of the dot on a step's line (its mark until t-22100),
+ * the foot line's ring, the fades and the dots. The same page is swept again with motion allowed and
  * moves, so the stillness is the guard's and not an empty page's — the guard
  * the person approved in the draft (`.run .dot, .spin { animation: none }`). */
 async function stepsStillPage(browser, origin, ok) {
@@ -3010,7 +2993,7 @@ async function stepsStillPage(browser, origin, ok) {
         asked: matchMedia("(prefers-reduced-motion: reduce)").matches,
         live: step !== null,
         page: runningIn(document.querySelector("#worker-view"), { subtree: true }).map((one) => one.animationName ?? one.transitionProperty ?? "?"),
-        mark: runningIn(step?.querySelector(":scope > .helper-step-line > .helper-step-icon")).map((one) => one.animationName ?? "?"),
+        mark: runningIn(step?.querySelector(":scope > .helper-step-line > .helper-step-dot")).map((one) => one.animationName ?? "?"),
         status: runningIn(list().querySelector(":scope > .helper-status"), { subtree: true }).length,
       };
     });
@@ -3018,12 +3001,12 @@ async function stepsStillPage(browser, origin, ok) {
     await page.emulateMedia({ reducedMotion: "no-preference" });
     const moving = await sweep();
     ok(
-      "C16: asked for less motion, nothing on the conversation page animates — swept over the whole page with a step still out: no pulse on the step's mark, no ring or fade on the foot line, no dot",
+      "C16: asked for less motion, nothing on the conversation page animates — swept over the whole page with a step still out: no pulse on the step's dot, no ring or fade on the foot line, no other dot",
       still.asked && still.live && still.page.length === 0 && still.mark.length === 0 && still.status === 0,
       JSON.stringify(still),
     );
     ok(
-      "C16: with motion allowed the same page moves — the mark of the step that is out pulses and the foot line animates — so the stillness above is the guard's, not an empty page's",
+      "C16: with motion allowed the same page moves — the dot of the step that is out pulses and the foot line animates — so the stillness above is the guard's, not an empty page's",
       !moving.asked && moving.live && moving.mark.includes("helper-live-pulse") && moving.status >= 1,
       JSON.stringify(moving),
     );
@@ -3399,8 +3382,8 @@ async function stepsNowWithoutARow(browser, origin, ok) {
       const card = `sub:${tab.worker.term}:${tab.worker.helper.id}`;
       const status = () => document.querySelector("#worker-view .helper-status");
       const nowWords = () => status()?.querySelector(".helper-status-now")?.textContent ?? "";
-      const seeing = () => (status()?.innerText ?? "").replace(/\s+/g, " ").trim();
-      const state = () => ({ now: nowWords(), seeing: seeing(), naming: status()?.classList.contains("is-naming") ?? false });
+      const seeing = () => (status()?.textContent ?? "").replace(/\s+/g, " ").trim();
+      const state = () => ({ now: nowWords(), seeing: seeing(), lead: status()?.querySelector(".helper-status-lead")?.textContent ?? "" });
       const tell = (name, payload) => {
         for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
       };
@@ -3415,15 +3398,15 @@ async function stepsNowWithoutARow(browser, origin, ok) {
         await pollHelperPages();
         await settle();
       };
-      const voice = agentVoice("zo");
-      const now = t("worker.now", "지금");
       const seen = {
-        busy: voice.busy_word,
-        wordNode: status()?.querySelector(".helper-status-word")?.textContent ?? "",
-        wantNothing: `${now} · ${t("worker.busy", "작업 중…")}`,
-        wantWaiting: `${now} · ${t("worker.nowWaiting", "답을 기다리는 중")}`,
-        wantReconnecting: `${now} · ${t("worker.nowReconnecting", "다시 연결하는 중")}`,
-        wantThinking: `${now} · ${t("worker.nowThinking", "생각하는 중")}`,
+        // zo's own English word for a turn that is out — the catalog row still carries it; the page does
+        // not say it (t-22100).
+        busy: installedAgents().find((row) => row.id === "zo")?.busy_word ?? "",
+        lead: t("worker.now", "지금"),
+        wantNothing: t("worker.busy", "작업 중…"),
+        wantWaiting: t("worker.nowWaiting", "답을 기다리는 중"),
+        wantReconnecting: t("worker.nowReconnecting", "다시 연결하는 중"),
+        wantThinking: t("worker.nowThinking", "생각하는 중"),
       };
       await settle();
       seen.nothing = state();
@@ -3463,10 +3446,10 @@ async function stepsNowWithoutARow(browser, origin, ok) {
       seen.ended = { hidden: status()?.hidden === true };
       return seen;
     });
-    const nothingKnown = (one) => one.now === seen.wantNothing && one.naming && !one.seeing.includes(seen.busy);
+    const nothingKnown = (one) => one.now === seen.wantNothing && one.lead === seen.lead && !one.seeing.includes(seen.busy);
     ok(
-      "D4: a helper page with no row out and nothing known says the window's own 「지금 · 작업 중…」 — the agent's English word (zo's 「Working…」) is not on the page, though the word's own node still holds it",
-      seen.busy !== "" && nothingKnown(seen.nothing) && seen.wordNode === seen.busy,
+      "D4: a helper page with no row out and nothing known says the window's own 「지금」 and 「작업 중…」 — the agent's English word (zo's 「Working…」) is nowhere on the line",
+      seen.busy !== "" && nothingKnown(seen.nothing),
       JSON.stringify(seen.nothing),
     );
     ok(
@@ -3482,8 +3465,8 @@ async function stepsNowWithoutARow(browser, origin, ok) {
       JSON.stringify({ w: seen.waiting.now, r: seen.reconnecting.now, t: seen.thinking.now, q: seen.quiet.now, f: seen.finished.now }),
     );
     ok(
-      "D4: none of them says the agent's English word aloud, and every one is the naming band, not the agent's mark and word",
-      [seen.waiting, seen.reconnecting, seen.thinking, seen.again].every((one) => one.naming && !one.seeing.includes(seen.busy)) &&
+      "D4: none of them says the agent's English word aloud, and every one leads with 「지금」",
+      [seen.waiting, seen.reconnecting, seen.thinking, seen.again].every((one) => one.lead === seen.lead && !one.seeing.includes(seen.busy)) &&
         seen.again.now.includes("SCREEN_WIDTH"),
       JSON.stringify(seen.again),
     );
@@ -3492,7 +3475,7 @@ async function stepsNowWithoutARow(browser, origin, ok) {
   } finally {
     await page.close();
   }
-  // An agent whose voice turns through verbs keeps its own line where nothing is known.
+  // An agent whose CLI turns through verbs says the window's words too (t-22100): the verbs were filler.
   const claude = await openWindowTestPage(browser, origin);
   try {
     await openHelperConversation(claude.page, stepsFixture().filter((turn) => turn.role !== "assistant"), "running");
@@ -3500,15 +3483,17 @@ async function stepsNowWithoutARow(browser, origin, ok) {
     const kept = await claude.page.evaluate(async () => {
       await window.__STEPS__.settle();
       const status = document.querySelector("#worker-view .helper-status");
+      const verbs = installedAgents().find((row) => row.id === "claude")?.spinner_verbs ?? [];
       return {
-        naming: status?.classList.contains("is-naming") ?? true,
         now: status?.querySelector(".helper-status-now")?.textContent ?? null,
-        verbs: agentVoice("claude").spinner_verbs.length,
+        want: t("worker.busy", "작업 중…"),
+        verbs: verbs.length,
+        spoke: verbs.filter((verb) => (status?.textContent ?? "").includes(verb)).length,
       };
     });
     ok(
-      "D4: an agent whose voice turns through verbs (Claude Code's) keeps its own line where nothing is known — the fallback is for a voice with one static word",
-      kept.verbs > 0 && kept.naming === false && kept.now === "",
+      "D4: an agent whose CLI turns through verbs (Claude Code's) says the window's 「작업 중…」 where nothing is known, as every agent does — none of its verbs",
+      kept.verbs > 0 && kept.now === kept.want && kept.spoke === 0,
       JSON.stringify(kept),
     );
     ok("D4: the kept voice raised no page errors", claude.faults.length === 0, claude.faults.join("\n"));
@@ -3726,43 +3711,58 @@ async function stepsHelperTally(browser, origin, ok) {
   }
 }
 
-/* D7 — what a search of the web says came of it: how much came back, the way the mockup's row does
- * (「결과 13 KB」), not the first line of whatever the engine printed. A page fetched keeps the size of
- * what came back. A shell step's kind is worded 「셸」 (the mockup's), in the rows, the foot line and the
- * strip — the kind's one word, so it is checked once here where the three read it. */
+/* D7 — what a step on the web says came of it (t-22100, the approved rows): a search says how many
+ * results it brought back — the distinct addresses in its answer, 「결과 12개」, not its size in bytes, and
+ * nothing when it brought none; a page fetched says its HTTP status and size as the CLI recorded them
+ * (`tool.facts`), 「200 · 2 KB」, and nothing when it recorded neither — never the length of the words the
+ * model wrote about the page. A shell step's kind is worded 「셸」 (the mockup's), in the rows, the foot
+ * line and the strip — the kind's one word, so it is checked once here where the three read it. */
 async function stepsWebResults(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
-    const listing = "- 묶음 상품 목록 화면의 제품 정보와 가격을 보여 주는 페이지\n".repeat(400);
+    const links = Array.from({ length: 12 }, (_, at) => ({ title: `묶음 상품 ${at}`, url: `https://example.com/bundles/${at}` }));
+    const listing = `Web search results for query: "bundle product list"\n\nLinks: ${JSON.stringify(links)}\n\n${"묶음 상품 목록 화면의 제품 정보.\n".repeat(40)}${links.map((one) => one.url).join("\n")}`;
     const turns = [{ role: "user", text: "웹을 조사해 줘.", at_ms: CLOCK }];
     let clock = CLOCK;
-    const call = (id, name, kind, input, answer) => {
+    const call = (id, name, kind, input, answer, facts = null) => {
       turns.push({ role: "tool", text: `${name} · ${input}`, at_ms: (clock += 1000), tool: { call_id: id, name, kind, input, is_error: false } });
-      turns.push({ role: "tool_result", text: answer, at_ms: (clock += 400), tool: { call_id: id, is_error: false } });
+      turns.push({ role: "tool_result", text: answer, at_ms: (clock += 400), tool: { call_id: id, is_error: false, ...(facts && { facts }) } });
     };
+    // No two of one kind side by side: settled steps of a kind in a row fold into one.
     call("ws1", "WebSearch", "websearch", "bundle product list", listing);
     call("wf1", "WebFetch", "web", "https://example.com/products/", WEB_OUTPUT);
     call("ws2", "WebSearch", "websearch", "nothing at all", "");
+    call("wf2", "WebFetch", "web", "https://example.com/gone/", "The page is gone.", { status: 404, bytes: 2048 });
     call("sh1", "Bash", "bash", "ls", "a\nb");
+    call("wf3", "WebFetch", "web", "https://example.com/catalog/", WEB_OUTPUT, { status: 200, bytes: 2048 });
     await openConversation(page, turns);
     await installStepsProbe(page);
-    const seen = await page.evaluate(async ({ listing, fetched }) => {
+    const seen = await page.evaluate(async () => {
       const { steps, lineOf, settle } = window.__STEPS__;
       await settle();
       const rowOf = (id) => steps().find((row) => row.__turn?.tool?.call_id === id);
       const partOf = (id, part) => lineOf(rowOf(id))?.querySelector(part)?.textContent ?? null;
       return {
         search: partOf("ws1", ".helper-step-res"),
-        wantSearch: t("worker.stepResultSize", "결과 {{size}}", { size: bytesLabel(listing.length) }),
+        wantSearch: t("worker.stepResults", "결과 {{n}}개", { n: 12, s: "s" }),
         fetch: partOf("wf1", ".helper-step-res"),
-        wantFetch: bytesLabel(fetched.length),
         empty: partOf("ws2", ".helper-step-res"),
         shell: partOf("sh1", ".helper-step-kind"),
+        gone: partOf("wf2", ".helper-step-res"),
+        goneInk: lineOf(rowOf("wf2"))?.querySelector(".helper-step-status")?.classList.contains("is-bad") ?? false,
+        fetched: partOf("wf3", ".helper-step-res"),
+        fetchedInk: lineOf(rowOf("wf3"))?.querySelector(".helper-step-status")?.classList.contains("is-ok") ?? false,
+        size: bytesLabel(2048),
       };
-    }, { listing, fetched: WEB_OUTPUT });
+    });
     ok(
-      "D7: a search of the web says how much came back — 「결과 13 KB」 — and a page fetched says the size of what it got, as before; a search that brought nothing says nothing",
-      seen.search === seen.wantSearch && /^결과 \d+ KB$/.test(seen.search ?? "") && seen.fetch === seen.wantFetch && seen.empty === "",
+      "D7: a search of the web says how many results it brought back — 「결과 12개」, the distinct addresses, not a byte count — and a search that brought nothing says nothing",
+      seen.search === seen.wantSearch && seen.empty === "",
+      JSON.stringify(seen),
+    );
+    ok(
+      "D7: a page fetched says the HTTP status and the size the CLI recorded — 「200 · 2 KB」 in the done ink, 「404 · 2 KB」 in the failure's — and nothing when the CLI recorded neither",
+      seen.fetched === `200 · ${seen.size}` && seen.fetchedInk && seen.gone === `404 · ${seen.size}` && seen.goneInk && seen.fetch === "",
       JSON.stringify(seen),
     );
     ok(

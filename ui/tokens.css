@@ -2367,6 +2367,12 @@
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 4%, transparent);
   --chat-code-bg: color-mix(in srgb, var(--ink-chalk) 8%, transparent);
+  /* The approved conversation (t-22100): a step's argument in a soft link
+   * ink — the link's colour leaning to the words', so a column of addresses,
+   * queries and commands reads as the machine's without shouting — and the
+   * turn rail's resting tick, a third of the quiet ink. */
+  --chat-arg-ink: color-mix(in srgb, var(--chat-link) 62%, var(--ink-chalk));
+  --chat-rail-tick: color-mix(in srgb, var(--ink-mist) 34%, transparent);
   /* The conversation's grammar is Claude Code's (2026-09-15): a 10px bubble,
    * 13px prose at 1.5, an 8px composer — and one accent per agent, worn by the
    * page through `data-agent` (`--chat-accent` is what the rules read). */
@@ -2466,6 +2472,21 @@
   --chat-step-body-indent: 38px;
   --chat-status-ring: 12px;
   --chat-status-ring-stroke: 2px;
+  /* The approved conversation (t-22100, read off its mockup): the flat panels
+   * — the person's words, a fence, the live line — round at 10px and the
+   * person's stand within 92% of the list; the turn rail is a 26px column of
+   * 2px ticks 7px apart, 9px wide and the person's 13px; the head's running
+   * dot is 6px; a shell step's first lines stand at a 1.6 leading. */
+  --chat-panel-radius: 10px;
+  --chat-said-max: 92%;
+  --chat-turn-rail-w: 26px;
+  --chat-turn-tick-w: 9px;
+  --chat-turn-tick-long: 13px;
+  --chat-turn-tick-h: 2px;
+  --chat-turn-tick-gap: 7px;
+  --chat-run-dot: 6px;
+  --chat-out-leading: 1.6;
+  --chat-stack-box: 12px;
   /* The strip under a helper's brief that counts what it did (t-18702): its
    * bar is 4px tall and never narrower than 80px, so a helper with two kinds
    * of step still draws a bar whose shares can be read. */
@@ -3030,6 +3051,8 @@
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 3%, transparent);
   --chat-code-bg: color-mix(in srgb, var(--ink-chalk) 6%, transparent);
+  --chat-arg-ink: color-mix(in srgb, var(--chat-link) 78%, var(--ink-chalk));
+  --chat-rail-tick: color-mix(in srgb, var(--ink-mist) 30%, transparent);
   --chat-accent: var(--ai-accent);
   --agent-accent-claude: #c8643a;
   --agent-send-claude: #c6613f;
