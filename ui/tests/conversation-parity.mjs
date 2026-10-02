@@ -1741,18 +1741,20 @@ async function installStepsProbe(page) {
 
 /* A helper's page, opened the way the sidebar opens it: its transcript read
  * from the parent's record, `state` the helper's own, `agent` the parent's. */
-async function openHelperConversation(page, turns, state, { agent = "claude" } = {}) {
-  await page.evaluate(async ({ turns, state, agent }) => {
+async function openHelperConversation(page, turns, state, { agent = "claude", about = null, sub = {} } = {}) {
+  await page.evaluate(async ({ turns, state, agent, about, sub }) => {
     const term = await openTermTab({ placement: "tab" });
     const owner = tabOfTerm(term);
     paneAgents.set(term, agent);
     hookStates.set(term, "working");
     window.__HELPER_TURNS__ = turns;
-    window.__ANSWER__.subagent_log = (args) => ({ found: true, next: turns.length, turns: turns.slice(args.after ?? 0) });
-    await openHelperPage({ term, tab: owner, worktree: owner.worktree, agent }, { id: "steps-helper", name: "프로필 도우미", state });
+    window.__ANSWER__.subagent_log = (args) => ({
+      found: true, next: turns.length, turns: turns.slice(args.after ?? 0), ...(about && { about }),
+    });
+    await openHelperPage({ term, tab: owner, worktree: owner.worktree, agent }, { id: "steps-helper", name: "프로필 도우미", state, ...sub });
     await pollHelperPages();
     await window.__PAINTED__();
-  }, { turns, state, agent });
+  }, { turns, state, agent, about, sub });
   await page.waitForSelector("#worker-view .helper-turns .helper-turn:not(.is-briefing)", { state: "attached" });
 }
 
@@ -1827,6 +1829,13 @@ export async function testConversationSteps(browser, origin, ok) {
   await stepsListUnderASentence(browser, origin, ok);
   await stepsHelperTally(browser, origin, ok);
   await stepsWebResults(browser, origin, ok);
+  await stepsStreamingLifetime(browser, origin, ok);
+  await stepsNewestStepNamed(browser, origin, ok);
+  await stepsLeadsWordsStayTheLeads(browser, origin, ok);
+  await stepsReportTail(browser, origin, ok);
+  await stepsTallyScope(browser, origin, ok);
+  await stepsWebKinds(browser, origin, ok);
+  await stepsBriefAndRole(browser, origin, ok);
 }
 
 /* C1–C4, C9 — the rows the fixture comes to, closed, then pressed. */
@@ -3763,6 +3772,613 @@ async function stepsWebResults(browser, origin, ok) {
     ok("D7: the web results raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
+  }
+}
+
+/* D8 — the rows that stream have a lifetime (the helper page, the pane's page and the wire's page are
+ * one renderer; the pane's own channel feeds the same rows, `pane-conversation.mjs`). A voice that opens
+ * and closes a block without a word leaves no row; a thought that is over is a thought, not 「생각 중…」;
+ * the foot line names the newest thought that is going — never the first of several, nothing once none
+ * goes; the words of a finished answer stand until the transcript carries them; and a thought a person
+ * was reading hands its open body and the keyboard to the row of its turn, wherever it stood among the
+ * streaming ones. */
+async function stepsStreamingLifetime(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, stepsFixture(), { status: "working" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async ({ at }) => {
+      const { list, lineOf, shown, settle } = window.__STEPS__;
+      const thoughts = () => [...list().querySelectorAll(":scope > .is-streaming.is-thinking")];
+      const turnRows = () => [...list().querySelectorAll(":scope > .is-thinking:not(.is-streaming)")];
+      const part = (row, name) => lineOf(row)?.querySelector(name)?.textContent ?? null;
+      const status = () => list().querySelector(":scope > .helper-status");
+      const now = () => status()?.querySelector(".helper-status-now")?.textContent ?? "";
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+      const bring = async (live, turns = []) => {
+        window.__CONVERSATION__.turns.push(...turns);
+        window.__CONVERSATION__.live = live;
+        await pollHelperPages();
+        await settle();
+      };
+      const piece = (text, done = true, role = "thinking") => ({ role, text, done });
+      const going = t("worker.thinking", "생각 중…");
+      const over = t("worker.thought", "생각");
+      const OLD = "Gathering task details";
+      const FRESH = "**Checking the current task**\nThen the cells.";
+      const seen = { going, over };
+      // An old thought, twenty blocks that said nothing, one short one: all of them over.
+      const finished = [piece(OLD), ...Array.from({ length: 20 }, () => piece("")), piece("ok")];
+      await bring(finished);
+      seen.finished = {
+        rows: thoughts().length,
+        titles: thoughts().map((row) => part(row, ".helper-step-target")),
+        labels: thoughts().map((row) => part(row, ".helper-step-res")),
+        now: now(),
+      };
+      // A new thought begins: it is the one the foot line names, and the old one is not.
+      await bring([...finished, piece(FRESH, false)]);
+      const newest = thoughts().at(-1);
+      seen.fresh = { rows: thoughts().length, title: part(newest, ".helper-step-target"), label: part(newest, ".helper-step-res"), now: now() };
+      // Its first sentence is not closed: nothing to name — and never the old one in its place.
+      await bring([...finished, piece("Checking the cells now", false)]);
+      seen.unclosed = { rows: thoughts().length, title: part(thoughts().at(-1), ".helper-step-target"), now: now() };
+      // A thought that goes is over: the same row, no longer 「생각 중…」, no longer what the foot line says.
+      await bring([piece("**Same node**\nwords", false)]);
+      const same = thoughts()[0];
+      const before = { label: part(same, ".helper-step-res"), now: now() };
+      await bring([piece("**Same node**\nwords", true)]);
+      seen.flip = {
+        before, rows: thoughts().length, same: thoughts()[0] === same, label: part(same, ".helper-step-res"),
+        done: same.classList.contains("is-done"), now: now(),
+      };
+      // The transcript brings the old thought's turn: its finished row goes, the new one stays and is named.
+      await bring([...finished, piece(FRESH, false)]);
+      await bring([piece(FRESH, false)], [{ role: "thinking", text: OLD, at_ms: at }]);
+      seen.settled = {
+        rows: thoughts().length, title: part(thoughts().at(-1), ".helper-step-target"), now: now(),
+        turn: turnRows().some((row) => part(row, ".helper-step-target") === OLD),
+      };
+      // A thought being read, standing before another one that goes on: when its turn comes the row of the turn
+      // is open and holds the keyboard, and the thought that goes on is the very node it was.
+      const ALPHA = "Alpha beta gamma";
+      await bring([piece(ALPHA), piece("**Bee**\nmore words", false)]);
+      const [alpha, bee] = thoughts();
+      lineOf(alpha).click();
+      await wait(60);
+      await settle();
+      lineOf(alpha).focus();
+      seen.read = { rows: thoughts().length, open: alpha.open === true, held: document.activeElement === lineOf(alpha) };
+      await bring([piece("**Bee**\nmore words", false)], [{ role: "thinking", text: ALPHA, at_ms: at + 2000 }]);
+      const turn = turnRows().find((row) => part(row, ".helper-step-target") === ALPHA);
+      seen.handed = {
+        gone: !alpha.isConnected,
+        beeKept: thoughts().length === 1 && thoughts()[0] === bee && bee.open === false,
+        open: turn?.open === true,
+        held: turn ? document.activeElement === lineOf(turn) : false,
+      };
+      // The words of a finished answer stand while the transcript is late.
+      const WORDS = "The final words of the answer.";
+      await bring([piece(WORDS, true, "assistant")]);
+      await bring([piece(WORDS, true, "assistant")]);
+      await wait(40);
+      await settle();
+      const answer = list().querySelector(":scope > .is-streaming.is-assistant");
+      seen.answer = { rows: list().querySelectorAll(":scope > .is-streaming").length, shown: answer ? shown(answer, WORDS) : false };
+      return seen;
+    }, { at: CLOCK + 300_000 });
+    const noBlank = (titles) => titles.every((title) => title !== null && title !== "");
+    ok(
+      "D8: finished thoughts stand as rows of their own words — twenty blocks that said nothing leave no row, the rest are called 「생각」 and not 「생각 중…」, and the foot line names none of them",
+      seen.finished.rows === 2 && noBlank(seen.finished.titles) && seen.finished.titles.join("|") === "Gathering task details|ok" &&
+        seen.finished.labels.every((label) => label === seen.over) && seen.finished.now === "",
+      JSON.stringify(seen.finished),
+    );
+    ok(
+      "D8: a new thought that goes is the one the foot line names — its heading, not the old thought's — and wears 「생각 중…」; with no sentence closed yet the line names nothing, and never an older thought in its place",
+      seen.fresh.rows === 3 && seen.fresh.title === "Checking the current task" && seen.fresh.label === seen.going &&
+        seen.fresh.now.endsWith("Checking the current task") && !seen.fresh.now.includes("Gathering") &&
+        seen.unclosed.rows === 3 && seen.unclosed.now === "" && !seen.unclosed.now.includes("Gathering"),
+      JSON.stringify({ fresh: seen.fresh, unclosed: seen.unclosed }),
+    );
+    ok(
+      "D8: a thought that goes and then ends is the same row — 「생각 중…」 turns 「생각」, it takes the end class, and the foot line stops naming it",
+      seen.flip.before.label === seen.going && seen.flip.before.now.endsWith("Same node") && seen.flip.rows === 1 && seen.flip.same &&
+        seen.flip.label === seen.over && seen.flip.done && seen.flip.now === "",
+      JSON.stringify(seen.flip),
+    );
+    ok(
+      "D8: when the transcript carries the old thoughts their rows go and the new thought stays and is named — one swap, the turn's row standing where the words were",
+      seen.settled.rows === 1 && seen.settled.title === "Checking the current task" && seen.settled.turn &&
+        seen.settled.now.endsWith("Checking the current task"),
+      JSON.stringify(seen.settled),
+    );
+    ok(
+      "D8: a thought being read that is not the last streaming one hands its open body and the keyboard to the row of its turn, and the thought that goes on is the very node it was, still closed",
+      seen.read.rows === 2 && seen.read.open && seen.read.held && seen.handed.gone && seen.handed.beeKept && seen.handed.open && seen.handed.held,
+      JSON.stringify({ read: seen.read, handed: seen.handed }),
+    );
+    ok(
+      "D8: the words of a finished answer stand while the transcript is late — they are not taken off the page early",
+      seen.answer.rows === 1 && seen.answer.shown,
+      JSON.stringify(seen.answer),
+    );
+    ok("D8: the streaming lifetime raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* D9 — the foot line of a helper's own page names the newest call that is out: two calls out, the later
+ * one; when it comes back, the earlier one; when that one comes back, nothing. A call that came back is
+ * never named again. */
+async function stepsNewestStepNamed(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const turns = [
+      { role: "user", text: "두 파일을 읽어 줘.", at_ms: CLOCK },
+      { role: "assistant", text: "먼저 두 파일을 읽겠습니다.", at_ms: CLOCK + 500 },
+    ];
+    await openHelperConversation(page, turns, "running");
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async ({ dir }) => {
+      const { list, settle } = window.__STEPS__;
+      const now = () => list().querySelector(":scope > .helper-status .helper-status-now")?.textContent ?? "";
+      const feed = async (...more) => {
+        window.__HELPER_TURNS__.push(...more);
+        await pollHelperPages();
+        await settle();
+      };
+      const call = (id, file, at) => ({
+        role: "tool", text: `Read · ${dir}/${file}`, at_ms: at, tool: { call_id: id, name: "Read", kind: "read", input: `${dir}/${file}`, is_error: false },
+      });
+      const back = (id, at) => ({ role: "tool_result", text: "ok", at_ms: at, tool: { call_id: id, is_error: false } });
+      const T = 1_790_000_500_000;
+      const seen = {};
+      await feed(call("n1", "First.tsx", T + 1000), call("n2", "Second.tsx", T + 1100));
+      seen.both = now();
+      await feed(back("n2", T + 2000));
+      seen.afterSecond = now();
+      await feed(back("n1", T + 3000));
+      seen.afterBoth = now();
+      return seen;
+    }, { dir: PROFILE });
+    ok(
+      "D9: two calls out — the foot line names the later one; when it comes back, the earlier one; when both are back it names nothing",
+      seen.both.includes("Second.tsx") && !seen.both.includes("First.tsx") &&
+        seen.afterSecond.includes("First.tsx") && !seen.afterSecond.includes("Second.tsx") &&
+        seen.afterBoth === "",
+      JSON.stringify(seen),
+    );
+    ok("D9: the foot line raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* D9b — a helper's page carries its lead's term, not its lead's channel. What the lead streams on its own
+ * channel is not drawn as rows in the helper's list, is not what the helper's foot line names, and is not
+ * settled — taken from the lead — when the helper's own turns land. */
+async function stepsLeadsWordsStayTheLeads(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standZo(page);
+    await openHelperConversation(page, [
+      { role: "user", text: "두 파일을 읽어 줘.", at_ms: CLOCK },
+      { role: "assistant", text: "먼저 두 파일을 읽겠습니다.", at_ms: CLOCK + 500 },
+    ], "running", { agent: "zo" });
+    await installStepsProbe(page);
+    const seen = await page.evaluate(async ({ at }) => {
+      const { list, settle } = window.__STEPS__;
+      const tab = activeHelperPage();
+      const term = tab.worker.term;
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const now = () => list().querySelector(":scope > .helper-status .helper-status-now")?.textContent ?? "";
+      const say = (frame) => tell("session:frame", { session: "s-lead", frame });
+      paneSessions.set(term, { agent: "zo", session: { key: "session_id", id: "s-lead" }, resumable: true });
+      say({ type: "turn", turn_id: 1, phase: "start" });
+      say({ type: "reasoning", id: 1, text: "**The lead thought**\nAbout other things.", done: true });
+      say({ type: "text_delta", id: 2, text: "The lead is answering.", done: true });
+      say({ type: "reasoning", id: 3, text: "**The lead is thinking**\nStill.", done: false });
+      const seen = { held: (paneLive.get(term) ?? []).length };
+      window.__HELPER_TURNS__.push({ role: "assistant", text: "The helper says something.", at_ms: at });
+      await pollHelperPages();
+      await settle();
+      seen.rows = list().querySelectorAll(":scope > .is-streaming").length;
+      seen.now = now();
+      // The helper's own thought lands: it settles nothing of the lead's.
+      window.__HELPER_TURNS__.push({ role: "thinking", text: "The helper thought.", at_ms: at + 100 });
+      await pollHelperPages();
+      await settle();
+      seen.heldAfter = (paneLive.get(term) ?? []).length;
+      seen.rowsAfter = list().querySelectorAll(":scope > .is-streaming").length;
+      seen.nowAfter = now();
+      paneLive.delete(term);
+      paneSessions.delete(term);
+      return seen;
+    }, { at: CLOCK + 500_000 });
+    ok(
+      "D9b: the words a lead streams on its own channel are not drawn in its helper's page, not named on the helper's foot line, and not settled by the helper's own turns — the lead keeps all three pieces",
+      seen.held === 3 && seen.rows === 0 && seen.rowsAfter === 0 && !/The lead/.test(seen.now) && !/The lead/.test(seen.nowAfter) &&
+        seen.heldAfter === 3,
+      JSON.stringify(seen),
+    );
+    ok("D9b: the helper's page raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* D10 — a finished helper's report is the last thing it said: a closing step or thought after it — the
+ * hand-in call — leaves it standing, with the door counting that step too. A call that never came back,
+ * the person's stop, a last answer with nothing in it, or a helper still running do not make a report,
+ * and an older answer is never put in the place of a missing one. */
+async function stepsReportTail(browser, origin, ok) {
+  const base = stepsFixture().filter((turn) => turn.role !== "assistant");
+  const REPORT = REPORT_WORDS.join(" ");
+  const T = CLOCK + 400_000;
+  const closing = [
+    { role: "assistant", text: REPORT, at_ms: T },
+    { role: "thinking", text: "Handing the report in now.", at_ms: T + 500 },
+    { role: "tool", text: "Bash · zerocode-orc send --type worker_done", at_ms: T + 900,
+      tool: { call_id: "done1", name: "Bash", kind: "bash", input: "zerocode-orc send --type worker_done", is_error: false } },
+    { role: "tool_result", text: "{\"messageId\":\"m-1\"}", at_ms: T + 1200, tool: { call_id: "done1", is_error: false } },
+  ];
+  const roadsOf = async (page) => page.evaluate(async ({ words }) => {
+    const { list, steps, shown, settle } = window.__STEPS__;
+    await settle();
+    const report = list().querySelector(":scope > .helper-report");
+    const door = report?.querySelector(".helper-report-door");
+    return {
+      report: report !== null,
+      whole: report !== null && words.every((sentence) => shown(report, sentence)),
+      door: door?.textContent ?? "",
+      steps: steps().length,
+      saidAbove: list().querySelector(":scope > .helper-turn.is-assistant.is-said-above") !== null,
+    };
+  }, { words: REPORT_WORDS });
+  // A hand-in call after the report: the report stands.
+  const clean = await openWindowTestPage(browser, origin);
+  try {
+    await openHelperConversation(clean.page, [...base, ...closing], "done");
+    await installStepsProbe(clean.page);
+    const seen = await roadsOf(clean.page);
+    ok(
+      "D10: a finished helper whose last act after its report was a thought and a hand-in call still opens on its report — whole, with the step counted in the door, the answer's own row folded under it",
+      seen.report && seen.whole && /\b13\b/.test(seen.door) && seen.saidAbove,
+      JSON.stringify(seen),
+    );
+    // The person's stop, afterwards, says it was cut short: no report is made of what it said on the way.
+    const stopped = await clean.page.evaluate(async () => {
+      const { list, settle } = window.__STEPS__;
+      const tab = activeHelperPage();
+      tab.worker.helper.stopRecord = "stopped_by_person";
+      syncHelperReport(list(), tab.worker);
+      await settle();
+      return { gone: list().querySelector(":scope > .helper-report") === null && !list().classList.contains("is-reported") };
+    });
+    ok(
+      "D10: the person's stop after a hand-in takes the report away — the helper was cut off in the middle of its work, and what it said on the way is not its last word",
+      stopped.gone,
+      JSON.stringify(stopped),
+    );
+    ok("D10: the report with a hand-in raised no page errors", clean.faults.length === 0, clean.faults.join("\n"));
+  } finally {
+    await clean.page.close();
+  }
+  const cases = [
+    ["a call that never came back", [...base, ...closing.slice(0, 3)], "done"],
+    ["a helper still running", [...base, ...closing], "running"],
+    ["a last answer with nothing in it", [...base, { role: "assistant", text: "An early answer, said on the way.", at_ms: T },
+      { role: "tool", text: "Read · x", at_ms: T + 100, tool: { call_id: "z1", name: "Read", kind: "read", input: `${PROFILE}/Z.tsx`, is_error: false } },
+      { role: "tool_result", text: "ok", at_ms: T + 200, tool: { call_id: "z1", is_error: false } },
+      { role: "assistant", text: "<system-reminder>Nothing to say.</system-reminder>", at_ms: T + 300 }], "done"],
+  ];
+  for (const [name, turns, state] of cases) {
+    const one = await openWindowTestPage(browser, origin);
+    try {
+      await openHelperConversation(one.page, turns, state);
+      await installStepsProbe(one.page);
+      const seen = await roadsOf(one.page);
+      ok(
+        `D10: ${name} makes no report — an older answer is not put in its place`,
+        !seen.report && !seen.saidAbove,
+        JSON.stringify(seen),
+      );
+      ok(`D10: ${name} raised no page errors`, one.faults.length === 0, one.faults.join("\n"));
+    } finally {
+      await one.page.close();
+    }
+  }
+}
+
+/* D11 — what the strip counts. The page holds the helper's last 400 turns; once the first it holds is not the
+ * file's first, the strip says it counts the recent steps and why the head's whole count is a bigger number. A
+ * helper whose whole record the page holds says the plain 「도구 N」. */
+async function stepsTallyScope(browser, origin, ok) {
+  const calls = (count) => {
+    const turns = [{ role: "user", text: "많은 파일을 읽어 줘.", at_ms: CLOCK }];
+    for (let at = 0; at < count; at += 1) {
+      turns.push({ role: "tool", text: `Bash · echo ${at}`, at_ms: CLOCK + 1000 + at * 10,
+        tool: { call_id: `m${at}`, name: "Bash", kind: "bash", input: `echo ${at}`, is_error: false } });
+      turns.push({ role: "tool_result", text: String(at), at_ms: CLOCK + 1005 + at * 10, tool: { call_id: `m${at}`, is_error: false } });
+    }
+    return turns;
+  };
+  const long = await openWindowTestPage(browser, origin);
+  try {
+    await openHelperConversation(long.page, calls(450), "running", { sub: { tool_calls: 450 } });
+    await installStepsProbe(long.page);
+    const seen = await long.page.evaluate(async () => {
+      await window.__STEPS__.settle();
+      const strip = document.querySelector("#worker-view .helper-tally");
+      const held = activeHelperPage().worker.helper;
+      const tools = held.turns.filter((turn) => turn.role === "tool").length;
+      return {
+        total: strip?.querySelector(".helper-tally-total")?.textContent ?? null,
+        tip: strip?.dataset.tip ?? null,
+        head: document.querySelector("#worker-view .worker-uses")?.textContent ?? null,
+        tools, first: held.turns[0]?.seq ?? null, cap: HELPER_TURN_CAP,
+        wantRecent: t("worker.tallyRecent", "최근 도구 {{n}}", { n: tools }),
+        wantTip: t("worker.tallyRecentTip", "이 화면은 도우미 기록의 마지막 {{cap}}줄만 들고 있어, 도구 수는 그 안의 것입니다 — 머리의 횟수는 처음부터의 전체입니다", { cap: HELPER_TURN_CAP }),
+        wantHead: toolUsesWords(450),
+      };
+    });
+    ok(
+      "D11: a helper longer than the page holds says its strip counts the recent steps — 「최근 도구 N」 with N the steps the page holds, a tip that says why — while the head keeps the whole count the roster gave",
+      seen.first > 0 && seen.total === seen.wantRecent && seen.tools < 450 && seen.tip === seen.wantTip && seen.head === seen.wantHead &&
+        /\b450\b/.test(seen.head ?? ""),
+      JSON.stringify(seen),
+    );
+    ok("D11: the long helper's strip raised no page errors", long.faults.length === 0, long.faults.join("\n"));
+  } finally {
+    await long.page.close();
+  }
+  const short = await openWindowTestPage(browser, origin);
+  try {
+    await openHelperConversation(short.page, calls(12), "running", { sub: { tool_calls: 12 } });
+    await installStepsProbe(short.page);
+    const seen = await short.page.evaluate(async () => {
+      await window.__STEPS__.settle();
+      const strip = document.querySelector("#worker-view .helper-tally");
+      return {
+        total: strip?.querySelector(".helper-tally-total")?.textContent ?? null,
+        tip: strip?.dataset.tip ?? null,
+        want: t("worker.tallyTotal", "도구 {{n}}", { n: 12 }),
+      };
+    });
+    ok(
+      "D11: a helper whose whole record the page holds says the plain 「도구 N」 and carries no tip",
+      seen.total === seen.want && seen.tip === null,
+      JSON.stringify(seen),
+    );
+    ok("D11: the short helper's strip raised no page errors", short.faults.length === 0, short.faults.join("\n"));
+  } finally {
+    await short.page.close();
+  }
+}
+
+/* D12 — a page fetched and a search of the web are two operations. The core words them apart (`web`,
+ * `websearch`); the page folds steps of one kind only, so the two stand as rows of their own, each in its
+ * own words, and the strip counts them apart — on the helper's page, the pane's and the wire's. A turn
+ * that carries no kind at all (written before turns did) stands under its tool's own name, so those two
+ * do not fold either. Six reads in a row are still one row. */
+async function stepsWebKinds(browser, origin, ok) {
+  const turnsOf = (legacy) => {
+    const turns = [{ role: "user", text: "웹을 조사해 줘.", at_ms: CLOCK }];
+    let clock = CLOCK;
+    const call = (id, name, kind, input, answer) => {
+      turns.push({ role: "tool", text: `${name} · ${input}`, at_ms: (clock += 1000),
+        tool: { call_id: id, name, ...(legacy ? {} : { kind }), input, is_error: false } });
+      turns.push({ role: "tool_result", text: answer, at_ms: (clock += 400), tool: { call_id: id, is_error: false } });
+    };
+    call("wf1", "WebFetch", "web", "https://example.com/products/", WEB_OUTPUT);
+    call("ws1", "WebSearch", "websearch", "bundle product list", "result ".repeat(200));
+    call("sh1", "Bash", "bash", "ls", "a\nb");
+    if (!legacy) READ_FIRST.forEach((name, at) => call(`r${at}`, "Read", "read", `${PROFILE}/${name}`, fileBody(name)));
+    return turns;
+  };
+  const read = (page) => page.evaluate(async () => {
+    const { steps, lineOf, wordsOf, settle } = window.__STEPS__;
+    await settle();
+    const strip = document.querySelector("#worker-view .helper-tally");
+    return {
+      lines: steps().map((row) => wordsOf(lineOf(row))),
+      runs: steps().map((row) => row.classList.contains("is-run")),
+      kinds: strip ? [...strip.querySelectorAll(".helper-tally-kind")].map((one) => one.textContent) : null,
+      web: t("worker.stepWeb", "웹 읽기"),
+      search: t("worker.stepWebSearch", "웹 검색"),
+      shell: t("worker.stepShell", "셸"),
+      reads: t("worker.stepRead", "파일 읽기"),
+    };
+  });
+  const roads = [
+    ["a helper's page", (page, turns) => openHelperConversation(page, turns, "done")],
+    ["the wire's page", (page, turns) => openConversation(page, turns)],
+    ["a pane's page", (page, turns) => openPaneConversation(page, turns)],
+  ];
+  for (const [road, open] of roads) {
+    const one = await openWindowTestPage(browser, origin);
+    try {
+      await open(one.page, turnsOf(false));
+      await installStepsProbe(one.page);
+      const seen = await read(one.page);
+      ok(
+        `D12: on ${road} a page fetched and a search of the web are rows of their own — 「${seen.web}」 with the address, 「${seen.search}」 with the query — and the six reads after them are one row`,
+        seen.lines.length === 4 && seen.lines[0].startsWith(seen.web) && seen.lines[0].includes("example.com/products") &&
+          seen.lines[1].startsWith(seen.search) && seen.lines[1].includes("bundle product list") &&
+          !seen.lines[0].includes(seen.search) && !seen.lines[1].includes(seen.web) &&
+          seen.runs.join() === "false,false,false,true" && /\b6\b/.test(seen.lines[3]),
+        JSON.stringify(seen),
+      );
+      if (road === "a helper's page") {
+        ok(
+          "D12: the strip counts the two apart — 「웹 읽기 1」, 「웹 검색 1」 — in the order each first came",
+          seen.kinds?.join("|") === [`${seen.web} 1`, `${seen.search} 1`, `${seen.shell} 1`, `${seen.reads} 6`].join("|"),
+          JSON.stringify(seen),
+        );
+      }
+      ok(`D12: ${road} with web steps raised no page errors`, one.faults.length === 0, one.faults.join("\n"));
+    } finally {
+      await one.page.close();
+    }
+  }
+  const legacy = await openWindowTestPage(browser, origin);
+  try {
+    await openHelperConversation(legacy.page, turnsOf(true), "done");
+    await installStepsProbe(legacy.page);
+    const seen = await read(legacy.page);
+    ok(
+      "D12: calls that carry no kind stand under their tools' own names — 「WebFetch」 and 「WebSearch」 are two rows, never one 「웹 읽기 2개」",
+      seen.lines.length === 3 && seen.lines[0].startsWith("WebFetch") && seen.lines[1].startsWith("WebSearch") &&
+        seen.runs.every((run) => run === false),
+      JSON.stringify(seen),
+    );
+    ok("D12: kind-less web steps raised no page errors", legacy.faults.length === 0, legacy.faults.join("\n"));
+  } finally {
+    await legacy.page.close();
+  }
+}
+
+/* D13 — what a helper was asked, in the card: the line its parent gave the job (the vendor's own, nothing
+ * translated), the sentences of the instruction that are not conditions, the conditions as tags — the one
+ * about the language of the report included — and the whole instruction behind a press; the kind of helper
+ * the vendor says it is as a tag beside the name, only when the name does not already say it. What the
+ * vendor wrote reaches the page as text. A helper with no such file, or a broken one, has neither. */
+const BRIEF_EVIDENCE =
+  "Read-only research and audit. Do NOT edit any files. Report back in Korean.\n" +
+  "The product owner of the shop app says the list must also show bundled products.";
+
+async function stepsBriefAndRole(browser, origin, ok) {
+  const turns = () => [
+    { role: "user", text: BRIEF_EVIDENCE, at_ms: CLOCK },
+    { role: "assistant", text: "읽는 중입니다.", at_ms: CLOCK + 1000 },
+  ];
+  const read = (page) => page.evaluate(async () => {
+    const { settle } = window.__STEPS__;
+    await settle();
+    const card = document.querySelector("#worker-view .helper-brief");
+    const q = (selector) => card?.querySelector(selector) ?? null;
+    const role = document.querySelector("#worker-view .helper-head .helper-role");
+    const name = document.querySelector("#worker-view .helper-head .worker-name");
+    const box = (node) => node?.getBoundingClientRect();
+    const tags = q(".helper-brief-tags");
+    const more = q(".helper-brief-more");
+    return {
+      card: card !== null && !card.hidden,
+      title: q(".helper-brief-title")?.textContent ?? null,
+      said: q(".helper-brief-said")?.textContent ?? null,
+      tags: [...(card?.querySelectorAll(".helper-brief-tag") ?? [])].map((one) => one.textContent),
+      more: more?.textContent ?? null,
+      oneRow: tags !== null && more !== null && box(more).top < box(tags).bottom && box(more).bottom > box(tags).top,
+      rightEdge: more !== null && card !== null && box(card).right - box(more).right < 24,
+      role: role && !role.hidden ? role.textContent : null,
+      roleLabel: role?.getAttribute("aria-label") ?? null,
+      roleAfterName: role?.previousElementSibling === name,
+      images: card?.querySelectorAll("img, script").length ?? -1,
+    };
+  });
+  const about = { agent_type: "Explore", description: "Map the products list" };
+  const first = await openWindowTestPage(browser, origin);
+  try {
+    await openHelperConversation(first.page, turns(), "running", { about, sub: { name: "price-research" } });
+    await installStepsProbe(first.page);
+    const seen = await read(first.page);
+    ok(
+      "D13: the card says the actual job — the sentence of the instruction that is not a condition — under the line the parent gave it, not the instruction's generic opening",
+      seen.card && seen.title === "Map the products list" &&
+        seen.said === "The product owner of the shop app says the list must also show bundled products.",
+      JSON.stringify(seen),
+    );
+    ok(
+      "D13: the conditions the instruction states are the tags, copied out of it — read-only, no edits, and the language of the report — and the door to the whole instruction stands at the card's far edge",
+      seen.tags.join("|") === "Read-only research and audit|Do NOT edit any files|Report back in Korean" &&
+        seen.more !== null && seen.more.includes(String([...BRIEF_EVIDENCE].length)) && seen.rightEdge,
+      JSON.stringify(seen),
+    );
+    ok(
+      "D13: the kind of helper the vendor says it is stands beside the name as a tag, with its words for a screen reader",
+      seen.role === "Explore" && seen.roleAfterName && (seen.roleLabel ?? "").includes("Explore"),
+      JSON.stringify(seen),
+    );
+    const whole = await first.page.evaluate(async () => {
+      const { settle } = window.__STEPS__;
+      const more = document.querySelector("#worker-view .helper-brief-more");
+      more?.click();
+      await settle();
+      const full = document.querySelector("#worker-view .helper-brief-full");
+      const said = document.querySelector("#worker-view .helper-brief-text");
+      return { door: more !== null, shown: full?.checkVisibility() ?? false, text: full?.textContent ?? null, said: said?.checkVisibility() ?? null };
+    });
+    ok(
+      "D13: the whole instruction is one press away, word for word, and the summary gives way to it",
+      whole.shown && whole.text === BRIEF_EVIDENCE && whole.said === false,
+      JSON.stringify(whole),
+    );
+    ok("D13: the card and the tag raised no page errors", first.faults.length === 0, first.faults.join("\n"));
+  } finally {
+    await first.page.close();
+  }
+  // Short conditions leave room: the door to the whole instruction stands on the tags' own row.
+  const brief = await openWindowTestPage(browser, origin);
+  try {
+    await openHelperConversation(brief.page, [
+      { role: "user", text: "Check the shop list for bundles and say which screens are involved. Read-only. Do not edit.", at_ms: CLOCK },
+      { role: "assistant", text: "읽는 중입니다.", at_ms: CLOCK + 1000 },
+    ], "running");
+    await installStepsProbe(brief.page);
+    const seen = await read(brief.page);
+    ok(
+      "D13: short conditions and the door to the whole instruction share one row, the door at the far end",
+      seen.tags.join("|") === "Read-only|Do not edit" && seen.said === "Check the shop list for bundles and say which screens are involved." &&
+        seen.more !== null && seen.oneRow && seen.rightEdge,
+      JSON.stringify(seen),
+    );
+    ok("D13: the short card raised no page errors", brief.faults.length === 0, brief.faults.join("\n"));
+  } finally {
+    await brief.page.close();
+  }
+  // The name already says the kind, the vendor wrote nothing, or what it wrote is broken: no tag, no line.
+  const unlisted = [
+    ["a name that is already the kind", { agent_type: "price-research", description: "Same word" }, { name: "price-research" }],
+    ["no file at all", null, {}],
+    ["words that are not strings", { agent_type: 7, description: ["x"] }, {}],
+    ["words that are blank", { agent_type: "  ", description: "" }, {}],
+  ];
+  for (const [name, bad, sub] of unlisted) {
+    const one = await openWindowTestPage(browser, origin);
+    try {
+      await openHelperConversation(one.page, turns(), "running", { about: bad, sub });
+      await installStepsProbe(one.page);
+      const seen = await read(one.page);
+      ok(
+        `D13: ${name} — no kind tag, ${bad?.description === "Same word" ? "the line is still the vendor's own" : "no line"}`,
+        seen.role === null && (bad?.description === "Same word" ? seen.title === "Same word" : seen.title === null) && seen.card,
+        JSON.stringify(seen),
+      );
+      ok(`D13: ${name} raised no page errors`, one.faults.length === 0, one.faults.join("\n"));
+    } finally {
+      await one.page.close();
+    }
+  }
+  // What the vendor wrote is text: markup in it is words on the page, not nodes.
+  const hostile = await openWindowTestPage(browser, origin);
+  try {
+    const markup = "<img src=x onerror=\"window.__PWNED__=1\"><script>window.__PWNED__=1</script>";
+    await openHelperConversation(hostile.page, turns(), "running", { about: { agent_type: markup, description: markup } });
+    await installStepsProbe(hostile.page);
+    const seen = await read(hostile.page);
+    const pwned = await hostile.page.evaluate(() => window.__PWNED__ === 1);
+    ok(
+      "D13: markup in what the vendor wrote is shown as words — no element is made of it and nothing runs",
+      seen.title === markup && seen.role === markup && seen.images === 0 && !pwned,
+      JSON.stringify(seen),
+    );
+    ok("D13: the markup case raised no page errors", hostile.faults.length === 0, hostile.faults.join("\n"));
+  } finally {
+    await hostile.page.close();
   }
 }
 

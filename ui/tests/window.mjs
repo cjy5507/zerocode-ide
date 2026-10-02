@@ -45,6 +45,7 @@ import { testWorkspaceBoard } from "./workspace-board.mjs";
 import { testFlowConsole } from "./flow-console.mjs";
 import { testWorktreeEvidence } from "./worktree-evidence.mjs";
 import { testAgentConversation } from "./agent-conversation.mjs";
+import { testHelperDoors } from "./helper-doors.mjs";
 import { testBrowserRecovery } from "./browser-recovery.mjs";
 import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
 import { testEmulatorSeat } from "./emulator-seat.mjs";
@@ -220,6 +221,7 @@ suite("workspace-board", ({ browser, origin, ok }) => testWorkspaceBoard(browser
 suite("flow-console", ({ browser, origin, ok }) => testFlowConsole(browser, origin, ok));
 suite("worktree-evidence", ({ browser, origin, ok }) => testWorktreeEvidence(browser, origin, ok));
 suite("agent-conversation", ({ browser, origin, ok }) => testAgentConversation(browser, origin, ok));
+suite("helper-doors", ({ browser, origin, ok }) => testHelperDoors(browser, origin, ok));
 suite("browser-recovery", ({ browser, origin, ok }) => testBrowserRecovery(browser, origin, ok));
 suite("browser-panes-survive", ({ browser, origin, ok }) => testBrowserPanesSurvive(browser, origin, ok));
 suite("emulator-seat", ({ browser, origin, ok }) => testEmulatorSeat(browser, origin, ok));

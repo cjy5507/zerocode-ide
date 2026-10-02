@@ -35411,6 +35411,21 @@ mod tests {
             reading.contains("transcript_log_at(&path, after)"),
             "the helper page reads its file down a road of its own:\n{reading}"
         );
+        // What the vendor wrote beside that file about the helper is found from the
+        // same path, opened by the opener every file the window owns is opened by
+        // (a link, a pipe or a swapped file answers nothing, and the handle's own size
+        // is checked), and read only up to its bound.
+        let about = block_after(shipped, "fn helper_about(");
+        assert!(
+            reading.contains("log.about = helper_about(&path);")
+                && about.contains("crate::durable_file::open_plain_file(&beside)")
+                && about.contains("file.metadata().ok()?.len() > HELPER_ABOUT_BYTES")
+                && about.contains("std::io::Read::take(file, HELPER_ABOUT_BYTES)")
+                && !about.contains("File::open(")
+                && !about.contains("symlink_metadata"),
+            "the helper's sidecar is looked at by path and then opened by it, or read without its \
+             bound:\n{about}"
+        );
         let pane = block_after(shipped, "fn pane_log(");
         assert!(
             !pane.contains("path: String")

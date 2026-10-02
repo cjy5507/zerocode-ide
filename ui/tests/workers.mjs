@@ -2302,12 +2302,13 @@ async function testHelperPage(page, ok) {
     return seen;
   }, { briefs: HELPER_BRIEFS, byLanguage: HELPER_BRIEFS_BY_LANGUAGE });
   const stated = HELPER_BRIEFS.stated;
-  const statedSummary = stated.slice(0, stated.indexOf(" Keep the report"));
+  // The sentences that are not conditions, as many whole ones as fit: the conditions are the tags, so the summary does not say them twice.
+  const statedSummary = stated.slice(0, stated.indexOf(" Do not modify"));
   ok(
-    "the card shows the first whole sentences up to a limit, names no cut where it cut at a sentence, and offers the whole instruction with its length in one press",
+    "the card shows the first whole sentences that are not conditions, up to a limit, names no cut where it cut at a sentence, and offers the whole instruction with its length in one press",
     card["stated"].present === true &&
       card["stated"].said === statedSummary &&
-      statedSummary.endsWith("src/sync.") && statedSummary.length <= 200 &&
+      statedSummary.endsWith("are counted.") && statedSummary.length <= 200 &&
       card["stated"].cut === null && card["stated"].cutSaid === "" &&
       card["stated"].more?.includes(String(stated.length)) === true &&
       card["stated"].expanded === "false" &&
@@ -2334,10 +2335,12 @@ async function testHelperPage(page, ok) {
       card["runOn"].more?.includes(String(HELPER_BRIEFS.runOn.length)) === true,
     JSON.stringify(card),
   );
+  const withItsStop = (sentence) => new RegExp(sentence.replace(/[.*+?^$()|[\]\\{}]/g, "\\$&") + "[。.！!？?]?\\s*");
   const tagChecks = Object.fromEntries(Object.entries(HELPER_BRIEFS_BY_LANGUAGE).map(([code, [text, tag, fact]]) => [code, {
     exactly: JSON.stringify(card[`lang-${code}`].tags) === JSON.stringify([tag]),
     noFact: !card[`lang-${code}`].tags.some((one) => one.includes(fact)),
-    whole: card[`lang-${code}`].said === text,
+    // The summary is the instruction without its condition's sentence — the fact stays in it, the gap the next sentence had too.
+    whole: card[`lang-${code}`].said === text.replace(withItsStop(tag), "").trim(),
   }]));
   const quoted = [...card["stated"].tags, ...card["lang-en"].tags].every((one) =>
     [stated, HELPER_BRIEFS_BY_LANGUAGE.en[0]].some((text) => text.includes(one.replace(/…$/, ""))));

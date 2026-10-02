@@ -174,11 +174,16 @@ pub(crate) fn subagent_log(
         more: false,
         folded: false,
         usage: None,
+        about: None,
     };
     let Some(path) = helper_transcript_path(&state, term, &id) else {
         return Ok(missing());
     };
-    transcript_log_at(&path, after)
+    let mut log = transcript_log_at(&path, after)?;
+    // What the vendor wrote beside the file about what this helper is: the
+    // window keeps it from whichever ask first brings it.
+    log.about = helper_about(&path);
+    Ok(log)
 }
 
 /// Where a pane's helper keeps its conversation. The vendor may have said so
@@ -282,6 +287,7 @@ pub(crate) fn pane_log(
             more: false,
             folded: false,
             usage: None,
+            about: None,
         });
     };
     transcript_log_at(&path, after)
@@ -360,6 +366,7 @@ fn long_line_log<F: std::io::Read + std::io::Seek>(
                     more: false,
                     folded: folded || start > 0,
                     usage: None,
+                    about: None,
                 },
                 lines: start..start,
                 ended: false,
@@ -387,6 +394,7 @@ fn long_line_log<F: std::io::Read + std::io::Seek>(
             more: next < size,
             folded: folded || start > 0,
             usage: zerocode_core::transcript::usage_in(&text),
+            about: None,
         },
         lines: start..next,
         ended: true,
@@ -489,6 +497,7 @@ fn transcript_log_window<F: std::io::Read + std::io::Seek>(
             more: next < size,
             folded,
             usage: zerocode_core::transcript::usage_in(&text),
+            about: None,
         },
         lines: base..base + whole,
         ended: chunk.start + chunk.bytes.len() > 0,

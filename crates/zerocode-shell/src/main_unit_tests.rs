@@ -6062,6 +6062,10 @@ fn no_label_reaches_the_window_hardcoded() {
         // Korean row of that table quotes the instruction, it never speaks to
         // the person (t-15683).
         r"/지\s?마(?:세요|십시오|라|요)?|지\s?말(?:고|라|것|아)|말\s?것|금지|읽기\s?전용|안\s?됩니다|하면\s?안|않도록/,",
+        // The same reader's row for the language a report is asked to be written
+        // in (「한국어로 보고」): it quotes the instruction, it never speaks to the
+        // person.
+        r"/(?:한국어|영어|일본어|중국어|스페인어)\s?(?:로|으로)\s?(?:만\s?)?(?:보고|답변|답|작성|말|쓰|출력|요약)/,",
     ];
 
     // The catalog-bearing part is exactly one file. The byte range used
@@ -18480,9 +18484,16 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.nowWaiting",
         "worker.nowReconnecting",
         "worker.nowThinking",
-        // The strip under a helper's brief that counts what it did (t-18702).
+        // The strip under a helper's brief that counts what it did (t-18702), and
+        // the words it uses once the page has let the oldest turns go.
         "worker.tallyTotal",
         "worker.tallyFailed",
+        "worker.tallyRecent",
+        "worker.tallyRecentTip",
+        // The kind of helper, beside its name.
+        "helper.role.label",
+        // The board's door to a card the ledger alone knows.
+        "board.graph.noConversation",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -18528,7 +18539,16 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         // The strip's two words are read where the strip is painted (t-18702).
         (
             "function paintHelperPageTally(strip, run) {",
-            vec!["worker.tallyTotal", "worker.tallyFailed"],
+            vec![
+                "worker.tallyTotal",
+                "worker.tallyFailed",
+                "worker.tallyRecent",
+                "worker.tallyRecentTip",
+            ],
+        ),
+        (
+            "function updateHelperPageRole(badge, run) {",
+            vec!["helper.role.label"],
         ),
         // What the foot line says while no row is out (t-18702): the three
         // status words are read where zo's status verbs are tabled.
@@ -22934,5 +22954,128 @@ mod browser_look_settle_pin {
             refused < pinned,
             "a held settle refuses the press before the pin is read:\n{press}"
         );
+    }
+}
+
+/// The two words Claude Code writes beside a helper's transcript reach the
+/// page as plain text, and nothing else in that file does.
+///
+/// A helper's page shows what KIND of helper it is and the short line its
+/// parent gave the job; both are the vendor's own words in `agentType` and
+/// `description`. Every other key is ignored, a value that is not a string is
+/// not a word, and what stays is folded to one line and cut to its length —
+/// the page writes it with `textContent`, so the bound is what keeps a long
+/// or odd value from becoming the page's layout.
+#[test]
+fn a_helpers_sidecar_gives_its_kind_and_its_line_and_nothing_else() {
+    let both = helper_about_in(
+        r#"{"agentType":"Explore","description":"Map the vault structure","toolUseId":"toolu_01",
+            "spawnDepth":1,"requestNonInteractive":true,"model":"sonnet"}"#,
+    )
+    .expect("a file with both words says both");
+    assert_eq!(both.agent_type.as_deref(), Some("Explore"));
+    assert_eq!(both.description.as_deref(), Some("Map the vault structure"));
+
+    // One word is enough to say something; none is nothing.
+    assert_eq!(
+        helper_about_in(r#"{"description":"Only a line"}"#),
+        Some(HelperAbout { agent_type: None, description: Some("Only a line".into()) })
+    );
+    for silent in [
+        r#"{}"#,
+        r#"{"agentType":"","description":"   "}"#,
+        r#"{"agentType":7,"description":["a"]}"#,
+        r#"{"agentType":null}"#,
+        r#"["agentType"]"#,
+        r#"not json at all"#,
+        "",
+    ] {
+        assert_eq!(helper_about_in(silent), None, "`{silent}` said something");
+    }
+
+    // Folded to one line, control characters dropped, each cut to its length.
+    let odd = helper_about_in(
+        "{\"agentType\":\"  Gen\\u0000eral\\n purpose \",\"description\":\"two\\nlines\\t and\\u001b[31m escapes\"}",
+    )
+    .expect("an odd value still has words");
+    assert_eq!(odd.agent_type.as_deref(), Some("General purpose"));
+    assert_eq!(odd.description.as_deref(), Some("two lines and[31m escapes"));
+    let long = helper_about_in(&format!(
+        r#"{{"agentType":"{}","description":"{}"}}"#,
+        "t".repeat(500),
+        "한".repeat(500)
+    ))
+    .expect("long words are cut, not dropped");
+    assert_eq!(long.agent_type.map(|word| word.chars().count()), Some(64));
+    assert_eq!(long.description.map(|word| word.chars().count()), Some(200));
+}
+
+/// The sidecar is found from the transcript this window already found for a
+/// validated helper id, and only a small plain file beside it is read — through
+/// the opener every file the window owns is opened by, so a link, a directory, a
+/// pipe or a file larger than the bound answers nothing and cannot hold the read.
+#[test]
+fn a_helpers_sidecar_is_read_from_beside_its_transcript_only() {
+    let dir = tempfile::tempdir().expect("a session's helper folder");
+    let transcript = dir.path().join("agent-ab12_cd-3.jsonl");
+    std::fs::write(&transcript, "{}\n").expect("the transcript");
+    let beside = dir.path().join("agent-ab12_cd-3.meta.json");
+    let plan = r#"{"agentType":"Plan","description":"Plan the change"}"#;
+
+    // No file, no words.
+    assert_eq!(helper_about(&transcript), None);
+
+    std::fs::write(&beside, plan).expect("the sidecar");
+    let about = helper_about(&transcript).expect("the file beside the transcript");
+    assert_eq!(about.agent_type.as_deref(), Some("Plan"));
+    assert_eq!(about.description.as_deref(), Some("Plan the change"));
+
+    // A broken file is no words, not an error.
+    std::fs::write(&beside, "{\"agentType\":\"Plan\",").expect("a half-written sidecar");
+    assert_eq!(helper_about(&transcript), None);
+    std::fs::write(&beside, [0xff, 0xfe, 0x00, 0x41]).expect("a sidecar that is not text");
+    assert_eq!(helper_about(&transcript), None);
+
+    // The bound is on the file that is opened: exactly the bound is read, one byte more is not.
+    let bound = usize::try_from(HELPER_ABOUT_BYTES).expect("a small bound");
+    let padded = |size: usize| format!("{plan}{}", " ".repeat(size - plan.len()));
+    std::fs::write(&beside, padded(bound)).expect("a sidecar at the bound");
+    assert!(helper_about(&transcript).is_some(), "a file at the bound was refused");
+    std::fs::write(&beside, padded(bound + 1)).expect("a sidecar past the bound");
+    assert_eq!(helper_about(&transcript), None);
+
+    // A transcript that is not `agent-<id>.jsonl` (zo's `<id>.session.jsonl`),
+    // or whose id is not the vendor's alphabet, has no sidecar to look for.
+    std::fs::write(&beside, plan).expect("the sidecar again");
+    let zo = dir.path().join("ab12.session.jsonl");
+    std::fs::write(&zo, "{}\n").expect("zo's transcript");
+    std::fs::write(dir.path().join("ab12.session.meta.json"), plan).expect("a sidecar nobody looks for");
+    assert_eq!(helper_about(&zo), None);
+    assert_eq!(helper_about(&dir.path().join("agent-a.b.jsonl")), None);
+    assert_eq!(helper_about(&dir.path().join("agent-..%2f.jsonl")), None);
+
+    // A directory where the file should be, and a file swapped for a link after
+    // it was good, answer nothing.
+    std::fs::remove_file(&beside).expect("the sidecar goes");
+    std::fs::create_dir(&beside).expect("a directory in its place");
+    assert_eq!(helper_about(&transcript), None);
+    std::fs::remove_dir(&beside).expect("the directory goes");
+    #[cfg(unix)]
+    {
+        let elsewhere = tempfile::tempdir().expect("somewhere else");
+        let target = elsewhere.path().join("secret.json");
+        std::fs::write(&target, r#"{"agentType":"Elsewhere","description":"Not this folder"}"#)
+            .expect("a good file elsewhere");
+        std::fs::write(&beside, plan).expect("the sidecar, good");
+        assert!(helper_about(&transcript).is_some());
+        std::fs::remove_file(&beside).expect("the sidecar goes");
+        std::os::unix::fs::symlink(&target, &beside).expect("a link in its place");
+        assert_eq!(helper_about(&transcript), None, "a link out of the folder was followed");
+        std::fs::remove_file(&beside).expect("the link goes");
+        // A pipe in its place must not hold the read: the opener refuses it at once.
+        let name = std::ffi::CString::new(beside.to_str().expect("a path")).expect("no NUL");
+        // SAFETY: `name` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo");
+        assert_eq!(helper_about(&transcript), None, "a pipe was read");
     }
 }

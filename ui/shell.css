@@ -8943,6 +8943,7 @@ body.is-dragging-pane {
 .peek-foot {
   display: flex;
   justify-content: flex-end;
+  gap: var(--space-2);
   padding: 6px 10px;
 }
 
@@ -15996,6 +15997,23 @@ button.worker-composer-pill:hover {
   white-space: nowrap;
 }
 
+/* The kind of helper in the vendor's own word, a small tag after the name — the
+ * agent's accent on its edge only, the word in the ink, so the contrast is the
+ * page's. Not drawn when the name already says it or the vendor named none. */
+.helper-role {
+  flex: none;
+  max-width: 100%;
+  padding: 0 var(--space-2);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--chat-accent) 45%, transparent);
+  border-radius: var(--chat-radius-small);
+  color: var(--ink-chalk);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .helper-head .worker-meta {
   align-items: center;
 }
@@ -16218,7 +16236,12 @@ button.helper-sib:hover {
 /* The card: a side rule in the agent's accent on a faint veil — never a box
  * with an edge all round, which is what an input looks like. */
 .helper-brief {
+  display: flex;
   flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: var(--space-1);
   margin: var(--space-2) var(--helper-gutter) 0;
   padding: var(--space-2) var(--space-3);
   border: 0;
@@ -16227,13 +16250,31 @@ button.helper-sib:hover {
   background: color-mix(in srgb, var(--ink-chalk) 5%, transparent);
 }
 
+/* The card's lines each take a row; the conditions and the door to the whole
+ * instruction share one — the door at the far end, wrapping under the tags on a
+ * narrow page. */
+.helper-brief > :is(.helper-brief-label, .helper-brief-title, .helper-brief-text, .helper-brief-full) {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
 .helper-brief-label {
   display: block;
-  margin-bottom: var(--space-1);
   font-size: var(--text-2xs);
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--ink-mist);
+}
+
+/* The short line the parent gave the job (`helper.about`), above the
+ * instruction's own words. */
+.helper-brief-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--ink-chalk);
+  overflow-wrap: anywhere;
 }
 
 .helper-brief-text {
@@ -16251,9 +16292,11 @@ button.helper-sib:hover {
 
 .helper-brief-tags {
   display: flex;
+  flex: 0 1 auto;
   flex-wrap: wrap;
+  min-width: 0;
   gap: var(--space-1);
-  margin: var(--space-2) 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
 }
@@ -16272,9 +16315,8 @@ button.helper-sib:hover {
 
 .helper-brief-more {
   display: inline-flex;
-  margin-top: var(--space-2);
+  margin-left: auto;
   padding: 0 var(--space-1);
-  margin-left: calc(var(--space-1) * -1);
   border: 0;
   border-radius: var(--chat-radius-small);
   background: none;
@@ -16293,7 +16335,7 @@ button.helper-sib:hover {
 
 .helper-brief-full {
   max-height: min(40vh, 22rem);
-  margin-top: var(--space-2);
+  margin-top: var(--space-1);
   padding-top: var(--space-2);
   border-top: 1px solid var(--edge-rule);
   overflow-y: auto;
@@ -33118,6 +33160,15 @@ details.task-board-section > summary {
 
 .agent-inspector-actions[hidden] {
   display: none;
+}
+
+/* A door that cannot open says why in its own words (a run only the ledger
+ * knows has no conversation to read here) and takes no press. */
+.agent-inspector-actions > .agent-inspector-chat[aria-disabled="true"] {
+  height: auto;
+  color: var(--ink-mist);
+  cursor: default;
+  white-space: normal;
 }
 
 @keyframes zc-graph-pulse {
