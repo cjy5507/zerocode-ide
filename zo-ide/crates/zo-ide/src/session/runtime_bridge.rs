@@ -1118,31 +1118,37 @@ mod tests {
         }
     }
 
-    /// `loop_schedule` rides a process-wide scope counter, so any test that
-    /// reads the advertised tools must hold the env lock like the loop test
-    /// does. While another thread holds the lock inside a loop scope, the
-    /// identity check must wait rather than read the scoped extra tool
-    /// (t-21349: CI saw 13 vs 12 names, the difference `loop_schedule`).
+    /// Tests that read the advertised tools hold the env lock: the loop tool
+    /// rides a process-wide scope, so a reader without it can see the extra tool.
     #[test]
-    fn the_advertisement_identity_check_waits_out_a_loop_scope() {
-        let lock = crate::test_env_lock();
-        let scope = crate::autonomy::wakeup::begin_scope();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let checker = std::thread::spawn(move || {
-            let outcome = std::panic::catch_unwind(
-                builtin_advertisement_is_identical_across_a_model_swap,
-            );
-            let _ = done_tx.send(());
-            outcome
-        });
-        // Bounded negative wait: a checker that honours the lock cannot finish.
-        assert!(
-            done_rx.recv_timeout(std::time::Duration::from_millis(500)).is_err(),
-            "the identity check read the advertisement while a loop scope was open"
-        );
-        drop(scope);
-        drop(lock);
-        assert!(checker.join().expect("checker thread").is_ok());
+    fn advertisement_readers_wait_out_a_loop_scope() {
+        type Reader = fn();
+        let readers: [Reader; 2] = [
+            a_lookup_never_lifts_deferral_on_any_provider,
+            builtin_advertisement_is_identical_across_a_model_swap,
+        ];
+        for reader in readers {
+            let lock = crate::test_env_lock();
+            let scope = crate::autonomy::wakeup::begin_scope();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let checker = std::thread::spawn(move || {
+                started_tx.send(()).expect("main is waiting");
+                let outcome = std::panic::catch_unwind(reader);
+                let _ = done_tx.send(());
+                outcome
+            });
+            let entered = started_rx.recv_timeout(std::time::Duration::from_secs(10));
+            // A reader holding the lock cannot finish while this thread holds it.
+            let finished = entered.is_ok()
+                && done_rx.recv_timeout(std::time::Duration::from_millis(500)).is_ok();
+            drop(scope);
+            drop(lock);
+            let outcome = checker.join().expect("checker thread");
+            assert!(entered.is_ok(), "the reader never started");
+            assert!(!finished, "a reader finished while a loop scope was open");
+            assert!(outcome.is_ok(), "the reader failed once the scope closed");
+        }
     }
 
     /// The quiet-reasoning heartbeat must read as information, never as a
