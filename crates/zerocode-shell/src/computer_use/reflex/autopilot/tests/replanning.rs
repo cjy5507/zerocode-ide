@@ -155,11 +155,6 @@ fn held_replan(case: &'static str) {
             "disabled" => fake.enabled = false,
             "owner_stop" => pilot.stop.store(true, Ordering::SeqCst),
             "missing_scene" => fake.helper.scene = Value::Null,
-            "missing_capture" => fake.helper.capture_known = false,
-            "stale" => {
-                fake.helper.age_ns =
-                    zerocode_core::computer_use_protocol::reflex::LIMITS.max_frame_age_ns + 1
-            }
             "deadline" => fake.now = pilot.deadline_ms,
             "jev_off" => fake.standing = (JevMode::Off, false),
             "helper_hold" => fake.helper.ends(&run, "paused", "external_input"),
@@ -286,11 +281,9 @@ fn a_pending_plan_never_outlives_stop_permission_or_deadline() {
 }
 
 #[test]
-fn a_pending_plan_cannot_use_changed_or_stale_execution_context() {
+fn a_pending_plan_cannot_use_changed_execution_context() {
     for case in [
-        "stale",
         "missing_scene",
-        "missing_capture",
         "stream",
         "geometry",
         "owner",

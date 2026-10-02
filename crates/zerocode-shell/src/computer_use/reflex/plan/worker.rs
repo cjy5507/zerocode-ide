@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
 use super::*;
 use crate::computer_use::errand::value::Setup;
@@ -74,12 +74,12 @@ struct Request {
 /// The window's writer for an autopilot: the first plan is written here, on
 /// the collector's thread, before any hand moves; every later plan goes to a
 /// writer of the same making on a thread of its own, started at the first
-/// later plan and kept until this generator is dropped. One request waits
-/// behind the writer; a withdrawn one is skipped.
+/// later plan and kept until this generator is dropped. Requests queue in
+/// the order they were asked, a withdrawn one skipped.
 pub(crate) struct Background {
     first: Box<dyn Generator>,
     factory: Option<Factory>,
-    requests: Option<SyncSender<Request>>,
+    requests: Option<Sender<Request>>,
 }
 
 impl Background {
@@ -102,9 +102,9 @@ impl Background {
     /// The writer's thread, started at the first later plan. `None` once it
     /// could not be started: a request then goes unanswered, and its poll
     /// says so.
-    fn writer(&mut self) -> Option<&SyncSender<Request>> {
+    fn writer(&mut self) -> Option<&Sender<Request>> {
         if let Some(factory) = self.factory.take() {
-            let (send, requests) = mpsc::sync_channel::<Request>(1);
+            let (send, requests) = mpsc::channel::<Request>();
             let started = std::thread::Builder::new()
                 .name(WRITER_THREAD.into())
                 .spawn(move || {
@@ -180,7 +180,7 @@ impl Generator for Background {
         // A writer that went, or never began, drops the request with the
         // sender of its answer: the poll says so.
         if let Some(writer) = self.writer() {
-            let _ = writer.try_send(request);
+            let _ = writer.send(request);
         }
         PendingPlan {
             answer: received,

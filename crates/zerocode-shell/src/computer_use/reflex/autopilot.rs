@@ -32,9 +32,10 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use zerocode_core::computer_use::{
-    REFLEX_AUTO_L1, REFLEX_COLLECT_MS, REFLEX_COVER_STOP_PERMILLE, REFLEX_ESCALATE_AFTER,
-    REFLEX_LABEL_WINDOW_MS, REFLEX_MISSED_OUTCOMES, REFLEX_PLAN_LABEL_MS, REFLEX_PLAN_LEDGER,
-    REFLEX_PRESSED_OUTCOME, REFLEX_REPLAN_AFTER_UNKNOWN_PASSES, REFLEX_REPLAN_COMPARE_MS,
+    REFLEX_APPLY_MAX_AGE_MS, REFLEX_AUTO_L1, REFLEX_COLLECT_MS, REFLEX_COVER_STOP_PERMILLE,
+    REFLEX_ESCALATE_AFTER, REFLEX_LABEL_WINDOW_MS, REFLEX_MISSED_OUTCOMES, REFLEX_PLAN_LABEL_MS,
+    REFLEX_PLAN_LEDGER, REFLEX_PRESSED_OUTCOME, REFLEX_REPLAN_AFTER_UNKNOWN_PASSES,
+    REFLEX_REPLAN_COMPARE_MS,
 };
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::computer_use_protocol::reflex::{ReflexPlan, Scope, Surface, ValidatedPlan};
@@ -1160,7 +1161,12 @@ impl Autopilot {
                 Some(mode) => mode.applies_with(true),
                 None => (world.standing)().1,
             };
-        let context = planning.run.as_deref().map_or(Ok(()), |id| {
+        // The premises the plan was asked on, as the run's newest reading
+        // shows them: the same run, the plan the helper says it runs, the
+        // scene the reading was of, and a capture the window can date and
+        // trust — the reflex table's own age for a reading a decision may
+        // act on.
+        let premises = planning.run.as_deref().map_or(Ok(()), |id| {
             let run = self
                 .current
                 .as_ref()
@@ -1170,33 +1176,36 @@ impl Autopilot {
                 return Err(Why::PlanMismatch);
             }
             let snapshot = run.snapshot.as_ref().ok_or(Why::Stale)?;
-            snapshot.capture.ok_or(Why::Stale)?;
             if planning.scene.is_none() || snapshot.scene != planning.scene {
                 return Err(Why::EpochMismatch);
             }
-            let age = snapshot
-                .read_ms
-                .and_then(|read| world.now_ms.checked_sub(read))
-                .and_then(|since| since.checked_mul(1_000_000))
-                .and_then(|since| snapshot.age_ns.and_then(|age| age.checked_add(since)));
-            if !age.is_some_and(|age| {
-                age <= zerocode_core::computer_use_protocol::reflex::LIMITS.max_frame_age_ns
-            }) {
+            if snapshot.capture.is_none()
+                || reflex_decide::age_at(snapshot, world.now_ms)
+                    .is_none_or(|age| age > REFLEX_APPLY_MAX_AGE_MS)
+            {
                 return Err(Why::Stale);
             }
             Ok(())
         });
-        if let Err(why) = if applicable {
-            context
+        match if applicable {
+            premises
         } else {
             Err(Why::NotAuto)
         } {
-            self.end(
-                world,
-                why.word(),
-                "the pending plan's execution context no longer stands",
-            );
-            return;
+            Ok(()) => {}
+            // A reading the window cannot date, or one older than the table
+            // lets a decision act on, proves nothing about the scene the
+            // plan was written for: the plan waits for a fresh reading, and
+            // a run that stays blind ends by its own rules, not by its plan.
+            Err(Why::Stale) => return,
+            Err(why) => {
+                self.end(
+                    world,
+                    why.word(),
+                    "the pending plan's execution context no longer stands",
+                );
+                return;
+            }
         }
         let written = match planning.answer.poll() {
             Ok(None) => return,
