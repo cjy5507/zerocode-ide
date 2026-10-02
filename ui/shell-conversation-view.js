@@ -1168,6 +1168,12 @@ const CODE_FENCE_EXTENSIONS = Object.freeze({
 /* The role a colour of the editor's ramp paints. */
 const CODE_ROLE_OF_COLOUR = /^var\(--syntax-([a-z]+)\)$/;
 
+/* The roles a fence leaves in the code's own ink, as the approved mockup
+ * draws them: names (the ramp's variable is the ink, near enough) and
+ * punctuation. They were two thirds of the page's colour ranges, and an
+ * engine re-checks every range whenever the page changes. */
+const CODE_PLAIN_ROLES = Object.freeze(new Set(["variable", "punctuation"]));
+
 /* A fence waiting its turn — or being coloured. */
 const CODE_WAITING = "waiting";
 
@@ -1236,14 +1242,15 @@ function codeColourable() {
 }
 
 /* The editor's ramp as roles: one class a colour, named by the colour's
- * token. Only colours — a weight or a slant the editor gives a role is not
- * carried, and the Highlight API would not paint one. */
+ * token, but for the roles left plain. Only colours — a weight or a slant
+ * the editor gives a role is not carried, and the Highlight API would not
+ * paint one. */
 function codeColourHighlighter() {
   if (codeColour.highlighter !== null) return codeColour.highlighter;
   const roles = [];
   for (const spec of editorHighlightStyle().specs) {
     const role = CODE_ROLE_OF_COLOUR.exec(spec.color ?? "")?.[1];
-    if (role !== undefined) roles.push({ tag: spec.tag, class: role });
+    if (role !== undefined && !CODE_PLAIN_ROLES.has(role)) roles.push({ tag: spec.tag, class: role });
   }
   codeColour.highlighter = window.CM6.HighlightStyle.define(roles);
   return codeColour.highlighter;
