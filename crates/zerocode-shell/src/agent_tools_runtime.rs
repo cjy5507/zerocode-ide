@@ -4931,12 +4931,13 @@ pub(super) fn answer_computer_command(
     ) {
         // A live reflex run is the window's to admit and to watch, and
         // whether one is supported here and enabled is the window's to say
-        // beside the helper's handshake; the person's setting is read only
-        // when a start, a status or the capabilities ask.
+        // beside the helper's handshake; an autopilot keeps reading the
+        // person's setting as it runs.
+        let reflex_window = permission_window.cloned();
         computer_use::reflex::answer(
             &command,
-            || {
-                permission_window.is_some_and(|app| {
+            move || {
+                reflex_window.as_ref().is_some_and(|app| {
                     crate::settings_runtime::computer_live_reflex(
                         app.state::<AppState>().settings(),
                     )

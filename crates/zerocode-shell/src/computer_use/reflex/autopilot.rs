@@ -8,8 +8,8 @@
 //! goal, app, display → palette → plan (asked again ≤ retries) → door → start (epoch 1)
 //! every collect: receipts → reading → decision → fit to carry out? (verdict)
 //!   continue: nothing more    pause: stop — a new plan when the run found
-//!   nothing three collects running, else the end    replan: stop → plan →
-//!   door → start (a new run, the next epoch)
+//!   nothing three collects running, else the end    replan: plan in the
+//!   background → door → stop → start (a new run, the next epoch)
 //! the end: the run's wall · escalated · paused · a person's hand or stop
 //! ```
 //!
@@ -32,9 +32,10 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use zerocode_core::computer_use::{
-    REFLEX_AUTO_L1, REFLEX_COLLECT_MS, REFLEX_COVER_STOP_PERMILLE, REFLEX_ESCALATE_AFTER,
-    REFLEX_LABEL_WINDOW_MS, REFLEX_MISSED_OUTCOMES, REFLEX_PLAN_LABEL_MS, REFLEX_PLAN_LEDGER,
-    REFLEX_PRESSED_OUTCOME, REFLEX_REPLAN_AFTER_UNKNOWN_PASSES, REFLEX_REPLAN_COMPARE_MS,
+    REFLEX_APPLY_MAX_AGE_MS, REFLEX_AUTO_L1, REFLEX_COLLECT_MS, REFLEX_COVER_STOP_PERMILLE,
+    REFLEX_ESCALATE_AFTER, REFLEX_LABEL_WINDOW_MS, REFLEX_MISSED_OUTCOMES, REFLEX_PLAN_LABEL_MS,
+    REFLEX_PLAN_LEDGER, REFLEX_PRESSED_OUTCOME, REFLEX_REPLAN_AFTER_UNKNOWN_PASSES,
+    REFLEX_REPLAN_COMPARE_MS,
 };
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::computer_use_protocol::reflex::{ReflexPlan, Scope, Surface, ValidatedPlan};
@@ -79,6 +80,27 @@ pub(crate) const NO_TIME: &str = "deadline";
 /// The app's window was covered while a run stood, and no move of its own
 /// uncovered it (t-12979): the person's.
 pub(crate) const COVERED: &str = zerocode_core::computer_use_protocol::error_code::COVERED;
+
+/// The least of the wall a plan is asked for: one second, the unit the run's
+/// policy counts its wall in — with less left there is no run for a plan to
+/// have.
+const LEAST_PLAN_WALL_MS: u64 = 1_000;
+
+/// Whether the person's setting lets a plan through the door now: the facts
+/// a start came with — a moment old for a first plan, as old as the
+/// autopilot for a later one — and the setting read again. Either reading
+/// closes the door; the setting read now never opens one the facts closed.
+fn enabled_now(facts: &DoorFacts, world: &mut World<'_>) -> bool {
+    facts.enabled && (world.enabled)()
+}
+
+/// The wall's refusal of another plan.
+fn no_time() -> ComputerUseError {
+    ComputerUseError::new(
+        NO_TIME,
+        "no second of the run's wall is left for another plan",
+    )
+}
 
 /// Where one autopilot stands, for a status and for its end (§2.4).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -189,6 +211,7 @@ struct Run {
     series: Vec<(u64, u64, u64)>,
     /// The plan the helper says it runs.
     helper_plan: Option<String>,
+    snapshot: Option<reflex_decide::Snapshot>,
     outcomes: Value,
     /// Collects running whose reading found nothing.
     blind: u32,
@@ -222,6 +245,7 @@ impl Run {
             missed: 0,
             series: vec![(now, 0, 0)],
             helper_plan: None,
+            snapshot: None,
             outcomes: json!({}),
             blind: 0,
             helper_ended: None,
@@ -235,6 +259,8 @@ impl Run {
     /// missed — where the helper stands, and whether its reading found
     /// anything.
     fn observe(&mut self, read: &Value, now: u64) -> bool {
+        let mut snapshot = reflex_decide::snapshot_of(read);
+        snapshot.read_ms = Some(now);
         for receipt in read
             .get("receipts")
             .and_then(Value::as_array)
@@ -280,7 +306,8 @@ impl Run {
                     .to_string(),
             );
         }
-        let found = !reflex_decide::finds_nothing(&reflex_decide::snapshot_of(read).state);
+        let found = !reflex_decide::finds_nothing(&snapshot.state);
+        self.snapshot = Some(snapshot);
         self.blind = if found { 0 } else { self.blind + 1 };
         found
     }
@@ -339,6 +366,7 @@ pub(crate) struct World<'a> {
     /// settings and the ledger ([`systemone::standing_in`]).
     pub standing: &'a mut dyn FnMut() -> (JevMode, bool),
     pub generator: &'a mut dyn Generator,
+    pub enabled: &'a mut dyn FnMut() -> bool,
     pub decisions: &'a mut dyn FnMut(Vec<Value>),
     pub plans: &'a mut dyn FnMut(Vec<Value>),
     /// Where a run keeps its receipts: its evidence file, and the sink.
@@ -507,6 +535,18 @@ impl Carrier for Seat<'_> {
     }
 }
 
+/// A plan being written while a run stands: its answer, polled; the run it
+/// was asked beside and the scene that run's reading showed, both of which
+/// must still stand for the answer to run; whether the reflex decision asked
+/// for it — the seat must still apply when it comes — and when it was asked.
+struct Replanning {
+    answer: plan::PendingPlan,
+    run: Option<String>,
+    scene: Option<reflex_decide::Scene>,
+    judged: bool,
+    request_at: i64,
+}
+
 /// One autopilot: the goal and the scope it acts in, what it read of the
 /// app's window, its runs, and the reflex decision's account of them.
 pub(crate) struct Autopilot {
@@ -530,6 +570,8 @@ pub(crate) struct Autopilot {
     judge: Judge,
     replanned: Vec<Replanned>,
     written: Vec<Written>,
+    planning: Option<Replanning>,
+    cancelled_plans: u64,
     stop: Arc<AtomicBool>,
 }
 
@@ -653,7 +695,10 @@ impl Autopilot {
                 ),
             ));
         }
-        super::door_opens(&facts)?;
+        super::door_opens(&DoorFacts {
+            enabled: enabled_now(&facts, world),
+            ..facts.clone()
+        })?;
         let displays = (world.call)("displays", json!({}))?;
         let windows = (world.call)("listWindows", json!({ "app": asked.app }))?;
         let (stage, target) = plan::stage_of(&displays, &windows, asked.display)
@@ -698,6 +743,8 @@ impl Autopilot {
             },
             replanned: Vec::new(),
             written: Vec::new(),
+            planning: None,
+            cancelled_plans: 0,
             stop: Arc::new(AtomicBool::new(false)),
         };
         let answer = autopilot.plan_and_start(world, None)?;
@@ -713,13 +760,7 @@ impl Autopilot {
         world: &mut World<'_>,
         previous: Option<Previous<'_>>,
     ) -> Result<Value, ComputerUseError> {
-        let no_time = || {
-            ComputerUseError::new(
-                NO_TIME,
-                "no second of the run's wall is left for another plan",
-            )
-        };
-        if self.deadline_ms.saturating_sub(world.now_ms) < 1_000 {
+        if self.deadline_ms.saturating_sub(world.now_ms) < LEAST_PLAN_WALL_MS {
             return Err(no_time());
         }
         let written = plan::write_plan(
@@ -736,13 +777,30 @@ impl Autopilot {
         // are seconds of acting. A later plan runs what is left once it is
         // written.
         let written_at = world.now_ms.saturating_add(written.rtt_ms);
+        let request_at = world.wall_ms;
+        self.start_written(world, written, written_at, request_at)
+    }
+
+    /// A written plan through the door and onto the helper: the wall it has
+    /// left, the door every plan passes read as it stands now, the run
+    /// standing — if one still stands — stopped only once the door let the
+    /// new plan through, the new run under the next epoch, and the plan's
+    /// ledger row whatever became of it. `written_at` is the steady moment
+    /// the plan was in hand, `request_at` the moment it was asked.
+    fn start_written(
+        &mut self,
+        world: &mut World<'_>,
+        written: plan::Written,
+        written_at: u64,
+        request_at: i64,
+    ) -> Result<Value, ComputerUseError> {
         if self.epoch == 0 {
             self.deadline_ms = written_at.saturating_add(self.asked.seconds.saturating_mul(1_000));
         }
         let seconds = self.deadline_ms.saturating_sub(written_at) / 1_000;
         self.epoch += 1;
         let model = world.generator.model();
-        let wall_ms = world.wall_ms;
+        let wall_ms = request_at;
         let row = |run: Option<&str>, outcome: &str| {
             plan::ledger_row(
                 wall_ms,
@@ -777,8 +835,16 @@ impl Autopilot {
             }
         };
         let started = self
-            .admitted(validated, seconds)
-            .and_then(|admitted| launch(&admitted, world.call).map(|answer| (answer, admitted)));
+            .admitted(validated, seconds, world)
+            .and_then(|admitted| {
+                if let Some(run) = &mut self.current
+                    && !run.stopped
+                {
+                    (world.call)("reflexStop", json!({ "run": run.id }))?;
+                    run.stopped = true;
+                }
+                launch(&admitted, world.call).map(|answer| (answer, admitted))
+            });
         let (answer, admitted) = match started {
             Ok(started) => started,
             Err(refusal) => {
@@ -846,7 +912,12 @@ impl Autopilot {
     /// The door every plan passes, for the seconds left of the wall — the
     /// operator's stop read as it stands now — and the plan written beside
     /// the run's receipts, in the sections a Flow document carries.
-    fn admitted(&self, plan: ValidatedPlan, seconds: u64) -> Result<Admitted, ComputerUseError> {
+    fn admitted(
+        &self,
+        plan: ValidatedPlan,
+        seconds: u64,
+        world: &mut World<'_>,
+    ) -> Result<Admitted, ComputerUseError> {
         if let Some(workspace) = &self.workspace {
             let _ = std::fs::write(
                 workspace.join(format!("reflex-auto-{}-{}.md", self.id, self.epoch)),
@@ -862,7 +933,16 @@ impl Autopilot {
             }),
             self.workspace.clone(),
             &DoorFacts {
-                stopped: super::super::guard::stopped_reason()
+                enabled: enabled_now(&self.facts, world),
+                stopped: world
+                    .stopped
+                    .clone()
+                    .or_else(|| {
+                        self.stop
+                            .load(Ordering::SeqCst)
+                            .then(|| STOPPED.to_string())
+                    })
+                    .or_else(super::super::guard::stopped_reason)
                     .or_else(|| self.facts.stopped.clone()),
                 ..self.facts.clone()
             },
@@ -883,6 +963,7 @@ impl Autopilot {
             return;
         }
         self.judge.tally.ended = Some(json!({ "reason": reason, "said": said }));
+        self.cancel_plan();
         self.judge.carry = None;
         if let Some(mut run) = self.current.take() {
             if !run.stopped {
@@ -904,10 +985,18 @@ impl Autopilot {
     /// once the autopilot ended and every run's watch is done.
     pub(crate) fn tick(&mut self, world: &mut World<'_>) -> bool {
         if self.judge.tally.ended.is_none() {
-            if self.stop.load(Ordering::SeqCst) {
+            if !(world.enabled)() {
+                self.end(
+                    world,
+                    error_code::UNSUPPORTED_CAPABILITY,
+                    "live reflex is switched off",
+                );
+            } else if self.stop.load(Ordering::SeqCst) {
                 self.end(world, STOPPED, "a person stopped the autopilot");
             } else if let Some(reason) = world.stopped.clone() {
                 self.end(world, &reason, "the operator is stopped");
+            } else if world.now_ms >= self.deadline_ms {
+                self.end(world, NO_TIME, "the autopilot's wall ended");
             }
         }
         self.pass_every_run(world);
@@ -934,6 +1023,9 @@ impl Autopilot {
                 ESCALATED,
                 "the reflex decision came back unanswered or unfit to carry out three times running while it was carried out: the run stopped for a person",
             );
+        }
+        if self.judge.tally.ended.is_none() {
+            self.poll_plan(world);
         }
         let done = self.judge.tally.ended.is_some()
             && self.current.is_none()
@@ -994,15 +1086,12 @@ impl Autopilot {
         }
     }
 
-    /// Carry out a decision about the run standing now: a pause stops it —
-    /// and hands it to a new plan when it found nothing for the collects
-    /// the table names — a re-plan stops it and runs the next plan.
+    /// A pause stops the hand at once. A re-plan leaves a valid run standing
+    /// while its writer works; only a validated answer replaces that run.
     fn carry_out(&mut self, world: &mut World<'_>, carry: &Carry) {
-        let Some(mut run) = self.current.take() else {
+        let Some(run) = self.current.as_ref() else {
             return;
         };
-        let _ = (world.call)("reflexStop", json!({ "run": run.id }));
-        run.stopped = true;
         let blind = run.blind >= REFLEX_REPLAN_AFTER_UNKNOWN_PASSES;
         if carry.chosen == REPLAN {
             let to = run.last_ms();
@@ -1016,20 +1105,164 @@ impl Autopilot {
             });
         }
         let (plan, outcomes) = (run.plan.clone(), run.outcomes.clone());
-        self.finishing.push(run);
-        if carry.chosen == PAUSE && !blind {
-            self.end(
-                world,
-                PAUSED,
-                "the reflex decision paused the run while its detectors still found something: it waits for a person",
-            );
+        if carry.chosen == PAUSE {
+            self.cancel_plan();
+            if let Some(mut run) = self.current.take() {
+                let _ = (world.call)("reflexStop", json!({ "run": run.id }));
+                run.stopped = true;
+                self.finishing.push(run);
+            }
+            if !blind {
+                self.end(world, PAUSED, "the reflex decision paused the run while its detectors still found something: it waits for a person");
+                return;
+            }
+        }
+        self.queue_plan(
+            world,
+            Previous {
+                plan: &plan,
+                outcomes: &outcomes,
+            },
+            true,
+        );
+    }
+
+    /// Ask for a later plan without waiting for it: one at a time — a plan
+    /// already being written is not asked again — for what is left of the
+    /// wall, remembered beside the run and the scene it was asked on.
+    /// `judged` says the reflex decision asked for it, so the seat must
+    /// still apply when its answer comes.
+    fn queue_plan(&mut self, world: &mut World<'_>, previous: Previous<'_>, judged: bool) {
+        if self.planning.is_some() {
             return;
         }
-        let previous = Previous {
-            plan: &plan,
-            outcomes: &outcomes,
+        let left_ms = self.deadline_ms.saturating_sub(world.now_ms);
+        if left_ms < LEAST_PLAN_WALL_MS {
+            let refused = no_time();
+            self.end(world, &refused.code, &refused.message);
+            return;
+        }
+        let answer = world.generator.plan_later(
+            &plan::Ask {
+                goal: &self.asked.goal,
+                scope: &self.scope,
+                stage: &self.stage,
+                palette: &self.palette,
+                previous: Some(previous),
+            },
+            Duration::from_millis(left_ms).min(Duration::from_secs(self.asked.seconds)),
+        );
+        self.planning = Some(Replanning {
+            answer,
+            run: self.current.as_ref().map(|run| run.id.clone()),
+            scene: self
+                .current
+                .as_ref()
+                .and_then(|run| run.snapshot.as_ref())
+                .and_then(|snapshot| snapshot.scene.clone()),
+            judged,
+            request_at: world.wall_ms,
+        });
+    }
+
+    /// Withdraw the plan being written, if one is: its answer is never
+    /// read, and the status counts it.
+    fn cancel_plan(&mut self) {
+        if self.planning.take().is_some() {
+            self.cancelled_plans += 1;
+        }
+    }
+
+    /// Look, without waiting, whether the plan being written has come, and
+    /// run it only if what it was asked on still stands: the seat still
+    /// applies (for a plan the decision asked for), and the run it was
+    /// asked beside is the one standing, on the plan and the scene it was
+    /// then. A premise that changed ends the autopilot — a plan for another
+    /// scene is never run — a reading too old to prove the scene holds the
+    /// plan for the next one, and a writer that went ends it by its word.
+    fn poll_plan(&mut self, world: &mut World<'_>) {
+        let Some(planning) = self.planning.as_ref() else {
+            return;
         };
-        if let Err(refusal) = self.plan_and_start(world, Some(previous)) {
+        let applicable = !planning.judged
+            || match self.asked.forced {
+                Some(mode) => mode.applies_with(true),
+                None => (world.standing)().1,
+            };
+        // The premises the plan was asked on, as the run's newest reading
+        // shows them: the same run, the plan the helper says it runs, the
+        // scene the reading was of, and a capture the window can date and
+        // trust — the reflex table's own age for a reading a decision may
+        // act on.
+        let premises = planning.run.as_deref().map_or(Ok(()), |id| {
+            let run = self
+                .current
+                .as_ref()
+                .filter(|run| run.id == id)
+                .ok_or(Why::EpochMismatch)?;
+            if run.helper_plan.as_deref() != Some(run.stamp.plan_hash.as_str()) {
+                return Err(Why::PlanMismatch);
+            }
+            let snapshot = run.snapshot.as_ref().ok_or(Why::Stale)?;
+            if planning.scene.is_none() || snapshot.scene != planning.scene {
+                return Err(Why::EpochMismatch);
+            }
+            if snapshot.capture.is_none()
+                || reflex_decide::age_at(snapshot, world.now_ms)
+                    .is_none_or(|age| age > REFLEX_APPLY_MAX_AGE_MS)
+            {
+                return Err(Why::Stale);
+            }
+            Ok(())
+        });
+        let fit = if applicable {
+            premises
+        } else {
+            Err(Why::NotAuto)
+        };
+        match fit {
+            Ok(()) => {}
+            // A reading the window cannot date, or one older than the table
+            // lets a decision act on, proves nothing about the scene the
+            // plan was written for: the plan waits for a fresh reading, and
+            // a run that stays blind ends by its own rules, not by its plan.
+            Err(Why::Stale) => return,
+            Err(why) => {
+                self.end(
+                    world,
+                    why.word(),
+                    "the pending plan's execution context no longer stands",
+                );
+                return;
+            }
+        }
+        let written = match planning.answer.poll() {
+            Ok(None) => return,
+            Ok(Some(written)) => written,
+            Err(word) => {
+                self.end(
+                    world,
+                    &word,
+                    "the background plan writer ended without an answer",
+                );
+                return;
+            }
+        };
+        let request_at = planning.request_at;
+        self.planning = None;
+        if let Some(run) = &self.current {
+            let to = run.last_ms();
+            let before = run.share_between(to.saturating_sub(REFLEX_REPLAN_COMPARE_MS), to);
+            for replan in self
+                .replanned
+                .iter_mut()
+                .filter(|replan| replan.run == run.id && replan.after.is_none())
+            {
+                replan.before = before;
+            }
+        }
+        let written_at = world.now_ms;
+        if let Err(refusal) = self.start_written(world, written, written_at, request_at) {
             self.end(world, &refusal.code, &refusal.message);
         }
     }
@@ -1063,6 +1296,7 @@ impl Autopilot {
         let Some(mut run) = self.current.take() else {
             return;
         };
+        self.cancel_plan();
         let _ = (world.call)("reflexStop", json!({ "run": run.id }));
         run.stopped = true;
         let (plan, outcomes) = (run.plan.clone(), run.outcomes.clone());
@@ -1099,9 +1333,7 @@ impl Autopilot {
                     plan: &plan,
                     outcomes: &outcomes,
                 };
-                if let Err(refusal) = self.plan_and_start(world, Some(previous)) {
-                    self.end(world, &refusal.code, &refusal.message);
-                }
+                self.queue_plan(world, previous, false);
             }
             Ok(Uncovered::Held { held, over }) => self.end(
                 world,
@@ -1262,6 +1494,9 @@ impl Autopilot {
             "current": self.current.as_ref().map(|run| json!({
                 "run": run.id, "epoch": run.stamp.epoch, "planHash": run.stamp.plan_hash,
             })),
+            "planning": self.planning.is_some(),
+            "cancelledPlans": self.cancelled_plans,
+            "planAccountingComplete": self.planning.is_none() && self.cancelled_plans == 0,
             "l1": { "forced": self.asked.forced.map(JevMode::key) },
             "roads": tally.roads,
             "applied": tally.applied,
@@ -1297,6 +1532,7 @@ impl Autopilot {
     /// The helper's session went: nothing more can be read of any run, and
     /// the autopilot ends on it.
     fn lost_the_session(&mut self) {
+        self.cancel_plan();
         if self.judge.tally.ended.is_none() {
             self.judge.tally.ended = Some(json!({
                 "reason": SESSION, "said": "the helper's session ended",
@@ -1317,6 +1553,7 @@ pub(crate) fn begin(
     params: &Value,
     facts: DoorFacts,
     generator: Setup,
+    mut enabled: impl FnMut() -> bool + Send + 'static,
     call: Call<'_>,
 ) -> Result<Value, ComputerUseError> {
     let asked = Asked::of(params);
@@ -1327,12 +1564,12 @@ pub(crate) fn begin(
     let (autopilot, answer) = {
         let mut generator = LiveWriter::window(setup.clone());
         let mut roads = Roads::of(&wire, workspace.clone());
-        let mut world = roads.world(call, &ask, &mut generator);
+        let mut world = roads.world(call, &ask, &mut generator, &mut enabled);
         Autopilot::start(asked, facts, workspace.clone(), &mut world)?
     };
     std::thread::spawn(move || {
         let mut autopilot = autopilot;
-        let mut generator = LiveWriter::window(setup);
+        let mut generator = plan::Background::window(setup);
         let mut roads = Roads::of(&wire, workspace);
         loop {
             if !super::super::session_stands() {
@@ -1340,7 +1577,7 @@ pub(crate) fn begin(
                 return;
             }
             let mut call = |method: &str, params: Value| super::super::call(method, params);
-            let mut world = roads.world(&mut call, &ask, &mut generator);
+            let mut world = roads.world(&mut call, &ask, &mut generator, &mut enabled);
             if autopilot.tick(&mut world) {
                 return;
             }
@@ -1407,6 +1644,7 @@ impl Roads {
         call: Call<'a>,
         ask: &'a Asker,
         generator: &'a mut dyn Generator,
+        enabled: &'a mut dyn FnMut() -> bool,
     ) -> World<'a> {
         World {
             call,
@@ -1414,6 +1652,7 @@ impl Roads {
             mode: &mut *self.mode,
             standing: &mut *self.standing,
             generator,
+            enabled,
             decisions: &mut *self.decisions,
             plans: &mut *self.plans,
             keeper: &mut *self.keeper,
