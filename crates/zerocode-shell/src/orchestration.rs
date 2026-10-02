@@ -4177,6 +4177,7 @@ fn read_pointer_receipt(key: &(String, String)) -> Receipt {
 /// until the draft goes or the watermark moves ([`Standing::HeldByADraft`]).
 /// `Lost` clears the mark so the next beat looks afresh.
 fn advice_standing(
+    host: &dyn Host,
     run: &str,
     address: &str,
     term: u32,
@@ -4200,6 +4201,7 @@ fn advice_standing(
         zerocode_pty::DeliveryOutcome::Refused(why) => {
             if !noted {
                 note_pointer_withheld(run, address, term, stood);
+                tell_unpointed(host, run, address, term, newest, why);
             }
             if why == zerocode_pty::ready::Refusal::HoldsADraft {
                 Standing::HeldByADraft
@@ -4214,6 +4216,79 @@ fn advice_standing(
             Standing::Unreachable
         }
     }))
+}
+
+/// The window event that tells the person, at a pane, that mail is waiting for
+/// its agent and was not typed (t-21017). Its words are the window's own
+/// table (`term.mailWaiting.*`), keyed by the guard's token.
+pub(crate) const MAIL_WAITING_NOT_TYPED_EVENT: &str = "term:mail-waiting";
+
+/// The receipt a sender's "filed, not pointed" letter is filed under, so one
+/// held message costs its sender one letter however many beats offer it.
+fn unpointed_receipt(newest: &str) -> String {
+    format!("pointer-held:{newest}")
+}
+
+/// What the sender of a message is told when its pointer could not be typed:
+/// plain words, the pane it waited for and the reason's kind — never the
+/// message's body and never anything on the person's line.
+fn unpointed_letter(
+    newest: &str,
+    address: &str,
+    term: u32,
+    why: zerocode_pty::ready::Refusal,
+) -> String {
+    let reason = match why {
+        zerocode_pty::ready::Refusal::HoldsADraft => {
+            "the line holds words its person typed and has not sent"
+        }
+        zerocode_pty::ready::Refusal::Parked => {
+            "a question or an approval is waiting on that pane for its person"
+        }
+        zerocode_pty::ready::Refusal::HandReached => "its person reached the line as it was typed",
+        zerocode_pty::ready::Refusal::LaunchChanged => "the pane now runs a different program",
+        zerocode_pty::ready::Refusal::InputRejected => "the terminal did not accept the input",
+        zerocode_pty::ready::Refusal::LaunchRefused => "the pane's program refused its launch",
+        zerocode_pty::ready::Refusal::NotTaken => "the pane's program never reported taking it",
+    };
+    format!(
+        "message {newest} to {address} is filed in its inbox but was NOT pointed at \
+         terminal {term}: {reason}. It is not lost: `check` there reads it."
+    )
+}
+
+/// A pointer was refused: say so where each side can see it, once per waiting
+/// message. The person gets the pane's own notice; the sender gets a letter
+/// from the ledger, so a coordinator knows the reply sits unpointed rather
+/// than waiting for an answer that cannot come.
+fn tell_unpointed(
+    host: &dyn Host,
+    run: &str,
+    address: &str,
+    term: u32,
+    newest: &str,
+    why: zerocode_pty::ready::Refusal,
+) {
+    host.mail_waiting_not_typed(term, why.token());
+    let Some(sender) = message_sender(run, newest) else {
+        return;
+    };
+    post_observation_once(
+        &sender,
+        &unpointed_letter(newest, address, term, why),
+        &unpointed_receipt(newest),
+        crate::now_epoch_ms(),
+    );
+}
+
+/// Who wrote this message, as an address a letter can be sent to.
+fn message_sender(run: &str, message: &str) -> Option<String> {
+    let held = runtime()?;
+    let image = held.actor.view().ok()?;
+    let rows = cached_ledger(&held, &image).ok()?;
+    rows.run(run)?
+        .message(message)
+        .map(|mail| mail.from.clone())
 }
 
 /// A pointer's advice reached the composer and stopped there: the guard
@@ -7212,7 +7287,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                      * Enter is theirs now, and retyping the line would only
                      * stack a second copy under it. */
                     Some(Standing::Advised { noted }) => {
-                        match advice_standing(&run.id, &address, term, &newest, noted) {
+                        match advice_standing(host, &run.id, &address, term, &newest, noted) {
                             None => continue,
                             Some(None) => {
                                 marks.remove(&key);
@@ -7384,14 +7459,20 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
          * but a host that answers on the spot (a `send-keys` dialect, a
          * test's fake) is settled on this very beat, exactly as the raw
          * road used to be. */
-        let standing =
-            match advice_standing(&key.0, &key.1, one.term, &one.newest, one.unreachable_noted) {
-                None => Standing::Advised {
-                    noted: one.unreachable_noted,
-                },
-                Some(None) => continue,
-                Some(Some(standing)) => standing,
-            };
+        let standing = match advice_standing(
+            host,
+            &key.0,
+            &key.1,
+            one.term,
+            &one.newest,
+            one.unreachable_noted,
+        ) {
+            None => Standing::Advised {
+                noted: one.unreachable_noted,
+            },
+            Some(None) => continue,
+            Some(Some(standing)) => standing,
+        };
         pointed()
             .lock()
             .unwrap_or_else(|held| held.into_inner())

@@ -1579,6 +1579,13 @@ impl agent_teams::Host for TeamWindow {
         zo_integration_runtime::delivery_refusal(&self.app, term)
     }
 
+    fn mail_waiting_not_typed(&self, term: TermId, why: &str) {
+        let _ = self.app.emit(
+            crate::orchestration::MAIL_WAITING_NOT_TYPED_EVENT,
+            serde_json::json!({ "term": term, "why": why }),
+        );
+    }
+
     fn point(
         &self,
         term: TermId,
