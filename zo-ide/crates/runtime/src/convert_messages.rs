@@ -66,9 +66,19 @@ fn newest_tool_run_start(messages: &[ConversationMessage]) -> usize {
 /// every earlier turn's reasoning from what the next model was shown — the
 /// text and the tool calls survived, the *why* did not. See
 /// `reasoning_passport`.
+///
+/// An Anthropic target is the exception that keeps the drop: reasoning without
+/// an Anthropic signature (another provider's) is not carried to it at all.
+/// Anthropic's safety classifier reads assistant turns that write reasoning out
+/// as text as `reasoning_extraction` and declines the whole conversation — a
+/// category the provider routes to no other model. On 2026-10-02 a session run
+/// on gpt-6-astra and switched to claude-opus-5-5 carried 144 such passports and
+/// every request was declined: with its images withheld, on the retry, and
+/// again after compaction kept the recent turns verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningReplay {
-    /// Signed blocks ride the wire verbatim (Anthropic).
+    /// Signed blocks ride the wire verbatim (Anthropic); reasoning without an
+    /// Anthropic signature is not carried.
     Native,
     /// The target cannot verify a signature, so reasoning is carried as text.
     AsText,
@@ -186,9 +196,11 @@ pub fn model_handoff_notice(previous: &str, next: &str) -> Option<String> {
         prefix = crate::session::MODEL_HANDOFF_PREFIX,
     );
     // Only say the reasoning changed shape when it actually did. Claiming it on
-    // a same-provider swap would send the model looking for markers that are
-    // not there.
-    if ReasoningReplay::for_model(previous) != ReasoningReplay::for_model(next) {
+    // a same-provider swap — or on a switch to Anthropic, which is carried no
+    // earlier reasoning at all — would send the model looking for markers that
+    // are not there.
+    let carried_as_text = ReasoningReplay::for_model(next) == ReasoningReplay::AsText;
+    if carried_as_text && ReasoningReplay::for_model(previous) != ReasoningReplay::for_model(next) {
         use std::fmt::Write as _;
         let _ = write!(
             note,
@@ -317,7 +329,7 @@ fn convert_blocks(
                         text: text.clone(),
                         cache_control: None,
                     }),
-                    // Reasoning has two ways onto the wire, and exactly one of
+                    // Reasoning has two ways onto the wire, and at most one of
                     // them is available per target.
                     //
                     // Signed + Anthropic: re-send VERBATIM so interleaved
@@ -325,27 +337,33 @@ fn convert_blocks(
                     // signature is the whole point — Anthropic 400s on a
                     // modified or unsigned thinking block.
                     //
-                    // Everything else — a different provider, or a block this
-                    // session's earlier (non-Anthropic) model produced with no
-                    // signature — is carried as attributed TEXT. It used to be
-                    // dropped, which is why switching models mid-session
-                    // handed the next model a conversation with every "why"
-                    // removed while the "what" stayed. Text cannot be rejected
-                    // as an unverified signature, and it is what the receiving
-                    // model can actually read.
-                    ContentBlock::Thinking { thinking, signature } => {
-                        if reasoning == ReasoningReplay::Native && !signature.is_empty() {
+                    // Unsigned + Anthropic (another provider's reasoning): not
+                    // carried. Written out as text it reads to Anthropic's
+                    // classifier as reasoning extraction, and the decline
+                    // stands for the whole conversation (see `ReasoningReplay`).
+                    // The answers and the tool calls still cross.
+                    //
+                    // A non-Anthropic target is carried the reasoning as
+                    // attributed TEXT. It used to be dropped, which is why
+                    // switching models mid-session handed the next model a
+                    // conversation with every "why" removed while the "what"
+                    // stayed. Text cannot be rejected as an unverified
+                    // signature, and it is what the receiving model can read.
+                    ContentBlock::Thinking { thinking, signature } => match reasoning {
+                        ReasoningReplay::Native if !signature.is_empty() => {
                             Some(InputContentBlock::Thinking {
                                 thinking: thinking.clone(),
                                 signature: signature.clone(),
                             })
-                        } else {
+                        }
+                        ReasoningReplay::Native => None,
+                        ReasoningReplay::AsText => {
                             reasoning_passport(thinking).map(|text| InputContentBlock::Text {
                                 text,
                                 cache_control: None,
                             })
                         }
-                    }
+                    },
                     // Redacted reasoning is an opaque blob: only the provider
                     // that sealed it can read it, so there is nothing to carry
                     // anywhere else. Replayed natively, omitted otherwise.
