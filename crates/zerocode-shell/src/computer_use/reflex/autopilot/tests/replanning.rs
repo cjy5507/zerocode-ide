@@ -421,7 +421,7 @@ fn a_stale_reading_holds_the_pending_plan_until_a_fresh_one() {
             2,
             "{case}: the plan starts on a fresh reading"
         );
-        assert_eq!(fake.helper.stops(), [run.clone()], "{case}");
+        assert_eq!(fake.helper.stops(), std::slice::from_ref(&run), "{case}");
         assert_eq!(pilot.ended(), None, "{case}");
         assert_eq!(pilot.rendered()["planning"], json!(false), "{case}");
         fake.stopped = Some("hotkey".into());
