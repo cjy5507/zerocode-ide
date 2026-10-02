@@ -607,7 +607,13 @@ pub(crate) struct Watch {
     durable: u64,
     report: Report,
     decider: Decider,
-    in_flight: Option<(Pending, mpsc::Receiver<(Wired, Spent)>)>,
+    /// The question in flight, its answer's channel, and the steady moment
+    /// it was sent — so its row can say how long the answer waited for the
+    /// window after it came back (`waitedMs`, t-22110).
+    in_flight: Option<(Pending, mpsc::Receiver<(Wired, Spent)>, u64)>,
+    /// Whether the last pass read the run as ended: what a settle between
+    /// collects, which reads nothing, says of a late answer.
+    seen_ended: bool,
     /// What an autopilot remembers of the run beside every question it asks
     /// (t-10223 §2.2): none for a run a person's plan started.
     stamp: Option<Stamp>,
@@ -624,6 +630,7 @@ impl Watch {
             },
             decider: Decider::new(),
             in_flight: None,
+            seen_ended: false,
             stamp: None,
         }
     }
@@ -693,13 +700,14 @@ impl Watch {
         let mut rows = Vec::new();
         let asks = mode.asks();
         let ended = state == "stopped";
+        self.seen_ended = ended;
         // A run that ended is asked about no more.
         if asks && !ended {
             let mut snapshot = reflex_decide::snapshot_of(&read);
             snapshot.read_ms = Some(carrier.now_ms());
             match self.decider.offer(snapshot) {
                 Offer::Same => {}
-                Offer::Ask(pending) => self.send(pending, ask),
+                Offer::Ask(pending) => self.send(pending, ask, carrier.now_ms()),
                 Offer::Waiting { coalesced } => {
                     rows.extend(coalesced.map(|merged| {
                         self.count(reflex_decide::ROAD_COALESCED, 0);
@@ -773,18 +781,19 @@ impl Watch {
         }
     }
 
-    fn send(&mut self, pending: Pending, ask: &Asker) {
+    fn send(&mut self, pending: Pending, ask: &Asker, now_ms: u64) {
         let (answered, answer) = mpsc::channel();
         let state = pending.snapshot.state.clone();
         let ask = Arc::clone(ask);
         std::thread::spawn(move || {
             let _ = answered.send(ask(state));
         });
-        self.in_flight = Some((pending, answer));
+        self.in_flight = Some((pending, answer, now_ms));
     }
 
     /// The question in flight, if it came back: its row, judged by `carrier`,
-    /// and the reading waiting behind it sent next.
+    /// and the reading waiting behind it sent next — against the scene the
+    /// pass's own reading shows.
     fn collect(
         &mut self,
         read: &Value,
@@ -794,23 +803,65 @@ impl Watch {
         carrier: &mut dyn Carrier,
         mode: JevMode,
     ) -> Vec<Value> {
-        let Some((pending, answer)) = self.in_flight.take() else {
+        let now = reflex_decide::snapshot_of(read).scene;
+        self.settle_in_flight(now.as_ref(), asks, ended, ask, carrier, mode)
+    }
+
+    /// Between two collects (t-22110): the question in flight, if it came
+    /// back since the last pass, judged by `carrier` and recorded now, against
+    /// `scene` — the scene the last pass read, since nothing is read here —
+    /// and the reading waiting behind it sent next. Whether a row was
+    /// recorded.
+    pub(crate) fn settle(
+        &mut self,
+        scene: Option<&reflex_decide::Scene>,
+        ask: &Asker,
+        carrier: &mut dyn Carrier,
+        record: &mut dyn FnMut(Vec<Value>),
+    ) -> bool {
+        let mode = carrier.mode();
+        let rows = self.settle_in_flight(scene, mode.asks(), self.seen_ended, ask, carrier, mode);
+        if rows.is_empty() {
+            return false;
+        }
+        record(rows);
+        true
+    }
+
+    /// The question in flight, if it came back: its row — stamped, judged by
+    /// `carrier`, and saying how long the answer waited for the window after
+    /// it came back (`waitedMs`: the time since it was sent, less the wire's
+    /// own round trip) — and the reading waiting behind it sent next.
+    fn settle_in_flight(
+        &mut self,
+        now: Option<&reflex_decide::Scene>,
+        asks: bool,
+        ended: bool,
+        ask: &Asker,
+        carrier: &mut dyn Carrier,
+        mode: JevMode,
+    ) -> Vec<Value> {
+        let Some((pending, answer, asked_ms)) = self.in_flight.take() else {
             return Vec::new();
         };
         let Ok((wired, spent)) = answer.try_recv() else {
-            self.in_flight = Some((pending, answer));
+            self.in_flight = Some((pending, answer, asked_ms));
             return Vec::new();
         };
-        let now = reflex_decide::snapshot_of(read).scene;
-        let mut row =
-            reflex_decide::asked_row(&self.run, &pending, &wired, now.as_ref(), asks, ended);
+        let settled_ms = carrier.now_ms();
+        let mut row = reflex_decide::asked_row(&self.run, &pending, &wired, now, asks, ended);
+        row["waitedMs"] = json!(
+            settled_ms
+                .saturating_sub(asked_ms)
+                .saturating_sub(wired.rtt_ms)
+        );
         spent.stamp(&mut row);
         self.stamp(&mut row, mode);
         carrier.settled(&pending, &mut row);
         let road = row["road"].as_str().unwrap_or_default().to_string();
         self.count(&road, u64::from(wired.attempts));
         if let Some(next) = self.decider.settled(pending.id) {
-            self.send(next, ask);
+            self.send(next, ask, settled_ms);
         }
         vec![row]
     }

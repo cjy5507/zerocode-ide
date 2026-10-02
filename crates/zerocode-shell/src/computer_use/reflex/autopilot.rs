@@ -10,6 +10,8 @@
 //!   continue: nothing more    pause: stop — a new plan when the run found
 //!   nothing three collects running, else the end    replan: plan in the
 //!   background → door → stop → start (a new run, the next epoch)
+//! between collects (every REFLEX_SETTLE_MS, nothing read): an answer that
+//!   came back → verdict → carried out; a plan written → door → start
 //! the end: the run's wall · escalated · paused · a person's hand or stop
 //! ```
 //!
@@ -35,7 +37,7 @@ use zerocode_core::computer_use::{
     REFLEX_APPLY_MAX_AGE_MS, REFLEX_AUTO_L1, REFLEX_COLLECT_MS, REFLEX_COVER_STOP_PERMILLE,
     REFLEX_ESCALATE_AFTER, REFLEX_LABEL_WINDOW_MS, REFLEX_MISSED_OUTCOMES, REFLEX_PLAN_LABEL_MS,
     REFLEX_PLAN_LEDGER, REFLEX_PRESSED_OUTCOME, REFLEX_REPLAN_AFTER_UNKNOWN_PASSES,
-    REFLEX_REPLAN_COMPARE_MS,
+    REFLEX_REPLAN_COMPARE_MS, REFLEX_SETTLE_MS,
 };
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::computer_use_protocol::reflex::{ReflexPlan, Scope, Surface, ValidatedPlan};
@@ -1011,6 +1013,59 @@ impl Autopilot {
             // person's input, a full queue — and nothing re-plans after it.
             self.end(world, &reason, "the helper ended the run");
         }
+        self.act_on_what_settled(world);
+        let done = self.judge.tally.ended.is_some()
+            && self.current.is_none()
+            && self.finishing.iter().all(|run| run.done);
+        self.close_labels(world, done);
+        self.publish();
+        done
+    }
+
+    /// Between two collects (t-22110, every `REFLEX_SETTLE_MS`): a reflex
+    /// decision's answer that came back since the last collect is judged and
+    /// carried out now, and a plan a model finished writing since is started
+    /// now — nothing is read from the helper, and the run's reading stays the
+    /// last collect's: the answer is judged against the scene that reading
+    /// showed, and its age is the reading's. Only the run standing settles
+    /// here; a run finishing settles at its collect, as before.
+    pub(crate) fn settle(&mut self, world: &mut World<'_>) {
+        if self.judge.tally.ended.is_some() {
+            return;
+        }
+        let running = self.running();
+        let forced = self.asked.forced;
+        let quiet = self.current.as_ref().is_some_and(Run::quiet);
+        if let Some(run) = self.current.as_mut().filter(|run| run.standing()) {
+            let scene = run
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.scene.clone());
+            let mut seat = Seat {
+                judge: &mut self.judge,
+                mode: &mut *world.mode,
+                standing: &mut *world.standing,
+                forced,
+                running,
+                quiet,
+                now_ms: world.now_ms,
+                wall_ms: world.wall_ms,
+            };
+            if run
+                .watch
+                .settle(scene.as_ref(), world.ask, &mut seat, &mut *world.decisions)
+            {
+                super::publish(&run.id, run.watch.report().clone());
+            }
+        }
+        self.act_on_what_settled(world);
+        self.publish();
+    }
+
+    /// What a collect or a settle left to do: the decision it settled is
+    /// carried out, three unusable answers running end the autopilot, and a
+    /// plan written meanwhile is started.
+    fn act_on_what_settled(&mut self, world: &mut World<'_>) {
         if let Some(carry) = self.judge.carry.take()
             && self.judge.tally.ended.is_none()
             && self.current.as_ref().is_some_and(|run| run.id == carry.run)
@@ -1027,24 +1082,12 @@ impl Autopilot {
         if self.judge.tally.ended.is_none() {
             self.poll_plan(world);
         }
-        let done = self.judge.tally.ended.is_some()
-            && self.current.is_none()
-            && self.finishing.iter().all(|run| run.done);
-        self.close_labels(world, done);
-        self.publish();
-        done
     }
 
-    /// Between two collects (t-22110, every `REFLEX_SETTLE_MS`): a reflex
-    /// decision's answer that came back since the last collect is judged and
-    /// carried out now, and a plan a model finished writing since is started
-    /// now — nothing is read from the helper, and the run's reading stays the
-    /// last collect's. Answers nothing yet (red).
-    pub(crate) fn settle(&mut self, _world: &mut World<'_>) {}
-
-    fn pass_every_run(&mut self, world: &mut World<'_>) {
-        let running = self
-            .current
+    /// The run standing now — its id, its epoch and the plan the helper says
+    /// it runs — as every question's verdict reads it.
+    fn running(&self) -> Option<(String, u64, String)> {
+        self.current
             .as_ref()
             .filter(|run| run.standing())
             .map(|run| {
@@ -1055,7 +1098,11 @@ impl Autopilot {
                         .clone()
                         .unwrap_or_else(|| run.stamp.plan_hash.clone()),
                 )
-            });
+            })
+    }
+
+    fn pass_every_run(&mut self, world: &mut World<'_>) {
+        let running = self.running();
         let forced = self.asked.forced;
         let quiet = self.current.as_ref().is_some_and(Run::quiet);
         let runs = self
@@ -1588,7 +1635,18 @@ pub(crate) fn begin(
             if autopilot.tick(&mut world) {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(REFLEX_COLLECT_MS));
+            // Between collects, what came back is carried out as it comes
+            // (t-22110): an answer, a written plan — the helper is not read.
+            for _ in 0..REFLEX_COLLECT_MS / REFLEX_SETTLE_MS {
+                std::thread::sleep(Duration::from_millis(REFLEX_SETTLE_MS));
+                if !super::super::session_stands() {
+                    autopilot.lost_the_session();
+                    return;
+                }
+                let mut call = |method: &str, params: Value| super::super::call(method, params);
+                let mut world = roads.world(&mut call, &ask, &mut generator, &mut enabled);
+                autopilot.settle(&mut world);
+            }
         }
     });
     Ok(answer)
