@@ -509,19 +509,25 @@ pub(crate) fn write_plan<G: Generator + ?Sized>(generator: &mut G, ask: &Ask<'_>
     }
 }
 
-/// [`write_plan`] down the one road the generator asks now.
-fn write_on_one_road<G: Generator + ?Sized>(generator: &mut G, ask: &Ask<'_>) -> Written {
-    let mut written = Written {
-        plan: Err(PLAN_REFUSED.to_string()),
+/// What asking came to before any request went: no plan, for `word`, and
+/// nothing spent.
+pub(crate) fn unwritten(word: &str, source: &'static str) -> Written {
+    Written {
+        plan: Err(word.to_string()),
         requests: 0,
         bytes_out: 0,
         bytes_in: 0,
         rtt_ms: 0,
         tokens: None,
         refusals: Vec::new(),
-        source: generator.source(),
+        source,
         answered: None,
-    };
+    }
+}
+
+/// [`write_plan`] down the one road the generator asks now.
+fn write_on_one_road<G: Generator + ?Sized>(generator: &mut G, ask: &Ask<'_>) -> Written {
+    let mut written = unwritten(PLAN_REFUSED, generator.source());
     let mut scope_refused = false;
     let mut rejected = None;
     for _ in 0..=REFLEX_PLAN_RETRIES {

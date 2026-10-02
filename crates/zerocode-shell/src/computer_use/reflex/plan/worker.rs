@@ -1,12 +1,13 @@
 //! A re-plan's writer, off the collector's thread (t-21494): the collector
 //! asks for a later plan and polls for it each collect, so the valid run it
 //! stands on keeps being read and judged while the model thinks. The writer
-//! is made on its own thread — a key store is read where it is asked from —
-//! and a pending answer dropped is a request withdrawn: no further request
-//! of it reaches the model, and a wire already answering is not waited on.
+//! is made on its own thread — a key store is read where it is asked from.
+//! A pending answer dropped is a request withdrawn, and a newer request
+//! passes every one still waiting: behind one write in progress the newest
+//! request alone is written, and a wire already answering is not waited on.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
 use super::*;
@@ -17,6 +18,10 @@ type Factory = Box<dyn FnOnce() -> Box<dyn Generator> + Send>;
 
 /// The name the writer's thread carries.
 const WRITER_THREAD: &str = "reflex-plan";
+
+/// The word a plan's row names a request passed by a newer one while it
+/// waited: never asked of the model.
+pub(crate) const PLAN_SUPERSEDED: &str = "plan_superseded";
 
 /// A plan asked for and not yet answered: polled by the collector, never
 /// waited on; dropped, it is withdrawn.
@@ -58,7 +63,8 @@ impl Drop for PendingPlan {
 }
 
 /// One plan asked of the writer's thread: the ask, owned; the wall it has
-/// from the moment it was asked; its withdrawal; and where its answer goes.
+/// from the moment it was asked; its withdrawal; its place in the order
+/// asked, against the newest; and where its answer goes.
 struct Request {
     goal: String,
     scope: Scope,
@@ -68,18 +74,33 @@ struct Request {
     began: Instant,
     left: Duration,
     cancelled: Arc<AtomicBool>,
+    stamp: u64,
+    newest: Arc<AtomicU64>,
     answer: Sender<Written>,
+}
+
+impl Request {
+    /// Withdrawn by whoever asked.
+    fn withdrawn(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
 }
 
 /// The window's writer for an autopilot: the first plan is written here, on
 /// the collector's thread, before any hand moves; every later plan goes to a
 /// writer of the same making on a thread of its own, started at the first
 /// later plan and kept until this generator is dropped. Requests queue in
-/// the order they were asked, a withdrawn one skipped.
+/// the order they were asked, and the newest wins: one withdrawn or passed
+/// by a newer request before its turn is answered [`PLAN_SUPERSEDED`] and
+/// never asked of the model, so behind one write in progress the newest
+/// request alone is written — the write in progress keeps the answer it is
+/// waiting on and asks nothing more.
 pub(crate) struct Background {
     first: Box<dyn Generator>,
     factory: Option<Factory>,
     requests: Option<Sender<Request>>,
+    /// The stamp of the newest request asked.
+    newest: Arc<AtomicU64>,
 }
 
 impl Background {
@@ -96,6 +117,7 @@ impl Background {
             first,
             factory: Some(factory),
             requests: None,
+            newest: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -110,7 +132,10 @@ impl Background {
                 .spawn(move || {
                     let mut generator = factory();
                     while let Ok(request) = requests.recv() {
-                        if request.cancelled.load(Ordering::SeqCst) {
+                        if request.withdrawn() {
+                            let _ = request
+                                .answer
+                                .send(unwritten(PLAN_SUPERSEDED, generator.source()));
                             continue;
                         }
                         let ask = Ask {
@@ -125,9 +150,7 @@ impl Background {
                         };
                         let mut bounded = Bounded {
                             generator: generator.as_mut(),
-                            began: request.began,
-                            left: request.left,
-                            cancelled: &request.cancelled,
+                            request: &request,
                         };
                         let written = write_plan(&mut bounded, &ask);
                         let _ = request.answer.send(written);
@@ -163,6 +186,7 @@ impl Generator for Background {
     fn plan_later(&mut self, ask: &Ask<'_>, left: Duration) -> PendingPlan {
         let (answer, received) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
+        let stamp = self.newest.fetch_add(1, Ordering::SeqCst) + 1;
         let request = Request {
             goal: ask.goal.to_string(),
             scope: ask.scope.clone(),
@@ -175,6 +199,8 @@ impl Generator for Background {
             began: Instant::now(),
             left,
             cancelled: Arc::clone(&cancelled),
+            stamp,
+            newest: Arc::clone(&self.newest),
             answer,
         };
         // A writer that went, or never began, drops the request with the
@@ -189,14 +215,21 @@ impl Generator for Background {
     }
 }
 
-/// A writer held to a request's wall and its withdrawal: a request asked
-/// after either is refused before it reaches the model, and no further road
-/// is asked for it.
+/// A writer held to its request: a request asked after the wall, after a
+/// withdrawal or after a newer request is refused before it reaches the
+/// model, and no further road is asked for it.
 struct Bounded<'a> {
     generator: &'a mut dyn Generator,
-    began: Instant,
-    left: Duration,
-    cancelled: &'a AtomicBool,
+    request: &'a Request,
+}
+
+impl Bounded<'_> {
+    /// What is left of the request's wall.
+    fn left(&self) -> Duration {
+        self.request
+            .left
+            .saturating_sub(self.request.began.elapsed())
+    }
 }
 
 impl Generator for Bounded<'_> {
@@ -213,10 +246,10 @@ impl Generator for Bounded<'_> {
     }
 
     fn ask(&mut self, system: &str, user: &str, left: Duration) -> Result<Said, String> {
-        if self.cancelled.load(Ordering::SeqCst) {
+        if self.request.withdrawn() {
             return Err(PLAN_REFUSED.to_string());
         }
-        let left = left.min(self.left.saturating_sub(self.began.elapsed()));
+        let left = left.min(self.left());
         if left.is_zero() {
             return Err(crate::systemone::TIMEOUT.to_string());
         }
@@ -224,9 +257,7 @@ impl Generator for Bounded<'_> {
     }
 
     fn pass_over(&mut self, why: &str) -> bool {
-        !self.cancelled.load(Ordering::SeqCst)
-            && self.began.elapsed() < self.left
-            && self.generator.pass_over(why)
+        !self.request.withdrawn() && !self.left().is_zero() && self.generator.pass_over(why)
     }
 }
 
@@ -253,29 +284,66 @@ mod tests {
         assert!(cancelled.load(Ordering::SeqCst));
     }
 
+    /// A request as the writer's thread holds it, its answer going nowhere.
+    fn request(left: Duration, stamp: u64, newest: &Arc<AtomicU64>) -> Request {
+        let (image, stage) = capture();
+        Request {
+            goal: "press the red dots, never the blue".into(),
+            scope: scope(),
+            stage,
+            palette: palette_of(&image, &stage).expect("a palette"),
+            previous: None,
+            began: Instant::now(),
+            left,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            stamp,
+            newest: Arc::clone(newest),
+            answer: mpsc::channel().0,
+        }
+    }
+
+    /// A request whose wall is spent, one withdrawn and one passed by a
+    /// newer request are each refused before the model hears of them, and
+    /// no other road is asked for them.
     #[test]
-    fn expired_or_cancelled_requests_never_reach_the_generator() {
+    fn expired_cancelled_or_superseded_requests_never_reach_the_generator() {
+        let newest = Arc::new(AtomicU64::new(1));
         let mut generator = Scripted {
-            answers: Vec::new().into(),
+            answers: vec![Ok(answer_for(&scope()).to_string()); 3].into(),
             asked: Vec::new(),
         };
-        let cancelled = AtomicBool::new(false);
+        let mut spent = request(Duration::ZERO, 1, &newest);
         let mut bounded = Bounded {
             generator: &mut generator,
-            began: Instant::now(),
-            left: Duration::ZERO,
-            cancelled: &cancelled,
+            request: &spent,
         };
         assert_eq!(
             bounded.ask("", "", Duration::from_secs(1)).err().as_deref(),
             Some(crate::systemone::TIMEOUT)
         );
         assert!(!bounded.pass_over(PLAN_REFUSED));
-        cancelled.store(true, Ordering::SeqCst);
-        bounded.left = Duration::from_secs(1);
+        spent.left = Duration::from_secs(1);
+        spent.cancelled.store(true, Ordering::SeqCst);
+        let mut bounded = Bounded {
+            generator: &mut generator,
+            request: &spent,
+        };
         assert_eq!(
             bounded.ask("", "", Duration::from_secs(1)).err().as_deref(),
-            Some(PLAN_REFUSED)
+            Some(PLAN_REFUSED),
+            "withdrawn"
+        );
+        assert!(!bounded.pass_over(PLAN_REFUSED));
+        let passed_by = request(Duration::from_secs(1), 1, &newest);
+        newest.store(2, Ordering::SeqCst);
+        let mut bounded = Bounded {
+            generator: &mut generator,
+            request: &passed_by,
+        };
+        assert_eq!(
+            bounded.ask("", "", Duration::from_secs(1)).err().as_deref(),
+            Some(PLAN_REFUSED),
+            "passed by a newer request"
         );
         assert!(!bounded.pass_over(PLAN_REFUSED));
         assert!(generator.asked.is_empty());
@@ -313,11 +381,13 @@ mod tests {
         }
     }
 
-    /// Requests queue behind a writer still answering: a plan asked while the
-    /// writer works on one since withdrawn is answered in its turn, never
-    /// dropped as though the writer had gone.
+    /// Behind a writer still answering, the newest request alone is
+    /// written: every request queued before it waits its turn — none is
+    /// dropped as though the writer had gone — and is then answered
+    /// `plan_superseded` without the model hearing of it; the write in
+    /// progress keeps the answer it was waiting on.
     #[test]
-    fn a_request_behind_a_busy_writer_is_answered_in_its_turn() {
+    fn the_newest_request_alone_is_written_behind_a_busy_writer() {
         let (release, gate) = mpsc::channel();
         let asked = Arc::new(AtomicUsize::new(0));
         let gated = Gated {
@@ -342,19 +412,19 @@ mod tests {
             previous: None,
         };
         let wall = Duration::from_secs(5);
-        let withdrawn = background.plan_later(&ask, wall);
+        let busy = background.plan_later(&ask, wall);
         let began = Instant::now();
         while asked.load(Ordering::SeqCst) == 0 {
             assert!(began.elapsed() < wall, "the writer never took the request");
             std::thread::sleep(Duration::from_millis(5));
         }
-        let second = background.plan_later(&ask, wall);
-        drop(withdrawn);
-        let third = background.plan_later(&ask, wall);
-        assert!(
-            matches!(third.poll(), Ok(None)),
-            "a request behind a busy writer waits for its turn"
-        );
+        let waiting: Vec<PendingPlan> = (0..3).map(|_| background.plan_later(&ask, wall)).collect();
+        for pending in &waiting {
+            assert!(
+                matches!(pending.poll(), Ok(None)),
+                "a request behind a busy writer waits, it is not dropped"
+            );
+        }
         release.send(()).expect("the gate");
         let answered = |pending: &PendingPlan| {
             let began = Instant::now();
@@ -367,16 +437,33 @@ mod tests {
                 }
             }
         };
-        for (which, pending) in [("second", &second), ("third", &third)] {
-            let written = answered(pending)
+        let written = |pending: &PendingPlan, which: &str| {
+            answered(pending)
                 .unwrap_or_else(|word| panic!("the {which} request lost its writer: {word}"))
-                .unwrap_or_else(|| panic!("the {which} request was never answered"));
-            assert!(written.plan.is_ok(), "{which}: a plan");
+                .unwrap_or_else(|| panic!("the {which} request was never answered"))
+        };
+        assert!(
+            written(&busy, "busy").plan.is_ok(),
+            "the write in progress keeps its answer"
+        );
+        let (passed_by, newest) = waiting.split_at(2);
+        for (at, pending) in passed_by.iter().enumerate() {
+            let answer = written(pending, &format!("{at}th waiting"));
+            assert_eq!(
+                answer.plan.as_ref().err().map(String::as_str),
+                Some(PLAN_SUPERSEDED),
+                "a request passed by a newer one"
+            );
+            assert_eq!(answer.requests, 0, "never asked");
         }
+        assert!(
+            written(&newest[0], "newest").plan.is_ok(),
+            "the newest is written"
+        );
         assert_eq!(
             asked.load(Ordering::SeqCst),
-            3,
-            "one request each, none twice"
+            2,
+            "the write in progress and the newest: one request each"
         );
     }
 }
