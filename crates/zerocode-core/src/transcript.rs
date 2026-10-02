@@ -2438,32 +2438,51 @@ mod tests {
         use serde_json::json;
         let result = |record: serde_json::Value, key: &str| {
             let mut line = json!({"type": "user", "message": {"content": [
-                {"type": "tool_result", "tool_use_id": "f1", "content": "The products page lists 24 products."}
+                {"type": "tool_result", "tool_use_id": "f1", "content": "24 products."}
             ]}});
             line[key] = record;
-            turns_in(&format!("{line}\n")).remove(0).tool.expect("a result turn")
+            turns_in(&format!("{line}\n"))
+                .remove(0)
+                .tool
+                .expect("a result turn")
         };
-        let fetched = json!({"bytes": 262_144, "code": 200, "codeText": "OK", "result": "…", "durationMs": 3912, "url": "https://example.com/products"});
-        let want = Some(ToolFacts { status: Some(200), bytes: Some(262_144) });
+        let fetched = json!({
+            "bytes": 262_144, "code": 200, "codeText": "OK", "result": "…",
+            "durationMs": 3912, "url": "https://example.com/products"
+        });
+        let want = Some(ToolFacts {
+            status: Some(200),
+            bytes: Some(262_144),
+        });
         assert_eq!(result(fetched.clone(), "toolUseResult").facts, want);
         assert_eq!(result(fetched, "tool_use_result").facts, want);
         // A shell's record names no status and no size.
-        assert_eq!(result(json!({"stdout": "", "stderr": "", "interrupted": false}), "toolUseResult").facts, None);
+        let shell = json!({"stdout": "", "stderr": "", "interrupted": false});
+        assert_eq!(result(shell, "toolUseResult").facts, None);
         // A code no HTTP status is none; the size still stands.
-        assert_eq!(
-            result(json!({"code": 1, "bytes": 10}), "toolUseResult").facts,
-            Some(ToolFacts { status: None, bytes: Some(10) })
-        );
+        let odd = json!({"code": 1, "bytes": 10});
+        let sized = Some(ToolFacts {
+            status: None,
+            bytes: Some(10),
+        });
+        assert_eq!(result(odd, "toolUseResult").facts, sized);
         // Two results on one line: the line's record is not one of theirs.
-        let two = json!({"type": "user", "toolUseResult": {"code": 200, "bytes": 5}, "message": {"content": [
-            {"type": "tool_result", "tool_use_id": "a", "content": "one"},
-            {"type": "tool_result", "tool_use_id": "b", "content": "two"}
-        ]}});
-        assert!(turns_in(&format!("{two}\n")).iter().all(|turn| turn.tool.as_ref().is_some_and(|tool| tool.facts.is_none())));
+        let two = json!({"type": "user", "toolUseResult": {"code": 200, "bytes": 5},
+            "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "a", "content": "one"},
+                {"type": "tool_result", "tool_use_id": "b", "content": "two"}
+            ]}});
+        let both = turns_in(&format!("{two}\n"));
+        assert_eq!(both.len(), 2);
+        for turn in &both {
+            assert_eq!(turn.tool.as_ref().map(|tool| tool.facts.clone()), Some(None));
+        }
         // And it rides the wire as the page reads it — left off when there is none.
-        let wire = serde_json::to_value(result(json!({"code": 404, "bytes": 2048}), "toolUseResult")).expect("serializes");
+        let gone = result(json!({"code": 404, "bytes": 2048}), "toolUseResult");
+        let wire = serde_json::to_value(gone).expect("serializes");
         assert_eq!(wire["facts"], json!({"status": 404, "bytes": 2048}));
-        let bare = serde_json::to_value(result(json!({"stdout": ""}), "toolUseResult")).expect("serializes");
+        let quiet = result(json!({"stdout": ""}), "toolUseResult");
+        let bare = serde_json::to_value(quiet).expect("serializes");
         assert!(bare.get("facts").is_none());
     }
 
