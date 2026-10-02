@@ -25,6 +25,7 @@ APM wall starts at the goal and ends at the verdict, and only the fixture's own
 hits are actions.
 """
 import argparse
+import bisect
 import collections
 import json
 import math
@@ -447,6 +448,78 @@ def spread(values_ms):
                                     for share in (50, 95, 99)}}
 
 
+def observation_numbers(record, limits):
+    """Counter deltas over each run's sampled interval, not the polling rate
+    or the configured capture rate. Re-planned runs keep separate windows."""
+    runs = (record.get("ended") or {}).get("runs")
+    if runs is None:
+        runs = [record["started"]]
+    samples = {run["runId"]: [] for run in runs}
+    for row in record.get("statuses") or []:
+        status = row.get("status") or {}
+        run, at, frames = status.get("runId"), row.get("ns"), status.get("framesEvaluated")
+        if run in samples and type(at) is int and at > 0 and type(frames) is int and frames >= 0:
+            samples[run].append((at, frames))
+    measured = []
+    for run, rows in samples.items():
+        pairs = list(zip(rows, rows[1:]))
+        known = bool(pairs) and all(b[0] > a[0] and b[1] >= a[1] for a, b in pairs)
+        seconds = (rows[-1][0] - rows[0][0]) / 1e9 if known else None
+        frames = rows[-1][1] - rows[0][1] if known else None
+        measured.append({"run": run, "samples": len(rows), "sampled_s": seconds,
+                         "evaluated_frames": frames, "evaluated_hz": round(frames / seconds, 3) if known else None,
+                         "poll_interval_ms": spread([(b[0] - a[0]) / 1e6 for a, b in pairs if b[0] > a[0]])})
+    return {"configured_hz": limits["frames_per_second"], "capture_hz": None, "runs": measured}
+
+
+def first_event_freshness(record, limits):
+    """Only each leaf's first posted event carries a frame time. Later events
+    and absent times remain unmeasured; a refused leaf with no input is no stale input."""
+    receipts = record["receipts"]
+    counts_known = bool(receipts) and all(type(receipt.get("events")) is int and receipt["events"] >= 0 for receipt in receipts)
+    posted = [receipt for receipt in receipts if type(receipt.get("events")) is int and receipt["events"] > 0]
+    ages = []
+    for receipt in posted:
+        event, frame = receipt.get("firstEventHostNs"), receipt.get("firstEventFrameHostNs")
+        if type(event) is int and type(frame) is int and 0 < frame <= event:
+            ages.append(event - frame)
+    events = sum(receipt["events"] for receipt in posted) if counts_known else None
+    return {"input_receipts": len(posted), "timed": len(ages), "unknown": len(posted) - len(ages),
+            "stale": sum(age > limits["max_frame_age_ns"] for age in ages) if ages else None,
+            "age_ms": spread([age / 1e6 for age in ages]), "max_age_ms": limits["max_frame_age_ns"] / 1e6,
+            "input_events": events, "events_without_age": events - len(ages) if events is not None else None}
+
+
+def effect_numbers(record):
+    """First recorded target removal before its expiry: a fixture scene
+    update, not proof that a screen capture or the display showed the effect."""
+    frames = sorted((frame for frame in record.get("frames") or []
+                     if type(frame.get("ns")) is int and frame["ns"] > 0 and isinstance(frame.get("shown"), list)),
+                    key=lambda frame: frame["ns"])
+    stamps = [frame["ns"] for frame in frames]
+    targets = {target["id"]: target for target in record["schedule"]["targets"]}
+    judged_hits = hits(record)
+    posted_ms, received_ms = [], []
+    for event in judged_hits:
+        posted, received = event.get("evNs"), event.get("rxNs")
+        target = targets.get(event["judged"]["hit"])
+        if target is None or type(posted) is not int or type(received) is not int or not 0 < posted <= received:
+            continue
+        after = bisect.bisect_right(stamps, received)
+        if after == 0 or target["id"] not in frames[after - 1]["shown"]:
+            continue
+        for frame in frames[after:]:
+            if frame["ns"] >= at_ns(record, target["expireMs"]) or frame.get("phase") != target["phase"]:
+                break
+            if target["id"] not in frame["shown"]:
+                posted_ms.append((frame["ns"] - posted) / 1e6)
+                received_ms.append((frame["ns"] - received) / 1e6)
+                break
+    return {"basis": "fixture_update_not_screen_capture", "hits": len(judged_hits),
+            "confirmed": len(posted_ms), "unconfirmed": len(judged_hits) - len(posted_ms),
+            "press_to_fixture_update_ms": spread(posted_ms), "receive_to_fixture_update_ms": spread(received_ms)}
+
+
 def measure(record, values, limits):
     """The run's numbers, every one from the fixture's record and the round;
     the runtime's receipts give only their own timings and the claims."""
@@ -533,6 +606,9 @@ def measure(record, values, limits):
         "appear_to_press_ms": spread(reaction),
         "press_to_receive_ms": spread(delivery),
         "appear_to_receive_ms": spread(received_reaction),
+        "observation": observation_numbers(record, limits),
+        "first_event_freshness": first_event_freshness(record, limits),
+        "effect": effect_numbers(record),
         "leaves": leaves,
         "roads": roads(fires, piloted),
         "autopilot": piloted,
@@ -850,6 +926,7 @@ def load(folder):
         "fixture": read("fixture.json"),
         "frames": lines("frames.jsonl"),
         "events": lines("events.jsonl"),
+        "statuses": lines("status.jsonl"),
         "started": read("started.json"),
         "receipts": receipts,
         "ended": ended,

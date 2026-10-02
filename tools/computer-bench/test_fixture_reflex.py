@@ -656,6 +656,149 @@ class Runner(unittest.TestCase):
         self.assertFalse((self.folder / "run-33").exists(), "refused before the fixture came up")
 
 
+class RealtimeTimings(unittest.TestCase):
+    def statuses(self, record, samples, run="rx-1"):
+        record.setdefault("statuses", []).extend(
+            {"ns": T0 + ms * MS, "status": {"runId": run, "framesEvaluated": frames}}
+            for ms, frames in samples)
+
+    def test_observation_uses_counter_deltas_not_poll_count_or_configured_fps(self):
+        record = clean()
+        self.statuses(record, [(100, 40), (120, 40), (200, 42)])
+        seen = reflex.measure(record, VALUES, LIMITS)["observation"]
+        self.assertEqual(seen["configured_hz"], LIMITS["frames_per_second"])
+        self.assertIsNone(seen["capture_hz"], "evaluated frames do not count every camera capture")
+        run = seen["runs"][0]
+        self.assertEqual((run["run"], run["samples"], run["evaluated_frames"]), ("rx-1", 3, 2))
+        self.assertEqual((run["sampled_s"], run["evaluated_hz"]), (0.1, 20.0))
+        self.assertEqual(run["poll_interval_ms"], reflex.spread([20, 80]))
+
+    def test_replans_keep_their_counter_windows_separate(self):
+        record = piloted()
+        self.statuses(record, [(100, 100), (200, 104)])
+        self.statuses(record, [(180, 0), (380, 2)], run="rx-2")
+        self.statuses(record, [(100, 0), (200, 999)], run="another-run")
+        runs = reflex.measure(record, VALUES, LIMITS)["observation"]["runs"]
+        self.assertEqual([(run["run"], run["evaluated_frames"], run["evaluated_hz"]) for run in runs],
+                         [("rx-1", 4, 40.0), ("rx-2", 2, 10.0)])
+
+    def test_missing_or_regressing_observation_samples_are_unknown_not_zero_hz(self):
+        for samples in ([], [(100, 2)], [(100, 2), (200, 1)], [(200, 2), (100, 3)], [(100, 2), (100, 3)]):
+            with self.subTest(samples=samples):
+                record = clean()
+                self.statuses(record, samples)
+                run = reflex.measure(record, VALUES, LIMITS)["observation"]["runs"][0]
+                self.assertIsNone(run["evaluated_hz"])
+                self.assertIsNone(run["evaluated_frames"])
+        record = clean()
+        self.statuses(record, [(100, 2), (200, 2)])
+        self.assertEqual(reflex.measure(record, VALUES, LIMITS)["observation"]["runs"][0]["evaluated_hz"], 0.0)
+
+    def test_invalid_counters_cannot_become_observation_samples(self):
+        for value in (None, True, -1, "2", 2.5):
+            with self.subTest(value=value):
+                record = clean()
+                self.statuses(record, [(100, 0), (200, value)])
+                run = reflex.measure(record, VALUES, LIMITS)["observation"]["runs"][0]
+                self.assertEqual(run["samples"], 1)
+                self.assertIsNone(run["evaluated_hz"])
+
+    def test_first_event_freshness_includes_partial_input_not_refusals_without_input(self):
+        record = clean()
+        limit = LIMITS["max_frame_age_ns"]
+        at = T0 + 1_000 * MS
+        record["receipts"] = [
+            {"events": 3, "outcome": "done", "firstEventHostNs": at, "firstEventFrameHostNs": at - limit},
+            {"events": 1, "outcome": "cancelled", "firstEventHostNs": at, "firstEventFrameHostNs": at - limit - 1},
+            {"events": 0, "outcome": "stale", "firstEventHostNs": None, "firstEventFrameHostNs": None},
+        ]
+        seen = reflex.first_event_freshness(record, LIMITS)
+        self.assertEqual((seen["input_receipts"], seen["timed"], seen["unknown"], seen["stale"]), (2, 2, 0, 1))
+        self.assertEqual((seen["input_events"], seen["events_without_age"]), (4, 2))
+        self.assertEqual(seen["max_age_ms"], limit / MS)
+
+    def test_missing_receipts_do_not_claim_zero_input_events(self):
+        record = clean()
+        record["receipts"] = []
+        seen = reflex.first_event_freshness(record, LIMITS)
+        self.assertIsNone(seen["input_events"])
+        self.assertIsNone(seen["events_without_age"])
+        self.assertIsNone(seen["stale"])
+        record["receipts"] = [{"events": 0, "outcome": "stale"}]
+        self.assertEqual(reflex.first_event_freshness(record, LIMITS)["input_events"], 0)
+
+    def test_missing_or_invalid_age_is_not_a_fresh_input(self):
+        for value in (None, 0, True, "bad", T0 + 1):
+            with self.subTest(value=value):
+                record = clean()
+                record["receipts"] = [{"events": 2, "firstEventHostNs": T0, "firstEventFrameHostNs": value}]
+                seen = reflex.first_event_freshness(record, LIMITS)
+                self.assertEqual((seen["input_receipts"], seen["timed"], seen["unknown"]), (1, 0, 1))
+                self.assertIsNone(seen["stale"])
+                self.assertEqual(seen["events_without_age"], 2)
+                self.assertEqual(seen["age_ms"], reflex.spread([]))
+        record["receipts"].append({"outcome": "done"})
+        seen = reflex.first_event_freshness(record, LIMITS)
+        self.assertIsNone(seen["input_events"])
+        self.assertIsNone(seen["events_without_age"])
+
+    def effect_record(self):
+        record = clean()
+        event = copy.deepcopy(reflex.hits(record)[0])
+        target = next(target for target in record["schedule"]["targets"] if target["id"] == event["judged"]["hit"])
+        before = {"seq": 1, "ns": event["evNs"] - MS, "phase": target["phase"], "shown": [target["id"]]}
+        after = {"seq": 2, "ns": event["rxNs"] + 10 * MS, "phase": target["phase"], "shown": []}
+        record.update(events=[event], frames=[before, after])
+        return record, target
+
+    def test_effect_uses_the_fixture_update_not_receipt_completion(self):
+        record, _ = self.effect_record()
+        seen = reflex.effect_numbers(record)
+        self.assertEqual((seen["hits"], seen["confirmed"], seen["unconfirmed"]), (1, 1, 0))
+        self.assertEqual(seen["press_to_fixture_update_ms"], reflex.spread([10.5]))
+        self.assertEqual(seen["receive_to_fixture_update_ms"], reflex.spread([10]))
+        self.assertEqual(seen["basis"], "fixture_update_not_screen_capture")
+        record["receipts"] = []
+        self.assertEqual(reflex.effect_numbers(record), seen)
+
+    def test_expiry_missing_frames_and_unknown_shown_are_not_verified_effects(self):
+        for change in ("expired", "no_before", "no_after", "still_present", "unknown_shown", "before_receive"):
+            with self.subTest(change=change):
+                record, target = self.effect_record()
+                if change == "expired":
+                    record["frames"][1]["ns"] = reflex.at_ns(record, target["expireMs"])
+                elif change == "no_before":
+                    record["frames"] = record["frames"][1:]
+                elif change == "no_after":
+                    record["frames"] = record["frames"][:1]
+                elif change == "still_present":
+                    record["frames"][1]["shown"] = [target["id"]]
+                elif change == "unknown_shown":
+                    record["frames"][1].pop("shown")
+                elif change == "before_receive":
+                    record["frames"][1]["ns"] = record["events"][0]["rxNs"] - 1
+                seen = reflex.effect_numbers(record)
+                self.assertEqual((seen["confirmed"], seen["unconfirmed"]), (0, 1))
+                self.assertEqual(seen["press_to_fixture_update_ms"], reflex.spread([]))
+
+    def test_status_rows_are_loaded_and_metrics_survive_the_tally(self):
+        record, _ = self.effect_record()
+        self.statuses(record, [(100, 40), (200, 42)])
+        with tempfile.TemporaryDirectory() as folder:
+            path = pathlib.Path(folder)
+            path.joinpath("status.jsonl").write_text("".join(json.dumps(row) + "\n" for row in record["statuses"]))
+            self.assertEqual(reflex.load(path)["statuses"], record["statuses"])
+            judged = reflex.judged(record, VALUES, LIMITS)
+            path.joinpath(tally.REFLEX_RUN).write_text(json.dumps(judged))
+            row = tally.measure(folder)
+            for name in ("observation", "first_event_freshness", "effect"):
+                self.assertEqual(row[name], judged["measure"][name])
+                judged["measure"].pop(name)
+            path.joinpath(tally.REFLEX_RUN).write_text(json.dumps(judged))
+            legacy = tally.measure(folder)
+            self.assertTrue(all(legacy[name] is None for name in ("observation", "first_event_freshness", "effect")))
+
+
 class DeliveryTimings(unittest.TestCase):
     def test_event_posting_and_receiving_have_separate_latency(self):
         record = clean()
