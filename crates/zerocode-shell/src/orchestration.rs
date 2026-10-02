@@ -7223,7 +7223,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     continue;
                 }
                 note_seatless_mail(&run.id, &address);
-                if false && is_news(run, newest, now_ms) {
+                if is_news(run, newest, now_ms) {
                     unsaid.push(Unsaid {
                         run: run.id.clone(),
                         address: address.clone(),
@@ -7256,7 +7256,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     continue;
                 }
                 note_pointer_held_by_takeover(&run.id, &address, term);
-                if false && is_news(run, newest, now_ms) {
+                if is_news(run, newest, now_ms) {
                     unsaid.push(Unsaid {
                         run: run.id.clone(),
                         address: address.clone(),
@@ -7302,8 +7302,12 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * question is silent too, and keeps the hook's reading. */
                 let held_inside_question =
                     asking.contains(&key) || attention.get(&term).copied().flatten().is_some();
-                let _ = held_inside_question;
-                let heard = turns.get(&term).copied().map(PaneTurn::as_read);
+                let heard = turn_for_pointing(
+                    host,
+                    term,
+                    turns.get(&term).copied().map(PaneTurn::as_read),
+                    held_inside_question,
+                );
                 /* The moment a WORKING pane can be reached without a
                  * keystroke, and the one this pass used to have nothing to
                  * say about.
