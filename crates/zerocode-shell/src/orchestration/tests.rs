@@ -25141,5 +25141,13 @@ fn an_unpointed_message_is_told_to_the_person_and_to_its_sender_once() {
         !letters.stdout.contains(SECRET),
         "the letter carried the message's body"
     );
+    // The mail stays unread on purpose (it was never pointed), so the pane
+    // leaves the way its siblings do — the terms leave the team and the
+    // pointer memory: a later test's beat must not find this pane and type
+    // the pointer into its own host.
+    super::pane_turn_began(LEADER, clock());
     crate::human_input::forget_term(LEADER);
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::orchestration_pointer_mailbox::forget_term(LEADER);
 }
