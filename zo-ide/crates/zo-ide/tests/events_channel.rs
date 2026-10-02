@@ -29,15 +29,16 @@ const PATIENCE: Duration = Duration::from_secs(5);
 const SESSION: &str = "session-events-test";
 
 async fn open(token: Option<&str>) -> EventsChannel {
-    EventsChannel::open(&EventsConfig {
+    let config = EventsConfig {
         bind: "127.0.0.1:0".to_string(),
         token: token.map(str::to_string),
         session_id: SESSION.to_string(),
         addr_file: None,
         discovery_file: None,
-    })
-    .await
-    .expect("loopback bind")
+    };
+    let mut channel = EventsChannel::bind(&config).await.expect("loopback bind");
+    channel.serve(&config).expect("serve");
+    channel
 }
 
 /// 창이 요청마다 새 연결을 여는 것과 같은 모양(`zerocode-shell::with_client`).

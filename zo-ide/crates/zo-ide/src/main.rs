@@ -564,8 +564,9 @@ fn publish_refusal(
         return Ok(());
     };
     let tokio_rt = tokio_runtime()?;
-    let channel = tokio_rt.block_on(EventsChannel::open(&config))?;
+    let mut channel = tokio_rt.block_on(EventsChannel::bind(&config))?;
     channel.install_refused_capabilities(requested, contract);
+    tokio_rt.block_on(async { channel.serve(&config) })?;
     tokio_rt.block_on(channel.wait_for_capabilities_read(launch_contract::CHANNEL_HOLD));
     drop(channel);
     Ok(())
@@ -638,12 +639,15 @@ fn open_events_channel(
     let Some(config) = EventsConfig::from_launch(bind, &session.handle.id, interactive) else {
         return Ok(None);
     };
-    let channel = tokio_rt.block_on(EventsChannel::open(&config))?;
+    let mut channel = tokio_rt.block_on(EventsChannel::bind(&config))?;
     channel.install_capabilities(requested, session, brief, contract);
     // 창이 붙자마자 묻는 것들(`session.list`/`info`/`subscribe`)이 첫 요청부터
     // 진실을 말하도록, 상태와 히스토리를 세우는 자리에서 한 번 밀어 넣는다.
     channel.publish_status(&session.status(), &session.cwd);
     channel.set_history(&session.replay_items());
+    // Only now do the address and discovery files appear and requests get
+    // read: the first subscriber hydrates from the state built above.
+    tokio_rt.block_on(async { channel.serve(&config) })?;
     let discovery_file = config.discovery_file.clone();
     events::install(channel);
     Ok(discovery_file)

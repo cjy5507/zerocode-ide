@@ -1082,6 +1082,7 @@ mod tests {
     /// before and after any number of searches.
     #[test]
     fn a_lookup_never_lifts_deferral_on_any_provider() {
+        let _lock = crate::test_env_lock();
         for model in ["gpt-5.6-sol", "claude-sonnet-4-6"] {
             let registry = GlobalToolRegistry::builtin();
             let before = advertised_tool_names(&registry, model);
@@ -1108,6 +1109,7 @@ mod tests {
     /// change the tool surface underneath the model.
     #[test]
     fn builtin_advertisement_is_identical_across_a_model_swap() {
+        let _lock = crate::test_env_lock();
         let registry = GlobalToolRegistry::builtin();
         let openai = advertised_tool_names(&registry, "gpt-5.6-sol");
         let anthropic = advertised_tool_names(&registry, "claude-sonnet-4-6");
