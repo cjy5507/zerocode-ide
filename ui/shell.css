@@ -15235,6 +15235,17 @@ details[open] > .helper-cap::after {
   margin: 0 auto;
 }
 
+/* The dock's watched height (`chatDockNode`), on the two that read it — the
+ * list's foot room above and the way back to the foot below. Not inherited:
+ * it moves each time a draft wraps, and a value every row of a 400-turn page
+ * inherits restyles every row, which made the key that wrapped a 50–85 ms
+ * frame (t-22095). A third reader is written by the observer too. */
+@property --chat-dock-h {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
 /* The way back to the foot (t-6824, the person's ask — the extension has
  * none): a pill over the list's lower right, above the dock when there is
  * one, shown while the list is not following its words. One class shows it
