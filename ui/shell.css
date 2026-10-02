@@ -13811,29 +13811,25 @@ details.worker-command {
 }
 
 /* The code in a fence, coloured by the editor's own ramp (t-22095): each
- * role `editorHighlightStyle` colours is a highlight the engine paints over
- * the words (`colourCodeIn`), so the fence holds no node more than plain
- * code does. Colours only — weight and slant stay the words' own — and both
- * treatments, because every role is a token of the ramp; names and
- * punctuation stay the code's ink (`CODE_PLAIN_ROLES`). Keyed on the fence
- * that holds the code's words: a highlight rule naming no element is matched
- * against every element in every style pass (the 400-turn open's style time
- * went 26 → 46 ms). */
-pre.md-block::highlight(chat-code-keyword) { color: var(--syntax-keyword); }
-pre.md-block::highlight(chat-code-string) { color: var(--syntax-string); }
-pre.md-block::highlight(chat-code-number) { color: var(--syntax-number); }
-pre.md-block::highlight(chat-code-comment) { color: var(--syntax-comment); }
-pre.md-block::highlight(chat-code-function) { color: var(--syntax-function); }
-pre.md-block::highlight(chat-code-type) { color: var(--syntax-type); }
-pre.md-block::highlight(chat-code-constant) { color: var(--syntax-constant); }
-pre.md-block::highlight(chat-code-operator) { color: var(--syntax-operator); }
-pre.md-block::highlight(chat-code-tag) { color: var(--syntax-tag); }
-pre.md-block::highlight(chat-code-attribute) { color: var(--syntax-attribute); }
-pre.md-block::highlight(chat-code-meta) { color: var(--syntax-meta); }
-pre.md-block::highlight(chat-code-link) { color: var(--syntax-link); }
-pre.md-block::highlight(chat-code-invalid) { color: var(--syntax-invalid); }
-pre.md-block::highlight(chat-code-inserted) { color: var(--syntax-inserted); }
-pre.md-block::highlight(chat-code-deleted) { color: var(--syntax-deleted); }
+ * role `editorHighlightStyle` colours is a span of the fence's words
+ * (`colourCodeIn`). Colours only — weight and slant stay the words' own —
+ * and both treatments, because every role is a token of the ramp; names and
+ * punctuation stay the code's ink (`CODE_PLAIN_ROLES`). */
+pre.md-block > .chat-code-keyword { color: var(--syntax-keyword); }
+pre.md-block > .chat-code-string { color: var(--syntax-string); }
+pre.md-block > .chat-code-number { color: var(--syntax-number); }
+pre.md-block > .chat-code-comment { color: var(--syntax-comment); }
+pre.md-block > .chat-code-function { color: var(--syntax-function); }
+pre.md-block > .chat-code-type { color: var(--syntax-type); }
+pre.md-block > .chat-code-constant { color: var(--syntax-constant); }
+pre.md-block > .chat-code-operator { color: var(--syntax-operator); }
+pre.md-block > .chat-code-tag { color: var(--syntax-tag); }
+pre.md-block > .chat-code-attribute { color: var(--syntax-attribute); }
+pre.md-block > .chat-code-meta { color: var(--syntax-meta); }
+pre.md-block > .chat-code-link { color: var(--syntax-link); }
+pre.md-block > .chat-code-invalid { color: var(--syntax-invalid); }
+pre.md-block > .chat-code-inserted { color: var(--syntax-inserted); }
+pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 
 .helper-code-copy {
   position: absolute;
