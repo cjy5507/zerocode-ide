@@ -247,6 +247,7 @@ export function jevDashboardFixture(real = null) {
       // take back that it handed to the person (t-6277 D6).
       seat.week = counted(4, 4, { p50Ms: 243, p95Ms: 435,
         guards: { instructed: 2, walled: 1 }, controls: { named: 4, destructiveHeld: 1 } });
+      seat.costUsd = 0;
       seat.days = days([null, null, null, null, null, null, { rows: 4, p50: 243, p95: 435 }]);
     }
     if (id === "notify") {
@@ -1662,6 +1663,20 @@ export async function testJevDashboardPictures(browser, origin, ok) {
         && tk.table[0][1] === "11,000" && tk.table[0][2] === "$0.0449" && tk.table[6][1] === "31,500" && tk.table[6][2] === "$0.0483",
       JSON.stringify(tk));
     const jd = charts.judgment;
+    const accounting = await page.evaluate(() => {
+      const known = { week: { rows: 1 }, costUsd: 0.1, days: [{ startMs: 1, tally: { rows: 1, inputTokens: 100, requests: 1 } }] };
+      const unknown = { week: { rows: 1 }, costUsd: null, days: [{ startMs: 1, tally: { rows: 1, inputTokens: 0, requests: 1, unmeteredRequests: 1 } }] };
+      const card = document.querySelector('[data-jev-chart="tokens"]').cloneNode(true);
+      const days = jevTokenDays([known, unknown]);
+      paintJevTokens(card, days, false);
+      const mixed = card.querySelector(".jev-chart-sub").textContent;
+      paintJevTokens(card, jevTokenDays([unknown]), false);
+      return { total: jevTotalCost([known, unknown]), known: jevTotalCost([known]), day: days[0].cost, mixed, empty: card.querySelector(".jev-chart-empty").textContent };
+    });
+    ok("missing usage stays unknown in the total, daily estimate and empty chart",
+      accounting.total === null && accounting.known === 0.1 && accounting.day === null
+        && accounting.mixed === "추정 비용 —" && accounting.empty === "요청의 입력 토큰 사용량을 확인하지 못했습니다",
+      JSON.stringify(accounting));
     ok("(c) the features waiting on a judgment stand nearest first, each with the samples it has and how many requests remain",
       jd.kind === "judgment" && jd.rows.join(",") === "placement,summon,routing"
         && jd.names.join("|") === ["placement", "summon", "routing"].map((id) => charts.names[id]).join("|")

@@ -295,6 +295,7 @@ fn an_answer_names_its_version_on_the_row_and_an_unanswered_ask_names_none() {
     );
     assert_eq!(row[REQUESTS_KEY], json!(1));
     assert_eq!(row[REDACTED_LINES_KEY], json!(0));
+    assert_eq!(row["inputTokens"], json!(1));
     let sent = endpoint.asked();
     let sent: Value = serde_json::from_str(sent[0].split("\r\n\r\n").nth(1).expect("a body"))
         .expect("the body is JSON");
@@ -333,6 +334,43 @@ fn an_answer_names_its_version_on_the_row_and_an_unanswered_ask_names_none() {
         late.spent.version, None,
         "nothing came back inside the wall"
     );
+}
+
+#[test]
+fn shared_and_cached_answers_add_no_new_usage() {
+    let sent = Spent {
+        requests: 1,
+        input_tokens: Some(212),
+        output_tokens: Some(2),
+        ..Spent::default()
+    };
+    let shared = Spent {
+        requests: 0,
+        ..sent.clone()
+    };
+    let total = Spent::together([&sent, &shared]);
+    assert_eq!((total.requests, total.input_tokens), (1, Some(212)));
+    let mut row = json!({});
+    shared.stamp(&mut row);
+    assert_eq!(row["inputTokens"], json!(0));
+}
+
+#[test]
+fn a_request_without_usage_keeps_a_combined_bill_unknown() {
+    let known = Spent {
+        requests: 1,
+        input_tokens: Some(100),
+        ..Spent::default()
+    };
+    let unknown = Spent {
+        requests: 1,
+        ..Spent::default()
+    };
+    let total = Spent::together([&known, &unknown]);
+    assert_eq!((total.requests, total.input_tokens), (2, None));
+    let mut row = json!({});
+    total.stamp(&mut row);
+    assert_eq!(row["inputTokens"], Value::Null);
 }
 
 /// Every request `endpoint` has heard once it has heard `many` of them, or

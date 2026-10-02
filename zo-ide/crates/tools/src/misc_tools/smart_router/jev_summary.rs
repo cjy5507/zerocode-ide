@@ -373,7 +373,10 @@ fn one_with(
     let not_compared_week = summary::not_compared_words(version.marks.iter().copied(), week_since_ms);
     let askers_week = summary::askers_since(version.rows.iter().copied(), week_since_ms);
     let asked_model = zerocode_core::jev::model_in(settings.unwrap_or(&Value::Null)).to_string();
-    let cost_usd = cost_of(summary::summarize(&rows, week_since_ms).input_tokens, &asked_model);
+    let billed = summary::summarize(&rows, week_since_ms);
+    let cost_usd = (billed.unmetered_requests == 0)
+        .then(|| cost_of(billed.input_tokens, &asked_model))
+        .flatten();
     let asked_toward_judgment = version.asked();
     // The judge's own reading of the same rows, not a second Evidence built
     // here from the week: routing reads its agreement off the probe beside

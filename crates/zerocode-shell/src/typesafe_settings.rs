@@ -2597,6 +2597,8 @@ pub struct SeatWindow {
     pub requests: u64,
     #[serde(default)]
     pub input_tokens: u64,
+    #[serde(default)]
+    pub unmetered_requests: u64,
     /// Rows whose answer is what the product did.
     #[serde(default)]
     pub applied: usize,

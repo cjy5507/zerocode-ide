@@ -456,6 +456,7 @@ pub enum Carry {
     /// Added: a count, a cost, each count of a tally (a screen seat's guards
     /// and controls).
     Add,
+    CompleteAdd,
     /// The same in every reading — the use table's own — or nothing when
     /// they differ.
     Agreed,
@@ -503,7 +504,7 @@ pub const SEAT: &[(&str, Carry)] = &[
     ("agreementWeek", Carry::Agreement),
     ("baseline", Carry::Agreed),
     ("negativesWanted", Carry::Own),
-    ("costUsd", Carry::Add),
+    ("costUsd", Carry::CompleteAdd),
     ("askedModel", Carry::Agreed),
     ("model", Carry::Agreed),
     ("days", Carry::Days),
@@ -531,6 +532,7 @@ pub const WINDOW: &[(&str, Carry)] = &[
     ("called", Carry::Add),
     ("requests", Carry::Add),
     ("inputTokens", Carry::Add),
+    ("unmeteredRequests", Carry::Add),
     ("applied", Carry::Add),
     ("failures", Carry::Tokens),
     ("refusals", Carry::Tokens),
@@ -650,6 +652,13 @@ fn carry(table: &[(&str, Carry)], readings: &[&Value]) -> Value {
         let carried = match rule {
             Carry::Across | Carry::Recounted => continue,
             Carry::Add => added(&held),
+            Carry::CompleteAdd => {
+                if held.len() == readings.len() {
+                    added(&held)
+                } else {
+                    Value::Null
+                }
+            }
             Carry::Agreed => agreed(&held),
             Carry::Own => Value::Null,
             Carry::Window => window(&held),
@@ -1162,6 +1171,18 @@ mod tests {
                 summed: false
             })
         );
+    }
+
+    #[test]
+    fn a_projects_unknown_bill_keeps_the_total_unknown() {
+        let mut readings = two_projects();
+        readings[1]
+            .iter_mut()
+            .find(|seat| seat.id == "routing")
+            .expect("a routing reading")
+            .cost_usd = None;
+        let total = summed(&readings).expect("the readings add");
+        assert_eq!(of(&total, "routing").cost_usd, None);
     }
 
     /// A seat whose rows the machine keeps reads the same numbers in every

@@ -35,7 +35,10 @@ fn recorded() -> BTreeMap<String, ModelRecord> {
             (
                 model.to_string(),
                 ModelRecord {
-                    ended: lineup::CHALLENGE_MIN_SAMPLES,
+                    overall: crate::summon_model::ModelPerformance {
+                        ended: lineup::CHALLENGE_MIN_SAMPLES,
+                        ..crate::summon_model::ModelPerformance::default()
+                    },
                     ..ModelRecord::default()
                 },
             )

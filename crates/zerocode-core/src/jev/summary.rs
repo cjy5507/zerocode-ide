@@ -363,6 +363,7 @@ pub struct Tally {
     pub redacted_lines: u64,
     /// Input tokens the window's calls billed.
     pub input_tokens: u64,
+    pub unmetered_requests: u64,
     /// Nearest-rank percentiles of the elapsed milliseconds of the calls that
     /// answered — how long the seat's answers take over the wire, the time
     /// the latency line holds to the apply stage's wall (§4).
@@ -934,9 +935,9 @@ pub fn summarize_rows<'a>(rows: impl IntoIterator<Item = &'a Value>, since_ms: i
     let mut failures: BTreeMap<&str, usize> = BTreeMap::new();
     let mut elapsed: Vec<u64> = Vec::new();
     for row in rows {
-        if asked_something(row).is_none() {
+        let Some(outcome) = asked_something(row) else {
             continue;
-        }
+        };
         let at = AT.read(row).and_then(Value::as_i64).unwrap_or(0);
         if at < since_ms {
             continue;
@@ -948,20 +949,23 @@ pub fn summarize_rows<'a>(rows: impl IntoIterator<Item = &'a Value>, since_ms: i
             .read(row)
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        tally.input_tokens += INPUT_TOKENS.read(row).and_then(Value::as_u64).unwrap_or(0);
+        let requests = REQUESTS.read(row).and_then(Value::as_u64);
+        let cached = CACHED.read(row).and_then(Value::as_bool).unwrap_or(false);
+        if !cached && requests != Some(0) && !is_refusal(outcome) {
+            if let Some(tokens) = INPUT_TOKENS.read(row).and_then(Value::as_u64) {
+                tally.input_tokens += tokens;
+            } else {
+                tally.unmetered_requests += requests.unwrap_or(1);
+            }
+        }
         tally.guards.count(row);
         tally.controls.count(row);
-        let outcome = OUTCOME
-            .read(row)
-            .and_then(Value::as_str)
-            .unwrap_or_default();
         if outcome == ANSWERED {
             tally.answered += 1;
         } else if let Some(token) = OUTCOME.read(row).and_then(Value::as_str) {
             *failures.entry(token).or_default() += 1;
             tally.refused += usize::from(is_refusal(token));
         }
-        let cached = CACHED.read(row).and_then(Value::as_bool).unwrap_or(false);
         if let Some(ms) = ELAPSED_MS
             .read(row)
             .and_then(Value::as_u64)

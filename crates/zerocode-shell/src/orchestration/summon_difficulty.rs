@@ -213,11 +213,9 @@ pub(super) fn model_facts(
         .filter_map(|seat| crate::systemone::ledger_of(&wire, seat))
         .flat_map(|path| crate::systemone::read_rows(&path))
         .collect();
-    let records = zerocode_core::summon_model::records(
-        difficulty::outcomes::latest(rows.iter()),
-        agent,
-        |model| lineup.canonical(model).to_string(),
-    );
+    let records = zerocode_core::summon_model::records(rows.iter(), agent, |model| {
+        lineup.canonical(model).to_string()
+    });
     Some(zerocode_core::summon_model::Facts {
         lineup,
         seen,

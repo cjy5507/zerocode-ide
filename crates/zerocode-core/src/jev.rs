@@ -1862,8 +1862,7 @@ pub const SUMMON: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
-    // The pinned model's own vendor CLI (`orchestration::native_agent`).
-    baseline: Baseline::TodaysRule,
+    baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
     reads_act_line: true,

@@ -1718,13 +1718,25 @@ function jevTokenDays(numbers) {
     const rate = held.costUsd !== null && held.costUsd !== undefined && billed > 0 ? held.costUsd / billed : null;
     for (const day of days) {
       const tokens = day.tally.inputTokens ?? 0;
-      const one = byStart.get(day.startMs) ?? { startMs: day.startMs, tokens: 0, cost: null };
+      const one = byStart.get(day.startMs) ?? { startMs: day.startMs, tokens: 0, cost: 0, unmetered: 0 };
       one.tokens += tokens;
-      if (rate !== null) one.cost = (one.cost ?? 0) + tokens * rate;
+      one.unmetered += day.tally.unmeteredRequests ?? 0;
+      if (one.unmetered > 0 || (rate === null && day.tally.rows > 0 && held.costUsd !== 0)) one.cost = null;
+      else if (rate !== null && one.cost !== null) one.cost += tokens * rate;
       byStart.set(day.startMs, one);
     }
   }
   return [...byStart.values()].sort((a, b) => a.startMs - b.startMs);
+}
+
+function jevTotalCost(numbers) {
+  if (!numbers.length) return null;
+  let cost = 0;
+  for (const held of numbers) {
+    if (Number.isFinite(held.costUsd)) cost += held.costUsd;
+    else if (held.week.rows > 0) return null;
+  }
+  return cost;
 }
 
 /* The features in use that wait on a judgment (t-9633 (c)), nearest first —
@@ -1781,10 +1793,13 @@ function jevChartDrawn(card) {
 function paintJevTokens(card, days, counting) {
   const total = days.reduce((sum, day) => sum + day.tokens, 0);
   if (counting || total === 0) {
-    jevChartEmpty(card, counting, t("jev.chart.tokens.empty", "입력 토큰을 쓴 판단이 없습니다"));
+    const unmetered = days.some((day) => day.unmetered > 0);
+    jevChartEmpty(card, counting, unmetered
+      ? t("jev.chart.tokens.unmetered", "요청의 입력 토큰 사용량을 확인하지 못했습니다")
+      : t("jev.chart.tokens.empty", "입력 토큰을 쓴 판단이 없습니다"));
     return;
   }
-  const priced = days.some((day) => day.cost !== null);
+  const priced = days.every((day) => day.cost !== null);
   const costs = new Map(days.map((day) => [day, day.cost === null ? "—" : jevCost(day.cost)]));
   const cost = (day) => costs.get(day);
   for (const day of days) {
@@ -1795,7 +1810,8 @@ function paintJevTokens(card, days, counting) {
   jevChartDrawn(card);
   jevSay(card.querySelector(".jev-chart-figure"), jevCount(total));
   jevSay(card.querySelector(".jev-chart-sub"), priced
-    ? t("jev.chart.tokens.cost", "추정 비용 {{cost}}", { cost: jevCost(days.reduce((sum, day) => sum + (day.cost ?? 0), 0)) }) : "");
+    ? t("jev.chart.tokens.cost", "추정 비용 {{cost}}", { cost: jevCost(days.reduce((sum, day) => sum + day.cost, 0)) })
+    : t("jev.chart.tokens.cost", "추정 비용 {{cost}}", { cost: "—" }));
   const label = t("jev.chart.tokens.label", "일별 입력 토큰 — {{days}}", {
     days: jevDaysSaid(days, (day) => jevCount(day.tokens)),
   });
@@ -2538,8 +2554,7 @@ function paintJevSummary(view, order, heldOf) {
   const sum = (read) => counted.reduce((total, held) => total + read(held), 0);
   said("today", counted.length ? jevCount(sum((held) => held.today.rows)) : "—");
   said("week", counted.length ? jevCount(sum((held) => held.week.rows)) : "—");
-  const costs = counted.filter((held) => held.costUsd !== null && held.costUsd !== undefined);
-  said("cost", costs.length ? jevCost(costs.reduce((total, held) => total + held.costUsd, 0)) : "—");
+  said("cost", jevCost(jevTotalCost(counted)));
   // The states are counted over the features in use this week: a feature
   // switched on that nothing asked is where its switch puts it, and is not
   // one more feature applying (t-6277 D8).

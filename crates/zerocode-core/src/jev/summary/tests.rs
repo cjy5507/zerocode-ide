@@ -70,6 +70,33 @@ fn a_memo_hit_answered_without_asking_so_it_leaves_the_latency_alone() {
     assert_eq!(tally.p95_ms, Some(800));
 }
 
+#[test]
+fn cached_and_shared_answers_do_not_bill_the_original_response_again() {
+    let rows = [
+        json!({"at": 1, "outcome": "answered", "requests": 1, "inputTokens": 250}),
+        json!({"at": 2, "outcome": "answered", "requests": 0, "cached": true, "inputTokens": 250}),
+        json!({"at": 3, "outcome": "answered", "requests": 0, "inputTokens": 250}),
+        json!({"at": 4, "outcome": "answered", "cached": true, "input_tokens": 250}),
+    ];
+    assert_eq!(summarize(&rows, 0).input_tokens, 250);
+}
+
+#[test]
+fn missing_usage_counts_sent_requests_but_not_refusals_or_cached_answers() {
+    let rows = [
+        json!({"at": 1, "outcome": "answered", "requests": 1}),
+        json!({"at": 2, "outcome": "timeout", "requests": 2}),
+        json!({"at": 3, "outcome": "answered", "requests": 0}),
+        json!({"at": 4, "outcome": "answered", "cached": true}),
+        json!({"at": 5, "outcome": "no_key"}),
+        json!({"at": 6, "outcome": "answered", "requests": 1, "inputTokens": 0}),
+        json!({"at": 7, "outcome": "answered", "input_tokens": 100}),
+    ];
+    let tally = summarize(&rows, 0);
+    assert_eq!(tally.unmetered_requests, 3);
+    assert_eq!(tally.input_tokens, 100);
+}
+
 /// Only an answer has an answer's time (t-9427). A timeout's row carries the
 /// wall its stage gave up at, and every call that did not answer is the
 /// answered share's to count — a latency sample of it counts the same miss a

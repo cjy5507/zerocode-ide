@@ -733,6 +733,8 @@ fn what_asking_cost_at_the_door_is_on_the_row() {
             Some(Spent {
                 requests: 1,
                 redacted_lines: 2,
+                input_tokens: Some(120),
+                output_tokens: Some(0),
                 model: Some("jev-1.13.0".to_string()),
                 version: Some("HTTP/2.0".to_string()),
             })
