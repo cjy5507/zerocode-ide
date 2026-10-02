@@ -152,13 +152,18 @@ impl EventsConfig {
 pub struct EventsChannel {
     state: Arc<ChannelState>,
     local_addr: SocketAddr,
-    accept: tokio::task::JoinHandle<()>,
+    /// Bound at [`EventsChannel::bind`], handed to the accept loop by
+    /// [`EventsChannel::serve`]; until then a connect waits in the backlog.
+    listener: Option<TcpListener>,
+    accept: Option<tokio::task::JoinHandle<()>>,
     discovery_file: Option<PathBuf>,
 }
 
 impl Drop for EventsChannel {
     fn drop(&mut self) {
-        self.accept.abort();
+        if let Some(accept) = self.accept.as_ref() {
+            accept.abort();
+        }
         if let Some(path) = self.discovery_file.as_ref() {
             let _ = std::fs::remove_file(path);
         }
@@ -166,13 +171,15 @@ impl Drop for EventsChannel {
 }
 
 impl EventsChannel {
-    /// 소켓을 열고 받아들이기 루프를 띄운다. tokio 런타임 **안**에서 불러야
-    /// 한다(`main.rs` 의 `block_on` 안).
+    /// 소켓만 붙인다 — 주소·발견 파일도 받아들이기 루프도 [`Self::serve`] 가
+    /// 낸다. 그 사이에 초기 capability·상태·히스토리를 채우면 첫 요청부터
+    /// 진실을 듣는다(그 전에 온 연결은 커널 대기열에서 기다린다). tokio
+    /// 런타임 **안**에서 불러야 한다(`main.rs` 의 `block_on` 안).
     ///
     /// # Errors
     ///
-    /// 루프백이 아닌 주소, 붙일 수 없는 포트, 주소/발견 파일을 쓸 수 없을 때.
-    pub async fn open(config: &EventsConfig) -> Result<Self, String> {
+    /// 루프백이 아닌 주소, 붙일 수 없는 포트.
+    pub async fn bind(config: &EventsConfig) -> Result<Self, String> {
         let requested = channel::auth::resolve_loopback_bind(&config.bind)?;
         let listener = TcpListener::bind(requested)
             .await
@@ -180,15 +187,34 @@ impl EventsChannel {
         let local_addr = listener
             .local_addr()
             .map_err(|error| format!("--events-bind {}: {error}", config.bind))?;
+        Ok(Self {
+            state: Arc::new(ChannelState::new(config.session_id.clone())),
+            local_addr,
+            listener: Some(listener),
+            accept: None,
+            discovery_file: None,
+        })
+    }
+
+    /// 주소·발견 파일을 쓰고 받아들이기 루프를 띄운다. 채널 하나에 한 번.
+    /// tokio 런타임 **안**에서 불러야 한다.
+    ///
+    /// # Errors
+    ///
+    /// 주소/발견 파일을 쓸 수 없을 때, 또는 이미 serve 했을 때.
+    pub fn serve(&mut self, config: &EventsConfig) -> Result<(), String> {
+        let Some(listener) = self.listener.take() else {
+            return Err("events channel is already serving".to_string());
+        };
         if let Some(path) = config.addr_file.as_ref() {
             // 창이 이 줄을 읽고 하네스를 붙인다. 못 쓰면 채널이 열려도
             // 아무도 못 찾으므로 조용히 넘기지 않는다.
-            write_whole(path, &format!("{local_addr}\n"))?;
+            write_whole(path, &format!("{}\n", self.local_addr))?;
         }
         if let Some(path) = config.discovery_file.as_ref() {
             if let Err(error) = write_discovery_file(
                 path,
-                local_addr,
+                self.local_addr,
                 config.token.as_deref(),
                 &config.session_id,
             ) {
@@ -198,19 +224,13 @@ impl EventsChannel {
                 return Err(error);
             }
         }
-        let state = Arc::new(ChannelState::new(config.session_id.clone()));
-        let auth = TokenPolicy::new(config.token.clone());
-        let accept = tokio::spawn(channel::server::accept_loop(
+        self.discovery_file.clone_from(&config.discovery_file);
+        self.accept = Some(tokio::spawn(channel::server::accept_loop(
             listener,
-            Arc::clone(&state),
-            auth,
-        ));
-        Ok(Self {
-            state,
-            local_addr,
-            accept,
-            discovery_file: config.discovery_file.clone(),
-        })
+            Arc::clone(&self.state),
+            TokenPolicy::new(config.token.clone()),
+        )));
+        Ok(())
     }
 
     /// Install public facts after session resolution and before any turn.
@@ -927,15 +947,16 @@ mod tests {
     }
 
     async fn open_channel() -> EventsChannel {
-        EventsChannel::open(&EventsConfig {
+        let config = EventsConfig {
             bind: "127.0.0.1:0".to_string(),
             token: None,
             session_id: "session-under-test".to_string(),
             addr_file: None,
             discovery_file: None,
-        })
-        .await
-        .expect("loopback bind")
+        };
+        let mut channel = EventsChannel::bind(&config).await.expect("loopback bind");
+        channel.serve(&config).expect("serve");
+        channel
     }
 
     /// r46 의 교훈: 새 필드는 JSON 방출에서 빠지기 쉽다. 카드가 아니라
@@ -1117,15 +1138,16 @@ mod tests {
     async fn a_discovery_file_is_complete_and_removed_with_its_channel() {
         let runtime = tempfile::tempdir().expect("runtime directory");
         let path = runtime.path().join("zo-events-42424.addr");
-        let events = EventsChannel::open(&EventsConfig {
+        let config = EventsConfig {
             bind: "127.0.0.1:0".to_string(),
             token: Some("private-token".to_string()),
             session_id: "session-discovered".to_string(),
             addr_file: None,
             discovery_file: Some(path.clone()),
-        })
-        .await
-        .expect("open discovered channel");
+        };
+        let mut events = EventsChannel::bind(&config).await.expect("bind discovered channel");
+        assert!(!path.exists(), "a bound channel publishes no discovery record yet");
+        events.serve(&config).expect("serve discovered channel");
 
         assert_eq!(
             std::fs::read_to_string(&path).expect("read discovery record"),

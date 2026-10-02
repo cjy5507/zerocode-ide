@@ -6926,15 +6926,15 @@ mod tests {
             RosterSnapshot, SubagentProgress, SubagentProgressWatcher,
         };
 
-        let channel = EventsChannel::open(&EventsConfig {
+        let config = EventsConfig {
             bind: "127.0.0.1:0".to_string(),
             token: None,
             session_id: "tui-session".to_string(),
             addr_file: None,
             discovery_file: None,
-        })
-        .await
-        .expect("open TUI events channel");
+        };
+        let mut channel = EventsChannel::bind(&config).await.expect("bind TUI events channel");
+        channel.serve(&config).expect("serve TUI events channel");
         let stream = TcpStream::connect(channel.local_addr())
             .await
             .expect("connect subscriber");

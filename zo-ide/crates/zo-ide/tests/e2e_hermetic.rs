@@ -6655,6 +6655,35 @@ async fn e2e_old_client_ignores_capability_frames_and_headless_token_remains_opt
     assert!(!layout.state.join(format!("zo-events-{}.addr",info["pid"])).exists());
 }
 
+/// Every launch's first subscriber hydrates from the capabilities the pane
+/// installed before it began reading requests — whenever the address file lets
+/// it in. A single launch races the pane's startup, so the check repeats over
+/// fresh launches and counts the ones whose first history lacked the frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_first_subscriber_always_hydrates_the_installed_capabilities() {
+    const LAUNCHES: usize = 12;
+    let service = ScriptedAnthropicService::text("first subscriber answer").await.unwrap();
+    let mut missing = Vec::new();
+    for launch in 0..LAUNCHES {
+        let layout = Layout::new();
+        let address = layout.root.path().join("first-subscriber.addr");
+        let address_text = address.to_string_lossy().into_owned();
+        let run = PtyRun::spawn_with_env(&layout.cwd,&layout.home,&layout.sessions,&layout.state,
+            service.base_url(), &["--plain","--events-bind","127.0.0.1:0","--permission-mode","danger-full-access"],
+            &[("ZO_EVENTS_ADDR_FILE",&address_text)]).unwrap();
+        let mut client = connect_to_addr_file(&address,"").await;
+        let info = client.call(method::INFO,serde_json::json!({})).await.unwrap();
+        let hydrated = client.subscribe(info["id"].as_str().unwrap(),true).await.unwrap();
+        let carried = hydrated["history"].as_array().unwrap().iter()
+            .any(|frame| frame["type"] == "session_capabilities");
+        if !carried { missing.push(launch); }
+        drop(client);
+        let _ = run.finish();
+    }
+    assert!(missing.is_empty(),
+        "first subscribe lacked session_capabilities on launches {missing:?} of {LAUNCHES}");
+}
+
 /// The exact-launch fixture, read from the shipped catalog rather than spelled
 /// here: the first Anthropic row (the hermetic provider) whose declared effort
 /// levels stop short of a rung zo's `--effort` accepts. Returns the row's id,

@@ -1082,6 +1082,7 @@ mod tests {
     /// before and after any number of searches.
     #[test]
     fn a_lookup_never_lifts_deferral_on_any_provider() {
+        let _lock = crate::test_env_lock();
         for model in ["gpt-5.6-sol", "claude-sonnet-4-6"] {
             let registry = GlobalToolRegistry::builtin();
             let before = advertised_tool_names(&registry, model);
@@ -1108,6 +1109,7 @@ mod tests {
     /// change the tool surface underneath the model.
     #[test]
     fn builtin_advertisement_is_identical_across_a_model_swap() {
+        let _lock = crate::test_env_lock();
         let registry = GlobalToolRegistry::builtin();
         let openai = advertised_tool_names(&registry, "gpt-5.6-sol");
         let anthropic = advertised_tool_names(&registry, "claude-sonnet-4-6");
@@ -1115,6 +1117,39 @@ mod tests {
         assert_eq!(openai, anthropic);
         for name in ["WebFetch", "Workflow", "TaskList", "REPL"] {
             assert!(!openai.contains(name), "{name} stays deferred on both");
+        }
+    }
+
+    /// Tests that read the advertised tools hold the env lock: the loop tool
+    /// rides a process-wide scope, so a reader without it can see the extra tool.
+    #[test]
+    fn advertisement_readers_wait_out_a_loop_scope() {
+        type Reader = fn();
+        let readers: [Reader; 2] = [
+            a_lookup_never_lifts_deferral_on_any_provider,
+            builtin_advertisement_is_identical_across_a_model_swap,
+        ];
+        for reader in readers {
+            let lock = crate::test_env_lock();
+            let scope = crate::autonomy::wakeup::begin_scope();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let checker = std::thread::spawn(move || {
+                started_tx.send(()).expect("main is waiting");
+                let outcome = std::panic::catch_unwind(reader);
+                let _ = done_tx.send(());
+                outcome
+            });
+            let entered = started_rx.recv_timeout(std::time::Duration::from_secs(10));
+            // A reader holding the lock cannot finish while this thread holds it.
+            let finished = entered.is_ok()
+                && done_rx.recv_timeout(std::time::Duration::from_millis(500)).is_ok();
+            drop(scope);
+            drop(lock);
+            let outcome = checker.join().expect("checker thread");
+            assert!(entered.is_ok(), "the reader never started");
+            assert!(!finished, "a reader finished while a loop scope was open");
+            assert!(outcome.is_ok(), "the reader failed once the scope closed");
         }
     }
 
