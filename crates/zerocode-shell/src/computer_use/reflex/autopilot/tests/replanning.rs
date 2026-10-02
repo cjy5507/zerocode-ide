@@ -410,3 +410,165 @@ fn a_stale_reading_holds_the_pending_plan_until_a_fresh_one() {
         }
     }
 }
+
+/// What the measurement's model remembers of its re-plan: when it was asked
+/// and when it answered, how many questions the teacher had heard at each,
+/// and whether it was asked on the collector's own thread.
+#[derive(Default)]
+struct Thought {
+    entered: Option<Instant>,
+    answered: Option<Instant>,
+    heard_at_entry: usize,
+    heard_at_answer: usize,
+    on_collector: bool,
+}
+
+/// A model that thinks for a fixed time on its re-plan, nobody holding it,
+/// and remembers where it was asked from.
+#[derive(Clone)]
+struct Thinking {
+    calls: Arc<AtomicUsize>,
+    hold: Duration,
+    heard: Arc<AtomicUsize>,
+    collector: std::thread::ThreadId,
+    thought: Arc<Mutex<Thought>>,
+}
+
+impl Generator for Thinking {
+    fn unready(&self) -> Option<String> {
+        None
+    }
+
+    fn model(&self) -> Option<String> {
+        Some("thinking-model-test".into())
+    }
+
+    fn ask(
+        &mut self,
+        system: &str,
+        user: &str,
+        left: Duration,
+    ) -> Result<crate::computer_use::errand::value::Said, String> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            {
+                let mut thought = self.thought.lock().expect("the thought");
+                thought.entered = Some(Instant::now());
+                thought.heard_at_entry = self.heard.load(Ordering::SeqCst);
+                thought.on_collector = std::thread::current().id() == self.collector;
+            }
+            std::thread::sleep(self.hold);
+            let mut thought = self.thought.lock().expect("the thought");
+            thought.answered = Some(Instant::now());
+            thought.heard_at_answer = self.heard.load(Ordering::SeqCst);
+        }
+        Scripted {
+            answers: vec![good()].into(),
+            asked: Vec::new(),
+        }
+        .ask(system, user, left)
+    }
+}
+
+/// Printed, for the report (t-21494 §5): how the collector fares while a
+/// re-plan's model thinks, against a fake helper and a fake teacher, on a
+/// clock the test moves — the collects it completes and the questions it
+/// asks during the think, its longest collect, the time it itself waited on
+/// the model, and the share of its collects made while a plan was pending.
+/// No hand, no screen, no model: a leaf's first-input age and a press's
+/// confirmed effect are the fixture round's to measure
+/// (`tools/computer-bench/fixture_reflex.py`), never this fake's.
+#[test]
+#[ignore = "a measurement for the report"]
+fn measure_the_collector_while_a_replan_is_written() {
+    /// How long the model thinks: longer than many collects.
+    const HOLD_MS: u64 = 1_500;
+    const HOLD: Duration = Duration::from_millis(HOLD_MS);
+    /// The wall between two collects here — the fake's clock moves as much.
+    const TICK_MS: u64 = 25;
+    const TICK: Duration = Duration::from_millis(TICK_MS);
+    /// Collects after the answer, enough for the plan to be applied.
+    const AFTER: Duration = Duration::from_millis(400);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let thought = Arc::new(Mutex::new(Thought::default()));
+    let mut fake = Fake::new((JevMode::Auto, true), Vec::new());
+    fake.teacher.says(REPLAN);
+    let thinking = Thinking {
+        calls: Arc::clone(&calls),
+        hold: HOLD,
+        heard: Arc::clone(&fake.teacher.heard),
+        collector: std::thread::current().id(),
+        thought: Arc::clone(&thought),
+    };
+    let mut generator = plan::Background::new(
+        Box::new(thinking.clone()),
+        Box::new(move || Box::new(thinking) as Box<dyn Generator>),
+    );
+    let (mut pilot, _) = fake
+        .with(Some(&mut generator), |world| {
+            Autopilot::start(asked(None), open(), None, world)
+        })
+        .expect("started");
+    let began = Instant::now();
+    let mut collects: Vec<(Instant, Instant, bool)> = Vec::new();
+    loop {
+        fake.helper.moment += 1;
+        fake.now += TICK_MS;
+        let from = Instant::now();
+        fake.with(Some(&mut generator), |world| pilot.tick(world));
+        let planning = pilot.rendered()["planning"].as_bool().unwrap_or(false);
+        collects.push((from, Instant::now(), planning));
+        let answered = thought.lock().expect("the thought").answered;
+        if answered.is_some_and(|at| at.elapsed() > AFTER) || began.elapsed() > HOLD * 4 {
+            break;
+        }
+        std::thread::sleep(TICK);
+    }
+    let (entered, answered, questions, on_collector) = {
+        let thought = thought.lock().expect("the thought");
+        (
+            thought.entered.expect("the re-plan asked its model"),
+            thought.answered.expect("the model answered"),
+            thought.heard_at_answer - thought.heard_at_entry,
+            thought.on_collector,
+        )
+    };
+    let during = collects
+        .iter()
+        .filter(|(from, to, _)| *from >= entered && *to <= answered)
+        .count();
+    let longest_ms = collects
+        .iter()
+        .map(|(from, to, _)| to.duration_since(*from).as_secs_f64() * 1_000.0)
+        .fold(0.0_f64, f64::max);
+    let while_planning = collects.iter().filter(|(_, _, planning)| *planning).count();
+    let think_s = answered.duration_since(entered).as_secs_f64();
+    println!(
+        "{}",
+        json!({
+            "basis": "fake helper, fake teacher, a model that sleeps: no input, no frame, no live model",
+            "holdMs": HOLD_MS, "tickMs": TICK_MS,
+            "modelThinkMs": think_s * 1_000.0,
+            "evaluation": {
+                "collectsDuringModel": during,
+                "hzDuringModel": during as f64 / think_s,
+                "longestCollectMs": longest_ms,
+                "collects": collects.len(),
+            },
+            "questionsDuringModel": questions,
+            "modelWaitOnCollectorMs": if on_collector { think_s * 1_000.0 } else { 0.0 },
+            "evaluationsWhilePlanningShare": while_planning as f64 / collects.len() as f64,
+            "firstInputAgeP95Ms": Value::Null,
+            "unconfirmedCoverage": Value::Null,
+            "runs": fake.helper.runs.len(),
+            "realInput": 0, "liveModelCalls": 0,
+        })
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "one initial plan, one re-plan"
+    );
+    assert_eq!(fake.helper.runs.len(), 2, "the re-plan ran");
+    fake.stopped = Some("hotkey".into());
+    fake.with(Some(&mut generator), |world| pilot.tick(world));
+}
