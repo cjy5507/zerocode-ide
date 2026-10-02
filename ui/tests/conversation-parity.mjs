@@ -4506,9 +4506,13 @@ export async function testConversationCodeColours(browser, origin, ok) {
           if (name) rules.set(name, { colour: rule.style.getPropertyValue("color").trim(), selector: rule.selectorText });
         }
       }
+      // Names and punctuation stay the words' own ink, as the approved mockup
+      // draws them: no highlight holds a range of either, and no rule paints one.
+      const plainRoles = ["variable", "punctuation"];
       const roles = editorHighlightStyle().specs.map((spec) => /^var\(--syntax-([a-z]+)\)$/.exec(spec.color ?? "")?.[1]).filter(Boolean);
-      seen.roles = [...new Set(roles)];
+      seen.roles = [...new Set(roles)].filter((role) => !plainRoles.includes(role));
       seen.unruled = seen.roles.filter((role) => rules.get(role)?.colour !== `var(--syntax-${role})`);
+      seen.plainPainted = plainRoles.filter((role) => rules.has(role) || (window.CSS?.highlights?.get(`chat-code-${role}`)?.size ?? 0) > 0);
       seen.unscoped = [...rules.entries()].filter(([role, rule]) => rule.selector !== `pre.md-block::highlight(chat-code-${role})`).map(([, rule]) => rule.selector);
       return seen;
     }, CODE_FENCES);
@@ -4525,8 +4529,13 @@ export async function testConversationCodeColours(browser, origin, ok) {
     );
     ok(
       "P1: every role the editor's ramp colours has its `::highlight(chat-code-…)` rule in that role's own token, so both themes reach it",
-      seen.roles.length >= 15 && seen.unruled.length === 0,
+      seen.roles.length >= 13 && seen.unruled.length === 0,
       JSON.stringify({ roles: seen.roles, unruled: seen.unruled }),
+    );
+    ok(
+      "P1: names and punctuation stay the words' own ink, as the approved mockup draws them — no range of either is held, no rule paints one",
+      seen.plainPainted.length === 0,
+      JSON.stringify({ plainPainted: seen.plainPainted }),
     );
     ok(
       "P1: the colour rules are keyed on the fence (`pre.md-block`) — not on every element of the page, which every style pass would then pay for",
