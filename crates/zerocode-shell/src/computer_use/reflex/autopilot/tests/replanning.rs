@@ -1,3 +1,10 @@
+//! The autopilot while a re-plan is written (t-21494): the model that writes
+//! the next plan is held by the test, and the valid run standing meanwhile
+//! must keep being read and judged; only an answer whose premises still
+//! stand replaces that run, under the same door every plan passes.
+
+use std::time::Instant;
+
 use super::*;
 
 #[derive(Clone)]
@@ -291,5 +298,122 @@ fn a_pending_plan_cannot_use_changed_or_stale_execution_context() {
         "wrong_plan",
     ] {
         held_replan(case);
+    }
+}
+
+/// How long the held model takes to answer when nobody releases it: a
+/// second — long enough for a collector that waits on it to show that it
+/// waited, short enough for a test.
+const LATE_MODEL: Duration = Duration::from_secs(1);
+
+/// A reading the window cannot date, or one older than the table lets a
+/// decision act on, holds the plan waiting to be applied: nothing of the
+/// plan reaches the hand while its premise is unproven, the run stands and
+/// keeps being read, and the plan starts once a fresh reading comes — the
+/// autopilot does not end for a frame the stream was late with.
+#[test]
+fn a_stale_reading_holds_the_pending_plan_until_a_fresh_one() {
+    for case in ["stale", "missing_capture"] {
+        let (entered, started) = mpsc::channel();
+        let (collecting, collecting_started) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let (finished, drained) = mpsc::channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let delayed = Delayed {
+            calls: Arc::clone(&calls),
+            entered,
+            collecting,
+            finished,
+            gate: Arc::new(Mutex::new(gate)),
+            answer: good().expect("a plan"),
+            budgets: Arc::new(Mutex::new(Vec::new())),
+        };
+        // The model answers late, whether or not the collector waits on it.
+        std::thread::spawn(move || {
+            std::thread::sleep(LATE_MODEL);
+            let _ = release.send(());
+        });
+        let mut fake = Fake::new((JevMode::Auto, true), Vec::new());
+        fake.teacher.says(REPLAN);
+        let first = delayed.clone();
+        let mut generator = plan::Background::new(
+            Box::new(first),
+            Box::new(move || Box::new(delayed) as Box<dyn Generator>),
+        );
+        let (mut pilot, answer) = fake
+            .with(Some(&mut generator), |world| {
+                Autopilot::start(asked(None), open(), None, world)
+            })
+            .expect("started");
+        let run = answer["runId"].as_str().expect("a run").to_string();
+        for _ in 0..400 {
+            fake.with(Some(&mut generator), |world| pilot.tick(world));
+            if !fake.asked_rows().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        started
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the re-plan asked its model");
+        collecting_started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the collector heard the model");
+        let fresh_age_ns = fake.helper.age_ns;
+        match case {
+            "stale" => {
+                fake.helper.age_ns =
+                    (zerocode_core::computer_use::REFLEX_APPLY_MAX_AGE_MS + 1) * 1_000_000;
+            }
+            "missing_capture" => fake.helper.capture_known = false,
+            _ => unreachable!("the cases above"),
+        }
+        // The answer comes while the reading is stale: collects go on, the
+        // run stands, nothing starts.
+        let before = fake.helper.calls.len();
+        let began = Instant::now();
+        while began.elapsed() < LATE_MODEL + Duration::from_millis(500) {
+            fake.now += 10;
+            fake.with(Some(&mut generator), |world| pilot.tick(world));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let passes = fake.helper.calls[before..]
+            .iter()
+            .filter(|(method, _)| method == "reflexReceipts")
+            .count();
+        assert!(passes > 0, "{case}: the run keeps being read");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "{case}: one re-plan asked");
+        assert_eq!(pilot.ended(), None, "{case}: a stale reading ends nothing");
+        assert_eq!(
+            fake.helper.runs.len(),
+            1,
+            "{case}: the plan waits for a reading it can trust"
+        );
+        assert!(fake.helper.stops().is_empty(), "{case}: the run stands");
+        assert_eq!(pilot.rendered()["planning"], json!(true), "{case}");
+        // A fresh reading: the plan starts on it, the old run stopped first.
+        match case {
+            "stale" => fake.helper.age_ns = fresh_age_ns,
+            "missing_capture" => fake.helper.capture_known = true,
+            _ => unreachable!("the cases above"),
+        }
+        fake.now += 10;
+        fake.with(Some(&mut generator), |world| pilot.tick(world));
+        assert_eq!(
+            fake.helper.runs.len(),
+            2,
+            "{case}: the plan starts on a fresh reading"
+        );
+        assert_eq!(fake.helper.stops(), [run.clone()], "{case}");
+        assert_eq!(pilot.ended(), None, "{case}");
+        assert_eq!(pilot.rendered()["planning"], json!(false), "{case}");
+        fake.stopped = Some("hotkey".into());
+        fake.with(Some(&mut generator), |world| pilot.tick(world));
+        drop(generator);
+        for _ in 0..2 {
+            drained
+                .recv_timeout(Duration::from_secs(3))
+                .expect("both writers have ended");
+        }
     }
 }

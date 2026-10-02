@@ -232,7 +232,10 @@ impl Generator for Bounded<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::Scripted;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+
+    use super::super::tests::{Scripted, answer_for, capture, scope};
     use super::*;
 
     #[test]
@@ -276,5 +279,104 @@ mod tests {
         );
         assert!(!bounded.pass_over(PLAN_REFUSED));
         assert!(generator.asked.is_empty());
+    }
+
+    /// A writer whose first request waits on the test's gate, answering a
+    /// plan to every request after it at once.
+    struct Gated {
+        gate: Arc<Mutex<mpsc::Receiver<()>>>,
+        asked: Arc<AtomicUsize>,
+    }
+
+    impl Generator for Gated {
+        fn unready(&self) -> Option<String> {
+            None
+        }
+
+        fn model(&self) -> Option<String> {
+            Some("gated-test".into())
+        }
+
+        fn ask(&mut self, system: &str, user: &str, left: Duration) -> Result<Said, String> {
+            if self.asked.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.gate
+                    .lock()
+                    .expect("one request at a time")
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("the test opens its gate");
+            }
+            Scripted {
+                answers: vec![Ok(answer_for(&scope()).to_string())].into(),
+                asked: Vec::new(),
+            }
+            .ask(system, user, left)
+        }
+    }
+
+    /// Requests queue behind a writer still answering: a plan asked while the
+    /// writer works on one since withdrawn is answered in its turn, never
+    /// dropped as though the writer had gone.
+    #[test]
+    fn a_request_behind_a_busy_writer_is_answered_in_its_turn() {
+        let (release, gate) = mpsc::channel();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let gated = Gated {
+            gate: Arc::new(Mutex::new(gate)),
+            asked: Arc::clone(&asked),
+        };
+        let mut background = Background::new(
+            Box::new(Scripted {
+                answers: Vec::new().into(),
+                asked: Vec::new(),
+            }),
+            Box::new(move || Box::new(gated) as Box<dyn Generator>),
+        );
+        let (image, stage) = capture();
+        let palette = palette_of(&image, &stage).expect("a palette");
+        let scope = scope();
+        let ask = Ask {
+            goal: "press the red dots, never the blue",
+            scope: &scope,
+            stage: &stage,
+            palette: &palette,
+            previous: None,
+        };
+        let wall = Duration::from_secs(5);
+        let withdrawn = background.plan_later(&ask, wall);
+        let began = Instant::now();
+        while asked.load(Ordering::SeqCst) == 0 {
+            assert!(began.elapsed() < wall, "the writer never took the request");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let second = background.plan_later(&ask, wall);
+        drop(withdrawn);
+        let third = background.plan_later(&ask, wall);
+        assert!(
+            matches!(third.poll(), Ok(None)),
+            "a request behind a busy writer waits for its turn"
+        );
+        release.send(()).expect("the gate");
+        let answered = |pending: &PendingPlan| {
+            let began = Instant::now();
+            loop {
+                match pending.poll() {
+                    Ok(None) if began.elapsed() < wall => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    other => return other,
+                }
+            }
+        };
+        for (which, pending) in [("second", &second), ("third", &third)] {
+            let written = answered(pending)
+                .unwrap_or_else(|word| panic!("the {which} request lost its writer: {word}"))
+                .unwrap_or_else(|| panic!("the {which} request was never answered"));
+            assert!(written.plan.is_ok(), "{which}: a plan");
+        }
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            3,
+            "one request each, none twice"
+        );
     }
 }
