@@ -3,55 +3,55 @@ part, the following packages — every one of them MIT, under the notice
 reproduced below. Regenerate both this file and the bundle with
 `node ui/vendor/build-cm6.mjs`.
 
-  @codemirror/autocomplete@6.20.3 (MIT)
-  @codemirror/commands@6.10.4 (MIT)
-  @codemirror/lang-cpp@6.0.3 (MIT)
-  @codemirror/lang-css@6.3.1 (MIT)
-  @codemirror/lang-go@6.0.1 (MIT)
-  @codemirror/lang-html@6.4.12 (MIT)
-  @codemirror/lang-java@6.0.2 (MIT)
-  @codemirror/lang-javascript@6.2.5 (MIT)
-  @codemirror/lang-json@6.0.2 (MIT)
-  @codemirror/lang-less@6.0.2 (MIT)
-  @codemirror/lang-liquid@6.3.2 (MIT)
-  @codemirror/lang-markdown@6.5.2 (MIT)
-  @codemirror/lang-php@6.0.2 (MIT)
-  @codemirror/lang-python@6.2.1 (MIT)
-  @codemirror/lang-rust@6.0.2 (MIT)
-  @codemirror/lang-sass@6.0.2 (MIT)
-  @codemirror/lang-sql@6.10.0 (MIT)
-  @codemirror/lang-vue@0.1.3 (MIT)
-  @codemirror/lang-wast@6.0.2 (MIT)
-  @codemirror/lang-xml@6.1.0 (MIT)
-  @codemirror/lang-yaml@6.1.3 (MIT)
-  @codemirror/language@6.12.4 (MIT)
-  @codemirror/legacy-modes@6.5.3 (MIT)
-  @codemirror/lint@6.9.7 (MIT)
-  @codemirror/merge@6.12.2 (MIT)
-  @codemirror/search@6.7.1 (MIT)
-  @codemirror/state@6.7.1 (MIT)
-  @codemirror/view@6.43.8 (MIT)
-  @lezer/common@1.5.2 (MIT)
-  @lezer/cpp@1.1.6 (MIT)
-  @lezer/css@1.3.6 (MIT)
-  @lezer/go@1.0.1 (MIT)
-  @lezer/highlight@1.2.3 (MIT)
-  @lezer/html@1.3.13 (MIT)
-  @lezer/java@1.1.3 (MIT)
-  @lezer/javascript@1.5.4 (MIT)
-  @lezer/json@1.0.3 (MIT)
-  @lezer/lr@1.4.10 (MIT)
-  @lezer/markdown@1.7.2 (MIT)
-  @lezer/php@1.0.5 (MIT)
-  @lezer/python@1.1.19 (MIT)
-  @lezer/rust@1.0.2 (MIT)
-  @lezer/sass@1.1.0 (MIT)
-  @lezer/xml@1.0.6 (MIT)
-  @lezer/yaml@1.0.4 (MIT)
-  @marijn/find-cluster-break@1.0.3 (MIT)
-  crelt@1.0.7 (MIT)
-  style-mod@4.1.3 (MIT)
-  w3c-keyname@2.2.8 (MIT)
+  @codemirror/autocomplete@6.20.3 (MIT) sha512-tlosUqb+3BbxCxZdu4tKeRghPFC+QM7q4X5YhKV2eCmPG+1r2F3f4AaSz5sCrFqUtX4Jh20VFTKecl16MgiV9g==
+  @codemirror/commands@6.10.4 (MIT) sha512-Ryk9y9T0FFVF0cUGhAknveAyUOl/A1qReTFi+qPKtOh2Z9F4AUBz3XOrYD4ZEgZirdugVzHvd/2/Wcwy5OliTg==
+  @codemirror/lang-cpp@6.0.3 (MIT) sha512-URM26M3vunFFn9/sm6rzqrBzDgfWuDixp85uTY49wKudToc2jTHUrKIGGKs+QWND+YLofNNZpxcNGRynFJfvgA==
+  @codemirror/lang-css@6.3.1 (MIT) sha512-kr5fwBGiGtmz6l0LSJIbno9QrifNMUusivHbnA1H6Dmqy4HZFte3UAICix1VuKo0lMPKQr2rqB+0BkKi/S3Ejg==
+  @codemirror/lang-go@6.0.1 (MIT) sha512-7fNvbyNylvqCphW9HD6WFnRpcDjr+KXX/FgqXy5H5ZS0eC5edDljukm/yNgYkwTsgp2busdod50AOTIy6Jikfg==
+  @codemirror/lang-html@6.4.12 (MIT) sha512-pw2ReWKUqSkbvh76RAT4NYxiogRu+PWkR2ukAwO9uOgrm8uipkzjtKKtNpyeAQwHOqxEeSvAXZ6vr3AfyB9y/w==
+  @codemirror/lang-java@6.0.2 (MIT) sha512-m5Nt1mQ/cznJY7tMfQTJchmrjdjQ71IDs+55d1GAa8DGaB8JXWsVCkVT284C3RTASaY43YknrK2X3hPO/J3MOQ==
+  @codemirror/lang-javascript@6.2.5 (MIT) sha512-zD4e5mS+50htS7F+TYjBPsiIFGanfVqg4HyUz6WNFikgOPf2BgKlx+TQedI1w6n/IqRBVBbBWmGFdLB/7uxO4A==
+  @codemirror/lang-json@6.0.2 (MIT) sha512-x2OtO+AvwEHrEwR0FyyPtfDUiloG3rnVTSZV1W8UteaLL8/MajQd8DpvUb2YVzC+/T18aSDv0H9mu+xw0EStoQ==
+  @codemirror/lang-less@6.0.2 (MIT) sha512-EYdQTG22V+KUUk8Qq582g7FMnCZeEHsyuOJisHRft/mQ+ZSZ2w51NupvDUHiqtsOy7It5cHLPGfHQLpMh9bqpQ==
+  @codemirror/lang-liquid@6.3.2 (MIT) sha512-6PDVU3ZnfeYyz1at1E/ttorErZvZFXXt1OPhtfe1EZJ2V2iDFa0CwPqPgG5F7NXN0yONGoBogKmFAafKTqlwIw==
+  @codemirror/lang-markdown@6.5.2 (MIT) sha512-AwBOdkWYuA//WcM0xO5PfHPUcmz/O2i5o0Nsg1U69SII/loCJlFI1Romd9xp2HYb1kYJRGZotyqRghuHH5n8Kw==
+  @codemirror/lang-php@6.0.2 (MIT) sha512-ZKy2v1n8Fc8oEXj0Th0PUMXzQJ0AIR6TaZU+PbDHExFwdu+guzOA4jmCHS1Nz4vbFezwD7LyBdDnddSJeScMCA==
+  @codemirror/lang-python@6.2.1 (MIT) sha512-IRjC8RUBhn9mGR9ywecNhB51yePWCGgvHfY1lWN/Mrp3cKuHr0isDKia+9HnvhiWNnMpbGhWrkhuWOc09exRyw==
+  @codemirror/lang-rust@6.0.2 (MIT) sha512-EZaGjCUegtiU7kSMvOfEZpaCReowEf3yNidYu7+vfuGTm9ow4mthAparY5hisJqOHmJowVH3Upu+eJlUji6qqA==
+  @codemirror/lang-sass@6.0.2 (MIT) sha512-l/bdzIABvnTo1nzdY6U+kPAC51czYQcOErfzQ9zSm9D8GmNPD0WTW8st/CJwBTPLO8jlrbyvlSEcN20dc4iL0Q==
+  @codemirror/lang-sql@6.10.0 (MIT) sha512-6ayPkEd/yRw0XKBx5uAiToSgGECo/GY2NoJIHXIIQh1EVwLuKoU8BP/qK0qH5NLXAbtJRLuT73hx7P9X34iO4w==
+  @codemirror/lang-vue@0.1.3 (MIT) sha512-QSKdtYTDRhEHCfo5zOShzxCmqKJvgGrZwDQSdbvCRJ5pRLWBS7pD/8e/tH44aVQT6FKm0t6RVNoSUWHOI5vNug==
+  @codemirror/lang-wast@6.0.2 (MIT) sha512-Imi2KTpVGm7TKuUkqyJ5NRmeFWF7aMpNiwHnLQe0x9kmrxElndyH0K6H/gXtWwY6UshMRAhpENsgfpSwsgmC6Q==
+  @codemirror/lang-xml@6.1.0 (MIT) sha512-3z0blhicHLfwi2UgkZYRPioSgVTo9PV5GP5ducFH6FaHy0IAJRg+ixj5gTR1gnT/glAIC8xv4w2VL1LoZfs+Jg==
+  @codemirror/lang-yaml@6.1.3 (MIT) sha512-AZ8DJBuXGVHybpBQhmZtgew5//4hv3tdkXnr3vDmOUMJRuB6vn/uuwtmTOTlqEaQFg3hQSVeA90NmvIQyUV6FQ==
+  @codemirror/language@6.12.4 (MIT) sha512-1q4PaT+o6PbgpkJt4Q8Fv5XJxTy4FUZ4MWETtyiDw3J0Pyr9E2vqcKL+k9wcvjNTIsauxvE7OfmWj3FRPHQ76A==
+  @codemirror/legacy-modes@6.5.3 (MIT) sha512-xCsmIzH78MyWkib9jlPaaun57XNkfbMIhagfaZVd0iLTqlpw3jXaIcbZm72MTmmn64eTZpBVNjbyYh+QXnxRsg==
+  @codemirror/lint@6.9.7 (MIT) sha512-28/+iWLYxKxsvGYhSYL7zaCZqLz5+FFFDq9tVsvGv9kv8RY4fFAchJ5WX9M3YrrRlTIsECjsXPqeNgnSmNP2dg==
+  @codemirror/merge@6.12.2 (MIT) sha512-V8JvyAPjHbPupqP7BeMcsdsYCbyPij74jxIbaIJDORI+VZzW44zFmon8bF+oxGWvOKhcRmkiUMXd8MxHr3YA2w==
+  @codemirror/search@6.7.1 (MIT) sha512-uMe5UO6PamJtSHrXhhHOzSX3ReWtiJrva6GnPMwSOrZtiExb5X5eExhr2OUZQVvdxPsKpY3Ro2mFbQadpPWmHA==
+  @codemirror/state@6.7.1 (MIT) sha512-9QzNDgE4EYDnAHfrTlR2lwiPciiOymLtwKK+8yHQzCc7GXhAP9xdEbEJFy2IWB1j9UGUl9BsgMmTo/ImA02T7A==
+  @codemirror/view@6.43.8 (MIT) sha512-qtItTDssZ/5GFfi94hrILu9j/VUeFPDPkhovEfmWFj2ipTxnzPB8DdHgfbb8HYTzLTYhrndKmyQxXUz/PDLenw==
+  @lezer/common@1.5.2 (MIT) sha512-sxQE460fPZyU3sdc8lafxiPwJHBzZRy/udNFynGQky1SePYBdhkBl1kOagA9uT3pxR8K09bOrmTUqA9wb/PjSQ==
+  @lezer/cpp@1.1.6 (MIT) sha512-vh9gWWJOXFVY8HBHK3Twzq8MgwG2iN4GSyzBP9sCGTe37P15x2R14VaBQk0VA0ezTRN1KHYBBsHhvpGZ2Xy/pA==
+  @lezer/css@1.3.6 (MIT) sha512-YJE78Wcg+zX8f10hiHWQ4Az48Qr/c13eId0VtRQYLBpxHDmDeSrXIlkbl+fJGW42rWC/uoUco9mhBZeVWP/A1g==
+  @lezer/go@1.0.1 (MIT) sha512-xToRsYxwsgJNHTgNdStpcvmbVuKxTapV0dM0wey1geMMRc9aggoVyKgzYp41D2/vVOx+Ii4hmE206kvxIXBVXQ==
+  @lezer/highlight@1.2.3 (MIT) sha512-qXdH7UqTvGfdVBINrgKhDsVTJTxactNNxLk7+UMwZhU13lMHaOBlJe9Vqp907ya56Y3+ed2tlqzys7jDkTmW0g==
+  @lezer/html@1.3.13 (MIT) sha512-oI7n6NJml729m7pjm9lvLvmXbdoMoi2f+1pwSDJkl9d68zGr7a9Btz8NdHTGQZtW2DA25ybeuv/SyDb9D5tseg==
+  @lezer/java@1.1.3 (MIT) sha512-yHquUfujwg6Yu4Fd1GNHCvidIvJwi/1Xu2DaKl/pfWIA2c1oXkVvawH3NyXhCaFx4OdlYBVX5wvz2f7Aoa/4Xw==
+  @lezer/javascript@1.5.4 (MIT) sha512-vvYx3MhWqeZtGPwDStM2dwgljd5smolYD2lR2UyFcHfxbBQebqx8yjmFmxtJ/E6nN6u1D9srOiVWm3Rb4tmcUA==
+  @lezer/json@1.0.3 (MIT) sha512-BP9KzdF9Y35PDpv04r0VeSTKDeox5vVr3efE7eBbx3r4s3oNLfunchejZhjArmeieBH+nVOpgIiBJpEAv8ilqQ==
+  @lezer/lr@1.4.10 (MIT) sha512-rnCpTIBafOx4mRp43xOxDJbFipJm/c0cia/V5TiGlhmMa+wsSdoGmUN3w5Bqrks/09Q/D4tNAmWaT8p6NRi77A==
+  @lezer/markdown@1.7.2 (MIT) sha512-iTkYvoVcKt3WkeL7qUDyXHONZEwLio4wj8KTNi2dnjQEXBZKMV63BpQrPqfsM+OkvuRbiSTAcycYAsQzLhRNoQ==
+  @lezer/php@1.0.5 (MIT) sha512-W7asp9DhM6q0W6DYNwIkLSKOvxlXRrif+UXBMxzsJUuqmhE7oVU+gS3THO4S/Puh7Xzgm858UNaFi6dxTP8dJA==
+  @lezer/python@1.1.19 (MIT) sha512-MhQIURHRytsNzP/YXnqpYKW6la6voAH3kyplTOOiCdjyFY6cWWGFVmYVdHIPrElqSDf4iCDktQCockB9FxuhzQ==
+  @lezer/rust@1.0.2 (MIT) sha512-Lz5sIPBdF2FUXcWeCu1//ojFAZqzTQNRga0aYv6dYXqJqPfMdCAI0NzajWUd4Xijj1IKJLtjoXRPMvTKWBcqKg==
+  @lezer/sass@1.1.0 (MIT) sha512-3mMGdCTUZ/84ArHOuXWQr37pnf7f+Nw9ycPUeKX+wu19b7pSMcZGLbaXwvD2APMBDOGxPmpK/O6S1v1EvLoqgQ==
+  @lezer/xml@1.0.6 (MIT) sha512-CdDwirL0OEaStFue/66ZmFSeppuL6Dwjlk8qk153mSQwiSH/Dlri4GNymrNWnUmPl2Um7QfV1FO9KFUyX3Twww==
+  @lezer/yaml@1.0.4 (MIT) sha512-2lrrHqxalACEbxIbsjhqGpSW8kWpUKuY6RHgnSAFZa6qK62wvnPxA8hGOwOoDbwHcOFs5M4o27mjGu+P7TvBmw==
+  @marijn/find-cluster-break@1.0.3 (MIT) sha512-FY+MKLBoTsLNJF/eLWaOsXGdz6uh3Iu1axjPf6TUq92IYumcTcXWHoS747JARLkcdlJ/Waiaxc5wQfFO8jC6NA==
+  crelt@1.0.7 (MIT) sha512-aK6BbWfhf4U/wCcLHKPJl/xa6VkVstRaPywWtMKGwuOLc/wZTyQYuoxgvZnNsBvv7Kg3YTBQYYBCggcviQczuA==
+  style-mod@4.1.3 (MIT) sha512-i/n8VsZydrugj3Iuzll8+x/00GH2vnYsk1eomD8QiRrSAeW6ItbCQDtfXCeJHd0iwiNagqjQkvpvREEPtW3IoQ==
+  w3c-keyname@2.2.8 (MIT) sha512-dpojBhNsCNN7T82Tm7k26A6G9ML3NkhDsnw9n/eoxSRlVBB4CEtIQ/KTCLI2Fwf3ataSXRhYFkQi3SlnFwPvPQ==
 
 MIT License
 

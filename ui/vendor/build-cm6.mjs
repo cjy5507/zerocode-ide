@@ -22,7 +22,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, statSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -71,6 +71,40 @@ const DEPS = {
   esbuild: "0.28.2",
 };
 
+/* What those packages bring with them, at the versions the bundle is built
+ * from — the rest of the list cm6-LICENSE names. `npm install` resolves these
+ * by the ranges their dependents ask for, so a later run would bundle
+ * whatever the registry holds by then; they are held here as overrides, and
+ * the run stops before bundling when the install comes back holding any
+ * package these two lists do not name at that version. */
+const BROUGHT = {
+  "@codemirror/lint": "6.9.7",
+  "@lezer/common": "1.5.2",
+  "@lezer/cpp": "1.1.6",
+  "@lezer/css": "1.3.6",
+  "@lezer/go": "1.0.1",
+  "@lezer/html": "1.3.13",
+  "@lezer/java": "1.1.3",
+  "@lezer/javascript": "1.5.4",
+  "@lezer/json": "1.0.3",
+  "@lezer/lr": "1.4.10",
+  "@lezer/markdown": "1.7.2",
+  "@lezer/php": "1.0.5",
+  "@lezer/python": "1.1.19",
+  "@lezer/rust": "1.0.2",
+  "@lezer/sass": "1.1.0",
+  "@lezer/xml": "1.0.6",
+  "@lezer/yaml": "1.0.4",
+  "@marijn/find-cluster-break": "1.0.3",
+  crelt: "1.0.7",
+  "style-mod": "4.1.3",
+  "w3c-keyname": "2.2.8",
+};
+
+/* esbuild is the tool that makes the file, not a thing inside it — nor are
+ * its per-platform binaries. */
+const isTool = (name) => name === "esbuild" || name.startsWith("@esbuild/");
+
 /* The entry. Written out rather than kept as a file beside this one because
  * it is only ever read by the esbuild run three lines below — a second file in
  * `ui/vendor/` would look like something the window loads, and it is not. */
@@ -99,7 +133,9 @@ import {
   autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion,
   completeAnyWord,
 } from "@codemirror/autocomplete"
-import {tags} from "@lezer/highlight"
+// highlightTree walks a parsed tree and names each token's style: what the
+// conversation's fences are coloured with (t-22095), outside any editor.
+import {tags, highlightTree} from "@lezer/highlight"
 import {MergeView, unifiedMergeView} from "@codemirror/merge"
 
 import {cpp} from "@codemirror/lang-cpp"
@@ -400,7 +436,7 @@ window.CM6 = {
   StreamLanguage, LanguageSupport, indentUnit, syntaxTree, foldable,
   autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion,
   completeAnyWord,
-  tags,
+  tags, highlightTree,
   MergeView, unifiedMergeView,
   languageFor, languageNameFor,
 }
@@ -418,12 +454,38 @@ rmSync(WORK, { recursive: true, force: true });
 mkdirSync(WORK, { recursive: true });
 writeFileSync(
   join(WORK, "package.json"),
-  `${JSON.stringify({ name: "zerocode-cm6-build", private: true, type: "module", dependencies: DEPS }, null, 2)}\n`,
+  `${JSON.stringify({ name: "zerocode-cm6-build", private: true, type: "module", dependencies: DEPS, overrides: BROUGHT }, null, 2)}\n`,
 );
 writeFileSync(join(WORK, "entry.mjs"), ENTRY);
 
 console.log(`installing into ${WORK} …`);
 run("npm", ["install", "--no-audit", "--no-fund", "--silent"], WORK);
+
+/* The install, read back from its lockfile — nested packages too, which a
+ * walk of the top directory would not see. Each must be one of the two lists
+ * at its version, and each listed one must be there; its integrity (the
+ * registry's digest of the tarball, as the lockfile records it) is what the
+ * licence writes beside it, so what went into the bundle can be checked
+ * again byte for byte. */
+const lock = JSON.parse(readFileSync(join(WORK, "package-lock.json"), "utf8"));
+const pinned = { ...DEPS, ...BROUGHT };
+const installed = new Map();
+for (const [path, entry] of Object.entries(lock.packages ?? {})) {
+  // The root package has the empty path; a platform's binary this machine
+  // does not run is listed and never installed.
+  if (path === "" || (entry.optional && isTool(path.split("node_modules/").pop()))) continue;
+  const name = path.split("node_modules/").pop();
+  if (pinned[name] !== entry.version) {
+    console.error(`\nthe install brought ${name}@${entry.version} (${path}), which this recipe does not pin`);
+    process.exit(1);
+  }
+  installed.set(name, { path, version: entry.version, integrity: entry.integrity });
+}
+const missing = Object.keys(pinned).filter((name) => !installed.has(name));
+if (missing.length) {
+  console.error(`\npinned and not installed: ${missing.join(", ")}`);
+  process.exit(1);
+}
 
 console.log("bundling …");
 run(
@@ -446,32 +508,17 @@ run(
  * the text is stated once — but WHICH packages is a fact that changes when the
  * language table above does, so the list is read off the install rather than
  * typed. A licence naming packages the file no longer contains, or missing one
- * it does, is a licence that has stopped being a notice. */
-const bundled = [];
-const walk = (dir) => {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const at = join(dir, entry.name);
-    if (entry.name.startsWith("@")) {
-      walk(at);
-      continue;
-    }
-    try {
-      const pkg = JSON.parse(readFileSync(join(at, "package.json"), "utf8"));
-      // esbuild is the tool that made the file, not a thing inside it.
-      if (pkg.name === "esbuild" || pkg.name?.startsWith("@esbuild/")) continue;
-      bundled.push(`${pkg.name}@${pkg.version} (${pkg.license})`);
-    } catch {
-      /* not a package — a `.bin` directory, or a stray folder */
-    }
-  }
-};
-walk(join(WORK, "node_modules"));
-bundled.sort();
+ * it does, is a licence that has stopped being a notice. Each line carries the
+ * package's integrity as the install's lockfile recorded it. */
+const packages = [...installed.entries()]
+  .filter(([name]) => !isTool(name))
+  .map(([name, held]) => ({ name, ...held, license: JSON.parse(readFileSync(join(WORK, held.path, "package.json"), "utf8")).license }))
+  .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+const bundled = packages.map((one) => `${one.name}@${one.version} (${one.license}) ${one.integrity}`);
 
-const notMit = bundled.filter((line) => !line.endsWith("(MIT)"));
+const notMit = packages.filter((one) => one.license !== "MIT");
 if (notMit.length) {
-  console.error(`\nnot MIT, so this notice cannot cover it:\n  ${notMit.join("\n  ")}`);
+  console.error(`\nnot MIT, so this notice cannot cover it:\n  ${notMit.map((one) => `${one.name}@${one.version} (${one.license})`).join("\n  ")}`);
   process.exit(1);
 }
 

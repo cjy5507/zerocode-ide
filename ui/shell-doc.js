@@ -1787,6 +1787,10 @@ function editorHighlightStyle() {
     { tag: tags.strong, fontWeight: "600" },
     { tag: tags.strikethrough, textDecoration: "line-through" },
     { tag: tags.invalid, color: "var(--syntax-invalid)" },
+    // A diff's added and removed lines — the editor's `.diff` and a
+    // conversation's diff fence alike (t-22095).
+    { tag: tags.inserted, color: "var(--syntax-inserted)" },
+    { tag: tags.deleted, color: "var(--syntax-deleted)" },
   ]);
   return editorHighlight;
 }

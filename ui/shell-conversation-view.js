@@ -1098,6 +1098,464 @@ function dressCodeCopies(host) {
   }
 }
 
+/* ---- the code in a fence wears colours (t-22095) ---------------------------
+ *
+ * A fence's code is coloured the way the editor colours a file: by the
+ * editor's own parsers (the vendored table, `CM6.languageFor`) and its own
+ * ramp — every colour `editorHighlightStyle` writes is a role
+ * (`var(--syntax-keyword)` is `keyword`), and a token of that role stands in
+ * a `span.chat-code-<role>` (shell.css), which wears the role's token. A
+ * fence in a language the table does not know shows its code as it is.
+ *
+ * Spans, not ranges the engine paints over the words (the CSS Custom
+ * Highlight API): an engine that holds a highlight checks its ranges again
+ * on each frame in which anything changes. Chromium paid for holding a
+ * single range on every key — 0.8 ms, 4 ms on a CPU four times slower — and
+ * WebKit paid on every frame of a stream, while spans cost a frame nothing
+ * (jobs 1790962540-w-22096-diag-hlcost, 1790962542-w-22096-diag-stream).
+ * Only the rows near the view hold a body at all (the shelf), so a 400-turn
+ * page holds a few dozen spans.
+ *
+ * Finding the roles is the work: the parse and the walk over its tree, done
+ * in slices that never hold the main thread past `CODE_COLOUR.sliceMs` — when
+ * the page is idle, or, where the engine does not say when it is, right after
+ * a frame. What a fence's code came to is remembered, and a fence drawn again
+ * with the same code (a row back from the shelf, the answer's turn standing
+ * where its stream was) wears those spans as it is drawn — no frame in which
+ * it stands plain. The fence still being written stands plain (the block
+ * being written is repainted every frame) and takes its colours once it has
+ * closed. A fence the person's selection reaches keeps its words as they
+ * stand until the selection moves: the spans hold the same words, but a node
+ * taken from under a selection takes the selection with it. */
+
+/* - `sliceMs`: the most a slice holds the main thread — the rest of a frame
+ *   stays the page's, and a key pressed meanwhile waits at most this long.
+ *   A unit of work is not begun when the last one of its kind would not fit
+ *   in what is left, a kind the page has not timed yet only begins a slice,
+ *   and the line is drawn one tick of the page's clock early (a clock that
+ *   counts whole milliseconds, WebKit's, reads 4 when nearly 5 have passed;
+ *   a page that is not cross-origin isolated counts in tenths), and earlier
+ *   again by what the last slices ran past theirs (`overKept`).
+ * - A unit is the parser's steps for `stepMs` (a step is microseconds —
+ *   below what the clock can tell — but a legacy mode's step is a whole
+ *   chunk of lines, and runs alone), `unitChars` characters of the walk,
+ *   `unitSpans` spans put in place of the words they hold, or the
+ *   highlighter made the first time: the clock is looked at between two.
+ * - `overKept`: how much of what a slice ran past its line the next one
+ *   still allows for — a collection the engine ran inside a unit is
+ *   forgotten in a few slices, a machine that is slow throughout keeps
+ *   its due (a 400-turn page's slice ran 0.4 ms past its line, job
+ *   1790962547-w-22096-diag-slices).
+ * - `waitMs`: a slice asked for while the page stays busy (a long stream)
+ *   runs at the latest this long after.
+ * - `keptChars`: the code whose roles are remembered, least recently drawn
+ *   let go first — the fences a page draws again are a stream's and the
+ *   rows near the view, not a long conversation's every one.
+ * - `largestChars`: a fence longer than this stands plain — a file pasted
+ *   whole would be thousands of spans in one row. */
+const CODE_COLOUR = Object.freeze({
+  sliceMs: 4,
+  stepMs: 0.25,
+  overKept: 0.5,
+  unitChars: 512,
+  unitSpans: 64,
+  waitMs: 500,
+  keptChars: 128 * 1024,
+  largestChars: 32 * 1024,
+});
+
+/* The words agents write after a fence that are not the extension of a file
+ * the editor's table knows (it is read by file name): the extension they
+ * mean. A whole-name language (`dockerfile`) is found by its name. */
+const CODE_FENCE_EXTENSIONS = Object.freeze({
+  javascript: "js",
+  typescript: "ts",
+  python: "py",
+  rust: "rs",
+  golang: "go",
+  shell: "sh",
+  console: "sh",
+  shellsession: "sh",
+  ruby: "rb",
+  kotlin: "kt",
+  csharp: "cs",
+  "c++": "cpp",
+});
+
+/* The role a colour of the editor's ramp paints. */
+const CODE_ROLE_OF_COLOUR = /^var\(--syntax-([a-z]+)\)$/;
+
+/* The roles a fence leaves in the code's own ink, as the approved mockup
+ * draws them: names (the ramp's variable is the ink, near enough) and
+ * punctuation — two thirds of a fence's tokens. */
+const CODE_PLAIN_ROLES = Object.freeze(new Set(["variable", "punctuation"]));
+
+/* A fence waiting its turn — or being coloured; and one that wears its
+ * colours. */
+const CODE_WAITING = "waiting";
+const CODE_WORN = "worn";
+
+const codeColour = {
+  // Fences in line (as the colouring each needs), the newest drawn last: it
+  // is coloured first — the foot of a page that opens, the block a stream
+  // just settled.
+  queue: [],
+  // The fence being coloured, and how far it has got.
+  job: null,
+  asked: false,
+  // Fences the person's selection reached: they wait for it to move. And
+  // whether a selection may stand: set by each change of the page's
+  // selection, cleared once one is asked for and found empty.
+  held: [],
+  heard: false,
+  maybeSelected: false,
+  // What a fence's code came to: its spans by language and code, least
+  // recently drawn first.
+  kept: new Map(),
+  keptChars: 0,
+  languages: new Map(),
+  highlighter: null,
+  // Whether this page can colour, asked once.
+  able: null,
+  // One tick of the page's clock, read once.
+  tick: null,
+  // How long the last unit of each kind took, and what the last slices ran
+  // past their line.
+  took: new Map(),
+  over: 0,
+};
+
+/* The clock's tick: how far `performance.now()` moves when it moves — five
+ * microseconds in one engine, a whole millisecond in another. Read once, by
+ * waiting for the clock to move (at most one tick); a clock that does not
+ * move within the slice's own line is taken to tick by the whole line, and
+ * each slice then runs one unit. */
+function codeClockTick() {
+  if (codeColour.tick === null) {
+    const from = performance.now();
+    const giveUp = Date.now() + CODE_COLOUR.sliceMs;
+    let next = from;
+    while (next === from && Date.now() <= giveUp) next = performance.now();
+    codeColour.tick = next === from ? CODE_COLOUR.sliceMs : Math.min(next - from, CODE_COLOUR.sliceMs);
+  }
+  return codeColour.tick;
+}
+
+/* A slice's clock: its line, how many units it has run, and the person's
+ * selection as the slice began. The selection is asked for once, and only
+ * while one may stand: it cannot move while the slice runs, and the engine
+ * brings the page's layout up to date to answer — asked between units, it
+ * laid the 400-turn page out again after every one (a slice ran 4.6 ms; 1.6
+ * without, job 1790962549-w-22096-diag-slices2). A fence drawn in the very
+ * paint that colours it cannot hold a selection yet, so that clock asks
+ * nothing. */
+function codeSliceClock(asking = true) {
+  const until = performance.now() + CODE_COLOUR.sliceMs - codeClockTick() - codeColour.over;
+  return { until, units: 0, selected: asking ? codeSelection() : null };
+}
+
+/* The person's selection on the page as a range, or null. */
+function codeSelection() {
+  if (!codeColour.maybeSelected) return null;
+  const selection = document.getSelection();
+  if (selection === null || selection.rangeCount === 0 || selection.isCollapsed) {
+    codeColour.maybeSelected = false;
+    return null;
+  }
+  return selection.getRangeAt(0);
+}
+
+/* A slice has ended: what it ran past its line is allowed for by the next. */
+function codeSliceEnded(clock) {
+  codeColour.over = Math.max(0, performance.now() - clock.until, codeColour.over * CODE_COLOUR.overKept);
+}
+
+/* Whether this page can colour: the editor's table and its walk over a tree. */
+function codeColourable() {
+  codeColour.able ??= typeof window.CM6?.highlightTree === "function" && typeof window.CM6?.languageFor === "function";
+  return codeColour.able;
+}
+
+/* The editor's ramp as roles: one class a colour, named by the colour's
+ * token, but for the roles left plain. Only colours — a weight or a slant
+ * the editor gives a role is not carried: the approved mockup colours a
+ * fence's code and nothing more. */
+function codeColourHighlighter() {
+  if (codeColour.highlighter !== null) return codeColour.highlighter;
+  const roles = [];
+  for (const spec of editorHighlightStyle().specs) {
+    const role = CODE_ROLE_OF_COLOUR.exec(spec.color ?? "")?.[1];
+    if (role !== undefined && !CODE_PLAIN_ROLES.has(role)) roles.push({ tag: spec.tag, class: role });
+  }
+  codeColour.highlighter = window.CM6.HighlightStyle.define(roles);
+  return codeColour.highlighter;
+}
+
+/* The language a fence's first word names, or null — once a word: a legacy
+ * mode is a new language each time the table makes it. */
+function codeLanguageOf(info) {
+  const word = String(info ?? "").trim().split(/[\s,{]/, 1)[0].toLowerCase();
+  if (word === "") return null;
+  if (!codeColour.languages.has(word)) {
+    const found = window.CM6.languageFor(word) ?? window.CM6.languageFor(`code.${CODE_FENCE_EXTENSIONS[word] ?? word}`);
+    codeColour.languages.set(word, found === null ? null : found.language ?? found);
+  }
+  return codeColour.languages.get(word);
+}
+
+/* Every fence `host` holds, coloured: at once when its code's roles are
+ * remembered — within one slice's time, the rest wait in line — and in line
+ * for a slice when they are not. Called once the prose stands; a colouring
+ * that throws leaves its fence as far as it got and never the prose
+ * unpainted — the throw is the page's to see, a moment later. */
+function colourCodeIn(host) {
+  if (!codeColourable()) return;
+  followCodeSelection();
+  const clock = codeSliceClock(false);
+  for (const pre of host.querySelectorAll("pre.md-block")) {
+    if (pre.__codeColour !== undefined) continue;
+    const words = codeWordsOf(pre);
+    const language = words === null ? null : codeLanguageOf(pre.dataset.language);
+    if (language === null || words.data.length > CODE_COLOUR.largestChars) continue;
+    pre.__codeColour = CODE_WAITING;
+    const job = codeJobOf(pre, words, language);
+    if (job.spans !== null) {
+      try {
+        if (drawCodeSpans(job, clock)) continue;
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+        continue;
+      }
+    }
+    if (!codeColour.held.includes(job)) codeColour.queue.push(job);
+  }
+  codeSliceEnded(clock);
+  askCodeSlice();
+}
+
+/* Ask for a slice, once, while anything waits. */
+function askCodeSlice() {
+  if (codeColour.asked || (codeColour.queue.length === 0 && codeColour.job === null)) return;
+  codeColour.asked = true;
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(colourCodeSlice, { timeout: CODE_COLOUR.waitMs });
+  } else {
+    requestAnimationFrame(() => setTimeout(colourCodeSlice, 0));
+  }
+}
+
+/* One slice: the fence being coloured goes on where it stopped, then the
+ * next in line, until the slice's time is spent. A fence whose colouring
+ * throws is let go as far as it got, and the throw is the page's to see. */
+function colourCodeSlice() {
+  codeColour.asked = false;
+  const clock = codeSliceClock();
+  for (;;) {
+    codeColour.job ??= nextCodeJob();
+    const job = codeColour.job;
+    if (job === null) break;
+    let done;
+    try {
+      done = stepCodeJob(job, clock);
+    } catch (error) {
+      codeColour.job = null;
+      askCodeSlice();
+      throw error;
+    }
+    if (!done && !codeColour.held.includes(job)) break;
+    codeColour.job = null;
+  }
+  codeSliceEnded(clock);
+  askCodeSlice();
+}
+
+/* Whether one more unit of `kind` fits in the slice: the first of a slice
+ * always does, so every slice moves the colouring on; after it, a kind the
+ * page has timed fits when its last unit would end before the line. */
+function codeTimeLeft(clock, kind) {
+  if (clock.units === 0) return true;
+  const took = codeColour.took.get(kind);
+  return took !== undefined && performance.now() + took <= clock.until;
+}
+
+/* A unit of `kind` begun at `from` has ended: its time is the kind's
+ * measure. */
+function codeTook(clock, kind, from) {
+  codeColour.took.set(kind, performance.now() - from);
+  clock.units += 1;
+}
+
+/* The next fence in line still standing on the page. */
+function nextCodeJob() {
+  while (codeColour.queue.length > 0) {
+    const job = codeColour.queue.pop();
+    if (job.pre.isConnected && job.pre.__codeColour === CODE_WAITING) return job;
+  }
+  return null;
+}
+
+/* What colouring `pre` takes: its words, and the roles its code came to
+ * before — or `null`, and the parse that finds them begins in a slice. */
+function codeJobOf(pre, words, language) {
+  const key = `${pre.dataset.language}\n${words.data}`;
+  return { pre, words, key, language, spans: keptCodeSpans(key), parse: null, tree: null, found: [], walked: 0, laid: 0, at: 0 };
+}
+
+/* A fence's words as the prose draws them — one text node — or null: a
+ * fence holding anything else is left as it stands. */
+function codeWordsOf(pre) {
+  const node = pre.firstChild;
+  return node !== null && node === pre.lastChild && node.nodeType === Node.TEXT_NODE ? node : null;
+}
+
+/* Take `job` on as far as the slice allows: the parse, the walk over its tree
+ * naming each token's role, then the spans. True when the fence is done —
+ * coloured, or gone from the page. */
+function stepCodeJob(job, clock) {
+  if (!job.pre.isConnected) return true;
+  if (job.spans === null && job.parse === null && job.tree === null) {
+    if (!codeTimeLeft(clock, "parse")) return false;
+    const from = performance.now();
+    job.parse = job.language.parser.startParse(job.words.data);
+    codeTook(clock, "parse", from);
+  }
+  while (job.parse !== null) {
+    if (!codeTimeLeft(clock, "parse")) return false;
+    const from = performance.now();
+    let tree = job.parse.advance();
+    while (tree === null && performance.now() - from < CODE_COLOUR.stepMs) tree = job.parse.advance();
+    codeTook(clock, "parse", from);
+    if (tree !== null) {
+      job.tree = tree;
+      job.parse = null;
+    }
+  }
+  if (job.tree !== null) {
+    if (codeColour.highlighter === null) {
+      if (!codeTimeLeft(clock, "highlighter")) return false;
+      const from = performance.now();
+      codeColourHighlighter();
+      codeTook(clock, "highlighter", from);
+    }
+    const text = job.words.data;
+    const found = (from, end, classes) => {
+      job.found.push(from, end, codeRoleOf(classes));
+    };
+    while (job.walked < text.length) {
+      if (!codeTimeLeft(clock, "walk")) return false;
+      const from = performance.now();
+      const to = codeUnitEnd(text, job.walked);
+      window.CM6.highlightTree(job.tree, codeColour.highlighter, found, job.walked, to);
+      job.walked = to;
+      codeTook(clock, "walk", from);
+    }
+    job.tree = null;
+    job.spans = job.found;
+    keepCodeSpans(job.key, job.spans, text.length);
+  }
+  return drawCodeSpans(job, clock);
+}
+
+/* Where a unit of the walk stops: at the end of the line it reaches, and
+ * never past twice its length — a minified line is one long line. */
+function codeUnitEnd(text, from) {
+  const reach = from + CODE_COLOUR.unitChars;
+  if (reach >= text.length) return text.length;
+  const line = text.indexOf("\n", reach);
+  return Math.min(line < 0 ? text.length : line + 1, reach + CODE_COLOUR.unitChars);
+}
+
+/* A span's role: the innermost of the classes the walk gives it. */
+function codeRoleOf(classes) {
+  return classes.slice(classes.lastIndexOf(" ") + 1);
+}
+
+/* Put `job`'s spans in place of the words they hold, a unit at a time from
+ * the top: a unit splits the words still plain where its last span ends, and
+ * puts its spans and the words between them in place of the part before.
+ * True when the fence wears them all (or no longer holds the words the job
+ * read); false when the slice is spent, or the person's selection reaches
+ * the fence — it then waits for the selection to move. */
+function drawCodeSpans(job, clock) {
+  const { spans, pre } = job;
+  while (job.laid < spans.length) {
+    if (job.words.parentNode !== pre) return true;
+    if (clock.selected?.intersectsNode(pre)) {
+      codeColour.held.push(job);
+      return false;
+    }
+    if (!codeTimeLeft(clock, "spans")) return false;
+    const began = performance.now();
+    const end = Math.min(spans.length, job.laid + 3 * CODE_COLOUR.unitSpans);
+    // Where the unit's last span ends, in the words still plain.
+    const stop = spans[end - 2] - job.at;
+    const text = job.words.data;
+    const rest = stop < text.length ? job.words.splitText(stop) : null;
+    const drawn = document.createDocumentFragment();
+    let at = 0;
+    for (; job.laid < end; job.laid += 3) {
+      const from = spans[job.laid] - job.at;
+      const to = spans[job.laid + 1] - job.at;
+      if (from > at) drawn.append(text.slice(at, from));
+      const span = document.createElement("span");
+      span.className = `chat-code-${spans[job.laid + 2]}`;
+      span.textContent = text.slice(from, to);
+      drawn.append(span);
+      at = to;
+    }
+    job.words.replaceWith(drawn);
+    job.words = rest;
+    job.at += stop;
+    codeTook(clock, "spans", began);
+    if (job.words === null) break;
+  }
+  pre.__codeColour = CODE_WORN;
+  return true;
+}
+
+/* The page's selection, followed from the first fence the page colours: a
+ * change of it means a selection may stand (a text box's own caret is not
+ * the page's), and the fences that waited for it go back in line. */
+function followCodeSelection() {
+  if (codeColour.heard) return;
+  codeColour.heard = true;
+  codeColour.maybeSelected = true;
+  document.addEventListener("selectionchange", (event) => {
+    if (event.target !== document) return;
+    codeColour.maybeSelected = true;
+    if (codeColour.held.length === 0) return;
+    codeColour.queue.push(...codeColour.held.splice(0));
+    askCodeSlice();
+  });
+}
+
+/* The roles `key`'s code came to, or null — and drawn again, it is the
+ * most recently drawn. */
+function keptCodeSpans(key) {
+  const kept = codeColour.kept.get(key);
+  if (kept === undefined) return null;
+  codeColour.kept.delete(key);
+  codeColour.kept.set(key, kept);
+  return kept.spans;
+}
+
+function keepCodeSpans(key, spans, chars) {
+  const held = codeColour.kept.get(key);
+  if (held !== undefined) {
+    codeColour.kept.delete(key);
+    codeColour.keptChars -= held.chars;
+  }
+  codeColour.kept.set(key, { spans, chars });
+  codeColour.keptChars += chars;
+  for (const [oldest, kept] of codeColour.kept) {
+    if (codeColour.keptChars <= CODE_COLOUR.keptChars) break;
+    codeColour.kept.delete(oldest);
+    codeColour.keptChars -= kept.chars;
+  }
+}
+
 /* ---- a row far from view keeps its height, not its body (t-6323 B1) ---------
  *
  * The extension keeps every message's DOM and trims the list instead — past
@@ -1277,7 +1735,10 @@ function shelveRow(list, row, height) {
   row.__shelved = { height };
   row.style.minHeight = `${height}px`;
   row.classList.add("is-shelved");
-  row.querySelector(":scope > .helper-said")?.replaceChildren();
+  const said = row.querySelector(":scope > .helper-said");
+  if (!said) return;
+  // Its fences' colours go with the body (t-22095).
+  said.replaceChildren();
 }
 
 /* A row takes its body back from its turn. */

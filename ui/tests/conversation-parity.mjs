@@ -7,7 +7,7 @@
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
-import { FIXTURE_PNG, conversationFixture, openFixtureConversation, webkitType } from "./conversation-perf.mjs";
+import { FIXTURE_PNG, MIXED_STREAM_FENCES, conversationFixture, openFixtureConversation, streamingAnswer, webkitType } from "./conversation-perf.mjs";
 
 /* A wire session's page opened on `history` — the page with the most roads
  * on it (turns, a live answer, the composer's wire) — painted once. */
@@ -4382,16 +4382,611 @@ async function stepsBriefAndRole(browser, origin, ok) {
   }
 }
 
+/* P1 — the code in a fence wears colours (t-22095). An answer's fences in the
+ * languages agents write most are coloured by role with the editor's own
+ * ramp — keywords, strings, numbers, comments, a diff's two kinds of line, a
+ * page's tags and the script inside it — and nothing else about them
+ * changes: its words, the elements of the answer around it, what its copy
+ * writes. The colours are read where the person meets them: the spans the
+ * tokens stand in, and the pixels the engine painted, in the dark theme and
+ * in the light one. A fence still being streamed stands plain and takes its
+ * colours when it closes; a fence the person is selecting keeps its words,
+ * and the selection, until the selection moves; a row that shelves its body
+ * gives its colours up with it and comes back coloured; the work is done in
+ * slices of at most `CODE_COLOUR.sliceMs`; a closed conversation leaves
+ * nothing in line; an engine without the Highlight API colours all the
+ * same — spans need none. Synthetic code throughout. */
+const PAINTED_STRING = `"${"s".repeat(40)}"`;
+const PAINTED_COMMENT = `// ${"c".repeat(40)}`;
+const CODE_FENCES = [
+  { language: "ts", code: "const total: number = 42; // ts done", wears: [["const", "keyword"], ["42", "number"], ["// ts done", "comment"]] },
+  { language: "tsx", code: "const view = <b>{\"hi\"}</b>; // tsx", wears: [["const", "keyword"], ["\"hi\"", "string"], ["// tsx", "comment"]] },
+  { language: "js", code: "function add(a) {\n  return a + 1; // js\n}", wears: [["function", "keyword"], ["return", "keyword"], ["1", "number"], ["// js", "comment"]] },
+  { language: "rust", code: "fn main() {\n    let n = 7;\n    println!(\"hi\"); // rust\n}", wears: [["fn", "keyword"], ["let", "keyword"], ["7", "number"], ["\"hi\"", "string"], ["// rust", "comment"]] },
+  { language: "python", code: "def add(a):\n    return a + 1  # py", wears: [["def", "keyword"], ["return", "keyword"], ["1", "number"], ["# py", "comment"]] },
+  { language: "sh", code: "if true; then echo \"hi\"; fi # sh", wears: [["if", "keyword"], ["\"hi\"", "string"], ["# sh", "comment"]] },
+  { language: "json", code: "{\"name\": \"x\", \"count\": 3}", wears: [["\"x\"", "string"], ["3", "number"]] },
+  { language: "diff", code: "@@ -1 +1 @@\n-old line\n+new line", wears: [["-old line", "deleted"], ["+new line", "inserted"]] },
+  { language: "go", code: "func main() {\n\tx := 5 // go\n}", wears: [["func", "keyword"], ["5", "number"], ["// go", "comment"]] },
+  { language: "css", code: ".box { opacity: 0.5; } /* css */", wears: [["0.5", "number"], ["/* css */", "comment"]] },
+  { language: "html", code: "<div class=\"x\">hi</div>\n<!-- html -->\n<script>let z = 1;</script>", wears: [["div", "tag"], ["<!-- html -->", "comment"], ["let", "keyword"]] },
+  { language: "ts", code: `const painted = ${PAINTED_STRING}; ${PAINTED_COMMENT}`, wears: [[PAINTED_STRING, "string"], [PAINTED_COMMENT, "comment"]] },
+  // A word the editor's table has no language for: its code stands plain.
+  { language: "text", code: "plain words, no colour", wears: [] },
+];
+
+/* A fence the selection check selects in: long, so its colouring takes
+ * several slices and several units of spans. */
+const SELECTED_CODE = Array.from({ length: 240 }, (_, line) => `const value${line} = measure(${line}, "row"); // note ${line}`).join("\n");
+
+const fencedAnswer = (fences) =>
+  `고칠 곳입니다.\n\n${fences.map((fence) => `\`\`\`${fence.language}\n${fence.code}\n\`\`\``).join("\n\n")}\n\n끝입니다.`;
+
+/* The page-side hands the colour checks share: frames, the wait until no
+ * fence is in line, and the role spans the page's fences hold. They read the
+ * product's own names only when they stand, so a page that has none of them
+ * answers "no colour", never a throw. */
+async function standColourProbe(page) {
+  await page.evaluate(() => {
+    const frames = async (count) => {
+      for (let beat = 0; beat < count; beat += 1) await window.__PAINTED__();
+    };
+    const settle = async () => {
+      const until = performance.now() + 3000;
+      await frames(2);
+      while (performance.now() < until) {
+        const idle = typeof codeColour === "undefined" || (codeColour.queue.length === 0 && codeColour.job === null && !codeColour.asked);
+        if (idle) break;
+        await frames(1);
+      }
+      await frames(2);
+    };
+    // Every role span of every fence, with the words it holds.
+    const worn = () => [...document.querySelectorAll("pre.md-block > [class^='chat-code-']")].map((span) => ({
+      role: span.className.slice("chat-code-".length),
+      words: span.textContent,
+      node: span,
+    }));
+    window.__COLOURS__ = { frames, settle, worn };
+  });
+}
+
+export async function testConversationCodeColours(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, [
+      { role: "user", text: "고쳐 줘" },
+      { role: "assistant", text: fencedAnswer(CODE_FENCES) },
+    ]);
+    await standColourProbe(page);
+    const seen = await page.evaluate(async (fences) => {
+      const { settle, worn } = window.__COLOURS__;
+      await settle();
+      const seen = {};
+      const answer = document.querySelector("#worker-view .helper-turn.is-assistant");
+      const pres = [...answer.querySelectorAll(".helper-said pre.md-block")];
+      seen.fences = pres.length;
+      const all = worn();
+      seen.missing = [];
+      seen.worn = [];
+      fences.forEach((fence, at) => {
+        const pre = pres[at];
+        const mine = all.filter((one) => pre?.contains(one.node)).map((one) => `${one.role}:${one.words}`);
+        seen.worn.push(`${fence.language}=${mine.join("|")}`);
+        for (const [words, role] of fence.wears) if (!mine.includes(`${role}:${words}`)) seen.missing.push(`${fence.language} ${role} ${words}`);
+        if (fence.wears.length === 0 && mine.length > 0) seen.missing.push(`${fence.language} wears ${mine.length} colours`);
+      });
+      // Nothing else about a fence changes: it holds its code's words and the
+      // role spans they stand in, nothing more; the answer holds the elements
+      // a plain drawing of it does besides those spans; the copy's words.
+      const roleSpan = (node) => node.nodeName === "SPAN" && node.className.startsWith("chat-code-") &&
+        node.childNodes.length === 1 && node.firstChild.nodeType === Node.TEXT_NODE;
+      seen.onlyWords = pres.every((pre) => [...pre.childNodes].every((node) => node.nodeType === Node.TEXT_NODE || roleSpan(node)));
+      seen.words = pres.map((pre) => pre.textContent);
+      const plain = document.createElement("div");
+      paintHelperProse(plain, cleanseAssistantText(answer.__turn.text), "", { colour: false });
+      seen.plainElements = plain.getElementsByTagName("*").length;
+      seen.elements = answer.querySelector(":scope > .helper-said").getElementsByTagName("*").length -
+        answer.querySelectorAll(".helper-said pre.md-block > [class^='chat-code-']").length;
+      answer.querySelector(".helper-code-copy").click();
+      await window.__PAINTED__();
+      seen.copied = window.__CLIPBOARD_WRITES__.at(-1);
+      // Every role the editor's ramp colours has its rule, written in that
+      // role's token — and keyed on the fence's own spans, so the names reach
+      // nothing else on the page.
+      const rules = new Map();
+      for (const sheet of document.styleSheets) {
+        let list = [];
+        try {
+          list = [...sheet.cssRules];
+        } catch {
+          continue;
+        }
+        for (const rule of list) {
+          const name = /(?:^|[\s>.])chat-code-([a-z]+)$/.exec(rule.selectorText ?? "")?.[1];
+          if (name) rules.set(name, { colour: rule.style.getPropertyValue("color").trim(), selector: rule.selectorText });
+        }
+      }
+      // Names and punctuation stay the words' own ink, as the approved mockup
+      // draws them: no span of either is drawn, and no rule paints one.
+      const plainRoles = ["variable", "punctuation"];
+      const roles = editorHighlightStyle().specs.map((spec) => /^var\(--syntax-([a-z]+)\)$/.exec(spec.color ?? "")?.[1]).filter(Boolean);
+      seen.roles = [...new Set(roles)].filter((role) => !plainRoles.includes(role));
+      seen.unruled = seen.roles.filter((role) => rules.get(role)?.colour !== `var(--syntax-${role})`);
+      seen.plainPainted = plainRoles.filter((role) => rules.has(role) || document.querySelector(`pre.md-block > .chat-code-${role}`) !== null);
+      seen.unscoped = [...rules.entries()].filter(([role, rule]) => rule.selector !== `pre.md-block > .chat-code-${role}`).map(([, rule]) => rule.selector);
+      return seen;
+    }, CODE_FENCES);
+    ok(
+      "P1: an answer's fences in ts, tsx, js, rust, python, shell, json, diff, go, css and html wear the editor's colours by role — keywords, strings, numbers, comments, a diff's added and removed lines, a page's tags and the script inside it — and a fence in a language the editor has none for stands plain",
+      seen.fences === CODE_FENCES.length && seen.missing.length === 0,
+      JSON.stringify({ missing: seen.missing, worn: seen.worn }),
+    );
+    ok(
+      "P1: the colours change nothing else — a fence holds its code's words and the role spans they stand in, nothing more; the answer holds the elements a plain drawing of it does besides those spans; the copy writes the code as it stands",
+      seen.onlyWords && JSON.stringify(seen.words) === JSON.stringify(CODE_FENCES.map((fence) => fence.code)) &&
+        seen.elements === seen.plainElements && seen.copied === CODE_FENCES[0].code,
+      JSON.stringify({ onlyWords: seen.onlyWords, elements: seen.elements, plainElements: seen.plainElements, copied: seen.copied }),
+    );
+    ok(
+      "P1: every role the editor's ramp colours has its `pre.md-block > .chat-code-…` rule in that role's own token, so both themes reach it",
+      seen.roles.length >= 13 && seen.unruled.length === 0,
+      JSON.stringify({ roles: seen.roles, unruled: seen.unruled }),
+    );
+    ok(
+      "P1: names and punctuation stay the words' own ink, as the approved mockup draws them — no span of either is drawn, no rule paints one",
+      seen.plainPainted.length === 0,
+      JSON.stringify({ plainPainted: seen.plainPainted }),
+    );
+    ok(
+      "P1: the colour rules are keyed on the fence's own spans (`pre.md-block > …`) — the names reach nothing else on the page",
+      seen.unscoped.length === 0,
+      JSON.stringify({ unscoped: seen.unscoped }),
+    );
+
+    // The pixels: the long string and the long comment, painted in their
+    // theme's own token, dark and light.
+    const painted = {};
+    for (const theme of ["dark", "light"]) {
+      const spot = await page.evaluate(async ({ theme, string, comment }) => {
+        document.documentElement.setAttribute("data-theme", theme);
+        await window.__COLOURS__.frames(3);
+        const pre = [...document.querySelectorAll("#worker-view .helper-said pre.md-block")].find((one) => one.textContent.includes(string));
+        pre.scrollIntoView({ block: "center" });
+        await window.__COLOURS__.frames(3);
+        // The words wherever they stand: the fence's text, or the span they
+        // are drawn in.
+        const rect = (words) => {
+          const walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+            const at = node.data.indexOf(words);
+            if (at < 0) continue;
+            const range = document.createRange();
+            range.setStart(node, at);
+            range.setEnd(node, at + words.length);
+            const box = range.getBoundingClientRect();
+            return { x: Math.floor(box.left), y: Math.floor(box.top), width: Math.ceil(box.width), height: Math.ceil(box.height) };
+          }
+          return null;
+        };
+        const root = getComputedStyle(document.documentElement);
+        return {
+          string: rect(string),
+          comment: rect(comment),
+          stringInk: root.getPropertyValue("--syntax-string").trim(),
+          commentInk: root.getPropertyValue("--syntax-comment").trim(),
+          plainInk: getComputedStyle(pre).color,
+        };
+      }, { theme, string: PAINTED_STRING, comment: PAINTED_COMMENT });
+      painted[theme] = {
+        string: await inkShare(page, await page.screenshot({ clip: spot.string }), spot.stringInk, spot.plainInk),
+        comment: await inkShare(page, await page.screenshot({ clip: spot.comment }), spot.commentInk, spot.plainInk),
+        inks: [spot.stringInk, spot.commentInk, spot.plainInk],
+      };
+    }
+    await page.evaluate(() => document.documentElement.removeAttribute("data-theme"));
+    ok(
+      "P1: the engine paints them — a string's and a comment's pixels wear their role's token, in the dark theme and in the light one",
+      ["dark", "light"].every((theme) => ["string", "comment"].every((role) => painted[theme][role].near >= 6 && painted[theme][role].near > painted[theme][role].plain)),
+      JSON.stringify(painted),
+    );
+
+    // While it streams: the fence being written stands plain; closed and
+    // settled, it takes its colours.
+    const streamed = await page.evaluate(async () => {
+      const { frames, settle, worn } = window.__COLOURS__;
+      const row = () => document.querySelector("#worker-view .helper-turns > .is-streaming.is-assistant");
+      const inside = (node) => worn().filter((one) => node?.contains(one.node)).map((one) => `${one.role}:${one.words}`);
+      window.__CONVERSATION__.status = "working";
+      window.__CONVERSATION__.live = [{ role: "assistant", text: "바꿉니다.\n\n```rust\nfn streamed() {\n    let open = 1;" }];
+      await pollHelperPages();
+      await frames(3);
+      await settle();
+      const open = { tailPre: row()?.querySelector(".helper-said-tail pre.md-block") !== null, worn: inside(row()) };
+      window.__CONVERSATION__.live = [{ role: "assistant", text: "바꿉니다.\n\n```rust\nfn streamed() {\n    let open = 1;\n}\n```\n\n다음" }];
+      await pollHelperPages();
+      await frames(3);
+      await settle();
+      const closed = { settledPre: row()?.querySelector(".helper-said-settled pre.md-block") !== null, worn: inside(row()?.querySelector(".helper-said-settled")) };
+      window.__CONVERSATION__.live = [];
+      window.__CONVERSATION__.status = "idle";
+      await pollHelperPages();
+      await frames(3);
+      return { open, closed, rowGone: row() === null };
+    });
+    ok(
+      "P1: the fence being streamed stands plain, and takes its colours once it closes and settles",
+      streamed.open.tailPre && streamed.open.worn.length === 0 && streamed.closed.settledPre &&
+        streamed.closed.worn.includes("keyword:fn") && streamed.closed.worn.includes("keyword:let") && streamed.rowGone,
+      JSON.stringify(streamed),
+    );
+
+    // A fence the person is selecting keeps its words — and the selection —
+    // until the selection moves, and takes its colours then. The selection is
+    // made in the very paint that draws the fence, so it stands before any
+    // slice runs.
+    const selecting = await page.evaluate(async (code) => {
+      const { frames, settle, worn } = window.__COLOURS__;
+      const selection = document.getSelection();
+      const settledPre = () => document.querySelector("#worker-view .helper-turns > .is-streaming.is-assistant .helper-said-settled pre.md-block");
+      const paint = window.paintLiveAnswerNow;
+      let chosen = null;
+      window.paintLiveAnswerNow = function selectingPaint(...args) {
+        const out = paint.apply(this, args);
+        const node = chosen === null ? settledPre()?.firstChild : null;
+        if (node?.nodeType === Node.TEXT_NODE) {
+          const range = document.createRange();
+          range.setStart(node, 6);
+          range.setEnd(node, 48);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          chosen = selection.toString();
+        }
+        return out;
+      };
+      try {
+        window.__CONVERSATION__.status = "working";
+        window.__CONVERSATION__.live = [{ role: "assistant", text: `고를 곳입니다.\n\n\`\`\`ts\n${code}\n\`\`\`\n\n다음` }];
+        await pollHelperPages();
+        await frames(4);
+        await settle();
+      } finally {
+        window.paintLiveAnswerNow = paint;
+      }
+      const pre = settledPre();
+      const inside = () => worn().filter((one) => pre?.contains(one.node)).length;
+      const held = { still: chosen !== null && selection.toString() === chosen, spans: inside(), words: pre?.textContent === code };
+      selection.removeAllRanges();
+      await frames(2);
+      await settle();
+      const moved = { spans: inside(), words: pre?.textContent === code };
+      window.__CONVERSATION__.live = [];
+      window.__CONVERSATION__.status = "idle";
+      await pollHelperPages();
+      await frames(3);
+      return { chosen: chosen?.length ?? 0, held, moved };
+    }, SELECTED_CODE);
+    ok(
+      "P1: a fence the person is selecting keeps its words and the selection while the selection stands, and takes its colours once it moves",
+      selecting.chosen > 0 && selecting.held.still && selecting.held.spans === 0 && selecting.held.words &&
+        selecting.moved.spans > 0 && selecting.moved.words,
+      JSON.stringify(selecting),
+    );
+
+    // A closed conversation leaves no colour, and nothing in line, behind.
+    const released = await page.evaluate(async () => {
+      const lined = () => typeof codeColour === "undefined"
+        ? 0
+        : codeColour.queue.length + (codeColour.held?.length ?? 0) + (codeColour.job === null ? 0 : 1);
+      const before = window.__COLOURS__.worn().length;
+      closeTab(tabs.find((one) => one.worker?.helper?.id === WIRE_LOG_ID).id);
+      await window.__COLOURS__.frames(3);
+      return { before, after: window.__COLOURS__.worn().length, lined: lined() };
+    });
+    ok(
+      "P1: closing the conversation takes its colours with its fences and leaves nothing in line",
+      released.before > 0 && released.after === 0 && released.lined === 0,
+      JSON.stringify(released),
+    );
+    ok("P1: the colours raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+
+  // The 400-turn page: the rows that shelve their bodies hold no colour, the
+  // rows that come back are coloured again, and no slice holds the main
+  // thread past its line.
+  const long = await openWindowTestPage(browser, origin);
+  try {
+    await standColourProbe(long.page);
+    await long.page.evaluate(() => {
+      window.__SLICES__ = [];
+      const timed = (name) => {
+        if (typeof window[name] !== "function") return;
+        const inner = window[name];
+        window[name] = function timedColour(...args) {
+          const from = performance.now();
+          try {
+            return inner.apply(this, args);
+          } finally {
+            window.__SLICES__.push({ name, ms: performance.now() - from });
+          }
+        };
+      };
+      timed("colourCodeSlice");
+      timed("colourCodeIn");
+    });
+    await openFixtureConversation(long.page, conversationFixture());
+    const seen = await long.page.evaluate(async () => {
+      const { frames, settle, worn } = window.__COLOURS__;
+      const list = document.querySelector("#worker-view .helper-turns");
+      await frames(4);
+      await settle();
+      const judge = () => {
+        const byRow = new Map();
+        for (const one of worn()) {
+          const row = one.node.closest(".helper-turn");
+          if (row) byRow.set(row, (byRow.get(row) ?? 0) + 1);
+        }
+        const answers = [...list.querySelectorAll(":scope > .helper-turn.is-assistant")];
+        return {
+          shelvedWorn: answers.filter((row) => row.__shelved && byRow.has(row)).length,
+          standing: answers.filter((row) => !row.__shelved && row.querySelector("pre.md-block")).length,
+          standingPlain: answers.filter((row) => !row.__shelved && row.querySelector("pre.md-block") && !byRow.has(row)).length,
+        };
+      };
+      const seen = { atFoot: judge() };
+      for (let step = 0; step < 400 && list.scrollTop > 0; step += 1) {
+        list.scrollTop = Math.max(0, list.scrollTop - list.clientHeight);
+        await frames(2);
+      }
+      await settle();
+      seen.atTop = judge();
+      const slices = window.__SLICES__.filter((one) => one.name === "colourCodeSlice").map((one) => one.ms);
+      const inline = window.__SLICES__.filter((one) => one.name === "colourCodeIn").map((one) => one.ms);
+      seen.slices = slices.length;
+      seen.sliceMax = Math.max(0, ...slices);
+      seen.inlineMax = Math.max(0, ...inline);
+      seen.line = typeof CODE_COLOUR === "undefined" ? null : CODE_COLOUR.sliceMs;
+      return seen;
+    });
+    ok(
+      "P1: on a 400-turn page the answers that stand their bodies wear their colours and the shelved ones hold none; scrolled to the top, the rows that came back are coloured again and the foot's shelved rows gave theirs back",
+      [seen.atFoot, seen.atTop].every((at) => at.standing > 0 && at.standingPlain === 0 && at.shelvedWorn === 0),
+      JSON.stringify(seen),
+    );
+    ok(
+      "P1: the colouring ran in slices, and none of them — nor the colours laid as a fence is drawn — held the main thread past `CODE_COLOUR.sliceMs`",
+      seen.line !== null && seen.slices > 0 && seen.sliceMax <= seen.line && seen.inlineMax <= seen.line,
+      JSON.stringify({ slices: seen.slices, sliceMax: seen.sliceMax, inlineMax: seen.inlineMax, line: seen.line }),
+    );
+    ok("P1: the 400-turn page raised no page errors", long.faults.length === 0, long.faults.join("\n"));
+  } finally {
+    await long.page.close();
+  }
+
+  // An engine without the Highlight API colours all the same: spans need none.
+  const bare = await openWindowTestPage(browser, origin, {
+    before: (page) => page.addInitScript(() => {
+      delete window.Highlight;
+    }),
+  });
+  try {
+    await openConversation(bare.page, [
+      { role: "user", text: "고쳐 줘" },
+      { role: "assistant", text: fencedAnswer(CODE_FENCES) },
+    ]);
+    const seen = await bare.page.evaluate(async () => {
+      for (let beat = 0; beat < 6; beat += 1) await window.__PAINTED__();
+      const pres = [...document.querySelectorAll("#worker-view .helper-said pre.md-block")];
+      const spans = pres.reduce((sum, pre) => sum + pre.querySelectorAll(":scope > [class^='chat-code-']").length, 0);
+      return { api: typeof window.Highlight, fences: pres.length, words: pres.map((pre) => pre.textContent), spans };
+    });
+    ok(
+      "P1: an engine without the Highlight API wears the colours all the same — spans need none — and raises nothing",
+      seen.api === "undefined" && seen.fences === CODE_FENCES.length && seen.spans > 0 &&
+        JSON.stringify(seen.words) === JSON.stringify(CODE_FENCES.map((fence) => fence.code)) && bare.faults.length === 0,
+      JSON.stringify({ ...seen, faults: bare.faults.slice(0, 2) }),
+    );
+  } finally {
+    await bare.page.close();
+  }
+}
+
+/* P1 — what a stream costs (t-22095). A streaming answer's closed blocks are
+ * drawn once each: a frame paints only the blocks that closed since the
+ * last, so the settled part costs what it says and not what it says times
+ * how often it grew — and it stands as the same page a single drawing of it
+ * makes. And words alone move nothing but the words: while the session's
+ * state stands still, a delta repaints neither the composer — the box the
+ * person is typing into — nor the page's head (its clock keeps its own
+ * beat). Every change is counted as the page makes it: an observer's
+ * callback takes its records as they come, so they are counted there and not
+ * only in what is still queued at the end. */
+export async function testConversationStreamWork(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, [{ role: "user", text: "써 줘" }], { status: "working" });
+    const seen = await page.evaluate(async (text) => {
+      const frame = () => new Promise((done) => requestAnimationFrame(() => done()));
+      const seen = {};
+      const face = document.querySelector("#worker-view");
+      const streaming = () => face.querySelector('.is-streaming[data-role="assistant"]');
+      // What the markdown road is handed while the words stream, by where.
+      const drawn = { settled: 0, tail: 0 };
+      const inner = window.paintHelperProse;
+      window.paintHelperProse = function countedProse(host, words, ...rest) {
+        drawn[host.classList?.contains("helper-said-tail") ? "tail" : "settled"] += words.length;
+        return inner.call(this, host, words, ...rest);
+      };
+      const moved = { composer: 0, head: 0 };
+      // The head's clock writes its own beat (`tickWorkers`); every other
+      // change in the head is the delta's.
+      const notClock = (records) => records.filter((record) => !(record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement)?.closest(".worker-elapsed"));
+      const watches = [
+        [face.querySelector(".worker-composer"), "composer", (records) => records],
+        [face.querySelector(".worker-head"), "head", notClock],
+      ].map(([node, name, kept]) => {
+        const watch = new MutationObserver((records) => {
+          moved[name] += kept(records).length;
+        });
+        watch.observe(node, { subtree: true, childList: true, attributes: true, characterData: true });
+        return [watch, name, kept];
+      });
+      const deltas = 40;
+      for (let at = 1; at <= deltas; at += 1) {
+        window.__CONVERSATION__.live = [{ role: "assistant", text: text.slice(0, Math.round((text.length * at) / deltas)) }];
+        await pollHelperPages();
+        await frame();
+      }
+      await frame();
+      for (const [watch, name, kept] of watches) {
+        moved[name] += kept(watch.takeRecords()).length;
+        watch.disconnect();
+      }
+      seen.composerMutations = moved.composer;
+      seen.headMutations = moved.head;
+      window.paintHelperProse = inner;
+      const row = streaming();
+      const settled = row?.querySelector(".helper-said-settled");
+      seen.settledLength = row?.__settledEnd ?? -1;
+      seen.drawn = drawn;
+      // The settled part stands as one drawing of the same words does — its
+      // fences' role spans are their colours, not the drawing's shape.
+      const once = document.createElement("div");
+      paintHelperProse(once, text.slice(0, seen.settledLength), helperBase(row.closest(".helper-turns").__run), { colour: false });
+      const shape = (node) => [...node.querySelectorAll("*")]
+        .filter((one) => !one.matches("pre.md-block > [class^='chat-code-']"))
+        .map((one) => `${one.tagName}.${one.className}`).join(" ");
+      seen.sameWords = settled?.textContent === once.textContent;
+      seen.sameShape = settled !== null && shape(settled) === shape(once);
+      window.__CONVERSATION__.live = [];
+      window.__CONVERSATION__.status = "idle";
+      await pollHelperPages();
+      return seen;
+    }, streamingAnswerText());
+    ok(
+      "P1: a streaming answer's closed blocks are drawn once each — the settled part is handed to the markdown road exactly as many characters as it holds — and it stands as a single drawing of the same words does",
+      seen.settledLength > 0 && seen.drawn.settled === seen.settledLength && seen.sameWords && seen.sameShape,
+      JSON.stringify(seen),
+    );
+    ok(
+      "P1: while only the words move, a delta repaints neither the composer — the box being typed into holds still — nor the page's head",
+      seen.composerMutations === 0 && seen.headMutations === 0,
+      JSON.stringify({ composerMutations: seen.composerMutations, headMutations: seen.headMutations }),
+    );
+    ok("P1: the stream raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* P1 — what a key costs (t-22095). A draft that wraps grows the composer and
+ * the dock under it, and the list makes room for it at its foot — the dock's
+ * height reaching exactly the two things that read it (the list's foot room,
+ * the way back to the foot), never every row of the page: on a 400-turn page
+ * a value every row inherited made the key that wrapped a 50–85 ms frame. */
+export async function testConversationTypingWork(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, [
+      { role: "user", text: "고쳐 줘" },
+      { role: "assistant", text: "고쳤습니다." },
+    ]);
+    const seen = await page.evaluate(async () => {
+      const frames = async (count) => {
+        for (let beat = 0; beat < count; beat += 1) await window.__PAINTED__();
+      };
+      const face = document.querySelector("#worker-view");
+      const box = face.querySelector(".worker-composer-box");
+      const dock = face.querySelector(".chat-dock");
+      const list = face.querySelector(".helper-turns");
+      const door = face.querySelector(".chat-foot-door");
+      const row = list.querySelector(":scope > .helper-turn");
+      const before = dock.offsetHeight;
+      box.focus();
+      box.value = "a draft long enough to wrap in the composer, ".repeat(6);
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      await frames(4);
+      const root = getComputedStyle(document.documentElement);
+      const px = (value) => parseFloat(value);
+      const after = dock.offsetHeight;
+      return {
+        grew: after - before,
+        dock: after,
+        listRoom: px(getComputedStyle(list).paddingBottom) - px(root.getPropertyValue("--chat-list-pad-bottom")),
+        doorRoom: px(getComputedStyle(door).bottom) - px(root.getPropertyValue("--chat-dock-inset")) - px(root.getPropertyValue("--space-2")),
+        rowSees: getComputedStyle(row).getPropertyValue("--chat-dock-h").trim(),
+      };
+    });
+    ok(
+      "P1: a draft that wraps grows the dock, and the list's foot room and the way back to the foot follow it — the dock's height reaches those two and no row of the page",
+      seen.grew > 0 && Math.abs(seen.listRoom - seen.dock) <= 0.5 && Math.abs(seen.doorRoom - seen.dock) <= 0.5 &&
+        (seen.rowSees === "" || px0(seen.rowSees) === 0),
+      JSON.stringify(seen),
+    );
+    ok("P1: the typing raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* A computed length in px as a number — `0px` and `0` alike. */
+function px0(value) {
+  return parseFloat(value) || 0;
+}
+
+/* The words the stream checks feed: paragraphs, a list and a fence a block,
+ * the harness's own mixed answer (`streamingAnswer`). */
+function streamingAnswerText() {
+  return streamingAnswer({ fences: MIXED_STREAM_FENCES });
+}
+
+/* What share of a screenshot's pixels wear `ink` (a `#rrggbb` token) and how
+ * many the plain ink (an `rgb()` computed colour) instead: each pixel is read
+ * through a canvas on the page that took it, so both engines decode the same
+ * way. Antialiased letters mix their ink with the ground, so a pixel counts
+ * when it is within `INK_NEAR` of one of the two. */
+const INK_NEAR = 48;
+
+async function inkShare(page, png, ink, plain) {
+  return page.evaluate(async ({ data, ink, plain, near }) => {
+    const image = new Image();
+    image.src = `data:image/png;base64,${data}`;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d");
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, image.width, image.height).data;
+    const hex = (value) => [1, 3, 5].map((at) => parseInt(value.slice(at, at + 2), 16));
+    const rgb = (value) => (value.match(/\d+(\.\d+)?/g) ?? []).slice(0, 3).map(Number);
+    const want = hex(ink);
+    const base = rgb(plain);
+    const apart = (at, colour) => Math.hypot(pixels[at] - colour[0], pixels[at + 1] - colour[1], pixels[at + 2] - colour[2]);
+    let inked = 0;
+    let plainly = 0;
+    for (let at = 0; at < pixels.length; at += 4) {
+      if (apart(at, want) <= near) inked += 1;
+      else if (apart(at, base) <= near) plainly += 1;
+    }
+    return { near: inked, plain: plainly, pixels: pixels.length / 4 };
+  }, { data: png.toString("base64"), ink, plain, near: INK_NEAR });
+}
+
 /* Run by itself (`node ui/tests/conversation-parity.mjs [--engine webkit]
  * [name…]`): every check above in file order, or only those whose function
  * names contain one of the words given, in Chromium or in WebKit (the
  * installed window's engine). The window gate runs the same checks as its
- * `conversation-*` suites. */
+ * `conversation-*` suites. `PARITY_DETAILS=1` prints what each check read
+ * when it passes too — the numbers a receipt quotes. */
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const all = {
     testConversationFont, testConversationFolds, testConversationPaths, testConversationKeys, testConversationStatus,
     testConversationScroll, testConversationFoot, testConversationAgents, testConversationTodos, testConversationImages,
     testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps,
+    testConversationCodeColours, testConversationStreamWork, testConversationTypingWork,
   };
   const argv = process.argv.slice(2);
   const at = argv.indexOf("--engine");
@@ -4404,7 +4999,8 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     for (const [name, check] of Object.entries(all)) {
       if (wanted.length && !wanted.some((word) => name.toLowerCase().includes(word))) continue;
       await check(browser, origin, (said, pass, details = "") => {
-        console.log(`${pass ? "PASS" : "FAIL"} ${said}${!pass ? `\n  ${details}` : ""}`);
+        const told = !pass || process.env.PARITY_DETAILS === "1";
+        console.log(`${pass ? "PASS" : "FAIL"} ${said}${told ? `\n  ${details}` : ""}`);
         if (!pass) failed += 1;
       });
     }

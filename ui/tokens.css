@@ -2252,6 +2252,11 @@
   --syntax-meta: #8a9199;
   --syntax-link: #7fb2e5;
   --syntax-invalid: #ff6568;
+  /* A diff's added and removed lines, in the editor and in a conversation's
+   * diff fence (t-22095) — the review surface's own two hues, which read on
+   * this floor: inserted 7.02, deleted 5.89 against `--editor-surface`. */
+  --syntax-inserted: var(--diff-add);
+  --syntax-deleted: var(--diff-del);
 
   /* The editor's own furniture, in the same two treatments.
    *
@@ -2977,6 +2982,12 @@
   --syntax-meta: #6b7280;
   --syntax-link: #1d5fa8;
   --syntax-invalid: #ad0707;
+  /* The review surface's light pair is a tint for a row's ground (1.89 and
+   * 4.00 as words on white), so a diff fence's lines take the explorer's
+   * git letters instead, made to be read as words: inserted 4.88, deleted
+   * 7.47 against `--editor-surface`. */
+  --syntax-inserted: var(--git-decoration-added);
+  --syntax-deleted: var(--git-decoration-deleted);
 
   --git-decoration-added: #587c0c;
   --git-decoration-modified: #895503;
