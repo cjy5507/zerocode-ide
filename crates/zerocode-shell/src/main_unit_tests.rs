@@ -18494,6 +18494,30 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "helper.role.label",
         // The board's door to a card the ledger alone knows.
         "board.graph.noConversation",
+        // The approved conversation (t-22100): the head's families, a search's
+        // count, the live line's answer being written, a fence's copied word,
+        // the turn rail, the state over the composer, the composer's sentence.
+        "worker.familyWeb",
+        "worker.familyShell",
+        "worker.familyFile",
+        "worker.familySearch",
+        "worker.familyHelper",
+        "worker.familyTodo",
+        "worker.familyOther",
+        "worker.stepResults",
+        "worker.nowWriting",
+        "worker.copied",
+        "worker.railLabel",
+        "worker.railAt",
+        "worker.stackLabel",
+        "worker.stackTodos",
+        "worker.stackNoWork",
+        "worker.stackWork",
+        "worker.stackQueue",
+        "worker.stackChanges",
+        "worker.stackOpen",
+        "worker.stackClose",
+        "composer.placeholder",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -18535,16 +18559,60 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
             "function streamingTurnNode(role) {",
             vec!["worker.thinking"],
         ),
-        ("function agentVoice(id) {", vec!["worker.busy"]),
-        // The strip's two words are read where the strip is painted (t-18702).
+        // The window's own word for an agent at work, said by the live line for
+        // every agent (t-22100) — no longer a voice's fallback.
+        ("function nowSaidOf(list, run) {", vec!["worker.busy"]),
+        // The strip's words are read where the strip is painted (t-18702), its
+        // two ends where the head's tally reads them too (t-22100).
         (
             "function paintHelperPageTally(strip, run) {",
+            vec!["worker.tallyRecentTip"],
+        ),
+        (
+            "function tallyTotalWords(total, partial) {",
+            vec!["worker.tallyTotal", "worker.tallyRecent"],
+        ),
+        (
+            "function tallyFailedNode(className, failed) {",
+            vec!["worker.tallyFailed"],
+        ),
+        // The approved conversation's words, read where they are drawn (t-22100).
+        (
+            "const STEP_FAMILY_WORDS = Object.freeze({",
             vec![
-                "worker.tallyTotal",
-                "worker.tallyFailed",
-                "worker.tallyRecent",
-                "worker.tallyRecentTip",
+                "worker.familyWeb",
+                "worker.familyShell",
+                "worker.familyFile",
+                "worker.familySearch",
+                "worker.familyHelper",
+                "worker.familyTodo",
+                "worker.familyOther",
             ],
+        ),
+        (
+            "function stepResultWords(kind, turn, output, failed, row) {",
+            vec!["worker.stepResults"],
+        ),
+        ("function nowWordsOf(list) {", vec!["worker.nowWriting"]),
+        ("function dressCodeCopies(host) {", vec!["worker.copied"]),
+        ("function turnRailNode(list) {", vec!["worker.railLabel"]),
+        ("function paintTurnRail(rail) {", vec!["worker.railAt"]),
+        ("function chatStackNode(run) {", vec!["worker.stackLabel"]),
+        (
+            "function paintChatStack(stack, run) {",
+            vec![
+                "worker.stackTodos",
+                "worker.stackNoWork",
+                "worker.stackWork",
+                "worker.stackQueue",
+                "worker.stackChanges",
+                "worker.stackOpen",
+                "worker.stackClose",
+            ],
+        ),
+        (
+            "function workerComposerNode(run, owner = null) {",
+            vec!["composer.placeholder"],
         ),
         (
             "function updateHelperPageRole(badge, run) {",
@@ -18626,6 +18694,9 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "reach-plan-ink",
         "reach-bypass",
         "reach-bypass-ink",
+        // The approved conversation (t-22100): a step's argument, the rail's tick.
+        "arg-ink",
+        "rail-tick",
     ] {
         let declared = format!("\n  --chat-{name}:");
         assert!(dark.contains(&declared), "--chat-{name} has no dark value");
@@ -18638,7 +18709,6 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "radius-bubble",
         "bubble-pad-x",
         "radius-composer",
-        "bubble-max",
         "prose-size",
         "prose-leading",
         "chip-size",
@@ -18668,14 +18738,11 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "sticky-pad-bottom",
         "sticky-fade",
         "status-h",
-        "status-mark-w",
-        "status-mark-size",
         "status-in",
-        // A step is one line (t-15682): the row, its mark and its body's
-        // indent, and the foot line's ring.
+        // A step is one line (t-15682): the row, the column of its dot and its
+        // body's indent, and the foot line's ring.
         "step-h",
         "step-icon",
-        "step-icon-pad",
         "step-body-indent",
         "status-ring",
         "status-ring-stroke",
@@ -18702,6 +18769,19 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "diff-leading",
         "user-clip-h",
         "user-clip-fade",
+        // The approved conversation (t-22100): its flat panels, the person's
+        // measure, the turn rail, the head's running dot, a shell step's lines,
+        // the stack's box.
+        "panel-radius",
+        "said-max",
+        "turn-rail-w",
+        "turn-tick-w",
+        "turn-tick-long",
+        "turn-tick-h",
+        "turn-tick-gap",
+        "run-dot",
+        "out-leading",
+        "stack-box",
     ] {
         let declared = format!("\n  --chat-{name}:");
         assert_eq!(
@@ -18725,14 +18805,12 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ".helper-turns {",
         ".chat-dock {",
         ".helper-actions {",
-        ".helper-status-mark {",
         // A step is one line (t-15682): the row, its line and its parts, the
         // foot line's ring, and the report a finished helper opens on.
         ".helper-turn:is(.is-tool, .is-thinking) {",
         ".helper-step-line {",
         ".helper-step-what {",
         ".helper-step-body {",
-        ".helper-status.is-naming {",
         ".helper-status-ring {",
         ".helper-report {",
         ".helper-report-label {",
@@ -18766,6 +18844,23 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ".helper-group-words {",
         ".helper-group-live {",
         ".worker-focus {",
+        // The approved conversation's own rules (t-22100).
+        ".helper-step-line > .helper-step-dot {",
+        ".helper-step-out {",
+        ".helper-code-bar {",
+        ".helper-status-lead {",
+        ".helper-body {",
+        ".chat-rail {",
+        ".chat-rail-tick {",
+        ".chat-rail-tick.is-user {",
+        ".is-chat-page .worker-head.chat-head {",
+        ".chat-run {",
+        ".chat-run-dot {",
+        ".chat-tally {",
+        ".chat-stack {",
+        ".chat-stack-mark {",
+        ".chat-stack-toggle {",
+        ".chat-stack-items {",
     ];
     let mut offenders = Vec::new();
     for opens in gained {
@@ -18995,8 +19090,6 @@ fn the_conversation_wears_the_extensions_own_measures() {
         ("chat-footer-gap", rule("inputFooter", "gap")),
         ("chat-status-h", rule("spinnerRow", "height")),
         ("chat-meta-gap", rule("spinnerRow", "margin-top")),
-        ("chat-status-mark-w", rule("spinner icon", "width")),
-        ("chat-status-mark-size", rule("spinner icon", "font-size")),
         ("chat-actions-h", rule("assistantActions", "height")),
         ("chat-actions-gap", rule("assistantActions", "gap")),
         (
@@ -19107,35 +19200,23 @@ fn the_conversation_wears_the_extensions_own_measures() {
             token("chat-tool-clip-fade")
         ));
     }
-    // The spinner's clock and its words are the panel's own (t-6323 A4): the
-    // page's one table of the verb's beats and sweep (`STATUS_VERB`), the
-    // glyph's step (`STATUS_CYCLE_MS`), and the catalog's verbs — Claude
-    // Code's list, which the panel carries whole.
+    // The spinner's turning verbs and glyph left the window with the approved
+    // conversation's live line (t-22100: 「지금」 and what the agent is doing,
+    // in the window's words), so the page holds no clock of them to measure.
+    // The catalog still carries Claude Code's verbs, the panel's list whole.
     let source = window_source();
-    let wanted_verb = format!(
-        "const STATUS_VERB = Object.freeze({{ after: [{}, {}, {}], every: {}, step: {}, tail: 3, suffix: \"...\" }});",
-        constant("spinnerVerbAfter1"),
-        constant("spinnerVerbAfter2"),
-        constant("spinnerVerbAfter3"),
-        constant("spinnerVerbEvery"),
-        constant("spinnerRevealStep")
-    );
-    if !source.contains(&wanted_verb) {
-        drifted.push(format!(
-            "the page's `STATUS_VERB` is not the panel's spinner — wanted `{wanted_verb}`"
-        ));
+    for gone in ["const STATUS_VERB", "const STATUS_CYCLE_MS"] {
+        if source.contains(gone) {
+            drifted.push(format!(
+                "`{gone}` came back — the live line says what the agent is doing, not the CLI's spinner"
+            ));
+        }
     }
     // A copy says it copied for the panel's own while (t-6323 A9, `gN`).
     let wanted_copied = format!("const CHAT_COPIED_MS = {};", constant("copiedFor"));
     if !source.contains(&wanted_copied) {
         drifted.push(format!(
             "the page's copy does not say it copied for the panel's while — wanted `{wanted_copied}`"
-        ));
-    }
-    let wanted_cycle = format!("const STATUS_CYCLE_MS = {};", constant("spinnerGlyphStep"));
-    if !source.contains(&wanted_cycle) {
-        drifted.push(format!(
-            "the spinner's glyph does not turn at the panel's step — wanted `{wanted_cycle}`"
         ));
     }
     let verbs: Vec<&str> = panel["words"]["spinnerVerbs"]
