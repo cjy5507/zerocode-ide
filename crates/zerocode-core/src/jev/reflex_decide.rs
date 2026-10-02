@@ -23,7 +23,9 @@ use super::questions::{
     REFLEX_DECIDE_RUBRIC_VERSION, REFLEX_DECIDE_STATE_KEYS, reflex_decide_rubric_fingerprint,
 };
 use super::summary::{AGREED, BASELINE_AGREED, LABEL, NOT_COMPARED, REQUEST_AT};
-use crate::computer_use::REFLEX_APPLY_MAX_AGE_MS;
+use crate::computer_use::{
+    REFLEX_APPLY_MAX_AGE_MS, REFLEX_MISSED_OUTCOMES, REFLEX_PRESSED_OUTCOME,
+};
 use crate::computer_use_protocol::reflex::{LIMITS, identifier};
 
 /// The three options by their words, in the table's order
@@ -82,9 +84,18 @@ impl Snapshot {
 /// question's typed state: at most the table's detectors, each named by its
 /// plan id — anything that is not an id is left out, never cut into one — its
 /// value or why it is unknown, the track it follows and how old its frame is
-/// in milliseconds; and the outcome counts under their words. Nothing else the
-/// status carries — the plan's hash, the monitor, the counters, and above all
-/// no pixel, no screen's words and no app's name — goes into the state.
+/// in milliseconds; the outcome counts under their words; what the hand did
+/// since the last reading (`activity`, t-22110: the receipts the status
+/// carries — the ones not yet acknowledged, one collect's worth — counted by
+/// the product's outcome words, [`REFLEX_PRESSED_OUTCOME`] as `done` and
+/// [`REFLEX_MISSED_OUTCOMES`] as `missed`, any other outcome neither); and
+/// how old the capture is against the hand's own frame limit (`freshness`:
+/// `capture_age_ms`, `max_frame_age_ms` and `over_age` by the hand's own
+/// comparison, `LIMITS.max_frame_age_ns`, in whole milliseconds; a capture
+/// nobody can date is `null`, not old). Nothing else the status carries —
+/// the plan's hash, the monitor, the counters, a receipt's action id or
+/// number, and above all no pixel, no screen's words and no app's name —
+/// goes into the state.
 #[must_use]
 pub fn snapshot_of(status: &Value) -> Snapshot {
     let cap = usize::try_from(LIMITS.max_detectors).unwrap_or(usize::MAX);
@@ -129,7 +140,27 @@ pub fn snapshot_of(status: &Value) -> Snapshot {
                 .collect()
         })
         .unwrap_or_default();
-    let [sightings_key, outcomes_key] = REFLEX_DECIDE_STATE_KEYS;
+    let (done, missed) = status
+        .get("receipts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|receipt| receipt.get("outcome").and_then(Value::as_str))
+        .fold((0_u64, 0_u64), |(done, missed), outcome| {
+            if outcome == REFLEX_PRESSED_OUTCOME {
+                (done + 1, missed)
+            } else if REFLEX_MISSED_OUTCOMES.contains(&outcome) {
+                (done, missed + 1)
+            } else {
+                (done, missed)
+            }
+        });
+    let max_frame_age_ms = LIMITS.max_frame_age_ns / 1_000_000;
+    let capture_age_ms = status
+        .get("lastCaptureAgeNs")
+        .and_then(Value::as_u64)
+        .map(|age| age / 1_000_000);
+    let [sightings_key, outcomes_key, activity_key, freshness_key] = REFLEX_DECIDE_STATE_KEYS;
     let scene = status.get("scene").and_then(|scene| {
         Some(Scene {
             run: status.get("runId")?.as_str()?.to_string(),
@@ -140,7 +171,16 @@ pub fn snapshot_of(status: &Value) -> Snapshot {
         })
     });
     Snapshot {
-        state: json!({ sightings_key: sightings, outcomes_key: outcomes }),
+        state: json!({
+            sightings_key: sightings,
+            outcomes_key: outcomes,
+            activity_key: { "done": done, "missed": missed },
+            freshness_key: {
+                "capture_age_ms": capture_age_ms,
+                "max_frame_age_ms": max_frame_age_ms,
+                "over_age": capture_age_ms.map(|age| age > max_frame_age_ms),
+            },
+        }),
         scene,
         capture: status.get("lastCapture").and_then(Value::as_u64),
         age_ns: status.get("lastCaptureAgeNs").and_then(Value::as_u64),
@@ -163,7 +203,7 @@ pub fn age_at(snapshot: &Snapshot, now_ms: u64) -> Option<u64> {
 /// sightings at all (§2.2: "every detector unknown or absent").
 #[must_use]
 pub fn finds_nothing(state: &Value) -> bool {
-    let [sightings_key, _] = REFLEX_DECIDE_STATE_KEYS;
+    let [sightings_key, ..] = REFLEX_DECIDE_STATE_KEYS;
     !state
         .get(sightings_key)
         .and_then(Value::as_array)
