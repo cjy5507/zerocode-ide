@@ -4490,7 +4490,9 @@ export async function testConversationCodeColours(browser, origin, ok) {
       await window.__PAINTED__();
       seen.copied = window.__CLIPBOARD_WRITES__.at(-1);
       // Every role the editor's ramp colours has its rule, written in that
-      // role's token.
+      // role's token — and keyed on the fence: a highlight rule that names no
+      // element is matched against every element of the page in every style
+      // pass (the 400-turn open's style time went 26 → 46 ms on such rules).
       const rules = new Map();
       for (const sheet of document.styleSheets) {
         let list = [];
@@ -4500,13 +4502,14 @@ export async function testConversationCodeColours(browser, origin, ok) {
           continue;
         }
         for (const rule of list) {
-          const name = /^::highlight\(chat-code-([a-z]+)\)$/.exec(rule.selectorText ?? "")?.[1];
-          if (name) rules.set(name, rule.style.getPropertyValue("color").trim());
+          const name = /::highlight\(chat-code-([a-z]+)\)$/.exec(rule.selectorText ?? "")?.[1];
+          if (name) rules.set(name, { colour: rule.style.getPropertyValue("color").trim(), selector: rule.selectorText });
         }
       }
       const roles = editorHighlightStyle().specs.map((spec) => /^var\(--syntax-([a-z]+)\)$/.exec(spec.color ?? "")?.[1]).filter(Boolean);
       seen.roles = [...new Set(roles)];
-      seen.unruled = seen.roles.filter((role) => rules.get(role) !== `var(--syntax-${role})`);
+      seen.unruled = seen.roles.filter((role) => rules.get(role)?.colour !== `var(--syntax-${role})`);
+      seen.unscoped = [...rules.entries()].filter(([role, rule]) => rule.selector !== `pre.md-block::highlight(chat-code-${role})`).map(([, rule]) => rule.selector);
       return seen;
     }, CODE_FENCES);
     ok(
@@ -4524,6 +4527,11 @@ export async function testConversationCodeColours(browser, origin, ok) {
       "P1: every role the editor's ramp colours has its `::highlight(chat-code-…)` rule in that role's own token, so both themes reach it",
       seen.roles.length >= 15 && seen.unruled.length === 0,
       JSON.stringify({ roles: seen.roles, unruled: seen.unruled }),
+    );
+    ok(
+      "P1: the colour rules are keyed on the fence (`pre.md-block`) — not on every element of the page, which every style pass would then pay for",
+      seen.unscoped.length === 0,
+      JSON.stringify({ unscoped: seen.unscoped }),
     );
 
     // The pixels: the long string and the long comment, painted in their
