@@ -981,10 +981,18 @@ mod tests {
 
     /// The reflex decision's question, its three options and the state it
     /// reads are one rubric (t-9205): a word changed without a version is red.
+    /// Version 2 (t-22110) reads the hand's own grounds beside the
+    /// sightings — what its actions came to since the last reading and how
+    /// old the capture is against the hand's limit — so the words, the
+    /// keys and the fingerprint moved together.
     #[test]
     fn reflex_decide_version_names_its_exact_words() {
-        assert_eq!(REFLEX_DECIDE_RUBRIC_VERSION, 1);
-        assert_eq!(reflex_decide_rubric_fingerprint(), "01d490a0db01adca");
+        assert_eq!(REFLEX_DECIDE_RUBRIC_VERSION, 2);
+        assert_eq!(reflex_decide_rubric_fingerprint(), "96bb93a53b2615f5");
+        assert_eq!(
+            REFLEX_DECIDE_STATE_KEYS.to_vec(),
+            vec!["sightings", "outcomes", "activity", "freshness"]
+        );
         for key in REFLEX_DECIDE_STATE_KEYS {
             assert!(REFLEX_DECIDE_ASKS.contains(&format!("`{key}`")), "{key}");
         }
