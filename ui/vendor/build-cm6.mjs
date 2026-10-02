@@ -133,7 +133,9 @@ import {
   autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion,
   completeAnyWord,
 } from "@codemirror/autocomplete"
-import {tags} from "@lezer/highlight"
+// highlightTree walks a parsed tree and names each token's style: what the
+// conversation's fences are coloured with (t-22095), outside any editor.
+import {tags, highlightTree} from "@lezer/highlight"
 import {MergeView, unifiedMergeView} from "@codemirror/merge"
 
 import {cpp} from "@codemirror/lang-cpp"
@@ -434,7 +436,7 @@ window.CM6 = {
   StreamLanguage, LanguageSupport, indentUnit, syntaxTree, foldable,
   autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion,
   completeAnyWord,
-  tags,
+  tags, highlightTree,
   MergeView, unifiedMergeView,
   languageFor, languageNameFor,
 }
