@@ -1211,6 +1211,27 @@ pub trait Host {
     fn wake_words_pending(&self, _term: u32) -> bool {
         false
     }
+    /// What the pane's own screen says about its provider being at rest,
+    /// measured off the terminal and never off a hook (t-21565): how long the
+    /// pty has been silent, and whether the provider's own ready prompt is the
+    /// last thing drawn. The mail pointer reads it only for a pane its hook
+    /// facts still call mid-turn, to tell a turn that is working from one
+    /// whose end the window never heard. Hosts that cannot look — tmux,
+    /// tests — answer nothing, and a pane then keeps the hook's reading.
+    fn provider_rest(&self, _term: u32) -> ProviderRest {
+        ProviderRest::default()
+    }
+}
+
+/// One look at a pane's provider, off its terminal (t-21565).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderRest {
+    /// Milliseconds since the pty last wrote, `None` when the host cannot
+    /// say.
+    pub silent_ms: Option<i64>,
+    /// The provider's own ready prompt — its catalog row's mark — is on the
+    /// screen as the composer.
+    pub prompt_shown: bool,
 }
 
 /// Why a spawned worker could not become usable, with its bounded last screen.

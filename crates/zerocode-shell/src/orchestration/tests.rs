@@ -12674,9 +12674,28 @@ fn a_pane_the_window_never_heard_is_told_apart_from_one_at_work() {
 #[derive(Default)]
 struct Pointing {
     sent: Mutex<Vec<(u32, String)>>,
+    /// The agent the panes hold; the Claude row when unset.
+    agent: Option<zerocode_core::AgentKind>,
+    /// What the panes' terminals say about their provider (t-21565).
+    rest: Mutex<crate::agent_teams::ProviderRest>,
+    /// Every notice the person at a pane was shown: terminal and token.
+    told: Mutex<Vec<(u32, String)>>,
 }
 
 impl Pointing {
+    /// Panes holding `agent`.
+    fn holding(agent: zerocode_core::AgentKind) -> Self {
+        Self {
+            agent: Some(agent),
+            ..Self::default()
+        }
+    }
+
+    /// What every pane's terminal says from now on.
+    fn rests(&self, rest: crate::agent_teams::ProviderRest) {
+        *self.rest.lock().unwrap_or_else(|held| held.into_inner()) = rest;
+    }
+
     /// Every line typed so far, by terminal.
     fn typed(&self) -> Vec<(u32, String)> {
         self.sent
@@ -12717,7 +12736,21 @@ impl Host for Pointing {
         Some(test_actor(term))
     }
     fn agent_of(&self, _term: u32) -> Option<String> {
-        Some(zerocode_core::AgentKind::Claude.slug().to_string())
+        Some(
+            self.agent
+                .unwrap_or(zerocode_core::AgentKind::Claude)
+                .slug()
+                .to_string(),
+        )
+    }
+    fn provider_rest(&self, _term: u32) -> crate::agent_teams::ProviderRest {
+        *self.rest.lock().unwrap_or_else(|held| held.into_inner())
+    }
+    fn mail_waiting_not_typed(&self, term: u32, why: &str) {
+        self.told
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push((term, why.to_string()));
     }
 }
 
@@ -25150,4 +25183,332 @@ fn an_unpointed_message_is_told_to_the_person_and_to_its_sender_once() {
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
     crate::orchestration_pointer_mailbox::forget_term(LEADER);
+}
+
+/// What a terminal says of a provider that has come to rest, as its catalog
+/// row can measure it: the row's own prompt mark with the settle bound, or
+/// the silence floor for a row that draws no prompt anyone can name
+/// (t-21565).
+fn a_provider_at_rest(agent: zerocode_core::AgentKind) -> (crate::agent_teams::ProviderRest, i64) {
+    let mark = zerocode_core::agent_capabilities(agent.slug())
+        .expect("a catalog row")
+        .startup
+        .mark;
+    let prompt_shown = !matches!(mark, zerocode_core::ReadyMark::Quiet);
+    let bound = if prompt_shown {
+        super::PROMPT_REST_SETTLE_MS
+    } else {
+        super::PROVIDER_SILENCE_ENDS_TURN_MS
+    };
+    (
+        crate::agent_teams::ProviderRest {
+            silent_ms: Some(bound),
+            prompt_shown,
+        },
+        bound,
+    )
+}
+
+/// t-21565: a turn whose end the window never heard — its hook facts still
+/// say mid-turn, and keep saying it because the pane's helpers keep
+/// speaking — stops holding the pane's mail once the pane's own terminal
+/// says its provider is at rest. Walked through the catalog's Claude Code
+/// and zo rows. One millisecond short of the bound is a turn at work and
+/// stays parked; at the bound the parked pointer is taken back and the
+/// composer road types it.
+#[test]
+fn a_turn_whose_end_was_never_heard_is_pointed_at_once_its_provider_rests() {
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let _stood = crate::standing_clock::stand_still();
+    for (at, agent) in [
+        zerocode_core::AgentKind::Claude,
+        zerocode_core::AgentKind::Zo,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let leader = 21_565 + 10 * at as u32;
+        let term = leader + 1;
+        let team = format!("team-unheard-end-{leader}");
+        let (_run_id, worker, pane) = an_agent_carrying_work(agent.slug(), &team, leader, term);
+        let host = Pointing::holding(agent);
+        let at_leader = |host: &Pointing| -> Vec<(u32, String)> {
+            host.typed()
+                .into_iter()
+                .filter(|(typed_at, _)| *typed_at == leader)
+                .collect()
+        };
+
+        super::pane_turn_began(leader, clock());
+        let held = crate::agent_teams::current_pane_capability(&team, &pane)
+            .expect("the split minted the worker a capability");
+        let done = run(
+            &host,
+            Vec::new(),
+            &team,
+            &pane,
+            &held,
+            &words(&format!(
+                "send --type worker_done --body {{\"ok\":true}} --retry-request unheard-{worker}"
+            )),
+            clock(),
+        );
+        assert_eq!(done.exit_code, 0, "{}", done.stderr);
+        for _ in 0..3 {
+            super::tick(&host, &[], clock());
+        }
+        assert_eq!(at_leader(&host), Vec::new(), "{agent:?}: typed mid-turn");
+
+        let (rest, bound) = a_provider_at_rest(agent);
+        host.rests(crate::agent_teams::ProviderRest {
+            silent_ms: Some(bound - 1),
+            ..rest
+        });
+        crate::orchestration_pointer_mailbox::age_parked(
+            leader,
+            crate::orchestration_pointer_mailbox::HOOK_COLLECTION_GRACE * 2,
+        );
+        super::tick(&host, &[], clock());
+        assert_eq!(
+            at_leader(&host),
+            Vec::new(),
+            "{agent:?}: a pane one millisecond short of the bound was read at rest"
+        );
+
+        host.rests(rest);
+        super::tick(&host, &[], clock());
+        assert_eq!(
+            at_leader(&host).first(),
+            Some(&(leader, zerocode_core::orchestration::pointer_text(1))),
+            "{agent:?}: mail stayed parked for a turn end that never came"
+        );
+
+        super::pane_turn_began(leader, clock());
+        crate::agent_teams::forget_term(leader);
+        crate::agent_teams::forget_term(term);
+        crate::orchestration_pointer_mailbox::forget_term(leader);
+    }
+}
+
+/// t-21565: a pane silent because it waits on its PERSON is not at rest, and
+/// the silence bound never types into the approval or question on it.
+#[test]
+fn a_pane_waiting_on_its_person_is_not_read_at_rest_by_its_silence() {
+    const LEADER: u32 = 21_585;
+    const WORKER: u32 = 21_586;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let _stood = crate::standing_clock::stand_still();
+    let team = format!("team-waiting-person-{LEADER}");
+    let (_run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let host = Pointing::default();
+    let (rest, _) = a_provider_at_rest(zerocode_core::AgentKind::Claude);
+    host.rests(rest);
+
+    super::pane_turn_began(LEADER, clock());
+    super::pane_attention_noted(LEADER, Some(clock()), clock());
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let done = run(
+        &host,
+        Vec::new(),
+        &team,
+        &pane,
+        &held,
+        &words(&format!(
+            "send --type worker_done --body {{\"ok\":true}} --retry-request waiting-{worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(done.exit_code, 0, "{}", done.stderr);
+    crate::orchestration_pointer_mailbox::age_parked(
+        LEADER,
+        crate::orchestration_pointer_mailbox::HOOK_COLLECTION_GRACE * 2,
+    );
+    for _ in 0..3 {
+        super::tick(&host, &[], clock());
+    }
+    assert_eq!(
+        host.typed(),
+        Vec::new(),
+        "a line was typed at a pane that waits on its person"
+    );
+
+    super::pane_attention_noted(LEADER, None, clock());
+    super::pane_turn_began(LEADER, clock());
+    super::forget_pane_attention(LEADER);
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::orchestration_pointer_mailbox::forget_term(LEADER);
+}
+
+/// t-21565: the terminal's reading of a provider, judged on its own — the
+/// bound with its prompt, the longer floor without one, nothing from a host
+/// that cannot look, and the prompt read off every catalog row's own mark.
+#[test]
+fn the_terminals_reading_of_a_provider_at_rest_follows_its_catalog_row() {
+    use crate::agent_teams::ProviderRest;
+    let rest = |silent_ms, prompt_shown| ProviderRest {
+        silent_ms,
+        prompt_shown,
+    };
+    assert!(!super::provider_rest_ends_turn(rest(None, true)));
+    assert!(!super::provider_rest_ends_turn(rest(
+        Some(super::PROMPT_REST_SETTLE_MS - 1),
+        true
+    )));
+    assert!(super::provider_rest_ends_turn(rest(
+        Some(super::PROMPT_REST_SETTLE_MS),
+        true
+    )));
+    assert!(!super::provider_rest_ends_turn(rest(
+        Some(super::PROMPT_REST_SETTLE_MS),
+        false
+    )));
+    assert!(super::provider_rest_ends_turn(rest(
+        Some(super::PROVIDER_SILENCE_ENDS_TURN_MS),
+        false
+    )));
+    for agent in zerocode_core::ALL_AGENTS {
+        let mark = zerocode_core::agent_capabilities(agent.slug())
+            .expect("a catalog row")
+            .startup
+            .mark;
+        let screen = match mark {
+            zerocode_core::ReadyMark::ComposerPrompt(glyph)
+            | zerocode_core::ReadyMark::AltScreenPrompt(glyph) => {
+                format!("answer text\n\n│ {glyph} \n  status line\n")
+            }
+            _ => "answer text\n".to_string(),
+        };
+        let expected = !matches!(mark, zerocode_core::ReadyMark::Quiet);
+        assert_eq!(
+            super::ready_prompt_shown(mark, &screen, true),
+            expected,
+            "{agent:?}"
+        );
+        assert!(
+            !super::ready_prompt_shown(mark, "only the transcript\n", false),
+            "{agent:?}: a screen with no prompt read as one"
+        );
+    }
+}
+
+/// t-21565: mail for a worker whose pane the person took over is not typed
+/// (the takeover rules stand) and is no longer silent: the window says so
+/// once, the person at the pane is told, and the sender gets one letter.
+#[test]
+fn mail_for_a_taken_over_workers_pane_is_told_to_its_sender_once() {
+    const LEADER: u32 = 21_595;
+    const WORKER: u32 = 21_596;
+    const BEATS: usize = 20;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let team = format!("team-taken-{LEADER}");
+    let (run_id, worker, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let host = Pointing::default();
+    crate::orchestration::forget_taken_term(WORKER);
+    super::pane_taken_over(WORKER, clock());
+    said_at(
+        &host,
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &format!(
+            "send --to worker:{worker} --type status --body hello --retry-request held-{worker}"
+        ),
+    );
+    for _ in 0..BEATS {
+        super::tick(&host, &[], clock());
+    }
+    assert!(
+        host.typed().iter().all(|(term, _)| *term != WORKER),
+        "a line was typed into a pane the person took over"
+    );
+    assert_eq!(
+        host.told.lock().unwrap().as_slice(),
+        [(WORKER, "pane_taken".to_string())],
+        "the person at the pane was not told exactly once"
+    );
+    let blackbox = super::BLACKBOX
+        .get()
+        .expect("the bench window's black box")
+        .join("window-errors.log");
+    let needle = format!(
+        "mail waiting for worker:{worker} in {run_id} was not pointed at terminal {WORKER}: \
+         its person took the pane over"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&blackbox)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(&needle))
+            .count(),
+        1,
+        "the window's log was not written exactly once"
+    );
+    let letters = said_at(&host, &team, leader, TEST_CAPABILITY, "check --peek");
+    let letters = letters.to_string();
+    assert_eq!(
+        letters.matches("took the pane over").count(),
+        1,
+        "the sender was not told exactly once: {letters}"
+    );
+
+    crate::orchestration::forget_taken_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+}
+
+/// t-21565: a restart that leaves a worker without its seat tells the mail's
+/// sender, once, that the mail is filed and nothing can be pointed — and says
+/// in plain words what to do — beside the window's own line.
+#[test]
+fn mail_left_without_a_seat_by_a_restart_is_told_to_its_sender_once() {
+    const LEADER: u32 = 21_605;
+    const WORKER: u32 = 21_606;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let team = format!("team-restarted-{LEADER}");
+    let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let host = Splitting::onto(WORKER);
+    let held =
+        crate::agent_teams::current_pane_capability(&team, &pane).expect("the worker's capability");
+    let done = run(
+        &host,
+        Vec::new(),
+        &team,
+        &pane,
+        &held,
+        &words(&format!(
+            "send --type worker_done --body {{\"ok\":true}} --retry-request restarted-{worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(done.exit_code, 0, "{}", done.stderr);
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    for _ in 0..3 {
+        super::tick(&host, &[], clock());
+    }
+    let told = || {
+        the_rows()
+            .messages
+            .iter()
+            .filter(|message| {
+                message.run == run_id
+                    && message.body.contains("was NOT pointed")
+                    && message.body.contains("holds no pane for it")
+            })
+            .count()
+    };
+    assert_eq!(
+        told(),
+        1,
+        "the sender was not told once that nothing was pointed"
+    );
+    super::tick(&host, &[], clock());
+    assert_eq!(told(), 1, "the sender was told again on a later beat");
 }
