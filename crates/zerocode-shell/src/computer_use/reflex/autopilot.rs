@@ -86,6 +86,14 @@ pub(crate) const COVERED: &str = zerocode_core::computer_use_protocol::error_cod
 /// have.
 const LEAST_PLAN_WALL_MS: u64 = 1_000;
 
+/// Whether the person's setting lets a plan through the door now: the facts
+/// a start came with — a moment old for a first plan, as old as the
+/// autopilot for a later one — and the setting read again. Either reading
+/// closes the door; the setting read now never opens one the facts closed.
+fn enabled_now(facts: &DoorFacts, world: &mut World<'_>) -> bool {
+    facts.enabled && (world.enabled)()
+}
+
 /// The wall's refusal of another plan.
 fn no_time() -> ComputerUseError {
     ComputerUseError::new(
@@ -688,7 +696,7 @@ impl Autopilot {
             ));
         }
         super::door_opens(&DoorFacts {
-            enabled: (world.enabled)(),
+            enabled: enabled_now(&facts, world),
             ..facts.clone()
         })?;
         let displays = (world.call)("displays", json!({}))?;
@@ -919,7 +927,7 @@ impl Autopilot {
             }),
             self.workspace.clone(),
             &DoorFacts {
-                enabled: (world.enabled)(),
+                enabled: enabled_now(&self.facts, world),
                 stopped: world
                     .stopped
                     .clone()
