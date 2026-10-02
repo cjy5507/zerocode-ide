@@ -36,6 +36,9 @@ use zerocode_core::computer_use_protocol::reflex::{
 use super::super::errand::value::{Answered, LiveWriter, Said, Tokens};
 use super::super::screenshot_png::RgbaImage;
 
+mod worker;
+pub(crate) use worker::{Background, PendingPlan};
+
 /// The version of the words below: a plan's first-thirty-seconds label is
 /// read per version, so a changed word is a new version
 /// (`the_version_is_pinned_to_the_words`).
@@ -79,6 +82,12 @@ pub(crate) trait Generator {
     /// is left to ask — whether one was. A generator of one road has none.
     fn pass_over(&mut self, _why: &str) -> bool {
         false
+    }
+
+    /// A later plan, polled by the collector. Scripted writers answer at
+    /// once; the window's writer uses [`Background`].
+    fn plan_later(&mut self, ask: &Ask<'_>, _left: Duration) -> PendingPlan {
+        PendingPlan::ready(write_plan(self, ask))
     }
 }
 
@@ -472,7 +481,7 @@ pub(crate) const SCOPE_REFUSED: &str = "scope";
 /// write this plan: when the generator has another road to ask (`auto`'s
 /// logins, t-10372), that road is asked afresh, and the row carries every
 /// request, every refusal and the road set aside with its reason.
-pub(crate) fn write_plan(generator: &mut dyn Generator, ask: &Ask<'_>) -> Written {
+pub(crate) fn write_plan<G: Generator + ?Sized>(generator: &mut G, ask: &Ask<'_>) -> Written {
     let mut before: Option<Written> = None;
     loop {
         let mut written = write_on_one_road(generator, ask);
@@ -501,7 +510,7 @@ pub(crate) fn write_plan(generator: &mut dyn Generator, ask: &Ask<'_>) -> Writte
 }
 
 /// [`write_plan`] down the one road the generator asks now.
-fn write_on_one_road(generator: &mut dyn Generator, ask: &Ask<'_>) -> Written {
+fn write_on_one_road<G: Generator + ?Sized>(generator: &mut G, ask: &Ask<'_>) -> Written {
     let mut written = Written {
         plan: Err(PLAN_REFUSED.to_string()),
         requests: 0,

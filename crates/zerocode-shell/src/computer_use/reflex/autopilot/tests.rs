@@ -15,6 +15,8 @@ use crate::systemone::tests::ANSWERING_VERSION;
 /// The epoch milliseconds the test's steady clock starts at.
 const WALL: i64 = 1_790_000_000_000;
 
+mod replanning;
+
 /// One run as the fake helper holds it.
 struct Held {
     state: &'static str,
@@ -38,8 +40,10 @@ struct Helper {
     /// the run did something.
     unknown: Option<&'static str>,
     age_ns: u64,
+    capture_known: bool,
     plan_hash: Option<&'static str>,
     moment: u64,
+    scene: Value,
     /// Every window on the screen at every layer, front to back, when the
     /// test lays one out (t-12979); none answers the list as an old helper.
     desk: Vec<Value>,
@@ -54,8 +58,10 @@ impl Helper {
             kernel: true,
             unknown: None,
             age_ns: 3_000_000,
+            capture_known: true,
             plan_hash: None,
             moment: 0,
+            scene: json!({ "stream": 1, "geometry": 1, "owner": 3, "plan": 1 }),
             desk: Vec::new(),
         }
     }
@@ -123,8 +129,8 @@ impl Helper {
                         "unknown": self.unknown, "track": 5, "ageNs": 2_000_000,
                     }],
                     "outcomes": { "done": self.moment },
-                    "scene": { "stream": 1, "geometry": 1, "owner": 3, "plan": 1 },
-                    "lastCapture": self.moment, "lastCaptureAgeNs": self.age_ns,
+                    "scene": self.scene,
+                    "lastCapture": self.capture_known.then_some(self.moment), "lastCaptureAgeNs": self.age_ns,
                 })
             }
             "reflexAck" => {
@@ -313,6 +319,7 @@ struct Fake {
     plans: Vec<Value>,
     now: u64,
     stopped: Option<String>,
+    enabled: bool,
 }
 
 impl Fake {
@@ -333,6 +340,7 @@ impl Fake {
             plans: Vec::new(),
             now: 10_000,
             stopped: None,
+            enabled: true,
         }
     }
 
@@ -350,12 +358,14 @@ impl Fake {
             plans,
             now,
             stopped,
+            enabled,
             ..
         } = self;
         let (mode, applies) = *standing;
         let mut call = |method: &str, params: Value| helper.call(method, params);
         let mut read_mode = move || mode;
         let mut read_standing = move || (mode, applies);
+        let mut read_enabled = || *enabled;
         let mut record = |rows: Vec<Value>| decisions.extend(rows);
         let mut write = |rows: Vec<Value>| plans.extend(rows);
         let mut keeper = |_run: &str| {
@@ -379,6 +389,7 @@ impl Fake {
             mode: &mut read_mode,
             standing: &mut read_standing,
             generator,
+            enabled: &mut read_enabled,
             decisions: &mut record,
             plans: &mut write,
             keeper: &mut keeper,

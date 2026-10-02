@@ -60,7 +60,7 @@ use super::{
 };
 use crate::api_routers::{RouterKeys, RouterRefusal};
 use crate::computer_use::ComputerUseError;
-use crate::computer_use::errand::value::{LiveWriter, Said};
+use crate::computer_use::errand::value::Said;
 use crate::computer_use::macos::Session;
 use crate::computer_use::session::ProviderSession as _;
 use crate::systemone::{self, Spent, Wire};
@@ -527,7 +527,7 @@ impl Bench<'_> {
                 poll: self.poll,
             })
         } else {
-            Box::new(LiveWriter::window(generator_setup()))
+            Box::new(super::plan::Background::window(generator_setup()))
         };
         let asked = Asked::of(&json!({
             "goal": self.request["goal"],
@@ -560,6 +560,7 @@ impl Bench<'_> {
         // ask, so a hold ends the round for the person.
         let mut cover = crate::computer_use::cover::LiveJudge::on(wire.clone(), Some(folder));
         let mut pause = std::thread::sleep;
+        let mut enabled = || true;
         let mut person = |_line: &crate::computer_use::cover::Said| {
             crate::computer_use::confirm::Decision::Refused
         };
@@ -571,6 +572,7 @@ impl Bench<'_> {
                     mode: &mut mode,
                     standing: &mut standing,
                     generator: generator.as_mut(),
+                    enabled: &mut enabled,
                     decisions: &mut record,
                     plans: &mut write_plans,
                     keeper: &mut keeper,
