@@ -348,6 +348,10 @@ mod tests {
 
     /// The real spawn, against a fake shell — a script that ignores the flags
     /// and prints a decorated PATH — and against one that hangs.
+    // Gated: the window reads a login shell's PATH only off Windows
+    // (`pick_shell` answers nothing for it, pinned above), so there is no
+    // Windows road to spawn a shell by.
+    #[cfg(unix)]
     #[test]
     fn a_real_shell_is_read_and_a_stuck_one_is_killed() {
         let dir = tempfile::tempdir().expect("temp");

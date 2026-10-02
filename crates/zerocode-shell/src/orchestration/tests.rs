@@ -3212,7 +3212,7 @@ fn a_declined_worker_is_resummoned_on_the_declared_rung_with_its_checkout() {
     const LEADER_TERM: u32 = 85_300;
     let stood = Walled::stand_declined(
         LEADER_TERM,
-        "/tmp",
+        crate::test_host::existing_directory(),
         "cyber",
         "--on-classifier-decline claude:claude-opus-4-8",
     );
@@ -3244,7 +3244,10 @@ fn a_declined_worker_is_resummoned_on_the_declared_rung_with_its_checkout() {
     assert_eq!(seated.agent, "claude");
     assert_eq!(seated.model.as_deref(), Some("claude-opus-4-8"));
     assert_eq!(seated.effort.as_deref(), Some("max"));
-    assert_eq!(seated.checkout.as_deref(), Some("/tmp"));
+    assert_eq!(
+        seated.checkout.as_deref(),
+        Some(crate::test_host::existing_directory())
+    );
     let linked = rows
         .dispatches
         .iter()
@@ -3272,7 +3275,7 @@ fn a_pause_dialog_behind_a_working_hook_is_diagnostic_news_once_and_ends_no_work
     const MINUTE: i64 = 60_000;
     let stood = Walled::stand_paused(
         LEADER_TERM,
-        "/tmp",
+        crate::test_host::existing_directory(),
         "--on-classifier-decline claude:claude-opus-4-8",
     );
     let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
@@ -3348,7 +3351,7 @@ fn a_screen_quoting_the_dialogs_words_is_nothing_and_the_cli_dialog_is_diagnosti
     for (leader_term, screen, told_count) in [(85_600, QUOTED, 0), (85_700, DIALOG, 1)] {
         let stood = Walled::stand_showing(
             leader_term,
-            "/tmp",
+            crate::test_host::existing_directory(),
             "--on-classifier-decline claude:claude-opus-4-8",
             screen,
         );
@@ -3396,7 +3399,7 @@ fn a_decline_that_reads_differently_at_the_last_boundary_ends_no_worker() {
     for (leader_term, at_the_fence) in changed {
         let stood = Walled::stand_declined(
             leader_term,
-            "/tmp",
+            crate::test_host::existing_directory(),
             "cyber",
             "--on-classifier-decline claude:claude-opus-4-8",
         );
@@ -3473,7 +3476,7 @@ fn a_dialogs_diagnostic_notice_does_not_hide_the_record_that_follows_it() {
     for (leader_term, hook_rests) in [(86_100, false), (86_150, true)] {
         let stood = Walled::stand_paused(
             leader_term,
-            "/tmp",
+            crate::test_host::existing_directory(),
             "--on-classifier-decline claude:claude-opus-4-8",
         );
         let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
@@ -3524,7 +3527,7 @@ fn a_dialogs_diagnostic_notice_does_not_hide_the_record_that_follows_it() {
 fn records_behind_a_hook_that_stays_working_are_told_and_planned_each_on_its_own_key() {
     const LEADER_TERM: u32 = 86_300;
     const MINUTE: i64 = 60_000;
-    let stood = Walled::stand_paused(LEADER_TERM, "/tmp", "");
+    let stood = Walled::stand_paused(LEADER_TERM, crate::test_host::existing_directory(), "");
     let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
     let keys = |news: &serde_json::Value| -> Vec<String> {
         news["messages"]
@@ -3631,7 +3634,8 @@ fn behind_a_working_hook_the_handovers_own_refusals_hold() {
             .collect()
     };
     let paused = |leader_term: u32| {
-        let stood = Walled::stand_paused(leader_term, "/tmp", ORDER);
+        let stood =
+            Walled::stand_paused(leader_term, crate::test_host::existing_directory(), ORDER);
         stood.host.pty_silent_for(11 * MINUTE);
         tick(&stood.host, &[], stood.began + 20_000);
         assert_eq!(told(&stood, stood.began + 20_001)["count"], 1);
@@ -3766,7 +3770,12 @@ fn behind_a_working_hook_the_handovers_own_refusals_hold() {
 #[test]
 fn a_later_decline_of_the_same_attempt_is_told_and_planned_on_its_own_record() {
     const LEADER_TERM: u32 = 86_200;
-    let stood = Walled::stand_declined(LEADER_TERM, "/tmp", "cyber", "");
+    let stood = Walled::stand_declined(
+        LEADER_TERM,
+        crate::test_host::existing_directory(),
+        "cyber",
+        "",
+    );
     let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
     tick(&stood.host, &[], stood.began + 10_000);
     assert_eq!(told(stood.began + 10_001)["count"], 1);
@@ -3843,7 +3852,7 @@ fn an_unrouted_decline_is_told_and_walked_nowhere() {
     const LEADER_TERM: u32 = 85_400;
     let stood = Walled::stand_declined(
         LEADER_TERM,
-        "/tmp",
+        crate::test_host::existing_directory(),
         "reasoning_extraction",
         "--on-classifier-decline claude:claude-opus-4-8",
     );
@@ -3930,7 +3939,12 @@ fn a_declines_category_is_joined_on_both_ids_at_the_beat_and_at_the_fence() {
     );
 
     // At the beat: a contradiction is unrouted news, and walks nowhere.
-    let stood = Walled::stand_declined_with(86_300, "/tmp", policy, reading(&disputing));
+    let stood = Walled::stand_declined_with(
+        86_300,
+        crate::test_host::existing_directory(),
+        policy,
+        reading(&disputing),
+    );
     tick(&stood.host, &[], stood.began + 10_000);
     let news = stood.json(
         "check --peek --types classifier_declined",
@@ -3954,7 +3968,12 @@ fn a_declines_category_is_joined_on_both_ids_at_the_beat_and_at_the_fence() {
 
     // At the fence: the same key, the category now contradicted — nothing
     // settles; read the same again, the walk lands.
-    let stood = Walled::stand_declined_with(86_400, "/tmp", policy, reading(&agreeing));
+    let stood = Walled::stand_declined_with(
+        86_400,
+        crate::test_host::existing_directory(),
+        policy,
+        reading(&agreeing),
+    );
     stood
         .host
         .read_at_the_fence(Some(reading(&disputing_at_the_fence)));
@@ -3992,7 +4011,7 @@ fn a_walled_alternative_fails_the_third_step_by_name_and_the_receipt_says_so() {
     const LEADER_TERM: u32 = 85_100;
     let stood = Walled::stand(
         LEADER_TERM,
-        "/tmp",
+        crate::test_host::existing_directory(),
         "--on-quota-wall claude:fable-5-1:high --wip-commit",
     );
     stood.wall_it();
@@ -4112,7 +4131,11 @@ fn a_walled_alternative_fails_the_third_step_by_name_and_the_receipt_says_so() {
 #[test]
 fn the_replacement_is_briefed_with_where_the_walled_worker_left_off() {
     const LEADER_TERM: u32 = 85_150;
-    let stood = Walled::stand(LEADER_TERM, "/tmp", "--on-quota-wall claude:fable-5-1");
+    let stood = Walled::stand(
+        LEADER_TERM,
+        crate::test_host::existing_directory(),
+        "--on-quota-wall claude:fable-5-1",
+    );
     stood.wall_it();
     let plan = stood.plan();
     let tail = vec![
@@ -4174,7 +4197,11 @@ fn the_replacement_is_briefed_with_where_the_walled_worker_left_off() {
 #[test]
 fn a_failed_wip_commit_aborts_with_news_and_an_unasked_one_is_skipped() {
     const LEADER_TERM: u32 = 85_200;
-    let stood = Walled::stand(LEADER_TERM, "/tmp", "--on-quota-wall claude --wip-commit");
+    let stood = Walled::stand(
+        LEADER_TERM,
+        crate::test_host::existing_directory(),
+        "--on-quota-wall claude --wip-commit",
+    );
     stood.wall_it();
     let began = stood.began;
     let plan = stood.plan();
@@ -4225,7 +4252,11 @@ fn a_failed_wip_commit_aborts_with_news_and_an_unasked_one_is_skipped() {
     // A second window, no `--wip-commit`: git is never asked.
     drop(refusing);
     drop(stood);
-    let stood = Walled::stand(LEADER_TERM + 10, "/tmp", "--on-quota-wall claude");
+    let stood = Walled::stand(
+        LEADER_TERM + 10,
+        crate::test_host::existing_directory(),
+        "--on-quota-wall claude",
+    );
     stood.wall_it();
     let began = stood.began;
     let plan = stood.plan();
@@ -13430,7 +13461,9 @@ fn a_turn_silent_past_the_stale_bound_hands_its_parked_pointer_to_the_composer()
     const WORKER: u32 = 11_236;
     let _window = the_window();
     let _turn = one_beat_at_a_time();
-    let _stood = crate::standing_clock::stand_still();
+    // Stood after the real now so that the turn heard twice the stale bound ago
+    // below is an instant a freshly booted runner has.
+    let _stood = crate::standing_clock::stand_still_ahead(stale_turn() * 3);
     let team = format!("team-silent-{LEADER}");
     let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
     let host = Pointing::default();
@@ -13458,9 +13491,7 @@ fn a_turn_silent_past_the_stale_bound_hands_its_parked_pointer_to_the_composer()
     );
 
     // Nothing more is heard from the pane, and its turn end is lost.
-    let long_ago = crate::standing_clock::now()
-        .checked_sub(stale_turn() * 2)
-        .expect("the machine has been up past the stale bound twice");
+    let long_ago = crate::standing_clock::now() - stale_turn() * 2;
     super::pane_turns()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
@@ -13502,10 +13533,10 @@ fn a_turn_silent_past_the_stale_bound_hands_its_parked_pointer_to_the_composer()
 /// is read as it was measured.
 #[test]
 fn only_a_running_turn_silent_past_the_stale_bound_reads_at_rest() {
-    let _stood = crate::standing_clock::stand_still();
+    let _stood = crate::standing_clock::stand_still_ahead(stale_turn() * 3);
     let now = crate::standing_clock::now();
-    let inside = now.checked_sub(stale_turn()).expect("an uptime");
-    let past = now.checked_sub(stale_turn() * 2).expect("an uptime");
+    let inside = now - stale_turn();
+    let past = now - stale_turn() * 2;
     assert!(matches!(
         super::PaneTurn::Running { heard: inside }.as_read(),
         super::PaneTurn::Running { .. }
@@ -15062,7 +15093,7 @@ fn a_sleeping_worker_waits_for_its_bound_coordinator_without_spending_an_attempt
     seat_a_team(&old_team, OLD_LEADER);
     let host = Seating {
         onto: WORKER,
-        checkout: "/tmp",
+        checkout: crate::test_host::existing_directory(),
     };
     let leader = zerocode_core::agent_teams::LEADER_PANE;
     let opened = run(
@@ -15218,7 +15249,7 @@ fn a_window_exiting_puts_the_seat_to_sleep_before_its_pane_exits() {
     let (_window, _store) = PrivateWindow::boot();
     let host = Seating {
         onto: WORKER,
-        checkout: "/tmp",
+        checkout: crate::test_host::existing_directory(),
     };
     let (_team, task, worker) =
         a_seated_worker_with_a_session(&host, LEADER, WORKER, "session-exiting");
@@ -15281,7 +15312,7 @@ fn the_goodbye_names_its_road_and_what_it_cuts_under_each_worker() {
     let (_window, _store) = PrivateWindow::boot();
     let host = Seating {
         onto: WORKER,
-        checkout: "/tmp",
+        checkout: crate::test_host::existing_directory(),
     };
     let (_team, _task, worker) =
         a_seated_worker_with_a_session(&host, LEADER, WORKER, "session-goodbye");
@@ -15356,7 +15387,7 @@ fn a_resumed_pane_is_seated_as_the_sleeper_it_is_and_reports_done_from_there() {
     let (_window, _store) = PrivateWindow::boot();
     let host = Seating {
         onto: WORKER,
-        checkout: "/tmp",
+        checkout: crate::test_host::existing_directory(),
     };
     let (_team, task, worker) =
         a_seated_worker_with_a_session(&host, LEADER, WORKER, "session-witness");
@@ -15370,26 +15401,53 @@ fn a_resumed_pane_is_seated_as_the_sleeper_it_is_and_reports_done_from_there() {
 
     // The read the nudge is worded from: this IS a sleeper's conversation.
     assert_eq!(
-        super::sleeper_awaiting("/tmp", "codex", "session-witness").as_deref(),
+        super::sleeper_awaiting(
+            crate::test_host::existing_directory(),
+            "codex",
+            "session-witness"
+        )
+        .as_deref(),
         Some(worker.as_str())
     );
     assert_eq!(
-        super::sleeper_awaiting("/tmp", "codex", "session-other"),
+        super::sleeper_awaiting(
+            crate::test_host::existing_directory(),
+            "codex",
+            "session-other"
+        ),
         None
     );
     // No seat yet: nothing is written.
     assert_eq!(
-        super::pane_resumed(RESUMED, "/tmp", "codex", "session-witness", clock()),
+        super::pane_resumed(
+            RESUMED,
+            crate::test_host::existing_directory(),
+            "codex",
+            "session-witness",
+            clock()
+        ),
         Ok(None)
     );
     let resumed_team = format!("team-t3058-resumed-{RESUMED}");
     seat_a_team(&resumed_team, RESUMED);
     assert_eq!(
-        super::pane_resumed(RESUMED, "/tmp/", "codex", "session-witness", clock()),
+        super::pane_resumed(
+            RESUMED,
+            &format!("{}/", crate::test_host::existing_directory()),
+            "codex",
+            "session-witness",
+            clock()
+        ),
         Ok(Some(worker.clone()))
     );
     assert_eq!(
-        super::pane_resumed(RESUMED, "/tmp", "codex", "session-witness", clock()),
+        super::pane_resumed(
+            RESUMED,
+            crate::test_host::existing_directory(),
+            "codex",
+            "session-witness",
+            clock()
+        ),
         Ok(None),
         "the same witness seated the worker twice"
     );
@@ -15447,7 +15505,7 @@ fn a_sleeper_nobody_resumed_dies_on_the_beat_after_the_grace() {
     let _beat = one_beat_at_a_time();
     let host = Seating {
         onto: WORKER,
-        checkout: "/tmp",
+        checkout: crate::test_host::existing_directory(),
     };
     let (_team, task, worker) =
         a_seated_worker_with_a_session(&host, LEADER, WORKER, "session-overdue");
@@ -15507,7 +15565,12 @@ fn a_sleeper_nobody_resumed_dies_on_the_beat_after_the_grace() {
     assert_eq!(told.len(), 1, "{told:?}");
     assert_eq!(told[0]["workerId"], worker, "{}", told[0]);
     assert_eq!(told[0]["dispatchId"], dispatch, "{}", told[0]);
-    assert_eq!(told[0]["checkout"], "/tmp", "{}", told[0]);
+    assert_eq!(
+        told[0]["checkout"],
+        crate::test_host::existing_directory(),
+        "{}",
+        told[0]
+    );
     assert_eq!(
         told[0]["reason"],
         zerocode_core::orchestration::NOT_RESUMED,
@@ -16138,11 +16201,11 @@ fn an_orphan_is_adopted_in_place_or_reseated_once_its_pane_is_proven_gone() {
     };
     let standing_host = Seating {
         onto: STANDING,
-        checkout: "/tmp",
+        checkout: crate::test_host::existing_directory(),
     };
     let gone_host = Seating {
         onto: GONE,
-        checkout: "/tmp",
+        checkout: crate::test_host::existing_directory(),
     };
     say(&standing_host, "run-create --name orphan-adopt");
     let task = say(&standing_host, "task-create --spec continue")["taskId"]
@@ -16206,7 +16269,7 @@ fn an_orphan_is_adopted_in_place_or_reseated_once_its_pane_is_proven_gone() {
     seat_a_team(&new_team, NEW_LEADER);
     let fresh_host = Seating {
         onto: FRESH,
-        checkout: "/tmp",
+        checkout: crate::test_host::existing_directory(),
     };
     assert_eq!(
         super::reseat_sleeping(
@@ -16267,7 +16330,7 @@ fn a_restored_coordinator_sits_again_through_the_restore_pass() {
     seat_a_team(&old_team, OLD_LEADER);
     let host = Seating {
         onto: WORKER,
-        checkout: "/tmp",
+        checkout: crate::test_host::existing_directory(),
     };
     let leader = zerocode_core::agent_teams::LEADER_PANE;
     let opened = run(
@@ -16356,7 +16419,7 @@ fn a_leaders_exit_a_takeover_and_the_orphans_report_land_with_the_seat() {
     seat_a_team(&old_team, OLD_LEADER);
     let host = Seating {
         onto: WORKER,
-        checkout: "/tmp",
+        checkout: crate::test_host::existing_directory(),
     };
     let leader = zerocode_core::agent_teams::LEADER_PANE;
     let say = |team: &str, pane: &str, token: &str, line: &str| {
@@ -18559,7 +18622,7 @@ fn the_crash_task_goes_down_the_task_create_door_from_the_seated_leader_once() {
     let (_window, _store) = PrivateWindow::boot();
     let host = Seating {
         onto: LEADER + 1,
-        checkout: "/tmp",
+        checkout: crate::test_host::existing_directory(),
     };
     let root = tempfile::tempdir().expect("a crash root");
     crate::crash::record(
@@ -19261,7 +19324,7 @@ fn stop_rejects_respawn_and_human_takeover_between_plan_and_effect_without_settl
 #[test]
 fn retained_quota_mail_does_not_replace_a_recovered_worker_when_policy_is_enabled_later() {
     for recovery in ["activity", "marker", "headroom", "reset", "stale"] {
-        let stood = Walled::stand(94_300, "/tmp", "");
+        let stood = Walled::stand(94_300, crate::test_host::existing_directory(), "");
         stood.wall_it();
         let historical =
             stood.json("check --all --types quota_walled", stood.began + 11_000)["messages"]
@@ -19328,7 +19391,11 @@ fn retained_quota_mail_does_not_replace_a_recovered_worker_when_policy_is_enable
 
 #[test]
 fn a_current_wall_after_recovery_can_use_the_order_without_rewriting_historical_mail() {
-    let stood = Walled::stand(94_400, "/tmp", "--on-quota-wall claude");
+    let stood = Walled::stand(
+        94_400,
+        crate::test_host::existing_directory(),
+        "--on-quota-wall claude",
+    );
     stood.wall_it();
     let history =
         stood.json("check --all --types quota_walled", stood.began + 11_000)["messages"].clone();
@@ -19370,7 +19437,7 @@ fn a_current_wall_after_recovery_can_use_the_order_without_rewriting_historical_
 fn a_superseded_policy_cannot_commit_or_stop_from_an_old_reservation() {
     let stood = Walled::stand(
         94_500,
-        "/tmp",
+        crate::test_host::existing_directory(),
         "--on-quota-wall claude:fable-5-1 --wip-commit",
     );
     stood.wall_it();
@@ -19411,7 +19478,11 @@ fn a_superseded_policy_cannot_commit_or_stop_from_an_old_reservation() {
 #[test]
 fn takeover_or_recovery_before_stop_revokes_the_walk_and_keeps_the_attempt_open() {
     for change in ["human", "recovery", "policy", "coordinator"] {
-        let stood = Walled::stand(94_600, "/tmp", "--on-quota-wall claude --wip-commit");
+        let stood = Walled::stand(
+            94_600,
+            crate::test_host::existing_directory(),
+            "--on-quota-wall claude --wip-commit",
+        );
         stood.wall_it();
         let plan = stood.plan();
         let held = super::runtime().unwrap();
@@ -19468,7 +19539,11 @@ fn takeover_or_recovery_before_stop_revokes_the_walk_and_keeps_the_attempt_open(
 
 #[test]
 fn actor_rejects_a_superseded_handover_after_the_shell_checked_it() {
-    let stood = Walled::stand(94_700, "/tmp", "--on-quota-wall claude --wip-commit");
+    let stood = Walled::stand(
+        94_700,
+        crate::test_host::existing_directory(),
+        "--on-quota-wall claude --wip-commit",
+    );
     stood.wall_it();
     let plan = stood.plan();
     let wall = current_handover_wall(&stood.host, &plan, stood.began + 20_000).unwrap();
@@ -19503,7 +19578,11 @@ fn actor_rejects_a_superseded_handover_after_the_shell_checked_it() {
 
 #[test]
 fn a_refused_handover_reservation_write_performs_no_external_step() {
-    let stood = Walled::stand(94_800, "/tmp", "--on-quota-wall claude --wip-commit");
+    let stood = Walled::stand(
+        94_800,
+        crate::test_host::existing_directory(),
+        "--on-quota-wall claude --wip-commit",
+    );
     stood.wall_it();
     let plan = stood.plan();
     {
@@ -19530,7 +19609,11 @@ fn a_refused_handover_reservation_write_performs_no_external_step() {
 #[test]
 fn a_handover_split_rechecks_the_order_after_planning_and_rolls_back_its_reservation() {
     for change in ["off", "alternative", "coordinator", "current"] {
-        let stood = Walled::stand(94_900, "/tmp", "--on-quota-wall claude");
+        let stood = Walled::stand(
+            94_900,
+            crate::test_host::existing_directory(),
+            "--on-quota-wall claude",
+        );
         stood.wall_it();
         let plan = stood.plan();
         let wall = current_handover_wall(&stood.host, &plan, clock()).unwrap();

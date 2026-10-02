@@ -2581,17 +2581,9 @@ mod tests {
     /// A fake CLI on disk: `body` is its shell, run with the row's home
     /// variable in the environment exactly as the runner hands it.
     fn fake_cli(root: &Path, name: &str, body: &str) -> String {
-        let bin = root.join("bin");
-        std::fs::create_dir_all(&bin).expect("bin");
-        let path = bin.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake cli");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod fake cli");
-        }
-        path.to_string_lossy().into_owned()
+        crate::test_host::fake_program(&root.join("bin"), name, body)
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// The fake CLI for one row: it answers ONLY the words the survey says
@@ -2652,7 +2644,7 @@ mod tests {
 
     /// Run one shell line the way a person's terminal would.
     fn typed(line: &str) -> std::process::Output {
-        crate::proc::quiet_command("/bin/sh")
+        crate::proc::quiet_command(crate::test_host::shell_program())
             .arg("-c")
             .arg(line)
             .output()
@@ -3103,7 +3095,7 @@ mod tests {
                 !json.contains("fixture-token") && !json.contains("access_token"),
                 "a credential reached the settings row: {json}"
             );
-            assert!(row.home.starts_with('~') || row.home.starts_with('/'));
+            assert!(row.home.starts_with('~') || Path::new(&row.home).is_absolute());
         }
         // The one row whose witness names a person names them and nothing
         // else — an address, never a token.

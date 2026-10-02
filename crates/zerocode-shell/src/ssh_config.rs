@@ -714,12 +714,11 @@ mod tests {
             "an unparseable Port either won or blocked the one that follows it"
         );
         // Last-wins, first argument only, `~` expanded against this home.
+        // As paths: the home is joined with `/.ssh/…` as written in the file,
+        // and Windows reads either separator as the same file.
         assert_eq!(
-            web.identity_file,
-            home.path()
-                .join(".ssh")
-                .join("second key")
-                .to_string_lossy(),
+            Path::new(&web.identity_file),
+            home.path().join(".ssh").join("second key"),
             "the identity file is not the last one named"
         );
         assert_eq!(

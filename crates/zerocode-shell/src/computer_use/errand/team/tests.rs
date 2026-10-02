@@ -43,16 +43,10 @@ pub(in crate::computer_use::errand) fn fake_zo(
 ) -> (PathBuf, PathBuf) {
     let record = root.join("record");
     std::fs::create_dir_all(&record).expect("a record folder");
-    let program = root.join("zo");
     let body = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$RECORD/argv\"\ncat > \"$RECORD/stdin\"\nout=\"\"\nwhile [ $# -gt 0 ]; do case \"$1\" in --last-message) out=\"$2\"; shift;; esac; shift; done\nsleep {sleep_s}\nprintf '%s' \"$ANSWER\" > \"$out\"\n",
+        "printf '%s\\n' \"$@\" > \"$RECORD/argv\"\ncat > \"$RECORD/stdin\"\nout=\"\"\nwhile [ $# -gt 0 ]; do case \"$1\" in --last-message) out=\"$2\"; shift;; esac; shift; done\nsleep {sleep_s}\nprintf '%s' \"$ANSWER\" > \"$out\"",
     );
-    std::fs::write(&program, body).expect("the script");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
+    let program = crate::test_host::fake_program(root, "zo", &body);
     let _ = answer;
     (program, record)
 }

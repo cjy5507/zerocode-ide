@@ -351,7 +351,10 @@ mod tests {
     /// staleness horizon.
     #[test]
     fn the_machine_is_held_exactly_when_the_mode_and_the_clock_agree() {
-        let now = Instant::now();
+        // Later than the real now, so the instants below it exist: an Instant
+        // counts from the machine's boot, and a CI runner has not been up for
+        // the two-hour horizon this table is read against.
+        let now = Instant::now() + STALE_AFTER * 2;
         let fresh = now - Duration::from_secs(60);
         let stale = now - STALE_AFTER - Duration::from_secs(1);
         let at_the_edge = now - STALE_AFTER;

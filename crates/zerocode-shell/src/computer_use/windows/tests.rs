@@ -593,6 +593,20 @@ fn a_clipboard_with_an_unpreservable_format_is_never_emptied() {
     }
 }
 
+/// Which tree lines name the fixture's multi-line edit: its own line when this
+/// Windows reports a multi-line edit as a `document` (the public runner's does),
+/// else the third `edit` — the single line, the password and it.
+fn multiline_line(observation: &Value) -> (&'static str, usize) {
+    if tree_text(observation)
+        .lines()
+        .any(|line| line.trim_start_matches('\t').split(' ').nth(1) == Some("document"))
+    {
+        ("document", 0)
+    } else {
+        ("edit", 2)
+    }
+}
+
 /// Click a control by its tree line so the fixture's own focus lands on it.
 fn focus_by_click(provider: &mut Provider, fixture: &Fixture, needle: &str, nth: usize) {
     let observed = observe(provider, fixture, false);
@@ -674,7 +688,8 @@ fn literal_text_stays_in_its_field_and_a_line_break_is_a_line_break() {
         );
 
         // The multi-line edit: exact content, the platform's line break.
-        focus_by_click(provider, fixture, "edit", 2);
+        let (role, nth) = multiline_line(&observe(provider, fixture, false));
+        focus_by_click(provider, fixture, role, nth);
         assert_eq!(fixture.focused_control_id(), super::fixture::MULTILINE_ID);
         input::type_text("a\nb\tc").unwrap();
         std::thread::sleep(Duration::from_millis(300));
@@ -683,7 +698,9 @@ fn literal_text_stays_in_its_field_and_a_line_break_is_a_line_break() {
         assert_eq!(Fixture::clicks(), clicks);
 
         // The accessibility road writes the literal text as given.
-        let multiline = nth_index_of(&observe(provider, fixture, false), "edit", 2);
+        let observed = observe(provider, fixture, false);
+        let (role, nth) = multiline_line(&observed);
+        let multiline = nth_index_of(&observed, role, nth);
         let answer = provider
             .handle(
                 "setValue",

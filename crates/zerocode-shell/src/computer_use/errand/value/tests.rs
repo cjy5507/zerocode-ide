@@ -358,24 +358,19 @@ pub(in crate::computer_use::errand) fn fake_cli(
     let at = dir.join(name);
     std::fs::write(at.with_extension("answer"), answer).expect("the answer");
     let script = format!(
-        "#!/bin/sh\n\
-         here=\"{here}\"\n\
+        "here=\"{here}\"\n\
          if [ {pause} -gt 0 ]; then sleep {pause} & echo $! > \"$here.child\"; fi\n\
          printf '%s\\n' \"$@\" > \"$here.argv\"\n\
          env > \"$here.env\"\n\
          cat > \"$here.stdin\"\n\
          if [ {pause} -gt 0 ]; then wait; fi\n\
          cat \"$here.answer\"\n\
-         exit {rc}\n",
+         exit {rc}",
         here = at.display(),
     );
-    std::fs::write(&at, script).expect("the script");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).expect("runnable");
-    }
-    at.to_string_lossy().into_owned()
+    crate::test_host::fake_program(dir, name, &script)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// What one fake CLI wrote down about the run it was: `argv`, `env`, `stdin`.

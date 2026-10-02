@@ -299,7 +299,18 @@ fn under_flat_worktree_area(facts: Facts<'_>, ours: Ours<'_>) -> bool {
 /// 열지 못한 저장소(빈 `worktree_root`)에서는 무엇도 external이 아니다 — 비교할
 /// 기준이 없는데 "밖"이라고 부르는 것은 근거 없이 숨기는 일이다.
 fn can_classify_as_external(facts: Facts<'_>, ours: Ours<'_>) -> bool {
-    !ours.worktree_root.is_empty() && facts.path.starts_with('/')
+    !ours.worktree_root.is_empty() && is_absolute_text(facts.path)
+}
+
+/// 슬래시로 바꿔 적은 경로가 절대 경로인가 — `/home/x`도, git이 윈도우에서
+/// 돌려주는 `C:/Users/x`도 그렇다.
+fn is_absolute_text(path: &str) -> bool {
+    let mut bytes = path.bytes();
+    path.starts_with('/')
+        || matches!(
+            (bytes.next(), bytes.next(), bytes.next()),
+            (Some(drive), Some(b':'), Some(b'/')) if drive.is_ascii_alphabetic()
+        )
 }
 
 /// 이 워크트리가 사이드바에 보이는가 — 이 기능의 전부.
@@ -563,6 +574,22 @@ mod tests {
             classify(at("/home/dev/scratch/by-hand"), ours()),
             Ownership::External
         );
+    }
+
+    /// 윈도우에서 git이 돌려주는 `C:/…` 경로도 절대 경로다 — 그 밖의 체크아웃은
+    /// external이다(앞이 `/`인 경로만 절대라고 읽던 시절에는 영원히 legacy였다).
+    #[test]
+    fn a_drive_letter_path_outside_our_area_is_external() {
+        let ours = Ours {
+            worktree_root: "C:/Users/dev/.zerocode/worktrees/api-abcd1234",
+            ..ours()
+        };
+        assert_eq!(
+            classify(at("D:/scratch/by-hand"), ours),
+            Ownership::External
+        );
+        assert!(!is_absolute_text("scratch/by-hand"));
+        assert!(!is_absolute_text("C:scratch"));
     }
 
     /// 우리 자리를 모르면 무엇도 external이 아니다.

@@ -23,10 +23,31 @@ pub(super) fn resident_bytes() -> u64 {
     unsafe { info.assume_init() }.pti_resident_size
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The working set — the Windows word for what Task Manager's "Memory" column
+/// and Activity Monitor's resident size both mean to a person.
+#[cfg(windows)]
 pub(super) fn resident_bytes() -> u64 {
-    // Every platform answers this differently and none of the others is a
-    // target yet. Nothing is better than a number that means something else.
+    use windows::Win32::System::{
+        ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+        Threading::GetCurrentProcess,
+    };
+    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: size,
+        ..PROCESS_MEMORY_COUNTERS::default()
+    };
+    // SAFETY: the pseudo-handle for this process needs no closing, and the
+    // buffer is exactly the `size` bytes being declared to the call.
+    match unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) } {
+        Ok(()) => counters.WorkingSetSize as u64,
+        Err(_) => 0,
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub(super) fn resident_bytes() -> u64 {
+    // Every other platform answers this differently and none is a target
+    // yet. Nothing is better than a number that means something else.
     0
 }
 

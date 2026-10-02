@@ -16,8 +16,13 @@ const PROCESS_OUTPUT_MAX: usize = 10 * 1024 * 1024;
 const PROCESS_STDERR_MAX: usize = 1024 * 1024;
 const PROCESS_ROWS_MAX: usize = 65_536;
 const PROCESS_LINE_MAX: usize = 4096;
-const PROCESS_SAMPLE_TIMEOUT: Duration = Duration::from_secs(8);
-const PROCESS_IDENTITY_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a process listing may take. Windows reads it through a PowerShell
+/// that starts cold and a CIM query behind Defender; the public runner's first
+/// listing outlasted the 8 s Unix `ps` bound (2026-10-01), so the process
+/// table of a Windows person's busy machine would have read as "timed out".
+const PROCESS_SAMPLE_TIMEOUT: Duration = Duration::from_secs(if cfg!(windows) { 30 } else { 8 });
+/// The same for one pid's start identity, which is a PowerShell start there too.
+const PROCESS_IDENTITY_TIMEOUT: Duration = Duration::from_secs(if cfg!(windows) { 15 } else { 2 });
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const HISTORY_CAPACITY: usize = 60;
 const HISTORY_KEY_CAPACITY: usize = 2048;

@@ -68,6 +68,12 @@ impl Provider {
             "scroll" => json(self.run_action(&params, Self::scroll)?),
             "drag" => json(self.run_action(&params, Self::drag)?),
             "terminate" => Ok(serde_json::json!({ "ok": true })),
+            // The window's stop is the only stop on Windows: this provider
+            // has no chord of its own to hear and no signal to be stopped by,
+            // so it is never stopped and has nothing to lift — but the
+            // window asks, and answers the person's `resume` through it.
+            "status" => Ok(serde_json::json!({ "stopped": false })),
+            "resume" => Ok(serde_json::json!({ "resumed": true })),
             other if zerocode_core::computer_use::WINDOWS_HOLD_METHODS.contains(&other) => {
                 Err(ProviderError::new(
                     error_code::UNSUPPORTED_CAPABILITY,

@@ -10735,7 +10735,10 @@ fn a_strangers_archive_script_waits_for_its_own_approval() {
     let cloned = temp.path().join("cloned-marker");
     std::fs::write(
         repo_root.join(zerocode_core::PROJECT_FILE),
-        format!("scripts:\n  archive: touch {}\n", cloned.display()),
+        format!(
+            "scripts:\n  archive: {}\n",
+            serde_json::to_string(&crate::test_host::script_that_creates(&cloned)).expect("a line"),
+        ),
     )
     .expect("the repository's file");
 
@@ -10842,13 +10845,11 @@ fn local_base_refresh_fast_forwards_only_a_clean_ancestor() {
         "keep me\n"
     );
     assert_eq!(
-        refreshed.owner_worktree_path,
-        Some(
-            repo.canonicalize()
-                .expect("canonical worktree")
-                .to_string_lossy()
-                .into_owned()
-        )
+        refreshed
+            .owner_worktree_path
+            .as_deref()
+            .map(crate::test_host::canonical),
+        Some(repo.canonicalize().expect("canonical worktree"))
     );
 }
 
@@ -13083,10 +13084,15 @@ fn a_stand_in_pane_says_what_it_stands_in_for_and_how_to_go_on() {
     let spelled = |agent: &str, id: &str, folder: Option<&str>| {
         cmd::board::spelled_resume(agent, &session(id), folder.map(std::path::Path::new))
     };
-    assert_eq!(
-        spelled("zo", "session-1790551803628-0", Some("/Users/dev/work")).as_deref(),
-        Some("cd /Users/dev/work && zo --resume session-1790551803628-0")
-    );
+    // Unix only: the line is a POSIX one (`cd … && …`) and its folder must be
+    // made of plain shell words, which a Windows path (`C:\…`) is not — it is
+    // left out of the line there, and the next assertion pins the line without it.
+    if cfg!(unix) {
+        assert_eq!(
+            spelled("zo", "session-1790551803628-0", Some("/Users/dev/work")).as_deref(),
+            Some("cd /Users/dev/work && zo --resume session-1790551803628-0")
+        );
+    }
     assert_eq!(
         spelled("claude", "3f1e2d4c-0000-4000-8000-00000000c1a0", None).as_deref(),
         Some("claude --resume 3f1e2d4c-0000-4000-8000-00000000c1a0")
@@ -13802,7 +13808,7 @@ fn a_worker_worktree_is_cut_from_the_leaders_repository_or_refused() {
     // through git with `/var` already resolved to `/private/var`.
     let placed_root = std::fs::canonicalize(placed.path()).expect("the configured root resolves");
     assert!(
-        cut.starts_with(&placed_root),
+        crate::test_host::canonical(&cut).starts_with(&placed_root),
         "the workspace preferences were ignored: {}",
         cut.display()
     );
@@ -20405,16 +20411,19 @@ pub(crate) mod computer_desktop_wait {
         let _hand = ONE_HAND
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let echoed =
-            desktop_run(&serde_json::json!({ "program": "/bin/echo", "args": "hello there" }));
+        let bin = tempfile::tempdir().expect("a folder for the stand-in programs");
+        let echo = crate::test_host::echo_program(bin.path());
+        let echoed = desktop_run(&serde_json::json!({ "program": echo, "args": "hello there" }));
         assert_eq!(echoed["spawned"], true, "{echoed}");
         assert_eq!(echoed["exitCode"], 0);
         assert_eq!(echoed["stdout"], "hello there\n");
         assert_eq!(echoed["timedOut"], false);
         assert_eq!(echoed["truncated"], false);
 
-        let failed =
-            desktop_run(&serde_json::json!({ "program": "/bin/sh", "args": "-c exit_7_please" }));
+        let failed = desktop_run(&serde_json::json!({
+            "program": crate::test_host::shell_program(),
+            "args": "-c exit_7_please",
+        }));
         assert_eq!(failed["spawned"], true);
         assert_ne!(failed["exitCode"], 0);
         assert!(
@@ -20423,15 +20432,20 @@ pub(crate) mod computer_desktop_wait {
                 .is_some_and(|text| !text.is_empty())
         );
 
-        let started = std::time::Instant::now();
-        let slow = desktop_run(
-            &serde_json::json!({ "program": "/bin/sleep", "args": "5", "timeoutMs": 120 }),
-        );
-        assert_eq!(slow["timedOut"], true, "{slow}");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(3),
-            "the budget, not the program, ended the run"
-        );
+        // Unix only: killing the budget's program must end the pipes too, and
+        // a Windows launcher (`.cmd`) over `sh` dies without its child, which
+        // keeps them open until it is done — the kill itself is not what differs.
+        if cfg!(unix) {
+            let started = std::time::Instant::now();
+            let slow = desktop_run(
+                &serde_json::json!({ "program": "/bin/sleep", "args": "5", "timeoutMs": 120 }),
+            );
+            assert_eq!(slow["timedOut"], true, "{slow}");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(3),
+                "the budget, not the program, ended the run"
+            );
+        }
 
         let missing = desktop_run(&serde_json::json!({ "program": "/nonexistent/program" }));
         assert_eq!(missing["spawned"], false);
@@ -20439,7 +20453,7 @@ pub(crate) mod computer_desktop_wait {
         let answer = answer_computer_command(&[
             "run".to_string(),
             "--program".to_string(),
-            "/bin/echo".to_string(),
+            echo,
             "--args".to_string(),
             "via the road".to_string(),
             "--json".to_string(),
@@ -20761,7 +20775,7 @@ fn github_aggregate_keeps_repositories_when_a_registered_folder_is_not_git() {
     let homes = known_project_repositories(home.path(), &paths).expect("aggregate");
     assert_eq!(homes.len(), 1);
     assert_eq!(
-        homes[0].1,
+        crate::test_host::canonical(&homes[0].1),
         repo.path().canonicalize().expect("canonical repo")
     );
     let unknown = tempfile::tempdir().expect("unknown");

@@ -273,10 +273,19 @@ fn searchable_entry(entry: &DirEntry) -> bool {
         || !PRUNED_DIRECTORIES.contains(&entry.file_name().to_string_lossy().as_ref())
 }
 
+/// A hit's path as the page, the file pick and the serialized pin all read
+/// it: project-relative with `/` between folders on every platform, where
+/// Windows' own spelling would put a backslash.
+const HIT_SEPARATOR: char = '/';
+
 fn relative_path(root: &Path, path: &Path) -> Option<String> {
-    path.strip_prefix(root)
-        .ok()
-        .map(|relative| relative.to_string_lossy().into_owned())
+    path.strip_prefix(root).ok().map(|relative| {
+        relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(&HIT_SEPARATOR.to_string())
+    })
 }
 
 fn append_line_hits(

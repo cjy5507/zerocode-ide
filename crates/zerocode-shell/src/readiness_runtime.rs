@@ -620,7 +620,7 @@ mod tests {
             empty.evidence
         );
         assert!(
-            matches!(&empty.binary, BinaryState::Present { path } if path.ends_with("/claude")),
+            matches!(&empty.binary, BinaryState::Present { path } if Path::new(path).ends_with("claude")),
             "{:?}",
             empty.binary
         );

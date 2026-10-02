@@ -66,9 +66,15 @@ pub(super) fn open() -> DoorFacts {
     }
 }
 
+/// The folder the Flow documents live in, spelled as the host spells an
+/// absolute folder — the watch's consent is read against absolute workspaces.
+fn flows() -> PathBuf {
+    crate::test_host::absolute("/flows")
+}
+
 /// A start's words: a Flow document, a display, sixty seconds.
 fn start_words() -> Value {
-    json!({ "flow": "/flows/reflex.md", "display": 0, "seconds": 60 })
+    json!({ "flow": flows().join("reflex.md"), "display": 0, "seconds": 60 })
 }
 
 /// The handshake of a helper with its kernel installed that reads this plan
@@ -179,7 +185,7 @@ fn barred_or_unknown_scope_never_enters_reflex() {
     assert_eq!(answer["state"], json!("running"));
     assert_eq!(
         admitted.workspace.as_deref(),
-        Some(Path::new("/flows")),
+        Some(flows().as_path()),
         "the Flow's folder is the words' workspace"
     );
 }
@@ -877,7 +883,7 @@ fn a_sent_request_counts_even_if_failed_or_late() {
     let failing = Endpoint::serving("HTTP/1.1 503 Service Unavailable", "{}".into(), 0);
     let (wired, _) = asker(
         Wire::at(&failing.base(), "key", Some(path.clone())),
-        Some(PathBuf::from("/flows")),
+        Some(flows()),
     )(a_state());
     assert_eq!(wired.attempts, 1);
     assert_eq!(wired.answer, Err("http_503".to_string()));
@@ -888,10 +894,7 @@ fn a_sent_request_counts_even_if_failed_or_late() {
         answer_naming("pause"),
         REFLEX_DECIDE_DEADLINE_MS + 500,
     );
-    let (wired, _) = asker(
-        Wire::at(&slow.base(), "key", Some(path)),
-        Some(PathBuf::from("/flows")),
-    )(a_state());
+    let (wired, _) = asker(Wire::at(&slow.base(), "key", Some(path)), Some(flows()))(a_state());
     assert_eq!(wired.answer, Err("timeout".to_string()));
     assert_eq!(wired.attempts, 1);
     assert!(
@@ -914,10 +917,8 @@ fn a_sent_request_counts_even_if_failed_or_late() {
 fn reflex_decision_does_not_call_an_unconsented_model() {
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer_naming("continue"), 0);
     let (_home, path) = settings(&["/somewhere/else"], Some("shadow"));
-    let (wired, spent) = asker(
-        Wire::at(&endpoint.base(), "key", Some(path)),
-        Some(PathBuf::from("/flows")),
-    )(a_state());
+    let (wired, spent) =
+        asker(Wire::at(&endpoint.base(), "key", Some(path)), Some(flows()))(a_state());
     assert_eq!(wired.attempts, 0);
     assert_eq!(spent.requests, 0);
     assert_eq!(wired.answer, Err("not_consented".to_string()));
@@ -1006,10 +1007,7 @@ fn until_answered(
 fn consent_off_after_send_keeps_count_drops_answer() {
     let (_home, path) = settings(&["*"], Some("shadow"));
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer_naming("pause"), 50);
-    let ask = asker(
-        Wire::at(&endpoint.base(), "key", Some(path)),
-        Some(PathBuf::from("/flows")),
-    );
+    let ask = asker(Wire::at(&endpoint.base(), "key", Some(path)), Some(flows()));
     let mut run = FakeRun {
         issued: 1,
         acknowledged: 0,
@@ -1062,7 +1060,7 @@ fn a_shadow_decision_changes_no_input() {
         let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer_naming(word), 0);
         let ask = asker(
             Wire::at(&endpoint.base(), "key", Some(path.clone())),
-            Some(PathBuf::from("/flows")),
+            Some(flows()),
         );
         let mut run = FakeRun {
             issued: 1,
