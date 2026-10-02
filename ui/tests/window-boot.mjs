@@ -2261,8 +2261,21 @@ const standBackend = (surface, boot = BOOT) =>
  *
  * Installed as an init script, lazy so it can name globals `ui/shell.js` has
  * not declared yet at injection time. */
-const installHarnessHands = (surface) => surface.addInitScript((primaryEvent) => {
+/** How long a scenario waits for a WebCodecs flush: the encode of three 64x64 frames settles in ~100 ms where it
+ * settles at all, so 20 s is two orders over the slowest settled flush and still a small slice of the queue's cap. */
+const ENCODER_FLUSH_DEADLINE_MS = 20000;
+
+const installHarnessHands = (surface) => surface.addInitScript(({ primaryEvent, flushDeadlineMs }) => {
   window.__TEST_PRIMARY_EVENT__ = primaryEvent;
+  // A WebCodecs encoder's `flush()` has no deadline of its own, and under the software GL of the runner's host
+  // (`runner-host.mjs`) it has been seen never to settle, which held the whole window suite until the queue's cap
+  // killed it (t-21351). Every scenario that encodes waits through this: the flush that does not settle in
+  // `flushDeadlineMs` throws, so the suite names the encoder instead of going quiet.
+  window.__FLUSH_ENCODER__ = (encoder) =>
+    Promise.race([
+      encoder.flush(),
+      new Promise((_, giveUp) => setTimeout(() => giveUp(new Error(`the encoder's flush did not settle in ${flushDeadlineMs} ms`)), flushDeadlineMs)),
+    ]);
   const owner = () => tabs.find((held) => held.id === activeTabId);
   // The live EditorView in front of the active tab, or null when the tab in
   // front is not a file.
@@ -2302,7 +2315,7 @@ const installHarnessHands = (surface) => surface.addInitScript((primaryEvent) =>
     await window.__PAINTED__();
     window.__COUNTS__ = {};
   };
-}, PRIMARY_EVENT);
+}, { primaryEvent: PRIMARY_EVENT, flushDeadlineMs: ENCODER_FLUSH_DEADLINE_MS });
 
 /* `WINDOW_FRAME_LAG_MS=<ms>`: every animation frame on the page lands this
  * much later — a loaded machine's frames, on an idle one (t-9741).
@@ -2345,6 +2358,31 @@ const lagFrames = (surface) => {
   }, lag);
 };
 
+/* What the window harness fixes about the browser, so the same page is judged
+ * the same on this Mac and on a CI runner (t-21351). Both are things a browser
+ * answers from its host unless told, and the GitHub macOS runner answered
+ * differently from this Mac — nineteen checks went red there for it:
+ *
+ *  - `--disable-3d-apis`: headless Chromium offers WebGL2 on the runner (a
+ *    software rasteriser) and not here. With it on, the knowledge graph hands
+ *    its drawing to the GL painter, whose colour swatches are 77 extra
+ *    `.knowledge-node`s inside the view and whose real points are not DOM at
+ *    all — every check that reads the 2D painter's nodes (a count, a seat, the
+ *    one selected point) saw another picture. The GL painter's contract has its
+ *    own harnesses (`knowledge-gpu.mjs`, `GL_ARGS` there) that ask for GL on
+ *    purpose; this one judges the window's 2D picture, so it is pinned off.
+ *  - `reducedMotion: "no-preference"`: Chromium reads the OS's Reduce Motion
+ *    switch, and the runner has it on. Every transition and animation then
+ *    computes to none, and a check that reads a duration, a blink, a spinner's
+ *    ring or the end of a flash fails for a reason that is the machine's. A
+ *    check that wants the preference sets it itself (`emulateMedia`), and gives
+ *    it back as THIS value — `null` would hand it back to the host. */
+export const WINDOW_BROWSER_ARGS = Object.freeze(["--disable-3d-apis"]);
+export const WINDOW_MOTION_REST = "no-preference";
+
+/** The browser every window suite shares: Chromium with the host answers above fixed. */
+export const launchWindowBrowser = () => chromium.launch({ headless: true, args: [...WINDOW_BROWSER_ARGS] });
+
 /* A fresh document for scenarios that own their timing, adapters or pane
  * layout — and, since t-4017, for every suite that owns its state: the page
  * dies with the suite, so nothing the suite moved (the active workspace, the
@@ -2359,7 +2397,7 @@ export async function openWindowTestPage(browser, origin, { faults = [], before 
   // A context of its own, not `browser.newPage()`: a context a page owns
   // refuses `context.newPage()`, and the axe check opens its blank page that
   // way ("Please use browser.newContext()"). The context leaves with the page.
-  const context = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 860 }, reducedMotion: WINDOW_MOTION_REST });
   const page = await context.newPage();
   page.on("close", () => context.close().catch(() => {}));
   page.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));

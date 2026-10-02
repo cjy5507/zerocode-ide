@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { openWindowTestPage } from "./window-boot.mjs";
+import { openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 
 /* Workers and helpers, on a page of their own (t-4017).
  *
@@ -2933,7 +2933,7 @@ async function testHelperPage(page, ok) {
       };
     });
   }
-  await page.emulateMedia({ reducedMotion: null });
+  await page.emulateMedia({ reducedMotion: WINDOW_MOTION_REST });
   const easing = (state) => [state.crumb, state.sib, state.fold, state.more, state.speak, state.stop];
   ok(
     "the state dot's pulse and the controls' easing move when motion is allowed and stop under reduced motion",
