@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.1.48] — 2026-10-02
+
+### feat
+
+- feat(jev): a summons that leaves the agent open asks which agent in the same single Jev request as the difficulty and the model-and-effort pair — one round trip instead of two (wait p50 518 → 261 ms on a 250 ms judge), and the agent seat's rows can now be graded by what the work came to (t-16578).
+
+### fix
+
+- fix(window): opening a finished worker's workspace no longer starts an empty agent in it — the ledger names only a seat somebody is coming back to, so the workspace opens your own default and is reclaimed on time; five finished workers' folders each held an empty Claude (about 190 MB) and their build output (t-19779).
+- fix(macOS): the window deletes the stale signed copies of itself that the embedded Chromium leaves at every restart, crash or force quit (0.4 GiB each, 31 on one machine) — once it has painted, on a background thread, only this app's own copies that no process runs; the copy the running window needs stays (t-20243).
+- fix(Windows): the window crate's tests now run on Windows, and the defects they found are fixed — the status bar's memory read 0, search results came back with backslashes, a drive-letter checkout was never cleaned up, file-tree undo keyed files wrongly, an agent could not resume after a stop, crash history was rewritten while its own file was open (t-20781).
+- fix(Computer Use): when the window refuses a generated autopilot plan, the retry sends the refused answer back as data with the reasons, so the model repairs its plan instead of starting blind; the contract checks are unchanged (t-21257).
+- fix(window): helper conversations distinguish finished thoughts from live work, retain completed reports after hand-in, show the assignment and genuine role metadata, and open read-only from the board without taking over the CLI; conversation doors are made on demand so initial DOM and listeners do not increase (t-21172).
+- fix(window): the coordinator's mail notice reaches a pane again after you used a slash command (such as /model) or a picker in it — the window had treated that line as holding your unsent words forever; it now lets the notice in once the agent is at rest, and still never types over words you are writing (t-21017).
+
+### internal
+
+- internal(zo): a runtime test that counted a helper channel's connections at once now waits for the first one to reach the listener, so it no longer fails now and then (t-20666).
+- internal(release): the release lane builds without cargo's incremental cache and removes the one earlier runs left — a mid-lane root gate held 11 of its 26 GiB as that cache and brought the disk to 11 GiB (t-19990).
+- internal(tests): a browser test harness ends once its whole report is written, so a slow log reader (the CI runner) sees every line and the failure it reports; before, the macOS CI cut the window suite's report at 64 KiB.
+- internal(tests): the orchestrator's pipe holder test waits up to 10 s for other tests' file descriptors to close before it calls a leak — one instant reading went red on the macOS CI runner.
+- internal(zo): test-only Jev mocks release idle listeners when dropped instead of keeping them to process exit; the sampled tools-test descriptor peak fell from 253 to 57 without raising the 256 limit or lowering test concurrency (t-20571).
+- internal(zo tests): the ledger road's no-tmux test reads the calls' words, not the file's text — a checkout whose folder name contains tmux no longer fails it.
+- internal(tests): two regressions found on main and fixed the same morning — a signed-copy test hard-linked the running test binary (nine window tests then failed in every full run), and ask_for's documentation linked a private item (the doc check failed).
+- internal(Computer Use): the reflex bench reports, per run, how many screen frames were actually judged each second, how old the screen was when each first input was sent, and how soon the fixture changed after a press — the groundwork for measuring real-time control (t-21455).
+
 ## [1.1.47] — 2026-10-02
 
 ### feat
