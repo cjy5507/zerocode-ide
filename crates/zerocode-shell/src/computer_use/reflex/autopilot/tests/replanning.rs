@@ -5,6 +5,10 @@
 
 use super::*;
 
+/// A model the test holds: its first request — the autopilot's first plan —
+/// answers at once; its second, the re-plan, tells the test and the
+/// collector that it was asked and waits on the test's gate. Every
+/// request's budget is remembered, and each copy says when it is dropped.
 #[derive(Clone)]
 struct Delayed {
     calls: Arc<AtomicUsize>,
@@ -63,6 +67,8 @@ impl Generator for Delayed {
     }
 }
 
+/// What the collector did while the re-plan's model was held: the helper's
+/// reads, the stops, the questions, and the capture age the fake answered.
 struct Progress {
     passes: usize,
     stops: usize,
@@ -70,6 +76,12 @@ struct Progress {
     capture_age_ns: u64,
 }
 
+/// One autopilot whose re-plan's model is held: sixteen collects go by
+/// while it is, then `case` changes one premise — or nothing, for `healthy`
+/// — and the model is released. While it was held the run must have been
+/// read every collect, never stopped, and judged; afterwards the answer
+/// replaces the run only for `healthy`, and every other case ends the
+/// autopilot with no second run and no run left accepting input.
 fn held_replan(case: &'static str) {
     let (entered, started) = mpsc::channel();
     let (collecting, collecting_started) = mpsc::channel();
@@ -246,6 +258,9 @@ fn held_replan(case: &'static str) {
     }
 }
 
+/// The person's setting is read again at the door: turned off since the
+/// facts were read, it refuses before the helper, the screen or the
+/// generator is asked.
 #[test]
 fn the_current_live_setting_wins_over_startup_facts() {
     let mut fake = Fake::new((JevMode::Auto, true), vec![good()]);
@@ -259,11 +274,18 @@ fn the_current_live_setting_wins_over_startup_facts() {
     assert!(fake.generator.asked.is_empty());
 }
 
+/// While the re-plan's model is held the valid run is read every collect,
+/// judged, and never stopped; its answer then replaces the run once, for
+/// what is left of the wall.
 #[test]
 fn a_blocked_replan_keeps_collecting_and_judging_before_one_handoff() {
     held_replan("healthy");
 }
 
+/// A stop — the operator's or the owner's — the setting turned off, the
+/// wall, a seat that no longer applies or the helper's own hold each end
+/// the autopilot while a plan is being written, and its late answer starts
+/// nothing.
 #[test]
 fn a_pending_plan_never_outlives_stop_permission_or_deadline() {
     for case in [
@@ -278,6 +300,10 @@ fn a_pending_plan_never_outlives_stop_permission_or_deadline() {
     }
 }
 
+/// A plan asked on one scene is never run on another: a scene the reading
+/// no longer shows, a changed stream, geometry, owner or plan, or a helper
+/// running another plan ends the autopilot, and the late answer starts
+/// nothing.
 #[test]
 fn a_pending_plan_cannot_use_changed_execution_context() {
     for case in [

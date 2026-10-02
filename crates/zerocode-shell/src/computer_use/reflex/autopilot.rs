@@ -781,6 +781,12 @@ impl Autopilot {
         self.start_written(world, written, written_at, request_at)
     }
 
+    /// A written plan through the door and onto the helper: the wall it has
+    /// left, the door every plan passes read as it stands now, the run
+    /// standing — if one still stands — stopped only once the door let the
+    /// new plan through, the new run under the next epoch, and the plan's
+    /// ledger row whatever became of it. `written_at` is the steady moment
+    /// the plan was in hand, `request_at` the moment it was asked.
     fn start_written(
         &mut self,
         world: &mut World<'_>,
@@ -1121,6 +1127,11 @@ impl Autopilot {
         );
     }
 
+    /// Ask for a later plan without waiting for it: one at a time — a plan
+    /// already being written is not asked again — for what is left of the
+    /// wall, remembered beside the run and the scene it was asked on.
+    /// `judged` says the reflex decision asked for it, so the seat must
+    /// still apply when its answer comes.
     fn queue_plan(&mut self, world: &mut World<'_>, previous: Previous<'_>, judged: bool) {
         if self.planning.is_some() {
             return;
@@ -1154,12 +1165,21 @@ impl Autopilot {
         });
     }
 
+    /// Withdraw the plan being written, if one is: its answer is never
+    /// read, and the status counts it.
     fn cancel_plan(&mut self) {
         if self.planning.take().is_some() {
             self.cancelled_plans += 1;
         }
     }
 
+    /// Look, without waiting, whether the plan being written has come, and
+    /// run it only if what it was asked on still stands: the seat still
+    /// applies (for a plan the decision asked for), and the run it was
+    /// asked beside is the one standing, on the plan and the scene it was
+    /// then. A premise that changed ends the autopilot — a plan for another
+    /// scene is never run — a reading too old to prove the scene holds the
+    /// plan for the next one, and a writer that went ends it by its word.
     fn poll_plan(&mut self, world: &mut World<'_>) {
         let Some(planning) = self.planning.as_ref() else {
             return;
@@ -1195,11 +1215,12 @@ impl Autopilot {
             }
             Ok(())
         });
-        match if applicable {
+        let fit = if applicable {
             premises
         } else {
             Err(Why::NotAuto)
-        } {
+        };
+        match fit {
             Ok(()) => {}
             // A reading the window cannot date, or one older than the table
             // lets a decision act on, proves nothing about the scene the
