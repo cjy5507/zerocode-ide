@@ -218,6 +218,7 @@ mod window_runtime;
 mod wire_runtime;
 mod work_item_store;
 mod worktree_evidence_runtime;
+mod worktree_landing;
 mod worktree_reclaim;
 mod worktree_runtime;
 mod worktree_shared;
@@ -409,6 +410,7 @@ use terminal_theme_import::{
 };
 use usage_runtime::*;
 use window_runtime::*;
+use worktree_landing::{WorktreeLanding, attach_landings};
 use worktree_runtime::*;
 #[allow(unused_imports)]
 use zerocode_shell_cmd_jira::commands::{

@@ -76,6 +76,7 @@ pub(crate) async fn list_worktrees(
         decorate_worktree_link(entry, &links);
     }
     attach_creation_bases_from(&mut entries, &orchestrator.creation_bases());
+    attach_landings(&mut entries, orchestrator.repo_root(), state.settings());
     Ok(entries)
 }
 

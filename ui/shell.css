@@ -2109,6 +2109,7 @@ svg.wt-agent-dot {
  * What does not fit is cut with an ellipsis (the full word is on the dot's
  * tooltip). Empty, it is not there — a row at work, or asking, or bare, has
  * nothing to add. */
+.wt-landing,
 .wt-phase {
   /* The name gives way first and the word does not: it is the news, and a name
    * cut to an ellipsis is still a name. Half the line is the most it takes, so
@@ -2137,6 +2138,7 @@ svg.wt-agent-dot {
   white-space: nowrap;
 }
 
+.wt-landing:empty,
 .wt-phase:empty {
   display: none;
 }
@@ -2147,6 +2149,30 @@ svg.wt-agent-dot {
 
 .wt-phase[data-phase="done"] {
   color: var(--signal-ready-ink);
+}
+
+/* What git says about the work (t-22104), a second chip beside the ledger's
+ * word and never in its colours alone: 반영됨 is ready ink, 미반영 N is the wait
+ * ink, 확인 필요 is the halt ink, and a checkout with nothing of its own yet
+ * stays the plane's quiet ink. 정리 가능 is the one chip that is a button. */
+.wt-landing[data-landing="landed"] {
+  color: var(--signal-ready-ink);
+}
+
+.wt-landing[data-landing="ahead"] {
+  color: var(--signal-wait-ink);
+}
+
+.wt-landing[data-landing="check"] {
+  color: var(--signal-halt-ink);
+}
+
+.wt-landing[data-landing="none"] {
+  color: color-mix(in srgb, var(--nav-plane-ink) 70%, transparent);
+}
+
+.wt-landing[data-cleanable="1"] {
+  cursor: pointer;
 }
 
 /* Where a branch came from, said on the branch line itself — `← main` after

@@ -1843,6 +1843,7 @@ function worktreeListShape(held) {
     for (const worktree of shownWorktrees(project)) {
       parts.push(
         `W${worktree.path}|${worktree.branch ?? ""}|${worktree.base ?? ""}|${worktree.is_main ? 1 : 0}` +
+          `|${landingShape(worktree.landing)}` +
           `|${worktree.is_folder ? 1 : 0}|${(held.get(worktree.path) ?? []).length}` +
           `|${expandedWorktrees.has(worktree.path) ? 1 : 0}|${worktreeTaskTitle(worktree.path)}`,
       );
@@ -1854,6 +1855,11 @@ function worktreeListShape(held) {
 /* The shape the rows on screen were built from, or `null` when there are
  * none. */
 let worktreeListDrawn = null;
+
+/* What git said about each checkout's work and the compare ref, by path
+ * (t-22104). Read off the catalog every time it lands and drawn beside the
+ * ledger's phase, never folded into it. */
+let worktreeLandings = new Map();
 
 /* Where the checkout the window is looking at sits. Kept as the list
  * refreshes so anything that opens *into* it can say where it went. (Its
@@ -3786,6 +3792,161 @@ function worktreeStateLabel(state, phase = "") {
   }
 }
 
+/* Whether the ledger wrote `merged` for the work standing in one checkout —
+ * `worktreeReviewPhase`'s walk, asked for the one word the phase folds away
+ * (verified, merged and deployed are all 「vouched」 there). */
+function worktreeLedgerMerged(path) {
+  for (const tab of tabs) {
+    if (tab.kind !== "term" || tab.worktree !== path) continue;
+    for (const term of paneLeaves(tab.layout)) {
+      if (paneLedger.get(term)?.review?.merged) return true;
+    }
+  }
+  return checkoutLedger.get(checkoutKey(path))?.review?.merged === true;
+}
+
+/* The part of a landing that moves the rows: a change of it rebuilds them. The
+ * time the compare ref last moved is left out on purpose — it only words the
+ * tooltip, and a row rebuilt for it would hop under the pointer. */
+function landingShape(landing) {
+  if (!landing) return "";
+  return `${landing.state}.${landing.ahead}.${landing.dirty ? 1 : 0}.${landing.detached ? 1 : 0}` +
+    `.${landing.compare_ref ?? ""}.${landing.landed_in?.sha ?? ""}`;
+}
+
+/* What git says about one checkout's work, in a word and a tooltip (t-22104).
+ *
+ * It is a second axis beside the ledger's phase: 반영됨 / 미반영 N / 커밋 없음
+ * are facts of the repository, 검증 대기 / 완료 are the coordinator's word, and
+ * the two are never one word. Where they disagree — the ledger wrote `merged`
+ * and git has no such commit, or git has the work in and the ledger holds a
+ * task nobody recorded as merged — neither is picked: 확인 필요, with both
+ * facts in the tooltip.
+ *
+ * `idle` is a checkout no session stands in; only that one, with its work in
+ * the compare ref and nothing unsaved, is offered for clean-up, through the
+ * clean-up review that already exists. Nothing is removed from here. */
+function worktreeLandingSay(landing, { phase = "", merged = false, idle = false, current = false } = {}) {
+  if (!landing) return null;
+  const ref = landing.compare_ref ?? "";
+  const state = landing.state;
+  const gitIn = state === "landed";
+  const gitOut = state === "unlanded" || state === "no_commits";
+  const ledgerOpen = phase === "review" || phase === "vouched" || phase === "unsettled";
+  let ledgerLine = "";
+  if (merged && gitOut) {
+    ledgerLine = t("worktree.landLedgerMergedGitNot", "원장에는 병합됨으로 적혀 있지만 git에서는 {{what}}입니다", {
+      what: state === "no_commits"
+        ? t("worktree.landNoCommits", "커밋 없음")
+        : t("worktree.landAheadWhat", "{{ref}}에 없는 커밋 {{count}}개", { ref, count: landing.ahead }),
+    });
+  } else if (gitIn && ledgerOpen && !merged) {
+    ledgerLine = t("worktree.landGitInLedgerNot", "git에는 {{ref}}에 들어가 있지만 원장에는 병합 기록이 없습니다", { ref });
+  }
+  const check = ledgerLine !== "" || state === "unknown";
+  const cleanable = gitIn && !landing.dirty && !check && idle && !current;
+  let word;
+  let tone;
+  if (check) {
+    word = t("worktree.landCheck", "확인 필요");
+    tone = "check";
+  } else if (cleanable) {
+    word = t("worktree.landCleanable", "반영됨 · 정리 가능");
+    tone = "landed";
+  } else if (gitIn) {
+    word = t("worktree.landLanded", "반영됨");
+    tone = "landed";
+  } else if (state === "unlanded") {
+    word = t("worktree.landAhead", "미반영 {{count}}", { count: landing.ahead });
+    tone = "ahead";
+  } else if (state === "no_commits") {
+    word = t("worktree.landNoCommits", "커밋 없음");
+    tone = "none";
+  } else {
+    word = t("worktree.landNoRef", "비교 기준 없음");
+    tone = "none";
+  }
+  if (landing.dirty && !check) word += t("worktree.landDirty", " · 저장 안 한 변경");
+  const lines = [];
+  if (ledgerLine) lines.push(ledgerLine);
+  if (state === "landed") {
+    lines.push(t("worktree.landTipLanded", "이 작업의 커밋이 모두 {{ref}}에 들어 있습니다 (git 기준)", { ref }));
+  } else if (state === "unlanded") {
+    lines.push(t("worktree.landTipAhead", "{{ref}}에 없는 커밋이 {{count}}개 있습니다 (내용 기준)", { ref, count: landing.ahead }));
+  } else if (state === "no_commits") {
+    lines.push(t("worktree.landTipNone", "만든 뒤 자기 커밋이 없습니다 — 반영된 것이 아닙니다"));
+  } else if (state === "no_ref") {
+    lines.push(ref
+      ? t("worktree.landTipNoRef", "비교 기준 {{ref}}을(를) 찾지 못했습니다", { ref })
+      : t("worktree.landTipNoRefAny", "비교할 기준 브랜치를 찾지 못했습니다"));
+  } else {
+    lines.push(t("worktree.landTipUnknown", "git 기록만으로는 반영 여부를 가를 수 없습니다 (브랜치를 만든 지점의 기록이 없음)"));
+  }
+  if (landing.detached) lines.push(t("worktree.landDetached", "분리된 HEAD입니다"));
+  if (landing.landed_in) {
+    lines.push(t("worktree.landTipIn", "{{sha}} · {{time}}에 {{ref}}에 담김", {
+      sha: landing.landed_in.sha.slice(0, 9),
+      time: new Date(landing.landed_in.time_ms).toLocaleString(),
+      ref,
+    }));
+  }
+  if (ref) {
+    const moved = landing.ref_updated_ms;
+    lines.push(moved
+      ? t("worktree.landTipRef", "비교: {{ref}} · 마지막 갱신 {{ago}} 전 (이 화면은 가져오지 않습니다)", {
+        ref, ago: agoWord(moved, Date.now()),
+      })
+      : t("worktree.landTipRefUnknown", "비교: {{ref}} · 마지막 갱신 시각을 알 수 없음", { ref }));
+  }
+  if (landing.dirty) lines.push(t("worktree.landTipDirty", "추적 중인 파일에 커밋하지 않은 변경이 있습니다"));
+  if (cleanable) lines.push(t("worktree.landTipCleanable", "활성 세션이 없습니다 — 눌러서 비활성 워크스페이스 검토에서 정리하세요"));
+  return { word, tone, tip: lines.join("\n"), cleanable };
+}
+
+/* The same words for a checkout looked up by path — what the git panel's head
+ * reads. It is the one road: the row and the panel cannot say two things. */
+function worktreeLandingSayFor(path, options = {}) {
+  const landing = worktreeLandings.get(path);
+  if (!landing) return null;
+  return worktreeLandingSay(landing, {
+    phase: worktreeReviewPhase(path),
+    merged: worktreeLedgerMerged(path),
+    ...options,
+  });
+}
+
+/* One row's git chip, written only when it changed: this runs once a frame per
+ * row while anything is working. */
+function dressWorktreeLanding(row, state, phase) {
+  const chip = row.querySelector(".wt-landing");
+  if (!chip) return;
+  const path = row.dataset.worktreePath;
+  const landing = worktreeLandings.get(path);
+  const say = landing
+    ? worktreeLandingSay(landing, {
+      phase,
+      merged: worktreeLedgerMerged(path),
+      idle: state === "empty",
+      current: row.getAttribute("aria-current") === "location",
+    })
+    : null;
+  if (!say) {
+    if (chip.textContent !== "") chip.textContent = "";
+    chip.removeAttribute("data-landing");
+    chip.removeAttribute("data-tip");
+    chip.removeAttribute("data-cleanable");
+    return;
+  }
+  writeTextContent(chip, say.word);
+  if (chip.dataset.landing !== say.tone) chip.dataset.landing = say.tone;
+  if (chip.dataset.tip !== say.tip) chip.dataset.tip = say.tip;
+  if (say.cleanable) {
+    if (chip.dataset.cleanable !== "1") chip.dataset.cleanable = "1";
+  } else if (chip.dataset.cleanable) {
+    chip.removeAttribute("data-cleanable");
+  }
+}
+
 /* When a lane became itself, in wall-clock ms — the ordering that answers
  * "which of these is the last one".
  *
@@ -4015,6 +4176,7 @@ function dressWorktreeDot(row, state) {
       if (chip.dataset.tip !== label) chip.dataset.tip = label;
     }
   }
+  dressWorktreeLanding(row, state, phase);
   if (dot.dataset.state === indicator && dot.dataset.tip === label) return;
   dot.dataset.state = indicator;
   dot.className = `wt-dot is-${indicator}`;
@@ -4253,11 +4415,19 @@ function makeWorktreeNode(worktree, held) {
     '<span class="wt-dot" aria-hidden="true"></span>' +
     '<span class="wt-titlebox">' +
     '<span class="wt-topline"><span class="wt-title"></span><span class="wt-default"></span>' +
-    '<span class="wt-phase" aria-hidden="true"></span></span>' +
+    '<span class="wt-phase" aria-hidden="true"></span>' +
+    '<span class="wt-landing" aria-hidden="true"></span></span>' +
     '<span class="wt-branch"></span>' +
     '</span>';
 
   row.querySelector(".wt-title").textContent = worktreeDisplayName(worktree);
+  // 정리 가능 is a door to the review that already exists, not a delete: the
+  // chip offers it only on a row with no session and nothing unsaved.
+  row.querySelector(".wt-landing").addEventListener("click", (event) => {
+    if (!event.currentTarget.dataset.cleanable) return;
+    event.stopPropagation();
+    openCleanup();
+  });
   const branch = row.querySelector(".wt-branch");
   // Always, not only when a custom label differs: Orca's card carries its
   // branch under the name even when they are the same word, and a sidebar
@@ -4791,6 +4961,13 @@ async function refreshWorktrees() {
     nextProjects = await invoke("project_catalog");
     if (generation !== worktreeRefreshGeneration) return [];
     projects = nextProjects;
+    worktreeLandings = new Map();
+    for (const project of projects) {
+      for (const worktree of project.worktrees ?? []) {
+        if (worktree.landing) worktreeLandings.set(worktree.path, worktree.landing);
+      }
+    }
+    paintScmLanding();
     if (!projectsRead) seedStartupProjectFolds(projects);
     projectsRead = true;
     worktreePoll.sync();

@@ -205,6 +205,12 @@ pub(crate) async fn project_catalog(
             );
             decorate_worktree_link(entry, &linked_items);
         }
+        // What git says about each checkout's work and the compare ref, beside
+        // the ledger's phase. Only a repository git could list has anything to
+        // ask about; the cache keeps an unchanged row to one `status`.
+        if orchestrator.is_some() && authoritative {
+            attach_landings(&mut worktrees, &root, state.settings());
+        }
         Some((
             identity,
             owners,
