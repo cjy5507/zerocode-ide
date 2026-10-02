@@ -1777,9 +1777,7 @@ function reportStrayJamo(road, text) {
   const now = Date.now();
   if (now - strayJamoReportedAt < STRAY_JAMO_REPORT_EVERY_MS) return;
   strayJamoReportedAt = now;
-  void invoke("log_window_error", {
-    message: imeDump(road, text),
-  });
+  tellWindowLog(imeDump(road, text));
 }
 
 /* The keystrokes themselves, at the sink, before the raw insert happens.

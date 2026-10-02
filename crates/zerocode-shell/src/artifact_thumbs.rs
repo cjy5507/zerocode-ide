@@ -60,6 +60,14 @@ const FAILED_MARK: &str = " !failed";
 #[cfg(target_os = "macos")]
 const SLOW_BIRTH: Duration = Duration::from_millis(500);
 
+/// What a hidden pane's page is told before its own first script: there is no
+/// backend here. Tauri hands every webview its bridge, and a pane takes one
+/// picture of a page an artifact names; an artifact that is this window's own
+/// `ui/index.html` would otherwise boot a second window in the pane whose every
+/// request is refused (the 7.4 s hang of 2026-10-01 17:28, t-20972). The script
+/// and its reasons are in `ui/hidden-pane-no-bridge.js`.
+const NO_BRIDGE_JS: &str = include_str!("../../../ui/hidden-pane-no-bridge.js");
+
 /// What the window is answered: the picture, or nothing — and nothing is
 /// final for this key.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -360,6 +368,8 @@ pub(crate) fn hidden_pane(
             .on_navigation(browsable_target)
             // A popup from a thumbnail is nobody's business — denied, not routed.
             .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+            // Nor does a thumbnail's page get the window's backend.
+            .initialization_script(NO_BRIDGE_JS)
             .on_page_load(move |_, payload| {
                 if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                     *finished.lock().unwrap_or_else(PoisonError::into_inner) =
