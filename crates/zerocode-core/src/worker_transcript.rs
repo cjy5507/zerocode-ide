@@ -1125,6 +1125,7 @@ mod tests {
                     is_error: false,
                     edits: Vec::new(),
                     file: None,
+                    facts: None,
                 }),
                 images: Vec::new(),
             });
