@@ -839,6 +839,37 @@ impl agent_teams::Host for TeamWindow {
         shell_in_front_of(&self.app.state::<AppState>(), term)
     }
 
+    /// The pane's own terminal on whether its provider is at rest
+    /// (t-21565): the pty's silence, and whether the catalog row's ready
+    /// mark is the composer on screen. The screen is copied only for a row
+    /// whose mark is a glyph, and only for a pane whose hook facts still say
+    /// mid-turn — the one caller asks for no other.
+    fn provider_rest(&self, term: TermId) -> agent_teams::ProviderRest {
+        let state = self.app.state::<AppState>();
+        let Some(held) = state.terminals().handle(term) else {
+            return agent_teams::ProviderRest::default();
+        };
+        let mark = { state.agent_terms().get(&term).copied() }
+            .and_then(zerocode_core::agent_capabilities)
+            .map(|caps| caps.startup.mark);
+        let pty = lock_pty(&held);
+        let silent_ms = pty
+            .last_output_epoch_ms()
+            .map(|at| crate::now_epoch_ms().saturating_sub(at));
+        let grid = pty.terminal().grid();
+        let prompt_shown = mark.is_some_and(|mark| {
+            crate::orchestration::ready_prompt_shown(
+                mark,
+                &grid.visible_text(),
+                grid.cursor_visible(),
+            )
+        });
+        agent_teams::ProviderRest {
+            silent_ms,
+            prompt_shown,
+        }
+    }
+
     fn split(
         &self,
         team: &str,

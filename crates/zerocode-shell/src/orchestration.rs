@@ -2645,6 +2645,20 @@ fn note_pointer_parked(run: &str, address: &str, term: u32) {
     );
 }
 
+/// Mail waiting for a worker whose pane the person took over: the window
+/// types nothing there, and says so once per message (t-21565).
+fn note_pointer_held_by_takeover(run: &str, address: &str, term: u32) {
+    let Some(root) = BLACKBOX.get() else { return };
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: mail waiting for {address} in {run} was not pointed at \
+             terminal {term}: its person took the pane over, so it is theirs and \
+             nothing is typed there; `check` reads the mail"
+        ),
+    );
+}
+
 /// A parked pointer whose hook never came for it.
 ///
 /// The other half of [`note_pointer_parked`], and the line a reader needs when
@@ -2792,7 +2806,7 @@ fn note_seatless_mail(run: &str, address: &str) {
         &format!(
             "orchestration: mail waiting for {address} in {run} has no seat in \
              this window — nothing can be pointed at it until a pane binds to \
-             the run"
+             the run; open that agent's conversation in a pane here again"
         ),
     );
 }
@@ -3844,6 +3858,90 @@ impl PaneTurn {
     }
 }
 
+/// How long a pane's pty stays silent, with its provider's own ready prompt
+/// as the composer on screen, before the pointer reads the turn as over
+/// (t-21565).
+///
+/// A turn at work redraws its spinner many times a second; a composer that
+/// stays still for this long is waiting for a person or a pointer. Short
+/// enough that mail lands a few seconds after the turn ended whether or not
+/// its end hook ever reached the window, long enough that the frame gap
+/// between a tool's last line and the next spinner tick never reads as rest.
+pub(crate) const PROMPT_REST_SETTLE_MS: i64 = 3_000;
+
+/// How long a pane's pty stays silent, with nothing the window can name as
+/// its provider's prompt, before the pointer reads the turn as over
+/// (t-21565).
+///
+/// The floor for providers whose catalog row has no prompt mark, and for a
+/// screen the window could not read. A working provider animates something —
+/// a spinner, an elapsed-time counter — so ten minutes of nothing is a turn
+/// that ended without telling the window, not a long tool call. The hook-fact
+/// bound ([`zerocode_core::interrupt::STALE_AFTER_MS`]) cannot stand in for it:
+/// a pane's background helpers keep speaking, and every word they say starts
+/// that clock again.
+pub(crate) const PROVIDER_SILENCE_ENDS_TURN_MS: i64 = 10 * 60 * 1000;
+
+/// Whether the pane's own terminal says its provider is at rest, whatever the
+/// hook facts still say. One reading for every agent: the row's mark has
+/// already decided, in [`ready_prompt_shown`], whether `prompt_shown` can be
+/// true at all.
+fn provider_rest_ends_turn(rest: crate::agent_teams::ProviderRest) -> bool {
+    let bound = if rest.prompt_shown {
+        PROMPT_REST_SETTLE_MS
+    } else {
+        PROVIDER_SILENCE_ENDS_TURN_MS
+    };
+    rest.silent_ms.is_some_and(|silent| silent >= bound)
+}
+
+/// How many of the screen's last non-empty lines may hold the composer. A
+/// composer sits under a status line or two; further up is the transcript.
+const COMPOSER_LINES: usize = 6;
+
+/// Whether a provider's own ready prompt is the composer on this screen, read
+/// off its catalog row's mark (t-21565): the glyph at the start of one of the
+/// last lines — a box border in front of it does not count against it — or
+/// the cursor shown again for a row whose prompt is the cursor. A `Quiet` row
+/// draws no prompt anyone could name, so only silence ends its turn.
+pub(crate) fn ready_prompt_shown(
+    mark: zerocode_core::ReadyMark,
+    screen: &str,
+    cursor_visible: bool,
+) -> bool {
+    match mark {
+        zerocode_core::ReadyMark::Quiet => false,
+        zerocode_core::ReadyMark::CursorShown => cursor_visible,
+        zerocode_core::ReadyMark::ComposerPrompt(glyph)
+        | zerocode_core::ReadyMark::AltScreenPrompt(glyph) => screen
+            .lines()
+            .map(|line| line.trim_start_matches(|c: char| c.is_whitespace() || "│┃".contains(c)))
+            .filter(|line| !line.trim().is_empty())
+            .rev()
+            .take(COMPOSER_LINES)
+            .any(|line| line.starts_with(glyph)),
+    }
+}
+
+/// The turn as the pointer reads it: the hook facts, unless the pane's own
+/// terminal says the provider is at rest ([`provider_rest_ends_turn`]), in
+/// which case a turn the window never heard end is an ended one.
+fn turn_for_pointing(
+    host: &dyn Host,
+    term: u32,
+    heard: Option<PaneTurn>,
+    held_inside_question: bool,
+) -> Option<PaneTurn> {
+    match heard {
+        Some(PaneTurn::Running { .. })
+            if !held_inside_question && provider_rest_ends_turn(host.provider_rest(term)) =>
+        {
+            Some(PaneTurn::Ended { interrupted: false })
+        }
+        other => other,
+    }
+}
+
 /// What each pane's turn was last measured doing, off the same hook event that
 /// stamps a worker quiet.
 ///
@@ -4079,6 +4177,10 @@ enum Standing {
     /// terminal to try. Only `check` can reach this mail now, and only from a
     /// pane that comes back.
     Seatless,
+    /// The person took this worker's pane over, and the window has said so
+    /// once for this mail (t-21565): nothing is typed there, the sender was
+    /// told the mail is filed and not pointed, and only `check` reaches it.
+    PaneTaken,
     /// The pane's own last answer was a wall that answers every prompt the
     /// same way — a quota, an expired login (t-6560) — and the window has
     /// said so once. Nothing is typed: a line typed there opens a turn the
@@ -4201,7 +4303,14 @@ fn advice_standing(
         zerocode_pty::DeliveryOutcome::Refused(why) => {
             if !noted {
                 note_pointer_withheld(run, address, term, stood);
-                tell_unpointed(host, run, address, term, newest, why);
+                tell_unpointed(
+                    host,
+                    run,
+                    address,
+                    Some(term),
+                    newest,
+                    Unpointed::Guard(why),
+                );
             }
             if why == zerocode_pty::ready::Refusal::HoldsADraft {
                 Standing::HeldByADraft
@@ -4229,50 +4338,99 @@ fn unpointed_receipt(newest: &str) -> String {
     format!("pointer-held:{newest}")
 }
 
+/// Why a message's pointer was not typed, in the one vocabulary the pane's
+/// notice, the sender's letter and the window's log share (t-21017, t-21565).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unpointed {
+    /// The pane's guard refused the line.
+    Guard(zerocode_pty::ready::Refusal),
+    /// The person took the pane over: its composer is theirs, and the window
+    /// types nothing there (the takeover rules are unchanged).
+    PaneTaken,
+    /// This window holds no pane for the address — a restart left it unbound.
+    NoSeat,
+}
+
+impl Unpointed {
+    /// The token the pane's notice is keyed by. The UI words the ones it
+    /// knows and reads the rest as its general "not typed" line.
+    fn token(self) -> &'static str {
+        match self {
+            Self::Guard(why) => why.token(),
+            Self::PaneTaken => "pane_taken",
+            Self::NoSeat => "no_seat",
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Guard(zerocode_pty::ready::Refusal::HoldsADraft) => {
+                "the line holds words its person typed and has not sent"
+            }
+            Self::Guard(zerocode_pty::ready::Refusal::Parked) => {
+                "a question or an approval is waiting on that pane for its person"
+            }
+            Self::Guard(zerocode_pty::ready::Refusal::HandReached) => {
+                "its person reached the line as it was typed"
+            }
+            Self::Guard(zerocode_pty::ready::Refusal::LaunchChanged) => {
+                "the pane now runs a different program"
+            }
+            Self::Guard(zerocode_pty::ready::Refusal::InputRejected) => {
+                "the terminal did not accept the input"
+            }
+            Self::Guard(zerocode_pty::ready::Refusal::LaunchRefused) => {
+                "the pane's program refused its launch"
+            }
+            Self::Guard(zerocode_pty::ready::Refusal::NotTaken) => {
+                "the pane's program never reported taking it"
+            }
+            Self::PaneTaken => {
+                "its person took the pane over, so its composer is theirs and nothing is typed there"
+            }
+            Self::NoSeat => {
+                "this window holds no pane for it — it restarted and the pane has not bound \
+                 to the run again"
+            }
+        }
+    }
+}
+
 /// What the sender of a message is told when its pointer could not be typed:
 /// plain words, the pane it waited for and the reason's kind — never the
 /// message's body and never anything on the person's line.
-fn unpointed_letter(
-    newest: &str,
-    address: &str,
-    term: u32,
-    why: zerocode_pty::ready::Refusal,
-) -> String {
-    let reason = match why {
-        zerocode_pty::ready::Refusal::HoldsADraft => {
-            "the line holds words its person typed and has not sent"
-        }
-        zerocode_pty::ready::Refusal::Parked => {
-            "a question or an approval is waiting on that pane for its person"
-        }
-        zerocode_pty::ready::Refusal::HandReached => "its person reached the line as it was typed",
-        zerocode_pty::ready::Refusal::LaunchChanged => "the pane now runs a different program",
-        zerocode_pty::ready::Refusal::InputRejected => "the terminal did not accept the input",
-        zerocode_pty::ready::Refusal::LaunchRefused => "the pane's program refused its launch",
-        zerocode_pty::ready::Refusal::NotTaken => "the pane's program never reported taking it",
-    };
+fn unpointed_letter(newest: &str, address: &str, term: Option<u32>, why: Unpointed) -> String {
+    let at = term.map_or_else(|| "any pane".to_string(), |term| format!("terminal {term}"));
     format!(
         "message {newest} to {address} is filed in its inbox but was NOT pointed at \
-         terminal {term}: {reason}. It is not lost: `check` there reads it."
+         {at}: {}. It is not lost: `check` there reads it.",
+        why.reason()
     )
 }
 
-/// A pointer was refused: say so where each side can see it, once per waiting
-/// message. The person gets the pane's own notice; the sender gets a letter
-/// from the ledger, so a coordinator knows the reply sits unpointed rather
-/// than waiting for an answer that cannot come.
+/// A pointer was not typed: say so where each side can see it, once per
+/// waiting message. The person gets the pane's own notice (when there is a
+/// pane); the sender gets a letter from the ledger, so a coordinator knows the
+/// reply sits unpointed rather than waiting for an answer that cannot come.
 fn tell_unpointed(
     host: &dyn Host,
     run: &str,
     address: &str,
-    term: u32,
+    term: Option<u32>,
     newest: &str,
-    why: zerocode_pty::ready::Refusal,
+    why: Unpointed,
 ) {
-    host.mail_waiting_not_typed(term, why.token());
+    if let Some(term) = term {
+        host.mail_waiting_not_typed(term, why.token());
+    }
     let Some(sender) = message_sender(run, newest) else {
         return;
     };
+    // The ledger's own letters are never answered with a letter: a worker
+    // left seatless by a restart would otherwise be told about the telling.
+    if sender == zerocode_core::orchestration::LEDGER_ITSELF {
+        return;
+    }
     post_observation_once(
         &sender,
         &unpointed_letter(newest, address, term, why),
@@ -4323,6 +4481,14 @@ fn note_pointer_withheld(
 /// Past this it is history: `check` still delivers it, the black box notes it
 /// once, and no composer hears about it.
 const POINTER_NEWS_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// Whether a waiting message is still news a letter may be written about:
+/// inside [`POINTER_NEWS_WINDOW_MS`]. A run's history is not told to its
+/// senders each time a window restarts.
+fn is_news(run: &zerocode_core::orchestration::Run, message: &str, now_ms: i64) -> bool {
+    run.message(message)
+        .is_some_and(|mail| now_ms.saturating_sub(mail.created_ms) <= POINTER_NEWS_WINDOW_MS)
+}
 
 /// How many delivered watermarks the window keeps on disk. A watermark is one
 /// message id per address; a run's mail is a few dozen lines, so this holds
@@ -6875,6 +7041,10 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .clone();
+    let attention: std::collections::HashMap<u32, Option<i64>> = pane_attention()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clone();
     let waiting: std::collections::HashSet<(String, String)> = address_waiters()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
@@ -6901,6 +7071,16 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
         unreachable_noted: bool,
     }
     let mut pointing: Vec<Pointing> = Vec::new();
+    /// A pointer this pass could not type and has not told anyone about:
+    /// told after the locks are down, because the telling is a ledger write.
+    struct Unsaid {
+        run: String,
+        address: String,
+        term: Option<u32>,
+        newest: String,
+        why: Unpointed,
+    }
+    let mut unsaid: Vec<Unsaid> = Vec::new();
     {
         let tables = crate::agent_teams::teams();
         let mut marks = pointed().lock().unwrap_or_else(|held| held.into_inner());
@@ -6981,6 +7161,8 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
              * and the loop over `seats` then has nothing to iterate and says
              * nothing about a run whose mail is piling up. */
             let mut seatless: Vec<String> = Vec::new();
+            // Live workers whose pane the person took over, and the pane.
+            let mut taken: Vec<(String, u32)> = Vec::new();
             if !leader_seated {
                 seatless.push(run.address());
             }
@@ -6995,9 +7177,20 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     }
                     continue;
                 }
-                // A taken pane is the person's composer: advice typed there
-                // would land under their hands.
+                /* A taken pane is the person's composer: advice typed there
+                 * would land under their hands. Not typed, and no longer
+                 * silent either (t-21565): the mail's sender is told it is
+                 * filed, once, below. */
                 if worker.taken_over {
+                    if let Some(term) = tables
+                        .get(&worker.team)
+                        .and_then(|team| team.term_of(&worker.pane))
+                    {
+                        taken.push((
+                            zerocode_core::orchestration::worker_address(&worker.id),
+                            term,
+                        ));
+                    }
                     continue;
                 }
                 match tables
@@ -7030,12 +7223,54 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     continue;
                 }
                 note_seatless_mail(&run.id, &address);
+                if is_news(run, newest, now_ms) {
+                    unsaid.push(Unsaid {
+                        run: run.id.clone(),
+                        address: address.clone(),
+                        term: None,
+                        newest: newest.to_string(),
+                        why: Unpointed::NoSeat,
+                    });
+                }
                 marks.insert(
                     key,
                     Pointed {
                         newest: newest.to_string(),
                         term: None,
                         standing: Standing::Seatless,
+                    },
+                );
+            }
+            for (address, term) in taken {
+                let key = (run.id.clone(), address.clone());
+                let Some(newest) = run.newest_pending(&address) else {
+                    marks.remove(&key);
+                    continue;
+                };
+                let said = marks.get(&key).is_some_and(|stood| {
+                    stood.newest == newest
+                        && stood.term == Some(term)
+                        && stood.standing == Standing::PaneTaken
+                });
+                if said {
+                    continue;
+                }
+                note_pointer_held_by_takeover(&run.id, &address, term);
+                if is_news(run, newest, now_ms) {
+                    unsaid.push(Unsaid {
+                        run: run.id.clone(),
+                        address: address.clone(),
+                        term: Some(term),
+                        newest: newest.to_string(),
+                        why: Unpointed::PaneTaken,
+                    });
+                }
+                marks.insert(
+                    key,
+                    Pointed {
+                        newest: newest.to_string(),
+                        term: Some(term),
+                        standing: Standing::PaneTaken,
                     },
                 );
             }
@@ -7061,7 +7296,18 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * finished turn, and a pane the window has never heard from
                  * may have no hook wired at all, in which case its silence
                  * outlasts the run. */
-                let heard = turns.get(&term).copied().map(PaneTurn::as_read);
+                /* The hook facts, unless the pane's own terminal says its
+                 * provider is at rest while they still say mid-turn
+                 * (t-21565): a pane that waits on its person or inside its own
+                 * question is silent too, and keeps the hook's reading. */
+                let held_inside_question =
+                    asking.contains(&key) || attention.get(&term).copied().flatten().is_some();
+                let heard = turn_for_pointing(
+                    host,
+                    term,
+                    turns.get(&term).copied().map(PaneTurn::as_read),
+                    held_inside_question,
+                );
                 /* The moment a WORKING pane can be reached without a
                  * keystroke, and the one this pass used to have nothing to
                  * say about.
@@ -7333,6 +7579,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                         | Standing::HeldByADraft
                         | Standing::Unattended
                         | Standing::Seatless
+                        | Standing::PaneTaken
                         | Standing::Walled { .. }
                         | Standing::Asking,
                     )
@@ -7414,6 +7661,16 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                 }
             }
         }
+    }
+    for told in unsaid {
+        tell_unpointed(
+            host,
+            &told.run,
+            &told.address,
+            told.term,
+            &told.newest,
+            told.why,
+        );
     }
     for one in pointing {
         let key = (one.run, one.address);
