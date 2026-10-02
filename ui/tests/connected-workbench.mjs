@@ -1,6 +1,6 @@
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { createWindowServer, launchWindowBrowser, openWindowTestPage } from "./window-boot.mjs";
 import { taskBoardFixture } from "./task-board.mjs";
 import { workspaceBoardFixture } from "./workspace-board.mjs";
 
@@ -349,7 +349,7 @@ export async function testConnectedWorkbench(browser, origin, ok) {
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const { files, origin } = await createWindowServer();
-  const browser = await chromium.launch({ headless: true });
+  const browser = await launchWindowBrowser();
   let failures = 0;
   try {
     await testConnectedWorkbench(browser, origin, (name, pass, detail = "") => {
