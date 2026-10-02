@@ -26,6 +26,16 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// WAL conversion can return BUSY without invoking SQLite's busy handler.
 /// A short pause avoids spinning while another first opener finishes it.
 const WAL_RETRY_DELAY: Duration = Duration::from_millis(10);
+/// A sidecar SQLite is deleting stays "delete pending" on Windows until the
+/// last handle to it closes, and every open of it meanwhile is refused as
+/// access denied — where a Unix unlink is simply gone (t-21270: eight
+/// concurrent assignments on the Windows CI runner). SQLite's own Windows
+/// layer asks again on that refusal ten times, 25 ms longer each time
+/// (`winIoerrRetry`, `winIoerrRetryDelay`); the sidecar check waits on the
+/// same terms, then refuses as it always did. Unix has no such state and
+/// does not wait.
+const DELETE_PENDING_RETRIES: u32 = if cfg!(windows) { 10 } else { 0 };
+const DELETE_PENDING_DELAY: Duration = Duration::from_millis(25);
 /* Seven is also the FIRST version a production window ever writes: the store
  * ships with the actor cutover, so every store in the wild is either empty or
  * already seven. The versions below seven only ever existed inside this
@@ -1540,14 +1550,19 @@ impl ReadOnlyWorkflows {
         for suffix in ["-wal", "-shm"] {
             let mut sidecar = path.as_os_str().to_os_string();
             sidecar.push(suffix);
-            match fs::symlink_metadata(PathBuf::from(sidecar)) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    return Err(WorkflowStoreError::UnsafeStorePath);
-                }
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return Err(WorkflowStoreError::UnsafeStorePath),
-            }
+            let sidecar = PathBuf::from(sidecar);
+            // Read as given, never opened: a reader changes nothing here.
+            sidecar_settles(
+                || match fs::symlink_metadata(&sidecar) {
+                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                        Err(not_a_regular_file())
+                    }
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(error),
+                },
+                DELETE_PENDING_RETRIES,
+                DELETE_PENDING_DELAY,
+            )?;
         }
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -1789,10 +1804,7 @@ fn private_file(path: &Path) -> std::io::Result<()> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     let file = options.open(path)?;
     if !file.metadata()?.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "workflow storage is not a regular file",
-        ));
+        return Err(not_a_regular_file());
     }
     file.set_permissions(fs::Permissions::from_mode(0o600))
 }
@@ -1801,12 +1813,18 @@ fn private_file(path: &Path) -> std::io::Result<()> {
 fn private_file(path: &Path) -> std::io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "workflow storage is not a regular file",
-        ));
+        return Err(not_a_regular_file());
     }
     Ok(())
+}
+
+/// The refusal a symlink, a directory or any other non-file earns: it is
+/// never asked again, unlike a refusal that may be a deletion in flight.
+fn not_a_regular_file() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "workflow storage is not a regular file",
+    )
 }
 
 fn tighten_store_files(path: &Path) -> Result<(), WorkflowStoreError> {
@@ -1819,13 +1837,40 @@ fn preflight_store_sidecars(path: &Path) -> Result<(), WorkflowStoreError> {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
         let sidecar = PathBuf::from(sidecar);
-        match private_file(&sidecar) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        sidecar_settles(
+            || private_file(&sidecar),
+            DELETE_PENDING_RETRIES,
+            DELETE_PENDING_DELAY,
+        )?;
+    }
+    Ok(())
+}
+
+/// One sidecar's check, waiting out a refusal that may only be a deletion in
+/// flight ([`DELETE_PENDING_RETRIES`]): an access-denied answer is asked again
+/// up to `retries` times, the pause `delay` longer each time. Gone is fine and
+/// a regular file is fine; anything else — a symlink, a directory, a refusal
+/// that outlasts the wait — is the unsafe path it always was.
+fn sidecar_settles(
+    mut check: impl FnMut() -> std::io::Result<()>,
+    retries: u32,
+    delay: Duration,
+) -> Result<(), WorkflowStoreError> {
+    let mut asked_again = 0;
+    loop {
+        match check() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && asked_again < retries =>
+            {
+                asked_again += 1;
+                std::thread::sleep(delay * asked_again);
+            }
             Err(_) => return Err(WorkflowStoreError::UnsafeStorePath),
         }
     }
-    Ok(())
 }
 
 fn immediate(connection: &mut Connection) -> Result<Transaction<'_>, WorkflowStoreError> {
@@ -2046,6 +2091,71 @@ mod tests {
                 .expect("private root");
         }
         root
+    }
+
+    /// A check that answers from a script, one answer an ask, and counts
+    /// the asks; past the script it keeps giving the script's last answer.
+    fn scripted(
+        answers: Vec<std::io::ErrorKind>,
+    ) -> (
+        std::cell::Cell<usize>,
+        impl Fn(&std::cell::Cell<usize>) -> std::io::Result<()>,
+    ) {
+        let check = move |asked: &std::cell::Cell<usize>| {
+            let at = asked.get();
+            asked.set(at + 1);
+            Err(std::io::Error::from(answers[at.min(answers.len() - 1)]))
+        };
+        (std::cell::Cell::new(0), check)
+    }
+
+    /// t-21270: on Windows a sidecar SQLite is deleting answers "access
+    /// denied" until its last handle closes; the check asks again and takes
+    /// the gone file it then finds.
+    #[test]
+    fn a_sidecar_refused_while_it_is_being_deleted_is_asked_again() {
+        use std::io::ErrorKind::{NotFound, PermissionDenied};
+        let (asked, check) = scripted(vec![PermissionDenied, PermissionDenied, NotFound]);
+        let answer = sidecar_settles(|| check(&asked), 10, Duration::from_millis(1));
+        assert!(answer.is_ok(), "{answer:?}");
+        assert_eq!(asked.get(), 3, "asked once, then twice again");
+    }
+
+    /// The wait is bounded and changes no verdict: a refusal that outlasts
+    /// it is the unsafe path it always was.
+    #[test]
+    fn a_refusal_that_outlasts_the_wait_is_still_an_unsafe_path() {
+        let (asked, check) = scripted(vec![std::io::ErrorKind::PermissionDenied]);
+        let answer = sidecar_settles(|| check(&asked), 3, Duration::from_millis(1));
+        assert!(
+            matches!(answer, Err(WorkflowStoreError::UnsafeStorePath)),
+            "{answer:?}"
+        );
+        assert_eq!(asked.get(), 4, "the first ask and three more");
+    }
+
+    /// A symlink or a non-file is refused on the first answer — only a
+    /// refusal that may be a deletion in flight is waited on — and with no
+    /// retries (Unix) an access refusal is refused at once too.
+    #[test]
+    fn a_non_file_and_a_platform_without_the_wait_are_refused_at_once() {
+        for (kind, retries) in [
+            (std::io::ErrorKind::InvalidData, 10),
+            (std::io::ErrorKind::PermissionDenied, 0),
+        ] {
+            let (asked, check) = scripted(vec![kind]);
+            let answer = sidecar_settles(|| check(&asked), retries, Duration::from_millis(1));
+            assert!(
+                matches!(answer, Err(WorkflowStoreError::UnsafeStorePath)),
+                "{kind:?}: {answer:?}"
+            );
+            assert_eq!(asked.get(), 1, "{kind:?} was asked again");
+        }
+        assert_eq!(
+            not_a_regular_file().kind(),
+            std::io::ErrorKind::InvalidData,
+            "the non-file refusal is not one the wait asks again"
+        );
     }
 
     #[test]

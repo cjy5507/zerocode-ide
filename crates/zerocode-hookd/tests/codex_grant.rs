@@ -19,6 +19,34 @@ use zerocode_hookd::codex_grant::{Grant, GrantError, GrantPlan, Invocation, Veri
 
 const MANAGED: &str = "/bin/sh '/h/.zerocode/agent-hooks/codex-hook.sh'";
 
+/// The silent server's deadline must outlast the interpreter's own start, or
+/// the grant gives up before the fake has run a line and the test proves
+/// nothing — a Windows CI runner took longer than 600 ms to start python
+/// (t-21270, run 36946561997). So the deadline is this machine's measured
+/// start times [`START_MARGIN`], never under the 600 ms the test was written
+/// with, and never over a ceiling that keeps "gave up near the deadline"
+/// (under [`GAVE_UP_WITHIN`]) a claim worth checking.
+const SILENT_DEADLINE_FLOOR: Duration = Duration::from_millis(600);
+const SILENT_DEADLINE_CEILING: Duration = Duration::from_secs(10);
+const START_MARGIN: u32 = 5;
+const GAVE_UP_WITHIN: Duration = Duration::from_secs(20);
+
+/// How long this machine's python takes from spawn to the end of a one-line
+/// script, measured with the same interpreter and environment the fake runs in.
+fn interpreter_start() -> Duration {
+    let started = std::time::Instant::now();
+    let status = std::process::Command::new("python3")
+        .args(["-c", "pass"])
+        .status()
+        .expect("python3 runs");
+    assert!(status.success(), "python3 -c pass: {status}");
+    started.elapsed()
+}
+
+fn silent_deadline() -> Duration {
+    (interpreter_start() * START_MARGIN).clamp(SILENT_DEADLINE_FLOOR, SILENT_DEADLINE_CEILING)
+}
+
 /// A fake `codex app-server`.
 ///
 /// `hooks` is the JSON it answers `hooks/list` with the FIRST time; `after` is
@@ -346,7 +374,7 @@ fn a_server_that_never_answers_times_out_and_is_killed() {
     .expect("write the silent server");
     let log = dir.path().join("asked.jsonl");
     let mut held = plan(&script, &log, &[]);
-    held.invocation.timeout = Duration::from_millis(600);
+    held.invocation.timeout = silent_deadline();
     let started = std::time::Instant::now();
     let outcome = zerocode_hookd::codex_grant::grant(&held);
     let took = started.elapsed();
@@ -355,7 +383,7 @@ fn a_server_that_never_answers_times_out_and_is_killed() {
         "a silent server was not a timeout: {outcome:?}"
     );
     // It gave up near the deadline rather than at the 300s the child asked for.
-    assert!(took < Duration::from_secs(20), "took {took:?}");
+    assert!(took < GAVE_UP_WITHIN, "took {took:?}");
     assert_eq!(
         std::fs::read_to_string(&log).unwrap_or_default(),
         "started",
