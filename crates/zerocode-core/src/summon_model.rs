@@ -253,7 +253,7 @@ pub fn ask(look: &Look, options: &[ModelOption]) -> Option<ModelAsk> {
 /// question for each agent its answer may choose. Each is named and keyed
 /// for its agent ([`scoped_question`], [`scoped_models_key`]) so several ride
 /// one request without sharing a name or a `models` list; its words are
-/// [`INSTRUCTIONS`] word for word with that key spelled where they say
+/// the seat's own instructions word for word with that key spelled where they say
 /// `models`, which is why the version stands.
 #[must_use]
 pub fn ask_for(agent: &str, look: &Look, options: &[ModelOption]) -> Option<ModelAsk> {
