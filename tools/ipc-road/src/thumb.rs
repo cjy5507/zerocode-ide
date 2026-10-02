@@ -96,6 +96,10 @@ pub(crate) struct Thumb {
     poke: bool,
     poked_at: Instant,
     poked: u32,
+    /// How long the pane keeps the page after it finished loading, before the
+    /// snapshot (`:hold<ms>`): the incident's pane held its page for about seven
+    /// seconds, and the run loop is read for the whole of it (the `hold` step).
+    hold: Duration,
     url: String,
     round: u32,
     stage: Stage,
@@ -259,7 +263,8 @@ pub(crate) fn verdict() -> i32 {
 impl Thumb {
     /// `spec` is `<page>` followed by any of `:store` (a named data store, as
     /// the window names one), `:window` (the pane in a window of its own) and
-    /// `:poke` (the main window resized by a pixel every 50 ms meanwhile).
+    /// `:poke` (the main window resized by a pixel every 50 ms meanwhile) and
+    /// `:hold<ms>` (the page kept that long after it finished loading).
     pub(crate) fn new(spec: &str) -> Self {
         let mut parts = spec.split(':');
         let page = parts.next().unwrap_or("calm");
@@ -272,6 +277,10 @@ impl Thumb {
             poke: flags.contains(&"poke"),
             poked_at: Instant::now(),
             poked: 0,
+            hold: flags
+                .iter()
+                .find_map(|flag| flag.strip_prefix("hold")?.parse::<u64>().ok())
+                .map_or(Duration::ZERO, Duration::from_millis),
             url: page_file(page),
             round: 0,
             stage: Stage::Begin,
@@ -345,13 +354,15 @@ impl Thumb {
                     return false;
                 }
                 self.marks.gaps.push(("load", gap_stats(take_gaps())));
+                open_phase("hold");
                 self.since = now;
                 self.stage = Stage::Settle;
             }
             Stage::Settle => {
-                if now.duration_since(self.since) < SETTLE {
+                if now.duration_since(self.since) < SETTLE + self.hold {
                     return false;
                 }
+                self.marks.gaps.push(("hold", gap_stats(take_gaps())));
                 open_phase("snapshot");
                 let (sender, receiver) = channel();
                 if let (Some(pane), Some(mtm)) = (&self.pane, MainThreadMarker::new()) {
@@ -406,10 +417,15 @@ impl Thumb {
                     .map(|(name, gaps)| ((*name).to_string(), gaps.clone()))
                     .collect();
                 let label = format!(
-                    "{}{}{}",
+                    "{}{}{}{}",
                     if self.store { "-store" } else { "" },
                     if self.own_window { "-window" } else { "" },
-                    if self.poke { "-poke" } else { "" }
+                    if self.poke { "-poke" } else { "" },
+                    if self.hold.is_zero() {
+                        String::new()
+                    } else {
+                        format!("-hold{}", self.hold.as_millis())
+                    }
                 );
                 let (served_before, served_ns_before) = self.marks.served_at_start;
                 let served = SERVED.load(Ordering::Relaxed).saturating_sub(served_before);

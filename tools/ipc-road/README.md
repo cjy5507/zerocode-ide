@@ -45,6 +45,11 @@ path, so the copy keeps the two files' places:
     # window by a pixel every 50 ms meanwhile)
     "$ROAD" --out thumb.json --thumb heavy:store[:window][:poke]
 
+    # `:hold<ms>` keeps the page that long after it finished loading, before the
+    # snapshot, and reads the run loop for all of it (the `hold` step): the
+    # incident's pane held its page for about seven seconds
+    "$ROAD" --out hold.json --thumb ui:store:hold7000 --ui-page "$PWD/ui/index.html" --assert-stall
+
     # the same run as a gate: exits 4 and names the step when the run loop stood
     # still longer than `thumb::STALL_BOUND_MS` in any step of any round
     "$ROAD" --out thumb.json --thumb heavy:store --assert-stall

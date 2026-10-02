@@ -717,7 +717,7 @@ fn main() {
     }
     let Some(out) = out else {
         eprintln!(
-            "usage: ipc-road --out <result.json> [--quick] [--limit-secs <n>] [--birth <calm|busy|heavy|layers>:<parked|hidden|none>] [--thumb <calm|busy|heavy|layers|storm[N]|stormfix[N]|ui|uicut>[:store][:window][:poke] [--assert-stall] [--ui-page <index.html>]]"
+            "usage: ipc-road --out <result.json> [--quick] [--limit-secs <n>] [--birth <calm|busy|heavy|layers>:<parked|hidden|none>] [--thumb <calm|busy|heavy|layers|storm[N]|stormfix[N]|ui|uicut>[:store][:window][:poke][:hold<ms>] [--assert-stall] [--ui-page <index.html>]]"
         );
         std::process::exit(2);
     };
