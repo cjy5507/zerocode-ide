@@ -359,6 +359,7 @@ struct TwoRoads {
     second: VecDeque<String>,
     on_second: bool,
     set_aside: Vec<String>,
+    asked: Vec<Value>,
 }
 
 impl Generator for TwoRoads {
@@ -371,6 +372,7 @@ impl Generator for TwoRoads {
     }
 
     fn ask(&mut self, _system: &str, user: &str, _left: Duration) -> Result<Said, String> {
+        self.asked.push(serde_json::from_str(user).expect("json"));
         let (text, road, model) = if self.on_second {
             (self.second.pop_front(), "codex_login", "second-model")
         } else {
@@ -420,12 +422,16 @@ fn a_road_whose_plans_the_contract_refused_is_passed_over_for_the_next_login() {
         second: VecDeque::from(vec![good]),
         on_second: false,
         set_aside: Vec::new(),
+        asked: Vec::new(),
     };
     let written = write_plan(&mut generator, &ask_of(&stage, &palette, &scope));
     assert!(written.plan.is_ok(), "{:?}", written.plan.as_ref().err());
     let tries = usize::try_from(REFLEX_PLAN_RETRIES).expect("a count") + 1;
     assert_eq!(written.requests as usize, tries + 1);
     assert_eq!(written.refusals.len(), tries);
+    assert_eq!(generator.asked[tries - 1]["rejected"], json!("no"));
+    assert!(generator.asked[tries].get("rejected").is_none());
+    assert!(generator.asked[tries].get("refused").is_none());
     let answered = written.answered.as_ref().expect("an answer");
     assert_eq!(answered.road, "codex_login");
     assert_eq!(answered.model, "second-model");
@@ -455,6 +461,7 @@ fn a_road_whose_plans_the_contract_refused_is_passed_over_for_the_next_login() {
         second: refused(),
         on_second: true,
         set_aside: Vec::new(),
+        asked: Vec::new(),
     };
     let written = write_plan(&mut alone, &ask_of(&stage, &palette, &scope));
     assert_eq!(written.plan.err().as_deref(), Some(PLAN_REFUSED));
@@ -519,6 +526,68 @@ fn a_refused_plan_is_asked_again_with_its_refusals_at_most_the_retries() {
     assert_eq!(written.requests, 1, "the wire is not asked again");
 }
 
+#[test]
+fn a_refused_blob_plan_is_returned_to_the_writer_for_correction() {
+    let (image, stage) = capture();
+    let palette = palette_of(&image, &stage).expect("a palette");
+    let scope = scope();
+    let good = answer_for(&scope);
+    let mut bad = good.clone();
+    bad["detectors"][0]["color"]["layout"]["min_blobs"] = json!(1);
+    let bad = bad.to_string();
+    let Err(Refused::Contract(reason)) = plan_of(&bad, &scope) else {
+        panic!("the contract must still refuse an invented layout field");
+    };
+    assert!(reason.contains("min_blobs"), "{reason}");
+    let mut generator = Scripted {
+        answers: vec![Ok(bad.clone()), Ok(good.to_string())].into(),
+        asked: Vec::new(),
+    };
+    let written = write_plan(&mut generator, &ask_of(&stage, &palette, &scope));
+    assert!(written.plan.is_ok());
+    assert_eq!(written.requests, 2);
+    let first: Value = serde_json::from_str(&generator.asked[0].1).expect("json");
+    let retry: Value = serde_json::from_str(&generator.asked[1].1).expect("json");
+    assert!(first.get("rejected").is_none());
+    assert_eq!(retry["rejected"], json!(bad));
+    assert_eq!(retry["refused"], json!([reason]));
+    assert_eq!(retry["contract"]["scope"], json!(scope));
+}
+
+#[test]
+fn a_retry_carries_only_the_last_rejected_answer_and_keeps_the_running_plan() {
+    let (image, stage) = capture();
+    let palette = palette_of(&image, &stage).expect("a palette");
+    let scope = scope();
+    let good = answer_for(&scope).to_string();
+    let previous = plan_of(&good, &scope).expect("a running plan");
+    let outcomes = json!({ "moved": 2 });
+    let second = "```json\n{}\n```";
+    let mut generator = Scripted {
+        answers: vec![Ok("not json".into()), Ok(second.into()), Ok(good)].into(),
+        asked: Vec::new(),
+    };
+    let written = write_plan(
+        &mut generator,
+        &Ask {
+            previous: Some(Previous {
+                plan: previous.plan(),
+                outcomes: &outcomes,
+            }),
+            ..ask_of(&stage, &palette, &scope)
+        },
+    );
+    assert!(written.plan.is_ok());
+    assert_eq!(written.requests, 3);
+    for (at, expected) in [(1, "not json"), (2, second)] {
+        let retry: Value = serde_json::from_str(&generator.asked[at].1).expect("json");
+        assert_eq!(retry["rejected"], json!(expected));
+        assert_eq!(retry["previous"]["plan"], json!(previous.plan()));
+        assert_eq!(retry["previous"]["outcomes"], outcomes);
+        assert_eq!(retry["refused"].as_array().map(Vec::len), Some(at));
+    }
+}
+
 /// What a plan is asked from is words and numbers: the goal, the contract's
 /// version and the scope, the display, the window, the palette, the
 /// contract's tables and its example — no picture of the screen, no
@@ -529,7 +598,7 @@ fn a_plan_is_asked_from_words_and_numbers_with_no_picture() {
     let (image, stage) = capture();
     let palette = palette_of(&image, &stage).expect("a palette");
     let scope = scope();
-    let said = user_text(&ask_of(&stage, &palette, &scope), &[]);
+    let said = user_text(&ask_of(&stage, &palette, &scope), &[], None);
     let sent: Value = serde_json::from_str(&said).expect("json");
     let keys: Vec<&str> = sent
         .as_object()
@@ -579,6 +648,7 @@ fn a_plan_is_asked_from_words_and_numbers_with_no_picture() {
             ..ask_of(&stage, &palette, &scope)
         },
         &["refused once".into()],
+        None,
     );
     let again: Value = serde_json::from_str(&again).expect("json");
     assert_eq!(again["previous"]["plan"], json!(old.plan()));
@@ -590,10 +660,10 @@ fn a_plan_is_asked_from_words_and_numbers_with_no_picture() {
 /// version is red here, because a plan's label is read per version.
 #[test]
 fn the_version_is_pinned_to_the_words() {
-    assert_eq!(PROMPT_VERSION, 2);
+    assert_eq!(PROMPT_VERSION, 3);
     assert_eq!(
         zerocode_core::jev::fingerprint_of(INSTRUCTIONS),
-        "fce7450f57458248"
+        "278ea90b68f98c91"
     );
 }
 
@@ -705,7 +775,7 @@ fn measure_the_plan_road() {
         palette: &palette,
         previous: None,
     };
-    let said = user_text(&ask, &[]);
+    let said = user_text(&ask, &[], None);
     let answer = answer_for(&scope).to_string();
     let mut read_ms = Vec::new();
     for _ in 0..99 {
