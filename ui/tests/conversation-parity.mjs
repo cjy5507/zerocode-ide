@@ -4386,14 +4386,16 @@ async function stepsBriefAndRole(browser, origin, ok) {
  * languages agents write most are coloured by role with the editor's own
  * ramp — keywords, strings, numbers, comments, a diff's two kinds of line, a
  * page's tags and the script inside it — and nothing else about them
- * changes: the nodes a fence holds, its words, what its copy writes. The
- * colours are read where the person meets them: the ranges the engine
- * paints, and the pixels it painted, in the dark theme and in the light one.
- * A fence still being streamed stands plain and takes its colours when it
- * closes; a row that shelves its body gives its colours back and comes back
- * coloured; the work is done in slices of at most `CODE_COLOUR.sliceMs`; a
- * closed conversation leaves no colour behind; an engine without the
- * Highlight API shows the code as it is. Synthetic code throughout. */
+ * changes: its words, the elements of the answer around it, what its copy
+ * writes. The colours are read where the person meets them: the spans the
+ * tokens stand in, and the pixels the engine painted, in the dark theme and
+ * in the light one. A fence still being streamed stands plain and takes its
+ * colours when it closes; a fence the person is selecting keeps its words,
+ * and the selection, until the selection moves; a row that shelves its body
+ * gives its colours up with it and comes back coloured; the work is done in
+ * slices of at most `CODE_COLOUR.sliceMs`; a closed conversation leaves
+ * nothing in line; an engine without the Highlight API colours all the
+ * same — spans need none. Synthetic code throughout. */
 const PAINTED_STRING = `"${"s".repeat(40)}"`;
 const PAINTED_COMMENT = `// ${"c".repeat(40)}`;
 const CODE_FENCES = [
@@ -4413,11 +4415,15 @@ const CODE_FENCES = [
   { language: "text", code: "plain words, no colour", wears: [] },
 ];
 
+/* A fence the selection check selects in: long, so its colouring takes
+ * several slices and several units of spans. */
+const SELECTED_CODE = Array.from({ length: 240 }, (_, line) => `const value${line} = measure(${line}, "row"); // note ${line}`).join("\n");
+
 const fencedAnswer = (fences) =>
   `고칠 곳입니다.\n\n${fences.map((fence) => `\`\`\`${fence.language}\n${fence.code}\n\`\`\``).join("\n\n")}\n\n끝입니다.`;
 
 /* The page-side hands the colour checks share: frames, the wait until no
- * fence is in line, and what the registry's ranges cover. They read the
+ * fence is in line, and the role spans the page's fences hold. They read the
  * product's own names only when they stand, so a page that has none of them
  * answers "no colour", never a throw. */
 async function standColourProbe(page) {
@@ -4435,21 +4441,13 @@ async function standColourProbe(page) {
       }
       await frames(2);
     };
-    // Every range of every `chat-code-*` highlight, with the words it covers.
-    const ranges = () => {
-      const out = [];
-      for (const [name, mark] of window.CSS?.highlights ?? []) {
-        if (!name.startsWith("chat-code-")) continue;
-        for (const range of mark) {
-          const words = range.startContainer === range.endContainer && range.startContainer.nodeType === Node.TEXT_NODE
-            ? range.startContainer.data.slice(range.startOffset, range.endOffset)
-            : null;
-          out.push({ role: name.slice("chat-code-".length), words, node: range.startContainer });
-        }
-      }
-      return out;
-    };
-    window.__COLOURS__ = { frames, settle, ranges };
+    // Every role span of every fence, with the words it holds.
+    const worn = () => [...document.querySelectorAll("pre.md-block > [class^='chat-code-']")].map((span) => ({
+      role: span.className.slice("chat-code-".length),
+      words: span.textContent,
+      node: span,
+    }));
+    window.__COLOURS__ = { frames, settle, worn };
   });
 }
 
@@ -4462,13 +4460,13 @@ export async function testConversationCodeColours(browser, origin, ok) {
     ]);
     await standColourProbe(page);
     const seen = await page.evaluate(async (fences) => {
-      const { settle, ranges } = window.__COLOURS__;
+      const { settle, worn } = window.__COLOURS__;
       await settle();
       const seen = {};
       const answer = document.querySelector("#worker-view .helper-turn.is-assistant");
       const pres = [...answer.querySelectorAll(".helper-said pre.md-block")];
       seen.fences = pres.length;
-      const all = ranges();
+      const all = worn();
       seen.missing = [];
       seen.worn = [];
       fences.forEach((fence, at) => {
@@ -4478,21 +4476,24 @@ export async function testConversationCodeColours(browser, origin, ok) {
         for (const [words, role] of fence.wears) if (!mine.includes(`${role}:${words}`)) seen.missing.push(`${fence.language} ${role} ${words}`);
         if (fence.wears.length === 0 && mine.length > 0) seen.missing.push(`${fence.language} wears ${mine.length} colours`);
       });
-      // Nothing else about a fence changes: one text node of its code, the
-      // nodes a plain drawing of the same answer holds, and the copy's words.
-      seen.oneTextNode = pres.every((pre) => pre.childNodes.length === 1 && pre.firstChild.nodeType === Node.TEXT_NODE);
+      // Nothing else about a fence changes: it holds its code's words and the
+      // role spans they stand in, nothing more; the answer holds the elements
+      // a plain drawing of it does besides those spans; the copy's words.
+      const roleSpan = (node) => node.nodeName === "SPAN" && node.className.startsWith("chat-code-") &&
+        node.childNodes.length === 1 && node.firstChild.nodeType === Node.TEXT_NODE;
+      seen.onlyWords = pres.every((pre) => [...pre.childNodes].every((node) => node.nodeType === Node.TEXT_NODE || roleSpan(node)));
       seen.words = pres.map((pre) => pre.textContent);
       const plain = document.createElement("div");
       paintHelperProse(plain, cleanseAssistantText(answer.__turn.text), "", { colour: false });
       seen.plainElements = plain.getElementsByTagName("*").length;
-      seen.elements = answer.querySelector(":scope > .helper-said").getElementsByTagName("*").length;
+      seen.elements = answer.querySelector(":scope > .helper-said").getElementsByTagName("*").length -
+        answer.querySelectorAll(".helper-said pre.md-block > [class^='chat-code-']").length;
       answer.querySelector(".helper-code-copy").click();
       await window.__PAINTED__();
       seen.copied = window.__CLIPBOARD_WRITES__.at(-1);
       // Every role the editor's ramp colours has its rule, written in that
-      // role's token — and keyed on the fence: a highlight rule that names no
-      // element is matched against every element of the page in every style
-      // pass (the 400-turn open's style time went 26 → 46 ms on such rules).
+      // role's token — and keyed on the fence's own spans, so the names reach
+      // nothing else on the page.
       const rules = new Map();
       for (const sheet of document.styleSheets) {
         let list = [];
@@ -4502,18 +4503,18 @@ export async function testConversationCodeColours(browser, origin, ok) {
           continue;
         }
         for (const rule of list) {
-          const name = /::highlight\(chat-code-([a-z]+)\)$/.exec(rule.selectorText ?? "")?.[1];
+          const name = /(?:^|[\s>.])chat-code-([a-z]+)$/.exec(rule.selectorText ?? "")?.[1];
           if (name) rules.set(name, { colour: rule.style.getPropertyValue("color").trim(), selector: rule.selectorText });
         }
       }
       // Names and punctuation stay the words' own ink, as the approved mockup
-      // draws them: no highlight holds a range of either, and no rule paints one.
+      // draws them: no span of either is drawn, and no rule paints one.
       const plainRoles = ["variable", "punctuation"];
       const roles = editorHighlightStyle().specs.map((spec) => /^var\(--syntax-([a-z]+)\)$/.exec(spec.color ?? "")?.[1]).filter(Boolean);
       seen.roles = [...new Set(roles)].filter((role) => !plainRoles.includes(role));
       seen.unruled = seen.roles.filter((role) => rules.get(role)?.colour !== `var(--syntax-${role})`);
-      seen.plainPainted = plainRoles.filter((role) => rules.has(role) || (window.CSS?.highlights?.get(`chat-code-${role}`)?.size ?? 0) > 0);
-      seen.unscoped = [...rules.entries()].filter(([role, rule]) => rule.selector !== `pre.md-block::highlight(chat-code-${role})`).map(([, rule]) => rule.selector);
+      seen.plainPainted = plainRoles.filter((role) => rules.has(role) || document.querySelector(`pre.md-block > .chat-code-${role}`) !== null);
+      seen.unscoped = [...rules.entries()].filter(([role, rule]) => rule.selector !== `pre.md-block > .chat-code-${role}`).map(([, rule]) => rule.selector);
       return seen;
     }, CODE_FENCES);
     ok(
@@ -4522,23 +4523,23 @@ export async function testConversationCodeColours(browser, origin, ok) {
       JSON.stringify({ missing: seen.missing, worn: seen.worn }),
     );
     ok(
-      "P1: the colours change nothing else — a fence holds one text node of its code, the answer holds the elements a plain drawing of it does, and the copy writes the code as it stands",
-      seen.oneTextNode && JSON.stringify(seen.words) === JSON.stringify(CODE_FENCES.map((fence) => fence.code)) &&
+      "P1: the colours change nothing else — a fence holds its code's words and the role spans they stand in, nothing more; the answer holds the elements a plain drawing of it does besides those spans; the copy writes the code as it stands",
+      seen.onlyWords && JSON.stringify(seen.words) === JSON.stringify(CODE_FENCES.map((fence) => fence.code)) &&
         seen.elements === seen.plainElements && seen.copied === CODE_FENCES[0].code,
-      JSON.stringify({ oneTextNode: seen.oneTextNode, elements: seen.elements, plainElements: seen.plainElements, copied: seen.copied }),
+      JSON.stringify({ onlyWords: seen.onlyWords, elements: seen.elements, plainElements: seen.plainElements, copied: seen.copied }),
     );
     ok(
-      "P1: every role the editor's ramp colours has its `::highlight(chat-code-…)` rule in that role's own token, so both themes reach it",
+      "P1: every role the editor's ramp colours has its `pre.md-block > .chat-code-…` rule in that role's own token, so both themes reach it",
       seen.roles.length >= 13 && seen.unruled.length === 0,
       JSON.stringify({ roles: seen.roles, unruled: seen.unruled }),
     );
     ok(
-      "P1: names and punctuation stay the words' own ink, as the approved mockup draws them — no range of either is held, no rule paints one",
+      "P1: names and punctuation stay the words' own ink, as the approved mockup draws them — no span of either is drawn, no rule paints one",
       seen.plainPainted.length === 0,
       JSON.stringify({ plainPainted: seen.plainPainted }),
     );
     ok(
-      "P1: the colour rules are keyed on the fence (`pre.md-block`) — not on every element of the page, which every style pass would then pay for",
+      "P1: the colour rules are keyed on the fence's own spans (`pre.md-block > …`) — the names reach nothing else on the page",
       seen.unscoped.length === 0,
       JSON.stringify({ unscoped: seen.unscoped }),
     );
@@ -4553,14 +4554,20 @@ export async function testConversationCodeColours(browser, origin, ok) {
         const pre = [...document.querySelectorAll("#worker-view .helper-said pre.md-block")].find((one) => one.textContent.includes(string));
         pre.scrollIntoView({ block: "center" });
         await window.__COLOURS__.frames(3);
-        const node = pre.firstChild;
+        // The words wherever they stand: the fence's text, or the span they
+        // are drawn in.
         const rect = (words) => {
-          const range = document.createRange();
-          const at = node.data.indexOf(words);
-          range.setStart(node, at);
-          range.setEnd(node, at + words.length);
-          const box = range.getBoundingClientRect();
-          return { x: Math.floor(box.left), y: Math.floor(box.top), width: Math.ceil(box.width), height: Math.ceil(box.height) };
+          const walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+            const at = node.data.indexOf(words);
+            if (at < 0) continue;
+            const range = document.createRange();
+            range.setStart(node, at);
+            range.setEnd(node, at + words.length);
+            const box = range.getBoundingClientRect();
+            return { x: Math.floor(box.left), y: Math.floor(box.top), width: Math.ceil(box.width), height: Math.ceil(box.height) };
+          }
+          return null;
         };
         const root = getComputedStyle(document.documentElement);
         return {
@@ -4587,9 +4594,9 @@ export async function testConversationCodeColours(browser, origin, ok) {
     // While it streams: the fence being written stands plain; closed and
     // settled, it takes its colours.
     const streamed = await page.evaluate(async () => {
-      const { frames, settle, ranges } = window.__COLOURS__;
+      const { frames, settle, worn } = window.__COLOURS__;
       const row = () => document.querySelector("#worker-view .helper-turns > .is-streaming.is-assistant");
-      const inside = (node) => ranges().filter((one) => node?.contains(one.node)).map((one) => `${one.role}:${one.words}`);
+      const inside = (node) => worn().filter((one) => node?.contains(one.node)).map((one) => `${one.role}:${one.words}`);
       window.__CONVERSATION__.status = "working";
       window.__CONVERSATION__.live = [{ role: "assistant", text: "바꿉니다.\n\n```rust\nfn streamed() {\n    let open = 1;" }];
       await pollHelperPages();
@@ -4614,16 +4621,71 @@ export async function testConversationCodeColours(browser, origin, ok) {
       JSON.stringify(streamed),
     );
 
-    // A closed conversation leaves no colour behind.
+    // A fence the person is selecting keeps its words — and the selection —
+    // until the selection moves, and takes its colours then. The selection is
+    // made in the very paint that draws the fence, so it stands before any
+    // slice runs.
+    const selecting = await page.evaluate(async (code) => {
+      const { frames, settle, worn } = window.__COLOURS__;
+      const selection = document.getSelection();
+      const settledPre = () => document.querySelector("#worker-view .helper-turns > .is-streaming.is-assistant .helper-said-settled pre.md-block");
+      const paint = window.paintLiveAnswerNow;
+      let chosen = null;
+      window.paintLiveAnswerNow = function selectingPaint(...args) {
+        const out = paint.apply(this, args);
+        const node = chosen === null ? settledPre()?.firstChild : null;
+        if (node?.nodeType === Node.TEXT_NODE) {
+          const range = document.createRange();
+          range.setStart(node, 6);
+          range.setEnd(node, 48);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          chosen = selection.toString();
+        }
+        return out;
+      };
+      try {
+        window.__CONVERSATION__.status = "working";
+        window.__CONVERSATION__.live = [{ role: "assistant", text: `고를 곳입니다.\n\n\`\`\`ts\n${code}\n\`\`\`\n\n다음` }];
+        await pollHelperPages();
+        await frames(4);
+        await settle();
+      } finally {
+        window.paintLiveAnswerNow = paint;
+      }
+      const pre = settledPre();
+      const inside = () => worn().filter((one) => pre?.contains(one.node)).length;
+      const held = { still: chosen !== null && selection.toString() === chosen, spans: inside(), words: pre?.textContent === code };
+      selection.removeAllRanges();
+      await frames(2);
+      await settle();
+      const moved = { spans: inside(), words: pre?.textContent === code };
+      window.__CONVERSATION__.live = [];
+      window.__CONVERSATION__.status = "idle";
+      await pollHelperPages();
+      await frames(3);
+      return { chosen: chosen?.length ?? 0, held, moved };
+    }, SELECTED_CODE);
+    ok(
+      "P1: a fence the person is selecting keeps its words and the selection while the selection stands, and takes its colours once it moves",
+      selecting.chosen > 0 && selecting.held.still && selecting.held.spans === 0 && selecting.held.words &&
+        selecting.moved.spans > 0 && selecting.moved.words,
+      JSON.stringify(selecting),
+    );
+
+    // A closed conversation leaves no colour, and nothing in line, behind.
     const released = await page.evaluate(async () => {
-      const before = window.__COLOURS__.ranges().length;
+      const lined = () => typeof codeColour === "undefined"
+        ? 0
+        : codeColour.queue.length + (codeColour.held?.length ?? 0) + (codeColour.job === null ? 0 : 1);
+      const before = window.__COLOURS__.worn().length;
       closeTab(tabs.find((one) => one.worker?.helper?.id === WIRE_LOG_ID).id);
       await window.__COLOURS__.frames(3);
-      return { before, after: window.__COLOURS__.ranges().length };
+      return { before, after: window.__COLOURS__.worn().length, lined: lined() };
     });
     ok(
-      "P1: closing the conversation lets every colour its fences wore go",
-      released.before > 0 && released.after === 0,
+      "P1: closing the conversation takes its colours with its fences and leaves nothing in line",
+      released.before > 0 && released.after === 0 && released.lined === 0,
       JSON.stringify(released),
     );
     ok("P1: the colours raised no page errors", faults.length === 0, faults.join("\n"));
@@ -4656,21 +4718,18 @@ export async function testConversationCodeColours(browser, origin, ok) {
     });
     await openFixtureConversation(long.page, conversationFixture());
     const seen = await long.page.evaluate(async () => {
-      const { frames, settle, ranges } = window.__COLOURS__;
+      const { frames, settle, worn } = window.__COLOURS__;
       const list = document.querySelector("#worker-view .helper-turns");
       await frames(4);
       await settle();
       const judge = () => {
         const byRow = new Map();
-        let loose = 0;
-        for (const one of ranges()) {
-          const row = one.node.isConnected ? one.node.parentElement?.closest(".helper-turn") : null;
-          if (!row) loose += 1;
-          else byRow.set(row, (byRow.get(row) ?? 0) + 1);
+        for (const one of worn()) {
+          const row = one.node.closest(".helper-turn");
+          if (row) byRow.set(row, (byRow.get(row) ?? 0) + 1);
         }
         const answers = [...list.querySelectorAll(":scope > .helper-turn.is-assistant")];
         return {
-          loose,
           shelvedWorn: answers.filter((row) => row.__shelved && byRow.has(row)).length,
           standing: answers.filter((row) => !row.__shelved && row.querySelector("pre.md-block")).length,
           standingPlain: answers.filter((row) => !row.__shelved && row.querySelector("pre.md-block") && !byRow.has(row)).length,
@@ -4693,7 +4752,7 @@ export async function testConversationCodeColours(browser, origin, ok) {
     });
     ok(
       "P1: on a 400-turn page the answers that stand their bodies wear their colours and the shelved ones hold none; scrolled to the top, the rows that came back are coloured again and the foot's shelved rows gave theirs back",
-      [seen.atFoot, seen.atTop].every((at) => at.standing > 0 && at.standingPlain === 0 && at.shelvedWorn === 0 && at.loose === 0),
+      [seen.atFoot, seen.atTop].every((at) => at.standing > 0 && at.standingPlain === 0 && at.shelvedWorn === 0),
       JSON.stringify(seen),
     );
     ok(
@@ -4706,7 +4765,7 @@ export async function testConversationCodeColours(browser, origin, ok) {
     await long.page.close();
   }
 
-  // An engine without the Highlight API: the code as it is, and nothing breaks.
+  // An engine without the Highlight API colours all the same: spans need none.
   const bare = await openWindowTestPage(browser, origin, {
     before: (page) => page.addInitScript(() => {
       delete window.Highlight;
@@ -4720,12 +4779,12 @@ export async function testConversationCodeColours(browser, origin, ok) {
     const seen = await bare.page.evaluate(async () => {
       for (let beat = 0; beat < 6; beat += 1) await window.__PAINTED__();
       const pres = [...document.querySelectorAll("#worker-view .helper-said pre.md-block")];
-      const names = [...(window.CSS?.highlights?.keys() ?? [])].filter((name) => name.startsWith("chat-code-"));
-      return { api: typeof window.Highlight, fences: pres.length, words: pres.map((pre) => pre.textContent), names };
+      const spans = pres.reduce((sum, pre) => sum + pre.querySelectorAll(":scope > [class^='chat-code-']").length, 0);
+      return { api: typeof window.Highlight, fences: pres.length, words: pres.map((pre) => pre.textContent), spans };
     });
     ok(
-      "P1: an engine without the Highlight API shows every fence's code as it is, and raises nothing",
-      seen.api === "undefined" && seen.fences === CODE_FENCES.length && seen.names.length === 0 &&
+      "P1: an engine without the Highlight API wears the colours all the same — spans need none — and raises nothing",
+      seen.api === "undefined" && seen.fences === CODE_FENCES.length && seen.spans > 0 &&
         JSON.stringify(seen.words) === JSON.stringify(CODE_FENCES.map((fence) => fence.code)) && bare.faults.length === 0,
       JSON.stringify({ ...seen, faults: bare.faults.slice(0, 2) }),
     );
@@ -4792,10 +4851,13 @@ export async function testConversationStreamWork(browser, origin, ok) {
       const settled = row?.querySelector(".helper-said-settled");
       seen.settledLength = row?.__settledEnd ?? -1;
       seen.drawn = drawn;
-      // The settled part stands as one drawing of the same words does.
+      // The settled part stands as one drawing of the same words does — its
+      // fences' role spans are their colours, not the drawing's shape.
       const once = document.createElement("div");
       paintHelperProse(once, text.slice(0, seen.settledLength), helperBase(row.closest(".helper-turns").__run), { colour: false });
-      const shape = (node) => [...node.querySelectorAll("*")].map((one) => `${one.tagName}.${one.className}`).join(" ");
+      const shape = (node) => [...node.querySelectorAll("*")]
+        .filter((one) => !one.matches("pre.md-block > [class^='chat-code-']"))
+        .map((one) => `${one.tagName}.${one.className}`).join(" ");
       seen.sameWords = settled?.textContent === once.textContent;
       seen.sameShape = settled !== null && shape(settled) === shape(once);
       window.__CONVERSATION__.live = [];
