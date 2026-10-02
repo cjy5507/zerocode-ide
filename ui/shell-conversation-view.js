@@ -1843,7 +1843,8 @@ function stepFoundLines(output) {
 const STEP_URL_RE = /https?:\/\/[^\s"'<>()[\]{}]+/g;
 
 function stepSearchCount(output) {
-  return new Set(output.match(STEP_URL_RE) ?? []).size;
+  // An address that ends a sentence keeps its stop outside it (the answer's own links' rule).
+  return new Set((output.match(STEP_URL_RE) ?? []).map((url) => url.replace(HELPER_LINK_TAIL_RE, ""))).size;
 }
 
 /* What a page read said of itself (t-22100): the HTTP status and the size the
@@ -2188,8 +2189,6 @@ function stepJoins(before, turn, kind) {
     stepReceives(before, kind);
 }
 
-/* `turn` joins `before` — a step, which becomes a row of two, or a row of
- * steps already. Returns the row that stands. */
 /* A step leaving the list for the row that folds it: the shelf forgets it
  * first — a shell step's lines are watched (t-22100), and a row the watcher
  * still holds is a row the page keeps alive. */
@@ -2198,6 +2197,8 @@ function dropStep(row) {
   row.remove();
 }
 
+/* `turn` joins `before` — a step, which becomes a row of two, or a row of
+ * steps already. Returns the row that stands. */
 function absorbStep(run, before, turn) {
   let row = before;
   if (!before.classList.contains("is-run")) {
@@ -2483,8 +2484,10 @@ function nowWordsOf(list) {
   const thinking = going?.querySelector(".helper-step-target")?.textContent ?? "";
   if (thinking !== "") return thinking;
   // The answer is being written (t-22100): the phase the provider's own stream
-  // says it is in, in the window's words.
-  return list.querySelector(":scope > .is-streaming.is-assistant") ? t("worker.nowWriting", "답을 쓰는 중") : "";
+  // says it is in, in the window's words — an answer the stream said is over
+  // and that waits for the transcript is not being written.
+  const writing = [...list.querySelectorAll(":scope > .is-streaming.is-assistant")].some((row) => row.__over !== true);
+  return writing ? t("worker.nowWriting", "답을 쓰는 중") : "";
 }
 
 /* ---- the foot line, when no row is out to name (t-18702) ----------------------------
