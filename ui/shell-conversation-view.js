@@ -1125,7 +1125,9 @@ function dressCodeCopies(host) {
 /* - `sliceMs`: the most a slice holds the main thread — the rest of a frame
  *   stays the page's, and a key pressed meanwhile waits at most this long.
  *   A unit of work is not begun when the slice's longest one so far would
- *   not fit in what is left.
+ *   not fit in what is left, and the line is drawn one tick of the page's
+ *   clock early: a clock that counts whole milliseconds (WebKit's) reads 4
+ *   when nearly 5 have passed.
  * - A unit is one step of the parser, `unitChars` characters of the walk,
  *   or `unitRanges` ranges laid: the clock is looked at between two.
  * - `waitMs`: a slice asked for while the page stays busy (a long stream)
@@ -1189,7 +1191,31 @@ const codeColour = {
   highlighter: null,
   // Whether this engine can colour, asked once.
   able: null,
+  // One tick of the page's clock, read once.
+  tick: null,
 };
+
+/* The clock's tick: how far `performance.now()` moves when it moves — five
+ * microseconds in one engine, a whole millisecond in another. Read once, by
+ * waiting for the clock to move (at most one tick); a clock that does not
+ * move within the slice's own line is taken to tick by the whole line, and
+ * each slice then runs one unit. */
+function codeClockTick() {
+  if (codeColour.tick === null) {
+    const from = performance.now();
+    const giveUp = Date.now() + CODE_COLOUR.sliceMs;
+    let next = from;
+    while (next === from && Date.now() <= giveUp) next = performance.now();
+    codeColour.tick = next === from ? CODE_COLOUR.sliceMs : Math.min(next - from, CODE_COLOUR.sliceMs);
+  }
+  return codeColour.tick;
+}
+
+/* A slice's clock: its line, the longest unit it has run so far, and how
+ * many it has run. */
+function codeSliceClock() {
+  return { until: performance.now() + CODE_COLOUR.sliceMs - codeClockTick(), most: 0, units: 0 };
+}
 
 /* Whether this engine can colour: the highlight registry, a highlight that
  * takes a static range (tried once, on an empty one), and the editor's walk
@@ -1254,7 +1280,7 @@ function codeMark(role) {
  * throw is the page's to see, a moment later. */
 function colourCodeIn(host) {
   if (!codeColourable()) return;
-  const clock = { until: performance.now() + CODE_COLOUR.sliceMs, most: 0 };
+  const clock = codeSliceClock();
   for (const pre of host.querySelectorAll("pre.md-block")) {
     if (pre.__codeColour !== undefined) continue;
     const language = codeLanguageOf(pre.dataset.language);
@@ -1298,7 +1324,7 @@ function askCodeSlice() {
  * throws is let go plain, and the throw is the page's to see. */
 function colourCodeSlice() {
   codeColour.asked = false;
-  const clock = { until: performance.now() + CODE_COLOUR.sliceMs, most: 0 };
+  const clock = codeSliceClock();
   sweepCodeColours();
   for (;;) {
     codeColour.job ??= nextCodeJob();
@@ -1319,9 +1345,10 @@ function colourCodeSlice() {
   askCodeSlice();
 }
 
-/* Whether one more unit fits in the slice, by its longest unit so far. */
+/* Whether one more unit fits in the slice, by its longest unit so far — the
+ * first always does, so every slice moves the colouring on. */
 function codeTimeLeft(clock) {
-  return performance.now() + clock.most <= clock.until;
+  return clock.units === 0 || performance.now() + clock.most <= clock.until;
 }
 
 /* One unit of work, timed into the slice's clock. */
@@ -1329,6 +1356,7 @@ function codeUnit(clock, unit) {
   const from = performance.now();
   unit();
   clock.most = Math.max(clock.most, performance.now() - from);
+  clock.units += 1;
 }
 
 /* The next fence in line still standing on the page. */
