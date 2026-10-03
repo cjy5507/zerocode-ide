@@ -243,7 +243,14 @@ pub(crate) struct WireState {
     /// tool calls name, said on each activity it files (t-31715) because a wire
     /// session has no pane to resolve one against.
     pub(crate) cwd: Option<String>,
+    /// What the session's tool calls said since the session last told its
+    /// window (`take_activities`).
+    activity: Vec<zerocode_core::hook::Activity>,
 }
+
+/// The most activities a session holds untold. The session tells its window
+/// after every line it takes, so this only bounds a state nobody drains.
+const WIRE_ACTIVITY_CAP: usize = 256;
 
 /// Where a picture the page asks a session for stands: kept by the session
 /// (`wire:<n>`, what its tools handed back), or in the transcript of the pane
@@ -358,6 +365,7 @@ pub(crate) enum Outgoing {
 
 impl WireState {
     fn push(&mut self, turn: TranscriptTurn) {
+        self.note_activity(&turn);
         let seq = self.next_seq;
         self.next_seq += 1;
         self.turns.push(SeqTurn { seq, turn });
@@ -548,10 +556,29 @@ impl WireState {
     /// (t-31715): each call's start and each result's end, as the activity a
     /// hook agent would have said — the road the file tree hears wire sessions
     /// on. Drained, so that each is told once.
-    ///
-    /// Red stub: the behaviour is written in the next commit.
     pub(crate) fn take_activities(&mut self) -> Vec<zerocode_core::hook::Activity> {
-        Vec::new()
+        std::mem::take(&mut self.activity)
+    }
+
+    /// A tool turn is also something the file tree hears (t-31715). Every
+    /// protocol's calls and results become turns through `push` — the
+    /// adapters' own (`call`, `result`) and Claude Code's, which the transcript
+    /// reader makes — so this is the one place they are told from, whatever
+    /// the protocol, and it says them as the one function that says a hook
+    /// agent's (`zerocode_core::hook::activity_of_turn`).
+    fn note_activity(&mut self, turn: &TranscriptTurn) {
+        let Some(tool) = turn.tool.as_ref() else {
+            return;
+        };
+        let Some(mut activity) = zerocode_core::hook::activity_of_turn(&turn.role, tool) else {
+            return;
+        };
+        activity.cwd.clone_from(&self.cwd);
+        self.activity.push(activity);
+        if self.activity.len() > WIRE_ACTIVITY_CAP {
+            let over = self.activity.len() - WIRE_ACTIVITY_CAP;
+            self.activity.drain(..over);
+        }
     }
 
     /// The turns from `after` on, for the page.
@@ -1857,6 +1884,14 @@ fn take_response(protocol: Protocol, state: &mut WireState, message: &serde_json
 
 // ---------------------------------------------------------------- session
 
+/// What a session tells its window: that its state moved in a way the page
+/// draws, so the page polls at once instead of on its next tick (`changed`),
+/// and what its tool calls said, for the window's file tree (`acted`, t-31715).
+pub(crate) struct WireNews {
+    pub(crate) changed: Box<dyn Fn(WireId) + Send + Sync>,
+    pub(crate) acted: Box<dyn Fn(WireId, Vec<zerocode_core::hook::Activity>) + Send + Sync>,
+}
+
 pub(crate) struct WireSession {
     pub(crate) id: WireId,
     pub(crate) agent: String,
@@ -1866,9 +1901,7 @@ pub(crate) struct WireSession {
     next_request: AtomicI64,
     pub(crate) state: Mutex<WireState>,
     replies: Mutex<HashMap<i64, mpsc::SyncSender<serde_json::Value>>>,
-    /// Told each time the state changed in a way the page draws, so the page
-    /// polls at once instead of on its next tick.
-    changed: Box<dyn Fn(WireId) + Send + Sync>,
+    news: WireNews,
     /// When the live text was last announced (`LIVE_NOTIFY_GAP`).
     last_live_notice: Mutex<Instant>,
 }
@@ -1879,7 +1912,7 @@ impl WireSession {
         if let Ok(mut at) = self.last_live_notice.lock() {
             *at = Instant::now();
         }
-        (self.changed)(self.id);
+        (self.news.changed)(self.id);
     }
 
     /// Tell the page what a line changed: a settled change at once, a live
@@ -1907,7 +1940,20 @@ impl WireSession {
             }
         });
         if due {
-            (self.changed)(self.id);
+            (self.news.changed)(self.id);
+        }
+    }
+
+    /// The tool calls the line just taken said, to the window's file tree
+    /// (t-31715) — after the page's own news, in the order they were said.
+    fn tell_tools(&self) {
+        let told = self
+            .state
+            .lock()
+            .map(|mut state| state.take_activities())
+            .unwrap_or_default();
+        if !told.is_empty() {
+            (self.news.acted)(self.id, told);
         }
     }
 
@@ -2006,6 +2052,7 @@ impl WireSession {
             }
         }
         self.announce(before);
+        self.tell_tools();
     }
 
     pub(crate) fn send(&self, text: &str) -> Result<(), String> {
@@ -2343,8 +2390,9 @@ impl WireRuntime {
     /// session. `binary` is the agent's executable as this machine found it;
     /// `resume` continues the conversation with that session id where the
     /// road has a flag for it; `env` is the launch's own environment (which
-    /// account it runs as — an empty value removes the variable); `changed`
-    /// is told the session's id each time the page should look.
+    /// account it runs as — an empty value removes the variable); `news` is
+    /// told the session's id each time the page should look, and what its tool
+    /// calls said.
     #[allow(clippy::too_many_arguments)] // Each is one independent fact of one launch.
     pub(crate) fn start(
         &self,
@@ -2354,7 +2402,7 @@ impl WireRuntime {
         version: &str,
         resume: Option<&str>,
         env: &[(String, String)],
-        changed: impl Fn(WireId) + Send + Sync + 'static,
+        news: WireNews,
     ) -> Result<Arc<WireSession>, String> {
         let road =
             zerocode_core::agent::wire_road(agent).ok_or_else(|| format!("{agent} has no wire"))?;
@@ -2403,10 +2451,11 @@ impl WireRuntime {
                 // The one place an agent fact enters the adapter: the
                 // catalog's, read here where the agent is still named.
                 plan_tool: zerocode_core::agent::agent_voice(agent).plan_tool,
+                cwd: Some(cwd.to_string_lossy().into_owned()),
                 ..WireState::default()
             }),
             replies: Mutex::new(HashMap::new()),
-            changed: Box::new(changed),
+            news,
             last_live_notice: Mutex::new(Instant::now()),
         });
         let reader = Arc::clone(&session);

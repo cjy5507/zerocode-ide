@@ -60,6 +60,19 @@ pub struct ToolCallFacts<'a> {
     pub file: Option<&'a str>,
 }
 
+impl ToolCallFacts<'_> {
+    /// What the window reads as the call's input: the file in Claude's spelling
+    /// (`{"file_path": …}`) when the call names one — the whole path, which is
+    /// what the file tree resolves and what every other agent's hook says —
+    /// else the compact input the working line shows, when there is one.
+    fn input(&self, compact: Option<&str>) -> Option<serde_json::Value> {
+        match self.file {
+            Some(file) => Some(serde_json::json!({ "file_path": file })),
+            None => compact.map(|text| serde_json::Value::String(text.to_string())),
+        }
+    }
+}
+
 /// hookd `HookJson` 과 같은 모양의 봉투. `payload` 는 이벤트별 JSON 객체.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HookEnvelope {
@@ -595,9 +608,12 @@ impl HookReporter {
     /// person to "working" every second and filled the window's activity ring
     /// with a stopwatch (t-2550).
     ///
-    /// `tool_input` is what the window's activity row shows as the target and
-    /// `activity` is the same compact fact `session_status.activity` carries
-    /// at the moment the call began.
+    /// `tool_input` is what the window's activity row shows as the target — the
+    /// whole path for a call that names a file (the compact tail the working
+    /// line shows cannot be resolved by a file tree), the compact input for
+    /// the rest — and `activity` is the same compact fact
+    /// `session_status.activity` carries at the moment the call began.
+    /// `tool_use_id` is the runtime's id for the call, the same on its end.
     pub fn pre_tool_use(
         &self,
         call: ToolCallFacts<'_>,
@@ -609,17 +625,29 @@ impl HookReporter {
             "PreToolUse",
             serde_json::json!({
                 "tool_name": call.name,
-                "tool_input": tool_input,
+                "tool_use_id": call.call_id,
+                "tool_input": call.input(Some(tool_input)),
                 "activity": activity,
                 "session_id": session_id,
             }),
         );
     }
 
+    /// One tool END, in Claude's spelling: the id its start said, and — for a
+    /// call that named a file — the same input, so a window that missed the
+    /// start (a batch lost, opened mid-turn) still knows which file ended.
     pub fn post_tool_use(&self, call: ToolCallFacts<'_>, is_error: bool, session_id: &str) {
+        let mut payload = serde_json::json!({
+            "tool_name": call.name,
+            "tool_use_id": call.call_id,
+            "session_id": session_id,
+        });
+        if let Some(input) = call.input(None) {
+            payload["tool_input"] = input;
+        }
         self.post(
             if is_error { "PostToolUseFailure" } else { "PostToolUse" },
-            serde_json::json!({ "tool_name": call.name, "session_id": session_id }),
+            payload,
         );
     }
 
@@ -1044,10 +1072,16 @@ mod tests {
         assert_eq!(envelope.hook_event_name, "PreToolUse");
         assert_eq!(envelope.pane_key, "test/pane");
         // The REAL tool name, so the window's `AskUserQuestion` rule and its
-        // verb table keep working; the compact target the window's row shows;
-        // and the same fact `session_status.activity` says, at second zero.
+        // verb table keep working; the call's whole file, which the window's
+        // row shows and its file tree resolves (the compact tail stays in the
+        // activity fact beside it); and the same fact `session_status.activity`
+        // says, at second zero.
         assert_eq!(envelope.payload["tool_name"], "Read");
-        assert_eq!(envelope.payload["tool_input"], "tui/view.rs");
+        assert_eq!(
+            envelope.payload["tool_input"],
+            serde_json::json!({ "file_path": "/repo/zo-ide/crates/zo-ide/src/tui/view.rs" })
+        );
+        assert_eq!(envelope.payload["tool_use_id"], "call-1");
         assert_eq!(
             envelope.payload["activity"],
             serde_json::json!({

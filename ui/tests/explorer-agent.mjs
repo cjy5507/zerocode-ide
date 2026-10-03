@@ -1066,3 +1066,80 @@ export async function testExplorerWriting(browser, origin, ok) {
     await page.close();
   }
 }
+
+/* ---- slice 8, memory: a long run grows nothing (t-31715) -----------------------
+ *
+ * An agent works for hours: thousands of calls, many of whose ends never reach
+ * the window. Everything the tree holds for them — the open writes, the files
+ * waiting for git, the rows it dressed — is bounded by a cap, so the heap after
+ * a long run, with garbage collected, is the heap before it. Measured over CDP
+ * (`HeapProfiler.collectGarbage`, `Runtime.getHeapUsage`: exact, where the
+ * page's own `performance.memory` is bucketed) and printed as
+ * `EXPLORER_AGENT_MEMORY`, so a before and an after are two log lines. */
+export async function testExplorerAgentMemory(browser, origin, ok) {
+  const listings = { "": [] };
+  for (let dir = 0; dir < 20; dir += 1) {
+    const name = `d${String(dir).padStart(2, "0")}`;
+    listings[""].push({ name, is_dir: true });
+    listings[name] = [];
+    for (let file = 0; file < 20; file += 1) listings[name].push({ name: `f${String(file).padStart(2, "0")}.rs`, is_dir: false });
+  }
+  const windowMs = await treeConstant("TREE_NUMSTAT_WINDOW_MS");
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  const cdp = await page.context().newCDPSession(page);
+  const heap = async () => {
+    await cdp.send("HeapProfiler.collectGarbage");
+    await cdp.send("HeapProfiler.collectGarbage");
+    return (await cdp.send("Runtime.getHeapUsage")).usedSize;
+  };
+  try {
+    await standTree(page, listings);
+    await page.evaluate(async () => {
+      const { settle } = window.__XT__;
+      window.__ANSWER__.scm_numstat = ({ paths }) => paths.map((path) => ({ path, code: " M", staged: false, changed: true, added: 2, removed: 1, conflict: null, origin: null }));
+      for (const row of [...fileTree.querySelectorAll(":scope > .tree-row.is-dir")]) await row._treeUnfold(true);
+      await settle();
+    });
+    // One round: 200 calls that end, 200 that never do — each with an id nobody
+    // has used — over the 400 files, then a breath.
+    const round = (rounds, windowMs) => page.evaluate(async ({ rounds, windowMs }) => {
+      const { root, fire, act } = window.__XT__;
+      const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+      let calls = window.__MEMORY_CALLS__ ?? 0;
+      for (let at = 0; at < rounds; at += 1) {
+        for (let one = 0; one < 200; one += 1) {
+          const dir = `d${String(calls % 20).padStart(2, "0")}`;
+          const file = `f${String(Math.floor(calls / 20) % 20).padStart(2, "0")}.rs`;
+          const target = `${root}/${dir}/${file}`;
+          fire("term:1", [act("edit", target, "started", { call: `mem${calls}` })]);
+          if (one % 2 === 0) fire("term:1", [act("edit", target, "finished", { call: `mem${calls}` })]);
+          calls += 1;
+        }
+        await sleep(windowMs + 40);
+      }
+      window.__MEMORY_CALLS__ = calls;
+      return calls;
+    }, { rounds, windowMs });
+    // Warm: the first rounds build what any long run keeps (rows dressed, maps filled).
+    await round(5, windowMs);
+    const before = await heap();
+    const calls = await round(50, windowMs);
+    const after = await heap();
+    const held = await page.evaluate(() => ({
+      writes: typeof treeWrites === "object" ? treeWrites.size : NaN,
+      wanted: typeof treeNumstatWanted === "object" ? treeNumstatWanted.size : NaN,
+      dressed: typeof treeDressedRows === "object" ? treeDressedRows.size : NaN,
+      touches: treeTouches.size,
+      cap: typeof TREE_TOUCH_CAP === "number" ? TREE_TOUCH_CAP : NaN,
+      activityRing: [...paneActivities.values()].reduce((sum, list) => sum + list.length, 0),
+    }));
+    const growthKiB = Math.round((after - before) / 1024);
+    const numbers = { calls, beforeKiB: Math.round(before / 1024), afterKiB: Math.round(after / 1024), growthKiB, ...held };
+    console.log(`EXPLORER_AGENT_MEMORY ${JSON.stringify(numbers)}`);
+    ok("what the tree holds for a long run is bounded by its caps: the open writes, the files waiting for git, the rows dressed and the window's ring", held.writes <= held.cap && held.wanted <= held.cap * 8 && held.dressed <= held.cap * 8 && held.touches <= held.cap && held.activityRing <= 20 * 4, JSON.stringify(numbers));
+    ok("fifty rounds of four hundred calls — half of them never ended — leave the heap, garbage collected, where it was (growth under 2 MiB)", Number.isFinite(growthKiB) && growthKiB < 2048 && held.writes <= held.cap, JSON.stringify(numbers));
+    ok("the memory suite raised no renderer faults", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}

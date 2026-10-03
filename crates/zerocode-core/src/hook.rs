@@ -1806,7 +1806,7 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             writes: touched.writes,
             vcs: touched.vcs,
             cwd: touched.cwd,
-            call: None,
+            call: worker_call_id_in(parsed),
         });
     }
     if word == "userpromptsubmit" || word == "beforesubmitprompt" {
@@ -1844,12 +1844,43 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
 /// says. `role` is the turn's (`tool` — a call, `tool_result` — its end);
 /// every other turn is the conversation's and says nothing here.
 ///
-/// Red stub: the behaviour is written in the next commit.
+/// The files are the call's own (`file`, what its input names) and the ones its
+/// edits describe, each as the agent wrote the path — a patch names several and
+/// no file of its own. A result carries the call's id and, where its agent
+/// repeats it, the edits; its name may be empty (Claude Code's result lines name
+/// no tool), and it then says `NAMELESS_TOOL_VERB`.
 #[must_use]
 pub fn activity_of_turn(role: &str, tool: &crate::transcript::TranscriptTool) -> Option<Activity> {
-    let _ = (role, tool);
-    None
+    let phase = match role {
+        TOOL_CALL_ROLE => Phase::Started,
+        TOOL_RESULT_ROLE if tool.is_error => Phase::Failed,
+        TOOL_RESULT_ROLE => Phase::Finished,
+        _ => return None,
+    };
+    let verb =
+        Tool::named(&tool.name).unwrap_or_else(|| Tool::Other(NAMELESS_TOOL_VERB.to_string()));
+    Some(Activity {
+        verb,
+        target: tool
+            .file
+            .as_ref()
+            .and_then(|file| activity_text(&file.path)),
+        phase,
+        reads: Vec::new(),
+        writes: tool.edits.iter().map(|edit| edit.path.clone()).collect(),
+        vcs: Vec::new(),
+        cwd: None,
+        call: Some(tool.call_id.clone()).filter(|id| !id.trim().is_empty()),
+    })
 }
+
+/// The transcript roles a tool call and its result take (`TranscriptTurn::role`).
+const TOOL_CALL_ROLE: &str = "tool";
+const TOOL_RESULT_ROLE: &str = "tool_result";
+
+/// What a result whose agent named no tool says it is: the neutral word zo's
+/// own reporter files an unnamed call under.
+const NAMELESS_TOOL_VERB: &str = "tool";
 
 /// The agent CLI a shell command launches, or `None` for an ordinary command.
 ///

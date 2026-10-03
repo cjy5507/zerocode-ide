@@ -7753,14 +7753,26 @@ fn what_an_agent_is_doing_reaches_the_window_bounded_and_coalesced() {
          pane is working:\n{activity_road}"
     );
 
-    // The floor. The emit is gated on `due`, which is the only place the
-    // throttle lives — an `emit` reached without it is one emit per hook
-    // event, which is what this window already paid for once on the
+    // The floor. The emit is gated on the ring's `release`, which asks `due` —
+    // the only place the throttle lives — and the batch leaves through
+    // `send_activities` alone: an `emit` reached without it is one emit per
+    // hook event, which is what this window already paid for once on the
     // painting side.
     assert!(
-        activity_road.contains("ring.due(Instant::now())")
-            && activity_road.contains(r#"app.emit("hook:activity", PaneActivities { pane"#),
+        activity_road.contains("ring.release(Instant::now())")
+            && activity_road.contains("send_activities(&app, pane, batch, owed);"),
         "the activity emit no longer goes through the throttle:\n{activity_road}"
+    );
+    let sending = block_after(shipped, "fn send_activities(");
+    assert!(
+        sending.contains(r#"app.emit("hook:activity", PaneActivities { pane, activities })"#),
+        "a batch leaves for the window some other way than the one door:\n{sending}"
+    );
+    let releasing = block_after(shipped, "    fn release(");
+    assert!(
+        releasing.contains("self.due(now)") && releasing.contains("self.owed(now)"),
+        "a release no longer asks the floor first, or forgets what it holds \
+         back:\n{releasing}"
     );
     let throttle = block_after(shipped, "    fn due(&mut self, now: Instant)");
     assert!(
@@ -7773,12 +7785,40 @@ fn what_an_agent_is_doing_reaches_the_window_bounded_and_coalesced() {
         Duration::from_millis(100),
         "the emit floor moved"
     );
-    // And no timer anywhere on this road: the batch rides the next
-    // envelope, which is the documented trade and the reason there is no
+    // The decision has no timer: it is a question of the clock. What a held
+    // batch is owed (t-31715 — a write's END must not wait for the agent's
+    // next event, which is seconds of model thinking away) is promised by
+    // exactly one sleeping task for each held batch, made only when the ring
+    // says the batch is owed (`owed` says each held batch once), and never a
     // thread per card.
     assert!(
         !throttle.contains("spawn") && !throttle.contains("sleep"),
         "the throttle grew a timer of its own:\n{throttle}"
+    );
+    let owing = block_after(shipped, "    fn owed(&mut self, now: Instant)");
+    assert!(
+        owing.contains("self.pending == 0 || self.armed")
+            && owing.contains("self.armed = true;")
+            && !owing.contains("spawn")
+            && !owing.contains("sleep"),
+        "a held batch is promised more than once, or the ledger of promises \
+         grew a timer:\n{owing}"
+    );
+    let promising = block_after(shipped, "fn promise_activities(");
+    assert_eq!(
+        (
+            promising.matches("tauri::async_runtime::spawn(").count(),
+            promising.matches("tokio::time::sleep(wait)").count(),
+            promising.matches("std::thread").count(),
+        ),
+        (1, 1, 0),
+        "the deadline of a held batch is more than one sleeping task, or a \
+         thread:\n{promising}"
+    );
+    assert!(
+        sending.contains("promise_activities(app, pane.clone(), wait)")
+            && sending.contains("if let Some(wait) = owed {"),
+        "a promise is made without the ring saying one is owed:\n{sending}"
     );
 
     // The cap, which is what makes a per-agent history a bounded one.
@@ -7980,7 +8020,9 @@ fn a_helpers_line_counts_its_tool_uses_whoever_counted_them() {
     );
     let filing = block_after(shipped, "fn note_helper_activity(");
     assert!(
-        filing.contains("ring.note_fresh(activity)") && filing.contains("ring.due(Instant::now())"),
+        filing.contains("ring.note_fresh(activity)")
+            && filing.contains("ring.release(Instant::now())")
+            && filing.contains("send_activities(app, card, batch, owed);"),
         "the snapshot road files without the dedupe or without the \
          floor:\n{filing}"
     );
@@ -8439,6 +8481,63 @@ fn an_agent_that_left_its_shell_behind_stops_being_drawn_as_running() {
     );
 }
 
+/// A wire session's tool calls reach the window on the road every pane's
+/// travel, and are answered to the file tree alone (t-31715): the card's prefix
+/// is one word on both sides, the wire branch stands ahead of everything that
+/// files a card (the window's ring, the sidebar, the graph), the scoped
+/// question the tree asks after a write is registered under the name the
+/// window calls it by, and what the tree names in one question stays below
+/// what the backend refuses.
+#[test]
+fn a_wire_sessions_tool_calls_reach_the_file_tree_alone_and_its_question_is_bounded() {
+    let window = window_source();
+    assert!(
+        window.contains(&format!(
+            "const WIRE_CARD_PREFIX = \"{}\";",
+            hooks::ACTIVITY_WIRE_PREFIX
+        )),
+        "the window and the backend name a wire session's card differently"
+    );
+    let listening = block_after(window, r#"listen("hook:activity", (event) => {"#);
+    let wire_at = listening
+        .find("if (pane.startsWith(WIRE_CARD_PREFIX)) {")
+        .expect("the activity listener stopped telling a wire card apart");
+    let filing_at = listening
+        .find("paneActivities.set(pane, held.slice(-ACTIVITY_RING))")
+        .expect("the activity listener stopped keeping its ring");
+    assert!(
+        wire_at < filing_at
+            && listening[wire_at..filing_at].contains("noteTreeActivities(pane, activities);")
+            && listening[wire_at..filing_at].contains("return;"),
+        "a wire card reaches the sidebar's ring, or never reaches the \
+         tree:\n{listening}"
+    );
+    let seeding = block_after(window, "function seedActivities() {");
+    assert!(
+        seeding.contains("!card.pane.startsWith(WIRE_CARD_PREFIX)"),
+        "a window opened mid-run files a wire card in the sidebar's \
+         ring:\n{seeding}"
+    );
+
+    assert!(
+        window.contains(r#"invoke("scm_numstat", { paths })"#)
+            && shipped_backend().contains("            scm_numstat,\n"),
+        "the tree asks a question the backend does not answer under that name"
+    );
+    let named_by_tree: usize = window
+        .split("const TREE_NUMSTAT_PATHS_MAX = ")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .and_then(|number| number.replace('_', "").trim().parse().ok())
+        .expect("the tree's cap on one question is gone");
+    assert!(
+        (1..=scm_runtime::SCM_NUMSTAT_PATHS_MAX / 2).contains(&named_by_tree),
+        "the tree names {named_by_tree} paths in one question; the backend \
+         refuses more than {}",
+        scm_runtime::SCM_NUMSTAT_PATHS_MAX
+    );
+}
+
 /// A batch the floor held back is owed a deadline, once (t-31715): the last
 /// event of a burst — an edit's end — must reach the window when the floor
 /// opens, not whenever the agent next does something. One promise for each
@@ -8486,6 +8585,68 @@ fn a_batch_the_floor_held_back_is_owed_a_deadline_once() {
     ring.note(one("src/c.rs", Phase::Finished));
     assert!(ring.due(after(110)).is_none());
     assert_eq!(ring.owed(after(110)), Some(Duration::from_millis(90)));
+}
+
+/// A measurement, not a gate (t-31715): what the ring's deadline costs a busy
+/// card — a hundred thousand events at one a millisecond — against the decision
+/// the ring made before it (`note` and `due`), and how many promises the
+/// deadline makes: one for each held batch, which is one for each floor. Run it
+/// by name, on the low-spec profile too:
+/// `taskpolicy -b cargo test -p zerocode-shell --bin zerocode-shell -- --ignored --nocapture the_rings_deadline_costs`.
+#[test]
+#[ignore = "a measurement, not a gate: run it by name"]
+fn the_rings_deadline_costs_nanoseconds_an_event_and_one_promise_a_floor() {
+    use zerocode_core::hook::{Activity, Phase, Tool};
+
+    const EVENTS: u64 = 100_000;
+    let one = || Activity {
+        verb: Tool::Edit,
+        target: Some("src/a.rs".to_string()),
+        phase: Phase::Started,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        vcs: Vec::new(),
+        cwd: None,
+        call: Some("call-1".to_string()),
+    };
+    let start = Instant::now();
+    let at = |event: u64| start + Duration::from_millis(event);
+
+    let mut before = ActivityRing::default();
+    let began = Instant::now();
+    let mut batches_before = 0_u64;
+    for event in 0..EVENTS {
+        before.note(one());
+        if before.due(at(event)).is_some() {
+            batches_before += 1;
+        }
+    }
+    let before_ns = began.elapsed().as_nanos() / u128::from(EVENTS);
+
+    let mut after = ActivityRing::default();
+    let began = Instant::now();
+    let (mut batches_after, mut promises) = (0_u64, 0_u64);
+    for event in 0..EVENTS {
+        after.note(one());
+        let (batch, owed) = after.release(at(event));
+        batches_after += u64::from(batch.is_some());
+        promises += u64::from(owed.is_some());
+    }
+    let after_ns = began.elapsed().as_nanos() / u128::from(EVENTS);
+
+    println!(
+        "ACTIVITY_RING_NUMBERS {}",
+        serde_json::json!({
+            "events": EVENTS,
+            "decide_ns_before": before_ns,
+            "decide_ns_after": after_ns,
+            "emits_before": batches_before,
+            "emits_after": batches_after,
+            "promises": promises,
+        })
+    );
+    assert_eq!(batches_before, batches_after, "the deadline moved the floor");
+    assert!(promises <= batches_after + 1, "more promises than held batches");
 }
 
 /// What the file tree asks when an agent's write ends (t-31715), answered

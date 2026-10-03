@@ -1155,11 +1155,7 @@ impl Orchestrator {
             .iter()
             .map(OsString::from)
             .collect();
-        args.extend(paths.iter().map(|path| {
-            let mut literal = OsString::from(":(literal)");
-            literal.push(path.as_ref());
-            literal
-        }));
+        args.extend(paths.iter().map(|path| literal_pathspec(path.as_ref())));
         let output = run(&self.git, worktree, &args)?;
         if !output.ok {
             return Err(self.failure("diff HEAD", &output));
@@ -1194,27 +1190,57 @@ impl Orchestrator {
     /// whole-repository status per write is what it must never cost. A file
     /// that is clean, or that git has never heard of, has no record.
     ///
-    /// Red stub: the behaviour is written in the next commit.
+    /// Asked for nobody in particular and while an agent may be running its
+    /// own git, so it takes no optional lock (`NO_OPTIONAL_LOCKS`). Every
+    /// path is a literal pathspec behind `--`, as for [`Self::diff`].
     pub fn status_of<S: AsRef<OsStr>>(
         &self,
         worktree: impl AsRef<Path>,
         paths: &[S],
     ) -> Result<Vec<StatusEntry>, OrchestratorError> {
-        let _ = (worktree, paths);
-        Ok(Vec::new())
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut args: Vec<OsString> = [NO_OPTIONAL_LOCKS, "status", "--porcelain=v2", "-z", "--"]
+            .map(OsString::from)
+            .into();
+        args.extend(paths.iter().map(|path| literal_pathspec(path.as_ref())));
+        let output = run(&self.git, worktree.as_ref(), &args)?;
+        if !output.ok {
+            return Err(self.failure("status --porcelain=v2 -z (scoped)", &output));
+        }
+        Ok(parse_status(&output.stdout).uncommitted)
     }
 
     /// The `--numstat -z` answer for just `paths` (t-31715), verbatim, as
-    /// [`Self::numstat`] gives it for the whole checkout.
+    /// [`Self::numstat`] gives it for the whole checkout — and for the same
+    /// reason empty in a repository whose first commit has not landed.
     ///
-    /// Red stub: the behaviour is written in the next commit.
+    /// A diff against the working tree refreshes the index when it meets a
+    /// file whose stat changed and takes `index.lock` to write it, whatever
+    /// `--no-optional-locks` says; this read runs while an agent may be
+    /// running `git add`, so it also turns that refresh off (`NO_DIFF_REFRESH`).
     pub fn numstat_of<S: AsRef<OsStr>>(
         &self,
         worktree: impl AsRef<Path>,
         paths: &[S],
     ) -> Result<String, OrchestratorError> {
-        let _ = (worktree, paths);
-        Ok(String::new())
+        let worktree = worktree.as_ref();
+        if paths.is_empty() || !self.has_commits(worktree)? {
+            return Ok(String::new());
+        }
+        let mut args: Vec<OsString> = [NO_OPTIONAL_LOCKS]
+            .into_iter()
+            .chain(NO_DIFF_REFRESH)
+            .chain(["diff", "HEAD", "--numstat", "--find-renames", "-z", "--"])
+            .map(OsString::from)
+            .collect();
+        args.extend(paths.iter().map(|path| literal_pathspec(path.as_ref())));
+        let output = run(&self.git, worktree, &args)?;
+        if !output.ok {
+            return Err(self.failure("diff HEAD --numstat (scoped)", &output));
+        }
+        Ok(output.stdout)
     }
 
     /// Put `paths` in the index — what the source-control panel's stage does.
@@ -1671,6 +1697,20 @@ struct GitOutput {
 
 /// Orca's `BULK_CHUNK_SIZE`: how many pathspecs ride one git invocation.
 const BULK_CHUNK: usize = 100;
+
+/// The global option every read nobody asked for by hand takes: `git status`
+/// otherwise refreshes the index and takes `index.lock` to write it back, and a
+/// background read that holds the lock turns an agent's own `git add` into
+/// "index.lock exists".
+const NO_OPTIONAL_LOCKS: &str = "--no-optional-locks";
+
+/// What `--no-optional-locks` does not cover: a diff against the working tree
+/// refreshes the index itself when it meets a file whose stat changed
+/// (`diff.autoRefreshIndex`, on by default), holding `index.lock` while it does.
+/// With it off, `--numstat` and `--stat` answer an empty change for a file
+/// whose content did not move; `--name-only` and `--name-status` would still
+/// list it, so a read that wants names must not use them here.
+const NO_DIFF_REFRESH: [&str; 2] = ["-c", "diff.autoRefreshIndex=false"];
 
 /// `:(literal)path` — a filename with a `*` in it is a filename, not a glob.
 fn literal_pathspec(path: &OsStr) -> OsString {
@@ -2385,6 +2425,126 @@ prunable gitdir file points to non-existent location
             !counts.contains_key("new file.txt"),
             "an untracked file has no counts"
         );
+    }
+
+    /// The file tree asks while an agent may be running its own `git add`, so
+    /// a scoped read must not take the index's lock to rewrite it — which a
+    /// working-tree diff does on its own when a file's stat moved (a `touch`),
+    /// whatever `--no-optional-locks` says (t-24545). The index is byte for
+    /// byte what it was, and a file whose content did not move has no counts.
+    #[test]
+    fn the_scoped_reads_leave_the_index_untouched_even_when_a_files_stat_moved() {
+        let dir = empty_repository();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "one\n").expect("write");
+        commit_everything(root);
+        // The same bytes with a newer stamp: what `touch` leaves.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("a.txt"))
+            .expect("open");
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .expect("touch");
+        drop(file);
+        let index = || std::fs::read(root.join(".git").join("index")).expect("the index");
+        let before = index();
+        let orchestrator = Orchestrator::open(root).expect("open");
+
+        orchestrator
+            .status_of(root, &["a.txt"])
+            .expect("scoped status");
+        let counts = orchestrator
+            .numstat_of(root, &["a.txt"])
+            .expect("scoped numstat");
+
+        assert_eq!(index(), before, "a scoped read rewrote the index");
+        assert_eq!(counts, "", "a file whose content did not move has counts");
+    }
+
+    /// A repository whose first commit has not landed has nothing to count
+    /// against: an empty answer, not a failure — and still a record for what
+    /// is there.
+    #[test]
+    fn a_scoped_read_in_a_repository_with_no_commits_yet_answers_instead_of_failing() {
+        let dir = empty_repository();
+        std::fs::write(dir.path().join("first.txt"), "hello\n").expect("write");
+        let orchestrator = Orchestrator::open(dir.path()).expect("open");
+
+        assert_eq!(
+            orchestrator
+                .numstat_of(dir.path(), &["first.txt"])
+                .expect("scoped numstat"),
+            ""
+        );
+        let records = orchestrator
+            .status_of(dir.path(), &["first.txt"])
+            .expect("scoped status");
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].code, "??");
+        // Nothing asked, nothing run.
+        let none: [&str; 0] = [];
+        assert!(
+            orchestrator
+                .status_of(dir.path(), &none)
+                .expect("an empty question")
+                .is_empty()
+        );
+    }
+
+    /// A measurement, not a gate (t-31715): what the file tree's scoped question
+    /// costs in the repository this test runs in, against the whole-checkout
+    /// status and numstat a refresh per write would cost. Run it by name, on
+    /// the low-spec profile too:
+    /// `taskpolicy -b cargo test -p zerocode-orchestrator --lib -- --ignored --nocapture scoped_reads_cost`.
+    #[test]
+    #[ignore = "a measurement, not a gate: run it by name"]
+    fn scoped_reads_cost_a_fraction_of_the_whole_checkouts_status() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let orchestrator = Orchestrator::open(&root).expect("open the checkout");
+        let listing = run(&orchestrator.git, &root, ["ls-files"])
+            .expect("ls-files")
+            .stdout;
+        let tracked: Vec<&str> = listing.lines().collect();
+        let stride = (tracked.len() / 64).max(1);
+        let paths: Vec<&str> = tracked.iter().copied().step_by(stride).take(64).collect();
+        let median = |mut millis: Vec<f64>| {
+            millis.sort_by(f64::total_cmp);
+            millis[millis.len() / 2]
+        };
+        let time = |work: &dyn Fn()| {
+            work();
+            median(
+                (0..15)
+                    .map(|_| {
+                        let began = std::time::Instant::now();
+                        work();
+                        began.elapsed().as_secs_f64() * 1000.0
+                    })
+                    .collect(),
+            )
+        };
+        let whole = time(&|| {
+            orchestrator.pending_loss(&root).expect("status");
+            orchestrator.numstat(&root).expect("numstat");
+        });
+        let scoped = time(&|| {
+            orchestrator
+                .status_of(&root, &paths)
+                .expect("scoped status");
+            orchestrator
+                .numstat_of(&root, &paths)
+                .expect("scoped numstat");
+        });
+        println!(
+            "SCOPED_READ_NUMBERS {}",
+            serde_json::json!({
+                "tracked_files": tracked.len(),
+                "asked_paths": paths.len(),
+                "whole_ms": (whole * 10.0).round() / 10.0,
+                "scoped_ms": (scoped * 10.0).round() / 10.0,
+            })
+        );
+        assert!(scoped > 0.0 && whole > 0.0);
     }
 
     /// A repository whose first commit has not landed has no `HEAD`, and

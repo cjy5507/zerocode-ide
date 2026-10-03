@@ -42,6 +42,10 @@ pub(super) struct ActivityRing {
     /// How many of the newest entries have not been emitted yet.
     pub(super) pending: usize,
     pub(super) last_emit: Option<Instant>,
+    /// Whether the batch the floor is holding back has been promised its
+    /// deadline (`owed`) — so each held batch is promised once, however many
+    /// events join it.
+    pub(super) armed: bool,
 }
 
 impl ActivityRing {
@@ -87,11 +91,38 @@ impl ActivityRing {
     /// next event. A write's END is such a batch — an edit's last event is
     /// followed by seconds of silence while the model thinks, and the file
     /// tree wants its numbers the moment the write ends.
-    ///
-    /// Red stub: the behaviour is written in the next commit.
     pub(super) fn owed(&mut self, now: Instant) -> Option<Duration> {
-        let _ = now;
-        None
+        if self.pending == 0 || self.armed {
+            return None;
+        }
+        self.armed = true;
+        let since = self.last_emit.map(|last| now.duration_since(last));
+        Some(ACTIVITY_EMIT_EVERY.saturating_sub(since.unwrap_or_default()))
+    }
+
+    /// What leaves now and what is owed: the batch the floor lets through, or
+    /// — when it holds one back — the deadline that batch is promised for.
+    pub(super) fn release(
+        &mut self,
+        now: Instant,
+    ) -> (Option<Vec<StampedActivity>>, Option<Duration>) {
+        let batch = self.due(now);
+        let owed = if batch.is_none() {
+            self.owed(now)
+        } else {
+            None
+        };
+        (batch, owed)
+    }
+
+    /// The promise comes due: the batch leaves if the floor is open, and is
+    /// promised again if it is not yet (a clock that woke the task a hair early).
+    pub(super) fn flush(
+        &mut self,
+        now: Instant,
+    ) -> (Option<Vec<StampedActivity>>, Option<Duration>) {
+        self.armed = false;
+        self.release(now)
     }
 
     /// Everything since the last emit — when the floor allows one.
@@ -103,15 +134,17 @@ impl ActivityRing {
     /// arrive when an agent decides something happened — back on the display
     /// clock the forwarding loop was deliberately taken off.
     ///
-    /// So a batch rides the NEXT envelope for the same card. What that costs
-    /// is exactly one case: the last activity of a burst that is then followed
-    /// by silence sits in the ring, unsent, until the agent does something
-    /// else. It is bounded (the ring holds it, `pane_activities` hands it
-    /// over, and the next event carries it), it is invisible on the surface
-    /// this feeds (a card only draws its newest line while the agent is
-    /// RUNNING, and an agent that has gone quiet is drawn by its state), and
-    /// the first event after any quiet stretch always leaves at once — which
-    /// is the case a person actually watches.
+    /// So the decision is a pure question of the clock, and a batch the floor
+    /// holds back used to ride the NEXT envelope for the same card — which cost
+    /// exactly one case: the last activity of a burst followed by silence sat
+    /// in the ring, unsent, until the agent did something else. That was
+    /// invisible on the surfaces this fed (a card only draws its newest line
+    /// while the agent is RUNNING), and it is not any more: the file tree
+    /// shows a write from its start to its END, and an edit's end is followed
+    /// by seconds of silence. A held batch is therefore owed a deadline
+    /// ([`ActivityRing::owed`]), and the roads that file activities promise it
+    /// (`promise_activities`) — one task asleep until the floor opens for each
+    /// held batch, still no thread per card, still at most ten emits a second.
     pub(super) fn due(&mut self, now: Instant) -> Option<Vec<StampedActivity>> {
         if self.pending == 0 {
             return None;
@@ -129,6 +162,7 @@ impl ActivityRing {
             .cloned()
             .collect();
         self.pending = 0;
+        self.armed = false;
         Some(batch)
     }
 }
@@ -146,24 +180,83 @@ pub(super) fn note_helper_activity(
     card: String,
     activity: zerocode_core::hook::Activity,
 ) {
-    let batch = {
+    let (batch, owed) = {
         let state = app.state::<AppState>();
         let mut held = state.activities();
         let ring = held.entry(card.clone()).or_default();
         if !ring.note_fresh(activity) {
             return;
         }
-        ring.due(Instant::now())
+        ring.release(Instant::now())
     };
-    if let Some(activities) = batch {
-        let _ = app.emit(
-            "hook:activity",
-            PaneActivities {
-                pane: card,
-                activities,
-            },
-        );
+    send_activities(app, card, batch, owed);
+}
+
+/// A wire session's tool calls, filed under its own card (`wire:<id>`) on the
+/// road every hook agent's travel (t-31715): the same ring, the same floor, the
+/// same `hook:activity` shape — so the file tree hears a wire session's writes
+/// the way it hears a hook agent's, and nothing here knows which protocol said
+/// them. Events, not snapshots: two identical ones are two calls.
+pub(super) fn note_wire_activities(
+    app: &AppHandle,
+    wire: u32,
+    activities: Vec<zerocode_core::hook::Activity>,
+) {
+    if activities.is_empty() {
+        return;
     }
+    let card = hooks::activity_wire(wire);
+    let (batch, owed) = {
+        let state = app.state::<AppState>();
+        let mut held = state.activities();
+        let ring = held.entry(card.clone()).or_default();
+        for activity in activities {
+            ring.note(activity);
+        }
+        ring.release(Instant::now())
+    };
+    send_activities(app, card, batch, owed);
+}
+
+/// What `ActivityRing::release` decided, carried out: the batch the floor let
+/// through leaves for the window, and the one it held back is promised its
+/// deadline.
+fn send_activities(
+    app: &AppHandle,
+    pane: String,
+    batch: Option<Vec<StampedActivity>>,
+    owed: Option<Duration>,
+) {
+    if let Some(wait) = owed {
+        promise_activities(app, pane.clone(), wait);
+    }
+    if let Some(activities) = batch {
+        let _ = app.emit("hook:activity", PaneActivities { pane, activities });
+    }
+}
+
+/// A held batch's deadline (t-31715): after `wait` whatever the floor then lets
+/// through leaves, whether or not the agent has done anything since — the last
+/// event of a burst (a write's end) must not wait for the next one. One task,
+/// asleep, for each held batch: no thread per card, and at most ten emits a
+/// second for a card however busy its agent is (`ActivityRing::owed` says each
+/// held batch once).
+fn promise_activities(app: &AppHandle, pane: String, wait: Duration) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(wait).await;
+        let (batch, owed) = {
+            let state = app.state::<AppState>();
+            let mut held = state.activities();
+            // A card forgotten while it slept (its pane closed, its wire
+            // stopped) has nothing owed.
+            match held.get_mut(&pane) {
+                Some(ring) => ring.flush(Instant::now()),
+                None => return,
+            }
+        };
+        send_activities(&app, pane, batch, owed);
+    });
 }
 
 /// Say what a pane's helper roster is NOW — the WHOLE list, not the change:
@@ -315,7 +408,7 @@ pub(super) async fn hook_loop(
             // Whose card this is, read BEFORE the name travels — the emit
             // below takes it — because a helper's tool call is also a NUMBER.
             let helper = hooks::helper_in_card(&pane).map(|(term, id)| (term, id.to_string()));
-            let batch = {
+            let (batch, owed) = {
                 let state = app.state::<AppState>();
                 let mut held = state.activities();
                 let ring = held.entry(pane.clone()).or_default();
@@ -324,8 +417,9 @@ pub(super) async fn hook_loop(
                 // webview a deserialise on the thread that owes the next
                 // keystroke, and four agents at work fire faster than any
                 // surface can draw. See `ActivityRing::due` for why the floor
-                // is a debounce and not a timer.
-                ring.due(Instant::now())
+                // is a debounce and not a timer — and `owed` for the deadline
+                // a held batch is promised (a write's end).
+                ring.release(Instant::now())
             };
             // The count Claude Code puts on a running helper's line ("12 tool
             // uses"), for the vendors that only fire events — zo counts its
@@ -350,9 +444,7 @@ pub(super) async fn hook_loop(
                     seat.tool_calls = seat.tool_calls.saturating_add(1);
                     moved.then(|| (term, roster.clone()))
                 });
-            if let Some(activities) = batch {
-                let _ = app.emit("hook:activity", PaneActivities { pane, activities });
-            }
+            send_activities(&app, pane, batch, owed);
             if let Some((term, rows)) = counted {
                 publish_pane_subagents(&app, term, rows);
             }
