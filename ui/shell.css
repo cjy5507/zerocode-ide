@@ -43708,6 +43708,23 @@ button.jev-token:hover {
 .tree-pin > .icon { width: 12px; height: 12px; flex: none; }
 .tree-pin-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* The git line under the tree: the head's type and ink, the branch glyph in
+ * the commit colour so it reads as the agents' git and not the window's. */
+.tree-ops {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: var(--space-1) var(--space-3);
+  border-top: var(--rule-width) solid var(--edge-rule);
+  font-size: var(--text-2xs);
+  color: var(--ink-chalk);
+}
+.tree-ops[hidden] { display: none; }
+.tree-ops .icon { width: 12px; height: 12px; flex: none; color: var(--tree-touch-commit); }
+.tree-ops-said { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-ops-more { flex: none; color: var(--ink-mist); }
+
 /* ---- 아티팩트 뷰 (t-2720, Orca 갭 #1) --------------------------------------
  *
  * 카드 그리드 + 오른쪽 서랍. 숫자는 tokens.css의 `--artifact-*`이고, 색은

@@ -320,12 +320,17 @@ function treeRowOf(relative) {
  * helper's card (`sub:<term>:<id>`) is its parent pane's. A pane no tab
  * holds has no base, and its relative paths resolve to nothing. */
 function treePaneBase(pane) {
-  const term = Number(/^(?:term|sub):(\d+)(?::|$)/.exec(pane ?? "")?.[1]);
-  if (!Number.isInteger(term)) return null;
-  const home = tabOfTerm(term)?.worktree;
+  const home = treePaneHome(pane);
   if (!home) return null;
-  const cwd = treeTermCwds.get(term);
+  const cwd = treeTermCwds.get(treePaneTerm(pane));
   return cwd && (cwd === home || cwd.startsWith(`${home}/`)) ? cwd : home;
+}
+
+/* The pane an activity card belongs to: `term:<n>`, or a helper's
+ * `sub:<n>:<id>`, which is its parent's. */
+function treePaneTerm(pane) {
+  const term = Number(/^(?:term|sub):(\d+)(?::|$)/.exec(pane ?? "")?.[1]);
+  return Number.isInteger(term) ? term : null;
 }
 
 /* A target as a path relative to the active workspace, or null — outside
@@ -338,12 +343,14 @@ function treeSlashes(path) {
   return usesWindowsPlatform ? path.replace(/\\/g, "/") : path;
 }
 
-function treeRelative(target, pane) {
+function treeRelative(target, pane, cwd = null) {
   const root = treeSlashes(activeWorktreePath ?? "").replace(/\/+$/, "");
   if (!root || typeof target !== "string" || target.length === 0 || target.endsWith("…")) return null;
   const wanted = treeSlashes(target);
   const absolute = wanted.startsWith("/") || (usesWindowsPlatform && /^[A-Za-z]:\//.test(wanted));
-  const base = absolute ? null : treePaneBase(pane);
+  // A call that said where it ran (`activity.cwd`) is read from there; the
+  // pane's own folder is the fallback.
+  const base = absolute ? null : (typeof cwd === "string" && cwd ? cwd : treePaneBase(pane));
   if (!absolute && base === null) return null;
   const joined = absolute ? wanted : `${treeSlashes(base)}/${wanted}`;
   const parts = [];
@@ -360,15 +367,23 @@ function treeRelative(target, pane) {
   return walked.startsWith(`${root}/`) ? walked.slice(root.length + 1) : null;
 }
 
-/* What one activity touched: a kind and the targets it names, or null. A
+/* What one activity touched: each file it names with the kind of touch. A
  * call that failed touched nothing; a prompt and a turn's end are not tool
- * calls. */
-function treeTouchOf(activity) {
-  if (activity.phase !== "started" && activity.phase !== "finished") return null;
+ * calls. The backend reads a shell command's reads and a patch's files with
+ * the shell's grammar (`reads`, `writes`); when it named those, the target is
+ * the command or the patch itself and names no file. */
+function treeTouchesOf(activity) {
+  if (activity.phase !== "started" && activity.phase !== "finished") return [];
+  const touches = [];
+  const named = (activity.reads?.length ?? 0) + (activity.writes?.length ?? 0) > 0;
   const kind = TREE_TOUCH_OF_VERB[activity.verb];
-  if (!kind || typeof activity.target !== "string") return null;
-  if (activity.verb === "grep" && TREE_PATTERN_SIGNS.test(activity.target)) return null;
-  return { kind, targets: [activity.target] };
+  if (kind && !named && typeof activity.target === "string" &&
+      !(activity.verb === "grep" && TREE_PATTERN_SIGNS.test(activity.target))) {
+    touches.push({ kind, target: activity.target });
+  }
+  for (const target of activity.reads ?? []) touches.push({ kind: "read", target });
+  for (const target of activity.writes ?? []) touches.push({ kind: "write", target });
+  return touches;
 }
 
 function touchTree(relative, kind, now) {
@@ -397,12 +412,11 @@ function noteTreeActivities(pane, activities) {
       revealTreeMentions(pane, activity.target);
       continue;
     }
-    const touch = treeTouchOf(activity);
-    if (!touch) continue;
-    for (const target of touch.targets) {
-      const relative = treeRelative(target, pane);
+    noteTreeVcs(pane, activity, now);
+    for (const { kind, target } of treeTouchesOf(activity)) {
+      const relative = treeRelative(target, pane, activity.cwd);
       if (relative === null) continue;
-      touchTree(relative, touch.kind, now);
+      touchTree(relative, kind, now);
       newest = relative;
     }
   }
@@ -642,6 +656,7 @@ function paintTreeGit() {
   for (const row of fileTree.querySelectorAll(".tree-row[data-tree-path]")) {
     paintTreeBadge(row, row.dataset.treePath, row.classList.contains("is-dir"));
   }
+  settleTreeCommit();
 }
 
 /* The last standing each checkout's head was told, by checkout: an answer
@@ -710,6 +725,7 @@ function dressTreeRows(container) {
   }
   if (treeTouches.size > 0) scheduleTreeTouchPaint();
   if (treeAgentFolder !== null) paintAgentFolder();
+  if (container === fileTree) paintTreeVcs();
 }
 
 /* ---- the keyboard and the screen reader (t-24298) ----
@@ -980,4 +996,110 @@ function paintAgentFolder() {
     row.dataset.agentCwd = "true";
     labelTreeRow(row);
   }
+}
+
+/* ---- what an agent is doing in git, under the tree (t-24298) ----
+ *
+ * The mod's footer: a commit, a push, a pull, a PR in flight, said on one
+ * line while it runs. A shell call carries its git and gh operations
+ * (`activity.vcs`, read by the backend with the shell's own grammar), so the
+ * line is in git's own words — `git add · git commit` — and the frame around
+ * them is translated, the way an activity row is. It clears when the call
+ * finishes or fails, or the pane's turn ends; only this workspace's panes
+ * speak on it. */
+
+/* A git call this long has an end the tree never heard — the batch carrying
+ * it was lost, or the pane went away mid-command. Ten minutes is past any
+ * push or clone a person would still be waiting on. */
+const TREE_VCS_RUNNING_MAX_MS = 10 * 60_000;
+
+/* pane → { steps, target, until }, newest last. */
+const treeVcsRuns = new Map();
+let treeVcsSweep = null;
+/* The files git held as changed when a commit finished, for the next answer
+ * to compare against — what left the list is what the commit took. */
+let treeCommitWatch = null;
+
+function noteTreeVcs(pane, activity, now) {
+  if (activity.phase === "stopped") {
+    if (treeVcsRuns.delete(pane)) paintTreeVcs();
+    return;
+  }
+  const steps = Array.isArray(activity.vcs) ? activity.vcs : [];
+  if (steps.length === 0) return;
+  if (activity.phase === "started") {
+    treeVcsRuns.delete(pane);
+    treeVcsRuns.set(pane, { steps, target: activity.target ?? null, until: now + TREE_VCS_RUNNING_MAX_MS });
+  } else {
+    const held = treeVcsRuns.get(pane);
+    if (held && (held.target === null || held.target === (activity.target ?? null))) treeVcsRuns.delete(pane);
+    if (activity.phase === "finished" && steps.some((step) => step.tool === "git" && step.verb === "commit") && treePaneHome(pane) === activeWorktreePath) {
+      treeCommitWatch = { root: activeWorktreePath, before: new Set(scmEntries.map((entry) => entry.path)) };
+    }
+  }
+  paintTreeVcs();
+}
+
+/* The workspace a pane works in — its tab's; a helper's card is its
+ * parent's. */
+function treePaneHome(pane) {
+  const term = treePaneTerm(pane);
+  return term === null ? null : tabOfTerm(term)?.worktree ?? null;
+}
+
+function paintTreeVcs() {
+  const host = el("tree-ops");
+  const now = performance.now();
+  for (const [pane, held] of treeVcsRuns) if (held.until <= now) treeVcsRuns.delete(pane);
+  const here = [...treeVcsRuns.entries()].filter(([pane]) => treePaneHome(pane) === activeWorktreePath);
+  clearTimeout(treeVcsSweep);
+  treeVcsSweep = null;
+  if (treeVcsRuns.size > 0) {
+    const soonest = Math.min(...[...treeVcsRuns.values()].map((held) => held.until));
+    treeVcsSweep = setTimeout(paintTreeVcs, Math.max(0, soonest - now));
+  }
+  if (here.length === 0) {
+    host.hidden = true;
+    host.replaceChildren();
+    return;
+  }
+  const [, newest] = here[here.length - 1];
+  const op = newest.steps.map((step) => `${step.tool} ${step.verb}`).join(" · ");
+  host.replaceChildren();
+  host.insertAdjacentHTML("beforeend", icon("branch"));
+  const said = document.createElement("span");
+  said.className = "tree-ops-said";
+  said.textContent = t("tree.vcs.running", "{{op}} 진행 중", { op });
+  host.appendChild(said);
+  if (here.length > 1) {
+    const more = document.createElement("span");
+    more.className = "tree-ops-more";
+    more.textContent = `+${here.length - 1}`;
+    host.appendChild(more);
+  }
+  host.hidden = false;
+}
+
+/* A fresh answer after a commit finished: what git no longer holds as
+ * changed went into the commit, and wears the commit's colour. */
+function settleTreeCommit() {
+  const watch = treeCommitWatch;
+  if (!watch) return;
+  treeCommitWatch = null;
+  if (watch.root !== activeWorktreePath) return;
+  if (treeTouchRoot !== activeWorktreePath) {
+    treeTouches.clear();
+    treeTouchRoot = activeWorktreePath;
+  }
+  const now = performance.now();
+  let newest = null;
+  for (const path of watch.before) {
+    if (treeGit.files.has(path)) continue;
+    touchTree(path, "commit", now);
+    newest = path;
+  }
+  if (newest === null) return;
+  scheduleTreeTouchPaint();
+  if (treeTouchSweep === null) armTreeTouchSweep();
+  if (treeFollowsAgent && fileTreeShowing()) followTreeTo(newest);
 }
