@@ -547,10 +547,15 @@ async function redesignRail(browser, origin, ok) {
       seen.user = ticks()[userAt]?.classList.contains("is-user") ?? false;
       seen.longer = (ticks()[userAt]?.getBoundingClientRect().width ?? 0) > (ticks()[plainAt]?.getBoundingClientRect().width ?? 0);
       seen.failed = ticks()[failedAt]?.classList.contains("is-failed") ?? false;
+      // One tick wears the accent, as long as the person's (the approved rail's `cur`): the row the rail
+      // stands at — at the list's foot, where the page opens, the newest.
+      const currentAt = () => ticks().findIndex((tick) => tick.classList.contains("is-current"));
       seen.current = ticks().filter((tick) => tick.classList.contains("is-current")).length;
-      const current = ticks().find((tick) => tick.classList.contains("is-current"));
+      const current = ticks()[currentAt()];
       seen.currentInk = current ? getComputedStyle(current).backgroundColor : null;
       seen.wantInk = window.__PROBE__("--chat-accent", "backgroundColor", document.querySelector("#worker-view"));
+      seen.currentLong = current ? Math.round(current.getBoundingClientRect().width) === Math.round(ticks()[userAt]?.getBoundingClientRect().width ?? -1) : false;
+      seen.currentAtFoot = currentAt() === ticks().length - 1;
       // A press on the first tick brings the first row to the list's top.
       ticks()[0]?.click();
       await settle();
@@ -574,22 +579,24 @@ async function redesignRail(browser, origin, ok) {
       seen.end = last.top < view.bottom && last.bottom > view.top;
       seen.value = Number(handle?.getAttribute("aria-valuenow"));
       seen.max = Number(handle?.getAttribute("aria-valuemax"));
+      seen.currentAtEnd = currentAt() === ticks().length - 1;
       handle?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true }));
       await settle();
       await new Promise((done) => setTimeout(done, 50));
       seen.home = Math.round(rows()[0].getBoundingClientRect().top - list().getBoundingClientRect().top);
+      seen.currentAtHome = currentAt() === 0 && ticks().filter((tick) => tick.classList.contains("is-current")).length === 1;
       return seen;
     });
     ok(
-      "R8: a rail stands beside the list with one tick per row; the person's tick is longer, a failed step's is marked, and the rows in view wear the accent",
+      "R8: a rail stands beside the list with one tick per row; the person's tick is longer, a failed step's is marked, and one tick — the row the rail stands at, the newest at the list's foot — wears the accent, as long as the person's",
       seen.rail && seen.beside && seen.ticks === seen.rows && seen.user && seen.longer && seen.failed &&
-        seen.current > 0 && seen.currentInk === seen.wantInk,
+        seen.current === 1 && seen.currentInk === seen.wantInk && seen.currentLong && seen.currentAtFoot,
       JSON.stringify(seen),
     );
     ok(
-      "R8: a press on a tick goes to its row; the rail's handle takes the keyboard, its ring shows, End and Home go to the last and the first row",
+      "R8: a press on a tick goes to its row; the rail's handle takes the keyboard, its ring shows, End and Home go to the last and the first row, and the accent goes with it",
       Math.abs(seen.pressed - seen.pad) <= 2 && seen.focused && seen.ring && seen.end && seen.value === seen.max &&
-        Math.abs(seen.home - seen.pad) <= 2,
+        Math.abs(seen.home - seen.pad) <= 2 && seen.currentAtEnd && seen.currentAtHome,
       JSON.stringify(seen),
     );
     ok("R8: the rail raised no page errors", faults.length === 0, faults.join("\n"));
