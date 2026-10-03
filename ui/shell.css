@@ -14549,12 +14549,15 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 /* The live line (t-22100, the approved conversation): the list's last row
  * while the run is out — a flat panel on the tool's ground, a turning ring,
  * 「지금」 in the primary ink and what the agent is doing beside it, fading in
- * as the extension's spinner row does. */
+ * as the extension's spinner row does. In a pane narrower than its words (an
+ * 89 px pane at 720 px) it cuts them at its own edge rather than push the
+ * list sideways. */
 .helper-status {
   flex: none;
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
   min-height: var(--chat-status-h);
   margin: var(--space-2) 0 0;
   padding: var(--space-2) var(--space-3);
@@ -14562,6 +14565,7 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   background: var(--chat-tool-bg);
   font-size: var(--text-sm);
   color: var(--ink-figure);
+  overflow: hidden;
   animation: helper-status-in var(--chat-status-in) var(--ease-standard);
 }
 
@@ -14739,12 +14743,14 @@ details[open] > .helper-step-line::after {
 
 /* A shell step's first lines (`dressStepOut`, t-22100): under its line, on a
  * hairline at the words' axis, in the machine's mono at a reading leading;
- * each line cut at the list's edge rather than wrapped, and each `path:line`
+ * each line cut at the row's edge rather than wrapped, and each `path:line`
  * a door in the argument's ink — the link's colour leaning to the words', so
- * it reads at 4.5:1 on the light ground too (the bare link read 4.4). */
+ * it reads at 4.5:1 on the light ground too (the bare link read 4.4). The box
+ * is the line less the indent its hairline stands at, so with that indent it
+ * is the line's whole width: a line of its own, inside the row. */
 .helper-step-out {
   order: 1;
-  flex: 1 0 100%;
+  flex: 0 0 calc(100% - var(--chat-step-icon) - var(--space-2));
   min-width: 0;
   margin: 0 0 var(--space-1) calc(var(--chat-step-icon) + var(--space-2));
   padding: 0 0 0 var(--space-3);

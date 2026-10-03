@@ -1636,8 +1636,12 @@ function dressWaiting(list) {
     waiting.delete(one.row);
     dressed.push(one);
   }
+  // Heights as the layout holds them, fractions and all, the kept one's way: a
+  // whole-pixel `offsetHeight` less a fractional kept height moved the reader
+  // by the rounding of every row dressed above them (1.5 px for three shell
+  // steps' first lines at their 1.6 leading, t-22100).
   let moved = 0;
-  for (const one of dressed) if (one.above) moved += one.row.offsetHeight - one.kept;
+  for (const one of dressed) if (one.above) moved += one.row.getBoundingClientRect().height - one.kept;
   if (moved !== 0) list.scrollTop += moved;
   if (waiting.size > 0) askShelfFrame(list);
 }
