@@ -137,7 +137,12 @@ async fn measured_plan_changes_the_real_wire_then_falls_back_and_respects_a_pin(
         .join("state/smart-router/plan-receipts.jsonl");
     fs::create_dir_all(ledger.parent().unwrap()).unwrap();
     let write = |receipts: &[tools::PlanRunReceipt]| {
-        fs::write(&ledger, receipts.iter().map(|receipt| format!("{}\n", serde_json::to_string(receipt).unwrap())).collect::<String>()).unwrap();
+        let mut encoded = Vec::new();
+        for receipt in receipts {
+            serde_json::to_writer(&mut encoded, receipt).unwrap();
+            encoded.push(b'\n');
+        }
+        fs::write(&ledger, encoded).unwrap();
     };
     write(&receipts);
     let service = ScriptedAnthropicService::text("fixture response without a completion claim").await.unwrap();
