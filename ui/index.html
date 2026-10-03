@@ -3968,6 +3968,70 @@
         <div class="agent-list" id="cli-login-list"></div>
         <p class="settings-hint" id="cli-login-note"></p>
         </div>
+
+        <!-- What keeps a day of agents from spending the plan before anyone looks
+             (t-26583). The window judges every worker it watches — go on, save a
+             checkpoint, pause, stop — from what it already holds of it, and counts
+             the calls it makes of an agent's CLI on the person's behalf as one
+             person's. The budget is set here and nowhere else, and a blank is none:
+             nobody is stopped on a number nobody gave. -->
+        <div class="settings-card" id="harness-settings">
+          <div class="settings-subhead">
+            <h3 class="settings-subhead-title" data-i18n="settings.harness.title">토큰 낭비 막기</h3>
+            <p class="settings-subhead-desc" data-i18n="settings.harness.about">
+              창이 일하는 워커를 지켜보다가 같은 일의 되풀이나 비용 급증이 보이면 알리고, 예산을 넘기 전에 멈출 수 있습니다. 판정과 그 근거는 작업 보드의 워커 줄에 보입니다.
+            </p>
+          </div>
+          <label class="settings-field" data-field="md" for="harness-gate-mode">
+            <span class="settings-label" data-i18n="settings.harness.mode">워커 계속 판정</span>
+            <span class="settings-hint" id="harness-gate-mode-hint" data-i18n="settings.harness.modeHint">
+              알리기만: 판정을 보드에 보이고 코디네이터에게 알립니다. 워커는 끝내지 않습니다. 중지: 예산을 넘기 전에 워커의 작업물을 복원점으로 저장하고 그 워커를 끝냅니다.
+            </span>
+            <select class="settings-input" id="harness-gate-mode" aria-describedby="harness-gate-mode-hint">
+              <option value="off" data-i18n="settings.harness.modeOff">끔</option>
+              <option value="notify" data-i18n="settings.harness.modeNotify">알리기만</option>
+              <option value="stop" data-i18n="settings.harness.modeStop">예산을 넘기 전에 중지</option>
+            </select>
+          </label>
+          <label class="settings-field" data-field="sm" for="harness-task-usd">
+            <span class="settings-label" data-i18n="settings.harness.taskBudget">과업 하나의 예산 (달러)</span>
+            <span class="settings-hint" id="harness-task-usd-hint" data-i18n="settings.harness.taskBudgetHint">
+              API 요금으로 환산한 값입니다. 비워 두면 예산이 없습니다.
+            </span>
+            <input class="settings-input" id="harness-task-usd" type="number" inputmode="decimal"
+                   min="0" step="any" aria-describedby="harness-task-usd-hint" />
+          </label>
+          <label class="settings-field" data-field="sm" for="harness-day-usd">
+            <span class="settings-label" data-i18n="settings.harness.dayBudget">하루 예산 (달러)</span>
+            <span class="settings-hint" id="harness-day-usd-hint" data-i18n="settings.harness.dayBudgetHint">
+              모든 워커의 합계이고 24시간을 이어서 셉니다. 비워 두면 예산이 없습니다.
+            </span>
+            <input class="settings-input" id="harness-day-usd" type="number" inputmode="decimal"
+                   min="0" step="any" aria-describedby="harness-day-usd-hint" />
+          </label>
+          <div class="settings-subhead">
+            <h3 class="settings-subhead-title" data-i18n="settings.harness.launchesTitle">에이전트 호출 한도</h3>
+            <p class="settings-subhead-desc" data-i18n="settings.harness.launchesAbout">
+              창이 사용자 대신 에이전트 CLI를 부르는 호출(커밋 메시지 초안, 로그인 갱신 등)을 한 사람의 몫으로 셉니다. 한도(429)를 만난 CLI는 잠시 쉬고, 같은 일은 한 번만 돌립니다. 비워 두면 그 한도는 없습니다.
+            </p>
+          </div>
+          <label class="settings-field" data-field="sm" for="harness-concurrent">
+            <span class="settings-label" data-i18n="settings.harness.concurrent">동시에 도는 호출</span>
+            <input class="settings-input" id="harness-concurrent" type="number" inputmode="numeric"
+                   min="0" step="1" />
+          </label>
+          <label class="settings-field" data-field="sm" for="harness-per-hour">
+            <span class="settings-label" data-i18n="settings.harness.perHour">한 시간에 부를 수 있는 횟수</span>
+            <input class="settings-input" id="harness-per-hour" type="number" inputmode="numeric"
+                   min="0" step="1" />
+          </label>
+          <label class="settings-field" data-field="sm" for="harness-per-day">
+            <span class="settings-label" data-i18n="settings.harness.perDay">하루에 부를 수 있는 횟수</span>
+            <input class="settings-input" id="harness-per-day" type="number" inputmode="numeric"
+                   min="0" step="1" />
+          </label>
+          <p class="settings-hint" id="harness-status"></p>
+        </div>
         </section>
 
         <!-- API Routers: connect OpenRouter, AgentRouter, or custom endpoints.

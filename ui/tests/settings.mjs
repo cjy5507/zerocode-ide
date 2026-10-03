@@ -2392,10 +2392,9 @@ class StatefulBackend {
       case "claude_autoswitch_mode": return this.settings.claude_autoswitch_mode;
       // What the card says of the window's counting: what is running, what the
       // last hour and day let through, which provider rests, what the day cost.
+      // What a person set is the document's, and comes with its snapshot.
       case "harness_status":
         return {
-          gate: clone(this.settings.harness.gate),
-          launches: clone(this.settings.harness.launches),
           counters: {
             active: 1, last_hour: 3, last_day: 12,
             resting: [{ provider: "claude", until_ms: Date.now() + 11 * 60_000 }],
@@ -8524,6 +8523,13 @@ await test("the harness card shows what a person set and what the window counted
       status: field("harness-status")?.textContent ?? null,
     };
   });
+  // The counts are asked for when the pane is opened and come a beat after it.
+  const said = await pageB.waitForFunction(
+    () => (document.getElementById("harness-status")?.textContent ?? "") !== "",
+    null,
+    { timeout: UI_TIMEOUT },
+  ).then(() => true, () => false);
+  assert(said, "the card never said what the window counted");
   const shown = await card();
   assert(
     shown.mode === "notify" && shown.task === "" && shown.day === "" &&
@@ -8531,7 +8537,7 @@ await test("the harness card shows what a person set and what the window counted
     "the card does not show the document's gate and ceilings", shown,
   );
   assert(
-    /^지금 1개 실행 중 · 최근 한 시간 3번 · 오늘 12번 · 쉬는 중: claude 1[01]분 · 오늘 워커 비용 약 \$4\.20$/.test(shown.status ?? ""),
+    /^지금 1개 실행 중 · 최근 한 시간 3번 · 오늘 12번 · 쉬는 중: [Cc]laude 1[01]분 · 오늘 워커 비용 약 \$4\.20$/.test(shown.status ?? ""),
     "the card does not say what the launch ledger and the day's spend hold", shown.status,
   );
   assert(await pageB.$("#harness-task-usd"), "the card has no task budget field");

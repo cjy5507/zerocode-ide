@@ -326,46 +326,38 @@ pub(crate) fn claude_autoswitch_mode(
         .claude_autoswitch_mode)
 }
 
-/// What the settings card shows of the continue gate and the launch ledger, in
-/// one read: what a person set, what the ledger has counted, and what the day has
-/// cost as far as the window watched it (t-26583).
+/// What the window has counted, for the settings card (t-26583): the launch
+/// ledger's counters and what the day has cost as far as the window watched it.
+/// What a person set is the settings document's, and comes with its snapshot.
 #[derive(serde::Serialize)]
 pub(crate) struct HarnessStatus {
-    gate: zerocode_core::continue_gate::Settings,
-    launches: zerocode_core::launch_budget::Limits,
     counters: zerocode_core::launch_budget::Counters,
     day_spent_usd: f64,
 }
 
-fn harness_status_of(harness: &crate::harness_settings::HarnessSettings) -> HarnessStatus {
+#[tauri::command(async)]
+pub(crate) fn harness_status() -> HarnessStatus {
     HarnessStatus {
-        gate: harness.gate,
-        launches: harness.launches,
         counters: crate::launch_budget_runtime::counters(),
         day_spent_usd: crate::orchestration::gate_book::day_spent_now(),
     }
 }
 
-#[tauri::command(async)]
-pub(crate) fn harness_status(state: State<'_, AppState>) -> Result<HarnessStatus, String> {
-    Ok(harness_status_of(
-        &load_settings(state.settings())?.document.harness,
-    ))
-}
-
 /// The gate's mode and budgets and the launch ceilings a person just chose
 /// (t-26583). A ceiling that is not a whole number of launches refuses the save;
-/// a budget that is not a budget is none ([`crate::harness_settings`]). The beat
-/// and the launch ledger take the new numbers at once.
+/// a budget that is not a budget is none ([`crate::harness_settings`]). Answers
+/// with the document's snapshot like every setting does; the beat and the launch
+/// ledger take the new numbers at once, and the card's counts are
+/// [`harness_status`]'s.
 #[tauri::command(async)]
 pub(crate) fn set_harness_settings(
     app: AppHandle,
     webview: tauri::Webview,
     state: State<'_, AppState>,
     harness: serde_json::Value,
-) -> Result<HarnessStatus, String> {
+) -> Result<SettingsSnapshot, String> {
     let harness = crate::harness_settings::HarnessSettings::parse(&harness)?;
-    commit_setting(
+    let snapshot = commit_setting(
         &app,
         &webview,
         &state,
@@ -377,7 +369,7 @@ pub(crate) fn set_harness_settings(
     )?;
     crate::orchestration::gate_book::set_settings(harness.gate);
     crate::launch_budget_runtime::set_limits(harness.launches);
-    Ok(harness_status_of(&harness))
+    Ok(snapshot)
 }
 
 #[tauri::command(async)]

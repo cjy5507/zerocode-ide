@@ -293,8 +293,7 @@ pub enum Mode {
 
 /// The person's declaration: what the gate may do and what a task and a day may
 /// cost.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct Settings {
     pub mode: Mode,
     /// Dollars a task may cost, API-equivalent; `None` is no budget.
@@ -307,6 +306,16 @@ pub struct Settings {
 /// guard ([`BUDGET_USD_MAX`]).
 fn is_budget(usd: &f64) -> bool {
     usd.is_finite() && *usd > 0.0 && *usd <= BUDGET_USD_MAX
+}
+
+impl<'de> Deserialize<'de> for Settings {
+    /// Read from the settings file the way [`Settings::parse`] reads what the
+    /// settings pane sends: field by field, a mess is the default and never an
+    /// error — the settings document is one file, and a file that does not parse is
+    /// set aside with every other setting in it.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::parse(&serde_json::Value::deserialize(deserializer)?))
+    }
 }
 
 impl Settings {
