@@ -2492,21 +2492,51 @@ prunable gitdir file points to non-existent location
     }
 
     /// A measurement, not a gate (t-31715): what the file tree's scoped question
-    /// costs in the repository this test runs in, against the whole-checkout
-    /// status and numstat a refresh per write would cost. Run it by name, on
-    /// the low-spec profile too:
+    /// costs against the whole-checkout status and numstat a refresh per write
+    /// would cost — in a project of a few thousand files with an agent halfway
+    /// through a large change, the state that makes a whole read dear. Asked
+    /// about one file (an edit), eight (a patch) and the most one question
+    /// names. Run it by name, on the low-spec profile too:
     /// `taskpolicy -b cargo test -p zerocode-orchestrator --lib -- --ignored --nocapture scoped_reads_cost`.
     #[test]
     #[ignore = "a measurement, not a gate: run it by name"]
     fn scoped_reads_cost_a_fraction_of_the_whole_checkouts_status() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let orchestrator = Orchestrator::open(&root).expect("open the checkout");
-        let listing = run(&orchestrator.git, &root, ["ls-files"])
-            .expect("ls-files")
-            .stdout;
-        let tracked: Vec<&str> = listing.lines().collect();
-        let stride = (tracked.len() / 64).max(1);
-        let paths: Vec<&str> = tracked.iter().copied().step_by(stride).take(64).collect();
+        // A mid-sized project's tracked files, and how many sit in one folder.
+        const FILES: usize = 3_000;
+        const FILES_PER_FOLDER: usize = 30;
+        // What the agent has changed so far, and the files it has made.
+        const CHANGED: usize = 300;
+        const UNTRACKED: usize = 100;
+        // One edit, a patch, and the most the tree puts in one question.
+        const ASKED: [usize; 3] = [1, 8, 64];
+        // Runs of each read, of which the median is told.
+        const RUNS: usize = 15;
+
+        let dir = empty_repository();
+        let root = dir.path();
+        let name = |index: usize| format!("dir{:03}/file{index:04}.txt", index / FILES_PER_FOLDER);
+        let write = |path: &str, text: &str| {
+            let target = root.join(path);
+            fs::create_dir_all(target.parent().expect("a folder")).expect("folder");
+            fs::write(target, text).expect("write");
+        };
+        for index in 0..FILES {
+            write(
+                &name(index),
+                &format!("line one\nline two of file {index}\nline three\n"),
+            );
+        }
+        commit_everything(root);
+        for index in 0..CHANGED {
+            write(
+                &name(index),
+                &format!("line one\nline two of file {index} changed\nline three\nline four\n"),
+            );
+        }
+        for index in 0..UNTRACKED {
+            write(&format!("fresh/new{index:03}.txt"), "new\n");
+        }
+        let orchestrator = Orchestrator::open(root).expect("open the checkout");
         let median = |mut millis: Vec<f64>| {
             millis.sort_by(f64::total_cmp);
             millis[millis.len() / 2]
@@ -2514,7 +2544,7 @@ prunable gitdir file points to non-existent location
         let time = |work: &dyn Fn()| {
             work();
             median(
-                (0..15)
+                (0..RUNS)
                     .map(|_| {
                         let began = std::time::Instant::now();
                         work();
@@ -2523,28 +2553,36 @@ prunable gitdir file points to non-existent location
                     .collect(),
             )
         };
+        let tenth = |millis: f64| (millis * 10.0).round() / 10.0;
         let whole = time(&|| {
-            orchestrator.pending_loss(&root).expect("status");
-            orchestrator.numstat(&root).expect("numstat");
+            orchestrator.pending_loss(root).expect("status");
+            orchestrator.numstat(root).expect("numstat");
         });
-        let scoped = time(&|| {
-            orchestrator
-                .status_of(&root, &paths)
-                .expect("scoped status");
-            orchestrator
-                .numstat_of(&root, &paths)
-                .expect("scoped numstat");
-        });
+        let questions: Vec<serde_json::Value> = ASKED
+            .iter()
+            .map(|&asked| {
+                let paths: Vec<String> = (0..asked).map(name).collect();
+                let scoped = time(&|| {
+                    orchestrator.status_of(root, &paths).expect("scoped status");
+                    orchestrator
+                        .numstat_of(root, &paths)
+                        .expect("scoped numstat");
+                });
+                assert!(scoped > 0.0, "a read that took no time was not made");
+                serde_json::json!({ "asked_paths": asked, "scoped_ms": tenth(scoped) })
+            })
+            .collect();
         println!(
             "SCOPED_READ_NUMBERS {}",
             serde_json::json!({
-                "tracked_files": tracked.len(),
-                "asked_paths": paths.len(),
-                "whole_ms": (whole * 10.0).round() / 10.0,
-                "scoped_ms": (scoped * 10.0).round() / 10.0,
+                "tracked_files": FILES,
+                "changed_files": CHANGED,
+                "untracked_files": UNTRACKED,
+                "whole_ms": tenth(whole),
+                "questions": questions,
             })
         );
-        assert!(scoped > 0.0 && whole > 0.0);
+        assert!(whole > 0.0, "a read that took no time was not made");
     }
 
     /// A repository whose first commit has not landed has no `HEAD`, and

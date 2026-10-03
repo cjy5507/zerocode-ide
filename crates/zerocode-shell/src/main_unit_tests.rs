@@ -8540,16 +8540,10 @@ fn a_wire_sessions_tool_calls_reach_the_file_tree_alone_and_its_question_is_boun
     );
 }
 
-/// A batch the floor held back is owed a deadline, once (t-31715): the last
-/// event of a burst — an edit's end — must reach the window when the floor
-/// opens, not whenever the agent next does something. One promise for each
-/// held batch, however many events join it; none when nothing is held.
-#[test]
-fn a_batch_the_floor_held_back_is_owed_a_deadline_once() {
-    use zerocode_core::hook::{Activity, Phase, Tool};
-
-    let one = |target: &str, phase: Phase| Activity {
-        verb: Tool::Edit,
+/// One edit's activity of the call `call-1`, as the ring's deadline tests file it.
+fn edit_activity(target: &str, phase: zerocode_core::hook::Phase) -> zerocode_core::hook::Activity {
+    zerocode_core::hook::Activity {
+        verb: zerocode_core::hook::Tool::Edit,
         target: Some(target.to_string()),
         phase,
         reads: Vec::new(),
@@ -8557,17 +8551,27 @@ fn a_batch_the_floor_held_back_is_owed_a_deadline_once() {
         vcs: Vec::new(),
         cwd: None,
         call: Some("call-1".to_string()),
-    };
+    }
+}
+
+/// A batch the floor held back is owed a deadline, once (t-31715): the last
+/// event of a burst — an edit's end — must reach the window when the floor
+/// opens, not whenever the agent next does something. One promise for each
+/// held batch, however many events join it; none when nothing is held.
+#[test]
+fn a_batch_the_floor_held_back_is_owed_a_deadline_once() {
+    use zerocode_core::hook::Phase;
+
     let mut ring = ActivityRing::default();
     let start = Instant::now();
     let after = |millis: u64| start + Duration::from_millis(millis);
 
-    ring.note(one("src/a.rs", Phase::Started));
+    ring.note(edit_activity("src/a.rs", Phase::Started));
     assert!(ring.due(start).is_some(), "the first leaves at once");
     assert_eq!(ring.owed(start), None, "nothing is held, so nothing is owed");
 
     // The end comes inside the floor: held, and owed the time the floor has left.
-    ring.note(one("src/a.rs", Phase::Finished));
+    ring.note(edit_activity("src/a.rs", Phase::Finished));
     assert!(ring.due(after(10)).is_none());
     assert_eq!(ring.owed(after(10)), Some(Duration::from_millis(90)));
     assert_eq!(
@@ -8575,7 +8579,7 @@ fn a_batch_the_floor_held_back_is_owed_a_deadline_once() {
         None,
         "one promise for a held batch, not one for each time somebody asks"
     );
-    ring.note(one("src/b.rs", Phase::Started));
+    ring.note(edit_activity("src/b.rs", Phase::Started));
     assert_eq!(ring.owed(after(30)), None, "another event joins the batch the promise covers");
 
     // The promise keeps: when the floor opens the batch leaves, all of it.
@@ -8584,9 +8588,41 @@ fn a_batch_the_floor_held_back_is_owed_a_deadline_once() {
     assert_eq!(ring.owed(after(100)), None);
 
     // And the next held batch is owed again.
-    ring.note(one("src/c.rs", Phase::Finished));
+    ring.note(edit_activity("src/c.rs", Phase::Finished));
     assert!(ring.due(after(110)).is_none());
     assert_eq!(ring.owed(after(110)), Some(Duration::from_millis(90)));
+}
+
+/// The promise comes due a hair before the floor opens — a clock that woke its
+/// task early (t-31715): the batch stays, and is promised again for what is
+/// left; when it comes due for good the batch leaves and nothing is owed. A
+/// promise that finds nothing held (the batch left with a later event) makes
+/// none.
+#[test]
+fn a_promise_that_wakes_early_is_made_again_and_one_that_wakes_on_time_takes_the_batch() {
+    use zerocode_core::hook::Phase;
+
+    let mut ring = ActivityRing::default();
+    let start = Instant::now();
+    let after = |millis: u64| start + Duration::from_millis(millis);
+    ring.note(edit_activity("src/a.rs", Phase::Started));
+    assert!(ring.due(start).is_some(), "the first leaves at once");
+
+    ring.note(edit_activity("src/a.rs", Phase::Finished));
+    let (batch, owed) = ring.release(after(10));
+    assert!(batch.is_none(), "the floor is shut");
+    assert_eq!(owed, Some(Duration::from_millis(90)));
+
+    let (batch, owed) = ring.flush(after(95));
+    assert!(batch.is_none(), "the clock woke the task before the floor opened");
+    assert_eq!(owed, Some(Duration::from_millis(5)), "promised again for what is left");
+
+    let (batch, owed) = ring.flush(after(100));
+    assert_eq!(batch.map(|held| held.len()), Some(1), "the floor opened: the end leaves");
+    assert_eq!(owed, None, "nothing is held, so nothing is owed");
+
+    let (batch, owed) = ring.flush(after(200));
+    assert!(batch.is_none() && owed.is_none(), "a promise that finds nothing held makes none");
 }
 
 /// A measurement, not a gate (t-31715): what the ring's deadline costs a busy
@@ -8598,19 +8634,10 @@ fn a_batch_the_floor_held_back_is_owed_a_deadline_once() {
 #[test]
 #[ignore = "a measurement, not a gate: run it by name"]
 fn the_rings_deadline_costs_nanoseconds_an_event_and_one_promise_a_floor() {
-    use zerocode_core::hook::{Activity, Phase, Tool};
+    use zerocode_core::hook::Phase;
 
     const EVENTS: u64 = 100_000;
-    let one = || Activity {
-        verb: Tool::Edit,
-        target: Some("src/a.rs".to_string()),
-        phase: Phase::Started,
-        reads: Vec::new(),
-        writes: Vec::new(),
-        vcs: Vec::new(),
-        cwd: None,
-        call: Some("call-1".to_string()),
-    };
+    let one = || edit_activity("src/a.rs", Phase::Started);
     let start = Instant::now();
     let at = |event: u64| start + Duration::from_millis(event);
 
