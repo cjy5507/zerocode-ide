@@ -20,7 +20,7 @@ import { installBoardWaits } from "./board-waits.mjs";
 
 /* The fixture, run inside the page. Self-contained: a page function carries
  * no closure. `now` is passed so a before/after pair draws the same clocks. */
-export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, folded = 0, now = Date.now() } = {}) {
+export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, folded = 0, gates = false, now = Date.now() } = {}) {
   const minute = 60_000;
   const run = "run-desk";
   const checkout = (n) => `/repos/zerocode/workspaces/t-${n}`;
@@ -34,6 +34,28 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
     worktree: "main", task: "", ask: "", said: "", you: "", parent: "",
     ledger: "active", at: now - 2 * minute, changed_at: now - 9 * minute, unseen: false, ...extra,
   });
+  /* The continue gate's reading of a worker, as the backend lays it on a row
+   * (t-26583) — asked for by the measurements and by no suite that counts a
+   * row's words: three in four calm, one in four repeating itself, and one of
+   * those over its budget with the restore point it was saved under. */
+  const gateOf = (n) => {
+    const steps = 40 + n * 17;
+    const calm = n % 4 !== 0;
+    const over = n % 8 === 0;
+    return {
+      mode: "stop", verdict: over ? "stop" : calm ? "continue" : "pause",
+      reasons: over ? [{ code: "task_budget_stop", value: 21.6, limit: 20 }]
+        : calm ? [] : [{ code: "rework_loop", value: 333, limit: 300 }],
+      metrics: {
+        steps, since_checkpoint: steps % 200, checkpoints: Math.floor(steps / 200),
+        rework_permille: calm ? 83 : 333, rise_permille: null, step_usd: 0.04,
+        spent_usd: 3.41 + n, unpriced_calls: n % 3,
+      },
+      cost: "read", task_spent_usd: 3.41 + n, task_limit_usd: 20, day_spent_usd: 7.5 + n, day_limit_usd: 60,
+      snapshot: { at_ms: now - 4 * minute, reference: `refs/zerocode/checkpoints/w-${n}/1`, error: null },
+      at_ms: now,
+    };
+  };
   const columns = { attention: [], working: [], done: [], idle: [] };
   const ledger = [];
   for (let n = 1; n <= workers; n += 1) {
@@ -64,6 +86,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
         : null,
       quiet_at: word === "idle" ? now - 6 * minute : null,
       pane_missing_since_ms: word === "dead" ? now - 12 * minute : null,
+      ...(gates ? { gate: gateOf(n) } : {}),
     });
     if (!seated) continue;
     const state = word === "turn" ? "working" : word === "asking" ? "needs-attention"

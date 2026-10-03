@@ -233,6 +233,9 @@ pub(super) fn sweep(host: &dyn Host, overrides: &[(String, LaunchOverride)], now
         gate_book::book().clear_readings();
         return;
     }
+    // What the beats before this one read of what the workers spent, written down
+    // when a minute has passed — also when the last worker has just ended.
+    gate_book::save_day(now_ms);
     let Some(held) = super::runtime() else {
         return;
     };
@@ -253,12 +256,16 @@ pub(super) fn sweep(host: &dyn Host, overrides: &[(String, LaunchOverride)], now
     }
     let notes: Vec<CostNote> = panes.iter().map(|pane| watch(host, pane, now_ms)).collect();
     let terms: Vec<u32> = panes.iter().map(|pane| pane.term).collect();
+    // The day's figures are everyone's, and nothing in the loop below changes
+    // them: read once a beat, not once a worker.
+    let (day_spent, day_ahead) = {
+        let book = gate_book::book();
+        (book.day_spent(now_ms), book.ahead_of(&terms))
+    };
     let door = LiveDoor { host, overrides };
     for (pane, cost) in panes.iter().zip(notes) {
         let (decided, around) = {
             let mut book = gate_book::book();
-            let day_ahead = book.ahead_of(&terms);
-            let day_spent = book.day_spent(now_ms);
             let task_spent = book.task_spent(&pane.task);
             let Some(gate) = book.pane_mut(pane.term) else {
                 continue;
@@ -285,8 +292,6 @@ pub(super) fn sweep(host: &dyn Host, overrides: &[(String, LaunchOverride)], now
             record(gate, decided, &done, settings, &around, now_ms);
         }
     }
-    // What the beat read of what the workers spent, written down once a minute.
-    gate_book::save_day(now_ms);
 }
 
 /// The calls a worker's CLI recorded since the last look, into the book: the
