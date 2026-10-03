@@ -81,8 +81,10 @@ pub struct IgnoredFacts {
     pub bytes: u64,
     /// `bytes` written for a person.
     pub size_text: String,
-    /// Whether the walk reached the end. `false` makes `bytes` a floor: the
-    /// panel says "or more", and nothing may read it as the exact size.
+    /// Whether every entry was measured to its end. `false` — the walk stopped
+    /// at a bound, a directory could not be listed, or a name was not found on
+    /// disk — makes `bytes` a floor: the panel says "or more", and nothing may
+    /// read it as the exact size.
     pub complete: bool,
     /// The biggest entries, biggest first, at most [`MAX_IGNORED_NAMED`].
     pub top: Vec<IgnoredEntry>,
@@ -159,20 +161,31 @@ fn measure_within(
     }
     let mut parents = Parents::default();
     let mut sized: Vec<IgnoredEntry> = Vec::with_capacity(ignored.len());
+    // The budget is gone: nothing more is walked.
     let mut stopped = false;
+    // Something was not measured, so the size is a floor.
+    let mut unmeasured = false;
     for name in ignored {
         let about = parents.about(fs, root, name);
         let dir = about.is_some_and(|held| held.is_dir);
         let mut bytes = about.map_or(0, |held| held.disk_bytes);
+        // A name the listing of its directory does not hold — gone since git
+        // looked, or spelled another way than the disk spells it (a decomposed
+        // Korean name on macOS) — has no size to give, and says so.
+        unmeasured |= about.is_none();
         // One entry of the budget for each name, so a list of ten thousand
-        // ignored files is as bounded as a tree of them.
-        if !stopped && !allowance.afford() {
-            stopped = true;
-        }
-        if dir && !stopped {
-            let (below, reached_the_end) = walk(fs, &root.join(name), &mut allowance);
-            bytes = bytes.saturating_add(below);
-            stopped = !reached_the_end;
+        // ignored files is as bounded as a tree of them. A file's size needs no
+        // walk — its listing already said it — so a spent budget leaves it exact.
+        stopped |= !allowance.afford();
+        if dir {
+            if stopped {
+                unmeasured = true;
+            } else {
+                let walked = walk(fs, &root.join(name), &mut allowance);
+                bytes = bytes.saturating_add(walked.bytes);
+                unmeasured |= walked.unread || walked.stopped;
+                stopped |= walked.stopped;
+            }
         }
         sized.push(IgnoredEntry {
             name: clipped(name),
@@ -195,42 +208,64 @@ fn measure_within(
         count: ignored.len(),
         bytes,
         size_text: format_bytes(bytes),
-        complete: !stopped,
+        complete: !unmeasured,
         top: sized,
     }
 }
 
-/// Bytes under `dir`, and whether the walk reached the end of it.
+/// How far one walk got.
+struct Walked {
+    /// Bytes counted under the directory.
+    bytes: u64,
+    /// A directory could not be listed, or an entry could not be described, so
+    /// what it holds is not in `bytes`.
+    unread: bool,
+    /// The budget ran out before the end.
+    stopped: bool,
+}
+
+/// Bytes under `dir`, and how far the walk got.
 ///
 /// A stack and not a recursion: a deep tree would overflow this thread's stack
 /// and take the window with it. Only the unexplored siblings along the path
 /// being walked are held, not the tree.
 ///
 /// A directory that cannot be listed counts as nothing, as it does in the
-/// window's space scan: one folder the process may not open must not make the
-/// rest of a nine-gigabyte tree unmeasurable.
-fn walk(fs: &dyn Fs, dir: &Path, allowance: &mut Allowance) -> (u64, bool) {
-    let mut total = 0_u64;
+/// window's space scan — one folder the process may not open must not make the
+/// rest of a nine-gigabyte tree unmeasurable — and the answer says so
+/// (`unread`), which makes the size a floor. A directory is listed whole before
+/// it is paid for (`Fs::read_dir` hands back its entries at once), so the
+/// bounds cut between directories and not inside one: the limit the window's
+/// space scan has too.
+fn walk(fs: &dyn Fs, dir: &Path, allowance: &mut Allowance) -> Walked {
+    let mut walked = Walked {
+        bytes: 0,
+        unread: false,
+        stopped: false,
+    };
     let mut pending = vec![dir.to_path_buf()];
     while let Some(next) = pending.pop() {
         let Ok(listing) = fs.read_dir(&next) else {
+            walked.unread = true;
             continue;
         };
         for found in listing {
             if !allowance.afford() {
-                return (total, false);
+                walked.stopped = true;
+                return walked;
             }
             let Some(about) = found.about else {
+                walked.unread = true;
                 continue;
             };
             if about.is_dir {
                 pending.push(found.path);
             } else {
-                total = total.saturating_add(about.disk_bytes);
+                walked.bytes = walked.bytes.saturating_add(about.disk_bytes);
             }
         }
     }
-    (total, true)
+    walked
 }
 
 /// The facts of an entry, read from the listing of the directory it sits in.
@@ -456,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_that_cannot_be_listed_counts_as_nothing_and_stops_nobody() {
+    fn a_directory_that_cannot_be_listed_counts_as_nothing_says_so_and_stops_nobody() {
         let mut tree = Tree::default();
         tree.locked("/checkout/locked")
             .dir("/checkout/open")
@@ -469,12 +504,14 @@ mod tests {
             unbounded(),
         );
 
-        assert!(facts.complete, "{facts:?}");
+        // What the locked directory holds is unknown, so the size is a floor;
+        // the open one beside it was still counted.
+        assert!(!facts.complete, "{facts:?}");
         assert_eq!(facts.bytes, 4_096 + 4_096 + 5_000, "{facts:?}");
     }
 
     #[test]
-    fn a_name_that_is_gone_is_still_an_entry_with_no_size() {
+    fn a_name_the_listing_does_not_hold_is_an_entry_with_no_size_and_a_floor() {
         let mut tree = Tree::default();
         tree.file("/checkout/kept", 10);
 
@@ -488,7 +525,23 @@ mod tests {
         assert_eq!(facts.count, 1);
         assert_eq!(facts.bytes, 0);
         assert!(!facts.top[0].dir);
-        assert!(facts.complete);
+        assert!(!facts.complete, "nothing was measured, so nothing is exact");
+    }
+
+    #[test]
+    fn a_file_needs_no_walk_so_a_spent_budget_still_sizes_it_exactly() {
+        let mut tree = Tree::default();
+        tree.file("/checkout/f", 7_000);
+
+        let facts = measure_within(
+            &tree,
+            Path::new("/checkout"),
+            &names(&["f"]),
+            Allowance::new(Duration::ZERO, usize::MAX),
+        );
+
+        assert!(facts.complete, "{facts:?}");
+        assert_eq!(facts.bytes, 7_000);
     }
 
     #[test]
