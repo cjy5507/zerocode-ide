@@ -289,10 +289,16 @@ pub(super) fn sweep(host: &dyn Host, overrides: &[(String, LaunchOverride)], now
     }
 }
 
-/// The meter of a worker's transcript (stub until its reader lands: every worker
-/// is read as though the window had watched it from its start).
-fn meter_for(agent: &str, _started_ms: i64, _watching_since_ms: i64) -> Meter {
-    Meter::new(agent)
+/// The meter of a worker's transcript: one whose attempt began before the window
+/// began to watch was already running, and its transcript holds spend the window
+/// has no claim on; every other is watched from its start.
+fn meter_for(agent: &str, started_ms: i64, watching_since_ms: i64) -> Meter {
+    let meter = Meter::new(agent);
+    if started_ms < watching_since_ms {
+        meter.predating_the_window()
+    } else {
+        meter
+    }
 }
 
 /// The calls a worker's CLI recorded since the last look, into the book: the

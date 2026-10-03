@@ -521,18 +521,31 @@ impl StepBook {
             Some(usd) => {
                 self.spent_usd += usd;
                 self.priced_calls = self.priced_calls.saturating_add(1);
-                self.costs.push_back(usd);
-                while self.costs.len() > COST_RING {
-                    self.costs.pop_front();
-                }
+                self.remember(usd);
             }
             None => self.unpriced_calls = self.unpriced_calls.saturating_add(1),
         }
     }
 
-    /// One model call the window only LEARNED OF: made before it began to watch
-    /// (stub until its reader lands: learns nothing).
-    pub fn seed_cost(&mut self, _usd: f64) {}
+    /// One model call the window only LEARNED OF: it finished before the window
+    /// began to watch, so what it cost is nobody's spend here — the day's total
+    /// already holds it if a window watched it, and a window that did not has no
+    /// claim on it — but it says how dear this worker's calls are, which the trend
+    /// and the projection of a stop need from the first beat. A cost that is not a
+    /// number of dollars is nothing.
+    pub fn seed_cost(&mut self, usd: f64) {
+        if usd.is_finite() && usd >= 0.0 {
+            self.remember(usd);
+        }
+    }
+
+    /// The latest calls' costs, newest last, and no more than the ring holds.
+    fn remember(&mut self, usd: f64) {
+        self.costs.push_back(usd);
+        while self.costs.len() > COST_RING {
+            self.costs.pop_front();
+        }
+    }
 
     /// The window saved this attempt's state at `now_ms`.
     pub fn checkpointed(&mut self, now_ms: i64) {

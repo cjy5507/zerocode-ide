@@ -293,9 +293,16 @@ impl GateBook {
         self.trim_tasks();
     }
 
-    /// What a transcript held of calls made before the window looked (stub until
-    /// its reader lands: learns nothing).
-    pub(super) fn seed_costs(&mut self, _term: u32, _costs: &[CallCost]) {}
+    /// What a transcript held of calls made before the window looked: into the
+    /// worker's own ring — how dear its calls are — and into no total.
+    pub(super) fn seed_costs(&mut self, term: u32, costs: &[CallCost]) {
+        let Some(gate) = self.panes.get_mut(&term) else {
+            return;
+        };
+        for usd in costs.iter().filter_map(|cost| cost.usd()) {
+            gate.book.seed_cost(usd);
+        }
+    }
 
     /// What a task has cost so far, as far as watched.
     pub(super) fn task_spent(&self, task: &str) -> f64 {

@@ -12,9 +12,11 @@
 //! - **a look reads at most [`READ_MAX_BYTES`]**; a backlog is read over
 //!   several looks and a line longer than one is stepped over, never held;
 //! - **a worker the window starts watching mid-run is read from the last
-//!   [`ATTACH_TAIL_BYTES`]** of its file, not from its first byte: what it spent
-//!   before the window looked is not this window's to know, and the board says
-//!   the cost is "as far as watched".
+//!   [`ATTACH_TAIL_BYTES`]** of its file, not from its first byte, and what is
+//!   found there is learned from and never counted ([`Looked::known`]): what it
+//!   spent before the window looked is not this window's to know — the day's total
+//!   already holds what a window that watched it counted — and the board says the
+//!   cost is "as far as watched".
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -109,11 +111,23 @@ impl Tail {
         }
         self.polled_ms = now_ms;
         match self.read_new() {
-            Ok(Look::Lines { text, known: _ }) => {
+            Ok(Look::Lines { text, known }) => {
                 self.unreadable = false;
-                Looked {
-                    counted: self.reader.feed(&text),
-                    known: Vec::new(),
+                let mut finished = self.reader.feed(&text);
+                if known {
+                    // The call still open at the end of a look at the past was made
+                    // before the window looked too: finished here, and its late
+                    // records are no second call.
+                    finished.extend(self.reader.flush());
+                    Looked {
+                        counted: Vec::new(),
+                        known: finished,
+                    }
+                } else {
+                    Looked {
+                        counted: finished,
+                        known: Vec::new(),
+                    }
                 }
             }
             Ok(Look::Quiet) => {
@@ -184,8 +198,10 @@ impl Tail {
             return Ok(Look::Pending);
         }
         self.offset = from + u64::try_from(end).unwrap_or_default();
-        let known = false;
-        self.predates = self.predates && !first;
+        let known = first && (self.predates || from > 0);
+        if first {
+            self.predates = false;
+        }
         Ok(Look::Lines {
             text: String::from_utf8_lossy(&bytes[skip..end]).into_owned(),
             known,
@@ -210,9 +226,11 @@ impl Meter {
         }
     }
 
-    /// The worker was running before the window began to watch (stub until its
-    /// reader lands: reads it like any other).
-    pub(super) fn predating_the_window(self) -> Self {
+    /// The worker was running before the window began to watch: its first look is
+    /// a look at the past, whatever the size of the file, and none of what it
+    /// finds is counted.
+    pub(super) fn predating_the_window(mut self) -> Self {
+        self.predates = true;
         self
     }
 
