@@ -1048,10 +1048,21 @@ const fn reflex_missing() -> &'static str {
 }
 
 /// The one question, asked down `wire` for the words of `workspace`, bounded
-/// by one lease: what the door let through, and what came back.
+/// by one lease: what the door let through, and what came back — with the
+/// branches its reading is asked ahead of beside it (t-32797).
 pub(crate) fn asker(wire: Wire, workspace: Option<PathBuf>) -> Asker {
+    asker_with(wire, workspace, reflex_decide::questions_for)
+}
+
+/// [`asker`], the request's questions built from the state by `questions`:
+/// a measurement asks the question alone beside it.
+pub(crate) fn asker_with(
+    wire: Wire,
+    workspace: Option<PathBuf>,
+    questions: fn(&Value) -> Value,
+) -> Asker {
     Arc::new(move |state: Value| {
-        let body = systemone::request_body(&state, &reflex_decide::questions_for(&state));
+        let body = systemone::request_body(&state, &questions(&state));
         let began = Instant::now();
         let asked = wire.ask(
             &REFLEX_DECIDE,
