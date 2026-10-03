@@ -5,8 +5,11 @@
 
 use zerocode_core::continue_gate::{Code, Verdict};
 
+use std::path::Path;
+
 use super::support::{
-    assert_canonical_setting_round_trip, block_after, shipped_backend, window_source,
+    assert_canonical_setting_round_trip, block_after, shipped_backend, strip_rust_comments,
+    window_source,
 };
 
 const BOARD: &str = include_str!("../../../../ui/shell-board.js");
@@ -136,4 +139,71 @@ fn a_persons_budget_travels_the_one_settings_road() {
             "the settings card has no `{id}`"
         );
     }
+}
+
+/// Every shipped `.rs` file under `directory`, as `(path relative to it, code)` — the
+/// code with its test tail and its comments taken out, so a gate reads what runs.
+fn shipped_sources(directory: &Path) -> Vec<(String, String)> {
+    fn walk(root: &Path, directory: &Path, found: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(directory).expect("a source directory") {
+            let path = entry.expect("a directory entry").path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if path.is_dir() {
+                if name != "tests" {
+                    walk(root, &path, found);
+                }
+                continue;
+            }
+            if !name.ends_with(".rs") || name == "tests.rs" || name.ends_with("_tests.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a source file");
+            let shipped = text
+                .split_once("#[cfg(test)]")
+                .map_or(text.as_str(), |(head, _)| head);
+            let relative = path
+                .strip_prefix(root)
+                .expect("under the root")
+                .display()
+                .to_string();
+            found.push((relative, strip_rust_comments(shipped)));
+        }
+    }
+    let mut found = Vec::new();
+    walk(directory, directory, &mut found);
+    found
+}
+
+/// The ledger counts every launch only if every launch goes in by its one door. A
+/// road that called `run_once` itself would run an agent's CLI outside the
+/// ceilings and outside a provider's rest, and would be found by nobody — so the
+/// two places `run_once` is named are its definition and the door, and a third is
+/// a failure of this test.
+#[test]
+fn no_road_runs_an_agents_cli_headless_except_through_the_launch_ledgers_door() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let sources = shipped_sources(&source);
+    assert!(
+        sources.len() > 100,
+        "the walk found {} files: it is measuring nothing",
+        sources.len()
+    );
+    let mut callers: Vec<(String, usize)> = sources
+        .iter()
+        .map(|(file, code)| (file.clone(), code.matches("run_once(").count()))
+        .filter(|(_, count)| *count > 0)
+        .collect();
+    callers.sort();
+    assert_eq!(
+        callers,
+        [
+            ("launch_budget_runtime.rs".to_string(), 1),
+            ("scm_runtime.rs".to_string(), 1),
+        ],
+        "`run_once(` is named in its definition and in the launch ledger's door and nowhere else; \
+         every other road goes in by `run_budgeted`"
+    );
 }
