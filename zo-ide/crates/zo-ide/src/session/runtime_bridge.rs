@@ -947,6 +947,7 @@ mod tests {
 
     #[test]
     fn tools_disabled_request_lowers_every_tool_block_even_on_anthropic() {
+        let _lock = crate::test_env_lock();
         let tool_name = "mcp__atlassian__getJiraIssue";
         let registry = GlobalToolRegistry::builtin()
             .with_runtime_tools(vec![tools::RuntimeToolDefinition {
@@ -1042,6 +1043,7 @@ mod tests {
     /// in the runtime crate), which costs one refused call instead.
     #[test]
     fn a_deep_leg_prompt_does_not_change_the_advertised_tool_set() {
+        let _lock = crate::test_env_lock();
         let registry = GlobalToolRegistry::builtin();
 
         let ordinary = advertised_tool_names_for_messages(
@@ -1125,9 +1127,11 @@ mod tests {
     #[test]
     fn advertisement_readers_wait_out_a_loop_scope() {
         type Reader = fn();
-        let readers: [Reader; 2] = [
+        let readers: [Reader; 4] = [
             a_lookup_never_lifts_deferral_on_any_provider,
             builtin_advertisement_is_identical_across_a_model_swap,
+            a_deep_leg_prompt_does_not_change_the_advertised_tool_set,
+            tools_disabled_request_lowers_every_tool_block_even_on_anthropic,
         ];
         for reader in readers {
             let lock = crate::test_env_lock();
