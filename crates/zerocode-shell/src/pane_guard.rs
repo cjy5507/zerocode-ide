@@ -1045,18 +1045,78 @@ fn record_turns(wire: &Wire, rows: Vec<Value>) {
 /// within the ask's wall.
 pub(crate) type BriefContributor = fn(&zerocode_hookd::TurnBriefAsk, usize) -> Option<String>;
 
-/// The voices a turn's brief is made of, in the order the agent reads them.
-/// Stub (red).
-const BRIEF_CONTRIBUTORS: &[BriefContributor] = &[];
+/// The voices a turn's brief is made of, in the order the agent reads them:
+/// the person's own pointer first — what "this" in the prompt means — then
+/// the file pick seat's likely files. A new voice is one more entry.
+const BRIEF_CONTRIBUTORS: &[BriefContributor] =
+    &[crate::tree_selection::brief_line, file_pick_line];
 
-/// The voices' lines joined a blank line apart, in order, each voice given
-/// the room left under `cap`. Stub (red).
+/// What separates two voices in a brief: a blank line, the way the bridge
+/// itself sets the vault's block apart from the contract.
+const BRIEF_VOICE_GAP: &str = "\n\n";
+
+/// The voices' lines joined a blank line apart, in order, each voice handed
+/// the room the ones before it left under `cap` — the bridge's cap, past
+/// which it drops a brief whole (`zerocode_hookd::TURN_BRIEF_CHAR_CAP`).
+///
+/// A voice answers inside its room or not at all, so a line it returns is
+/// never thrown away after it was given (a voice that records having said
+/// something can trust that it reached the agent); a voice left no room is
+/// not asked. A line over its room breaks that promise and is left out —
+/// the bridge would drop every voice's line with it.
 pub(crate) fn compose_brief(
-    _voices: &[BriefContributor],
-    _ask: &zerocode_hookd::TurnBriefAsk,
-    _cap: usize,
+    voices: &[BriefContributor],
+    ask: &zerocode_hookd::TurnBriefAsk,
+    cap: usize,
 ) -> Option<String> {
-    None
+    let mut brief = String::new();
+    let mut used = 0;
+    for voice in voices {
+        let gap = if brief.is_empty() {
+            0
+        } else {
+            BRIEF_VOICE_GAP.chars().count()
+        };
+        let room = cap.saturating_sub(used + gap);
+        if room == 0 {
+            continue;
+        }
+        let Some(line) = voice(ask, room) else {
+            continue;
+        };
+        let line = line.trim();
+        let size = line.chars().count();
+        if size == 0 {
+            continue;
+        }
+        debug_assert!(size <= room, "a brief voice said {size} characters in a room of {room}");
+        if size > room {
+            continue;
+        }
+        if gap > 0 {
+            brief.push_str(BRIEF_VOICE_GAP);
+        }
+        brief.push_str(line);
+        used += gap + size;
+    }
+    (!brief.is_empty()).then_some(brief)
+}
+
+/// The file pick seat's voice: its likely files, while it acts for a
+/// summoned worker's pane, when they fit the room it is handed.
+fn file_pick_line(ask: &zerocode_hookd::TurnBriefAsk, room: usize) -> Option<String> {
+    if !STANDING.asking().file_pick {
+        return None;
+    }
+    let term = crate::hooks::term_of_pane_key(&ask.pane_key)?;
+    brief_for(
+        &GUARDS,
+        &Wire::of_this_machine(),
+        term,
+        summoned(term),
+        ask,
+        room,
+    )
 }
 
 /// The window's answer to a turn's brief, installed on the bridge.
@@ -1064,16 +1124,10 @@ pub(crate) struct PaneBrief;
 
 impl zerocode_hookd::TurnBrief for PaneBrief {
     fn brief(&self, ask: zerocode_hookd::TurnBriefAsk) -> Option<String> {
-        if !STANDING.asking().file_pick {
-            return None;
-        }
-        let term = crate::hooks::term_of_pane_key(&ask.pane_key)?;
-        brief_for(
-            &GUARDS,
-            &Wire::of_this_machine(),
-            term,
-            summoned(term),
+        compose_brief(
+            BRIEF_CONTRIBUTORS,
             &ask,
+            zerocode_hookd::TURN_BRIEF_CHAR_CAP,
         )
     }
 }
@@ -1106,6 +1160,7 @@ pub(crate) fn brief_for(
     term: u32,
     worker: bool,
     ask: &zerocode_hookd::TurnBriefAsk,
+    room: usize,
 ) -> Option<String> {
     if !worker {
         return None;
@@ -1129,6 +1184,12 @@ pub(crate) fn brief_for(
             {
                 briefing.until.get_or_insert(until);
                 match &briefing.said {
+                    // A pick that does not fit the room the voices before it
+                    // left is not said — and is not recorded as said.
+                    Said::Ready(line) if line.chars().count() > room => {
+                        briefing.said = Said::Nothing;
+                        return None;
+                    }
                     Said::Ready(line) => {
                         let line = line.clone();
                         briefing.said = Said::Taken;

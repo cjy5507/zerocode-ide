@@ -1156,7 +1156,14 @@ fn brief_beside_the_prompt(
     let (wire_for_brief, worker) = (wire.clone(), pane.worker);
     let brief = std::thread::spawn(move || {
         let began = Instant::now();
-        let said = brief_for(guards, &wire_for_brief, 7, worker, &ask);
+        let said = brief_for(
+            guards,
+            &wire_for_brief,
+            7,
+            worker,
+            &ask,
+            zerocode_hookd::TURN_BRIEF_CHAR_CAP,
+        );
         (said, began.elapsed())
     });
     join(note(

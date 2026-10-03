@@ -495,6 +495,14 @@ pub(crate) fn fs_open_default(state: State<'_, AppState>, path: String) -> Resul
         .map_err(|error| error.to_string())
 }
 
+/// The file tree's selection, relative to the workspace it was made in
+/// (t-24298): held for the next prompt's brief in that workspace's panes
+/// (`crate::tree_selection`).
+#[tauri::command]
+pub(crate) fn tree_selection(root: String, paths: Vec<String>) {
+    crate::tree_selection::hold(&root, paths);
+}
+
 #[tauri::command(async)]
 pub(crate) fn open_download(app: AppHandle, path: String) -> Result<(), String> {
     let real = downloaded_file_checked(&app, &path)?;

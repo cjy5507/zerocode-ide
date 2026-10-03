@@ -7995,6 +7995,7 @@ fn a_helpers_line_counts_its_tool_uses_whoever_counted_them() {
         reads: Vec::new(),
         writes: Vec::new(),
         vcs: Vec::new(),
+        cwd: None,
     };
     assert!(ring.note_fresh(doing("src/x.rs")));
     assert!(
@@ -8450,6 +8451,7 @@ fn a_ring_keeps_the_last_twenty_and_speaks_at_most_ten_times_a_second() {
         reads: Vec::new(),
         writes: Vec::new(),
         vcs: Vec::new(),
+        cwd: None,
     };
     let mut ring = ActivityRing::default();
     let start = Instant::now();

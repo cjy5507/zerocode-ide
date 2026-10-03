@@ -29,15 +29,66 @@ pub(crate) struct Selections {
     told: HashSet<String>,
 }
 
+/// How the line opens: what the paths are and why they are said — the
+/// person's pointer, so "this" in their prompt has a referent.
+const TREE_SELECTION_SAYS: &str = "Selected in the person's file tree in ZeroCode — what \"this\" or \"it\" in their prompt most likely refers to:";
+
 impl Selections {
-    /// The window's selection, relative to `root`. Stub (red).
-    pub(crate) fn hold(&mut self, _root: &str, _paths: Vec<String>) {}
+    /// The window's selection, relative to `root`: only paths that stay
+    /// inside it, each once, the first [`TREE_SELECTION_PATHS`] of them. The
+    /// same selection said again is not news and tells nobody again.
+    pub(crate) fn hold(&mut self, root: &str, paths: Vec<String>) {
+        let root = root.trim_end_matches('/').to_string();
+        let mut kept: Vec<String> = Vec::new();
+        for path in paths {
+            let inside = !path.is_empty()
+                && !path.starts_with('/')
+                && !path.contains('\0')
+                && !path.split('/').any(|part| part == "..");
+            if inside && !kept.contains(&path) {
+                kept.push(path);
+            }
+            if kept.len() == TREE_SELECTION_PATHS {
+                break;
+            }
+        }
+        if root == self.root && kept == self.paths {
+            return;
+        }
+        self.root = root;
+        self.paths = kept;
+        self.told.clear();
+    }
 
     /// The line for `pane_key`'s next prompt, in at most `room` characters,
     /// if it works in the selection's workspace and has not been told this
-    /// selection yet. Stub (red).
-    pub(crate) fn offer(&mut self, _worktree: &str, _pane_key: &str, _room: usize) -> Option<String> {
-        None
+    /// selection yet. As many paths as fit, in the person's order; a room
+    /// too small for one says nothing, and leaves the pane still owed.
+    pub(crate) fn offer(&mut self, worktree: &str, pane_key: &str, room: usize) -> Option<String> {
+        if self.paths.is_empty()
+            || worktree.trim_end_matches('/') != self.root
+            || self.told.contains(pane_key)
+        {
+            return None;
+        }
+        let mut line = String::from(TREE_SELECTION_SAYS);
+        let mut size = line.chars().count();
+        let mut named = 0;
+        for path in &self.paths {
+            let entry = format!("\n- {}/{path}", self.root);
+            let grown = size + entry.chars().count();
+            if grown > room {
+                break;
+            }
+            line.push_str(&entry);
+            size = grown;
+            named += 1;
+        }
+        if named == 0 {
+            return None;
+        }
+        self.told.insert(pane_key.to_string());
+        Some(line)
     }
 }
 
