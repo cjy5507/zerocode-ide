@@ -14764,15 +14764,19 @@ details[open] > .helper-step-line::after {
   text-overflow: ellipsis;
 }
 
+/* A door's underline comes in as it is pointed at or reached by the
+ * keyboard, eased as the window's other states are. */
 .helper-out-path {
   border-radius: var(--radius-xs);
   color: var(--chat-arg-ink);
+  text-decoration: underline transparent;
+  text-underline-offset: 0.2em;
   cursor: pointer;
+  transition: text-decoration-color var(--motion-fast) var(--ease-standard);
 }
 
-.helper-out-path:hover {
-  text-decoration: underline;
-  text-underline-offset: 0.2em;
+.helper-out-path:is(:hover, :focus-visible) {
+  text-decoration-color: currentColor;
 }
 
 .helper-step-res:empty,
