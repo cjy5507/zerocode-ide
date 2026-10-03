@@ -7,11 +7,13 @@
 //! digit in somebody else's menu, an Escape that stops a running turn.
 //!
 //! So every road that types an answer a card prepared (`answer_ask`,
-//! `answer_approval`) goes through here, and here the screen is read again
-//! under the pane's own terminal lock, in the same hold as the write:
-//! [`type_if_up`] writes only if the question is still the one on screen. The
-//! pump needs that lock to move output into the grid, so the screen read and
-//! the key are not separated by a redraw this window parsed.
+//! `answer_approval`) — and the one line the window types by itself that a
+//! menu would take for an answer (the hand-over's exit command) — goes
+//! through here, and here the screen is read again under the pane's own
+//! terminal lock, in the same hold as the write: [`type_if_up`] writes only if
+//! the screen shows what the caller needs. The pump needs that lock to move
+//! output into the grid, so the screen read and the key are not separated by a
+//! redraw this window parsed.
 //!
 //! One answer at a time per pane ([`answer_lease`]), on the lease a
 //! `zerocode-ssh send` already takes — the same pane, the same "two writers
@@ -19,20 +21,32 @@
 //!
 //! The reading itself is `zerocode_core::screen_menu`'s. This module owns the
 //! terminal, its lock and its clock; core owns what a menu is.
+//!
+//! **What does not come through here, and why.** A person's own keys, paste
+//! and wheel (`term_key`, `term_paste`, `term_scroll`): the person is looking
+//! at the screen that takes them. A queued prompt (`PromptDelivery`): it has
+//! its own guard on the composer line it writes to. An agent team's
+//! `send-keys`, the restart nudge and the usage probes: nothing was prepared
+//! from an earlier read of the screen, so there is nothing here to be late.
 
 use super::*;
 use zerocode_core::ask::{AskPrompt, AskQuestion, AskSelection};
+use zerocode_core::screen_menu::{self, ScreenMenu};
 
 use crate::terminal_registry::HeldTerminal;
 
 /// The word a refused answer carries to the page when the question it was
 /// prepared for is no longer the one on the screen. The page maps it to its
-/// own sentence and shows the pane's current question.
+/// own sentence and shows the pane's question as it is now.
 pub(crate) const QUESTION_CHANGED: &str = "question-changed";
 
 /// The word a refused answer carries when another answer to the same pane is
 /// still being typed or has not yet been shown to land.
 pub(crate) const ANSWER_IN_FLIGHT: &str = "answer-in-flight";
+
+/// The word a refused answer carries when a numbered menu was answered with
+/// only words: a menu takes a row.
+pub(crate) const MENU_NEEDS_A_ROW: &str = "menu-needs-a-row";
 
 /// How long a pane stays "being answered" after the last key of an answer.
 ///
@@ -113,6 +127,33 @@ impl<'a> Expect<'a> {
     }
 }
 
+/// The visible rows of a pane's screen and where its cursor stands — what
+/// `screen_menu` reads. Copied out so the lock is held for the copy and not
+/// for the reading.
+fn screen_of(pty: &PtyHandle) -> (Vec<String>, Option<usize>) {
+    let grid = pty.terminal().grid();
+    let rows = (0..grid.screen_rows()).map(|row| grid.line(row)).collect();
+    (rows, Some(grid.cursor().0))
+}
+
+/// Whether the screen shows what `expect` says.
+fn shows(pty: &PtyHandle, expect: &Expect<'_>) -> bool {
+    let (rows, cursor) = screen_of(pty);
+    if expect.absent {
+        return screen_menu::read_menu(&rows, cursor).is_none();
+    }
+    let on_row = |menu: &ScreenMenu| expect.row.is_none_or(|row| menu.selected == row);
+    match expect.question {
+        // A question with no rows to compare: its words on the last rows.
+        Some(question) if question.options.is_empty() => {
+            screen_menu::words_are_up(&rows, &question.question)
+        }
+        Some(question) => screen_menu::read_menu(&rows, cursor)
+            .is_some_and(|menu| menu.shows(question) && on_row(&menu)),
+        None => screen_menu::read_menu(&rows, cursor).is_some_and(|menu| on_row(&menu)),
+    }
+}
+
 /// Type `bytes` into the pane if — and only if — the screen shows what
 /// `expect` says, read and written in one hold of the pane's lock.
 ///
@@ -122,9 +163,25 @@ pub(super) fn type_if_up(
     expect: &Expect<'_>,
     bytes: &[u8],
 ) -> Result<bool, PtyTransportError> {
-    let _ = expect;
-    lock_pty(held).write_input(bytes)?;
+    let mut pty = lock_pty(held);
+    if !shows(&pty, expect) {
+        return Ok(false);
+    }
+    pty.write_input(bytes)?;
     Ok(true)
+}
+
+/// Type one key group of a walk, refusing if the question is gone.
+fn press(
+    held: &HeldTerminal,
+    expect: &Expect<'_>,
+    group: &zerocode_core::ask::KeyGroup,
+    wake: &dyn Fn(),
+) -> Result<(), Refusal> {
+    let typed = type_if_up(held, expect, &crate::cmd::terminal::key_group_bytes(group))
+        .map_err(|error| Refusal::Pty(error.to_string()))?;
+    wake();
+    if typed { Ok(()) } else { Err(Refusal::Changed) }
 }
 
 /// The one row a card's answer picked on a numbered menu, or `None` when the
@@ -132,8 +189,10 @@ pub(super) fn type_if_up(
 /// picks, a multi-select, nothing answered. A menu takes a row — not a
 /// sentence and not a set.
 pub(super) fn chosen_row(question: &AskQuestion, selections: &[AskSelection]) -> Option<usize> {
-    let _ = (question, selections);
-    None
+    match selections.first()?.indices.as_slice() {
+        [row] if !question.multi_select => Some(*row),
+        _ => None,
+    }
 }
 
 /// Choose row `to` of the menu `question` is on a pane's screen the way a
@@ -154,7 +213,28 @@ pub(super) fn choose_row(
     settle: Duration,
     wake: &dyn Fn(),
 ) -> Result<(), Refusal> {
-    let _ = (held, question, to, step, settle, wake);
+    let (rows, cursor) = screen_of(&lock_pty(held));
+    let from = screen_menu::read_menu(&rows, cursor)
+        .filter(|menu| menu.shows(question) && to < menu.options.len())
+        .map(|menu| menu.selected)
+        .ok_or(Refusal::Changed)?;
+    let on_question = Expect::question(question);
+    let walk = zerocode_core::ask::walk_to_row(from, to);
+    for group in &walk {
+        press(held, &on_question, group, wake)?;
+        std::thread::sleep(step);
+    }
+    // Nothing moved when the selection was already on the row, so there is
+    // nothing for the screen to settle after.
+    if !walk.is_empty() {
+        std::thread::sleep(settle);
+    }
+    // The look: the selection has to be on the chosen row, and it is checked
+    // in the same hold as the Enter.
+    let on_the_row = Expect::question(question).on_row(to);
+    for group in zerocode_core::ask::press_enter() {
+        press(held, &on_the_row, &group, wake)?;
+    }
     Ok(())
 }
 
@@ -165,16 +245,34 @@ pub(super) fn choose_row(
 /// terminal is busy being parsed is simply not read this time; the next ask
 /// finds it.
 pub(super) fn screen_card(held: &HeldTerminal) -> Option<AskPrompt> {
-    let _ = held;
-    None
+    let (rows, cursor) = {
+        let pty = match held.try_lock() {
+            Ok(pty) => pty,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        screen_of(&pty)
+    };
+    screen_menu::read_menu(&rows, cursor)?.card()
 }
 
 /// Take the right to type one answer into `term`, or say why not.
 pub(super) fn answer_lease(term: TermId) -> Result<tokio::sync::OwnedMutexGuard<()>, Refusal> {
-    let _ = term;
-    Arc::new(tokio::sync::Mutex::new(()))
+    crate::ssh_send_guard::send_lease(term)
         .try_lock_owned()
         .map_err(|_| Refusal::InFlight)
+}
+
+/// Keep the pane "being answered" for [`ANSWER_SETTLE`] after its last key,
+/// then let go. Blocks; a caller already on a thread of its own calls this.
+pub(super) fn settle(lease: tokio::sync::OwnedMutexGuard<()>) {
+    std::thread::sleep(ANSWER_SETTLE);
+    drop(lease);
+}
+
+/// [`settle`] for a caller that has nothing more to do and must not wait.
+pub(super) fn settle_in_background(lease: tokio::sync::OwnedMutexGuard<()>) {
+    std::thread::spawn(move || settle(lease));
 }
 
 #[cfg(test)]
@@ -528,5 +626,95 @@ mod tests {
         assert!(answer_lease(910_002).is_ok(), "another pane is not blocked");
         drop(first);
         assert!(answer_lease(910_001).is_ok(), "the pane is free again");
+    }
+
+    /// MEASUREMENT (ignored): what the door costs a pane and what it keeps. The
+    /// reading is paid when a pane that waits is listed for the board and when
+    /// an answer is about to be typed — never per output chunk — so this is the
+    /// whole bill: the card's screen read (lock, copy, reading), the typed
+    /// answer's look-and-write, and the memory after a long run of both.
+    /// Run on purpose, normally and under `taskpolicy -b`:
+    /// `cargo test -p zerocode-shell --bin zerocode-shell answer_door::tests::measure -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, run on purpose: -- --ignored --nocapture"]
+    fn measure_the_door_and_what_it_keeps() {
+        use std::time::Instant;
+        const ITERATIONS: u32 = 50_000;
+        const LEASE_CYCLES: u32 = 20_000;
+        // The loops run in this many equal parts and the resident size is read
+        // after each, so a plateau and a leak look different.
+        const PARTS: u32 = 5;
+        let rss_kib = || -> u64 {
+            let out = crate::proc::quiet_command("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
+        };
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut cli = MenuCli {
+            terminal: Terminal::new(40, 120),
+            title: "Select an approach".to_string(),
+            options: vec!["Rebase".into(), "Merge".into(), "Cancel".into()],
+            selected: 0,
+            follows_arrows: true,
+            written: Arc::clone(&written),
+            chosen: Arc::new(Mutex::new(None)),
+        };
+        cli.redraw();
+        let held: HeldTerminal = Arc::new(Mutex::new(PtyHandle::new(cli)));
+        let question = asked("Select an approach", &["Rebase", "Merge", "Cancel"]);
+        let before = rss_kib();
+
+        let mut cards = 0_u32;
+        let mut card_time = Duration::ZERO;
+        let mut card_rss = Vec::new();
+        for _ in 0..PARTS {
+            let began = Instant::now();
+            for _ in 0..ITERATIONS / PARTS {
+                cards += u32::from(screen_card(&held).is_some());
+            }
+            card_time += began.elapsed();
+            card_rss.push(rss_kib());
+        }
+        let card_nanos = card_time.as_nanos() as f64 / f64::from(ITERATIONS);
+
+        let mut typed = 0_u32;
+        let mut type_time = Duration::ZERO;
+        let mut type_rss = Vec::new();
+        for _ in 0..PARTS {
+            let began = Instant::now();
+            for round in 0..ITERATIONS / PARTS {
+                typed += u32::from(
+                    type_if_up(&held, &Expect::question(&question), b"x").unwrap_or(false),
+                );
+                if round.is_multiple_of(1_000) {
+                    written.lock().unwrap().clear();
+                }
+            }
+            type_time += began.elapsed();
+            type_rss.push(rss_kib());
+        }
+        let type_nanos = type_time.as_nanos() as f64 / f64::from(ITERATIONS);
+
+        let mut lease_rss = Vec::new();
+        for part in 0..PARTS {
+            for term in 0..LEASE_CYCLES / PARTS {
+                let pane = 920_000 + part * (LEASE_CYCLES / PARTS) + term;
+                drop(answer_lease(pane).expect("a free pane"));
+            }
+            lease_rss.push(rss_kib());
+        }
+        println!(
+            "MEASURE door: screen_card {:.1} us/call ({cards} cards of {ITERATIONS}), type_if_up {:.1} us/call ({typed} typed of {ITERATIONS}) — look + write under one hold of the pane's lock",
+            card_nanos / 1_000.0,
+            type_nanos / 1_000.0
+        );
+        println!(
+            "MEASURE memory: rss {before} KiB at the start; after each fifth of {ITERATIONS} card reads {card_rss:?}; of {ITERATIONS} typed answers {type_rss:?}; of {LEASE_CYCLES} lease cycles on distinct panes {lease_rss:?} (a plateau is no growth)"
+        );
     }
 }

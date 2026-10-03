@@ -2304,8 +2304,8 @@ pub(super) fn observe_stop_gesture(app: &AppHandle, term: TermId, bytes: &[u8]) 
         Observed::Nothing | Observed::FirstEscape { .. } => {}
         Observed::Infer(call) => apply_inferred_interrupt(app, term, &call),
         Observed::Armed { flush_at } => {
-            // The settle, on the shape `answer_ask` already uses: a newer
-            // gesture bumps the stamp and this thread finds its own gone.
+            // The settle: a newer gesture bumps the stamp and this thread
+            // finds its own gone.
             let generation = {
                 let mut sends = state.inference_sends();
                 let slot = sends.entry(term).or_insert(0);

@@ -34347,6 +34347,15 @@ details.task-board-section > summary {
   white-space: nowrap;
 }
 
+/* A question read off a pane's screen can run over several rows (the command,
+ * then the ask): the rows as they are, under the same ellipsis. */
+.board-ask-question.is-multiline {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  white-space: pre-line;
+}
+
 .board-ask-rows {
   display: flex;
   overflow: hidden;

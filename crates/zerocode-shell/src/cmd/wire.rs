@@ -245,7 +245,29 @@ fn hand_over_pane(
         pty.terminal_mut().grid_mut().view_to_bottom();
         Ok(())
     })?;
-    crate::cmd::terminal::walk_key_groups(state, term, &groups, step, || true)?;
+    // The exit command is a line the window types by itself, and a menu takes
+    // its Enter for the highlighted row — which may be a permission nobody
+    // gave. So its first key goes through the answer door, which refuses a
+    // pane that is standing on one; the rest is the walk every line takes.
+    let Some((first, rest)) = groups.split_first() else {
+        return Err(format!("{agent}'s exit command has nothing to type"));
+    };
+    let held = state
+        .terminals()
+        .handle(term)
+        .ok_or("터미널이 떠 있지 않습니다")?;
+    let typed = crate::answer_door::type_if_up(
+        &held,
+        &crate::answer_door::Expect::no_menu(),
+        &crate::cmd::terminal::key_group_bytes(first),
+    )
+    .map_err(|error| error.to_string())?;
+    state.cadence().wake();
+    if !typed {
+        return Err("the pane stands on a menu — nothing was typed; answer it first".to_string());
+    }
+    std::thread::sleep(step);
+    crate::cmd::terminal::walk_key_groups(state, term, rest, step)?;
     while state.terminals().contains_key(&term) {
         if started.elapsed() >= HAND_OVER_EXIT_WAIT {
             return Err(format!(

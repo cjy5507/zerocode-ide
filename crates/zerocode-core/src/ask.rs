@@ -466,8 +466,12 @@ pub const ROW_SETTLE_MS: u64 = 200;
 /// been read to show the selection landed ([`press_enter`]).
 #[must_use]
 pub fn walk_to_row(from: usize, to: usize) -> Vec<KeyGroup> {
-    let _ = (from, to);
-    Vec::new()
+    let (key, steps) = if to >= from {
+        (NEXT_ROW, to - from)
+    } else {
+        (PREVIOUS_ROW, from - to)
+    };
+    (0..steps).map(|_| KeyGroup::Raw(key.to_string())).collect()
 }
 
 /// The key that takes the row a menu's selection stands on.
