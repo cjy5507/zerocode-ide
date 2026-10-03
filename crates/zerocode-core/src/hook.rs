@@ -1488,9 +1488,9 @@ struct Touched {
     cwd: Option<String>,
 }
 
-fn touched_in(verb: &Tool, parsed: &serde_json::Value) -> Touched {
+fn touched_in(verb: &Tool, parsed: &serde_json::Value, shown: Option<&str>) -> Touched {
     let input = INPUT_KEYS.iter().find_map(|key| parsed.get(*key));
-    let writes: Vec<String> = match input {
+    let mut writes: Vec<String> = match input {
         Some(input) if matches!(verb, Tool::Edit | Tool::Bash) && names_a_patch(input) => {
             crate::transcript::edits_in(tool_named_in(parsed).unwrap_or_default(), Some(input))
                 .into_iter()
@@ -1499,12 +1499,13 @@ fn touched_in(verb: &Tool, parsed: &serde_json::Value) -> Touched {
         }
         _ => Vec::new(),
     };
-    let (reads, vcs) = match verb {
+    let (mut reads, vcs) = match verb {
         Tool::Bash => shell_script_in(parsed)
             .map(|script| (read_paths(&script), vcs_steps(&script)))
             .unwrap_or_default(),
         _ => (Vec::new(), Vec::new()),
     };
+    file_cut_path(verb, shown, || target_in(parsed), &mut reads, &mut writes);
     // Raw, not through the row's clamp: a base cut at 120 characters would
     // put every path under it somewhere else.
     let cwd = (!reads.is_empty() || !writes.is_empty())
@@ -1621,8 +1622,39 @@ fn activity_text(text: &str) -> Option<String> {
         return Some(collapsed);
     }
     let mut cut: String = collapsed.chars().take(ACTIVITY_TARGET_CHARS).collect();
-    cut.push('…');
+    cut.push(CUT_MARK);
     Some(cut)
+}
+
+/// What the row's clamp leaves at the end of a target it cut ([`activity_text`]).
+const CUT_MARK: char = '…';
+
+/// A file whose path the row's clamp cut, filed whole with the files the call
+/// reads or writes (t-31715) — where the file tree looks, which cannot walk to a
+/// path that ends in [`CUT_MARK`] — while the row keeps its cut words. Without
+/// it a deep path never lights its row, shimmers, or gets its counts, for any
+/// agent. Only a call that names a file of its own has one (`Read`, `Edit`,
+/// `Write`: a search's pattern or a command is no file), and only when it names
+/// no other: a patch lists its files already. `whole_path` is asked only then.
+fn file_cut_path(
+    verb: &Tool,
+    shown: Option<&str>,
+    whole_path: impl FnOnce() -> Option<String>,
+    reads: &mut Vec<String>,
+    writes: &mut Vec<String>,
+) {
+    let cut = shown.is_some_and(|words| words.ends_with(CUT_MARK));
+    if !cut || !reads.is_empty() || !writes.is_empty() {
+        return;
+    }
+    let Some(whole) = whole_path() else {
+        return;
+    };
+    match verb {
+        Tool::Read => reads.push(whole),
+        Tool::Edit | Tool::Write => writes.push(whole),
+        _ => {}
+    }
 }
 
 /// What separates a verb from its target in a composed activity line.
@@ -1797,7 +1829,7 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
         } else {
             phase
         };
-        let touched = touched_in(&verb, parsed);
+        let touched = touched_in(&verb, parsed, target.as_deref());
         return Some(Activity {
             verb,
             target,
@@ -1859,15 +1891,25 @@ pub fn activity_of_turn(role: &str, tool: &crate::transcript::TranscriptTool) ->
     };
     let verb =
         Tool::named(&tool.name).unwrap_or_else(|| Tool::Other(NAMELESS_TOOL_VERB.to_string()));
+    let target = tool
+        .file
+        .as_ref()
+        .and_then(|file| activity_text(&file.path));
+    let mut reads = Vec::new();
+    let mut writes: Vec<String> = tool.edits.iter().map(|edit| edit.path.clone()).collect();
+    file_cut_path(
+        &verb,
+        target.as_deref(),
+        || tool.file.as_ref().map(|file| file.path.clone()),
+        &mut reads,
+        &mut writes,
+    );
     Some(Activity {
         verb,
-        target: tool
-            .file
-            .as_ref()
-            .and_then(|file| activity_text(&file.path)),
+        target,
         phase,
-        reads: Vec::new(),
-        writes: tool.edits.iter().map(|edit| edit.path.clone()).collect(),
+        reads,
+        writes,
         vcs: Vec::new(),
         cwd: None,
         call: Some(tool.call_id.clone()).filter(|id| !id.trim().is_empty()),
