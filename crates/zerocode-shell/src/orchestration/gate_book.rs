@@ -64,12 +64,22 @@ static DAY_SAVED_MS: AtomicI64 = AtomicI64::new(i64::MIN);
 
 /// The day as it was written, or `None` for a file that is not there or not a
 /// day.
-pub(super) fn load_day(_file: &Path) -> Option<DaySpend> {
-    None
+pub(super) fn load_day(file: &Path) -> Option<DaySpend> {
+    serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()
 }
 
-/// The day, written down: one durable replace.
-pub(super) fn write_day(_file: &Path, _day: &DaySpend) {}
+/// The day, written down: one durable replace. A write that fails is dropped:
+/// the day stays right in memory until the next restart, and the beat that asked
+/// has other work.
+pub(super) fn write_day(file: &Path, day: &DaySpend) {
+    let Ok(text) = serde_json::to_string(day) else {
+        return;
+    };
+    if let Some(parent) = file.parent() {
+        let _ = crate::durable_file::ensure_private_directory(parent);
+    }
+    let _ = crate::durable_file::replace_bytes(file, text.as_bytes());
+}
 
 /// Opens the gate at boot: what a person set, and the day the window had
 /// already counted.
