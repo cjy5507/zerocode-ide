@@ -467,9 +467,10 @@ mod tests {
     }
 
     /// This process's resident memory in KB, from `ps` — a measurement helper,
-    /// never part of the shipped code.
+    /// never part of the shipped code. The child starts through the window's one
+    /// door ([`crate::proc::quiet_command`]), as every child in this crate does.
     fn resident_kb() -> u64 {
-        std::process::Command::new("ps")
+        crate::proc::quiet_command("ps")
             .args(["-o", "rss=", "-p", &std::process::id().to_string()])
             .output()
             .ok()
