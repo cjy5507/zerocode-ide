@@ -342,6 +342,11 @@ fn a_runaway_is_stopped_before_it_spends_the_budget() {
         usd *= GROWTH;
         spent += usd;
     }
+    // Said on every run, so a reader of the log sees how much room the stop left.
+    eprintln!(
+        "runaway: began at call {RUNS_AWAY_AT}, paused at call {first_pause}, stopped at call {stopped} \
+         with ${at_decision:.2} spent; ${spent:.2} once the stop lands, against a budget of ${BUDGET:.2}"
+    );
     assert!(
         spent < BUDGET,
         "stopped at call {stopped} with ${at_decision:.2} spent; ${spent:.2} once the stop lands, \
@@ -467,8 +472,11 @@ fn a_day(
 /// all. A checkpoint is the most the gate ever asks of it.
 #[test]
 fn a_normal_worker_is_never_paused_or_stopped_at_any_call_of_its_day() {
-    for seed in 1..=8_u64 {
-        a_day(seed, 1_500, None, |step, drive| {
+    const DAYS: u64 = 8;
+    const CALLS: usize = 1_500;
+    let (mut judged, mut checkpoints) = (0_usize, 0_usize);
+    for seed in 1..=DAYS {
+        a_day(seed, CALLS, None, |step, drive| {
             let spent = drive.book.spent_usd().unwrap_or(0.0);
             let ahead = drive.book.ahead_usd();
             let budgeted = Allowance {
@@ -491,10 +499,17 @@ fn a_normal_worker_is_never_paused_or_stopped_at_any_call_of_its_day() {
                     judgement.verdict,
                     judgement.reasons
                 );
+                judged += 1;
+                checkpoints += usize::from(judgement.verdict == Verdict::Checkpoint);
             }
             drive.checkpoint_when_due();
         });
     }
+    // Said on every run, so a reader of the log sees how much was judged.
+    eprintln!(
+        "normal: {DAYS} days of {CALLS} calls, {judged} judgements, none above a checkpoint \
+         ({checkpoints} of them a checkpoint)"
+    );
 }
 
 /// And the same days are not blind: the loop that the ordinary day never makes
@@ -511,6 +526,7 @@ fn the_same_worker_is_paused_within_a_window_of_its_day_turning_into_a_loop() {
             }
         });
         let paused_at = paused_at.unwrap_or_else(|| panic!("seed {seed}: never paused"));
+        eprintln!("loop: seed {seed}: began at call {LOOPS_FROM}, paused at call {paused_at}");
         assert!(
             (LOOPS_FROM..=LOOPS_FROM + REWORK_WINDOW_STEPS).contains(&paused_at),
             "seed {seed}: the loop began at {LOOPS_FROM} and was seen at {paused_at}"
