@@ -721,8 +721,8 @@ function treeWriteIsEvent(pane, activity) {
 /* One call's key: its pane and its id, or — with no id — its pane, verb and
  * the files it writes. */
 function treeWriteKey(pane, activity, paths) {
-  const parts = activity.call ? [pane, activity.call] : [pane, activity.verb, ...paths];
-  return parts.join(TREE_WRITE_KEY_GAP);
+  if (activity.call) return `${pane}${TREE_WRITE_KEY_GAP}${activity.call}`;
+  return [pane, activity.verb, ...paths].join(TREE_WRITE_KEY_GAP);
 }
 
 /* What one activity does to the writes open: a start opens one, an end closes
@@ -731,7 +731,8 @@ function treeWriteKey(pane, activity, paths) {
 function noteTreeWrite(pane, activity, files, now) {
   const phase = activity.phase;
   if (phase !== "started" && phase !== "finished" && phase !== "failed") return false;
-  const paths = files.filter(({ kind }) => kind === "write").map(({ relative }) => relative);
+  const paths = [];
+  for (const { kind, relative } of files) if (kind === "write") paths.push(relative);
   return phase === "started"
     ? openTreeWrite(pane, activity, paths, now)
     : closeTreeWrite(pane, activity, paths, now, phase === "finished");
