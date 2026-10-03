@@ -2683,11 +2683,19 @@ function treeMenuAt(x, y, seat) {
       },
     });
   }
+  items.push({
+    label: revealLabel,
+    run: ask("fs_reveal", { path: treeAbsolute(relative) }),
+  });
+  // A folder can become the tree's whole view (t-24298) — the mod's pinned
+  // folder, undone from the tree's head.
+  if (entry.is_dir) {
+    items.push({
+      label: t("tree.menu.pinRoot", "트리 루트로 고정"),
+      run: () => void pinTreeRoot(relative),
+    });
+  }
   items.push(
-    {
-      label: revealLabel,
-      run: ask("fs_reveal", { path: treeAbsolute(relative) }),
-    },
     { separator: true },
     {
       label: t("tree.menu.rename", "이름 바꾸기"),
@@ -2703,12 +2711,21 @@ function treeMenuAt(x, y, seat) {
 }
 
 async function loadTree(container, path) {
+  // The whole tree is the folder the person pinned, if they pinned one
+  // (t-24298): every road that reloads the tree from its top keeps the pin.
+  if (container === fileTree && path === "") path = treePinnedRoot();
   let entries = [];
   const ahead = listedAhead;
   listedAhead = null;
   try {
     entries = ahead?.path === path ? ahead.entries : await invoke("list_dir", { path });
   } catch {
+    // A pinned folder that is gone gives the tree back its workspace rather
+    // than a view of nothing.
+    if (container === fileTree && path !== "") {
+      forgetTreeRoot();
+      return loadTree(fileTree, "");
+    }
     return;
   }
   container.replaceChildren();

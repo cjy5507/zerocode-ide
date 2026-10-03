@@ -50125,7 +50125,8 @@ const treeMenu = await page.evaluate(async () => {
       reveal,
       ...tail,
     ],
-    wantDir: [...common, word("tree.menu.openInTerminal", "터미널에서 열기"), reveal, ...tail],
+    // A folder can also become the tree's root (t-24298).
+    wantDir: [...common, word("tree.menu.openInTerminal", "터미널에서 열기"), reveal, word("tree.menu.pinRoot", "트리 루트로 고정"), ...tail],
     wantDanger: [word("tree.menu.delete", "삭제")],
   };
 });

@@ -201,13 +201,15 @@ listen('tree:operation', (event) => {
   if (event.payload.operation.by?.kind === 'agent') void loadTree(fileTree, '');
 });
 
+// The tree's empty ground is its root — the workspace's, or the folder the
+// person pinned (t-24298).
 fileTree.addEventListener('dragover', (event) => {
   if (event.target.closest('.tree-row')) return;
-  previewTreeDrop(event, fileTree, '');
+  previewTreeDrop(event, fileTree, treePinnedRoot());
 });
 fileTree.addEventListener('drop', (event) => {
   if (event.target.closest('.tree-row')) return;
-  void dropTreePaths(event, '');
+  void dropTreePaths(event, treePinnedRoot());
 });
 
 /* ---- what the agents are touching, worn by the tree (t-24298) ----
@@ -298,6 +300,7 @@ listen("term:cwd", (event) => {
   const { term, cwd } = event.payload ?? {};
   if (typeof term !== "number" || typeof cwd !== "string" || cwd.length === 0) return;
   treeTermCwds.set(term, cwd);
+  followAgentFolder(term, cwd);
   if (treeTermCwds.size <= TREE_CWD_KEEP) return;
   for (const held of [...treeTermCwds.keys()]) if (!tabOfTerm(held)) treeTermCwds.delete(held);
 });
@@ -487,8 +490,11 @@ function sweepTreeTouches() {
  * tree". The row it reaches, or null when the path is not in this tree. */
 async function revealInTree(relative, { scroll = true } = {}) {
   const root = activeWorktreePath;
+  const pinned = treePinnedRoot();
+  // Outside a pinned root there is no row to reach, and nothing to list.
+  if (pinned && !relative.startsWith(`${pinned}/`)) return null;
   const parts = relative.split("/");
-  for (let depth = 1; depth < parts.length; depth += 1) {
+  for (let depth = treeRootDepth() + 1; depth < parts.length; depth += 1) {
     const folder = treeRowOf(parts.slice(0, depth).join("/"));
     if (!folder?._treeUnfold) return null;
     await folder._treeUnfold(true);
@@ -689,19 +695,21 @@ function dressTreeRows(container) {
   for (const row of container.querySelectorAll(":scope > .tree-row[data-tree-path]")) {
     const path = row.dataset.treePath;
     row.setAttribute("role", "treeitem");
-    row.setAttribute("aria-level", String(path.split("/").length));
+    row.setAttribute("aria-level", String(path.split("/").length - treeRootDepth()));
     row.setAttribute("aria-selected", String(selectedTreePaths.has(path)));
     row.tabIndex = path === treeCursorPath ? 0 : -1;
   }
   for (const group of container.querySelectorAll(":scope > .tree-children")) group.setAttribute("role", "group");
   if (container === fileTree) {
     paintTreeHead();
+    paintTreePin();
     if (!fileTree.querySelector('.tree-row[tabindex="0"]')) {
       const first = fileTree.querySelector(":scope > .tree-row[data-tree-path]");
       if (first) first.tabIndex = 0;
     }
   }
   if (treeTouches.size > 0) scheduleTreeTouchPaint();
+  if (treeAgentFolder !== null) paintAgentFolder();
 }
 
 /* ---- the keyboard and the screen reader (t-24298) ----
@@ -821,6 +829,7 @@ function labelTreeRow(row) {
     if (entry) words.push(treeGitWord(treeGitKind(entry)), row.querySelector(".tree-tally")?.textContent ?? "");
   }
   words.push(treeTouchWord(row.dataset.agentTouch ?? row.dataset.agentTouchWithin));
+  if (row.dataset.agentCwd === "true") words.push(t("tree.agentHere", "에이전트 작업 폴더"));
   row.setAttribute("aria-label", words.filter(Boolean).join(", "));
 }
 
@@ -874,4 +883,101 @@ async function showInTree(relative) {
     await runFileSearch();
   }
   return revealTreePath(relative, { focus: true });
+}
+
+/* ---- the tree's root: the agent's folder, or one the person pins (t-24298)
+ *
+ * The mod's tree follows its session's working folder, or a folder pinned
+ * with `/filetree <path>`. Here the tree is the active workspace's — the
+ * sidebar already moves it with the agent from checkout to checkout
+ * (`followPaneIntoWorktree`) — so inside it the agent's working folder is
+ * followed the way a file is: revealed and marked while follow is on, never
+ * made the whole view under the person. A folder the PERSON pins does become
+ * the whole view, per workspace, until they unpin it from the head. */
+const TREE_ROOT_KEY = "zerocode.explorer-root.v1";
+let treeRoots = null;
+
+function heldTreeRoots() {
+  if (treeRoots !== null) return treeRoots;
+  try {
+    const saved = JSON.parse(localStorage.getItem(TREE_ROOT_KEY) ?? "{}");
+    treeRoots = saved && typeof saved === "object" ? saved : {};
+  } catch {
+    treeRoots = {};
+  }
+  return treeRoots;
+}
+
+function keepTreeRoots() {
+  try { localStorage.setItem(TREE_ROOT_KEY, JSON.stringify(heldTreeRoots())); }
+  catch { /* Storage refusal keeps the pin for this session. */ }
+}
+
+/* The folder the whole tree shows for this workspace: "" for its root. */
+function treePinnedRoot() {
+  const held = activeWorktreePath ? heldTreeRoots()[activeWorktreePath] : undefined;
+  return typeof held === "string" ? held : "";
+}
+
+function treeRootDepth() {
+  const pinned = treePinnedRoot();
+  return pinned ? pinned.split("/").length : 0;
+}
+
+function forgetTreeRoot() {
+  if (!activeWorktreePath || !(activeWorktreePath in heldTreeRoots())) return;
+  delete heldTreeRoots()[activeWorktreePath];
+  keepTreeRoots();
+}
+
+/* Pin a folder as the whole tree, or unpin with "". The tree is reloaded
+ * from its new top; selections under the old one are let go. */
+async function pinTreeRoot(relative) {
+  if (!activeWorktreePath) return;
+  if (relative) heldTreeRoots()[activeWorktreePath] = relative;
+  else delete heldTreeRoots()[activeWorktreePath];
+  keepTreeRoots();
+  resetTreeSelection();
+  treeCursorPath = null;
+  await loadTree(fileTree, "");
+}
+
+function paintTreePin() {
+  const pinned = treePinnedRoot();
+  el("tree-pin").hidden = !pinned;
+  el("tree-pin-path").textContent = pinned;
+  el("tree-pin").dataset.tip = pinned;
+}
+
+el("tree-unpin").addEventListener("click", () => void pinTreeRoot(""));
+
+/* Where an agent's pane in this workspace stands, if that is a folder below
+ * its root: revealed and marked (`data-agent-cwd`) while follow is on, the
+ * mark gone when the pane steps back to the root. A plain shell is a person
+ * walking, not an agent working, and is not followed. */
+let treeAgentFolder = null;
+
+function followAgentFolder(term, cwd) {
+  const tab = tabOfTerm(term);
+  if (!tab || tab.worktree !== activeWorktreePath || (!tab.agent && !paneAgents.has(term))) return;
+  const relative = treeRelative(cwd, null);
+  treeAgentFolder = relative === null ? null : { root: activeWorktreePath, relative };
+  paintAgentFolder();
+  if (relative !== null && treeFollowsAgent && fileTreeShowing()) {
+    void revealInTree(relative).then(paintAgentFolder);
+  }
+}
+
+function paintAgentFolder() {
+  const here = treeAgentFolder?.root === activeWorktreePath ? treeAgentFolder.relative : null;
+  const row = here === null ? null : treeRowOf(here);
+  for (const held of fileTree.querySelectorAll("[data-agent-cwd]")) {
+    if (held === row) continue;
+    delete held.dataset.agentCwd;
+    labelTreeRow(held);
+  }
+  if (row && row.dataset.agentCwd !== "true") {
+    row.dataset.agentCwd = "true";
+    labelTreeRow(row);
+  }
 }
