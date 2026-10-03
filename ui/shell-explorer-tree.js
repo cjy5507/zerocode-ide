@@ -242,8 +242,8 @@ const TREE_TOUCH_HOLD_MS = 6_000;
  * and what a low-spec machine has to bear: every lit row transitions its
  * colour and its bar on the page's main thread, and every writing row wears a
  * mark, so a burst that lit sixty-four of them cost a quarter-speed Chromium a
- * third of its frames. */
-const TREE_TOUCH_CAP = 16;
+ * third of its frames, and sixteen still cost it a few; eight do not. */
+const TREE_TOUCH_CAP = 8;
 
 /* ---- how long and how many, for the writing mark (t-31715) ---- */
 
@@ -268,7 +268,7 @@ const TREE_WRITING_MIN_MS = 1_000;
  * of them cost the page a third of its frames while a burst of two hundred
  * files finished. The rows of the newest writes move; every other writing row
  * wears the still line reduced motion wears, and says the same words. */
-const TREE_WRITING_MOVING_MAX = 8;
+const TREE_WRITING_MOVING_MAX = 4;
 
 /* How long after a write ends the tree waits before asking git about every
  * file written since: the one window one scoped question covers. The backend
@@ -279,8 +279,10 @@ const TREE_NUMSTAT_WINDOW_MS = 150;
 
 /* The most files one scoped question names. A patch over a hundred files is
  * rare, and a question that long is a slow git; what does not fit waits for
- * the next window, in order. */
-const TREE_NUMSTAT_PATHS_MAX = 64;
+ * the next window, in order. One answer is also drawn in one task — every file
+ * it names and every folder above them — and on a low-spec machine (Chromium at
+ * a quarter of its CPU) sixty-four files were frames made late; eight are not. */
+const TREE_NUMSTAT_PATHS_MAX = 8;
 
 /* Which kind of touch a verb is. Searches are reads; edits and writes are
  * writes. A verb not here (a shell command, a fetch, a delegation) names no
@@ -394,6 +396,10 @@ function treePaneTerm(pane) {
   return Number.isInteger(term) ? term : null;
 }
 
+/* A segment the walk below would take out or turn back: empty (a doubled or a
+ * closing slash), `.` or `..`. A path with none is its own walked form. */
+const TREE_UNWALKED_SEGMENT = /(?:^|\/)(?:\.{0,2})(?:\/|$)/;
+
 /* A target as a path relative to the active workspace, or null — outside
  * it, climbing out of it, clamped by the backend (`…`, the row's 120-character
  * cut), or relative with nowhere to be relative to. `.` and `..` are walked
@@ -408,6 +414,8 @@ function treeRelative(target, pane, cwd = null) {
   const root = treeSlashes(activeWorktreePath ?? "").replace(/\/+$/, "");
   if (!root || typeof target !== "string" || target.length === 0 || target.endsWith("…")) return null;
   const wanted = treeSlashes(target);
+  // The usual path — one inside the workspace, already walked: nothing to walk.
+  if (wanted.startsWith(`${root}/`) && !TREE_UNWALKED_SEGMENT.test(wanted.slice(root.length + 1))) return wanted.slice(root.length + 1);
   const absolute = wanted.startsWith("/") || (usesWindowsPlatform && /^[A-Za-z]:\//.test(wanted));
   // A call that said where it ran (`activity.cwd`) is read from there; the
   // pane's own folder is the fallback.

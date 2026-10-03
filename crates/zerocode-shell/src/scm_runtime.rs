@@ -71,8 +71,8 @@ pub(super) fn scm_entries(
 
 /// The most paths one scoped question may name. A pathspec list is a command
 /// line, so past this the question is refused rather than handed to git. The
-/// file tree names at most its own cap in one (`TREE_NUMSTAT_PATHS_MAX`, a
-/// quarter of this), so this only stops a caller that is not the tree.
+/// file tree names at most its own cap in one (`TREE_NUMSTAT_PATHS_MAX`, far
+/// below this), so this only stops a caller that is not the tree.
 pub(super) const SCM_NUMSTAT_PATHS_MAX: usize = 256;
 
 /// What changed in just `paths` (t-31715), as the panel's own entries: the

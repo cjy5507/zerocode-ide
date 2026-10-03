@@ -41,16 +41,17 @@ const BURST_SWEEPS_ARMED_MAX = 3;
  * open. Every lit row transitions its colour and its bar on the page's main
  * thread, and every writing row wears a mark: on a low-spec machine (Chromium
  * at a quarter of its CPU) a burst that lit sixty-four of them cost a third of
- * the page's frames and made it miss nine more. A number of this test's own: a
- * tree that wants more has to show a low-spec burst that bears it. */
-const BURST_TOUCH_CAP_MAX = 16;
+ * the page's frames and made it miss nine more, and sixteen still cost it a few
+ * (87 frames against main's 92); eight bore it (94). A number of this test's
+ * own: a tree that wants more has to show a low-spec burst that bears it. */
+const BURST_TOUCH_CAP_MAX = 8;
 
 /* The most files one scoped question may name. One answer is drawn in one task —
  * every file it names and every folder above them — and on a quarter-speed
- * Chromium sixty-four files were a frame made late (two to four of them in a
- * burst of two hundred); sixteen are not. A number of this test's own, like the
- * cap above. */
-const BURST_NUMSTAT_PATHS_MAX = 16;
+ * Chromium sixty-four files were frames made late (two to four of them in a
+ * burst of two hundred); sixteen and eight are not. A number of this test's
+ * own, like the cap above. */
+const BURST_NUMSTAT_PATHS_MAX = 8;
 
 /* How long the memory run breathes between its rounds, in ms: the same reason. */
 const MEMORY_BREATH_MS = 190;
@@ -1049,7 +1050,7 @@ export async function testExplorerWriting(browser, origin, ok) {
     }, { windowMs, min });
     ok("a wire session's writes follow start to end the same way: its folder is its `cwd`, its end needs no file of its own, and it fills no sidebar card", wire.writing === "true" && wire.notFiled === true && wire.ended === true && wire.asked === 1 && wire.named === "src/lib.rs", JSON.stringify(wire));
 
-    /* a burst: 200 pairs in one tick, 40 files — one question for the window, 40 files in it */
+    /* a burst: 200 pairs in one tick, 40 files — as few questions as the cap allows, each file in one */
     const burst = await page.evaluate(async ({ windowMs, most }) => {
       const { root, fire, act, settle, sleep } = window.__XT__;
       const out = {};
@@ -1062,7 +1063,7 @@ export async function testExplorerWriting(browser, origin, ok) {
         fire("term:5", [act("edit", target, "finished", { call: `b${at}` })]);
       }
       await settle(3);
-      await sleep(windowMs * 3 + 600);
+      await sleep(windowMs * (Math.ceil(40 / most) + 1) + 600);
       const delta = (command) => (window.__COUNTS__[command] ?? 0) - (before[command] ?? 0);
       const questions = window.__XT__.asked.slice(askedBefore);
       out.questions = questions.length;
@@ -1083,7 +1084,7 @@ export async function testExplorerWriting(browser, origin, ok) {
       out.spill = spill;
       return out;
     }, { windowMs, most });
-    ok("a burst of 200 start/end pairs asks git one scoped question about each file once — never per event, never a whole-repo status, no listing", burst.questions === 1 && burst.files === 40 && burst.repeats === 0 && burst.wholeRepo === 0 && burst.listed === 0, JSON.stringify(burst));
+    ok("a burst of 200 start/end pairs asks git about each file once, in as few questions as the cap allows — never per event, never a whole-repo status, no listing", burst.questions === Math.ceil(40 / most) && burst.biggest <= most && burst.files === 40 && burst.repeats === 0 && burst.wholeRepo === 0 && burst.listed === 0, JSON.stringify(burst));
     ok("more files than one question may name are asked in the following windows, none dropped and none named twice", burst.spillBiggest <= most && burst.spillFiles === burst.spill && burst.spillQuestions >= 3, JSON.stringify(burst));
 
     /* held writes are bounded however many calls start and never end */
