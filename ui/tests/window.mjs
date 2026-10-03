@@ -36432,9 +36432,15 @@ const chatFace = await page.evaluate(async () => {
   // `--chat-send-bg`), so the token is read where the button stands.
   seen.sendFromToken = sendStyle?.backgroundColor ===
     probe(sendStops ? "--chat-send-stop-bg" : "--chat-send-bg", "backgroundColor", composer);
+  // The composer wears the token's corners — its top two joined to the
+  // conversation's state when that stands over it (t-22100), which wears them.
   const root = getComputedStyle(document.documentElement);
+  const corner = root.getPropertyValue("--chat-radius-composer").trim();
+  const stackOver = composer.previousElementSibling?.matches(".chat-stack:not([hidden])") ? composer.previousElementSibling : null;
   seen.composerRadius = getComputedStyle(composer).borderRadius;
-  seen.wantComposerRadius = root.getPropertyValue("--chat-radius-composer").trim();
+  seen.wantComposerRadius = stackOver ? `0px 0px ${corner} ${corner}` : corner;
+  seen.stackRadius = stackOver ? getComputedStyle(stackOver).borderRadius : null;
+  seen.wantStackRadius = stackOver ? `${corner} ${corner} 0px 0px` : null;
   // The composer floats in the extension's dock, no wider than the token.
   const chatDock = composer?.closest(".chat-dock") ?? null;
   seen.dockMax = chatDock ? getComputedStyle(chatDock).maxWidth : "";
@@ -36572,8 +36578,9 @@ const helperGrammar = await page.evaluate(async () => {
   seen.headNoRule = head ? getComputedStyle(head).borderBottomWidth === "0px" : false;
   seen.ground = getComputedStyle(face).backgroundColor === probe("--chat-ground", "backgroundColor");
   // Two tool rows under their kind's word, closed by the answer after them:
-  // the dot in the done ink, not on the accent (t-22100: a dot where the mark
-  // stood), the target in mono beside the word.
+  // the dot quiet — no result came back to say how they went — and not on the
+  // accent (t-22100: a dot where the mark stood), the target in mono beside
+  // the word.
   const tools = turns.filter((one) => one.classList.contains("is-tool"));
   seen.toolCount = `×${tools.length}`;
   seen.toolBody = tools
@@ -36583,7 +36590,7 @@ const helperGrammar = await page.evaluate(async () => {
   seen.toolNames = tools.map((row) => row.getAttribute("aria-label")).join(",");
   seen.wantToolNames = ["read_file", "grep_search"].map((name) => t("worker.toolRow", "{{name}} 도구", { name })).join(",");
   seen.toolsSettled = tools.every((row) => !row.classList.contains("is-live")) &&
-    tools.every((row) => getComputedStyle(row.querySelector(".helper-step-dot")).backgroundColor === probe("--chat-dot-done", "backgroundColor"));
+    tools.every((row) => getComputedStyle(row.querySelector(".helper-step-dot")).backgroundColor === probe("--ink-mist", "backgroundColor"));
   seen.argMono = tools[0] ? /mono/i.test(getComputedStyle(tools[0].querySelector(".helper-step-target")).fontFamily) : false;
   // zo has an accent of its own but the harness catalog gives it no voice: the
   // page wears zo's accent and the window's one mark and word — what every
@@ -37038,11 +37045,13 @@ const helperWide = await page.evaluate(async () => {
     ? speakBox.left >= footBox.left && speakBox.right <= footBox.right
     : false;
   seen.noDock = face.querySelector(".chat-dock") === null && face.querySelector(".worker-composer") === null;
-  // While the helper runs, the status line under the transcript says the
-  // agent's word on the transcript's axis, and the tail calls are out.
+  // While the helper runs, the live line under the transcript says 「지금」
+  // and the call that is out in its row's words (t-22100), on the
+  // transcript's axis, and the tail calls are out.
   const status = face.querySelector(".helper-status");
   seen.liveShows = status !== null && !status.hidden &&
-    status.textContent.includes(agentVoice("zo").busy_word);
+    status.querySelector(".helper-status-lead")?.textContent === t("worker.now", "지금") &&
+    (status.querySelector(".helper-status-now")?.textContent ?? "").startsWith(t("worker.stepSearch", "검색"));
   seen.liveOnAxis = status
     ? Math.abs(status.getBoundingClientRect().left - proseBox.left) <= 2
     : false;
@@ -37158,7 +37167,7 @@ ok(
     chatFace.enterSent && chatFace.grows &&
     chatFace.noDoorOnPane && chatFace.noWhereLine &&
     chatFace.sendNamed && chatFace.sendSquare && chatFace.sendFromToken &&
-    chatFace.composerRadius === chatFace.wantComposerRadius &&
+    chatFace.composerRadius === chatFace.wantComposerRadius && chatFace.stackRadius === chatFace.wantStackRadius &&
     chatFace.composerRadius !== "" && chatFace.dockMax === chatFace.wantDockMax && chatFace.dockMax !== "" &&
     chatFace.modelWords === chatFace.wantModel && chatFace.wantModel !== null,
   JSON.stringify(chatFace),
@@ -37212,18 +37221,17 @@ const paneDock = await page.evaluate(async () => {
   const proseBox = prose.getBoundingClientRect();
   seen.paneWidth = Math.round(listBox.width);
   seen.columnWidth = Math.round(proseBox.width);
-  // The composer floats in the extension's dock: inset from the pane's edges,
-  // no wider than the token, centered on the pane's axis, and the composer
-  // as wide as the dock.
+  // The composer floats in the extension's dock: inset from the list's edges,
+  // no wider than the token, centered on the list's axis — the turn rail
+  // stands at its left (t-22100) — and the composer as wide as the dock.
   const rootTokens = getComputedStyle(document.documentElement);
   const dockInset = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-inset"));
   const dockMax = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-max"));
-  const faceBox = face.getBoundingClientRect();
   const dockBox = face.querySelector(".chat-dock")?.getBoundingClientRect() ?? null;
   seen.dockWidth = dockBox ? Math.round(dockBox.width) : 0;
-  seen.wantDockWidth = Math.round(Math.min(faceBox.width - 2 * dockInset, dockMax));
+  seen.wantDockWidth = Math.round(Math.min(listBox.width - 2 * dockInset, dockMax));
   seen.dockCentered = dockBox
-    ? Math.abs((dockBox.left - faceBox.left) - (faceBox.right - dockBox.right)) <= 2
+    ? Math.abs((dockBox.left - listBox.left) - (listBox.right - dockBox.right)) <= 2
     : false;
   const composerBox = face.querySelector(".worker-composer")?.getBoundingClientRect() ?? null;
   seen.composerOnAxis = composerBox && dockBox
