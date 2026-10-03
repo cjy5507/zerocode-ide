@@ -1063,7 +1063,12 @@ export async function testExplorerWriting(browser, origin, ok) {
         fire("term:5", [act("edit", target, "finished", { call: `b${at}` })]);
       }
       await settle(3);
-      await sleep(windowMs * (Math.ceil(40 / most) + 1) + 600);
+      // As many windows as the questions need and one over — and no longer than the
+      // page's own settled re-read of git (`SCM_SETTLE_MS`, after the last activity),
+      // so that what is counted below is the write-end road's alone.
+      out.window = windowMs * (Math.ceil(40 / most) + 1) + 250;
+      out.settle = typeof SCM_SETTLE_MS === "number" ? SCM_SETTLE_MS : NaN;
+      await sleep(out.window);
       const delta = (command) => (window.__COUNTS__[command] ?? 0) - (before[command] ?? 0);
       const questions = window.__XT__.asked.slice(askedBefore);
       out.questions = questions.length;
@@ -1084,7 +1089,7 @@ export async function testExplorerWriting(browser, origin, ok) {
       out.spill = spill;
       return out;
     }, { windowMs, most });
-    ok("a burst of 200 start/end pairs asks git about each file once, in as few questions as the cap allows — never per event, never a whole-repo status, no listing", burst.questions === Math.ceil(40 / most) && burst.biggest <= most && burst.files === 40 && burst.repeats === 0 && burst.wholeRepo === 0 && burst.listed === 0, JSON.stringify(burst));
+    ok("a burst of 200 start/end pairs asks git about each file once, in as few questions as the cap allows — never per event, never a whole-repo status, no listing", burst.questions === Math.ceil(40 / most) && burst.biggest <= most && burst.files === 40 && burst.repeats === 0 && burst.wholeRepo === 0 && burst.listed === 0 && burst.window < burst.settle, JSON.stringify(burst));
     ok("more files than one question may name are asked in the following windows, none dropped and none named twice", burst.spillBiggest <= most && burst.spillFiles === burst.spill && burst.spillQuestions >= 3, JSON.stringify(burst));
 
     /* held writes are bounded however many calls start and never end */
