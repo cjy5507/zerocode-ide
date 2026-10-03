@@ -15,9 +15,9 @@ pub(super) fn read(ledger: &Ledger, sessions: &mut SessionBook, now_ms: i64) {
     let mut ids = BTreeSet::new();
     for run in ledger.runs() {
         for attempt in &run.dispatches {
-            if !run
+            if run
                 .worker(&attempt.worker)
-                .is_some_and(|worker| worker.agent == "zo")
+                .is_none_or(|worker| worker.agent != "zo")
             {
                 continue;
             }
