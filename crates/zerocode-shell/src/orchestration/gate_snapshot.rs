@@ -3,12 +3,17 @@
 //! A checkpoint the gate forces is made while the worker is working in that very
 //! tree. A commit would move its HEAD and clear what it sees as changed; a stash
 //! would take its files away. So the snapshot never uses the worker's index or
-//! its branch: it builds a tree out of a temporary index — HEAD plus every
-//! change and every new file the ignore rules do not name — and saves it as a
-//! commit under a ref of its own,
+//! its branch: it builds a tree out of a COPY of the worker's index — everything
+//! it already knows of every file, then every change and every new file the
+//! ignore rules do not name — and saves it as a commit under a ref of its own,
 //! `refs/zerocode/checkpoints/<worker>/<number>`. The worker's files, index,
 //! branch and stash are exactly as they were; what was saved is one `git show`
 //! or `git checkout <ref> -- .` away, and the newest few are kept.
+//!
+//! Two things keep it cheap on a machine that cannot spare it, because it runs
+//! on the beat while the worker works: the copy of the index carries each file's
+//! stat, so `add` hashes only what changed and not the whole tree; and one
+//! `rev-parse` answers everything the snapshot needs to know of the checkout.
 
 use std::path::Path;
 
@@ -29,6 +34,14 @@ const IDENTITY: [&str; 4] = [
     "user.email=checkpoint@zerocode.invalid",
 ];
 
+/// What the snapshot stands on: the commit the worker is on, that commit's tree,
+/// and the worker's own index — the one thing of the worker's it reads.
+struct Base<'a> {
+    head: &'a str,
+    head_tree: &'a str,
+    own_index: &'a Path,
+}
+
 /// Saves `checkout`'s tree under a ref of `worker`'s, numbered `number`; the ref,
 /// or `None` for a tree with nothing to save — the same as its HEAD.
 ///
@@ -43,14 +56,28 @@ pub(super) fn save(checkout: &Path, worker: &str, number: u32) -> Result<Option<
     if !checkout.is_dir() {
         return Err(format!("the checkout {} is gone", checkout.display()));
     }
-    let head = git(checkout, &["rev-parse", "--verify", "HEAD"], None)?;
-    let head = head.trim();
-    let git_dir = git(checkout, &["rev-parse", "--absolute-git-dir"], None)?;
-    let index = Path::new(git_dir.trim()).join(format!(
+    let facts = git(
+        checkout,
+        &["rev-parse", "HEAD", "HEAD^{tree}", "--absolute-git-dir"],
+        None,
+    )?;
+    let mut said = facts.lines().map(str::trim);
+    let (Some(head), Some(head_tree), Some(git_dir)) = (said.next(), said.next(), said.next())
+    else {
+        return Err("git did not say where the checkout stands".to_string());
+    };
+    let git_dir = Path::new(git_dir);
+    let own_index = git_dir.join("index");
+    let index = git_dir.join(format!(
         "zerocode-checkpoint-{}-{number}.index",
         std::process::id()
     ));
-    let saved = save_with(checkout, worker, number, head, &index);
+    let base = Base {
+        head,
+        head_tree,
+        own_index: &own_index,
+    };
+    let saved = save_with(checkout, worker, number, &base, &index);
     let _ = std::fs::remove_file(&index);
     saved
 }
@@ -59,20 +86,22 @@ fn save_with(
     checkout: &Path,
     worker: &str,
     number: u32,
-    head: &str,
+    base: &Base<'_>,
     index: &Path,
 ) -> Result<Option<String>, String> {
-    git(checkout, &["read-tree", head], Some(index))?;
+    // A repository with no index yet has nothing to copy: it starts from HEAD.
+    if std::fs::copy(base.own_index, index).is_err() {
+        git(checkout, &["read-tree", base.head], Some(index))?;
+    }
     git(checkout, &["add", "-A"], Some(index))?;
     let tree = git(checkout, &["write-tree"], Some(index))?;
     let tree = tree.trim();
-    let head_tree = git(checkout, &["rev-parse", &format!("{head}^{{tree}}")], None)?;
-    if tree == head_tree.trim() {
+    if tree == base.head_tree {
         return Ok(None);
     }
     let message = format!("checkpoint({worker}) {number}");
     let mut commit = IDENTITY.to_vec();
-    commit.extend(["commit-tree", tree, "-p", head, "-m", &message]);
+    commit.extend(["commit-tree", tree, "-p", base.head, "-m", &message]);
     let commit = git(checkout, &commit, None)?;
     let reference = format!("{REF_ROOT}/{worker}/{number}");
     git(checkout, &["update-ref", &reference, commit.trim()], None)?;
