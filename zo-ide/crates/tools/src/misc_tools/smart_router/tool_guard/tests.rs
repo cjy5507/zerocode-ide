@@ -437,6 +437,55 @@ fn an_acting_command_guard_hands_back_its_line_after_the_command_ran() {
     });
 }
 
+#[test]
+fn command_and_text_advice_recheck_permissions_at_delivery() {
+    use super::super::jev_mock::{SettingsChange, APPLICATION_CHANGES};
+    for change in APPLICATION_CHANGES {
+        let changed = SettingsChange::new(&COMMAND_GUARD, change);
+        let during_reply = changed.clone();
+        let mock = Mock::answering(move |_| {
+            during_reply.apply();
+            (200, cannot_be_undone())
+        });
+        machine(&COMMAND_GUARD, "on", &mock.base_url, |cwd| {
+            changed.bind(&runtime::default_config_home());
+            forget_waiting(cwd);
+            let judge = ToolGuardJudge::at(cwd);
+            judge.command(command_ask(cwd, "settings-command", "rm -rf build"));
+            let ran = |id: &str| CommandRan { owner: "turn-1".into(), tool_use_id: id.into(), failed: false, cancelled: false };
+            let note = api::sync_bridge::run_blocking(judge.command_ran(ran("settings-command")));
+            assert_eq!(note.is_some(), change == "none", "command {change}");
+            let row: CommandGuardRow = serde_json::from_value(rows_of(&command_guard_path(), 1)[0].clone()).unwrap();
+            assert_eq!(row.asked.applied, change == "none", "command {change}");
+            if change == "none" {
+                judge.command(command_ask(cwd, "completed-command", "rm -rf target"));
+                assert_eq!(rows_of(&command_guard_path(), 2).len(), 2);
+                let revoke = SettingsChange::new(&COMMAND_GUARD, "global_off");
+                revoke.bind(&runtime::default_config_home());
+                revoke.apply();
+                assert!(api::sync_bridge::run_blocking(judge.command_ran(ran("completed-command"))).is_none());
+            }
+        });
+        let changed = SettingsChange::new(&TOOL_TEXT_GUARD, change);
+        let during_reply = changed.clone();
+        let mock = Mock::answering(move |_| {
+            during_reply.apply();
+            (200, addresses_the_agent())
+        });
+        machine(&TOOL_TEXT_GUARD, "on", &mock.base_url, |cwd| {
+            changed.bind(&runtime::default_config_home());
+            forget_waiting(cwd);
+            let judge = ToolGuardJudge::at(cwd);
+            let ask = text_ask("turn-1", "settings-read", "read_file", ORDER).unwrap();
+            let guard = api::sync_bridge::run_blocking(judge.text(ask));
+            assert_eq!(guard.note.is_some(), change == "none", "text {change}");
+            assert_eq!(guard.fence.is_some(), change == "none", "text {change}");
+            let row: ToolTextGuardRow = serde_json::from_value(rows_of(&tool_text_guard_path(), 1)[0].clone()).unwrap();
+            assert_eq!(row.asked.applied, change == "none", "text {change}");
+        });
+    }
+}
+
 /// A wire that never answers leaves an acting guard's call as it was, at the
 /// cost of the wall and no more.
 #[test]

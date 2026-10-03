@@ -1672,7 +1672,9 @@ async fn a_brief_effect_waits_for_the_exact_clients_ack_and_a_late_producer_neve
                 StatusCode::OK
             }
         );
-        let _ = axum::body::to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+        let _ = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
         assert_eq!(
             source.delivered.load(Ordering::SeqCst),
             0,

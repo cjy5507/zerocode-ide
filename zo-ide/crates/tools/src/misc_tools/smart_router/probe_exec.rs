@@ -1160,6 +1160,45 @@ mod live_path_tests {
             MockCodex::serving("HTTP/1.1 200 OK", "application/json", body)
         }
 
+        #[test]
+        fn routing_rechecks_permissions_for_late_and_cached_assessments() {
+            use super::super::super::jev_mock::{machine, Mock, SettingsChange, APPLICATION_CHANGES};
+            use super::super::super::decision_shadow::active_assessments;
+            use zerocode_core::jev::ROUTING;
+            for change in APPLICATION_CHANGES {
+                let changed = SettingsChange::new(&ROUTING, change);
+                let during_reply = changed.clone();
+                let mock = Mock::answering(move |_| {
+                    during_reply.apply();
+                    (200, judgment_answer())
+                });
+                machine(&ROUTING, "on", &mock.base_url, |_| {
+                    let home = runtime::default_config_home();
+                    changed.bind(&home);
+                    let cwd = std::env::current_dir().unwrap();
+                    let path = home.join("settings.json");
+                    let mut root: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    root["smart"]["jev"]["workspaces"] = serde_json::json!([cwd.to_string_lossy()]);
+                    std::fs::write(path, root.to_string()).unwrap();
+                    let task = format!("routing permission change {change}");
+                    let tasks = [("", task.as_str())];
+                    let facts = [runtime::RoutingFacts::default()];
+                    let active = active_assessments(&tasks, &facts, "settings-routing", UNHURRIED).unwrap();
+                    assert_eq!(active.assessments[0].is_some(), change == "none", "{change}");
+                    let rows: Vec<DecisionShadowRow> = super::super::super::shadow_ledger::read_shadow_rows(&decision_shadow_path(&cwd));
+                    assert_eq!(rows[0].route_use == DecisionRouteUse::Applied, change == "none", "{change}");
+                    if change == "none" {
+                        let revoke = SettingsChange::new(&ROUTING, "consent");
+                        revoke.bind(&home);
+                        revoke.apply();
+                        let cached = active_assessments(&tasks, &facts, "settings-routing", UNHURRIED).unwrap();
+                        assert!(cached.assessments[0].is_none() && cached.control.is_none());
+                        assert_eq!(mock.requests().len(), 1, "withheld memo sends nothing");
+                    }
+                });
+            }
+        }
+
         /// A task no other case has probed or judged — both memos are
         /// process-wide — and one the control sample leaves alone under an
         /// empty description, so a case that counts probe requests on the

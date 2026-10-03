@@ -549,6 +549,7 @@ impl MentionRerank {
         let ticket = self.tickets.fetch_add(1, Ordering::Relaxed) + 1;
         self.abandon_in_flight();
         let shot = Shot {
+            cwd: self.cwd.clone(),
             ledger: mention_rerank_path(&self.cwd),
             door,
             client,
@@ -640,6 +641,7 @@ fn cut_to_caps(mut ask: MentionAsk) -> MentionAsk {
 
 /// Everything one page's judgment carries off the calling thread.
 struct Shot {
+    cwd: PathBuf,
     ledger: PathBuf,
     door: Arc<JevDoor>,
     client: Option<SystemOneClient>,
@@ -653,12 +655,14 @@ struct Shot {
 
 /// Judge the page, hand the surface what it may act on, and write the row.
 async fn run(shot: Shot) {
-    let Shot { ledger, door, client, ask, mode, acting, ticket, settled, deliver } = shot;
+    let Shot { cwd, ledger, door, client, ask, mode, acting, ticket, settled, deliver } = shot;
     let (mut row, order) = judge(&door, client.as_ref(), &ask).await;
     let answered = row.outcome == MENTION_OUTCOME_ANSWERED;
-    row.applied = answered && acting;
+    row.applied = answered && acting && door.permits_application_for(&cwd, &MENTION_RERANK);
     row.route_use = if row.applied {
         ROUTE_USE_APPLIED.to_string()
+    } else if answered && acting {
+        JevMode::Shadow.key().to_string()
     } else if answered {
         mode.key().to_string()
     } else {

@@ -1031,9 +1031,7 @@ async fn judge(
     };
     // Cached and newly received rankings have the same live application gate.
     // A recording request cannot become acting while its reply is in flight.
-    let still_acts = || acting && door.permits_application_now()
-        && asking_mode(cwd, &SKILLS).is_some_and(|current|
-            current.applies_with(runtime::jev_seat_applies(cwd, &SKILLS)));
+    let still_acts = || acting && door.permits_application_for(cwd, &SKILLS);
     let key = MemoKey::for_search(task, candidates, door.model_key());
     if let Some(remembered) = memo().lock().ok().and_then(|memo| memo.get(&key).cloned()) {
         telemetry::attest_fired(telemetry::HarnessFeature::SkillSearch);

@@ -56,6 +56,13 @@ const HEDGE_SAMPLE_ROWS: usize = 256;
 /// say a person had a judgment turned on in a workspace.
 const ZO_USES: [JevUse; 2] = [ROUTING, RECALL];
 
+/// Current authorization for locally reusing historical evidence. This reads
+/// without migrating consent and does not discard old evidence on a model pin change.
+pub(super) fn workspace_permitted_now(cwd: &Path) -> bool {
+    let settings = read_settings(&runtime::default_config_home().join(SETTINGS_FILE));
+    settings.enabled && settings.consents(&door::resolved_path(cwd))
+}
+
 /// The door as it stands for one batch of requests.
 #[derive(Debug, Clone)]
 pub struct JevDoor {
@@ -152,6 +159,24 @@ impl JevDoor {
         let settings = self.settings_file.as_deref().map_or_else(|| self.settings.clone(), read_settings);
         settings.enabled && settings.model == self.settings.model
             && self.workspace.as_deref().is_some_and(|workspace| settings.consents(workspace))
+    }
+
+    /// Recheck the original pin and consent together with this seat's current
+    /// merged mode and promotion standing. Callers also keep their original
+    /// acting flag so a recording request cannot gain effects while it waits.
+    #[must_use]
+    pub fn permits_application_for(&self, cwd: &Path, seat: &JevUse) -> bool {
+        self.permits_application_with(cwd, seat, || runtime::jev_seat_applies(cwd, seat))
+    }
+
+    /// Some seats keep their standing outside the per-project ledger.
+    pub(super) fn permits_application_with(&self, cwd: &Path, seat: &JevUse, raised: impl FnOnce() -> bool) -> bool {
+        self.permits_application_now()
+            && super::settings::merged_settings_root_from(&runtime::ConfigLoader::default_for(cwd))
+                .is_some_and(|root| {
+                    let mode = seat.mode_in(&root);
+                    mode.applies_with(mode.automatic() && raised())
+                })
     }
 
     /// [`Self::model`] as the fingerprint an in-process memo keys on

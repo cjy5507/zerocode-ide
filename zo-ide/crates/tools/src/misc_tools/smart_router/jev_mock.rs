@@ -10,12 +10,46 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use zerocode_core::jev::JevUse;
+
+/// Changes the exact temporary settings file a test bound before its HTTP
+/// reply. No background callback resolves a config home after the test ends.
+#[derive(Clone)]
+pub(super) struct SettingsChange {
+    path: Arc<Mutex<Option<PathBuf>>>,
+    setting: &'static str,
+    change: &'static str,
+}
+
+impl SettingsChange {
+    pub(super) fn new(seat: &JevUse, change: &'static str) -> Self {
+        Self { path: Arc::new(Mutex::new(None)), setting: seat.setting, change }
+    }
+
+    pub(super) fn bind(&self, home: &Path) {
+        *self.path.lock().unwrap() = Some(home.join("settings.json"));
+    }
+
+    pub(super) fn apply(&self) {
+        if self.change == "none" { return; }
+        let path = self.path.lock().unwrap().clone().expect("bind the temporary settings before asking");
+        let mut root: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        match self.change {
+            "global_off" => root["smart"]["jev"]["enabled"] = serde_json::json!(false),
+            "consent" => root["smart"]["jev"]["workspaces"] = serde_json::json!([]),
+            "model" => root["smart"]["jevModel"] = serde_json::json!("jev-new-pin"),
+            word => root["smart"][self.setting] = serde_json::json!(word),
+        }
+        std::fs::write(path, root.to_string()).unwrap();
+    }
+}
+
+pub(super) const APPLICATION_CHANGES: [&str; 6] = ["none", "off", "shadow", "global_off", "consent", "model"];
 
 /// One scripted HTTP answer on a loopback port, recording each request
 /// body it saw. `std::net` on a thread, because the tools crate's tokio

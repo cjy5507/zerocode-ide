@@ -213,6 +213,7 @@ pub struct StepSeat {
     cwd: PathBuf,
     ledger: PathBuf,
     answer: SlotHandle,
+    door: JevDoor,
 }
 
 impl std::fmt::Debug for StepSeat {
@@ -230,6 +231,7 @@ impl StepSeat {
             cwd: cwd.to_path_buf(),
             ledger: step_effort_path(cwd),
             answer: SlotHandle::default(),
+            door: JevDoor::open(cwd),
         })
     }
 }
@@ -239,6 +241,7 @@ impl StepEffortSeat for StepSeat {
         if telemetry::attest_ablated(telemetry::HarnessFeature::DecisionShadow) {
             return;
         }
+        if !self.judgment_current() { return; }
         let owned = OwnedAsk {
             step: ask.step,
             why: ask.why.token().to_string(),
@@ -247,14 +250,10 @@ impl StepEffortSeat for StepSeat {
                 .filter(|attempt| !attempt.is_empty())
                 .map(str::to_string),
         };
-        let cwd = self.cwd.clone();
+        let door = self.door.clone();
         let ledger = self.ledger.clone();
         let slot = self.answer.clone();
         shared_agent_runtime().spawn(async move {
-            let door = tokio::task::spawn_blocking(move || JevDoor::open(&cwd)).await.ok();
-            let Some(door) = door else {
-                return;
-            };
             let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
             let (row, answer) = judge_step(&door, client.as_ref(), &owned).await;
             if let Some(answer) = answer {
@@ -269,7 +268,16 @@ impl StepEffortSeat for StepSeat {
     }
 
     fn take(&self) -> Option<StepJudgment> {
-        self.answer.take()
+        let answer = self.answer.take()?;
+        self.judgment_current().then_some(answer)
+    }
+
+    fn judgment_current(&self) -> bool {
+        self.door.permits_application_now() && step_effort_word(&self.cwd).is_some_and(StepEffortWord::asks)
+    }
+
+    fn permits_application(&self) -> bool {
+        self.door.permits_application_for(&self.cwd, &ZO_STEP_EFFORT)
     }
 }
 
@@ -660,20 +668,57 @@ mod tests {
 
     #[test]
     fn the_seat_hands_an_answer_over_once() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let seat = StepSeat::open(dir.path());
-        assert_eq!(seat.take(), None);
-        seat.answer.leave(StepJudgment {
-            complexity: RouteTaskComplexity::Large,
-            at_step: 5,
-        });
-        assert_eq!(
-            seat.take(),
-            Some(StepJudgment {
+        super::super::jev_mock::machine(&ZO_STEP_EFFORT, "on", "http://127.0.0.1:9", |cwd| {
+            let seat = StepSeat::open(cwd);
+            assert_eq!(seat.take(), None);
+            seat.answer.leave(StepJudgment {
                 complexity: RouteTaskComplexity::Large,
-                at_step: 5
-            })
-        );
-        assert_eq!(seat.take(), None, "an answer is read once");
+                at_step: 5,
+            });
+            assert_eq!(seat.take(), Some(StepJudgment { complexity: RouteTaskComplexity::Large, at_step: 5 }));
+            assert_eq!(seat.take(), None, "an answer is read once");
+        });
+    }
+
+    #[test]
+    fn a_step_rechecks_pending_and_cached_judgments_before_the_next_request() {
+        use super::super::jev_mock::{machine, Mock, SettingsChange, APPLICATION_CHANGES};
+        for change in APPLICATION_CHANGES {
+            let changed = SettingsChange::new(&ZO_STEP_EFFORT, change);
+            let during_reply = changed.clone();
+            let mock = Mock::answering(move |_| {
+                during_reply.apply();
+                (200, judged_large())
+            });
+            machine(&ZO_STEP_EFFORT, "on", &mock.base_url, |cwd| {
+                changed.bind(&runtime::default_config_home());
+                let seat = StepSeat::open(cwd);
+                let state = runtime::step_state(&format!("step settings {change}"), 5, &runtime::StepSignals::default());
+                let ask = runtime::StepAskContext { step: 5, why: runtime::StepAsk::Cadence, state: &state, attempt: "settings-step" };
+                let wait_rows = |count| {
+                    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    loop {
+                        let rows = super::super::jev_summary::read_rows(&step_effort_path(cwd));
+                        if rows.iter().filter(|row| row["kind"] == JUDGMENT_ROW_KIND).count() >= count { break; }
+                        assert!(std::time::Instant::now() < until, "step did not settle: {change}");
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                };
+                seat.ask(&ask);
+                wait_rows(1);
+                assert_eq!(seat.take().is_some(), matches!(change, "none" | "shadow"), "{change}");
+                assert_eq!(seat.permits_application(), change == "none", "{change}");
+                if change == "none" {
+                    seat.ask(&ask);
+                    wait_rows(2);
+                    let revoke = SettingsChange::new(&ZO_STEP_EFFORT, "global_off");
+                    revoke.bind(&runtime::default_config_home());
+                    revoke.apply();
+                    assert!(seat.take().is_none());
+                    assert!(!seat.permits_application());
+                    assert_eq!(mock.requests().len(), 1, "second judgment was cached");
+                }
+            });
+        }
     }
 }

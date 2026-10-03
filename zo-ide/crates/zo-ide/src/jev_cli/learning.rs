@@ -76,7 +76,7 @@ pub(super) fn parse(args: &[String]) -> Result<Request, Refused> {
         return Ok(Request::Outcome { case_id, question: required("--question")?.into(), correct,
             reviewer, note: required("--note")?.into() });
     }
-    let seat = fields.get("--seat").map(|value| value.to_string());
+    let seat = fields.get("--seat").map(std::string::ToString::to_string);
     if seat.as_ref().is_some_and(|id| zerocode_core::jev::jev_use(id).is_none()) {
         return Err(refused("--seat must name an existing Jev feature"));
     }

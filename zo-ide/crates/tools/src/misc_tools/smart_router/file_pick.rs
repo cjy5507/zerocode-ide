@@ -132,7 +132,7 @@ async fn run_at_with_recent(
     .unwrap_or_default();
     let candidate_elapsed_ms = jev_gate::millis(candidate_started.elapsed());
 
-    let (mut row, answers) =
+    let (mut row, answers, door) =
         score_candidates(&cwd, &ask, &batch, candidate_elapsed_ms).await?;
     row.outcome = FILE_PICK_OUTCOME_ANSWERED.to_string();
     row.answers = Some(answers.probabilities.clone());
@@ -143,11 +143,14 @@ async fn run_at_with_recent(
         .iter()
         .map(|path| fingerprint_of(path))
         .collect();
-    let hint = acting.then(|| runtime::file_pick::hint(&selected)).flatten();
+    let still_acts = acting && door.permits_application_for(&cwd, &FILE_PICK);
+    let hint = still_acts.then(|| runtime::file_pick::hint(&selected)).flatten();
     row.applied = hint.is_some();
     row.noted = hint.is_some();
     row.route_use = if row.applied {
         zerocode_core::jev::ROUTE_USE_APPLIED.to_string()
+    } else if acting && !still_acts {
+        JevMode::Shadow.key().to_string()
     } else {
         mode.key().to_string()
     };
@@ -160,7 +163,7 @@ async fn score_candidates(
     ask: &FilePickAsk,
     batch: &CandidateBatch,
     candidate_elapsed_ms: u64,
-) -> Option<(FilePickRow, CheckedAnswers)> {
+) -> Option<(FilePickRow, CheckedAnswers, JevDoor)> {
     let state = runtime::file_pick::state(&ask.request, &batch.files);
     let questions = runtime::file_pick::questions(&batch.files);
     let request = SystemOneRequest {
@@ -228,7 +231,7 @@ async fn score_candidates(
             return None;
         }
     };
-    Some((row, answers))
+    Some((row, answers, door))
 }
 
 struct CheckedAnswers {
