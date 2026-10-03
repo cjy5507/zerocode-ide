@@ -16791,6 +16791,8 @@ fn the_sync_overflow_guard_accepts_a_retained_result_and_keeps_disk_and_memory_e
     assert!(runtime.ensure_request_context_budget(&[]).is_err());
     runtime.enforce_request_overflow_guard(&[]).unwrap();
     assert_eq!(runtime.session.messages.len(), count);
+    assert_eq!(runtime.consecutive_microcompacts, 1, "overflow trims must count toward the summary escape");
+    assert_eq!(runtime.full_compactions_this_turn, 0);
     assert_eq!(runtime.session.messages, Session::load_from_path(&path).unwrap().messages);
     assert!(message_contains_text(&runtime.session.messages[0], "original constraints"));
     assert!(runtime.ensure_request_context_budget(&[]).is_ok());

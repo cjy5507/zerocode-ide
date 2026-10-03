@@ -510,9 +510,7 @@ where
             },
             None,
         );
-        if result.removed_message_count > 0 || result.cleared_tool_results > 0 {
-            self.session = result.compacted_session;
-        }
+        self.finish_compaction_swap(result, super::POST_COMPACTION_SYSTEM_REMINDER);
 
         // Re-check after compaction — if still over budget, aggressively
         // trim preserved messages down to the most recent pair. A pair can
@@ -528,9 +526,7 @@ where
                 },
                 None,
             );
-            if result.removed_message_count > 0 || result.cleared_tool_results > 0 {
-                self.session = result.compacted_session;
-            }
+            self.finish_compaction_swap(result, super::POST_COMPACTION_SYSTEM_REMINDER);
         }
         if let Some(t) = guard_t {
             log_build_segment("overflow_guard_compaction (BLOCKING LLM)", t);

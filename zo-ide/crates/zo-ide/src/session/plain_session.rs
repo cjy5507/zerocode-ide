@@ -1739,18 +1739,10 @@ impl PlainSession {
             let cleared = done.result.cleared_tool_results;
             let kept = done.result.compacted_session.messages.len();
             rt.apply_manual_compaction(done.result);
-            if removed == 0 && cleared == 0 {
-                return Ok(CompactReport::NothingToCompact { kept });
-            }
-            if cleared > 0 {
-                CompactReport::Retained { cleared, kept, tokens_before, tokens_after: rt.estimated_tokens() }
-            } else { CompactReport::Compacted {
-                removed,
-                kept,
-                tokens_before,
-                tokens_after: rt.estimated_tokens(),
-                local_summary: done.local_summary_reason,
-            } }
+            let report = CompactReport::from_counts(removed, cleared, kept, tokens_before,
+                rt.estimated_tokens(), done.local_summary_reason);
+            if matches!(report, CompactReport::NothingToCompact { .. }) { return Ok(report); }
+            report
         };
         self.persist().map_err(|error| error.to_string())?;
         Ok(report)
@@ -2050,6 +2042,15 @@ pub(crate) enum CompactReport {
 }
 
 impl CompactReport {
+    fn from_counts(removed: usize, cleared: usize, kept: usize, tokens_before: usize,
+        tokens_after: usize, local_summary: Option<String>) -> Self {
+        if cleared > 0 {
+            Self::Retained { cleared, kept, tokens_before, tokens_after }
+        } else if removed > 0 {
+            Self::Compacted { removed, kept, tokens_before, tokens_after, local_summary }
+        } else { Self::NothingToCompact { kept } }
+    }
+
     /// The line the person reads.
     #[must_use]
     pub(crate) fn note(&self) -> String {
@@ -2389,10 +2390,14 @@ mod tests {
 
     #[test]
     fn manual_retention_reports_the_cleared_results_without_claiming_a_summary() {
-        let report = super::CompactReport::Retained { cleared: 2, kept: 12,
-            tokens_before: 12_000, tokens_after: 3_000 };
+        let report = super::CompactReport::from_counts(0, 2, 12, 12_000, 3_000, None);
         assert_eq!(report.note(), "compact: 2 tool results cleared · 12 messages retained · 12.0k → 3.0k tokens");
         assert_eq!(report.level(), runtime::message_stream::SystemLevel::Info);
+        assert!(matches!(super::CompactReport::from_counts(0, 0, 12, 12_000, 12_000, None),
+            super::CompactReport::NothingToCompact { kept: 12 }));
+        let summary = super::CompactReport::from_counts(10, 0, 2, 12_000, 3_000, Some("quota".into()));
+        assert!(matches!(&summary, super::CompactReport::Compacted { removed: 10, kept: 2, .. }));
+        assert_eq!(summary.level(), runtime::message_stream::SystemLevel::Warn);
     }
 
     #[test]

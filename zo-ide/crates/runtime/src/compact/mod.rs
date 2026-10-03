@@ -556,34 +556,51 @@ pub fn apply_compaction(plan: CompactionPlan, raw_summary: &str) -> CompactionRe
 /// Whether applying the already-judged plan can retain original prose and skip
 /// the summarizer. The same cache payback rule as microcompaction applies, and
 /// enough room must remain below the caller's existing context threshold.
+#[cfg(test)]
 pub(super) fn can_retain_originals(plan: &CompactionPlan, history_budget: usize, payback_requests: u64) -> bool {
-    if plan.relevance_dropped == 0 || history_budget == 0
-        || plan.session_shell.persistence_path().is_none()
-        || std::env::var_os("ZO_DISABLE_RAW_VAULT").is_some() {
-        return false;
+    retention_assessment(plan, history_budget, payback_requests).eligible
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RetentionAssessment {
+    pub eligible: bool,
+    pub reason: &'static str,
+    pub quote: Option<MicrocompactQuote>,
+}
+
+impl RetentionAssessment {
+    pub(crate) const fn withheld(reason: &'static str) -> Self {
+        Self { eligible: false, reason, quote: None }
     }
+}
+
+pub(crate) fn retention_assessment(plan: &CompactionPlan, history_budget: usize, payback_requests: u64) -> RetentionAssessment {
+    if plan.session_shell.persistence_path().is_none() { return RetentionAssessment::withheld("no_persistence"); }
+    if std::env::var_os("ZO_DISABLE_RAW_VAULT").is_some() { return RetentionAssessment::withheld("vault_disabled"); }
+    if plan.relevance_dropped == 0 { return RetentionAssessment::withheld("no_applied_drop"); }
+    if history_budget == 0 { return RetentionAssessment::withheld("headroom"); }
     let original = &plan.session_shell.messages;
     let kept = plan.cache_prefix.iter().chain(&plan.messages_to_compact).chain(&plan.preserved_tail);
     let after = kept.clone().map(estimate_message_tokens).sum::<usize>();
-    if kept.count() != original.len() || after >= history_budget { return false; }
+    if kept.count() != original.len() { return RetentionAssessment::withheld("message_shape"); }
+    if after >= history_budget { return RetentionAssessment::withheld("headroom"); }
     let from = plan.cache_prefix.len();
     // Text-only judgments cannot establish that the pixels in a result are
     // dispensable. Keep the established summary fallback for those plans.
     if original[from..].iter().zip(&plan.messages_to_compact).any(|(old, next)| {
         old.blocks.iter().zip(&next.blocks).any(|(before, after)| before != after
             && matches!(before, ContentBlock::ToolResult { images, .. } if !images.is_empty()))
-    }) { return false; }
-    let quote = retained_cache_quote(plan);
-    quote.clearable_tokens > 0 && quote.pays_back_within(payback_requests)
+    }) { return RetentionAssessment::withheld("images"); }
+    let quote = retained_cache_quote(plan, after);
+    let eligible = quote.clearable_tokens > 0 && quote.pays_back_within(payback_requests);
+    RetentionAssessment { eligible, reason: if eligible { "retained" } else { "payback" }, quote: Some(quote) }
 }
 
 /// The same payback estimate used by the retained-original decision. Kept
 /// separate so diagnostics can report its inputs without inventing a second rule.
-pub(crate) fn retained_cache_quote(plan: &CompactionPlan) -> MicrocompactQuote {
+fn retained_cache_quote(plan: &CompactionPlan, after: usize) -> MicrocompactQuote {
     let original = &plan.session_shell.messages;
     let from = plan.cache_prefix.len();
-    let after = plan.cache_prefix.iter().chain(&plan.messages_to_compact).chain(&plan.preserved_tail)
-        .map(estimate_message_tokens).sum::<usize>();
     let before = estimate_session_tokens(&plan.session_shell);
     let frontier = original[from..].iter().zip(&plan.messages_to_compact)
         .position(|(old, next)| old != next).map(|index| from + index);

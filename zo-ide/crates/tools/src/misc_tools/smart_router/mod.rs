@@ -35,6 +35,10 @@ mod question_discovery;
 #[cfg(test)]
 mod review_replay;
 #[cfg(test)]
+mod skills_impact;
+#[cfg(test)]
+mod retention_impact;
+#[cfg(test)]
 mod routing_replay;
 mod skill_search;
 mod shape;

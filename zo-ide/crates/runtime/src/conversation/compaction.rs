@@ -1522,7 +1522,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// for a no-op result (nothing removed), leaving session and prompt
     /// untouched. Pure mutation apart from the best-effort todo/turn-trace
     /// reads.
-    fn finish_compaction_swap(&mut self, result: CompactionResult, status_reminder: &str) -> bool {
+    pub(super) fn finish_compaction_swap(&mut self, result: CompactionResult, status_reminder: &str) -> bool {
         if result.removed_message_count == 0 && result.cleared_tool_results == 0 {
             return false;
         }
@@ -1951,16 +1951,29 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     }
 
     fn retains_originals(&self, plan: &CompactionPlan, focus: Option<&str>) -> bool {
-        if focus.is_some() || self.consecutive_microcompacts >= MICROCOMPACT_THRASH_PROMOTION {
-            return false;
+        let mut history_budget = None;
+        let assessment = if focus.is_some() {
+            crate::compact::RetentionAssessment::withheld("focus")
+        } else if self.consecutive_microcompacts >= MICROCOMPACT_THRASH_PROMOTION {
+            crate::compact::RetentionAssessment::withheld("streak")
+        } else {
+            let history = u64::try_from(estimate_session_tokens(&self.session)).unwrap_or(u64::MAX);
+            // Preserve the caller's thresholds and reserve request overhead.
+            let overhead = self.effective_context_tokens().saturating_sub(history);
+            let target = self.precompaction_input_tokens_threshold.min(u64::from(self.auto_compaction_input_tokens_threshold));
+            let budget = usize::try_from(target.saturating_sub(overhead)).unwrap_or(usize::MAX);
+            history_budget = Some(budget);
+            crate::compact::retention_assessment(plan, budget, MICROCOMPACT_PAYBACK_REQUESTS)
+        };
+        if let Some(tracer) = &self.session_tracer {
+            tracer.record_security_audit("retention_eligibility", trace_attrs(serde_json::json!({
+                "eligible":assessment.eligible,"reason":assessment.reason,"history_budget":history_budget,
+                "clearable_tokens":assessment.quote.map(|quote| quote.clearable_tokens),
+                "rebilled_tokens":assessment.quote.map(|quote| quote.rebilled_tokens),
+                "frontier":assessment.quote.and_then(|quote| quote.frontier),
+            })));
         }
-        let history = u64::try_from(estimate_session_tokens(&self.session)).unwrap_or(u64::MAX);
-        // Preserve the caller's existing thresholds and reserve the observed
-        // request overhead; a smaller payload alone does not prove it fits.
-        let overhead = self.effective_context_tokens().saturating_sub(history);
-        let target = self.precompaction_input_tokens_threshold.min(u64::from(self.auto_compaction_input_tokens_threshold));
-        let budget = usize::try_from(target.saturating_sub(overhead)).unwrap_or(usize::MAX);
-        crate::compact::can_retain_originals(plan, budget, MICROCOMPACT_PAYBACK_REQUESTS)
+        assessment.eligible
     }
 
     /// Guard against a hallucinated API summary (LAVA P1 verifier): if it cites

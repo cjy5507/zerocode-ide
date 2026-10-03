@@ -652,7 +652,7 @@ fn an_in_flight_suggestion_cannot_outlive_its_settings() {
     use super::super::jev_mock::{machine_words, Mock};
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
     for (change, stage, expected_requests, applied) in [
-        ("none", 0, 2, true), ("off", 1, 1, false),
+        ("none", 0, 2, true), ("provenance", 0, 2, true), ("off", 1, 1, false),
         ("shadow", 2, 2, false), ("global_off", 1, 1, false),
         ("model", 1, 1, false),
     ] {
@@ -675,8 +675,9 @@ fn an_in_flight_suggestion_cannot_outlive_its_settings() {
             let answers: serde_json::Map<String, Value> = request["questions"].as_object().unwrap()
                 .keys().map(|id| {
                     let answer = if id == "which" {
-                        json!({"type":"choice","choice":"s0","confidence":if change == "none" { 0.1 } else { 1.0 },
-                            "probabilities":{"s0":1.0,"__no_skill__":0.0}})
+                        let confidence = if change == "provenance" { 0.55 } else { 1.0 };
+                        json!({"type":"choice","choice":"s0","confidence":confidence,
+                            "probabilities":{"s0":confidence,"__no_skill__":1.0-confidence}})
                     } else { json!({"type":"noul","noul":if id == "prose_suffices" { 0.0 } else { 1.0 }}) };
                     (id.clone(), answer)
                 }).collect();
@@ -685,7 +686,7 @@ fn an_in_flight_suggestion_cannot_outlive_its_settings() {
         });
         machine_words(&[(SKILL_SUGGESTION.setting, "on")], &mock.base_url, |cwd| {
             *path.lock().unwrap() = Some(runtime::default_config_home().join("settings.json"));
-            if change == "none" {
+            if change == "provenance" {
                 let file = path.lock().unwrap().clone().unwrap();
                 let mut root: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
                 root["smart"]["jev"]["labelDrafts"] = json!(true);
@@ -704,7 +705,7 @@ fn an_in_flight_suggestion_cannot_outlive_its_settings() {
             let rows = super::super::jev_summary::read_rows(&skill_suggestion_path(cwd));
             assert_eq!(rows.len(), 1, "{change}: {rows:?}");
             assert_eq!(rows[0]["routeUse"] == ROUTE_USE_APPLIED, applied, "{change}: {rows:?}");
-            if change == "none" {
+            if change == "provenance" {
                 let captured = zerocode_core::jev::learning::store::Store::at(&runtime::default_config_home()).snapshot().unwrap();
                 let origin = zerocode_core::jev::learning::origin_group("zo/session", "suggestion-session").unwrap();
                 assert_eq!(captured.cases.len(), 2, "both request stages retain the actual session origin");
