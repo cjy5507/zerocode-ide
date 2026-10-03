@@ -834,8 +834,9 @@ export async function testExplorerSelection(browser, origin, ok) {
  * in it was *happening*. Live progress, and only that: while a write or edit
  * tool call is open — it has started and not finished — its file's row, and
  * every collapsed folder above it, shimmers; the moment the call ends the
- * file's +N -N lands on the row, from one scoped git question for every file
- * written in a short window (never one per event, never a whole-repo status);
+ * file's +N -N lands on the row, from the scoped git questions for the files
+ * written in a short window, a few files each (never one per event, never a
+ * whole-repo status);
  * and all of it is the same for every agent, because the tree reads one shape —
  * `hook:activity`'s — in which a start and its end are paired by the call's id,
  * or, where an agent gives none, by its verb and target. Hook agents, wire
@@ -1063,12 +1064,17 @@ export async function testExplorerWriting(browser, origin, ok) {
         fire("term:5", [act("edit", target, "finished", { call: `b${at}` })]);
       }
       await settle(3);
-      // As many windows as the questions need and one over — and no longer than the
-      // page's own settled re-read of git (`SCM_SETTLE_MS`, after the last activity),
-      // so that what is counted below is the write-end road's alone.
-      out.window = windowMs * (Math.ceil(40 / most) + 1) + 250;
+      // Wait for the questions the cap makes necessary, one window over (a question
+      // beyond them would show) — and never into the page's own settled re-read of git
+      // (`SCM_SETTLE_MS`, after the last activity), so that what is counted below is
+      // the write-end road's alone.
+      const expected = Math.ceil(40 / most);
+      const waited = performance.now();
+      while (window.__XT__.asked.length - askedBefore < expected && performance.now() - waited < windowMs * (expected + 2)) await sleep(25);
+      await sleep(windowMs + 50);
+      out.window = Math.round(performance.now() - waited);
       out.settle = typeof SCM_SETTLE_MS === "number" ? SCM_SETTLE_MS : NaN;
-      await sleep(out.window);
+      out.waitingMax = typeof TREE_NUMSTAT_WAITING_MAX === "number" ? TREE_NUMSTAT_WAITING_MAX : NaN;
       const delta = (command) => (window.__COUNTS__[command] ?? 0) - (before[command] ?? 0);
       const questions = window.__XT__.asked.slice(askedBefore);
       out.questions = questions.length;
@@ -1090,7 +1096,7 @@ export async function testExplorerWriting(browser, origin, ok) {
       return out;
     }, { windowMs, most });
     ok("a burst of 200 start/end pairs asks git about each file once, in as few questions as the cap allows — never per event, never a whole-repo status, no listing", burst.questions === Math.ceil(40 / most) && burst.biggest <= most && burst.files === 40 && burst.repeats === 0 && burst.wholeRepo === 0 && burst.listed === 0 && burst.window < burst.settle, JSON.stringify(burst));
-    ok("more files than one question may name are asked in the following windows, none dropped and none named twice", burst.spillBiggest <= most && burst.spillFiles === burst.spill && burst.spillQuestions >= 3, JSON.stringify(burst));
+    ok("more files than one question may name are asked in the following windows, none dropped and none named twice", burst.spillBiggest <= most && burst.spillFiles === burst.spill && burst.spillQuestions >= 3 && burst.spill <= burst.waitingMax, JSON.stringify(burst));
 
     /* held writes are bounded however many calls start and never end */
     const held = await page.evaluate(() => {
@@ -1099,6 +1105,31 @@ export async function testExplorerWriting(browser, origin, ok) {
       return { writes: typeof treeWrites === "object" ? treeWrites.size : NaN, cap: typeof TREE_TOUCH_CAP === "number" ? TREE_TOUCH_CAP : NaN };
     });
     ok("the writes held open are bounded by the touch cap however many calls start and never end", Number.isFinite(held.writes) && held.writes <= held.cap, JSON.stringify(held));
+
+    /* a run of short writes does not push out the long ones still open: with the cap full, a write
+     * that has ended — only waiting out its showing — goes first, for an open write's end may name
+     * no file (a wire session's does not) and then only its start knows it */
+    const crowd = await page.evaluate(async ({ max }) => {
+      const { root, fire, act } = window.__XT__;
+      const real = performance.now.bind(performance);
+      const letGo = () => {
+        performance.now = () => real() + max + 1000;
+        try { sweepTreeTouches(); } finally { performance.now = real; }
+      };
+      letGo();
+      const cap = typeof TREE_TOUCH_CAP === "number" ? TREE_TOUCH_CAP : NaN;
+      const longs = cap - 2;
+      for (let at = 0; at < longs; at += 1) fire("term:7", [act("edit", `${root}/src/long${at}.rs`, "started", { call: `long${at}` })]);
+      for (let at = 0; at < 4; at += 1) {
+        fire("term:8", [act("edit", `${root}/src/short${at}.rs`, "started", { call: `short${at}` })]);
+        fire("term:8", [act("edit", `${root}/src/short${at}.rs`, "finished", { call: `short${at}` })]);
+      }
+      const holding = [...treeWrites.values()];
+      const out = { cap, longs, open: holding.filter((one) => !one.closed && one.pane === "term:7").length, held: holding.length };
+      letGo();
+      return out;
+    }, { max });
+    ok("with the cap full, a write that has ended goes before one still open: a run of short writes leaves the long ones in place", Number.isFinite(crowd.cap) && crowd.longs > 0 && crowd.open === crowd.longs && crowd.held <= crowd.cap, JSON.stringify(crowd));
 
     /* the sheen is a theme token and the name stays readable under its peak */
     const sheen = await page.evaluate(async () => {
