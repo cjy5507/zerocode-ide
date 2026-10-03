@@ -1677,3 +1677,44 @@ fn a_turns_brief_hands_each_voice_the_room_the_ones_before_it_left() {
     let selection: BriefContributor = crate::tree_selection::brief_line;
     assert_eq!(first, Some(selection as usize));
 }
+
+/// A turn's brief runs inside the bridge's one wall — the hook reply's
+/// timeout is around the whole brief, not each voice — so each voice is
+/// handed what is left of that wall, and a voice the wall has run out for is
+/// not asked. A voice that waited out the full wall after another had spent
+/// part of it would have the bridge drop every voice's line, including one
+/// that recorded its delivery (t-24298, from Jev run-22509's integration).
+#[test]
+fn a_turns_brief_hands_each_voice_what_is_left_of_the_wall() {
+    static WALLS: Mutex<Vec<Duration>> = Mutex::new(Vec::new());
+    fn slow(ask: &zerocode_hookd::TurnBriefAsk, _: usize) -> Option<String> {
+        WALLS.lock().expect("walls").push(ask.wall);
+        std::thread::sleep(Duration::from_millis(40));
+        Some("slow".to_string())
+    }
+    fn after(ask: &zerocode_hookd::TurnBriefAsk, _: usize) -> Option<String> {
+        WALLS.lock().expect("walls").push(ask.wall);
+        Some("after".to_string())
+    }
+    let roomy = brief_ask(Path::new("/Users/dev/repo"), Duration::from_millis(400));
+    assert_eq!(
+        compose_brief(&[slow, after], &roomy, 100).as_deref(),
+        Some("slow\n\nafter")
+    );
+    let walls = WALLS.lock().expect("walls").clone();
+    assert!(
+        walls.len() == 2 && walls[1] <= Duration::from_millis(360),
+        "the second voice was handed the whole wall again: {walls:?}"
+    );
+    WALLS.lock().expect("walls").clear();
+    let short = brief_ask(Path::new("/Users/dev/repo"), Duration::from_millis(20));
+    assert_eq!(
+        compose_brief(&[slow, after], &short, 100).as_deref(),
+        Some("slow")
+    );
+    assert_eq!(
+        WALLS.lock().expect("walls").len(),
+        1,
+        "a voice was asked after the wall ran out"
+    );
+}
