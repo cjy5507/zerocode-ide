@@ -514,6 +514,32 @@ async function redesignNow(browser, origin, ok) {
       seen.writing.doing === seen.want.writing && seen.calling.doing === seen.wantCalling,
       JSON.stringify({ writing: seen.writing, calling: seen.calling }),
     );
+    // The ring turns while the agent works, in steps: a ring the page turns every frame is the main
+    // thread's work every frame — over 120 keys typed at a 4x CPU it cost 680 ms more of the main thread
+    // and 2 ms more on the typical key than the ring held still (1791002210, 1791006138) — and turned in
+    // steps it moves a handful of times a second.
+    const turning = await page.evaluate(async () => {
+      const ring = document.querySelector("#worker-view .helper-status-ring");
+      if (!ring) return { ring: false };
+      const frame = () => new Promise((done) => requestAnimationFrame(() => done()));
+      let last = getComputedStyle(ring).transform;
+      let moves = 0;
+      let frames = 0;
+      const start = performance.now();
+      while (performance.now() - start < 1000) {
+        await frame();
+        frames += 1;
+        const now = getComputedStyle(ring).transform;
+        if (now !== last) moves += 1;
+        last = now;
+      }
+      return { ring: true, frames, moves, timing: getComputedStyle(ring).animationTimingFunction };
+    });
+    ok(
+      "R7: while the agent works the live line's ring turns, in steps — a handful of moves a second, not one every frame",
+      turning.ring && turning.moves > 0 && turning.moves <= 12 && turning.moves < turning.frames / 2,
+      JSON.stringify(turning),
+    );
     ok("R7: the live line raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
