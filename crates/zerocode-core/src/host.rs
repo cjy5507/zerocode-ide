@@ -913,13 +913,42 @@ fn disk_bytes(about: &std::fs::Metadata) -> u64 {
     about.len()
 }
 
+/// 앱이 띄우는 모든 git이 지나는 문 하나: 배경 호출이 색인을 다시 쓰지 않게 한다.
+///
+/// `git status`는 기본으로 색인의 stat 정보를 새로 고쳐 `.git/index`에 다시 쓰고
+/// 그동안 `index.lock`을 쥔다(git-status 문서의 BACKGROUND REFRESH). 배경에서
+/// 도는 status가 그 순간 같은 체크아웃에서 사람이나 워커가 시작한 `commit`·`add`·
+/// `merge`를 "Unable to create '.git/index.lock': File exists"로 거절하게 만든다.
+///
+/// 막는 설정은 둘이고 서로 다른 명령을 막는다.
+/// - `GIT_OPTIONAL_LOCKS=0`은 `--no-optional-locks`와 같은 뜻이다. `status`가 그
+///   설정을 따른다. 그 설정을 모르는 2.15 미만의 git은 환경 변수를 무시할 뿐
+///   실패하지 않는다(첫 인자 플래그는 모든 호출을 실패시킨다).
+/// - `diff.autoRefreshIndex=false`: 작업 트리와 견주는 `git diff`(`diff HEAD
+///   --numstat`)는 선택적 잠금 설정을 따르지 않고 제 `refresh_index_quietly`로 같은
+///   색인을 다시 쓴다(git 2.50.1에서 시험으로 확인). 이 설정이 그 새로 고침만 끄고
+///   출력은 그대로다 — stat만 바뀐 파일은 내용이 같으므로 어느 쪽이든 줄이 없다.
+///
+/// 쓰기 명령(`commit`·`add`)이 쥐는 필수 잠금은 둘 모두와 무관하다. 소스 계약
+/// (`every_git_the_app_starts_goes_through_lock_free_git`)이 이 함수를 거치지 않는
+/// 새 git 생성을 막는다.
+pub fn lock_free_git(mut command: Command) -> Command {
+    command
+        .env(GIT_OPTIONAL_LOCKS, "0")
+        .args(["-c", "diff.autoRefreshIndex=false"]);
+    command
+}
+
+/// [`lock_free_git`]이 세우는 환경 변수의 이름.
+pub const GIT_OPTIONAL_LOCKS: &str = "GIT_OPTIONAL_LOCKS";
+
 /// 이 프로세스가 도는 기계의 git.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalVcs;
 
 impl Vcs for LocalVcs {
     fn text(&self, root: &Path, args: &[&str]) -> Result<String, String> {
-        let out = Command::new("git")
+        let out = lock_free_git(Command::new("git"))
             .args(args)
             .current_dir(root)
             .output()
@@ -931,7 +960,7 @@ impl Vcs for LocalVcs {
     }
 
     fn try_within(&self, root: &Path, args: &[&str], budget: Duration) -> Within {
-        let Ok(mut child) = Command::new("git")
+        let Ok(mut child) = lock_free_git(Command::new("git"))
             .args(args)
             .current_dir(root)
             .stdin(Stdio::null())
@@ -1000,7 +1029,7 @@ impl Vcs for LocalVcs {
         let parent = into
             .parent()
             .ok_or_else(|| "복제할 위치가 없습니다".to_string())?;
-        let mut child = Command::new("git")
+        let mut child = lock_free_git(Command::new("git"))
             // `--`가 장식이 아닌 이유: `-` 로 시작하는 URL을 사람이 붙여넣으면
             // git은 그것을 플래그로 읽는다.
             .args(["clone", "--progress", "--"])

@@ -1294,7 +1294,7 @@ fn claude_transcript_marker(
 /// and this one is a checkpoint made for them by a machine, named as such.
 pub(crate) fn wip_commit(checkout: &Path, message: &str) -> Result<Option<String>, String> {
     let git = |args: &[&str]| -> Result<String, String> {
-        let output = crate::proc::quiet_command("git")
+        let output = zerocode_core::host::lock_free_git(crate::proc::quiet_command("git"))
             .arg("-C")
             .arg(checkout)
             .args(args)

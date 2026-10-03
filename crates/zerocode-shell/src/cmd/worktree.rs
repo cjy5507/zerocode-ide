@@ -1649,11 +1649,13 @@ pub(crate) async fn merge_and_remove_worktree(
     let branch_clone = branch.clone();
     let repo_clone = repo_root.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let output = crate::proc::quiet_command(zerocode_orchestrator::GIT_EXECUTABLE)
-            .current_dir(&repo_clone)
-            .args(["merge", "--squash", &branch_clone])
-            .output()
-            .map_err(|e| format!("git merge 실행 실패: {e}"))?;
+        let output = zerocode_core::host::lock_free_git(crate::proc::quiet_command(
+            zerocode_orchestrator::GIT_EXECUTABLE,
+        ))
+        .current_dir(&repo_clone)
+        .args(["merge", "--squash", &branch_clone])
+        .output()
+        .map_err(|e| format!("git merge 실행 실패: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("스쿼시 병합 실패: {stderr}"));
@@ -1668,11 +1670,13 @@ pub(crate) async fn merge_and_remove_worktree(
     let msg = commit_message.unwrap_or(default_msg);
     let repo_clone2 = repo_root.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let output = crate::proc::quiet_command(zerocode_orchestrator::GIT_EXECUTABLE)
-            .current_dir(&repo_clone2)
-            .args(["commit", "-m", &msg])
-            .output()
-            .map_err(|e| format!("git commit 실행 실패: {e}"))?;
+        let output = zerocode_core::host::lock_free_git(crate::proc::quiet_command(
+            zerocode_orchestrator::GIT_EXECUTABLE,
+        ))
+        .current_dir(&repo_clone2)
+        .args(["commit", "-m", &msg])
+        .output()
+        .map_err(|e| format!("git commit 실행 실패: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("커밋 실패: {stderr}"));

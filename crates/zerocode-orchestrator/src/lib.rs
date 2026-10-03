@@ -1743,7 +1743,7 @@ fn validate_untracked_discard_target(
 }
 
 fn git_command(git: &OsStr, cwd: &Path) -> Command {
-    let mut command = Command::new(git);
+    let mut command = zerocode_core::host::lock_free_git(Command::new(git));
     // Paths read out of one git command are handed back to the next one as
     // pathspecs, so they have to survive the round trip. Left at its default,
     // `core.quotePath` escapes every non-ASCII byte — `한글.txt` comes back as
