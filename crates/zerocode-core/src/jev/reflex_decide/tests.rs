@@ -738,3 +738,30 @@ fn a_label_names_its_request_by_run_decision_and_time_as_the_judge_joins_it() {
     assert_eq!(unsaid["notCompared"], json!(HAND_STOPPED));
     assert!(unsaid.get("agreed").is_none() && unsaid.get("baselineAgreed").is_none());
 }
+
+/// A reading that differs from the one before it only by the capture's exact
+/// age is the same reading (t-22110): the hand's captures jitter a few
+/// milliseconds from collect to collect, and a run standing still would
+/// otherwise ask every collect for nothing new. Past the hand's limit the
+/// reading is new — `over_age` turned, which the words read.
+#[test]
+fn a_reading_that_differs_only_by_the_captures_exact_age_is_the_same_reading() {
+    let mut decider = Decider::new();
+    let mut raw = status(1, 7, 10, 1, 2);
+    raw["lastCaptureAgeNs"] = json!(3_000_000);
+    assert!(matches!(decider.offer(snapshot_of(&raw)), Offer::Ask(_)));
+    raw["lastCaptureAgeNs"] = json!(7_000_000);
+    assert_eq!(
+        decider.offer(snapshot_of(&raw)),
+        Offer::Same,
+        "four milliseconds of jitter is no decision"
+    );
+    raw["lastCaptureAgeNs"] = json!(LIMITS.max_frame_age_ns + 1_000_000);
+    assert!(
+        matches!(
+            decider.offer(snapshot_of(&raw)),
+            Offer::Waiting { coalesced: None }
+        ),
+        "over the hand's limit the reading is new"
+    );
+}
