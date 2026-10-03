@@ -56780,6 +56780,9 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
       window.__ANSWER__.wire_log = (args) => ({ ...log, turns: log.turns.slice(args.after), next: log.turns.length });
       window.__ANSWER__.wire_send = (args) => { calls.push(["wire", args.id, args.text]); return null; };
       window.__ANSWER__.wire_stop = () => null;
+      for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "codex"); tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
       const tabId = await openWirePage("codex", "/tmp/zerocode-window-test");
       // 선의 상태는 첫 `wire_log` 읽기가 실어 온다(`holdWireState`) — 시계가
       // 아니라 그 읽기를 기다린다(부하 아래 120 ms가 모자라 보내기가 먼저 나갔다).
@@ -57013,6 +57016,10 @@ suite("context-meter", async ({ browser, origin, ok }) => {
       window.__ANSWER__.wire_log = (args) => ({ ...log, turns: log.turns.slice(args.after), next: log.turns.length });
       window.__ANSWER__.wire_send = (args) => { calls.push(["wire", args.id, args.text]); return null; };
       window.__ANSWER__.wire_stop = () => null;
+      for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "codex"); tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
+      seen.agentsReady = installedAgents().some((row) => row.id === "codex");
       const tabId = await openWirePage("codex", "/tmp/zerocode-window-test");
       await window.__PAINTED__();
       await pollHelperPages();
@@ -57314,6 +57321,9 @@ suite("plan-card", async ({ browser, origin, ok }) => {
       window.__ANSWER__.wire_log = (args) => ({ ...log, turns: log.turns.slice(args.after), next: log.turns.length });
       window.__ANSWER__.wire_answer = (args) => { calls.push(["answer", args]); return null; };
       window.__ANSWER__.wire_stop = () => null;
+      for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "claude"); tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
       await openWirePage("claude", "/tmp/zerocode-window-test");
       await pollHelperPages();
       await window.__PAINTED__();
@@ -57487,6 +57497,9 @@ suite("wire-live-stream", async ({ browser, origin, ok }) => {
       window.__ANSWER__.wire_start = (args) => ({ id: 21, agent: args.agent, protocol: "claude-stream", version: "2.1.278", model: null, session: null });
       window.__ANSWER__.wire_log = (args) => { const held = log(); return { ...held, turns: held.turns.slice(args.after), next: held.turns.length }; };
       window.__ANSWER__.wire_stop = () => null;
+      for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "claude"); tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
       await openWirePage("claude", "/tmp/zerocode-window-test");
       await pollHelperPages();
       await window.__PAINTED__();
