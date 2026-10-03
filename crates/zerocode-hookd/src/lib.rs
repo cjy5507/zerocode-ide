@@ -1872,7 +1872,11 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
         // Only cmd builtins and the existing curl are needed. Numeric status
         // comes from curl's formatter, never from untrusted response text.
         lines.extend([
-            "set \"brief_id=w-%RANDOM%-%RANDOM%-%RANDOM%\"".into(),
+            "set \"brief_clock=%TIME: =0%\"".into(),
+            "set \"brief_clock=%brief_clock::=%\"".into(),
+            "set \"brief_clock=%brief_clock:.=%\"".into(),
+            "set \"brief_clock=%brief_clock:,=%\"".into(),
+            "set \"brief_id=w-%brief_clock%-%RANDOM%-%RANDOM%-%RANDOM%\"".into(),
             "set \"brief_dir=%TEMP%\\zerocode-hook-%brief_id%\"".into(),
             "mkdir \"%brief_dir%\" >nul 2>nul".into(),
             "if errorlevel 1 goto :plain_post".into(),

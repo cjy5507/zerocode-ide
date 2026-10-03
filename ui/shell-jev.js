@@ -2481,10 +2481,9 @@ function jevRenderReview(host, sample) {
     const status = jevNode("p", "jev-drawer-text");
     status.setAttribute("role", "status");
     const buttons = [
-      [true, () => jevText("jev.review.correct", "맞음", "button", "btn")],
-      [false, () => jevText("jev.review.incorrect", "틀림", "button", "btn")],
-    ].map(([correct, makeButton]) => {
-      const button = makeButton();
+      [true, jevText("jev.review.correct", "맞음", "button", "btn")],
+      [false, jevText("jev.review.incorrect", "틀림", "button", "btn")],
+    ].map(([correct, button]) => {
       button.type = "button";
       button.disabled = true;
       button.addEventListener("click", async () => {

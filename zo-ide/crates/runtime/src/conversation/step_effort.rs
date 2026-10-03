@@ -1327,11 +1327,13 @@ mod tests {
         configured.seat = Some(seat.clone());
         let mut state = StepEffortState::new(configured);
         state.step = 1;
+        state.routine_streak = 1;
         state.batch = BatchSeen { calls: 1, read_only: true, ..BatchSeen::default() };
         let first = state.plan(Some("main-model"), "settings-step");
         assert!(first.row.applied && first.row.jev.is_some());
         seat.applying.store(false, Ordering::SeqCst);
         state.moved_to = Some("lighter-model".into());
+        state.batch = BatchSeen { calls: 1, read_only: true, ..BatchSeen::default() };
         let recording = state.plan(Some("lighter-model"), "settings-step");
         assert!(!recording.row.applied && recording.row.jev.is_some());
         assert!(recording.return_home);

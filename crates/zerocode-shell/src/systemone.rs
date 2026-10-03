@@ -247,9 +247,11 @@ pub fn applies(wire: &Wire, seat: &JevUse) -> bool {
 /// goal walk, which starts pressing, and it did not.
 #[must_use]
 pub fn applies_once_risen(wire: &Wire, seat: &JevUse) -> bool {
+    let root = wire.settings_root();
+    if !JevSettings::from_root(&root).enabled { return false; }
     let raised = ledger_of(wire, seat)
         .is_some_and(|ledger| zerocode_core::jev::promote::risen(seat, &read_rows(&ledger)));
-    seat.mode_in(&wire.settings_root()).applies_with(raised)
+    seat.mode_in(&root).applies_with(raised)
 }
 
 /// [`applies`], in a run that may repeat one before it (t-6385): a use its
@@ -278,7 +280,7 @@ pub fn standing_in(
 /// person's `on`, or `auto` its project's own ledger raised (t-14869).
 #[must_use]
 pub fn applies_in_project(wire: &Wire, seat: &JevUse, workspace: &Path) -> bool {
-    standing_at(
+    wire.permits_workspace_now(Some(workspace)) && standing_at(
         wire,
         seat,
         zerocode_core::jev::Run::Fresh,
@@ -295,7 +297,9 @@ fn standing_at(
     run: zerocode_core::jev::Run,
     ledger: Option<&Path>,
 ) -> (zerocode_core::jev::JevMode, bool) {
-    let mode = seat.mode_in_run(&wire.settings_root(), run);
+    let root = wire.settings_root();
+    let mode = seat.mode_in_run(&root, run);
+    if !JevSettings::from_root(&root).enabled { return (mode, false); }
     let raised = ledger.is_some_and(|ledger| {
         standing::standing_of(seat, ledger) == zerocode_core::jev::promote::Stand::Applying
     });
@@ -594,6 +598,21 @@ impl Wire {
             .map_or(Value::Null, Value::Object)
     }
 
+    /// Whether current global settings still authorize effects in this workspace.
+    #[must_use]
+    pub(crate) fn permits_workspace_now(&self, workspace: Option<&Path>) -> bool {
+        let settings = JevSettings::from_root(&self.settings_root()).resolved();
+        settings.enabled && workspace.is_some_and(|path| settings.consents(&door::resolved_path(path)))
+    }
+
+    fn response_is_current(&self, row: &JevUse, workspace: Option<&Path>, allowed: &JevSettings,
+        mode: zerocode_core::jev::JevMode) -> bool {
+        let root = self.settings_root();
+        let settings = JevSettings::from_root(&root).resolved();
+        settings.enabled && settings.model == allowed.model && row.mode_in(&root) == mode
+            && workspace.is_some_and(|path| settings.consents(&door::resolved_path(path)))
+    }
+
     /// zo's config home: the folder the settings file sits in, where the door
     /// counts the day and a use the window asks keeps its ledger.
     #[must_use]
@@ -610,7 +629,7 @@ impl Wire {
         workspace: Option<&Path>,
         body: Value,
         memo: Option<Memo<'_>>,
-    ) -> Result<Passed, Refused> {
+    ) -> Result<(Passed, JevSettings, zerocode_core::jev::JevMode), Refused> {
         let root = self.settings_root();
         let settings = JevSettings::from_root(&root).resolved();
         let workspace = workspace.map(door::resolved_path);
@@ -619,7 +638,10 @@ impl Wire {
             .map(|home| count::requests_path(home, &today()))
             .unwrap_or_default();
         door::pass_remembering(
-            |asking| door::may_send(row, asking, body),
+            |asking| {
+                let cleared = door::may_send(row, asking, body)?;
+                if row.mode_in(&root).asks() { Ok(cleared) } else { Err(Refused::Off) }
+            },
             key,
             &settings,
             workspace.as_deref(),
@@ -635,7 +657,7 @@ impl Wire {
                     passed.cleared = passed.cleared.with_review_origin(namespace, origin);
                 }
             }
-            passed
+            (passed, settings, row.mode_in(&root))
         })
     }
 
@@ -733,7 +755,7 @@ impl Wire {
         let Some(key) = key else {
             return refused(Refused::NoKey);
         };
-        let Passed { cleared, memo } = passed;
+        let (Passed { cleared, memo }, allowed, mode) = passed;
         let request_bytes = cleared.bytes().len();
         let redacted_lines = cleared.withheld_lines();
         if let Some(remembered) = memo
@@ -742,7 +764,9 @@ impl Wire {
             .and_then(|memoed| memoed.recalled.as_ref())
         {
             return Asked {
-                answer: Ok(remembered.answer.clone()),
+                answer: if self.response_is_current(row, workspace, &allowed, mode) {
+                    Ok(remembered.answer.clone())
+                } else { Err(Refused::SettingsChanged.token().to_string()) },
                 spent: Spent {
                     requests: 0,
                     redacted_lines,
@@ -792,6 +816,10 @@ impl Wire {
             model: answer.as_deref().ok().and_then(answered_by),
             version,
         };
+        // Keep the actual wire usage even when a late reply loses permission.
+        let answer = if answer.is_ok() && !self.response_is_current(row, workspace, &allowed, mode) {
+            Err(Refused::SettingsChanged.token().to_string())
+        } else { answer };
         Asked {
             answer,
             spent,

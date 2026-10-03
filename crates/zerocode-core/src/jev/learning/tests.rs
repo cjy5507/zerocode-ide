@@ -2,6 +2,11 @@ use super::*;
 use crate::jev::{AGENT_TOOL, door};
 use serde_json::json;
 
+const WORKSPACE: &str = if cfg!(windows) { r"C:\work\project" } else { "/work/project" };
+
+const WORKSPACE_ONE: &str = if cfg!(windows) { r"C:\work\one" } else { "/work/one" };
+const WORKSPACE_TWO: &str = if cfg!(windows) { r"C:\work\two" } else { "/work/two" };
+
 fn case_with(seat: &JevUse, state: &str, questions: Value, answers: Value, model: &str) -> Case {
     let settings =
         door::JevSettings::from_root(&json!({"smart":{"jev":{"enabled":true,"workspaces":["*"]}}}));
@@ -10,7 +15,7 @@ fn case_with(seat: &JevUse, state: &str, questions: Value, answers: Value, model
         &door::Asking {
             key: true,
             settings: &settings,
-            workspace: Some("/work/project"),
+            workspace: Some(WORKSPACE),
             sent_today: 0,
         },
         json!({"model":"jev-latest","state":{"context":state},"questions":questions}),
@@ -252,7 +257,7 @@ fn workspace_provenance_binds_the_case_but_does_not_split_identical_evidence_gro
         original.request.clone(),
         &response,
         original.at,
-        Some("/work/one".into()),
+        Some(WORKSPACE_ONE.into()),
     )
     .unwrap();
     let mut second = Case::from_request(
@@ -261,7 +266,7 @@ fn workspace_provenance_binds_the_case_but_does_not_split_identical_evidence_gro
         original.request,
         &response,
         original.at,
-        Some("/work/two".into()),
+        Some(WORKSPACE_TWO.into()),
     )
     .unwrap();
     assert_ne!(
@@ -276,7 +281,7 @@ fn workspace_provenance_binds_the_case_but_does_not_split_identical_evidence_gro
     assert_eq!(second.validate(), Err(Invalid::Identity));
     assert!(
         second
-            .with_workspace(std::path::Path::new("/work/one"))
+            .with_workspace(std::path::Path::new(WORKSPACE_ONE))
             .is_err(),
         "binding a workspace must not launder already-modified evidence"
     );
@@ -293,9 +298,9 @@ fn streaming_review_selects_the_same_evidence_and_respects_its_workspace() {
         );
         one.workspace = Some(
             if index % 2 == 0 {
-                "/work/one"
+                WORKSPACE_ONE
             } else {
-                "/work/two"
+                WORKSPACE_TWO
             }
             .into(),
         );
@@ -323,7 +328,7 @@ fn streaming_review_selects_the_same_evidence_and_respects_its_workspace() {
         assert_eq!((review.total, review.cases, review.invalid), (17, 16, 1));
     }
     let scoped = store
-        .review(Some(AGENT_TOOL.id), Some("/work/one"), 5, 1, 42)
+        .review(Some(AGENT_TOOL.id), Some(WORKSPACE_ONE), 5, 1, 42)
         .unwrap();
     assert_eq!((scoped.total, scoped.cases, scoped.invalid), (17, 8, 1));
     assert_eq!(
@@ -335,7 +340,7 @@ fn streaming_review_selects_the_same_evidence_and_respects_its_workspace() {
         scoped
             .samples
             .iter()
-            .all(|sample| sample.case.workspace.as_deref() == Some("/work/one"))
+            .all(|sample| sample.case.workspace.as_deref() == Some(WORKSPACE_ONE))
     );
     assert!(store.review(None, None, 0, 0, 42).is_err());
 }
@@ -476,14 +481,14 @@ fn prepare(home: &std::path::Path) -> store::Pending {
         &door::Asking {
             key: true,
             settings: &settings,
-            workspace: Some("/work/project"),
+            workspace: Some(WORKSPACE),
             sent_today: 0,
         },
         json!({"state":{"context":"a result"},"questions":{"q":{"type":"noul"}}}),
     )
     .unwrap();
     cleared
-        .with_review(home, &AGENT_TOOL, "/work/project")
+        .with_review(home, &AGENT_TOOL, WORKSPACE)
         .with_review_origin("zo/session", "session-one")
         .prepare_review()
         .unwrap()
@@ -534,7 +539,7 @@ fn recording_and_applying_both_collect_evidence_under_the_existing_preference() 
         );
         let cases = store::Store::at(home.path()).snapshot().unwrap().cases;
         assert_eq!(cases.len(), 1);
-        assert_eq!(cases[0].workspace.as_deref(), Some("/work/project"));
+        assert_eq!(cases[0].workspace.as_deref(), Some(WORKSPACE));
         assert_eq!(
             cases[0].origin_group,
             Some(origin_group("zo/session", "session-one").unwrap())
@@ -579,7 +584,7 @@ fn a_missing_draft_preference_prepares_no_copy_at_the_door() {
         &door::Asking {
             key: true,
             settings: &settings,
-            workspace: Some("/work/project"),
+            workspace: Some(WORKSPACE),
             sent_today: 0,
         },
         json!({"state":{},"questions":{}}),

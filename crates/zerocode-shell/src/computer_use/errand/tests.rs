@@ -797,6 +797,27 @@ fn on_presses_the_number_it_chose_and_walks_again_from_the_reports_own_next() {
 }
 
 #[test]
+fn a_walk_withdrawn_while_choosing_neither_presses_nor_claims_the_goal() {
+    struct Withdrawn(Judged);
+    impl ActionJudge for Withdrawn {
+        fn choose(&mut self, _: &ActionAsk) -> Judged { self.0.clone() }
+        fn permits_application(&self) -> bool { false }
+    }
+    let done = Judged::Chose(ActionChoice {
+        chosen: Chosen::Done, probabilities: BTreeMap::new(), confidence: 0.9, guard: None,
+    }.into());
+    for answer in [pick(1), done] {
+        let mut judge = Withdrawn(answer);
+        let mut world = FakeWorld::that_moves(&[1, 2]);
+        let walked = run(Mode::On, true, &goal(3), &mut judge, &mut world);
+        assert!(world.presses.is_empty());
+        assert_eq!(walked.reached, None);
+        assert_eq!(walked.rows[0]["routeUse"], USE_SHADOW);
+        assert_eq!(walked.rows[0]["pressed"], false);
+    }
+}
+
+#[test]
 fn pressing_is_not_succeeding() {
     let mut judge = FakeJudge::chose(&[1, 3]);
     let mut world = FakeWorld::showing(&[1, 2, 3]);

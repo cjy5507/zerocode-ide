@@ -267,6 +267,12 @@ impl Pending {
 pub trait ActionJudge {
     fn choose(&mut self, ask: &ActionAsk) -> Judged;
 
+    /// Recheck permission before an answer changes the live surface.
+    fn permits_application(&self) -> bool { true }
+
+    /// A running walk may lose permission; it never gains a new acting seat.
+    fn branching_now(&self, configured: Branching) -> Branching { configured }
+
     /// Which of a forked step's results is the closest to the goal (t-6044,
     /// `zerocode_core::jev::BRANCHING`) — asked under that seat's own row,
     /// down the same wire. A judge with no comparison to give — a test's that
@@ -1400,6 +1406,13 @@ fn walk(
                 note(&mut said, key, json!(permille));
             }
         }
+        if acting && !judge.permits_application() {
+            note(&mut said, "routeUse", json!(USE_SHADOW));
+            note(&mut said, walk_words::PRESSED, json!(false));
+            note(&mut said, REASON, json!(SEAT_RECORDING));
+            walked.rows.push(row(mode, at, attempt, said));
+            return walked;
+        }
         // The hand goes out to one number either way: a control to press, or
         // a field to type into (t-6720). Everything up to the hand — the
         // row's words, the stand, the guards and the floor — is one road.
@@ -1548,6 +1561,14 @@ fn walk(
         }
         let chosen = chosen;
 
+        if !judge.permits_application() {
+            note(&mut said, "routeUse", json!(USE_SHADOW));
+            note(&mut said, walk_words::PRESSED, json!(false));
+            note(&mut said, REASON, json!(SEAT_RECORDING));
+            walked.rows.push(row(mode, at, attempt, said));
+            return walked;
+        }
+
         if typing {
             // The entry (t-6720): the world writes — or remembers — the value
             // this field needs, presses the field by its pinned number and
@@ -1623,6 +1644,14 @@ fn walk(
                     same_pick: forked.same_pick,
                 });
                 walked.forks.push(row);
+            }
+
+            if !judge.permits_application() {
+                note(&mut said, "routeUse", json!(USE_SHADOW));
+                note(&mut said, walk_words::PRESSED, json!(false));
+                note(&mut said, REASON, json!(SEAT_RECORDING));
+                walked.rows.push(row(mode, at, attempt, said));
+                return walked;
             }
 
             let seen = before
