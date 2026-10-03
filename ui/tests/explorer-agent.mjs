@@ -359,6 +359,11 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
       const shown = fileTree.querySelectorAll("[data-agent-writing]").length;
       // The rows whose sheen runs, and what a row held still wears and says.
       const sweeping = document.getAnimations().filter((one) => one.animationName === "tree-writing-sweep" && one.playState === "running" && fileTree.contains(one.effect?.target)).length;
+      // What the sheen's keyframes animate: only what the compositor moves without the page's main thread.
+      const sheenProperties = [...new Set(document.getAnimations()
+        .filter((one) => one.animationName === "tree-writing-sweep")
+        .flatMap((one) => one.effect.getKeyframes().flatMap((frame) => Object.keys(frame))))]
+        .filter((key) => !["offset", "easing", "composite", "computedOffset"].includes(key));
       const held = fileTree.querySelector('[data-agent-writing="still"]');
       const word = t("tree.writing.file", "");
       const still = held ? { animation: getComputedStyle(held, "::after").animationName, height: getComputedStyle(held, "::after").height, said: word.length > 0 && (held.getAttribute("aria-label") ?? "").includes(word) } : null;
@@ -389,6 +394,7 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
         paints: paintsDuring,
         shown,
         sweeping,
+        sheenProperties,
         still,
         tallied,
         numstat: delta("scm_numstat"),
@@ -402,6 +408,7 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
     ok("the most rows the tree lights at once, which is also the most writes it holds open, is one named cap that a low-spec machine bears: a burst of two hundred lights and marks no more", Number.isFinite(touchCap) && touchCap > 0 && touchCap <= BURST_TOUCH_CAP_MAX && numbers.lit <= touchCap && pairs.shown <= touchCap, JSON.stringify({ touchCap, most: BURST_TOUCH_CAP_MAX, lit: numbers.lit, shown: pairs.shown }));
     ok("a burst of 200 start/end pairs arms the tree's one sweep timer a handful of times at most, never once for each event", Number.isFinite(pairs.sweepsArmed) && pairs.sweepsArmed >= 1 && pairs.sweepsArmed <= BURST_SWEEPS_ARMED_MAX, JSON.stringify({ sweepsArmed: pairs.sweepsArmed, most: BURST_SWEEPS_ARMED_MAX }));
     ok("the sheen moves on at most the few rows the tree names however many are being written; the rest wear the still marker and say the same words", Number.isFinite(movingMax) && movingMax > 0 && pairs.sweeping > 0 && pairs.sweeping <= movingMax && pairs.shown > movingMax && pairs.still?.animation === "none" && parseFloat(pairs.still?.height) === 2 && pairs.still?.said === true, JSON.stringify({ movingMax, sweeping: pairs.sweeping, shown: pairs.shown, still: pairs.still }));
+    ok("the sheen is moved by transform alone — a property the compositor animates without the page's main thread", pairs.sweeping > 0 && JSON.stringify(pairs.sheenProperties) === JSON.stringify(["transform"]), JSON.stringify(pairs.sheenProperties));
     ok("an idle tree runs no animation and holds no timer once the writing has ended and the marks have faded", pairs.idle.animations === 0 && pairs.idle.timers === 0, JSON.stringify(pairs.idle));
     ok("the burst suite raised no renderer faults", faults.length === 0, faults.join(" | "));
   } finally {
