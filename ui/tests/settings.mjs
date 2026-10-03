@@ -8509,6 +8509,11 @@ for (const row of ROLLBACKS) {
 }
 
 await test("the harness card shows what a person set and what the window counted, and saves each field as the person typed it (t-26583)", async () => {
+  // The status sentence below is read in Korean; the persisted writes above leave
+  // the page in Japanese, so the language is set first and given back at the end.
+  const previousLocale = backend.settings.locale;
+  await backend.externalPatch({ locale: "ko" }, ["locale"]);
+  await renderSettled(pageB);
   backend.settings.harness = clone(DEFAULT_SETTINGS.harness);
   await reopenSettings(pageB, "B", "provider-accounts");
   const card = () => pageB.evaluate(() => {
@@ -8578,6 +8583,8 @@ await test("the harness card shows what a person set and what the window counted
     { concurrent: 4, per_hour: 300, per_day: null },
     "a refused ceiling reached the stored document",
   );
+  await backend.externalPatch({ locale: previousLocale }, ["locale"]);
+  await renderSettled(pageB);
 });
 
 await test("Tab Order persists its Orca MRU/sequential choice", async () => {
