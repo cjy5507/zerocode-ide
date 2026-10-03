@@ -49,6 +49,16 @@ static SETTINGS: Mutex<Settings> = Mutex::new(Settings {
     day_usd: None,
 });
 
+/// When this window began to watch, in epoch milliseconds: a worker whose attempt
+/// began before that was already running when the window met it, and what it
+/// spent until then is not this window's to count.
+static WATCHING_SINCE_MS: AtomicI64 = AtomicI64::new(0);
+
+/// When this window began to watch.
+pub(super) fn watching_since_ms() -> i64 {
+    WATCHING_SINCE_MS.load(Ordering::Relaxed)
+}
+
 /// Where the day's spend is kept, beside the other per-machine records.
 const DAY_FILE: &str = "gate-day-spend.json";
 
@@ -84,6 +94,7 @@ pub(super) fn write_day(file: &Path, day: &DaySpend) {
 /// Opens the gate at boot: what a person set, and the day the window had
 /// already counted.
 pub(crate) fn open(config_root: &Path, settings: Settings) {
+    WATCHING_SINCE_MS.store(crate::now_epoch_ms(), Ordering::Relaxed);
     set_settings(settings);
     let file = config_root.join(DAY_FILE);
     if let Some(day) = load_day(&file) {
@@ -281,6 +292,10 @@ impl GateBook {
         }
         self.trim_tasks();
     }
+
+    /// What a transcript held of calls made before the window looked (stub until
+    /// its reader lands: learns nothing).
+    pub(super) fn seed_costs(&mut self, _term: u32, _costs: &[CallCost]) {}
 
     /// What a task has cost so far, as far as watched.
     pub(super) fn task_spent(&self, task: &str) -> f64 {

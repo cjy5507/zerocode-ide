@@ -257,6 +257,9 @@ pub(super) struct WorkerPane {
     /// The effort the summons carried — the floor a lower never goes under.
     pub(super) floor: Option<String>,
     pub(super) checkout: Option<String>,
+    /// When the attempt began (`Dispatch::started_ms`): what tells a worker the
+    /// window has watched from its start from one it met already running.
+    pub(super) started_ms: i64,
 }
 
 /// Every live worker carrying an open attempt in a pane this window holds
@@ -291,6 +294,7 @@ pub(super) fn worker_panes(ledger: &Ledger, seats: &super::TeamSeatIndex) -> Vec
                     term,
                     floor: worker.effort.clone(),
                     checkout: worker.checkout.clone(),
+                    started_ms: dispatch.started_ms,
                 })
             })
         })

@@ -859,3 +859,50 @@ fn every_verdict_has_the_word_it_is_serialized_as_and_they_rise_in_the_order_of_
         "ALL is lowest first: the board lists them that way"
     );
 }
+
+/// A worker the window met mid-run: the calls it made before the window looked say
+/// how dear its calls are — the projection of a stop must know that from the first
+/// beat — and are nobody's spend: the day already holds what a window that watched
+/// them counted, and counting them again would stop a worker that is within its
+/// budget.
+#[test]
+fn a_call_the_window_only_learned_of_shapes_the_projection_and_is_not_spent() {
+    let mut book = StepBook::default();
+    for _ in 0..PROJECTION_RECENT_CALLS {
+        book.seed_cost(1.0);
+    }
+    assert_eq!(
+        book.ahead_usd(),
+        f64::from(PROJECTION_STEPS),
+        "eight more calls at a dollar each, from the first beat"
+    );
+    assert_eq!(book.spent_usd(), None, "and none of it is spent");
+    assert_eq!(book.metrics().unpriced_calls, 0);
+    book.note_cost(Some(1.0));
+    assert_eq!(
+        book.spent_usd(),
+        Some(1.0),
+        "only what the window watched is"
+    );
+}
+
+#[test]
+fn what_the_window_learned_of_is_bounded_like_what_it_counted() {
+    let mut book = StepBook::default();
+    for _ in 0..10 * COST_RING {
+        book.seed_cost(0.5);
+    }
+    assert_eq!(
+        book.costs.len(),
+        COST_RING,
+        "the ring holds the newest and no more"
+    );
+    book.seed_cost(f64::NAN);
+    book.seed_cost(-3.0);
+    assert_eq!(
+        book.costs.len(),
+        COST_RING,
+        "a cost that is not a number of dollars is nothing"
+    );
+    assert!(book.costs.iter().all(|usd| usd.is_finite() && *usd >= 0.0));
+}

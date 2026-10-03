@@ -216,3 +216,24 @@ fn a_days_spend_is_written_down_and_read_back_and_what_is_not_a_day_is_none() {
         "a damaged file is no day, and does not stop the window"
     );
 }
+
+#[test]
+fn what_the_window_only_learned_of_is_in_the_workers_ring_and_in_no_total() {
+    let mut book = GateBook::default();
+    book.pane(7, "launch", NOW);
+    book.seed_costs(7, &[CallCost::Usd(1.0); 5]);
+    assert!(
+        (book.ahead_of(&[7]) - 8.0).abs() < 1e-9,
+        "the projection knows how dear the worker's calls are from the first beat"
+    );
+    assert_eq!(book.task_spent("t-1"), 0.0);
+    assert_eq!(book.day_spent(NOW), 0.0);
+    let metrics = book.pane_mut(7).expect("a record").book.metrics();
+    assert_eq!(metrics.spent_usd, None);
+    assert_eq!(metrics.unpriced_calls, 0);
+    book.seed_costs(9, &[CallCost::Usd(1.0)]);
+    assert!(
+        book.pane_mut(9).is_none(),
+        "a pane the book never heard of gets no record from it"
+    );
+}

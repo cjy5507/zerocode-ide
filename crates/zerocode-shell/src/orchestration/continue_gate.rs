@@ -289,6 +289,12 @@ pub(super) fn sweep(host: &dyn Host, overrides: &[(String, LaunchOverride)], now
     }
 }
 
+/// The meter of a worker's transcript (stub until its reader lands: every worker
+/// is read as though the window had watched it from its start).
+fn meter_for(agent: &str, _started_ms: i64, _watching_since_ms: i64) -> Meter {
+    Meter::new(agent)
+}
+
 /// The calls a worker's CLI recorded since the last look, into the book: the
 /// transcript is read with no lock held, and only what it said goes under it.
 fn watch(host: &dyn Host, pane: &WorkerPane, now_ms: i64) -> CostNote {
@@ -299,12 +305,15 @@ fn watch(host: &dyn Host, pane: &WorkerPane, now_ms: i64) -> CostNote {
         let mut book = gate_book::book();
         let gate = book.pane(pane.term, "", now_ms);
         gate.for_attempt(&pane.dispatch);
-        gate.meter.take().unwrap_or_else(|| Meter::new(&pane.agent))
+        gate.meter.take().unwrap_or_else(|| {
+            meter_for(&pane.agent, pane.started_ms, gate_book::watching_since_ms())
+        })
     };
-    let costs = meter.poll(path.as_deref(), now_ms);
+    let looked = meter.poll(path.as_deref(), now_ms);
     let note = meter.note(path.is_some());
     let mut book = gate_book::book();
-    book.add_costs(pane.term, &pane.task, &costs, now_ms);
+    book.add_costs(pane.term, &pane.task, &looked.counted, now_ms);
+    book.seed_costs(pane.term, &looked.known);
     if let Some(gate) = book.pane_mut(pane.term) {
         gate.meter = Some(meter);
     }

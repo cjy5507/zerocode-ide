@@ -530,6 +530,10 @@ impl StepBook {
         }
     }
 
+    /// One model call the window only LEARNED OF: made before it began to watch
+    /// (stub until its reader lands: learns nothing).
+    pub fn seed_cost(&mut self, _usd: f64) {}
+
     /// The window saved this attempt's state at `now_ms`.
     pub fn checkpointed(&mut self, now_ms: i64) {
         self.since_checkpoint = 0;

@@ -61,6 +61,7 @@ fn pane() -> WorkerPane {
         term: 7,
         floor: None,
         checkout: Some("/repo/checkout".into()),
+        started_ms: NOW,
     }
 }
 
@@ -567,4 +568,39 @@ fn measure_the_gate_on_the_paths_a_slow_machine_feels() {
         zerocode_core::continue_gate::REWORK_WINDOW_STEPS,
         zerocode_core::continue_gate::COST_RING
     );
+}
+
+#[test]
+fn a_worker_whose_attempt_began_before_the_window_did_is_met_already_running() {
+    let dir = tempfile::tempdir().expect("a transcript dir");
+    let path = dir.path().join("session.jsonl");
+    let call = |index: usize| {
+        serde_json::json!({
+            "type": "assistant", "sessionId": "session-1", "timestamp": "2026-10-03T00:00:00.000Z",
+            "uuid": format!("uuid-{index}"), "requestId": format!("request-{index}"),
+            "message": {"id": format!("message-{index}"), "model": "claude-haiku-4-5", "role": "assistant",
+                "usage": {"input_tokens": 1_000_000, "output_tokens": 0, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0}},
+        })
+        .to_string()
+    };
+    let lines: Vec<String> = (0..3).map(call).collect();
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("a transcript");
+    let text = path.to_str().expect("a utf-8 path");
+
+    let mut running = meter_for("claude", NOW - 1, NOW);
+    let met = running.poll(Some(text), 0);
+    assert!(
+        met.counted.is_empty() && !met.known.is_empty(),
+        "an attempt that began before the window did was already spending: {met:?}"
+    );
+
+    let mut watched = meter_for("claude", NOW + 1, NOW);
+    let seen = watched.poll(Some(text), 0);
+    assert_eq!(
+        seen.counted.len(),
+        2,
+        "watched from its start, every finished call counts"
+    );
+    assert!(seen.known.is_empty());
 }

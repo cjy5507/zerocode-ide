@@ -49,14 +49,28 @@ pub(crate) enum CostNote {
     Unreadable,
 }
 
+/// What one look at a transcript found, in the two kinds of call it can hold.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct Looked {
+    /// Calls that finished while the window watched: spent — in the worker's own
+    /// total, its task's and the day's.
+    pub(super) counted: Vec<CallCost>,
+    /// Calls that finished before the window looked, read from the tail of a file
+    /// it met mid-run. They say how dear this worker's calls are and are nobody's
+    /// spend here: the day's total already holds what a window that watched them
+    /// counted, and one that did not has no claim on them.
+    pub(super) known: Vec<CallCost>,
+}
+
 /// What one look at the file found.
 enum Look {
     /// The file has not grown: the stream of the call being written is over.
     Quiet,
     /// It has grown, but not to a whole line yet.
     Pending,
-    /// Whole lines, oldest first.
-    Lines(String),
+    /// Whole lines, oldest first — and whether they were already there when the
+    /// window first looked.
+    Lines { text: String, known: bool },
 }
 
 /// One transcript being followed.
@@ -70,10 +84,13 @@ struct Tail {
     reader: Box<dyn CostReader>,
     polled_ms: i64,
     unreadable: bool,
+    /// Whether the worker was running before the window began to watch: its first
+    /// look is then a look at the past, whatever the size of the file.
+    predates: bool,
 }
 
 impl Tail {
-    fn new(path: &Path, reader: Box<dyn CostReader>) -> Self {
+    fn new(path: &Path, reader: Box<dyn CostReader>, predates: bool) -> Self {
         Self {
             path: path.to_path_buf(),
             offset: 0,
@@ -81,31 +98,38 @@ impl Tail {
             reader,
             polled_ms: i64::MIN,
             unreadable: false,
+            predates,
         }
     }
 
     /// The calls the file has finished since the last look.
-    fn look(&mut self, now_ms: i64) -> Vec<CallCost> {
+    fn look(&mut self, now_ms: i64) -> Looked {
         if now_ms.saturating_sub(self.polled_ms) < POLL_MS {
-            return Vec::new();
+            return Looked::default();
         }
         self.polled_ms = now_ms;
         match self.read_new() {
-            Ok(Look::Lines(text)) => {
+            Ok(Look::Lines { text, known: _ }) => {
                 self.unreadable = false;
-                self.reader.feed(&text)
+                Looked {
+                    counted: self.reader.feed(&text),
+                    known: Vec::new(),
+                }
             }
             Ok(Look::Quiet) => {
                 self.unreadable = false;
-                self.reader.flush().into_iter().collect()
+                Looked {
+                    counted: self.reader.flush().into_iter().collect(),
+                    known: Vec::new(),
+                }
             }
             Ok(Look::Pending) => {
                 self.unreadable = false;
-                Vec::new()
+                Looked::default()
             }
             Err(_) => {
                 self.unreadable = true;
-                Vec::new()
+                Looked::default()
             }
         }
     }
@@ -160,9 +184,12 @@ impl Tail {
             return Ok(Look::Pending);
         }
         self.offset = from + u64::try_from(end).unwrap_or_default();
-        Ok(Look::Lines(
-            String::from_utf8_lossy(&bytes[skip..end]).into_owned(),
-        ))
+        let known = false;
+        self.predates = self.predates && !first;
+        Ok(Look::Lines {
+            text: String::from_utf8_lossy(&bytes[skip..end]).into_owned(),
+            known,
+        })
     }
 }
 
@@ -171,6 +198,7 @@ impl Tail {
 pub(super) struct Meter {
     agent: String,
     tail: Option<Tail>,
+    predates: bool,
 }
 
 impl Meter {
@@ -178,15 +206,22 @@ impl Meter {
         Self {
             agent: agent.to_string(),
             tail: None,
+            predates: false,
         }
+    }
+
+    /// The worker was running before the window began to watch (stub until its
+    /// reader lands: reads it like any other).
+    pub(super) fn predating_the_window(self) -> Self {
+        self
     }
 
     /// One look, when it is time: the model calls the transcript at `path`
     /// finished since the last one. A CLI with no reader, or one that has not
     /// said where it writes, answers none.
-    pub(super) fn poll(&mut self, path: Option<&str>, now_ms: i64) -> Vec<CallCost> {
+    pub(super) fn poll(&mut self, path: Option<&str>, now_ms: i64) -> Looked {
         let Some(path) = path.map(Path::new) else {
-            return Vec::new();
+            return Looked::default();
         };
         if self
             .tail
@@ -194,13 +229,14 @@ impl Meter {
             .is_none_or(|tail| tail.path.as_path() != path)
         {
             let Some(reader) = reader_for(&self.agent) else {
-                return Vec::new();
+                return Looked::default();
             };
-            self.tail = Some(Tail::new(path, reader));
+            self.tail = Some(Tail::new(path, reader, self.predates));
+            self.predates = false;
         }
         self.tail
             .as_mut()
-            .map_or_else(Vec::new, |tail| tail.look(now_ms))
+            .map_or_else(Looked::default, |tail| tail.look(now_ms))
     }
 
     /// Why the cost is, or is not, a number.

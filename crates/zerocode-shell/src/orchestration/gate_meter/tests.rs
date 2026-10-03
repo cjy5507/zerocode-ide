@@ -37,8 +37,24 @@ fn append(path: &Path, text: &str) {
         .expect("the transcript grows");
 }
 
-fn dollars(costs: &[CallCost]) -> Vec<f64> {
-    costs.iter().filter_map(|cost| cost.usd()).collect()
+/// The dollars of the calls a look counted.
+fn dollars(looked: &Looked) -> Vec<f64> {
+    looked
+        .counted
+        .iter()
+        .filter_map(|cost| cost.usd())
+        .collect()
+}
+
+/// A look that found nothing at all, counted or learned from.
+trait Nothing {
+    fn is_empty(&self) -> bool;
+}
+
+impl Nothing for Looked {
+    fn is_empty(&self) -> bool {
+        self.counted.is_empty() && self.known.is_empty()
+    }
 }
 
 fn transcript() -> (tempfile::TempDir, PathBuf) {
@@ -153,14 +169,19 @@ fn a_worker_first_seen_mid_run_is_read_from_the_end_of_its_file() {
     let first = meter.poll(Some(path_text(&path)), 0);
     let tail_calls = usize::try_from(ATTACH_TAIL_BYTES).expect("fits") / one;
     assert!(
-        first.len() <= tail_calls + 3,
-        "{} calls from one look at a file of {copies}: only its tail",
-        first.len()
+        first.counted.is_empty(),
+        "{} calls counted: what the window met already there is learned from and not spent",
+        first.counted.len()
     );
     assert!(
-        first.len() + 100 >= tail_calls,
+        first.known.len() <= tail_calls + 3,
+        "{} calls from one look at a file of {copies}: only its tail",
+        first.known.len()
+    );
+    assert!(
+        first.known.len() + 100 >= tail_calls,
         "{} calls: the tail was read",
-        first.len()
+        first.known.len()
     );
 }
 
@@ -263,5 +284,57 @@ fn a_codex_worker_is_read_through_its_rollout_the_way_a_claude_worker_is() {
         meter.note(false),
         CostNote::Read,
         "it has said where it writes"
+    );
+}
+
+fn calls(messages: &[&str]) -> String {
+    let lines: Vec<String> = messages.iter().map(|message| record(message, 0)).collect();
+    format!("{}\n", lines.join("\n"))
+}
+
+#[test]
+fn a_worker_that_predates_the_window_is_learned_from_and_none_of_it_is_counted() {
+    let (_dir, path) = transcript();
+    append(&path, &calls(&["m1", "m2", "m3"]));
+    let mut meter = Meter::new("claude").predating_the_window();
+    let first = meter.poll(Some(path_text(&path)), 0);
+    assert!(
+        first.counted.is_empty(),
+        "what the worker spent before the window looked is not this window's"
+    );
+    assert_eq!(
+        first
+            .known
+            .iter()
+            .filter_map(|cost| cost.usd())
+            .collect::<Vec<_>>(),
+        vec![1.0, 1.0, 1.0],
+        "all three are learned from — the one still open at the end of the look too"
+    );
+    // The stream of m3 was still being written: its late record is not a call.
+    append(&path, &format!("{}\n", record("m3", 0)));
+    assert!(meter.poll(Some(path_text(&path)), POLL_MS).is_empty());
+    // And what the worker does from here on is the window's to count, once.
+    append(&path, &calls(&["m4"]));
+    assert!(meter.poll(Some(path_text(&path)), 2 * POLL_MS).is_empty());
+    assert_eq!(
+        dollars(&meter.poll(Some(path_text(&path)), 3 * POLL_MS)),
+        vec![1.0],
+        "m4, finished once nothing more came"
+    );
+}
+
+#[test]
+fn a_worker_the_window_watched_from_its_start_counts_every_call() {
+    let (_dir, path) = transcript();
+    append(&path, &calls(&["m1", "m2"]));
+    let mut meter = Meter::new("claude");
+    let first = meter.poll(Some(path_text(&path)), 0);
+    assert_eq!(dollars(&first), vec![1.0], "m1, finished by m2 beginning");
+    assert!(first.known.is_empty(), "nothing of it predates the window");
+    assert_eq!(
+        dollars(&meter.poll(Some(path_text(&path)), POLL_MS)),
+        vec![1.0],
+        "and m2 once nothing more came"
     );
 }
