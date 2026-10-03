@@ -27,11 +27,14 @@ pub(super) struct WorktreeLanding {
     pub(super) detached: bool,
     /// `unlanded`일 때 내용 기준으로 비교 ref에 없는 커밋 수.
     pub(super) ahead: u32,
-    /// 추적 중인 파일에 커밋하지 않은 변경이 있다. 캐시하지 않고 매번 읽는다.
+    /// 추적 중인 파일에 커밋하지 않은 변경이 있다.
     pub(super) dirty: bool,
-    /// How old, at most, the `dirty` answer can be — [`LANDING_DIRTY_TTL`] in
-    /// seconds. Sent so the tooltip says the delay the code has, not a copy of it.
-    pub(super) dirty_max_age_s: u64,
+    /// When `dirty` was last read, epoch milliseconds. A `status` is the one
+    /// thing no ref can key, so it is re-read in the background once it is
+    /// [`LANDING_DIRTY_TTL`] old and the catalog is read again; the tooltip says
+    /// when, rather than promising a delay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) dirty_checked_ms: Option<i64>,
     /// 비교한 ref의 이름. 비교 ref가 아예 없으면 없다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) compare_ref: Option<String>,
@@ -43,6 +46,23 @@ pub(super) struct WorktreeLanding {
     /// 경우에만 안다 — 내용으로만 들어간 것은 그런 커밋이 없다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) landed_in: Option<LandedIn>,
+}
+
+impl WorktreeLanding {
+    /// A row the cache has never answered for. The list goes out with this, and
+    /// the classification follows in the background (`run_landing_job`).
+    fn pending() -> Self {
+        Self {
+            state: "pending",
+            detached: false,
+            ahead: 0,
+            dirty: false,
+            dirty_checked_ms: None,
+            compare_ref: None,
+            ref_updated_ms: None,
+            landed_in: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -106,72 +126,220 @@ pub(super) fn resolve_landing_base(
 
 /// How long a row's "unsaved changes" answer stands. The one thing the landing
 /// reads that no git ref can key is the working tree, and it costs a `status`
-/// per row; the catalog is re-read on every workspace click, so within this
-/// window a refresh starts no git process for a row it already knows.
+/// per row. Past this age the next catalog read serves the old answer at once
+/// and queues the re-read in the background; inside it nothing is asked.
 const LANDING_DIRTY_TTL: Duration = Duration::from_secs(5);
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+#[derive(Clone)]
 struct HeldLanding {
     key: String,
     landing: WorktreeLanding,
-    dirty_at: Instant,
 }
 
 type LandingCache = Mutex<HashMap<PathBuf, HeldLanding>>;
 
-/// (head, 비교 ref oid, 브랜치)가 같으면 분류는 같다 — 분류가 읽는 것은 그
-/// 셋과 불변의 생성 지점뿐이다. 저장 안 한 변경만 그 밖이라 따로 시각을
-/// 들고 다닌다.
+/// 행마다 마지막으로 답한 분류. (head, 비교 ref oid, 브랜치)가 같으면 분류는
+/// 같다 — 분류가 읽는 것은 그 셋과 불변의 생성 지점뿐이다.
 fn landing_cache() -> &'static LandingCache {
     static CACHE: OnceLock<LandingCache> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Stamp every row of one repository with its landing. The rows are
-/// independent and each one's `status` is a process, so they are asked side by
-/// side; a row whose (head, ref, branch) is unchanged and whose unsaved-changes
-/// answer is under [`LANDING_DIRTY_TTL`] old costs no process at all.
+fn landing_key(head: Option<&str>, branch: Option<&str>, base: &LandingBase) -> String {
+    format!(
+        "{}|{}|{}",
+        head.unwrap_or(""),
+        base.oid.as_deref().unwrap_or(""),
+        branch.unwrap_or("")
+    )
+}
+
+fn held_landing(path: &Path) -> Option<HeldLanding> {
+    landing_cache().lock().ok()?.get(path).cloned()
+}
+
+/// Whether a held answer still answers for these facts: the same key, and an
+/// unsaved-changes reading younger than `dirty_ttl`.
+fn stands(held: &HeldLanding, key: &str, dirty_ttl: Duration) -> bool {
+    let ttl_ms = i64::try_from(dirty_ttl.as_millis()).unwrap_or(i64::MAX);
+    held.key == key
+        && held
+            .landing
+            .dirty_checked_ms
+            .is_some_and(|at| now_ms().saturating_sub(at) < ttl_ms)
+}
+
+/// Whether two answers say the same thing about the work. The two stamps that
+/// move without the work moving are left out: when `dirty` was read, and when
+/// the compare ref last moved (it only words the tooltip).
+fn same_facts(left: &WorktreeLanding, right: &WorktreeLanding) -> bool {
+    let mut other = right.clone();
+    other.dirty_checked_ms = left.dirty_checked_ms;
+    other.ref_updated_ms = left.ref_updated_ms;
+    *left == other
+}
+
+/// One row the background has to answer for.
+pub(super) struct LandingRow {
+    path: PathBuf,
+    branch: Option<String>,
+    head: Option<String>,
+}
+
+/// What one repository's catalog read left to do: the rows whose answer is
+/// missing, moved or too old.
+pub(super) struct LandingJob {
+    repo_root: PathBuf,
+    pinned: Option<String>,
+    rows: Vec<LandingRow>,
+}
+
+/// Stamp every row of one repository with what the cache already knows, and say
+/// what is left to ask.
+///
+/// Nothing here starts a git process. A row the cache never answered for is
+/// `pending`; one whose head or ref moved keeps its old answer until the new
+/// one is ready, so a commit does not make a chip flash. The job — [`None`]
+/// when every row stands — is run off the catalog's road by
+/// [`spawn_landing_jobs`].
 pub(super) fn attach_landings(
     entries: &mut [WorktreeEntry],
     repo_root: &Path,
     repository: &settings::SettingsRepository,
-) {
-    let host = Host::for_workspace(repo_root);
+) -> Option<LandingJob> {
     let pinned = stored_project_settings_at(repository, &project_settings_key(repo_root))
         .ok()
         .and_then(|stored| stored.worktree_base_ref);
-    let base = landing_base(&host, repo_root, pinned.as_deref());
-    let landings: Vec<Option<WorktreeLanding>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = entries
+    plan_landings(entries, repo_root, pinned.as_deref())
+}
+
+fn plan_landings(
+    entries: &mut [WorktreeEntry],
+    repo_root: &Path,
+    pinned: Option<&str>,
+) -> Option<LandingJob> {
+    let base = known_landing_base(repo_root, pinned);
+    let mut rows = Vec::new();
+    for entry in entries.iter_mut() {
+        if entry.is_main || entry.is_folder || entry.prunable {
+            continue;
+        }
+        let path = PathBuf::from(&entry.path);
+        let held = held_landing(&path);
+        let standing = match (&held, &base) {
+            (Some(held), Some(base)) => stands(
+                held,
+                &landing_key(entry.head.as_deref(), entry.branch.as_deref(), base),
+                LANDING_DIRTY_TTL,
+            ),
+            _ => false,
+        };
+        let mut served = held.map_or_else(WorktreeLanding::pending, |held| held.landing);
+        if let Some(base) = &base {
+            served.compare_ref = base.name.clone();
+            served.ref_updated_ms = base.updated_ms;
+        }
+        entry.landing = Some(served);
+        if !standing {
+            rows.push(LandingRow {
+                path,
+                branch: entry.branch.clone(),
+                head: entry.head.clone(),
+            });
+        }
+    }
+    (!rows.is_empty()).then(|| LandingJob {
+        repo_root: repo_root.to_path_buf(),
+        pinned: pinned.map(str::to_string),
+        rows,
+    })
+}
+
+/// Run the jobs a catalog read left, each on a thread of its own, and tell the
+/// window once per job that moved something. A job that changed nothing says
+/// nothing, so a window that re-reads on the notice cannot start a loop.
+pub(super) fn spawn_landing_jobs(app: &AppHandle, jobs: Vec<LandingJob>) {
+    for job in jobs {
+        let app = app.clone();
+        let _ = std::thread::Builder::new()
+            .name("landing".to_string())
+            .spawn(move || {
+                run_landing_job(&job, &|| {
+                    let _ = app.emit("worktree:landing", ());
+                });
+            });
+    }
+}
+
+/// Answer a job's rows and call `notify` once if any of them now says something
+/// different from what the window was last given.
+fn run_landing_job(job: &LandingJob, notify: &(dyn Fn() + Sync)) {
+    // One job per repository at a time. A second read of the same catalog queues
+    // behind the first and finds its rows already standing, which is cheaper
+    // than answering them twice.
+    let gate = repo_gate(&job.repo_root);
+    let _turn = gate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let host = Host::for_workspace(&job.repo_root);
+    let base = landing_base(&host, &job.repo_root, job.pinned.as_deref());
+    let moved = std::thread::scope(|scope| {
+        let handles: Vec<_> = job
+            .rows
             .iter()
-            .map(|entry| {
+            .map(|row| {
                 let (host, base) = (&host, &base);
-                scope.spawn(move || {
-                    if entry.is_main || entry.is_folder || entry.prunable {
-                        return None;
-                    }
-                    Some(worktree_landing(
-                        host,
-                        Path::new(&entry.path),
-                        entry.branch.as_deref(),
-                        entry.head.as_deref(),
-                        base,
-                    ))
-                })
+                scope.spawn(move || refresh_row(host, row, base))
             })
             .collect();
         handles
             .into_iter()
-            .map(|handle| handle.join().unwrap_or(None))
-            .collect()
+            .fold(false, |any, handle| handle.join().unwrap_or(false) || any)
     });
-    for (entry, landing) in entries.iter_mut().zip(landings) {
-        entry.landing = landing;
+    if moved {
+        notify();
     }
+}
+
+fn refresh_row(host: &Host, row: &LandingRow, base: &LandingBase) -> bool {
+    let key = landing_key(row.head.as_deref(), row.branch.as_deref(), base);
+    let before = held_landing(&row.path);
+    if before
+        .as_ref()
+        .is_some_and(|held| stands(held, &key, LANDING_DIRTY_TTL))
+    {
+        return false;
+    }
+    let after = worktree_landing(
+        host,
+        &row.path,
+        row.branch.as_deref(),
+        row.head.as_deref(),
+        base,
+    );
+    before.is_none_or(|held| !same_facts(&held.landing, &after))
+}
+
+fn repo_gate(repo_root: &Path) -> Arc<Mutex<()>> {
+    static GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let mut gates = GATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(gates.entry(repo_root.to_path_buf()).or_default())
 }
 
 /// 한 작업 폴더의 분류. 바뀐 행만 git을 몇 번 부르고, 같은 행은 TTL 안에서
 /// 한 번도 부르지 않는다.
-pub(super) fn worktree_landing(
+fn worktree_landing(
     host: &Host,
     path: &Path,
     branch: Option<&str>,
@@ -189,45 +357,36 @@ fn worktree_landing_within(
     base: &LandingBase,
     dirty_ttl: Duration,
 ) -> WorktreeLanding {
-    let key = format!(
-        "{}|{}|{}",
-        head.unwrap_or(""),
-        base.oid.as_deref().unwrap_or(""),
-        branch.unwrap_or("")
-    );
-    let held = landing_cache().lock().ok().and_then(|cache| {
-        cache
-            .get(path)
-            .filter(|held| held.key == key)
-            .map(|held| (held.landing.clone(), held.dirty_at))
-    });
-    let (mut landing, dirty_at) = match held {
-        Some((landing, at)) => (
-            WorktreeLanding {
-                compare_ref: base.name.clone(),
-                ref_updated_ms: base.updated_ms,
-                ..landing
-            },
-            Some(at),
-        ),
-        None => (classify_landing(host, path, branch, head, base), None),
-    };
-    let fresh = dirty_at.filter(|at| at.elapsed() < dirty_ttl);
-    if fresh.is_none() {
-        landing.dirty = optional_git_text(
-            host,
-            path,
-            &["status", "--porcelain", "--untracked-files=no"],
-        )
-        .is_some();
+    let key = landing_key(head, branch, base);
+    let held = held_landing(path);
+    if let Some(held) = held.as_ref()
+        && stands(held, &key, dirty_ttl)
+    {
+        return WorktreeLanding {
+            compare_ref: base.name.clone(),
+            ref_updated_ms: base.updated_ms,
+            ..held.landing.clone()
+        };
     }
+    let mut landing = match held {
+        Some(held) if held.key == key => held.landing,
+        _ => classify_landing(host, path, branch, head, base),
+    };
+    landing.compare_ref = base.name.clone();
+    landing.ref_updated_ms = base.updated_ms;
+    landing.dirty = optional_git_text(
+        host,
+        path,
+        &["status", "--porcelain", "--untracked-files=no"],
+    )
+    .is_some();
+    landing.dirty_checked_ms = Some(now_ms());
     if let Ok(mut cache) = landing_cache().lock() {
         cache.insert(
             path.to_path_buf(),
             HeldLanding {
                 key,
                 landing: landing.clone(),
-                dirty_at: fresh.unwrap_or_else(Instant::now),
             },
         );
     }
@@ -271,35 +430,91 @@ fn base_stamp(git_dir: &Path, name: Option<&str>) -> Vec<Option<std::time::Syste
         .collect()
 }
 
+/// The compare ref as it was last asked of git, when nothing it reads has moved
+/// since — by `stat` alone. [`None`] means somebody has to ask git.
+fn known_landing_base(repo_root: &Path, pinned: Option<&str>) -> Option<LandingBase> {
+    let git_dir = repo_root.join(".git");
+    if !git_dir.is_dir() {
+        return None;
+    }
+    let cache = base_cache().lock().ok()?;
+    let held = cache.get(repo_root)?;
+    (held.pinned.as_deref() == pinned
+        && held.stamp == base_stamp(&git_dir, held.base.name.as_deref()))
+    .then(|| held.base.clone())
+}
+
 /// [`resolve_landing_base`], asked of git only when the stamp of the files it
 /// reads has moved. A checkout whose `.git` is not a directory (a linked one
 /// opened as the project) is asked every time rather than guessed at.
-pub(super) fn landing_base(host: &Host, repo_root: &Path, pinned: Option<&str>) -> LandingBase {
+fn landing_base(host: &Host, repo_root: &Path, pinned: Option<&str>) -> LandingBase {
+    if let Some(base) = known_landing_base(repo_root, pinned) {
+        return base;
+    }
+    let base = resolve_landing_base(host, repo_root, pinned);
     let git_dir = repo_root.join(".git");
-    if !git_dir.is_dir() {
-        return resolve_landing_base(host, repo_root, pinned);
-    }
-    let pinned = pinned.map(str::to_string);
-    if let Ok(held) = base_cache().lock()
-        && let Some(held) = held.get(repo_root)
-        && held.pinned == pinned
-        && held.stamp == base_stamp(&git_dir, held.base.name.as_deref())
-    {
-        return held.base.clone();
-    }
-    let base = resolve_landing_base(host, repo_root, pinned.as_deref());
-    let stamp = base_stamp(&git_dir, base.name.as_deref());
-    if let Ok(mut held) = base_cache().lock() {
-        held.insert(
-            repo_root.to_path_buf(),
-            HeldBase {
-                pinned,
-                stamp,
-                base: base.clone(),
-            },
-        );
+    if git_dir.is_dir() {
+        let stamp = base_stamp(&git_dir, base.name.as_deref());
+        if let Ok(mut held) = base_cache().lock() {
+            held.insert(
+                repo_root.to_path_buf(),
+                HeldBase {
+                    pinned: pinned.map(str::to_string),
+                    stamp,
+                    base: base.clone(),
+                },
+            );
+        }
     }
     base
+}
+
+/// What the window polls to learn that a landing may have moved: the
+/// modification times of the files a commit, a checkout, a branch move or a
+/// fetch writes — the compare ref's, and each linked checkout's `HEAD` and its
+/// reflog. Only `stat`; no git process and no network, and a stamp that cannot
+/// be read is a stamp that does not move.
+pub(crate) fn landing_stamp_of(roots: Vec<String>) -> String {
+    fn at(path: &Path) -> String {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or_else(|| "-".to_string(), |since| since.as_nanos().to_string())
+    }
+    let mut said = String::new();
+    for root in roots {
+        said.push_str(&root);
+        said.push(':');
+        let root = Path::new(&root);
+        let git_dir = root.join(".git");
+        let name = base_cache()
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(root).and_then(|held| held.base.name.clone()));
+        for mark in base_stamp(&git_dir, name.as_deref()) {
+            said.push_str(&format!("{mark:?},"));
+        }
+        said.push_str(&at(&git_dir.join("logs/HEAD")));
+        if let Some(dir) = linked_worktrees_dir(root)
+            && let Ok(entries) = std::fs::read_dir(&dir)
+        {
+            let mut names: Vec<String> = entries
+                .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+                .collect();
+            names.sort_unstable();
+            for name in names {
+                let home = dir.join(&name);
+                said.push_str(&format!(
+                    ",{name}={}/{}",
+                    at(&home.join("HEAD")),
+                    at(&home.join("logs/HEAD"))
+                ));
+            }
+        }
+        said.push(';');
+    }
+    said
 }
 
 fn classify_landing(
@@ -314,7 +529,7 @@ fn classify_landing(
         detached: branch.is_none(),
         ahead: 0,
         dirty: false,
-        dirty_max_age_s: LANDING_DIRTY_TTL.as_secs(),
+        dirty_checked_ms: None,
         compare_ref: base.name.clone(),
         ref_updated_ms: base.updated_ms,
         landed_in: None,
@@ -760,5 +975,111 @@ mod tests {
         let pinned = landing_base(&host, &bench.repo, Some("origin/gone"));
         assert_eq!(pinned.name.as_deref(), Some("origin/gone"));
         assert_eq!(pinned.oid, None);
+    }
+
+    fn entry(path: &Path, branch: &str, head: &str) -> WorktreeEntry {
+        WorktreeEntry::new(
+            Worktree {
+                path: path.to_path_buf(),
+                head: Some(head.to_string()),
+                branch: Some(branch.to_string()),
+                is_main: false,
+                bare: false,
+                detached: false,
+                locked: false,
+                prunable: false,
+            },
+            Path::new("/not/the/active/root"),
+        )
+    }
+
+    fn noticed(job: &LandingJob) -> usize {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        run_landing_job(job, &|| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn a_row_never_answered_goes_out_pending_is_filled_behind_it_and_noticed_once() {
+        let bench = Bench::open();
+        let wt = bench.worktree("pend");
+        let head = git(&wt, &["rev-parse", "HEAD"]);
+        let mut rows = [entry(&wt, "wt/pend", &head)];
+        let job = plan_landings(&mut rows, &bench.repo, None).expect("nothing is known yet");
+        assert_eq!(
+            rows[0].landing.as_ref().map(|one| one.state),
+            Some("pending")
+        );
+        assert_eq!(noticed(&job), 1);
+        // The same read again: the row is filled and standing, so there is no job
+        // to run and nobody to tell.
+        let mut again = [entry(&wt, "wt/pend", &head)];
+        assert!(plan_landings(&mut again, &bench.repo, None).is_none());
+        assert_eq!(
+            again[0].landing.as_ref().map(|one| one.state),
+            Some("no_commits")
+        );
+        // And running the old job once more finds every row standing: no notice.
+        assert_eq!(noticed(&job), 0);
+    }
+
+    #[test]
+    fn a_commit_in_a_checkout_moves_the_stamp_is_reclassified_in_the_background_and_noticed() {
+        let bench = Bench::open();
+        let wt = bench.worktree("moves");
+        let head = git(&wt, &["rev-parse", "HEAD"]);
+        let roots = vec![bench.repo.to_string_lossy().into_owned()];
+        let mut rows = [entry(&wt, "wt/moves", &head)];
+        let job = plan_landings(&mut rows, &bench.repo, None).expect("first read");
+        assert_eq!(noticed(&job), 1);
+        let quiet = landing_stamp_of(roots.clone());
+        assert_eq!(
+            landing_stamp_of(roots.clone()),
+            quiet,
+            "stat alone moves nothing"
+        );
+        bench.commit(&wt, "w.txt", "work\n");
+        assert_ne!(
+            landing_stamp_of(roots),
+            quiet,
+            "a commit in a checkout moves the stamp"
+        );
+        // The next read serves the old answer at once — no flash — and queues the
+        // new one, which says something different and so is noticed.
+        let moved_head = git(&wt, &["rev-parse", "HEAD"]);
+        let mut next = [entry(&wt, "wt/moves", &moved_head)];
+        let job = plan_landings(&mut next, &bench.repo, None).expect("the head moved");
+        assert_eq!(
+            next[0].landing.as_ref().map(|one| one.state),
+            Some("no_commits")
+        );
+        assert_eq!(noticed(&job), 1);
+        let mut last = [entry(&wt, "wt/moves", &moved_head)];
+        assert!(plan_landings(&mut last, &bench.repo, None).is_none());
+        assert_eq!(
+            last[0].landing.as_ref().map(|one| (one.state, one.ahead)),
+            Some(("unlanded", 1))
+        );
+    }
+
+    #[test]
+    fn the_compare_ref_moving_without_changing_any_answer_notices_nobody() {
+        let bench = Bench::open();
+        let wt = bench.worktree("quiet");
+        let head = git(&wt, &["rev-parse", "HEAD"]);
+        let mut rows = [entry(&wt, "wt/quiet", &head)];
+        let job = plan_landings(&mut rows, &bench.repo, None).expect("first read");
+        assert_eq!(noticed(&job), 1);
+        // main moves on and is published: the stamp of the ref moved, so the
+        // rows are asked again — and say the same thing, so nobody is told.
+        bench.commit(&bench.repo, "m.txt", "main moves\n");
+        bench.publish();
+        let mut next = [entry(&wt, "wt/quiet", &head)];
+        let job = plan_landings(&mut next, &bench.repo, None).expect("the ref moved");
+        assert_eq!(noticed(&job), 0);
+        let mut last = [entry(&wt, "wt/quiet", &head)];
+        assert!(plan_landings(&mut last, &bench.repo, None).is_none());
     }
 }

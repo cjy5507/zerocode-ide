@@ -24,7 +24,7 @@ const REF = "origin/main";
 const NOW = Date.now();
 const LANDED_IN = { sha: "0123456789abcdef0123456789abcdef01234567", time_ms: NOW - 3 * 3600_000 };
 const base = (state, over = {}) => ({
-  state, detached: false, ahead: 0, dirty: false, dirty_max_age_s: 5, compare_ref: REF, ref_updated_ms: NOW - 2 * 86_400_000, ...over,
+  state, detached: false, ahead: 0, dirty: false, dirty_checked_ms: NOW - 1000, compare_ref: REF, ref_updated_ms: NOW - 2 * 86_400_000, ...over,
 });
 
 const SCENE = [
@@ -44,6 +44,7 @@ const SCENE = [
   { path: "/r/noref", landing: base("no_ref", { compare_ref: "origin/gone", ref_updated_ms: null }) },
   { path: "/r/det", landing: base("landed", { detached: true }) },
   { path: "/r/unk", landing: base("unknown") },
+  { path: "/r/pend", landing: { state: "pending", detached: false, ahead: 0, dirty: false } },
   { path: "/r/plain" },
 ];
 
@@ -59,6 +60,7 @@ const WANT = {
   "/r/noref": { word: "비교 기준 없음", tone: "none", cleanable: false },
   "/r/det": { word: "반영됨 · 정리 가능", tone: "landed", cleanable: true },
   "/r/unk": { word: "확인 필요", tone: "check", cleanable: false },
+  "/r/pend": { word: "확인 중", tone: "pending", cleanable: false },
 };
 
 export async function testSidebarLandingState({ browser, origin, ok, faults }) {
@@ -169,8 +171,10 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
         chips["/r/unk"].tip.includes("가를 수 없습니다") &&
         chips["/r/ahead"].tip.includes(`${REF}에 없는 커밋이 13개`) &&
         chips["/r/dirty"].tip.includes("커밋하지 않은 변경") &&
-        // The delay the answer can have is said in every tooltip git spoke in.
-        Object.values(chips).filter((one) => one.tip).every((one) => one.tip.includes("최대 5초 늦을 수 있습니다")),
+        // When the unsaved mark was read is said in every tooltip git spoke in.
+        Object.entries(chips).filter(([path, one]) => one.tip && path !== "/r/pend")
+          .every(([, one]) => one.tip.includes("저장 안 한 변경은") && one.tip.includes("에 확인한 값입니다")) &&
+        chips["/r/pend"].tip.includes("확인하는 중"),
       JSON.stringify(Object.fromEntries(Object.entries(chips).map(([path, one]) => [path, one.tip]))),
     );
 
@@ -211,6 +215,64 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       !panel.ahead.hidden && panel.ahead.word === "미반영 13" && panel.ahead.tip === panel.rowTip &&
         panel.plain.hidden === true && !panel.landed.hidden && panel.landed.word === "반영됨",
       JSON.stringify(panel),
+    );
+
+    /* ---- behind the list: 확인 중 filled by the backend's notice; the stamp ---- */
+    const live = await page.evaluate(async () => {
+      const asked = { catalog: 0 };
+      let answer = "pending";
+      const wait = async (test) => {
+        for (let tries = 0; tries < 80 && !test(); tries += 1) await new Promise((done) => setTimeout(done, 25));
+        await window.__PAINTED__();
+      };
+      const row = () => ({
+        path: "/r/live", branch: "live", is_main: false, active: false, is_folder: false,
+        ownership: "zerocode-managed", external_hidden: false, last_activity_ms: 99,
+        landing: answer === "pending"
+          ? { state: "pending", detached: false, ahead: 0, dirty: false }
+          : { state: "unlanded", detached: false, ahead: 4, dirty: false, compare_ref: "origin/main",
+            ref_updated_ms: Date.now(), dirty_checked_ms: Date.now() },
+      });
+      const was = window.__ANSWER__.project_catalog;
+      window.__ANSWER__.project_catalog = () => {
+        asked.catalog += 1;
+        const [project] = was();
+        return [{ ...project, worktrees: [...project.worktrees.filter((one) => one.path !== "/r/live"), row()] }];
+      };
+      await refreshWorktrees();
+      await window.__PAINTED__();
+      const word = () => window.__CHIP__("/r/live").word;
+      const first = word();
+      answer = "filled";
+      for (const listener of window.__LISTENERS__["worktree:landing"] ?? []) listener({ payload: null });
+      await wait(() => word() === "미반영 4");
+      const filled = word();
+      const afterNotice = asked.catalog;
+      // The poll: the first look only takes the baseline, a look at the same stamp
+      // re-reads nothing, and a stamp that moved re-reads once.
+      let stamp = "a";
+      window.__ANSWER__.worktree_landing_stamp = () => stamp;
+      landingStamp = null;
+      landingLookedAt = 0;
+      await lookForLandingChange();
+      const baseline = asked.catalog;
+      landingLookedAt = 0;
+      await lookForLandingChange();
+      const unchanged = asked.catalog;
+      landingLookedAt = Date.now();
+      stamp = "b";
+      await lookForLandingChange();
+      const tooSoon = asked.catalog;
+      landingLookedAt = 0;
+      await lookForLandingChange();
+      return { first, filled, afterNotice, baseline, unchanged, tooSoon, moved: asked.catalog };
+    });
+    ok(
+      "a row git has not been asked about goes out as 확인 중 and is filled when the backend says so; the stamp poll re-reads only when the stamp moved and no oftener than its period",
+      live.first === "확인 중" && live.filled === "미반영 4" && live.afterNotice >= 2 &&
+        live.baseline === live.afterNotice && live.unchanged === live.baseline &&
+        live.tooSoon === live.unchanged && live.moved === live.unchanged + 1,
+      JSON.stringify(live),
     );
 
     const heights = await page.evaluate(() => {

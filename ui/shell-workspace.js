@@ -3830,6 +3830,17 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   if (!landing) return null;
   const ref = landing.compare_ref ?? "";
   const state = landing.state;
+  // The list goes out before git has been asked; the answer follows and the
+  // window re-reads on the backend's notice. Neutral, and never offered for
+  // clean-up: it says nothing about the work.
+  if (state === "pending") {
+    return {
+      word: t("worktree.landPending", "확인 중"),
+      tone: "pending",
+      tip: t("worktree.landTipPending", "main에 들어갔는지 git으로 확인하는 중입니다"),
+      cleanable: false,
+    };
+  }
   const gitIn = state === "landed";
   const gitOut = state === "unlanded" || state === "no_commits";
   const ledgerOpen = phase === "review" || phase === "vouched" || phase === "unsettled";
@@ -3899,9 +3910,9 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
       : t("worktree.landTipRefUnknown", "비교: {{ref}} · 마지막 갱신 시각을 알 수 없음", { ref }));
   }
   if (landing.dirty) lines.push(t("worktree.landTipDirty", "추적 중인 파일에 커밋하지 않은 변경이 있습니다"));
-  if (landing.dirty_max_age_s > 0) {
-    lines.push(t("worktree.landTipDirtyAge", "저장 안 한 변경 표시는 최대 {{seconds}}초 늦을 수 있습니다", {
-      seconds: landing.dirty_max_age_s,
+  if (landing.dirty_checked_ms) {
+    lines.push(t("worktree.landTipDirtyAge", "저장 안 한 변경은 {{time}}에 확인한 값입니다", {
+      time: new Date(landing.dirty_checked_ms).toLocaleTimeString(),
     }));
   }
   if (cleanable) lines.push(t("worktree.landTipCleanable", "활성 세션이 없습니다 — 눌러서 비활성 워크스페이스 검토에서 정리하세요"));
@@ -6740,11 +6751,49 @@ let worktreeStamp = null;
 const worktreePoll = idlePoller({
   wanted: () => projectsRead && projects.length > 0,
   every: WORKTREE_LOOK_EVERY_MS,
-  tick: () => void lookForCheckoutsNobodyAskedFor(),
+  tick: () => {
+    void lookForCheckoutsNobodyAskedFor();
+    void lookForLandingChange();
+  },
   // Back after an absence, look now rather than a beat later — a checkout
   // made while the window was away is the case this poller exists for.
-  onResume: () => void lookForCheckoutsNobodyAskedFor(),
+  onResume: () => {
+    void lookForCheckoutsNobodyAskedFor();
+    landingLookedAt = 0;
+    void lookForLandingChange();
+  },
 });
+
+/* Whether any checkout's landing may have moved (t-22104): a commit in a
+ * checkout, a branch move or a fetch writes files, and the backend's stamp is
+ * their modification times — `stat` alone, no git process. It rides this
+ * poller's beats but asks no oftener than `LANDING_LOOK_EVERY_MS`, and only
+ * while the window is visible (the poller parks otherwise). A change only makes
+ * the window re-read the catalog, which answers from the cache or queues the
+ * rows behind the list; the backend then says so when something differs
+ * (`worktree:landing`). */
+const LANDING_LOOK_EVERY_MS = 5000;
+let landingStamp = null;
+let landingLookedAt = 0;
+
+async function lookForLandingChange() {
+  if (document.visibilityState !== "visible" || !projectsRead || projects.length === 0) return;
+  const now = Date.now();
+  if (now - landingLookedAt < LANDING_LOOK_EVERY_MS) return;
+  landingLookedAt = now;
+  let stamp;
+  try {
+    stamp = await invoke("worktree_landing_stamp", { roots: projects.map((one) => one.path) });
+  } catch {
+    return;
+  }
+  if (landingStamp === null || stamp === landingStamp) {
+    landingStamp = stamp;
+    return;
+  }
+  landingStamp = stamp;
+  await refreshWorktrees();
+}
 
 async function lookForCheckoutsNobodyAskedFor() {
   if (document.visibilityState !== "visible" || !projectsRead || projects.length === 0) return;
