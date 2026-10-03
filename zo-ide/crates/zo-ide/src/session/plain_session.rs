@@ -1736,18 +1736,21 @@ impl PlainSession {
                 return Ok(CompactReport::Cancelled);
             };
             let removed = done.result.removed_message_count;
+            let cleared = done.result.cleared_tool_results;
             let kept = done.result.compacted_session.messages.len();
             rt.apply_manual_compaction(done.result);
-            if removed == 0 {
+            if removed == 0 && cleared == 0 {
                 return Ok(CompactReport::NothingToCompact { kept });
             }
-            CompactReport::Compacted {
+            if cleared > 0 {
+                CompactReport::Retained { cleared, kept, tokens_before, tokens_after: rt.estimated_tokens() }
+            } else { CompactReport::Compacted {
                 removed,
                 kept,
                 tokens_before,
                 tokens_after: rt.estimated_tokens(),
                 local_summary: done.local_summary_reason,
-            }
+            } }
         };
         self.persist().map_err(|error| error.to_string())?;
         Ok(report)
@@ -2028,6 +2031,8 @@ async fn until_aborted<F: std::future::Future>(work: F, abort: &HookAbortSignal)
 /// What a `/compact` came to — the one sentence both front-ends show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompactReport {
+    /// Original messages stay in order; sealed tool bodies were cleared.
+    Retained { cleared: usize, kept: usize, tokens_before: usize, tokens_after: usize },
     /// The conversation was folded: `removed` messages into a summary,
     /// `kept` left, and the estimate before and after. `local_summary` says
     /// why the model's summary did not come, when the local one stands in.
@@ -2049,6 +2054,9 @@ impl CompactReport {
     #[must_use]
     pub(crate) fn note(&self) -> String {
         match self {
+            Self::Retained { cleared, kept, tokens_before, tokens_after } => format!(
+                "compact: {cleared} tool results cleared · {kept} messages retained · {} → {} tokens",
+                runtime::format_kilo_tokens(*tokens_before), runtime::format_kilo_tokens(*tokens_after)),
             Self::Compacted {
                 removed,
                 kept,
@@ -2378,6 +2386,14 @@ mod tests {
     use crate::effort::Effort;
     use crate::goal::GoalPhase;
     use runtime::PermissionMode;
+
+    #[test]
+    fn manual_retention_reports_the_cleared_results_without_claiming_a_summary() {
+        let report = super::CompactReport::Retained { cleared: 2, kept: 12,
+            tokens_before: 12_000, tokens_after: 3_000 };
+        assert_eq!(report.note(), "compact: 2 tool results cleared · 12 messages retained · 12.0k → 3.0k tokens");
+        assert_eq!(report.level(), runtime::message_stream::SystemLevel::Info);
+    }
 
     #[test]
     fn permission_labels_fold_to_three_cli_words() {

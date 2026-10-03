@@ -566,22 +566,32 @@ pub(super) fn can_retain_originals(plan: &CompactionPlan, history_budget: usize,
     let kept = plan.cache_prefix.iter().chain(&plan.messages_to_compact).chain(&plan.preserved_tail);
     let after = kept.clone().map(estimate_message_tokens).sum::<usize>();
     if kept.count() != original.len() || after >= history_budget { return false; }
-    let before = estimate_session_tokens(&plan.session_shell);
     let from = plan.cache_prefix.len();
-    let frontier = original[from..].iter().zip(&plan.messages_to_compact)
-        .position(|(old, next)| old != next).map(|index| from + index);
     // Text-only judgments cannot establish that the pixels in a result are
     // dispensable. Keep the established summary fallback for those plans.
     if original[from..].iter().zip(&plan.messages_to_compact).any(|(old, next)| {
         old.blocks.iter().zip(&next.blocks).any(|(before, after)| before != after
             && matches!(before, ContentBlock::ToolResult { images, .. } if !images.is_empty()))
     }) { return false; }
-    let quote = MicrocompactQuote {
+    let quote = retained_cache_quote(plan);
+    quote.clearable_tokens > 0 && quote.pays_back_within(payback_requests)
+}
+
+/// The same payback estimate used by the retained-original decision. Kept
+/// separate so diagnostics can report its inputs without inventing a second rule.
+pub(crate) fn retained_cache_quote(plan: &CompactionPlan) -> MicrocompactQuote {
+    let original = &plan.session_shell.messages;
+    let from = plan.cache_prefix.len();
+    let after = plan.cache_prefix.iter().chain(&plan.messages_to_compact).chain(&plan.preserved_tail)
+        .map(estimate_message_tokens).sum::<usize>();
+    let before = estimate_session_tokens(&plan.session_shell);
+    let frontier = original[from..].iter().zip(&plan.messages_to_compact)
+        .position(|(old, next)| old != next).map(|index| from + index);
+    MicrocompactQuote {
         clearable_tokens: u64::try_from(before.saturating_sub(after)).unwrap_or(u64::MAX),
         rebilled_tokens: frontier.map_or(0, |index| original[index..].iter().map(estimated_message_tokens).sum()),
         frontier,
-    };
-    quote.clearable_tokens > 0 && quote.pays_back_within(payback_requests)
+    }
 }
 
 /// Publish already-sealed relevance clears while keeping every remaining block

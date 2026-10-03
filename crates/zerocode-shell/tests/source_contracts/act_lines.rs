@@ -145,7 +145,7 @@ const READS: &[(&str, &[(&str, &str)])] = &[
                 WALKS,
                 "act_line: crate::systemone::act_line(judge.wire(), forks)",
             ),
-            (BRANCH, "press_rule(&BRANCHING, line, screen"),
+            (BRANCH, "press_rule(&BRANCHING, branching.act_line, screen"),
         ],
     ),
     (

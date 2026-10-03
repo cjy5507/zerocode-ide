@@ -1851,7 +1851,8 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// long enough to need `/compact` in the first place. A no-op compaction
     /// (nothing removed) leaves the session and prompt untouched.
     pub fn apply_manual_compaction(&mut self, result: CompactionResult) {
-        if self.finish_compaction_swap(result, COMPACTION_RESUME_REMINDER) {
+        let retained = result.cleared_tool_results > 0;
+        if self.finish_compaction_swap(result, COMPACTION_RESUME_REMINDER) && !retained {
             self.schedule_compaction_curation();
         }
     }

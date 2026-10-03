@@ -510,7 +510,7 @@ where
             },
             None,
         );
-        if result.removed_message_count > 0 {
+        if result.removed_message_count > 0 || result.cleared_tool_results > 0 {
             self.session = result.compacted_session;
         }
 
@@ -528,7 +528,7 @@ where
                 },
                 None,
             );
-            if result.removed_message_count > 0 {
+            if result.removed_message_count > 0 || result.cleared_tool_results > 0 {
                 self.session = result.compacted_session;
             }
         }

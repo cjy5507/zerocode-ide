@@ -675,7 +675,7 @@ fn an_in_flight_suggestion_cannot_outlive_its_settings() {
             let answers: serde_json::Map<String, Value> = request["questions"].as_object().unwrap()
                 .keys().map(|id| {
                     let answer = if id == "which" {
-                        json!({"type":"choice","choice":"s0","confidence":1.0,
+                        json!({"type":"choice","choice":"s0","confidence":if change == "none" { 0.1 } else { 1.0 },
                             "probabilities":{"s0":1.0,"__no_skill__":0.0}})
                     } else { json!({"type":"noul","noul":if id == "prose_suffices" { 0.0 } else { 1.0 }}) };
                     (id.clone(), answer)
@@ -685,17 +685,32 @@ fn an_in_flight_suggestion_cannot_outlive_its_settings() {
         });
         machine_words(&[(SKILL_SUGGESTION.setting, "on")], &mock.base_url, |cwd| {
             *path.lock().unwrap() = Some(runtime::default_config_home().join("settings.json"));
+            if change == "none" {
+                let file = path.lock().unwrap().clone().unwrap();
+                let mut root: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+                root["smart"]["jev"]["labelDrafts"] = json!(true);
+                std::fs::write(file, root.to_string()).unwrap();
+            }
             let skill = cwd.join(".zo/skills/docx");
             std::fs::create_dir_all(&skill).unwrap();
             std::fs::write(skill.join("SKILL.md"),
                 "---\nname: docx\ndescription: Write Word documents.\n---\nCreate the Word file.\n").unwrap();
-            let judge = SkillSuggestionJudge::at(cwd);
+            let session = Arc::new(Mutex::new(None));
+            let judge = SkillSuggestionJudge::at(cwd).with_session_source(Arc::clone(&session));
+            *session.lock().unwrap() = Some("suggestion-session".to_string());
             let note = api::sync_bridge::run_blocking(judge.suggest("write a Word document".into()));
             assert_eq!(note.is_some(), applied, "{change}: {note:?}");
             assert_eq!(mock.requests().len(), expected_requests, "{change}");
             let rows = super::super::jev_summary::read_rows(&skill_suggestion_path(cwd));
             assert_eq!(rows.len(), 1, "{change}: {rows:?}");
             assert_eq!(rows[0]["routeUse"] == ROUTE_USE_APPLIED, applied, "{change}: {rows:?}");
+            if change == "none" {
+                let captured = zerocode_core::jev::learning::store::Store::at(&runtime::default_config_home()).snapshot().unwrap();
+                let origin = zerocode_core::jev::learning::origin_group("zo/session", "suggestion-session").unwrap();
+                assert_eq!(captured.cases.len(), 2, "both request stages retain the actual session origin");
+                assert!(captured.cases.iter().all(|case| case.origin_group.as_ref() == Some(&origin)));
+                assert!(mock.requests().iter().all(|body| !body.contains("suggestion-session") && !body.contains("originGroup")));
+            }
             finish_turn_suggestion(cwd, &[]);
         });
     }

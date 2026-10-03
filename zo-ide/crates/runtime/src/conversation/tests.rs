@@ -16755,6 +16755,47 @@ fn acting_relevance_skips_the_summary_call_while_shadow_keeps_the_existing_path(
     }
 }
 
+#[test]
+fn the_sync_overflow_guard_accepts_a_retained_result_and_keeps_disk_and_memory_equal() {
+    use crate::compact::relevance::{CompactionAsk, CompactionJudgment, CompactionSeat};
+    struct DropRead;
+    impl CompactionSeat for DropRead {
+        fn judge<'a>(&'a self, _: &'a CompactionAsk) -> futures_util::future::BoxFuture<'a, CompactionJudgment> {
+            Box::pin(async { CompactionJudgment { dropped: vec![0], applies: true } })
+        }
+    }
+    struct NoSummary;
+    impl ApiClient for NoSummary {
+        fn stream(&mut self, _: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            panic!("an accepted retained trim must not request a summary");
+        }
+    }
+    let _env = crate::test_env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("overflow-retained.jsonl");
+    let mut session = Session::new().with_persistence_path(&path);
+    session.push_user_text("Keep the user's original constraints.").unwrap();
+    session.push_message(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+        id: "resolved-read".into(), name: "Read".into(), input: "{\"path\":\"src/lib.rs\"}".into(),
+    }])).unwrap();
+    session.push_message(ConversationMessage::tool_result("resolved-read", "Read", "resolved evidence ".repeat(5_000), false)).unwrap();
+    for turn in 0..4 {
+        session.push_user_text(format!("remaining work {turn}")).unwrap();
+        session.push_message(ConversationMessage::assistant(vec![ContentBlock::Text { text: "continue".into() }])).unwrap();
+    }
+    let count = session.messages.len();
+    let mut runtime = ConversationRuntime::new(session, NoSummary, StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess), vec!["system".into()]);
+    runtime.set_context_window(10_000);
+    runtime.set_compaction_seat(Some(Arc::new(DropRead)));
+    assert!(runtime.ensure_request_context_budget(&[]).is_err());
+    runtime.enforce_request_overflow_guard(&[]).unwrap();
+    assert_eq!(runtime.session.messages.len(), count);
+    assert_eq!(runtime.session.messages, Session::load_from_path(&path).unwrap().messages);
+    assert!(message_contains_text(&runtime.session.messages[0], "original constraints"));
+    assert!(runtime.ensure_request_context_budget(&[]).is_ok());
+}
+
 /// P2a: the `/context` report names the window, the live occupancy split, every
 /// ladder tier with its percentage, and the headroom to the auto threshold.
 #[test]
