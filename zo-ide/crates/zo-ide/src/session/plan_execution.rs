@@ -5,6 +5,12 @@ use runtime::{DecisionKind, PlanCandidate, PlanContext, PlanShape, VerdictBasis,
 
 use super::{BuiltRuntime, smart_runtime::PlanShadowTurn, turn_harness::TurnSetup};
 
+#[derive(Clone, Copy)]
+pub(crate) enum ModelSelection {
+    Automatic,
+    Pinned,
+}
+
 pub(crate) struct PlanTurn {
     receipt: tools::PlanRunReceipt,
     began_ms: u64,
@@ -27,7 +33,7 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 impl PlanTurn {
-    pub(crate) fn begin(runtime: &mut BuiltRuntime, start: PlanStart<'_>) -> Option<Self> {
+    pub(crate) fn begin(runtime: &mut BuiltRuntime, start: &PlanStart<'_>) -> Option<Self> {
         let cohort = tools::plan_cohort_for_turn(start.input, start.setup.assessment.complexity, start.setup.orchestration.risk)?;
         let current = api::resolve_model_alias(runtime.api_client().model());
         let shape = super::smart_runtime::plan_shape_of(start.prelude);
@@ -94,7 +100,7 @@ impl PlanTurn {
 
     pub(crate) fn finish(mut self, cwd: &Path, session: &str, result: &Result<runtime::TurnSummary, String>) {
         self.receipt.at_ms = now_ms();
-        self.receipt.duration_ms = self.receipt.at_ms.checked_sub(self.began_ms).unwrap_or_default();
+        self.receipt.duration_ms = self.receipt.at_ms.saturating_sub(self.began_ms);
         let records = runtime::read_route_outcomes(cwd).unwrap_or_default();
         let mut checked = false;
         let mut failed = result.is_err();

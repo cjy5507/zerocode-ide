@@ -233,6 +233,9 @@ pub(crate) mod test_env {
     /// hand-rolled timestamp path or manual `remove_dir_all`.
     pub(crate) struct CredentialEnvIsolation {
         saved: Vec<(&'static str, Option<OsString>)>,
+        #[cfg(unix)]
+        temp_home: TempDir,
+        #[cfg(not(unix))]
         _temp_home: TempDir,
     }
 
@@ -252,7 +255,13 @@ pub(crate) mod test_env {
             std::env::set_var("HOME", temp_home.path());
             std::env::set_var(core_types::paths::ZO_HOME_ENV, temp_home.path());
             std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, temp_home.path());
-            Self { saved, _temp_home: temp_home }
+            Self {
+                saved,
+                #[cfg(unix)]
+                temp_home,
+                #[cfg(not(unix))]
+                _temp_home: temp_home,
+            }
         }
 
         /// The isolated config home (also the isolated `HOME`), so a test can
@@ -260,7 +269,7 @@ pub(crate) mod test_env {
         /// `HOME`-relative path (e.g. the Google ADC location) under it.
         #[cfg(unix)]
         pub(crate) fn config_home(&self) -> &Path {
-            self._temp_home.path()
+            self.temp_home.path()
         }
     }
 

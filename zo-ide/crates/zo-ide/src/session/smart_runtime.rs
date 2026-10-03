@@ -486,7 +486,7 @@ fn plan_shadow_turn(
         settings,
         held: if architect {
             Some("architect_policy")
-        } else if tools::step_effort_word(cwd).is_none_or(|word| word.asks()) {
+        } else if tools::step_effort_word(cwd).is_none_or(tools::StepEffortWord::asks) {
             Some("step_policy")
         } else { None },
         models: tools::model_options_for(inventory, floor, ceiling),

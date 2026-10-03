@@ -152,7 +152,7 @@ pub enum RewindTurn {
 
 pub struct PlainSession {
     selection_origins: (&'static str, &'static str),
-    auto_plan_model_allowed: bool,
+    model_selection: super::plan_execution::ModelSelection,
     pub cwd: PathBuf,
     pub model: String,
     pub permission_mode: PermissionMode,
@@ -512,8 +512,10 @@ impl PlainSession {
             });
         }
 
-        let auto_plan_model_allowed = !options.exact_selection && options.model == crate::DEFAULT_MODEL
-            && persisted_preferences.model.is_none();
+        let model_selection = if !options.exact_selection && options.model == crate::DEFAULT_MODEL
+            && persisted_preferences.model.is_none() {
+            super::plan_execution::ModelSelection::Automatic
+        } else { super::plan_execution::ModelSelection::Pinned };
         let preferences_selected = !options.exact_selection && options.model == crate::DEFAULT_MODEL && persisted_preferences.model.is_some();
         let selection_origins = (
             if preferences_selected { "preferences" } else { "launch" },
@@ -609,7 +611,7 @@ impl PlainSession {
 
         let session = Self {
             selection_origins,
-            auto_plan_model_allowed,
+            model_selection,
             cwd,
             model,
             permission_mode: options.permission_mode,
@@ -834,7 +836,7 @@ impl PlainSession {
         let turn_setup = TurnHarness::setup_model_led_turn(&mut self.runtime, input, true);
         let named_effort = self.effort.and_then(Effort::level);
         let effort_band_ceiling = self.effort.and_then(Effort::band_ceiling);
-        let mut live_client: Arc<dyn runtime::AsyncApiClient> = TurnHarness::build_live_client(
+        let live_client: Arc<dyn runtime::AsyncApiClient> = TurnHarness::build_live_client(
             &self.runtime,
             self.allowed_tools.clone(),
             thinking_config_for(self.effort),
@@ -861,29 +863,9 @@ impl PlainSession {
                 route_fact: &self.route_fact,
             },
         );
-        let mut plan_turn = installed.plan_shadow.as_ref().and_then(|shadow| {
-            super::plan_execution::PlanTurn::begin(&mut self.runtime, super::plan_execution::PlanStart {
-                shadow, setup: &turn_setup, input, session: &self.handle.id, began_ms: plan_began_ms,
-                pinned_model: !self.auto_plan_model_allowed,
-                prelude: tools::decide_host_prelude(installed.orchestration, turn_setup.assessment,
-                    turn_setup.orchestration, runtime::subagent_panes::nested()),
-            })
-        });
-        if let Some(plan) = plan_turn.as_mut() {
-            if let Some(client) = plan.client(&self.runtime, &self.handle.id, self.allowed_tools.clone()) {
-                live_client = client;
-                installed.route_watch.plan_applied();
-                if let Some(inner) = self.runtime.try_runtime_mut() {
-                    inner.set_step_effort(None);
-                    inner.set_exec_contract(None);
-                }
-                let _ = block_tx.send(RenderBlock::System {
-                    id: runtime::message_stream::BlockIdGen::default().next(),
-                    level: runtime::message_stream::SystemLevel::Info,
-                    text: format!("plan · measured objective-checked route: {}", plan.model()),
-                }).await;
-            }
-        }
+        let (plan_turn, live_client) = self.prepare_measured_plan(
+            input, &turn_setup, &installed, plan_began_ms, &block_tx, live_client,
+        ).await;
         self.arm_turn_limits();
         self.begin_workspace_checkpoint();
         let mut host_turn = installed.host_turn();
@@ -943,6 +925,41 @@ impl PlainSession {
         let summary = result?;
         self.persist().map_err(|error| error.to_string())?;
         Ok(summary)
+    }
+
+    async fn prepare_measured_plan(
+        &mut self,
+        input: &str,
+        setup: &super::turn_harness::TurnSetup,
+        installed: &super::smart_runtime::SmartTurnInstalled,
+        began_ms: u64,
+        block_tx: &tokio::sync::mpsc::Sender<RenderBlock>,
+        mut live_client: Arc<dyn runtime::AsyncApiClient>,
+    ) -> (Option<super::plan_execution::PlanTurn>, Arc<dyn runtime::AsyncApiClient>) {
+        let mut plan_turn = installed.plan_shadow.as_ref().and_then(|shadow| {
+            super::plan_execution::PlanTurn::begin(&mut self.runtime, &super::plan_execution::PlanStart {
+                shadow, setup, input, session: &self.handle.id, began_ms,
+                pinned_model: matches!(self.model_selection, super::plan_execution::ModelSelection::Pinned),
+                prelude: tools::decide_host_prelude(installed.orchestration, setup.assessment,
+                    setup.orchestration, runtime::subagent_panes::nested()),
+            })
+        });
+        if let Some(plan) = plan_turn.as_mut() {
+            if let Some(client) = plan.client(&self.runtime, &self.handle.id, self.allowed_tools.clone()) {
+                live_client = client;
+                installed.route_watch.plan_applied();
+                if let Some(inner) = self.runtime.try_runtime_mut() {
+                    inner.set_step_effort(None);
+                    inner.set_exec_contract(None);
+                }
+                let _ = block_tx.send(RenderBlock::System {
+                    id: runtime::message_stream::BlockIdGen::default().next(),
+                    level: runtime::message_stream::SystemLevel::Info,
+                    text: format!("plan · measured objective-checked route: {}", plan.model()),
+                }).await;
+            }
+        }
+        (plan_turn, live_client)
     }
 
     /// Who stops this turn if it does not stop itself, and what cuts a tool
@@ -1275,7 +1292,7 @@ impl PlainSession {
     /// `/model` — 같은 세션을 들고 런타임을 재빌드한다(제공자 클라이언트가
     /// 모델에 묶여 있어 라이브 교체가 불가능하다).
     pub fn set_model(&mut self, model: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.auto_plan_model_allowed = false;
+        self.model_selection = super::plan_execution::ModelSelection::Pinned;
         let model = crate::cli_args::resolve_model_alias(model);
         runtime::model_discovery::note_selected(&model);
         // The person's switch, scored the way any other switch is: what the
