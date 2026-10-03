@@ -16721,8 +16721,8 @@ button.helper-sib:hover {
 
 /* The turn rail (`turnRailNode`): a tick per row, 2px tall and 7px apart down
  * a column of its own on one hairline — the person's longer and in the
- * quiet ink, the rows in view on the agent's accent, a failed step in the
- * failure's ink. The handle lies over the whole column: a press anywhere goes
+ * quiet ink, the row the rail stands at as long on the agent's accent, a
+ * failed step in the failure's ink. The handle lies over the whole column: a press anywhere goes
  * to the nearest tick's row, and the keyboard's ring is drawn inside it. */
 .chat-rail {
   grid-column: 1;
@@ -16764,6 +16764,7 @@ button.helper-sib:hover {
 }
 
 .chat-rail-tick.is-current {
+  width: var(--chat-turn-tick-long);
   background: var(--chat-accent);
 }
 

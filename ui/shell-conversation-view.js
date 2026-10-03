@@ -2688,9 +2688,10 @@ function syncHelperReport(list, run) {
 /* ---- the turn rail (t-22100) --------------------------------------------------
  *
  * The approved conversation stands a rail of its rows at the list's left: a
- * tick for each row the list shows — the person's longer, the ones in the view
- * on the accent, a step that failed in the failure's ink — so a long
- * conversation is a length a person can see and go along. A press anywhere on
+ * tick for each row the list shows — the person's longer, a step that failed
+ * in the failure's ink, and one on the accent, as long as the person's: the row
+ * the rail stands at (`railAt`) — so a long conversation is a length a person
+ * can see and go along. A press anywhere on
  * the rail goes to the row of the tick nearest it; the rail's handle takes the
  * keyboard (Up and Down a row, Page Up and Down a rail's worth, Home and End
  * the ends) and is announced as a slider over the rows. A long conversation
@@ -2802,13 +2803,15 @@ function railInView(list, rows) {
   return { start, end: Math.max(start, end) };
 }
 
-/* The row the handle stands on: the one a press or a key went to, while it is
- * still in view; else the first row in view. */
-function railAt(list, rows) {
-  const seen = railInView(list, rows);
+/* The row the handle stands on — the one tick the rail wears on the accent:
+ * the row a press or a key went to, while it is still in view; else, with the
+ * list at its foot, the newest row (the turn the person follows), and up the
+ * list, the first row in view (where they read). */
+function railAt(list, rows, seen = railInView(list, rows)) {
   const held = list.__railAt ? rows.indexOf(list.__railAt) : -1;
   if (held >= 0 && seen && held >= seen.start && held <= seen.end) return held;
-  return seen ? seen.start : rows.length - 1;
+  if (!seen) return rows.length - 1;
+  return chatFootGap(list) < CHAT_FOLLOW.slack ? seen.end : seen.start;
 }
 
 /* Ask the rail for a paint on the next frame — one a frame however often it is
@@ -2828,7 +2831,9 @@ function paintTurnRail(rail) {
   const list = rail.__list;
   const rows = railRows(list);
   const room = railRoom(rail);
-  const seen = railInView(list, rows) ?? { start: 0, end: -1 };
+  const view = railInView(list, rows);
+  const seen = view ?? { start: 0, end: -1 };
+  const at = rows.length > 0 ? railAt(list, rows, view) : -1;
   const count = Math.min(rows.length, room);
   const middle = Math.floor((count - (seen.end - seen.start + 1)) / 2);
   const from = Math.max(0, Math.min(rows.length - count, seen.start - Math.max(0, middle)));
@@ -2845,18 +2850,17 @@ function paintTurnRail(rail) {
     rail.appendChild(tick);
     wrote = true;
   }
-  for (let at = 0; at < count; at += 1) {
-    const tick = ticks[at];
-    const index = from + at;
+  for (let place = 0; place < count; place += 1) {
+    const tick = ticks[place];
+    const index = from + place;
     const row = rows[index];
     tick.__row = row;
-    const wear = `chat-rail-tick${row.classList.contains("is-user") ? " is-user" : ""}${row.classList.contains("is-failed") ? " is-failed" : ""}${index >= seen.start && index <= seen.end ? " is-current" : ""}`;
+    const wear = `chat-rail-tick${row.classList.contains("is-user") ? " is-user" : ""}${row.classList.contains("is-failed") ? " is-failed" : ""}${index === at ? " is-current" : ""}`;
     if (tick.className !== wear) {
       tick.className = wear;
       wrote = true;
     }
   }
-  const at = rows.length > 0 ? railAt(list, rows) : -1;
   const value = String(at + 1);
   if (handle.getAttribute("aria-valuemax") !== String(rows.length) || handle.getAttribute("aria-valuenow") !== value) {
     writeAttribute(handle, "aria-valuemax", String(rows.length));
