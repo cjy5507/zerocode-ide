@@ -944,6 +944,19 @@ impl ReviewFacts {
 /// briefing that asks for it ([`worker_briefing`]), from this one place.
 pub const HANDED_IN_HEAD: &str = "head";
 
+/// The key a worker's report carries the words a person reads under — spelled
+/// in the briefing ([`worker_briefing`]) and read back by [`worker_summary`]
+/// from this one place.
+pub const HANDED_IN_SUMMARY: &str = "summary";
+
+/// The words a worker handed in for a person to read: the
+/// [`HANDED_IN_SUMMARY`] string of its own `worker_done` body. Red skeleton:
+/// reads nothing yet.
+#[must_use]
+pub fn worker_summary(_result: &str, _author: Option<&ResultAuthor>) -> Option<String> {
+    None
+}
+
 /// The `--attempt` word for "this task has no attempt": a correction of work
 /// nobody was dispatched on still names what it looked at, and the word is
 /// refused the moment an attempt exists.

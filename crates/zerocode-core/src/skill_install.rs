@@ -526,6 +526,114 @@ mod tests {
         );
     }
 
+    /// The six agents the person named — Claude Code, Codex, zo, agy (the
+    /// catalog's `antigravity`), Kimi and Grok — each get the `plain-report`
+    /// skill in the root they read, and each reads it from there (t-32786).
+    /// Every one has a root: none is left unwired. Kimi has no root of its own
+    /// and reads the shared `.agents` home.
+    #[test]
+    fn the_plain_report_skill_installs_for_each_of_the_six_agents_in_the_root_it_reads() {
+        assert!(
+            bundled_skill("plain-report").is_some(),
+            "this build carries no plain-report skill"
+        );
+        let six = [
+            ("claude", ".claude/skills"),
+            ("codex", ".codex/skills"),
+            ("zo", ".zo/skills"),
+            ("antigravity", ".gemini/antigravity/skills"),
+            ("kimi", ".agents/skills"),
+            ("grok", ".grok/skills"),
+        ];
+        let rows: Vec<(String, String)> = six
+            .iter()
+            .map(|(agent, _)| {
+                let spec = crate::agent::agent_spec(agent)
+                    .unwrap_or_else(|| panic!("{agent} is not a catalog row"));
+                (spec.id.to_string(), spec.name.to_string())
+            })
+            .collect();
+        let home = tempfile::tempdir().unwrap();
+        let outcomes = install_bundled_skill("plain-report", home.path(), &rows).unwrap();
+        assert_eq!(outcomes.len(), six.len());
+        let sources = discovery_sources(home.path(), &[]);
+        for ((agent, root), outcome) in six.into_iter().zip(&outcomes) {
+            assert_eq!(outcome.agent, agent);
+            assert_eq!(
+                outcome.state,
+                InstallState::Written,
+                "{agent}: {}",
+                outcome.detail
+            );
+            assert_eq!(
+                outcome.path,
+                home.path().join(root).join("plain-report").join(SKILL_FILE),
+                "{agent}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&outcome.path).unwrap(),
+                bundled_skill("plain-report").unwrap().content,
+                "{agent}"
+            );
+            let own = install_root(agent, &sources)
+                .unwrap_or_else(|| panic!("{agent} has no skills root"));
+            let found = crate::skill::scan(own);
+            let skill = found
+                .iter()
+                .find(|skill| skill.name == "plain-report")
+                .unwrap_or_else(|| panic!("{agent}: the skill is not found in its own root"));
+            assert!(
+                crate::skill::agent_reads_skill(agent, skill),
+                "{agent} does not read the root it was installed into"
+            );
+        }
+    }
+
+    /// The skill's two lists are the table's rows, as the table renders them:
+    /// a row added to the lint's table reaches the agents that read the skill,
+    /// and the limits the skill names are the lint's own constants.
+    #[test]
+    fn the_plain_report_skill_lists_exactly_the_rows_of_the_lint_table() {
+        use crate::plain_text::{EN_SENTENCE_WORDS_MAX, KO_SENTENCE_CHARS_MAX, Language, rules};
+        assert!(
+            bundled_skill("plain-report").is_some(),
+            "this build carries no plain-report skill"
+        );
+        let content = bundled_skill("plain-report").map_or("", |skill| skill.content);
+        for (code, language) in [("ko", Language::Korean), ("en", Language::English)] {
+            let begin = format!("<!-- plain-rules:{code}:begin -->\n");
+            let end = format!("<!-- plain-rules:{code}:end -->");
+            let block = content
+                .split_once(&begin)
+                .and_then(|(_, rest)| rest.split_once(&end))
+                .map_or("", |(block, _)| block);
+            // The first two lines of the block are the header and its rule.
+            let listed: String = block
+                .lines()
+                .skip(2)
+                .map(|line| format!("{line}\n"))
+                .collect();
+            let rendered: String = rules()
+                .iter()
+                .filter(|rule| rule.language == language)
+                .map(|rule| format!("| {} | {} |\n", rule.shown, rule.plain))
+                .collect();
+            assert!(!rendered.is_empty(), "the table has no {code} rows");
+            assert_eq!(
+                listed, rendered,
+                "the {code} list of the skill drifted from the table"
+            );
+        }
+        assert!(
+            content.contains(&format!("{KO_SENTENCE_CHARS_MAX}자 안에서")),
+            "the skill names a Korean limit other than the lint's"
+        );
+        assert!(
+            content.contains(&format!("Use {EN_SENTENCE_WORDS_MAX} words or fewer")),
+            "the skill names an English limit other than the lint's"
+        );
+    }
+
     #[test]
     fn a_name_this_build_does_not_carry_is_refused() {
         let home = tempfile::tempdir().unwrap();

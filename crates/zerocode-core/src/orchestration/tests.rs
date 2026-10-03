@@ -30,6 +30,61 @@ fn a_worker_briefing_names_zerocode_find_before_the_task() {
     );
 }
 
+/// A worker is told once, at launch, that what it writes for a person follows
+/// the `plain-report` skill (t-32786) — before the task, in the shared
+/// briefing and in the federated one, so every agent that takes a task is told
+/// the same thing, and no turn after it carries the sentence again.
+#[test]
+fn worker_briefings_ask_for_a_plain_report_by_the_skills_name() {
+    for briefing in [worker_briefing("t-1", "lint"), federated_briefing("d-1")] {
+        let (before, _) = briefing
+            .split_once(BRIEFING_HANDS_OVER)
+            .expect("the briefing hands over");
+        assert!(before.contains("plain-report"), "{before}");
+        assert_eq!(before.matches("plain-report").count(), 1, "{before}");
+    }
+}
+
+/// What the board lints is what the worker itself wrote for a person: the
+/// `summary` of its own `worker_done` body. A coordinator's correction, a body
+/// without prose and a result nobody is known to have written are not read.
+#[test]
+fn a_worker_summary_is_the_prose_its_own_report_carries_and_nothing_else() {
+    let worker = ResultAuthor::Worker {
+        worker: "w-1".into(),
+        dispatch: Some("dp-1".into()),
+    };
+    let coordinator = ResultAuthor::Coordinator {
+        seat: "team-1/%1".into(),
+        generation: Some(1),
+        attempt: None,
+        source: None,
+        completed_ms: None,
+    };
+    let body = r#"{"ok":true,"summary":"시험이 통과했다.","head":"abc1234"}"#;
+    assert_eq!(
+        worker_summary(body, Some(&worker)).as_deref(),
+        Some("시험이 통과했다.")
+    );
+    assert_eq!(
+        worker_summary(body, Some(&coordinator)),
+        None,
+        "a coordinator's words are not a worker's report"
+    );
+    assert_eq!(
+        worker_summary(body, None),
+        None,
+        "nobody is known to have written it"
+    );
+    assert_eq!(worker_summary(r#"{"ok":true}"#, Some(&worker)), None);
+    assert_eq!(
+        worker_summary(r#"{"ok":true,"summary":7}"#, Some(&worker)),
+        None
+    );
+    assert_eq!(worker_summary("not json", Some(&worker)), None);
+    assert_eq!(HANDED_IN_SUMMARY, "summary");
+}
+
 #[test]
 fn review_facts_read_only_what_a_coordinator_wrote() {
     let nothing = ReviewFacts::from_result("");

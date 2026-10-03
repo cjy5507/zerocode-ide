@@ -73,6 +73,7 @@ pub mod pane;
 pub mod pane_claim;
 pub mod payload;
 pub mod pick;
+pub mod plain_text;
 pub mod project;
 pub mod provider_session;
 pub mod readiness;

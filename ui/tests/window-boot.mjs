@@ -1315,7 +1315,9 @@ const stubBackend = ({ boot, pollers }) => {
       const kinds = ["report", "screenshot", "evidence", "export", "transcript", "other"];
       const kind = kinds[at % kinds.length];
       if (kind === "report") {
-        return { kind: "markdown", text: `# 보고서 ${at}\n\n본문 **굵게** landed`, bytes: 40, truncated: false };
+        // `window.__WRITING__`: what the writing lint counted in the text (t-32786), laid on by the test that reads it.
+        return { kind: "markdown", text: `# 보고서 ${at}\n\n본문 **굵게** landed`, bytes: 40, truncated: false,
+          ...(window.__WRITING__ ? { writing: window.__WRITING__ } : {}) };
       }
       if (kind === "screenshot") {
         return {

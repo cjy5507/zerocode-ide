@@ -36,6 +36,7 @@ mod summon_assign;
 mod summon_choice;
 mod summon_difficulty;
 mod summon_model;
+mod writing_book;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -2263,10 +2264,13 @@ pub(crate) fn refresh_board_ledger() {
             states: Arc::new(ledger_states_for_seats(ledger, seats)),
             overlays: Arc::new(graph_overlay_snapshot_for_seats(ledger, seats)),
             held_checkouts: zerocode_core::orchestration::held_checkouts(ledger).len(),
-            desk: Arc::new(desk::desk_snapshot(
+            desk: Arc::new(writing_book::dressed(
                 ledger,
-                |seat| seat_is_held(seats, seat),
-                |run, task| costs.cost(run, task),
+                desk::desk_snapshot(
+                    ledger,
+                    |seat| seat_is_held(seats, seat),
+                    |run, task| costs.cost(run, task),
+                ),
             )),
         };
         let outcomes = summon_difficulty::observations(ledger, &mut costs);
