@@ -302,7 +302,7 @@ impl Decider {
     }
 
     /// Take a new reading of the run: the same as the one before it by
-    /// everything but the capture's exact age ([`reading_key`]) is no
+    /// everything but the capture's exact age (`reading_key`) is no
     /// decision.
     pub fn offer(&mut self, snapshot: Snapshot) -> Offer {
         let key = reading_key(&snapshot.state);
