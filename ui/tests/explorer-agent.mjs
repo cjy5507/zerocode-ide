@@ -556,3 +556,78 @@ export async function testExplorerRoot(browser, origin, ok) {
     await page.close();
   }
 }
+
+/* ---- slice 5: what an agent is doing in git, under the tree ---------------
+ *
+ * A shell call that runs git or gh carries its operations (`activity.vcs`,
+ * read by the backend with the shell's grammar). While it runs, one line
+ * under the tree says so in git's own words; it is gone when the call
+ * finishes or fails, or the turn ends. A commit that finished lights the
+ * files it took in the commit colour once git has been asked again. Only
+ * this workspace's panes speak here. */
+export async function testExplorerVcs(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standTree(page);
+    const seen = await page.evaluate(async () => {
+      const { root, fire, settle, open, row } = window.__XT__;
+      const out = {};
+      const line = () => {
+        const host = document.getElementById("tree-ops");
+        return host ? { hidden: host.hidden, text: host.textContent.replace(/\s+/g, " ").trim(), role: host.getAttribute("role") } : null;
+      };
+      const command = "git add -A && git commit -m 'tree: wear the agents'";
+      const vcs = [{ tool: "git", verb: "add" }, { tool: "git", verb: "commit" }];
+      let seq = 100;
+      const bash = (phase, target, steps = vcs) => ({ seq: ++seq, activity: { verb: "bash", target, phase, vcs: steps } });
+      mountTermTab(9874, { agent: "claude", worktree: root }, { placement: "tab", focus: false });
+      mountTermTab(9875, { agent: "codex", worktree: "/tmp/zerocode-window-test-elsewhere" }, { placement: "tab", focus: false });
+      // The files git holds as changed before the commit.
+      window.__ANSWER__.scm_status = () => ({ changed: [
+        { path: "README.md", code: " M", staged: false, changed: true, added: 1, removed: 0, conflict: null, origin: null },
+        { path: "src/main.rs", code: " M", staged: false, changed: true, added: 2, removed: 1, conflict: null, origin: null },
+      ], ignored: [] });
+      setActivityItem("files");
+      await refreshScm();
+      await row("src")._treeUnfold(true);
+      fire("term:9874", [bash("started", command)]);
+      await settle();
+      out.running = line();
+      // Another workspace's pane is that workspace's news.
+      fire("term:9875", [bash("started", "git push origin HEAD", [{ tool: "git", verb: "push" }])]);
+      await settle();
+      out.othersQuiet = !(line()?.text ?? "").includes("git push");
+      // The commit lands: the call finishes, git is asked again and no longer
+      // holds src/main.rs as changed — it was taken into the commit.
+      fire("term:9874", [bash("finished", command)]);
+      await settle();
+      out.cleared = line()?.hidden ?? null;
+      window.__ANSWER__.scm_status = () => ({ changed: [
+        { path: "README.md", code: " M", staged: false, changed: true, added: 1, removed: 0, conflict: null, origin: null },
+      ], ignored: [] });
+      await refreshScm();
+      await settle();
+      out.committed = row("src/main.rs")?.dataset.agentTouch ?? null;
+      out.untouched = row("README.md")?.dataset.agentTouch ?? null;
+      // A failed operation clears the line too, and so does a turn's end.
+      fire("term:9874", [bash("started", "gh pr create --fill", [{ tool: "gh", verb: "pr create" }])]);
+      await settle();
+      out.pr = line()?.text ?? null;
+      fire("term:9874", [bash("failed", "gh pr create --fill", [{ tool: "gh", verb: "pr create" }])]);
+      await settle();
+      out.failedCleared = line()?.hidden ?? null;
+      fire("term:9874", [bash("started", "git pull --rebase", [{ tool: "git", verb: "pull" }])]);
+      await settle();
+      fire("term:9874", [{ seq: ++seq, activity: { verb: "stop", phase: "stopped" } }]);
+      await settle();
+      out.stoppedCleared = line()?.hidden ?? null;
+      return out;
+    });
+    ok("a running git operation is one status line under the tree, in git's own words, for this workspace's panes only", seen.running?.hidden === false && seen.running.role === "status" && seen.running.text.includes("git add") && seen.running.text.includes("git commit") && seen.othersQuiet === true, JSON.stringify(seen));
+    ok("the line clears when the operation finishes, fails or the turn ends", seen.cleared === true && seen.pr?.includes("gh pr create") && seen.failedCleared === true && seen.stoppedCleared === true, JSON.stringify(seen));
+    ok("a finished commit lights the files it took in the commit colour once git has been asked again", seen.committed === "commit" && seen.untouched === null, JSON.stringify(seen));
+    ok("the vcs suite raised no renderer faults", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
