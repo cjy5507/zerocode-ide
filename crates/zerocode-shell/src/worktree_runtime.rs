@@ -2334,13 +2334,12 @@ pub(crate) fn worktree_stamp_of(roots: Vec<String>) -> String {
 }
 
 #[cfg(test)]
-mod index_lock_tests {
+mod tests {
     use super::*;
-    use std::process::Command;
     use std::time::{Duration, SystemTime};
 
     fn git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::proc::quiet_command("git")
             .arg("-C")
             .arg(cwd)
             .args(args)
