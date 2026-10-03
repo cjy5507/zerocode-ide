@@ -18,6 +18,7 @@ use runtime::file_pick::{FilePickAsk, FilePickCandidate, FilePickHint, FilePickS
 use runtime::file_search::{self, FileSearchOptions, MatchType, SearchRoot};
 use runtime::{grep_search, GrepSearchInput};
 use serde_json::Value;
+use zerocode_core::jev::JevMode;
 use zerocode_core::jev::door::{self, Refused};
 use zerocode_core::jev::file_pick::{
     edited_fingerprints, interleave, label_row, search_terms, workspace_relative_path,

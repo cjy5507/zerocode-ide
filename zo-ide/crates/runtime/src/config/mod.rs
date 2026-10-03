@@ -2650,11 +2650,7 @@ pub fn jev_seat_applies(cwd: &std::path::Path, seat: &zerocode_core::jev::JevUse
     let Ok(text) = std::fs::read_to_string(jev_ledger_dir(cwd).join(seat.ledger)) else {
         return false;
     };
-    let rows: Vec<serde_json::Value> = text
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
-    zerocode_core::jev::promote::standing(seat, &rows) == zerocode_core::jev::promote::Stand::Applying
+    zerocode_core::jev::promote::standing_in(seat, &text) == zerocode_core::jev::promote::Stand::Applying
 }
 
 /// Whether durable traces (`.zo/turns`, `.zo/dream`) live under the global
@@ -3247,4 +3243,3 @@ mod traces_base_tests {
         assert_eq!(moved, super::zo_project_state_dir(cwd));
     }
 }
-
