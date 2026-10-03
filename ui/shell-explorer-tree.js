@@ -236,10 +236,14 @@ fileTree.addEventListener('drop', (event) => {
  * than its whole trail. */
 const TREE_TOUCH_HOLD_MS = 6_000;
 
-/* The most files the tree holds lit at once. A search can name hundreds, and
- * a tree lit everywhere is pointing at nothing; past this the oldest go
- * first. It also bounds what one paint walks. */
-const TREE_TOUCH_CAP = 64;
+/* The most files the tree holds lit at once, and the most writes it holds
+ * open. A search can name hundreds, and a tree lit everywhere is pointing at
+ * nothing; past this the oldest go first. It also bounds what one paint walks,
+ * and what a low-spec machine has to bear: every lit row transitions its
+ * colour and its bar on the page's main thread, and every writing row wears a
+ * mark, so a burst that lit sixty-four of them cost a quarter-speed Chromium a
+ * third of its frames. */
+const TREE_TOUCH_CAP = 16;
 
 /* ---- how long and how many, for the writing mark (t-31715) ---- */
 
@@ -257,6 +261,14 @@ const TREE_WRITING_MAX_MS = 60_000;
  * duration of `--tree-writing-sweep` (tokens.css), a little under it so the
  * mark does not outstay its motion. */
 const TREE_WRITING_MIN_MS = 1_000;
+
+/* The most rows whose sheen moves at once. Each moving sheen is a layer the
+ * compositor draws on every frame, and no eye follows sixty-four sweeps at
+ * once; on a low-spec machine (Chromium at a quarter of its CPU) sixty-four
+ * of them cost the page a third of its frames while a burst of two hundred
+ * files finished. The rows of the newest writes move; every other writing row
+ * wears the still line reduced motion wears, and says the same words. */
+const TREE_WRITING_MOVING_MAX = 8;
 
 /* How long after a write ends the tree waits before asking git about every
  * file written since: the one window one scoped question covers. The backend
@@ -293,6 +305,8 @@ const treeTouches = new Map();
 let treeTouchRoot = null;
 let treeTouchFrame = 0;
 let treeTouchSweep = null;
+/* When the armed sweep fires; `Infinity` while none is armed. */
+let treeTouchSweepAt = Infinity;
 /* The write calls open right now, newest last (t-31715): a call key → { paths
  * (relative), pane, verb, since, until, closed }. `closed` is a call that has
  * ended and is only waiting out its shortest showing. Bounded like the touches
@@ -451,6 +465,7 @@ function touchTree(relative, kind, now) {
   treeTouches.delete(relative);
   treeTouches.set(relative, { kind: keep ? held.kind : kind, until: now + TREE_TOUCH_HOLD_MS });
   while (treeTouches.size > TREE_TOUCH_CAP) treeTouches.delete(treeTouches.keys().next().value);
+  armTreeTouchSweepFor(now + TREE_TOUCH_HOLD_MS);
 }
 
 /* One batch of what an agent did (`hook:activity`, ui/shell.js). Cheap by
@@ -483,7 +498,6 @@ function noteTreeActivities(pane, activities) {
   }
   if (newest === null && !wrote) return;
   scheduleTreeTouchPaint();
-  armTreeTouchSweep();
   if (newest !== null && treeFollowsAgent && fileTreeShowing()) followTreeTo(newest);
 }
 
@@ -523,18 +537,28 @@ function paintTreeTouches() {
     // One walk of the tree for every lookup below: a lookup by selector walks
     // it again each time, and a busy turn asks for a few hundred.
     const rows = treeRowIndex();
-    const mark = (relative, slot, withinSlot, kind) => {
+    // `say(row, slot)` is how a mark is put on a row: for the file itself, and for
+    // each shut folder above it.
+    const mark = (relative, slot, withinSlot, say) => {
       const row = rows.get(relative);
-      if (row) want(row, slot, kind);
+      if (row) say(row, slot);
       const parts = relative.split("/");
       for (let depth = parts.length - 1; depth >= 1; depth -= 1) {
         const folder = rows.get(parts.slice(0, depth).join("/"));
-        if (folder && folder.getAttribute("aria-expanded") !== "true") want(folder, withinSlot, kind);
+        if (folder && folder.getAttribute("aria-expanded") !== "true") say(folder, withinSlot);
       }
     };
-    for (const [relative, held] of treeTouches) mark(relative, "agentTouch", "agentTouchWithin", held.kind);
-    for (const held of treeWrites.values()) {
-      for (const relative of held.paths) mark(relative, "agentWriting", "agentWritingWithin", TREE_WRITING_ON);
+    for (const [relative, held] of treeTouches) mark(relative, "agentTouch", "agentTouchWithin", (row, slot) => want(row, slot, held.kind));
+    // The newest writes first: the first rows to be marked are the ones that move.
+    let moving = TREE_WRITING_MOVING_MAX;
+    const wantWriting = (row, slot) => {
+      if (wanted.get(row)?.[slot]) return;
+      const sheen = moving > 0 ? TREE_WRITING_ON : TREE_WRITING_STILL;
+      if (sheen === TREE_WRITING_ON) moving -= 1;
+      want(row, slot, sheen);
+    };
+    for (const held of [...treeWrites.values()].reverse()) {
+      for (const relative of held.paths) mark(relative, "agentWriting", "agentWritingWithin", wantWriting);
     }
   }
   for (const row of treeDressedRows) {
@@ -564,9 +588,11 @@ function paintTreeTouches() {
  * over it. */
 const TREE_MARK_SLOTS = Object.freeze(["agentTouch", "agentTouchWithin", "agentWriting", "agentWritingWithin"]);
 
-/* What a writing row's attribute says. The state has one kind, so the value
- * only has to be present. */
+/* What a writing row's attribute says: its sheen moves, or — past the most
+ * rows that may move (`TREE_WRITING_MOVING_MAX`) — it is held still. Either
+ * way the row is being written, and says so in words. */
 const TREE_WRITING_ON = "true";
+const TREE_WRITING_STILL = "still";
 
 /* Every row the tree holds, by its path — one walk for a pass's many lookups. */
 function treeRowIndex() {
@@ -576,16 +602,27 @@ function treeRowIndex() {
 }
 
 /* One timer for every mark and every write: armed for the soonest expiry
- * while any is held, and gone when none is. Armed again whenever something
- * new is held, because the new expiry may be the soonest. */
+ * while any is held, and gone when none is. Whatever is held asks for its own
+ * expiry as it is held (`armTreeTouchSweepFor`) and a timer already armed for
+ * sooner is left as it is — so a burst of two hundred events costs one timer,
+ * not two hundred. */
+function armTreeTouchSweepFor(at) {
+  if (treeTouchSweep !== null && treeTouchSweepAt <= at) return;
+  clearTimeout(treeTouchSweep);
+  treeTouchSweepAt = at;
+  treeTouchSweep = setTimeout(sweepTreeTouches, Math.max(0, at - performance.now()));
+}
+
+/* After a sweep: armed again for the soonest expiry of what is still held —
+ * the one place the whole of it is walked. */
 function armTreeTouchSweep() {
   clearTimeout(treeTouchSweep);
   treeTouchSweep = null;
+  treeTouchSweepAt = Infinity;
   let soonest = Infinity;
   for (const held of treeTouches.values()) soonest = Math.min(soonest, held.until);
   for (const held of treeWrites.values()) soonest = Math.min(soonest, held.until);
-  if (soonest === Infinity) return;
-  treeTouchSweep = setTimeout(sweepTreeTouches, Math.max(0, soonest - performance.now()));
+  if (soonest !== Infinity) armTreeTouchSweepFor(soonest);
 }
 
 function sweepTreeTouches() {
@@ -707,6 +744,7 @@ function openTreeWrite(pane, activity, paths, now) {
   treeWrites.delete(key);
   treeWrites.set(key, { paths, pane, verb: activity.verb, since: now, until: now + TREE_WRITING_MAX_MS, closed: false });
   while (treeWrites.size > TREE_TOUCH_CAP) treeWrites.delete(treeWrites.keys().next().value);
+  armTreeTouchSweepFor(now + TREE_WRITING_MAX_MS);
   return true;
 }
 
@@ -750,6 +788,7 @@ function finishTreeWrite(held, now) {
   if (held.closed) return false;
   held.closed = true;
   held.until = Math.max(now, held.since + TREE_WRITING_MIN_MS);
+  armTreeTouchSweepFor(held.until);
   return true;
 }
 
@@ -1379,7 +1418,6 @@ function settleTreeCommit() {
   }
   if (newest === null) return;
   scheduleTreeTouchPaint();
-  armTreeTouchSweep();
   if (treeFollowsAgent && fileTreeShowing()) followTreeTo(newest);
 }
 
