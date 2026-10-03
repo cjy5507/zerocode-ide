@@ -163,10 +163,16 @@ export async function testExplorerAgentActivity(browser, origin, ok) {
       for (const theme of ["dark", "light"]) {
         document.documentElement.dataset.theme = theme;
         await new Promise((done) => setTimeout(done, 250));
-        const read = getComputedStyle(row("src/lib.rs").querySelector(".tree-name")).color;
-        const write = getComputedStyle(row("src/main.rs").querySelector(".tree-name")).color;
-        const plain = getComputedStyle(row("src/deep").querySelector(".tree-name")).color;
-        const back = luminance(rgb(ground(row("src/main.rs"))));
+        // A row the tree never reached reads as no colour at all, so a
+        // window without the feature fails these checks rather than throwing.
+        const ink = (relative) => {
+          const name = row(relative)?.querySelector(".tree-name");
+          return name ? getComputedStyle(name).color : "";
+        };
+        const read = ink("src/lib.rs");
+        const write = ink("src/main.rs");
+        const plain = ink("src/deep");
+        const back = luminance(rgb(ground(row("src/main.rs") ?? fileTree)));
         const ratio = (colour) => {
           const pair = [luminance(rgb(colour)), back].sort((a, b) => b - a);
           return (pair[0] + .05) / (pair[1] + .05);
@@ -293,7 +299,10 @@ export async function testExplorerGit(browser, origin, ok) {
       window.__ANSWER__.scm_status = () => ({ changed: status, ignored: [] });
       window.__ANSWER__.upstream_status = () => ({ upstream: "origin/main", ahead: 2, behind: 1, behind_commits_are_patch_equivalent: null });
       setActivityItem("files");
-      await refreshScm();
+      // The moment the tree asks git: the agents' settled beat and the window
+      // coming back both land here (the panel's own refresh is the other).
+      refreshScmIfShowing();
+      await new Promise((done) => setTimeout(done, 80));
       await loadTree(fileTree, "");
       await row("src")._treeUnfold(true);
       await row("src/deep")._treeUnfold(true);

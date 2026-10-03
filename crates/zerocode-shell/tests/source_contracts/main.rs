@@ -7135,10 +7135,17 @@ mod tests {
              that mean something:\n{letter}"
         );
 
+        // Built rows and rows re-dressed by a fresh answer share one painter
+        // (t-24298), and the letter is its.
         let tree = block_after(window, "async function loadTree(container, path) {");
         assert!(
-            tree.contains("badgeLetter(code)"),
-            "the tree still writes the raw code into the badge:\n{tree}"
+            tree.contains("paintTreeBadge(row, relative, entry.is_dir, code);"),
+            "a built row no longer goes through the tree's one badge painter:\n{tree}"
+        );
+        let painting = block_after(window, "function paintTreeBadge(");
+        assert!(
+            painting.contains("badgeLetter(code)"),
+            "the tree still writes the raw code into the badge:\n{painting}"
         );
     }
 
@@ -10652,11 +10659,23 @@ mod tests {
             "the source-control re-read is no longer settled, so a working \
              agent runs `git status` continuously:\n{noting}"
         );
+        // Two surfaces wear the one `scm_status` answer — the panel's list and
+        // the file tree's badges, numbers and head (t-24298) — so the re-read
+        // runs while either is on screen, and never while neither is.
         let showing = block_after(window, "function refreshScmIfShowing() {");
         assert!(
-            showing.contains("if (el(\"activity-scm\").hidden) return;")
+            showing.contains("if (el(\"activity-scm\").hidden && !fileTreeShowing()) return;")
                 && showing.contains("refreshScm()"),
-            "source control is re-read for a panel nobody is looking at:\n{showing}"
+            "source control is re-read while neither its panel nor the file \
+             tree that wears the same answer is on screen:\n{showing}"
+        );
+        let tree_showing = block_after(window, "function fileTreeShowing() {");
+        assert!(
+            tree_showing.contains("!el(\"activity-files\").hidden")
+                && tree_showing.contains("!folded.aside")
+                && tree_showing.contains("!fileTree.hidden"),
+            "the file tree counts as looked at while its panel is down, its \
+             column folded or a search list stands in its place:\n{tree_showing}"
         );
         // The guard has to be asked when the work would run, not when it was
         // scheduled — the panel can close inside the settle.

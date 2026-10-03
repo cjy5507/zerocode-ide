@@ -509,7 +509,169 @@ function followTreeTo(relative) {
   })();
 }
 
-/* What `loadTree` calls once it has built a folder's rows. */
-function dressTreeRows() {
+/* ---- git on the tree's rows (t-24298) ----
+ *
+ * The mod prints a changed file's exact lines (+N -N), counts each kind of
+ * change on a folder, and puts the branch with its upstream and ahead/behind
+ * at the top. Every number here is one `scm_status` and `upstream_status`
+ * already answer for the source-control panel — numstat rides the status —
+ * so the tree asks git for nothing of its own. */
+
+/* A folder's roll-up, strongest first: what a folder says when it holds more
+ * than one kind of change. A conflict stops work; a deletion loses work; a
+ * modification and an addition are work in progress; an untracked file is
+ * not yet anyone's business. The letters are the explorer's own (`U` is
+ * Orca's untracked) with git clients' `!` for a conflict, so a chip and a
+ * file row never use one letter for two things. A rename counts as the
+ * modification it is, a copy as the addition. */
+const TREE_GIT_ROLLUP = Object.freeze([
+  Object.freeze({ kind: "conflict", letter: "!" }),
+  Object.freeze({ kind: "deleted", letter: "D" }),
+  Object.freeze({ kind: "modified", letter: "M" }),
+  Object.freeze({ kind: "added", letter: "A" }),
+  Object.freeze({ kind: "untracked", letter: "U" }),
+]);
+const TREE_GIT_FOLD = Object.freeze({ renamed: "modified", copied: "added" });
+
+/* The last answer, indexed once per answer rather than once per row: the
+ * entry behind each changed file, and the counts beneath each folder. */
+let treeGit = { files: new Map(), folders: new Map() };
+
+function treeGitKind(entry) {
+  if (entry.conflict) return "conflict";
+  const decoration = gitDecorationOf(entry.code);
+  return TREE_GIT_FOLD[decoration] ?? decoration;
+}
+
+function indexTreeGit() {
+  const files = new Map();
+  const folders = new Map();
+  for (const entry of scmEntries) {
+    // git names an untracked folder once, with its slash; the row is the
+    // folder's own, so the slash goes.
+    const path = entry.path.replace(/\/+$/, "");
+    files.set(path, entry);
+    const kind = treeGitKind(entry);
+    if (!kind) continue;
+    const parts = path.split("/");
+    for (let depth = 1; depth <= parts.length; depth += 1) {
+      const folder = parts.slice(0, depth).join("/");
+      if (depth === parts.length && !entry.path.endsWith("/")) break;
+      const counts = folders.get(folder) ?? {};
+      counts[kind] = (counts[kind] ?? 0) + 1;
+      folders.set(folder, counts);
+    }
+  }
+  treeGit = { files, folders };
+}
+
+function treeGitWord(kind) {
+  switch (kind) {
+    case "conflict":
+      return t("tree.git.conflict", "충돌");
+    case "deleted":
+      return t("tree.git.deleted", "삭제됨");
+    case "modified":
+      return t("tree.git.modified", "수정됨");
+    case "added":
+      return t("tree.git.added", "추가됨");
+    case "untracked":
+      return t("tree.git.untracked", "추적 안 됨");
+    default:
+      return "";
+  }
+}
+
+/* The part of a row's git face the badge letter does not say: a file's +N -N
+ * (the source-control row's own builder, `paintScmTally`), a conflict's
+ * colour, and a folder's counts of each kind beneath it in the roll-up's
+ * order, the folder wearing the strongest. */
+function dressTreeGit(row, relative, isDir, ignored) {
+  const badge = row.querySelector(".badge");
+  const tally = row.querySelector(".tree-tally");
+  tally?.replaceChildren();
+  if (ignored) return;
+  if (!isDir) {
+    const entry = treeGit.files.get(relative);
+    if (!entry) return;
+    if (tally) paintScmTally(tally, entry);
+    if (entry.conflict) badge.dataset.git = "conflict";
+    return;
+  }
+  const counts = treeGit.folders.get(relative);
+  if (!counts) return;
+  badge.replaceChildren();
+  const said = [];
+  for (const { kind, letter } of TREE_GIT_ROLLUP) {
+    if (!counts[kind]) continue;
+    const chip = document.createElement("span");
+    chip.className = "tree-count git-ink";
+    chip.dataset.git = kind;
+    chip.textContent = `${letter}${counts[kind]}`;
+    badge.appendChild(chip);
+    said.push(`${treeGitWord(kind)} ${counts[kind]}`);
+  }
+  badge.dataset.git = TREE_GIT_ROLLUP.find(({ kind }) => counts[kind])?.kind ?? "";
+  badge.dataset.tip = said.join(" · ");
+}
+
+/* A fresh answer, worn by every row on screen — written in place, one pass,
+ * no listing (`refreshScm` calls this as soon as `vcsCodes` moves). */
+function paintTreeGit() {
+  indexTreeGit();
+  for (const row of fileTree.querySelectorAll(".tree-row[data-tree-path]")) {
+    paintTreeBadge(row, row.dataset.treePath, row.classList.contains("is-dir"));
+  }
+}
+
+/* The last standing each checkout's head was told, by checkout: an answer
+ * asked for one workspace is never drawn over another, and coming back to a
+ * workspace shows what was last known there at once instead of asking git
+ * on the switch. Bounded by the checkouts this window can hold. */
+const treeHeadStanding = new Map();
+const TREE_HEAD_KEEP = 64;
+
+/* The head: the branch, the upstream it tracks, and how far ahead and
+ * behind. `askUpstream` hands it each answer with the checkout it was asked
+ * for; a workspace's first listing paints its branch (the catalog's) before
+ * git has said anything. A folder that is not a repository has no branch,
+ * and the head keeps only its switches. */
+function paintTreeHead(asked = null) {
+  if (asked !== null) {
+    treeHeadStanding.delete(asked);
+    treeHeadStanding.set(asked, upstreamState);
+    while (treeHeadStanding.size > TREE_HEAD_KEEP) treeHeadStanding.delete(treeHeadStanding.keys().next().value);
+  }
+  const host = el("tree-head-branch");
+  const branch = worktreeAt(activeWorktreePath)?.branch ?? null;
+  host.replaceChildren();
+  host.hidden = !branch;
+  if (!branch) return;
+  const standing = treeHeadStanding.get(activeWorktreePath) ?? null;
+  const part = (className, text) => {
+    const span = document.createElement("span");
+    span.className = className;
+    span.textContent = text;
+    host.appendChild(span);
+  };
+  host.insertAdjacentHTML("beforeend", icon("branch"));
+  part("tree-head-name", branch);
+  if (standing?.upstream) {
+    part("tree-head-upstream", `→ ${standing.upstream}`);
+    if (standing.ahead > 0) part("tree-head-ahead", `↑${standing.ahead}`);
+    if (standing.behind > 0) part("tree-head-behind", `↓${standing.behind}`);
+  }
+  host.dataset.tip = standing?.upstream
+    ? t("tree.headTip", "{{branch}} — {{upstream}}보다 {{ahead}}개 앞서고 {{behind}}개 뒤져 있습니다", {
+      branch, upstream: standing.upstream, ahead: standing.ahead, behind: standing.behind,
+    })
+    : branch;
+}
+
+/* What `loadTree` calls once it has built a folder's rows: they wear what the
+ * tree already knows — the agents' marks — and a fresh root wears its
+ * branch at once. */
+function dressTreeRows(container) {
+  if (container === fileTree) paintTreeHead();
   if (treeTouches.size > 0) scheduleTreeTouchPaint();
 }

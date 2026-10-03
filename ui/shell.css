@@ -43642,6 +43642,30 @@ button.jev-token:hover {
 .tree-head-button .icon { width: 14px; height: 14px; }
 .tree-head-button:hover { background: var(--row-hover); color: var(--ink-chalk); }
 .tree-head-button.is-active { color: var(--nav-plane-ring); }
+.tree-head-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.tree-head-branch[hidden] { display: none; }
+.tree-head-branch .icon { width: 12px; height: 12px; flex: none; }
+.tree-head-name { color: var(--ink-chalk); overflow: hidden; text-overflow: ellipsis; }
+.tree-head-upstream { overflow: hidden; text-overflow: ellipsis; }
+.tree-head-ahead,
+.tree-head-behind { flex: none; font-variant-numeric: tabular-nums; color: var(--ink-chalk); }
+
+/* A changed file's +N -N sits between its name and its letter, in the
+ * source-control row's own tally (`.scm-tally`, `paintScmTally`); the empty
+ * slot keeps the letter at the row's edge. A folder's badge is its counts,
+ * each chip in its kind's decoration (`.git-ink`). */
+.tree-row .tree-tally { margin-left: auto; }
+.tree-row .tree-tally + .badge { margin-left: var(--space-1); }
+.tree-row .badge .tree-count + .tree-count { margin-left: 3px; }
+.badge[data-git="conflict"],
+.git-ink[data-git="conflict"] { color: var(--git-decoration-conflict); }
 
 /* A lit row: the name in the kind's colour and a bar at the row's edge. The
  * bar is what fades — slower than a hover (`--tree-touch-fade`), so the eye

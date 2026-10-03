@@ -16633,7 +16633,10 @@ ok(
 const scmFollows = await page.evaluate(async () => {
   const seen = {};
   const ran = () => window.__COUNTS__.scm_status ?? 0;
-  // 판이 닫혀 있으면 한 번도 돌지 않는다.
+  // 판이 닫혀 있으면 한 번도 돌지 않는다. 파일 트리도 같은 답을 입으므로
+  // (t-24298) "아무도 안 본다"는 트리까지 닫혀 있다는 뜻이다.
+  const filesWere = el("activity-files").hidden;
+  el("activity-files").hidden = true;
   el("activity-scm").hidden = true;
   const closed = ran();
   noteScmMayHaveChanged();
@@ -16672,6 +16675,7 @@ const scmFollows = await page.evaluate(async () => {
   // 그리고 에이전트 소식이 실제로 이 문을 지난다.
   seen.beatCarriesIt = String(noteAgentsStirred).includes("noteScmMayHaveChanged");
   el("activity-scm").hidden = true;
+  el("activity-files").hidden = filesWere;
   return seen;
 });
 ok(
