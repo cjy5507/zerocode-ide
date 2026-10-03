@@ -2,36 +2,64 @@
 //! summary its own worker handed in, linted once and remembered, so a beat
 //! that moved nothing works out nothing.
 //!
-//! The rule is the core's ([`zerocode_core::plain_text::lint`]): a pure
-//! function of the text that counts and never refuses. This is where the
-//! counts are held. Nothing is stored in the ledger — the summary is already
-//! there, and a count worked out from it again is the same count.
-//!
-//! This is the red skeleton: the memo is held and nothing is dressed yet.
+//! This is the red skeleton: the book is held and dresses nothing yet.
 
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
 use zerocode_core::orchestration::Ledger;
 use zerocode_core::plain_text::LintMemo;
 
-use super::desk::DeskSnapshot;
+use super::LedgerAgent;
+use super::desk::{self, DeskSnapshot};
 
-static BOOK: LazyLock<Mutex<LintMemo>> = LazyLock::new(Mutex::default);
-
-/// The desk, with the lint of the summary on each finished row whose worker
-/// wrote one.
-pub(crate) fn dressed(ledger: &Ledger, mut desk: DeskSnapshot) -> DeskSnapshot {
-    let mut memo = BOOK.lock().unwrap_or_else(PoisonError::into_inner);
-    dress_with(&mut memo, ledger, &mut desk);
-    desk
+/// What the writing lint counted in each finished task's summary.
+#[derive(Debug, Default)]
+pub(crate) struct WritingBook {
+    memo: LintMemo,
 }
 
-fn dress_with(_memo: &mut LintMemo, _ledger: &Ledger, _desk: &mut DeskSnapshot) {}
+static BOOK: LazyLock<Mutex<WritingBook>> = LazyLock::new(Mutex::default);
+
+/// The window's one book, for the board's beat.
+pub(crate) fn book() -> MutexGuard<'static, WritingBook> {
+    BOOK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl WritingBook {
+    /// Opens a beat.
+    pub(crate) fn begin(&mut self) {
+        self.memo.begin();
+    }
+
+    /// Lets go of every lint this beat did not ask for.
+    pub(crate) fn end(&mut self) {
+        self.memo.end();
+    }
+
+    /// The desk, with the lint of the summary on each finished row.
+    pub(crate) fn dress_desk(&mut self, ledger: &Ledger, mut desk: DeskSnapshot) -> DeskSnapshot {
+        dress_desk_with(&mut self.memo, ledger, &mut desk);
+        desk
+    }
+
+    /// The worker rows, each carrying its finished task's lint.
+    pub(crate) fn dress_agents(
+        &mut self,
+        ledger: &Ledger,
+        mut agents: Vec<LedgerAgent>,
+    ) -> Vec<LedgerAgent> {
+        dress_agents_with(&mut self.memo, ledger, &mut agents);
+        agents
+    }
+}
+
+fn dress_desk_with(_memo: &mut LintMemo, _ledger: &Ledger, _desk: &mut DeskSnapshot) {}
+
+fn dress_agents_with(_memo: &mut LintMemo, _ledger: &Ledger, _agents: &mut [LedgerAgent]) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestration::desk;
     use zerocode_core::orchestration::task_cost::TaskCost;
     use zerocode_core::orchestration::{ResultAuthor, TaskStatus};
 
@@ -52,8 +80,8 @@ mod tests {
     }
 
     /// A run somebody is still at, with one completed task whose result
-    /// `author` wrote.
-    fn a_finished_task(result: &str, author: ResultAuthor) -> (Ledger, String) {
+    /// `author` wrote: the ledger, the run's id and the task's id.
+    fn a_finished_task(result: &str, author: ResultAuthor) -> (Ledger, String, String) {
         let mut ledger = Ledger::new();
         let run = ledger.create_run("writing", 1);
         ledger
@@ -72,14 +100,23 @@ mod tests {
                 10,
             )
             .expect("done");
-        (ledger, id)
+        (ledger, run, id)
     }
 
     fn desk_of(ledger: &Ledger) -> DeskSnapshot {
         desk::desk_snapshot(ledger, |_| false, |_, _| TaskCost::default())
     }
 
-    /// What the row of `id` wears, as (sentences, words, patterns).
+    /// A worker row of `run` carrying `task`, as the board lists it.
+    fn agent_of(run: &str, task: &str) -> LedgerAgent {
+        LedgerAgent {
+            run: run.to_string(),
+            task_id: task.to_string(),
+            ..LedgerAgent::default()
+        }
+    }
+
+    /// What the desk row of `id` wears, as (sentences, words, patterns).
     fn worn(desk: &DeskSnapshot, id: &str) -> Option<(u32, u32, u32)> {
         desk.tasks
             .iter()
@@ -88,17 +125,24 @@ mod tests {
             .map(|found| (found.sentences, found.words, found.patterns))
     }
 
+    /// One beat over the desk: open it, dress, close it.
+    fn beat(memo: &mut LintMemo, ledger: &Ledger) -> DeskSnapshot {
+        memo.begin();
+        let mut desk = desk_of(ledger);
+        dress_desk_with(memo, ledger, &mut desk);
+        memo.end();
+        desk
+    }
+
     #[test]
     fn a_finished_task_wears_the_lint_of_its_workers_summary_and_it_is_worked_out_once() {
-        let (ledger, id) = a_finished_task(&body(SUMMARY), worker());
+        let (ledger, _, id) = a_finished_task(&body(SUMMARY), worker());
         let mut memo = LintMemo::default();
-        for beat in 0..3 {
-            let mut desk = desk_of(&ledger);
-            dress_with(&mut memo, &ledger, &mut desk);
+        for at in 0..3 {
             assert_eq!(
-                worn(&desk, &id),
+                worn(&beat(&mut memo, &ledger), &id),
                 Some((1, 2, 1)),
-                "beat {beat}: the finished row did not wear its summary's lint"
+                "beat {at}: the finished row did not wear its summary's lint"
             );
         }
         assert_eq!(
@@ -110,8 +154,12 @@ mod tests {
 
     #[test]
     fn the_lint_rides_the_row_as_the_window_reads_it() {
-        let (ledger, id) = a_finished_task(&body(SUMMARY), worker());
-        let desk = dressed(&ledger, desk_of(&ledger));
+        let (ledger, run, id) = a_finished_task(&body(SUMMARY), worker());
+        let mut book = WritingBook::default();
+        book.begin();
+        let desk = book.dress_desk(&ledger, desk_of(&ledger));
+        let agents = book.dress_agents(&ledger, vec![agent_of(&run, &id)]);
+        book.end();
         let said = serde_json::to_value(&desk).expect("the desk serializes");
         let row = said["tasks"]
             .as_array()
@@ -123,6 +171,41 @@ mod tests {
         assert_eq!(row["writing"]["patterns"], 1, "{row}");
         assert_eq!(row["writing"]["hits"][0]["find"], "Jev 자리", "{row}");
         assert_eq!(row["writing"]["hits"][0]["plain"], "Jev 기능", "{row}");
+        let agent = serde_json::to_value(&agents[0]).expect("the worker row serializes");
+        assert_eq!(agent["writing"]["words"], 2, "{agent}");
+    }
+
+    /// The task board's worker row and the desk's row ask by the same task, so
+    /// one lint serves both; a row whose task is still moving wears nothing.
+    #[test]
+    fn a_finished_worker_row_wears_the_lint_the_desk_row_wears_and_a_moving_one_none() {
+        let (mut ledger, run, id) = a_finished_task(&body(SUMMARY), worker());
+        let moving = ledger
+            .create_task(&run, "y".into(), "u".into(), vec![], None, 101)
+            .expect("a second task");
+        ledger
+            .update_task(&run, &moving, None, Some(body(SUMMARY)), worker(), 11)
+            .expect("a result with no ending");
+        let mut memo = LintMemo::default();
+        memo.begin();
+        let mut desk = desk_of(&ledger);
+        dress_desk_with(&mut memo, &ledger, &mut desk);
+        let mut agents = vec![agent_of(&run, &id), agent_of(&run, &moving)];
+        dress_agents_with(&mut memo, &ledger, &mut agents);
+        memo.end();
+        let counts = |row: &LedgerAgent| {
+            row.writing
+                .as_ref()
+                .map(|found| (found.sentences, found.words, found.patterns))
+        };
+        assert_eq!(worn(&desk, &id), Some((1, 2, 1)));
+        assert_eq!(counts(&agents[0]), Some((1, 2, 1)), "the finished row");
+        assert_eq!(counts(&agents[1]), None, "a task still moving wore a lint");
+        assert_eq!(
+            memo.worked(),
+            1,
+            "the desk and the task board each worked the same summary out"
+        );
     }
 
     /// Only what the worker wrote, only for a task that is finished.
@@ -137,19 +220,15 @@ mod tests {
         };
         let mut memo = LintMemo::default();
         // The one summary that is read: a worker's own, on a finished task.
-        let (ledger, id) = a_finished_task(&body(SUMMARY), worker());
-        let mut desk = desk_of(&ledger);
-        dress_with(&mut memo, &ledger, &mut desk);
+        let (ledger, _, id) = a_finished_task(&body(SUMMARY), worker());
         assert_eq!(
-            worn(&desk, &id),
+            worn(&beat(&mut memo, &ledger), &id),
             Some((1, 2, 1)),
             "the one summary that is read was not"
         );
         let mut check = |what: &str, result: &str, author: ResultAuthor| {
-            let (ledger, id) = a_finished_task(result, author);
-            let mut desk = desk_of(&ledger);
-            dress_with(&mut memo, &ledger, &mut desk);
-            assert_eq!(worn(&desk, &id), None, "{what}");
+            let (ledger, _, id) = a_finished_task(result, author);
+            assert_eq!(worn(&beat(&mut memo, &ledger), &id), None, "{what}");
         };
         check(
             "a coordinator's result is not the worker's writing",
@@ -175,10 +254,8 @@ mod tests {
         ledger
             .update_task(&run, &id, None, Some(body(SUMMARY)), worker(), 10)
             .expect("a result with no ending");
-        let mut desk = desk_of(&ledger);
-        dress_with(&mut memo, &ledger, &mut desk);
         assert_eq!(
-            worn(&desk, &id),
+            worn(&beat(&mut memo, &ledger), &id),
             None,
             "a task that is not finished wore a lint"
         );
@@ -188,24 +265,154 @@ mod tests {
     /// in a beat is let go.
     #[test]
     fn a_lint_nobody_asked_for_in_a_beat_is_let_go() {
-        let (ledger, id) = a_finished_task(&body(SUMMARY), worker());
+        let (ledger, _, id) = a_finished_task(&body(SUMMARY), worker());
         let mut memo = LintMemo::default();
-        let mut desk = desk_of(&ledger);
-        dress_with(&mut memo, &ledger, &mut desk);
-        assert_eq!(worn(&desk, &id), Some((1, 2, 1)));
+        assert_eq!(worn(&beat(&mut memo, &ledger), &id), Some((1, 2, 1)));
         assert_eq!(memo.len(), 1);
         // The task is gone from the next beat's desk: nothing asks for it.
-        let mut empty = DeskSnapshot::default();
-        dress_with(&mut memo, &Ledger::new(), &mut empty);
+        memo.begin();
+        dress_desk_with(&mut memo, &Ledger::new(), &mut DeskSnapshot::default());
+        memo.end();
         assert_eq!(memo.len(), 0, "a lint nobody asked for stayed in the book");
 
-        let (plain, plain_id) = a_finished_task(&body("1234 5678"), worker());
-        let mut desk = desk_of(&plain);
-        dress_with(&mut memo, &plain, &mut desk);
+        let (plain, _, plain_id) = a_finished_task(&body("1234 5678"), worker());
         assert_eq!(
-            worn(&desk, &plain_id),
+            worn(&beat(&mut memo, &plain), &plain_id),
             None,
             "a text with no words wore a lint"
         );
+    }
+
+    /// A ledger of finished tasks the desk carries only part of: the book holds
+    /// the rows the desk sends — a stage's cap — and no more, however many beats
+    /// ask and however the tasks churn.
+    #[test]
+    fn the_book_holds_only_the_rows_the_desk_sends_over_a_long_run() {
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("writing", 1);
+        ledger
+            .start_worker(&run, "claude", ("team-writing", "%2"), None, 2)
+            .expect("somebody is at the run");
+        let finished = desk::STAGE_ROWS + 16;
+        for at in 0..finished {
+            let id = ledger
+                .create_task(
+                    &run,
+                    "x".into(),
+                    format!("t{at}"),
+                    vec![],
+                    None,
+                    100 + at as i64,
+                )
+                .expect("a task");
+            ledger
+                .update_task(
+                    &run,
+                    &id,
+                    Some(TaskStatus::Completed),
+                    Some(body(&format!("{SUMMARY} 번호 {at}."))),
+                    worker(),
+                    10,
+                )
+                .expect("done");
+        }
+        let mut memo = LintMemo::default();
+        for _ in 0..200 {
+            beat(&mut memo, &ledger);
+            assert!(
+                memo.len() <= desk::STAGE_ROWS,
+                "the book grew past the rows the desk sends: {}",
+                memo.len()
+            );
+        }
+        assert_eq!(memo.len(), desk::STAGE_ROWS);
+        assert_eq!(
+            memo.worked(),
+            desk::STAGE_ROWS,
+            "two hundred beats over the same summaries worked something out twice"
+        );
+    }
+
+    /// The cost of a beat that asks about a full stage of finished rows, cold
+    /// (every summary worked out) and warm (every summary remembered), and the
+    /// resident memory around two thousand beats. A measurement, run on purpose:
+    /// `cargo test -p zerocode-shell --bin zerocode-shell writing_book::tests::the_cost
+    /// -- --ignored --nocapture`, on the normal profile and under `taskpolicy -b`.
+    #[test]
+    #[ignore = "a measurement, run on purpose"]
+    fn the_cost_of_a_beat_over_a_full_stage_of_finished_rows() {
+        const BEATS: usize = 2_000;
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("writing", 1);
+        ledger
+            .start_worker(&run, "claude", ("team-writing", "%2"), None, 2)
+            .expect("somebody is at the run");
+        // A summary of about 600 bytes: what a worker writes when it is asked to be short.
+        let summary = SUMMARY.repeat(3);
+        for at in 0..desk::STAGE_ROWS {
+            let id = ledger
+                .create_task(
+                    &run,
+                    "x".into(),
+                    format!("t{at}"),
+                    vec![],
+                    None,
+                    100 + at as i64,
+                )
+                .expect("a task");
+            ledger
+                .update_task(
+                    &run,
+                    &id,
+                    Some(TaskStatus::Completed),
+                    Some(body(&format!("{summary} 번호 {at}."))),
+                    worker(),
+                    10,
+                )
+                .expect("done");
+        }
+        let micros = |from: std::time::Instant| from.elapsed().as_micros();
+        let started = std::time::Instant::now();
+        for _ in 0..BEATS {
+            std::hint::black_box(desk_of(&ledger));
+        }
+        let bare_us = micros(started) / BEATS as u128;
+        let bare = desk_of(&ledger);
+        let mut memo = LintMemo::default();
+        let started = std::time::Instant::now();
+        memo.begin();
+        let mut cold = bare.clone();
+        dress_desk_with(&mut memo, &ledger, &mut cold);
+        memo.end();
+        let cold_us = micros(started);
+        let rss_before = resident_kb();
+        let started = std::time::Instant::now();
+        for _ in 0..BEATS {
+            memo.begin();
+            let mut desk = std::hint::black_box(bare.clone());
+            dress_desk_with(&mut memo, &ledger, &mut desk);
+            memo.end();
+        }
+        let warm_us = micros(started) / BEATS as u128;
+        let rss_after = resident_kb();
+        assert_eq!(memo.worked(), desk::STAGE_ROWS);
+        eprintln!(
+            "WRITING_BOOK_NUMBERS rows={} summary_bytes={} beats={BEATS} desk_snapshot_us={bare_us} cold_dress_us={cold_us} warm_beat_us={warm_us} rss_kb_before={rss_before} rss_kb_after={rss_after} held={}",
+            desk::STAGE_ROWS,
+            summary.len(),
+            memo.len()
+        );
+    }
+
+    /// This process's resident memory in KB, from `ps` — a measurement helper,
+    /// never part of the shipped code.
+    fn resident_kb() -> u64 {
+        std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|text| text.trim().parse().ok())
+            .unwrap_or(0)
     }
 }

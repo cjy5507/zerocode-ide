@@ -957,6 +957,13 @@ pub fn worker_summary(_result: &str, _author: Option<&ResultAuthor>) -> Option<S
     None
 }
 
+/// The words the carrying worker handed in for a person to read, red skeleton:
+/// found nowhere yet.
+#[must_use]
+pub fn worker_summary_in(_run: &Run, _task: &Task) -> Option<String> {
+    None
+}
+
 /// The `--attempt` word for "this task has no attempt": a correction of work
 /// nobody was dispatched on still names what it looked at, and the word is
 /// refused the moment an attempt exists.

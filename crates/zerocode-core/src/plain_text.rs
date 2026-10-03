@@ -9,6 +9,8 @@
 //! This is the red skeleton of t-32786: the types, the limits and the entry
 //! points the tests name, with no counting behind them yet.
 
+use std::hash::Hash;
+
 use serde::Serialize;
 
 /// The rule table. The skeleton carries none; the table arrives with the lint.
@@ -110,9 +112,21 @@ impl LintMemo {
     /// Open a beat.
     pub fn begin(&mut self) {}
 
+    /// The lint of the text `text_of` reads, remembered while `stamp` stays the same.
+    pub fn lint_in<S: Hash + ?Sized>(
+        &mut self,
+        _scope: &str,
+        _id: &str,
+        _stamp: &S,
+        text_of: impl FnOnce() -> Option<String>,
+    ) -> Option<TextLint> {
+        text_of().map(|text| lint(&text))
+    }
+
     /// The lint of `text`, which belongs to `id` in `scope`.
-    pub fn lint_of(&mut self, _scope: &str, _id: &str, text: &str) -> TextLint {
-        lint(text)
+    pub fn lint_of(&mut self, scope: &str, id: &str, text: &str) -> TextLint {
+        self.lint_in(scope, id, text, || Some(text.to_string()))
+            .unwrap_or_default()
     }
 
     /// Close the beat.

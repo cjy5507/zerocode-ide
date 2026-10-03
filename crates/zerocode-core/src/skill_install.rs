@@ -608,20 +608,18 @@ mod tests {
                 .and_then(|(_, rest)| rest.split_once(&end))
                 .map_or("", |(block, _)| block);
             // The first two lines of the block are the header and its rule.
-            let listed: String = block
-                .lines()
-                .skip(2)
-                .map(|line| format!("{line}\n"))
-                .collect();
-            let rendered: String = rules()
+            let listed: Vec<&str> = block.lines().skip(2).collect();
+            let rendered: Vec<String> = rules()
                 .iter()
                 .filter(|rule| rule.language == language)
-                .map(|rule| format!("| {} | {} |\n", rule.shown, rule.plain))
+                .map(|rule| format!("| {} | {} |", rule.shown, rule.plain))
                 .collect();
             assert!(!rendered.is_empty(), "the table has no {code} rows");
             assert_eq!(
-                listed, rendered,
-                "the {code} list of the skill drifted from the table"
+                listed,
+                rendered,
+                "the {code} list of the skill drifted from the table; its rows should read:\n{}",
+                rendered.join("\n")
             );
         }
         assert!(

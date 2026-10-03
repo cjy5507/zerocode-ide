@@ -52,6 +52,10 @@ export function taskBoardFixture() {
         cacheReadTokens: 1_100_000, cacheWriteTokens: 100_000, usd: 4.2, usdReason: null },
       jev: { requests: 7, stampedSeats: 4, unstampedSeats: 23, inputTokens: null },
     },
+    /* What the writing lint counted in the summary its worker handed in (t-32786), laid on by the same beat. */
+    writing: { lang: "ko", sentences: 6, avg_len: 61, longest: 77, limit: 60, long_sentences: 4, words: 10, patterns: 13,
+      hits: [{ kind: "word", find: "박자", plain: "주기", count: 2 },
+        { kind: "pattern", find: "~하는 것이다", plain: "서술어로 바로 끝낸다 (~한다)", count: 2 }], cut: false },
   }];
   paneActivities.set("term:102", [{ at: now - 30_000, activity: { verb: "edit", target: "db/queries.sql", phase: "started" } }]);
   paneActivities.set("term:103", [{ at: now - 15_000, activity: { verb: "bash", target: "npm run test:window", phase: "started" } }]);
@@ -192,6 +196,49 @@ export async function testTaskBoard(browser, origin, ok) {
     ok("a quiet repaint leaves the cost line alone, and a cost that moved rewrites it",
       costWrites.quiet === 0 && costWrites.moved > 0 &&
       costWrites.text.includes("$— 끝난 뒤 읽은 사용량 스캔 없음 — 통계에서 읽으면 채워짐"), JSON.stringify(costWrites));
+
+    /* ---- 글 점검 (t-32786): 끝난 과업의 카드에 한 줄 — 비용 줄과 같은 길, 거절 없이 ---- */
+    const readWriting = () => page.evaluate(() => [...document.querySelectorAll("#board-view .task-board-row")].map((row) => {
+      const line = row.querySelector(".task-board-writing");
+      return { title: row.querySelector(".task-board-title").textContent,
+        text: line && !line.hidden ? line.textContent : "", tip: line?.dataset.tip ?? "" };
+    }));
+    const writings = await readWriting();
+    const finishedWriting = writings.find((row) => row.title === "관리자 화면 구현");
+    ok("a finished task's card says what the writing lint counted in its worker's summary, from the worker row the board's beat laid it on — and a task still moving carries none",
+      finishedWriting?.text === "글 점검 · 문장 평균 61자 · 긴 문장 4 · 바꿀 말 10 · 직역투 13" &&
+      finishedWriting.tip.includes("6문장") && finishedWriting.tip.includes("‘박자’ → 주기 ×2") &&
+      writings.filter((row) => row.title !== "관리자 화면 구현").every((row) => row.text === "" && row.tip === ""),
+      JSON.stringify(writings));
+    const writingWrites = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const where = (record) => (record.target.nodeType === 1 ? record.target : record.target.parentElement);
+      const seen = [];
+      const watch = new MutationObserver((batch) => seen.push(...batch));
+      const settled = async () => {
+        while (ledgerAgentsPending) await ledgerAgentsPending.catch(() => {});
+        await paintBoardView();
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        seen.push(...watch.takeRecords());
+        const onLine = seen.filter((record) => where(record)?.classList?.contains("task-board-writing")).length;
+        seen.length = 0;
+        return onLine;
+      };
+      await settled();
+      watch.observe(view, { subtree: true, childList: true, attributes: true, characterData: true });
+      const quiet = await settled();
+      const row = window.__LEDGER__[0];
+      window.__LEDGER__ = [{ ...row, writing: { ...row.writing, words: row.writing.words + 5 } }];
+      const moved = await settled();
+      watch.disconnect();
+      const text = view.querySelector(".task-board-row .task-board-writing:not([hidden])")?.textContent ?? "";
+      window.__LEDGER__ = [row];
+      await settled();
+      return { quiet, moved, text };
+    });
+    ok("a quiet repaint leaves the writing line alone, and a count that moved rewrites it",
+      writingWrites.quiet === 0 && writingWrites.moved > 0 && writingWrites.text.includes("바꿀 말 15"),
+      JSON.stringify(writingWrites));
 
     await page.click('[data-task-filter="attention"]');
     ok("attention filter shows the actionable task", await page.locator(".task-board-row").count() === 1);

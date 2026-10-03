@@ -21,6 +21,10 @@ fn the_table_loads_every_row_and_each_row_names_what_to_write_instead() {
     );
     for rule in rules() {
         assert!(!rule.finds.is_empty(), "{rule:?} names no spelling");
+        assert!(
+            rule.finds.iter().all(|find| !find.trim().is_empty()),
+            "{rule:?} names an empty spelling, which would match everywhere"
+        );
         assert!(!rule.shown.trim().is_empty(), "{rule:?} has no name");
         assert!(
             !rule.plain.trim().is_empty(),
@@ -30,16 +34,17 @@ fn the_table_loads_every_row_and_each_row_names_what_to_write_instead() {
         for find in &rule.finds {
             assert_eq!(find, &find.to_lowercase(), "{rule:?} was not lower-cased");
         }
-        // Two spellings of one row where the first begins the second would count
-        // one place twice. A whole English word is safe: its right edge is
-        // checked, so `utilize` does not stand inside `utilizes`.
+        // Two spellings of one row where the first stands inside the second would
+        // count one place twice (`로 인해` stands inside `으로 인해`). A whole
+        // English word is safe: its edges are checked, so `utilize` does not
+        // stand inside `utilizes`.
         let whole_english = rule.language == Language::English && rule.mode == Match::Word;
         if !whole_english {
             for one in &rule.finds {
                 for other in &rule.finds {
                     assert!(
-                        one == other || !other.starts_with(one.as_str()),
-                        "{one:?} begins {other:?} in one row, so one place would count twice"
+                        one == other || !other.contains(one.as_str()),
+                        "{one:?} stands inside {other:?} in one row, so one place would count twice"
                     );
                 }
             }
@@ -319,6 +324,38 @@ fn a_lint_is_worked_out_once_until_its_text_changes_and_let_go_of_when_not_asked
         "the lint nobody asked for in the beat was kept"
     );
     assert!(!memo.is_empty());
+}
+
+/// A beat that finds a row's stamp unchanged neither reads its text nor lints it,
+/// and a row with no text is remembered as none: the parse of a worker's report
+/// is paid once, not once a beat.
+#[test]
+fn a_warm_lookup_neither_reads_nor_lints_the_text_again() {
+    let mut memo = LintMemo::default();
+    let mut reads = 0;
+    memo.begin();
+    let first = memo.lint_in("run-1", "t-1", "v1", || {
+        reads += 1;
+        Some(BEFORE_KO.to_string())
+    });
+    let again = memo.lint_in("run-1", "t-1", "v1", || {
+        reads += 1;
+        Some(BEFORE_KO.to_string())
+    });
+    assert_eq!(reads, 1, "a warm lookup read the text again");
+    assert_eq!(first, again);
+    assert_eq!(first.as_ref().map(|found| found.sentences), Some(6));
+    let moved = memo.lint_in("run-1", "t-1", "v2", || {
+        reads += 1;
+        None
+    });
+    assert_eq!(moved, None);
+    memo.lint_in("run-1", "t-1", "v2", || {
+        reads += 1;
+        None
+    });
+    assert_eq!(reads, 2, "a remembered none was asked again");
+    assert_eq!(memo.worked(), 2);
 }
 
 /// The cost of one lint on a report of about 20 KB, for the report to quote.

@@ -85,6 +85,55 @@ fn a_worker_summary_is_the_prose_its_own_report_carries_and_nothing_else() {
     assert_eq!(HANDED_IN_SUMMARY, "summary");
 }
 
+/// A coordinator's `task-update --result` replaces the task's result whole, and
+/// the worker's report goes with it. The summary is still in the run's mail,
+/// and the board reads it from there, so a task keeps its writing count after
+/// its review is written.
+#[test]
+fn a_worker_summary_is_found_in_the_mail_after_a_coordinator_replaced_the_result() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name summaries");
+    let task = bench.json("task-create --spec work");
+    let task_id = task["taskId"].as_str().expect("an id").to_string();
+    let (_, pane) = bench.seat(&format!("worker-start --agent claude --task {task_id}"));
+    let body = serde_json::json!({ "ok": true, "summary": "시험이 통과했다." }).to_string();
+    let planned = bench.at_argv(
+        &pane,
+        vec![
+            "send".into(),
+            "--type".into(),
+            "worker_done".into(),
+            "--body".into(),
+            body,
+        ],
+    );
+    assert_eq!(planned.reply.exit_code, 0, "{:?}", planned.reply);
+    let summary = |bench: &Bench| {
+        let run = &bench.ledger.runs()[0];
+        run.task(&task_id)
+            .and_then(|task| worker_summary_in(run, task))
+    };
+    assert_eq!(
+        summary(&bench).as_deref(),
+        Some("시험이 통과했다."),
+        "the worker's own result"
+    );
+    bench.json(&format!("task-update --task {task_id} --result noted"));
+    let replaced = bench.ledger.runs()[0]
+        .task(&task_id)
+        .map(|task| task.result.as_str().to_string());
+    assert_eq!(
+        replaced.as_deref(),
+        Some("noted"),
+        "the coordinator did not replace the result"
+    );
+    assert_eq!(
+        summary(&bench).as_deref(),
+        Some("시험이 통과했다."),
+        "the report left with the result"
+    );
+}
+
 #[test]
 fn review_facts_read_only_what_a_coordinator_wrote() {
     let nothing = ReviewFacts::from_result("");
