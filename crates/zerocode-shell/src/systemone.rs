@@ -640,7 +640,8 @@ impl Wire {
         door::pass_remembering(
             |asking| {
                 let cleared = door::may_send(row, asking, body)?;
-                if row.mode_in(&root).asks() { Ok(cleared) } else { Err(Refused::Off) }
+                if row.word_in(&root).is_none() || row.mode_in(&root).asks() { Ok(cleared) }
+                else { Err(Refused::Off) }
             },
             key,
             &settings,

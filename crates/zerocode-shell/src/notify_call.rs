@@ -386,7 +386,9 @@ pub(crate) fn call_at_the_bell(app: &AppHandle, bell: &Bell<'_>) -> Call {
         return today;
     };
     let wire = Wire::of_this_machine();
-    let mode = NOTIFY.mode_in(&wire.settings_root());
+    let settings = wire.settings_root();
+    let mode = NOTIFY.mode_in(&settings);
+    let model = zerocode_core::jev::door::JevSettings::from_root(&settings).resolved().model;
     if !mode.asks() {
         return today;
     }
@@ -440,6 +442,7 @@ pub(crate) fn call_at_the_bell(app: &AppHandle, bell: &Bell<'_>) -> Call {
     let thread_handoff = Arc::clone(&handoff);
     let thread_app = app.clone();
     let thread_ledger = ledger.clone();
+    let applying_wire = wire.clone();
     let spawned = std::thread::Builder::new()
         .name("jev-notify-call".to_string())
         .spawn(move || {
@@ -462,7 +465,9 @@ pub(crate) fn call_at_the_bell(app: &AppHandle, bell: &Bell<'_>) -> Call {
         return today;
     };
     let (call, applied) = chosen(
-        true,
+        crate::systemone::applies(&applying_wire, &NOTIFY)
+            && applying_wire.permits_workspace_now(Some(Path::new(bell.worktree)))
+            && zerocode_core::jev::door::JevSettings::from_root(&applying_wire.settings_root()).resolved().model == model,
         waiting.as_ref().map(|one| (one.call, one.confidence)),
         line,
     );
