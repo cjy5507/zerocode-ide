@@ -38,18 +38,19 @@
 pub mod spend;
 
 use std::collections::VecDeque;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
-// `Phase` is the tests' (they reach it through this module); the stub has no use for it.
-#[allow(unused_imports)]
-use crate::hook::{Activity, Phase};
+use crate::hook::{Activity, INPUT_KEYS, Phase, tool_name_in_parsed};
+use crate::payload::HookPayload;
 
-/// Tool calls between two forced checkpoints. Two hundred: a worker on this
-/// machine makes calls at a rate of the order of a thousand an hour — the
-/// activity ring's own comment counts "thousands" — so a checkpoint comes every
-/// few minutes of real work, often enough that a lost pane costs minutes and
-/// seldom enough that the snapshot (a status and a tree write) is noise.
+/// Tool calls between two forced checkpoints. Two hundred: the activity ring's
+/// own comment counts an agent at work in "thousands" of calls an hour, so a
+/// checkpoint comes every few minutes of real work — often enough that a lost
+/// pane costs minutes, seldom enough that the snapshot (a status and a tree
+/// write) is noise. A first estimate, calibrated against the checkpoint counts
+/// the board shows after a week of use.
 pub const CHECKPOINT_EVERY_STEPS: u32 = 200;
 
 /// The shortest time between two forced checkpoints: a worker making calls as
@@ -258,13 +259,32 @@ pub struct Settings {
     pub day_usd: Option<f64>,
 }
 
+/// Whether a figure can be a budget: a positive, finite number under the typo
+/// guard ([`BUDGET_USD_MAX`]).
+fn is_budget(usd: &f64) -> bool {
+    usd.is_finite() && *usd > 0.0 && *usd <= BUDGET_USD_MAX
+}
+
 impl Settings {
     /// The settings out of a stored value, field by field: a field that is not
     /// what it should be falls back alone and does not take its neighbours
     /// with it, and a budget that is not a budget ([`BUDGET_USD_MAX`]) is none.
     #[must_use]
-    pub fn parse(_value: &serde_json::Value) -> Self {
-        Self::default()
+    pub fn parse(value: &serde_json::Value) -> Self {
+        let usd = |key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_f64)
+                .filter(is_budget)
+        };
+        Self {
+            mode: value
+                .get("mode")
+                .and_then(|mode| serde_json::from_value(mode.clone()).ok())
+                .unwrap_or_default(),
+            task_usd: usd("task_usd"),
+            day_usd: usd("day_usd"),
+        }
     }
 }
 
@@ -299,61 +319,299 @@ pub struct Judgement {
     pub metrics: Metrics,
 }
 
-/// What a tool call is, for the question "is this the call it just made".
-fn call_print(_payload: &str) -> Option<u64> {
-    None
+/// The median of some numbers, or `None` for none.
+fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut sorted: Vec<f64> = values.collect();
+    if sorted.is_empty() {
+        return None;
+    }
+    sorted.sort_by(f64::total_cmp);
+    let middle = sorted.len() / 2;
+    Some(if sorted.len() % 2 == 1 {
+        sorted[middle]
+    } else {
+        (sorted[middle - 1] + sorted[middle]) / 2.0
+    })
 }
 
-/// One attempt's record: what the window has seen it do.
+/// `part` of `whole`, in thousandths.
+fn permille(part: u32, whole: usize) -> u32 {
+    let whole = u64::try_from(whole).unwrap_or(u64::MAX).max(1);
+    u32::try_from(u64::from(part) * 1_000 / whole).unwrap_or(u32::MAX)
+}
+
+/// `top` over `bottom`, in thousandths, saturating.
+fn ratio_permille(top: f64, bottom: f64) -> u32 {
+    (top / bottom * 1_000.0)
+        .round()
+        .clamp(0.0, f64::from(u32::MAX)) as u32
+}
+
+/// What a tool call is, for the question "is this the call it just made": a
+/// hash of the tool's name and the first [`PRINT_BYTES`] bytes of its input's
+/// words. `None` for an event that names no tool — it cannot repeat anything.
+fn call_print(payload: &str) -> Option<u64> {
+    let payload = HookPayload::of(payload);
+    let name = tool_name_in_parsed(&payload)?;
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    if let Some(input) = payload
+        .tree()
+        .and_then(|tree| INPUT_KEYS.iter().find_map(|key| tree.get(*key)))
+    {
+        let mut room = PRINT_BYTES;
+        feed(input, &mut hasher, &mut room);
+    }
+    Some(hasher.finish())
+}
+
+/// The words of one input value into a hash, spending at most `room` bytes.
+fn feed(value: &serde_json::Value, hasher: &mut DefaultHasher, room: &mut usize) {
+    use serde_json::Value;
+    if *room == 0 {
+        return;
+    }
+    match value {
+        Value::String(text) => {
+            let taken = text.len().min(*room);
+            hasher.write(&text.as_bytes()[..taken]);
+            *room -= taken;
+        }
+        Value::Array(items) => {
+            for item in items {
+                feed(item, hasher, room);
+            }
+        }
+        Value::Object(fields) => {
+            for (key, item) in fields {
+                hasher.write(key.as_bytes());
+                feed(item, hasher, room);
+            }
+        }
+        other => {
+            let text = other.to_string();
+            let taken = text.len().min(*room);
+            hasher.write(&text.as_bytes()[..taken]);
+            *room -= taken;
+        }
+    }
+}
+
+/// One attempt's record: what the window has seen it do, as little of it as the
+/// judgment reads. Small and bounded — a window of marks, a ring of costs, a few
+/// counters — so a window holding a hundred workers holds a few kilobytes of
+/// this.
 #[derive(Clone, Debug, Default)]
 pub struct StepBook {
+    steps: u32,
+    since_checkpoint: u32,
+    checkpoints: u32,
+    last_checkpoint_ms: Option<i64>,
+    /// The print of the call just made, while a repeat of it would be rework.
+    last_call: Option<u64>,
+    /// The latest calls, newest last: whether each redid something or failed.
     window: VecDeque<bool>,
+    rework_in_window: u32,
+    /// What each of the latest model calls cost, in dollars, newest last.
     costs: VecDeque<f64>,
+    spent_usd: f64,
+    priced_calls: u32,
+    unpriced_calls: u32,
 }
 
 impl StepBook {
-    /// One hook event of this attempt's pane.
-    pub fn note_activity(&mut self, _activity: &Activity, _payload: &str) {}
-
-    /// One model call's cost as its CLI's record gave it.
-    pub fn note_cost(&mut self, _usd: Option<f64>) {}
-
-    /// The window saved this attempt's state at `now_ms`.
-    pub fn checkpointed(&mut self, _now_ms: i64) {}
-
-    /// What this attempt's model calls cost so far.
-    #[must_use]
-    pub fn spent_usd(&self) -> Option<f64> {
-        None
+    /// One hook event of this attempt's pane. A tool call starting is a step,
+    /// and a repeat of the call before it is rework; a call that failed is
+    /// rework; a prompt is a new instruction, which no run of repeats crosses.
+    /// Everything else — a call finishing, a turn ending — says nothing the
+    /// gate reads.
+    pub fn note_activity(&mut self, activity: &Activity, payload: &str) {
+        match activity.phase {
+            Phase::Started => self.note_call(payload),
+            Phase::Failed => self.note_failure(),
+            Phase::Prompted => self.last_call = None,
+            Phase::Finished | Phase::Stopped => {}
+        }
     }
 
-    /// What this attempt is still to spend before a stop can land.
+    fn note_call(&mut self, payload: &str) {
+        self.steps = self.steps.saturating_add(1);
+        self.since_checkpoint = self.since_checkpoint.saturating_add(1);
+        let print = call_print(payload);
+        let repeat = print.is_some() && print == self.last_call;
+        self.last_call = print;
+        self.window.push_back(repeat);
+        if repeat {
+            self.rework_in_window += 1;
+        }
+        while self.window.len() > REWORK_WINDOW_STEPS {
+            if self.window.pop_front() == Some(true) {
+                self.rework_in_window -= 1;
+            }
+        }
+    }
+
+    /// The call that just failed was rework, whether or not it repeated one.
+    fn note_failure(&mut self) {
+        if let Some(newest) = self.window.back_mut()
+            && !*newest
+        {
+            *newest = true;
+            self.rework_in_window += 1;
+        }
+    }
+
+    /// One model call's cost as its CLI's record gave it: dollars, or `None` for
+    /// a model with no price — which counts against nothing and says so.
+    pub fn note_cost(&mut self, usd: Option<f64>) {
+        match usd.filter(|usd| usd.is_finite() && *usd >= 0.0) {
+            Some(usd) => {
+                self.spent_usd += usd;
+                self.priced_calls = self.priced_calls.saturating_add(1);
+                self.costs.push_back(usd);
+                while self.costs.len() > COST_RING {
+                    self.costs.pop_front();
+                }
+            }
+            None => self.unpriced_calls = self.unpriced_calls.saturating_add(1),
+        }
+    }
+
+    /// The window saved this attempt's state at `now_ms`.
+    pub fn checkpointed(&mut self, now_ms: i64) {
+        self.since_checkpoint = 0;
+        self.checkpoints = self.checkpoints.saturating_add(1);
+        self.last_checkpoint_ms = Some(now_ms);
+    }
+
+    /// What this attempt's model calls cost so far, in dollars, as far as they
+    /// were read and priced; `None` when none was.
+    #[must_use]
+    pub fn spent_usd(&self) -> Option<f64> {
+        (self.priced_calls > 0).then_some(self.spent_usd)
+    }
+
+    /// What this attempt is still to spend before a stop can land: the next
+    /// [`PROJECTION_STEPS`] calls at the median of the latest — nothing until
+    /// [`PROJECTION_MIN_CALLS`] were read.
     #[must_use]
     pub fn ahead_usd(&self) -> f64 {
-        0.0
+        self.recent_step_usd()
+            .map_or(0.0, |step| step * f64::from(PROJECTION_STEPS))
+    }
+
+    fn recent_step_usd(&self) -> Option<f64> {
+        if self.costs.len() < PROJECTION_MIN_CALLS {
+            return None;
+        }
+        median(
+            self.costs
+                .iter()
+                .rev()
+                .take(PROJECTION_RECENT_CALLS)
+                .copied(),
+        )
+    }
+
+    fn rework_permille(&self) -> Option<u32> {
+        (self.window.len() >= REWORK_MIN_STEPS)
+            .then(|| permille(self.rework_in_window, self.window.len()))
+    }
+
+    /// The latest calls against the ones before, as a pair: the ratio in
+    /// thousandths and the latest median.
+    fn rise(&self) -> Option<(u32, f64)> {
+        if self.costs.len() < 2 * RISE_WINDOW {
+            return None;
+        }
+        let latest = median(self.costs.iter().rev().take(RISE_WINDOW).copied())?;
+        let before = median(
+            self.costs
+                .iter()
+                .rev()
+                .skip(RISE_WINDOW)
+                .take(RISE_WINDOW)
+                .copied(),
+        )?;
+        (before > 0.0).then(|| (ratio_permille(latest, before), latest))
     }
 
     /// The numbers the judgment reads, for a board to show.
     #[must_use]
     pub fn metrics(&self) -> Metrics {
         Metrics {
-            steps: 0,
-            since_checkpoint: 0,
-            checkpoints: 0,
-            rework_permille: None,
-            rise_permille: None,
-            step_usd: None,
-            spent_usd: None,
-            unpriced_calls: 0,
+            steps: self.steps,
+            since_checkpoint: self.since_checkpoint,
+            checkpoints: self.checkpoints,
+            rework_permille: self.rework_permille(),
+            rise_permille: self.rise().map(|(ratio, _)| ratio),
+            step_usd: self.recent_step_usd(),
+            spent_usd: self.spent_usd(),
+            unpriced_calls: self.unpriced_calls,
         }
     }
 
     /// The verdict, and every fact behind it, most serious first.
     #[must_use]
-    pub fn judge(&self, _allowance: &Allowance, _now_ms: i64) -> Judgement {
+    pub fn judge(&self, allowance: &Allowance, now_ms: i64) -> Judgement {
+        let mut reasons = Vec::new();
+        for (stop, near, cap) in [
+            (Code::TaskBudgetStop, Code::TaskBudgetNear, allowance.task),
+            (Code::DayBudgetStop, Code::DayBudgetNear, allowance.day),
+        ] {
+            if let Some(cap) = cap.filter(|cap| cap.limit_usd > 0.0) {
+                if cap.spent_usd + cap.ahead_usd >= cap.limit_usd {
+                    reasons.push(Reason {
+                        code: stop,
+                        value: cap.spent_usd + cap.ahead_usd,
+                        limit: cap.limit_usd,
+                    });
+                } else if cap.spent_usd * 1_000.0 >= cap.limit_usd * f64::from(BUDGET_NEAR_PERMILLE)
+                {
+                    reasons.push(Reason {
+                        code: near,
+                        value: cap.spent_usd,
+                        limit: cap.limit_usd,
+                    });
+                }
+            }
+        }
+        if let Some(rework) = self
+            .rework_permille()
+            .filter(|rework| *rework > REWORK_LIMIT_PERMILLE)
+        {
+            reasons.push(Reason {
+                code: Code::ReworkLoop,
+                value: f64::from(rework),
+                limit: f64::from(REWORK_LIMIT_PERMILLE),
+            });
+        }
+        if let Some((ratio, latest)) = self.rise()
+            && ratio >= RISE_FACTOR_PERMILLE
+            && latest >= RISE_MIN_USD
+        {
+            reasons.push(Reason {
+                code: Code::CostRising,
+                value: f64::from(ratio),
+                limit: f64::from(RISE_FACTOR_PERMILLE),
+            });
+        }
+        let waited = self
+            .last_checkpoint_ms
+            .is_none_or(|at_ms| now_ms.saturating_sub(at_ms) >= CHECKPOINT_MIN_GAP_MS);
+        if self.since_checkpoint >= CHECKPOINT_EVERY_STEPS && waited {
+            reasons.push(Reason {
+                code: Code::CheckpointDue,
+                value: f64::from(self.since_checkpoint),
+                limit: f64::from(CHECKPOINT_EVERY_STEPS),
+            });
+        }
+        reasons.sort_by_key(|reason| std::cmp::Reverse(reason.code.verdict()));
         Judgement {
-            verdict: Verdict::Continue,
-            reasons: Vec::new(),
+            verdict: reasons
+                .first()
+                .map_or(Verdict::Continue, |reason| reason.code.verdict()),
+            reasons,
             metrics: self.metrics(),
         }
     }

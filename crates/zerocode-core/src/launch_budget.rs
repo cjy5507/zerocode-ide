@@ -103,14 +103,21 @@ impl Default for Limits {
 }
 
 /// FNV-1a over a byte stream.
-fn fnv1a(_bytes: impl Iterator<Item = u8>) -> u64 {
-    0
+fn fnv1a(bytes: impl Iterator<Item = u8>) -> u64 {
+    bytes.fold(FNV_OFFSET, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+    })
 }
 
-/// The identity of a job.
+/// The identity of a job: the repository it is about, the commit it reads, what
+/// it is for and the configuration it runs under. Two launches with the same
+/// key are the same job.
 #[must_use]
-pub fn job_key(_repo: &str, _head: &str, _job: &str, _config: &str) -> String {
-    String::new()
+pub fn job_key(repo: &str, head: &str, job: &str, config: &str) -> String {
+    let bytes = [repo, head, job, config]
+        .into_iter()
+        .flat_map(|part| part.bytes().chain(std::iter::once(PART_END)));
+    format!("{:016x}", fnv1a(bytes))
 }
 
 /// One launch asking to start.
@@ -206,17 +213,36 @@ pub struct Counters {
     pub resting: Vec<Resting>,
 }
 
+/// A launch that holds a place.
+#[derive(Debug)]
+struct Held {
+    id: u64,
+    at_ms: i64,
+    job: Option<String>,
+}
+
 /// The ledger: launch stamps, the walls that stand, the jobs that finished
-/// and the launches running.
+/// and the launches running. Only the first three outlive the process — a
+/// running launch does not survive a window that restarted, and its place is
+/// not kept for it.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LaunchLedger {
+    /// When each launch of the last day was let through, oldest first.
     launches: VecDeque<i64>,
+    /// Provider → when its wall stops standing.
     rests: BTreeMap<String, i64>,
+    /// Job key → when its last run finished well.
     done: BTreeMap<String, i64>,
+    #[serde(skip)]
+    active: Vec<Held>,
+    #[serde(skip)]
+    next_id: u64,
 }
 
 impl LaunchLedger {
-    /// Asks to start a launch.
+    /// Asks to start a launch. The first refusal that applies is the answer, in
+    /// the order a person would want it told: a resting provider, then the
+    /// same job, then the three ceilings.
     ///
     /// # Errors
     ///
@@ -224,30 +250,175 @@ impl LaunchLedger {
     pub fn reserve(
         &mut self,
         ask: &Ask<'_>,
-        _limits: &Limits,
-        _now_ms: i64,
+        limits: &Limits,
+        now_ms: i64,
     ) -> Result<Permit, Refusal> {
+        self.prune(now_ms);
+        if let Some(until_ms) = self.rests.get(ask.provider) {
+            return Err(Refusal::Resting {
+                until_ms: *until_ms,
+            });
+        }
+        if let Some(job) = ask.job {
+            if self
+                .active
+                .iter()
+                .any(|held| held.job.as_deref() == Some(job))
+            {
+                return Err(Refusal::Running);
+            }
+            if let Some(fresh_ms) = ask.fresh_ms
+                && let Some(done_ms) = self.done.get(job)
+                && now_ms.saturating_sub(*done_ms) < fresh_ms
+            {
+                return Err(Refusal::Fresh {
+                    age_ms: now_ms.saturating_sub(*done_ms),
+                });
+            }
+        }
+        let active = count(self.active.len());
+        if let Some(limit) = limits.concurrent
+            && active >= limit
+        {
+            return Err(Refusal::Concurrent { active, limit });
+        }
+        if let Some(limit) = limits.per_hour {
+            let used = self.launched_within(now_ms, MS_PER_HOUR);
+            if used >= limit {
+                return Err(Refusal::Hourly {
+                    used,
+                    limit,
+                    retry_at_ms: self.frees_at(MS_PER_HOUR, limit),
+                });
+            }
+        }
+        if let Some(limit) = limits.per_day {
+            let used = self.launched_within(now_ms, MS_PER_DAY);
+            if used >= limit {
+                return Err(Refusal::Daily {
+                    used,
+                    limit,
+                    retry_at_ms: self.frees_at(MS_PER_DAY, limit),
+                });
+            }
+        }
+        self.launches.push_back(now_ms);
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.active.push(Held {
+            id,
+            at_ms: now_ms,
+            job: ask.job.map(str::to_string),
+        });
         Ok(Permit {
-            id: 0,
+            id,
             provider: ask.provider.to_string(),
             job: ask.job.map(str::to_string),
             fresh: ask.fresh_ms.is_some(),
         })
     }
 
-    /// A launch ended.
-    pub fn finish(&mut self, _permit: Permit, _outcome: Outcome, _now_ms: i64) {}
+    /// A launch ended. Its place is freed — the hourly and daily counts keep
+    /// it, because they count launches and not completions — and what it
+    /// ended in is remembered: a wall rests its provider, a good run of a job
+    /// whose caller reuses answers stands as one.
+    pub fn finish(&mut self, permit: Permit, outcome: Outcome, now_ms: i64) {
+        self.active.retain(|held| held.id != permit.id);
+        match outcome {
+            Outcome::Done => {
+                if permit.fresh
+                    && let Some(job) = permit.job
+                {
+                    self.done.insert(job, now_ms);
+                    self.trim_done();
+                }
+            }
+            Outcome::Failed => {}
+            Outcome::Rested { until_ms } => {
+                let standing = self.rests.entry(permit.provider).or_insert(until_ms);
+                *standing = (*standing).max(until_ms);
+            }
+        }
+    }
 
     /// What the ledger holds at `now_ms`.
     #[must_use]
-    pub fn counters(&self, _now_ms: i64) -> Counters {
+    pub fn counters(&self, now_ms: i64) -> Counters {
         Counters {
-            active: 0,
-            last_hour: 0,
-            last_day: 0,
-            resting: Vec::new(),
+            active: count(self.active.len()),
+            last_hour: self.launched_within(now_ms, MS_PER_HOUR),
+            last_day: self.launched_within(now_ms, MS_PER_DAY),
+            resting: self
+                .rests
+                .iter()
+                .filter(|(_, until_ms)| **until_ms > now_ms)
+                .map(|(provider, until_ms)| Resting {
+                    provider: provider.clone(),
+                    until_ms: *until_ms,
+                })
+                .collect(),
         }
     }
+
+    /// Lets go of what has aged out: launches past a day, walls that stopped
+    /// standing, jobs past a day, places held by a launch that never ended.
+    fn prune(&mut self, now_ms: i64) {
+        while self
+            .launches
+            .front()
+            .is_some_and(|at_ms| now_ms.saturating_sub(*at_ms) >= MS_PER_DAY)
+            || self.launches.len() > LAUNCHES_KEPT_MAX
+        {
+            self.launches.pop_front();
+        }
+        self.rests.retain(|_, until_ms| *until_ms > now_ms);
+        self.done
+            .retain(|_, done_ms| now_ms.saturating_sub(*done_ms) < MS_PER_DAY);
+        self.active
+            .retain(|held| now_ms.saturating_sub(held.at_ms) < PERMIT_STALE_MS);
+    }
+
+    /// Launches let through in the last `span_ms`.
+    fn launched_within(&self, now_ms: i64, span_ms: i64) -> u32 {
+        count(
+            self.launches
+                .iter()
+                .rev()
+                .take_while(|at_ms| now_ms.saturating_sub(**at_ms) < span_ms)
+                .count(),
+        )
+    }
+
+    /// When a window of `span_ms` holding `limit` launches has a place again:
+    /// when the `limit`-th newest ages out. `None` for a ceiling of nothing.
+    fn frees_at(&self, span_ms: i64, limit: u32) -> Option<i64> {
+        let nth = usize::try_from(limit).ok()?.checked_sub(1)?;
+        self.launches
+            .iter()
+            .rev()
+            .nth(nth)
+            .map(|at_ms| at_ms.saturating_add(span_ms))
+    }
+
+    /// Keeps the fresh rule's memory to [`DONE_KEPT_MAX`] jobs, the oldest out.
+    fn trim_done(&mut self) {
+        while self.done.len() > DONE_KEPT_MAX {
+            let Some(oldest) = self
+                .done
+                .iter()
+                .min_by_key(|(_, done_ms)| **done_ms)
+                .map(|(job, _)| job.clone())
+            else {
+                break;
+            };
+            self.done.remove(&oldest);
+        }
+    }
+}
+
+/// A length as the counts speak it, saturating where a count cannot.
+fn count(length: usize) -> u32 {
+    u32::try_from(length).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
