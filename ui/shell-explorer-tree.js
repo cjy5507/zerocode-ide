@@ -11,6 +11,7 @@ function resetTreeSelection() {
   selectedTreePaths.clear();
   treeSelectionAnchor = null;
   finishTreeDrag();
+  scheduleTreeSelectionReport();
 }
 
 function paintTreeSelection() {
@@ -21,6 +22,7 @@ function paintTreeSelection() {
     // toggle button's word and was never true of a row.
     row.setAttribute('aria-selected', String(selected));
   }
+  scheduleTreeSelectionReport();
 }
 
 function selectTreeRow(row, event) {
@@ -131,6 +133,7 @@ async function dropTreePaths(event, dir) {
     const operation = await invoke("fs_move", { paths: drag.paths.map((path) => `${drag.root}/${path}`), dir: `${drag.root}/${dir}`, root: drag.root });
     if (activeWorktreePath !== drag.root) return;
     selectedTreePaths.clear();
+    scheduleTreeSelectionReport();
     await loadTree(fileTree, '');
     fileTree.focus({ preventScroll: true });
     showTreeUndo(operation);
@@ -1102,4 +1105,37 @@ function settleTreeCommit() {
   scheduleTreeTouchPaint();
   if (treeTouchSweep === null) armTreeTouchSweep();
   if (treeFollowsAgent && fileTreeShowing()) followTreeTo(newest);
+}
+
+/* ---- the selection, the agents' context (t-24298) ----
+ *
+ * What the person has selected in the tree is what "this" means in their
+ * next prompt — the mod hands it to Claude with the prompt. Here the backend
+ * holds it (`tree_selection`) and the prompt hook's brief carries it to the
+ * agents whose prompt takes context (crates/zerocode-shell tree_selection.rs).
+ * Said once a frame however fast the arrows move, and only when it changed:
+ * the backend starts with nothing selected, and a workspace switch with
+ * nothing selected says nothing, so a switch still asks only what the move
+ * needs. */
+const TREE_SELECTION_NONE = "[]";
+let treeSelectionSaid = TREE_SELECTION_NONE;
+let treeSelectionFrame = 0;
+
+function scheduleTreeSelectionReport() {
+  if (treeSelectionFrame !== 0) return;
+  treeSelectionFrame = requestAnimationFrame(() => {
+    treeSelectionFrame = 0;
+    reportTreeSelection();
+  });
+}
+
+function reportTreeSelection() {
+  const root = activeWorktreePath;
+  if (!root) return;
+  const paths = [...selectedTreePaths];
+  const said = paths.length === 0 ? TREE_SELECTION_NONE : JSON.stringify([root, paths]);
+  if (said === treeSelectionSaid) return;
+  treeSelectionSaid = said;
+  // A backend without the door keeps the selection the window's own.
+  invoke("tree_selection", { root, paths }).catch(() => {});
 }
