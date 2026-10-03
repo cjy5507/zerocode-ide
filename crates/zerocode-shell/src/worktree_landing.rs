@@ -1047,6 +1047,44 @@ mod tests {
     }
 
     #[test]
+    fn a_classification_does_not_rewrite_the_index_other_git_commands_need_the_lock_of() {
+        let bench = Bench::open();
+        let wt = bench.worktree("quiet");
+        bench.commit(&wt, "w.txt", "work\n");
+        // The index as git names it for this checkout; a linked one keeps its own
+        // under the repository's `.git/worktrees`.
+        let index = wt.join(git(&wt, &["rev-parse", "--git-path", "index"]));
+        // Same bytes, older modification time: after that a plain `status` keeps
+        // the refreshed stat data by writing the index back under `index.lock`,
+        // and a `commit`, `add` or `merge --ff-only` started meanwhile is refused.
+        std::fs::File::options()
+            .write(true)
+            .open(wt.join("a.txt"))
+            .expect("a tracked file")
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+            .expect("its time");
+        let before = std::fs::read(&index).expect("the index");
+        // A zero TTL: this ask is the one that runs the `status`.
+        let landing = bench.landing(&wt);
+        assert_eq!((landing.state, landing.ahead), ("unlanded", 1));
+        assert!(!landing.dirty, "only the time moved, not the content");
+        let after = std::fs::read(&index).expect("the index");
+        assert!(
+            after == before,
+            "the classification rewrote the checkout's index ({} bytes before, {} after)",
+            before.len(),
+            after.len()
+        );
+        // The check can see what it guards against: the same checkout under a
+        // plain `status` does rewrite its index.
+        git(&wt, &["status", "--porcelain", "--untracked-files=no"]);
+        assert!(
+            std::fs::read(&index).expect("the index") != before,
+            "a plain `status` left the index alone here, so the check above proves nothing"
+        );
+    }
+
+    #[test]
     fn the_compare_ref_is_asked_of_git_again_only_when_its_files_moved() {
         let bench = Bench::open();
         let host = Host::for_workspace(&bench.repo);
