@@ -12534,7 +12534,10 @@ function noticeOnPaneChat(held, key, wanted, words) {
   said.className = "pane-chat-notice";
   said.dataset.says = key;
   said.textContent = words;
-  held.host.querySelector(".helper-turns")?.before(said);
+  // Above the body, not inside it: the body is the rail | list grid
+  // (t-22100), where a line of its own would become a grid cell and fall into
+  // the rail's narrow column.
+  held.host.querySelector(":scope > .helper-body")?.before(said);
 }
 
 /* The question the pane's program is asking, as the extension's card in the
