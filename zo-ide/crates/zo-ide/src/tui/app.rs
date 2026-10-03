@@ -6696,9 +6696,18 @@ mod tests {
             [ev("PreToolUse", "Read"), ev("PreToolUse", "Read")]
         );
         let posted = captured.lock().expect("hook capture");
-        // The real tool name, the compact target the row shows, and the same
-        // started fact the channel says — at second zero, where a start is.
-        assert_eq!(posted[0].payload["tool_input"], "tui/view.rs");
+        // The real tool name; the id the runtime minted for each call, which is
+        // what tells two reads of one file apart and what the call's end will
+        // say again (t-31715); the call's whole file in Claude's spelling, which
+        // the window's file tree resolves (the compact tail the working line
+        // shows stays in the activity fact beside it); and the same started
+        // fact the channel says — at second zero, where a start is.
+        assert_eq!(posted[0].payload["tool_use_id"], "toolu_1");
+        assert_eq!(posted[1].payload["tool_use_id"], "toolu_2");
+        assert_eq!(
+            posted[0].payload["tool_input"],
+            json!({ "file_path": "workspace/crates/zo-ide/src/tui/view.rs" })
+        );
         assert_eq!(
             posted[0].payload["activity"],
             json!({
