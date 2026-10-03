@@ -9,18 +9,27 @@
 //!
 //! **Wired:** Claude Code's format ([`ClaudeFormat`]) — `usage` on each
 //! assistant record, priced at the table the usage statistics already keep
-//! ([`crate::usage_stats::estimate_cost_usd`]). **Not yet:** every other CLI.
-//! [`reader_for`] answers `None` for them, and the window then says on the board
-//! that the cost is unread and judges that worker on the facts it does have. A
-//! reader is added here, as a row, the day its format has been measured; a
-//! format guessed at is a cost nobody can check.
+//! ([`crate::usage_stats::estimate_cost_usd`]) — and Codex's ([`CodexFormat`]):
+//! the rollout's `token_count` events, read by the rule the Codex usage ledger
+//! reads them by ([`crate::usage_stats_codex::read_record`]) and priced at its
+//! table. **Not yet:** every other CLI. [`reader_for`] answers `None` for them,
+//! and the window then says on the board that the cost is unread and judges that
+//! worker on the facts it does have. A reader is added here, as a row, the day
+//! its format has been measured; a format guessed at is a cost nobody can check.
 
 use crate::agent::AgentKind;
 use crate::usage_stats::{SourceTurn, estimate_cost_usd, parse_record};
+use crate::usage_stats_codex::{ReadState, read_record};
 
 /// What an assistant record without a session of its own is filed under: the
 /// reader judges one file and never looks at the id.
 const NO_SESSION: &str = "-";
+
+/// What a Codex line must say for it to matter: a usage event, or one of the two
+/// context lines (the session's header and a turn's) that name the model and the
+/// directory the next usage event is attributed to. Everything else in a rollout —
+/// the model's words, a tool's output — is looked past without being parsed.
+const CODEX_MARKS: [&str; 3] = ["\"token_count\"", "\"session_meta\"", "\"turn_context\""];
 
 /// What every billable record carries and most of a transcript does not: the
 /// word `usage`, looked for before a line is parsed. A transcript is mostly tool
@@ -67,17 +76,44 @@ pub trait CostReader: Send {
 pub fn reader_for(agent: &str) -> Option<Box<dyn CostReader>> {
     match AgentKind::from_slug(agent)? {
         AgentKind::Claude => Some(Box::new(ClaudeFormat::default())),
+        AgentKind::Codex => Some(Box::new(CodexFormat::default())),
         _ => None,
     }
 }
 
-/// Codex's rollout (stub until its reader lands): reads nothing.
+/// Codex's rollout: a `token_count` event carries the session's RUNNING total and
+/// the last turn's own usage, and the increment is recovered by the rule the usage
+/// ledger already reads Codex by ([`read_record`]) — never the total, which would
+/// charge a long session once for every event it wrote. A turn is finished in its
+/// one line, so nothing is ever left open for [`CostReader::flush`].
+///
+/// A look that begins mid-file has not seen the header; the first usage event it
+/// meets is priced by its own turn, and a turn whose model no context line has
+/// named is counted and not priced.
 #[derive(Debug, Default)]
-pub struct CodexFormat;
+pub struct CodexFormat {
+    state: ReadState,
+}
+
+/// What a turn cost at its model's price.
+fn cost_of_turn(turn: &crate::usage_ledger::Entry) -> CallCost {
+    crate::usage_stats_codex::estimate_cost_usd(
+        turn.model.as_deref(),
+        turn.input_tokens,
+        turn.cached_input_tokens,
+        turn.output_tokens,
+    )
+    .map_or(CallCost::Unpriced, CallCost::Usd)
+}
 
 impl CostReader for CodexFormat {
-    fn feed(&mut self, _lines: &str) -> Vec<CallCost> {
-        Vec::new()
+    fn feed(&mut self, lines: &str) -> Vec<CallCost> {
+        lines
+            .lines()
+            .filter(|line| CODEX_MARKS.iter().any(|mark| line.contains(mark)))
+            .filter_map(|line| read_record(line, &mut self.state))
+            .map(|turn| cost_of_turn(&turn))
+            .collect()
     }
 
     fn flush(&mut self) -> Option<CallCost> {
