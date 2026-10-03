@@ -804,25 +804,26 @@ const GATE_VERDICTS = Object.freeze({
 });
 
 /* 사유의 `value`·`limit`은 사유마다 단위가 다르다(`Code`의 문서): 횟수, 천분율(되풀이)과 천분율로
- * 적은 배수(비용 상승), 달러. `show`가 그 단위를 읽는 말로 바꾼다. */
+ * 적은 배수(비용 상승), 달러. `show`가 그 단위를 읽는 말로 바꾼다. 한국어 문장은 `key:`와 같은 줄에 둔다 —
+ * 「창에 박힌 라벨」 검사(`no_label_reaches_the_window_hardcoded`)가 줄 단위로 읽는다. */
 const gateCount = (value) => String(Math.round(value));
 const gatePercent = (permille) => String(Math.round(permille / 10));
 const gateTimes = (permille) => (permille / 1000).toFixed(1);
 const GATE_REASONS = Object.freeze({
-  checkpoint_due: { key: "board.desk.gate.reasonCheckpoint", show: gateCount,
-    word: "마지막 체크포인트 뒤 호출 {{value}}번 (간격 {{limit}}번)" },
-  cost_rising: { key: "board.desk.gate.reasonRising", show: gateTimes,
-    word: "호출당 비용이 직전의 {{value}}배 (기준 {{limit}}배)" },
-  rework_loop: { key: "board.desk.gate.reasonRework", show: gatePercent,
-    word: "되풀이·실패 {{value}}% (한도 {{limit}}%)" },
-  task_budget_near: { key: "board.desk.gate.reasonTaskNear", show: formatCost,
-    word: "과업 예산 {{limit}} 중 {{value}} 씀" },
-  day_budget_near: { key: "board.desk.gate.reasonDayNear", show: formatCost,
-    word: "오늘 예산 {{limit}} 중 {{value}} 씀" },
-  task_budget_stop: { key: "board.desk.gate.reasonTaskStop", show: formatCost,
-    word: "과업 예산 {{limit}} 초과 예상 — {{value}}" },
-  day_budget_stop: { key: "board.desk.gate.reasonDayStop", show: formatCost,
-    word: "오늘 예산 {{limit}} 초과 예상 — {{value}}" },
+  checkpoint_due: { show: gateCount,
+    key: "board.desk.gate.reasonCheckpoint", word: "마지막 체크포인트 뒤 호출 {{value}}번 (간격 {{limit}}번)" },
+  cost_rising: { show: gateTimes,
+    key: "board.desk.gate.reasonRising", word: "호출당 비용이 직전의 {{value}}배 (기준 {{limit}}배)" },
+  rework_loop: { show: gatePercent,
+    key: "board.desk.gate.reasonRework", word: "되풀이·실패 {{value}}% (한도 {{limit}}%)" },
+  task_budget_near: { show: formatCost,
+    key: "board.desk.gate.reasonTaskNear", word: "과업 예산 {{limit}} 중 {{value}} 씀" },
+  day_budget_near: { show: formatCost,
+    key: "board.desk.gate.reasonDayNear", word: "오늘 예산 {{limit}} 중 {{value}} 씀" },
+  task_budget_stop: { show: formatCost,
+    key: "board.desk.gate.reasonTaskStop", word: "과업 예산 {{limit}} 초과 예상 — {{value}}" },
+  day_budget_stop: { show: formatCost,
+    key: "board.desk.gate.reasonDayStop", word: "오늘 예산 {{limit}} 초과 예상 — {{value}}" },
 });
 
 /* 비용이 숫자가 아닌 까닭, 창의 미터가 말하는 그대로(`CostNote`). `read`만 숫자다. */
