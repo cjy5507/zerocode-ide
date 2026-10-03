@@ -60,6 +60,21 @@ class RtsTests(unittest.TestCase):
         self.assertEqual({key: asked[key] for key in asked if key != 'pointer'},
                          {key: table[key] for key in table if key != 'pointer'})
 
+    def test_the_rts_desk_takes_the_launch_hooks_scene_as_the_reflex_desk_does(self):
+        # reflex.Desk.launch hands every round the cover scene a run may carry (None for the RTS round,
+        # which has none): a desk whose round cannot take it ends every run with a TypeError before the
+        # fixture is up — the RTS runner stood so since the covered rounds landed (t-26708).
+        import inspect
+        self.assertIn('scene', inspect.signature(rts.Desk.round).parameters)
+        with tempfile.TemporaryDirectory() as folder:
+            path = pathlib.Path(folder)
+            (path / 'session.json').write_text(json.dumps({'owner': 'abcdef012345', 'app': '-', 'executable': '-',
+                                                             'bundle': 'dev.zerocode.bench.rts.abcdef012345'}))
+            desk = rts.Desk(path, self.values, reflex.limits())
+            played = desk.round(11, None)
+        self.assertEqual(played['schedule'], rts.schedule(11, self.values))
+        self.assertNotIn('cover', played, 'the RTS round carries no cover')
+
     def record(self, stress=False, accepted_ms=0):
         schedule = rts.schedule(11, self.values, stress=stress)
         t0 = 5_000_000_000_000
