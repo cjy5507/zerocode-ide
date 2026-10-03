@@ -13,7 +13,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openWindowTestPage, PRIMARY_EVENT } from "./window-boot.mjs";
+import { openWindowTestPage, PRIMARY_EVENT, WINDOW_MOTION_REST } from "./window-boot.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -60,7 +60,9 @@ async function standTree(page, listings = LISTINGS) {
       fire: (pane, activities) => {
         for (const handler of window.__LISTENERS__["hook:activity"] ?? []) handler({ payload: { pane, activities } });
       },
-      act: (verb, target, phase = "started") => ({ seq: ++seq, activity: { verb, ...(target === null ? {} : { target }), phase } }),
+      // `extra` is what a road adds beside the three fields every agent says —
+      // the call's id (`call`), the folder it ran in (`cwd`).
+      act: (verb, target, phase = "started", extra = {}) => ({ seq: ++seq, activity: { verb, ...(target === null ? {} : { target }), phase, ...extra } }),
       // Two frames and the tasks between them: a batch is painted on the
       // frame after it lands, and an unfold waits on its listing.
       settle: async (rounds = 4) => {
@@ -222,6 +224,8 @@ export async function testExplorerAgentActivity(browser, origin, ok) {
  * handlers and its paint took. Printed as `EXPLORER_AGENT_NUMBERS` beside the
  * checks, so a before/after is two log lines. */
 export async function testExplorerAgentBurst(browser, origin, ok) {
+  const hold = await treeConstant("TREE_TOUCH_HOLD_MS");
+  const windowMs = await treeConstant("TREE_NUMSTAT_WINDOW_MS");
   const listings = { "": [] };
   for (let dir = 0; dir < 20; dir += 1) {
     const name = `d${String(dir).padStart(2, "0")}`;
@@ -269,6 +273,89 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
     });
     console.log(`EXPLORER_AGENT_NUMBERS ${JSON.stringify(numbers)}`);
     ok("a burst of 200 activity events on a 400-file tree paints at most once a frame, lists nothing already listed and runs no git", numbers.files >= 400 && numbers.lit > 0 && numbers.paints >= 1 && numbers.paints <= numbers.frames && numbers.listDir === 0 && numbers.git === 0, JSON.stringify(numbers));
+
+    /* The same tree, 200 start/end pairs (t-31715): what live progress costs a
+     * busy agent. Counted the way a low-spec machine feels it — paints per
+     * frame, the frames the page's own work made late (an animation-frame gap
+     * past one 60 Hz budget), the handlers' milliseconds — and what it asks of
+     * git: one scoped question per window, never a whole-repo status. Printed as
+     * `EXPLORER_AGENT_PAIR_NUMBERS`, so a before and an after are two log lines
+     * (and `WINDOW_CPU_THROTTLE=4` is the low-spec profile). */
+    const pairs = await page.evaluate(async ({ hold, windowMs }) => {
+      const { root, fire, act, settle } = window.__XT__;
+      const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+      // The first burst's marks fade before this one is measured.
+      await sleep(hold + 800);
+      await settle(3);
+      window.__ANSWER__.scm_numstat = ({ paths }) => paths.map((path) => ({ path, code: " M", staged: false, changed: true, added: 2, removed: 1, conflict: null, origin: null }));
+      const counts = () => ({ ...window.__COUNTS__ });
+      const before = counts();
+      const paintsBefore = typeof treeTouchPaints === "number" ? treeTouchPaints : NaN;
+      // A 60 Hz frame that fit its budget lands ~16.7 ms after the last; a gap
+      // past this is a frame the page's own work made late.
+      const LONG_FRAME_GAP_MS = 20;
+      let frames = 0;
+      let longFrames = 0;
+      let worstGapMs = 0;
+      let last = performance.now();
+      let counting = true;
+      const tick = (stamp) => {
+        if (!counting) return;
+        frames += 1;
+        const gap = stamp - last;
+        last = stamp;
+        if (gap > LONG_FRAME_GAP_MS) longFrames += 1;
+        worstGapMs = Math.max(worstGapMs, gap);
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+      let longTasks = 0;
+      const observer = new PerformanceObserver((list) => { longTasks += list.getEntries().length; });
+      try { observer.observe({ type: "longtask" }); } catch { /* an engine with no long-task entries counts none */ }
+      const started = performance.now();
+      for (let at = 0; at < 200; at += 1) {
+        const dir = `d${String(at % 20).padStart(2, "0")}`;
+        const file = `f${String(Math.floor(at / 20) * 2 % 20).padStart(2, "0")}.rs`;
+        const target = `${root}/${dir}/${file}`;
+        fire("term:1", [act("edit", target, "started", { call: `burst${at}` })]);
+        fire("term:1", [act("edit", target, "finished", { call: `burst${at}` })]);
+      }
+      const handled = performance.now() - started;
+      await settle(3);
+      const settled = performance.now() - started;
+      const shown = fileTree.querySelectorAll("[data-agent-writing]").length;
+      await sleep(windowMs + 500);
+      counting = false;
+      observer.disconnect();
+      const after = counts();
+      const delta = (command) => (after[command] ?? 0) - (before[command] ?? 0);
+      const tallied = [...fileTree.querySelectorAll(".tree-row.is-file .tree-tally")].filter((tally) => tally.textContent.includes("+2")).length;
+      // Nothing writing and nothing held: no animation runs and no timer of the
+      // tree's is armed — the cost of an idle tree is zero.
+      await sleep(hold + 1500);
+      const idle = {
+        animations: fileTree.getAnimations({ subtree: true }).length,
+        timers: [typeof treeTouchSweep === "undefined" ? "missing" : treeTouchSweep, typeof treeNumstatTimer === "undefined" ? "missing" : treeNumstatTimer, typeof treeVcsSweep === "undefined" ? "missing" : treeVcsSweep].filter((timer) => timer !== null).length,
+      };
+      return {
+        handledMs: Math.round(handled * 10) / 10,
+        settledMs: Math.round(settled * 10) / 10,
+        frames,
+        longFrames,
+        longTasks,
+        worstGapMs: Math.round(worstGapMs),
+        paints: (typeof treeTouchPaints === "number" ? treeTouchPaints : NaN) - paintsBefore,
+        shown,
+        tallied,
+        numstat: delta("scm_numstat"),
+        wholeRepo: delta("scm_status") + delta("upstream_status") + delta("git_history"),
+        listDir: delta("list_dir"),
+        idle,
+      };
+    }, { hold, windowMs });
+    console.log(`EXPLORER_AGENT_PAIR_NUMBERS ${JSON.stringify(pairs)}`);
+    ok("a burst of 200 start/end pairs shows the writing state, paints at most once a frame, asks git one scoped question per window and never a whole-repo status", pairs.shown > 0 && pairs.paints >= 1 && pairs.paints <= pairs.frames && pairs.numstat >= 1 && pairs.numstat <= Math.ceil((pairs.settledMs + windowMs + 500) / windowMs) && pairs.wholeRepo === 0 && pairs.listDir === 0 && pairs.tallied > 0, JSON.stringify(pairs));
+    ok("an idle tree runs no animation and holds no timer once the writing has ended and the marks have faded", pairs.idle.animations === 0 && pairs.idle.timers === 0, JSON.stringify(pairs.idle));
     ok("the burst suite raised no renderer faults", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();
@@ -672,6 +759,276 @@ export async function testExplorerSelection(browser, origin, ok) {
     }, PRIMARY_EVENT);
     ok("the tree's selection is said to the backend as it moves, relative to its workspace, once a frame", seen.one?.root === seen.root && JSON.stringify(seen.one?.paths) === JSON.stringify(["README.md"]) && JSON.stringify([...(seen.two?.paths ?? [])].sort()) === JSON.stringify(["README.md", "src"]) && seen.burst === 1 && JSON.stringify(seen.none?.paths) === JSON.stringify([]), JSON.stringify(seen));
     ok("the selection suite raised no renderer faults", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
+
+/* ---- slice 8: what an agent is writing right now (t-31715) --------------------
+ *
+ * The person tried the tree of 1.1.50 and said its marks were there but nothing
+ * in it was *happening*. Live progress, and only that: while a write or edit
+ * tool call is open — it has started and not finished — its file's row, and
+ * every collapsed folder above it, shimmers; the moment the call ends the
+ * file's +N -N lands on the row, from one scoped git question for every file
+ * written in a short window (never one per event, never a whole-repo status);
+ * and all of it is the same for every agent, because the tree reads one shape —
+ * `hook:activity`'s — in which a start and its end are paired by the call's id,
+ * or, where an agent gives none, by its verb and target. Hook agents, wire
+ * sessions (`wire:<n>`) and zo's main pane all arrive on that shape; this suite
+ * drives it the way each arrives.
+ *
+ * Nothing here calls a function the feature added: on a window without it,
+ * every check fails at its assertion. */
+export async function testExplorerWriting(browser, origin, ok) {
+  const [max, min, windowMs, most] = await Promise.all(["TREE_WRITING_MAX_MS", "TREE_WRITING_MIN_MS", "TREE_NUMSTAT_WINDOW_MS", "TREE_NUMSTAT_PATHS_MAX"].map(treeConstant));
+  ok("the writing mark's lost-end bound, its shortest showing, the numstat window and the most paths one question names are named constants of the tree's module", [max, min, windowMs, most].every((one) => Number.isFinite(one) && one > 0) && min < max, JSON.stringify({ max, min, windowMs, most }));
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standTree(page);
+    // What the backend's scoped question answers: the asked files, each
+    // modified, with the counts below.
+    await page.evaluate(() => {
+      window.__XT__.asked = [];
+      window.__ANSWER__.scm_numstat = (args) => {
+        window.__XT__.asked.push([...args.paths]);
+        return args.paths.map((path) => ({ path, code: " M", staged: false, changed: true, added: 3, removed: 1, conflict: null, origin: null }));
+      };
+      window.__XT__.sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+      window.__XT__.writing = (relative) => window.__XT__.row(relative)?.dataset.agentWriting ?? null;
+      window.__XT__.sweeping = (relative) => {
+        const row = window.__XT__.row(relative);
+        return row ? row.getAnimations({ subtree: true }).filter((one) => one instanceof CSSAnimation && one.animationName === "tree-writing-sweep" && one.playState === "running").length : 0;
+      };
+    });
+
+    /* a hook agent in Claude's shape: the call's id on both ends */
+    const claude = await page.evaluate(async ({ windowMs, min }) => {
+      const { root, fire, act, settle, row, open, sleep, writing, sweeping } = window.__XT__;
+      const file = "src/deep/x.rs";
+      const asking = () => window.__COUNTS__.scm_numstat ?? 0;
+      const out = {};
+      fire("term:1", [act("edit", `${root}/${file}`, "started", { call: "toolu_a" })]);
+      await settle(6);
+      out.writing = writing(file);
+      out.followed = open("src") && open("src/deep");
+      out.sweeping = sweeping(file);
+      const word = t("tree.writing.file", "");
+      out.said = word.length > 0 && (row(file)?.getAttribute("aria-label") ?? "").includes(word);
+      out.askedBeforeEnd = asking();
+      // The end arrives in the same batch the start did: the mark stays for its
+      // shortest showing, so an edit that took 20 ms is still seen to happen.
+      fire("term:1", [act("edit", `${root}/${file}`, "finished", { call: "toolu_a" })]);
+      await settle(2);
+      out.heldByMin = writing(file);
+      await sleep(windowMs + 500);
+      out.asked = window.__XT__.asked.map((paths) => paths.join(","));
+      out.tally = row(file)?.querySelector(".tree-tally")?.textContent ?? null;
+      out.letter = row(file)?.querySelector(".badge")?.textContent ?? null;
+      out.chips = ["src/deep", "src"].map((folder) => [...(row(folder)?.querySelectorAll(".badge .tree-count") ?? [])].map((chip) => chip.textContent).join(""));
+      await sleep(min + 500);
+      out.cleared = writing(file) === null && sweeping(file) === 0;
+      return out;
+    }, { windowMs, min });
+    ok("a write that has started and not ended shimmers its file's row, in words for a screen reader, and costs git nothing until it ends", claude.writing === "true" && claude.sweeping === 1 && claude.said === true && claude.askedBeforeEnd === 0 && claude.followed === true, JSON.stringify(claude));
+    ok("a call's end lands its +N -N on the row, its letter and its folders' roll-ups from one scoped question, and the mark leaves after its shortest showing", claude.heldByMin === "true" && JSON.stringify(claude.asked) === JSON.stringify(["src/deep/x.rs"]) && claude.tally?.includes("+3") && claude.tally?.includes("-1") && claude.letter === "M" && JSON.stringify(claude.chips) === JSON.stringify(["M1", "M1"]) && claude.cleared === true, JSON.stringify(claude));
+
+    /* with follow off the folders stay shut and wear the state themselves */
+    const folders = await page.evaluate(async ({ min }) => {
+      const { root, fire, act, settle, row, open, sleep } = window.__XT__;
+      const toggle = document.getElementById("tree-follow");
+      toggle.click();
+      fire("term:1", [act("write", `${root}/docs/guide.md`, "started", { call: "toolu_b" })]);
+      await settle();
+      const folder = row("docs");
+      const out = {
+        within: folder?.dataset.agentWritingWithin ?? null,
+        stayedClosed: !open("docs"),
+        sweeping: folder ? folder.getAnimations({ subtree: true }).filter((one) => one instanceof CSSAnimation && one.animationName === "tree-writing-sweep").length : 0,
+        said: (() => { const word = t("tree.writing.within", ""); return word.length > 0 && (folder?.getAttribute("aria-label") ?? "").includes(word); })(),
+      };
+      fire("term:1", [act("write", `${root}/docs/guide.md`, "finished", { call: "toolu_b" })]);
+      await sleep(min + 600);
+      out.cleared = (row("docs")?.dataset.agentWritingWithin ?? null) === null;
+      toggle.click();
+      return out;
+    }, { min });
+    ok("with follow off the collapsed folder above a file being written shimmers for it, says so in words and stays shut; it clears with the call", folders.within === "true" && folders.stayedClosed === true && folders.sweeping === 1 && folders.said === true && folders.cleared === true, JSON.stringify(folders));
+
+    /* an agent that gives no call id: start and end meet by verb and target */
+    const plain = await page.evaluate(async ({ min }) => {
+      const { root, fire, act, settle, sleep, writing } = window.__XT__;
+      const out = {};
+      fire("term:2", [act("edit", `${root}/README.md`, "started"), act("write", `${root}/src/lib.rs`, "started")]);
+      await settle(6);
+      out.both = [writing("README.md"), writing("src/lib.rs")];
+      fire("term:2", [act("edit", `${root}/README.md`, "finished")]);
+      await sleep(min + 500);
+      out.afterOne = [writing("README.md"), writing("src/lib.rs")];
+      // An end that names no file closes the pane's oldest open call of that verb.
+      fire("term:2", [act("write", null, "finished")]);
+      await sleep(min + 500);
+      out.afterTwo = writing("src/lib.rs");
+      return out;
+    }, { min });
+    ok("without a call id an end closes the call with its verb and target, and an end naming nothing closes the pane's oldest open call of that verb", JSON.stringify(plain.both) === JSON.stringify(["true", "true"]) && JSON.stringify(plain.afterOne) === JSON.stringify([null, "true"]) && plain.afterTwo === null, JSON.stringify(plain));
+
+    /* a helper's card with no id is a snapshot of what it does now: nothing closes it;
+     * the same card with a call id is an event stream like any pane's */
+    const helper = await page.evaluate(async ({ min }) => {
+      const { root, fire, act, settle, row, sleep, writing } = window.__XT__;
+      fire("sub:1:h9", [act("edit", `${root}/src/main.rs`, "started")]);
+      await settle(6);
+      const out = { touched: row("src/main.rs")?.dataset.agentTouch ?? null, snapshot: writing("src/main.rs") };
+      fire("sub:1:h9", [act("edit", `${root}/src/main.rs`, "started", { call: "h9-1" })]);
+      await settle(6);
+      out.withId = writing("src/main.rs");
+      fire("sub:1:h9", [act("edit", `${root}/src/main.rs`, "finished", { call: "h9-1" })]);
+      await sleep(min + 500);
+      out.closed = writing("src/main.rs") === null;
+      return out;
+    }, { min });
+    ok("a helper's activity with no call id lights its file but never opens a write nothing would close; with a call id its writes are paired like any pane's", helper.touched === "write" && helper.snapshot === null && helper.withId === "true" && helper.closed === true, JSON.stringify(helper));
+
+    /* the turn ending, a failed call, an end that never came, an end whose start was missed */
+    const ends = await page.evaluate(async ({ windowMs, min, max }) => {
+      const { root, fire, act, settle, sleep, writing } = window.__XT__;
+      const asking = () => window.__COUNTS__.scm_numstat ?? 0;
+      const out = {};
+      await sleep(windowMs + 300);
+      let before = asking();
+      fire("term:3", [act("edit", `${root}/src/main.rs`, "started", { call: "c3" })]);
+      await settle(6);
+      out.openedForStop = writing("src/main.rs");
+      fire("term:3", [{ seq: 900, activity: { verb: "stop", phase: "stopped" } }]);
+      await sleep(min + windowMs + 500);
+      out.stopCleared = writing("src/main.rs") === null;
+      out.stopAsked = asking() - before;
+      before = asking();
+      fire("term:3", [act("edit", `${root}/README.md`, "started", { call: "f1" })]);
+      await settle(6);
+      fire("term:3", [act("edit", `${root}/README.md`, "failed", { call: "f1" })]);
+      await sleep(min + windowMs + 500);
+      out.failedCleared = writing("README.md") === null;
+      out.failedAsked = asking() - before;
+      before = asking();
+      fire("term:3", [act("edit", `${root}/docs/guide.md`, "finished", { call: "orphan" })]);
+      await sleep(windowMs + 500);
+      out.orphanAsked = asking() - before;
+      out.orphanNamed = window.__XT__.asked.at(-1)?.join(",") ?? null;
+      // An end that never comes: the bound closes the call and asks git once.
+      before = asking();
+      fire("term:3", [act("edit", `${root}/src/lib.rs`, "started", { call: "lost1" })]);
+      await settle(6);
+      out.openedForBound = writing("src/lib.rs");
+      const real = performance.now.bind(performance);
+      performance.now = () => real() + max + 1000;
+      try { sweepTreeTouches(); } finally { performance.now = real; }
+      await settle(3);
+      out.boundCleared = writing("src/lib.rs") === null;
+      await sleep(windowMs + 500);
+      out.boundAsked = asking() - before;
+      return out;
+    }, { windowMs, min, max });
+    ok("the turn's end closes what it left open and asks git once; a failed call clears the mark and asks nothing; an end whose start was missed still asks for its file", ends.openedForStop === "true" && ends.stopCleared === true && ends.stopAsked === 1 && ends.failedCleared === true && ends.failedAsked === 0 && ends.orphanAsked === 1 && ends.orphanNamed === "docs/guide.md", JSON.stringify(ends));
+    ok("a call whose end never comes is let go at its bound — the mark clears and git is asked once for what it may have written", ends.openedForBound === "true" && ends.boundCleared === true && ends.boundAsked === 1, JSON.stringify(ends));
+
+    /* a wire session: its own pane key, its folder in `cwd`, its end naming no file */
+    const wire = await page.evaluate(async ({ windowMs, min }) => {
+      const { root, fire, act, settle, sleep, writing } = window.__XT__;
+      const out = {};
+      const before = window.__COUNTS__.scm_numstat ?? 0;
+      fire("wire:7", [act("edit", "src/lib.rs", "started", { call: "item_1", cwd: root })]);
+      await settle(6);
+      out.writing = writing("src/lib.rs");
+      out.notFiled = typeof paneActivities === "object" && !paneActivities.has("wire:7");
+      fire("wire:7", [act("edit", null, "finished", { call: "item_1" })]);
+      await sleep(min + windowMs + 500);
+      out.ended = writing("src/lib.rs") === null;
+      out.asked = (window.__COUNTS__.scm_numstat ?? 0) - before;
+      out.named = window.__XT__.asked.at(-1)?.join(",") ?? null;
+      return out;
+    }, { windowMs, min });
+    ok("a wire session's writes follow start to end the same way: its folder is its `cwd`, its end needs no file of its own, and it fills no sidebar card", wire.writing === "true" && wire.notFiled === true && wire.ended === true && wire.asked === 1 && wire.named === "src/lib.rs", JSON.stringify(wire));
+
+    /* a burst: 200 pairs in one tick, 40 files — one question for the window, 40 files in it */
+    const burst = await page.evaluate(async ({ windowMs, most }) => {
+      const { root, fire, act, settle, sleep } = window.__XT__;
+      const out = {};
+      await sleep(windowMs + 300);
+      const before = { ...window.__COUNTS__ };
+      const askedBefore = window.__XT__.asked.length;
+      for (let at = 0; at < 200; at += 1) {
+        const target = `${root}/src/burst${at % 40}.rs`;
+        fire("term:5", [act("edit", target, "started", { call: `b${at}` })]);
+        fire("term:5", [act("edit", target, "finished", { call: `b${at}` })]);
+      }
+      await settle(3);
+      await sleep(windowMs * 3 + 600);
+      const delta = (command) => (window.__COUNTS__[command] ?? 0) - (before[command] ?? 0);
+      const questions = window.__XT__.asked.slice(askedBefore);
+      out.questions = questions.length;
+      out.files = new Set(questions.flat()).size;
+      out.biggest = Math.max(0, ...questions.map((paths) => paths.length));
+      out.repeats = questions.flat().length - out.files;
+      out.wholeRepo = delta("scm_status") + delta("upstream_status");
+      out.listed = delta("list_dir");
+      // More files than one question may name wait for the next window, in order.
+      const spill = 2 * most + 6;
+      const spillBefore = window.__XT__.asked.length;
+      for (let at = 0; at < spill; at += 1) fire("term:5", [act("edit", `${root}/src/spill${at}.rs`, "finished", { call: `s${at}` })]);
+      await sleep(windowMs * 5 + 600);
+      const spilled = window.__XT__.asked.slice(spillBefore);
+      out.spillQuestions = spilled.length;
+      out.spillFiles = new Set(spilled.flat()).size;
+      out.spillBiggest = Math.max(0, ...spilled.map((paths) => paths.length));
+      out.spill = spill;
+      return out;
+    }, { windowMs, most });
+    ok("a burst of 200 start/end pairs asks git one scoped question about each file once — never per event, never a whole-repo status, no listing", burst.questions === 1 && burst.files === 40 && burst.repeats === 0 && burst.wholeRepo === 0 && burst.listed === 0, JSON.stringify(burst));
+    ok("more files than one question may name are asked in the following windows, none dropped and none named twice", burst.spillBiggest <= most && burst.spillFiles === burst.spill && burst.spillQuestions >= 3, JSON.stringify(burst));
+
+    /* held writes are bounded however many calls start and never end */
+    const held = await page.evaluate(() => {
+      const { root, fire, act } = window.__XT__;
+      for (let at = 0; at < 300; at += 1) fire("term:6", [act("edit", `${root}/src/many${at}.rs`, "started", { call: `many${at}` })]);
+      return { writes: typeof treeWrites === "object" ? treeWrites.size : NaN, cap: typeof TREE_TOUCH_CAP === "number" ? TREE_TOUCH_CAP : NaN };
+    });
+    ok("the writes held open are bounded by the touch cap however many calls start and never end", Number.isFinite(held.writes) && held.writes <= held.cap, JSON.stringify(held));
+
+    /* reduced motion: nothing moves, a static marker stands, the words are the same */
+    await page.evaluate(() => { for (const key of [...treeWrites.keys()]) treeWrites.delete(key); });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const still = await page.evaluate(async () => {
+      const { root, fire, act, settle, row, writing, sweeping } = window.__XT__;
+      fire("term:7", [act("edit", `${root}/README.md`, "started", { call: "rm1" })]);
+      await settle(6);
+      const row0 = row("README.md");
+      const mark = row0 ? getComputedStyle(row0, "::after") : null;
+      const word = t("tree.writing.file", "");
+      return {
+        writing: writing("README.md"),
+        sweeping: sweeping("README.md"),
+        animationName: mark?.animationName ?? null,
+        marker: mark ? { content: mark.content, display: mark.display, height: parseFloat(mark.height) } : null,
+        said: word.length > 0 && (row0?.getAttribute("aria-label") ?? "").includes(word),
+      };
+    });
+    await page.emulateMedia({ reducedMotion: WINDOW_MOTION_REST });
+    ok("under reduced motion the writing state does not move, a static marker stands in its place, and the words are the same", still.writing === "true" && still.sweeping === 0 && still.animationName === "none" && still.marker?.content !== "none" && still.marker?.display !== "none" && still.marker?.height > 0 && still.said === true, JSON.stringify(still));
+
+    /* the keyboard: the row that holds focus names what is happening to it */
+    await page.evaluate(() => window.__XT__.row("README.md").focus());
+    // README.md is the tree's last row: up to its neighbour and back, by keyboard.
+    await page.keyboard.press("ArrowUp");
+    await page.keyboard.press("ArrowDown");
+    const focus = await page.evaluate(() => {
+      const row = document.activeElement;
+      const word = t("tree.writing.file", "");
+      return { path: row?.dataset?.treePath ?? null, visible: row?.matches?.(":focus-visible") ?? false, said: word.length > 0 && (row?.getAttribute?.("aria-label") ?? "").includes(word) };
+    });
+    ok("a focused row that is being written shows its focus ring and says what is happening to it in words", focus.path === "README.md" && focus.visible === true && focus.said === true, JSON.stringify(focus));
+    ok("the writing suite raised no renderer faults", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();
   }

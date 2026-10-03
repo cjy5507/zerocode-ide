@@ -67,7 +67,7 @@ import { installHarnessWaits } from "./harness-waits.mjs";
 import { installBoardWaits, testBoardWaits } from "./board-waits.mjs";
 
 import { testExplorer } from "./explorer.mjs";
-import { testExplorerAgentActivity, testExplorerAgentBurst, testExplorerGit, testExplorerKeys, testExplorerMentions, testExplorerRoot, testExplorerSelection, testExplorerVcs } from "./explorer-agent.mjs";
+import { testExplorerAgentActivity, testExplorerAgentBurst, testExplorerGit, testExplorerKeys, testExplorerMentions, testExplorerRoot, testExplorerSelection, testExplorerVcs, testExplorerWriting } from "./explorer-agent.mjs";
 import { testPathBrowser } from "./path-browser.mjs";
 import { testNativeFolderPicker } from "./native-folder-picker.mjs";
 import { testSftpAndTeam } from "./sftp.mjs";
@@ -215,6 +215,9 @@ suite("explorer", async ({ browser, origin, ok }) => {
  * (t-24298): one suite per slice, so each red and green is one name. */
 suite("explorer-agent-activity", ({ browser, origin, ok }) => testExplorerAgentActivity(browser, origin, ok));
 suite("explorer-agent-burst", ({ browser, origin, ok }) => testExplorerAgentBurst(browser, origin, ok));
+/* Live progress (t-31715): a write that has started and not ended shimmers its
+ * row, its end lands the file's +N -N from one scoped git question. */
+suite("explorer-agent-writing", ({ browser, origin, ok }) => testExplorerWriting(browser, origin, ok));
 suite("explorer-git", ({ browser, origin, ok }) => testExplorerGit(browser, origin, ok));
 suite("explorer-mentions", ({ browser, origin, ok }) => testExplorerMentions(browser, origin, ok));
 suite("explorer-keys", ({ browser, origin, ok }) => testExplorerKeys(browser, origin, ok));
