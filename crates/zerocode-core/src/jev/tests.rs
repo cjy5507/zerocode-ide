@@ -2358,10 +2358,12 @@ fn choice_label_permutation_cannot_retarget_an_action() {
 }
 
 /// What a reflex decision sends is the run's typed state and nothing else:
-/// the table declares only the sightings and the outcome counts, a detector's
-/// name is cut at the plan's own id bound and the list at the plan's detector
-/// bound — the door's own clearing — and no pointer reaches a pixel, a
-/// screen's words or an app.
+/// the table declares the sightings, the outcome counts, what the hand
+/// finished since the last reading and the capture's age against its limit
+/// (t-22110) — numbers and closed words — a detector's name is cut at the
+/// plan's own id bound and the list at the plan's detector bound — the
+/// door's own clearing — and no pointer reaches a pixel, a screen's words or
+/// an app.
 #[test]
 fn reflex_decide_sends_no_pixels_text_or_app_names() {
     use crate::computer_use_protocol::reflex::{LIMITS, MAX_IDENTIFIER_BYTES};
@@ -2374,6 +2376,8 @@ fn reflex_decide_sends_no_pixels_text_or_app_names() {
             "/state/sightings/*/detector",
             "/state/sightings/*/unknown",
             "/state/outcomes",
+            "/state/activity",
+            "/state/freshness",
         ]
     );
     for sent in REFLEX_DECIDE.sends {

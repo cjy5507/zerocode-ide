@@ -468,7 +468,14 @@ Recording permission the screenshots use — no new prompt.
   answers the frame (as a file), the accessibility tree when an app is named,
   the screen text with `--ocr`, and with `--diff` the rectangles that changed
   since your last look — an `observe` or a `screenshot` of the same place
-  (`changed`, in screen points; empty when nothing did) plus `changedShare`. Look
+  (`changed`, in screen points; `[]` when nothing did) plus `changedShare`.
+  The first diff after an act counts from your last look before it, so a
+  screenshot in between does not hide what the act did; its picture is taken
+  after the act, and a change too thin for the shrunk picture (a checkbox, a
+  caret, a border) is still found where the watched display repainted. So `[]` after
+  an act is the answer — do not `zoom` to confirm it. `changed` is `null`
+  when there was nothing to compare with (no earlier look of the same place
+  at the same scale): unknown, not nothing — look again with `--diff`. Look
   after every act: the tree tells you names, the pixels tell you truth, the
   diff tells you where to look. When the tree is empty, `--ocr`; when the
   text is small, `zoom`.

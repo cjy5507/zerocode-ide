@@ -4432,6 +4432,18 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
             at: "/state/outcomes",
             cap: Cap::Uncut,
         },
+        // What the hand finished since the last reading (t-22110): two
+        // counts under the product's own words, `done` and `missed`.
+        Sent {
+            at: "/state/activity",
+            cap: Cap::Uncut,
+        },
+        // How old the capture is against the hand's own frame limit: two
+        // numbers of milliseconds and the comparison's word, nothing else.
+        Sent {
+            at: "/state/freshness",
+            cap: Cap::Uncut,
+        },
     ],
     ledger: "reflex-decide.jsonl",
     promotes: true,

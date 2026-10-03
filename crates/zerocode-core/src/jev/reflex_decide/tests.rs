@@ -1,4 +1,5 @@
 use super::*;
+use crate::computer_use::{REFLEX_MISSED_OUTCOMES, REFLEX_PRESSED_OUTCOME};
 
 /// A helper status on `plan` and `owner`, capture `capture`, with the ball's
 /// newest sighting `value` and `done` actions so far.
@@ -209,7 +210,7 @@ fn every_decision_leaves_one_row_and_a_sent_one_keeps_its_cost() {
 /// left out whole — and the outcome counts; the status's other fields stay
 /// home.
 #[test]
-fn the_state_is_the_sightings_and_the_outcomes_alone() {
+fn the_state_is_the_sightings_outcomes_activity_and_freshness_alone() {
     let mut raw = status(1, 7, 10, 1, 2);
     let many: Vec<Value> = (0..LIMITS.max_detectors + 3)
         .map(|at| json!({ "detector": format!("d{at}"), "value": 1, "unknown": null, "track": at, "ageNs": 1 }))
@@ -235,6 +236,21 @@ fn the_state_is_the_sightings_and_the_outcomes_alone() {
         "a name that is not an id is left out"
     );
     assert_eq!(snapshot.state["outcomes"], json!({ "done": 2 }));
+    // A status carrying no receipts: nothing finished since the last reading.
+    assert_eq!(
+        snapshot.state["activity"],
+        json!({ "done": 0, "missed": 0 }),
+        "the activity of a reading with no receipts"
+    );
+    // Its capture is three milliseconds old against the table's own limit.
+    assert_eq!(
+        snapshot.state["freshness"],
+        json!({
+            "capture_age_ms": 3,
+            "max_frame_age_ms": LIMITS.max_frame_age_ns / 1_000_000,
+            "over_age": false,
+        })
+    );
     let text = snapshot.state.to_string();
     assert!(!text.contains("planHash") && !text.contains("an-app-name-free-hash"));
     assert_eq!(
@@ -243,6 +259,66 @@ fn the_state_is_the_sightings_and_the_outcomes_alone() {
             .map(Map::len),
         Some(3)
     );
+}
+
+/// What the hand did since the last reading goes with the reading (t-22110):
+/// the receipts a status carries — the ones not yet acknowledged, one
+/// collect's worth — counted by the product's own outcome words, a landed
+/// action `done` and a target the hand went for and lost `missed`; any other
+/// outcome is neither. And the capture's age is held to the hand's own frame
+/// limit, in whole milliseconds, with the limit itself beside it; a capture
+/// nobody can date is not an old one — it is not measured.
+#[test]
+fn activity_counts_the_readings_receipts_and_freshness_holds_the_capture_to_the_hands_limit() {
+    let mut raw = status(1, 7, 10, 1, 9);
+    raw["receipts"] = json!([
+        { "seq": 1, "actionId": "click1", "outcome": REFLEX_PRESSED_OUTCOME },
+        { "seq": 2, "actionId": "move1", "outcome": REFLEX_MISSED_OUTCOMES[0] },
+        { "seq": 3, "actionId": "move1", "outcome": REFLEX_MISSED_OUTCOMES[1] },
+        { "seq": 4, "actionId": "move1", "outcome": REFLEX_MISSED_OUTCOMES[2] },
+        { "seq": 5, "actionId": "move1", "outcome": REFLEX_MISSED_OUTCOMES[3] },
+        { "seq": 6, "actionId": "click1", "outcome": REFLEX_PRESSED_OUTCOME },
+        { "seq": 7, "actionId": "click1", "outcome": "stopped" },
+        { "seq": 8, "actionId": "click1" },
+    ]);
+    raw["lastCaptureAgeNs"] = json!(LIMITS.max_frame_age_ns + 1_000_000);
+    let snapshot = snapshot_of(&raw);
+    assert_eq!(
+        snapshot.state["activity"],
+        json!({ "done": 2, "missed": 4 })
+    );
+    assert_eq!(
+        snapshot.state["freshness"],
+        json!({
+            "capture_age_ms": LIMITS.max_frame_age_ns / 1_000_000 + 1,
+            "max_frame_age_ms": LIMITS.max_frame_age_ns / 1_000_000,
+            "over_age": true,
+        })
+    );
+    // At the limit itself the capture is still young: the hand's own rule
+    // (`observed <= now && now - observed <= max_frame_age_ns`).
+    raw["lastCaptureAgeNs"] = json!(LIMITS.max_frame_age_ns);
+    assert_eq!(
+        snapshot_of(&raw).state["freshness"]["over_age"],
+        json!(false)
+    );
+    // A capture nobody can date is not measured, and establishes nothing.
+    raw.as_object_mut()
+        .expect("a status")
+        .remove("lastCaptureAgeNs");
+    let undated = snapshot_of(&raw);
+    assert_eq!(undated.state["freshness"]["capture_age_ms"], Value::Null);
+    assert_eq!(undated.state["freshness"]["over_age"], Value::Null);
+    assert_eq!(
+        undated.state["freshness"]["max_frame_age_ms"],
+        json!(LIMITS.max_frame_age_ns / 1_000_000)
+    );
+    // The receipts are no part of the state beyond their counts: no action
+    // id and no sequence number goes to the model.
+    let text = snapshot.state.to_string();
+    assert!(!text.contains("click1") && !text.contains("\"seq\""));
+    // Finding nothing is still the sightings' word alone.
+    assert!(!finds_nothing(&snapshot.state));
 }
 
 // ---- what may be carried out, and what grades it (t-10223 §2.2) ---------------
@@ -661,4 +737,31 @@ fn a_label_names_its_request_by_run_decision_and_time_as_the_judge_joins_it() {
     let unsaid = label_row("rx-9-1", 2, 1_000, measured, Err(HAND_STOPPED));
     assert_eq!(unsaid["notCompared"], json!(HAND_STOPPED));
     assert!(unsaid.get("agreed").is_none() && unsaid.get("baselineAgreed").is_none());
+}
+
+/// A reading that differs from the one before it only by the capture's exact
+/// age is the same reading (t-22110): the hand's captures jitter a few
+/// milliseconds from collect to collect, and a run standing still would
+/// otherwise ask every collect for nothing new. Past the hand's limit the
+/// reading is new — `over_age` turned, which the words read.
+#[test]
+fn a_reading_that_differs_only_by_the_captures_exact_age_is_the_same_reading() {
+    let mut decider = Decider::new();
+    let mut raw = status(1, 7, 10, 1, 2);
+    raw["lastCaptureAgeNs"] = json!(3_000_000);
+    assert!(matches!(decider.offer(snapshot_of(&raw)), Offer::Ask(_)));
+    raw["lastCaptureAgeNs"] = json!(7_000_000);
+    assert_eq!(
+        decider.offer(snapshot_of(&raw)),
+        Offer::Same,
+        "four milliseconds of jitter is no decision"
+    );
+    raw["lastCaptureAgeNs"] = json!(LIMITS.max_frame_age_ns + 1_000_000);
+    assert!(
+        matches!(
+            decider.offer(snapshot_of(&raw)),
+            Offer::Waiting { coalesced: None }
+        ),
+        "over the hand's limit the reading is new"
+    );
 }

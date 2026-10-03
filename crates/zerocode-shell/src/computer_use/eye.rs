@@ -116,6 +116,84 @@ pub(super) fn frame(memory: &Memory, display: Option<u64>, call: Call<'_>) -> Op
     ask(memory, FRAME_METHOD, display, Map::new(), call).ok()
 }
 
+/// Where the eye stands now — its newest repaint, its stream and the mark of
+/// the last act the helper answered (`act`, none when the eye saw no act) —
+/// for the look after an act: `None` when the eye cannot be had.
+pub(super) fn standing(memory: &Memory, display: Option<u64>, call: Call<'_>) -> Option<Changes> {
+    if memory.refused_lately() {
+        return None;
+    }
+    changes(memory, display, None, None, call).ok()
+}
+
+/// Wait for the eye to deliver a repaint after the act `act` of the stream
+/// `stream`, at the table's pace, for at most `EYE_QUIET_MS` on the helper's
+/// clock — three frame intervals, and a screen an act changed repaints
+/// within one once it is drawn. `true` once one has come; `false` when none
+/// did, or the eye cannot say.
+pub(super) fn repainted_after(
+    memory: &Memory,
+    display: Option<u64>,
+    (act, stream): (Mark, Option<&str>),
+    call: Call<'_>,
+    pause: &mut dyn FnMut(Duration),
+) -> bool {
+    let quiet = i64::try_from(EYE_QUIET_MS).unwrap_or(i64::MAX);
+    // The helper's clock decides; this bound only keeps a clock that never
+    // moves from holding the look.
+    let most = EYE_QUIET_MS / EYE_POLL_MS + 2;
+    let mut began = None;
+    for _ in 0..most {
+        let Ok(got) = changes(memory, display, None, None, call) else {
+            return false;
+        };
+        if !got.streaming || got.stream_id.as_deref() != stream {
+            return false;
+        }
+        if got.seq > act.seq {
+            return true;
+        }
+        if got.now_ms - *began.get_or_insert(got.now_ms) >= quiet {
+            return false;
+        }
+        pause(Duration::from_millis(EYE_POLL_MS));
+    }
+    false
+}
+
+/// Where the display repainted after the act `act` of the stream `stream`,
+/// up to the repaint `upto` (the look's own frame; all of them for a look
+/// that captured), as the look after an act counts it: not ZeroCode's own
+/// windows, not what was already moving before the act — in screen points.
+/// The eye notes a repaint when its frame is not the same to the last bit
+/// and places it where the window server says it drew, so a change the
+/// look's shrunk picture averages under the drift is here. `None` when the
+/// eye cannot say: no eye, another stream, a history that was lost.
+pub(super) fn repainted_since(
+    memory: &Memory,
+    display: Option<u64>,
+    (act, stream): (Mark, Option<&str>),
+    upto: Option<u64>,
+    call: Call<'_>,
+) -> Option<Vec<Rect>> {
+    let back = i64::try_from(EYE_BACKGROUND_MS).unwrap_or(i64::MAX);
+    let got = changes(memory, display, None, Some(act.at_ms - back), call).ok()?;
+    if !got.streaming || !got.whole || got.stream_id.as_deref() != stream {
+        return None;
+    }
+    let windows = super::marks::desktop_windows(call).ok()?;
+    let ignore = Ignore::new(&got.changes, act, &windows);
+    Some(
+        ignore
+            .after(&got.changes, act)
+            .into_iter()
+            .filter(|change| upto.is_none_or(|upto| change.seq <= upto))
+            .flat_map(|change| change.rects.iter().copied())
+            .filter(|rect| !ignore.owns(rect))
+            .collect(),
+    )
+}
+
 /// A desktop `screenshot` through the eye: the newest frame, answered the way
 /// the helper answers a capture — `None` for a region or a zoom (the display
 /// at its own resolution), and when the eye cannot be had.
