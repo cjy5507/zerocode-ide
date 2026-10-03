@@ -149,7 +149,7 @@ fn one_session(root: &Path, scenario: &str, phase: &str, jev: &Mutex<Vec<usize>>
         let eligibility=sink.events().into_iter().filter_map(|event| match event {
             TelemetryEvent::SessionTrace(trace) if trace.attributes.get("action").and_then(Value::as_str)==Some("retention_eligibility") => Some(json!(trace.attributes)),
             _=>None,
-        }).last();
+        }).next_back();
         results.push(json!({"round":round,"cleared":cleared,"removed":removed,"retained":cleared>0,
             "historyEstimatedTokensBefore":before,"historyEstimatedTokensAfterBoundary":after_boundary,
             "historyEstimatedTokensAfterRecovery":after,"recoveryHostMicros":recovery_us,
