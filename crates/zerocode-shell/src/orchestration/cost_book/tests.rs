@@ -135,8 +135,8 @@ fn claude_scan() -> usage_stats::Ledger {
     usage_stats::Ledger {
         sessions: vec![usage_stats::Session {
             session_id: "conv-private-a".into(),
-            first_timestamp: "2026-09-26T00:00:00Z".into(),
-            last_timestamp: "2026-09-26T01:00:00Z".into(),
+            first_timestamp: "1970-01-01T00:00:02Z".into(),
+            last_timestamp: "1970-01-01T00:00:03Z".into(),
             model: Some(OPUS.into()),
             last_cwd: Some("/Users/dev/repo".into()),
             last_git_branch: Some("wt/t-cost".into()),
@@ -156,6 +156,12 @@ fn row(task: &str, requests: u64) -> String {
         "{}\n",
         json!({"at": 1, "task": task, "outcome": "answered", "requests": requests})
     )
+}
+
+fn row_in(run: &str, task: &str, requests: u64) -> String {
+    let mut value: Value = serde_json::from_str(&row(task, requests)).unwrap();
+    value["run"] = json!(run);
+    format!("{value}\n")
 }
 
 fn append(path: &Path, text: &str) {
@@ -273,7 +279,7 @@ fn a_finished_task_is_worked_out_once_until_what_it_is_made_of_moves() {
     let (run_id, done, _) = a_run(&mut ledger, 1_000);
     let dir = tempfile::tempdir().expect("a scratch directory");
     let summon = dir.path().join("summon-choice.jsonl");
-    std::fs::write(&summon, row(&done, 1)).expect("a row");
+    std::fs::write(&summon, row_in(&run_id, &done, 1)).expect("a row");
     let ledgers = vec![summon.clone()];
     let scan = claude_scan();
     let run = ledger.run(&run_id).expect("the run");
@@ -306,7 +312,7 @@ fn a_finished_task_is_worked_out_once_until_what_it_is_made_of_moves() {
         "a new scan left a cost read off the old one"
     );
 
-    append(&summon, &row(&done, 2));
+    append(&summon, &row_in(&run_id, &done, 2));
     let again = beat(&mut book, SCANNED + 1);
     assert_eq!(
         book.worked, 3,

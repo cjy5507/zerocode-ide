@@ -58,6 +58,8 @@ use crate::{usage_ledger, usage_stats, usage_stats_codex};
 
 mod session_attribution;
 pub use session_attribution::SessionAttribution;
+mod zo_usage;
+pub use zo_usage::ZoRequestUsage;
 
 /// The key a stamping seat writes the ledger's task id under.
 pub const TASK_STAMP: &str = "task";
@@ -84,6 +86,7 @@ pub enum UsageSource {
     Claude,
     Codex,
     OpenCode,
+    Zo,
 }
 
 impl UsageSource {
@@ -95,6 +98,7 @@ impl UsageSource {
             AgentKind::Claude => Some(Self::Claude),
             AgentKind::Codex => Some(Self::Codex),
             AgentKind::Opencode => Some(Self::OpenCode),
+            AgentKind::Zo => Some(Self::Zo),
             _ => None,
         }
     }
@@ -143,9 +147,16 @@ fn token_sum(counters: [i64; 4]) -> Option<i64> {
 pub struct SessionBook {
     sessions: HashMap<(UsageSource, String), SessionSpend>,
     scanned_at: HashMap<UsageSource, i64>,
+    bounds: HashMap<(UsageSource, String), Option<(i64, i64)>>,
 }
 
 impl SessionBook {
+    pub fn clear_source(&mut self, source: UsageSource) {
+        self.sessions.retain(|(held, _), _| *held != source);
+        self.bounds.retain(|(held, _), _| *held != source);
+        self.scanned_at.remove(&source);
+    }
+
     /// Claude's transcripts, read at `scanned_at`: four independent
     /// counters, priced at the conversation's model — the last one it named
     /// ([`usage_stats::Session::model`]), which is why a switch mid-way is
@@ -153,6 +164,12 @@ impl SessionBook {
     pub fn read_claude(&mut self, ledger: &usage_stats::Ledger, scanned_at: i64) {
         self.scanned_at.insert(UsageSource::Claude, scanned_at);
         for session in &ledger.sessions {
+            self.record_bounds(
+                UsageSource::Claude,
+                &session.session_id,
+                &session.first_timestamp,
+                &session.last_timestamp,
+            );
             self.sessions.insert(
                 (UsageSource::Claude, session.session_id.clone()),
                 SessionSpend {
@@ -184,6 +201,12 @@ impl SessionBook {
     pub fn read_codex(&mut self, ledger: &usage_ledger::Ledger, scanned_at: i64) {
         self.scanned_at.insert(UsageSource::Codex, scanned_at);
         for session in &ledger.sessions {
+            self.record_bounds(
+                UsageSource::Codex,
+                &session.session_id,
+                &session.first_timestamp,
+                &session.last_timestamp,
+            );
             let cached = session.cached_input_tokens.min(session.input_tokens);
             let fresh = session.input_tokens.checked_sub(cached);
             self.sessions.insert(
@@ -218,6 +241,12 @@ impl SessionBook {
     pub fn read_opencode(&mut self, ledger: &usage_ledger::Ledger, scanned_at: i64) {
         self.scanned_at.insert(UsageSource::OpenCode, scanned_at);
         for session in &ledger.sessions {
+            self.record_bounds(
+                UsageSource::OpenCode,
+                &session.session_id,
+                &session.first_timestamp,
+                &session.last_timestamp,
+            );
             let output = session
                 .output_tokens
                 .checked_add(session.reasoning_output_tokens);
@@ -246,6 +275,15 @@ impl SessionBook {
 
     fn spend(&self, source: UsageSource, id: &str) -> Option<&SessionSpend> {
         self.sessions.get(&(source, id.to_string()))
+    }
+
+    fn record_bounds(&mut self, source: UsageSource, id: &str, first: &str, last: &str) {
+        self.bounds.insert(
+            (source, id.to_owned()),
+            crate::civil::epoch_ms_of_iso(first)
+                .zip(crate::civil::epoch_ms_of_iso(last))
+                .filter(|(first, last)| first <= last),
+        );
     }
 }
 
@@ -281,6 +319,8 @@ impl std::ops::Add for JevTally {
 #[derive(Clone, Debug, Default)]
 pub struct JevBook {
     by_task: HashMap<String, JevTally>,
+    by_run_task: HashMap<(String, String), JevTally>,
+    unscoped_rows: HashMap<String, u64>,
 }
 
 impl JevBook {
@@ -295,7 +335,8 @@ impl JevBook {
             return;
         };
         let usage = summary::summarize_rows([row], i64::MIN);
-        let tally = self.by_task.entry(task.to_string()).or_default();
+        let mut counted = JevTally::default();
+        let tally = &mut counted;
         tally.rows += 1;
         if summary::CACHED.read(row).and_then(Value::as_bool) != Some(true)
             && !summary::is_refusal(outcome)
@@ -306,12 +347,38 @@ impl JevBook {
         if usage.unmetered_requests == 0 {
             tally.rows_with_tokens += 1;
         }
+        let total = self.by_task.entry(task.to_string()).or_default();
+        *total = *total + counted;
+        if let Some(run) = row
+            .get("run")
+            .and_then(Value::as_str)
+            .filter(|run| !run.is_empty())
+        {
+            let total = self
+                .by_run_task
+                .entry((run.to_owned(), task.to_owned()))
+                .or_default();
+            *total = *total + counted;
+        } else {
+            *self.unscoped_rows.entry(task.to_owned()).or_default() += 1;
+        }
     }
 
     /// What `task_id`'s stamped rows came to.
     #[must_use]
     pub fn tally(&self, task_id: &str) -> JevTally {
         self.by_task.get(task_id).copied().unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn tally_in(&self, run: &str, task: &str) -> JevTally {
+        let mut tally = self
+            .by_run_task
+            .get(&(run.to_owned(), task.to_owned()))
+            .copied()
+            .unwrap_or_default();
+        tally.rows += self.unscoped_rows.get(task).copied().unwrap_or_default();
+        tally
     }
 }
 
@@ -334,6 +401,7 @@ pub enum UsdReason {
     Unlinked,
     IncompleteSessionHistory,
     InvalidUsage,
+    OutsideAttempt,
     /// A conversation switched models mid-way — a switch the ledger wrote
     /// against the attempt, or more than one model in the vendor's own
     /// ledger — and its vendor keeps one price per conversation.
@@ -343,7 +411,7 @@ pub enum UsdReason {
 }
 
 /// What the generation model spent in the task's recorded conversations.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationCost {
     pub history_complete: bool,
@@ -376,6 +444,7 @@ impl GenerationCost {
                         | UsdReason::Unlinked
                         | UsdReason::IncompleteSessionHistory
                         | UsdReason::InvalidUsage
+                        | UsdReason::OutsideAttempt
                 )
             )
         {
@@ -639,6 +708,17 @@ fn generation(
                 worse(UsdReason::Unlinked);
                 continue;
             };
+            if !session_attribution::covers(
+                carried,
+                sessions
+                    .bounds
+                    .get(&(source, session.id.clone()))
+                    .copied()
+                    .flatten(),
+            ) {
+                worse(UsdReason::OutsideAttempt);
+                continue;
+            }
             if cost.add_tokens(spend).is_none() {
                 worse(UsdReason::InvalidUsage);
                 continue;

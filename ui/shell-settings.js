@@ -2596,6 +2596,20 @@ function agentRow(row) {
     }
   }
   line.querySelector(".agent-row-name").textContent = row.name;
+  if (row.support) {
+    const support = document.createElement("span");
+    support.className = "agent-support";
+    const yes = t("settings.agents.supportYes", "지원");
+    const no = t("settings.agents.supportNo", "미지원");
+    support.textContent = t("settings.agents.support", "지원 범위 · 실행 {{execution}} / 구조화 관찰 {{observation}} / 추가 문맥 {{context}} / 직접 제어 {{control}}", {
+      execution: row.support.execution ? yes : no,
+      observation: row.support.structured_observation ? yes : no,
+      context: row.support.additional_context ? yes : no,
+      control: row.support.direct_control ? yes : no,
+    });
+    support.dataset.tip = t("settings.agents.supportHint", "연결 방식의 지원 범위입니다. 설치·로그인·현재 실행·권한 허용이나 작업 완료를 뜻하지 않습니다. 직접 제어는 프로토콜 API, 추가 문맥은 수명주기 훅을 뜻합니다.");
+    line.querySelector(".agent-row-body").appendChild(support);
+  }
   const command = line.querySelector(".agent-row-cmd");
   if (row.installed) command.textContent = row.found_as ?? "";
   else command.textContent = row.found_as ?? row.id;

@@ -3529,19 +3529,21 @@ fn smart_plan_knobs_read_with_defaults_and_pinned_percents() {
         read_smart_runtime_settings_for(&cwd).expect("settings").plan
     });
     assert!(plan.shadow);
+    assert!(!plan.apply);
     assert_eq!(plan.min_pass_percent, DEFAULT_PLAN_MIN_PASS_PERCENT);
     assert_eq!(plan.switch_margin_percent, DEFAULT_PLAN_SWITCH_MARGIN_PERCENT);
     // A declared section: each key read, a percent past 100 pinned to 100,
     // a malformed key left at its default.
     write_settings(
         home.path(),
-        &json!({ "smart": { "plan": { "shadow": false, "minPassPercent": 70, "switchMarginPercent": 250, } } }),
+        &json!({ "smart": { "plan": { "apply": true, "shadow": false, "minPassPercent": 70, "switchMarginPercent": 250, } } }),
     );
     let plan = with_config_home(home.path(), || {
         let cwd = std::env::current_dir().expect("cwd");
         read_smart_runtime_settings_for(&cwd).expect("settings").plan
     });
     assert!(!plan.shadow);
+    assert!(plan.apply);
     assert_eq!(plan.min_pass_percent, 70);
     assert_eq!(plan.switch_margin_percent, 100);
     write_settings(home.path(), &json!({ "smart": { "plan": { "minPassPercent": "lots" } } }));

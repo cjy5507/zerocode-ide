@@ -132,7 +132,7 @@ pub(crate) async fn run_host_prelude(
     // the alternatives and file what the scorer would have chosen beside it.
     // Log-only — nothing below reads the row.
     if let Some(shadow) = host.plan_shadow {
-        super::smart_runtime::record_plan_shadow_turn(runtime, shadow, setup, decision, session_id);
+        super::smart_runtime::record_plan_shadow_turn(runtime, shadow, setup, decision, session_id, input);
     }
     // "Why did it (not) spawn?" — the same env-guarded audit line zo-cli had;
     // the decision itself is unit-tested as a pure function.

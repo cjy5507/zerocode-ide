@@ -1,6 +1,73 @@
 use super::*;
 
 #[test]
+fn equal_task_names_in_different_runs_do_not_share_jev_usage() {
+    let mut book = JevBook::default();
+    for (run, tokens) in [("first", 100), ("second", 200)] {
+        book.read(
+            &json!({"at": 1, "run": run, "task": "task", "outcome": "answered",
+            "requests": 1, "inputTokens": tokens}),
+        );
+    }
+    assert_eq!(book.tally_in("first", "task").input_tokens, 100);
+    assert_eq!(book.tally_in("second", "task").input_tokens, 200);
+    book.read(
+        &json!({"at": 1, "task": "task", "outcome": "answered", "requests": 1, "inputTokens": 300}),
+    );
+    let unscoped = book.tally_in("first", "task");
+    assert!(unscoped.rows_with_tokens < unscoped.rows);
+    assert_eq!(unscoped.input_tokens, 100);
+}
+
+#[test]
+fn session_lifetime_before_after_or_between_attempts_is_not_a_task_bill() {
+    let held = run(
+        json!([attempt("dp-1", "t-1", "w-1", 10_000, Some(20_000))]),
+        json!([worker("w-1", "claude", Some("conversation"))]),
+        json!([]),
+    );
+    for (first, last, expected) in [
+        (10_000, 20_000, true),
+        (9_999, 15_000, false),
+        (15_000, 20_001, false),
+    ] {
+        let mut session = claude_session("conversation", OPUS, [100, 10, 0, 0]);
+        session.first_timestamp = crate::civil::iso_utc_of(first);
+        session.last_timestamp = crate::civil::iso_utc_of(last);
+        let sessions = book_of(vec![session]);
+        let cost = super::super::task_cost(
+            &held,
+            "t-1",
+            &sessions,
+            JevTally::default(),
+            &SessionAttribution::new([&held]),
+        );
+        assert_eq!(cost.generation.measured_tokens().is_some(), expected);
+        if !expected {
+            assert_eq!(cost.generation.usd_reason, Some(UsdReason::OutsideAttempt));
+        }
+    }
+    let mut split = held.clone();
+    split.dispatches[0].ended_ms = Some(12_000);
+    let mut second = split.dispatches[0].clone();
+    second.id = "dp-2".into();
+    second.started_ms = 18_000;
+    second.ended_ms = Some(20_000);
+    split.dispatches.push(second);
+    let mut session = claude_session("conversation", OPUS, [100, 10, 0, 0]);
+    session.first_timestamp = crate::civil::iso_utc_of(11_000);
+    session.last_timestamp = crate::civil::iso_utc_of(19_000);
+    let cost = super::super::task_cost(
+        &split,
+        "t-1",
+        &book_of(vec![session]),
+        JevTally::default(),
+        &SessionAttribution::new([&split]),
+    );
+    assert_eq!(cost.generation.usd_reason, Some(UsdReason::OutsideAttempt));
+}
+
+#[test]
 fn a_clock_reversal_in_any_attempt_is_unknown_not_a_cheap_elapsed_time() {
     for dispatches in [
         json!([attempt("dp-1", "t-1", "w-1", 20, Some(10))]),

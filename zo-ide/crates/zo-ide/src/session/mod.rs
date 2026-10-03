@@ -12,6 +12,7 @@ pub(crate) mod file_search;
 mod lsp_runtime;
 mod mcp_runtime;
 mod orchestration;
+mod plan_execution;
 #[doc(hidden)]
 pub mod process_lifecycle;
 pub mod permission_bridge;

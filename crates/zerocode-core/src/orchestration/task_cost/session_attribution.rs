@@ -9,6 +9,7 @@ pub(super) struct SessionOwner {
     pub run: String,
     pub dispatch: String,
     pub ended_ms: Option<i64>,
+    pub started_ms: i64,
 }
 
 #[derive(Default)]
@@ -47,6 +48,7 @@ impl SessionAttribution {
                         run: run.id.clone(),
                         dispatch: attempt.id.clone(),
                         ended_ms: attempt.ended_ms,
+                        started_ms: attempt.started_ms,
                     });
                 }
             }
@@ -86,4 +88,32 @@ impl SessionAttribution {
         }
         digest.finish()
     }
+}
+
+pub(super) fn covers(owners: &[SessionOwner], bounds: Option<(i64, i64)>) -> bool {
+    let Some((first, last)) = bounds else {
+        return false;
+    };
+    if first < 0 || first > last {
+        return false;
+    }
+    let mut ranges: Vec<_> = owners
+        .iter()
+        .filter_map(|owner| owner.ended_ms.map(|end| (owner.started_ms, end)))
+        .collect();
+    ranges.sort_unstable();
+    let mut covered = None;
+    for (start, end) in ranges {
+        if start < 0 || end < start {
+            return false;
+        }
+        if covered.is_none() && start <= first && end >= first {
+            covered = Some(end);
+        } else if let Some(previous) = covered {
+            if start <= previous {
+                covered = Some(previous.max(end));
+            }
+        }
+    }
+    covered.is_some_and(|end| end >= last)
 }

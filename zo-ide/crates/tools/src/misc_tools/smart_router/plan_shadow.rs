@@ -26,6 +26,15 @@ use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_
 
 /// The plan shadow's ledger file, under the shared shadow-ledger directory.
 pub const PLAN_SHADOW_FILE: &str = "plan-shadow.jsonl";
+
+#[must_use]
+pub fn plan_cohort_for_turn(
+    input: &str,
+    complexity: RouteTaskComplexity,
+    risk: runtime::RouteTaskRisk,
+) -> Option<runtime::PlanCohort> {
+    runtime::PlanCohort::new("main", "turn", super::infer::infer_route_role(None, "", input), complexity, risk)
+}
 /// How many scored candidates a row keeps in full: the ranked head, plus the
 /// best same-model plan when it did not make the head. The rest is a count.
 const PLAN_SHADOW_HEAD: usize = 8;
@@ -175,6 +184,8 @@ pub struct PlanShadowRow {
     /// The turn's attempt key when the runtime had minted one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohort: Option<runtime::PlanCohort>,
     pub complexity: String,
     pub current_model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,7 +277,9 @@ pub fn build_plan_shadow(inputs: PlanShadowInputs<'_>) -> PlanShadowRow {
             .map_or(ModelBand::Rest, |option| option.band)
     };
     let evidence = |candidate: &PlanCandidate| {
-        plan_evidence_from_records(inputs.records, candidate, canonicalize_route_model_id)
+        inputs.ctx.cohort.and_then(|cohort| {
+            plan_evidence_from_records(inputs.records, candidate, cohort, canonicalize_route_model_id)
+        })
     };
     let scored: Vec<ScoredPlan> = plan_candidates(&inputs.ctx, inputs.models)
         .into_iter()
@@ -315,6 +328,7 @@ pub fn build_plan_shadow(inputs: PlanShadowInputs<'_>) -> PlanShadowRow {
         recorded_at: inputs.recorded_at,
         session_id: inputs.session_id.to_string(),
         attempt: inputs.attempt.map(str::to_string),
+        cohort: inputs.ctx.cohort.cloned(),
         complexity: inputs.ctx.complexity.as_label().to_string(),
         current_model: inputs.ctx.current_model.to_string(),
         current_effort: inputs.ctx.current_effort.map(str::to_string),
@@ -450,6 +464,7 @@ mod tests {
 
     fn context(current: &str) -> PlanContext<'_> {
         PlanContext {
+            cohort: None,
             complexity: RouteTaskComplexity::Medium,
             current_model: current,
             current_effort: Some("high"),

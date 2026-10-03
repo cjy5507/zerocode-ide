@@ -511,6 +511,7 @@ pub fn jev_mention_rerank_mode_from(loader: &runtime::ConfigLoader) -> Option<De
 /// later comparison reads the thresholds the live scorer would use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanShadowSettings {
+    pub apply: bool,
     /// Whether a turn writes a plan-shadow row at all (`smart.plan.shadow`,
     /// default true). Off means no scoring work and no row.
     pub shadow: bool,
@@ -529,6 +530,7 @@ impl Default for PlanShadowSettings {
     fn default() -> Self {
         Self {
             shadow: true,
+            apply: false,
             min_pass_percent: DEFAULT_PLAN_MIN_PASS_PERCENT,
             switch_margin_percent: DEFAULT_PLAN_SWITCH_MARGIN_PERCENT,
         }
@@ -552,6 +554,7 @@ impl PlanShadowSettings {
                 .and_then(|plan| plan.get("shadow"))
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
+            apply: plan.and_then(|plan| plan.get("apply")).and_then(Value::as_bool).unwrap_or(false),
             min_pass_percent: percent("minPassPercent", DEFAULT_PLAN_MIN_PASS_PERCENT),
             switch_margin_percent: percent("switchMarginPercent", DEFAULT_PLAN_SWITCH_MARGIN_PERCENT),
         }

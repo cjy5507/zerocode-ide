@@ -20736,6 +20736,13 @@ button.helper-sib:hover {
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
 }
+.agent-support {
+  display: block;
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 
 /* What this agent does when it is ready for keys, for the two that say so.
  * Pushed to the far end because it is a footnote, not the subject. */

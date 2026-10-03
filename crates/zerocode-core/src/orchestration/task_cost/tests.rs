@@ -10,11 +10,39 @@ const OPUS: &str = "claude-opus-5-5";
 const SOL: &str = "gpt-5.6-sol";
 
 fn task_cost(run: &Run, task_id: &str, sessions: &SessionBook, jev: JevTally) -> TaskCost {
-    super::task_cost(run, task_id, sessions, jev, &SessionAttribution::new([run]))
+    super::task_cost(
+        run,
+        task_id,
+        &scoped_fixture(run, sessions),
+        jev,
+        &SessionAttribution::new([run]),
+    )
 }
 
 fn attempt_generation(run: &Run, attempt: &Dispatch, sessions: &SessionBook) -> GenerationCost {
-    super::attempt_generation(run, attempt, sessions, &SessionAttribution::new([run]))
+    super::attempt_generation(
+        run,
+        attempt,
+        &scoped_fixture(run, sessions),
+        &SessionAttribution::new([run]),
+    )
+}
+
+fn scoped_fixture(run: &Run, sessions: &SessionBook) -> SessionBook {
+    let mut scoped = sessions.clone();
+    for ((source, id), bounds) in &mut scoped.bounds {
+        if let Some(attempt) = run.dispatches.iter().find(|attempt| {
+            run.worker(&attempt.worker)
+                .and_then(|worker| UsageSource::of_agent(&worker.agent))
+                == Some(*source)
+                && reported_sessions(run, attempt)
+                    .iter()
+                    .any(|session| session.id == *id)
+        }) {
+            *bounds = Some((attempt.started_ms, attempt.started_ms));
+        }
+    }
+    scoped
 }
 
 /// A run holding the attempts, workers and mail of one test, with two tasks
@@ -442,7 +470,7 @@ fn an_agent_with_no_usage_ledger_leaves_the_dollars_unknown_not_zero() {
         ]),
         json!([
             worker("w-1", "claude", Some("conv-claude")),
-            worker("w-2", "zo", Some("conv-zo")),
+            worker("w-2", "cursor", Some("conv-unscanned")),
         ]),
         json!([]),
     );
@@ -867,7 +895,7 @@ fn the_reason_said_is_the_most_fundamental() {
         ]),
         json!([
             worker("w-1", "claude", Some("conv-claude")),
-            worker("w-2", "zo", Some("conv-zo")),
+            worker("w-2", "cursor", Some("conv-unscanned")),
         ]),
         json!([deviated("dp-1")]),
     );

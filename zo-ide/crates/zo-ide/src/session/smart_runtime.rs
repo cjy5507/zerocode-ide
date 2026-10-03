@@ -274,7 +274,7 @@ pub(crate) fn install_smart_turn(
     // roots. Sub-agent clients keep the short markers regardless.
     runtime::declare_conversation_anchor_ttl(tools::conversation_anchor_ttl_for(cwd));
     let orchestration = routing.orchestration;
-    let plan_shadow = routing.plan.shadow.then(|| {
+    let plan_shadow = (routing.plan.shadow || routing.plan.apply).then(|| {
         Arc::new(plan_shadow_turn(
             routing.plan,
             &inventory,
@@ -502,6 +502,7 @@ pub(crate) fn plan_shape_of(decision: tools::HostPrelude) -> runtime::PlanShape 
 /// gathered by the caller that has the runtime — or the switch event — in
 /// hand, so the one builder below never has to borrow either.
 struct PlanShadowSubject<'a> {
+    cohort: Option<&'a runtime::PlanCohort>,
     /// The model the row is scored from: the turn's model, or the one a
     /// switch left.
     current_model: &'a str,
@@ -544,6 +545,7 @@ fn file_plan_shadow(
         _ => None,
     };
     let ctx = runtime::PlanContext {
+        cohort: subject.cohort,
         complexity,
         current_model: subject.current_model,
         current_effort: shadow.effort.as_deref(),
@@ -610,7 +612,9 @@ pub(crate) fn record_plan_shadow_turn(
     setup: &super::turn_harness::TurnSetup,
     decision: tools::HostPrelude,
     session_id: &str,
+    input: &str,
 ) {
+    let cohort = tools::plan_cohort_for_turn(input, setup.assessment.complexity, setup.orchestration.risk);
     let current_model = runtime.api_client().model().to_string();
     let context_tokens = runtime
         .try_runtime_mut()
@@ -632,6 +636,7 @@ pub(crate) fn record_plan_shadow_turn(
         session_id,
         setup.assessment.complexity,
         PlanShadowSubject {
+            cohort: cohort.as_ref(),
             current_model: &current_model,
             context_tokens,
             attempt: attempt.as_deref(),
@@ -670,6 +675,7 @@ fn record_plan_switch(
         session_id,
         complexity,
         PlanShadowSubject {
+            cohort: None,
             current_model: &switch.from,
             context_tokens: switch.context_tokens,
             attempt: (!switch.attempt.is_empty()).then_some(switch.attempt.as_str()),
