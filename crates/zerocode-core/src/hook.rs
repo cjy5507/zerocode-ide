@@ -1096,9 +1096,20 @@ pub struct Activity {
     pub vcs: Vec<VcsStep>,
     /// The folder the call ran in, as the payload said it (Claude's and
     /// Cursor's `cwd`) — carried only beside [`Activity::reads`] or
-    /// [`Activity::writes`], the relative paths it is the base of.
+    /// [`Activity::writes`], the relative paths it is the base of. A wire
+    /// session (no pane to resolve a relative path against) says its own
+    /// folder on every call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// The vendor's id for the tool call this event is one end of (t-31715),
+    /// said on the start AND on the end — Claude's family and Codex write
+    /// `tool_use_id`, Amp `toolUseId`, a wire session's turns `call_id`; zo
+    /// writes the same spelling Claude does. It is what lets the file tree pair
+    /// a write that has begun with the one that has ended. `None` where the
+    /// vendor gives none (then the two meet by verb and target) and for a
+    /// snapshot of what a helper is doing now, which no end will ever close.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
 }
 
 /// One git or gh operation a shell command runs (t-24298): the program and
@@ -1648,6 +1659,7 @@ pub fn activity_said(line: &str) -> Option<Activity> {
         writes: Vec::new(),
         vcs: Vec::new(),
         cwd: None,
+        call: None,
     })
 }
 
@@ -1794,6 +1806,7 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             writes: touched.writes,
             vcs: touched.vcs,
             cwd: touched.cwd,
+            call: None,
         });
     }
     if word == "userpromptsubmit" || word == "beforesubmitprompt" {
@@ -1805,6 +1818,7 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             writes: Vec::new(),
             vcs: Vec::new(),
             cwd: None,
+            call: None,
         });
     }
     // Every way a turn ends, borrowed from the one table that already knows
@@ -1818,8 +1832,22 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             writes: Vec::new(),
             vcs: Vec::new(),
             cwd: None,
+            call: None,
         });
     }
+    None
+}
+
+/// What a tool turn of a driver that has no hooks says an agent is doing
+/// (t-31715): the one road a wire session (Codex `app-server`, ACP, Claude
+/// Code's stream) reports its tool calls on, so that it says what a hook agent
+/// says. `role` is the turn's (`tool` — a call, `tool_result` — its end);
+/// every other turn is the conversation's and says nothing here.
+///
+/// Red stub: the behaviour is written in the next commit.
+#[must_use]
+pub fn activity_of_turn(role: &str, tool: &crate::transcript::TranscriptTool) -> Option<Activity> {
+    let _ = (role, tool);
     None
 }
 
@@ -3284,6 +3312,192 @@ mod tests {
         // And says nothing about its target rather than dumping the whole input
         // object onto a row.
         assert_eq!(mcp.target, None);
+    }
+
+    /// A call's start and its end say the same id (t-31715) — what lets the
+    /// file tree tell a write that has begun from one that has ended, whichever
+    /// agent writes. One payload per spelling of the id, the start and the end
+    /// of each; and an agent that gives none says none (the tree then pairs by
+    /// verb and target), never an invented one.
+    #[test]
+    fn a_tool_calls_start_and_end_say_the_same_call_id_in_every_spelling() {
+        let call_of = |event: &str, payload: &str| {
+            activity_of(event, payload)
+                .expect("a tool event said nothing")
+                .call
+        };
+        let said = |id: &str| Some(id.to_string());
+        // Claude's family, and Codex: `tool_use_id`, on both ends.
+        let edit = |event: &str, id: &str| {
+            format!(
+                r#"{{"hook_event_name":"{event}","tool_name":"Edit","tool_use_id":"{id}",
+                    "tool_input":{{"file_path":"/repo/src/a.rs"}}}}"#
+            )
+        };
+        assert_eq!(
+            call_of("PreToolUse", &edit("PreToolUse", "toolu_01")),
+            said("toolu_01")
+        );
+        assert_eq!(
+            call_of("PostToolUse", &edit("PostToolUse", "toolu_01")),
+            said("toolu_01")
+        );
+        assert_eq!(
+            call_of(
+                "PostToolUseFailure",
+                &edit("PostToolUseFailure", "toolu_01")
+            ),
+            said("toolu_01")
+        );
+        // Amp's plugin: `toolUseId`.
+        assert_eq!(
+            call_of(
+                "tool.call",
+                r#"{"hook_event_name":"tool.call","toolUseId":"u-1","tool":"edit_file","input":{"path":"/repo/src/a.rs"}}"#
+            ),
+            said("u-1")
+        );
+        assert_eq!(
+            call_of(
+                "tool.result",
+                r#"{"hook_event_name":"tool.result","toolUseId":"u-1","tool":"edit_file","input":{"path":"/repo/src/a.rs"},"status":"done"}"#
+            ),
+            said("u-1")
+        );
+        // The other spellings the one reader knows.
+        assert_eq!(
+            call_of(
+                "PreToolUse",
+                r#"{"tool_name":"Write","tool_call_id":"call-9","tool_input":{"file_path":"/repo/b.rs"}}"#
+            ),
+            said("call-9")
+        );
+        // zo's own hooks, in Claude's spelling: the id its runtime minted, and the
+        // full path rather than the clipped tail its working line shows.
+        let zo = activity_of(
+            "PreToolUse",
+            r#"{"tool_name":"Edit","tool_use_id":"call_7","session_id":"s-1",
+                "tool_input":{"file_path":"/repo/zo-ide/crates/zo-ide/src/tui/view.rs"},
+                "activity":{"verb":"edit","target":"tui/view.rs","phase":"started","elapsed_secs":0}}"#,
+        )
+        .expect("a zo tool start said nothing");
+        assert_eq!(zo.call, said("call_7"));
+        assert_eq!(
+            zo.target.as_deref(),
+            Some("/repo/zo-ide/crates/zo-ide/src/tui/view.rs")
+        );
+        // An agent that gives none says none; so do a prompt and a turn's end.
+        assert_eq!(
+            call_of(
+                "PreToolUse",
+                r#"{"tool_name":"Edit","tool_input":{"file_path":"/repo/src/a.rs"}}"#
+            ),
+            None
+        );
+        assert_eq!(
+            activity_of("UserPromptSubmit", r#"{"prompt":"go"}"#)
+                .expect("a prompt said nothing")
+                .call,
+            None
+        );
+        // And the id rides the wire only when there is one.
+        let wire = serde_json::to_value(
+            activity_of(
+                "PreToolUse",
+                r#"{"tool_name":"Edit","tool_input":{"file_path":"/repo/src/a.rs"}}"#,
+            )
+            .expect("a tool start said nothing"),
+        )
+        .expect("an activity serializes");
+        assert!(wire.get("call").is_none(), "{wire}");
+    }
+
+    /// A wire session's tool turns say what a hook agent says (t-31715): a call
+    /// is a start, its result an end that is a failure when the result is one,
+    /// the id is the call's own, the files are the call's file or the files its
+    /// edits name — and the conversation's other turns say nothing.
+    #[test]
+    fn a_wire_sessions_tool_turns_say_what_a_hook_agent_says() {
+        use crate::transcript::{TranscriptEdit, TranscriptFile, TranscriptTool};
+        let tool = |name: &str, call: &str, file: Option<&str>, paths: &[&str], is_error: bool| {
+            TranscriptTool {
+                call_id: call.to_string(),
+                name: name.to_string(),
+                kind: Tool::named(name)
+                    .map(|known| known.as_str().to_string())
+                    .unwrap_or_default(),
+                input: String::new(),
+                is_error,
+                edits: paths
+                    .iter()
+                    .map(|path| TranscriptEdit::at(path, Vec::new()))
+                    .collect(),
+                file: file.map(|path| TranscriptFile {
+                    path: path.to_string(),
+                    offset: None,
+                    limit: None,
+                    search: None,
+                }),
+                facts: None,
+            }
+        };
+        // Claude Code's Edit over its stream: one file, named by the call.
+        let started = activity_of_turn(
+            "tool",
+            &tool(
+                "Edit",
+                "toolu_1",
+                Some("/repo/src/a.rs"),
+                &["/repo/src/a.rs"],
+                false,
+            ),
+        )
+        .expect("a call said nothing");
+        assert_eq!(started.verb, Tool::Edit);
+        assert_eq!(started.phase, Phase::Started);
+        assert_eq!(started.call.as_deref(), Some("toolu_1"));
+        assert_eq!(started.target.as_deref(), Some("/repo/src/a.rs"));
+        assert_eq!(started.writes, vec!["/repo/src/a.rs".to_string()]);
+        // Codex's `apply_patch`: no file of its own, the files its edits name.
+        let patch = activity_of_turn(
+            "tool",
+            &tool(
+                "apply_patch",
+                "item_3",
+                None,
+                &["src/a.rs", "src/b.rs"],
+                false,
+            ),
+        )
+        .expect("a patch said nothing");
+        assert_eq!(patch.verb, Tool::Edit);
+        assert_eq!(patch.target, None);
+        assert_eq!(
+            patch.writes,
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+        // A result is the end, and says the id of the call it ends — its name
+        // may be empty (Claude's result lines name none).
+        let finished = activity_of_turn("tool_result", &tool("", "toolu_1", None, &[], false))
+            .expect("a result said nothing");
+        assert_eq!(finished.phase, Phase::Finished);
+        assert_eq!(finished.call.as_deref(), Some("toolu_1"));
+        let failed = activity_of_turn("tool_result", &tool("Edit", "toolu_2", None, &[], true))
+            .expect("a failed result said nothing");
+        assert_eq!(failed.phase, Phase::Failed);
+        assert_eq!(failed.verb, Tool::Edit);
+        // A tool this table has not heard of keeps its own name.
+        let other = activity_of_turn("tool", &tool("calendar.add", "c-1", None, &[], false))
+            .expect("an unknown tool said nothing");
+        assert_eq!(other.verb, Tool::Other("calendar.add".to_string()));
+        // The conversation's own turns are not tool calls.
+        for role in ["assistant", "user", "thinking", "system"] {
+            assert_eq!(
+                activity_of_turn(role, &tool("Edit", "toolu_3", None, &[], false)),
+                None,
+                "{role}"
+            );
+        }
     }
 
     /// The prompt and the turn's end ride the same stream as the tools between

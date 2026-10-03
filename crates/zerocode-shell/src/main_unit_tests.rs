@@ -7996,6 +7996,7 @@ fn a_helpers_line_counts_its_tool_uses_whoever_counted_them() {
         writes: Vec::new(),
         vcs: Vec::new(),
         cwd: None,
+        call: None,
     };
     assert!(ring.note_fresh(doing("src/x.rs")));
     assert!(
@@ -8438,6 +8439,99 @@ fn an_agent_that_left_its_shell_behind_stops_being_drawn_as_running() {
     );
 }
 
+/// A batch the floor held back is owed a deadline, once (t-31715): the last
+/// event of a burst — an edit's end — must reach the window when the floor
+/// opens, not whenever the agent next does something. One promise for each
+/// held batch, however many events join it; none when nothing is held.
+#[test]
+fn a_batch_the_floor_held_back_is_owed_a_deadline_once() {
+    use zerocode_core::hook::{Activity, Phase, Tool};
+
+    let one = |target: &str, phase: Phase| Activity {
+        verb: Tool::Edit,
+        target: Some(target.to_string()),
+        phase,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        vcs: Vec::new(),
+        cwd: None,
+        call: Some("call-1".to_string()),
+    };
+    let mut ring = ActivityRing::default();
+    let start = Instant::now();
+    let after = |millis: u64| start + Duration::from_millis(millis);
+
+    ring.note(one("src/a.rs", Phase::Started));
+    assert!(ring.due(start).is_some(), "the first leaves at once");
+    assert_eq!(ring.owed(start), None, "nothing is held, so nothing is owed");
+
+    // The end comes inside the floor: held, and owed the time the floor has left.
+    ring.note(one("src/a.rs", Phase::Finished));
+    assert!(ring.due(after(10)).is_none());
+    assert_eq!(ring.owed(after(10)), Some(Duration::from_millis(90)));
+    assert_eq!(
+        ring.owed(after(20)),
+        None,
+        "one promise for a held batch, not one for each time somebody asks"
+    );
+    ring.note(one("src/b.rs", Phase::Started));
+    assert_eq!(ring.owed(after(30)), None, "another event joins the batch the promise covers");
+
+    // The promise keeps: when the floor opens the batch leaves, all of it.
+    let batch = ring.due(after(100)).expect("the floor opened");
+    assert_eq!(batch.len(), 2);
+    assert_eq!(ring.owed(after(100)), None);
+
+    // And the next held batch is owed again.
+    ring.note(one("src/c.rs", Phase::Finished));
+    assert!(ring.due(after(110)).is_none());
+    assert_eq!(ring.owed(after(110)), Some(Duration::from_millis(90)));
+}
+
+/// What the file tree asks when an agent's write ends (t-31715), answered
+/// through the panel's own entries: just the files asked about, with their
+/// counts — a change nobody asked about stays out however large it is, and a
+/// clean (or unknown) file has no entry.
+#[test]
+fn a_scoped_scm_answer_covers_only_the_files_asked_about() {
+    let temp = tempfile::tempdir().expect("a repository");
+    let repo = temp.path();
+    test_git(repo, &["init", "-q", "-b", "main"]);
+    test_git(repo, &["config", "user.name", "ZeroCode Test"]);
+    test_git(repo, &["config", "user.email", "zerocode@example.invalid"]);
+    std::fs::write(repo.join("kept.txt"), "one\ntwo\nthree\n").expect("kept");
+    std::fs::write(repo.join("other.txt"), "alpha\n").expect("other");
+    test_git(repo, &["add", "."]);
+    test_git(repo, &["commit", "-q", "-m", "base"]);
+    std::fs::write(repo.join("kept.txt"), "one\nTWO\nthree\nfour\n").expect("a change");
+    std::fs::write(repo.join("other.txt"), "alpha\nbeta\ngamma\n").expect("a change nobody asked about");
+    std::fs::write(repo.join("fresh.txt"), "new\n").expect("a new file");
+    let orchestrator = Orchestrator::open(repo).expect("open repository");
+
+    let asked = vec![
+        "kept.txt".to_string(),
+        "fresh.txt".to_string(),
+        "never-existed.txt".to_string(),
+    ];
+    let answer =
+        scm_runtime::scoped_scm_entries(&orchestrator, repo, &asked).expect("a scoped answer");
+    assert_eq!(
+        answer
+            .iter()
+            .map(|entry| (
+                entry.path.as_str(),
+                entry.code.as_str(),
+                entry.added,
+                entry.removed
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("kept.txt", " M", Some(2), Some(1)),
+            ("fresh.txt", "??", None, None),
+        ]
+    );
+}
+
 /// The ring counts, throttles and forgets — the mechanism itself, not the
 /// source that spells it.
 #[test]
@@ -8452,6 +8546,7 @@ fn a_ring_keeps_the_last_twenty_and_speaks_at_most_ten_times_a_second() {
         writes: Vec::new(),
         vcs: Vec::new(),
         cwd: None,
+        call: None,
     };
     let mut ring = ActivityRing::default();
     let start = Instant::now();

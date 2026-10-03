@@ -1188,6 +1188,35 @@ impl Orchestrator {
         Ok(output.stdout)
     }
 
+    /// What changed in just `paths` (t-31715): the records `git status` would
+    /// print for exactly those files, and nothing about the rest of the
+    /// repository. The file tree asks it when an agent's write ends — a
+    /// whole-repository status per write is what it must never cost. A file
+    /// that is clean, or that git has never heard of, has no record.
+    ///
+    /// Red stub: the behaviour is written in the next commit.
+    pub fn status_of<S: AsRef<OsStr>>(
+        &self,
+        worktree: impl AsRef<Path>,
+        paths: &[S],
+    ) -> Result<Vec<StatusEntry>, OrchestratorError> {
+        let _ = (worktree, paths);
+        Ok(Vec::new())
+    }
+
+    /// The `--numstat -z` answer for just `paths` (t-31715), verbatim, as
+    /// [`Self::numstat`] gives it for the whole checkout.
+    ///
+    /// Red stub: the behaviour is written in the next commit.
+    pub fn numstat_of<S: AsRef<OsStr>>(
+        &self,
+        worktree: impl AsRef<Path>,
+        paths: &[S],
+    ) -> Result<String, OrchestratorError> {
+        let _ = (worktree, paths);
+        Ok(String::new())
+    }
+
     /// Put `paths` in the index — what the source-control panel's stage does.
     ///
     /// `add` rather than `stage`: the two are the same command, and `add` is
@@ -2312,6 +2341,50 @@ prunable gitdir file points to non-existent location
                 .expect("git");
             assert!(status.success(), "git {args:?} failed");
         }
+    }
+
+    /// What the file tree asks when an agent's write ends (t-31715): about
+    /// just the files that were written, never the rest of the checkout. A
+    /// modified file answers its record and its counts, a new file its record
+    /// (untracked has no counts), a clean one nothing — and a change nobody
+    /// asked about stays out of the answer however large it is.
+    #[test]
+    fn a_scoped_read_answers_only_the_files_asked_about_with_what_changed_in_them() {
+        let dir = empty_repository();
+        let root = dir.path();
+        std::fs::write(root.join("kept.txt"), "one\ntwo\nthree\n").expect("write");
+        std::fs::write(root.join("other.txt"), "alpha\n").expect("write");
+        std::fs::write(root.join("한글 file.txt"), "a\n").expect("write");
+        commit_everything(root);
+        std::fs::write(root.join("kept.txt"), "one\nTWO\nthree\nfour\n").expect("write");
+        std::fs::write(root.join("other.txt"), "alpha\nbeta\ngamma\n").expect("write");
+        std::fs::write(root.join("new file.txt"), "fresh\n").expect("write");
+        let orchestrator = Orchestrator::open(root).expect("open");
+        let asked = ["kept.txt", "new file.txt", "한글 file.txt"];
+
+        let records = orchestrator.status_of(root, &asked).expect("scoped status");
+        assert_eq!(
+            records
+                .iter()
+                .map(|entry| (entry.path.as_str(), entry.code.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("kept.txt", " M"), ("new file.txt", "??")],
+            "a clean file has no record, and a change nobody asked about stays out"
+        );
+        let counts = parse_numstat(
+            &orchestrator
+                .numstat_of(root, &asked)
+                .expect("scoped numstat"),
+        );
+        assert_eq!(counts.get("kept.txt"), Some(&(2, 1)));
+        assert!(
+            !counts.contains_key("other.txt"),
+            "a change nobody asked about was counted: {counts:?}"
+        );
+        assert!(
+            !counts.contains_key("new file.txt"),
+            "an untracked file has no counts"
+        );
     }
 
     /// A repository whose first commit has not landed has no `HEAD`, and

@@ -34,6 +34,21 @@ pub(super) fn line_counts_by_path(numstat: &str) -> std::collections::HashMap<St
     held
 }
 
+/// What changed in just `paths` (t-31715), as the panel's own entries: the
+/// file tree asks it when an agent's write ends, so the counts appear on the
+/// row at once instead of at the next whole-repository read. Status and counts
+/// for exactly those files; a clean one has no entry.
+///
+/// Red stub: the behaviour is written in the next commit.
+pub(super) fn scoped_scm_entries(
+    orchestrator: &zerocode_orchestrator::Orchestrator,
+    root: &Path,
+    paths: &[String],
+) -> Result<Vec<ScmEntry>, String> {
+    let _ = (orchestrator, root, paths);
+    Ok(Vec::new())
+}
+
 /// A commit git refused, as the card needs to remember it.
 pub(super) struct CommitFailure {
     /// Both pipes of the refused `git commit`, as git and its hooks wrote it.

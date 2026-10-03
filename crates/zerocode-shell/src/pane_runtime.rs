@@ -81,6 +81,19 @@ impl ActivityRing {
         true
     }
 
+    /// What a batch the floor held back is owed (t-31715): the time until the
+    /// floor opens, said once for each held batch, so that whoever is told can
+    /// promise the window the batch at that moment instead of at the agent's
+    /// next event. A write's END is such a batch — an edit's last event is
+    /// followed by seconds of silence while the model thinks, and the file
+    /// tree wants its numbers the moment the write ends.
+    ///
+    /// Red stub: the behaviour is written in the next commit.
+    pub(super) fn owed(&mut self, now: Instant) -> Option<Duration> {
+        let _ = now;
+        None
+    }
+
     /// Everything since the last emit — when the floor allows one.
     ///
     /// **The throttle is here and nowhere else, and it has no timer.** A

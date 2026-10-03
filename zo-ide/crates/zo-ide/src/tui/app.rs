@@ -4233,7 +4233,11 @@ impl Ui {
                     // channel's fact (`publish_working_activity`), not a hook.
                     let activity = super::activity::Activity::from_preview(name, preview);
                     reporter.pre_tool_use(
-                        name,
+                        crate::ide::reporter::ToolCallFacts {
+                            call_id: &tool_call_id.0,
+                            name,
+                            file: super::activity::file_of(preview),
+                        },
                         activity.hook_input(summary),
                         &activity.started_card(),
                         session_id,
@@ -4253,11 +4257,20 @@ impl Ui {
                 is_error,
                 ..
             } => {
-                let name = self
-                    .tools
-                    .get(&tool_call_id.0)
-                    .map_or("tool", |call| call.name.as_str());
-                reporter.post_tool_use(name, *is_error, session_id);
+                let pending = self.tools.get(&tool_call_id.0);
+                let name = pending.map_or("tool", |call| call.name.as_str());
+                let file = pending
+                    .map(|call| call.path.as_str())
+                    .filter(|path| !path.is_empty());
+                reporter.post_tool_use(
+                    crate::ide::reporter::ToolCallFacts {
+                        call_id: &tool_call_id.0,
+                        name,
+                        file,
+                    },
+                    *is_error,
+                    session_id,
+                );
                 if crate::ide::reporter::HookReporter::spawns_subagent(name) {
                     reporter.subagent_stop(
                         &tool_call_id.0,
