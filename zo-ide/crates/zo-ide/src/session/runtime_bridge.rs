@@ -947,6 +947,7 @@ mod tests {
 
     #[test]
     fn tools_disabled_request_lowers_every_tool_block_even_on_anthropic() {
+        let _lock = crate::test_env_lock();
         let tool_name = "mcp__atlassian__getJiraIssue";
         let registry = GlobalToolRegistry::builtin()
             .with_runtime_tools(vec![tools::RuntimeToolDefinition {
@@ -1042,6 +1043,7 @@ mod tests {
     /// in the runtime crate), which costs one refused call instead.
     #[test]
     fn a_deep_leg_prompt_does_not_change_the_advertised_tool_set() {
+        let _lock = crate::test_env_lock();
         let registry = GlobalToolRegistry::builtin();
 
         let ordinary = advertised_tool_names_for_messages(
