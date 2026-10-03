@@ -18,7 +18,10 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *   - 정리 가능 stands only on a landed checkout with no session and nothing
  *     unsaved, and the chip opens the clean-up review that already exists;
  *   - the tooltip names the compare ref and when it last moved;
- *   - the git panel's head says the same words from the same function. */
+ *   - the git panel's head says the same words from the same function;
+ *   - a landed checkout that still holds files git ignores says so on the chip
+ *     in the words the evidence panel uses (t-34315), and only a landed one:
+ *     nothing about ignored files is said of work main does not have. */
 
 const REF = "origin/main";
 const NOW = Date.now();
@@ -46,6 +49,10 @@ const SCENE = [
   { path: "/r/unk", landing: base("unknown") },
   { path: "/r/fail", landing: { state: "failed", detached: false, ahead: 0, dirty: false } },
   { path: "/r/pend", landing: { state: "pending", detached: false, ahead: 0, dirty: false } },
+  { path: "/r/ignored", landing: base("landed", { ignored: true }) },
+  { path: "/r/busyignored", term: 9103, hook: "working", landing: base("landed", { ignored: true }) },
+  { path: "/r/dirtyignored", landing: base("landed", { dirty: true, ignored: true }) },
+  { path: "/r/aheadignored", landing: base("unlanded", { ahead: 2, ignored: true }) },
   { path: "/r/plain" },
 ];
 
@@ -63,6 +70,10 @@ const WANT = {
   "/r/unk": { word: "확인 필요", tone: "check", cleanable: false },
   "/r/pend": { word: "확인 중", tone: "pending", cleanable: false },
   "/r/fail": { word: "확인 실패", tone: "check", cleanable: false },
+  "/r/ignored": { word: "반영됨 · 정리 가능 · 무시된 파일 남음", tone: "landed", cleanable: true },
+  "/r/busyignored": { word: "반영됨 · 무시된 파일 남음", tone: "landed", cleanable: false },
+  "/r/dirtyignored": { word: "반영됨 · 저장 안 한 변경 · 무시된 파일 남음", tone: "landed", cleanable: false },
+  "/r/aheadignored": { word: "미반영 2", tone: "ahead", cleanable: false },
 };
 
 export async function testSidebarLandingState({ browser, origin, ok, faults }) {
@@ -161,6 +172,15 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
         chips["/r/gl"].phaseWord === "검증 대기" && chips["/r/lm"].phaseWord === "완료" &&
         chips["/r/gl"].dotTip.includes("검증 대기") && !chips["/r/gl"].dotTip.includes("반영"),
       JSON.stringify({ lm: chips["/r/lm"], gl: chips["/r/gl"] }),
+    );
+
+    ok(
+      "files git ignores are said on the chip of a landed checkout — after the other words, in the words the evidence panel uses — with a tooltip line that says they go with the folder, and never on work main does not have",
+      chips["/r/ignored"].word.endsWith(" · 무시된 파일 남음") && chips["/r/ignored"].tip.includes("git이 무시하는 파일이 남아 있습니다") &&
+        chips["/r/ignored"].tip.includes("폴더를 지우면 함께 사라집니다") &&
+        chips["/r/landed"].word === "반영됨 · 정리 가능" && !chips["/r/landed"].tip.includes("무시하는") &&
+        !chips["/r/aheadignored"].word.includes("무시된") && !chips["/r/aheadignored"].tip.includes("무시하는"),
+      JSON.stringify({ ignored: chips["/r/ignored"], landed: chips["/r/landed"], ahead: chips["/r/aheadignored"] }),
     );
 
     ok(

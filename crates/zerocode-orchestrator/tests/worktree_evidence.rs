@@ -15,7 +15,9 @@ use zerocode_core::agent_teams::{LEADER_PANE, Team};
 use zerocode_core::orchestration::{
     Ledger, LedgerProjectionV1, NoLauncher, ResultAuthor, ReviewAuthor, incarnation_actor, plan,
 };
-use zerocode_orchestrator::handoff::{HandoffLineage, HandoffManifestV1, TestReceipt};
+use zerocode_orchestrator::handoff::{
+    CoverageGap, HandoffLineage, HandoffManifestV1, PublishBlocker, PublishPolicy, TestReceipt,
+};
 use zerocode_orchestrator::workflow::{NewAssignment, WorkflowRecord};
 use zerocode_orchestrator::workflow_store::{ReadOnlyWorkflows, WorkflowStore, WorkflowStoreError};
 use zerocode_orchestrator::worktree_evidence::{
@@ -983,4 +985,237 @@ fn a_receipt_read_that_fails_after_the_reviews_is_news_for_receipts_only() {
         empty_hand.json
     );
     assert_eq!(empty_hand.evidence.summary.receipts_current_passing, 0);
+}
+
+/* ---- "uncommitted" and "ignored" are two facts (t-34315) ----------------
+ *
+ * A landed checkout that a build has used holds nothing a commit could carry
+ * and still holds files git is told to ignore. The panel called that "there is
+ * uncommitted content", which a person who had just read 반영됨 beside it took
+ * for a contradiction. These cases pin the two facts apart on the wire — what
+ * the panel says is the window suite's to pin — and the second block pins what
+ * did NOT move: every refusal that read the two as one.
+ *
+ * The answer is read as JSON because that is what a reader gets; a field this
+ * answer does not carry is a null here, not a compile error.
+ */
+
+/// What a build leaves behind: a directory git ignores whole (one entry however
+/// many files it holds), three logs and a `.env`.
+const IGNORED_LEFTOVERS: usize = 5;
+
+/// The leftovers' own lengths added up. What they occupy on disk is this or
+/// more, because a disk counts in blocks.
+const IGNORED_LEFTOVER_BYTES: u64 = 10_000 + 20_000 + 5_000 + 9_000 + 13_000 + 100;
+
+/// The entries a read names. A reader that needs every name has the cleanup
+/// review, which lists them all.
+const IGNORED_NAMED: usize = 3;
+
+/// The project's own rules, committed the way a project commits them.
+fn commit_ignore_rules(root: &Path) {
+    std::fs::write(root.join(".gitignore"), "build/\n*.log\n.env\n").expect("ignore rules");
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "-m", "ignore what a build leaves"]);
+}
+
+/// The files themselves. The sizes land in different disk blocks, so "biggest
+/// first" has one answer on any filesystem.
+fn leave_ignored_leftovers(root: &Path) {
+    let file = |path: &str, bytes: usize| {
+        let at = root.join(path);
+        std::fs::create_dir_all(at.parent().expect("a parent directory")).expect("directory");
+        std::fs::write(at, vec![b'x'; bytes]).expect("an ignored file");
+    };
+    file("build/a.bin", 10_000);
+    file("build/nested/b.bin", 20_000);
+    file("one.log", 5_000);
+    file("two.log", 9_000);
+    file("three.log", 13_000);
+    file(".env", 100);
+}
+
+fn snapshot_data(read: &Read) -> serde_json::Value {
+    let answer: serde_json::Value = serde_json::from_str(&read.json).expect("the answer is JSON");
+    answer["snapshot"]["data"].clone()
+}
+
+/// Landed work with nothing left to commit: git lists no change, and the
+/// ignored leftovers are a fact of their own — how many, how big, which.
+#[test]
+fn a_checkout_holding_only_ignored_files_has_nothing_uncommitted_and_says_what_is_left() {
+    let root = repository();
+    commit_ignore_rules(root.path());
+    leave_ignored_leftovers(root.path());
+
+    let read = observe(root.path(), None, None, 1);
+    let data = snapshot_data(&read);
+
+    assert_eq!(data["uncommitted"], serde_json::json!(false), "{}", read.json);
+    let ignored = &data["ignored"];
+    assert_eq!(
+        ignored["count"],
+        serde_json::json!(IGNORED_LEFTOVERS),
+        "{}",
+        read.json
+    );
+    assert_eq!(ignored["complete"], serde_json::json!(true), "{}", read.json);
+    let bytes = ignored["bytes"].as_u64().expect("a byte count");
+    assert!(
+        bytes >= IGNORED_LEFTOVER_BYTES,
+        "{bytes} is under the {IGNORED_LEFTOVER_BYTES} the files hold: {}",
+        read.json
+    );
+    assert!(
+        ignored["sizeText"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "{}",
+        read.json
+    );
+    let named = ignored["top"].as_array().expect("the biggest entries");
+    assert_eq!(named.len(), IGNORED_NAMED, "{}", read.json);
+    assert_eq!(named[0]["name"], serde_json::json!("build"), "{}", read.json);
+    assert_eq!(named[0]["dir"], serde_json::json!(true), "{}", read.json);
+    let sizes: Vec<u64> = named
+        .iter()
+        .map(|one| one["bytes"].as_u64().expect("an entry's size"))
+        .collect();
+    assert!(
+        sizes.windows(2).all(|pair| pair[0] >= pair[1]),
+        "biggest first: {sizes:?}"
+    );
+}
+
+/// The other way round: real uncommitted work, and nothing ignored to name.
+#[test]
+fn uncommitted_work_alone_leaves_the_ignored_fact_empty() {
+    let root = repository();
+    std::fs::write(root.path().join("tracked.txt"), "two\n").expect("a tracked edit");
+    std::fs::write(root.path().join("new.txt"), "new\n").expect("a new file");
+
+    let read = observe(root.path(), None, None, 1);
+    let data = snapshot_data(&read);
+
+    assert_eq!(data["uncommitted"], serde_json::json!(true), "{}", read.json);
+    assert_eq!(data["ignored"]["count"], serde_json::json!(0), "{}", read.json);
+    assert_eq!(data["ignored"]["bytes"], serde_json::json!(0), "{}", read.json);
+    assert_eq!(data["ignored"]["top"], serde_json::json!([]), "{}", read.json);
+}
+
+/// Both at once stay two facts: neither hides the other.
+#[test]
+fn uncommitted_work_beside_ignored_files_reports_both() {
+    let root = repository();
+    commit_ignore_rules(root.path());
+    leave_ignored_leftovers(root.path());
+    std::fs::write(root.path().join("tracked.txt"), "two\n").expect("a tracked edit");
+
+    let read = observe(root.path(), None, None, 1);
+    let data = snapshot_data(&read);
+
+    assert_eq!(data["uncommitted"], serde_json::json!(true), "{}", read.json);
+    assert_eq!(
+        data["ignored"]["count"],
+        serde_json::json!(IGNORED_LEFTOVERS),
+        "{}",
+        read.json
+    );
+    assert_eq!(
+        data["changes"].as_array().map(Vec::len),
+        Some(1),
+        "the tracked edit is a change and the ignored files are not: {}",
+        read.json
+    );
+}
+
+/// What did not move. An ignored-only checkout is still what a deletion would
+/// lose, still an observation with a gap, and still something the handoff
+/// refuses to publish and no receipt may be called current against. The words
+/// changed; none of these decisions did.
+#[test]
+fn ignored_files_alone_keep_every_refusal_they_had() {
+    let root = repository();
+    commit_ignore_rules(root.path());
+    let beside = tempfile::tempdir().expect("a place for the store");
+    let store_path = vault(beside.path());
+    let store = WorkflowStore::open(&store_path).expect("store");
+    let orchestrator = Orchestrator::open(root.path()).expect("repository");
+    let clean = orchestrator
+        .handoff_snapshot(root.path(), 1)
+        .expect("a clean observation");
+    let (_, manifest) = submitted(&store, &orchestrator, root.path(), "wf-1", Vec::new());
+    record_trusted_receipt(
+        &store,
+        &manifest.manifest_id,
+        &clean.content_digest,
+        &clean.head_oid,
+        0,
+    );
+    let control = observe(root.path(), None, Some(&store_path), 2);
+    let receipt = control
+        .evidence
+        .verification
+        .data
+        .iter()
+        .find(|row| row.source == ReceiptSource::HostTrusted)
+        .expect("the receipt is read");
+    assert_eq!(receipt.currency, Currency::Current, "{}", control.json);
+
+    leave_ignored_leftovers(root.path());
+    let read = observe(root.path(), None, Some(&store_path), 3);
+    let facts = read.evidence.snapshot.data.as_ref().expect("git answered");
+    assert!(facts.dirty, "a deletion would lose them: {}", read.json);
+    assert_eq!(read.evidence.summary.dirty, Some(true), "{}", read.json);
+    assert!(!facts.complete, "{}", read.json);
+    assert_eq!(facts.coverage_gaps, vec!["ignored_content"], "{}", read.json);
+    let receipt = read
+        .evidence
+        .verification
+        .data
+        .iter()
+        .find(|row| row.source == ReceiptSource::HostTrusted)
+        .expect("the receipt is still stored");
+    assert_eq!(receipt.currency, Currency::Unknown, "{}", read.json);
+    assert_eq!(receipt.currency_reason, "incomplete_observation");
+    assert_eq!(read.evidence.summary.receipts_current_passing, 0);
+
+    let snapshot = orchestrator
+        .handoff_snapshot(root.path(), 4)
+        .expect("an observation of the leftovers");
+    let handed = HandoffManifestV1::new(
+        1,
+        4,
+        HandoffLineage {
+            run_id: "run-1".to_string(),
+            task_id: "wf-1".to_string(),
+            dispatch_id: "d-1".to_string(),
+            worker_id: "worker-alice".to_string(),
+            parent_manifest_id: None,
+        },
+        snapshot,
+        Vec::new(),
+    )
+    .expect("a manifest");
+    let blockers = handed.structural_publish_blockers(&PublishPolicy::default());
+    assert!(
+        blockers.contains(&PublishBlocker::IncompleteSnapshot {
+            gap: CoverageGap::IgnoredContent {
+                count: IGNORED_LEFTOVERS
+            }
+        }),
+        "{blockers:?}"
+    );
+    assert!(
+        blockers.contains(&PublishBlocker::DirtySnapshotNotMaterialized),
+        "{blockers:?}"
+    );
+
+    // The cleanup review reads the same git and lists the same leftovers, none
+    // of them as an uncommitted change.
+    let loss = orchestrator
+        .pending_loss(root.path())
+        .expect("what a deletion would take");
+    assert!(loss.uncommitted.is_empty(), "{loss:?}");
+    assert_eq!(loss.ignored.len(), IGNORED_LEFTOVERS, "{loss:?}");
 }

@@ -975,6 +975,59 @@ mod tests {
         assert_eq!(landing.state, "no_commits");
     }
 
+    /// What the window is told, field by field: a field the landing does not
+    /// carry is a null here and not a compile error.
+    fn told(landing: &WorktreeLanding) -> serde_json::Value {
+        serde_json::to_value(landing).expect("a landing serializes")
+    }
+
+    /// A checkout whose work is in the compare ref, the way a project that
+    /// ignores its build output cuts one: the rule is on main before the
+    /// checkout exists.
+    fn landed_checkout(bench: &Bench, name: &str) -> PathBuf {
+        let wt = bench.worktree(name);
+        bench.commit(&wt, "w.txt", "work\n");
+        git(&bench.repo, &["merge", "--ff-only", "-q", &format!("wt/{name}")]);
+        bench.commit(&bench.repo, &format!("{name}.txt"), "later\n");
+        bench.publish();
+        wt
+    }
+
+    fn leave_build_output(at: &Path) {
+        std::fs::create_dir_all(at.join("scratch")).expect("a build directory");
+        std::fs::write(at.join("scratch/out.bin"), "built\n").expect("build output");
+    }
+
+    #[test]
+    fn a_landed_checkout_says_whether_ignored_files_remain_and_others_are_not_asked() {
+        let bench = Bench::open();
+        std::fs::write(bench.repo.join(".gitignore"), "scratch/\n").expect("the project's rule");
+        git(&bench.repo, &["add", ".gitignore"]);
+        git(&bench.repo, &["commit", "-q", "-m", "ignore build output"]);
+        bench.publish();
+
+        let built = landed_checkout(&bench, "built");
+        let clean = bench.landing(&built);
+        assert_eq!(clean.state, "landed");
+        assert_eq!(told(&clean)["ignored"], serde_json::json!(false));
+
+        // A build leaves its output: nothing to commit, something to say.
+        leave_build_output(&built);
+        let left = bench.landing(&built);
+        assert_eq!(left.state, "landed");
+        assert_eq!(told(&left)["ignored"], serde_json::json!(true));
+        assert!(!left.dirty, "ignored files are not unsaved changes");
+
+        // The same leftovers beside work main does not have: the chip words only
+        // landed work, so nothing is asked about this one.
+        let ahead = bench.worktree("ahead");
+        bench.commit(&ahead, "x.txt", "x\n");
+        leave_build_output(&ahead);
+        let unlanded = bench.landing(&ahead);
+        assert_eq!(unlanded.state, "unlanded");
+        assert_eq!(told(&unlanded)["ignored"], serde_json::json!(false));
+    }
+
     #[test]
     fn a_missing_compare_ref_is_no_ref_not_landed() {
         let bench = Bench::open();
