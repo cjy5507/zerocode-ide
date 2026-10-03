@@ -308,10 +308,12 @@ listen("term:cwd", (event) => {
   for (const held of [...treeTermCwds.keys()]) if (!tabOfTerm(held)) treeTermCwds.delete(held);
 });
 
-/* Is the tree where somebody can see it — its panel up, its column open, no
- * search list standing in its place. */
+/* Is the tree where somebody can see it — a workspace the catalog holds,
+ * its panel up, its column open, no search list standing in its place. A
+ * window with no workspace has no tree to keep fresh, and asks git nothing. */
 function fileTreeShowing() {
-  return !el("activity-files").hidden && !folded.aside && !fileTree.hidden;
+  return Boolean(worktreeAt(activeWorktreePath)) &&
+    !el("activity-files").hidden && !folded.aside && !fileTree.hidden;
 }
 
 function treeRowOf(relative) {
@@ -836,8 +838,7 @@ function treeTouchWord(kind) {
 /* What a screen reader says for a row: its name, its git state in words
  * (and a file's +N -N), and what an agent is doing to it — the same facts
  * the row shows, never a raw letter. Rewritten whenever one of them moves. */
-function labelTreeRow(row) {
-  const path = row.dataset.treePath;
+function labelTreeRow(row, path = row.dataset.treePath) {
   const words = [row.querySelector(".tree-name")?.textContent ?? ""];
   if (row.classList.contains("is-ignored")) {
     words.push(t("tree.git.ignored", "무시됨"));

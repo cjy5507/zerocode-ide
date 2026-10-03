@@ -2377,7 +2377,9 @@ function paintTreeBadge(row, relative, isDir, code = badgeFor(relative)) {
   badge.dataset.tip = code.trim();
   badge.dataset.git = gitDecorationOf(code);
   dressTreeGit(row, relative, isDir, ignored);
-  labelTreeRow(row);
+  // The path is handed over: a row being built is labelled before it is
+  // bound, so it does not carry its own path yet.
+  labelTreeRow(row, relative);
 }
 
 /* One folder's entries, from the backend or from the answer already fetched.

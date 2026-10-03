@@ -647,6 +647,10 @@ export async function testExplorerSelection(browser, origin, ok) {
       const { root, row, settle } = window.__XT__;
       const said = [];
       window.__ANSWER__.tree_selection = (args) => { said.push(JSON.parse(JSON.stringify(args))); return null; };
+      // A plain click also opens the file's preview; this suite is about the
+      // selection, so the preview door is held shut while it clicks.
+      const keptOpenPath = openPath;
+      openPath = () => {};
       const click = (relative, extra = {}) => row(relative).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ...extra }));
       click("README.md");
       await settle();
@@ -663,6 +667,7 @@ export async function testExplorerSelection(browser, origin, ok) {
       resetTreeSelection();
       await settle();
       const none = said.at(-1) ?? null;
+      openPath = keptOpenPath;
       return { root, one, two, burst, none };
     }, PRIMARY_EVENT);
     ok("the tree's selection is said to the backend as it moves, relative to its workspace, once a frame", seen.one?.root === seen.root && JSON.stringify(seen.one?.paths) === JSON.stringify(["README.md"]) && JSON.stringify([...(seen.two?.paths ?? [])].sort()) === JSON.stringify(["README.md", "src"]) && seen.burst === 1 && JSON.stringify(seen.none?.paths) === JSON.stringify([]), JSON.stringify(seen));
