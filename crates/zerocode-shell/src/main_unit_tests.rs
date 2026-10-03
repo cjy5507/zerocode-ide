@@ -21955,7 +21955,8 @@ fn a_hand_over_is_typed_as_a_line_and_verified_before_the_wire_stands() {
     let hand = block_after(backend, "fn hand_over_pane(");
     for needed in [
         "zerocode_core::ask::line_keys(exit)",
-        "walk_key_groups(state, term, &groups, step, || true)",
+        "answer_door::Expect::no_menu()",
+        "walk_key_groups(state, term, rest, step)",
         "while state.terminals().contains_key(&term) {",
         "started.elapsed() >= HAND_OVER_EXIT_WAIT",
     ] {
@@ -21983,7 +21984,7 @@ fn a_hand_over_is_typed_as_a_line_and_verified_before_the_wire_stands() {
     // The answer card walks the same road: one walker, one door.
     let answer = block_after(backend, "fn answer_ask(");
     assert!(
-        answer.contains("walk_key_groups(&state, term, &groups, step, same_send)")
+        answer.contains("walk_key_groups(&state, term, &rest, step)")
             && answer.contains("ask::line_keys(&ask::format_answer(&prompt, &selections))"),
         "answer_ask stopped walking the shared road:\n{answer}"
     );

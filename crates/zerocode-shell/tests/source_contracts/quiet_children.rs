@@ -27,7 +27,9 @@ const EXEMPT: &[(&str, &str)] = &[
 
 /// 창 크레이트의 모든 `.rs` — 목록을 손으로 들지 않는다. 손으로 든 목록은
 /// 새로 생긴 파일을 놓치는데, 그게 바로 이 계약이 막으려는 실패다.
-fn shell_sources() -> Vec<(String, String)> {
+///
+/// 다른 계약도 같은 걸음을 쓴다(`answer_door`: 화면을 읽는 자리는 한 곳).
+pub(crate) fn shell_sources() -> Vec<(String, String)> {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut found = Vec::new();
     let mut pending = vec![src.clone()];
@@ -60,7 +62,7 @@ fn shell_sources() -> Vec<(String, String)> {
 /// 문자열까지 비우는 것이 요점이다: 이 크레이트의 시험들은 자기 계약을 적을
 /// 때 `"Command::new(\"gh\")"` 처럼 그 철자를 **인용**하는데, 인용은 자식을
 /// 띄우지 않는다. 인용을 코드로 세면 계약이 제 시험을 고발한다.
-fn code_only(source: &str) -> String {
+pub(crate) fn code_only(source: &str) -> String {
     let without_prose = strip_rust_comments(source);
     let bytes: Vec<char> = without_prose.chars().collect();
     let mut out = String::with_capacity(without_prose.len());

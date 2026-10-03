@@ -384,6 +384,68 @@ Which one do you want?
         assert_eq!(only.options[2].description, None);
     }
 
+    /// A dialog with a long body is drawn as a card of the rows nearest its
+    /// options — the command and the ask — and a menu with fewer rows keeps
+    /// all of them. What the card carries is still checked against the screen.
+    #[test]
+    fn a_card_carries_the_rows_nearest_the_options_of_a_long_question() {
+        let long = "\
+Allow this edit?
+Path: src/lib.rs
+Change: rename the helper
+Reason: the old name is misleading
+Do you want to apply it?
+❯ 1. Yes
+  2. No
+";
+        let menu = read(long);
+        assert_eq!(menu.question.len(), 5);
+        let card = card_of(&menu);
+        assert_eq!(
+            card.questions[0].question,
+            "Change: rename the helper\nReason: the old name is misleading\nDo you want to apply it?"
+        );
+        assert!(menu.shows(&card.questions[0]));
+        let short = card_of(&read(FORM));
+        assert_eq!(
+            short.questions[0].question,
+            "Library\nWhich library should we use for dates?"
+        );
+    }
+
+    /// The one screen this repository holds that was recorded off a real agent
+    /// instead of written for a test: Claude Code's pause dialog, as a
+    /// coordinator read it off a worker's pane (2.1.281, 2026-09-21 — the
+    /// shell's `quota_wall` carries the same capture). The reading was written
+    /// from known layouts; this is a layout the product actually drew.
+    const RECORDED_PAUSE_DIALOG: &str = "\
+ Session paused
+ Fable 5.1's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster.
+   Details: `[cyber]`
+ ❯ 1. Switch to Opus 4.8
+   2. Edit prompt and retry
+";
+
+    /// The same pane after the error was printed instead: no menu stands on it.
+    const RECORDED_PRINTED_DECLINE: &str = "\
+⎿  API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup).
+   Double press esc to edit your last message, or try a different model with /model.
+❯ ";
+
+    #[test]
+    fn a_screen_recorded_off_a_real_agent_reads_as_the_menu_it_is() {
+        let menu = read(RECORDED_PAUSE_DIALOG);
+        assert_eq!(
+            labels(&Some(menu.clone())),
+            vec!["Switch to Opus 4.8", "Edit prompt and retry"]
+        );
+        assert_eq!(menu.selected, 0);
+        assert_eq!(menu.question.len(), 3);
+        assert_eq!(menu.question[0], "Session paused");
+        assert!(menu.shows(&card_of(&menu).questions[0]));
+        assert_eq!(menu_of(RECORDED_PRINTED_DECLINE), None);
+    }
+
     // ---- is it still the question ---------------------------------------
 
     /// The card a menu was drawn from is shown by that menu.

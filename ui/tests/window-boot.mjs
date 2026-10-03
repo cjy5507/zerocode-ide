@@ -1418,12 +1418,16 @@ const stubBackend = ({ boot, pollers }) => {
     // verbatim, through this one door.
     answer_ask: (args) => {
       window.__ANSWERED__ = JSON.parse(JSON.stringify(args));
+      // A refused answer, as the backend says it (`answer_door`): a word the
+      // page turns into its own sentence.
+      if (window.__ANSWER_REFUSES__) throw new Error(window.__ANSWER_REFUSES__);
       return null;
     },
     // A permission request's one-key answer — which byte means Allow is the
     // backend's; this side only says which way the person pressed.
     answer_approval: (args) => {
       window.__APPROVED__ = JSON.parse(JSON.stringify(args));
+      if (window.__ANSWER_REFUSES__) throw new Error(window.__ANSWER_REFUSES__);
       return null;
     },
     // The vault, the same way: the filtering, sorting and grouping are Rust's and
