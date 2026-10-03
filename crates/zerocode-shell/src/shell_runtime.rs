@@ -2886,11 +2886,6 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
     state.worker_prompt_submits().remove(&term);
     state.completed_worker_cleanups().remove(&term);
     state.isolated_worker_terms().remove(&term);
-    // And which answer-walk this pane was on. The generation exists to let a
-    // new answer overtake an old one's timers; a pane with no agent in it has
-    // no walk to overtake, and this was the one map that no road removed from
-    // at all — not even the tab close.
-    state.ask_sends().remove(&term);
     // 그 판의 제스처 기억과 셋틀 세대도 함께. 반쯤 눌린 이중 Escape의 첫
     // 다리를 남겨 두면 이 번호를 물려받는 다음 판의 첫 Escape가 **남의 짝**이
     // 되어 아무도 두 번 누르지 않은 인터럽트를 만든다.

@@ -445,6 +445,41 @@ pub fn line_keys(text: &str) -> (Vec<KeyGroup>, std::time::Duration) {
     )
 }
 
+/// The gap between two arrow keys walking a menu's selection.
+///
+/// Unmeasured on the CLIs this road serves — a stated floor, not a finding.
+/// What makes it safe to be wrong is [`ROW_SETTLE_MS`]'s read after the walk:
+/// a pace that outruns a TUI shows up as "the selection is not on the chosen
+/// row" and no Enter is sent, never as a wrong row chosen.
+pub const ROW_STEP_MS: u64 = 80;
+
+/// How long the screen is given to show where the selection landed before it
+/// is read and the Enter decided on.
+pub const ROW_SETTLE_MS: u64 = 200;
+
+/// The arrow keys that move a menu's selection from row `from` to row `to`,
+/// one key to a group so the walk can be paced ([`ROW_STEP_MS`]).
+///
+/// Straight, never around the end: whether a list wraps is that list's
+/// business, and a walk that relied on it would be wrong on every list that
+/// does not. The Enter is not here — it is sent only after the screen has
+/// been read to show the selection landed ([`press_enter`]).
+#[must_use]
+pub fn walk_to_row(from: usize, to: usize) -> Vec<KeyGroup> {
+    let (key, steps) = if to >= from {
+        (NEXT_ROW, to - from)
+    } else {
+        (PREVIOUS_ROW, from - to)
+    };
+    (0..steps).map(|_| KeyGroup::Raw(key.to_string())).collect()
+}
+
+/// The key that takes the row a menu's selection stands on.
+#[must_use]
+pub fn press_enter() -> Vec<KeyGroup> {
+    vec![KeyGroup::Raw(ENTER.to_string())]
+}
+
 /// Which builder an agent's TUI answers to
 /// (`shouldStepNativeChatAskAnswer`/`resolveNativeChatTranscriptAgent`,
 /// web-runtime-session-DN6BsdRt.js:172-186): claude's grammar for claude,
@@ -651,6 +686,25 @@ mod tests {
                 KeyGroup::Text(text) => format!("text:{text}"),
             })
             .collect()
+    }
+
+    /// A menu's selection is walked to its row one arrow a group, in the
+    /// direction the row lies and never around the end of the list; the
+    /// Enter that takes the row is a key of its own.
+    #[test]
+    fn a_menu_is_walked_to_its_row_one_arrow_a_group_and_never_around_the_end() {
+        assert_eq!(
+            raws(&walk_to_row(0, 2)),
+            vec!["raw:\x1b[B".to_string(), "raw:\x1b[B".to_string()]
+        );
+        assert_eq!(
+            raws(&walk_to_row(3, 1)),
+            vec!["raw:\x1b[A".to_string(), "raw:\x1b[A".to_string()]
+        );
+        assert!(walk_to_row(2, 2).is_empty(), "already on the row");
+        assert_eq!(walk_to_row(0, 5).len(), 5, "the far row is walked to");
+        assert_eq!(walk_to_row(5, 0).len(), 5, "and back, not wrapped");
+        assert_eq!(raws(&press_enter()), vec!["raw:\r".to_string()]);
     }
 
     /// The shape rules, each on its own row: string options become labels,

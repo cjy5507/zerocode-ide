@@ -124,6 +124,33 @@ pub(crate) fn pane_hearing(
     }
 }
 
+/// The cards the screens of the panes that WAIT are drawn as: for a pane whose
+/// agent said it needs a person but described no question and no permission,
+/// the numbered menu on its screen (`answer_door::screen_card`).
+///
+/// Only a pane that waits is read, so a busy pane's output costs this nothing,
+/// and a pane whose terminal is being parsed this instant is skipped rather
+/// than waited for — the next paint finds it. Taken before `agent_terms` is
+/// locked, as `living` is: the terminal pool's lock and that one never
+/// overlap.
+fn screen_cards(
+    state: &State<'_, AppState>,
+    states: &HashMap<TermId, PaneState>,
+) -> HashMap<TermId, zerocode_core::ask::AskPrompt> {
+    states
+        .iter()
+        .filter(|(_, row)| {
+            row.state == zerocode_core::hook::HookState::NeedsAttention
+                && row.ask_prompt.is_none()
+                && row.approval.is_none()
+        })
+        .filter_map(|(term, _)| {
+            let held = state.terminals().handle(*term)?;
+            Some((*term, crate::answer_door::screen_card(&held)?))
+        })
+        .collect()
+}
+
 /// Every pane this window knows holds an agent, with its last reported state.
 ///
 /// The board's data half. Deliberately does NOT filter to "interesting" panes:
@@ -149,6 +176,7 @@ pub(crate) fn pane_agents(state: State<'_, AppState>) -> Vec<PaneAgent> {
     // launched as an agent is doing SOMETHING; only a dead one may rest.
     // Collected before the `agent_terms` lock so the two guards never overlap.
     let living: std::collections::HashSet<TermId> = state.terminals().terms().into_iter().collect();
+    let screen_cards = screen_cards(&state, &states);
     // What the LEDGER says about the seats it summoned, gathered once for the
     // whole paint rather than per pane. A pane the ledger never seated is
     // absent from this map, and absence leaves the agent's own report standing.
@@ -193,7 +221,12 @@ pub(crate) fn pane_agents(state: State<'_, AppState>) -> Vec<PaneAgent> {
                 you: held.and_then(|one| one.you.clone()),
                 said: held.and_then(|one| one.said.clone()),
                 ask: held.and_then(|one| one.ask.clone()),
-                ask_prompt: held.and_then(|one| one.ask_prompt.clone()),
+                // What the agent described, or — for a pane that only said it
+                // waits, with a numbered menu on its screen — the menu itself
+                // as the same card ([`screen_cards`]).
+                ask_prompt: held
+                    .and_then(|one| one.ask_prompt.clone())
+                    .or_else(|| screen_cards.get(term).cloned()),
                 approval: held.and_then(|one| one.approval.clone()),
                 autonomy: held.and_then(|one| one.autonomy.clone()),
                 parent: parents.get(term).copied(),

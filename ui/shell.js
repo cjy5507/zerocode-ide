@@ -773,11 +773,36 @@ function confirmAsk(card, draft, fromKeyboard = false) {
   }
 }
 
+/* What a refused answer says.
+ *
+ * The backend refuses with a WORD (`answer_door`) rather than a sentence this
+ * side would have to match: the question the answer was prepared for is no
+ * longer found on the pane's screen (`question-changed` — it changed, or the
+ * screen is not a numbered menu this window can read), another answer to
+ * the pane is still on its way in (`answer-in-flight`), or a numbered menu
+ * was answered with only words (`menu-needs-a-row`). Anything else is the
+ * error's own text. */
+function answerRefusalWords(error) {
+  const said = String(error);
+  if (said.includes("question-changed")) {
+    return t("board.ask.changed", "화면에서 이 질문을 찾지 못해 답을 보내지 않았어요 — 터미널을 확인해 주세요");
+  }
+  if (said.includes("answer-in-flight")) {
+    return t("board.ask.inFlight", "앞서 누른 답을 보내는 중이에요");
+  }
+  if (said.includes("menu-needs-a-row")) {
+    return t("board.ask.needsRow", "이 메뉴는 목록에서 고른 답만 받아요");
+  }
+  return said;
+}
+
 /* Hand the picks to the backend, which walks the agent's own TUI with them
  * (`answer_ask` — the keys and their pacing live over there). The panel goes
  * quiet while the keys are being typed; the hook event that follows the
  * agent moving on clears the ask and takes the card out of the attention
- * column, draft and all. */
+ * column, draft and all. A refused answer says why and repaints from the
+ * pane as it is now — which is how the question that replaced this one
+ * reaches the person. */
 function submitAsk(card, draft) {
   const selections = card.ask_prompt.questions.map((unused, i) => ({
     indices: [...(draft.selections[i] ?? [])],
@@ -791,7 +816,7 @@ function submitAsk(card, draft) {
     : invoke("answer_ask", { term, agent: card.agent, prompt: card.ask_prompt, selections });
   road.catch((error) => {
     draft.sending = false;
-    showError(String(error));
+    showError(answerRefusalWords(error));
     repaintAsk(draft);
   });
 }
@@ -832,6 +857,9 @@ function askPanelNode(card, draft) {
   title.className = "board-ask-question";
   title.textContent = question.question;
   title.dataset.tip = question.question;
+  // A question read off a pane's screen can run over several rows — the command
+  // and then the ask — and is shown as the rows it is; an agent's own stays one line.
+  if (question.question.includes("\n")) title.classList.add("is-multiline");
   panel.appendChild(title);
 
   const rows = document.createElement("span");
@@ -1007,7 +1035,11 @@ function approvalPanelNode(card, draft) {
       event.stopPropagation();
       draft.sending = true;
       draft.open = false;
-      decide(choice, says?.() || null).catch((error) => showError(String(error)));
+      decide(choice, says?.() || null).catch((error) => {
+        draft.sending = false;
+        showError(answerRefusalWords(error));
+        repaintAsk(draft);
+      });
       repaintAsk(draft);
       then?.();
     };
@@ -1490,6 +1522,33 @@ async function boardCardsAndLedger(ask = null, surface = "graph") {
  * the live map's waits (the badge). */
 async function boardCards() {
   return (await boardCardsAndLedger()).cards;
+}
+
+/* A wait the hook only SIGNALLED — a menu, a prompt with no payload — has its
+ * question on the program's own screen, and the backend reads it there when the
+ * board asks (`pane_agents`). The hook fires before the program has
+ * necessarily drawn that menu, so the board is asked again a few times as the
+ * screen settles and then left alone: three asks per wait, not a poll. */
+const SIGNALLED_WAIT_REPAINT_MS = [400, 1500, 4000];
+const signalledWaitTimers = new Map();
+
+function clearSignalledWait(term) {
+  for (const timer of signalledWaitTimers.get(term) ?? []) clearTimeout(timer);
+  signalledWaitTimers.delete(term);
+}
+
+function watchSignalledWait(term) {
+  clearSignalledWait(term);
+  const last = SIGNALLED_WAIT_REPAINT_MS.length - 1;
+  signalledWaitTimers.set(
+    term,
+    SIGNALLED_WAIT_REPAINT_MS.map((after, at) =>
+      setTimeout(() => {
+        scheduleAgentPaint(["cards", "board"]);
+        // The last ask is the end of this wait's watching: nothing is left to hold.
+        if (at === last) signalledWaitTimers.delete(term);
+      }, after)),
+  );
 }
 
 /* 판 하나가 떠날 때 받는 표 (t-7288).
@@ -11398,6 +11457,8 @@ listen("hook:agent", (event) => {
   }
   const wasMidTurn = isMidTurn(hookStates.get(term));
   hookStates.set(term, state);
+  if (asking && !shaped) watchSignalledWait(term);
+  else clearSignalledWait(term);
   // The state moved: whatever the notify seat said about the LAST ring of
   // this pane is over with it (t-6043) — and so is what was withheld from
   // it: a person's own Enter starts a turn, so the next refusal there is

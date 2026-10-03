@@ -61,6 +61,7 @@ mod accounts;
 mod agent_teams;
 mod agent_tools_runtime;
 mod agent_trust_presets;
+mod answer_door;
 pub(crate) mod api_routers;
 mod app_paths;
 mod artifact_render;
@@ -1176,19 +1177,15 @@ struct ShellRuntime {
     pending_done: Mutex<HashMap<TermId, (String, hooks::PaneHookReport)>>,
     /// The last few things each agent DID, by card — see `activities()`.
     activities: Mutex<HashMap<String, ActivityRing>>,
-    /// Which [`answer_ask`] walk each pane is on. A new answer bumps the
-    /// pane's generation and the previous walk's thread stops at its next
-    /// step — Orca's `cancelInFlight`, held here because the timers are here.
-    ask_sends: Mutex<HashMap<TermId, u64>>,
     /// Each pane's stop-gesture inference — the per-terminal machine that
     /// decides whether an Escape or a Ctrl+C meant "stop this turn"
     /// ([`zerocode_core::interrupt::InterruptInference`]).
     ///
-    /// Here rather than in core for the same reason `ask_sends` is: the rules
-    /// are pure and the CLOCK is ours.
+    /// Here rather than in core because the rules are pure and the CLOCK is
+    /// ours.
     interrupt_inference: Mutex<HashMap<TermId, zerocode_core::interrupt::InterruptInference>>,
-    /// Which settle each pane is on, in the shape `ask_sends` already uses. A
-    /// newer gesture bumps the generation and the sleeping thread from the
+    /// Which settle each pane is on, as a generation per pane. A newer
+    /// gesture bumps the generation and the sleeping thread from the
     /// older one finds its stamp gone and says nothing — otherwise two
     /// gestures 200ms apart both flush and the second reads a baseline the
     /// first already spent.
@@ -1674,12 +1671,6 @@ impl ShellRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn ask_sends(&self) -> MutexGuard<'_, HashMap<TermId, u64>> {
-        self.ask_sends
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     fn interrupt_inference(
         &self,
     ) -> MutexGuard<'_, HashMap<TermId, zerocode_core::interrupt::InterruptInference>> {
@@ -1830,7 +1821,6 @@ trait ShellStateExt {
     fn activities(&self) -> MutexGuard<'_, HashMap<String, ActivityRing>>;
     fn forget_activities(&self, term: TermId);
     fn team_envs(&self) -> MutexGuard<'_, HashMap<TermId, Vec<(String, String)>>>;
-    fn ask_sends(&self) -> MutexGuard<'_, HashMap<TermId, u64>>;
     fn interrupt_inference(
         &self,
     ) -> MutexGuard<'_, HashMap<TermId, zerocode_core::interrupt::InterruptInference>>;
@@ -2103,10 +2093,6 @@ impl ShellStateExt for AppState {
         self.shell_runtime().team_envs()
     }
 
-    fn ask_sends(&self) -> MutexGuard<'_, HashMap<TermId, u64>> {
-        self.shell_runtime().ask_sends()
-    }
-
     fn interrupt_inference(
         &self,
     ) -> MutexGuard<'_, HashMap<TermId, zerocode_core::interrupt::InterruptInference>> {
@@ -2376,7 +2362,6 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         unpublished_rosters: Mutex::default(),
         pane_cwds: Mutex::default(),
         team_envs: Mutex::new(HashMap::new()),
-        ask_sends: Mutex::new(HashMap::new()),
         // 제스처의 기억도 늘 빈 손으로 시작한다 — 지난 프로세스가 반쯤
         // 누른 이중 Escape를 이 프로세스가 이어받을 이유가 없다.
         interrupt_inference: Mutex::new(HashMap::new()),
