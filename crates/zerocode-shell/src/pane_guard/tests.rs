@@ -1597,3 +1597,30 @@ fn a_panes_folder_is_named_as_zo_names_it_from_inside() {
             .contains(&zerocode_core::zo_project::project_slug(&physical))
     );
 }
+
+/// A turn's brief is its voices, in order, a blank line apart — and within
+/// the bridge's cap, because the bridge drops a longer brief whole: a voice
+/// that would cross it is left out, the ones before it (and a short one
+/// after) still reach the agent (t-24298). The person's own selection in the
+/// file tree is the first voice.
+#[test]
+fn a_turns_brief_reads_its_voices_in_order_within_the_bridges_cap() {
+    let voices = |lines: &[Option<&str>]| {
+        lines
+            .iter()
+            .map(|line| line.map(str::to_string))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        compose_brief(voices(&[Some("selected"), None, Some("picked")]), 100).as_deref(),
+        Some("selected\n\npicked")
+    );
+    assert_eq!(
+        compose_brief(voices(&[Some("12345"), Some("1234567890"), Some("xy")]), 10).as_deref(),
+        Some("12345\n\nxy")
+    );
+    assert_eq!(compose_brief(voices(&[None, Some("  ")]), 100), None);
+    let first = BRIEF_CONTRIBUTORS.first().map(|voice| *voice as usize);
+    let selection: BriefContributor = crate::tree_selection::brief_line;
+    assert_eq!(first, Some(selection as usize));
+}

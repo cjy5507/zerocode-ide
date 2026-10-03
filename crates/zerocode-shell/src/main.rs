@@ -194,6 +194,7 @@ mod terminal_prefs_runtime;
 mod terminal_registry;
 mod terminal_theme_import;
 mod token_scan;
+mod tree_selection;
 mod type_value_keys;
 mod typesafe_settings;
 mod ui_source;

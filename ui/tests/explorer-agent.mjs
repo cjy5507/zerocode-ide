@@ -13,7 +13,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openWindowTestPage } from "./window-boot.mjs";
+import { openWindowTestPage, PRIMARY_EVENT } from "./window-boot.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -627,6 +627,44 @@ export async function testExplorerVcs(browser, origin, ok) {
     ok("the line clears when the operation finishes, fails or the turn ends", seen.cleared === true && seen.pr?.includes("gh pr create") && seen.failedCleared === true && seen.stoppedCleared === true, JSON.stringify(seen));
     ok("a finished commit lights the files it took in the commit colour once git has been asked again", seen.committed === "commit" && seen.untouched === null, JSON.stringify(seen));
     ok("the vcs suite raised no renderer faults", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
+
+/* ---- slice 3, second half: the selection is the agent's context ----------
+ *
+ * Whatever the person has selected in the tree is said to the backend as it
+ * moves — once per frame, however fast the arrows go — so the next prompt in
+ * this workspace's panes can carry it (the brief the prompt hook takes). */
+export async function testExplorerSelection(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standTree(page);
+    const seen = await page.evaluate(async (primary) => {
+      const { root, row, settle } = window.__XT__;
+      const said = [];
+      window.__ANSWER__.tree_selection = (args) => { said.push(JSON.parse(JSON.stringify(args))); return null; };
+      const click = (relative, extra = {}) => row(relative).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ...extra }));
+      click("README.md");
+      await settle();
+      const one = said.at(-1) ?? null;
+      click("src", primary);
+      await settle();
+      const two = said.at(-1) ?? null;
+      // Ten moves inside one frame are one word to the backend.
+      const before = said.length;
+      for (let at = 0; at < 10; at += 1) click(at % 2 ? "README.md" : "docs");
+      await settle();
+      const burst = said.length - before;
+      // Letting go of the selection says so too.
+      resetTreeSelection();
+      await settle();
+      const none = said.at(-1) ?? null;
+      return { root, one, two, burst, none };
+    }, PRIMARY_EVENT);
+    ok("the tree's selection is said to the backend as it moves, relative to its workspace, once a frame", seen.one?.root === seen.root && JSON.stringify(seen.one?.paths) === JSON.stringify(["README.md"]) && JSON.stringify([...(seen.two?.paths ?? [])].sort()) === JSON.stringify(["README.md", "src"]) && seen.burst === 1 && JSON.stringify(seen.none?.paths) === JSON.stringify([]), JSON.stringify(seen));
+    ok("the selection suite raised no renderer faults", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();
   }
