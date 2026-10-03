@@ -7768,7 +7768,9 @@ fn what_an_agent_is_doing_reaches_the_window_bounded_and_coalesced() {
         sending.contains(r#"app.emit("hook:activity", PaneActivities { pane, activities })"#),
         "a batch leaves for the window some other way than the one door:\n{sending}"
     );
-    let releasing = block_after(shipped, "    fn release(");
+    // Markers without their indent, so the block ends at the method's own
+    // closing brace instead of running on to the end of the impl.
+    let releasing = block_after(shipped, "fn release(\n        &mut self,");
     assert!(
         releasing.contains("self.due(now)") && releasing.contains("self.owed(now)"),
         "a release no longer asks the floor first, or forgets what it holds \
@@ -7795,7 +7797,7 @@ fn what_an_agent_is_doing_reaches_the_window_bounded_and_coalesced() {
         !throttle.contains("spawn") && !throttle.contains("sleep"),
         "the throttle grew a timer of its own:\n{throttle}"
     );
-    let owing = block_after(shipped, "    fn owed(&mut self, now: Instant)");
+    let owing = block_after(shipped, "fn owed(&mut self, now: Instant)");
     assert!(
         owing.contains("self.pending == 0 || self.armed")
             && owing.contains("self.armed = true;")
