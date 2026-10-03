@@ -1,0 +1,585 @@
+//! A numbered menu standing on a pane's screen: what it asks, what it offers,
+//! and whether a card made earlier is still about it.
+//!
+//! Two roads need the same reading and used to have none:
+//!
+//! - **The late answer.** A card is drawn from what an agent SAID it asked
+//!   (a hook's payload) and answered some moments later by typing into the
+//!   pane. In between the question may have been answered at the keyboard,
+//!   resolved by the agent itself, or replaced by the next one — and a key
+//!   typed then lands in whatever the screen shows now: a digit in somebody
+//!   else's menu, an Escape that stops a running turn. [`ScreenMenu::shows`]
+//!   is the question "is the thing this card asks still the thing on the
+//!   screen", asked just before the key is typed.
+//! - **The menu nobody described.** A CLI with no structured question road
+//!   still stops on a numbered menu and signals only that it waits. The
+//!   screen is the only place that menu exists, so [`read_menu`] reads it
+//!   there and [`ScreenMenu::card`] draws the same card an agent-described
+//!   question gets.
+//!
+//! The reading is deliberately generic — a block of `N. label` / `N) label` /
+//! `❯ N. label` rows at the bottom of the screen with the selection on one of
+//! them — and the places where one CLI differs (how it takes a choice) are the
+//! caller's: [`crate::ask::walk_to_row`] is the generic way, an agent's own
+//! grammar is [`crate::ask::keys_for`].
+//!
+//! Pure on purpose: rows in, words out. The terminal, its lock and its clock
+//! are the shell's.
+
+use crate::ask::{AskOption, AskPrompt, AskQuestion};
+
+/// One row a menu offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuOption {
+    /// The number the row wears — the screen's own, which the reading
+    /// guarantees runs from 1 without a gap.
+    pub number: u32,
+    /// The row's words, with the selection glyph, the number and a checkbox
+    /// taken off.
+    pub label: String,
+    /// What the rows indented under this one say — a description, or the
+    /// tail of a label the pane wrapped. Empty when there is none.
+    pub detail: String,
+    /// Whether the row carries a checkbox, which makes the menu a
+    /// multi-select.
+    pub checkbox: bool,
+}
+
+/// A numbered menu with the selection on one of its rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenMenu {
+    /// The rows above the options that say what is being asked, top first,
+    /// each with its glyphs and its padding taken off.
+    pub question: Vec<String>,
+    pub options: Vec<MenuOption>,
+    /// Which option the selection stands on, as an index into `options`.
+    pub selected: usize,
+}
+
+/// Read the menu a pane is stopped on, if the screen shows one.
+///
+/// `rows` are the visible rows top to bottom, each trailing-trimmed and with
+/// its leading padding kept (the padding is how a description is told from
+/// the next question); `cursor_row` is where the terminal's own cursor sits,
+/// which some menus use as their only selection mark.
+#[must_use]
+pub fn read_menu(rows: &[String], cursor_row: Option<usize>) -> Option<ScreenMenu> {
+    let _ = (rows, cursor_row);
+    None
+}
+
+/// Whether the words `text` are on the screen's last rows — the check for a
+/// question that offers no rows to compare.
+#[must_use]
+pub fn words_are_up(rows: &[String], text: &str) -> bool {
+    let _ = (rows, text);
+    false
+}
+
+impl ScreenMenu {
+    /// Whether any row has a checkbox — a menu this reading can show but not
+    /// answer with one choice.
+    #[must_use]
+    pub fn multi_select(&self) -> bool {
+        self.options.iter().any(|option| option.checkbox)
+    }
+
+    /// The card this menu is drawn as: one single-select question whose rows
+    /// are the menu's. `None` for a multi-select, which a card of one pick
+    /// would answer wrongly.
+    #[must_use]
+    pub fn card(&self) -> Option<AskPrompt> {
+        let _ = (
+            AskOption {
+                label: String::new(),
+                description: None,
+            },
+            self.selected,
+        );
+        None
+    }
+
+    /// Whether this menu is the one `question` asked about: the question's
+    /// words are the ones standing above the options, and each option it
+    /// declared is the row of the same number.
+    ///
+    /// The menu may offer MORE rows than the question declared — an agent's
+    /// own "type something" and "chat about this" rows — but never fewer, and
+    /// never the same rows in another order.
+    #[must_use]
+    pub fn shows(&self, question: &AskQuestion) -> bool {
+        let _ = question;
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(screen: &str) -> Vec<String> {
+        screen.lines().map(str::to_string).collect()
+    }
+
+    fn menu_of(screen: &str) -> Option<ScreenMenu> {
+        read_menu(&rows(screen), None)
+    }
+
+    /// The menu on `screen`, asserted to be there — so a reading that finds
+    /// nothing fails at this assertion, with the screen, and not at an unwrap.
+    fn read(screen: &str) -> ScreenMenu {
+        let menu = menu_of(screen);
+        assert!(menu.is_some(), "no menu was read from:\n{screen}");
+        menu.expect("asserted above")
+    }
+
+    /// The card a menu is drawn as, asserted to exist.
+    fn card_of(menu: &ScreenMenu) -> AskPrompt {
+        let card = menu.card();
+        assert!(card.is_some(), "no card was drawn for {menu:?}");
+        card.expect("asserted above")
+    }
+
+    fn labels(menu: &Option<ScreenMenu>) -> Vec<String> {
+        menu.as_ref()
+            .map(|menu| menu.options.iter().map(|o| o.label.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn selected(menu: &Option<ScreenMenu>) -> Option<usize> {
+        menu.as_ref().map(|menu| menu.selected)
+    }
+
+    /// A permission prompt as a coding agent's TUI draws it: a body, the
+    /// question, three rows with the selection glyph on the first.
+    const PERMISSION: &str = "\
+ Bash command
+
+   make build
+   Build the project
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for similar commands
+   3. No, and tell the agent what to do differently (esc)
+";
+
+    /// A form question with descriptions under its rows, an agent's own
+    /// extra rows, a rule before the last of them and a hint line.
+    const FORM: &str = "\
+────────────────────────────────────────
+ ☐ Library
+
+Which library should we use for dates?
+
+❯ 1. date-fns
+     Modern and tree-shakable
+  2. dayjs
+     Small and familiar
+  3. Type something.
+────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+";
+
+    /// The same permission prompt inside a drawn box.
+    const BOXED: &str = "\
+╭──────────────────────────────────────────╮
+│ Do you want to make this edit?           │
+│ ❯ 1. Yes                                 │
+│   2. No                                  │
+╰──────────────────────────────────────────╯
+";
+
+    /// A third CLI's menu: `>` for the selection, `N)` for the number.
+    const PLAIN: &str = "\
+ Select an approach
+ > 1) Rebase onto main
+   2) Merge main into this branch
+   3) Cancel
+";
+
+    fn question(text: &str, options: &[&str]) -> AskQuestion {
+        AskQuestion {
+            question: text.to_string(),
+            header: None,
+            multi_select: false,
+            options: options
+                .iter()
+                .map(|label| AskOption {
+                    label: (*label).to_string(),
+                    description: None,
+                })
+                .collect(),
+        }
+    }
+
+    // ---- reading -----------------------------------------------------
+
+    /// The rows, their numbers, which one the selection is on and the words
+    /// above them — for a prompt whose body is several paragraphs.
+    #[test]
+    fn a_numbered_menu_with_the_selection_on_a_row_reads_as_a_menu() {
+        let menu = menu_of(PERMISSION);
+        assert_eq!(
+            labels(&menu),
+            vec![
+                "Yes",
+                "Yes, and don't ask again for similar commands",
+                "No, and tell the agent what to do differently (esc)",
+            ]
+        );
+        assert_eq!(selected(&menu), Some(0));
+        assert_eq!(
+            menu.map(|menu| menu.question),
+            Some(vec![
+                "Bash command".to_string(),
+                "make build".to_string(),
+                "Build the project".to_string(),
+                "Do you want to proceed?".to_string(),
+            ])
+        );
+    }
+
+    /// Both ways a number is spelled and every glyph a selection is drawn
+    /// with: the generic reading is not one CLI's.
+    #[test]
+    fn every_number_separator_and_selection_glyph_reads() {
+        assert_eq!(labels(&menu_of(PLAIN)).len(), 3);
+        assert_eq!(selected(&menu_of(PLAIN)), Some(0));
+        for glyph in ["❯", "›", ">", "→", "➜", "▶", "▸", "➤"] {
+            let screen = format!("Pick\n  1. Alpha\n{glyph} 2. Beta\n  3. Gamma\n");
+            assert_eq!(
+                selected(&menu_of(&screen)),
+                Some(1),
+                "the glyph {glyph} did not mark a selection"
+            );
+        }
+    }
+
+    /// A menu drawn inside a box reads through the border, and the box's own
+    /// top and bottom edges are neither rows nor words.
+    #[test]
+    fn a_menu_inside_a_box_reads_through_its_border() {
+        let menu = menu_of(BOXED);
+        assert_eq!(labels(&menu), vec!["Yes", "No"]);
+        assert_eq!(selected(&menu), Some(0));
+        assert_eq!(
+            menu.map(|menu| menu.question),
+            Some(vec!["Do you want to make this edit?".to_string()])
+        );
+    }
+
+    /// A description is the rows indented under its option; a rule between
+    /// two options does not split the menu; the hint line under it is no
+    /// option's detail; and the header chip's checkbox glyph is not part of
+    /// the question.
+    #[test]
+    fn descriptions_ride_with_their_option_and_a_rule_does_not_split_the_menu() {
+        let menu = menu_of(FORM);
+        assert_eq!(
+            labels(&menu),
+            vec!["date-fns", "dayjs", "Type something.", "Chat about this"]
+        );
+        let details: Vec<String> = menu
+            .as_ref()
+            .map(|menu| menu.options.iter().map(|o| o.detail.clone()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            details,
+            vec!["Modern and tree-shakable", "Small and familiar", "", ""]
+        );
+        assert_eq!(
+            menu.map(|menu| menu.question),
+            Some(vec![
+                "Library".to_string(),
+                "Which library should we use for dates?".to_string(),
+            ])
+        );
+    }
+
+    /// A menu with no glyph on any row still has a selection when the
+    /// terminal's own cursor stands on one of its rows.
+    #[test]
+    fn a_cursor_on_a_numbered_row_stands_for_the_selection_glyph() {
+        let screen = rows("Pick one\n  1. Alpha\n  2. Beta\n  3. Gamma\n");
+        assert_eq!(selected(&read_menu(&screen, Some(2))), Some(1));
+        assert_eq!(read_menu(&screen, Some(0)), None);
+        assert_eq!(read_menu(&screen, None), None);
+    }
+
+    /// What a numbered list in ordinary output looks like next to what a
+    /// menu looks like: no selection on a row, rows far above the bottom,
+    /// numbers that do not start at one, a single row.
+    #[test]
+    fn a_numbered_list_in_ordinary_output_is_not_a_menu() {
+        let plan =
+            "Here is the plan:\n1. Read the file\n2. Change the code\n3. Run the tests\n❯ \n";
+        assert_eq!(menu_of(plan), None, "a list with no selection is output");
+        let buried = format!(
+            "Pick\n❯ 1. Alpha\n  2. Beta\n{}",
+            "some later output line\n".repeat(7)
+        );
+        assert_eq!(menu_of(&buried), None, "an answered menu buried in output");
+        assert_eq!(
+            menu_of("Pick\n❯ 2. Beta\n  3. Gamma\n"),
+            None,
+            "must start at 1"
+        );
+        assert_eq!(
+            menu_of("Pick\n❯ 1. Alpha\n  3. Gamma\n"),
+            None,
+            "must not skip"
+        );
+        assert_eq!(menu_of("Pick\n❯ 1. Alpha\n"), None, "one row is no menu");
+    }
+
+    /// A list of numbers earlier in the same paragraph does not make the
+    /// menu start at its first row.
+    #[test]
+    fn an_earlier_list_above_the_menu_is_not_part_of_it() {
+        let screen = "\
+1. First thing mentioned
+Some words in between
+Which one do you want?
+❯ 1. Yes
+  2. No
+";
+        let menu = menu_of(screen);
+        assert_eq!(labels(&menu), vec!["Yes", "No"]);
+    }
+
+    /// Checkboxes make a multi-select; the label is clean of them and the
+    /// card is not offered, since one pick cannot answer it.
+    #[test]
+    fn checkboxes_make_a_multi_select_with_clean_labels_and_no_card() {
+        let screen = "Which?\n❯ 1. [ ] Alpha\n  2. [x] Beta\n  3. [ ] Gamma\n";
+        let menu = menu_of(screen);
+        assert_eq!(labels(&menu), vec!["Alpha", "Beta", "Gamma"]);
+        assert_eq!(menu.as_ref().map(ScreenMenu::multi_select), Some(true));
+        assert_eq!(menu.and_then(|menu| menu.card()), None);
+    }
+
+    /// The card a read menu is drawn as: one single-select question, the
+    /// words above the options as its question, a row each with its detail
+    /// as the description.
+    #[test]
+    fn a_read_menu_is_drawn_as_one_single_select_question() {
+        let card = menu_of(FORM).and_then(|menu| menu.card());
+        let questions = card.map(|card| card.questions).unwrap_or_default();
+        assert_eq!(questions.len(), 1);
+        let only = &questions[0];
+        assert_eq!(
+            only.question,
+            "Library\nWhich library should we use for dates?"
+        );
+        assert!(!only.multi_select);
+        assert_eq!(only.options.len(), 4);
+        assert_eq!(only.options[0].label, "date-fns");
+        assert_eq!(
+            only.options[0].description.as_deref(),
+            Some("Modern and tree-shakable")
+        );
+        assert_eq!(only.options[2].description, None);
+    }
+
+    // ---- is it still the question ---------------------------------------
+
+    /// The card a menu was drawn from is shown by that menu.
+    #[test]
+    fn a_card_drawn_from_a_menu_is_shown_by_it() {
+        let menu = read(PERMISSION);
+        let card = card_of(&menu);
+        assert!(menu.shows(&card.questions[0]));
+    }
+
+    /// An agent's own description of a question names only the options it
+    /// declared; the screen adds rows of its own. Those match.
+    #[test]
+    fn a_declared_question_is_shown_by_a_menu_with_extra_rows() {
+        let menu = read(FORM);
+        let asked = question(
+            "Which library should we use for dates?",
+            &["date-fns", "dayjs"],
+        );
+        assert!(menu.shows(&asked));
+    }
+
+    /// The ways a question can have changed under a card: other words, other
+    /// rows, rows in another order, more rows than the screen has.
+    #[test]
+    fn a_changed_question_is_not_shown() {
+        let menu = read(FORM);
+        for (why, changed) in [
+            (
+                "other words",
+                question("Which framework should we use?", &["date-fns", "dayjs"]),
+            ),
+            (
+                "reordered rows",
+                question(
+                    "Which library should we use for dates?",
+                    &["dayjs", "date-fns"],
+                ),
+            ),
+            (
+                "a row the screen lacks",
+                question(
+                    "Which library should we use for dates?",
+                    &["date-fns", "dayjs", "moment", "luxon", "temporal"],
+                ),
+            ),
+            (
+                "another row",
+                question(
+                    "Which library should we use for dates?",
+                    &["date-fns", "moment"],
+                ),
+            ),
+        ] {
+            assert!(!menu.shows(&changed), "{why} was shown");
+        }
+        // Same options, but the command above them is another command.
+        let build = read(PERMISSION);
+        let test = read(&PERMISSION.replace("make build", "make test"));
+        let card = card_of(&build);
+        assert!(build.shows(&card.questions[0]));
+        assert!(
+            !test.shows(&card.questions[0]),
+            "another command, same rows"
+        );
+    }
+
+    /// How a screen spells a row differs from how an agent said it: the
+    /// pane's width truncates, wraps and adds hints; case and punctuation
+    /// are not words.
+    #[test]
+    fn a_label_the_screen_wraps_truncates_or_hints_is_still_the_label() {
+        let wrapped = read(
+            "Which?\n❯ 1. A very long option label that wraps\n       around to the next row\n  2. Short\n",
+        );
+        assert!(wrapped.shows(&question(
+            "Which?",
+            &[
+                "A very long option label that wraps around to the next row",
+                "Short"
+            ]
+        )));
+        let truncated = read("Which?\n❯ 1. Yes, and don't ask again for simi…\n  2. No\n");
+        assert!(truncated.shows(&question(
+            "Which?",
+            &["Yes, and don't ask again for similar commands", "No"]
+        )));
+        let hinted = read(PERMISSION);
+        assert!(hinted.shows(&question(
+            "Do you want to proceed?",
+            &[
+                "Yes",
+                "Yes, and don't ask again for similar commands",
+                "No, and tell the agent what to do differently",
+            ]
+        )));
+        let cased = read(FORM);
+        assert!(cased.shows(&question(
+            "which LIBRARY should we use for dates",
+            &["Date-FNS!", "DayJS"]
+        )));
+    }
+
+    /// A counter that ticks inside the question is not the question
+    /// changing; a number that is part of what is asked is.
+    #[test]
+    fn a_ticking_counter_in_the_question_is_not_a_change_but_a_count_is() {
+        let before = "Waiting for your answer (12s)\nDelete 3 files?\n❯ 1. Yes\n  2. No\n";
+        let ticked = "Waiting for your answer (13s)\nDelete 3 files?\n❯ 1. Yes\n  2. No\n";
+        let counted = "Waiting for your answer (13s)\nDelete 5 files?\n❯ 1. Yes\n  2. No\n";
+        let card = card_of(&read(before));
+        assert!(read(ticked).shows(&card.questions[0]));
+        assert!(!read(counted).shows(&card.questions[0]));
+    }
+
+    /// The set the "no false refusal" claim rests on: the same question on a
+    /// screen that differs everywhere a menu does not — clocks and counters
+    /// above it, a spinner, the selection on every row, trailing blanks, a
+    /// different hint, the box around it. Every variant must still show it.
+    #[test]
+    fn nothing_that_happens_elsewhere_on_the_screen_refuses_a_good_answer() {
+        let asked = question(
+            "Which library should we use for dates?",
+            &["date-fns", "dayjs"],
+        );
+        let mut refused = Vec::new();
+        let mut variants = 0;
+        let spinners = ["⠋", "⠙", "⠹", "⠸", "✻", "✽", "·", "*"];
+        let hints = [
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+            "Press enter to confirm or esc to cancel",
+            "",
+        ];
+        for tick in 0..12_u32 {
+            for selection in 0..4_usize {
+                for (h, hint) in hints.iter().enumerate() {
+                    let mut screen = String::new();
+                    // Rows far above the dialog: output, a status line that
+                    // ticks, a spinner line.
+                    screen.push_str("● Ran the formatter and the tests\n");
+                    screen.push_str(&format!(
+                        "✻ Worked for {}m {}s · {}.{}k tokens\n",
+                        tick,
+                        7 + tick,
+                        tick,
+                        h
+                    ));
+                    screen.push_str(&format!(
+                        "{} Thinking… ({}s)   {:02}:{:02}\n\n",
+                        spinners[(tick as usize + h) % spinners.len()],
+                        tick * 3,
+                        9 + tick,
+                        tick * 5
+                    ));
+                    screen.push_str("────────────────────────────────────────\n");
+                    screen.push_str(" ☐ Library\n\nWhich library should we use for dates?\n\n");
+                    let options = [
+                        ("date-fns", "Modern and tree-shakable"),
+                        ("dayjs", "Small and familiar"),
+                        ("Type something.", ""),
+                        ("Chat about this", ""),
+                    ];
+                    for (i, (label, detail)) in options.iter().enumerate() {
+                        let glyph = if i == selection { "❯" } else { " " };
+                        screen.push_str(&format!("{glyph} {}. {label}   \n", i + 1));
+                        if !detail.is_empty() {
+                            screen.push_str(&format!("     {detail}\n"));
+                        }
+                        if i == 2 {
+                            screen.push_str("────────────────────────────────────────\n");
+                        }
+                    }
+                    screen.push_str(&format!("\n{hint}\n"));
+                    variants += 1;
+                    let shown = menu_of(&screen).is_some_and(|menu| menu.shows(&asked));
+                    if !shown {
+                        refused.push((tick, selection, h));
+                    }
+                }
+            }
+        }
+        assert_eq!(variants, 144);
+        assert_eq!(refused, Vec::<(u32, usize, usize)>::new(), "false refusals");
+    }
+
+    /// The same question, with no row to compare: its words are on the last
+    /// rows or they are not.
+    #[test]
+    fn a_question_with_no_rows_is_shown_by_its_words_on_the_last_rows() {
+        let screen = rows("old output\nmore output\nWhat should the branch be called?\n> \n");
+        assert!(words_are_up(&screen, "What should the branch be called?"));
+        assert!(!words_are_up(&screen, "What should the tag be called?"));
+        let buried = rows(&format!(
+            "What should the branch be called?\n{}",
+            "later output\n".repeat(30)
+        ));
+        assert!(!words_are_up(&buried, "What should the branch be called?"));
+    }
+}

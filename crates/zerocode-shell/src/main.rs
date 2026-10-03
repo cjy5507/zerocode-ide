@@ -61,6 +61,7 @@ mod accounts;
 mod agent_teams;
 mod agent_tools_runtime;
 mod agent_trust_presets;
+mod answer_door;
 pub(crate) mod api_routers;
 mod app_paths;
 mod artifact_render;
