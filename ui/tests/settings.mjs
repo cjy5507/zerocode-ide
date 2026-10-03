@@ -1944,6 +1944,9 @@ class StatefulBackend {
         };
       case "update_history": return { releases: [], fetched_at: null, source: "none", failure: null };
       case "scm_status": return { changed: [], ignored: [] };
+      // The file tree's head reads the branch's standing (t-24298); this fixture's
+      // workspace tracks no upstream, so the answer is the real backend's for that.
+      case "upstream_status": return { upstream: null, ahead: 0, behind: 0, behind_commits_are_patch_equivalent: null };
       case "list_dir": return [];
       case "stage_layouts": return null;
       case "pane_layouts": return [];
