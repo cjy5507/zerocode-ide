@@ -225,6 +225,7 @@ pub(crate) struct HostTurn<'a> {
 /// settings snapshot and the same provider probe the live routes used.
 pub(crate) struct PlanShadowTurn {
     pub(crate) settings: tools::PlanShadowSettings,
+    pub(crate) held: Option<&'static str>,
     /// The connected models with the efforts this turn's band allows them.
     pub(crate) models: Vec<runtime::ModelOption>,
     /// Whether a cross-model VERIFY leg stands for this turn.
@@ -285,6 +286,7 @@ pub(crate) fn install_smart_turn(
             routing.plan,
             &inventory,
             routing.deep_verify_model.is_some(),
+            routing.deep_tier_only,
             turn_effort,
             cwd,
         ))
@@ -475,12 +477,18 @@ fn plan_shadow_turn(
     settings: tools::PlanShadowSettings,
     inventory: &runtime::ModelInventory,
     verify_leg: bool,
+    architect: bool,
     turn_effort: (Option<api::EffortLevel>, Option<api::EffortLevel>),
     cwd: &Path,
 ) -> PlanShadowTurn {
     let (floor, ceiling) = turn_effort;
     PlanShadowTurn {
         settings,
+        held: if architect {
+            Some("architect_policy")
+        } else if tools::step_effort_word(cwd).is_none_or(|word| word.asks()) {
+            Some("step_policy")
+        } else { None },
         models: tools::model_options_for(inventory, floor, ceiling),
         verify_leg,
         effort: floor.map(|level| level.label().to_string()),
@@ -727,6 +735,7 @@ pub(crate) fn record_person_model_switch(
         routing.plan,
         &inventory,
         routing.deep_verify_model.is_some(),
+        routing.deep_tier_only,
         turn_effort,
         cwd,
     );

@@ -108,7 +108,7 @@ async fn measured_plan_changes_the_real_wire_then_falls_back_and_respects_a_pin(
     workspace.auto_plan = true;
     workspace.objective_check = true;
     fs::write(workspace.home.join("settings.json"), serde_json::to_vec(&json!({
-        "smart": { "autoClassifier": "off", "orchestration": "model", "plan": { "apply": true } }
+        "smart": { "autoClassifier": "off", "orchestration": "model", "policy": "classic", "plan": { "apply": true } }
     })).unwrap()).unwrap();
     let input = "Implement a small low-risk Rust helper in a single file without delegation.";
     let assessment = tools::assess_turn_deterministic(input);
@@ -144,6 +144,9 @@ async fn measured_plan_changes_the_real_wire_then_falls_back_and_respects_a_pin(
     let output = workspace.run(&service, false, &format!("{input}\n/exit\n")).await;
     assert_success(&output);
     let requests = service.request_bodies().await;
+    assert!(!requests.is_empty(), "no request reached the isolated provider; stdout: {}\nstderr: {}\nreceipt: {}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&ledger).unwrap_or_default().lines().last().unwrap_or("missing"));
     let selected: Value = serde_json::from_str(&requests[0]).unwrap();
     assert_ne!(selected["model"].as_str(), Some(current.as_str()),
         "stdout: {}\nstderr: {}\nreceipt: {}\nshadow: {}",
@@ -168,6 +171,15 @@ async fn measured_plan_changes_the_real_wire_then_falls_back_and_respects_a_pin(
     let requests = service.request_bodies().await;
     let pinned: Value = serde_json::from_str(&requests[before]).unwrap();
     assert_eq!(pinned["model"], "claude-sonnet-4-6");
+    workspace.auto_plan = true;
+    fs::write(workspace.home.join("settings.json"), serde_json::to_vec(&json!({
+        "smart": { "autoClassifier": "off", "orchestration": "model", "policy": "architect", "plan": { "apply": true } }
+    })).unwrap()).unwrap();
+    let before = requests.len();
+    assert_success(&workspace.run(&service, false, &format!("{input}\n/exit\n")).await);
+    let requests = service.request_bodies().await;
+    let architect: Value = serde_json::from_str(&requests[before]).unwrap();
+    assert_eq!(architect["model"].as_str(), Some(current.as_str()));
 }
 
 fn assert_restored_tool_pairs(body: &str) {

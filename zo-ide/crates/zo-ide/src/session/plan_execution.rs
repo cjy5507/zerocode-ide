@@ -54,7 +54,8 @@ impl PlanTurn {
             ctx, models: &start.shadow.models, priors: &priors, records: &[],
             price: &tools::model_price_for, cache: &[], actual: actual.clone(), trigger: None, category: None,
         };
-        let selected = (start.shadow.settings.apply && start.shadow.effort.is_some() && shape == PlanShape::Solo
+        let selected = (start.shadow.settings.apply && start.shadow.held.is_none()
+            && start.shadow.effort.is_some() && shape == PlanShape::Solo
             && !start.setup.orchestration.user_requested_delegation())
             .then(|| tools::read_plan_receipts(&start.shadow.cwd).ok()
                 .and_then(|receipts| tools::choose_measured_plan(&inputs, &receipts)))
@@ -62,7 +63,8 @@ impl PlanTurn {
         Some(Self {
             receipt: tools::PlanRunReceipt {
                 version: 1, at_ms: 0, attempt, cohort, plan: actual, verified: None,
-                duration_ms: 0, total_tokens: None, total_usd: None, held: Vec::new(),
+                duration_ms: 0, total_tokens: None, total_usd: None,
+                held: start.shadow.held.into_iter().map(str::to_string).collect(),
             },
             began_ms: start.began_ms, selected,
         })
