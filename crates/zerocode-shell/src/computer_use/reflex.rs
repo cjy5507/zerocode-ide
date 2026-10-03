@@ -601,6 +601,16 @@ pub(crate) struct Passed {
     pub read: Option<Value>,
 }
 
+/// A question in flight: the decision asked, the channel its answer comes
+/// down, and the steady moment it was sent — so its row can say how long
+/// the answer waited for the window after it came back (`waitedMs`,
+/// t-22110).
+struct InFlight {
+    pending: Pending,
+    answer: mpsc::Receiver<(Wired, Spent)>,
+    asked_ms: u64,
+}
+
 /// One run's watch. Each pass reads the run's receipts after the last number
 /// on disk — the read carries the run's status — keeps them, and only then
 /// acknowledges them; a batch read again is written once. The same status is
@@ -611,10 +621,7 @@ pub(crate) struct Watch {
     durable: u64,
     report: Report,
     decider: Decider,
-    /// The question in flight, its answer's channel, and the steady moment
-    /// it was sent — so its row can say how long the answer waited for the
-    /// window after it came back (`waitedMs`, t-22110).
-    in_flight: Option<(Pending, mpsc::Receiver<(Wired, Spent)>, u64)>,
+    in_flight: Option<InFlight>,
     /// Whether the last pass read the run as ended: what a settle between
     /// collects, which reads nothing, says of a late answer.
     seen_ended: bool,
@@ -793,7 +800,11 @@ impl Watch {
         std::thread::spawn(move || {
             let _ = answered.send(ask(state));
         });
-        self.in_flight = Some((pending, answer, now_ms));
+        self.in_flight = Some(InFlight {
+            pending,
+            answer,
+            asked_ms: now_ms,
+        });
     }
 
     /// The question in flight, if it came back: its row, judged by `carrier`,
@@ -846,11 +857,20 @@ impl Watch {
         carrier: &mut dyn Carrier,
         mode: JevMode,
     ) -> Vec<Value> {
-        let Some((pending, answer, asked_ms)) = self.in_flight.take() else {
+        let Some(InFlight {
+            pending,
+            answer,
+            asked_ms,
+        }) = self.in_flight.take()
+        else {
             return Vec::new();
         };
         let Ok((wired, spent)) = answer.try_recv() else {
-            self.in_flight = Some((pending, answer, asked_ms));
+            self.in_flight = Some(InFlight {
+                pending,
+                answer,
+                asked_ms,
+            });
             return Vec::new();
         };
         let settled_ms = carrier.now_ms();

@@ -453,10 +453,10 @@ impl Carrier for Seat<'_> {
     /// reading says nothing about the run standing.
     fn reading(&mut self, read: &Value) {
         let read_run = read.get("runId").and_then(Value::as_str);
-        if !self
+        if self
             .running
             .as_ref()
-            .is_some_and(|(id, _, _)| read_run == Some(id.as_str()))
+            .is_none_or(|(id, _, _)| read_run != Some(id.as_str()))
         {
             return;
         }
