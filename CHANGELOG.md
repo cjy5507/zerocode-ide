@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.1.50] — 2026-10-03
+
+### feat
+
+- feat(window): the sidebar and the git panel say from git whether a checkout's work is in main — a second chip beside the task's phase reads In main, N not in main, No commits, or Check needed when the ledger and git disagree; its tooltip names the compare ref, when that ref last moved and the commit that took the work, and a landed checkout with no live session and nothing unsaved offers the existing clean-up review. Nothing is fetched for it, and git is asked in the background, four checkouts at a time (t-22104).
+- feat(computer-use): Jev's judgment while Computer Use acts reads the hand's own grounds — what the hand finished since the last screen reading and how old the capture is against its limit — instead of only the readings and the totals (on 09-27 it said "pause" to 172 of 177 readings of a healthy run), and a run standing still no longer asks again on every reading (t-22110).
+- feat(conversation): the conversation view takes the approved redesign — a head with the agent, the model and a running clock (it could read 「0초」 while running), flat tool rows that name each tool in the window's words and say what the result means (an HTTP status and size for a page read, a count of results for a search), thinking folded to one line, a shell row showing its first output lines, a turn rail to jump through a long conversation, and a status stack over the composer (to-dos, background tasks, queue, git) that hides when empty (t-22100).
+- feat(file-tree): the file tree shows what every agent is doing — files an agent reads and writes light up on the file and its folders, and the tree follows the agent to the newest one (a setting); each changed file shows its added and removed lines, folders roll up their changes, the tree's head shows the branch and how far it is ahead or behind, and the badges stay current while the tree is open (t-24298).
+- feat(file-tree): an @path in a prompt reveals that file in the tree, the file selected in the tree is offered to the agent with the next prompt (Claude, Codex), arrow keys move through the tree, a double-click opens a file in its default app, the agent's git and gh steps show in a line under the tree, and a folder can be pinned as the tree's root (t-24298).
+
+### fix
+
+- fix(computer-use): the look after an action says "nothing changed" only when nothing did — it reads a frame taken after the action, compares at the display's own resolution, keeps the action's baseline apart from a later look, and reads an unreadable frame as unknown; agents are no longer told to zoom in to confirm (t-15517, ported in t-22110).
+
+### perf
+
+- perf(computer-use): an answer from Jev or a newly written plan that comes back between two screen readings is carried out within 50 ms instead of waiting up to a second for the next reading; an answer is checked against the reading just made, so an answer asked under the previous plan is never carried out (a race the new path would have opened: 31 of 50 runs → 0 of 50) (t-22110).
+
+### internal
+
+- internal(tests): zo's stop-one-helper end-to-end test waits until the first helper is seen in its long step before the person's stop, so on a loaded parallel run the stop no longer overtakes the helper's first answer (t-22035).
+- internal(tests): zo's tools-off request test and deep-leg advertised-set test take the env lock that every test opening a loop scope holds, so a scope another test opened no longer adds loop_schedule to their requests and fails them on a loaded run (t-24523).
+- internal(tests): the window's wire suites (composer-queue, context-meter, plan-card, wire-live-stream) wait for the agent list before they open a wire page, as wire-session does, so on a slow runner the context-meter chip is no longer looked for before its agent row exists (t-24973).
+
 ## [1.1.49] — 2026-10-03
 
 ### feat
