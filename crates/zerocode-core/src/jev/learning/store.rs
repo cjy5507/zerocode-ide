@@ -155,6 +155,20 @@ pub struct Store {
     root: PathBuf,
 }
 
+#[derive(Debug)]
+struct ReviewLock {
+    file: File,
+}
+
+impl Drop for ReviewLock {
+    fn drop(&mut self) {
+        // A concurrent process launch may inherit the open file description
+        // until exec. Closing only our descriptor can leave its lock alive;
+        // end the critical section explicitly before the handle is closed.
+        let _ = self.file.unlock();
+    }
+}
+
 impl Store {
     #[must_use]
     pub fn at(home: &Path) -> Self {
@@ -163,7 +177,7 @@ impl Store {
         }
     }
 
-    fn lock(&self) -> io::Result<File> {
+    fn lock(&self) -> io::Result<ReviewLock> {
         fs::create_dir_all(&self.root)?;
         let metadata = fs::symlink_metadata(&self.root)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -175,7 +189,7 @@ impl Store {
             .read(true)
             .open(self.root.join(".lock"))?;
         lock.try_lock().map_err(io::Error::other)?;
-        Ok(lock)
+        Ok(ReviewLock { file: lock })
     }
 
     /// Write one immutable case. Identical observations cost no new storage.
@@ -458,4 +472,43 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::Store;
+
+    #[test]
+    fn a_review_lock_ends_with_its_guard_even_if_a_duplicate_handle_survives() {
+        std::thread::scope(|threads| {
+            for _ in 0..4 {
+                threads.spawn(|| {
+                    let home = tempfile::tempdir().unwrap();
+                    let store = Store::at(home.path());
+                    for _ in 0..32 {
+                        let held = store.lock().unwrap();
+                        assert!(
+                            store.lock().is_err(),
+                            "a live critical section excludes another writer"
+                        );
+                        // Duplicating the handle reproduces the lifetime of a
+                        // descriptor inherited between fork and exec, without
+                        // relying on a process launch winning a timing race.
+                        let inherited = held.file.try_clone().unwrap();
+                        drop(held);
+                        let next = store.lock();
+                        drop(inherited);
+                        assert!(
+                            next.is_ok(),
+                            "a completed critical section must release its lock: {next:?}"
+                        );
+                        assert!(
+                            store.lock().is_err(),
+                            "the next writer still owns its own lock"
+                        );
+                    }
+                });
+            }
+        });
+    }
 }
