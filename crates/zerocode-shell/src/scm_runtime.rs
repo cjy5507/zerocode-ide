@@ -582,13 +582,13 @@ pub(super) fn run_text_generation(
         "text-generation",
         prompt,
     );
-    let launch = crate::launch_budget_runtime::Launch {
+    let launch = crate::launch_budget_door::Launch {
         provider: "claude",
         job: Some(&job),
         fresh_ms: None,
         requested: true,
     };
-    let once = match crate::launch_budget_runtime::run_budgeted(
+    let once = match crate::launch_budget_door::run_budgeted(
         &launch,
         &program,
         Some(root),
@@ -597,10 +597,10 @@ pub(super) fn run_text_generation(
         prompt,
         zerocode_core::commit_message::GENERATION_TIMEOUT,
     ) {
-        crate::launch_budget_runtime::Budgeted::Refused(refusal) => {
-            return Err(crate::launch_budget_runtime::refusal_said(&refusal));
+        crate::launch_budget_door::Budgeted::Refused(refusal) => {
+            return Err(crate::launch_budget_door::refusal_said(&refusal));
         }
-        crate::launch_budget_runtime::Budgeted::Ran(ran) => ran,
+        crate::launch_budget_door::Budgeted::Ran(ran) => ran,
     }
     .map_err(|failure| match failure {
         OnceFailure::Spawn(said) => said,

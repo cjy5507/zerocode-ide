@@ -1941,13 +1941,13 @@ pub(crate) fn renew_login(
     let argv: Vec<String> = row.argv.iter().map(|word| (*word).to_string()).collect();
     // Counted in the window's one launch ledger (t-26583): a renewal nobody
     // pressed is held to the ceilings and not asked of a provider at its wall.
-    let launch = crate::launch_budget_runtime::Launch {
+    let launch = crate::launch_budget_door::Launch {
         provider: "claude",
         job: None,
         fresh_ms: None,
         requested: false,
     };
-    match crate::launch_budget_runtime::run_budgeted(
+    match crate::launch_budget_door::run_budgeted(
         &launch,
         program,
         crate::computer_use::errand::value::one_shot_dir().as_deref(),
@@ -1956,12 +1956,12 @@ pub(crate) fn renew_login(
         row.stdin,
         LOGIN_PROBE_DEADLINE,
     ) {
-        crate::launch_budget_runtime::Budgeted::Refused(refusal) => {
+        crate::launch_budget_door::Budgeted::Refused(refusal) => {
             Err(crate::scm_runtime::OnceFailure::Spawn(
-                crate::launch_budget_runtime::refusal_said(&refusal),
+                crate::launch_budget_door::refusal_said(&refusal),
             ))
         }
-        crate::launch_budget_runtime::Budgeted::Ran(ran) => ran,
+        crate::launch_budget_door::Budgeted::Ran(ran) => ran,
     }
 }
 

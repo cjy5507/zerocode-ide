@@ -27264,7 +27264,7 @@ mod tests {
         let account = block_after(shipped, "fn claude_reading_env(");
         let running = block_after(shipped, "fn run_once(");
         let ledgers_door = block_after(
-            include_str!("../../src/launch_budget_runtime.rs"),
+            include_str!("../../src/launch_budget_door.rs"),
             "pub(crate) fn run_budgeted(",
         );
         assert!(

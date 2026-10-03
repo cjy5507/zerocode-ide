@@ -338,7 +338,7 @@ pub(crate) struct HarnessStatus {
 #[tauri::command(async)]
 pub(crate) fn harness_status() -> HarnessStatus {
     HarnessStatus {
-        counters: crate::launch_budget_runtime::counters(),
+        counters: crate::launch_budget_door::counters(),
         day_spent_usd: crate::orchestration::gate_book::day_spent_now(),
     }
 }
@@ -368,7 +368,7 @@ pub(crate) fn set_harness_settings(
         },
     )?;
     crate::orchestration::gate_book::set_settings(harness.gate);
-    crate::launch_budget_runtime::set_limits(harness.launches);
+    crate::launch_budget_door::set_limits(harness.launches);
     Ok(snapshot)
 }
 

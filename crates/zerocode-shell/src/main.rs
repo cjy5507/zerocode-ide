@@ -129,7 +129,7 @@ mod jira_attachments;
 mod jira_store;
 mod keyboard_input_source;
 mod last_status;
-mod launch_budget_runtime;
+mod launch_budget_door;
 mod native_tray;
 mod notify_call;
 mod opencode_home;
@@ -3298,7 +3298,7 @@ fn main() -> ExitCode {
             hang_watchdog::configure(crash::Limits::overlay(&boot_settings.crash));
             // The launch ledger and the continue gate, with what a person set
             // for them and the day the window had already counted (t-26583).
-            launch_budget_runtime::open(managed.config_root(), boot_settings.harness.launches);
+            launch_budget_door::open(managed.config_root(), boot_settings.harness.launches);
             orchestration::gate_book::open(managed.config_root(), boot_settings.harness.gate);
             // The readiness probe reads the account stores under this root
             // and no other; until it is named, every door answers unknown.

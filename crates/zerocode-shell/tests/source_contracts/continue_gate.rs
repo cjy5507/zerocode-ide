@@ -200,7 +200,7 @@ fn no_road_runs_an_agents_cli_headless_except_through_the_launch_ledgers_door() 
     assert_eq!(
         callers,
         [
-            ("launch_budget_runtime.rs".to_string(), 1),
+            ("launch_budget_door.rs".to_string(), 1),
             ("scm_runtime.rs".to_string(), 1),
         ],
         "`run_once(` is named in its definition and in the launch ledger's door and nowhere else; \
