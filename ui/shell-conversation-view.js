@@ -2699,8 +2699,8 @@ function syncHelperReport(list, run) {
  * around the rows in view — so 400 rows stand some seventy ticks, not 400.
  *
  * It is asked again when the rows change (`syncHelperTurns`), when the list
- * scrolls (once a frame) and when its box changes; it writes only what
- * changed, and never for a word that streams — a streaming row is no row of
+ * scrolls (at its own pace, `CHAT_RAIL_SCROLL_MS`) and when its box changes;
+ * it writes only what changed, and never for a word that streams — a streaming row is no row of
  * the list's, and words move no row while the reader is up the list. Every
  * paint that wrote is counted (`__paints`), so that promise is a number a test
  * reads. The rows in view are found by halving the list, not by a watcher on
@@ -2742,9 +2742,10 @@ function turnRailNode(list) {
     list.__railAt = rows[index];
     railJump(list, rows[index]);
   });
-  // The list's own scroll asks the rail once a frame; a press that left the
-  // handle on a row keeps that row its value until the person moves the list.
-  list.addEventListener("scroll", () => askTurnRail(list), { passive: true });
+  // The list's own scroll asks the rail at its own pace (`askTurnRailScrolled`);
+  // a press that left the handle on a row keeps that row its value until the
+  // person moves the list.
+  list.addEventListener("scroll", () => askTurnRailScrolled(list), { passive: true });
   for (const kind of ["wheel", "touchmove"]) list.addEventListener(kind, () => { list.__railAt = null; }, { passive: true });
   return rail;
 }
@@ -2823,6 +2824,24 @@ function askTurnRail(list) {
     rail.__frame = 0;
     if (rail.isConnected) paintTurnRail(rail);
   });
+}
+
+/* How often the rail follows a list that scrolls: a paint every scroll frame
+ * — the rows gathered, the view halved, some seventy ticks worn again — put
+ * 0.075 more of the 400-turn page's scroll frames over 20 ms at a 4x CPU
+ * (t-22100, measured with the rail held still); ten a second still moves the
+ * accent along with the reader. */
+const CHAT_RAIL_SCROLL_MS = 100;
+
+/* The list scrolled: the rail is asked once its pace allows, and so once more
+ * after the last scroll, whatever the scroll's own rate. */
+function askTurnRailScrolled(list) {
+  const rail = list?.__rail;
+  if (!rail || rail.__scrolled) return;
+  rail.__scrolled = setTimeout(() => {
+    rail.__scrolled = 0;
+    askTurnRail(list);
+  }, CHAT_RAIL_SCROLL_MS);
 }
 
 /* The rail as the list stands: the stretch of ticks it has room for, around

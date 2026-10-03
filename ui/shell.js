@@ -15250,8 +15250,9 @@ function releaseWorkerPage(tab) {
   const host = groups.get(tab.pane)?.workerView;
   const held = host?.__helperPage;
   if (!held || held.id !== tab.id) return;
-  // The rail's frame, if one was asked for (t-22100).
+  // The rail's frame and its scroll's pace, if either was asked for (t-22100).
   if (held.turns.__rail?.__frame) cancelAnimationFrame(held.turns.__rail.__frame);
+  clearTimeout(held.turns.__rail?.__scrolled);
   held.turns.__shelf?.disconnect();
   held.turns.__imageWatch?.disconnect();
   held.turns.__footWatch?.disconnect();
