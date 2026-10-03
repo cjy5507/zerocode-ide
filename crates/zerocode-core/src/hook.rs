@@ -3443,39 +3443,49 @@ mod tests {
         assert!(wire.get("call").is_none(), "{wire}");
     }
 
+    /// A tool turn as a wire session's transcript makes it: the call's id and
+    /// name, the file it names (if any), the files its edits describe, and
+    /// whether its result was an error.
+    fn wire_tool(
+        name: &str,
+        call: &str,
+        file: Option<&str>,
+        paths: &[&str],
+        is_error: bool,
+    ) -> crate::transcript::TranscriptTool {
+        use crate::transcript::{TranscriptEdit, TranscriptFile, TranscriptTool};
+        TranscriptTool {
+            call_id: call.to_string(),
+            name: name.to_string(),
+            kind: Tool::named(name)
+                .map(|known| known.as_str().to_string())
+                .unwrap_or_default(),
+            input: String::new(),
+            is_error,
+            edits: paths
+                .iter()
+                .map(|path| TranscriptEdit::at(path, Vec::new()))
+                .collect(),
+            file: file.map(|path| TranscriptFile {
+                path: path.to_string(),
+                offset: None,
+                limit: None,
+                search: None,
+            }),
+            facts: None,
+        }
+    }
+
     /// A wire session's tool turns say what a hook agent says (t-31715): a call
     /// is a start, its result an end that is a failure when the result is one,
     /// the id is the call's own, the files are the call's file or the files its
     /// edits name — and the conversation's other turns say nothing.
     #[test]
     fn a_wire_sessions_tool_turns_say_what_a_hook_agent_says() {
-        use crate::transcript::{TranscriptEdit, TranscriptFile, TranscriptTool};
-        let tool = |name: &str, call: &str, file: Option<&str>, paths: &[&str], is_error: bool| {
-            TranscriptTool {
-                call_id: call.to_string(),
-                name: name.to_string(),
-                kind: Tool::named(name)
-                    .map(|known| known.as_str().to_string())
-                    .unwrap_or_default(),
-                input: String::new(),
-                is_error,
-                edits: paths
-                    .iter()
-                    .map(|path| TranscriptEdit::at(path, Vec::new()))
-                    .collect(),
-                file: file.map(|path| TranscriptFile {
-                    path: path.to_string(),
-                    offset: None,
-                    limit: None,
-                    search: None,
-                }),
-                facts: None,
-            }
-        };
         // Claude Code's Edit over its stream: one file, named by the call.
         let started = activity_of_turn(
             "tool",
-            &tool(
+            &wire_tool(
                 "Edit",
                 "toolu_1",
                 Some("/repo/src/a.rs"),
@@ -3492,7 +3502,7 @@ mod tests {
         // Codex's `apply_patch`: no file of its own, the files its edits name.
         let patch = activity_of_turn(
             "tool",
-            &tool(
+            &wire_tool(
                 "apply_patch",
                 "item_3",
                 None,
@@ -3509,26 +3519,120 @@ mod tests {
         );
         // A result is the end, and says the id of the call it ends — its name
         // may be empty (Claude's result lines name none).
-        let finished = activity_of_turn("tool_result", &tool("", "toolu_1", None, &[], false))
+        let finished = activity_of_turn("tool_result", &wire_tool("", "toolu_1", None, &[], false))
             .expect("a result said nothing");
         assert_eq!(finished.phase, Phase::Finished);
         assert_eq!(finished.call.as_deref(), Some("toolu_1"));
-        let failed = activity_of_turn("tool_result", &tool("Edit", "toolu_2", None, &[], true))
-            .expect("a failed result said nothing");
+        let failed = activity_of_turn(
+            "tool_result",
+            &wire_tool("Edit", "toolu_2", None, &[], true),
+        )
+        .expect("a failed result said nothing");
         assert_eq!(failed.phase, Phase::Failed);
         assert_eq!(failed.verb, Tool::Edit);
         // A tool this table has not heard of keeps its own name.
-        let other = activity_of_turn("tool", &tool("calendar.add", "c-1", None, &[], false))
+        let other = activity_of_turn("tool", &wire_tool("calendar.add", "c-1", None, &[], false))
             .expect("an unknown tool said nothing");
         assert_eq!(other.verb, Tool::Other("calendar.add".to_string()));
         // The conversation's own turns are not tool calls.
         for role in ["assistant", "user", "thinking", "system"] {
             assert_eq!(
-                activity_of_turn(role, &tool("Edit", "toolu_3", None, &[], false)),
+                activity_of_turn(role, &wire_tool("Edit", "toolu_3", None, &[], false)),
                 None,
                 "{role}"
             );
         }
+    }
+
+    /// A path longer than the row's clamp is cut there, and a file tree cannot
+    /// walk to a path that ends in the cut's mark (t-31715) — so a call that
+    /// names a file of its own says the whole path where the tree reads files
+    /// (`reads`, `writes`) and keeps the cut words for the row. A path that
+    /// fits says nothing beside its target, as before; a pattern or a command
+    /// is not a file.
+    #[test]
+    fn a_path_the_rows_clamp_cut_is_said_whole_where_the_file_tree_reads_files() {
+        let deep = format!("/repo/{}a.rs", "deep/".repeat(40));
+        assert!(deep.chars().count() > ACTIVITY_TARGET_CHARS);
+        let said = |event: &str, tool: &str, key: &str, value: &str| {
+            activity_of(
+                event,
+                &format!(
+                    r#"{{"tool_name":"{tool}","cwd":"/repo","tool_input":{{"{key}":"{value}"}}}}"#
+                ),
+            )
+            .expect("a tool event said nothing")
+        };
+        let edit = said("PreToolUse", "Edit", "file_path", &deep);
+        assert!(
+            edit.target
+                .as_deref()
+                .is_some_and(|words| words.ends_with('…')),
+            "the row's words are still the cut ones: {:?}",
+            edit.target
+        );
+        assert_eq!(edit.writes, vec![deep.clone()]);
+        assert!(edit.reads.is_empty());
+        assert_eq!(edit.cwd.as_deref(), Some("/repo"));
+        assert_eq!(
+            said("PreToolUse", "Write", "file_path", &deep).writes,
+            vec![deep.clone()]
+        );
+        let read = said("PreToolUse", "Read", "file_path", &deep);
+        assert_eq!(read.reads, vec![deep.clone()]);
+        assert!(read.writes.is_empty());
+        // The end says it as the start does: it can ask git for the file alone.
+        assert_eq!(
+            said("PostToolUse", "Edit", "file_path", &deep).writes,
+            vec![deep.clone()]
+        );
+        // A path that fits is its own target, with nothing beside it.
+        let short = said("PreToolUse", "Edit", "file_path", "/repo/src/a.rs");
+        assert_eq!(short.target.as_deref(), Some("/repo/src/a.rs"));
+        assert!(short.writes.is_empty() && short.reads.is_empty());
+        // A cut pattern or command is not a file.
+        let long = "x".repeat(ACTIVITY_TARGET_CHARS * 2);
+        let pattern = said("PreToolUse", "Grep", "pattern", &long);
+        assert!(pattern.reads.is_empty() && pattern.writes.is_empty());
+        let command = said("PreToolUse", "Bash", "command", &long);
+        assert!(command.reads.is_empty() && command.writes.is_empty());
+    }
+
+    /// A wire session's file call is cut by the same clamp and says its path
+    /// whole the same way (t-31715): a call that carries its edits has said the
+    /// files already, and says each once.
+    #[test]
+    fn a_wire_calls_cut_path_is_said_whole_where_the_file_tree_reads_files() {
+        let deep = format!("/repo/{}a.rs", "deep/".repeat(40));
+        let started = |name: &str, paths: &[&str]| {
+            activity_of_turn(
+                "tool",
+                &wire_tool(name, "c1", Some(deep.as_str()), paths, false),
+            )
+            .expect("a call said nothing")
+        };
+        let read = started("Read", &[]);
+        assert!(
+            read.target
+                .as_deref()
+                .is_some_and(|words| words.ends_with('…')),
+            "the row's words are still the cut ones: {:?}",
+            read.target
+        );
+        assert_eq!(read.reads, vec![deep.clone()]);
+        assert!(read.writes.is_empty());
+        assert_eq!(started("Edit", &[]).writes, vec![deep.clone()]);
+        assert_eq!(started("Edit", &[deep.as_str()]).writes, vec![deep.clone()]);
+        // A path that fits says nothing beside its target, and a result names no file.
+        let short = activity_of_turn(
+            "tool",
+            &wire_tool("Read", "c2", Some("/repo/a.rs"), &[], false),
+        )
+        .expect("a call said nothing");
+        assert!(short.reads.is_empty());
+        let result = activity_of_turn("tool_result", &wire_tool("Read", "c1", None, &[], false))
+            .expect("a result said nothing");
+        assert!(result.reads.is_empty() && result.target.is_none());
     }
 
     /// The prompt and the turn's end ride the same stream as the tools between
