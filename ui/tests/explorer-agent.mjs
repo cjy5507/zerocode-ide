@@ -31,6 +31,20 @@ const treeConstant = async (name) => {
  * and their frame, paint and long-frame counts are counts of the same thing. */
 const BURST_WATCH_MS = 800;
 
+/* The most times a burst may arm the tree's one sweep timer: once for the first
+ * thing held, again if a later one expires sooner (a write that has ended is
+ * shown for a second, a lit row for six) — never once for each event. A number
+ * of this test's own, so that a before and an after judge the same bound. */
+const BURST_SWEEPS_ARMED_MAX = 3;
+
+/* The most rows the tree may light at once, and the most writes it may hold
+ * open. Every lit row transitions its colour and its bar on the page's main
+ * thread, and every writing row wears a mark: on a low-spec machine (Chromium
+ * at a quarter of its CPU) a burst that lit sixty-four of them cost a third of
+ * the page's frames and made it miss nine more. A number of this test's own: a
+ * tree that wants more has to show a low-spec burst that bears it. */
+const BURST_TOUCH_CAP_MAX = 16;
+
 /* How long the memory run breathes between its rounds, in ms: the same reason. */
 const MEMORY_BREATH_MS = 190;
 
@@ -235,6 +249,8 @@ export async function testExplorerAgentActivity(browser, origin, ok) {
 export async function testExplorerAgentBurst(browser, origin, ok) {
   const hold = await treeConstant("TREE_TOUCH_HOLD_MS");
   const windowMs = await treeConstant("TREE_NUMSTAT_WINDOW_MS");
+  const movingMax = await treeConstant("TREE_WRITING_MOVING_MAX");
+  const touchCap = await treeConstant("TREE_TOUCH_CAP");
   const listings = { "": [] };
   for (let dir = 0; dir < 20; dir += 1) {
     const name = `d${String(dir).padStart(2, "0")}`;
@@ -321,6 +337,13 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
       let longTasks = 0;
       const observer = new PerformanceObserver((list) => { longTasks += list.getEntries().length; });
       try { observer.observe({ type: "longtask" }); } catch { /* an engine with no long-task entries counts none */ }
+      // The timers the tree's sweep is armed with while the burst is handled.
+      const realSetTimeout = window.setTimeout;
+      let sweepsArmed = 0;
+      window.setTimeout = (callback, ...rest) => {
+        if (typeof sweepTreeTouches === "function" && callback === sweepTreeTouches) sweepsArmed += 1;
+        return realSetTimeout.call(window, callback, ...rest);
+      };
       const started = performance.now();
       for (let at = 0; at < 200; at += 1) {
         const dir = `d${String(at % 20).padStart(2, "0")}`;
@@ -330,9 +353,15 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
         fire("term:1", [act("edit", target, "finished", { call: `burst${at}` })]);
       }
       const handled = performance.now() - started;
+      window.setTimeout = realSetTimeout;
       await settle(3);
       const settled = performance.now() - started;
       const shown = fileTree.querySelectorAll("[data-agent-writing]").length;
+      // The rows whose sheen runs, and what a row held still wears and says.
+      const sweeping = document.getAnimations().filter((one) => one.animationName === "tree-writing-sweep" && one.playState === "running" && fileTree.contains(one.effect?.target)).length;
+      const held = fileTree.querySelector('[data-agent-writing="still"]');
+      const word = t("tree.writing.file", "");
+      const still = held ? { animation: getComputedStyle(held, "::after").animationName, height: getComputedStyle(held, "::after").height, said: word.length > 0 && (held.getAttribute("aria-label") ?? "").includes(word) } : null;
       await sleep(watchMs);
       counting = false;
       observer.disconnect();
@@ -351,6 +380,7 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
       };
       return {
         handledMs: Math.round(handled * 10) / 10,
+        sweepsArmed,
         settledMs: Math.round(settled * 10) / 10,
         frames,
         longFrames,
@@ -358,6 +388,8 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
         worstGapMs: Math.round(worstGapMs),
         paints: paintsDuring,
         shown,
+        sweeping,
+        still,
         tallied,
         numstat: delta("scm_numstat"),
         wholeRepo: delta("scm_status") + delta("upstream_status") + delta("git_history"),
@@ -367,6 +399,9 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
     }, { hold, watchMs: BURST_WATCH_MS });
     console.log(`EXPLORER_AGENT_PAIR_NUMBERS ${JSON.stringify(pairs)}`);
     ok("a burst of 200 start/end pairs shows the writing state, paints at most once a frame, asks git one scoped question per window and never a whole-repo status", pairs.shown > 0 && pairs.paints >= 1 && pairs.paints <= pairs.frames && pairs.numstat >= 1 && pairs.numstat <= Math.ceil((pairs.settledMs + BURST_WATCH_MS) / windowMs) && pairs.wholeRepo === 0 && pairs.listDir === 0 && pairs.tallied > 0, JSON.stringify(pairs));
+    ok("the most rows the tree lights at once, which is also the most writes it holds open, is one named cap that a low-spec machine bears: a burst of two hundred lights and marks no more", Number.isFinite(touchCap) && touchCap > 0 && touchCap <= BURST_TOUCH_CAP_MAX && numbers.lit <= touchCap && pairs.shown <= touchCap, JSON.stringify({ touchCap, most: BURST_TOUCH_CAP_MAX, lit: numbers.lit, shown: pairs.shown }));
+    ok("a burst of 200 start/end pairs arms the tree's one sweep timer a handful of times at most, never once for each event", Number.isFinite(pairs.sweepsArmed) && pairs.sweepsArmed >= 1 && pairs.sweepsArmed <= BURST_SWEEPS_ARMED_MAX, JSON.stringify({ sweepsArmed: pairs.sweepsArmed, most: BURST_SWEEPS_ARMED_MAX }));
+    ok("the sheen moves on at most the few rows the tree names however many are being written; the rest wear the still marker and say the same words", Number.isFinite(movingMax) && movingMax > 0 && pairs.sweeping > 0 && pairs.sweeping <= movingMax && pairs.shown > movingMax && pairs.still?.animation === "none" && parseFloat(pairs.still?.height) === 2 && pairs.still?.said === true, JSON.stringify({ movingMax, sweeping: pairs.sweeping, shown: pairs.shown, still: pairs.still }));
     ok("an idle tree runs no animation and holds no timer once the writing has ended and the marks have faded", pairs.idle.animations === 0 && pairs.idle.timers === 0, JSON.stringify(pairs.idle));
     ok("the burst suite raised no renderer faults", faults.length === 0, faults.join(" | "));
   } finally {
