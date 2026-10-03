@@ -156,11 +156,11 @@ pub fn snapshot_of(status: &Value) -> Snapshot {
             }
         });
     let max_frame_age_ms = LIMITS.max_frame_age_ns / 1_000_000;
+    let [sightings_key, outcomes_key, activity_key, freshness_key] = REFLEX_DECIDE_STATE_KEYS;
     let capture_age_ms = status
         .get("lastCaptureAgeNs")
         .and_then(Value::as_u64)
         .map(|age| age / 1_000_000);
-    let [sightings_key, outcomes_key, activity_key, freshness_key] = REFLEX_DECIDE_STATE_KEYS;
     let scene = status.get("scene").and_then(|scene| {
         Some(Scene {
             run: status.get("runId")?.as_str()?.to_string(),
@@ -176,7 +176,7 @@ pub fn snapshot_of(status: &Value) -> Snapshot {
             outcomes_key: outcomes,
             activity_key: { "done": done, "missed": missed },
             freshness_key: {
-                "capture_age_ms": capture_age_ms,
+                CAPTURE_AGE_KEY: capture_age_ms,
                 "max_frame_age_ms": max_frame_age_ms,
                 "over_age": capture_age_ms.map(|age| age > max_frame_age_ms),
             },
@@ -196,6 +196,23 @@ pub fn age_at(snapshot: &Snapshot, now_ms: u64) -> Option<u64> {
     let read = snapshot.read_ms?;
     let then = snapshot.age_ns? / 1_000_000;
     Some(now_ms.saturating_sub(read).saturating_add(then))
+}
+
+/// The capture's exact age in the state's `freshness`: the one number two
+/// readings may differ by and still be the same reading ([`Decider::offer`]).
+const CAPTURE_AGE_KEY: &str = "capture_age_ms";
+
+/// What two readings are the same by (t-22110): everything the question
+/// carries but the capture's exact age — `over_age` still counts — so a run
+/// standing still asks nothing while its captures merely jitter between
+/// collects.
+fn reading_key(state: &Value) -> Value {
+    let [.., freshness_key] = REFLEX_DECIDE_STATE_KEYS;
+    let mut key = state.clone();
+    if let Some(freshness) = key.get_mut(freshness_key).and_then(Value::as_object_mut) {
+        freshness.remove(CAPTURE_AGE_KEY);
+    }
+    key
 }
 
 /// Whether a run's state finds nothing: no detector reads a known value
@@ -260,7 +277,8 @@ pub enum Offer {
 
 /// One run's questions: at most one in flight, and behind it the newest
 /// reading that changed — every reading it replaced is merged (`coalesced`)
-/// and never asked. A reading the same as the one before it is no decision.
+/// and never asked. A reading the same as the one before it by everything but
+/// the capture's exact age is no decision.
 #[derive(Debug, Default)]
 pub struct Decider {
     last: Option<Value>,
@@ -283,12 +301,15 @@ impl Decider {
         }
     }
 
-    /// Take a new reading of the run.
+    /// Take a new reading of the run: the same as the one before it by
+    /// everything but the capture's exact age ([`reading_key`]) is no
+    /// decision.
     pub fn offer(&mut self, snapshot: Snapshot) -> Offer {
-        if self.last.as_ref() == Some(&snapshot.state) {
+        let key = reading_key(&snapshot.state);
+        if self.last.as_ref() == Some(&key) {
             return Offer::Same;
         }
-        self.last = Some(snapshot.state.clone());
+        self.last = Some(key);
         let pending = self.number(snapshot);
         if self.in_flight.is_some() {
             let coalesced = self.waiting.replace(pending);

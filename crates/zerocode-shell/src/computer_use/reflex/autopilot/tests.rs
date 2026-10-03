@@ -598,13 +598,38 @@ fn a_replan_carried_out_runs_the_next_plan_and_is_graded_across_both_runs() {
         "what is left of the wall: {run_ns}"
     );
     assert_eq!(fake.asked_rows()[0]["applied"], json!(true));
-    // The new run asks under its own epoch.
+    // The new run asks under its own epoch. (The first run, read quiet once
+    // after its presses, asked one more question before it was stopped — the
+    // hand going quiet is a reading that changed, t-22110 — which settles
+    // late, about a run no longer the hand's, and is not carried out.)
     fake.helper.press(&second, 3, 1);
     fake.now += REFLEX_COLLECT_MS;
-    fake.until_settled(&mut autopilot);
-    let asked_new = fake.asked_rows().last().copied().cloned().expect("a row");
-    assert_eq!(asked_new["run"], json!(second));
+    for _ in 0..400 {
+        if fake
+            .asked_rows()
+            .iter()
+            .any(|row| row["run"] == json!(second))
+        {
+            break;
+        }
+        fake.tick(&mut autopilot);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let asked_new = fake
+        .asked_rows()
+        .into_iter()
+        .rev()
+        .find(|row| row["run"] == json!(second))
+        .cloned()
+        .expect("the new run's question");
     assert_eq!(asked_new["provenance"]["epoch"], json!(2));
+    for late in fake
+        .asked_rows()
+        .iter()
+        .filter(|row| row["run"] == json!(first) && row["decision"] != json!(1))
+    {
+        assert_eq!(late["applied"], json!(false), "{late}");
+    }
     fake.now += REFLEX_REPLAN_COMPARE_MS;
     fake.tick(&mut autopilot);
     let label = fake
