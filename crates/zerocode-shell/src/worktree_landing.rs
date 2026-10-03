@@ -1,14 +1,3 @@
-/// 병합 시험의 나무가 `target`의 나무와 같은가 — 병합해도 나무가 바뀌지 않는가.
-/// squash나 cherry-pick으로 내용만 들어간 작업이 여기서 잡힌다. 충돌하거나 git이
-/// 답하지 못했으면 같다고 말하지 않는다.
-fn merge_changes_nothing(host: &Host, path: &Path, target: &str, probe: &MergeProbe) -> bool {
-    let MergeProbe::Clean(tree) = probe else {
-        return false;
-    };
-    landing_git_text(host, path, &["rev-parse", &format!("{target}^{{tree}}")])
-        .is_some_and(|target_tree| target_tree == *tree)
-}
-
 use super::*;
 
 /// 한 작업 폴더가 비교 ref(기본은 원격 추적 main)에 들어갔는지, git이 직접 한
@@ -809,18 +798,15 @@ fn creation_point(host: &Host, path: &Path, branch: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `head`를 `target`에 병합해도 나무가 바뀌지 않는가. squash나 cherry-pick으로
-/// 내용만 들어간 작업이 여기서 잡힌다. 충돌하면(git이 0이 아닌 값으로 끝난다)
-/// 같다고 말하지 않는다.
-fn merge_changes_nothing(host: &Host, path: &Path, head: &str, target: &str) -> bool {
-    let Ok(merged) = landing_git(host, path, &["merge-tree", "--write-tree", target, head]) else {
-        return false;
-    };
-    let Some(tree) = merged.lines().next().map(str::trim) else {
+/// 병합 시험의 나무가 `target`의 나무와 같은가 — 병합해도 나무가 바뀌지 않는가.
+/// squash나 cherry-pick으로 내용만 들어간 작업이 여기서 잡힌다. 충돌하거나 git이
+/// 답하지 못했으면 같다고 말하지 않는다.
+fn merge_changes_nothing(host: &Host, path: &Path, target: &str, probe: &MergeProbe) -> bool {
+    let MergeProbe::Clean(tree) = probe else {
         return false;
     };
     landing_git_text(host, path, &["rev-parse", &format!("{target}^{{tree}}")])
-        .is_some_and(|target_tree| target_tree == tree)
+        .is_some_and(|target_tree| target_tree == *tree)
 }
 
 /// 이 작업을 처음 담은 비교 ref의 first-parent 커밋. `head`가 그 줄기 위에
