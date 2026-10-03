@@ -2468,14 +2468,17 @@ mod tests {
         assert_eq!(result(odd, "toolUseResult").facts, sized);
         // Two results on one line: the line's record is not one of theirs.
         let two = json!({"type": "user", "toolUseResult": {"code": 200, "bytes": 5},
-            "message": {"content": [
-                {"type": "tool_result", "tool_use_id": "a", "content": "one"},
-                {"type": "tool_result", "tool_use_id": "b", "content": "two"}
-            ]}});
+        "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "a", "content": "one"},
+            {"type": "tool_result", "tool_use_id": "b", "content": "two"}
+        ]}});
         let both = turns_in(&format!("{two}\n"));
         assert_eq!(both.len(), 2);
         for turn in &both {
-            assert_eq!(turn.tool.as_ref().map(|tool| tool.facts.clone()), Some(None));
+            assert_eq!(
+                turn.tool.as_ref().map(|tool| tool.facts.clone()),
+                Some(None)
+            );
         }
         // And it rides the wire as the page reads it — left off when there is none.
         let gone = result(json!({"code": 404, "bytes": 2048}), "toolUseResult");
