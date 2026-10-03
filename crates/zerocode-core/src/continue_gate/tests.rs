@@ -796,3 +796,22 @@ fn settings_are_read_field_by_field_and_a_budget_must_be_one() {
     }
     assert_eq!(read(serde_json::Value::Null), Settings::default());
 }
+
+#[test]
+fn every_code_has_the_word_it_is_serialized_as() {
+    for code in [
+        Code::CheckpointDue,
+        Code::CostRising,
+        Code::ReworkLoop,
+        Code::TaskBudgetNear,
+        Code::DayBudgetNear,
+        Code::TaskBudgetStop,
+        Code::DayBudgetStop,
+    ] {
+        assert_eq!(
+            serde_json::to_string(&code).expect("serializes"),
+            format!("\"{}\"", code.word()),
+            "{code:?}"
+        );
+    }
+}

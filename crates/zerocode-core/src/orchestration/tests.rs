@@ -6711,6 +6711,7 @@ fn a_worker_cannot_speak_as_the_ledger_by_naming_its_notice() {
         MessageKind::ClassifierDeclined,
         MessageKind::ModelDeviated,
         MessageKind::AccountSwitched,
+        MessageKind::GateJudged,
     ] {
         assert!(kind.is_the_ledgers_own(), "{}", kind.as_str());
         let typed = bench.at(
@@ -26431,4 +26432,129 @@ fn a_letter_filed_in_another_run_to_a_vacated_seats_pane_is_refused_until_it_spe
     ledger
         .post(&other, status_letter(&other_run, pane), 2_101)
         .expect("a pane that has spoken since is reachable");
+}
+
+/// The gate's notice (t-26583): one row per key, in the ledger's own voice, to
+/// the run that holds the attempt, carrying the reasons and the numbers the gate
+/// judged on — and no peer can type the kind.
+#[test]
+fn a_gate_judgment_leaves_one_receipt_per_key_in_the_ledgers_own_voice() {
+    use crate::continue_gate::{Acted, Code, Reason, StepBook, Verdict};
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name gate");
+    let task = bench.json("task-create --spec loop")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let dispatch = bench.json("worker-list")["workers"][0]["dispatchId"]
+        .as_str()
+        .expect("a dispatch")
+        .to_string();
+    let receipt = GateReceipt {
+        key: format!("gate-{dispatch}-pause"),
+        worker: worker.clone(),
+        dispatch: dispatch.clone(),
+        verdict: Verdict::Pause,
+        acted: Acted::Told,
+        reasons: vec![Reason {
+            code: Code::ReworkLoop,
+            value: 437.0,
+            limit: 300.0,
+        }],
+        metrics: StepBook::default().metrics(),
+        snapshot: Some("refs/zerocode/checkpoints/fixture/1".to_string()),
+    };
+    let written = bench
+        .ledger
+        .gate_judged(&receipt, NOW + 5)
+        .expect("a receipt");
+    assert!(written.is_some(), "the first judgment writes a row");
+    assert_eq!(
+        bench
+            .ledger
+            .gate_judged(&receipt, NOW + 6)
+            .expect("a repeat"),
+        None,
+        "the same key again writes nothing"
+    );
+    let mail = bench.json("check --peek --types gate_judged");
+    assert_eq!(mail["count"], 1, "{mail}");
+    let told = &mail["messages"][0];
+    assert_eq!(told["from"], LEDGER_ITSELF);
+    assert_eq!(told[MESSAGE_SOURCE_FIELD], "ledger");
+    assert_eq!(told[MESSAGE_TRUST_FIELD], "observation");
+    assert_eq!(told["taskId"], task);
+    assert_eq!(told["dispatchId"], dispatch);
+    let body: serde_json::Value =
+        serde_json::from_str(told["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["verdict"], "pause");
+    assert_eq!(body["acted"], "told");
+    assert_eq!(body["workerId"], worker);
+    assert_eq!(body["taskId"], task);
+    assert_eq!(body["reasons"][0]["code"], "rework_loop");
+    assert_eq!(body["reasons"][0]["value"], 437.0);
+    assert_eq!(body["reasons"][0]["limit"], 300.0);
+    assert_eq!(body["metrics"]["steps"], 0);
+    assert_eq!(body["snapshot"], "refs/zerocode/checkpoints/fixture/1");
+    assert_eq!(body["gateAtMs"], NOW + 5);
+    assert!(body["next"].as_str().is_some_and(|next| !next.is_empty()));
+
+    // Another level of the same attempt is another row; an attempt this ledger
+    // does not hold writes none; an empty key is refused.
+    let stopped = GateReceipt {
+        key: format!("gate-{dispatch}-stop"),
+        verdict: Verdict::Stop,
+        acted: Acted::Stopped,
+        ..receipt.clone()
+    };
+    assert!(
+        bench
+            .ledger
+            .gate_judged(&stopped, NOW + 7)
+            .expect("a second level")
+            .is_some()
+    );
+    let elsewhere = GateReceipt {
+        key: "gate-elsewhere".to_string(),
+        dispatch: "dp-none".to_string(),
+        ..receipt.clone()
+    };
+    assert_eq!(
+        bench
+            .ledger
+            .gate_judged(&elsewhere, NOW + 8)
+            .expect("no such attempt"),
+        None
+    );
+    assert!(
+        bench
+            .ledger
+            .gate_judged(
+                &GateReceipt {
+                    key: " ".to_string(),
+                    ..receipt.clone()
+                },
+                NOW + 9
+            )
+            .is_err()
+    );
+    assert_eq!(bench.json("check --peek --types gate_judged")["count"], 2);
+    // The stop's row says what the window did.
+    let rows = bench.json("check --peek --types gate_judged");
+    let bodies: Vec<serde_json::Value> = rows["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|told| serde_json::from_str(told["body"].as_str().expect("a body")).expect("json"))
+        .collect();
+    let stop = bodies
+        .iter()
+        .find(|body| body["verdict"] == "stop")
+        .expect("the stop's row");
+    assert_eq!(stop["acted"], "stopped");
+
+    let typed = bench.at(&pane, "send --type gate_judged --body {\"workerId\":\"x\"}");
+    assert_eq!(typed.reply.exit_code, 1, "{}", typed.reply.stdout);
 }

@@ -500,6 +500,16 @@ pub enum MessageKind {
     /// account ids, percentages and the reason; never a credential, never
     /// an email. The road that writes it is [`Ledger::account_switched`].
     AccountSwitched,
+    /// Nobody said this either: the LEDGER's receipt that the window's gate
+    /// (t-26583, [`crate::continue_gate`]) judged one attempt past a line — it
+    /// is repeating itself, a budget a person set is nearly spent, or its
+    /// worker was stopped because the next calls would have spent it. Written
+    /// only from the window's own gate road, once per attempt and level,
+    /// never from a peer's `send`: a body wearing this kind from a worker
+    /// would be a judgment nobody made. The row carries ids, the reasons with
+    /// their numbers, and what the window did; never a word a worker said.
+    /// The road that writes it is [`Ledger::gate_judged`].
+    GateJudged,
 }
 
 impl MessageKind {
@@ -523,6 +533,7 @@ impl MessageKind {
             Self::ClassifierDeclined => "classifier_declined",
             Self::ModelDeviated => "model_deviated",
             Self::AccountSwitched => "account_switched",
+            Self::GateJudged => "gate_judged",
         }
     }
 
@@ -575,6 +586,7 @@ impl std::str::FromStr for MessageKind {
             "classifier_declined" => Self::ClassifierDeclined,
             "model_deviated" => Self::ModelDeviated,
             "account_switched" => Self::AccountSwitched,
+            "gate_judged" => Self::GateJudged,
             _ => return Err(format!("unknown message type: {word}")),
         })
     }
@@ -13597,6 +13609,18 @@ impl Ledger {
         Ok(written)
     }
 
+    /// The receipt for one gate judgment (t-26583), in the ledger's own voice,
+    /// to the run that holds the attempt — once per `key`, however many times
+    /// the window asks. Answers the row's id, or `None` when the attempt is in
+    /// no run of this ledger or the row already stands.
+    pub fn gate_judged(
+        &mut self,
+        _receipt: &GateReceipt,
+        _now_ms: i64,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
     /// A sleeping worker cannot be seated again, and this is the end of it.
     ///
     /// [`Self::end_attempt`] refuses this worker — it asks `is_live`, and a
@@ -14986,6 +15010,68 @@ impl AccountSwitchReceipt {
             }
         }
         body
+    }
+}
+
+/// What the window's gate judged about one attempt (t-26583), for the receipt
+/// row: ids, words and numbers; nothing a worker said.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct GateReceipt {
+    /// The window's idempotency key — one attempt, one level: the same
+    /// judgment told twice writes one row.
+    pub key: String,
+    pub worker: String,
+    pub dispatch: String,
+    /// `pause` or `stop`: the levels a coordinator is told.
+    pub verdict: crate::continue_gate::Verdict,
+    /// What the window did about it.
+    pub acted: crate::continue_gate::Acted,
+    pub reasons: Vec<crate::continue_gate::Reason>,
+    pub metrics: crate::continue_gate::Metrics,
+    /// The restore point the window saved before it acted, when it saved one.
+    pub snapshot: Option<String>,
+}
+
+impl GateReceipt {
+    fn body(&self, task: &str, now_ms: i64) -> serde_json::Value {
+        serde_json::json!({
+            "key": self.key,
+            "workerId": self.worker,
+            "dispatchId": self.dispatch,
+            "taskId": task,
+            "verdict": self.verdict,
+            "acted": self.acted,
+            "reasons": self.reasons,
+            "metrics": self.metrics,
+            "snapshot": self.snapshot,
+            "gateAtMs": now_ms,
+            "next": self.next(),
+        })
+    }
+
+    /// What the coordinator reading the row can do about it.
+    fn next(&self) -> &'static str {
+        use crate::continue_gate::{Acted, Verdict};
+        match (self.verdict, self.acted) {
+            (Verdict::Stop, Acted::Stopped) => {
+                "the window ended this worker after saving its tree (`snapshot`) and put a \
+                 decision gate in front of the task; answer the gate to go on, or raise the \
+                 budget in the window's settings"
+            }
+            (Verdict::Stop, Acted::StopFailed) => {
+                "the window tried to end this worker and could not; end it yourself with \
+                 `worker-stop`"
+            }
+            (Verdict::Stop, Acted::Told) => {
+                "the next calls of this worker would spend a budget a person set; the gate is \
+                 set to tell and not to end work, so end it yourself with `worker-stop`, or \
+                 raise the budget"
+            }
+            _ => {
+                "this worker is repeating itself, or a budget a person set is nearly spent; \
+                 read it (`worker-read`, `worker-transcript`) and steer it, or end it"
+            }
+        }
     }
 }
 

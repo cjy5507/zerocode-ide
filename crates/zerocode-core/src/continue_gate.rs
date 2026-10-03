@@ -35,6 +35,8 @@
 //! Nothing here touches a pane, a file, a clock or the network: the time
 //! arrives as an argument and every rule below is a test, not a hope.
 
+pub mod day;
+pub mod plan;
 pub mod spend;
 
 use std::collections::VecDeque;
@@ -165,6 +167,19 @@ impl Verdict {
     }
 }
 
+/// What the window did about a verdict it told the coordinator, for the receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Acted {
+    /// It told, and ended nobody: the gate is set to tell, or the verdict is
+    /// not one that ends work.
+    Told,
+    /// It saved the worker's tree and ended the worker.
+    Stopped,
+    /// It tried to end the worker and could not.
+    StopFailed,
+}
+
 /// Why the judgment says what it says — one code per fact, so the board can
 /// word each in a person's language and carry its numbers beside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -197,6 +212,22 @@ impl Code {
             Self::CheckpointDue | Self::CostRising => Verdict::Checkpoint,
             Self::ReworkLoop | Self::TaskBudgetNear | Self::DayBudgetNear => Verdict::Pause,
             Self::TaskBudgetStop | Self::DayBudgetStop => Verdict::Stop,
+        }
+    }
+}
+
+impl Code {
+    /// The word this code is serialized as — what a row and a screen key on.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::CheckpointDue
+            | Self::CostRising
+            | Self::ReworkLoop
+            | Self::TaskBudgetNear
+            | Self::DayBudgetNear
+            | Self::TaskBudgetStop
+            | Self::DayBudgetStop => "",
         }
     }
 }
