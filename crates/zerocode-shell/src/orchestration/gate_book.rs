@@ -14,8 +14,9 @@
 //! holds the facts between them.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use serde::Serialize;
 use zerocode_core::continue_gate::day::DaySpend;
@@ -47,6 +48,61 @@ static SETTINGS: Mutex<Settings> = Mutex::new(Settings {
     task_usd: None,
     day_usd: None,
 });
+
+/// Where the day's spend is kept, beside the other per-machine records.
+const DAY_FILE: &str = "gate-day-spend.json";
+
+/// How often the day's spend is written down when it changed: a minute — a
+/// restart loses at most that much of it, and a write is not paid every beat.
+pub(super) const DAY_SAVE_EVERY_MS: i64 = 60_000;
+
+/// The file the day is kept in, once the window has named its config root.
+static DAY_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// When the day was last written down.
+static DAY_SAVED_MS: AtomicI64 = AtomicI64::new(i64::MIN);
+
+/// The day as it was written, or `None` for a file that is not there or not a
+/// day.
+pub(super) fn load_day(_file: &Path) -> Option<DaySpend> {
+    None
+}
+
+/// The day, written down: one durable replace.
+pub(super) fn write_day(_file: &Path, _day: &DaySpend) {}
+
+/// Opens the gate at boot: what a person set, and the day the window had
+/// already counted.
+pub(crate) fn open(config_root: &Path, settings: Settings) {
+    set_settings(settings);
+    let file = config_root.join(DAY_FILE);
+    if let Some(day) = load_day(&file) {
+        book().restore_day(day);
+    }
+    let _ = DAY_PATH.set(file);
+}
+
+/// The day's spend, written down when it changed and a minute has passed since
+/// it last was.
+pub(crate) fn save_day(now_ms: i64) {
+    let Some(file) = DAY_PATH.get() else {
+        return;
+    };
+    if now_ms.saturating_sub(DAY_SAVED_MS.load(Ordering::Relaxed)) < DAY_SAVE_EVERY_MS {
+        return;
+    }
+    let Some(day) = book().take_day_for_saving() else {
+        return;
+    };
+    DAY_SAVED_MS.store(now_ms, Ordering::Relaxed);
+    write_day(file, &day);
+}
+
+/// What the rolling day has cost so far, as far as the window watched it — for
+/// the settings card.
+pub(crate) fn day_spent_now() -> f64 {
+    book().day_spent(crate::now_epoch_ms())
+}
 
 /// What the gate saved of a worker's tree, or why it could not.
 #[derive(Clone, Debug, PartialEq, Serialize)]

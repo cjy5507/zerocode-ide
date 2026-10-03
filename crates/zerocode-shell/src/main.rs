@@ -119,6 +119,7 @@ mod glab;
 mod google_login;
 mod hang_sample;
 mod hang_watchdog;
+mod harness_settings;
 mod hooks;
 mod human_input;
 mod icon;
@@ -128,6 +129,7 @@ mod jira_attachments;
 mod jira_store;
 mod keyboard_input_source;
 mod last_status;
+mod launch_budget_runtime;
 mod native_tray;
 mod notify_call;
 mod opencode_home;
@@ -275,7 +277,7 @@ use cmd::{
     gitlab_pipeline_jobs, gitlab_project_members, gitlab_retry_job, gitlab_set_item_open,
     gitlab_set_mr_reviewers, gitlab_status, gitlab_todos, gitlab_update_mr, gitlab_work_items,
     google_account, google_login_finish, google_login_start, google_logout, grok_usage,
-    hooks_report, hosted_review_eligibility, image_diff, import_browser_cookies,
+    harness_status, hooks_report, hosted_review_eligibility, image_diff, import_browser_cookies,
     import_cookie_file, import_external_worktrees, install_bundled_skill, install_hooks, jev_day,
     jev_summary, judge_worker_room, key_input, kimi_usage, lane_fold, lane_lines, lane_scroll,
     launch_agent_tab, launch_plan_for_action, launch_recipes, leave_cancel, leave_now,
@@ -326,13 +328,13 @@ use cmd::{
     set_computer_live_reflex, set_confirm_close_pinned, set_conversation_focus_view,
     set_crash_watchdog, set_ctrl_tab_order_mode, set_default_agent, set_default_task_source,
     set_diff_side_by_side, set_dock_badge, set_external_worktree_visibility, set_guide_dismissed,
-    set_hidden_shortcuts, set_hidden_task_sources, set_hide_agent_scratch_workspaces,
-    set_hide_automation_workspaces, set_hide_default_branch_workspaces,
-    set_hide_detached_head_workspaces, set_hide_sleeping_workspaces, set_hooks_enabled,
-    set_jev_enabled, set_jev_model, set_keep_default_branch_awake, set_keybinding, set_locale,
-    set_minimize_to_tray_on_close, set_notification_preference, set_opencode_cookie,
-    set_opencode_workspace, set_panel_width, set_panel_widths, set_previewed_terms,
-    set_project_script_policy, set_project_script_setting,
+    set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
+    set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
+    set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
+    set_hide_sleeping_workspaces, set_hooks_enabled, set_jev_enabled, set_jev_model,
+    set_keep_default_branch_awake, set_keybinding, set_locale, set_minimize_to_tray_on_close,
+    set_notification_preference, set_opencode_cookie, set_opencode_workspace, set_panel_width,
+    set_panel_widths, set_previewed_terms, set_project_script_policy, set_project_script_setting,
     set_refresh_local_base_ref_on_worktree_create, set_repo_mark, set_route_classifier,
     set_second_brain_explore, set_second_brain_scenes, set_second_brain_weekly_review,
     set_setup_script_launch_mode, set_shortcut_visibility, set_show_git_ignored_files,
@@ -3059,6 +3061,8 @@ fn main() -> ExitCode {
             agent_teams_mode,
             set_claude_autoswitch_mode,
             claude_autoswitch_mode,
+            set_harness_settings,
+            harness_status,
             set_confirm_close_pinned,
             set_computer_confirm,
             set_computer_generator_road,
@@ -3292,6 +3296,10 @@ fn main() -> ExitCode {
             managed.native_tray().install_handler(&handle);
             let boot_settings = load_settings_for_boot(managed.settings()).document;
             hang_watchdog::configure(crash::Limits::overlay(&boot_settings.crash));
+            // The launch ledger and the continue gate, with what a person set
+            // for them and the day the window had already counted (t-26583).
+            launch_budget_runtime::open(managed.config_root(), boot_settings.harness.launches);
+            orchestration::gate_book::open(managed.config_root(), boot_settings.harness.gate);
             // The readiness probe reads the account stores under this root
             // and no other; until it is named, every door answers unknown.
             readiness_runtime::configure_root(managed.config_root());

@@ -93,6 +93,8 @@ pub(super) mod setting_key {
     /// `accounts.claudeAutoSwitch` in the briefing's words: whether the
     /// window may move the Claude account by itself (t-7538).
     pub const CLAUDE_AUTOSWITCH_MODE: &str = "claude_autoswitch_mode";
+    /// The continue gate's mode and budgets and the launch ceilings (t-26583).
+    pub const HARNESS: &str = "harness";
     pub const HIDDEN_SHORTCUTS: &str = "hidden_shortcuts";
     pub const KEYBINDINGS: &str = "keybindings";
     pub const HIDDEN_TASK_SOURCES: &str = "hidden_task_sources";
@@ -2256,6 +2258,11 @@ pub(super) struct SettingsDocument {
     /// `off`, `ask` (the default — a line and a button), `auto`.
     #[serde(default)]
     pub(super) claude_autoswitch_mode: zerocode_core::account_autoswitch::AutoSwitchMode,
+    /// How the continue gate may act and what a task and a day may cost, and how
+    /// many background launches of an agent's CLI may run at once, in an hour and
+    /// in a day (t-26583). The defaults tell and end nobody.
+    #[serde(default)]
+    pub(super) harness: crate::harness_settings::HarnessSettings,
     #[serde(default)]
     pub(super) worktree_prefs: WorktreePrefs,
     #[serde(default)]
@@ -2447,6 +2454,7 @@ impl Default for SettingsDocument {
             default_agent: zerocode_core::DefaultAgentPreference::Auto,
             agent_teams_mode: TeamsMode::default(),
             claude_autoswitch_mode: zerocode_core::account_autoswitch::AutoSwitchMode::default(),
+            harness: crate::harness_settings::HarnessSettings::default(),
             worktree_prefs: WorktreePrefs::default(),
             notifications: NotificationPrefs::default(),
             computer_awake_mode: awake::ComputerAwakeMode::default(),

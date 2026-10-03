@@ -286,6 +286,8 @@ pub(super) fn sweep(host: &dyn Host, overrides: &[(String, LaunchOverride)], now
             record(gate, decided, &done, settings, &around, now_ms);
         }
     }
+    // What the beat read of what the workers spent, written down once a minute.
+    gate_book::save_day(now_ms);
 }
 
 /// The calls a worker's CLI recorded since the last look, into the book: the

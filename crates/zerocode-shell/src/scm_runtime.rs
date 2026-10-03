@@ -572,14 +572,36 @@ pub(super) fn run_text_generation(
 ) -> Result<String, String> {
     let program = claude_program().ok_or("claude를 PATH에서 찾지 못했습니다")?;
     let env = claude_reading_env(config_root)?;
-    let once = run_once(
+    let argv = zerocode_core::commit_message::argv(zerocode_core::commit_message::DEFAULT_MODEL);
+    // Counted in the window's one launch ledger (t-26583). The same draft asked
+    // for twice while the first still runs is one draft, and a person's own
+    // button is never held to the ceilings.
+    let job = zerocode_core::launch_budget::job_key(
+        &root.to_string_lossy(),
+        "",
+        "text-generation",
+        prompt,
+    );
+    let launch = crate::launch_budget_runtime::Launch {
+        provider: "claude",
+        job: Some(&job),
+        fresh_ms: None,
+        requested: true,
+    };
+    let once = match crate::launch_budget_runtime::run_budgeted(
+        &launch,
         &program,
         Some(root),
-        &zerocode_core::commit_message::argv(zerocode_core::commit_message::DEFAULT_MODEL),
+        &argv,
         &env,
         prompt,
         zerocode_core::commit_message::GENERATION_TIMEOUT,
-    )
+    ) {
+        crate::launch_budget_runtime::Budgeted::Refused(refusal) => {
+            return Err(crate::launch_budget_runtime::refusal_said(&refusal));
+        }
+        crate::launch_budget_runtime::Budgeted::Ran(ran) => ran,
+    }
     .map_err(|failure| match failure {
         OnceFailure::Spawn(said) => said,
         OnceFailure::TimedOut => timed_out.to_string(),

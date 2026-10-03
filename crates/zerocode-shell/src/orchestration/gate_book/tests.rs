@@ -199,3 +199,20 @@ fn a_gate_that_is_off_hears_nothing_and_one_that_is_on_counts() {
     );
     set_settings(before);
 }
+
+#[test]
+fn a_days_spend_is_written_down_and_read_back_and_what_is_not_a_day_is_none() {
+    let dir = tempfile::tempdir().expect("a config root");
+    let file = dir.path().join("nested").join("gate-day-spend.json");
+    assert!(load_day(&file).is_none(), "no file, no day");
+    let mut day = DaySpend::default();
+    day.add(NOW, 3.5);
+    write_day(&file, &day);
+    let back = load_day(&file).expect("the day as it was written");
+    assert!((back.spent(NOW) - 3.5).abs() < 1e-9);
+    std::fs::write(&file, "not json at all").expect("a damaged file");
+    assert!(
+        load_day(&file).is_none(),
+        "a damaged file is no day, and does not stop the window"
+    );
+}
