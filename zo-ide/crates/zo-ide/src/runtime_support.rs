@@ -384,6 +384,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         tool_registry,
         plugin_registry,
         memory_retriever,
+        user_preference_source,
         recall_seat,
         compaction_seat,
         patch_review_seat,
@@ -491,6 +492,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     }
     runtime.set_auto_compaction_enabled(feature_config.auto_compact_enabled());
     runtime.set_memory_retriever(memory_retriever);
+    runtime.set_user_preference_source(user_preference_source);
     runtime.set_recall_seat(recall_seat);
     runtime.set_compaction_seat(compaction_seat);
     runtime.set_patch_review_seat(patch_review_seat);

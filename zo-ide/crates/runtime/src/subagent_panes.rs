@@ -3602,16 +3602,19 @@ mod tests {
 
     /// A tmux whose panes are whatever its `panes` file holds when it is asked
     /// — one id a line — so a test can take a pane out of the table.
+    #[cfg(target_os = "macos")]
     fn fake_tmux_reading(directory: &Path) -> PathBuf {
         link_fake_tmux(directory)
     }
 
     /// A child's channel whose connections end when the test says its process
     /// ends: what a dying process does to the sockets it holds.
+    #[cfg(target_os = "macos")]
     struct DyingChannel {
         held: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
     }
 
+    #[cfg(target_os = "macos")]
     impl DyingChannel {
         fn stand(child: &Path) -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -3643,6 +3646,7 @@ mod tests {
 
     /// The cadence tests use: a channel is held from the first look, and tmux is
     /// left alone for half a minute unless something says otherwise.
+    #[cfg(target_os = "macos")]
     fn watching_cadence() -> Cadence {
         Cadence {
             hold_after: Duration::ZERO,

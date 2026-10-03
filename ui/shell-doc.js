@@ -8317,6 +8317,9 @@ function artifactStripNode() {
   exporter.setAttribute("aria-expanded", "false");
   const share = artifactStripButton("is-secondary artifact-strip-share", "share", ARTIFACT_LABELS.share);
   const reveal = artifactStripButton("is-secondary artifact-strip-reveal", "folder-open", ARTIFACT_LABELS.reveal);
+  const preferences = artifactStripButton("is-secondary artifact-strip-preferences", "settings", {
+    key: "artifacts.preferences.manage", word: "선호 관리",
+  });
   const more = document.createElement("button");
   more.type = "button";
   more.className = "btn artifact-strip-more";
@@ -8325,7 +8328,7 @@ function artifactStripNode() {
   more.setAttribute("aria-label", ARTIFACT_LABELS.more.word);
   more.setAttribute("aria-haspopup", "menu");
   more.setAttribute("aria-expanded", "false");
-  actions.append(annotate, compare, exporter, share, reveal, more);
+  actions.append(annotate, compare, exporter, share, reveal, preferences, more);
   head.append(title, feedback, gap, actions);
   const meta = document.createElement("div");
   meta.className = "artifact-strip-meta";
@@ -8416,6 +8419,7 @@ function wireArtifactStrip(strip) {
     if (strip._facts) void openArtifactExportMenu(strip);
   };
   strip.querySelector(".artifact-strip-more").onclick = () => void openArtifactStripMenu(strip);
+  strip.querySelector(".artifact-strip-preferences").onclick = () => void openArtifactPreferences();
 }
 
 /* 접힌 머리띠의 「⋯」: 가려진 행동을 같은 순서, 같은 가능·불가능으로 한 메뉴에.
@@ -8601,6 +8605,173 @@ async function artifactFeedbackPlace(tab) {
   return { facts, version: left, pageUrl: tab.url, context };
 }
 
+let artifactPreferencesPanel = null;
+
+async function openArtifactPreferences(feedback = null) {
+  artifactPreferencesPanel?.close();
+  const root = activeWorktreePath;
+  const opener = document.activeElement;
+  const panel = document.createElement("section");
+  panel.className = "note-pop artifact-preferences-panel";
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-label", t("artifacts.preferences.manage", "선호 관리"));
+  panel.setAttribute("popover", "manual");
+  const heading = document.createElement("header");
+  const title = document.createElement("strong");
+  title.textContent = t("artifacts.preferences.manage", "선호 관리");
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "btn";
+  close.textContent = t("artifacts.preferences.close", "닫기");
+  heading.append(title, close);
+  const explanation = document.createElement("p");
+  explanation.textContent = t("artifacts.preferences.about", "주석 전달은 일회성입니다. 따로 저장한 선호만 자동 메모리를 켠 zo의 다음 요청에 적용됩니다. 현재 요청이 저장된 선호보다 우선합니다.");
+  const status = document.createElement("p");
+  status.className = "artifact-preferences-status";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  const list = document.createElement("div");
+  list.className = "artifact-preferences-list";
+  panel.append(heading, explanation);
+  let snapshot = null;
+  let busy = false;
+  let text = null;
+  let scope = null;
+  let save = null;
+  const current = () => artifactPreferencesPanel?.node === panel && panel.isConnected;
+  const sameProject = () => activeWorktreePath === root;
+  const fail = (error) => { if (current()) status.textContent = String(error); };
+  const refreshControls = () => {
+    if (text) text.disabled = busy;
+    if (scope) scope.disabled = busy;
+    if (save) save.disabled = busy || snapshot === null || !text.value.trim()
+      || (scope.value === "project" && !snapshot.projectKey);
+    for (const button of list.querySelectorAll("button")) button.disabled = busy;
+  };
+  const show = (next) => {
+    if (!current()) return;
+    if (!sameProject()) {
+      fail(t("artifacts.preferences.projectChanged", "작업공간이 바뀌었습니다. 이 창을 닫고 다시 열어 주세요."));
+      return;
+    }
+    if (!next || !Array.isArray(next.entries)) throw new Error(t("artifacts.preferences.unavailable", "저장된 선호를 읽을 수 없습니다."));
+    snapshot = next;
+    list.replaceChildren();
+    for (const entry of next.entries) {
+      const row = document.createElement("article");
+      const words = document.createElement("p");
+      words.textContent = entry.text;
+      const origin = document.createElement("small");
+      const where = entry.scope?.kind === "personal"
+        ? t("artifacts.preferences.personal", "개인 — 이 기기의 모든 프로젝트")
+        : t("artifacts.preferences.project", "이 프로젝트 — 작업트리 공유");
+      origin.textContent = `${where} · ${entry.origin?.artifactId ?? ""} · v${entry.origin?.version ?? "?"}`;
+      if (entry.origin?.followedLink) origin.textContent += ` · ${t("artifacts.preferences.followed", "연결된 페이지의 피드백")}`;
+      const revoke = document.createElement("button");
+      revoke.type = "button";
+      revoke.className = "btn";
+      revoke.textContent = t("artifacts.preferences.revoke", "철회");
+      revoke.addEventListener("click", async () => {
+        if (busy) return;
+        if (!sameProject()) return fail(t("artifacts.preferences.projectChanged", "작업공간이 바뀌었습니다. 이 창을 닫고 다시 열어 주세요."));
+        busy = true; refreshControls();
+        try {
+          show(await invoke("artifact_preference_revoke", { id: entry.id }));
+          if (current() && sameProject()) status.textContent = t("artifacts.preferences.revoked", "선호를 철회했습니다. 원래 피드백 기록은 유지됩니다.");
+        } catch (error) { fail(error); }
+        finally { busy = false; if (current()) refreshControls(); }
+      });
+      row.append(words, origin, revoke);
+      list.append(row);
+    }
+    if (!next.entries.length) {
+      const empty = document.createElement("p");
+      empty.textContent = t("artifacts.preferences.empty", "이 프로젝트에 적용할 저장된 선호가 없습니다.");
+      list.append(empty);
+    }
+    refreshControls();
+  };
+  if (feedback) {
+    const form = document.createElement("form");
+    const label = document.createElement("label");
+    label.textContent = t("artifacts.preferences.text", "앞으로도 적용할 선호를 한 문장으로 직접 적어 주세요");
+    text = document.createElement("input");
+    text.type = "text";
+    text.autocomplete = "off";
+    text.name = "preference";
+    text.addEventListener("input", refreshControls);
+    label.append(text);
+    const scopeLabel = document.createElement("label");
+    scopeLabel.textContent = t("artifacts.preferences.scope", "적용 범위");
+    scope = document.createElement("select");
+    scope.name = "scope";
+    for (const [value, key, word] of [
+      ["project", "project", "이 프로젝트 — 작업트리 공유"],
+      ["personal", "personal", "개인 — 이 기기의 모든 프로젝트"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value; option.textContent = t(`artifacts.preferences.${key}`, word);
+      scope.append(option);
+    }
+    scope.addEventListener("change", refreshControls);
+    scopeLabel.append(scope);
+    save = document.createElement("button");
+    save.type = "submit";
+    save.className = "btn btn--primary";
+    save.textContent = t("artifacts.preferences.save", "선호로 저장");
+    form.append(label, scopeLabel, save);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (busy || !snapshot) return;
+      if (!sameProject()) return fail(t("artifacts.preferences.projectChanged", "작업공간이 바뀌었습니다. 이 창을 닫고 다시 열어 주세요."));
+      const preference = text.value.trim();
+      if (!preference || new TextEncoder().encode(preference).length > snapshot.maxTextBytes
+        || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(preference)) {
+        return fail(t("artifacts.preferences.invalid", "선호는 허용 길이 이내의 한 문장이어야 합니다."));
+      }
+      busy = true; refreshControls();
+      try {
+        show(await invoke("artifact_preference_save", {
+          feedback, text: preference, scope: scope.value, expectedProject: snapshot.projectKey,
+        }));
+        if (current() && sameProject()) {
+          text.value = "";
+          status.textContent = t("artifacts.preferences.saved", "선호를 저장했습니다. zo의 다음 요청부터 기억 문맥에 반영됩니다.");
+        }
+      } catch (error) { fail(error); }
+      finally { busy = false; if (current()) refreshControls(); }
+    });
+    panel.append(form);
+  }
+  panel.append(status, list);
+  const position = () => {
+    panel.style.left = `${Math.max(12, (innerWidth - Math.min(460, innerWidth - 24)) / 2)}px`;
+    panel.style.top = "48px";
+  };
+  const dismiss = () => {
+    document.removeEventListener("pointerdown", outside, true);
+    window.removeEventListener("resize", position);
+    if (artifactPreferencesPanel?.node === panel) artifactPreferencesPanel = null;
+    panel.remove();
+    syncBrowserPanes();
+    if (opener?.isConnected) opener.focus?.({ preventScroll: true });
+  };
+  const outside = (event) => { if (!panel.contains(event.target)) dismiss(); };
+  close.addEventListener("click", dismiss);
+  panel.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); dismiss(); }
+  });
+  artifactPreferencesPanel = { node: panel, close: dismiss };
+  document.body.append(panel);
+  position(); showing(panel); syncBrowserPanes();
+  document.addEventListener("pointerdown", outside, true);
+  window.addEventListener("resize", position);
+  refreshControls();
+  (text ?? close).focus();
+  try { show(await invoke("artifact_preferences")); }
+  catch (error) { fail(error); }
+}
+
 /* 주석을 사람이 고른 판에 초안으로 넣은 뒤, 그 묶음을 `place`(`artifactFeedbackPlace`)
  * 가 정한 발행물의 기록에 남긴다(t-11959, t-14586). 기록이 실패해도 초안은 이미
  * 판에 있다: 그 사실만 말한다. */
@@ -8627,6 +8798,12 @@ async function recordArtifactFeedback(place, notes, recipient) {
       row.feedback_count = summary.count;
       row.feedback_version = summary.version ?? null;
     }
+    toast(t("artifacts.preferences.offer", "주석을 전달하고 기록했습니다. 지속할 선호는 별도로 저장할 수 있습니다."), "", {
+      action: {
+        label: t("artifacts.preferences.remember", "선호로 기억"),
+        run: () => void openArtifactPreferences(feedback),
+      },
+    });
   } catch (error) {
     showError(String(error));
   }

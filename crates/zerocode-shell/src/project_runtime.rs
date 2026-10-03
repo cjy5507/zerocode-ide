@@ -1013,7 +1013,9 @@ pub(super) fn github_context(state: &AppState) -> (PathBuf, Option<String>) {
 pub(super) fn github_lifecycle_error(error: gh::GhError) -> String {
     match error {
         gh::GhError::Missing => "GitHub CLI(gh)를 찾지 못했습니다".to_string(),
-        gh::GhError::Refused(_) => "GitHub CLI가 계정 작업을 완료하지 못했습니다".to_string(),
+        gh::GhError::Refused(_) | gh::GhError::Fetch(_) | gh::GhError::Budget => {
+            "GitHub CLI가 계정 작업을 완료하지 못했습니다".to_string()
+        }
         gh::GhError::Unreadable(_) => "GitHub CLI의 계정 상태를 읽지 못했습니다".to_string(),
     }
 }

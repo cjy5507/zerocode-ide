@@ -96,6 +96,7 @@ impl From<CliError> for GlabError {
     fn from(error: CliError) -> Self {
         match error {
             CliError::Missing => Self::Missing,
+            CliError::TimedOut => Self::Refused("the vendor CLI ran past its budget".into()),
             CliError::Refused(message) => Self::Refused(message),
         }
     }

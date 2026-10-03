@@ -119,6 +119,7 @@ pub mod usage_report;
 pub mod usage_stats;
 pub mod usage_stats_codex;
 pub mod usage_stats_opencode;
+pub mod user_preferences;
 pub mod vault;
 pub mod vault_opencode;
 pub mod worker_placement;

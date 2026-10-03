@@ -321,6 +321,24 @@ where
         self.memory_retriever = retriever;
     }
 
+    pub fn set_user_preference_source(&mut self, source: Option<Arc<crate::memory::user_preferences::UserPreferenceSource>>) {
+        let prefix = crate::memory::user_preferences::PREFERENCE_REMINDER_PREFIX;
+        let prior = self.session.messages.iter().any(|message| {
+            message.role == crate::session::MessageRole::System && message.blocks.iter().any(|block| {
+                matches!(block, crate::ContentBlock::Text { text, .. } if text.contains(prefix))
+            })
+        });
+        self.replace_transient_system_reminder_by_prefix(prefix, None);
+        if let Some(source) = &source {
+            if prior { source.note_prior_context(); }
+        } else if prior {
+            self.replace_transient_system_reminder_by_prefix(prefix, Some(&format!(
+                "{prefix} Saved preferences are disabled for this session. Do not apply an earlier saved-preference snapshot; follow the current user request."
+            )));
+        }
+        self.user_preference_source = source;
+    }
+
     /// Seat something beside recall that sees every recall's query and hits
     /// after recall settles and answers with the order the turn reads.
     pub fn set_recall_seat(&mut self, seat: Option<Arc<dyn crate::RecallSeat>>) {

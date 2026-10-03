@@ -92,6 +92,7 @@ fn review_facts_read_only_what_a_coordinator_wrote() {
             generation: Some(1),
             attempt: Some("dp-1".into()),
             source: None,
+            completed_ms: None,
         }),
         closed: None,
     };
@@ -2907,6 +2908,7 @@ fn a_task_ended_by_hand_leaves_a_ledger_this_window_still_opens() {
                 Some(ending),
                 Some("somebody finished it by hand".into()),
                 ResultAuthor::Ledger,
+                bench.clock,
             )
             .expect("a hand ending");
         if let Err(wrong) = bench.ledger.validate_loaded() {
@@ -4354,6 +4356,168 @@ fn a_worker_row_remembers_the_conversation_its_pane_reported() {
         .and_then(|held| held.session.as_ref())
         .expect("the rebuilt worker remembers its conversation");
     assert_eq!(carried, &replacement);
+}
+
+#[test]
+fn an_attempt_keeps_every_reported_conversation_across_projection_and_rebuild() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name session-history");
+    let task = bench.json("task-create --spec retain-every-conversation")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent codex --task {task}"));
+    let first = ProviderSession {
+        key: SessionKey::SessionId,
+        id: "conversation-first".to_string(),
+        transcript_path: Some("/transcripts/first.jsonl".to_string()),
+    };
+    let second = ProviderSession {
+        key: SessionKey::SessionId,
+        id: "conversation-second".to_string(),
+        transcript_path: None,
+    };
+    assert!(
+        bench
+            .ledger
+            .worker_session_reported(("team-1", &pane), first.clone())
+    );
+    assert!(
+        bench
+            .ledger
+            .worker_session_reported(("team-1", &pane), second.clone())
+    );
+    assert!(
+        !bench
+            .ledger
+            .worker_session_reported(("team-1", &pane), second.clone())
+    );
+    let rebuilt = Ledger::rebuild(bench.ledger.export()).expect("the history rebuilds");
+    let projected = serde_json::to_value(rebuilt.export()).expect("a projection");
+    assert_eq!(
+        projected["dispatches"][0]["session_history"]["sessions"],
+        serde_json::json!([first, second])
+    );
+    assert_eq!(
+        projected["dispatches"][0]["session_history"]["complete"],
+        true
+    );
+    assert_eq!(
+        rebuilt.runs()[0]
+            .worker(&worker)
+            .expect("the worker")
+            .session
+            .as_ref(),
+        Some(&second)
+    );
+}
+
+#[test]
+fn repeated_session_reports_enrich_the_same_history_entry_without_losing_its_path() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name session-enrichment");
+    let task = bench.json("task-create --spec retain-session-location")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (_, pane) = bench.seat(&format!("worker-start --agent codex --task {task}"));
+    let bare = ProviderSession {
+        key: SessionKey::SessionId,
+        id: "conversation-kept".into(),
+        transcript_path: None,
+    };
+    let located = ProviderSession {
+        transcript_path: Some("/transcripts/kept.jsonl".into()),
+        ..bare.clone()
+    };
+    assert!(
+        bench
+            .ledger
+            .worker_session_reported(("team-1", &pane), bare.clone())
+    );
+    assert!(
+        bench
+            .ledger
+            .worker_session_reported(("team-1", &pane), located.clone())
+    );
+    assert!(
+        !bench
+            .ledger
+            .worker_session_reported(("team-1", &pane), bare)
+    );
+    let projected = serde_json::to_value(bench.ledger.export()).expect("a projection");
+    assert_eq!(
+        projected["dispatches"][0]["session_history"]["sessions"],
+        serde_json::json!([located])
+    );
+}
+
+#[test]
+fn a_new_attempt_records_its_own_report_and_preserves_a_legacy_attempts_last_known_session() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name session-attribution");
+    let task = bench.json("task-create --spec first-work")["taskId"]
+        .as_str()
+        .expect("task")
+        .to_string();
+    let (_, pane) = bench.seat(&format!("worker-start --agent codex --task {task}"));
+    let first = ProviderSession {
+        key: SessionKey::SessionId,
+        id: "conversation-first".into(),
+        transcript_path: None,
+    };
+    assert!(
+        bench
+            .ledger
+            .worker_session_reported(("team-1", &pane), first.clone())
+    );
+    bench.json_at(&pane, "send --type worker_done --body {\"ok\":true}");
+    let mut legacy = serde_json::to_value(bench.ledger.export()).expect("projection");
+    legacy["dispatches"][0]
+        .as_object_mut()
+        .expect("first attempt")
+        .remove("session_history");
+    bench.ledger = Ledger::rebuild(serde_json::from_value(legacy).expect("legacy projection"))
+        .expect("legacy ledger");
+    let next = bench.json("task-create --spec second-work")["taskId"]
+        .as_str()
+        .expect("next task")
+        .to_string();
+    let run = bench.ledger.runs()[0].id.clone();
+    bench
+        .ledger
+        .attach_dispatch(&run, &next, ("team-1", &pane), 100_000)
+        .expect("take the next task");
+    let before = serde_json::to_value(bench.ledger.export()).expect("projection");
+    assert_eq!(
+        before["dispatches"][1]["session_history"]["sessions"],
+        serde_json::json!([])
+    );
+    let second = ProviderSession {
+        id: "conversation-second".into(),
+        ..first.clone()
+    };
+    assert!(
+        bench
+            .ledger
+            .worker_session_reported(("team-1", &pane), second.clone())
+    );
+    let after = serde_json::to_value(bench.ledger.export()).expect("projection");
+    assert_eq!(
+        after["dispatches"][0]["session_history"]["sessions"],
+        serde_json::json!([first])
+    );
+    assert_eq!(after["dispatches"][0]["session_history"]["complete"], false);
+    assert_eq!(
+        after["dispatches"][1]["session_history"]["sessions"],
+        serde_json::json!([second])
+    );
+    assert!(
+        !bench
+            .json(&format!("dispatch-show --task {next}"))
+            .to_string()
+            .contains("conversation-second")
+    );
 }
 
 /// The stored state and the public aggregates must use the same word even
@@ -8378,6 +8542,7 @@ fn boot_repair_respects_unfinished_failed_and_missing_dependencies() {
                 Some(dependency_status.unwrap_or(TaskStatus::Completed)),
                 None,
                 ResultAuthor::Ledger,
+                4,
             )
             .unwrap();
         let task = ledger
@@ -8435,6 +8600,7 @@ fn boot_repair_respects_unfinished_failed_and_missing_dependencies() {
                         Some(TaskStatus::Completed),
                         None,
                         ResultAuthor::Ledger,
+                        5,
                     )
                     .unwrap();
                 rebuilt
@@ -22924,6 +23090,7 @@ fn a_former_coordinator_or_another_runs_worker_cannot_correct_the_record() {
             generation: Some(2),
             attempt: None,
             source: Some("abc1234".to_string()),
+            completed_ms: None,
         })
     );
     assert!(run.review_of(held).verified);
@@ -23126,6 +23293,7 @@ fn a_workers_claimed_verification_is_shown_as_a_claim() {
                 generation: Some(1),
                 attempt: Some(dispatch.clone()),
                 source: Some(source.clone()),
+                completed_ms: Some(bench.clock),
             })
         );
     }
@@ -24587,6 +24755,7 @@ mod assign;
 /// t-19159: a closed state that is not failure, and the settle pass
 /// (`tests/closed.rs`).
 mod closed;
+mod completion;
 /// t-7812: the window restart restore transitions (`tests/restore.rs`).
 mod restore;
 /// t-7812: the transitions those roads added (`tests/restore_seams.rs`).
@@ -25630,6 +25799,7 @@ fn summon_outcome_requires_receipt_and_bound_landing_and_a_retry_revokes_success
             &task,
             &task_cost::SessionBook::default(),
             task_cost::JevTally::default(),
+            &task_cost::SessionAttribution::new(bench.ledger.runs()),
         );
         observe(run, run.dispatch(&dispatch).unwrap(), &cost, &total).unwrap()
     };

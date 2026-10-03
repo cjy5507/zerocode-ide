@@ -1,6 +1,7 @@
 use std::fs;
 #[cfg(any(target_os = "linux", test))]
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
@@ -19,7 +20,9 @@ use decision_core::dreamer::PatchCheckResult;
 use super::QuarantineCheckCommand;
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+#[cfg(unix)]
 const CHECK_DIAGNOSTIC_CAP: usize = 8 * 1024;
+#[cfg(unix)]
 const CHECK_DIAGNOSTIC_DRAIN_GRACE: Duration = Duration::from_millis(250);
 
 pub(super) fn run(
@@ -121,8 +124,6 @@ fn spawn_and_wait(command: &mut Command) -> Result<(ExitStatus, Vec<u8>), &'stat
         }
         None => None,
     };
-    #[cfg(not(unix))]
-    let diagnostic = ();
     let deadline = Instant::now() + CHECK_TIMEOUT;
     loop {
         #[cfg(unix)]

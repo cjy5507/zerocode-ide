@@ -44,6 +44,7 @@ pub(crate) struct CliOutput {
 pub(crate) enum CliError {
     /// The binary was not found on the hydrated PATH.
     Missing,
+    TimedOut,
     /// The process started but the call could not be completed.
     Refused(String),
 }
@@ -148,9 +149,7 @@ impl ProcessRunner {
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(CliError::Refused(
-                    "the vendor CLI ran past its budget".into(),
-                ));
+                return Err(CliError::TimedOut);
             }
             std::thread::sleep(POLL_EVERY);
         }

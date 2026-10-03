@@ -413,6 +413,7 @@ pub(super) mod held_spawns {
     static HELD: Mutex<Vec<Held>> = Mutex::new(Vec::new());
 
     /// Hold every spawn of `program` for `hold`, from now on.
+    #[cfg(target_os = "macos")]
     pub(crate) fn hold(program: &OsStr, hold: Duration) {
         HELD.lock().unwrap_or_else(PoisonError::into_inner).push(Held {
             program: program.to_os_string(),
@@ -422,6 +423,7 @@ pub(super) mod held_spawns {
     }
 
     /// How many spawns of `program` with `verb` were held.
+    #[cfg(target_os = "macos")]
     pub(crate) fn asked(program: &OsStr, verb: &str) -> usize {
         HELD.lock()
             .unwrap_or_else(PoisonError::into_inner)

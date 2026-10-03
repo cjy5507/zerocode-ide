@@ -1104,6 +1104,59 @@ impl Store {
         Ok(self.feedback_summary(&line.id))
     }
 
+    pub(crate) fn feedback_origin(
+        &self,
+        ask: &FeedbackAsk,
+    ) -> Result<zerocode_core::user_preferences::FeedbackOrigin, String> {
+        use std::io::Read as _;
+        validate_feedback(ask)?;
+        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
+        if !index
+            .rows
+            .get(&ask.id)
+            .is_some_and(|row| is_publication(&row.artifact))
+        {
+            return Err("preferences require a recorded publication feedback".into());
+        }
+        let file = crate::durable_file::open_plain_file(&self.feedback_path(&ask.id))
+            .map_err(|_| "recorded feedback could not be read safely")?;
+        if file
+            .metadata()
+            .map_err(|_| "feedback metadata is unavailable")?
+            .len()
+            > FEEDBACK_FILE_MAX_BYTES
+        {
+            return Err("recorded feedback exceeds its size limit".into());
+        }
+        let mut text = String::new();
+        file.take(FEEDBACK_FILE_MAX_BYTES + 1)
+            .read_to_string(&mut text)
+            .map_err(|_| "recorded feedback could not be read")?;
+        if u64::try_from(text.len()).unwrap_or(u64::MAX) > FEEDBACK_FILE_MAX_BYTES {
+            return Err("recorded feedback exceeds its size limit".into());
+        }
+        for raw in text.lines().rev() {
+            let Ok(line) = serde_json::from_str::<FeedbackLine>(raw) else {
+                continue;
+            };
+            if line.id == ask.id
+                && line.version == ask.version
+                && line.items == ask.items
+                && line.recipient == ask.recipient
+                && line.page_url == ask.page_url
+            {
+                return Ok(zerocode_core::user_preferences::FeedbackOrigin {
+                    artifact_id: line.id,
+                    version: line.version,
+                    sha256: line.sha256,
+                    feedback_key: zerocode_core::user_preferences::content_key(raw.as_bytes()),
+                    followed_link: line.page_url.is_some(),
+                });
+            }
+        }
+        Err("the feedback must be recorded before it becomes a saved preference".into())
+    }
+
     fn feedback_path(&self, id: &str) -> PathBuf {
         self.root
             .join(zerocode_core::artifact_publish::PAGES_DIR)
@@ -3016,6 +3069,7 @@ mod tests {
                 retry_of: None,
                 remote: None,
                 source: None,
+                session_history: None,
             };
         let history = vec![
             dispatch("d1", "w1", "old", 1),
@@ -5040,6 +5094,43 @@ mod tests {
 
     fn feedback_file(store: &Store, id: &str) -> PathBuf {
         store.root().join("pages").join(id).join(FEEDBACK_FILE)
+    }
+
+    #[test]
+    fn a_preference_origin_requires_the_actual_recorded_feedback_and_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, id, _) = published_twice(directory.path());
+        let ask = feedback_ask(&id, 1, "Keep headings concise");
+        assert!(store.feedback_origin(&ask).is_err());
+        store.record_feedback(ask.clone(), 10).unwrap();
+        let origin = store.feedback_origin(&ask).unwrap();
+        let recorded = std::fs::read_to_string(feedback_file(&store, &id)).unwrap();
+        assert_eq!(
+            origin.feedback_key,
+            zerocode_core::user_preferences::content_key(recorded.trim_end().as_bytes())
+        );
+        assert_eq!(origin.version, 1);
+        assert_eq!(
+            origin.sha256,
+            zerocode_core::artifact_publish::versions(store.root(), &id)[0].sha256
+        );
+        assert!(!origin.followed_link);
+        assert!(
+            store
+                .feedback_origin(&feedback_ask(&id, 2, "Keep headings concise"))
+                .is_err()
+        );
+        assert!(
+            store
+                .feedback_origin(&feedback_ask(&id, 1, "Unrecorded preference"))
+                .is_err()
+        );
+        let mut followed = ask;
+        followed.page_url = Some("https://example.com/review".into());
+        store.record_feedback(followed.clone(), 20).unwrap();
+        assert!(store.feedback_origin(&followed).unwrap().followed_link);
+        let exposed = serde_json::to_string(&origin).unwrap();
+        assert!(!exposed.contains(&directory.path().to_string_lossy().into_owned()));
     }
 
     /// 전달된 주석은 그 페이지의 `feedback.jsonl`에 한 줄씩 덧붙는다. 줄은 판의
