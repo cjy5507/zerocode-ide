@@ -7134,7 +7134,7 @@ function worktreeEvidenceIgnoredRow(ignored) {
     ));
   }
   row.appendChild(worktreeEvidenceLine(
-    t("evidence.ignoredCaveat", "폴더를 지우면 함께 사라지며, 시험 영수증과 비교하는 내용에는 들어가지 않습니다"),
+    t("evidence.ignoredCaveat", "폴더를 지우면 함께 사라집니다. 이 파일들은 읽지 않으므로, 남아 있는 동안 시험 영수증이 지금 내용과 맞는지는 확인되지 않습니다"),
     "wt-evidence-caveat",
   ));
   return row;

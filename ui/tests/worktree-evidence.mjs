@@ -4,7 +4,7 @@ import { workspaceBoardFixture } from "./workspace-board.mjs";
 /* 워크스페이스 근거 화면 — 진짜 렌더러로.
  *
  * Rust 게이트는 이 화면의 말이 맞는지 읽을 수 있지만, 그 말이 화면에 실제로
- * 서는지는 레이아웃을 수행한 브라우저만 안다. 여기서 재는 것 넷:
+ * 서는지는 레이아웃을 수행한 브라우저만 안다. 여기서 재는 것 다섯:
  *
  * - 네 상태(읽음·없음·지원 안 함·읽지 못함)가 서로 다르게 읽히는가
  * - 묻지 않으면 묻지 않는가(닫힌 동안 조회 0, 같은 질문은 한 번)
@@ -462,6 +462,8 @@ export async function testWorktreeEvidence(browser, origin, ok) {
       await page.screenshot({ path: `output/playwright/worktree-evidence/evidence-${width}.png` });
     }
 
+    await page.setViewportSize({ width: 1280, height: 900 });
+
     /* ---- 무시된 파일은 「커밋하지 않은 내용」이 아니다 (t-34315) ----
      *
      * 두 사실이다: git이 변경으로 센 것(커밋하지 않은 변경)과, git이 무시하는
@@ -480,7 +482,7 @@ export async function testWorktreeEvidence(browser, origin, ok) {
       line: "git이 무시하는 파일 5개 항목 · 270 MB",
       names: "node_modules/ (180 MB) · target/ (60 MB) · output/ (20 MB)",
       more: "외 2개",
-      caveat: "폴더를 지우면 함께 사라지며, 시험 영수증과 비교하는 내용에는 들어가지 않습니다",
+      caveat: "폴더를 지우면 함께 사라집니다. 이 파일들은 읽지 않으므로, 남아 있는 동안 시험 영수증이 지금 내용과 맞는지는 확인되지 않습니다",
     };
     const sameSentences = (one, want) => Object.entries(want).every(([key, text]) => one?.[key] === text);
     ok("무시된 파일만 남은 폴더: 「커밋하지 않은 변경이 없습니다」와 무시된 파일 한 줄의 사실 — 경고 줄도 날것의 이름도 없다",
@@ -514,7 +516,7 @@ export async function testWorktreeEvidence(browser, origin, ok) {
     const gapWords = await page.evaluate(async ({ held, tags, locales }) => {
       const out = {};
       for (const code of locales) {
-        setLocale(code, { persist: false });
+        setLocale(code, { persist: false, refresh: false });
         out[code] = {};
         for (const tag of [...tags, "a_gap_kind_from_the_future"]) {
           const answer = structuredClone(held);
@@ -528,7 +530,7 @@ export async function testWorktreeEvidence(browser, origin, ok) {
             .map((one) => one.textContent);
         }
       }
-      setLocale("ko", { persist: false });
+      setLocale("ko", { persist: false, refresh: false });
       return out;
     }, { held: ONLY_CHANGES, tags: GAP_TAGS, locales: LOCALES });
     const everyTag = [...GAP_TAGS, "a_gap_kind_from_the_future"];
@@ -554,7 +556,7 @@ export async function testWorktreeEvidence(browser, origin, ok) {
     const sameWords = await page.evaluate(async ({ held, locales }) => {
       const out = {};
       for (const code of locales) {
-        setLocale(code, { persist: false });
+        setLocale(code, { persist: false, refresh: false });
         const chip = worktreeLandingSay({
           state: "landed", detached: false, ahead: 0, dirty: false, ignored: true, compare_ref: "origin/main",
         }, {});
@@ -565,7 +567,7 @@ export async function testWorktreeEvidence(browser, origin, ok) {
           label: document.querySelector("[data-evidence-ignored] .wt-evidence-strong")?.textContent ?? null,
         };
       }
-      setLocale("ko", { persist: false });
+      setLocale("ko", { persist: false, refresh: false });
       return out;
     }, { held: ONLY_IGNORED, locales: LOCALES });
     ok("뱃지와 패널이 같은 말을 한다 — 다섯 언어 모두 뱃지가 「… · 〈패널 행의 이름표〉」로 끝난다",
