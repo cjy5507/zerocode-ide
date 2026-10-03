@@ -185,7 +185,7 @@ async fn score_candidates(
         return None;
     };
     let (cleared, client) = match (door.pass(&FILE_PICK, client.is_some(), body), client) {
-        (Ok(cleared), Some(client)) => (cleared, client),
+        (Ok(cleared), Some(client)) => (cleared.with_review_origin("zo/session", &ask.session_id), client),
         (passed, _) => {
             let refusal = passed.err().unwrap_or(Refused::NoKey);
             row.outcome = refusal.token().to_string();

@@ -444,6 +444,15 @@ pub struct SystemOneRate {
 const TOKENS_PER_RATE_UNIT: f64 = 1_000_000.0;
 
 impl SystemOneRate {
+    /// Price all usage reported by the endpoint, including a model whose
+    /// output rate is nonzero. Existing input-only callers retain their API.
+    #[must_use]
+    pub fn cost_usd(&self, input_tokens: u64, output_tokens: u64) -> f64 {
+        #[allow(clippy::cast_precision_loss)]
+        let output = output_tokens as f64;
+        self.input_cost_usd(input_tokens) + output * self.output / TOKENS_PER_RATE_UNIT
+    }
+
     /// What `input_tokens` cost at this rate. Output is priced too, but a
     /// System One call writes no prose, so input is the bill.
     #[must_use]

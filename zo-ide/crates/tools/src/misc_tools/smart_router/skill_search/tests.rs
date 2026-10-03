@@ -572,6 +572,60 @@ fn a_suggestion_label_that_completes_the_evidence_records_its_own_rise() {
     assert!(!runtime::jev_seat_applies(&cwd, &SKILLS));
 }
 
+#[test]
+fn an_in_flight_suggestion_cannot_outlive_its_settings() {
+    use super::super::jev_mock::{machine_words, Mock};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    for (change, stage, expected_requests, applied) in [
+        ("none", 0, 2, true), ("off", 1, 1, false),
+        ("shadow", 2, 2, false), ("global_off", 1, 1, false),
+        ("model", 1, 1, false),
+    ] {
+        let path = Arc::new(Mutex::new(None::<PathBuf>));
+        let settings = Arc::clone(&path);
+        let requests = AtomicUsize::new(0);
+        let mock = Mock::answering(move |body| {
+            let number = requests.fetch_add(1, Ordering::SeqCst) + 1;
+            if number == stage {
+                let path = settings.lock().unwrap().clone().unwrap();
+                let mut root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                match change {
+                    "global_off" => root["smart"]["jev"]["enabled"] = json!(false),
+                    "model" => root["smart"]["jevModel"] = json!("jev-new-pin"),
+                    _ => root["smart"][SKILL_SUGGESTION.setting] = json!(change),
+                }
+                std::fs::write(path, root.to_string()).unwrap();
+            }
+            let request: Value = serde_json::from_str(body).unwrap();
+            let answers: serde_json::Map<String, Value> = request["questions"].as_object().unwrap()
+                .keys().map(|id| {
+                    let answer = if id == "which" {
+                        json!({"type":"choice","choice":"s0","confidence":1.0,
+                            "probabilities":{"s0":1.0,"__no_skill__":0.0}})
+                    } else { json!({"type":"noul","noul":if id == "prose_suffices" { 0.0 } else { 1.0 }}) };
+                    (id.clone(), answer)
+                }).collect();
+            (200, json!({"model":"jev-test","answers":answers,
+                "usage":{"input_tokens":10,"output_tokens":0}}).to_string())
+        });
+        machine_words(&[(SKILL_SUGGESTION.setting, "on")], &mock.base_url, |cwd| {
+            *path.lock().unwrap() = Some(runtime::default_config_home().join("settings.json"));
+            let skill = cwd.join(".zo/skills/docx");
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(skill.join("SKILL.md"),
+                "---\nname: docx\ndescription: Write Word documents.\n---\nCreate the Word file.\n").unwrap();
+            let judge = SkillSuggestionJudge::at(cwd);
+            let note = api::sync_bridge::run_blocking(judge.suggest("write a Word document".into()));
+            assert_eq!(note.is_some(), applied, "{change}: {note:?}");
+            assert_eq!(mock.requests().len(), expected_requests, "{change}");
+            let rows = super::super::jev_summary::read_rows(&skill_suggestion_path(cwd));
+            assert_eq!(rows.len(), 1, "{change}: {rows:?}");
+            assert_eq!(rows[0]["routeUse"] == ROUTE_USE_APPLIED, applied, "{change}: {rows:?}");
+            finish_turn_suggestion(cwd, &[]);
+        });
+    }
+}
+
 /// A rise decided on two questions at once stands for neither (t-6877
 /// round 2, astra R3): the search's ledger holds the search's full window
 /// and marks and the rise the judge wrote while the skills seat asked two

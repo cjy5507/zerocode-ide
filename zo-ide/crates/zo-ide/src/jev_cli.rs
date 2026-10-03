@@ -26,11 +26,21 @@ use tools::{JevAnswer, JevCaller, JevQuestion, JevShape, JevVerdict};
 
 use crate::autonomy::limits::HEADLESS_LOOP_EXIT_DONE;
 
+mod learning;
+mod rules;
+
 pub const USAGE: &str = "\
 zo jev summary [--cwd <dir>] [--computer-use <sessions-dir>] [--recent <n>] [--act-lines] [--json]
 zo jev ask <question> [--context <text>] [--cwd <dir>] [--json]
 zo jev choose <question> (--option <text>... | --stdin) [--context <text>] [--cwd <dir>] [--json]
 zo jev score <question> --level <text>... (--item <text>... | --stdin) [--cwd <dir>] [--json]
+zo jev review [--seat <id>] [--limit <n>] [--audit <n>] [--seed <n>] [--json]
+zo jev outcome <case-id> --question <id> --correct true|false --reviewer human|agent|execution --note <text> [--json]
+zo jev export [--seat <id>] [--json]
+zo jev archive <new-file> [--seat <id>] [--rubric-version <n>] [--include-unreviewed] [--json]
+zo jev rules show [--cwd <dir>] [--json]
+zo jev rules compile <definition.json> [--cwd <dir>] [--json]
+zo jev rules activate <definition-id> [--cwd <dir>] [--json]
 
   summary: count every Jev seat's ledger — today and the last seven days.
   Per seat: its mode (off/shadow/on/auto), rows, how many answered and the
@@ -115,6 +125,8 @@ struct JudgeRequest {
 enum Request {
     Summary(SummaryRequest),
     Judge(JudgeRequest),
+    Learning(learning::Request),
+    Rules(rules::Request),
 }
 
 fn usage(exit: u8) -> Refused {
@@ -123,6 +135,8 @@ fn usage(exit: u8) -> Refused {
 
 fn parse(args: &[String]) -> Result<Request, Refused> {
     match args.first().map(String::as_str) {
+        Some("review" | "outcome" | "export" | "archive") => learning::parse(args).map(Request::Learning),
+        Some("rules") => rules::parse(&args[1..]).map(Request::Rules),
         Some("summary") => parse_summary(&args[1..]).map(Request::Summary),
         Some(verb) if JevShape::from_word(verb).is_some() => {
             let shape = JevShape::from_word(verb).unwrap_or(JevShape::Ask);
@@ -232,6 +246,8 @@ pub struct Report {
 /// refusal code.
 pub fn run(args: &[String], cwd: &Path, now_ms: i64, offset_s: i64) -> Result<Report, Refused> {
     match parse(args)? {
+        Request::Learning(request) => learning::run(&request, &runtime::default_config_home(), now_ms),
+        Request::Rules(request) => rules::run(&request, cwd, &runtime::default_config_home()),
         Request::Summary(request) => Ok(run_summary(&request, cwd, now_ms, offset_s)),
         Request::Judge(request) => {
             let parts = if request.stdin {

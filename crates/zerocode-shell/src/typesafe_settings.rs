@@ -519,6 +519,22 @@ pub fn set_model(path: &Path, word: &str) -> Result<ModelRow, String> {
     )?))
 }
 
+/// Change the existing local label-draft preference without changing consent or feature modes.
+pub fn set_label_drafts(path: &Path, on: bool) -> Result<(), String> {
+    update_smart(path, |smart| {
+        let jev = smart
+            .entry(zerocode_core::jev::door::JEV_SETTINGS_KEY)
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or_else(|| "Jev settings must be an object".to_string())?;
+        jev.insert(
+            zerocode_core::jev::promote::LABEL_DRAFTS_KEY.to_string(),
+            Value::Bool(on),
+        );
+        Ok(())
+    })
+}
+
 /// What `zo decision-shadow check --json` said: the model that answered and
 /// how long it took, or the failure token of why none did (`no_key`,
 /// `unauthorized`, `timeout`, …).
@@ -577,6 +593,32 @@ pub fn read_day(path: &Path) -> DayBudget {
 mod tests {
     use super::*;
     use crate::api_routers::{HeldKeys, Keychain, RouterRefusalKind};
+
+    #[test]
+    fn review_retention_changes_neither_consent_nor_explicit_feature_choices() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let before = serde_json::json!({"theme":"dark","smart":{
+            "jev":{"enabled":false,"workspaces":["/work/acme"],"dailyRequests":12},
+            "jevCompaction":"off","skillSearch":"shadow","jevModel":"jev-held"
+        }});
+        std::fs::write(&path, before.to_string()).unwrap();
+        for on in [true, false] {
+            set_label_drafts(&path, on).unwrap();
+            let mut after: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(after["smart"]["jev"]["labelDrafts"], on);
+            after["smart"]["jev"]
+                .as_object_mut()
+                .unwrap()
+                .remove("labelDrafts");
+            assert_eq!(after, before);
+        }
+        let invalid = serde_json::json!({"smart":{"jev":false}}).to_string();
+        std::fs::write(&path, &invalid).unwrap();
+        assert!(set_label_drafts(&path, true).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+    }
 
     #[test]
     fn summon_profiles_save_only_the_table_and_refuse_bad_rows() {

@@ -1138,6 +1138,8 @@ fn brief_ask(project: &Path, wall: Duration) -> zerocode_hookd::TurnBriefAsk {
         agent: AgentKind::Claude,
         pane_key: crate::hooks::pane_key_of(7),
         launch_token: String::new(),
+        session_id: Some("session-1".to_string()),
+        supports_receipts: true,
         worktree: project.to_string_lossy().into_owned(),
         prompt: BRIEFED.to_string(),
         wall,

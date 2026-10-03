@@ -1446,6 +1446,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         result: CompactionResult,
     ) -> Option<AutoCompactionEvent> {
         let removed_message_count = result.removed_message_count;
+        let retained = result.cleared_tool_results > 0;
         let tokens_before = crate::compact::estimate_session_tokens(&self.session);
         let event = self
             .finish_compaction_swap(result, POST_COMPACTION_SYSTEM_REMINDER)
@@ -1455,8 +1456,8 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 tokens_after: crate::compact::estimate_session_tokens(&self.session),
             });
         if let Some(event) = &event {
-            self.record_compaction_round("full_auto", event.tokens_before, event.tokens_after, event.removed_message_count);
-            self.schedule_compaction_curation();
+            self.record_compaction_round(if retained { "retained_auto" } else { "full_auto" }, event.tokens_before, event.tokens_after, event.removed_message_count);
+            if !retained { self.schedule_compaction_curation(); }
         }
         event
     }
@@ -1522,16 +1523,27 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// untouched. Pure mutation apart from the best-effort todo/turn-trace
     /// reads.
     fn finish_compaction_swap(&mut self, result: CompactionResult, status_reminder: &str) -> bool {
-        if result.removed_message_count == 0 {
+        if result.removed_message_count == 0 && result.cleared_tool_results == 0 {
             return false;
         }
-
+        let retained = result.cleared_tool_results > 0;
+        let before = estimate_session_tokens(&self.session);
         self.session = result.compacted_session;
         // Recompute recall dedup against the compacted transcript. The summary
         // erased the bodies it evicted, so those entries must be free to reseed
         // in full — but compaction keeps a preserved tail, and a body still
         // sitting there is still in context, so clearing outright re-injects it.
         self.recalled_memory_slugs = super::recalled_slugs_from_session(&self.session);
+        if retained {
+            // A relevance trim preserved the conversation, so it must not erase
+            // repetition evidence or pretend that a new summary was generated.
+            api::note_context_trim(&self.session.session_id,
+                u64::try_from(before.saturating_sub(estimate_session_tokens(&self.session))).unwrap_or(u64::MAX));
+            self.consecutive_microcompacts = self.consecutive_microcompacts.saturating_add(1);
+            self.precompaction_warned = false;
+            self.clear_state_distill_compaction_state();
+            return true;
+        }
         // Full compaction summarized the transcript, breaking any microcompact
         // thrash cycle: reset the streak so the escape re-arms cleanly.
         self.consecutive_microcompacts = 0;
@@ -1867,6 +1879,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     ) -> Result<CompactionResult, RuntimeError> {
         let Some(plan) = prepare_compaction(&self.session, config) else {
             return Ok(CompactionResult {
+                cleared_tool_results: 0,
                 summary: String::new(),
                 formatted_summary: String::new(),
                 compacted_session: self.session.clone(),
@@ -1874,6 +1887,10 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             });
         };
         let plan = self.judged_compaction_plan_blocking(plan);
+
+        if self.retains_originals(&plan, focus) {
+            return crate::compact::retain_originals(plan).map_err(|error| RuntimeError::new(error.to_string()));
+        }
 
         let raw_summary = self.request_compaction_summary(&plan, focus)?;
         let raw_summary = Self::faithful_summary_or_local(raw_summary, &plan);
@@ -1932,6 +1949,19 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         ::api::sync_bridge::run_blocking(self.judged_compaction_plan(plan))
     }
 
+    fn retains_originals(&self, plan: &CompactionPlan, focus: Option<&str>) -> bool {
+        if focus.is_some() || self.consecutive_microcompacts >= MICROCOMPACT_THRASH_PROMOTION {
+            return false;
+        }
+        let history = u64::try_from(estimate_session_tokens(&self.session)).unwrap_or(u64::MAX);
+        // Preserve the caller's existing thresholds and reserve the observed
+        // request overhead; a smaller payload alone does not prove it fits.
+        let overhead = self.effective_context_tokens().saturating_sub(history);
+        let target = self.precompaction_input_tokens_threshold.min(u64::from(self.auto_compaction_input_tokens_threshold));
+        let budget = usize::try_from(target.saturating_sub(overhead)).unwrap_or(usize::MAX);
+        crate::compact::can_retain_originals(plan, budget, MICROCOMPACT_PAYBACK_REQUESTS)
+    }
+
     /// Guard against a hallucinated API summary (LAVA P1 verifier): if it cites
     /// path/code identifiers that appear nowhere in the evicted source, fall
     /// back to the deterministic, non-fabricating [`LocalSummarizer`]. The check
@@ -1985,6 +2015,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     ) -> Result<CompactionResult, RuntimeError> {
         let Some(plan) = prepare_compaction(&self.session, config) else {
             return Ok(CompactionResult {
+                cleared_tool_results: 0,
                 summary: String::new(),
                 formatted_summary: String::new(),
                 compacted_session: self.session.clone(),
@@ -1992,6 +2023,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             });
         };
         let plan = self.judged_compaction_plan(plan).await;
+        if self.retains_originals(&plan, focus) {
+            return crate::compact::retain_originals(plan).map_err(|error| RuntimeError::new(error.to_string()));
+        }
         let Some(async_client) = self.async_api_client.clone() else {
             // Defensive: callers only take this path when an async client is
             // present, but stay correct (sync round-trip) if that changes.

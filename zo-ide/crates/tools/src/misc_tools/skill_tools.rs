@@ -207,9 +207,16 @@ pub(crate) fn execute_skill_at(input: SkillInput, cwd: &Path) -> Result<SkillOut
 ///
 /// # Errors
 /// A cap the caller asked for that is not one this search offers.
+#[cfg(test)]
 pub(crate) fn execute_skill_search(
     input: &SkillSearchInput,
     cwd: &Path,
+) -> Result<SkillSearchOutput, ToolError> {
+    execute_skill_search_for_session(input, cwd, None)
+}
+
+pub(crate) fn execute_skill_search_for_session(
+    input: &SkillSearchInput, cwd: &Path, session: Option<&str>,
 ) -> Result<SkillSearchOutput, ToolError> {
     let task = non_empty("task", &input.task)?;
     let wanted = match input.max_skills {
@@ -223,7 +230,7 @@ pub(crate) fn execute_skill_search(
         }
     };
     let installed = runtime::discover_skills(cwd);
-    let searched = crate::misc_tools::skill_search(cwd, task, &installed);
+    let searched = super::smart_router::skill_search_for_session(cwd, task, &installed, session);
     // What the turn does next is this seat's only evidence, so the names the
     // JUDGMENT gave are remembered before any skill is loaded — not the ones
     // the turn was handed, which under a recording mode are the word match's

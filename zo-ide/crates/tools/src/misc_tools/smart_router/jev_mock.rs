@@ -258,6 +258,7 @@ fn machine_with<T>(words: &[(&str, &str)], wire: Option<&str>, body: impl FnOnce
     .expect("a settings file");
     let mut env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", &home.path().to_string_lossy())
         .set_also("ZO_HOME", home.path())
+        .set_also("ZO_PROVIDER_SKILLS", "0")
         .set_also(core_types::paths::ZO_STATE_DIR_ENV, home.path());
     if let Some(base_url) = wire {
         env = env

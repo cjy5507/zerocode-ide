@@ -219,15 +219,15 @@ pub fn act_line(wire: &Wire, seat: &JevUse) -> Option<u16> {
 /// uses, so a judgment here and a number on the screen read one file one way.
 #[must_use]
 pub fn read_rows(ledger: &Path) -> Vec<Value> {
-    let Ok(text) = std::fs::read_to_string(ledger) else {
-        return Vec::new();
-    };
-    text.lines()
-        .filter_map(|line| {
-            zerocode_core::jev::promote::note_line_parsed();
-            serde_json::from_str(line).ok()
-        })
-        .collect()
+    let rows = zerocode_core::jev::journal::read(ledger).unwrap_or_default();
+    if ledger
+        .file_name()
+        .is_some_and(|name| name == zerocode_core::jev::PROJECT_RULES.ledger)
+    {
+        zerocode_core::jev::project_rules::observed_rows(rows)
+    } else {
+        rows
+    }
 }
 
 /// Whether a seat acts right now: a person's `on`, or `auto` raised by the
@@ -309,15 +309,33 @@ fn standing_at(
 /// named by the ledger file's own stem, so the sentence cannot name one use
 /// while the bytes go to another.
 pub fn append_rows(ledger: &Path, rows: &[Value]) {
+    if let Err(why) = append_rows_inner(ledger, rows, false) {
+        let what = ledger.file_stem().map_or_else(
+            || ledger.to_string_lossy(),
+            std::ffi::OsStr::to_string_lossy,
+        );
+        eprintln!("orchestration: the {what} record was not written: {why}");
+    }
+}
+
+/// Append a receipt whose successful write is part of acknowledging an effect.
+///
+/// # Errors
+/// The ledger could not be created or written.
+pub fn append_rows_checked(ledger: &Path, rows: &[Value]) -> std::io::Result<()> {
+    append_rows_inner(ledger, rows, true)
+}
+
+fn append_rows_inner(ledger: &Path, rows: &[Value], durable: bool) -> std::io::Result<()> {
     if rows.is_empty() {
-        return;
+        return Ok(());
     }
     let mut said = String::new();
     for row in rows {
         said.push_str(&row.to_string());
         said.push('\n');
     }
-    let written = ledger
+    ledger
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
         .and_then(|()| {
@@ -326,14 +344,10 @@ pub fn append_rows(ledger: &Path, rows: &[Value]) {
                 .append(true)
                 .open(ledger)
         })
-        .and_then(|mut file| std::io::Write::write_all(&mut file, said.as_bytes()));
-    if let Err(why) = written {
-        let what = ledger.file_stem().map_or_else(
-            || ledger.to_string_lossy(),
-            std::ffi::OsStr::to_string_lossy,
-        );
-        eprintln!("orchestration: the {what} record was not written: {why}");
-    }
+        .and_then(|mut file| {
+            std::io::Write::write_all(&mut file, said.as_bytes())?;
+            if durable { file.sync_all() } else { Ok(()) }
+        })
 }
 
 /// The origin to ask, honouring the test override — also the pane guard's
@@ -477,6 +491,7 @@ pub struct Wire {
     /// The window's one socket ([`SOCKET`]); a test points a wire at a socket
     /// of its own (`Wire::on`).
     socket: &'static Socket<reqwest::Client>,
+    review_origin: Option<(String, String)>,
 }
 
 /// A key as the wire keeps it: trimmed, and empty is none.
@@ -486,6 +501,13 @@ fn trimmed(key: Option<String>) -> Option<String> {
 }
 
 impl Wire {
+    /// Carry a local session/task name to opted-in review evidence only.
+    #[must_use]
+    pub(crate) fn for_origin(&self, namespace: &str, origin: &str) -> Self {
+        let mut wire = self.clone();
+        wire.review_origin = Some((namespace.to_string(), origin.to_string()));
+        wire
+    }
     /// A wire holding the key `keys` has now. An unreadable keychain and an
     /// empty item are both "no key": nothing is sent either way.
     #[must_use]
@@ -499,6 +521,7 @@ impl Wire {
             base: base_url(),
             settings: crate::api_routers::zo_settings_path(),
             socket: &SOCKET,
+            review_origin: None,
         }
     }
 
@@ -511,6 +534,7 @@ impl Wire {
             base: base_url(),
             settings: crate::api_routers::zo_settings_path(),
             socket: &SOCKET,
+            review_origin: None,
         }
     }
 
@@ -525,6 +549,7 @@ impl Wire {
             base: base.trim().to_string(),
             settings,
             socket: &SOCKET,
+            review_origin: None,
         }
     }
 
@@ -586,7 +611,8 @@ impl Wire {
         body: Value,
         memo: Option<Memo<'_>>,
     ) -> Result<Passed, Refused> {
-        let settings = JevSettings::from_root(&self.settings_root()).resolved();
+        let root = self.settings_root();
+        let settings = JevSettings::from_root(&root).resolved();
         let workspace = workspace.map(door::resolved_path);
         let requests = self
             .config_home()
@@ -600,6 +626,17 @@ impl Wire {
             &requests,
             memo,
         )
+        .map(|mut passed| {
+            if zerocode_core::jev::promote::label_drafts_wanted(&root)
+                && let (Some(home), Some(workspace)) = (self.config_home(), workspace.as_deref())
+            {
+                passed.cleared = passed.cleared.with_review(home, row, workspace);
+                if let Some((namespace, origin)) = &self.review_origin {
+                    passed.cleared = passed.cleared.with_review_origin(namespace, origin);
+                }
+            }
+            passed
+        })
     }
 
     /// Open the endpoint's connection ahead of the first question, off the
@@ -723,8 +760,19 @@ impl Wire {
         // Every caller is sync — a walk drives sync roads, a question asked
         // off the beat has a thread of its own — and blocks on the window's
         // runtime the same way.
+        let review = cleared.prepare_review();
         let (answer, version) =
             tauri::async_runtime::block_on(self.ask_once(&key, cleared, deadline));
+        if let (Some(review), Ok(body)) = (review, &answer)
+            && let Ok(response) = serde_json::from_str::<Value>(body)
+        {
+            let at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |elapsed| {
+                    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+                });
+            let _ = review.finish(&response, at);
+        }
         let usage = answer
             .as_deref()
             .ok()

@@ -127,7 +127,7 @@ pub const COMPUTER_TOKEN_HEADER: &str = "x-zerocode-computer-token";
 
 /// Version stamped into generated scripts and echoed back in the envelope, so a
 /// script left behind by an older install is identifiable rather than mysterious.
-pub const HOOK_CONTRACT_VERSION: &str = "2";
+pub const HOOK_CONTRACT_VERSION: &str = "3";
 
 /// Hook payloads are small (a JSON event, sometimes a diff summary). A megabyte
 /// is already generous; past that something is wrong and we would rather answer
@@ -195,6 +195,7 @@ pub mod env_var {
     pub const SELECTION_SEEDED: &str = "ZEROCODE_AGENT_SELECTION_SEEDED";
 }
 
+mod brief_receipts;
 pub mod codex_grant;
 pub mod codex_install;
 pub mod codex_mirror;
@@ -483,6 +484,8 @@ pub struct BridgeState {
     /// Where the window keeps what the seats say at a turn's start — see
     /// [`TurnBrief`]. `None` until the window installs one.
     brief: Option<Arc<dyn TurnBrief>>,
+    brief_receipts: Arc<std::sync::Mutex<brief_receipts::Receipts>>,
+    brief_acks: Arc<tokio::sync::Semaphore>,
     /// Where the window answers `zerocode-find` — see [`FileFind`].
     finder: Option<Arc<dyn FileFind>>,
     artifacts: Option<Arc<dyn ArtifactCommands>>,
@@ -546,6 +549,18 @@ pub const TURN_BRIEF_CHAR_CAP: usize = 2_000;
 /// them as context only: no decision, no permission, no changed input.
 pub trait TurnBrief: Send + Sync {
     fn brief(&self, ask: TurnBriefAsk) -> Option<String>;
+    /// Whether this text has a deferred effect that needs client acknowledgment.
+    fn needs_receipt(&self, _text: &str) -> bool {
+        false
+    }
+    /// Commit only after the matching hook client has received and forwarded
+    /// the response. Returning an error leaves the receipt retryable.
+    ///
+    /// # Errors
+    /// The host could not persist its acknowledgment.
+    fn delivered(&self, _ask: &TurnBriefAsk, _text: &str) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The person's prompt as this bridge reads it for a turn's context — `None`
@@ -565,6 +580,10 @@ pub struct TurnBriefAsk {
     pub pane_key: String,
     /// The launch the knock says it belongs to; empty from an older script.
     pub launch_token: String,
+    /// The provider's validated session identity from this exact prompt event.
+    /// A repeated prompt in a new session must not match the previous book.
+    pub session_id: Option<String>,
+    pub supports_receipts: bool,
     /// The folder the pane works in.
     pub worktree: String,
     pub prompt: String,
@@ -690,6 +709,10 @@ impl BridgeState {
                 federation,
                 knowledge: None,
                 brief: None,
+                brief_receipts: Arc::new(
+                    std::sync::Mutex::new(brief_receipts::Receipts::default()),
+                ),
+                brief_acks: Arc::new(tokio::sync::Semaphore::new(4)),
                 finder: None,
                 artifacts: None,
                 pointers: None,
@@ -726,6 +749,8 @@ struct HookForm {
     hook_event_name: String,
     #[serde(default)]
     selection_seeded: String,
+    #[serde(default)]
+    delivery_id: String,
     payload: String,
 }
 
@@ -764,6 +789,8 @@ struct HookJson {
     hook_event_name: String,
     #[serde(default, alias = "selection_seeded")]
     selection_seeded: bool,
+    #[serde(default, alias = "delivery_id")]
+    delivery_id: String,
     /// Any JSON — object, string, whatever the host handed the plugin. Carried
     /// on as text because that is what a payload IS to this bridge: the
     /// agent's own schema, which it is not our business to parse.
@@ -774,6 +801,7 @@ struct HookJson {
 pub fn router(state: BridgeState) -> Router {
     Router::new()
         .route("/hook/{agent}", post(receive_hook))
+        .route("/hook-receipt/{agent}", post(receive_hook_receipt))
         // The orchestration road. Same server, same token, same gate — a
         // second listener for a second protocol would be a second secret to
         // keep and a second port to explain.
@@ -1128,6 +1156,63 @@ async fn receive_find_command(State(state): State<BridgeState>, request: Request
     }
 }
 
+#[derive(Deserialize)]
+struct BriefAcknowledgment {
+    pane_key: String,
+    launch_token: String,
+    delivery_id: String,
+}
+
+async fn receive_hook_receipt(
+    UrlPath(agent): UrlPath<String>,
+    State(state): State<BridgeState>,
+    Form(body): Form<BriefAcknowledgment>,
+) -> Response {
+    let Some(agent) = AgentKind::from_slug(&agent) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let key = brief_receipts::Key {
+        agent,
+        pane: body.pane_key,
+        launch: body.launch_token,
+        id: body.delivery_id,
+    };
+    if !key.valid() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(source) = state.brief.as_ref().map(Arc::clone) else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    let Ok(permit) = state.brief_acks.clone().try_acquire_owned() else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
+    let ticket = state
+        .brief_receipts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take(&key, std::time::Instant::now());
+    let Some((ask, text)) = ticket else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    // The effect runs on a bounded worker, after the client attests successful
+    // stdout delivery. A producer abandoned by the brief timer cannot get here.
+    let held = state.brief_receipts.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let result = source.delivered(&ask, &text);
+        held.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish(&key, result.is_err().then_some((ask, text)));
+        result
+    })
+    .await;
+    if matches!(result, Ok(Ok(()))) {
+        StatusCode::ACCEPTED.into_response()
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
+}
+
 async fn receive_hook(
     UrlPath(agent): UrlPath<String>,
     State(state): State<BridgeState>,
@@ -1138,10 +1223,11 @@ async fn receive_hook(
     };
 
     let json = body_is_json(request.headers());
-    let (envelope, selection_seeded) = if json {
+    let (envelope, selection_seeded, delivery_id) = if json {
         match axum::Json::<HookJson>::from_request(request, &()).await {
             Ok(axum::Json(body)) => {
                 let seeded = body.selection_seeded;
+                let delivery_id = body.delivery_id;
                 (
                     HookEnvelope {
                         agent,
@@ -1162,6 +1248,7 @@ async fn receive_hook(
                         },
                     },
                     seeded,
+                    delivery_id,
                 )
             }
             Err(rejection) => return rejection.into_response(),
@@ -1170,6 +1257,7 @@ async fn receive_hook(
         match Form::<HookForm>::from_request(request, &()).await {
             Ok(Form(form)) => {
                 let seeded = matches!(form.selection_seeded.trim(), "1" | "true");
+                let delivery_id = form.delivery_id;
                 (
                     HookEnvelope {
                         agent,
@@ -1183,6 +1271,7 @@ async fn receive_hook(
                         payload: form.payload,
                     },
                     seeded,
+                    delivery_id,
                 )
             }
             Err(rejection) => return rejection.into_response(),
@@ -1212,6 +1301,19 @@ async fn receive_hook(
     let submission = (state.knowledge.is_some() || state.brief.is_some())
         .then(|| orchestration_contract::prompt_submission(&envelope))
         .flatten();
+    let receipt_key = brief_receipts::Key {
+        agent: envelope.agent,
+        pane: envelope.pane_key.clone(),
+        launch: envelope.launch_token.clone(),
+        id: delivery_id,
+    };
+    let supports_receipts = state.brief.is_some()
+        && submission.is_some()
+        && state
+            .brief_receipts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reserve(receipt_key.clone(), std::time::Instant::now());
     let brief_ask = state
         .brief
         .as_ref()
@@ -1220,6 +1322,8 @@ async fn receive_hook(
             agent: envelope.agent,
             pane_key: envelope.pane_key.clone(),
             launch_token: envelope.launch_token.clone(),
+            session_id: submission.session_id.clone(),
+            supports_receipts,
             worktree: envelope.worktree_id.clone(),
             prompt: submission.prompt.clone(),
             wall: TURN_BRIEF_WALL,
@@ -1292,16 +1396,47 @@ async fn receive_hook(
     let brief = async {
         let (source, ask) = state.brief.as_ref().map(Arc::clone).zip(brief_ask)?;
         let wall = ask.wall;
-        tokio::time::timeout(wall, tokio::task::spawn_blocking(move || source.brief(ask)))
-            .await
-            .ok()?
-            .ok()
-            .flatten()
-            .filter(|text| !text.trim().is_empty() && text.chars().count() <= TURN_BRIEF_CHAR_CAP)
+        let checking = ask.clone();
+        let text = tokio::time::timeout(
+            wall,
+            tokio::task::spawn_blocking(move || source.brief(checking)),
+        )
+        .await
+        .ok()?
+        .ok()
+        .flatten()
+        .filter(|text| !text.trim().is_empty() && text.chars().count() <= TURN_BRIEF_CHAR_CAP)?;
+        Some((ask, text))
     };
     let (knowledge, brief) = tokio::join!(knowledge, brief);
     let knowledge = event_name.clone().zip(knowledge);
-    let brief = event_name.zip(brief);
+    let mut wants_receipt = false;
+    let brief = brief.and_then(|(ask, text)| {
+        if state
+            .brief
+            .as_ref()
+            .is_some_and(|source| source.needs_receipt(&text))
+        {
+            if !supports_receipts
+                || !state
+                    .brief_receipts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .ready(&receipt_key, ask, text.clone())
+            {
+                return None;
+            }
+            wants_receipt = true;
+        }
+        event_name.zip(Some(text))
+    });
+    if !wants_receipt {
+        state
+            .brief_receipts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unused(&receipt_key);
+    }
     /* The pointer's own moment. Decided above, before the envelope went, and
      * answered here ahead of the context reply.
      *
@@ -1331,7 +1466,11 @@ async fn receive_hook(
     };
     match compose_additional_context(additional_context, knowledge, brief, pointer) {
         Some((event_name, context)) => (
-            StatusCode::ACCEPTED,
+            if wants_receipt {
+                StatusCode::OK
+            } else {
+                StatusCode::ACCEPTED
+            },
             axum::Json(serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": event_name,
@@ -1723,11 +1862,36 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
     } else {
         " >nul 2>nul"
     };
-    lines.push(format!(
+    let post = format!(
         "curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook/{slug}\" --connect-timeout {connect} --max-time {budget} -H \"Content-Type: application/x-www-form-urlencoded\" -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"tab_id=%{tab_id}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"worktree_id=%{worktree_id}%\" --data-urlencode \"selection_seeded=%{seeded}%\" --data-urlencode \"hook_event_name=%{event_var}%\" --data-urlencode \"env=%{agent_env}%\" --data-urlencode \"version={HOOK_CONTRACT_VERSION}\" --data-urlencode \"payload@-\"{quiet}",
         connect = HOOK_CONNECT_BUDGET.as_secs_f64(),
         budget = HOOK_REPLY_BUDGET.as_secs_f64(),
-    ));
+    );
+    if spec.prints_context {
+        // Only cmd builtins and the existing curl are needed. Numeric status
+        // comes from curl's formatter, never from untrusted response text.
+        lines.extend([
+            "set \"brief_id=w-%RANDOM%-%RANDOM%-%RANDOM%\"".into(),
+            "set \"brief_dir=%TEMP%\\zerocode-hook-%brief_id%\"".into(),
+            "mkdir \"%brief_dir%\" >nul 2>nul".into(),
+            "if errorlevel 1 goto :plain_post".into(),
+            format!("{post} --data-urlencode \"delivery_id=%brief_id%\" -o \"%brief_dir%\\reply\" -w \"%%{{http_code}}\" >\"%brief_dir%\\status\" 2>nul"),
+            "set \"curl_exit=%ERRORLEVEL%\"".into(),
+            "if not \"%curl_exit%\"==\"0\" (call :gave_up %curl_exit% & goto :brief_cleanup)".into(),
+            "call :succeeded".into(),
+            "type \"%brief_dir%\\reply\" 2>nul".into(),
+            "if errorlevel 1 goto :brief_cleanup".into(),
+            "set \"brief_status=\"".into(),
+            "set /p brief_status=<\"%brief_dir%\\status\"".into(),
+            format!("if \"%brief_status%\"==\"200\" curl.exe -fsS -X POST \"http://127.0.0.1:%{port}%/hook-receipt/{slug}\" --connect-timeout 0.1 --max-time 0.25 -H \"{HOOK_TOKEN_HEADER}: %{token}%\" --data-urlencode \"pane_key=%{pane_key}%\" --data-urlencode \"launch_token=%{launch_token}%\" --data-urlencode \"delivery_id=%brief_id%\" >nul 2>nul"),
+            ":brief_cleanup".into(),
+            "del /q \"%brief_dir%\\reply\" \"%brief_dir%\\status\" >nul 2>nul".into(),
+            "rmdir \"%brief_dir%\" >nul 2>nul".into(),
+            "exit /b 0".into(),
+            ":plain_post".into(),
+        ]);
+    }
+    lines.push(post);
     lines.push("set \"curl_exit=%ERRORLEVEL%\"".into());
     lines.push(
         "if \"%curl_exit%\"==\"0\" (call :succeeded) else (call :gave_up %curl_exit%)".into(),
@@ -1860,6 +2024,8 @@ pub fn hook_script(agent: AgentKind) -> String {
 
     let slug = agent.slug();
     if context_hook.is_some() {
+        lines.push("brief_id=p-$$".into());
+        lines.push("brief_nl='\n'".into());
         lines.push("reply=".into());
         lines.push("if reply=$(".into());
     } else {
@@ -1899,6 +2065,7 @@ pub fn hook_script(agent: AgentKind) -> String {
         r#"  --data-urlencode "version={HOOK_CONTRACT_VERSION}" \"#
     ));
     if context_hook.is_some() {
+        lines.push(r#"  --data-urlencode "delivery_id=$brief_id" -w '\n%{http_code}' \"#.into());
         lines.push(r#"  --data-urlencode "payload@-" 2>/dev/null"#.into());
         lines.push(")".into());
         lines.push("then".into());
@@ -1908,8 +2075,16 @@ pub fn hook_script(agent: AgentKind) -> String {
         lines.push("  delivery_gave_up $?".into());
         lines.push("  reply=".into());
         lines.push("fi".into());
+        lines.push(r#"  brief_status=${reply##*"$brief_nl"}"#.into());
+        lines.push(r#"  reply=${reply%"$brief_nl"*}"#.into());
         lines.push(r#"  case "$reply" in"#.into());
-        lines.push(r#"    \{*\}) printf '%s\n' "$reply" ;;"#.into());
+        lines.push(r#"    \{*\}) trap '' PIPE"#.into());
+        lines.push(
+            r#"    if printf '%s\n' "$reply" 2>/dev/null && [ "$brief_status" = 200 ]; then"#
+                .into(),
+        );
+        lines.push(format!(r#"      curl -fsS -X POST "http://127.0.0.1:${{{port}}}/hook-receipt/{slug}" --connect-timeout 0.1 --max-time 0.25 -H "{HOOK_TOKEN_HEADER}: ${{{token}}}" --data-urlencode "pane_key=${{{pane_key}}}" --data-urlencode "launch_token=${{{launch_token}}}" --data-urlencode "delivery_id=$brief_id" >/dev/null 2>&1 || :"#));
+        lines.push("    fi ;;".into());
         lines.push("  esac".into());
     } else {
         lines.push(r#"  --data-urlencode "payload@-" >/dev/null 2>&1"#.into());
@@ -1964,7 +2139,7 @@ mod tests {
                 "selection_seeded=",
                 "hook_event_name=",
                 "env=",
-                "version=2",
+                "version=",
             ] {
                 assert!(
                     batch.contains(field),
@@ -1972,6 +2147,9 @@ mod tests {
                 );
             }
             assert!(batch.contains("x-zerocode-hook-token: %ZEROCODE_HOOK_TOKEN%"));
+            assert!(batch.contains(&format!(
+                "--data-urlencode \"version={HOOK_CONTRACT_VERSION}\""
+            )));
             // The endpoint file is read before the guard, and the guard before the post.
             let endpoint = batch
                 .find("%ZEROCODE_HOOK_ENDPOINT%")

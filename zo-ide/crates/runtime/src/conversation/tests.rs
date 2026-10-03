@@ -4006,6 +4006,7 @@ fn precompaction_warning_fires_once_per_segment_and_rearms_after_compaction() {
 
     // A real compaction re-arms the latch, so the next approach warns again.
     runtime.finish_auto_compaction(CompactionResult {
+        cleared_tool_results: 0,
         summary: "s".to_string(),
         formatted_summary: "s".to_string(),
         compacted_session: runtime.session.clone(),
@@ -4067,6 +4068,7 @@ fn manual_compaction_clears_stale_state_distill_prompt_and_resets_defer_gate() {
     assert_eq!(state_distill_prompt_count(&runtime), 1);
 
     runtime.apply_manual_compaction(CompactionResult {
+        cleared_tool_results: 0,
         summary: "manual compacted state".to_string(),
         formatted_summary: "manual compacted state".to_string(),
         compacted_session: runtime.session.clone(),
@@ -4102,6 +4104,7 @@ fn compaction_status_reminder_is_one_shot_not_re_injected_every_turn() {
     let mut runtime = runtime_for_context_policy(Some("custom-local-model"), 1_000_000);
     push_until_precompaction_threshold(&mut runtime);
     runtime.apply_manual_compaction(CompactionResult {
+        cleared_tool_results: 0,
         summary: "compacted state".to_string(),
         formatted_summary: "compacted state".to_string(),
         compacted_session: runtime.session.clone(),
@@ -8732,6 +8735,7 @@ fn recalled_entry_reappearance_is_omitted_until_compaction_reseeds() {
 
     // Full compaction erased the earlier full copy → the entry reseeds in full.
     runtime.apply_manual_compaction(CompactionResult {
+        cleared_tool_results: 0,
         summary: "compacted".to_string(),
         formatted_summary: "compacted".to_string(),
         compacted_session: {
@@ -8933,6 +8937,7 @@ fn reminder_until_persisted_teaches_once_and_rearms_after_compaction() {
 
     // Compaction summarizes the persisted copy away → teaching re-arms.
     runtime.apply_manual_compaction(CompactionResult {
+        cleared_tool_results: 0,
         summary: "compacted".to_string(),
         formatted_summary: "compacted".to_string(),
         compacted_session: Session::new(),
@@ -9086,6 +9091,7 @@ fn compaction_that_preserves_the_recall_body_does_not_reseed_it() {
             .expect("carry the preserved tail");
     }
     runtime.apply_manual_compaction(CompactionResult {
+        cleared_tool_results: 0,
         summary: "compacted".to_string(),
         formatted_summary: "compacted".to_string(),
         compacted_session: compacted,
@@ -10589,6 +10595,7 @@ fn repeated_manual_compact_does_not_accumulate_reminders() {
     // in-place reminder injection must be idempotent.
     for _ in 0..3 {
         runtime.apply_manual_compaction(crate::compact::CompactionResult {
+            cleared_tool_results: 0,
             summary: summary.clone(),
             formatted_summary: formatted.clone(),
             compacted_session: compacted.clone(),
@@ -10617,6 +10624,7 @@ fn manual_compact_noop_leaves_session_and_prompt_untouched() {
     // A no-op compaction (nothing removed) must not swap the session or push a
     // reminder.
     runtime.apply_manual_compaction(crate::compact::CompactionResult {
+        cleared_tool_results: 0,
         summary: String::new(),
         formatted_summary: String::new(),
         compacted_session: snapshot,
@@ -10699,6 +10707,7 @@ fn manual_compact_after_auto_replaces_status_reminder() {
 
     // Simulate a prior AUTO round having asserted its own status reminder.
     runtime.finish_auto_compaction(crate::compact::CompactionResult {
+        cleared_tool_results: 0,
         summary: summary.clone(),
         formatted_summary: formatted.clone(),
         compacted_session: compacted.clone(),
@@ -10713,6 +10722,7 @@ fn manual_compact_after_auto_replaces_status_reminder() {
     );
 
     runtime.apply_manual_compaction(crate::compact::CompactionResult {
+        cleared_tool_results: 0,
         summary,
         formatted_summary: formatted,
         compacted_session: compacted,
@@ -12348,6 +12358,7 @@ fn full_compaction_swap_clears_per_turn_repetition_state() {
         .push_message(crate::session::ConversationMessage::user_text("tail"))
         .expect("tail message");
     runtime.finish_auto_compaction(crate::compact::CompactionResult {
+        cleared_tool_results: 0,
         summary: "s".to_string(),
         formatted_summary: "s".to_string(),
         compacted_session: compacted,
@@ -12395,6 +12406,7 @@ fn third_full_compaction_in_a_turn_stops_clearing_repetition_state() {
             .push_message(crate::session::ConversationMessage::user_text("tail"))
             .expect("tail message");
         crate::compact::CompactionResult {
+            cleared_tool_results: 0,
             summary: "s".to_string(),
             formatted_summary: "s".to_string(),
             compacted_session: compacted,
@@ -16685,6 +16697,62 @@ fn compaction_test_runtime() -> ConversationRuntime<NoopApiClient, StaticToolExe
     );
     runtime.set_context_window(200_000);
     runtime
+}
+
+#[test]
+fn acting_relevance_skips_the_summary_call_while_shadow_keeps_the_existing_path() {
+    use crate::compact::relevance::{CompactionAsk, CompactionJudgment, CompactionSeat};
+    struct CountSummaries(Arc<AtomicUsize>);
+    impl ApiClient for CountSummaries {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![AssistantEvent::TextDelta("<summary>Keep working on the requested task.</summary>".to_string()),
+                AssistantEvent::MessageStop])
+        }
+    }
+    struct DropRead(bool);
+    impl CompactionSeat for DropRead {
+        fn judge<'a>(&'a self, _ask: &'a CompactionAsk) -> futures_util::future::BoxFuture<'a, CompactionJudgment> {
+            Box::pin(async move { CompactionJudgment { dropped: vec![0], applies: self.0 } })
+        }
+    }
+    let _env = crate::test_env_lock();
+    for acting in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("retained.jsonl");
+        let mut session = Session::new().with_persistence_path(&path);
+        session.push_user_text("Keep the original instructions while fixing the task.").unwrap();
+        session.push_message(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "read-original".to_string(), name: "Read".to_string(), input: "{\"path\":\"src/lib.rs\"}".to_string(),
+        }])).unwrap();
+        session.push_message(ConversationMessage {
+            role: MessageRole::User,
+            blocks: vec![ContentBlock::ToolResult { tool_use_id: "read-original".to_string(),
+                tool_name: "Read".to_string(), output: "old evidence ".repeat(2_000), is_error: false, images: vec![] }],
+            usage: None, thought_signature: None, reasoning_replay: None, model: None, updated_at_ms: None,
+        }).unwrap();
+        session.push_user_text("That read is resolved.").unwrap();
+        session.push_message(ConversationMessage::assistant(vec![ContentBlock::Text { text: "Proceeding with the remaining task.".into() }])).unwrap();
+        session.push_user_text("Keep going.").unwrap();
+        let messages_before = session.messages.len();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut runtime = ConversationRuntime::new(session, CountSummaries(Arc::clone(&calls)),
+            StaticToolExecutor::new(), PermissionPolicy::new(PermissionMode::DangerFullAccess), vec!["system".to_string()]);
+        runtime.set_context_window(200_000);
+        runtime.set_compaction_seat(Some(Arc::new(DropRead(acting))));
+        let result = runtime.compact(CompactionConfig { preserve_recent_messages: 2, max_estimated_tokens: 0 }, None);
+        assert_eq!(calls.load(Ordering::SeqCst), usize::from(!acting), "only an applied trim may skip generation");
+        assert_eq!(result.cleared_tool_results, usize::from(acting));
+        if acting {
+            assert!(result.summary.is_empty());
+            assert_eq!(result.compacted_session.messages.len(), messages_before);
+            runtime.apply_manual_compaction(result);
+            assert_eq!(runtime.session.messages.len(), messages_before);
+            assert_eq!(runtime.consecutive_microcompacts, 1, "retention cannot reset the thrash guard");
+            assert_eq!(runtime.full_compactions_this_turn, 0, "a trim is not a generated summary");
+            assert_eq!(Session::load_from_path(&path).unwrap().messages, runtime.session.messages);
+        }
+    }
 }
 
 /// P2a: the `/context` report names the window, the live occupancy split, every

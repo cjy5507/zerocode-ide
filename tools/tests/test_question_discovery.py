@@ -389,7 +389,13 @@ class RoundRules(unittest.TestCase):
     def test_a_revise_is_kept_only_when_dev_error_drops(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
-            asker = FakeAsker(sample(), informative)
+            def initial(qid, index, label):
+                if qid == "q_lean":
+                    return informative(qid, index, not label if index % 7 == 0 else label)
+                if qid == "q_lean__v2":
+                    return informative("noise_b", index, label)
+                return informative(qid, index, label)
+            asker = FakeAsker(sample(), initial)
             search = loop.Search("notify", "seed.json", tmp, asker, None, None, 300, 3)
             search.enumerate()
             search.round_zero()
@@ -409,6 +415,23 @@ class RoundRules(unittest.TestCase):
             self.assertIn("q_lean__v3", search.questions)
             self.assertNotIn("q_lean", search.questions)
             self.assertLess(better["devLogloss"], before)
+
+    def test_rescaling_the_same_information_is_not_a_question_improvement(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            asker = FakeAsker(sample(), informative)
+            search = loop.Search("notify", "seed.json", tmp, asker, None, None, 300, 2)
+            search.enumerate()
+            search.round_zero()
+            search.step(1, loop.Proposal(add={"q_lean": {"type": "noul", "instructions": "a", "yes": "y", "no": "n"}}))
+            before = search.history[-1]["devLogloss"]
+            asker.rule = lambda qid, i, label: (0.95 if label else 0.05) if qid == "q_lean__v2" else informative(qid, i, label)
+            result = search.step(2, loop.Proposal(revise={"q_lean": {"type": "noul", "instructions": "same evidence, rescaled", "yes": "y", "no": "n"}}))
+            self.assertEqual(result["revised"], [])
+            self.assertFalse(result["improved"])
+            self.assertEqual(result["devLogloss"], before)
+            self.assertIn("q_lean", search.questions)
+            self.assertNotIn("q_lean__v2", search.questions)
 
     def test_a_removal_is_kept_only_when_dev_error_drops(self):
         with tempfile.TemporaryDirectory() as raw:

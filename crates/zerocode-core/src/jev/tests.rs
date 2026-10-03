@@ -1715,7 +1715,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 31);
+    assert_eq!(JEV_USES.len(), 32);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -2017,7 +2017,7 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
     assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
     assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
-    assert_eq!(JEV_USES.len(), 31);
+    assert_eq!(JEV_USES.len(), 32);
     assert_eq!(JEV_USES.get(JEV_USES.len() - 4), Some(&FILE_PICK));
 }
 
@@ -3315,6 +3315,12 @@ fn every_seat_offers_no_option_without_the_words_that_say_what_it_means() {
                 {
                     Asked::InZo
                 }
+                id if id == PROJECT_RULES.id => Asked::Spelled(
+                    super::project_rules::CRITERIA
+                        .iter()
+                        .map(|(_, meaning)| *meaning)
+                        .collect(),
+                ),
                 id if id == JUDGMENT_CACHE.id => Asked::Nothing,
                 id => panic!("{id}: a seat the audit places nowhere"),
             },

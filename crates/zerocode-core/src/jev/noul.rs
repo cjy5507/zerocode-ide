@@ -72,6 +72,14 @@ impl NoulRefusal {
 /// [`NoulRefusal`] names the rule the answer broke.
 pub fn read(answers: &Value, question: &str) -> Result<f64, NoulRefusal> {
     let answer = answers.get(question).ok_or(NoulRefusal::NoAnswer)?;
+    read_value(answer)
+}
+
+/// Read a borrowed Noul without constructing a second answers object.
+///
+/// # Errors
+/// Returns the first answer rule that fails.
+pub fn read_value(answer: &Value) -> Result<f64, NoulRefusal> {
     if !super::choice::tagged(answer, NOUL) {
         return Err(NoulRefusal::NotANoul);
     }

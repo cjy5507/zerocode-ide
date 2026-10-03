@@ -813,6 +813,7 @@ impl PlainSession {
         hook_abort_signal: HookAbortSignal,
         user_cancel_requested: Arc<AtomicBool>,
     ) -> Result<runtime::TurnSummary, String> {
+        self.sync_project_rule_advice();
         self.runtime
             .set_hook_abort_signal(hook_abort_signal.clone());
         self.install_turn_stop(&hook_abort_signal);
@@ -996,6 +997,12 @@ impl PlainSession {
         let Some(inner) = self.runtime.try_runtime() else {
             return;
         };
+        if let Some(advice) = tools::pending_project_rule_advice(&self.cwd, &self.handle.id,
+            zerocode_core::jev::project_rules::ADVICE_CHAR_CAP) {
+            if project_rule_advice_persisted(inner.session(), &advice.key) {
+                tools::project_rule_advice_delivered(&self.cwd, &self.handle.id, &advice);
+            }
+        }
         let attempt = inner.attempt().to_string();
         if cancelled {
             let _ = tools::note_recall_read(&self.cwd, &attempt, true);
@@ -1030,6 +1037,24 @@ impl PlainSession {
         // The same turn's completion claims and tool lines meet beside r43;
         // the next person's turn labels the preceding answer.
         tools::note_claim_turn(&self.cwd, &self.handle.path, &attempt, &messages[from..]);
+        tools::note_project_rule_turn(&self.cwd, &self.handle.id, &attempt, &messages[from..]);
+    }
+
+    fn sync_project_rule_advice(&mut self) {
+        const PREFIX: &str = "[zo:project-rules:";
+        let advice = tools::pending_project_rule_advice(&self.cwd, &self.handle.id,
+            zerocode_core::jev::project_rules::ADVICE_CHAR_CAP);
+        let Some(inner) = self.runtime.try_runtime_mut() else { return; };
+        // A revoked mode/source removes an unsent transient note immediately.
+        inner.replace_transient_system_reminder_by_prefix(PREFIX, None);
+        if let Some(advice) = advice {
+            if project_rule_advice_persisted(inner.session(), &advice.key) {
+                tools::project_rule_advice_delivered(&self.cwd, &self.handle.id, &advice);
+            } else {
+                let prefix = format!("{PREFIX}{}]", advice.key);
+                inner.install_reminder_until_persisted(&prefix, Some(&advice.text));
+            }
+        }
     }
 
     /// 턴 후 영속 — 메시지는 이미 append 됐고, 헤더/압축 변경만 스냅샷.
@@ -2088,6 +2113,16 @@ fn session_has_goal_reminder(session: &Session) -> bool {
                 if text.contains(PERSISTENT_GOAL_REMINDER_PREFIX))
         })
     })
+}
+
+fn project_rule_advice_persisted(session: &Session, key: &str) -> bool {
+    let prefix = format!("[zo:project-rules:{key}]");
+    session.messages.iter().filter(|message| message.role == core_types::MessageRole::System)
+        .flat_map(|message| &message.blocks).any(|block| {
+            let core_types::ContentBlock::Text { text } = block else { return false; };
+            text.strip_prefix(core_types::session::REMINDER_TAG_OPEN).unwrap_or(text)
+                .trim_start_matches('\n').starts_with(&prefix)
+        })
 }
 
 /// Keep the standing objective on the runtime's reminder seam rather than in

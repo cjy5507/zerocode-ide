@@ -44,6 +44,71 @@ pub(crate) fn jev_day() -> Result<DayBudget, RouterRefusal> {
     Ok(typesafe_settings::read_day(&settings_path()?))
 }
 
+/// Read local review samples. Opening or refreshing this view never asks a model.
+#[tauri::command(async)]
+pub(crate) fn jev_review(
+    state: State<'_, AppState>,
+    seat: String,
+    seed: Option<u64>,
+    scope: Option<jev_scope::Scope>,
+) -> Result<serde_json::Value, String> {
+    use zerocode_core::jev::learning::{self, store::Store};
+    let feature =
+        zerocode_core::jev::jev_use(&seat).ok_or_else(|| "unknown Jev feature".to_string())?;
+    let path = settings_path().map_err(|error| error.message)?;
+    let home = path
+        .parent()
+        .ok_or_else(|| "settings file has no parent".to_string())?;
+    let settings = serde_json::Value::Object(api_routers::read_zo_settings_root(&path)?);
+    let workspace = zerocode_core::jev::door::resolved_path(&state.active_root());
+    let every_project = matches!(scope, Some(jev_scope::Scope::Projects));
+    let enabled = zerocode_core::jev::promote::label_drafts_wanted(&settings);
+    let review = Store::at(home)
+        .review(
+            Some(&seat),
+            (!every_project).then_some(workspace.as_str()),
+            5,
+            1,
+            seed.unwrap_or(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let gate = zerocode_core::jev::door::JevSettings::from_root(&settings);
+    Ok(serde_json::json!({"schemaVersion":1,"enabled":enabled,
+        "captureEnabled":enabled && gate.enabled && gate.consents(&workspace) && feature.mode_in(&settings).asks(),
+        "cases":review.cases,"invalid":review.invalid,"total":review.total,
+        "capacity":learning::store::MAX_CASES,"samples":review.samples}))
+}
+
+#[tauri::command(async)]
+pub(crate) fn set_jev_review_enabled(on: bool) -> Result<(), String> {
+    typesafe_settings::set_label_drafts(&settings_path().map_err(|error| error.message)?, on)
+}
+
+/// A person reviewed this exact case and question; the store validates both again.
+#[tauri::command(async)]
+pub(crate) fn jev_review_outcome(
+    case_id: String,
+    question: String,
+    correct: bool,
+    note: String,
+) -> Result<(), String> {
+    use zerocode_core::jev::learning::{Outcome, Reviewer, store::Store};
+    let path = settings_path().map_err(|error| error.message)?;
+    let home = path
+        .parent()
+        .ok_or_else(|| "settings file has no parent".to_string())?;
+    Store::at(home)
+        .outcome(Outcome {
+            case_id,
+            question,
+            correct,
+            note,
+            reviewer: Reviewer::Human,
+            at: crate::now_epoch_ms(),
+        })
+        .map_err(|error| error.to_string())
+}
+
 /// Turn Jev on or off — the one switch the card and the dashboard wear
 /// (docs/design/jev-settings-20260917.md §6.1). On consents every folder and
 /// hands every feature its recommended mode; off sends nothing.

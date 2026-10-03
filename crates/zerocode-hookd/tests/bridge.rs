@@ -1621,6 +1621,83 @@ impl zerocode_hookd::TurnBrief for StandingBrief {
 
 const BRIEF: &str = "[zo:file-pick] Likely files for this request: \"src/parser.rs\" (suggestions; verify or ignore).";
 
+struct ReceiptBrief {
+    delivered: AtomicUsize,
+    delay: Duration,
+}
+
+impl zerocode_hookd::TurnBrief for ReceiptBrief {
+    fn brief(&self, ask: zerocode_hookd::TurnBriefAsk) -> Option<String> {
+        if !ask.supports_receipts {
+            return None;
+        }
+        std::thread::sleep(self.delay);
+        Some("deferred advice".into())
+    }
+    fn needs_receipt(&self, _: &str) -> bool {
+        true
+    }
+    fn delivered(&self, _: &zerocode_hookd::TurnBriefAsk, _: &str) -> std::io::Result<()> {
+        self.delivered.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_brief_effect_waits_for_the_exact_clients_ack_and_a_late_producer_never_commits() {
+    for late in [false, true] {
+        let source = Arc::new(ReceiptBrief {
+            delivered: AtomicUsize::new(0),
+            delay: if late {
+                zerocode_hookd::TURN_BRIEF_WALL + Duration::from_millis(50)
+            } else {
+                Duration::ZERO
+            },
+        });
+        let (state, _events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+        let service = router(state.with_turn_brief(source.clone()));
+        let mut request: serde_json::Value =
+            serde_json::from_str(&prompt_body("term-3", "UserPromptSubmit", "same words")).unwrap();
+        request["deliveryId"] = serde_json::json!("p-one");
+        let response = service
+            .clone()
+            .oneshot(post_json("/hook/claude", Some(TOKEN), &request.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if late {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            }
+        );
+        let _ = response.into_body().collect().await.unwrap();
+        assert_eq!(
+            source.delivered.load(Ordering::SeqCst),
+            0,
+            "preparing a response is not delivery"
+        );
+        if late {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+        for launch in ["wrong", "launch-3", "launch-3"] {
+            let reply = service
+                .clone()
+                .oneshot(post(
+                    "/hook-receipt/claude",
+                    Some(TOKEN),
+                    &format!("pane_key=term-3&launch_token={launch}&delivery_id=p-one"),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(reply.status(), StatusCode::ACCEPTED);
+            let wanted = usize::from(!late && launch != "wrong");
+            assert_eq!(source.delivered.load(Ordering::SeqCst), wanted);
+        }
+    }
+}
+
 fn prompt_body(pane: &str, event: &str, prompt: &str) -> String {
     serde_json::json!({
         "paneKey": pane,
@@ -1697,6 +1774,8 @@ async fn a_brief_joins_the_prompts_context_after_the_vault_and_carries_nothing_e
             agent: AgentKind::Claude,
             pane_key: "term-3".to_string(),
             launch_token: "launch-3".to_string(),
+            session_id: Some("s-brief".to_string()),
+            supports_receipts: false,
             worktree: "/w/project".to_string(),
             prompt: "fix the parser".to_string(),
             wall: zerocode_hookd::TURN_BRIEF_WALL,

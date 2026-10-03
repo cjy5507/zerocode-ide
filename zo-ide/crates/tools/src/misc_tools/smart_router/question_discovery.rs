@@ -369,7 +369,7 @@ async fn ask(door: &JevDoor, client: &SystemOneClient, seat: Seat, row: &Row, qu
     let state_sent = keep_state
         .then(|| serde_json::from_slice::<Value>(cleared.bytes()).ok().map(|sent| sent["state"].clone()))
         .flatten();
-    let call = client.decide_body_once(cleared.into_bytes(), WALL).await;
+    let call = jev_gate::send_once(cleared, client, WALL).await;
     let mut asked = Asked {
         elapsed_ms: jev_gate::millis(call.elapsed), state_sent,
         requests: call.requests, retries: call.retries,

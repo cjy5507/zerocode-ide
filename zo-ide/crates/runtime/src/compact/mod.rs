@@ -78,6 +78,8 @@ impl Default for CompactionConfig {
 /// Result of compacting a session into a summary plus preserved tail messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionResult {
+    /// Tool results cleared while retaining original messages, without a generated summary.
+    pub cleared_tool_results: usize,
     pub summary: String,
     pub formatted_summary: String,
     pub compacted_session: Session,
@@ -107,10 +109,11 @@ pub struct CompactionPlan {
     /// from `session.compaction.anchor` (or parsed from a legacy continuation
     /// message on the first post-upgrade round). The next summary folds into it.
     pub existing_anchor: Option<AnchorSummary>,
-    /// Lightweight clone of the original session with messages cleared,
-    /// carrying only the metadata (id, timestamps, compaction state, fork).
-    /// Avoids cloning the entire message history (P0 L2).
+    /// Original session metadata and shared message Arc. The atomic replacement
+    /// needs the original view for rollback; cloning the Arc copies no bodies.
     session_shell: Session,
+    /// Actual, durably sealed relevance clears; shadow suggestions never set this.
+    relevance_dropped: usize,
 }
 
 /// Trait for generating a summary of messages being compacted.
@@ -403,8 +406,7 @@ pub fn prepare_compaction(session: &Session, config: CompactionConfig) -> Option
         keep_from -= 1;
     }
 
-    let mut session_shell = session.clone();
-    session_shell.messages = std::sync::Arc::new(Vec::new());
+    let session_shell = session.clone();
 
     Some(CompactionPlan {
         cache_prefix: session.messages[..compacted_prefix_len].to_vec(),
@@ -412,6 +414,7 @@ pub fn prepare_compaction(session: &Session, config: CompactionConfig) -> Option
         preserved_tail: session.messages[keep_from..].to_vec(),
         existing_anchor,
         session_shell,
+        relevance_dropped: 0,
     })
 }
 
@@ -447,6 +450,7 @@ pub fn apply_compaction(plan: CompactionPlan, raw_summary: &str) -> CompactionRe
         preserved_tail,
         existing_anchor,
         session_shell,
+        relevance_dropped: _,
     } = plan;
     let compacted_prefix_len = cache_prefix.len();
     drop(cache_prefix);
@@ -531,19 +535,68 @@ pub fn apply_compaction(plan: CompactionPlan, raw_summary: &str) -> CompactionRe
     // (index 0, the one new message) with the compaction's time; the preserved
     // tail was cloned from the live messages and keeps the time each carries,
     // which is why it is passed as messages and not rebuilt (t-18703).
+    let before_publish = std::sync::Arc::clone(&compacted_session.messages);
     compacted_session.apply_compaction_atomic(
         std::sync::Arc::new(compacted_messages),
         summary.clone(),
         removed_message_count,
         Some(folded_anchor),
     );
+    let applied = !std::sync::Arc::ptr_eq(&before_publish, &compacted_session.messages);
 
     CompactionResult {
-        summary,
-        formatted_summary,
+        cleared_tool_results: 0,
+        summary: if applied { summary } else { String::new() },
+        formatted_summary: if applied { formatted_summary } else { String::new() },
         compacted_session,
-        removed_message_count,
+        removed_message_count: if applied { removed_message_count } else { 0 },
     }
+}
+
+/// Whether applying the already-judged plan can retain original prose and skip
+/// the summarizer. The same cache payback rule as microcompaction applies, and
+/// enough room must remain below the caller's existing context threshold.
+pub(super) fn can_retain_originals(plan: &CompactionPlan, history_budget: usize, payback_requests: u64) -> bool {
+    if plan.relevance_dropped == 0 || history_budget == 0
+        || plan.session_shell.persistence_path().is_none()
+        || std::env::var_os("ZO_DISABLE_RAW_VAULT").is_some() {
+        return false;
+    }
+    let original = &plan.session_shell.messages;
+    let kept = plan.cache_prefix.iter().chain(&plan.messages_to_compact).chain(&plan.preserved_tail);
+    let after = kept.clone().map(estimate_message_tokens).sum::<usize>();
+    if kept.count() != original.len() || after >= history_budget { return false; }
+    let before = estimate_session_tokens(&plan.session_shell);
+    let from = plan.cache_prefix.len();
+    let frontier = original[from..].iter().zip(&plan.messages_to_compact)
+        .position(|(old, next)| old != next).map(|index| from + index);
+    // Text-only judgments cannot establish that the pixels in a result are
+    // dispensable. Keep the established summary fallback for those plans.
+    if original[from..].iter().zip(&plan.messages_to_compact).any(|(old, next)| {
+        old.blocks.iter().zip(&next.blocks).any(|(before, after)| before != after
+            && matches!(before, ContentBlock::ToolResult { images, .. } if !images.is_empty()))
+    }) { return false; }
+    let quote = MicrocompactQuote {
+        clearable_tokens: u64::try_from(before.saturating_sub(after)).unwrap_or(u64::MAX),
+        rebilled_tokens: frontier.map_or(0, |index| original[index..].iter().map(estimated_message_tokens).sum()),
+        frontier,
+    };
+    quote.clearable_tokens > 0 && quote.pays_back_within(payback_requests)
+}
+
+/// Publish already-sealed relevance clears while keeping every remaining block
+/// and all message indices intact. No model writes replacement prose.
+pub(super) fn retain_originals(plan: CompactionPlan) -> Result<CompactionResult, crate::session::SessionError> {
+    let CompactionPlan { cache_prefix, messages_to_compact, preserved_tail, session_shell,
+        relevance_dropped, .. } = plan;
+    let mut session = session_shell;
+    let messages = cache_prefix.into_iter().chain(messages_to_compact).chain(preserved_tail).collect();
+    session.replace_context_atomic(std::sync::Arc::new(messages))?;
+    Ok(CompactionResult {
+        cleared_tool_results: relevance_dropped,
+        summary: String::new(), formatted_summary: String::new(),
+        compacted_session: session, removed_message_count: 0,
+    })
 }
 
 /// A tool result's raw `(output, images)`, BORROWED from the source that holds
@@ -976,6 +1029,7 @@ pub fn compact_session_with<S: CompactionSummarizer>(
 ) -> CompactionResult {
     let Some(plan) = prepare_compaction(session, config) else {
         return CompactionResult {
+            cleared_tool_results: 0,
             summary: String::new(),
             formatted_summary: String::new(),
             compacted_session: session.clone(),
