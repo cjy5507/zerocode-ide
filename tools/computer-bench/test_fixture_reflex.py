@@ -2,6 +2,7 @@
 fixture's own record decides every success, and the runtime's receipts are a
 claim that record must confirm. Nothing here moves the pointer: every run is
 a record written in the shapes the fixture, the driver and the runner write."""
+import collections
 import copy
 import hashlib
 import json
@@ -583,7 +584,7 @@ class Runner(unittest.TestCase):
         import shutil
         shutil.rmtree(self.folder, ignore_errors=True)
 
-    def run_desk(self, seed, autopilot=None, keychain=None, pointer_ms=None, **env):
+    def run_desk(self, seed, autopilot=None, keychain=None, pointer_ms=None, kind=None, **env):
         desk = reflex.Desk(self.folder, self.values, LIMITS)
         with mock.patch.object(reflex.Bench, "hid_idle_s", return_value=VALUES["reflex_safety"]["idle_s"] + 1), \
                 mock.patch.object(reflex.Bench, "screen_locked", return_value=False), \
@@ -591,8 +592,17 @@ class Runner(unittest.TestCase):
                 mock.patch.object(reflex, "other_benches", return_value=[]), \
                 mock.patch.object(reflex, "keychain", keychain or (lambda service, value=False: None)), \
                 mock.patch.dict(os.environ, env):
-            return (desk.run(seed, self.driver, "/nowhere/helper.app", autopilot=autopilot, pointer_ms=pointer_ms),
+            return (desk.run(seed, self.driver, "/nowhere/helper.app", autopilot=autopilot, pointer_ms=pointer_ms,
+                             kind=kind),
                     self.folder / f"run-{seed}")
+
+    def test_a_run_of_a_kind_plays_that_kinds_round_and_its_row_and_config_say_so(self):
+        result, run = self.run_desk(39, kind="avoid")
+        self.assertEqual(json.loads((run / "round.json").read_text()).get("kind"), "avoid")
+        self.assertTrue(json.loads((run / "round.json").read_text())["schedule"].get("sweeps"), "the round has sweepers")
+        self.assertEqual(json.loads((run / "run.json").read_text()).get("kind"), "avoid")
+        self.assertEqual(result["config"], f"{reflex.CONFIG}+kind-avoid")
+        self.assertIn("kind", result["measure"] or {}, "the kind's own numbers are measured")
 
     def test_a_run_may_ask_for_a_glide_and_its_config_says_so(self):
         # The plan the runner writes for the hand glides as asked, the run's row and its config
@@ -1123,3 +1133,197 @@ class DeskHooks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def of_kind(kind, seed=7, press_after_ms=60):
+    """A record of a round of `kind` that did its job, in the shapes the fixture
+    writes for it: every target pressed `press_after_ms` after it was armed (a
+    timing round shows it as a preview before that), every sweeper cleared by a
+    move to its pad, every panel's card pressed in time."""
+    record = clean(seed)
+    schedule = reflex.schedule(seed, VALUES, kind=kind)
+    record["schedule"] = schedule
+    accepted, deadline = run_window(record)
+    events, frames = [], []
+    for target in schedule["targets"]:
+        appear, expire = T0 + target["appearMs"] * MS, T0 + target["expireMs"] * MS
+        armed = T0 + target.get("armMs", target["appearMs"]) * MS
+        if appear < accepted or expire > deadline:
+            continue
+        if armed > appear:
+            frames.append({"seq": len(frames) + 1, "ns": appear, "phase": target["phase"], "shown": [f"{target['id']}:preview"]})
+        frames.append({"seq": len(frames) + 1, "ns": armed, "phase": target["phase"], "shown": [target["id"]]})
+        at = armed + press_after_ms * MS
+        events.append({"n": 0, "kind": "down", "evNs": at, "rxNs": at + MS // 2, "x": target["x"], "y": target["y"],
+                       "sourcePid": HELPER, "userData": 99, "button": 0, "judged": {"hit": target["id"]}})
+        events.append({"n": 0, "kind": "up", "evNs": at + 8 * MS, "rxNs": at + 8 * MS + MS // 2, "x": target["x"],
+                       "y": target["y"], "sourcePid": HELPER, "userData": 99, "button": 0})
+    scenes = []
+    for sweep in schedule.get("sweeps") or []:
+        launched = T0 + sweep["appearMs"] * MS
+        arrived = launched + sweep["flightMs"] * MS
+        if launched < accepted or arrived > deadline:
+            continue
+        moved = launched + 90 * MS
+        events.append({"n": 0, "kind": "move", "evNs": moved, "rxNs": moved + MS // 2, "x": sweep["padX"], "y": sweep["padY"],
+                       "sourcePid": HELPER, "userData": 99})
+        scenes.append({"kind": "sweep", "id": sweep["id"], "launchedNs": launched, "arrivedNs": arrived, "outcome": "clear"})
+    events.sort(key=lambda event: event["evNs"])
+    for number, event in enumerate(events, start=1):
+        event["n"] = number
+    hits = sum(1 for event in events if "hit" in (event.get("judged") or {}))
+    record.update(events=events, frames=frames, scenes=scenes, receipts=[])
+    record["fixture"].update(downs=hits, ups=hits, hits=hits, misses={}, frames=len(frames))
+    record["run"]["kind"] = kind
+    return record
+
+
+class Kinds(unittest.TestCase):
+    """The round's kinds (t-26708; the coordinator's 19:14 framing): `plain`
+    is today's round; `timing` shows each target as a preview and arms it
+    after a while, so a press is measured against the moment it became
+    right; `avoid` sends a sweeper toward the resting pointer with a pad to
+    move to; `panel` shows each card among decoys for a limited time. Every
+    number is the seed's and the table's; nothing here moves the pointer."""
+
+    def test_plain_is_todays_round_and_a_kind_is_the_seeds_alone(self):
+        self.assertEqual(reflex.schedule(7, VALUES, kind="plain"), reflex.schedule(7, VALUES))
+        self.assertEqual(reflex.schedule(7, VALUES, kind="timing"), reflex.schedule(7, VALUES, kind="timing"))
+        self.assertNotEqual(reflex.schedule(7, VALUES, kind="timing"), reflex.schedule(7, VALUES))
+        self.assertNotEqual(reflex.schedule(7, VALUES, kind="avoid"), reflex.schedule(8, VALUES, kind="avoid"))
+
+    def test_a_timing_round_arms_each_target_after_its_preview_and_lives_from_the_arm(self):
+        drawn = reflex.schedule(7, VALUES, kind="timing")
+        table, life = VALUES["reflex_kind"]["timing"], VALUES["reflex_target"]["life_ms"]
+        self.assertGreater(len(drawn["targets"]), 100)
+        for target in drawn["targets"]:
+            self.assertIn("armMs", target)
+            self.assertTrue(table["preview_ms"][0] <= target["armMs"] - target["appearMs"] <= table["preview_ms"][1], target)
+            self.assertTrue(life[0] <= target["expireMs"] - target["armMs"] <= life[1], target)
+            phase = drawn["phases"][target["phase"]]
+            self.assertTrue(phase["startMs"] <= target["appearMs"] and target["expireMs"] <= phase["endMs"], target)
+
+    def test_an_avoid_round_launches_sweepers_one_at_a_time_with_a_pad_on_the_far_side(self):
+        drawn = reflex.schedule(7, VALUES, kind="avoid")
+        table, box = VALUES["reflex_kind"]["avoid"], reflex.field(VALUES)
+        sweeps = drawn.get("sweeps") or []
+        self.assertGreaterEqual(len(sweeps), 10)
+        middle = box["x"] + box["width"] / 2
+        for sweep in sweeps:
+            self.assertTrue(table["flight_ms"][0] <= sweep["flightMs"] <= table["flight_ms"][1], sweep)
+            self.assertEqual((sweep["width"], sweep["height"], sweep["padRadius"]),
+                             (table["width_pt"], table["height_pt"], table["pad_radius_pt"]))
+            from_left = sweep["fromX"] <= box["x"]
+            self.assertTrue(from_left or sweep["fromX"] >= box["x"] + box["width"], "launched from outside the field")
+            self.assertTrue(sweep["padX"] > middle if from_left else sweep["padX"] < middle, "the pad is on the far side")
+            self.assertTrue(box["x"] + sweep["padRadius"] <= sweep["padX"] <= box["x"] + box["width"] - sweep["padRadius"])
+            self.assertTrue(box["y"] + sweep["padRadius"] <= sweep["padY"] <= box["y"] + box["height"] - sweep["padRadius"])
+        for before, after in zip(sweeps, sweeps[1:]):
+            self.assertLessEqual(before["appearMs"] + before["flightMs"] + table["every_ms"][0], after["appearMs"])
+
+    def test_a_panel_round_shows_each_card_among_the_tables_decoys_for_its_limit(self):
+        drawn = reflex.schedule(7, VALUES, kind="panel")
+        table = VALUES["reflex_kind"]["panel"]
+        beside = collections.Counter(decoy.get("beside") for decoy in drawn["decoys"])
+        self.assertGreater(len(drawn["targets"]), 30)
+        for target in drawn["targets"]:
+            self.assertEqual(beside[target["id"]], table["cards"] - 1, target["id"])
+            self.assertTrue(table["life_ms"][0] <= target["expireMs"] - target["appearMs"] <= table["life_ms"][1], target)
+        for decoy in drawn["decoys"]:
+            target = next(row for row in drawn["targets"] if row["id"] == decoy["beside"])
+            self.assertEqual((decoy["appearMs"], decoy["expireMs"]), (target["appearMs"], target["expireMs"]),
+                             "a card shows with its panel")
+
+    def test_the_round_file_names_its_kind_and_carries_the_kinds_colours(self):
+        drawn = reflex.the_round(OWNER, 7, VALUES, LIMITS, kind="avoid")
+        self.assertEqual(drawn.get("kind"), "avoid")
+        for name in ("preview", "sweeper", "pad"):
+            self.assertIn(name, drawn["palette"])
+        plain = reflex.the_round(OWNER, 7, VALUES, LIMITS)
+        self.assertEqual(plain, reflex.the_round(OWNER, 7, VALUES, LIMITS, kind="plain"))
+        self.assertNotIn("sweeper", plain["palette"], "today's round bytes are untouched")
+        source = reflex.SOURCE.read_text()
+        for word in ("armMs", "sweeps", "padX", "preview"):
+            self.assertIn(word, source, f"the fixture reads {word}")
+
+    def test_a_kinds_plan_reads_the_kinds_colours_and_an_avoid_plan_moves_to_the_pad(self):
+        bundle = f"dev.zerocode.bench.reflex.{OWNER}"
+        avoid = reflex.plan(GEOMETRY, VALUES, bundle, reflex.contract(), kind="avoid")
+        by_id = {detector["id"]: detector for detector in avoid["detectors"]}
+        self.assertIn("pad", by_id)
+        added = VALUES["reflex_kind_palette"]
+        for detector in by_id.values():
+            classes = [(c["r"], c["g"], c["b"]) for c in detector["color"]["classes"]]
+            for name in ("preview", "sweeper", "pad"):
+                self.assertIn((added[name]["r"], added[name]["g"], added[name]["b"]), classes, detector["id"])
+        self.assertEqual(by_id["pad"]["color"]["anchors"], [], "the pad reads under either strip colour")
+        rule = next(row for row in avoid["rules"] if row["detector"] == "pad")
+        self.assertGreater(rule["priority"], max(row["priority"] for row in avoid["rules"] if row["detector"] != "pad"))
+        macro = next(row for row in avoid["macros"] if row["id"] == rule["macro_id"])
+        self.assertEqual([(action["kind"], action["target"]) for action in macro["actions"]], [("move", "pad")])
+        macros = {row["id"]: row for row in avoid["macros"]}
+        self.assertLessEqual(sum(row["max_fires"] * len(macros[row["macro_id"]]["actions"]) for row in avoid["rules"]),
+                             LIMITS["max_expanded_actions"])
+        timing = reflex.plan(GEOMETRY, VALUES, bundle, reflex.contract(), kind="timing")
+        self.assertEqual({detector["id"] for detector in timing["detectors"]}, set(reflex.COLOURS), "timing adds no detector")
+        self.assertEqual(reflex.plan(GEOMETRY, VALUES, bundle, reflex.contract(), kind="plain"),
+                         reflex.plan(GEOMETRY, VALUES, bundle, reflex.contract()))
+
+    def test_a_timing_rounds_numbers_read_the_press_against_the_arm_and_an_early_press_is_wrong(self):
+        record = of_kind("timing")
+        measured = reflex.measure(record, VALUES, LIMITS)
+        self.assertIn("kind", measured)
+        timing = measured["kind"]["timing"]
+        self.assertEqual(timing["arm_to_press_ms"]["p50"], 60)
+        self.assertEqual(timing["arm_to_press_ms"]["n"], measured["hits"])
+        self.assertEqual(timing["early"], 0)
+        self.assertEqual(reflex.verdict(record, VALUES, LIMITS)["verdict"], "pass", failed(reflex.verdict(record, VALUES, LIMITS)))
+        early = of_kind("timing")
+        first = next(event for event in early["events"] if event["kind"] == "down")
+        early["events"].append({**first, "n": 0, "evNs": first["evNs"] - 100 * MS, "rxNs": first["rxNs"] - 100 * MS,
+                                "judged": {"miss": "early", "near": first["judged"]["hit"]}})
+        early["events"].append({**first, "n": 0, "kind": "up", "evNs": first["evNs"] - 92 * MS, "rxNs": first["rxNs"] - 92 * MS,
+                                "judged": None})
+        early["fixture"]["downs"] += 1
+        early["fixture"]["ups"] += 1
+        measured = reflex.measure(early, VALUES, LIMITS)
+        self.assertEqual(measured["kind"]["timing"]["early"], 1)
+        self.assertEqual(measured["wrong_by_kind"].get("early"), 1)
+        self.assertIn("no wrong input", failed(reflex.verdict(early, VALUES, LIMITS)))
+
+    def test_an_avoid_rounds_numbers_count_the_sweepers_cleared_and_the_move_that_cleared_them(self):
+        record = of_kind("avoid")
+        measured = reflex.measure(record, VALUES, LIMITS)
+        self.assertIn("kind", measured)
+        avoid = measured["kind"]["avoid"]
+        self.assertGreaterEqual(avoid["launched"], 10)
+        self.assertEqual((avoid["clear"], avoid["struck"]), (avoid["launched"], 0))
+        self.assertEqual(avoid["clear_share"], 1.0)
+        self.assertEqual(avoid["reaction_ms"]["p50"], 90, "the first move after the launch")
+        self.assertEqual(avoid["reaction_ms"]["n"], avoid["launched"])
+        struck = of_kind("avoid")
+        struck["scenes"][0]["outcome"] = "struck"
+        measured = reflex.measure(struck, VALUES, LIMITS)
+        self.assertEqual(measured["kind"]["avoid"]["struck"], 1)
+        self.assertLess(measured["kind"]["avoid"]["clear_share"], 1.0)
+        self.assertFalse(reflex.floors(measured, VALUES)["kind"]["avoid"], "one struck sweeper of this many fails the floor")
+        self.assertTrue(reflex.floors(reflex.measure(record, VALUES, LIMITS), VALUES)["kind"]["avoid"])
+
+    def test_a_panel_rounds_numbers_are_the_in_time_share_against_the_random_pick(self):
+        record = of_kind("panel")
+        measured = reflex.measure(record, VALUES, LIMITS)
+        self.assertIn("kind", measured)
+        panel = measured["kind"]["panel"]
+        self.assertEqual(panel["panels"], measured["targets_due"]["run"])
+        self.assertEqual(panel["in_time"], panel["panels"])
+        self.assertEqual(panel["in_time_share"], 1.0)
+        self.assertEqual(panel["baseline_share"], 1 / VALUES["reflex_kind"]["panel"]["cards"])
+        gate = reflex.floors(measured, VALUES)
+        self.assertTrue(gate["kind"]["panel"])
+        late = of_kind("panel", press_after_ms=VALUES["reflex_kind"]["panel"]["life_ms"][1] + 50)
+        self.assertLess(reflex.measure(late, VALUES, LIMITS)["kind"]["panel"]["in_time_share"], 1.0)
+
+    def test_a_plain_round_measures_no_kind_and_its_floors_are_untouched(self):
+        measured = reflex.measure(clean(), VALUES, LIMITS)
+        self.assertIsNone(measured.get("kind"))
+        self.assertNotIn("kind", reflex.floors(measured, VALUES))

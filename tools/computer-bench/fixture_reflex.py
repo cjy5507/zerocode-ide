@@ -81,7 +81,7 @@ def field(values):
     return {"x": 0, "y": hud, "width": canvas["width"], "height": canvas["height"] - hud}
 
 
-def schedule(seed, values):
+def schedule(seed, values, kind=None):
     """The round's stimulus, drawn from `seed` and the table alone: phases of
     one colour, one target at a time inside its phase with a clean gap after
     it, still decoys of the other colour inside a target's life, and curtains
@@ -190,7 +190,7 @@ def colour_class(entry, tolerance=True):
     return {word: entry[word] for word in words}
 
 
-def plan(geometry, values, bundle, contract_version, rules=None, table_limits=None, pointer_ms=None):
+def plan(geometry, values, bundle, contract_version, rules=None, table_limits=None, pointer_ms=None, kind=None):
     """The plan the goal asks for, read off the window the window server named
     (`listWindows`) on the display it sits on (`displays`) and the table —
     never off the round: its reference extent is the display in points, its
@@ -941,7 +941,7 @@ def load(folder):
     }
 
 
-def the_round(owner, seed, values, table_limits):
+def the_round(owner, seed, values, table_limits, kind=None):
     """What the fixture plays: the round and everything it draws it with — no
     number of the fixture's own."""
     return {"owner": owner, "seed": seed, "canvas": values["reflex_canvas_pt"], "hud": values["reflex_hud_pt"],
@@ -971,6 +971,8 @@ class Desk:
         self.fixture = None
         # The glide the current run asked its plan for; None is the table's.
         self.pointer_ms = None
+        # The round's kind the current run plays; None is the plain round.
+        self.kind = None
 
     def run_folder(self, seed):
         # One run a seed, never reset: a folder that exists is a run that happened.
@@ -1064,7 +1066,7 @@ class Desk:
                 "frame_ms": spread(spans), "shown": sorted({name for frame in frames for name in frame["shown"]})[:12]}
 
     def run(self, seed, driver, helper_app, rules=None, autopilot=None, cover=None, cover_mode=None,
-            pointer_ms=None):
+            pointer_ms=None, kind=None):
         """One run: announce, re-check, the goal, the driver, the supervision,
         the verdict. `autopilot` ({"generator", "words"}) gives the driver
         bench.json's goal in place of a plan; `cover` (a cover_scenes scene)
@@ -1267,6 +1269,8 @@ def main(argv=None):
                         help="run --autopilot: the cover seat's word in the bench's own zo home (t-12979)")
     parser.add_argument("--pointer-ms", type=int,
                         help="run: the glide the hand's plan asks for, in ms (default: the table's pointer_ms)")
+    parser.add_argument("--kind", choices=["plain", "timing", "avoid", "panel"],
+                        help="run: the round's kind — plain (default), timing, avoid or panel (bench.json's reflex_kind)")
     args = parser.parse_args(argv)
     values, table_limits = tally.table(), limits()
     signals = Signals().install()
@@ -1291,7 +1295,8 @@ def main(argv=None):
                 import cover_scenes
                 scene = None if args.cover_seed is None else cover_scenes.draw(args.cover_seed, values)
                 result = desk.run(args.seed, args.driver, helper_app, rules=args.rules, autopilot=autopilot,
-                                  cover=scene, cover_mode=args.cover_mode, pointer_ms=args.pointer_ms)
+                                  cover=scene, cover_mode=args.cover_mode, pointer_ms=args.pointer_ms,
+                                  kind=args.kind)
         print(json.dumps(result, indent=2))
         return 0
     except Refused as why:
