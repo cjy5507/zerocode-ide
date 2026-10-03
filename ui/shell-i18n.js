@@ -3660,6 +3660,8 @@ const CATALOG = {
     "worktree.landTipDirty": "Tracked files have uncommitted changes",
     "worktree.landTipDirtyAge": "The unsaved-changes mark is what was read at {{time}}",
     "worktree.landPending": "Checking",
+    "worktree.landFailed": "Check failed",
+    "worktree.landTipFailed": "git could not say whether this landed in main — it will be asked again on the next refresh",
     "worktree.landTipPending": "Asking git whether this has landed in main",
     "worktree.landTipCleanable": "No active session — click to clean up in the inactive-workspace review",
     "worktree.attemptFailedTip": "Failed — the ledger has this attempt as ended without a successful report (the worker reported ok:false, or the attempt was stopped or abandoned)",

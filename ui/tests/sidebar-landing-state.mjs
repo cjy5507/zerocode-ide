@@ -44,6 +44,7 @@ const SCENE = [
   { path: "/r/noref", landing: base("no_ref", { compare_ref: "origin/gone", ref_updated_ms: null }) },
   { path: "/r/det", landing: base("landed", { detached: true }) },
   { path: "/r/unk", landing: base("unknown") },
+  { path: "/r/fail", landing: { state: "failed", detached: false, ahead: 0, dirty: false } },
   { path: "/r/pend", landing: { state: "pending", detached: false, ahead: 0, dirty: false } },
   { path: "/r/plain" },
 ];
@@ -61,6 +62,7 @@ const WANT = {
   "/r/det": { word: "반영됨 · 정리 가능", tone: "landed", cleanable: true },
   "/r/unk": { word: "확인 필요", tone: "check", cleanable: false },
   "/r/pend": { word: "확인 중", tone: "pending", cleanable: false },
+  "/r/fail": { word: "확인 실패", tone: "check", cleanable: false },
 };
 
 export async function testSidebarLandingState({ browser, origin, ok, faults }) {
@@ -172,9 +174,9 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
         chips["/r/ahead"].tip.includes(`${REF}에 없는 커밋이 13개`) &&
         chips["/r/dirty"].tip.includes("커밋하지 않은 변경") &&
         // When the unsaved mark was read is said in every tooltip git spoke in.
-        Object.entries(chips).filter(([path, one]) => one.tip && path !== "/r/pend")
+        Object.entries(chips).filter(([path, one]) => one.tip && !["/r/pend", "/r/fail"].includes(path))
           .every(([, one]) => one.tip.includes("저장 안 한 변경은") && one.tip.includes("에 확인한 값입니다")) &&
-        chips["/r/pend"].tip.includes("확인하는 중"),
+        chips["/r/pend"].tip.includes("확인하는 중") && chips["/r/fail"].tip.includes("다시 시도합니다"),
       JSON.stringify(Object.fromEntries(Object.entries(chips).map(([path, one]) => [path, one.tip]))),
     );
 

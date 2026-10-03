@@ -6,7 +6,7 @@ use super::*;
 /// 분류는 이 파일 한 곳에서만 한다. 사이드바 행과 git 패널 머리가 같은 값을
 /// 읽고, 뒤따르는 원장 알림 과업도 같은 값을 재사용한다.
 ///
-/// 여섯 상태, 그리고 서로 오분류하기 쉬운 쌍:
+/// 상태, 그리고 서로 오분류하기 쉬운 쌍:
 ///
 ///   - `landed`: 자기 커밋이 모두 비교 ref에 들어 있다 — 조상이거나, 병합 결과가
 ///     비교 ref의 나무와 같거나(squash·cherry-pick), `git cherry`가 모두 같은
@@ -16,6 +16,9 @@ use super::*;
 ///     같아 보이므로 **브랜치 reflog의 첫 줄(생성 지점)과 HEAD가 같은가**로
 ///     가른다. 비교 ref가 앞으로 가도 이 답은 변하지 않는다.
 ///   - `no_ref`: 비교 ref가 없거나 커밋을 가리키지 못한다.
+///   - `failed`: git이 답하지 못했거나 답하던 일이 죽었다(작업 폴더가 없어졌거나
+///     git 저장소가 아니거나, 분류 중 패닉). 옛 답을 계속 보이지 않고 이 말로
+///     바꾸며, 캐시에 서지 못하므로 다음 새로고침이 다시 시도한다.
 ///   - `unknown`: 조상인데 생성 지점을 읽을 자국이 없어 `landed`와 `no_commits`를
 ///     가를 수 없다(만료된 reflog, 복제본의 브랜치). 짐작하지 않는다.
 ///
@@ -49,6 +52,16 @@ pub(super) struct WorktreeLanding {
 }
 
 impl WorktreeLanding {
+    /// git could not answer for this row, or the job answering died.
+    fn failed(base: Option<&LandingBase>) -> Self {
+        Self {
+            state: "failed",
+            compare_ref: base.and_then(|base| base.name.clone()),
+            ref_updated_ms: base.and_then(|base| base.updated_ms),
+            ..Self::pending()
+        }
+    }
+
     /// A row the cache has never answered for. The list goes out with this, and
     /// the classification follows in the background (`run_landing_job`).
     fn pending() -> Self {
@@ -279,8 +292,14 @@ pub(super) fn spawn_landing_jobs(app: &AppHandle, jobs: Vec<LandingJob>) {
     }
 }
 
+/// How many rows of one job are classified at once. Each is a handful of git
+/// processes, and a catalog of thirty checkouts must not start them all together.
+const LANDING_PARALLEL: usize = 4;
+
 /// Answer a job's rows and call `notify` once if any of them now says something
-/// different from what the window was last given.
+/// different from what the window was last given. A row whose answer failed, or
+/// whose thread died, is held as `failed` — never as its old answer — and is
+/// asked again by the next read; a job that died as a whole fails every row.
 fn run_landing_job(job: &LandingJob, notify: &(dyn Fn() + Sync)) {
     // One job per repository at a time. A second read of the same catalog queues
     // behind the first and finds its rows already standing, which is cheaper
@@ -289,27 +308,79 @@ fn run_landing_job(job: &LandingJob, notify: &(dyn Fn() + Sync)) {
     let _turn = gate
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let host = Host::for_workspace(&job.repo_root);
-    let base = landing_base(&host, &job.repo_root, job.pinned.as_deref());
-    let moved = std::thread::scope(|scope| {
-        let handles: Vec<_> = job
-            .rows
-            .iter()
-            .map(|row| {
-                let (host, base) = (&host, &base);
-                scope.spawn(move || refresh_row(host, row, base))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .fold(false, |any, handle| handle.join().unwrap_or(false) || any)
-    });
+    let moved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| answer_rows(job)))
+        .unwrap_or_else(|_| {
+            for row in &job.rows {
+                hold_failure(&row.path, None);
+            }
+            true
+        });
     if moved {
         notify();
     }
 }
 
+fn answer_rows(job: &LandingJob) -> bool {
+    let host = Host::for_workspace(&job.repo_root);
+    let base = landing_base(&host, &job.repo_root, job.pinned.as_deref());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..job.rows.len().min(LANDING_PARALLEL))
+            .map(|_| {
+                let (host, base, next) = (&host, &base, &next);
+                scope.spawn(move || {
+                    let mut moved = false;
+                    while let Some(row) = job
+                        .rows
+                        .get(next.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+                    {
+                        moved |= answer_row(host, row, base);
+                    }
+                    moved
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .fold(false, |any, handle| handle.join().unwrap_or(true) || any)
+    })
+}
+
+fn answer_row(host: &Host, row: &LandingRow, base: &LandingBase) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        refresh_row(host, row, base)
+    }))
+    .unwrap_or_else(|_| {
+        hold_failure(&row.path, Some(base));
+        true
+    })
+}
+
+/// A failed answer is held under a key no real row has, so it never stands and
+/// the next read asks again; the window is told, because it differs from what it
+/// was given.
+fn hold_failure(path: &Path, base: Option<&LandingBase>) {
+    if let Ok(mut cache) = landing_cache().lock() {
+        cache.insert(
+            path.to_path_buf(),
+            HeldLanding {
+                key: String::new(),
+                landing: WorktreeLanding::failed(base),
+            },
+        );
+    }
+}
+
 fn refresh_row(host: &Host, row: &LandingRow, base: &LandingBase) -> bool {
+    #[cfg(test)]
+    {
+        if tests::PANIC_AT
+            .lock()
+            .is_ok_and(|at| at.as_deref() == Some(row.path.as_path()))
+        {
+            panic!("a landing job that dies (test)");
+        }
+    }
     let key = landing_key(row.head.as_deref(), row.branch.as_deref(), base);
     let before = held_landing(&row.path);
     if before
@@ -368,18 +439,23 @@ fn worktree_landing_within(
             ..held.landing.clone()
         };
     }
+    // The `status` goes first: it is what proves git can answer for this
+    // directory at all. A directory that is gone, or not a repository, is
+    // `failed` — held so it is asked again, never answered with a guess.
+    let Ok(status) = host
+        .vcs()
+        .text(path, &["status", "--porcelain", "--untracked-files=no"])
+    else {
+        hold_failure(path, Some(base));
+        return WorktreeLanding::failed(Some(base));
+    };
     let mut landing = match held {
         Some(held) if held.key == key => held.landing,
         _ => classify_landing(host, path, branch, head, base),
     };
     landing.compare_ref = base.name.clone();
     landing.ref_updated_ms = base.updated_ms;
-    landing.dirty = optional_git_text(
-        host,
-        path,
-        &["status", "--porcelain", "--untracked-files=no"],
-    )
-    .is_some();
+    landing.dirty = !status.trim().is_empty();
     landing.dirty_checked_ms = Some(now_ms());
     if let Ok(mut cache) = landing_cache().lock() {
         cache.insert(
@@ -562,12 +638,12 @@ fn classify_landing(
         landing.state = "landed";
         return landing;
     }
-    let ahead = host
-        .vcs()
-        .text(path, &["cherry", target, head])
-        .map_or(0, |said| {
-            said.lines().filter(|line| line.starts_with('+')).count()
-        });
+    // A `cherry` git could not run says nothing about the work; counting it as
+    // zero would be calling the work landed.
+    let Ok(cherry) = host.vcs().text(path, &["cherry", target, head]) else {
+        return landing;
+    };
+    let ahead = cherry.lines().filter(|line| line.starts_with('+')).count();
     if ahead == 0 {
         landing.state = "landed";
     } else {
@@ -669,6 +745,10 @@ fn commit_time(host: &Host, path: &Path, commit: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A seam for the one thing a test cannot make git do: a row whose answering
+    /// dies. The row at this path panics in `refresh_row`.
+    pub(super) static PANIC_AT: Mutex<Option<PathBuf>> = Mutex::new(None);
 
     fn git(repo: &Path, args: &[&str]) -> String {
         let output = crate::proc::quiet_command("git")
@@ -1081,5 +1161,110 @@ mod tests {
         assert_eq!(noticed(&job), 0);
         let mut last = [entry(&wt, "wt/quiet", &head)];
         assert!(plan_landings(&mut last, &bench.repo, None).is_none());
+    }
+
+    #[test]
+    fn a_row_git_cannot_answer_for_is_failed_not_its_old_answer_and_is_asked_again() {
+        let bench = Bench::open();
+        let plain = bench.root.join("plain");
+        std::fs::create_dir_all(&plain).expect("a directory that is not a repository");
+        let nothing = "0000000000000000000000000000000000000000";
+        let mut rows = [entry(&plain, "wt/plain", nothing)];
+        let job = plan_landings(&mut rows, &bench.repo, None).expect("first read");
+        assert_eq!(noticed(&job), 1);
+        let mut again = [entry(&plain, "wt/plain", nothing)];
+        let retry =
+            plan_landings(&mut again, &bench.repo, None).expect("a failed row never stands");
+        assert_eq!(
+            again[0].landing.as_ref().map(|one| one.state),
+            Some("failed")
+        );
+        // Still failing: asked again, and nothing new to tell, so no notice.
+        assert_eq!(noticed(&retry), 0);
+        // It becomes a repository: the next read's job answers and says so.
+        git(&plain, &["init", "-q"]);
+        let mut healed = [entry(&plain, "wt/plain", nothing)];
+        let job = plan_landings(&mut healed, &bench.repo, None).expect("still not standing");
+        assert_eq!(noticed(&job), 1);
+        let mut last = [entry(&plain, "wt/plain", nothing)];
+        plan_landings(&mut last, &bench.repo, None);
+        assert_ne!(
+            last[0].landing.as_ref().map(|one| one.state),
+            Some("failed")
+        );
+    }
+
+    #[test]
+    fn a_job_that_dies_fails_its_row_loudly_and_the_next_read_tries_again() {
+        let bench = Bench::open();
+        let wt = bench.worktree("dies");
+        let head = git(&wt, &["rev-parse", "HEAD"]);
+        let mut rows = [entry(&wt, "wt/dies", &head)];
+        let job = plan_landings(&mut rows, &bench.repo, None).expect("first read");
+        assert_eq!(noticed(&job), 1);
+        // Its old answer stands in the cache; the row's answering now dies.
+        bench.commit(&wt, "w.txt", "work\n");
+        let moved = git(&wt, &["rev-parse", "HEAD"]);
+        let mut next = [entry(&wt, "wt/dies", &moved)];
+        let job = plan_landings(&mut next, &bench.repo, None).expect("the head moved");
+        *PANIC_AT.lock().expect("seam") = Some(wt.clone());
+        assert_eq!(
+            noticed(&job),
+            1,
+            "the window is told, because the answer changed"
+        );
+        *PANIC_AT.lock().expect("seam") = None;
+        let mut failed = [entry(&wt, "wt/dies", &moved)];
+        let retry = plan_landings(&mut failed, &bench.repo, None).expect("failed never stands");
+        assert_eq!(
+            failed[0].landing.as_ref().map(|one| one.state),
+            Some("failed")
+        );
+        // The retry answers, which differs from the failure: noticed once, then it stands.
+        assert_eq!(noticed(&retry), 1);
+        let mut last = [entry(&wt, "wt/dies", &moved)];
+        assert!(plan_landings(&mut last, &bench.repo, None).is_none());
+        assert_eq!(
+            last[0].landing.as_ref().map(|one| one.state),
+            Some("unlanded")
+        );
+    }
+
+    #[test]
+    fn more_rows_than_the_cap_are_all_answered_by_the_few_workers() {
+        let bench = Bench::open();
+        let wts: Vec<PathBuf> = (0..LANDING_PARALLEL + 3)
+            .map(|at| bench.worktree(&format!("many{at}")))
+            .collect();
+        let mut rows: Vec<WorktreeEntry> = wts
+            .iter()
+            .enumerate()
+            .map(|(at, wt)| {
+                entry(
+                    wt,
+                    &format!("wt/many{at}"),
+                    &git(wt, &["rev-parse", "HEAD"]),
+                )
+            })
+            .collect();
+        let job = plan_landings(&mut rows, &bench.repo, None).expect("first read");
+        assert_eq!(noticed(&job), 1);
+        let mut again: Vec<WorktreeEntry> = wts
+            .iter()
+            .enumerate()
+            .map(|(at, wt)| {
+                entry(
+                    wt,
+                    &format!("wt/many{at}"),
+                    &git(wt, &["rev-parse", "HEAD"]),
+                )
+            })
+            .collect();
+        assert!(plan_landings(&mut again, &bench.repo, None).is_none());
+        assert!(
+            again
+                .iter()
+                .all(|one| one.landing.as_ref().map(|landing| landing.state) == Some("no_commits"))
+        );
     }
 }

@@ -3841,6 +3841,16 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
       cleanable: false,
     };
   }
+  // git could not answer, or the answering died. Never the old answer: the
+  // backend replaced it, and the next read asks again.
+  if (state === "failed") {
+    return {
+      word: t("worktree.landFailed", "확인 실패"),
+      tone: "check",
+      tip: t("worktree.landTipFailed", "git으로 main 반영 여부를 읽지 못했습니다 — 다음 새로고침에 다시 시도합니다"),
+      cleanable: false,
+    };
+  }
   const gitIn = state === "landed";
   const gitOut = state === "unlanded" || state === "no_commits";
   const ledgerOpen = phase === "review" || phase === "vouched" || phase === "unsettled";
