@@ -24,7 +24,7 @@ const REF = "origin/main";
 const NOW = Date.now();
 const LANDED_IN = { sha: "0123456789abcdef0123456789abcdef01234567", time_ms: NOW - 3 * 3600_000 };
 const base = (state, over = {}) => ({
-  state, detached: false, ahead: 0, dirty: false, compare_ref: REF, ref_updated_ms: NOW - 2 * 86_400_000, ...over,
+  state, detached: false, ahead: 0, dirty: false, dirty_max_age_s: 5, compare_ref: REF, ref_updated_ms: NOW - 2 * 86_400_000, ...over,
 });
 
 const SCENE = [
@@ -168,7 +168,9 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
         chips["/r/noref"].tip.includes("origin/gone") && !chips["/r/noref"].tip.includes("origin/gone를") && chips["/r/noref"].tip.includes("시각을 알 수 없음") &&
         chips["/r/unk"].tip.includes("가를 수 없습니다") &&
         chips["/r/ahead"].tip.includes(`${REF}에 없는 커밋이 13개`) &&
-        chips["/r/dirty"].tip.includes("커밋하지 않은 변경"),
+        chips["/r/dirty"].tip.includes("커밋하지 않은 변경") &&
+        // The delay the answer can have is said in every tooltip git spoke in.
+        Object.values(chips).filter((one) => one.tip).every((one) => one.tip.includes("최대 5초 늦을 수 있습니다")),
       JSON.stringify(Object.fromEntries(Object.entries(chips).map(([path, one]) => [path, one.tip]))),
     );
 

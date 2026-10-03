@@ -3899,6 +3899,11 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
       : t("worktree.landTipRefUnknown", "비교: {{ref}} · 마지막 갱신 시각을 알 수 없음", { ref }));
   }
   if (landing.dirty) lines.push(t("worktree.landTipDirty", "추적 중인 파일에 커밋하지 않은 변경이 있습니다"));
+  if (landing.dirty_max_age_s > 0) {
+    lines.push(t("worktree.landTipDirtyAge", "저장 안 한 변경 표시는 최대 {{seconds}}초 늦을 수 있습니다", {
+      seconds: landing.dirty_max_age_s,
+    }));
+  }
   if (cleanable) lines.push(t("worktree.landTipCleanable", "활성 세션이 없습니다 — 눌러서 비활성 워크스페이스 검토에서 정리하세요"));
   return { word, tone, tip: lines.join("\n"), cleanable };
 }

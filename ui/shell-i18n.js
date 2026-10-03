@@ -3658,6 +3658,7 @@ const CATALOG = {
     "worktree.landTipRef": "Compared with {{ref}} · last updated {{ago}} ago (this view never fetches)",
     "worktree.landTipRefUnknown": "Compared with {{ref}} · last update time unknown",
     "worktree.landTipDirty": "Tracked files have uncommitted changes",
+    "worktree.landTipDirtyAge": "The unsaved-changes mark can be up to {{seconds}} s late",
     "worktree.landTipCleanable": "No active session — click to clean up in the inactive-workspace review",
     "worktree.attemptFailedTip": "Failed — the ledger has this attempt as ended without a successful report (the worker reported ok:false, or the attempt was stopped or abandoned)",
     "worktree.stateStreaming": "Working",

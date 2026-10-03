@@ -29,6 +29,9 @@ pub(super) struct WorktreeLanding {
     pub(super) ahead: u32,
     /// 추적 중인 파일에 커밋하지 않은 변경이 있다. 캐시하지 않고 매번 읽는다.
     pub(super) dirty: bool,
+    /// How old, at most, the `dirty` answer can be — [`LANDING_DIRTY_TTL`] in
+    /// seconds. Sent so the tooltip says the delay the code has, not a copy of it.
+    pub(super) dirty_max_age_s: u64,
     /// 비교한 ref의 이름. 비교 ref가 아예 없으면 없다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) compare_ref: Option<String>,
@@ -311,6 +314,7 @@ fn classify_landing(
         detached: branch.is_none(),
         ahead: 0,
         dirty: false,
+        dirty_max_age_s: LANDING_DIRTY_TTL.as_secs(),
         compare_ref: base.name.clone(),
         ref_updated_ms: base.updated_ms,
         landed_in: None,
