@@ -8,6 +8,95 @@ use zerocode_core::{ALL_AGENTS, AgentKind};
 use zerocode_hookd::endpoint::EndpointFields;
 use zerocode_hookd::{BridgeState, env_var, install_hook_scripts, serve};
 
+struct ReceivedBrief(std::sync::atomic::AtomicUsize);
+
+impl zerocode_hookd::TurnBrief for ReceivedBrief {
+    fn brief(&self, ask: zerocode_hookd::TurnBriefAsk) -> Option<String> {
+        ask.supports_receipts
+            .then(|| "receipt-required context".into())
+    }
+    fn needs_receipt(&self, _: &str) -> bool {
+        true
+    }
+    fn delivered(&self, _: &zerocode_hookd::TurnBriefAsk, _: &str) -> std::io::Result<()> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Executes the platform's actual hook dialect and curl, including the stdout
+/// failure road. No interpreter beyond the platform's normal hook shell.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hook_acknowledges_only_context_it_successfully_forwards() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = Arc::new(ReceivedBrief(AtomicUsize::new(0)));
+    let (state, _events, _teams, _browser) =
+        BridgeState::new("receipt-test-key", "browser-test-key");
+    let (addr, _server) = serve(state.with_turn_brief(source.clone()), 0)
+        .await
+        .unwrap();
+    let script = dir
+        .path()
+        .join(if cfg!(windows) { "hook.cmd" } else { "hook.sh" });
+    std::fs::write(
+        &script,
+        if cfg!(windows) {
+            zerocode_hookd::hook_script_cmd(AgentKind::Claude)
+        } else {
+            zerocode_hookd::hook_script(AgentKind::Claude)
+        },
+    )
+    .unwrap();
+    for broken_output in [true, false] {
+        let script = script.clone();
+        let temp = dir.path().to_path_buf();
+        let output = tokio::task::spawn_blocking(move || {
+            let mut command = if cfg!(windows) {
+                let mut command = Command::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
+                command.args(["/d", "/c"]).arg(&script);
+                command
+            } else {
+                let mut command = Command::new("/bin/sh");
+                command.arg(&script);
+                command
+            };
+            command.env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("TEMP", &temp).env("TMPDIR", &temp)
+                .env(env_var::PORT, addr.port().to_string()).env(env_var::TOKEN, "receipt-test-key")
+                .env(env_var::PANE_KEY, "term-receipt").env(env_var::LAUNCH_TOKEN, "launch-receipt")
+                .env(env_var::WORKTREE_ID, &temp)
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            if let Some(value) = std::env::var_os("SYSTEMROOT") { command.env("SYSTEMROOT", value); }
+            let mut child = command.spawn().unwrap();
+            if broken_output { drop(child.stdout.take()); }
+            child.stdin.take().unwrap().write_all(br#"{"hook_event_name":"UserPromptSubmit","session_id":"s-receipt","prompt":"continue"}"#).unwrap();
+            child.wait_with_output().unwrap()
+        }).await.unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            source.0.load(Ordering::SeqCst),
+            usize::from(!broken_output),
+            "broken_output={broken_output}; stdout={}; stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !broken_output {
+            let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                body["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .unwrap()
+                    .contains("receipt-required context")
+            );
+        }
+    }
+}
+
 /// agy 1.2.11 rejects a PreToolUse reply without a decision, even when the
 /// status script exits successfully. Reporting must not decide permissions.
 #[cfg_attr(

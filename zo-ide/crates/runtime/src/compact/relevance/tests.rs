@@ -197,8 +197,8 @@ impl BlockHead {
 /// a quiet drift the ledger's `rubricVersion` never noticed.
 #[test]
 fn the_rubric_is_pinned_to_its_version() {
-    assert_eq!(COMPACTION_RUBRIC_VERSION, 1);
-    assert_eq!(rubric_fingerprint(rubric_words), "426c79112f852c13");
+    assert_eq!(COMPACTION_RUBRIC_VERSION, 2);
+    assert_eq!(rubric_fingerprint(rubric_words), "b1c2a446f4f57ec6");
 }
 
 fn answer(chosen: &str, drop: f64, confidence: f64) -> serde_json::Value {
@@ -344,6 +344,72 @@ fn a_seal_that_does_not_land_drops_nothing() {
 
 /// A seat that only says what it would drop.
 struct Says(CompactionJudgment);
+
+#[test]
+fn an_applied_relevance_trim_can_keep_original_messages_and_skip_a_summary() {
+    let _env = crate::test_env_lock();
+    let dir = tempfile::tempdir().expect("a session dir");
+    let path = dir.path().join("retained.jsonl");
+    let mut session = Session::new().with_persistence_path(&path);
+    for message in session_with_four_results().messages.iter() {
+        session.push_message(message.clone()).unwrap();
+    }
+    let before = session.messages.clone();
+    let base = session.first_message_index();
+    let (plan, judged) = api::sync_bridge::run_blocking(judge_plan(&Says(CompactionJudgment { dropped: vec![0], applies: true }),
+        &session, plan_of(&session), MIN_BYTES, "attempt"));
+    assert_eq!(judged.dropped, 1);
+    assert!(crate::compact::can_retain_originals(&plan, usize::MAX, 5));
+    assert!(!crate::compact::can_retain_originals(&plan, 1, 5), "insufficient room falls back");
+    let retained = crate::compact::retain_originals(plan).unwrap();
+    assert_eq!(retained.cleared_tool_results, 1);
+    assert_eq!(retained.removed_message_count, 0);
+    assert!(retained.summary.is_empty(), "no prose was generated");
+    assert_eq!(retained.compacted_session.messages.len(), before.len());
+    assert_eq!(retained.compacted_session.first_message_index(), base);
+    assert_eq!(retained.compacted_session.compaction, session.compaction);
+    for (index, (old, new)) in before.iter().zip(retained.compacted_session.messages.iter()).enumerate() {
+        if index == 2 {
+            let mut expected = old.clone();
+            let ContentBlock::ToolResult { output, .. } = &mut expected.blocks[0] else { panic!("the original result") };
+            *output = MICROCOMPACT_PLACEHOLDER.to_string();
+            assert_eq!(&expected, new, "only the original result's body changed");
+        } else { assert_eq!(old, new, "message {index} was retained verbatim"); }
+    }
+    let loaded = Session::load_from_path(&path).unwrap();
+    assert_eq!(loaded.messages, retained.compacted_session.messages, "cold resume keeps the same context");
+    assert!(loaded.read_vault().iter().any(|record| record.message.blocks.iter().any(
+        |block| matches!(block, ContentBlock::ToolResult { output, .. } if *output == big("READ_BODY"))
+    )), "the removed body remains recoverable");
+}
+
+#[test]
+fn shadow_answers_and_unpersisted_originals_do_not_take_the_retention_road() {
+    let _env = crate::test_env_lock();
+    let session = session_with_four_results();
+    for applies in [false, true] {
+        let (plan, _) = api::sync_bridge::run_blocking(judge_plan(&Says(CompactionJudgment { dropped: vec![0], applies }),
+            &session, plan_of(&session), MIN_BYTES, "attempt"));
+        assert!(!crate::compact::can_retain_originals(&plan, usize::MAX, 5));
+    }
+}
+
+#[test]
+fn a_summary_refused_by_a_peer_write_preserves_the_original_plan_and_reports_no_change() {
+    let _env = crate::test_env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peer.jsonl");
+    let mut writer = Session::new().with_persistence_path(&path);
+    for message in session_with_four_results().messages.iter() { writer.push_message(message.clone()).unwrap(); }
+    let stale = Session::load_from_path(&path).unwrap();
+    let plan = plan_of(&stale);
+    writer.push_user_text("new information from the current writer").unwrap();
+    drop(writer);
+    let result = apply_compaction(plan, "<summary>old state</summary>");
+    assert_eq!(result.compacted_session.messages, stale.messages, "rollback must not restore an empty shell");
+    assert_eq!(result.removed_message_count, 0);
+    assert!(Session::load_from_path(&path).unwrap().messages.len() > stale.messages.len());
+}
 
 impl CompactionSeat for Says {
     fn judge<'a>(&'a self, _ask: &'a CompactionAsk) -> BoxFuture<'a, CompactionJudgment> {

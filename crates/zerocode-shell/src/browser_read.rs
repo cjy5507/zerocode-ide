@@ -37,9 +37,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use zerocode_core::browser_read::{self, ReadAsk, Verdict, inside};
 use zerocode_core::jev::promote::SEAT_RECORDING;
-use zerocode_core::jev::summary::{
-    AGREED, APPLIED, AT, ELAPSED_MS, INPUT_TOKENS, LABEL, ROUTE_USE,
-};
+use zerocode_core::jev::summary::{AGREED, APPLIED, AT, ELAPSED_MS, LABEL, ROUTE_USE};
 use zerocode_core::jev::{
     BROWSER_READ, BROWSER_READ_APPLY_DEADLINE_MS, JevMode, ROUTE_USE_APPLIED, ROUTE_USE_FALLBACK,
 };
@@ -152,14 +150,6 @@ fn same_page(read: &str, now: &str) -> bool {
     cut(read) == cut(now)
 }
 
-/// The input tokens a System One body says it billed, if it says.
-fn input_tokens_of(body: &str) -> u64 {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|parsed| parsed["usage"]["input_tokens"].as_u64())
-        .unwrap_or(0)
-}
-
 /// Ask every shard side by side and wait for the slowest, under one wall.
 fn ask_shards(wire: &Wire, workspace: Option<&Path>, asks: &[ReadAsk]) -> Vec<Asked> {
     std::thread::scope(|scope| {
@@ -242,14 +232,6 @@ pub(crate) fn settle(
             .map(|asked| asked.request_bytes)
             .sum::<usize>()
     );
-    row[INPUT_TOKENS.canonical] = json!(
-        answers
-            .iter()
-            .filter_map(|asked| asked.answer.as_deref().ok())
-            .map(input_tokens_of)
-            .sum::<u64>()
-    );
-
     // Every shard read through the question it asked; the first that did
     // not come back whole names the row's outcome, and the page goes back
     // whole.
@@ -307,6 +289,9 @@ pub(crate) fn settle(
     row["outcome"] = json!(ANSWERED);
     row["chrome"] = json!(verdict.chrome.len());
     row["droppable"] = json!(droppable.len());
+    let acting = acting
+        && wire.permits_workspace_now(workspace)
+        && crate::systemone::applies(wire, &BROWSER_READ);
     let text = if acting {
         let folded = browser_read::fold(&page.blocks, &droppable, &full_hint(label));
         row["folded"] = json!(folded.dropped.len());

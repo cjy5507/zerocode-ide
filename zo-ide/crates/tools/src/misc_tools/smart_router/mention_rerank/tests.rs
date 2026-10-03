@@ -329,6 +329,47 @@ fn rows_settled(cwd: &Path, n: usize) -> Vec<MentionRerankRow> {
 
 const ANSWER_WAIT: Duration = Duration::from_secs(5);
 
+#[test]
+fn an_armed_page_rechecks_permissions_for_late_and_cached_rankings() {
+    use super::super::jev_mock::{SettingsChange, APPLICATION_CHANGES};
+    for change in APPLICATION_CHANGES {
+        let changed = SettingsChange::new(&MENTION_RERANK, change);
+        let during_reply = changed.clone();
+        let mock = Mock::answering(move |_| {
+            during_reply.apply();
+            (200, reply(&[0.1, 0.7, 0.2]))
+        });
+        machine("on", &mock.base_url, |cwd| {
+            changed.bind(&runtime::default_config_home());
+            let (seat, rx) = seat(cwd);
+            seat.arm_now();
+            let ask = page(&format!("permission change {change}"));
+            assert!(seat.ask(ask.clone()).is_some());
+            let received = rx.recv_timeout(ANSWER_WAIT).expect("answered page");
+            assert_eq!(received.applies, change == "none", "{change}");
+            assert_eq!(rows_settled(cwd, 1)[0].applied, change == "none", "{change}");
+            if change == "none" {
+                let revoke = SettingsChange::new(&MENTION_RERANK, "global_off");
+                revoke.bind(&runtime::default_config_home());
+                revoke.apply();
+                assert!(seat.ask(ask).is_some(), "the page remains armed");
+                let cached = rx.recv_timeout(ANSWER_WAIT).expect("cached observation");
+                assert!(!cached.applies);
+                let rows = rows_settled(cwd, 2);
+                assert!(rows[1].cached && !rows[1].applied);
+                assert_eq!(mock.requests().len(), 1);
+            } else if change == "off" {
+                assert!(seat.ask(page("a different page after the seat was switched off")).is_some());
+                let rows = rows_settled(cwd, 2);
+                assert_eq!(rows[1].outcome, "off");
+                assert_eq!(mock.requests().len(), 1, "an armed seat cannot send a new request after off");
+                assert!(rx.try_recv().is_err());
+            }
+            seat.disarm();
+        });
+    }
+}
+
 /// `off` is bytes-identical to a seat that does not exist: nothing armed,
 /// nothing asked, nothing sent, nothing written.
 #[test]

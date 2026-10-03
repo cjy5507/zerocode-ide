@@ -4322,6 +4322,11 @@
             <span data-jev-summary data-i18n="settings.typesafe.agent_toolSummary">워커와 에이전트가 예/아니오·고르기·점수 매기기를 자기 모델 대신 Jev에 맡깁니다. 켜면 그 답을 에이전트에게 돌려줍니다.</span>
             <p data-jev-hint data-i18n="settings.typesafe.agent_toolHint">zo의 Jev 도구와 zo jev ask|choose|score 명령이 이 기능입니다. 에이전트가 스스로 부를 때만 판단을 요청하고, 제품이 대신 부르는 일은 없습니다. 보내는 것은 에이전트가 적은 질문·맥락·선택지·수준·항목뿐이며, 각각 앞 2,000자로 자르고 비밀처럼 보이는 줄은 지웁니다. 「기록만」에서는 답을 기록만 하고 에이전트에게 넘기지 않아 무엇을 얼마나 묻는지 먼저 볼 수 있고, 켜면 답을 넘깁니다. 채점할 정답이 없어 자동으로 적용되지 않고, 건수·토큰·지연만 셉니다.</p>
           </div>
+          <div data-jev-feature="project_rules">
+            <span data-jev-name data-i18n="settings.typesafe.project_rules">프로젝트 규칙 점검</span>
+            <span data-jev-summary data-i18n="settings.typesafe.project_rulesSummary">턴이 끝나면 등록된 프로젝트 지침과 작업 근거를 대조합니다. 켜면 확인할 규칙을 다음 턴에 한 번 전달합니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.project_rulesHint">원문과 해시가 확인된 규칙만 점검하며, 지침이 바뀌면 정의를 다시 준비할 때까지 적용하지 않습니다. 확정적으로 검사할 항목은 코드로 확인하고, 해석이 필요한 규칙만 Jev에 묻습니다. 보내는 것은 해당 규칙, 요청·작업 근거·최종 응답의 제한된 부분입니다. 기록만 하는 모드에서는 알림을 전달하지 않으며, 판단이 오지 않거나 근거가 부족하면 위반으로 단정하지 않습니다.</p>
+          </div>
           <div data-jev-feature="browser_read">
             <span data-jev-name data-i18n="settings.typesafe.browser_read">웹페이지 잡음 제거</span>
             <span data-jev-summary data-i18n="settings.typesafe.browser_readSummary">에이전트가 웹페이지를 읽을 때 메뉴·푸터·배너 같은 블록이 본문인지 판단합니다. 켜면 본문이 아닌 블록을 접어서 넘깁니다.</span>

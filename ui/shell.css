@@ -42288,6 +42288,47 @@ h4.knowledge-inspector-head::after {
   font-weight: var(--jev-weight-strong);
 }
 
+.jev-review-cases, .jev-review-case, .jev-review-case form, .jev-review-note {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-2);
+}
+
+.jev-review-cases {
+  gap: var(--space-4);
+}
+
+.jev-review-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.jev-review-case pre {
+  max-height: 24em;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--jev-meta-size);
+}
+
+.jev-review-note textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 5em;
+  resize: vertical;
+  padding: var(--space-2);
+  color: var(--ink-chalk);
+  background: var(--surface-deck);
+  border: var(--jev-line) solid var(--edge-rule);
+  font: inherit;
+}
+
+.jev-review-case summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
 .jev-drawer-facts {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

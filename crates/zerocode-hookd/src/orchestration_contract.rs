@@ -115,6 +115,7 @@ pub struct PromptSubmission {
     /// The provider's own prompt event name, the one its reply must carry.
     pub event_name: String,
     pub session_key: String,
+    pub session_id: Option<String>,
     pub prompt: String,
 }
 
@@ -126,19 +127,21 @@ pub const MAX_PROMPT_READ_BYTES: usize = 4_096;
 #[must_use]
 pub fn prompt_submission(envelope: &HookEnvelope) -> Option<PromptSubmission> {
     let capability = envelope.agent.hook_additional_context()?;
-    let (event_name, session_id) = zerocode_core::hook::envelope_event_and_session(envelope);
-    let event_name = event_name?;
+    let payload = zerocode_core::payload::HookPayload::of(&envelope.payload);
+    let event_name = zerocode_core::hook::envelope_event_name_parsed(envelope, &payload)?;
     if normalized_event(&event_name) != normalized_event(capability.prompt_submit_event) {
         return None;
     }
-    let parsed = serde_json::from_str::<serde_json::Value>(&envelope.payload).ok()?;
-    let prompt = parsed.get("prompt")?.as_str()?.trim();
+    let session_id = zerocode_core::provider_session::session_in_parsed(envelope.agent, &payload)
+        .map(|session| session.id);
+    let prompt = payload.tree()?.get("prompt")?.as_str()?.trim();
     if prompt.is_empty() {
         return None;
     }
     Some(PromptSubmission {
         event_name: capability.prompt_submit_event.to_string(),
         session_key: session_key(envelope, session_id.as_deref()),
+        session_id,
         prompt: clip_utf8(prompt, MAX_PROMPT_READ_BYTES).to_string(),
     })
 }
@@ -423,7 +426,16 @@ mod tests {
         let read = prompt_submission(&prompt).expect("a prompt on the prompt event");
         assert_eq!(read.event_name, "UserPromptSubmit");
         assert_eq!(read.session_key, "claude:session:s-1");
+        assert_eq!(read.session_id.as_deref(), Some("s-1"));
         assert_eq!(read.prompt, "훅 다리를 고쳐 줘");
+
+        let mut unidentified = prompt.clone();
+        unidentified.payload = r#"{"hook_event_name":"UserPromptSubmit","session_id":"-not-a-session","prompt":"same words"}"#.into();
+        let unidentified = prompt_submission(&unidentified).expect("the prompt still has context");
+        assert!(
+            unidentified.session_id.is_none(),
+            "an invalid id cannot acknowledge another session's advice"
+        );
 
         let start = event(AgentKind::Claude, "p/1", "SessionStart", "s-1");
         assert_eq!(

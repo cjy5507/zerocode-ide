@@ -67,7 +67,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -500,9 +500,19 @@ def cross_validate(rows: list[Row], names: list[str], folds: int = FOLDS) -> dic
     for ridge in RIDGES if names else RIDGES[:1]:
         scores = out_of_fold(rows, names, ridge, folds)
         found = {"logloss": logloss(scores, labels), "auc": auc(scores, labels), "scores": scores, "ridge": ridge}
-        if best is None or found["logloss"] < best["logloss"]:
+        if best is None or improves(found["logloss"], best["logloss"]):
             best = found
     return best
+
+
+def improves(after: float, before: float) -> bool:
+    """Ignore arithmetic noise, including equivalent standardized columns.
+
+    This tolerance is only a numerical tie, not evidence of generalization;
+    the frozen held-out comparison still decides whether a question helps.
+    """
+    return (math.isfinite(after) and math.isfinite(before) and after < before
+            and not math.isclose(after, before, rel_tol=1e-9, abs_tol=1e-12))
 
 
 def resamples(n: int, count: int = BOOTSTRAP, seed: int = BOOTSTRAP_SEED) -> list[list[int]]:
@@ -684,7 +694,7 @@ def read_lines(path: Path) -> tuple[list[dict], dict]:
     return rows, summary
 
 
-Asker = Callable[[dict, Path, Path | None], dict]
+Asker = Callable[[dict, Path, Optional[Path]], dict]
 Proposer = Callable[[str], str]
 
 
@@ -959,7 +969,7 @@ class Search:
             del trial[qid]
             trial[f"{qid}__v{number}"] = spec
             score = cross_validate(self.dev, feature_names(trial, self.dev))
-            if score["logloss"] < current["logloss"]:
+            if improves(score["logloss"], current["logloss"]):
                 self.questions, current = trial, score
                 record["revised"].append(qid)
             else:
@@ -970,12 +980,12 @@ class Search:
             trial = dict(self.questions)
             del trial[qid]
             score = cross_validate(self.dev, feature_names(trial, self.dev))
-            if score["logloss"] < current["logloss"]:
+            if improves(score["logloss"], current["logloss"]):
                 self.questions, current = trial, score
                 record["removed"].append(qid)
             else:
                 record["dropped"][qid] = f"removal dev error {score['logloss']:.4f} ≥ {current['logloss']:.4f}"
-        improved = current["logloss"] < before["logloss"]
+        improved = improves(current["logloss"], before["logloss"])
         if not improved:
             # The rejected round remains in the research log, but its
             # questions never become the final candidate seen by holdout.

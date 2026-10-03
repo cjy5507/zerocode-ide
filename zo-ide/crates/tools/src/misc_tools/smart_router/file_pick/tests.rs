@@ -7,6 +7,36 @@ use zerocode_core::jev::fingerprint_of;
 use super::*;
 
 #[test]
+fn a_file_hint_rechecks_permissions_after_its_answer() {
+    use super::super::jev_mock::{machine, Mock, SettingsChange, APPLICATION_CHANGES};
+    for change in APPLICATION_CHANGES {
+        let changed = SettingsChange::new(&FILE_PICK, change);
+        let during_reply = changed.clone();
+        let mock = Mock::answering(move |body| {
+            during_reply.apply();
+            let request: Value = serde_json::from_str(body).unwrap();
+            let answers: serde_json::Map<String, Value> = request["questions"].as_object().unwrap()
+                .keys().map(|id| (id.clone(), json!({"type":"noul","noul":0.95}))).collect();
+            (200, json!({"model":"jev-test","answers":answers,
+                "usage":{"input_tokens":10,"output_tokens":0}}).to_string())
+        });
+        machine(&FILE_PICK, "on", &mock.base_url, |cwd| {
+            changed.bind(&runtime::default_config_home());
+            fs::write(cwd.join("target.rs"), "//! The target module.\npub fn target() {}\n").unwrap();
+            let ask = FilePickAsk { attempt: format!("settings-{change}"), session_id: "settings-session".into(),
+                request: "fix target implementation".into() };
+            let hint = api::sync_bridge::run_blocking(run_at_with_recent(
+                cwd.to_path_buf(), ask, Some(vec!["target.rs".into()])));
+            assert_eq!(hint.is_some(), change == "none", "{change}: {hint:?}");
+            let rows = super::super::jev_summary::read_rows(&file_pick_path(cwd));
+            assert_eq!(rows.len(), 1, "{change}: {rows:?}");
+            assert_eq!(rows[0]["applied"], change == "none", "{change}: {rows:?}");
+            assert_eq!(mock.requests().len(), 1);
+        });
+    }
+}
+
+#[test]
 fn candidates_are_workspace_relative_and_send_only_a_comment_line() {
     let workspace = tempdir().expect("workspace");
     let src = workspace.path().join("src");

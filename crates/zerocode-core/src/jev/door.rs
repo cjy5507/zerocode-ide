@@ -361,11 +361,19 @@ pub enum Refused {
     NotConsented,
     /// The day's budget is spent.
     Budget,
+    /// The model pin changed after the caller prepared this batch.
+    SettingsChanged,
 }
 
 impl Refused {
     /// Every refusal, in the order the door asks.
-    pub const ALL: [Self; 4] = [Self::NoKey, Self::Off, Self::NotConsented, Self::Budget];
+    pub const ALL: [Self; 5] = [
+        Self::NoKey,
+        Self::Off,
+        Self::NotConsented,
+        Self::Budget,
+        Self::SettingsChanged,
+    ];
 
     /// The token a ledger row, a counter and a pane name this refusal by.
     #[must_use]
@@ -375,6 +383,7 @@ impl Refused {
             Self::Off => JevMode::Off.key(),
             Self::NotConsented => "not_consented",
             Self::Budget => "budget",
+            Self::SettingsChanged => "settings_changed",
         }
     }
 
@@ -406,9 +415,33 @@ pub struct Asking<'a> {
 pub struct Cleared {
     bytes: Vec<u8>,
     withheld_lines: usize,
+    review: Option<super::learning::store::Target>,
 }
 
 impl Cleared {
+    /// Attach local evidence retention only after the host read the existing
+    /// label-draft preference. This metadata is never sent to the provider.
+    #[must_use]
+    pub fn with_review(mut self, home: &Path, seat: &JevUse, workspace: &str) -> Self {
+        self.review = Some(super::learning::store::Target::new(home, seat, workspace));
+        self
+    }
+
+    /// Attach a real local session/task identity without changing wire bytes.
+    #[must_use]
+    pub fn with_review_origin(mut self, namespace: &str, origin: &str) -> Self {
+        if let Some(target) = &mut self.review {
+            target.bind_origin(namespace, origin);
+        }
+        self
+    }
+
+    /// Prepare a bounded copy only for a request opted into local review.
+    #[must_use]
+    pub fn prepare_review(&self) -> Option<super::learning::store::Pending> {
+        super::learning::store::Pending::prepare(self.review.as_ref()?, &self.bytes)
+    }
+
     /// The request body, exactly as it may be sent.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
@@ -454,6 +487,7 @@ pub fn may_send(row: &JevUse, asking: &Asking<'_>, mut body: Value) -> Result<Cl
     Ok(Cleared {
         bytes: body.to_string().into_bytes(),
         withheld_lines,
+        review: None,
     })
 }
 
@@ -472,6 +506,7 @@ pub fn may_check_key(asking: &Asking<'_>, body: &Value) -> Result<Cleared, Refus
     Ok(Cleared {
         bytes: body.to_string().into_bytes(),
         withheld_lines: 0,
+        review: None,
     })
 }
 

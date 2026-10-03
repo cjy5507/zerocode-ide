@@ -267,9 +267,8 @@ async fn judge_at(cwd: &Path, ask: &CompactionAsk) -> CompactionJudgment {
     let Some(mode) = asking_mode(cwd) else {
         return CompactionJudgment::default();
     };
-    // Read once, here: the standing decides whether the dropped blocks leave
-    // the summary's input, and two readings of one ledger could answer that
-    // twice.
+    // The initial permission cannot be widened by a change during the request.
+    // It is checked again before the answer changes live context.
     let acting = mode.applies_with(runtime::jev_seat_applies(cwd, &COMPACTION));
     let opened_at = cwd.to_path_buf();
     let Ok(door) = tokio::task::spawn_blocking(move || JevDoor::open(&opened_at)).await else {
@@ -277,8 +276,12 @@ async fn judge_at(cwd: &Path, ask: &CompactionAsk) -> CompactionJudgment {
         return CompactionJudgment::default();
     };
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
-    let (row, dropped) = judge(&door, client.as_ref(), ask, acting).await;
-    let (row, judgment) = settle(mode, acting, row, dropped);
+    let (mut row, dropped) = judge(&door, client.as_ref(), ask, acting).await;
+    let still_acts = acting && door.permits_application_now()
+        && asking_mode(cwd).is_some_and(|current| current.applies_with(runtime::jev_seat_applies(cwd, &COMPACTION)));
+    if acting && !still_acts { row.rejected = Some("settings_changed".to_string()); }
+    let settled_mode = if acting && !still_acts { JevMode::Shadow } else { mode };
+    let (row, judgment) = settle(settled_mode, still_acts, row, dropped);
     let ledger = compaction_relevance_path(cwd);
     if row.outcome == COMPACTION_OUTCOME_ANSWERED {
         remember_blocks(cwd, &row, ask, &judgment.dropped);
@@ -380,7 +383,7 @@ async fn ask_one(
         return refused(failure.ledger_token());
     };
     let (cleared, client) = match (door.pass(&COMPACTION, client.is_some(), body), client) {
-        (Ok(cleared), Some(client)) => (cleared, client),
+        (Ok(cleared), Some(client)) => (cleared.with_review_origin("zo/session", &ask.session_id), client),
         (passed, _) => {
             let refusal = passed.err().unwrap_or(Refused::NoKey);
             telemetry::attest_declined(telemetry::HarnessFeature::DecisionShadow, refusal.token());

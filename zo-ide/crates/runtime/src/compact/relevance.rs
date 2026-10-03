@@ -79,8 +79,8 @@ pub const DROP_MEANS: &str = "This result has served its purpose: what mattered 
 /// The instructions every block question carries, before its own place is
 /// named: one sentence, so a reader of the ledger and a reader of the wire
 /// see the same rubric.
-pub const INSTRUCTIONS_HEAD: &str = "The conversation is about to be summarized. Given `goal` (the person's \
-    last request) and `recent` (the assistant's newest words), will the summary still need to read";
+pub const INSTRUCTIONS_HEAD: &str = "The conversation needs a smaller context. Given `goal` (the person's \
+    last request) and `recent` (the assistant's newest words), will the remaining work still need the full content of";
 
 /// One tool result the seat is asked about: where it sits in the plan, the
 /// call that produced it, and the head of what it produced.
@@ -125,6 +125,8 @@ fn position_of(question_id: &str) -> Option<usize> {
 /// newest words and every candidate block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionAsk {
+    /// Local provenance for grouped evaluation; never included in wire state.
+    pub session_id: String,
     /// The turn the compaction runs inside, as the runtime names it.
     pub attempt: String,
     /// The person's last request — the goal the remaining work serves.
@@ -281,6 +283,7 @@ pub fn ask_for(
         return None;
     }
     Some(CompactionAsk {
+        session_id: session.session_id.clone(),
         attempt: attempt.to_string(),
         goal,
         recent: newest_words(session, MessageRole::Assistant),
@@ -544,6 +547,7 @@ pub async fn judge_plan(
     } else {
         0
     };
+    plan.relevance_dropped = dropped;
     (plan, Judged { asked, dropped })
 }
 

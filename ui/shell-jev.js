@@ -563,6 +563,8 @@ const JEV_TOKENS = Object.freeze({
   no_key: { key: "jev.token.noKey", word: "API 키 없음", fix: "key", saidKey: "settings.typesafe.noKey", said: "zo가 키를 찾지 못했습니다 — 키를 저장한 뒤 다시 확인하세요." },
   unauthorized: { key: "jev.token.unauthorized", word: "키 거절", fix: "key", saidKey: "settings.typesafe.unauthorized", said: "키가 거절되었습니다 — 키를 다시 확인하세요." },
   not_consented: { key: "jev.token.notConsented", word: "동의 안 된 폴더", fix: "consent" },
+  settings_changed: { key: "jev.token.settingsChanged", word: "설정 변경으로 취소됨" },
+  rules_unavailable: { key: "jev.token.rulesUnavailable", word: "규칙 정의를 확인하거나 다시 준비해야 함" },
   budget: { key: "jev.token.budget", word: "하루 한도 초과", fix: "budget" },
   timeout: { key: "jev.token.timeout", word: "시간 초과" },
   schema: { key: "jev.token.schema", word: "형식 오류" },
@@ -2253,6 +2255,7 @@ function paintJevDrawer(view, id, held) {
     if (press && press.getAttribute("aria-expanded") !== String(open)) press.setAttribute("aria-expanded", String(open));
   }
   if (id === null) return;
+  jevReviewPart(drawer, id);
   const standing = jevSeat(typesafeState ?? {}, id);
   // Drawn again when its feature's numbers, its switch or the language moved
   // — or a minute passed, which moves how long ago its last judgments were.
@@ -2363,6 +2366,151 @@ function paintJevDrawer(view, id, held) {
   jevFacts(part("version").querySelector("dl"), models);
 
   part("sends").querySelector(".jev-drawer-text").textContent = feature.hint ? t(feature.hint.key, feature.hint.source) : "";
+}
+
+/* Evidence is loaded on an explicit press, never on the dashboard's poll.
+ * A drawer generation owns its response and its buttons own the case they show. */
+const jevReviewStates = new WeakMap();
+
+function jevReviewPart(drawer, seat) {
+  const scope = jevScopeChoice;
+  const context = `${scope}:${jevScope?.workspace ?? ""}`;
+  let state = jevReviewStates.get(drawer);
+  if (!state) {
+    const section = jevNode("section", "jev-drawer-part jev-review");
+    const title = jevText("jev.review.title", "판단 검토", "h3", "jev-drawer-heading");
+    const about = jevText("jev.review.about", "확신이 낮은 판단과 무작위 표본을 살펴보고 실제 결과를 남깁니다.", "p", "jev-drawer-text");
+    const load = jevText("jev.review.load", "표본 불러오기", "button", "btn");
+    load.type = "button";
+    const status = jevNode("p", "jev-drawer-text");
+    status.setAttribute("role", "status");
+    const content = jevNode("div", "jev-review-cases");
+    section.append(title, about, load, status, content);
+    drawer.append(section);
+    state = { seat, scope, context, generation: 0, seed: 0, load, status, content };
+    jevReviewStates.set(drawer, state);
+    load.addEventListener("click", () => { void jevLoadReviews(drawer); });
+  }
+  if (state.seat !== seat || state.context !== context) {
+    state.seat = seat;
+    state.scope = scope;
+    state.context = context;
+    state.generation += 1;
+    state.load.disabled = false;
+    state.status.textContent = "";
+    state.content.replaceChildren();
+  }
+}
+
+async function jevLoadReviews(drawer) {
+  const state = jevReviewStates.get(drawer);
+  if (!state || state.load.disabled) return;
+  const generation = ++state.generation;
+  const seat = state.seat;
+  state.load.disabled = true;
+  state.status.textContent = t("jev.review.loading", "검토 기록을 읽는 중…");
+  try {
+    const data = await invoke("jev_review", { seat, scope: state.scope, seed: state.seed++ });
+    if (state.generation !== generation || state.seat !== seat) return;
+    state.content.replaceChildren();
+    const label = jevNode("label", "jev-review-toggle");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(data.enabled);
+    label.append(checkbox, jevText("jev.review.capture", "검토용 입력·응답 저장"));
+    checkbox.addEventListener("change", async () => {
+      const wanted = checkbox.checked;
+      checkbox.disabled = true;
+      try {
+        await invoke("set_jev_review_enabled", { on: wanted });
+        if (state.generation === generation) state.status.textContent = t("jev.review.preferenceSaved", "검토 기록 저장 설정을 반영했습니다.");
+      } catch (error) {
+        checkbox.checked = !wanted;
+        if (state.generation === generation) state.status.textContent = String(error);
+      } finally { checkbox.disabled = false; }
+    });
+    state.content.append(label);
+    const samples = Array.isArray(data.samples) ? data.samples : [];
+    state.status.textContent = samples.length
+      ? t("jev.review.count", "검토할 표본 {{count}}건", { count: samples.length })
+      : t("jev.review.empty", "검토할 기록이 없습니다.");
+    if (data.total >= data.capacity) {
+      state.content.append(jevText("jev.review.full", "검토 기록이 저장 한도에 도달했습니다. 기록을 내보내고 보관 상태를 확인하세요.", "p", "jev-drawer-text"));
+    }
+    if (data.invalid > 0) {
+      const warning = jevNode("p", "jev-drawer-text");
+      warning.textContent = t("jev.review.invalid", "읽을 수 없는 기록 {{count}}건은 제외했습니다.", { count: data.invalid });
+      state.content.append(warning);
+    }
+    for (const sample of samples) jevRenderReview(state.content, sample);
+  } catch (error) {
+    if (state.generation === generation) state.status.textContent = String(error);
+  } finally {
+    if (state.generation === generation) state.load.disabled = false;
+  }
+}
+
+function jevRenderReview(host, sample) {
+  const item = sample.case;
+  if (!item || typeof item.id !== "string") return;
+  const card = jevNode("article", "jev-review-case");
+  const reason = sample.reason === "audit"
+    ? t("jev.review.audit", "무작위 점검") : t("jev.review.uncertain", "불확실한 판단");
+  const heading = jevNode("p", "jev-drawer-text");
+  heading.textContent = `${reason} · ${item.model} · v${item.rubricVersion}`;
+  const details = document.createElement("details");
+  const summary = jevText("jev.review.evidence", "판단 당시 입력과 응답", "summary");
+  const evidence = document.createElement("pre");
+  evidence.tabIndex = 0;
+  evidence.dataset.keyboardOwner = "jev-review";
+  evidence.setAttribute("role", "region");
+  evidence.setAttribute("aria-label", summary.textContent);
+  evidence.textContent = JSON.stringify({ workspace: item.workspace, request: item.request, answers: item.answers }, null, 2);
+  details.append(summary, evidence);
+  card.append(heading, details);
+  for (const question of sample.remaining ?? []) {
+    const form = document.createElement("form");
+    const label = jevNode("label", "jev-review-note");
+    const name = jevNode("span");
+    name.textContent = question;
+    const note = document.createElement("textarea");
+    note.maxLength = 1000;
+    note.placeholder = t("jev.review.note", "실제 결과나 확인 근거");
+    note.setAttribute("aria-label", `${question} · ${note.placeholder}`);
+    label.append(name, note);
+    const status = jevNode("p", "jev-drawer-text");
+    status.setAttribute("role", "status");
+    const buttons = [
+      [true, jevText("jev.review.correct", "맞음", "button", "btn")],
+      [false, jevText("jev.review.incorrect", "틀림", "button", "btn")],
+    ].map(([correct, button]) => {
+      button.type = "button";
+      button.disabled = true;
+      button.addEventListener("click", async () => {
+        if (!note.value.trim() || form.dataset.saving) return;
+        form.dataset.saving = "true";
+        note.disabled = true;
+        buttons.forEach((held) => { held.disabled = true; });
+        try {
+          await invoke("jev_review_outcome", { caseId: item.id, question, correct, note: note.value.trim() });
+          status.textContent = t("jev.review.saved", "검토 결과를 저장했습니다.");
+          form.dataset.saved = "true";
+        } catch (error) {
+          status.textContent = String(error);
+          note.disabled = false;
+          buttons.forEach((held) => { held.disabled = !note.value.trim(); });
+        } finally { delete form.dataset.saving; }
+      });
+      return button;
+    });
+    note.addEventListener("input", () => {
+      if (!form.dataset.saved && !form.dataset.saving) buttons.forEach((button) => { button.disabled = !note.value.trim(); });
+    });
+    form.addEventListener("submit", (event) => { event.preventDefault(); });
+    form.append(label, jevNode("div", "jev-actions", ...buttons), status);
+    card.append(form);
+  }
+  host.append(card);
 }
 
 /* One feature's row, built once: a cell per column. */

@@ -778,6 +778,7 @@ pub(super) fn active_assessments(
             .into_iter()
             .map(|shot| judge(&door, client.as_ref(), shot, attempt, deadline, true, line)),
     ));
+    let still_acts = door.permits_application_for(&cwd, &ROUTING);
     let mut by_task = HashMap::with_capacity(judgments.len());
     // The sample is drawn from what was judged, not from what was asked: a
     // control row compares the probe with a judgment, and a task the judgment
@@ -785,7 +786,13 @@ pub(super) fn active_assessments(
     let mut sampled: HashMap<u64, SampledJudgment> = HashMap::new();
     let rows: Vec<DecisionShadowRow> = judgments
         .into_iter()
-        .map(|judgment| {
+        .map(|mut judgment| {
+            if !still_acts {
+                judgment.assessment = None;
+                if judgment.row.route_use == DecisionRouteUse::Applied {
+                    judgment.row.route_use = DecisionRouteUse::RecordOnly;
+                }
+            }
             by_task.insert(judgment.task, judgment.assessment);
             // Drawn from what acted: a control row measures how many routes
             // applying the judgment moved, and an abstained answer moved none

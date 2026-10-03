@@ -309,7 +309,9 @@ async fn review_and_write(
     acting: bool,
 ) -> PatchReview {
     let (row, answers) = judge(&door, client.as_ref(), &ask).await;
-    let (row, verdict, note) = settle(mode, acting, row, answers.as_ref());
+    let still_acts = acting && door.permits_application_for(&cwd, &PATCH_REVIEW);
+    let mode = if acting && !still_acts { JevMode::Shadow } else { mode };
+    let (row, verdict, note) = settle(mode, still_acts, row, answers.as_ref());
     settle_verdict(&cwd, &ledger, &row.judged.to_string(), verdict, row.applied);
     // The row and the judge after it read and write the ledger — the whole of
     // it, for the judge — and nothing the result carries waits on either.

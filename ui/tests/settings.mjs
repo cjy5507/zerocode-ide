@@ -116,6 +116,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "step_effort", setting: "zoStepEffort", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "compaction", setting: "jevCompaction", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "agent_tool", setting: "agentTool", modes: "off shadow on", recommended: "on" }),
+  Object.freeze({ id: "project_rules", setting: "projectRules", modes: "off shadow on", recommended: "on" }),
   Object.freeze({ id: "browser_read", setting: "jevBrowserRead", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "notify", setting: "jevNotify", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "mention_rerank", setting: "jevMentionRerank", modes: "off shadow on auto", recommended: "auto" }),

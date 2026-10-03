@@ -85,6 +85,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
     tool_context
         .tasks
         .set_completion_callback(Some(std::sync::Arc::new(task_completion)));
+    let skill_session = Arc::clone(&tool_context.session_id);
     let tool_registry: GlobalToolRegistry =
         GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)
             .map_err(|e| e.to_string())?
@@ -114,7 +115,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         // Seated at every public prompt boundary; its default mode records
         // candidate rankings until the same turn's edited files label them.
         file_pick_seat: Some(Arc::new(tools::FilePickJudge::at(cwd))),
-        skill_suggestion_seat: Some(Arc::new(tools::SkillSuggestionJudge::at(cwd))),
+        skill_suggestion_seat: Some(Arc::new(tools::SkillSuggestionJudge::at(cwd).with_session_source(skill_session))),
         mcp_state,
         lsp_state,
     })

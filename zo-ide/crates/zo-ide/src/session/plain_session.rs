@@ -819,6 +819,7 @@ impl PlainSession {
         hook_abort_signal: HookAbortSignal,
         user_cancel_requested: Arc<AtomicBool>,
     ) -> Result<runtime::TurnSummary, String> {
+        self.sync_project_rule_advice();
         self.runtime
             .set_hook_abort_signal(hook_abort_signal.clone());
         self.install_turn_stop(&hook_abort_signal);
@@ -1046,6 +1047,12 @@ impl PlainSession {
         let Some(inner) = self.runtime.try_runtime() else {
             return;
         };
+        if let Some(advice) = tools::pending_project_rule_advice(&self.cwd, &self.handle.id,
+            zerocode_core::jev::project_rules::ADVICE_CHAR_CAP) {
+            if project_rule_advice_persisted(inner.session(), &advice.key) {
+                tools::project_rule_advice_delivered(&self.cwd, &self.handle.id, &advice);
+            }
+        }
         let attempt = inner.attempt().to_string();
         if cancelled {
             let _ = tools::note_recall_read(&self.cwd, &attempt, true);
@@ -1080,6 +1087,24 @@ impl PlainSession {
         // The same turn's completion claims and tool lines meet beside r43;
         // the next person's turn labels the preceding answer.
         tools::note_claim_turn(&self.cwd, &self.handle.path, &attempt, &messages[from..]);
+        tools::note_project_rule_turn(&self.cwd, &self.handle.id, &attempt, &messages[from..]);
+    }
+
+    fn sync_project_rule_advice(&mut self) {
+        const PREFIX: &str = "[zo:project-rules:";
+        let advice = tools::pending_project_rule_advice(&self.cwd, &self.handle.id,
+            zerocode_core::jev::project_rules::ADVICE_CHAR_CAP);
+        let Some(inner) = self.runtime.try_runtime_mut() else { return; };
+        // A revoked mode/source removes an unsent transient note immediately.
+        inner.replace_transient_system_reminder_by_prefix(PREFIX, None);
+        if let Some(advice) = advice {
+            if project_rule_advice_persisted(inner.session(), &advice.key) {
+                tools::project_rule_advice_delivered(&self.cwd, &self.handle.id, &advice);
+            } else {
+                let prefix = format!("{PREFIX}{}]", advice.key);
+                inner.install_reminder_until_persisted(&prefix, Some(&advice.text));
+            }
+        }
     }
 
     /// 턴 후 영속 — 메시지는 이미 append 됐고, 헤더/압축 변경만 스냅샷.
@@ -1762,18 +1787,13 @@ impl PlainSession {
                 return Ok(CompactReport::Cancelled);
             };
             let removed = done.result.removed_message_count;
+            let cleared = done.result.cleared_tool_results;
             let kept = done.result.compacted_session.messages.len();
             rt.apply_manual_compaction(done.result);
-            if removed == 0 {
-                return Ok(CompactReport::NothingToCompact { kept });
-            }
-            CompactReport::Compacted {
-                removed,
-                kept,
-                tokens_before,
-                tokens_after: rt.estimated_tokens(),
-                local_summary: done.local_summary_reason,
-            }
+            let report = CompactReport::from_counts(removed, cleared, kept, tokens_before,
+                rt.estimated_tokens(), done.local_summary_reason);
+            if matches!(report, CompactReport::NothingToCompact { .. }) { return Ok(report); }
+            report
         };
         self.persist().map_err(|error| error.to_string())?;
         Ok(report)
@@ -2054,6 +2074,8 @@ async fn until_aborted<F: std::future::Future>(work: F, abort: &HookAbortSignal)
 /// What a `/compact` came to — the one sentence both front-ends show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompactReport {
+    /// Original messages stay in order; sealed tool bodies were cleared.
+    Retained { cleared: usize, kept: usize, tokens_before: usize, tokens_after: usize },
     /// The conversation was folded: `removed` messages into a summary,
     /// `kept` left, and the estimate before and after. `local_summary` says
     /// why the model's summary did not come, when the local one stands in.
@@ -2071,10 +2093,22 @@ pub(crate) enum CompactReport {
 }
 
 impl CompactReport {
+    fn from_counts(removed: usize, cleared: usize, kept: usize, tokens_before: usize,
+        tokens_after: usize, local_summary: Option<String>) -> Self {
+        if cleared > 0 {
+            Self::Retained { cleared, kept, tokens_before, tokens_after }
+        } else if removed > 0 {
+            Self::Compacted { removed, kept, tokens_before, tokens_after, local_summary }
+        } else { Self::NothingToCompact { kept } }
+    }
+
     /// The line the person reads.
     #[must_use]
     pub(crate) fn note(&self) -> String {
         match self {
+            Self::Retained { cleared, kept, tokens_before, tokens_after } => format!(
+                "compact: {cleared} tool results cleared · {kept} messages retained · {} → {} tokens",
+                runtime::format_kilo_tokens(*tokens_before), runtime::format_kilo_tokens(*tokens_after)),
             Self::Compacted {
                 removed,
                 kept,
@@ -2139,6 +2173,16 @@ fn session_has_goal_reminder(session: &Session) -> bool {
                 if text.contains(PERSISTENT_GOAL_REMINDER_PREFIX))
         })
     })
+}
+
+fn project_rule_advice_persisted(session: &Session, key: &str) -> bool {
+    let prefix = format!("[zo:project-rules:{key}]");
+    session.messages.iter().filter(|message| message.role == core_types::MessageRole::System)
+        .flat_map(|message| &message.blocks).any(|block| {
+            let core_types::ContentBlock::Text { text } = block else { return false; };
+            text.strip_prefix(core_types::session::REMINDER_TAG_OPEN).unwrap_or(text)
+                .trim_start_matches('\n').starts_with(&prefix)
+        })
 }
 
 /// Keep the standing objective on the runtime's reminder seam rather than in
@@ -2394,6 +2438,18 @@ mod tests {
     use crate::effort::Effort;
     use crate::goal::GoalPhase;
     use runtime::PermissionMode;
+
+    #[test]
+    fn manual_retention_reports_the_cleared_results_without_claiming_a_summary() {
+        let report = super::CompactReport::from_counts(0, 2, 12, 12_000, 3_000, None);
+        assert_eq!(report.note(), "compact: 2 tool results cleared · 12 messages retained · 12.0k → 3.0k tokens");
+        assert_eq!(report.level(), runtime::message_stream::SystemLevel::Info);
+        assert!(matches!(super::CompactReport::from_counts(0, 0, 12, 12_000, 12_000, None),
+            super::CompactReport::NothingToCompact { kept: 12 }));
+        let summary = super::CompactReport::from_counts(10, 0, 2, 12_000, 3_000, Some("quota".into()));
+        assert!(matches!(&summary, super::CompactReport::Compacted { removed: 10, kept: 2, .. }));
+        assert_eq!(summary.level(), runtime::message_stream::SystemLevel::Warn);
+    }
 
     #[test]
     fn permission_labels_fold_to_three_cli_words() {

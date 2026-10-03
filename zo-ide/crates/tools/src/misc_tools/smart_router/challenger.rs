@@ -1803,6 +1803,7 @@ pub(crate) fn may_move(
 /// an `auto`, the one word the standing decides. `None` for a seat that asks
 /// nothing, or acts on nothing.
 fn acting_now(cwd: &Path, mode: Option<JevMode>) -> Option<(JevMode, bool)> {
+    if !super::jev_gate::workspace_permitted_now(cwd) { return None; }
     let mode = mode.filter(|mode| mode.asks())?;
     let raised = mode.automatic() && runtime::jev_seat_applies(cwd, &CHALLENGER);
     mode.applies_with(raised).then_some((mode, raised))

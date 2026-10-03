@@ -17,6 +17,7 @@ mod mention_rerank;
 mod metadata;
 mod patch_review;
 mod claim_check;
+mod project_rules;
 mod vault_pairs;
 pub mod jev_summary;
 mod plan_shadow;
@@ -33,6 +34,12 @@ mod roads_tests;
 mod route_label;
 #[cfg(test)]
 mod question_discovery;
+#[cfg(test)]
+mod review_replay;
+#[cfg(test)]
+mod skills_impact;
+#[cfg(test)]
+mod retention_impact;
 #[cfg(test)]
 mod routing_replay;
 mod skill_search;
@@ -98,6 +105,7 @@ pub use patch_review::{
     PATCH_REVIEW_DEADLINE, PATCH_REVIEW_FILE, PATCH_REVIEW_OUTCOME_ANSWERED,
 };
 pub use claim_check::{claim_check_path, note_claim_turn, ClaimCheckRow, ClaimLabelRow};
+pub use project_rules::{note_project_rule_turn, pending_project_rule_advice, project_rule_advice_delivered};
 pub use vault_pairs::{
     judge_vault_pairs, mark_vault_pair, recorded_vault_pair_proposals,
     PairJudgment, PairLabel, PairRun,
@@ -117,7 +125,7 @@ pub use mention_rerank::{
     MENTION_RERANK_FILE, MENTION_RUBRIC_VERSION,
 };
 pub use skill_search::{
-    note_loaded_skill, note_search_answer, search as skill_search,
+    note_loaded_skill, note_search_answer, search as skill_search, search_for_session as skill_search_for_session,
     skill_search_path, Chosen, Searched, SkillLabelRow, SkillRequestName, SkillSearchRow,
     SkillSuggestionJudge, SKILL_OUTCOME_ANSWERED, SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE,
 };

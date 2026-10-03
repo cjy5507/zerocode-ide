@@ -1,5 +1,65 @@
 # question-discovery — 판단 질문을 라벨 있는 원장으로 자동으로 찾는 하네스 (t-6349)
 
+## 검토한 Jev 응답으로 질문 비교하기
+
+`review.py`는 `zo jev export`의 입력·응답과 명시적인 검토 결과를 읽는다. 같은 입력은 작업 공간이나 질문 문구가 달라도 개발/보류 양쪽에 놓지 않는다. 한 실행은 기능·루브릭·응답 모델·검토 출처를 하나씩 고정한다. 개발용 파일에만 정답을 내주고, 최종 비교는 후보를 고정한 뒤 한 번만 연다. 같은 입력의 복수 응답으로 좋은 결과를 고르는 후보 파일은 거절한다.
+
+```sh
+zo jev export --seat compaction --json > /tmp/jev-reviewed.json
+python3 tools/question-discovery/review.py prepare /tmp/jev-reviewed.json /tmp/jev-study \
+  --seat compaction --rubric 2 --model jev-1.13.0 --reviewer human
+```
+
+`development.json`을 보고 후보 파일을 작성한다. 후보는 질문의 시작 문구만 바꾸며 타입·선택지·입력은 그대로 비교한다. 예를 들어 `/tmp/jev-candidate.json`은 아래 모양이다. `from`은 실제 개발 사례의 질문에 있는 문구여야 한다.
+
+```json
+{
+  "schemaVersion": 1,
+  "seat": "compaction",
+  "baseRubricVersion": 2,
+  "rubricVersion": 3,
+  "model": "jev-1.13.0",
+  "rewrites": [{"from": "The conversation needs a smaller context.", "to": "Judge which original tool results the remaining task still requires."}]
+}
+```
+
+```sh
+python3 tools/question-discovery/review.py requests /tmp/jev-study \
+  --candidate /tmp/jev-candidate.json > /tmp/jev-development-requests.json
+```
+
+요청 파일을 실행하는 단계는 기존 Jev 설정·작업 공간 동의·`smart.jev.labelDrafts`가 허용할 때만 보낸다. 출력 홈은 새 경로여야 한다. 예시는 개발 요청이며, **유료 API 요청**이 나간다. 키는 기존 설정으로 찾는다. 에이전트를 새로 실행하지 않는다.
+
+```sh
+ZEROCODE_JEV_REVIEW_PLAN=/tmp/jev-development-requests.json \
+ZEROCODE_JEV_REVIEW_OUTPUT=/tmp/jev-development-records \
+cargo test --manifest-path zo-ide/Cargo.toml -p tools --lib \
+  review_replay::replay_frozen_review_requests -- --ignored --nocapture --test-threads=1
+```
+
+기본 한도는 요청 32회·예상 API 비용 $4이다. `ZEROCODE_JEV_REVIEW_CAP`(최대 300)과 `ZEROCODE_JEV_REVIEW_SPEND_USD`(최대 $4)로 낮추거나 요청 수를 지정한다. 호출당 재시도는 없고, 비용이 미확정이거나 예약량을 넘으면 다음 요청을 중지한다. 가격의 발표일·사용량·예상 비용은 출력 홈의 `replay.jsonl`에 남는다. 이 비용은 연구 실행의 영수증이며 운영 기능의 승격 원장에 섞지 않는다.
+
+기존 검토 CLI를 출력 홈에 대면 재생한 사례를 읽고 결과를 기록할 수 있다. `outcome`의 `--reviewer`는 실제 근거의 출처로 지정한다. 재생 단계는 정답을 만들지 않는다.
+
+```sh
+ZO_CONFIG_HOME=/tmp/jev-development-records zo jev review --json
+# 각 사례를 확인하고 zo jev outcome <case-id> --question <id> --correct ... --reviewer ... --note ... 로 기록한다.
+ZO_CONFIG_HOME=/tmp/jev-development-records zo jev export --json > /tmp/jev-development-results.json
+python3 tools/question-discovery/review.py evaluate /tmp/jev-study /tmp/jev-development-results.json \
+  --development --candidate /tmp/jev-candidate.json
+python3 tools/question-discovery/review.py freeze /tmp/jev-study --candidate /tmp/jev-candidate.json
+python3 tools/question-discovery/review.py requests /tmp/jev-study --heldout > /tmp/jev-heldout-requests.json
+```
+
+보류 요청도 **별도의 새 출력 홈**으로 재생·검토·내보낸 뒤 `evaluate`를 `--development` 없이 실행한다. 고정 전 응답, 누락된 검토, 바뀐 원본·모델·후보는 최종 점수로 받지 않는다. 같은 보류 사례를 다른 연구에서 다시 쓰면 새로운 독립 증거가 아니다.
+
+```sh
+python3 tools/question-discovery/review.py evaluate /tmp/jev-study /tmp/jev-heldout-results.json
+python3 tools/question-discovery/review.py result /tmp/jev-study
+```
+
+`ready_for_code_review`는 검토한 사례에서 입력 묶음별 짝 비교가 개선을 지지했다는 뜻이다. 운영 적용·전체 트래픽 정확도·시간이나 비용 절감을 뜻하지 않는다. 운영 질문을 바꿀 때는 고정된 문구와 다음 루브릭 버전을 코드에 반영하고 기능 검사와 시간·비용 비교를 함께 통과시킨다. 되돌릴 때도 기존 루브릭 판정 기록과 버전 경계를 유지한다.
+
 세 조각이다. `seed.py` 는 **세기만** 하고, `loop.py` 는 **제안·적합·판정**만 하며, 묻는 일은 Rust 쪽 묻기 단계 하나가 한다.
 행이 무엇인지·상태가 무엇을 싣는지·라벨이 무엇을 말하는지는 자리마다 배포되는 함수의 것이다 — 패치 검토는
 `runtime::patch_review::ask_reading`·`state`·`hindsight_of_turn`(`replay_support::replay_points`), 알림은
@@ -77,3 +137,49 @@ TYPESAFE_API_KEY="$(security find-generic-password \
 
 `seed.py` 는 원장 행의 `agreed` 와 개수, 원천 씨앗의 크기만 센다. 묻기 단계의 행 파일은 id·시각·묶음 지문·라벨·기준선 숫자·답 숫자·결과 낱말·토큰·벽뿐이다 —
 사람의 글도 판 이름도 없다(시험 `the_rows_file_carries_no_words…`). 상태 글은 `states.jsonl` 한 곳에만, 문이 이미 자르고 가린 그대로, 제안자를 위해 남고 깃에 들어가지 않는다.
+
+
+## 프로젝트 규칙의 실행과 원문 검증
+
+`zo jev rules compile <definition.json> --cwd <project>`는 검토한 규칙 정의를
+현재 원문의 정확한 줄과 SHA-256에 묶어 보관하고 선택한다. 정의는
+`schemaVersion: 1`, `rules` 배열이며, 각 규칙은 `id`,
+`source: {path, sha256, firstLine, lastLine, text}`, `paths`, `check`를 갖는다.
+비어 있는 `sha256`만 현재 파일에서 채운다. `check.kind`는 `model`
+(`question` 필요), `deterministic` (`checks_after_edits`,
+`no_contradicted_completion`, `worktree_edits` 중 `check`), `deferred`
+(`reason` 필요)다. 정의를 준비하는 것은 전역 Jev 스위치·동의·기능 모드를
+바꾸지 않는다. 현재 선택은 `zo jev rules show`, 이전 정의로의 복귀는
+`zo jev rules activate <definition-id>`로 확인하고 실행한다.
+
+기존 Jev 설정의 프로젝트 규칙 점검이 켜져 있고 해당 폴더가 송신에 동의한
+경우에만 완료 턴을 검사한다. 기록만 모드는 판단을 남기며, On은 다음 턴의
+문맥에 제한된 관찰을 한 번 전달한다. 정의가 없으면 질문하지 않는다.
+판단은 자동 수정이나 새로운 권한이 아니며 사람의 명시적 지시가 우선한다.
+
+하위 `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, `GEMINI.md`는
+그 디렉터리 안에서만 적용된다. 실제 편집 경로의 상위 디렉터리에 정의가
+다루지 않은 지침 파일이 있으면, 재정의 전까지 해당 턴을 보류한다.
+송신 전·알림 보관 전·전달 전에 이를 확인하므로, 늦게 도착한 판단도 새
+하위 지침을 무시할 수 없다. 원문에 없는 정책을 자동 추정하지 않으며,
+등록한 규칙 이외의 의무까지 모두 검사했다고 해석해서는 안 된다.
+검사 통과 근거가 없거나 하위 지침의 예외를 코드로 해석할 수 없는 경우는
+`unknown`이다. 편집 경로는 디렉터리와 적용 규칙이 같은 것끼리 묶어 대표 경로를 남긴다.
+같은 영역의 수백 파일을 다루는 수정도 이 묶음으로 검사하며, 최대 32개
+서로 다른 지침 범위의 상위 디렉터리 128개만 확인하며
+저장소 전체를 매 턴 탐색하지 않는다.
+
+검토 연구의 독립 묶음은 입력 문자열이 아니라 캡처 시점의 실제 세션·과업
+출처(`originGroup`)다. 같은 출처의 다른 턴과, 서로 다른 출처의 같은 입력은
+연결된 한 묶음으로 나누고 채점한다. 출처가 없는 이전 기록은 계속 검토하고
+내보낼 수 있지만, 독립 표본으로 간주하거나 보류 평가의 합격 근거로 쓰지
+않는다. 세션 이름은 로컬에서 해시로 묶으며 Jev 요청에는 추가하지 않는다.
+
+활성 검토 기록의 512건 한도는 보관 명령으로 관리한다.
+`zo jev archive <새로운-보관파일> --seat <기능> --rubric-version <판>`은
+선택한 기록과 모든 검토자의 결과를 새 비공개 JSON 파일에 완전히 저장하고
+동기화한 뒤 활성 공간을 비운다. 기본값은 모든 질문을 검토한 기록만이며,
+미검토 기록까지 옮기려면 `--include-unreviewed`를 명시한다. 기존 파일은
+덮어쓰지 않고, 보관에 실패하면 원본을 지우지 않는다. 손상된 기록은 그대로
+두고 개수를 보고한다. 보관파일은 공개 체크아웃 밖의 지속적으로 보관할
+위치에 두며, 같은 연구 도구가 읽는 `zo jev export` 형식이다.

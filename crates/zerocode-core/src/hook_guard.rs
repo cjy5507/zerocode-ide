@@ -33,7 +33,7 @@ use crate::agent::{ALL_AGENTS, AgentKind};
 use crate::hook::{self, HookState, Phase, Tool};
 use crate::jev::claim::{self, Evidence};
 use crate::jev::tool_guard::{MCP_TOOL_PREFIX, TextSource, WRITTEN_WORDS_KEYS};
-use crate::jev::{CLAIM, COMMAND_GUARD, FILE_PICK, JevUse, TOOL_TEXT_GUARD};
+use crate::jev::{CLAIM, COMMAND_GUARD, FILE_PICK, JevUse, PROJECT_RULES, TOOL_TEXT_GUARD};
 use crate::payload::HookPayload;
 use crate::transcript::SaidAt;
 
@@ -301,6 +301,16 @@ pub fn seat_sight(seat: &JevUse, agent: AgentKind) -> Option<SeatSight> {
             row.prompt,
             vec![row.edited_path, row.turn_end, turn_start_road(agent)],
         )
+    } else if seat.id == PROJECT_RULES.id {
+        (
+            row.turn_answer,
+            vec![
+                row.prompt,
+                row.after,
+                row.edited_path,
+                turn_start_road(agent),
+            ],
+        )
     } else {
         return None;
     };
@@ -317,7 +327,13 @@ pub fn seat_sight(seat: &JevUse, agent: AgentKind) -> Option<SeatSight> {
 
 /// The seats a pane's moments serve, each one the window asks or leaves
 /// off by its own switch.
-pub const PANE_SEATS: [&JevUse; 4] = [&COMMAND_GUARD, &TOOL_TEXT_GUARD, &CLAIM, &FILE_PICK];
+pub const PANE_SEATS: [&JevUse; 5] = [
+    &COMMAND_GUARD,
+    &TOOL_TEXT_GUARD,
+    &CLAIM,
+    &FILE_PICK,
+    &PROJECT_RULES,
+];
 
 /// Which of the seats a pane's moments serve ([`PANE_SEATS`]) are asked now
 /// (t-11349): the one gate before anything of a pane's work is read — a seat
@@ -330,6 +346,7 @@ pub struct Asking {
     pub text: bool,
     pub claim: bool,
     pub file_pick: bool,
+    pub project_rules: bool,
 }
 
 impl Asking {
@@ -339,6 +356,7 @@ impl Asking {
         text: true,
         claim: true,
         file_pick: true,
+        project_rules: true,
     };
 
     /// The seats `asked` names, each by its row.
@@ -353,6 +371,8 @@ impl Asking {
                 asking.claim = true;
             } else if seat.id == FILE_PICK.id {
                 asking.file_pick = true;
+            } else if seat.id == PROJECT_RULES.id {
+                asking.project_rules = true;
             }
             asking
         })
@@ -365,12 +385,13 @@ impl Asking {
             || (seat.id == TOOL_TEXT_GUARD.id && self.text)
             || (seat.id == CLAIM.id && self.claim)
             || (seat.id == FILE_PICK.id && self.file_pick)
+            || (seat.id == PROJECT_RULES.id && self.project_rules)
     }
 
     /// Whether no seat is asked.
     #[must_use]
     pub const fn nothing(self) -> bool {
-        !(self.command || self.text || self.claim || self.file_pick)
+        !(self.command || self.text || self.claim || self.file_pick || self.project_rules)
     }
 }
 
@@ -516,7 +537,7 @@ pub fn moments_parsed(
                     cwd,
                 }));
             }
-            let paths = if asking.file_pick
+            let paths = if (asking.file_pick || asking.project_rules)
                 && row.edited_path.yes()
                 && matches!(activity.verb, Tool::Edit | Tool::Write)
             {
@@ -558,7 +579,7 @@ pub fn moments_parsed(
                     text,
                 });
             }
-            let evidence = if asking.claim && row.after.yes() {
+            let evidence = if (asking.claim || asking.project_rules) && row.after.yes() {
                 evidence_in(&row, &activity.verb, tree, failed)
             } else {
                 None
@@ -576,7 +597,7 @@ pub fn moments_parsed(
         }
         Phase::Stopped => {
             if row.turn_end.yes() {
-                let said = if asking.claim && row.turn_answer.yes() {
+                let said = if (asking.claim || asking.project_rules) && row.turn_answer.yes() {
                     crate::transcript::said_at_in_parsed(parsed).map(|said| match said {
                         SaidAt::Words(words) => {
                             SaidAt::Words(crate::clone::scrub_credentials(&words))

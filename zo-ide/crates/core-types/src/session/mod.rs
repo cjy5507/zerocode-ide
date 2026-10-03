@@ -731,6 +731,26 @@ impl Session {
         self.persist_appended_state_to_path(path)
     }
 
+    /// Publish a same-length context edit without rebasing message or vault indices.
+    /// Original message timestamps and compaction metadata remain unchanged.
+    ///
+    /// # Errors
+    /// A changed message count or any persistence failure. On failure, restore
+    /// the complete original in-memory view, including on a writer conflict.
+    pub fn replace_context_atomic(&mut self, messages: Arc<Vec<ConversationMessage>>) -> Result<(), SessionError> {
+        if messages.len() != self.messages.len() {
+            return Err(SessionError::Format("a context edit cannot change message indices".to_string()));
+        }
+        let rollback = MutationRollback::capture(self);
+        self.messages = messages;
+        self.touch();
+        if let Err(error) = self.publish_transcript_rewrite() {
+            rollback.restore(self);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn save_to_secure_path(&self, path: &Path) -> Result<(), SessionError> {
         let snapshot = self.render_jsonl_snapshot()?;
         if self.is_bound_path(path) {

@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use api::{
@@ -366,6 +366,11 @@ impl Searched {
 /// the search that a tool result came from.
 #[must_use]
 pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
+    search_for_session(cwd, task, skills, None)
+}
+
+#[must_use]
+pub fn search_for_session(cwd: &Path, task: &str, skills: &[SkillIndexEntry], session: Option<&str>) -> Searched {
     let candidates = skill_candidates(skills);
     let baseline = lexical_rank(task, &candidates);
     let baseline_names: Vec<String> = baseline.iter().map(|reading| reading.name.clone()).collect();
@@ -383,12 +388,11 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
     let Some(mode) = asking_mode(cwd, &SKILLS) else {
         return fallback(JevMode::Off.key());
     };
-    // Read once, here: the standing decides both whether the tool result is
-    // the judgment's and whether a second request is worth buying, and two
-    // readings of one ledger could answer those two questions differently.
+    // This standing decides whether an acting request is worth buying. The
+    // final application check may withhold it, never upgrade a recording call.
     let acting = mode.applies_with(runtime::jev_seat_applies(cwd, &SKILLS));
-    let (mut row, ranked) =
-        api::sync_bridge::run_blocking(judge(cwd, task, &candidates, acting));
+    let (mut row, ranked, still_acts) =
+        api::sync_bridge::run_blocking(judge(cwd, task, &candidates, acting, session));
     let judged = row.outcome == SKILL_OUTCOME_ANSWERED;
     let judged_names = judged.then(|| {
         ranked
@@ -400,7 +404,7 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
     // A recording mode asked and wrote the row down; what the turn reads is
     // still the word match's ranking, exactly as it would be with the switch
     // off. That is what makes the two readable side by side.
-    let searched = if judged && acting {
+    let searched = if judged && still_acts {
         Searched {
             ranked,
             route_use: ROUTE_USE_APPLIED.to_string(),
@@ -412,7 +416,9 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
     } else {
         Searched {
             ranked: baseline,
-            route_use: if judged {
+            route_use: if judged && acting {
+                JevMode::Shadow.key().to_string()
+            } else if judged {
                 mode.key().to_string()
             } else {
                 ROUTE_USE_FALLBACK.to_string()
@@ -516,18 +522,26 @@ fn skill_mark(loaded: &str, named: &[String]) -> (bool, Option<usize>) {
 #[derive(Debug)]
 pub struct SkillSuggestionJudge {
     cwd: PathBuf,
+    session: Arc<Mutex<Option<String>>>,
 }
 
 impl SkillSuggestionJudge {
     #[must_use]
     pub fn at(cwd: &Path) -> Self {
-        Self { cwd: cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf()) }
+        Self { cwd: cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf()), session: Arc::new(Mutex::new(None)) }
+    }
+
+    #[must_use]
+    pub fn with_session_source(mut self, session: Arc<Mutex<Option<String>>>) -> Self {
+        self.session = session;
+        self
     }
 }
 
 impl SkillSuggestionSeat for SkillSuggestionJudge {
     fn suggest(&self, request: String) -> futures_util::future::BoxFuture<'_, Option<String>> {
-        Box::pin(suggest_at(self.cwd.clone(), request))
+        let session = self.session.lock().ok().and_then(|held| held.clone());
+        Box::pin(suggest_at(self.cwd.clone(), request, session))
     }
 
     fn finish(&self, turn: &[ConversationMessage]) {
@@ -715,7 +729,7 @@ fn skill_quote_lines(output: &str) -> Vec<String> {
 /// threads and goes on, the way the patch-review seat's `detach` does. The
 /// mode is read before the skills are discovered, so a seat that is off costs
 /// a turn no directory walk.
-async fn suggest_at(cwd: PathBuf, task: String) -> Option<String> {
+async fn suggest_at(cwd: PathBuf, task: String, session: Option<String>) -> Option<String> {
     if let Ok(mut answered) = last_answer().lock() {
         answered.remove(&cwd);
     }
@@ -746,7 +760,7 @@ async fn suggest_at(cwd: PathBuf, task: String) -> Option<String> {
             }
         }
     }
-    let judged = judge_suggestion(cwd, task, skills, candidates, mode, acting, generation);
+    let judged = judge_suggestion(cwd, task, skills, candidates, mode, acting, SuggestionOrigin { generation, session });
     if acting {
         judged.await
     } else {
@@ -760,6 +774,11 @@ async fn suggest_at(cwd: PathBuf, task: String) -> Option<String> {
 /// Ask the two stages, write the row, and mark the turn's pending entry
 /// judged — when the turn is still open; a turn that has already ended took
 /// its entry with it, and a judgment that lands after it labels nothing.
+struct SuggestionOrigin {
+    generation: Option<u64>,
+    session: Option<String>,
+}
+
 async fn judge_suggestion(
     cwd: PathBuf,
     task: String,
@@ -767,10 +786,15 @@ async fn judge_suggestion(
     candidates: Vec<SkillCandidate>,
     mode: JevMode,
     acting: bool,
-    generation: Option<u64>,
+    origin: SuggestionOrigin,
 ) -> Option<String> {
+    let SuggestionOrigin { generation, session } = origin;
     let opened = cwd.clone();
     let door = tokio::task::spawn_blocking(move || JevDoor::open(&opened)).await.ok()?;
+    let door = match session.as_deref() {
+        Some(session) => door.with_origin("zo/session", session),
+        None => door,
+    };
     let mut key = MemoKey::for_search(&task, &candidates, door.model_key());
     key.rubric = zerocode_core::jev::questions::SKILL_SUGGESTION_RUBRIC_VERSION;
     let mut row = SkillSearchRow::new(key, candidates.len(), 1, String::new());
@@ -790,6 +814,11 @@ async fn judge_suggestion(
         return None;
     };
     row.gate_score = Some(wide.gate);
+    if !door.permits_application_now() || asking_mode(&cwd, &SKILL_SUGGESTION).is_none() {
+        row.outcome = Refused::SettingsChanged.token().into();
+        record_row(&SKILL_SUGGESTION, &skill_suggestion_path(&cwd), &row);
+        return None;
+    }
     let winner = if wide.shortlist.is_empty() {
         None
     } else {
@@ -806,11 +835,15 @@ async fn judge_suggestion(
     row.outcome = SKILL_OUTCOME_ANSWERED.into();
     telemetry::attest_fired(telemetry::HarnessFeature::SkillSearch);
     row.chosen = winner.iter().map(Chosen::from).collect();
-    row.route_use = if acting { ROUTE_USE_APPLIED.into() } else { mode.key().into() };
+    let still_acts = acting && door.permits_application_now()
+        && asking_mode(&cwd, &SKILL_SUGGESTION).is_some_and(|current|
+            current.applies_with(runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION)));
+    row.route_use = if still_acts { ROUTE_USE_APPLIED.into() }
+        else if acting { JevMode::Shadow.key().into() } else { mode.key().into() };
     record_row(&SKILL_SUGGESTION, &skill_suggestion_path(&cwd), &row);
     // The absence of a skill is a prediction too. It stays until this turn
     // ends so a no-load turn contributes a negative label.
-    if let Some(generation) = generation {
+    if let Some(generation) = generation.filter(|_| !acting || still_acts) {
         mark_pending_suggestion_judged(
             &cwd,
             generation,
@@ -818,7 +851,7 @@ async fn judge_suggestion(
             SkillRequestName::of(&row),
         );
     }
-    acting.then(|| suggestion_note(winner.as_ref().map(|choice| choice.name.as_str())))
+    still_acts.then(|| suggestion_note(winner.as_ref().map(|choice| choice.name.as_str())))
 }
 
 /// Why the narrow request gave nothing.
@@ -976,7 +1009,8 @@ async fn judge(
     task: &str,
     candidates: &[SkillCandidate],
     acting: bool,
-) -> (SkillSearchRow, Vec<SkillReading>) {
+    session: Option<&str>,
+) -> (SkillSearchRow, Vec<SkillReading>, bool) {
     let shards = skill_shards(candidates);
     // The door before the memo: what a ranking is remembered under is the
     // model the door asks for, and only the person's settings say which.
@@ -989,8 +1023,15 @@ async fn judge(
             shards.len(),
             FAIL_SETTINGS_UNAVAILABLE.to_string(),
         );
-        return (row, Vec::new());
+        return (row, Vec::new(), false);
     };
+    let door = match session {
+        Some(session) => door.with_origin("zo/session", session),
+        None => door,
+    };
+    // Cached and newly received rankings have the same live application gate.
+    // A recording request cannot become acting while its reply is in flight.
+    let still_acts = || acting && door.permits_application_for(cwd, &SKILLS);
     let key = MemoKey::for_search(task, candidates, door.model_key());
     if let Some(remembered) = memo().lock().ok().and_then(|memo| memo.get(&key).cloned()) {
         telemetry::attest_fired(telemetry::HarnessFeature::SkillSearch);
@@ -1003,7 +1044,7 @@ async fn judge(
         row.cached = true;
         row.shards_answered = shards.len();
         row.chosen = remembered.iter().map(Chosen::from).collect();
-        return (row, remembered);
+        return (row, remembered, still_acts());
     }
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
     // Every shard at once: they are independent requests over disjoint
@@ -1013,7 +1054,8 @@ async fn judge(
         .iter()
         .map(|shard| ask_one(&door, client.as_ref(), task, shard, acting));
     let answers = futures_util::future::join_all(asked).await;
-    fold(key, candidates, &shards, answers)
+    let (row, ranked) = fold(key, candidates, &shards, answers);
+    (row, ranked, still_acts())
 }
 
 /// What one shard's request came back with.

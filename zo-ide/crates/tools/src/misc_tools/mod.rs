@@ -40,6 +40,7 @@ pub use smart_router::{
 };
 pub use smart_router::{
     claim_check_path, jev_claim_mode_from, note_claim_turn, ClaimCheckRow, ClaimLabelRow,
+    note_project_rule_turn, pending_project_rule_advice, project_rule_advice_delivered,
     judge_vault_pairs, mark_vault_pair, recorded_vault_pair_proposals,
     PairJudgment, PairLabel, PairRun,
     jev_patch_review_mode_from, note_patch_review_turn, patch_review_path, PatchReviewJudge,
@@ -911,7 +912,7 @@ pub(crate) fn run_skill_search(
     input: &SkillSearchInput,
     ctx: &ToolContext,
 ) -> Result<String, ToolError> {
-    let output = skill_tools::execute_skill_search(input, &tool_cwd(ctx))?;
+    let output = skill_tools::execute_skill_search_for_session(input, &tool_cwd(ctx), ctx.session_id().as_deref())?;
     for skill in &output.skills {
         ctx.note_artifact_skill_read(std::path::Path::new(&skill.path));
     }

@@ -61,7 +61,9 @@ fn door_in(home: &tempfile::TempDir, consented: &str) -> Doorway {
     let root = home.path().join(consented);
     std::fs::write(
         &settings,
-        json!({ "smart": { "jev": { "workspaces": [root.display().to_string()] } } }).to_string(),
+        json!({ "smart": { zerocode_core::jev::BROWSER.setting: "on",
+            "jev": { "workspaces": [root.display().to_string()] } } })
+        .to_string(),
     )
     .expect("zo's settings");
     Doorway {
@@ -642,7 +644,8 @@ fn door_caching(home: &tempfile::TempDir, cache: Option<&str>) -> Doorway {
     let work = home.path().join("work");
     std::fs::create_dir_all(&work).expect("a workspace");
     let settings = home.path().join("settings.json");
-    let mut smart = json!({ "jev": { "workspaces": [work.display().to_string()] } });
+    let mut smart = json!({ zerocode_core::jev::BROWSER.setting: "on",
+        "jev": { "workspaces": [work.display().to_string()] } });
     if let Some(cache) = cache {
         smart[zerocode_core::jev::JUDGMENT_CACHE.setting] = json!(cache);
     }

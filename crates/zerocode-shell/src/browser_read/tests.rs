@@ -13,6 +13,7 @@ use super::*;
 use crate::cmd::browser::BrowserReadReport;
 use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
 use crate::systemone::{SYSTEMONE_MODEL, TIMEOUT};
+use zerocode_core::jev::summary::INPUT_TOKENS;
 
 const PANE: &str = "browser-7";
 const URL: &str = "https://docs.example.com/guide/start";
@@ -88,8 +89,9 @@ fn consented(home: &tempfile::TempDir) -> (PathBuf, PathBuf) {
     let settings = home.path().join("settings.json");
     std::fs::write(
         &settings,
-        json!({ SMART_SETTINGS_KEY: { "jev": { "workspaces": [work.display().to_string()] } } })
-            .to_string(),
+        json!({ SMART_SETTINGS_KEY: { BROWSER_READ.setting: "on",
+            "jev": { "enabled": true, "workspaces": [work.display().to_string()] } } })
+        .to_string(),
     )
     .expect("zo's settings");
     (settings, work)
@@ -97,6 +99,56 @@ fn consented(home: &tempfile::TempDir) -> (PathBuf, PathBuf) {
 
 fn wire_at(endpoint: &Endpoint, settings: PathBuf) -> Wire {
     Wire::at(&endpoint.base(), "test-key", Some(settings))
+}
+
+#[test]
+fn a_read_keeps_the_whole_page_when_permission_changes_and_keeps_the_paid_usage() {
+    for change in ["before_shadow", "shadow", "global_off", "consent", "model"] {
+        let home = tempfile::tempdir().unwrap();
+        let (settings, workspace) = consented(&home);
+        if change == "before_shadow" {
+            let mut root: Value =
+                serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+            root[SMART_SETTINGS_KEY][BROWSER_READ.setting] = json!("shadow");
+            std::fs::write(&settings, root.to_string()).unwrap();
+        }
+        let during_reply = settings.clone();
+        let endpoint = Endpoint::answering_each(
+            "HTTP/1.1 200 OK",
+            move |_| {
+                let mut root: Value =
+                    serde_json::from_slice(&std::fs::read(&during_reply).unwrap()).unwrap();
+                match change {
+                    "before_shadow" => {}
+                    "global_off" => root[SMART_SETTINGS_KEY]["jev"]["enabled"] = json!(false),
+                    "consent" => root[SMART_SETTINGS_KEY]["jev"]["workspaces"] = json!([]),
+                    "model" => root[SMART_SETTINGS_KEY]["jevModel"] = json!("jev-new-pin"),
+                    _ => root[SMART_SETTINGS_KEY][BROWSER_READ.setting] = json!("shadow"),
+                }
+                std::fs::write(&during_reply, root.to_string()).unwrap();
+                body(6, &[(0, 0.95)])
+            },
+            0,
+        );
+        let page = page();
+        let judged = settle(
+            &wire_at(&endpoint, settings),
+            Some(&workspace),
+            PANE,
+            &page,
+            JevMode::On,
+            true,
+            1,
+        );
+        assert_eq!(judged.text, page.report.text, "{change}");
+        let row = judged.row.unwrap();
+        assert_eq!(row[APPLIED.canonical], false, "{change}: {row}");
+        assert_eq!(
+            row[INPUT_TOKENS.canonical], 700,
+            "a withheld answer still cost tokens: {change}"
+        );
+        assert_eq!(endpoint.asked().len(), 1);
+    }
 }
 
 #[test]

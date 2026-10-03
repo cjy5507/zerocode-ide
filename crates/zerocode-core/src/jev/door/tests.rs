@@ -85,7 +85,16 @@ fn the_door_asks_in_order_and_names_each_refusal() {
     assert_eq!(refused(&asking(&consented, Some(APP), 1)), None);
 
     let tokens: Vec<&str> = Refused::ALL.iter().map(|refused| refused.token()).collect();
-    assert_eq!(tokens, ["no_key", "off", "not_consented", "budget"]);
+    assert_eq!(
+        tokens,
+        [
+            "no_key",
+            "off",
+            "not_consented",
+            "budget",
+            "settings_changed"
+        ]
+    );
     assert_eq!(Refused::Off.token(), JevMode::Off.key());
     for refused in Refused::ALL {
         assert_eq!(Refused::from_token(refused.token()), Some(refused));
