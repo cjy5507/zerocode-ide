@@ -54,6 +54,18 @@ export function mockupTurns(start) {
   ];
 }
 
+/* Whether `node`, focused, shows where the keyboard stands: an outline the page draws (its own controls'
+ * ring) or the window's shadow ring (`:focus-visible`, shell.css). Read in the page. */
+const RING = `
+  window.__RING__ = (node) => {
+    if (!node) return null;
+    node.focus();
+    const style = getComputedStyle(node);
+    const outline = style.outlineStyle !== "none" && parseFloat(style.outlineWidth) > 0;
+    return { focused: document.activeElement === node, ring: outline || style.boxShadow !== "none" };
+  };
+`;
+
 /* The mockup's page: a wire session at work on the mockup's conversation, its model named, the person's
  * request said `ago` ms before now. */
 async function openMockup(page, { ago = 41_000, status = "working" } = {}) {
@@ -65,6 +77,7 @@ async function openMockup(page, { ago = 41_000, status = "working" } = {}) {
     await window.__PAINTED__();
   }, MOCKUP_MODEL);
   await installStepsProbe(page);
+  await page.addScriptTag({ content: RING });
 }
 
 /* A value the page resolves for a token, through a probe of the same property (its camel-case name,
@@ -91,6 +104,7 @@ export async function testConversationRedesign(browser, origin, ok) {
   await redesignStack(browser, origin, ok);
   await redesignTreatments(browser, origin, ok);
   await redesignNoWorkPerToken(browser, origin, ok);
+  await redesignFocus(browser, origin, ok);
 }
 
 /* R1 — the head: the agent, its model chip, a chip that says it is running and for how long, and on the
@@ -630,6 +644,7 @@ async function redesignStack(browser, origin, ok) {
       { role: "tool_result", text: "Todos have been modified successfully.", at_ms: 1_790_000_001_200, tool: { call_id: "todo-1", is_error: false } },
     ];
     await openPaneConversation(page, turns, { agent: "claude" });
+    await page.addScriptTag({ content: RING });
     const seen = await page.evaluate(async () => {
       const settle = async () => {
         await window.__PAINTED__();
@@ -657,6 +672,7 @@ async function redesignStack(browser, origin, ok) {
       const toggle = stack()?.querySelector(".chat-stack-toggle");
       toggle?.focus();
       seen.toggleFocus = document.activeElement === toggle;
+      seen.toggleRing = window.__RING__(toggle)?.ring ?? false;
       toggle?.click();
       await settle();
       seen.openItems = stack()?.querySelectorAll(".chat-stack-item").length ?? 0;
@@ -695,8 +711,8 @@ async function redesignStack(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok(
-      "R9: the stack opens to the items by its own button (the keyboard reaches it), keeps that choice for this conversation across tabs, and counts a waiting message",
-      seen.toggleFocus && seen.openItems === 3 && seen.expanded === "true" && seen.focusKept && seen.keptOpen && seen.queued === seen.wantQueued,
+      "R9: the stack opens to the items by its own button (the keyboard reaches it and its ring shows), keeps that choice for this conversation across tabs, and counts a waiting message",
+      seen.toggleFocus && seen.toggleRing && seen.openItems === 3 && seen.expanded === "true" && seen.focusKept && seen.keptOpen && seen.queued === seen.wantQueued,
       JSON.stringify(seen),
     );
     ok(
@@ -831,6 +847,39 @@ async function redesignNoWorkPerToken(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok("R8/R9: the streaming count raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* R12 — the keyboard reaches the rows the approved page drew and shows where it stands: a thought's line and
+ * a step's line take the focus and wear the page's ring, and Tab goes from one row's line to the next (R8
+ * holds the rail's handle, R9 the stack's button). */
+async function redesignFocus(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openMockup(page);
+    const thoughtFirst = await page.evaluate(async () => {
+      const { thoughts, lineOf, settle } = window.__STEPS__;
+      await settle();
+      return window.__RING__(lineOf(thoughts()[0]));
+    });
+    const step = await page.evaluate(() => {
+      const { steps, lineOf } = window.__STEPS__;
+      const line = lineOf(steps()[0]);
+      line?.setAttribute("data-probe", "step-0");
+      lineOf(steps()[1])?.setAttribute("data-probe", "step-1");
+      return window.__RING__(line);
+    });
+    await page.keyboard.press("Tab");
+    const next = await page.evaluate(() => document.activeElement?.getAttribute("data-probe") ?? document.activeElement?.className ?? null);
+    const seen = { thought: thoughtFirst, step, next };
+    ok(
+      "R12: a thought's line and a step's line take the keyboard and wear the page's ring, and Tab goes from one step's line to the next",
+      seen.thought?.focused && seen.thought?.ring && seen.step?.focused && seen.step?.ring && seen.next === "step-1",
+      JSON.stringify(seen),
+    );
+    ok("R12: the keyboard raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }
