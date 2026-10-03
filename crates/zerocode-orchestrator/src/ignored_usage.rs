@@ -305,10 +305,7 @@ mod tests {
             let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
             self.dirs.entry(parent).or_default().push(DirEntry {
                 path,
-                about: Some(About {
-                    is_dir,
-                    disk_bytes,
-                }),
+                about: Some(About { is_dir, disk_bytes }),
             });
             self
         }
@@ -378,7 +375,11 @@ mod tests {
             .collect();
         assert_eq!(
             named,
-            vec![("target", true), ("node_modules", true), ("notes.log", false)],
+            vec![
+                ("target", true),
+                ("node_modules", true),
+                ("notes.log", false)
+            ],
             "{facts:?}"
         );
         assert_eq!(facts.top[0].size_text, format_bytes(54_096));
@@ -447,7 +448,10 @@ mod tests {
         );
 
         assert!(!facts.complete, "{facts:?}");
-        assert_eq!(facts.bytes, 4_096, "only what the listing of its parent said");
+        assert_eq!(
+            facts.bytes, 4_096,
+            "only what the listing of its parent said"
+        );
         assert_eq!(facts.count, 1);
     }
 

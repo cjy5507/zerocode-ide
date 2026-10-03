@@ -11262,7 +11262,9 @@ mod tests {
                 continue;
             };
             let Some((key, fallback)) = rest.split_once("\", \"") else {
-                wordless.push(format!("{tag}: the row has no Korean sentence at its call site"));
+                wordless.push(format!(
+                    "{tag}: the row has no Korean sentence at its call site"
+                ));
                 continue;
             };
             if fallback.trim_start_matches(['"', ')', ',', ' ']).is_empty() {

@@ -1051,7 +1051,12 @@ fn a_checkout_holding_only_ignored_files_has_nothing_uncommitted_and_says_what_i
     let read = observe(root.path(), None, None, 1);
     let data = snapshot_data(&read);
 
-    assert_eq!(data["uncommitted"], serde_json::json!(false), "{}", read.json);
+    assert_eq!(
+        data["uncommitted"],
+        serde_json::json!(false),
+        "{}",
+        read.json
+    );
     let ignored = &data["ignored"];
     assert_eq!(
         ignored["count"],
@@ -1059,7 +1064,12 @@ fn a_checkout_holding_only_ignored_files_has_nothing_uncommitted_and_says_what_i
         "{}",
         read.json
     );
-    assert_eq!(ignored["complete"], serde_json::json!(true), "{}", read.json);
+    assert_eq!(
+        ignored["complete"],
+        serde_json::json!(true),
+        "{}",
+        read.json
+    );
     let bytes = ignored["bytes"].as_u64().expect("a byte count");
     assert!(
         bytes >= IGNORED_LEFTOVER_BYTES,
@@ -1075,7 +1085,12 @@ fn a_checkout_holding_only_ignored_files_has_nothing_uncommitted_and_says_what_i
     );
     let named = ignored["top"].as_array().expect("the biggest entries");
     assert_eq!(named.len(), IGNORED_NAMED, "{}", read.json);
-    assert_eq!(named[0]["name"], serde_json::json!("build"), "{}", read.json);
+    assert_eq!(
+        named[0]["name"],
+        serde_json::json!("build"),
+        "{}",
+        read.json
+    );
     assert_eq!(named[0]["dir"], serde_json::json!(true), "{}", read.json);
     let sizes: Vec<u64> = named
         .iter()
@@ -1097,10 +1112,30 @@ fn uncommitted_work_alone_leaves_the_ignored_fact_empty() {
     let read = observe(root.path(), None, None, 1);
     let data = snapshot_data(&read);
 
-    assert_eq!(data["uncommitted"], serde_json::json!(true), "{}", read.json);
-    assert_eq!(data["ignored"]["count"], serde_json::json!(0), "{}", read.json);
-    assert_eq!(data["ignored"]["bytes"], serde_json::json!(0), "{}", read.json);
-    assert_eq!(data["ignored"]["top"], serde_json::json!([]), "{}", read.json);
+    assert_eq!(
+        data["uncommitted"],
+        serde_json::json!(true),
+        "{}",
+        read.json
+    );
+    assert_eq!(
+        data["ignored"]["count"],
+        serde_json::json!(0),
+        "{}",
+        read.json
+    );
+    assert_eq!(
+        data["ignored"]["bytes"],
+        serde_json::json!(0),
+        "{}",
+        read.json
+    );
+    assert_eq!(
+        data["ignored"]["top"],
+        serde_json::json!([]),
+        "{}",
+        read.json
+    );
 }
 
 /// Both at once stay two facts: neither hides the other.
@@ -1114,7 +1149,12 @@ fn uncommitted_work_beside_ignored_files_reports_both() {
     let read = observe(root.path(), None, None, 1);
     let data = snapshot_data(&read);
 
-    assert_eq!(data["uncommitted"], serde_json::json!(true), "{}", read.json);
+    assert_eq!(
+        data["uncommitted"],
+        serde_json::json!(true),
+        "{}",
+        read.json
+    );
     assert_eq!(
         data["ignored"]["count"],
         serde_json::json!(IGNORED_LEFTOVERS),
@@ -1168,7 +1208,12 @@ fn ignored_files_alone_keep_every_refusal_they_had() {
     assert!(facts.dirty, "a deletion would lose them: {}", read.json);
     assert_eq!(read.evidence.summary.dirty, Some(true), "{}", read.json);
     assert!(!facts.complete, "{}", read.json);
-    assert_eq!(facts.coverage_gaps, vec!["ignored_content"], "{}", read.json);
+    assert_eq!(
+        facts.coverage_gaps,
+        vec!["ignored_content"],
+        "{}",
+        read.json
+    );
     let receipt = read
         .evidence
         .verification
@@ -1272,10 +1317,16 @@ fn measure_what_an_evidence_read_costs_beside_ignored_trees() {
                 .expect("a tracked file");
         }
     }
-    let rules: String = TREES.iter().map(|(name, ..)| format!("{name}/\n")).collect();
+    let rules: String = TREES
+        .iter()
+        .map(|(name, ..)| format!("{name}/\n"))
+        .collect();
     std::fs::write(root.path().join(".gitignore"), rules).expect("ignore rules");
     git(root.path(), &["add", "-A"]);
-    git(root.path(), &["commit", "-q", "-m", "a project with its sources"]);
+    git(
+        root.path(),
+        &["commit", "-q", "-m", "a project with its sources"],
+    );
     let mut ignored_files = 0;
     for (name, dirs, files) in TREES {
         for dir in 0..dirs {
@@ -1326,4 +1377,3 @@ fn measure_what_an_evidence_read_costs_beside_ignored_trees() {
         })
     );
 }
-

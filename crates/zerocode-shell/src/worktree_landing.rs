@@ -1025,7 +1025,10 @@ mod tests {
     fn landed_checkout(bench: &Bench, name: &str) -> PathBuf {
         let wt = bench.worktree(name);
         bench.commit(&wt, "w.txt", "work\n");
-        git(&bench.repo, &["merge", "--ff-only", "-q", &format!("wt/{name}")]);
+        git(
+            &bench.repo,
+            &["merge", "--ff-only", "-q", &format!("wt/{name}")],
+        );
         bench.commit(&bench.repo, &format!("{name}.txt"), "later\n");
         bench.publish();
         wt
@@ -1082,8 +1085,11 @@ mod tests {
         const TRACKED_DIRS: usize = 100;
         const TRACKED_PER_DIR: usize = 20;
         // 400 directories of 100 files, 100 of 200, 50 of 20 — 61,000 files.
-        const TREES: [(&str, usize, usize); 3] =
-            [("node_modules", 400, 100), ("target", 100, 200), ("output", 50, 20)];
+        const TREES: [(&str, usize, usize); 3] = [
+            ("node_modules", 400, 100),
+            ("target", 100, 200),
+            ("output", 50, 20),
+        ];
         const ROUNDS: usize = 9;
         const REFRESHES_FOR_MEMORY: usize = 60;
 
@@ -1112,10 +1118,16 @@ mod tests {
                     .expect("a tracked file");
             }
         }
-        let rules: String = TREES.iter().map(|(name, ..)| format!("{name}/\n")).collect();
+        let rules: String = TREES
+            .iter()
+            .map(|(name, ..)| format!("{name}/\n"))
+            .collect();
         std::fs::write(bench.repo.join(".gitignore"), rules).expect("the project's rules");
         git(&bench.repo, &["add", "-A"]);
-        git(&bench.repo, &["commit", "-q", "-m", "a project with its sources"]);
+        git(
+            &bench.repo,
+            &["commit", "-q", "-m", "a project with its sources"],
+        );
         bench.publish();
         let wt = landed_checkout(&bench, "built");
         let mut ignored_files = 0;
