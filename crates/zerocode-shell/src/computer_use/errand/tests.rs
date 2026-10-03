@@ -805,18 +805,28 @@ fn on_presses_the_number_it_chose_and_walks_again_from_the_reports_own_next() {
 fn a_walk_withdrawn_while_choosing_neither_presses_nor_claims_the_goal() {
     struct Withdrawn(Judged);
     impl ActionJudge for Withdrawn {
-        fn choose(&mut self, _: &ActionAsk) -> Judged { self.0.clone() }
-        fn permits_application(&self) -> bool { false }
+        fn choose(&mut self, _: &ActionAsk) -> Judged {
+            self.0.clone()
+        }
+        fn permits_application(&self) -> bool {
+            false
+        }
     }
-    let done = Judged::Chose(ActionChoice {
-        chosen: Chosen::Done, probabilities: BTreeMap::new(), confidence: 0.9, guard: None,
-    }.into());
+    let done = Judged::Chose(
+        ActionChoice {
+            chosen: Chosen::Done,
+            probabilities: BTreeMap::new(),
+            confidence: 0.9,
+            guard: None,
+        }
+        .into(),
+    );
     for answer in [pick(1), done] {
         let mut judge = Withdrawn(answer);
         let mut world = FakeWorld::that_moves(&[1, 2]);
         let walked = run(Mode::On, true, &goal(3), &mut judge, &mut world);
         assert!(world.presses.is_empty());
-        assert_eq!(walked.reached, None);
+        assert_eq!(walked.reached, Some(false));
         assert_eq!(walked.rows[0]["routeUse"], USE_SHADOW);
         assert_eq!(walked.rows[0]["pressed"], false);
     }
@@ -828,23 +838,36 @@ pub(super) struct RevocableJudge {
 }
 
 impl ActionJudge for RevocableJudge {
-    fn choose(&mut self, ask: &ActionAsk) -> Judged { self.inner.choose(ask) }
-    fn compare(&mut self, ask: &BranchAsk) -> Compared { self.inner.compare(ask) }
-    fn permits_application(&self) -> bool { self.allowed.load(std::sync::atomic::Ordering::SeqCst) }
+    fn choose(&mut self, ask: &ActionAsk) -> Judged {
+        self.inner.choose(ask)
+    }
+    fn compare(&mut self, ask: &BranchAsk) -> Compared {
+        self.inner.compare(ask)
+    }
+    fn permits_application(&self) -> bool {
+        self.allowed.load(std::sync::atomic::Ordering::SeqCst)
+    }
     fn branching_now(&self, configured: Branching) -> Branching {
-        if self.permits_application() { configured } else { Branching::OFF }
+        if self.permits_application() {
+            configured
+        } else {
+            Branching::OFF
+        }
     }
 }
 
 #[test]
 fn a_walk_withdrawn_after_its_first_press_makes_no_second_press() {
     let allowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let mut judge = RevocableJudge { inner: FakeJudge::chose(&[1, 2, 3]), allowed: allowed.clone() };
+    let mut judge = RevocableJudge {
+        inner: FakeJudge::chose(&[1, 2, 3]),
+        allowed: allowed.clone(),
+    };
     let mut world = FakeWorld::that_moves(&[1, 2, 3]);
     world.withdraw_after_press = Some(allowed);
     let walked = run(Mode::On, true, &goal(3), &mut judge, &mut world);
     assert_eq!(world.presses, [1]);
-    assert_eq!(walked.reached, None);
+    assert_eq!(walked.reached, Some(false));
     assert_eq!(walked.rows.last().unwrap()["routeUse"], USE_SHADOW);
 }
 

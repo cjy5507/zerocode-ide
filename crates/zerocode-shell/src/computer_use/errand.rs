@@ -268,10 +268,14 @@ pub trait ActionJudge {
     fn choose(&mut self, ask: &ActionAsk) -> Judged;
 
     /// Recheck permission before an answer changes the live surface.
-    fn permits_application(&self) -> bool { true }
+    fn permits_application(&self) -> bool {
+        true
+    }
 
     /// A running walk may lose permission; it never gains a new acting seat.
-    fn branching_now(&self, configured: Branching) -> Branching { configured }
+    fn branching_now(&self, configured: Branching) -> Branching {
+        configured
+    }
 
     /// Which of a forked step's results is the closest to the goal (t-6044,
     /// `zerocode_core::jev::BRANCHING`) — asked under that seat's own row,

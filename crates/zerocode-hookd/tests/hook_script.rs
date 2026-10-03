@@ -78,9 +78,13 @@ async fn a_hook_acknowledges_only_context_it_successfully_forwards() {
         }).await.unwrap();
         assert!(output.status.success(), "{output:?}");
         assert!(output.stderr.is_empty(), "{output:?}");
-        assert_eq!(source.0.load(Ordering::SeqCst), usize::from(!broken_output),
+        assert_eq!(
+            source.0.load(Ordering::SeqCst),
+            usize::from(!broken_output),
             "broken_output={broken_output}; stdout={}; stderr={}",
-            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         if !broken_output {
             let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert!(

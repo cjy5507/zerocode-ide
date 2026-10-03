@@ -37,9 +37,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use zerocode_core::browser_read::{self, ReadAsk, Verdict, inside};
 use zerocode_core::jev::promote::SEAT_RECORDING;
-use zerocode_core::jev::summary::{
-    AGREED, APPLIED, AT, ELAPSED_MS, LABEL, ROUTE_USE,
-};
+use zerocode_core::jev::summary::{AGREED, APPLIED, AT, ELAPSED_MS, LABEL, ROUTE_USE};
 use zerocode_core::jev::{
     BROWSER_READ, BROWSER_READ_APPLY_DEADLINE_MS, JevMode, ROUTE_USE_APPLIED, ROUTE_USE_FALLBACK,
 };
@@ -291,7 +289,8 @@ pub(crate) fn settle(
     row["outcome"] = json!(ANSWERED);
     row["chrome"] = json!(verdict.chrome.len());
     row["droppable"] = json!(droppable.len());
-    let acting = acting && wire.permits_workspace_now(workspace)
+    let acting = acting
+        && wire.permits_workspace_now(workspace)
         && crate::systemone::applies(wire, &BROWSER_READ);
     let text = if acting {
         let folded = browser_read::fold(&page.blocks, &droppable, &full_hint(label));

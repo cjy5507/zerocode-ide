@@ -2,10 +2,22 @@ use super::*;
 use crate::jev::{AGENT_TOOL, door};
 use serde_json::json;
 
-const WORKSPACE: &str = if cfg!(windows) { r"C:\work\project" } else { "/work/project" };
+const WORKSPACE: &str = if cfg!(windows) {
+    r"C:\work\project"
+} else {
+    "/work/project"
+};
 
-const WORKSPACE_ONE: &str = if cfg!(windows) { r"C:\work\one" } else { "/work/one" };
-const WORKSPACE_TWO: &str = if cfg!(windows) { r"C:\work\two" } else { "/work/two" };
+const WORKSPACE_ONE: &str = if cfg!(windows) {
+    r"C:\work\one"
+} else {
+    "/work/one"
+};
+const WORKSPACE_TWO: &str = if cfg!(windows) {
+    r"C:\work\two"
+} else {
+    "/work/two"
+};
 
 fn case_with(seat: &JevUse, state: &str, questions: Value, answers: Value, model: &str) -> Case {
     let settings =

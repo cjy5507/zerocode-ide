@@ -275,8 +275,13 @@ fn compared(
             }
             // The walk's one press rule, read for the pick (t-6187): a
             // control a press cannot take back asks nine in ten here too.
-            let (permitted, kind) =
-                press_rule(&BRANCHING, branching.act_line, screen, choice.mark, choice.confidence);
+            let (permitted, kind) = press_rule(
+                &BRANCHING,
+                branching.act_line,
+                screen,
+                choice.mark,
+                choice.confidence,
+            );
             said[CONTROL_KIND] = json!(kind.word());
             if !permitted {
                 said[BARRED] = json!(Barred::LowConfidence.as_str());
@@ -299,7 +304,10 @@ fn compared(
 /// the walk goes on from is the one it forked from, except after a load that
 /// failed, where the row says which candidate's screen the device stands on.
 pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World) -> Stepped {
-    let current = Step { branching: judge.branching_now(step.branching), ..*step };
+    let current = Step {
+        branching: judge.branching_now(step.branching),
+        ..*step
+    };
     let step = &current;
     let today = step.chosen;
     if !step.branching.mode.asks() {
@@ -350,7 +358,10 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
                 &asked,
                 screen,
                 today,
-                Branching { acting: false, ..step.branching },
+                Branching {
+                    acting: false,
+                    ..step.branching
+                },
                 &mut said,
             );
             same_pick = said
@@ -399,7 +410,9 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
     let mut restore_ms = Vec::new();
     let mut explored = 0usize;
     for (index, candidate) in candidates.iter_mut().enumerate() {
-        if !judge.permits_application() || !judge.branching_now(step.branching).acting { break; }
+        if !judge.permits_application() || !judge.branching_now(step.branching).acting {
+            break;
+        }
         // The clock: past the budget, or without room to ask and still press,
         // the candidates left are not explored.
         if elapsed_ms(forking) >= budget
@@ -488,14 +501,7 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
             before: &before,
             candidates: &tried,
         }) {
-            pick = compared(
-                judge,
-                &asked,
-                screen,
-                today,
-                step.branching,
-                &mut said,
-            );
+            pick = compared(judge, &asked, screen, today, step.branching, &mut said);
         }
     }
     world.forget(&saved);

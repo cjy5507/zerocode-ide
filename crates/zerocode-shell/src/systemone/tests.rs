@@ -418,25 +418,50 @@ fn a_late_window_answer_rechecks_settings_without_losing_its_actual_bill() {
             "workspaces":[door::resolved_path(workspace.path())]}}});
         std::fs::write(&path, root.to_string()).unwrap();
         let settings = path.clone();
-        let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", move |_| {
-            let mut root = root.clone();
-            match change {
-                "none" => {},
-                "global_off" => root["smart"]["jev"]["enabled"] = json!(false),
-                "consent" => root["smart"]["jev"]["workspaces"] = json!([]),
-                "model" => root["smart"]["jevModel"] = json!("jev-new-pin"),
-                word => root["smart"][AGENT_TOOL.setting] = json!(word),
-            }
-            std::fs::write(&settings, root.to_string()).unwrap();
-            json!({"model":ANSWERING_VERSION,"answers":{},
-                "usage":{"input_tokens":7,"output_tokens":3}}).to_string()
-        }, 0);
+        let endpoint = Endpoint::answering_each(
+            "HTTP/1.1 200 OK",
+            move |_| {
+                let mut root = root.clone();
+                match change {
+                    "none" => {}
+                    "global_off" => root["smart"]["jev"]["enabled"] = json!(false),
+                    "consent" => root["smart"]["jev"]["workspaces"] = json!([]),
+                    "model" => root["smart"]["jevModel"] = json!("jev-new-pin"),
+                    word => root["smart"][AGENT_TOOL.setting] = json!(word),
+                }
+                std::fs::write(&settings, root.to_string()).unwrap();
+                json!({"model":ANSWERING_VERSION,"answers":{},
+                "usage":{"input_tokens":7,"output_tokens":3}})
+                .to_string()
+            },
+            0,
+        );
         let wire = Wire::at(&endpoint.base(), "test-key", Some(path.clone()));
-        let request = || request_body(&json!({"context":"settings regression"}),
-            &json!({"q":{"type":"noul","instructions":"Is this useful?"}}));
-        let asked = wire.ask(&AGENT_TOOL, Some(workspace.path()), request(), Duration::from_secs(5));
-        assert_eq!(asked.answer.is_ok(), change == "none", "{change}: {asked:?}");
-        assert_eq!((asked.spent.requests, asked.spent.input_tokens, asked.spent.output_tokens), (1, Some(7), Some(3)));
+        let request = || {
+            request_body(
+                &json!({"context":"settings regression"}),
+                &json!({"q":{"type":"noul","instructions":"Is this useful?"}}),
+            )
+        };
+        let asked = wire.ask(
+            &AGENT_TOOL,
+            Some(workspace.path()),
+            request(),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            asked.answer.is_ok(),
+            change == "none",
+            "{change}: {asked:?}"
+        );
+        assert_eq!(
+            (
+                asked.spent.requests,
+                asked.spent.input_tokens,
+                asked.spent.output_tokens
+            ),
+            (1, Some(7), Some(3))
+        );
         assert_eq!(asked.spent.model.as_deref(), Some(ANSWERING_VERSION));
         if matches!(change, "global_off" | "consent") {
             assert!(!applies_in_project(&wire, &AGENT_TOOL, workspace.path()));
@@ -446,9 +471,18 @@ fn a_late_window_answer_rechecks_settings_without_losing_its_actual_bill() {
             assert!(!applies_once_risen(&wire, &AGENT_TOOL));
         }
         if change == "off" {
-            let off = wire.ask(&AGENT_TOOL, Some(workspace.path()), request(), Duration::from_secs(5));
+            let off = wire.ask(
+                &AGENT_TOOL,
+                Some(workspace.path()),
+                request(),
+                Duration::from_secs(5),
+            );
             assert_eq!(off.spent.requests, 0);
-            assert_eq!(endpoint.asked().len(), 1, "a disabled feature sends no new request");
+            assert_eq!(
+                endpoint.asked().len(),
+                1,
+                "a disabled feature sends no new request"
+            );
         }
     }
 }

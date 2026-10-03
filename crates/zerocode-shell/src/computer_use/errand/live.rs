@@ -142,7 +142,9 @@ impl LiveJudge {
         // The walk's first look is longer than a handshake: connect now,
         // so the first question pays for its answer alone.
         wire.warm();
-        let model = JevSettings::from_root(&wire.settings_root()).resolved().model;
+        let model = JevSettings::from_root(&wire.settings_root())
+            .resolved()
+            .model;
         Self {
             wire,
             workspace: workspace.map(Path::to_path_buf),
@@ -170,7 +172,9 @@ impl LiveJudge {
     #[must_use]
     pub fn at(base: &str, key: &str, doorway: Doorway) -> Self {
         let wire = Wire::at(base, key, doorway.settings);
-        let model = JevSettings::from_root(&wire.settings_root()).resolved().model;
+        let model = JevSettings::from_root(&wire.settings_root())
+            .resolved()
+            .model;
         Self {
             wire,
             workspace: doorway.workspace,
@@ -403,17 +407,23 @@ impl LiveJudge {
 
 impl ActionJudge for LiveJudge {
     fn permits_application(&self) -> bool {
-        JevSettings::from_root(&self.wire.settings_root()).resolved().model == self.model
+        JevSettings::from_root(&self.wire.settings_root())
+            .resolved()
+            .model
+            == self.model
             && self.wire.permits_workspace_now(self.workspace.as_deref())
             && crate::systemone::applies_in(&self.wire, self.seat, self.run)
     }
 
     fn branching_now(&self, configured: super::Branching) -> super::Branching {
-        if !configured.mode.asks() { return configured; }
+        if !configured.mode.asks() {
+            return configured;
+        }
         let mode = BRANCHING.mode_in(&self.wire.settings_root());
         super::Branching {
             mode,
-            acting: configured.acting && self.permits_application()
+            acting: configured.acting
+                && self.permits_application()
                 && crate::systemone::applies(&self.wire, &BRANCHING),
             act_line: configured.act_line,
         }

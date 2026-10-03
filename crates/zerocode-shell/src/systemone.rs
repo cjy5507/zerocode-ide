@@ -248,7 +248,9 @@ pub fn applies(wire: &Wire, seat: &JevUse) -> bool {
 #[must_use]
 pub fn applies_once_risen(wire: &Wire, seat: &JevUse) -> bool {
     let root = wire.settings_root();
-    if !JevSettings::from_root(&root).enabled { return false; }
+    if !JevSettings::from_root(&root).enabled {
+        return false;
+    }
     let raised = ledger_of(wire, seat)
         .is_some_and(|ledger| zerocode_core::jev::promote::risen(seat, &read_rows(&ledger)));
     seat.mode_in(&root).applies_with(raised)
@@ -280,13 +282,14 @@ pub fn standing_in(
 /// person's `on`, or `auto` its project's own ledger raised (t-14869).
 #[must_use]
 pub fn applies_in_project(wire: &Wire, seat: &JevUse, workspace: &Path) -> bool {
-    wire.permits_workspace_now(Some(workspace)) && standing_at(
-        wire,
-        seat,
-        zerocode_core::jev::Run::Fresh,
-        project_ledger_of(wire, seat, workspace).as_deref(),
-    )
-    .1
+    wire.permits_workspace_now(Some(workspace))
+        && standing_at(
+            wire,
+            seat,
+            zerocode_core::jev::Run::Fresh,
+            project_ledger_of(wire, seat, workspace).as_deref(),
+        )
+        .1
 }
 
 /// The mode `seat` is read under in `run`, and whether it acts given the
@@ -299,7 +302,9 @@ fn standing_at(
 ) -> (zerocode_core::jev::JevMode, bool) {
     let root = wire.settings_root();
     let mode = seat.mode_in_run(&root, run);
-    if !JevSettings::from_root(&root).enabled { return (mode, false); }
+    if !JevSettings::from_root(&root).enabled {
+        return (mode, false);
+    }
     let raised = ledger.is_some_and(|ledger| {
         standing::standing_of(seat, ledger) == zerocode_core::jev::promote::Stand::Applying
     });
@@ -602,14 +607,22 @@ impl Wire {
     #[must_use]
     pub(crate) fn permits_workspace_now(&self, workspace: Option<&Path>) -> bool {
         let settings = JevSettings::from_root(&self.settings_root()).resolved();
-        settings.enabled && workspace.is_some_and(|path| settings.consents(&door::resolved_path(path)))
+        settings.enabled
+            && workspace.is_some_and(|path| settings.consents(&door::resolved_path(path)))
     }
 
-    fn response_is_current(&self, row: &JevUse, workspace: Option<&Path>, allowed: &JevSettings,
-        mode: zerocode_core::jev::JevMode) -> bool {
+    fn response_is_current(
+        &self,
+        row: &JevUse,
+        workspace: Option<&Path>,
+        allowed: &JevSettings,
+        mode: zerocode_core::jev::JevMode,
+    ) -> bool {
         let root = self.settings_root();
         let settings = JevSettings::from_root(&root).resolved();
-        settings.enabled && settings.model == allowed.model && row.mode_in(&root) == mode
+        settings.enabled
+            && settings.model == allowed.model
+            && row.mode_in(&root) == mode
             && workspace.is_some_and(|path| settings.consents(&door::resolved_path(path)))
     }
 
@@ -640,8 +653,11 @@ impl Wire {
         door::pass_remembering(
             |asking| {
                 let cleared = door::may_send(row, asking, body)?;
-                if row.word_in(&root).is_none() || row.mode_in(&root).asks() { Ok(cleared) }
-                else { Err(Refused::Off) }
+                if row.word_in(&root).is_none() || row.mode_in(&root).asks() {
+                    Ok(cleared)
+                } else {
+                    Err(Refused::Off)
+                }
             },
             key,
             &settings,
@@ -767,7 +783,9 @@ impl Wire {
             return Asked {
                 answer: if self.response_is_current(row, workspace, &allowed, mode) {
                     Ok(remembered.answer.clone())
-                } else { Err(Refused::SettingsChanged.token().to_string()) },
+                } else {
+                    Err(Refused::SettingsChanged.token().to_string())
+                },
                 spent: Spent {
                     requests: 0,
                     redacted_lines,
@@ -818,9 +836,12 @@ impl Wire {
             version,
         };
         // Keep the actual wire usage even when a late reply loses permission.
-        let answer = if answer.is_ok() && !self.response_is_current(row, workspace, &allowed, mode) {
+        let answer = if answer.is_ok() && !self.response_is_current(row, workspace, &allowed, mode)
+        {
             Err(Refused::SettingsChanged.token().to_string())
-        } else { answer };
+        } else {
+            answer
+        };
         Asked {
             answer,
             spent,
