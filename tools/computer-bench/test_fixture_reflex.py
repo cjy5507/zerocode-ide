@@ -467,6 +467,15 @@ class Plan(unittest.TestCase):
             self.assertEqual(rule["predicate"], {"op": "eq", "value": 1})
             self.assertEqual(rule["max_fires"], VALUES["reflex_plan"]["quota"])
 
+    def test_the_glide_may_be_asked_for_in_place_of_the_tables(self):
+        # A run measured at another pace asks for it — 16 ms is two pointer ticks, R10's fast
+        # profile; left out, the plan glides as the table says. The glide is all that changes (t-26708).
+        fast = reflex.plan(GEOMETRY, VALUES, self.bundle, reflex.contract(), pointer_ms=16)
+        self.assertEqual(fast["pointer"]["duration_ms"], 16)
+        self.assertEqual(self.plan["pointer"]["duration_ms"], VALUES["reflex_plan"]["pointer_ms"])
+        self.assertEqual({key: fast[key] for key in fast if key != "pointer"},
+                         {key: self.plan[key] for key in self.plan if key != "pointer"})
+
 
 class Fixture(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "darwin", "the fixture is an AppKit app")
@@ -574,7 +583,7 @@ class Runner(unittest.TestCase):
         import shutil
         shutil.rmtree(self.folder, ignore_errors=True)
 
-    def run_desk(self, seed, autopilot=None, keychain=None, **env):
+    def run_desk(self, seed, autopilot=None, keychain=None, pointer_ms=None, **env):
         desk = reflex.Desk(self.folder, self.values, LIMITS)
         with mock.patch.object(reflex.Bench, "hid_idle_s", return_value=VALUES["reflex_safety"]["idle_s"] + 1), \
                 mock.patch.object(reflex.Bench, "screen_locked", return_value=False), \
@@ -582,7 +591,21 @@ class Runner(unittest.TestCase):
                 mock.patch.object(reflex, "other_benches", return_value=[]), \
                 mock.patch.object(reflex, "keychain", keychain or (lambda service, value=False: None)), \
                 mock.patch.dict(os.environ, env):
-            return desk.run(seed, self.driver, "/nowhere/helper.app", autopilot=autopilot), self.folder / f"run-{seed}"
+            return (desk.run(seed, self.driver, "/nowhere/helper.app", autopilot=autopilot, pointer_ms=pointer_ms),
+                    self.folder / f"run-{seed}")
+
+    def test_a_run_may_ask_for_a_glide_and_its_config_says_so(self):
+        # The plan the runner writes for the hand glides as asked, the run's row and its config
+        # name the pace, and a run that asks for nothing is the table's (t-26708).
+        result, run = self.run_desk(37, pointer_ms=16)
+        self.assertEqual(json.loads((run / "plan.json").read_text())["pointer"]["duration_ms"], 16)
+        self.assertEqual(json.loads((run / "run.json").read_text())["pointerMs"], 16)
+        self.assertEqual(result["config"], f"{reflex.CONFIG}+pointer16")
+        result, run = self.run_desk(38)
+        self.assertEqual(json.loads((run / "plan.json").read_text())["pointer"]["duration_ms"],
+                         VALUES["reflex_plan"]["pointer_ms"])
+        self.assertEqual(json.loads((run / "run.json").read_text())["pointerMs"], VALUES["reflex_plan"]["pointer_ms"])
+        self.assertEqual(result["config"], reflex.CONFIG)
 
     def test_an_autopilot_round_hands_over_the_goal_and_keeps_its_ledgers_home(self):
         secret = "k-" + "x" * 24

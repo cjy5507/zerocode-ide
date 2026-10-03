@@ -833,3 +833,23 @@ fn a_plan_says_which_generator_wrote_it() {
     );
     assert_eq!(row["source"], json!("stub"));
 }
+
+/// The model writes `pointer.duration_ms` for every plan and the one example
+/// it is shown glides 80 ms — a pace a person follows with their eyes on a
+/// still screen. The instructions say what the glide costs and what a target
+/// that shows for under a second wants, in the table's own terms (t-26708);
+/// else every model-written plan reacts at the example's pace, and the bench
+/// measured that pace at 110 ms to the press where 16 ms gave 56.
+#[test]
+fn the_instructions_say_what_the_glide_costs_and_what_a_short_lived_target_wants() {
+    for words in [
+        "pointer.duration_ms",
+        "shortest glide",
+        "limits.reflex.pointer_tick_ns",
+    ] {
+        assert!(
+            INSTRUCTIONS.contains(words),
+            "the instructions say nothing of {words:?}"
+        );
+    }
+}

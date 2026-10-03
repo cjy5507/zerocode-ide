@@ -185,7 +185,7 @@ def colour_class(entry, tolerance=True):
     return {word: entry[word] for word in words}
 
 
-def plan(geometry, values, bundle, contract_version, rules=None, table_limits=None):
+def plan(geometry, values, bundle, contract_version, rules=None, table_limits=None, pointer_ms=None):
     """The plan the goal asks for, read off the window the window server named
     (`listWindows`) on the display it sits on (`displays`) and the table —
     never off the round: its reference extent is the display in points, its
@@ -1052,11 +1052,13 @@ class Desk:
         return {"folder": str(run), "frames": fixture.get("frames"), "events": fixture.get("events"),
                 "frame_ms": spread(spans), "shown": sorted({name for frame in frames for name in frame["shown"]})[:12]}
 
-    def run(self, seed, driver, helper_app, rules=None, autopilot=None, cover=None, cover_mode=None):
+    def run(self, seed, driver, helper_app, rules=None, autopilot=None, cover=None, cover_mode=None,
+            pointer_ms=None):
         """One run: announce, re-check, the goal, the driver, the supervision,
         the verdict. `autopilot` ({"generator", "words"}) gives the driver
         bench.json's goal in place of a plan; `cover` (a cover_scenes scene)
-        puts a window over the fixture at its moment (t-12979)."""
+        puts a window over the fixture at its moment (t-12979); `pointer_ms`
+        asks the hand's plan for that glide in place of the table's (t-26708)."""
         import cover_scenes
         safety = self.values["reflex_safety"]
         goal = self.values["reflex_goal"]
@@ -1248,6 +1250,8 @@ def main(argv=None):
                         help="run: put the scene this seed draws over the fixture (cover_scenes.py, t-12979)")
     parser.add_argument("--cover-mode", choices=["auto", "shadow", "off"],
                         help="run --autopilot: the cover seat's word in the bench's own zo home (t-12979)")
+    parser.add_argument("--pointer-ms", type=int,
+                        help="run: the glide the hand's plan asks for, in ms (default: the table's pointer_ms)")
     args = parser.parse_args(argv)
     values, table_limits = tally.table(), limits()
     signals = Signals().install()
@@ -1272,7 +1276,7 @@ def main(argv=None):
                 import cover_scenes
                 scene = None if args.cover_seed is None else cover_scenes.draw(args.cover_seed, values)
                 result = desk.run(args.seed, args.driver, helper_app, rules=args.rules, autopilot=autopilot,
-                                  cover=scene, cover_mode=args.cover_mode)
+                                  cover=scene, cover_mode=args.cover_mode, pointer_ms=args.pointer_ms)
         print(json.dumps(result, indent=2))
         return 0
     except Refused as why:

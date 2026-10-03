@@ -47,6 +47,19 @@ class RtsTests(unittest.TestCase):
         golden['plan_hash'] = ''
         self.assertEqual(plan, golden, 'both native contracts validate these exact plan fields')
 
+    def test_the_glide_may_be_asked_for_in_place_of_the_tables(self):
+        # The RTS plan glides two pointer ticks by the table; a run measured at another pace asks
+        # for it, and the glide is all that changes (t-26708).
+        geometry = {'display': {'x': 0, 'y': 0, 'width': 1512, 'height': 982},
+                    'window': {'x': 396, 'y': 271, 'width': 720, 'height': 440}}
+        table = rts.plan(geometry, self.values, 'dev.zerocode.bench.rts', reflex.contract(), table_limits=reflex.limits())
+        asked = rts.plan(geometry, self.values, 'dev.zerocode.bench.rts', reflex.contract(), table_limits=reflex.limits(),
+                         pointer_ms=80)
+        self.assertEqual(table['pointer']['duration_ms'], self.values['rts_plan']['pointer_ms'])
+        self.assertEqual(asked['pointer']['duration_ms'], 80)
+        self.assertEqual({key: asked[key] for key in asked if key != 'pointer'},
+                         {key: table[key] for key in table if key != 'pointer'})
+
     def record(self, stress=False, accepted_ms=0):
         schedule = rts.schedule(11, self.values, stress=stress)
         t0 = 5_000_000_000_000

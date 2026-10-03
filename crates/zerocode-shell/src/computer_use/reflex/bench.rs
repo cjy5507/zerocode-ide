@@ -204,6 +204,67 @@ fn append(path: &Path, value: &Value) {
     writeln!(file, "{value}").expect("the run's folder takes a line");
 }
 
+/// The line `calls.jsonl` keeps for a start or a stop: the method, the run
+/// it named or was given, when it was asked and answered on the host clock,
+/// the deadline a start was given, and the helper's refusal.
+fn call_row(
+    method: &str,
+    params: &Value,
+    answer: Result<&Value, &str>,
+    asked_ns: u64,
+    answered_ns: u64,
+) -> Value {
+    let answered = answer.ok();
+    json!({
+        "method": method,
+        "run": params.get("run").or_else(|| answered.and_then(|answer| answer.get("runId"))),
+        "askedNs": asked_ns,
+        "answeredNs": answered_ns,
+        "deadlineNs": answered.and_then(|answer| answer.get("deadlineNs")),
+        "refused": answer.err(),
+    })
+}
+
+#[cfg(test)]
+mod call_rows {
+    use super::*;
+
+    /// A start's line in `calls.jsonl` names the glide its plan asked for
+    /// (`pointerMs`), so a measurement reads the pace every plan ran at —
+    /// the stand-in's and the model's alike — off the run's own folder
+    /// (t-26708); a stop names no plan and so no pace.
+    #[test]
+    fn a_start_row_carries_the_plans_pointer_duration() {
+        let golden: Value = serde_json::from_str(include_str!(
+            "../../../../zerocode-core/fixtures/reflex-contract/valid_basic.json"
+        ))
+        .expect("the golden");
+        let wire = golden["plan"].to_string();
+        let answer = json!({ "runId": "rx-1", "deadlineNs": 5 });
+        let start = call_row(
+            "reflexStart",
+            &json!({ "runId": "rx-1", "plan": wire, "display": 0 }),
+            Ok(&answer),
+            1,
+            2,
+        );
+        assert_eq!(start["run"], json!("rx-1"));
+        assert_eq!(start["deadlineNs"], json!(5));
+        assert_eq!(
+            start["pointerMs"],
+            json!(80),
+            "the start names the glide its plan asked for"
+        );
+        let stop = call_row("reflexStop", &json!({ "run": "rx-1" }), Err("gone"), 3, 4);
+        assert_eq!(stop["run"], json!("rx-1"));
+        assert_eq!(stop["refused"], json!("gone"));
+        assert!(
+            stop.get("pointerMs").is_none_or(Value::is_null),
+            "a stop names no plan"
+        );
+    }
+}
+
 /// The Flow document the door reads: the fixture as its one app, a dry
 /// policy, and the plan's reflex sections, hashed here by the core.
 fn flow(plan: &ReflexPlan, bundle: &str) -> String {
@@ -303,17 +364,15 @@ fn a_reflex_run_on_the_benchs_own_fixture() {
             known.borrow_mut().insert(run.to_string(), status);
         }
         if matches!(method, "reflexStart" | "reflexStop") {
-            let answered = answer.as_ref().ok();
             append(
                 &calls,
-                &json!({
-                    "method": method,
-                    "run": params.get("run").or_else(|| answered.and_then(|answer| answer.get("runId"))),
-                    "askedNs": asked_ns,
-                    "answeredNs": uptime_ns(),
-                    "deadlineNs": answered.and_then(|answer| answer.get("deadlineNs")),
-                    "refused": answer.as_ref().err().map(|refusal| refusal.message.clone()),
-                }),
+                &call_row(
+                    method,
+                    &params,
+                    answer.as_ref().map_err(|refusal| refusal.message.as_str()),
+                    asked_ns,
+                    uptime_ns(),
+                ),
             );
         }
         answer

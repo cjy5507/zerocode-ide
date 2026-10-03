@@ -55,7 +55,7 @@ def schedule(seed, values, stress=False):
     return {'seed': seed, 'lengthMs': length, 'stress': stress, 'steps': steps, 'targets': targets}
 
 
-def plan(geometry, values, bundle, contract_version, rules=None, table_limits=None):
+def plan(geometry, values, bundle, contract_version, rules=None, table_limits=None, pointer_ms=None):
     display, window = geometry['display'], geometry['window']
     inputs, chosen = values['rts_inputs'], values['reflex_plan']
     x, y = window['x'] - int(display['x']), window['y'] - int(display['y'])
@@ -231,6 +231,8 @@ def main(argv=None):
     parser.add_argument('--autopilot', action='store_true')
     parser.add_argument('--generator', choices=['window', reflex.STUB], default='window')
     parser.add_argument('--l1', choices=['auto', 'shadow', 'off'], default='shadow')
+    parser.add_argument('--pointer-ms', type=int,
+                        help="run: the glide the hand's plan asks for, in ms (default: the table's rts_plan pointer_ms)")
     args = parser.parse_args(argv)
     values, limits = tally.table(), reflex.limits()
     if args.command == 'prepare':
@@ -250,7 +252,8 @@ def main(argv=None):
                 if not args.driver or not args.helper_app:
                     parser.error('run needs --driver and --helper-app')
                 autopilot = {'generator': args.generator, 'words': goal(values), 'l1': args.l1} if args.autopilot else None
-                result = desk.run(args.seed, args.driver, args.helper_app, autopilot=autopilot)
+                result = desk.run(args.seed, args.driver, args.helper_app, autopilot=autopilot,
+                                  pointer_ms=args.pointer_ms)
         print(json.dumps(result, indent=2))
         return 0
     except (reflex.Refused, reflex.Stopped) as error:
