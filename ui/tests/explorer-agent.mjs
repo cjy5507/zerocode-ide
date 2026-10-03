@@ -943,6 +943,34 @@ export async function testExplorerWriting(browser, origin, ok) {
     ok("the turn's end closes what it left open and asks git once; a failed call clears the mark and asks nothing; an end whose start was missed still asks for its file", ends.openedForStop === "true" && ends.stopCleared === true && ends.stopAsked === 1 && ends.failedCleared === true && ends.failedAsked === 0 && ends.orphanAsked === 1 && ends.orphanNamed === "docs/guide.md", JSON.stringify(ends));
     ok("a call whose end never comes is let go at its bound — the mark clears and git is asked once for what it may have written", ends.openedForBound === "true" && ends.boundCleared === true && ends.boundAsked === 1, JSON.stringify(ends));
 
+    /* a patch: the call names no file of its own but the files it writes — each one shimmers
+     * and each is asked about when the patch ends; and a folded column is nobody looking */
+    const patch = await page.evaluate(async ({ windowMs, min }) => {
+      const { root, fire, act, settle, sleep, writing } = window.__XT__;
+      const asking = () => window.__COUNTS__.scm_numstat ?? 0;
+      const out = {};
+      const said = { writes: ["src/lib.rs", "src/main.rs"], cwd: root, call: "patch-1" };
+      fire("term:8", [act("edit", "*** Begin Patch …", "started", said)]);
+      await settle(6);
+      out.both = [writing("src/lib.rs"), writing("src/main.rs")];
+      const before = asking();
+      fire("term:8", [act("edit", "*** Begin Patch …", "finished", said)]);
+      await sleep(min + windowMs + 500);
+      out.cleared = [writing("src/lib.rs"), writing("src/main.rs")].every((one) => one === null);
+      out.asked = asking() - before;
+      out.named = window.__XT__.asked.at(-1)?.slice().sort().join(",") ?? null;
+      // Nobody is looking at a tree whose column is folded: its writes end, and git is not asked.
+      setPanelFolded("aside", true);
+      const folded = asking();
+      fire("term:8", [act("edit", `${root}/README.md`, "finished", { call: "folded-1" })]);
+      await sleep(windowMs + 400);
+      out.foldedAsks = asking() - folded;
+      setPanelFolded("aside", false);
+      return out;
+    }, { windowMs, min });
+    ok("a patch's files each shimmer while it runs and are asked about together when it ends", JSON.stringify(patch.both) === JSON.stringify(["true", "true"]) && patch.cleared === true && patch.asked === 1 && patch.named === "src/lib.rs,src/main.rs", JSON.stringify(patch));
+    ok("a tree whose column is folded asks git nothing when a write ends", patch.foldedAsks === 0, JSON.stringify(patch));
+
     /* a wire session: its own pane key, its folder in `cwd`, its end naming no file */
     const wire = await page.evaluate(async ({ windowMs, min }) => {
       const { root, fire, act, settle, sleep, writing } = window.__XT__;

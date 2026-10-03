@@ -414,18 +414,24 @@ function treeRelative(target, pane, cwd = null) {
   return walked.startsWith(`${root}/`) ? walked.slice(root.length + 1) : null;
 }
 
-/* What one activity touched: each file it names with the kind of touch. A
- * call that failed touched nothing; a prompt and a turn's end are not tool
- * calls. The backend reads a shell command's reads and a patch's files with
- * the shell's grammar (`reads`, `writes`); when it named those, the target is
- * the command or the patch itself and names no file. */
-function treeTouchesOf(activity) {
-  return activity.phase === "started" || activity.phase === "finished" ? treeTargetsOf(activity) : [];
+/* Every file an activity names, resolved to the active workspace, with the kind
+ * of touch: `[{ kind, relative }]`. Whatever its phase — a call that failed
+ * names the same files (it touched none, but it ends the write that was open on
+ * them) — and a prompt and a turn's end, which are not tool calls, name none. A
+ * path outside the workspace, or one that cannot be resolved, is left out. */
+function treeFilesOf(pane, activity) {
+  const files = [];
+  for (const { kind, target } of treeTargetsOf(activity)) {
+    const relative = treeRelative(target, pane, activity.cwd);
+    if (relative !== null) files.push({ kind, relative });
+  }
+  return files;
 }
 
-/* Every file an activity names, with the kind of touch — whatever its phase:
- * a call that failed names the same files (it touched none, but it ends the
- * write that was open on them). */
+/* What an activity's files are before they are resolved. The backend reads a
+ * shell command's reads and a patch's files with the shell's grammar (`reads`,
+ * `writes`); when it named those, the target is the command or the patch itself
+ * and names no file. */
 function treeTargetsOf(activity) {
   const targets = [];
   const named = (activity.reads?.length ?? 0) + (activity.writes?.length ?? 0) > 0;
@@ -465,13 +471,15 @@ function noteTreeActivities(pane, activities) {
     }
     if (activity.phase === "stopped") wrote = closeTreeWritesOf(pane, now) || wrote;
     noteTreeVcs(pane, activity, now);
-    for (const { kind, target } of treeTouchesOf(activity)) {
-      const relative = treeRelative(target, pane, activity.cwd);
-      if (relative === null) continue;
-      touchTree(relative, kind, now);
-      newest = relative;
+    const files = treeFilesOf(pane, activity);
+    // A call that failed touched nothing.
+    if (activity.phase === "started" || activity.phase === "finished") {
+      for (const { kind, relative } of files) {
+        touchTree(relative, kind, now);
+        newest = relative;
+      }
     }
-    wrote = noteTreeWrite(pane, activity, now) || wrote;
+    wrote = noteTreeWrite(pane, activity, files, now) || wrote;
   }
   if (newest === null && !wrote) return;
   scheduleTreeTouchPaint();
@@ -673,15 +681,12 @@ function treeWriteKey(pane, activity) {
 }
 
 /* What one activity does to the writes open: a start opens one, an end closes
- * it. True when the open set moved. */
-function noteTreeWrite(pane, activity, now) {
+ * it; `files` is what `treeFilesOf` resolved of it. True when the open set
+ * moved. */
+function noteTreeWrite(pane, activity, files, now) {
   const phase = activity.phase;
   if (phase !== "started" && phase !== "finished" && phase !== "failed") return false;
-  const paths = [];
-  for (const { kind, target } of treeTargetsOf(activity)) {
-    const relative = kind === "write" ? treeRelative(target, pane, activity.cwd) : null;
-    if (relative !== null) paths.push(relative);
-  }
+  const paths = files.filter(({ kind }) => kind === "write").map(({ relative }) => relative);
   return phase === "started"
     ? openTreeWrite(pane, activity, paths, now)
     : closeTreeWrite(pane, activity, paths, now, phase === "finished");
