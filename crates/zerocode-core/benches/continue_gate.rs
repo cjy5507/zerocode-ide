@@ -16,6 +16,7 @@ use std::hint::black_box;
 use zerocode_core::continue_gate::spend::{ClaudeFormat, CostReader};
 use zerocode_core::continue_gate::{Allowance, Cap, StepBook};
 use zerocode_core::hook::{Activity, Phase, Tool};
+use zerocode_core::usage_stats::parse_record;
 
 fn started() -> Activity {
     Activity {
@@ -142,6 +143,17 @@ fn bench(c: &mut Criterion) {
         b.iter(|| {
             let mut reader = ClaudeFormat::default();
             black_box(reader.feed(black_box(&chunk)))
+        });
+    });
+    // The same look without the reader's one cheap question — does this line say
+    // `usage` at all — put to every line before it is parsed: what the reader
+    // would cost if it parsed everything a transcript holds, tool results and all.
+    group.bench_function("the_same_look_parsing_every_line", |b| {
+        b.iter(|| {
+            black_box(&chunk)
+                .lines()
+                .filter_map(|line| parse_record(line, Some("-")))
+                .count()
         });
     });
     group.finish();

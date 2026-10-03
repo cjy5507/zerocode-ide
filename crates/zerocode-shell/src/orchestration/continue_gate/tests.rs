@@ -435,3 +435,136 @@ fn the_ledgers_note_of_a_stop_names_the_budget_it_would_have_spent() {
     };
     assert_eq!(stop_reason(&calm), "gate");
 }
+
+/// A measurement, not a test (t-26583): what the gate costs the window on the
+/// paths a slow machine feels, with the numbers printed — the hook road's one
+/// event, the beat's judgment of many workers, a transcript look that finds
+/// nothing new and one that finds a kilobyte-sized call, and what a pane's record
+/// weighs. Run it on purpose:
+///
+/// `cargo test -p zerocode-shell --bin zerocode-shell measure_the_gate -- --ignored --nocapture`
+///
+/// (and under `taskpolicy -b` for the efficiency-core profile).
+#[test]
+#[ignore = "a measurement; it prints its numbers"]
+fn measure_the_gate_on_the_paths_a_slow_machine_feels() {
+    use std::io::Write as _;
+    use std::time::Instant;
+
+    use crate::orchestration::gate_book::{self, PaneGate};
+    use crate::orchestration::gate_meter::{Meter, POLL_MS};
+
+    let per = |total: std::time::Duration, count: u32| total.as_nanos() as f64 / f64::from(count);
+
+    // The hook road: one tool event of one pane into the window's book, the lock
+    // and the hash and all.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo test -p zerocode-core --lib -- case_7","description":"Run the core tests"}}"#;
+    let events = 200_000_u32;
+    let call_started = activity(Phase::Started);
+    let started = Instant::now();
+    for index in 0..events {
+        gate_book::note_hook(
+            90_000,
+            "launch",
+            &call_started,
+            payload,
+            NOW + i64::from(index),
+        );
+    }
+    eprintln!(
+        "hook road: {:.0} ns per tool event through gate_book::note_hook ({events} events)",
+        per(started.elapsed(), events)
+    );
+
+    // The beat: every live worker judged and recorded, a full window and a full ring
+    // of costs each.
+    for workers in [1_u32, 10, 50] {
+        let door = FakeDoor::default();
+        let mut book = GateBook::default();
+        for term in 0..workers {
+            let gate = book.pane(term, "launch", NOW);
+            work(gate, 150);
+            for index in 0..64 {
+                gate.book
+                    .note_cost(Some(0.15 + f64::from(index % 7) * 0.01));
+            }
+        }
+        let beats = 2_000_u32;
+        let started = Instant::now();
+        for beat in 0..beats {
+            for term in 0..workers {
+                let gate = book.pane_mut(term).expect("a record");
+                step(
+                    gate,
+                    &pane(),
+                    settings(Mode::Notify),
+                    &around(Allowance::default()),
+                    &door,
+                    NOW + i64::from(beat) * SECOND,
+                );
+            }
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "beat: {:.0} µs for {workers} workers judged and recorded ({:.0} ns a worker)",
+            per(elapsed, beats) / 1_000.0,
+            per(elapsed, beats * workers)
+        );
+    }
+
+    // A transcript look: nothing grew (a stat), and a growth of one model call.
+    let dir = tempfile::tempdir().expect("a transcript dir");
+    let path = dir.path().join("session.jsonl");
+    let call = |index: usize| {
+        serde_json::json!({
+            "type": "assistant", "sessionId": "session-1", "timestamp": "2026-10-03T00:00:00.000Z",
+            "uuid": format!("uuid-{index}"), "requestId": format!("request-{index}"),
+            "message": {"id": format!("message-{index}"), "model": "claude-haiku-4-5", "role": "assistant",
+                "content": [{"type": "text", "text": "Reading the file before I change it."}],
+                "usage": {"input_tokens": 3, "output_tokens": 120, "cache_read_input_tokens": 90_000,
+                    "cache_creation_input_tokens": 400}},
+        })
+        .to_string()
+    };
+    std::fs::write(&path, format!("{}\n", call(0))).expect("a transcript");
+    let text = path.to_str().expect("a utf-8 path");
+    let mut meter = Meter::new("claude");
+    meter.poll(Some(text), 0);
+    let looks = 20_000_u32;
+    let started = Instant::now();
+    for look in 1..=looks {
+        meter.poll(Some(text), i64::from(look) * POLL_MS);
+    }
+    eprintln!(
+        "transcript look, nothing new: {:.1} µs (an open, a stat and a flush, {looks} looks)",
+        per(started.elapsed(), looks) / 1_000.0
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("the transcript opens");
+    let mut grown = 0_u32;
+    let mut spent = std::time::Duration::ZERO;
+    for index in 1..=2_000_usize {
+        writeln!(file, "{}", call(index)).expect("the transcript grows");
+        let at = i64::from(looks + 1) * POLL_MS + i64::try_from(index).expect("fits") * POLL_MS;
+        let started = Instant::now();
+        meter.poll(Some(text), at);
+        spent += started.elapsed();
+        grown += 1;
+    }
+    eprintln!(
+        "transcript look, one model call grown: {:.1} µs ({grown} looks)",
+        per(spent, grown) / 1_000.0
+    );
+
+    // What a record weighs in the book.
+    eprintln!(
+        "records: PaneGate {} bytes on the stack; a book of {} panes is bounded by it and the heap of one \
+         window of {} marks and one ring of {} costs",
+        std::mem::size_of::<PaneGate>(),
+        gate_book::PANES_MAX,
+        zerocode_core::continue_gate::REWORK_WINDOW_STEPS,
+        zerocode_core::continue_gate::COST_RING
+    );
+}

@@ -53,3 +53,9 @@ harness = false
 [[bench]]
 name = "continue_gate"
 harness = false
+
+# What the gate's memory does over a long run: three bounded stores fed far more
+# than a month would, and the process's resident size after each step.
+[[bench]]
+name = "continue_gate_memory"
+harness = false
