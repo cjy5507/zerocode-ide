@@ -45,8 +45,8 @@ use zerocode_core::computer_use_protocol::reflex::{ReflexPlan, Scope, Surface, V
 use zerocode_core::jev::promote::names_a_schema_failure;
 use zerocode_core::jev::reflex_decide::{
     self, ANSWERED, CONTINUE, KIND_KEY, LABEL_KIND, NOT_REPLANNED, PAUSE, Pending, REPLAN,
-    ROAD_DOOR, ROAD_JEV, ROAD_MEMO, ROAD_SURROGATE, Running, Share, Stamp, WINDOW_CUT, WITHDRAWN,
-    Why,
+    ROAD_AHEAD, ROAD_DOOR, ROAD_JEV, ROAD_MEMO, ROAD_SURROGATE, Running, Share, Stamp, WINDOW_CUT,
+    WITHDRAWN, Why,
 };
 use zerocode_core::jev::summary::{AT, LABEL, REQUEST_AT};
 use zerocode_core::jev::{JevMode, REFLEX_DECIDE, Run as Asking};
@@ -129,13 +129,18 @@ impl Tally {
     fn new() -> Self {
         let zero = |words: &[&'static str]| words.iter().map(|word| (*word, 0)).collect();
         Self {
-            roads: zero(&[ROAD_MEMO, ROAD_SURROGATE, ROAD_JEV]),
+            roads: zero(&ANSWERING_ROADS[..3]),
             applied: zero(&[CONTINUE, PAUSE, REPLAN]),
             invalid: zero(&Why::ALL.map(Why::word)),
             ..Self::default()
         }
     }
 }
+
+/// The roads a carried-out decision's answer may come down: the memo and the
+/// stand-in (named, answering nothing yet), the wire, and an answer the wire
+/// gave a reading before, held for this one (t-32797).
+const ANSWERING_ROADS: [&str; 4] = [ROAD_MEMO, ROAD_SURROGATE, ROAD_JEV, ROAD_AHEAD];
 
 /// A label window still open: one answer, and whether the run it was about
 /// found anything since.
@@ -512,8 +517,12 @@ impl Carrier for Seat<'_> {
                 reflex_decide::carried(row, verdict);
                 match verdict {
                     Ok(()) => {
+                        let road = ANSWERING_ROADS
+                            .into_iter()
+                            .find(|road| row["road"] == json!(road))
+                            .unwrap_or(ROAD_JEV);
                         *judge.tally.applied.entry(chosen).or_default() += 1;
-                        *judge.tally.roads.entry(ROAD_JEV).or_default() += 1;
+                        *judge.tally.roads.entry(road).or_default() += 1;
                         judge.streak = 0;
                         if chosen != CONTINUE {
                             judge.carry = Some(Carry {

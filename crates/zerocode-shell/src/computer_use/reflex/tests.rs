@@ -12,6 +12,7 @@ use zerocode_core::computer_use::COMPUTER_USE_PROTOCOL_VERSION;
 use zerocode_core::computer_use_protocol::reflex::{ReflexPlan, plan_hash};
 use zerocode_core::jev::JevMode;
 use zerocode_core::jev::questions::{REFLEX_DECIDE_OPTIONS, REFLEX_DECIDE_QUESTION};
+use zerocode_core::jev::reflex_decide::Branch;
 
 use super::*;
 use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
@@ -851,19 +852,30 @@ fn settings(consented: &[&str], mode: Option<&str>) -> (tempfile::TempDir, PathB
 
 /// The endpoint's body naming `word`.
 pub(super) fn answer_naming(word: &str) -> String {
-    let probabilities: serde_json::Map<String, Value> = REFLEX_DECIDE_OPTIONS
-        .iter()
-        .map(|(option, _)| {
-            (
-                (*option).to_string(),
-                json!(if *option == word { 0.8 } else { 0.1 }),
-            )
-        })
-        .collect();
-    json!({ "answers": { REFLEX_DECIDE_QUESTION: {
-        "type": "choice", "choice": word, "probabilities": probabilities, "confidence": 0.7
-    } }, "model": ANSWERING_VERSION })
-    .to_string()
+    answer_naming_ahead(word, &[])
+}
+
+/// The endpoint's body answering the reading's own question with `own` and
+/// each branch in `branches` with its word (t-32797).
+pub(super) fn answer_naming_ahead(own: &str, branches: &[(Branch, &str)]) -> String {
+    let choice = |word: &str| {
+        let probabilities: serde_json::Map<String, Value> = REFLEX_DECIDE_OPTIONS
+            .iter()
+            .map(|(option, _)| {
+                (
+                    (*option).to_string(),
+                    json!(if *option == word { 0.8 } else { 0.1 }),
+                )
+            })
+            .collect();
+        json!({ "type": "choice", "choice": word, "probabilities": probabilities, "confidence": 0.7 })
+    };
+    let mut answers = serde_json::Map::new();
+    answers.insert(REFLEX_DECIDE_QUESTION.to_string(), choice(own));
+    for (branch, word) in branches {
+        answers.insert(branch.question(), choice(word));
+    }
+    json!({ "answers": answers, "model": ANSWERING_VERSION }).to_string()
 }
 
 fn a_state() -> Value {
@@ -908,6 +920,37 @@ fn a_sent_request_counts_even_if_failed_or_late() {
         asked.contains("\"model\":\"jev-latest\""),
         "the alias, never another model"
     );
+}
+
+/// The one request a reading asks carries its own question as it always
+/// was and the same question of each branch it can take (t-32797): one
+/// request, its state carried once.
+#[test]
+fn a_readings_request_asks_its_branches_beside_it() {
+    let (_home, path) = settings(&["*"], Some("shadow"));
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer_naming("continue"), 0);
+    let state = a_state();
+    let (wired, _) =
+        asker(Wire::at(&endpoint.base(), "key", Some(path)), Some(flows()))(state.clone());
+    assert_eq!(wired.attempts, 1, "one request");
+    let asked = endpoint.asked();
+    assert_eq!(asked.len(), 1);
+    let body: Value = serde_json::from_str(
+        asked[0]
+            .split_once("\r\n\r\n")
+            .expect("a request with a body")
+            .1,
+    )
+    .expect("a body of JSON");
+    assert_eq!(body["questions"], reflex_decide::questions_for(&state));
+    for branch in [Branch::Taken, Branch::Missed] {
+        assert!(
+            body["questions"].get(branch.question()).is_some(),
+            "{}",
+            branch.word()
+        );
+    }
+    assert_eq!(body["state"]["sightings"], state["sightings"]);
 }
 
 /// A decision the seat did not consent to never reaches a model: the seat off

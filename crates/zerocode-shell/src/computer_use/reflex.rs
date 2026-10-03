@@ -33,7 +33,9 @@ use zerocode_core::computer_use_protocol::game_state;
 use zerocode_core::computer_use_protocol::reflex::{
     self, RUN_POLICY_VERSION, ReflexCapability, RunPolicy, Surface, VERSION, ValidatedPlan,
 };
-use zerocode_core::jev::reflex_decide::{self, Decider, Offer, Pending, Stamp, Wired};
+use zerocode_core::jev::reflex_decide::{
+    self, ANSWERED, Ahead, Decider, Offer, Pending, Snapshot, Stamp, Wired,
+};
 use zerocode_core::jev::{JevMode, REFLEX_DECIDE, REFLEX_DECIDE_DEADLINE_MS};
 
 use super::ComputerUseError;
@@ -529,6 +531,8 @@ pub(crate) struct Report {
     /// Reflex decisions, by the road each took, and the requests they sent.
     pub roads: BTreeMap<String, u64>,
     pub attempts: u64,
+    /// What was asked ahead of the run's readings (t-32797).
+    pub ahead: AheadReport,
 }
 
 impl Report {
@@ -541,9 +545,44 @@ impl Report {
             "ended": self.ended,
             "decisions": self.roads,
             "attempts": self.attempts,
+            "ahead": self.ahead.rendered(),
         })
     }
 }
+
+/// What a run's questions asked ahead came to (t-32797): the answers held
+/// for a next reading, the readings one decided at once, the held answers
+/// let go unused — what asking ahead cost — why a reading found none held
+/// for it, and whether a reading's own answer, when it came, agreed with the
+/// held one that had decided it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AheadReport {
+    pub held: u64,
+    pub used: u64,
+    pub dropped: u64,
+    pub unheld: BTreeMap<&'static str, u64>,
+    pub agreed: u64,
+    pub disagreed: u64,
+}
+
+impl AheadReport {
+    fn rendered(&self) -> Value {
+        json!({
+            "held": self.held,
+            "used": self.used,
+            "dropped": self.dropped,
+            "unheld": self.unheld,
+            "agreed": self.agreed,
+            "disagreed": self.disagreed,
+        })
+    }
+}
+
+/// The key every decision row says how long its reading waited for it under
+/// (t-32797): from the moment the window read the run to the moment the
+/// answer was judged, in milliseconds of its steady clock — 0 for a reading
+/// an answer held for it decided in the pass that read it.
+pub(crate) const DECISION_WAIT_MS: &str = "decisionWaitMs";
 
 /// One question on the wire as the watch hands it to a thread of its own: the
 /// state goes, what the wire came to — and the door's and the version's
@@ -628,6 +667,13 @@ pub(crate) struct Watch {
     /// What an autopilot remembers of the run beside every question it asks
     /// (t-10223 §2.2): none for a run a person's plan started.
     stamp: Option<Stamp>,
+    /// The answers held for the run's next reading (t-32797).
+    ahead: Ahead,
+    /// Readings a held answer decided, by the decision of their own question:
+    /// the held decision and its word, for that question's row to say
+    /// whether the two agreed. At most the question in flight's and the one
+    /// waiting behind it.
+    decided_ahead: BTreeMap<u64, (u64, String)>,
 }
 
 impl Watch {
@@ -643,6 +689,8 @@ impl Watch {
             in_flight: None,
             seen_ended: false,
             stamp: None,
+            ahead: Ahead::new(),
+            decided_ahead: BTreeMap::new(),
         }
     }
 
@@ -717,17 +765,20 @@ impl Watch {
         if asks && !ended {
             let mut snapshot = reflex_decide::snapshot_of(&read);
             snapshot.read_ms = Some(carrier.now_ms());
-            match self.decider.offer(snapshot) {
-                Offer::Same => {}
-                Offer::Ask(pending) => self.send(pending, ask, carrier.now_ms()),
-                Offer::Waiting { coalesced } => {
-                    rows.extend(coalesced.map(|merged| {
-                        self.count(reflex_decide::ROAD_COALESCED, 0);
-                        let mut row = reflex_decide::coalesced_row(&self.run, &merged);
-                        self.stamp(&mut row, mode);
-                        row
-                    }));
+            let reading = snapshot.clone();
+            let changed = match self.decider.offer(snapshot) {
+                Offer::Same => false,
+                Offer::Ask(pending) => {
+                    self.send(pending, ask, carrier.now_ms());
+                    true
                 }
+                Offer::Waiting { coalesced } => {
+                    rows.extend(coalesced.map(|merged| self.merged(&merged, mode)));
+                    true
+                }
+            };
+            if changed {
+                rows.extend(self.decide_ahead(&reading, carrier, mode));
             }
         }
         rows.extend(self.collect(&read, asks, ended, ask, carrier, mode));
@@ -791,6 +842,30 @@ impl Watch {
             }
             Err(_) => self.report.write_failures += 1,
         }
+    }
+
+    /// A reading merged into a newer one: its row. A held answer that decided
+    /// it leaves no agreement to say — its own question is asked never.
+    fn merged(&mut self, merged: &Pending, mode: JevMode) -> Value {
+        self.count(reflex_decide::ROAD_COALESCED, 0);
+        self.decided_ahead.remove(&merged.id);
+        let mut row = reflex_decide::coalesced_row(&self.run, merged);
+        self.stamp(&mut row, mode);
+        row
+    }
+
+    /// The reading just offered, decided in this pass by the answer held for
+    /// its premise, if one is (t-32797): its row, judged by `carrier` as an
+    /// answer that came back is — and its own question asked as ever.
+    fn decide_ahead(
+        &mut self,
+        reading: &Snapshot,
+        carrier: &mut dyn Carrier,
+        mode: JevMode,
+    ) -> Option<Value> {
+        // stub until asking ahead lands (t-32797)
+        let _ = (reading, carrier, mode, Snapshot::provenance);
+        None
     }
 
     fn send(&mut self, pending: Pending, ask: &Asker, now_ms: u64) {
@@ -882,6 +957,8 @@ impl Watch {
         );
         spent.stamp(&mut row);
         self.stamp(&mut row, mode);
+        self.agree_with_ahead(&pending, &mut row);
+        let _ = (ANSWERED, ended);
         carrier.settled(&pending, &mut row);
         let road = row["road"].as_str().unwrap_or_default().to_string();
         self.count(&road, u64::from(wired.attempts));
@@ -889,6 +966,13 @@ impl Watch {
             self.send(next, ask, settled_ms);
         }
         vec![row]
+    }
+
+    /// A reading a held answer decided, its own question come back (t-32797):
+    /// whether the two answers chose alike, on the question's row.
+    fn agree_with_ahead(&mut self, pending: &Pending, row: &mut Value) {
+        // stub until asking ahead lands (t-32797)
+        let _ = (pending, row);
     }
 
     /// The run's provenance and the pass's mode on a row it leaves.
@@ -907,11 +991,11 @@ impl Watch {
     /// The run ended: the reading still waiting is recorded as merged.
     fn finish(&mut self, record: &mut dyn FnMut(Vec<Value>), mode: JevMode) -> bool {
         if let Some(waiting) = self.decider.close() {
-            self.count(reflex_decide::ROAD_COALESCED, 0);
-            let mut row = reflex_decide::coalesced_row(&self.run, &waiting);
-            self.stamp(&mut row, mode);
+            let row = self.merged(&waiting, mode);
             record(vec![row]);
         }
+        self.report.ahead.dropped += self.ahead.clear() as u64;
+        self.decided_ahead.clear();
         true
     }
 }
@@ -925,7 +1009,7 @@ const fn reflex_missing() -> &'static str {
 /// by one lease: what the door let through, and what came back.
 pub(crate) fn asker(wire: Wire, workspace: Option<PathBuf>) -> Asker {
     Arc::new(move |state: Value| {
-        let body = systemone::request_body(&state, &reflex_decide::questions());
+        let body = systemone::request_body(&state, &reflex_decide::questions_for(&state));
         let began = Instant::now();
         let asked = wire.ask(
             &REFLEX_DECIDE,

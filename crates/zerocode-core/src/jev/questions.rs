@@ -768,7 +768,10 @@ pub fn command_guard_rubric_fingerprint() -> String {
 /// Bumped whenever the reflex decision's words, its options or the state they
 /// read change: a surrogate fitted to answers under one version never answers
 /// for another. Version 2 (t-22110) reads `activity` and `freshness` beside
-/// the sightings.
+/// the sightings. Version 3 (t-32797) asks, in the same request, the same
+/// question of each branch the next reading may take
+/// ([`REFLEX_DECIDE_BRANCHES`]); the question about the reading as it is
+/// keeps version 2's every word.
 pub const REFLEX_DECIDE_RUBRIC_VERSION: u32 = 2;
 /// The keys the reflex decision's state carries, in the order the use table
 /// declares them: each detector's newest sighting, how the run's actions
@@ -800,8 +803,47 @@ pub const REFLEX_DECIDE_OPTIONS: [(&str, &str); 3] = [
         "What the detectors find no longer fits what the plan acts on — targets gone or elsewhere for good: the plan needs rewriting.",
     ),
 ];
+/// The sentence of [`REFLEX_DECIDE_ASKS`] that asks (t-32797). A question
+/// asked ahead keeps every word around it — what the state's keys mean, the
+/// ordinary gap, the labels — and asks about a supposed next reading in its
+/// place ([`reflex_ahead_instructions`]).
+pub const REFLEX_DECIDE_ASKS_WHAT: &str = "What should the run do next?";
+/// How a question asked ahead opens its supposition: the reading the state
+/// carries, changed only as its branch says.
+pub const REFLEX_AHEAD_SUPPOSE: &str =
+    "Suppose the next reading, about a second from now, is this one except that";
+/// What a question asked ahead asks, in place of [`REFLEX_DECIDE_ASKS_WHAT`].
+pub const REFLEX_AHEAD_ASKS_WHAT: &str = "What should the run do then?";
+/// The branches a reading is asked ahead of, beside its own question
+/// (t-32797): each its word and what it supposes changed in the next reading
+/// — the facts the options are written in, and nothing else. The word names
+/// the branch in a row; the model reads the supposition.
+pub const REFLEX_DECIDE_BRANCHES: [(&str, &str); 3] = [
+    (
+        "appears",
+        "every detector whose value in `sightings` is 0 reads a target, a value other than 0, instead — everything else as it is now",
+    ),
+    (
+        "taken",
+        "every detector whose value in `sightings` is a target, a value other than 0, reads 0 instead — everything else as it is now",
+    ),
+    (
+        "missed",
+        "`activity` counts no action done and at least one missed — everything else as it is now",
+    ),
+];
 
-/// One fingerprint over the question, its options and the state it reads.
+/// A question asked ahead of `supposes`: the reflex decision's own words,
+/// its asking sentence replaced by the supposition and what it asks then.
+#[must_use]
+pub fn reflex_ahead_instructions(supposes: &str) -> String {
+    // stub until asking ahead lands (t-32797)
+    let _ = (supposes, REFLEX_AHEAD_SUPPOSE, REFLEX_AHEAD_ASKS_WHAT);
+    REFLEX_DECIDE_ASKS.to_string()
+}
+
+/// One fingerprint over the question, its options, the state it reads and
+/// the branches it is asked ahead of.
 #[must_use]
 pub fn reflex_decide_rubric_fingerprint() -> String {
     super::rubric_fingerprint(|| {
@@ -990,11 +1032,14 @@ mod tests {
     /// Version 2 (t-22110) reads the hand's own grounds beside the
     /// sightings — what its actions came to since the last reading and how
     /// old the capture is against the hand's limit — so the words, the
-    /// keys and the fingerprint moved together.
+    /// keys and the fingerprint moved together. Version 3 (t-32797) asks,
+    /// beside the question, the same question of each branch the next
+    /// reading may take — the words of each supposition are the seat's
+    /// words too.
     #[test]
     fn reflex_decide_version_names_its_exact_words() {
-        assert_eq!(REFLEX_DECIDE_RUBRIC_VERSION, 2);
-        assert_eq!(reflex_decide_rubric_fingerprint(), "96bb93a53b2615f5");
+        assert_eq!(REFLEX_DECIDE_RUBRIC_VERSION, 3);
+        assert_eq!(reflex_decide_rubric_fingerprint(), "20bccd5c0ff3db9e");
         assert_eq!(
             REFLEX_DECIDE_STATE_KEYS.to_vec(),
             vec!["sightings", "outcomes", "activity", "freshness"]
@@ -1007,6 +1052,41 @@ mod tests {
             .map(|(word, _)| *word)
             .collect();
         assert_eq!(words, ["continue", "pause", "replan"]);
+    }
+
+    /// A question asked ahead is the reflex decision's own question with one
+    /// sentence changed (t-32797): every word that says what the state's keys
+    /// mean stays, the asking sentence is there once to be replaced, and the
+    /// supposition and what is asked then stand in its place — never the
+    /// question about the reading as it is.
+    #[test]
+    fn a_question_asked_ahead_keeps_every_word_but_the_one_that_asks() {
+        assert_eq!(
+            REFLEX_DECIDE_ASKS.matches(REFLEX_DECIDE_ASKS_WHAT).count(),
+            1
+        );
+        let (before, after) = REFLEX_DECIDE_ASKS
+            .split_once(REFLEX_DECIDE_ASKS_WHAT)
+            .expect("the asking sentence");
+        let words: Vec<&str> = REFLEX_DECIDE_BRANCHES
+            .iter()
+            .map(|(word, _)| *word)
+            .collect();
+        assert_eq!(words, ["appears", "taken", "missed"]);
+        for (word, supposes) in REFLEX_DECIDE_BRANCHES {
+            let asked = reflex_ahead_instructions(supposes);
+            assert!(
+                asked.starts_with(before) && asked.ends_with(after),
+                "{word}"
+            );
+            assert!(
+                asked.contains(&format!(
+                    "{REFLEX_AHEAD_SUPPOSE} {supposes}. {REFLEX_AHEAD_ASKS_WHAT}"
+                )),
+                "{word}"
+            );
+            assert!(!asked.contains(REFLEX_DECIDE_ASKS_WHAT), "{word}");
+        }
     }
 
     /// The suggestion's words, keys and option template are one rubric
