@@ -8,6 +8,8 @@ use zerocode_core::orchestration::task_cost::{GenerationCost, UsdReason};
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Receipt {
     version: u8,
+    #[serde(default)]
+    revoked: bool,
     run: String,
     task: String,
     generation: u64,
@@ -61,11 +63,17 @@ pub(super) fn preserve(
         }) {
             spend.usd = None;
             spend.usd_reason = Some(UsdReason::InvalidUsage);
-            let _ = crate::durable_file::remove_file(&file);
+            if let Some(mut receipt) = previous {
+                receipt.revoked = true;
+                if let Ok(bytes) = serde_json::to_vec(&receipt) {
+                    let _ = crate::durable_file::replace_bytes(&file, &bytes);
+                }
+            }
             return;
         }
         let receipt = Receipt {
             version: 1,
+            revoked: false,
             run: run.into(),
             task: task.into(),
             generation,
@@ -84,7 +92,7 @@ pub(super) fn preserve(
         spend.usd_reason,
         Some(UsdReason::Unlinked | UsdReason::Unscanned)
     ) {
-        if let Some(receipt) = previous {
+        if let Some(receipt) = previous.filter(|receipt| !receipt.revoked) {
             *spend = receipt.spend;
         }
     } else {
@@ -155,5 +163,26 @@ mod tests {
         };
         preserve(directory.path(), "run", "task", Some(1), &mut missing);
         assert_eq!(missing.usd, None);
+    }
+
+    #[test]
+    fn decreasing_counters_remain_revoked_after_another_scan_or_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        preserve(directory.path(), "run", "task", Some(1), &mut known());
+        for _ in 0..2 {
+            let mut decreased = known();
+            decreased.input_tokens -= 1;
+            preserve(directory.path(), "run", "task", Some(1), &mut decreased);
+            assert_eq!(decreased.usd_reason, Some(UsdReason::InvalidUsage));
+        }
+        let mut missing = GenerationCost {
+            usd_reason: Some(UsdReason::Unlinked),
+            ..GenerationCost::default()
+        };
+        preserve(directory.path(), "run", "task", Some(1), &mut missing);
+        assert_eq!(missing.usd, None);
+        preserve(directory.path(), "run", "task", Some(1), &mut known());
+        preserve(directory.path(), "run", "task", Some(1), &mut missing);
+        assert_eq!(missing, known());
     }
 }

@@ -26,7 +26,7 @@
 //!
 //! A figure nobody can check is not written as one. The dollars stay `None`,
 //! with the reason ([`UsdReason`]), wherever one attempt's price cannot be
-//! read whole — an agent with no usage ledger (zo), a scan read before the
+//! read whole — an agent with no usage ledger, a scan read before the
 //! attempt ended or not at all, a conversation the scan does not hold or that
 //! another task shares, one that switched models mid-way (Claude's ledger
 //! keeps one model per conversation, the last, and pricing all of it at that
@@ -91,7 +91,7 @@ pub enum UsageSource {
 
 impl UsageSource {
     /// The ledger an agent's conversations are written to, or `None` for an
-    /// agent with none on this machine — zo, and every CLI no scan reads.
+    /// agent with none on this machine. Zo's request journal is read per session.
     #[must_use]
     pub fn of_agent(agent: &str) -> Option<Self> {
         match AgentKind::from_slug(agent)? {
@@ -389,8 +389,8 @@ impl JevBook {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum UsdReason {
-    /// An attempt ran on an agent with no usage ledger (zo, and every CLI no
-    /// scan reads): its tokens exist and nothing here can count them.
+    /// An attempt ran on a CLI no scan reads: its tokens exist and nothing
+    /// here can count them.
     UnsupportedAgent,
     /// No scan of that agent's ledger was read after the attempt ended —
     /// none is held, or the one held was read before the work was over.

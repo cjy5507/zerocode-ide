@@ -110,7 +110,8 @@ async fn measured_plan_changes_the_real_wire_then_falls_back_and_respects_a_pin(
     let assessment = tools::assess_turn_deterministic(input);
     let hint = tools::assess_turn_orchestration(input);
     let cohort = tools::plan_cohort_for_turn(input, assessment.complexity, hint.risk).unwrap();
-    let current = api::resolve_model_alias(api::ANTHROPIC_LATEST_MODEL_ALIAS);
+    let current = api::builtin_provider_catalog().iter()
+        .find(|entry| entry.alias == api::ANTHROPIC_LATEST_MODEL_ALIAS).unwrap().canonical_model_id.to_string();
     let models: BTreeSet<_> = api::builtin_provider_catalog().iter()
         .filter(|entry| entry.provider == api::ProviderKind::Anthropic)
         .map(|entry| entry.canonical_model_id)

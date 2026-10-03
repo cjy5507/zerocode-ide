@@ -459,7 +459,7 @@ fn each_conversation_is_priced_at_its_own_model_and_the_task_sums_them() {
     assert_eq!(generation.usd_reason, None);
 }
 
-/// zo keeps no usage ledger this window reads: its attempt's dollars are
+/// A CLI with no supported usage ledger leaves its attempt's dollars
 /// unknown, not zero, and so are the task's.
 #[test]
 fn an_agent_with_no_usage_ledger_leaves_the_dollars_unknown_not_zero() {
