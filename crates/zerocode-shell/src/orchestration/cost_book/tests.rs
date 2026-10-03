@@ -9,6 +9,79 @@ const OPUS: &str = "claude-opus-5-5";
 const SCANNED: i64 = 10_000_000;
 const TEAM: &str = "team-cost";
 
+#[test]
+fn independent_completion_changes_the_cost_memo_without_a_new_usage_scan() {
+    use zerocode_core::orchestration::{ResultAuthor, TaskStatus};
+
+    let mut ledger = Ledger::new();
+    let (run_id, task_id, _) = a_run(&mut ledger, 0);
+    let mut book = CostBook::default();
+    let scans = [Some(SCANNED), None, None];
+    book.begin_with(&ledger, scans, |_| {}, &[]);
+    let run = ledger.run(&run_id).unwrap();
+    let task = run.task(&task_id).unwrap();
+    assert_eq!(book.cost(run, task).completion_wall_ms, None);
+    let dispatch = run.newest_attempt(&task_id).unwrap();
+    let author = ResultAuthor::Coordinator {
+        seat: format!("{TEAM}/%1"),
+        generation: Some(1),
+        attempt: Some(dispatch.id.clone()),
+        source: dispatch.source.clone(),
+        completed_ms: None,
+    };
+    ledger
+        .update_task(
+            &run_id,
+            &task_id,
+            None,
+            Some(r#"{"verified":true,"merged":true}"#.into()),
+            author.clone(),
+            90_000,
+        )
+        .unwrap();
+    book.begin_with(&ledger, scans, |_| panic!("unchanged scan"), &[]);
+    let run = ledger.run(&run_id).unwrap();
+    let task = run.task(&task_id).unwrap();
+    assert_eq!(book.cost(run, task).completion_wall_ms, Some(89_997));
+    assert_eq!(book.worked, 2);
+    ledger
+        .update_task(
+            &run_id,
+            &task_id,
+            None,
+            Some(r#"{"verified":true,"merged":true,"deployed":true}"#.into()),
+            author.clone(),
+            120_000,
+        )
+        .unwrap();
+    book.begin_with(&ledger, scans, |_| panic!("unchanged scan"), &[]);
+    let run = ledger.run(&run_id).unwrap();
+    assert_eq!(
+        book.cost(run, run.task(&task_id).unwrap())
+            .completion_wall_ms,
+        Some(89_997)
+    );
+    assert_eq!(book.worked, 2);
+    ledger
+        .update_task(
+            &run_id,
+            &task_id,
+            Some(TaskStatus::Ready),
+            None,
+            author,
+            150_000,
+        )
+        .unwrap();
+    book.begin_with(&ledger, scans, |_| panic!("unchanged scan"), &[]);
+    let run = ledger.run(&run_id).unwrap();
+    assert_eq!(
+        book.cost(run, run.task(&task_id).unwrap())
+            .completion_wall_ms,
+        None
+    );
+    assert_eq!(book.worked, 3);
+}
+
 /// A run with one finished task — one Claude attempt whose conversation the
 /// pane reported, reported done — and one still moving: a Codex worker
 /// carrying it. Answers the run and the two task ids.
@@ -62,8 +135,8 @@ fn claude_scan() -> usage_stats::Ledger {
     usage_stats::Ledger {
         sessions: vec![usage_stats::Session {
             session_id: "conv-private-a".into(),
-            first_timestamp: "2026-09-26T00:00:00Z".into(),
-            last_timestamp: "2026-09-26T01:00:00Z".into(),
+            first_timestamp: "1970-01-01T00:00:02Z".into(),
+            last_timestamp: "1970-01-01T00:00:03Z".into(),
             model: Some(OPUS.into()),
             last_cwd: Some("/Users/dev/repo".into()),
             last_git_branch: Some("wt/t-cost".into()),
@@ -85,6 +158,12 @@ fn row(task: &str, requests: u64) -> String {
     )
 }
 
+fn row_in(run: &str, task: &str, requests: u64) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(&row(task, requests)).unwrap();
+    value["run"] = json!(run);
+    format!("{value}\n")
+}
+
 fn append(path: &Path, text: &str) {
     use std::io::Write as _;
     std::fs::OpenOptions::new()
@@ -98,14 +177,20 @@ fn append(path: &Path, text: &str) {
 /// same scans read nothing, a new scan reads once.
 #[test]
 fn the_conversations_are_read_once_per_scan() {
+    let ledger = Ledger::new();
     let mut book = CostBook::default();
     let mut reads = 0;
     for _ in 0..3 {
-        book.begin_with([Some(SCANNED), None, None], |_| reads += 1, &[]);
+        book.begin_with(&ledger, [Some(SCANNED), None, None], |_| reads += 1, &[]);
         book.end();
     }
     assert_eq!(reads, 1, "a beat on the same scans read them again");
-    book.begin_with([Some(SCANNED), Some(SCANNED), None], |_| reads += 1, &[]);
+    book.begin_with(
+        &ledger,
+        [Some(SCANNED), Some(SCANNED), None],
+        |_| reads += 1,
+        &[],
+    );
     book.end();
     assert_eq!(reads, 2, "a new scan was not read");
 }
@@ -118,6 +203,7 @@ fn the_conversations_are_read_once_per_scan() {
 /// reads as nothing, and a task's rows are summed across the ledgers.
 #[test]
 fn a_jev_ledger_is_read_on_only_while_the_rows_already_read_are_the_ones_it_holds() {
+    let ledger = Ledger::new();
     let dir = tempfile::tempdir().expect("a scratch directory");
     let stall = dir.path().join("stall-cause.jsonl");
     let summon = dir.path().join("summon-choice.jsonl");
@@ -127,7 +213,7 @@ fn a_jev_ledger_is_read_on_only_while_the_rows_already_read_are_the_ones_it_hold
     let ledgers = vec![stall.clone(), summon.clone(), absent];
     let mut book = CostBook::default();
     let beat = |book: &mut CostBook| {
-        book.begin_with([None; 3], |_| {}, &ledgers);
+        book.begin_with(&ledger, [None; 3], |_| {}, &ledgers);
         book.end();
         (book.jev_tally("t-1").requests, book.jev_reads)
     };
@@ -193,7 +279,7 @@ fn a_finished_task_is_worked_out_once_until_what_it_is_made_of_moves() {
     let (run_id, done, _) = a_run(&mut ledger, 1_000);
     let dir = tempfile::tempdir().expect("a scratch directory");
     let summon = dir.path().join("summon-choice.jsonl");
-    std::fs::write(&summon, row(&done, 1)).expect("a row");
+    std::fs::write(&summon, row_in(&run_id, &done, 1)).expect("a row");
     let ledgers = vec![summon.clone()];
     let scan = claude_scan();
     let run = ledger.run(&run_id).expect("the run");
@@ -202,6 +288,7 @@ fn a_finished_task_is_worked_out_once_until_what_it_is_made_of_moves() {
     let mut book = CostBook::default();
     let beat = |book: &mut CostBook, scanned: i64| {
         book.begin_with(
+            &ledger,
             [Some(scanned), None, None],
             |sessions| sessions.read_claude(&scan, scanned),
             &ledgers,
@@ -225,7 +312,7 @@ fn a_finished_task_is_worked_out_once_until_what_it_is_made_of_moves() {
         "a new scan left a cost read off the old one"
     );
 
-    append(&summon, &row(&done, 2));
+    append(&summon, &row_in(&run_id, &done, 2));
     let again = beat(&mut book, SCANNED + 1);
     assert_eq!(
         book.worked, 3,
@@ -234,12 +321,209 @@ fn a_finished_task_is_worked_out_once_until_what_it_is_made_of_moves() {
     assert_eq!(again.jev.requests, 3, "{again:?}");
 
     book.begin_with(
+        &ledger,
         [Some(SCANNED + 1), None, None],
         |sessions| sessions.read_claude(&scan, SCANNED + 1),
         &ledgers,
     );
     book.end();
     assert!(book.memo.is_empty(), "a cost no beat asked for was kept");
+}
+
+#[test]
+fn a_historical_session_change_invalidates_cost_without_changing_the_resume_session() {
+    let mut ledger = Ledger::new();
+    let (run_id, done, _) = a_run(&mut ledger, 1_000);
+    let mut scan = claude_scan();
+    let mut earlier = scan.sessions[0].clone();
+    earlier.session_id = "conv-private-earlier".into();
+    scan.sessions.push(earlier);
+    let mut book = CostBook::default();
+    book.begin_with(
+        &ledger,
+        [Some(SCANNED), None, None],
+        |sessions| sessions.read_claude(&scan, SCANNED),
+        &[],
+    );
+    let run = ledger.run(&run_id).expect("the run");
+    let first = book.cost(run, run.task(&done).expect("the task"));
+    let mut projection = ledger.export();
+    projection
+        .dispatches
+        .iter_mut()
+        .find(|attempt| attempt.task == done)
+        .expect("the attempt")
+        .session_history
+        .as_mut()
+        .expect("its complete history")
+        .observe(&ProviderSession {
+            key: SessionKey::SessionId,
+            id: "conv-private-earlier".into(),
+            transcript_path: None,
+        });
+    let changed = Ledger::rebuild(projection).expect("the extra session is durable");
+    book.begin_with(
+        &changed,
+        [Some(SCANNED), None, None],
+        |_| panic!("the scan did not move"),
+        &[],
+    );
+    let run = changed.run(&run_id).expect("the run");
+    let second = book.cost(run, run.task(&done).expect("the task"));
+    assert_eq!(
+        (
+            first.generation.sessions_linked,
+            second.generation.sessions_linked
+        ),
+        (1, 2)
+    );
+    assert_eq!(
+        second.generation.input_tokens,
+        first.generation.input_tokens * 2
+    );
+    assert_eq!(book.worked, 2);
+}
+
+#[test]
+fn a_conversation_claim_in_another_run_invalidates_the_cached_bill_and_outcome() {
+    let mut ledger = Ledger::new();
+    let (run_id, done, _) = a_run(&mut ledger, 1_000);
+    let scan = claude_scan();
+    let mut book = CostBook::default();
+    book.begin_with(
+        &ledger,
+        [Some(SCANNED), None, None],
+        |sessions| sessions.read_claude(&scan, SCANNED),
+        &[],
+    );
+    let rows = super::super::ledger_agents_for_seats(&ledger, &super::super::TeamSeatIndex::new());
+    let first = book.dress(&ledger, rows);
+    assert!(
+        first
+            .iter()
+            .find(|row| row.task_id == done)
+            .unwrap()
+            .cost
+            .as_ref()
+            .unwrap()
+            .generation
+            .usd
+            .is_some()
+    );
+    book.end();
+
+    let other_run = ledger.create_run("a different run", SCANNED + 1);
+    let other_task = ledger
+        .create_task(
+            &other_run,
+            "other".into(),
+            "other".into(),
+            vec![],
+            None,
+            SCANNED + 2,
+        )
+        .unwrap();
+    ledger
+        .start_worker(
+            &other_run,
+            "claude",
+            ("other-team", "%4"),
+            Some(&other_task),
+            SCANNED + 3,
+        )
+        .unwrap();
+    assert!(ledger.worker_session_reported(
+        ("other-team", "%4"),
+        ProviderSession {
+            key: SessionKey::SessionId,
+            id: "conv-private-a".into(),
+            transcript_path: None,
+        }
+    ));
+    book.begin_with(
+        &ledger,
+        [Some(SCANNED), None, None],
+        |_| panic!("the scan did not move"),
+        &[],
+    );
+    let rows = super::super::ledger_agents_for_seats(&ledger, &super::super::TeamSeatIndex::new());
+    let second = book.dress(&ledger, rows);
+    let cost = second
+        .iter()
+        .find(|row| row.task_id == done)
+        .unwrap()
+        .cost
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        cost.generation.usd_reason,
+        Some(task_cost::UsdReason::Unlinked)
+    );
+    assert_eq!(cost.generation.usd, None);
+    let run = ledger.run(&run_id).unwrap();
+    let attempt = run.newest_attempt(&done).unwrap();
+    assert_eq!(
+        book.attempt_generation(run, attempt).measured_tokens(),
+        None
+    );
+    assert_eq!(book.worked, 2);
+    book.end();
+}
+
+#[test]
+fn a_shared_conversation_claim_invalidates_another_workers_cached_bill() {
+    let mut ledger = Ledger::new();
+    let (run_id, done, _) = a_run(&mut ledger, 1_000);
+    let scan = claude_scan();
+    let mut book = CostBook::default();
+    book.begin_with(
+        &ledger,
+        [Some(SCANNED), None, None],
+        |sessions| sessions.read_claude(&scan, SCANNED),
+        &[],
+    );
+    let run = ledger.run(&run_id).expect("the run");
+    assert!(
+        book.cost(run, run.task(&done).expect("the task"))
+            .generation
+            .usd
+            .is_some()
+    );
+    let other = ledger
+        .create_task(
+            &run_id,
+            "other".into(),
+            "other".into(),
+            vec![],
+            None,
+            SCANNED + 1,
+        )
+        .expect("another task");
+    ledger
+        .start_worker(&run_id, "claude", (TEAM, "%4"), Some(&other), SCANNED + 2)
+        .expect("another worker");
+    assert!(ledger.worker_session_reported(
+        (TEAM, "%4"),
+        ProviderSession {
+            key: SessionKey::SessionId,
+            id: "conv-private-a".into(),
+            transcript_path: None,
+        }
+    ));
+    book.begin_with(
+        &ledger,
+        [Some(SCANNED), None, None],
+        |_| panic!("the scan did not move"),
+        &[],
+    );
+    let run = ledger.run(&run_id).expect("the run");
+    let cost = book.cost(run, run.task(&done).expect("the task"));
+    assert_eq!(
+        cost.generation.usd_reason,
+        Some(task_cost::UsdReason::Unlinked)
+    );
+    assert_eq!(cost.generation.usd, None);
+    assert_eq!(book.worked, 2);
 }
 
 /// The desk's finished rows and the board's worker rows carry the cost of a
@@ -253,6 +537,7 @@ fn the_rows_carry_a_finished_tasks_cost_and_no_conversation_path_or_directory() 
     let scan = claude_scan();
     let mut book = CostBook::default();
     book.begin_with(
+        &ledger,
         [Some(SCANNED), None, None],
         |sessions| sessions.read_claude(&scan, SCANNED),
         &[],
@@ -419,7 +704,7 @@ fn the_costs_over_the_ledger_and_the_transcripts_that_already_happened() {
         .collect();
 
     let mut book = CostBook::default();
-    book.begin_with(scans, read, &ledgers);
+    book.begin_with(&ledger, scans, read, &ledgers);
     let finished: Vec<(&Run, &Task)> = ledger
         .runs()
         .iter()
@@ -469,7 +754,7 @@ fn the_costs_over_the_ledger_and_the_transcripts_that_already_happened() {
         desk.tasks.iter().filter(|one| one.cost.is_some()).count()
     };
     let beat = |book: &mut CostBook, cold: bool| {
-        book.begin_with(scans, read, &ledgers);
+        book.begin_with(&ledger, scans, read, &ledgers);
         if cold {
             book.memo.clear();
         }

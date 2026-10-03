@@ -190,6 +190,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         retry_of TEXT,
         remote TEXT,
         source TEXT,
+        session_history TEXT,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, run, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -440,6 +441,7 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
         ("ledger_workers", "adopted_by", "INTEGER"),
         ("ledger_dispatches", "remote", "TEXT"),
         ("ledger_dispatches", "source", "TEXT"),
+        ("ledger_dispatches", "session_history", "TEXT"),
         /* Who holds the open batch, and since when. Additive with NULL for
          * both, because a lease written before they were recorded has no
          * honest holder to invent — and `Ledger::deliver` reads that NULL as
@@ -680,6 +682,10 @@ fn bytes_held(projection: &LedgerProjectionV1) -> u64 {
         .map(|row| {
             plain(&row.retry_of)
                 + plain(&row.source)
+                + row
+                    .session_history
+                    .as_ref()
+                    .map_or(0, |history| history.bytes() as u64)
                 + row.remote.as_ref().map_or(0, |seat| {
                     seat.outbox
                         .iter()
@@ -1681,8 +1687,8 @@ fn write_rows(
                 .execute(
                     "INSERT INTO ledger_dispatches (
                         ledger_id, ordinal, run, id, task, worker, started_ms,
-                        ended_ms, succeeded, retry_of, remote, source
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                        ended_ms, succeeded, retry_of, remote, source, session_history
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         ledger_id,
                         ordinal(at)?,
@@ -1700,6 +1706,11 @@ fn write_rows(
                             .transpose()
                             .map_err(|_| EffectJournalError::Corrupt)?,
                         row.source,
+                        row.session_history
+                            .as_ref()
+                            .map(serde_json::to_string)
+                            .transpose()
+                            .map_err(|_| EffectJournalError::Corrupt)?,
                     ],
                 )
                 .map_err(|_| EffectJournalError::Database)?;
@@ -2421,7 +2432,7 @@ fn read_repairable_from_head(
     let mut dispatches = Vec::new();
     each(
         connection,
-        "SELECT run, id, task, worker, started_ms, ended_ms, succeeded, retry_of, remote, source
+        "SELECT run, id, task, worker, started_ms, ended_ms, succeeded, retry_of, remote, source, session_history
            FROM ledger_dispatches WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -2437,16 +2448,23 @@ fn read_repairable_from_head(
                     retry_of: row.get(7)?,
                     remote: None,
                     source: row.get(9)?,
+                    session_history: None,
                 },
                 row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(10)?,
             ));
             Ok(())
         },
     )?;
     let dispatches = dispatches
         .into_iter()
-        .map(|(mut row, seat)| {
+        .map(|(mut row, seat, history)| {
             row.remote = seat
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|_| EffectJournalError::Corrupt)?;
+            row.session_history = history
                 .as_deref()
                 .map(serde_json::from_str)
                 .transpose()
@@ -3015,6 +3033,7 @@ mod tests {
                 // default would pin nothing about the retry lineage.
                 retry_of: Some("dp-3".to_string()),
                 source: None,
+                session_history: None,
                 // And the federated seat whole — queue bytes included, so a
                 // store that dropped the outbox would fail the byte check.
                 remote: Some(zerocode_core::orchestration::RemoteSeat {
@@ -3265,6 +3284,7 @@ mod tests {
             generation: Some(3),
             attempt: Some("dp-9".to_string()),
             source: Some("abc1234".to_string()),
+            completed_ms: Some(8),
         });
         let mut reported = projection.tasks[0].clone();
         reported.id = "t-11".to_string();
@@ -3927,6 +3947,7 @@ mod tests {
             .expect("age the populated store")
             .execute_batch(&format!(
                 "ALTER TABLE ledger_workers DROP COLUMN session;
+                 ALTER TABLE ledger_dispatches DROP COLUMN session_history;
                  ALTER TABLE ledger_workers DROP COLUMN pane_missing_since_ms;
                  ALTER TABLE ledger_inboxes DROP COLUMN open_holder;
                  ALTER TABLE ledger_inboxes DROP COLUMN open_opened_ms;
@@ -3952,6 +3973,30 @@ mod tests {
         .expect("the migrated ledger reads")
         .expect("the ledger remains");
         assert_eq!(held.projection, expected);
+    }
+
+    #[test]
+    fn session_history_round_trips_and_its_private_bytes_are_counted() {
+        let store = a_store();
+        let mut projection = a_ledger_where_order_is_load_bearing();
+        let before = bytes_held(&projection);
+        let session = zerocode_core::ProviderSession {
+            key: zerocode_core::provider_session::SessionKey::SessionId,
+            id: "history-conversation".into(),
+            transcript_path: Some("/transcripts/history.jsonl".into()),
+        };
+        let mut history = zerocode_core::orchestration::SessionHistory::from_start();
+        assert!(history.observe(&session));
+        projection.dispatches[0].session_history = Some(history);
+        assert_eq!(
+            bytes_held(&projection) - before,
+            (session.id.len() + session.transcript_path.as_ref().expect("path").len()) as u64
+        );
+        write(&store, "history", 0, 1, &projection, 10).expect("write history");
+        let reopened = read(&store, "history", projection.schema)
+            .expect("read history")
+            .expect("stored history");
+        assert_eq!(reopened.projection, projection);
     }
 
     /// The head's derived byte count covers every private session byte too.

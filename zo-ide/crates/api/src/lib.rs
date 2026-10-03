@@ -200,6 +200,7 @@ pub(crate) mod test_env {
     //! real credential values — they only assert on the isolated empty store.
 
     use std::ffi::OsString;
+    #[cfg(unix)]
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -232,7 +233,10 @@ pub(crate) mod test_env {
     /// hand-rolled timestamp path or manual `remove_dir_all`.
     pub(crate) struct CredentialEnvIsolation {
         saved: Vec<(&'static str, Option<OsString>)>,
+        #[cfg(unix)]
         temp_home: TempDir,
+        #[cfg(not(unix))]
+        _temp_home: TempDir,
     }
 
     impl CredentialEnvIsolation {
@@ -251,12 +255,19 @@ pub(crate) mod test_env {
             std::env::set_var("HOME", temp_home.path());
             std::env::set_var(core_types::paths::ZO_HOME_ENV, temp_home.path());
             std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, temp_home.path());
-            Self { saved, temp_home }
+            Self {
+                saved,
+                #[cfg(unix)]
+                temp_home,
+                #[cfg(not(unix))]
+                _temp_home: temp_home,
+            }
         }
 
         /// The isolated config home (also the isolated `HOME`), so a test can
         /// seed a credential file when it needs a non-empty store or resolve a
         /// `HOME`-relative path (e.g. the Google ADC location) under it.
+        #[cfg(unix)]
         pub(crate) fn config_home(&self) -> &Path {
             self.temp_home.path()
         }

@@ -393,6 +393,8 @@ const pollers = await derivePollerCommands();
 const POLLER_COMMANDS = [...pollers.commands.keys()];
 
 const stubBackend = ({ boot, pollers }) => {
+  window.__SCM_OBSERVER_HEALTH__ = { root: boot.active_root, rows: [] };
+  window.__SCM_OBSERVER_RETRIES__ = [];
   window.__CALLS__ = [];
   window.__LISTENERS__ = {};
   window.__CLIPBOARD_TEXT__ = "";
@@ -1155,6 +1157,12 @@ const stubBackend = ({ boot, pollers }) => {
       checklist: { chose_agent: false, dismissed: false },
     }),
     scm_status: () => ({ changed: [], ignored: [] }),
+    scm_observer_health: () => window.__SCM_OBSERVER_HEALTH__,
+    scm_observer_retry: ({ root }) => {
+      window.__SCM_OBSERVER_RETRIES__.push(root);
+      if (window.__SCM_OBSERVER_RETRY_HOLD__) return new Promise((done) => { window.__SCM_OBSERVER_RETRY_FINISH__ = done; });
+      return window.__SCM_OBSERVER_HEALTH__;
+    },
     scm_tree_rows: (args) => scmTreeRows(args.area, args.paths, args.folded ?? []),
     // 토큰 원장 둘 — 스캔 전 상태가 이 스텁의 기본값이다(게이지의 답과
     // 모양이 다르다: 원장은 report·scanning·scanned_at을 준다).

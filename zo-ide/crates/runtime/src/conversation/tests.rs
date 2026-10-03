@@ -1171,6 +1171,7 @@ fn team_inbox_write_failure_is_fail_open_and_still_injects_reminder() {
     // Make the SQLite store read-only so the digest still reads but the
     // injected/ack write seam fails. Best-effort chmod; skip if the platform
     // refuses (the assertion below tolerates a written row in that case).
+    #[cfg(unix)]
     let db = cwd.join(".zo").join("team_inbox").join("team_inbox.sqlite3");
     #[cfg(unix)]
     {
@@ -8641,6 +8642,7 @@ fn recall_reminder_section_async_matches_sync_path() {
         runtime.session_tracer.clone(),
         None,
         runtime.attempt().to_string(),
+        None,
     ));
 
     // The streaming loop assembles transient reminders + recall section; with
@@ -8658,6 +8660,31 @@ fn recall_reminder_section_async_matches_sync_path() {
             .any(|section| section.contains("# Recalled memory") && section.contains("parsers")),
         "recall section is present in the off-thread result: {async_reminders:?}"
     );
+}
+
+#[test]
+fn withheld_saved_preferences_expire_prior_context_on_both_recall_roads() {
+    use crate::memory::user_preferences::UserPreferenceSource;
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = Arc::new(UserPreferenceSource::at(directory.path(), directory.path()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(), NoopApiClient, StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite), vec!["base prompt".into()],
+    );
+    runtime.set_user_preference_source(Some(source.clone()));
+    assert!(runtime.recall_query_text().is_none());
+    assert!(runtime.request_wire_reminders().is_empty());
+    source.note_prior_context();
+    let synchronous = runtime.request_wire_reminders();
+    let asynchronous = tokio::runtime::Runtime::new().unwrap().block_on(
+        ConversationRuntime::<NoopApiClient, StaticToolExecutor>::recall_reminder_section(
+            None, None, None, None, "session@turn".into(), Some(source),
+        ),
+    );
+    assert_eq!(synchronous.as_ref(), asynchronous.as_slice());
+    assert_eq!(synchronous.len(), 1);
+    assert!(synchronous[0].contains("withheld for this request"));
 }
 
 /// B4: a memory entry recalled twice in one session must persist in FULL only
@@ -9211,6 +9238,7 @@ fn recall_panic_degrades_and_reports_to_tracer() {
             Some(tracer),
             None,
             "session@turn".to_string(),
+            None,
         ),
     );
 

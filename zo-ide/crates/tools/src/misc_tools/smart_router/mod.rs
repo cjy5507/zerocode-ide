@@ -20,6 +20,8 @@ mod claim_check;
 mod vault_pairs;
 pub mod jev_summary;
 mod plan_shadow;
+mod plan_control;
+mod plan_usage;
 mod planner;
 mod probe_exec;
 mod probe_gate;
@@ -126,10 +128,12 @@ pub use step_effort::{
     JUDGMENT_ROW_KIND, STEP_EFFORT_FILE, STEP_EFFORT_SETTING, STEP_JUDGMENT_DEADLINE,
 };
 pub use plan_shadow::{
-    build_plan_shadow, model_options_for, model_price_for, plan_priors_for, plan_shadow_path,
+    build_plan_shadow, model_options_for, model_price_for, plan_cohort_for_turn, plan_priors_for, plan_shadow_path,
     record_plan_shadow, switch_candidates,
     PlanShadowActual, PlanShadowCandidate, PlanShadowInputs, PlanShadowRow,
 };
+pub use plan_control::{choose_measured_plan, plan_pins_allow, read_plan_receipts, record_plan_receipt, PlanRunReceipt};
+pub use plan_usage::{measure_plan_usage, PlanUsage};
 pub(crate) use settings::live_agent_model_policy;
 pub use settings::{
     agent_tool_mode_from, decision_shadow_mode_from, jev_challenger_mode_from, jev_compaction_mode_from,

@@ -352,12 +352,14 @@ fn replay_execution_outcomes() {
         row["retryOf"] = json!(dispatch.retry_of.is_some());
         let pin = row["effort"].as_str().map(str::to_owned);
         difficulty::compare(row, pin.as_deref());
-        let generation = task_cost::attempt_generation(run, dispatch, &sessions);
+        let attribution = task_cost::SessionAttribution::new(ledger.runs());
+        let generation = task_cost::attempt_generation(run, dispatch, &sessions, &attribution);
         let total = task_cost::task_cost(
             run,
             &dispatch.task,
             &sessions,
             task_cost::JevTally::default(),
+            &attribution,
         );
         row[difficulty::outcomes::KEY] = serde_json::to_value(difficulty::outcomes::observe(
             run,

@@ -130,10 +130,35 @@ export async function testTaskBoard(browser, origin, ok) {
     const finished = costs.find((row) => row.title === "관리자 화면 구현");
     ok("a finished task's card says what it cost, from the worker row the board's beat laid it on",
       finished?.cost === "시도 2 · 3시간 12분(대기 포함) · 생성 1.3M 토큰 · $4.20 · Jev 요청 7" &&
-      finished.tip.includes("마지막 세션 기준 합 · 이은 세션 2/2") && finished.tip.includes("API 환산가"),
+      finished.tip.includes("시도별 기록된 세션의 합 · 이은 세션 2/2") && finished.tip.includes("API 환산가"),
       JSON.stringify(costs));
     ok("a task still moving carries no cost line",
       costs.filter((row) => row.title !== "관리자 화면 구현").every((row) => row.cost === ""), JSON.stringify(costs));
+    const incomplete = await page.evaluate(() => taskCostWords({
+      attempts: 1, wallMs: 1000,
+      generation: { historyComplete: false, sessionsKnown: 1, sessionsLinked: 1, inputTokens: 100,
+        outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, usd: null, usdReason: "incomplete_session_history" },
+      jev: { requests: 0, stampedSeats: 7, unstampedSeats: 24, inputTokens: 0 },
+    }));
+    ok("an incomplete session history is named instead of presenting a complete bill",
+      incomplete.text.includes("$— 과거 세션 이력이 완전하지 않음") && incomplete.tip.includes("과거 세션 이력이 완전하지 않음"),
+      JSON.stringify(incomplete));
+    const invalid = await page.evaluate(() => taskCostWords({
+      attempts: 1, wallMs: 1000,
+      generation: { historyComplete: true, sessionsKnown: 1, sessionsLinked: 0, inputTokens: 0,
+        outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, usd: null, usdReason: "invalid_usage" },
+      jev: { requests: 0, stampedSeats: 7, unstampedSeats: 24, inputTokens: 0 },
+    }));
+    ok("invalid usage explains the unknown price instead of showing a zero bill",
+      invalid.text.includes("$— 사용량 수치를 검증할 수 없음") && !invalid.text.includes("$0.00"), JSON.stringify(invalid));
+    const completion = await page.evaluate(() => taskCostWords({
+      attempts: 1, wallMs: 60_000, completionWallMs: 180_000,
+    }));
+    ok("verified landing time includes review waiting, while an older record stays explicitly unknown",
+      completion.tip.includes("첫 시도부터 검증·반영 확인까지 3분")
+        && incomplete.tip.includes("검증·반영 완료 시간 미기록")
+        && completion.text.includes("1분(대기 포함)"), JSON.stringify(completion));
+
     const costWrites = await page.evaluate(async () => {
       const view = document.querySelector("#board-view");
       const where = (record) => (record.target.nodeType === 1 ? record.target : record.target.parentElement);

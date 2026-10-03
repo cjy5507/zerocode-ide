@@ -20,6 +20,9 @@
 
 use serde::Serialize;
 
+mod support;
+pub use support::AgentSupport;
+
 use crate::account::{Provider, providers_for};
 use crate::agent::{
     AgentSpec, ComposerClear, ComposerWords, Injection, NudgeRoad, ReadyMark, agent_spec,

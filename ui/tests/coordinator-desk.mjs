@@ -766,7 +766,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     const shape = /^시도 \d · \d+시간 \d+분\(대기 포함\) · 생성 [\d.]+[kMB] 토큰 · \$\d+\.\d{2} · Jev 요청 \d$/;
     ok("a finished task's row says what it cost: attempts, the wall clock with its waits, the generation tokens at the API rate, the Jev requests",
       costs.length === 6 && costs.some((row) => shape.test(row.cost)) &&
-      costs.every((row) => row.tip.includes("마지막 세션 기준 합") && row.tip.includes("API 환산가(구독 사용자는 청구액 아님)") &&
+      costs.every((row) => row.tip.includes("시도별 기록된 세션의 합") && row.tip.includes("API 환산가(구독 사용자는 청구액 아님)") &&
         row.tip.includes("스탬프 좌석 4개") && row.tip.includes("토큰 미기록")), JSON.stringify(costs));
     ok("what is not known is said as — with its reason, never as a guess",
       costs.some((row) => row.cost.includes("$— 사용량 원장 없는 에이전트")) && costs.some((row) => row.cost.includes("벽시계 —")) &&

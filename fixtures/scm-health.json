@@ -1,0 +1,15 @@
+{
+  "root": "/tmp/zerocode-window-test",
+  "rows": [
+    {
+      "root": "/tmp/zerocode-window-test",
+      "operation": "discovery",
+      "lastAttemptMs": 10,
+      "lastSuccessMs": null,
+      "failedSinceMs": 10,
+      "consecutiveFailures": 1,
+      "nextRetryMs": 30010,
+      "failure": "timeout"
+    }
+  ]
+}

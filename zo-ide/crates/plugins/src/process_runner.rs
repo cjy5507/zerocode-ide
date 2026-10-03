@@ -345,6 +345,7 @@ fn wait_with_timeout(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn sh(script: &str) -> Command {
         let mut command = Command::new("sh");
         command.arg("-c").arg(script);

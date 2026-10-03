@@ -182,6 +182,10 @@ pub(crate) struct SmartTurnInstalled {
 pub(crate) struct RouteWatch(std::sync::Mutex<Option<runtime::SwitchTrigger>>);
 
 impl RouteWatch {
+    pub(crate) fn plan_applied(&self) {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert(runtime::SwitchTrigger::Plan);
+    }
     fn note(&self, trigger: runtime::SwitchTrigger) {
         if !tools::route_unseated_by(trigger) {
             return;
@@ -203,6 +207,7 @@ impl SmartTurnInstalled {
         HostTurn {
             policy: self.orchestration,
             plan_shadow: self.plan_shadow.as_deref(),
+            applied: None,
         }
     }
 }
@@ -213,12 +218,14 @@ impl SmartTurnInstalled {
 pub(crate) struct HostTurn<'a> {
     pub(crate) policy: tools::HostOrchestration,
     pub(crate) plan_shadow: Option<&'a PlanShadowTurn>,
+    pub(crate) applied: Option<&'a runtime::PlanCandidate>,
 }
 
 /// The plan scorer's shadow inputs gathered at turn start, from the same
 /// settings snapshot and the same provider probe the live routes used.
 pub(crate) struct PlanShadowTurn {
     pub(crate) settings: tools::PlanShadowSettings,
+    pub(crate) held: Option<&'static str>,
     /// The connected models with the efforts this turn's band allows them.
     pub(crate) models: Vec<runtime::ModelOption>,
     /// Whether a cross-model VERIFY leg stands for this turn.
@@ -274,11 +281,12 @@ pub(crate) fn install_smart_turn(
     // roots. Sub-agent clients keep the short markers regardless.
     runtime::declare_conversation_anchor_ttl(tools::conversation_anchor_ttl_for(cwd));
     let orchestration = routing.orchestration;
-    let plan_shadow = routing.plan.shadow.then(|| {
+    let plan_shadow = (routing.plan.shadow || routing.plan.apply).then(|| {
         Arc::new(plan_shadow_turn(
             routing.plan,
             &inventory,
             routing.deep_verify_model.is_some(),
+            routing.deep_tier_only,
             turn_effort,
             cwd,
         ))
@@ -469,12 +477,18 @@ fn plan_shadow_turn(
     settings: tools::PlanShadowSettings,
     inventory: &runtime::ModelInventory,
     verify_leg: bool,
+    architect: bool,
     turn_effort: (Option<api::EffortLevel>, Option<api::EffortLevel>),
     cwd: &Path,
 ) -> PlanShadowTurn {
     let (floor, ceiling) = turn_effort;
     PlanShadowTurn {
         settings,
+        held: if architect {
+            Some("architect_policy")
+        } else if tools::step_effort_word(cwd).is_none_or(tools::StepEffortWord::asks) {
+            Some("step_policy")
+        } else { None },
         models: tools::model_options_for(inventory, floor, ceiling),
         verify_leg,
         effort: floor.map(|level| level.label().to_string()),
@@ -502,6 +516,7 @@ pub(crate) fn plan_shape_of(decision: tools::HostPrelude) -> runtime::PlanShape 
 /// gathered by the caller that has the runtime — or the switch event — in
 /// hand, so the one builder below never has to borrow either.
 struct PlanShadowSubject<'a> {
+    cohort: Option<&'a runtime::PlanCohort>,
     /// The model the row is scored from: the turn's model, or the one a
     /// switch left.
     current_model: &'a str,
@@ -544,6 +559,7 @@ fn file_plan_shadow(
         _ => None,
     };
     let ctx = runtime::PlanContext {
+        cohort: subject.cohort,
         complexity,
         current_model: subject.current_model,
         current_effort: shadow.effort.as_deref(),
@@ -610,13 +626,18 @@ pub(crate) fn record_plan_shadow_turn(
     setup: &super::turn_harness::TurnSetup,
     decision: tools::HostPrelude,
     session_id: &str,
+    input: &str,
+    applied: Option<&runtime::PlanCandidate>,
 ) {
+    let cohort = tools::plan_cohort_for_turn(input, setup.assessment.complexity, setup.orchestration.risk);
     let current_model = runtime.api_client().model().to_string();
     let context_tokens = runtime
         .try_runtime_mut()
         .map_or(0, |inner| u64::try_from(inner.estimated_tokens()).unwrap_or(u64::MAX));
     let shape = plan_shape_of(decision);
-    let verify = if shadow.verify_leg {
+    let verify = if runtime.deep_gate().is_some_and(|gate| gate.check_command.is_some()) {
+        runtime::VerifyMode::Objective
+    } else if shadow.verify_leg {
         runtime::VerifyMode::ModelJudge
     } else {
         runtime::VerifyMode::None
@@ -632,14 +653,15 @@ pub(crate) fn record_plan_shadow_turn(
         session_id,
         setup.assessment.complexity,
         PlanShadowSubject {
+            cohort: cohort.as_ref(),
             current_model: &current_model,
             context_tokens,
             attempt: attempt.as_deref(),
             pinned_model: setup.orchestration.user_named_model,
             shape,
             actual: tools::PlanShadowActual {
-                model: current_model.clone(),
-                effort: shadow.effort.clone(),
+                model: applied.map_or_else(|| current_model.clone(), |plan| plan.model.clone()),
+                effort: applied.map_or_else(|| shadow.effort.clone(), |plan| plan.effort.clone()),
                 shape: shape.label(),
                 verify: verify.as_str().to_string(),
             },
@@ -670,6 +692,7 @@ fn record_plan_switch(
         session_id,
         complexity,
         PlanShadowSubject {
+            cohort: None,
             current_model: &switch.from,
             context_tokens: switch.context_tokens,
             attempt: (!switch.attempt.is_empty()).then_some(switch.attempt.as_str()),
@@ -712,6 +735,7 @@ pub(crate) fn record_person_model_switch(
         routing.plan,
         &inventory,
         routing.deep_verify_model.is_some(),
+        routing.deep_tier_only,
         turn_effort,
         cwd,
     );

@@ -87,7 +87,7 @@ async fn await_cancellable_tool_dispatch(
             Err(join_error) => ToolDispatchOutcome::Completed(join_error.to_string(), ToolTextKind::Failure),
         },
         () = watch.cancelled() => {
-            crate::bash::interrupt_foreground_bash(Some(owner_session));
+            let _ = crate::bash::interrupt_foreground_bash(Some(owner_session));
             ToolDispatchOutcome::Cancelled
         }
     }
@@ -1333,6 +1333,7 @@ where
                 self.session_tracer.clone(),
                 self.recall_seat.clone(),
                 self.attempt().to_string(),
+                self.user_preference_source.clone(),
             )
             .await;
             let recall_attached = !recall_section.is_empty();

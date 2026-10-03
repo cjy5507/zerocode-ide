@@ -12,6 +12,7 @@ pub(crate) struct RuntimePluginState {
     pub(crate) tool_registry: GlobalToolRegistry,
     pub(crate) plugin_registry: PluginRegistry,
     pub(crate) memory_retriever: Option<Arc<dyn runtime::MemoryRetriever + Send + Sync>>,
+    pub(crate) user_preference_source: Option<Arc<runtime::memory::user_preferences::UserPreferenceSource>>,
     /// Seated beside the retriever and shown every recall after it settles;
     /// it answers with the order a turn reads. Built here, where the project's
     /// working directory is known, because that is where its setting and its

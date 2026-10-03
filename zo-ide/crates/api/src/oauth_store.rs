@@ -1150,14 +1150,18 @@ fn base64url_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialFileLock, GOOGLE_CODE_ASSIST_PROJECT_KEY, GRANT_FINGERPRINT_LEN, OAUTH_KEY, RememberedProject, SavedOAuthProvider, clear_google_code_assist_oauth, clear_oauth_credentials, clear_openai_oauth, codex_auth, credentials_path, grant_fingerprint, load_google_code_assist_oauth, load_google_code_assist_project, load_oauth_credentials, load_openai_compat_api_key, load_openai_oauth, read_one_credentials_root, save_google_code_assist_oauth, save_google_code_assist_project, save_oauth_credentials, save_openai_compat_api_key, save_openai_oauth, saved_oauth_liveness_effective, update_credentials_root, write_credentials_root,
+        GOOGLE_CODE_ASSIST_PROJECT_KEY, GRANT_FINGERPRINT_LEN, OAUTH_KEY, RememberedProject, SavedOAuthProvider, clear_google_code_assist_oauth, clear_oauth_credentials, clear_openai_oauth, codex_auth, credentials_path, grant_fingerprint, load_google_code_assist_oauth, load_google_code_assist_project, load_oauth_credentials, load_openai_compat_api_key, load_openai_oauth, read_one_credentials_root, save_google_code_assist_oauth, save_google_code_assist_project, save_oauth_credentials, save_openai_compat_api_key, save_openai_oauth, saved_oauth_liveness_effective, update_credentials_root,
     };
+    #[cfg(unix)]
+    use super::{CredentialFileLock, write_credentials_root};
     use core_types::{OAuthTokenSet, OpenAiOAuthTokens};
     use serde_json::Value;
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(unix)]
+    use std::time::Duration;
 
     fn unique_config_home() -> PathBuf {
         let nanos = SystemTime::now()

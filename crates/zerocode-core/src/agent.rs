@@ -1615,6 +1615,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
 /// makes the first thing a person tries fail.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentPresence {
+    pub support: crate::capabilities::AgentSupport,
     pub id: &'static str,
     pub name: &'static str,
     /// Where the window fetches this agent's icon from at runtime.
@@ -2199,6 +2200,7 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                 .copied()
                 .find(|needed| !on_path(path_var, needed));
             AgentPresence {
+                support: crate::capabilities::AgentSupport::for_agent(spec),
                 id: spec.id,
                 name: spec.name,
                 favicon_domain: spec.favicon_domain,

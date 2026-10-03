@@ -10,8 +10,6 @@ use std::sync::Arc;
 
 use runtime::message_stream::RenderBlock;
 
-use super::runtime_bridge::LiveAsyncApiClient;
-
 /// 턴을 스트리밍 런타임으로 돌리며 모든 블록을 `block_tx` 로 전달한다.
 ///
 /// 포워딩 루프는 턴이 내부 sender 를 놓으면 끝난다. 호출자의 receiver 가
@@ -19,16 +17,18 @@ use super::runtime_bridge::LiveAsyncApiClient;
 /// 끝까지 돌지 않게 한다.
 pub(crate) async fn drive_render_stream(
     rt: &mut runtime::ConversationRuntime<crate::AnthropicRuntimeClient, crate::CliToolExecutor>,
-    live_client: Arc<LiveAsyncApiClient>,
+    live_client: Arc<dyn runtime::AsyncApiClient>,
     input: String,
     images: Vec<(String, String)>,
     // 배너가 이미 말한 모델 — 이제 이 함수는 쓰지 않는다. 호출부(plain_session)
     // 를 건드리지 않으려고 자리만 남겨 뒀다.
-    _model: &str,
+    model: &str,
     block_tx: tokio::sync::mpsc::Sender<RenderBlock>,
     prompter: Arc<dyn runtime::permission::PermissionPrompter>,
 ) -> Result<runtime::TurnSummary, String> {
     rt.set_async_api_client(live_client);
+    rt.set_context_model(model);
+    rt.tool_executor_mut().tool_registry_mut().context().set_active_model(model);
     let (render_tx, mut render_rx) = tokio::sync::mpsc::channel::<RenderBlock>(64);
 
     // 턴 시작을 알리는 `· session start · model …` System 블록이 여기 있었다.

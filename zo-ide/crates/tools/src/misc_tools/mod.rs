@@ -98,6 +98,8 @@ pub use smart_router::{
     model_options_for, model_price_for, plan_priors_for, plan_shadow_path,
     record_plan_shadow, switch_candidates, CACHE_ANCHOR_TTL_ENV,
     PlanShadowActual, PlanShadowCandidate, PlanShadowInputs, PlanShadowRow,
+    plan_cohort_for_turn, choose_measured_plan, plan_pins_allow, read_plan_receipts, record_plan_receipt, PlanRunReceipt,
+    measure_plan_usage, PlanUsage,
 };
 #[allow(unused_imports)]
 pub(crate) use agent_tools::{
