@@ -40,7 +40,7 @@ pub const RECALL_RUBRIC_VERSION: u32 = 1;
 pub const SKILL_SEARCH_RUBRIC_VERSION: u32 = 1;
 /// The compaction seat's rubric, whose words are zo's
 /// `runtime::compact::relevance::rubric_words` and are pinned there.
-pub const COMPACTION_RUBRIC_VERSION: u32 = 1;
+pub const COMPACTION_RUBRIC_VERSION: u32 = 2;
 /// The agent's own tool, whose words and state shape are zo's
 /// `tools::misc_tools::smart_router::agent_tool` and are pinned there.
 /// Version 2 (t-10010) says what each of an `ask`'s two answers means,
@@ -61,6 +61,8 @@ pub const PATCH_REVIEW_RUBRIC_VERSION: u32 = 1;
 /// [`crate::jev::CLAIM_CRITERIA`] and the state's keys — and are pinned there
 /// (`the_version_is_pinned_to_the_words`, t-9469).
 pub const CLAIM_RUBRIC_VERSION: u32 = 1;
+/// Source-bound project rules; each compiled definition also carries its own content identity.
+pub const PROJECT_RULES_RUBRIC_VERSION: u32 = 1;
 /// The file pick seat's rubric and state shape, whose words are zo's
 /// `runtime::file_pick::rubric_words` and are pinned there
 /// (`the_version_is_pinned_to_the_words`, t-9469; the tools crate only asks

@@ -32,6 +32,24 @@ answer green, missing evidence rejection, out-of-scope change rejection, and
 running-vs-completed receipt rejection. Cargo subprocesses inside this test
 inherit the outer build coordinator's slot (never nest its lock).
 
+## Required portable workflows
+
+`cd zo-ide && just e2e` also runs `portable_workflow_acceptance` on every host,
+including Windows. These tests execute the real zo binary over ordinary pipes
+against an isolated loopback provider. They verify a completed tool conversation
+across two processes, forced termination after a real file write followed by
+restoration of the original instruction and paired tool receipts, and a failed
+file read whose error cannot be replaced by the model's completion claim.
+
+The portable tests clear the inherited environment, use temporary configuration
+and session stores, disable external credentials and keychain reads, and contact
+no real provider. They require neither Unix PTYs nor macOS heap sampling. Their
+verdict comes from process status, actual files and captured request envelopes,
+not timing or an assistant's final prose. They are required by `verify`; the
+quality baseline below remains a separate warning-only measurement. Portable
+pipe acceptance does not claim coverage of the Windows interactive TUI or native
+window rendering.
+
 ## What the measurements mean
 
 Elapsed time includes process startup, workflow, shutdown and the independent

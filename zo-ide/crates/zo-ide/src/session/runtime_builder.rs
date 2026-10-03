@@ -33,6 +33,9 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         .auto_memory_enabled()
         .then(|| load_runtime_memory_retriever(cwd, active_model, Arc::clone(&recall_seat)))
         .flatten();
+    let user_preference_source = runtime_config.auto_memory_enabled().then(|| {
+        Arc::new(runtime::memory::user_preferences::UserPreferenceSource::at(&runtime::default_config_home(), cwd))
+    });
     let plugin_hook_config =
         runtime_hook_config_from_plugin_hooks(plugin_registry.aggregated_hooks()?);
     let feature_config = runtime_config
@@ -82,6 +85,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
     tool_context
         .tasks
         .set_completion_callback(Some(std::sync::Arc::new(task_completion)));
+    let skill_session = Arc::clone(&tool_context.session_id);
     let tool_registry: GlobalToolRegistry =
         GlobalToolRegistry::with_plugin_tools(plugin_registry.aggregated_tools()?)
             .map_err(|e| e.to_string())?
@@ -94,6 +98,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         tool_registry,
         plugin_registry,
         memory_retriever,
+        user_preference_source,
         // Seated whenever there is a retriever to sit beside; what it may do
         // per recall — record, or settle the order — is `smart.rerankShadow`.
         recall_seat: Some(recall_seat),
@@ -110,7 +115,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         // Seated at every public prompt boundary; its default mode records
         // candidate rankings until the same turn's edited files label them.
         file_pick_seat: Some(Arc::new(tools::FilePickJudge::at(cwd))),
-        skill_suggestion_seat: Some(Arc::new(tools::SkillSuggestionJudge::at(cwd))),
+        skill_suggestion_seat: Some(Arc::new(tools::SkillSuggestionJudge::at(cwd).with_session_source(skill_session))),
         mcp_state,
         lsp_state,
     })
@@ -181,19 +186,30 @@ pub(crate) fn build_smart_live_client(
     named_effort: Option<api::EffortLevel>,
     effort_band_ceiling: Option<api::EffortLevel>,
 ) -> Option<Arc<dyn runtime::AsyncApiClient>> {
-    let auth_route = crate::runtime_support::catalog_auth_route_for_model(model);
-    let provider = if let Some(provider_kind) =
-        crate::runtime_support::catalog_provider_for_model(model)
-    {
-        api::ProviderClient::from_provider_kind_with_auth_route(provider_kind, auth_route)
-    } else {
-        api::ProviderClient::from_model_with_auth_route(model, auth_route)
-    }
-    .ok()?
-    .with_cache_scope(session_id);
+    let requested_auth = crate::runtime_support::catalog_auth_route_for_model(model);
     let main = runtime.api_client();
+    let native_provider = |selected: &str| {
+        crate::runtime_support::catalog_provider_for_model(selected).or_else(|| {
+            api::provider_catalog().iter().find(|entry|
+                entry.alias == selected || entry.canonical_model_id == selected).map(|entry| entry.provider)
+        })
+    };
+    let same_provider = native_provider(main.model()).zip(native_provider(model))
+        .is_some_and(|(current, selected)| current == selected && current == main.provider_kind());
+    let (provider, auth_route) = if same_provider
+        && (requested_auth == api::AuthRoute::Auto || requested_auth == main.auth_route())
+    {
+        (main.client(), main.auth_route())
+    } else {
+        let provider = if let Some(provider_kind) = crate::runtime_support::catalog_provider_for_model(model) {
+            api::ProviderClient::from_provider_kind_with_auth_route(provider_kind, requested_auth)
+        } else {
+            api::ProviderClient::from_model_with_auth_route(model, requested_auth)
+        }.ok()?;
+        (provider, requested_auth)
+    };
     Some(Arc::new(super::runtime_bridge::LiveAsyncApiClient::new(
-        provider,
+        provider.with_cache_scope(session_id),
         model.to_string(),
         auth_route,
         main.enable_tools(),

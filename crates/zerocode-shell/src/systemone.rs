@@ -219,15 +219,15 @@ pub fn act_line(wire: &Wire, seat: &JevUse) -> Option<u16> {
 /// uses, so a judgment here and a number on the screen read one file one way.
 #[must_use]
 pub fn read_rows(ledger: &Path) -> Vec<Value> {
-    let Ok(text) = std::fs::read_to_string(ledger) else {
-        return Vec::new();
-    };
-    text.lines()
-        .filter_map(|line| {
-            zerocode_core::jev::promote::note_line_parsed();
-            serde_json::from_str(line).ok()
-        })
-        .collect()
+    let rows = zerocode_core::jev::journal::read(ledger).unwrap_or_default();
+    if ledger
+        .file_name()
+        .is_some_and(|name| name == zerocode_core::jev::PROJECT_RULES.ledger)
+    {
+        zerocode_core::jev::project_rules::observed_rows(rows)
+    } else {
+        rows
+    }
 }
 
 /// Whether a seat acts right now: a person's `on`, or `auto` raised by the
@@ -247,9 +247,13 @@ pub fn applies(wire: &Wire, seat: &JevUse) -> bool {
 /// goal walk, which starts pressing, and it did not.
 #[must_use]
 pub fn applies_once_risen(wire: &Wire, seat: &JevUse) -> bool {
+    let root = wire.settings_root();
+    if !JevSettings::from_root(&root).enabled {
+        return false;
+    }
     let raised = ledger_of(wire, seat)
         .is_some_and(|ledger| zerocode_core::jev::promote::risen(seat, &read_rows(&ledger)));
-    seat.mode_in(&wire.settings_root()).applies_with(raised)
+    seat.mode_in(&root).applies_with(raised)
 }
 
 /// [`applies`], in a run that may repeat one before it (t-6385): a use its
@@ -278,13 +282,14 @@ pub fn standing_in(
 /// person's `on`, or `auto` its project's own ledger raised (t-14869).
 #[must_use]
 pub fn applies_in_project(wire: &Wire, seat: &JevUse, workspace: &Path) -> bool {
-    standing_at(
-        wire,
-        seat,
-        zerocode_core::jev::Run::Fresh,
-        project_ledger_of(wire, seat, workspace).as_deref(),
-    )
-    .1
+    wire.permits_workspace_now(Some(workspace))
+        && standing_at(
+            wire,
+            seat,
+            zerocode_core::jev::Run::Fresh,
+            project_ledger_of(wire, seat, workspace).as_deref(),
+        )
+        .1
 }
 
 /// The mode `seat` is read under in `run`, and whether it acts given the
@@ -295,7 +300,11 @@ fn standing_at(
     run: zerocode_core::jev::Run,
     ledger: Option<&Path>,
 ) -> (zerocode_core::jev::JevMode, bool) {
-    let mode = seat.mode_in_run(&wire.settings_root(), run);
+    let root = wire.settings_root();
+    let mode = seat.mode_in_run(&root, run);
+    if !JevSettings::from_root(&root).enabled {
+        return (mode, false);
+    }
     let raised = ledger.is_some_and(|ledger| {
         standing::standing_of(seat, ledger) == zerocode_core::jev::promote::Stand::Applying
     });
@@ -309,15 +318,33 @@ fn standing_at(
 /// named by the ledger file's own stem, so the sentence cannot name one use
 /// while the bytes go to another.
 pub fn append_rows(ledger: &Path, rows: &[Value]) {
+    if let Err(why) = append_rows_inner(ledger, rows, false) {
+        let what = ledger.file_stem().map_or_else(
+            || ledger.to_string_lossy(),
+            std::ffi::OsStr::to_string_lossy,
+        );
+        eprintln!("orchestration: the {what} record was not written: {why}");
+    }
+}
+
+/// Append a receipt whose successful write is part of acknowledging an effect.
+///
+/// # Errors
+/// The ledger could not be created or written.
+pub fn append_rows_checked(ledger: &Path, rows: &[Value]) -> std::io::Result<()> {
+    append_rows_inner(ledger, rows, true)
+}
+
+fn append_rows_inner(ledger: &Path, rows: &[Value], durable: bool) -> std::io::Result<()> {
     if rows.is_empty() {
-        return;
+        return Ok(());
     }
     let mut said = String::new();
     for row in rows {
         said.push_str(&row.to_string());
         said.push('\n');
     }
-    let written = ledger
+    ledger
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
         .and_then(|()| {
@@ -326,14 +353,10 @@ pub fn append_rows(ledger: &Path, rows: &[Value]) {
                 .append(true)
                 .open(ledger)
         })
-        .and_then(|mut file| std::io::Write::write_all(&mut file, said.as_bytes()));
-    if let Err(why) = written {
-        let what = ledger.file_stem().map_or_else(
-            || ledger.to_string_lossy(),
-            std::ffi::OsStr::to_string_lossy,
-        );
-        eprintln!("orchestration: the {what} record was not written: {why}");
-    }
+        .and_then(|mut file| {
+            std::io::Write::write_all(&mut file, said.as_bytes())?;
+            if durable { file.sync_all() } else { Ok(()) }
+        })
 }
 
 /// The origin to ask, honouring the test override — also the pane guard's
@@ -477,6 +500,7 @@ pub struct Wire {
     /// The window's one socket ([`SOCKET`]); a test points a wire at a socket
     /// of its own (`Wire::on`).
     socket: &'static Socket<reqwest::Client>,
+    review_origin: Option<(String, String)>,
 }
 
 /// A key as the wire keeps it: trimmed, and empty is none.
@@ -486,6 +510,13 @@ fn trimmed(key: Option<String>) -> Option<String> {
 }
 
 impl Wire {
+    /// Carry a local session/task name to opted-in review evidence only.
+    #[must_use]
+    pub(crate) fn for_origin(&self, namespace: &str, origin: &str) -> Self {
+        let mut wire = self.clone();
+        wire.review_origin = Some((namespace.to_string(), origin.to_string()));
+        wire
+    }
     /// A wire holding the key `keys` has now. An unreadable keychain and an
     /// empty item are both "no key": nothing is sent either way.
     #[must_use]
@@ -499,6 +530,7 @@ impl Wire {
             base: base_url(),
             settings: crate::api_routers::zo_settings_path(),
             socket: &SOCKET,
+            review_origin: None,
         }
     }
 
@@ -511,6 +543,7 @@ impl Wire {
             base: base_url(),
             settings: crate::api_routers::zo_settings_path(),
             socket: &SOCKET,
+            review_origin: None,
         }
     }
 
@@ -525,6 +558,7 @@ impl Wire {
             base: base.trim().to_string(),
             settings,
             socket: &SOCKET,
+            review_origin: None,
         }
     }
 
@@ -569,6 +603,29 @@ impl Wire {
             .map_or(Value::Null, Value::Object)
     }
 
+    /// Whether current global settings still authorize effects in this workspace.
+    #[must_use]
+    pub(crate) fn permits_workspace_now(&self, workspace: Option<&Path>) -> bool {
+        let settings = JevSettings::from_root(&self.settings_root()).resolved();
+        settings.enabled
+            && workspace.is_some_and(|path| settings.consents(&door::resolved_path(path)))
+    }
+
+    fn response_is_current(
+        &self,
+        row: &JevUse,
+        workspace: Option<&Path>,
+        allowed: &JevSettings,
+        mode: zerocode_core::jev::JevMode,
+    ) -> bool {
+        let root = self.settings_root();
+        let settings = JevSettings::from_root(&root).resolved();
+        settings.enabled
+            && settings.model == allowed.model
+            && row.mode_in(&root) == mode
+            && workspace.is_some_and(|path| settings.consents(&door::resolved_path(path)))
+    }
+
     /// zo's config home: the folder the settings file sits in, where the door
     /// counts the day and a use the window asks keeps its ledger.
     #[must_use]
@@ -585,21 +642,40 @@ impl Wire {
         workspace: Option<&Path>,
         body: Value,
         memo: Option<Memo<'_>>,
-    ) -> Result<Passed, Refused> {
-        let settings = JevSettings::from_root(&self.settings_root()).resolved();
+    ) -> Result<(Passed, JevSettings, zerocode_core::jev::JevMode), Refused> {
+        let root = self.settings_root();
+        let settings = JevSettings::from_root(&root).resolved();
         let workspace = workspace.map(door::resolved_path);
         let requests = self
             .config_home()
             .map(|home| count::requests_path(home, &today()))
             .unwrap_or_default();
         door::pass_remembering(
-            |asking| door::may_send(row, asking, body),
+            |asking| {
+                let cleared = door::may_send(row, asking, body)?;
+                if row.word_in(&root).is_none() || row.mode_in(&root).asks() {
+                    Ok(cleared)
+                } else {
+                    Err(Refused::Off)
+                }
+            },
             key,
             &settings,
             workspace.as_deref(),
             &requests,
             memo,
         )
+        .map(|mut passed| {
+            if zerocode_core::jev::promote::label_drafts_wanted(&root)
+                && let (Some(home), Some(workspace)) = (self.config_home(), workspace.as_deref())
+            {
+                passed.cleared = passed.cleared.with_review(home, row, workspace);
+                if let Some((namespace, origin)) = &self.review_origin {
+                    passed.cleared = passed.cleared.with_review_origin(namespace, origin);
+                }
+            }
+            (passed, settings, row.mode_in(&root))
+        })
     }
 
     /// Open the endpoint's connection ahead of the first question, off the
@@ -696,7 +772,7 @@ impl Wire {
         let Some(key) = key else {
             return refused(Refused::NoKey);
         };
-        let Passed { cleared, memo } = passed;
+        let (Passed { cleared, memo }, allowed, mode) = passed;
         let request_bytes = cleared.bytes().len();
         let redacted_lines = cleared.withheld_lines();
         if let Some(remembered) = memo
@@ -705,7 +781,11 @@ impl Wire {
             .and_then(|memoed| memoed.recalled.as_ref())
         {
             return Asked {
-                answer: Ok(remembered.answer.clone()),
+                answer: if self.response_is_current(row, workspace, &allowed, mode) {
+                    Ok(remembered.answer.clone())
+                } else {
+                    Err(Refused::SettingsChanged.token().to_string())
+                },
                 spent: Spent {
                     requests: 0,
                     redacted_lines,
@@ -723,8 +803,19 @@ impl Wire {
         // Every caller is sync — a walk drives sync roads, a question asked
         // off the beat has a thread of its own — and blocks on the window's
         // runtime the same way.
+        let review = cleared.prepare_review();
         let (answer, version) =
             tauri::async_runtime::block_on(self.ask_once(&key, cleared, deadline));
+        if let (Some(review), Ok(body)) = (review, &answer)
+            && let Ok(response) = serde_json::from_str::<Value>(body)
+        {
+            let at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |elapsed| {
+                    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+                });
+            let _ = review.finish(&response, at);
+        }
         let usage = answer
             .as_deref()
             .ok()
@@ -743,6 +834,13 @@ impl Wire {
                 .and_then(Value::as_u64),
             model: answer.as_deref().ok().and_then(answered_by),
             version,
+        };
+        // Keep the actual wire usage even when a late reply loses permission.
+        let answer = if answer.is_ok() && !self.response_is_current(row, workspace, &allowed, mode)
+        {
+            Err(Refused::SettingsChanged.token().to_string())
+        } else {
+            answer
         };
         Asked {
             answer,

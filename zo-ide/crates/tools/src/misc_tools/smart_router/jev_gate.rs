@@ -56,6 +56,13 @@ const HEDGE_SAMPLE_ROWS: usize = 256;
 /// say a person had a judgment turned on in a workspace.
 const ZO_USES: [JevUse; 2] = [ROUTING, RECALL];
 
+/// Current authorization for locally reusing historical evidence. This reads
+/// without migrating consent and does not discard old evidence on a model pin change.
+pub(super) fn workspace_permitted_now(cwd: &Path) -> bool {
+    let settings = read_settings(&runtime::default_config_home().join(SETTINGS_FILE));
+    settings.enabled && settings.consents(&door::resolved_path(cwd))
+}
+
 /// The door as it stands for one batch of requests.
 #[derive(Debug, Clone)]
 pub struct JevDoor {
@@ -66,9 +73,18 @@ pub struct JevDoor {
     /// delay is read from. `None` for a door that stands in no project, which
     /// has no past to read and so plans no hedge.
     ledgers: Option<PathBuf>,
+    review_home: Option<PathBuf>,
+    settings_file: Option<PathBuf>,
+    review_origin: Option<(String, String)>,
 }
 
 impl JevDoor {
+    /// Bind opted-in local review evidence to the caller's actual session/task.
+    #[must_use]
+    pub fn with_origin(mut self, namespace: &str, origin: &str) -> Self {
+        self.review_origin = Some((namespace.to_string(), origin.to_string()));
+        self
+    }
     /// The door for words from `cwd`: the person's own settings, `cwd` spelled
     /// as the filesystem spells it, and today's count under zo's config home.
     /// A workspace whose ledgers predate the door is consented here, once.
@@ -76,7 +92,8 @@ impl JevDoor {
     pub fn open(cwd: &Path) -> Self {
         let home = runtime::default_config_home();
         let settings_path = home.join(SETTINGS_FILE);
-        let mut settings = read_settings(&settings_path);
+        let root = read_settings_root(&settings_path);
+        let mut settings = JevSettings::from_root(&root).resolved();
         let workspace = door::resolved_path(cwd);
         if settings.enabled
             && !settings.consents(&workspace)
@@ -90,6 +107,9 @@ impl JevDoor {
             workspace: Some(workspace),
             requests: todays_requests(&home),
             ledgers: Some(shadow_ledger_dir(cwd)),
+            review_home: zerocode_core::jev::promote::label_drafts_wanted(&root).then_some(home),
+            settings_file: Some(settings_path),
+            review_origin: None,
         }
     }
 
@@ -102,6 +122,9 @@ impl JevDoor {
             workspace: None,
             requests: todays_requests(&home),
             ledgers: None,
+            review_home: None,
+            settings_file: Some(home.join(SETTINGS_FILE)),
+            review_origin: None,
         }
     }
 
@@ -114,6 +137,9 @@ impl JevDoor {
             workspace: Some(door::resolved_path(workspace)),
             requests: count::requests_path(config_home, "2026-09-17"),
             ledgers: Some(config_home.to_path_buf()),
+            review_home: None,
+            settings_file: None,
+            review_origin: None,
         }
     }
 
@@ -125,6 +151,38 @@ impl JevDoor {
     #[must_use]
     pub fn model(&self) -> &str {
         &self.settings.model
+    }
+
+    /// Recheck consent and the model pin before a delayed answer changes live state.
+    #[must_use]
+    pub fn permits_application_now(&self) -> bool {
+        let settings = self.settings_file.as_deref().map_or_else(|| self.settings.clone(), read_settings);
+        settings.enabled && settings.model == self.settings.model
+            && self.workspace.as_deref().is_some_and(|workspace| settings.consents(workspace))
+    }
+
+    /// Recheck the original pin and consent together with this seat's current
+    /// merged mode and promotion standing. Callers also keep their original
+    /// acting flag so a recording request cannot gain effects while it waits.
+    #[must_use]
+    pub fn permits_application_for(&self, cwd: &Path, seat: &JevUse) -> bool {
+        self.permits_application_with(cwd, seat, || runtime::jev_seat_applies(cwd, seat))
+    }
+
+    /// Some seats keep their standing outside the per-project ledger.
+    pub(super) fn permits_application_with(&self, cwd: &Path, seat: &JevUse, raised: impl FnOnce() -> bool) -> bool {
+        self.permits_application_now()
+            && super::settings::merged_settings_root_from(&runtime::ConfigLoader::default_for(cwd))
+                .is_some_and(|root| {
+                    let mode = seat.mode_in(&root);
+                    mode.applies_with(mode.automatic() && raised())
+                })
+    }
+
+    fn seat_asks_now(&self, seat: &JevUse) -> bool {
+        self.settings_file.is_none() || self.workspace.as_deref().and_then(|cwd|
+            super::settings::merged_settings_root_from(&runtime::ConfigLoader::default_for(Path::new(cwd))))
+            .is_some_and(|root| seat.mode_in(&root).asks())
     }
 
     /// [`Self::model`] as the fingerprint an in-process memo keys on
@@ -140,13 +198,28 @@ impl JevDoor {
     /// # Errors
     /// The door's refusal.
     pub fn pass(&self, row: &JevUse, key: bool, body: Value) -> Result<Cleared, Refused> {
+        let settings = self.settings_file.as_deref().map_or_else(|| self.settings.clone(), read_settings);
         door::pass(
-            |asking| door::may_send(row, asking, body),
+            |asking| {
+                let cleared = door::may_send(row, asking, body)?;
+                if !self.seat_asks_now(row) { Err(Refused::Off) }
+                else if settings.model == self.settings.model { Ok(cleared) }
+                else { Err(Refused::SettingsChanged) }
+            },
             key,
-            &self.settings,
+            &settings,
             self.workspace.as_deref(),
             &self.requests,
-        )
+        ).map(|cleared| match (&self.review_home, &self.workspace) {
+            (Some(home), Some(workspace)) => {
+                let cleared = cleared.with_review(home, row, workspace);
+                match &self.review_origin {
+                    Some((namespace, origin)) => cleared.with_review_origin(namespace, origin),
+                    None => cleared,
+                }
+            },
+            _ => cleared,
+        })
     }
 
     /// Clear `body` as a request of `row`'s — the key, the switch, the
@@ -162,13 +235,17 @@ impl JevDoor {
     /// # Errors
     /// The door's refusal, as [`Self::pass`] would answer it now.
     pub fn clear(&self, row: &JevUse, key: bool, body: Value) -> Result<Cleared, Refused> {
+        let settings = self.settings_file.as_deref().map_or_else(|| self.settings.clone(), read_settings);
         let asking = door::Asking {
             key,
-            settings: &self.settings,
+            settings: &settings,
             workspace: self.workspace.as_deref(),
             sent_today: count::sent(&self.requests),
         };
-        door::may_send(row, &asking, body)
+        let cleared = door::may_send(row, &asking, body)?;
+        if !self.seat_asks_now(row) { Err(Refused::Off) }
+        else if settings.model == self.settings.model { Ok(cleared) }
+        else { Err(Refused::SettingsChanged) }
     }
 
     /// Ask the door about a key check; cleared, it is counted in the day.
@@ -176,7 +253,8 @@ impl JevDoor {
     /// # Errors
     /// The door's refusal.
     pub fn pass_key_check(&self, key: bool, body: &Value) -> Result<Cleared, Refused> {
-        door::pass(|asking| door::may_check_key(asking, body), key, &self.settings, None, &self.requests)
+        let settings = self.settings_file.as_deref().map_or_else(|| self.settings.clone(), read_settings);
+        door::pass(|asking| door::may_check_key(asking, body), key, &settings, None, &self.requests)
     }
 
     /// When a second request of `row`'s would leave, against the `wall` an
@@ -222,9 +300,16 @@ impl JevDoor {
     /// leave. A hedge this refuses must not be sent.
     ///
     /// # Errors
-    /// [`Refused::Budget`] when the day has no place left for it.
+    /// A withdrawn switch/consent, a changed model pin, or [`Refused::Budget`]
+    /// when the day has no place left for it.
     pub fn count_a_hedge(&self) -> Result<(), Refused> {
-        door::count_a_hedge(&self.settings, &self.requests)
+        let settings = self.settings_file.as_deref().map_or_else(|| self.settings.clone(), read_settings);
+        if !settings.enabled { return Err(Refused::Off); }
+        if !self.workspace.as_deref().is_some_and(|workspace| settings.consents(workspace)) {
+            return Err(Refused::NotConsented);
+        }
+        if settings.model != self.settings.model { return Err(Refused::SettingsChanged); }
+        door::count_a_hedge(&settings, &self.requests)
     }
 
     /// The delay a second request of `row`'s leaves at, with the day's place
@@ -299,6 +384,13 @@ pub fn millis(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Research replays make one paid attempt and keep their own explicit receipts.
+/// The supplied request has already passed the same settings and consent door.
+#[cfg(test)]
+pub(super) async fn send_once(cleared: Cleared, client: &SystemOneClient, deadline: Duration) -> SystemOneCall {
+    client.decide_body_once(cleared.into_bytes(), deadline).await
+}
+
 /// A typed request as the body the door reads; `None` for one that does not
 /// serialize, which is sent nowhere.
 #[must_use]
@@ -317,7 +409,14 @@ pub async fn send(
     deadline: Duration,
     hedge: Option<Duration>,
 ) -> SystemOneCall {
-    client.decide_body(cleared.into_bytes(), deadline, hedge).await
+    let review = cleared.prepare_review();
+    let call = client.decide_body(cleared.into_bytes(), deadline, hedge).await;
+    if let (Some(review), Ok(response)) = (review, &call.outcome) {
+        let response = serde_json::json!({"model":response.model,"answers":response.answers});
+        let at = super::decision_shadow::now_ms();
+        let _ = tokio::task::spawn_blocking(move || review.finish(&response, at)).await;
+    }
+    call
 }
 
 /// The door's settings in the person's settings file, each root spelled as the
@@ -397,6 +496,76 @@ fn consent(path: &Path, workspace: &str) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_jev_tool_uses_the_existing_switches_for_calls_and_review_retention() {
+        use super::super::{agent_tool, jev_mock};
+        use zerocode_core::jev::{AGENT_TOOL, learning::store::Store};
+        let endpoint = jev_mock::Mock::answering(|body| {
+            let request: Value = serde_json::from_str(body).unwrap();
+            let answers: Map<String, Value> = request["questions"].as_object().unwrap().keys().map(|name| (
+                name.clone(), serde_json::json!({"type":"choice","choice":"yes",
+                    "probabilities":{"yes":0.5,"no":0.5},"confidence":0.1})
+            )).collect();
+            (200, serde_json::json!({"model":"jev-test","answers":answers,
+                "usage":{"input_tokens":10,"output_tokens":0}}).to_string())
+        });
+        jev_mock::machine(&AGENT_TOOL, "on", &endpoint.base_url, |cwd| {
+            let home = runtime::default_config_home();
+            let path = home.join("settings.json");
+            let mut root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            root["smart"]["jev"]["labelDrafts"] = Value::Bool(true);
+            std::fs::write(&path, root.to_string()).unwrap();
+            let ask = |context: &str| {
+                let question = agent_tool::JevQuestion::new(agent_tool::JevShape::Ask, "Is this useful?",
+                    Some(context), &[], &[], &[]).unwrap();
+                agent_tool::decide(cwd, agent_tool::JevCaller::Cli, &question)
+            };
+            assert!(ask("first result").answered());
+            assert_eq!(Store::at(&home).snapshot().unwrap().cases.len(), 1);
+            root["smart"]["jev"]["labelDrafts"] = Value::Bool(false);
+            std::fs::write(&path, root.to_string()).unwrap();
+            assert!(ask("second result").answered());
+            assert_eq!(Store::at(&home).snapshot().unwrap().cases.len(), 1);
+            root["smart"][AGENT_TOOL.setting] = Value::String("off".to_string());
+            std::fs::write(&path, root.to_string()).unwrap();
+            assert!(!ask("third result").answered());
+            assert_eq!(endpoint.requests().len(), 2, "off reaches neither the wire nor capture");
+        });
+    }
+
+    #[test]
+    fn a_prepared_batch_rechecks_the_global_switch_and_does_not_relabel_a_changed_model_pin() {
+        use super::super::jev_mock;
+        use zerocode_core::jev::AGENT_TOOL;
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        jev_mock::machine(&AGENT_TOOL, "on", &endpoint.base_url, |cwd| {
+            let path = runtime::default_config_home().join("settings.json");
+            let door = JevDoor::open(cwd);
+            let mut root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            root["smart"]["jevModel"] = Value::String("jev-another-pin".into());
+            std::fs::write(&path, root.to_string()).unwrap();
+            let body = || serde_json::json!({"state":{"question":"test"},"questions":{}});
+            assert_eq!(door.pass(&AGENT_TOOL, false, body()).unwrap_err(), Refused::NoKey);
+            assert_eq!(door.pass(&AGENT_TOOL, true, body()).unwrap_err(), Refused::SettingsChanged);
+            assert_eq!(door.clear(&AGENT_TOOL, true, body()).unwrap_err(), Refused::SettingsChanged);
+            assert_eq!(door.count_a_hedge(), Err(Refused::SettingsChanged));
+            assert!(!door.permits_application_now());
+            root["smart"]["jev"]["enabled"] = Value::Bool(false);
+            std::fs::write(&path, root.to_string()).unwrap();
+            assert_eq!(door.pass(&AGENT_TOOL, true, body()).unwrap_err(), Refused::Off);
+            assert_eq!(door.clear(&AGENT_TOOL, true, body()).unwrap_err(), Refused::Off);
+            assert_eq!(door.count_a_hedge(), Err(Refused::Off));
+            root["smart"]["jev"]["enabled"] = Value::Bool(true);
+            root["smart"]["jevModel"] = Value::String(door.model().to_string());
+            root["smart"][AGENT_TOOL.setting] = Value::String("off".into());
+            std::fs::write(&path, root.to_string()).unwrap();
+            assert_eq!(door.pass(&AGENT_TOOL, true, body()).unwrap_err(), Refused::Off);
+            assert_eq!(door.clear(&AGENT_TOOL, true, body()).unwrap_err(), Refused::Off);
+            assert_eq!(count::sent(&door.requests), 0, "withheld requests are not counted as sent");
+            assert!(endpoint.requests().is_empty());
+        });
+    }
+
     /// No file in the workspace but this one calls the wire, and the wire
     /// takes nothing but bytes: every request zo makes of System One has been
     /// through the door.
@@ -423,7 +592,8 @@ mod tests {
             .iter()
             .filter(|path| !path.ends_with(&wire))
             .filter(|path| {
-                std::fs::read_to_string(path).is_ok_and(|text| text.contains(".decide_body("))
+                std::fs::read_to_string(path).is_ok_and(|text|
+                    text.contains(".decide_body(") || text.contains(".decide_body_once("))
             })
             .map(|path| path.display().to_string())
             .collect();

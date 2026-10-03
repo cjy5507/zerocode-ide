@@ -207,7 +207,7 @@ impl ManagedMcpServer {
 
 #[derive(Debug)]
 enum ManagedMcpProcess {
-    Stdio(McpStdioProcess),
+    Stdio(Box<McpStdioProcess>),
     Sse(McpSseProcess),
     Http(McpHttpProcess),
     Ws(Box<McpWsProcess>),
@@ -1752,7 +1752,7 @@ async fn open_mcp_process(bootstrap: &McpClientBootstrap) -> io::Result<ManagedM
 
     match &bootstrap.transport {
         McpClientTransport::Stdio(_) => {
-            spawn_mcp_stdio_process(bootstrap).map(ManagedMcpProcess::Stdio)
+            spawn_mcp_stdio_process(bootstrap).map(|process| ManagedMcpProcess::Stdio(Box::new(process)))
         }
         McpClientTransport::Sse(transport) => {
             crate::mcp_sse::connect_mcp_sse(transport, Some(oauth_server_name(bootstrap)))

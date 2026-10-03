@@ -152,6 +152,7 @@ pub enum RewindTurn {
 
 pub struct PlainSession {
     selection_origins: (&'static str, &'static str),
+    model_selection: super::plan_execution::ModelSelection,
     pub cwd: PathBuf,
     pub model: String,
     pub permission_mode: PermissionMode,
@@ -511,6 +512,10 @@ impl PlainSession {
             });
         }
 
+        let model_selection = if !options.exact_selection && options.model == crate::DEFAULT_MODEL
+            && persisted_preferences.model.is_none() {
+            super::plan_execution::ModelSelection::Automatic
+        } else { super::plan_execution::ModelSelection::Pinned };
         let preferences_selected = !options.exact_selection && options.model == crate::DEFAULT_MODEL && persisted_preferences.model.is_some();
         let selection_origins = (
             if preferences_selected { "preferences" } else { "launch" },
@@ -606,6 +611,7 @@ impl PlainSession {
 
         let session = Self {
             selection_origins,
+            model_selection,
             cwd,
             model,
             permission_mode: options.permission_mode,
@@ -813,6 +819,7 @@ impl PlainSession {
         hook_abort_signal: HookAbortSignal,
         user_cancel_requested: Arc<AtomicBool>,
     ) -> Result<runtime::TurnSummary, String> {
+        self.sync_project_rule_advice();
         self.runtime
             .set_hook_abort_signal(hook_abort_signal.clone());
         self.install_turn_stop(&hook_abort_signal);
@@ -826,10 +833,11 @@ impl PlainSession {
         // 가 bearer 를 복제해 가므로 그 **전**이어야 이번 턴이 새 토큰을 쓴다 —
         // 이 자리를 잃으면 긴 세션이 턴 도중 401 로 죽는다.
         self.refresh_credentials_for_turn(&block_tx).await;
+        let plan_began_ms = super::plan_execution::now_ms();
         let turn_setup = TurnHarness::setup_model_led_turn(&mut self.runtime, input, true);
         let named_effort = self.effort.and_then(Effort::level);
         let effort_band_ceiling = self.effort.and_then(Effort::band_ceiling);
-        let live_client = TurnHarness::build_live_client(
+        let live_client: Arc<dyn runtime::AsyncApiClient> = TurnHarness::build_live_client(
             &self.runtime,
             self.allowed_tools.clone(),
             thinking_config_for(self.effort),
@@ -856,17 +864,22 @@ impl PlainSession {
                 route_fact: &self.route_fact,
             },
         );
+        let (plan_turn, live_client) = self.prepare_measured_plan(
+            input, &turn_setup, &installed, plan_began_ms, &block_tx, live_client,
+        ).await;
         self.arm_turn_limits();
         self.begin_workspace_checkpoint();
+        let mut host_turn = installed.host_turn();
+        host_turn.applied = plan_turn.as_ref().and_then(|plan| plan.selected.as_ref());
         // 난이도가 넓다고 하면 호스트가 먼저 갈라 읽는다(`orchestration`): 결과는
         // 이 턴의 문맥에 앉고, 모델은 그 위에서 시작한다. 예산·출석 선언 뒤라
         // 헬퍼도 같은 한도를 받는다.
         let input = self
-            .input_after_host_prelude(installed.host_turn(), &turn_setup, input, &block_tx, || {
+            .input_after_host_prelude(host_turn, &turn_setup, input, &block_tx, || {
                 user_cancel_requested.load(Ordering::SeqCst) || hook_abort_signal.is_aborted()
             })
             .await;
-        let model = self.model.clone();
+        let model = plan_turn.as_ref().map_or_else(|| self.model.clone(), |plan| plan.model().to_string());
         let result = match self.runtime.runtime.as_mut() {
             Some(rt) => {
                 let completed = until_aborted(
@@ -907,9 +920,47 @@ impl PlainSession {
             installed.route_watch.taken(), turn_from,
             user_cancel_requested.load(Ordering::SeqCst) || hook_abort_signal.is_aborted(),
         );
+        if let Some(plan) = plan_turn {
+            plan.finish(&self.cwd, &self.handle.id, &result);
+        }
         let summary = result?;
         self.persist().map_err(|error| error.to_string())?;
         Ok(summary)
+    }
+
+    async fn prepare_measured_plan(
+        &mut self,
+        input: &str,
+        setup: &super::turn_harness::TurnSetup,
+        installed: &super::smart_runtime::SmartTurnInstalled,
+        began_ms: u64,
+        block_tx: &tokio::sync::mpsc::Sender<RenderBlock>,
+        mut live_client: Arc<dyn runtime::AsyncApiClient>,
+    ) -> (Option<super::plan_execution::PlanTurn>, Arc<dyn runtime::AsyncApiClient>) {
+        let mut plan_turn = installed.plan_shadow.as_ref().and_then(|shadow| {
+            super::plan_execution::PlanTurn::begin(&mut self.runtime, &super::plan_execution::PlanStart {
+                shadow, setup, input, session: &self.handle.id, began_ms,
+                pinned_model: matches!(self.model_selection, super::plan_execution::ModelSelection::Pinned),
+                prelude: tools::decide_host_prelude(installed.orchestration, setup.assessment,
+                    setup.orchestration, runtime::subagent_panes::nested()),
+            })
+        });
+        if let Some(plan) = plan_turn.as_mut() {
+            if let Some(client) = plan.client(&self.runtime, &self.handle.id, self.allowed_tools.clone()) {
+                live_client = client;
+                installed.route_watch.plan_applied();
+                if let Some(inner) = self.runtime.try_runtime_mut() {
+                    inner.set_step_effort(None);
+                    inner.set_exec_contract(None);
+                }
+                let _ = block_tx.send(RenderBlock::System {
+                    id: runtime::message_stream::BlockIdGen::default().next(),
+                    level: runtime::message_stream::SystemLevel::Info,
+                    text: format!("plan · measured objective-checked route: {}", plan.model()),
+                }).await;
+            }
+        }
+        (plan_turn, live_client)
     }
 
     /// Who stops this turn if it does not stop itself, and what cuts a tool
@@ -996,6 +1047,12 @@ impl PlainSession {
         let Some(inner) = self.runtime.try_runtime() else {
             return;
         };
+        if let Some(advice) = tools::pending_project_rule_advice(&self.cwd, &self.handle.id,
+            zerocode_core::jev::project_rules::ADVICE_CHAR_CAP) {
+            if project_rule_advice_persisted(inner.session(), &advice.key) {
+                tools::project_rule_advice_delivered(&self.cwd, &self.handle.id, &advice);
+            }
+        }
         let attempt = inner.attempt().to_string();
         if cancelled {
             let _ = tools::note_recall_read(&self.cwd, &attempt, true);
@@ -1030,6 +1087,24 @@ impl PlainSession {
         // The same turn's completion claims and tool lines meet beside r43;
         // the next person's turn labels the preceding answer.
         tools::note_claim_turn(&self.cwd, &self.handle.path, &attempt, &messages[from..]);
+        tools::note_project_rule_turn(&self.cwd, &self.handle.id, &attempt, &messages[from..]);
+    }
+
+    fn sync_project_rule_advice(&mut self) {
+        const PREFIX: &str = "[zo:project-rules:";
+        let advice = tools::pending_project_rule_advice(&self.cwd, &self.handle.id,
+            zerocode_core::jev::project_rules::ADVICE_CHAR_CAP);
+        let Some(inner) = self.runtime.try_runtime_mut() else { return; };
+        // A revoked mode/source removes an unsent transient note immediately.
+        inner.replace_transient_system_reminder_by_prefix(PREFIX, None);
+        if let Some(advice) = advice {
+            if project_rule_advice_persisted(inner.session(), &advice.key) {
+                tools::project_rule_advice_delivered(&self.cwd, &self.handle.id, &advice);
+            } else {
+                let prefix = format!("{PREFIX}{}]", advice.key);
+                inner.install_reminder_until_persisted(&prefix, Some(&advice.text));
+            }
+        }
     }
 
     /// 턴 후 영속 — 메시지는 이미 append 됐고, 헤더/압축 변경만 스냅샷.
@@ -1242,6 +1317,7 @@ impl PlainSession {
     /// `/model` — 같은 세션을 들고 런타임을 재빌드한다(제공자 클라이언트가
     /// 모델에 묶여 있어 라이브 교체가 불가능하다).
     pub fn set_model(&mut self, model: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.model_selection = super::plan_execution::ModelSelection::Pinned;
         let model = crate::cli_args::resolve_model_alias(model);
         runtime::model_discovery::note_selected(&model);
         // The person's switch, scored the way any other switch is: what the
@@ -1711,18 +1787,13 @@ impl PlainSession {
                 return Ok(CompactReport::Cancelled);
             };
             let removed = done.result.removed_message_count;
+            let cleared = done.result.cleared_tool_results;
             let kept = done.result.compacted_session.messages.len();
             rt.apply_manual_compaction(done.result);
-            if removed == 0 {
-                return Ok(CompactReport::NothingToCompact { kept });
-            }
-            CompactReport::Compacted {
-                removed,
-                kept,
-                tokens_before,
-                tokens_after: rt.estimated_tokens(),
-                local_summary: done.local_summary_reason,
-            }
+            let report = CompactReport::from_counts(removed, cleared, kept, tokens_before,
+                rt.estimated_tokens(), done.local_summary_reason);
+            if matches!(report, CompactReport::NothingToCompact { .. }) { return Ok(report); }
+            report
         };
         self.persist().map_err(|error| error.to_string())?;
         Ok(report)
@@ -2003,6 +2074,8 @@ async fn until_aborted<F: std::future::Future>(work: F, abort: &HookAbortSignal)
 /// What a `/compact` came to — the one sentence both front-ends show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompactReport {
+    /// Original messages stay in order; sealed tool bodies were cleared.
+    Retained { cleared: usize, kept: usize, tokens_before: usize, tokens_after: usize },
     /// The conversation was folded: `removed` messages into a summary,
     /// `kept` left, and the estimate before and after. `local_summary` says
     /// why the model's summary did not come, when the local one stands in.
@@ -2020,10 +2093,22 @@ pub(crate) enum CompactReport {
 }
 
 impl CompactReport {
+    fn from_counts(removed: usize, cleared: usize, kept: usize, tokens_before: usize,
+        tokens_after: usize, local_summary: Option<String>) -> Self {
+        if cleared > 0 {
+            Self::Retained { cleared, kept, tokens_before, tokens_after }
+        } else if removed > 0 {
+            Self::Compacted { removed, kept, tokens_before, tokens_after, local_summary }
+        } else { Self::NothingToCompact { kept } }
+    }
+
     /// The line the person reads.
     #[must_use]
     pub(crate) fn note(&self) -> String {
         match self {
+            Self::Retained { cleared, kept, tokens_before, tokens_after } => format!(
+                "compact: {cleared} tool results cleared · {kept} messages retained · {} → {} tokens",
+                runtime::format_kilo_tokens(*tokens_before), runtime::format_kilo_tokens(*tokens_after)),
             Self::Compacted {
                 removed,
                 kept,
@@ -2088,6 +2173,16 @@ fn session_has_goal_reminder(session: &Session) -> bool {
                 if text.contains(PERSISTENT_GOAL_REMINDER_PREFIX))
         })
     })
+}
+
+fn project_rule_advice_persisted(session: &Session, key: &str) -> bool {
+    let prefix = format!("[zo:project-rules:{key}]");
+    session.messages.iter().filter(|message| message.role == core_types::MessageRole::System)
+        .flat_map(|message| &message.blocks).any(|block| {
+            let core_types::ContentBlock::Text { text } = block else { return false; };
+            text.strip_prefix(core_types::session::REMINDER_TAG_OPEN).unwrap_or(text)
+                .trim_start_matches('\n').starts_with(&prefix)
+        })
 }
 
 /// Keep the standing objective on the runtime's reminder seam rather than in
@@ -2343,6 +2438,18 @@ mod tests {
     use crate::effort::Effort;
     use crate::goal::GoalPhase;
     use runtime::PermissionMode;
+
+    #[test]
+    fn manual_retention_reports_the_cleared_results_without_claiming_a_summary() {
+        let report = super::CompactReport::from_counts(0, 2, 12, 12_000, 3_000, None);
+        assert_eq!(report.note(), "compact: 2 tool results cleared · 12 messages retained · 12.0k → 3.0k tokens");
+        assert_eq!(report.level(), runtime::message_stream::SystemLevel::Info);
+        assert!(matches!(super::CompactReport::from_counts(0, 0, 12, 12_000, 12_000, None),
+            super::CompactReport::NothingToCompact { kept: 12 }));
+        let summary = super::CompactReport::from_counts(10, 0, 2, 12_000, 3_000, Some("quota".into()));
+        assert!(matches!(&summary, super::CompactReport::Compacted { removed: 10, kept: 2, .. }));
+        assert_eq!(summary.level(), runtime::message_stream::SystemLevel::Warn);
+    }
 
     #[test]
     fn permission_labels_fold_to_three_cli_words() {

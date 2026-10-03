@@ -1398,6 +1398,7 @@ mod tests {
                         Some(TaskStatus::Completed),
                         None,
                         ResultAuthor::Ledger,
+                        10,
                     )
                     .expect("done");
             }
@@ -1717,7 +1718,9 @@ mod tests {
                         generation: Some(1),
                         attempt: None,
                         source: None,
+                        completed_ms: None,
                     },
+                    10,
                 )
                 .expect("an update");
         }
@@ -1831,6 +1834,7 @@ mod tests {
             generation: Some(1),
             attempt: None,
             source: None,
+            completed_ms: None,
         };
         // Five tasks the coordinator wrote down as done by hand after attempts
         // that ended handing nothing in.
@@ -1867,6 +1871,7 @@ mod tests {
                     Some(TaskStatus::Completed),
                     None,
                     coordinator.clone(),
+                    10,
                 )
                 .expect("done by hand");
             by_hand.push(task);
@@ -1987,6 +1992,7 @@ mod tests {
                     Some(TaskStatus::Completed),
                     None,
                     ResultAuthor::Ledger,
+                    10,
                 )
                 .expect("done");
         }

@@ -402,6 +402,44 @@ fn the_installed_seat_is_the_projects_own() {
     assert_eq!(Arc::strong_count(&installed), 1);
 }
 
+#[test]
+fn a_compaction_answer_applies_only_while_the_current_settings_still_allow_it() {
+    use std::sync::{Arc, Mutex};
+    use super::super::jev_mock::machine;
+    for change in ["none", "off", "shadow", "global_off", "consent", "model"] {
+        let path = Arc::new(Mutex::new(None::<PathBuf>));
+        let settings = Arc::clone(&path);
+        let mock = Mock::answering(move |body| {
+            let path = settings.lock().unwrap().clone().unwrap();
+            let mut root: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            match change {
+                "none" => {},
+                "global_off" => root["smart"]["jev"]["enabled"] = serde_json::json!(false),
+                "consent" => root["smart"]["jev"]["workspaces"] = serde_json::json!([]),
+                "model" => root["smart"]["jevModel"] = serde_json::json!("jev-new-pin"),
+                _ => root["smart"][COMPACTION.setting] = serde_json::json!(change),
+            }
+            std::fs::write(path, root.to_string()).unwrap();
+            let request: serde_json::Value = serde_json::from_str(body).unwrap();
+            let answers = request["questions"].as_object().unwrap().keys()
+                .map(|id| (id.clone(), answer(COMPACTION_DROP, 1.0))).collect();
+            (200, reply(&answers))
+        });
+        machine(&COMPACTION, "on", &mock.base_url, |cwd| {
+            *path.lock().unwrap() = Some(runtime::default_config_home().join("settings.json"));
+            let (ask, _) = ask_of(&session());
+            let judge = CompactionJudge::at(cwd);
+            let judgment = api::sync_bridge::run_blocking(judge.judge(&ask));
+            assert!(!judgment.dropped.is_empty(), "the reply answered the drop question: {change}");
+            assert_eq!(judgment.applies, change == "none", "{change}");
+            let rows = super::super::jev_summary::read_rows(&compaction_relevance_path(cwd));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["applied"], change == "none", "{change}");
+            if change != "none" { assert_eq!(rows[0]["rejected"], "settings_changed"); }
+        });
+    }
+}
+
 /* ---- the replay: this machine's own compaction points -------------------- */
 
 /// Where the replay seed says which transcripts to read

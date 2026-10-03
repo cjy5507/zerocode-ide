@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zerocode_core::branching::BranchAsk;
-use zerocode_core::jev::door::{Memo, Memoed};
+use zerocode_core::jev::door::{JevSettings, Memo, Memoed};
 use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
 use zerocode_core::jev::{
     BRANCHING, BRANCHING_APPLY_DEADLINE_MS, JUDGMENT_CACHE, JevMode, JevUse, Run, memo,
@@ -121,6 +121,8 @@ pub struct LiveJudge {
     /// Whether the walk repeats one walked before (t-6385): what the Jev
     /// table says a use stands at then ([`zerocode_core::jev::JevUse::repeat`]).
     run: Run,
+    /// A walk never carries a choice across a change of the person's model pin.
+    model: String,
 }
 
 /// How the judgment cache stands for one question: the seat's mode as the
@@ -140,6 +142,9 @@ impl LiveJudge {
         // The walk's first look is longer than a handshake: connect now,
         // so the first question pays for its answer alone.
         wire.warm();
+        let model = JevSettings::from_root(&wire.settings_root())
+            .resolved()
+            .model;
         Self {
             wire,
             workspace: workspace.map(Path::to_path_buf),
@@ -148,6 +153,7 @@ impl LiveJudge {
             cached: false,
             memo_rows: Vec::new(),
             run: Run::Fresh,
+            model,
         }
     }
 
@@ -165,14 +171,19 @@ impl LiveJudge {
     #[cfg(test)]
     #[must_use]
     pub fn at(base: &str, key: &str, doorway: Doorway) -> Self {
+        let wire = Wire::at(base, key, doorway.settings);
+        let model = JevSettings::from_root(&wire.settings_root())
+            .resolved()
+            .model;
         Self {
-            wire: Wire::at(base, key, doorway.settings),
+            wire,
             workspace: doorway.workspace,
             seat: doorway.seat,
             spent: None,
             cached: false,
             memo_rows: Vec::new(),
             run: Run::Fresh,
+            model,
         }
     }
 
@@ -389,11 +400,35 @@ impl LiveJudge {
             cached: false,
             memo_rows: Vec::new(),
             run: self.run,
+            model: self.model.clone(),
         }
     }
 }
 
 impl ActionJudge for LiveJudge {
+    fn permits_application(&self) -> bool {
+        JevSettings::from_root(&self.wire.settings_root())
+            .resolved()
+            .model
+            == self.model
+            && self.wire.permits_workspace_now(self.workspace.as_deref())
+            && crate::systemone::applies_in(&self.wire, self.seat, self.run)
+    }
+
+    fn branching_now(&self, configured: super::Branching) -> super::Branching {
+        if !configured.mode.asks() {
+            return configured;
+        }
+        let mode = BRANCHING.mode_in(&self.wire.settings_root());
+        super::Branching {
+            mode,
+            acting: configured.acting
+                && self.permits_application()
+                && crate::systemone::applies(&self.wire, &BRANCHING),
+            act_line: configured.act_line,
+        }
+    }
+
     fn choose(&mut self, ask: &ActionAsk) -> Judged {
         self.choose_within(ask, ACTION_DEADLINE)
     }

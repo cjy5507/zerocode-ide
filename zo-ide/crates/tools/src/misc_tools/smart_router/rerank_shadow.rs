@@ -372,7 +372,7 @@ struct Shot {
 /// buffer, so a send that succeeds is one a caller is holding: that caller
 /// writes the row, and the `applied` it writes is the truth about what the turn
 /// read.
-type RowSender = SyncSender<RerankShadowRow>;
+type RowSender = SyncSender<(RerankShadowRow, JevDoor)>;
 
 /// One recall, on the road its mode names: nothing, a row beside what the turn
 /// read, or the order the turn reads.
@@ -533,13 +533,13 @@ fn fire(
 fn apply(cwd: &Path, query: &str, hits: Vec<MemoryHit>, label: &ReadingSlot) -> Vec<MemoryHit> {
     let (answer, judged) = sync_channel(0);
     fire(cwd, query, &hits, RERANK_APPLY_DEADLINE, Some(answer), Arc::clone(label));
-    let Ok(mut row) = judged.recv_timeout(RERANK_APPLY_DEADLINE) else {
+    let Ok((mut row, door)) = judged.recv_timeout(RERANK_APPLY_DEADLINE) else {
         return hits;
     };
-    let read = row
+    let read = door.permits_application_for(cwd, &RECALL).then(|| row
         .judged
         .as_ref()
-        .and_then(|judged| apply_order(&hits, &judged.proposed, &judged.dropped));
+        .and_then(|judged| apply_order(&hits, &judged.proposed, &judged.dropped))).flatten();
     row.applied = read.is_some();
     let ledger = rerank_shadow_path(cwd);
     if record_settled(&ledger, label, &row, &hits) {
@@ -561,7 +561,7 @@ async fn run(shot: Shot, answer: Option<RowSender>) {
     // this order, and a wall it is waited inside is the one thing a second
     // request can buy.
     let row = judge(&door, client.as_ref(), &query, &hits, deadline, answer.is_some()).await;
-    let Some(row) = kept(row, answer).await else {
+    let Some(row) = kept(row, door, answer).await else {
         return;
     };
     let _ = tokio::task::spawn_blocking(move || {
@@ -1434,14 +1434,14 @@ pub fn recall_demand_from<'a>(rows: impl IntoIterator<Item = &'a RerankLabelRow>
 
 /// The row when this task is the one to write it, `None` when a caller waiting
 /// for the order took it instead.
-async fn kept(row: RerankShadowRow, answer: Option<RowSender>) -> Option<RerankShadowRow> {
+async fn kept(row: RerankShadowRow, door: JevDoor, answer: Option<RowSender>) -> Option<RerankShadowRow> {
     let Some(answer) = answer else {
         return Some(row);
     };
     // A blocking send, because the handoff is a rendezvous: it finishes when a
     // caller takes the row, and fails — handing the row back — when the wall has
     // already passed and that caller has gone.
-    tokio::task::spawn_blocking(move || answer.send(row).err().map(|returned| returned.0))
+    tokio::task::spawn_blocking(move || answer.send((row, door)).err().map(|returned| returned.0.0))
         .await
         .ok()
         .flatten()
@@ -2065,6 +2065,36 @@ mod tests {
             hit("wiki/b", "the answer"),
             hit("wiki/c", "background"),
         ]
+    }
+
+    #[test]
+    fn a_recall_rechecks_permissions_for_late_and_cached_orders() {
+        use super::super::jev_mock::{SettingsChange, APPLICATION_CHANGES};
+        for change in APPLICATION_CHANGES {
+            let changed = SettingsChange::new(&RECALL, change);
+            let during_reply = changed.clone();
+            let mock = Mock::answering(move |_| {
+                during_reply.apply();
+                (200, reply_for(&[1, 3, 2]))
+            });
+            machine("on", &mock.base_url, |cwd| {
+                changed.bind(&runtime::default_config_home());
+                let query = format!("recall permission change {change}");
+                let read = settle(cwd, &query, three().to_vec());
+                let expected = if change == "none" { vec!["wiki/b", "wiki/c", "wiki/a"] }
+                    else { vec!["wiki/a", "wiki/b", "wiki/c"] };
+                assert_eq!(slugs(&read), expected, "{change}");
+                assert_eq!(rows(cwd)[0].applied, change == "none", "{change}");
+                if change == "none" {
+                    let revoke = SettingsChange::new(&RECALL, "consent");
+                    revoke.bind(&runtime::default_config_home());
+                    revoke.apply();
+                    assert_eq!(slugs(&settle(cwd, &query, three().to_vec())), slugs(&three()));
+                    assert!(rows(cwd)[1].cached && !rows(cwd)[1].applied);
+                    assert_eq!(mock.requests().len(), 1);
+                }
+            });
+        }
     }
 
     /// `on` is the one mode that changes what a turn reads, and the row it

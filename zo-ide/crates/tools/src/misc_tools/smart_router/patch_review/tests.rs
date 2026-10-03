@@ -108,6 +108,27 @@ fn reply(yes: [f64; 4]) -> String {
 const PERMITS: [f64; 4] = [0.95, 0.9, 0.05, 0.05];
 const UNRELATED: [f64; 4] = [0.95, 0.9, 0.82, 0.05];
 
+#[test]
+fn a_patch_review_withholds_its_note_when_permissions_change_during_the_reply() {
+    use super::super::jev_mock::{SettingsChange, APPLICATION_CHANGES};
+    for change in APPLICATION_CHANGES {
+        let changed = SettingsChange::new(&PATCH_REVIEW, change);
+        let during_reply = changed.clone();
+        let mock = Mock::answering(move |_| {
+            during_reply.apply();
+            (200, reply(UNRELATED))
+        });
+        machine(&PATCH_REVIEW, "on", &mock.base_url, |cwd| {
+            changed.bind(&runtime::default_config_home());
+            let reviewed = api::sync_bridge::run_blocking(review_at(cwd.to_path_buf(), ask(&format!("settings-{change}"))));
+            assert_eq!(reviewed.note.is_some(), change == "none", "{change}: {reviewed:?}");
+            let rows = rows_of(cwd, 1);
+            assert_eq!(rows[0]["applied"], change == "none", "{change}: {rows:?}");
+            assert_eq!(mock.requests().len(), 1);
+        });
+    }
+}
+
 fn judged(base_url: &str, ask: &PatchAsk) -> (PatchReviewRow, Option<Answers>) {
     let home = tempfile::tempdir().expect("a config home");
     let client = SystemOneClient::new(base_url, "test-key");

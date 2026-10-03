@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod health;
+pub use health::{Failure, FailureKind, HealthBook, HealthChange, HealthRow, Operation};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FactKind {
@@ -335,6 +338,8 @@ impl Subject {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Book {
     pub subjects: BTreeMap<String, Tracked>,
+    #[serde(default)]
+    pub health: HealthBook,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tracked {
@@ -349,6 +354,16 @@ pub trait Effects {
 }
 
 impl Book {
+    pub fn update_health(
+        &mut self,
+        health: HealthBook,
+        effects: &mut impl Effects,
+    ) -> Result<(), String> {
+        let mut staged = self.clone();
+        staged.health = health;
+        self.commit(staged, effects)
+    }
+
     pub fn discover(
         &mut self,
         subjects: &[Subject],

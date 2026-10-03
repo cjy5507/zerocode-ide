@@ -333,16 +333,18 @@ where
     /// byte-identical (the old wire-only injection re-billed the prior tail on
     /// every request).
     pub(super) fn request_wire_reminders(&self) -> Arc<[String]> {
+        let query = self.recall_query_text();
         let recalled = self
             .memory_retriever
             .as_ref()
-            .and_then(|retriever| {
-                let query = self.recall_query_text()?;
-                Some(retriever.recall(query.as_ref(), RECALL_AND_REMINDER_LIMIT))
-            })
+            .zip(query.as_deref())
+            .map(|(retriever, query)| retriever.recall(query, RECALL_AND_REMINDER_LIMIT))
             .unwrap_or_default();
         let mut reminders = self.transient_reminders.clone();
         reminders.extend(recall_and_reminder_sections(&recalled));
+        if let Some(source) = &self.user_preference_source {
+            reminders.extend(if query.is_some() { source.reminder() } else { source.withheld_reminder() });
+        }
         Arc::from(reminders)
     }
 
@@ -364,20 +366,24 @@ where
         tracer: Option<SessionTracer>,
         seat: Option<Arc<dyn crate::RecallSeat>>,
         attempt: String,
+        preferences: Option<Arc<crate::memory::user_preferences::UserPreferenceSource>>,
     ) -> Vec<String> {
-        let (Some(retriever), Some(query)) = (retriever, query) else {
-            return Vec::new();
+        let Some(query) = query else {
+            return preferences.and_then(|source| source.withheld_reminder()).into_iter().collect();
         };
+        if retriever.is_none() && preferences.is_none() { return Vec::new(); }
         let section = match tokio::task::spawn_blocking(move || {
-            let hits = retriever.recall(&query, RECALL_AND_REMINDER_LIMIT);
+            let hits = retriever.as_ref().map_or_else(Vec::new, |retriever| retriever.recall(&query, RECALL_AND_REMINDER_LIMIT));
             // After recall has settled and before anything renders, so the seat
             // sees exactly what recall chose and its answer is what the turn
             // reads. A seat in a record-only mode hands the same hits back.
             let hits = match seat {
-                Some(seat) => seat.settle(&attempt, &query, hits),
-                None => hits,
+                Some(seat) if retriever.is_some() => seat.settle(&attempt, &query, hits),
+                _ => hits,
             };
-            recall_and_reminder_sections(&hits)
+            let mut sections = recall_and_reminder_sections(&hits);
+            sections.extend(preferences.and_then(|source| source.reminder()));
+            sections
         })
         .await
         {
@@ -510,9 +516,7 @@ where
             },
             None,
         );
-        if result.removed_message_count > 0 {
-            self.session = result.compacted_session;
-        }
+        self.finish_compaction_swap(result, super::POST_COMPACTION_SYSTEM_REMINDER);
 
         // Re-check after compaction — if still over budget, aggressively
         // trim preserved messages down to the most recent pair. A pair can
@@ -528,9 +532,7 @@ where
                 },
                 None,
             );
-            if result.removed_message_count > 0 {
-                self.session = result.compacted_session;
-            }
+            self.finish_compaction_swap(result, super::POST_COMPACTION_SYSTEM_REMINDER);
         }
         if let Some(t) = guard_t {
             log_build_segment("overflow_guard_compaction (BLOCKING LLM)", t);

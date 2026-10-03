@@ -4186,6 +4186,10 @@ async function deliverAnnotations(host, tab) {
   // 어디에 단 주석인지는 전달 전에 한 번 정한다 — 초안이 말하는 페이지와 기록이
   // 적는 발행물이 같은 판정에서 나온다(t-14586).
   const place = await artifactFeedbackPlace(tab);
+  const batch = new Map((browserAnnotations.get(tab.label) ?? []).map((note) => [note, {
+    selector: String(note.selector ?? ""), comment: String(note.comment ?? ""),
+  }]));
+  if (batch.size === 0) return;
   // 아티팩트의 판에 단 주석은 만든 판이 받을 곳의 기본이고(첫 줄, 초점), 초안은
   // 사람이 쓰던 입력 뒤에 붙여 넣는다 — 지우는 키도 Enter도 없다(t-11958).
   await openSendToAgent(
@@ -4194,8 +4198,13 @@ async function deliverAnnotations(host, tab) {
     async (recipient) => {
       // 전달된 주석은 떠난다 — 뱃지가 비고, 다음 묶음이 새로 모인다. 아티팩트
       // 탭에서 단 것이면 떠난 뒤에도 그 발행물의 기록에 남는다(t-11959, t-14586).
-      const delivered = browserAnnotations.get(tab.label) ?? [];
-      browserAnnotations.delete(tab.label);
+      const delivered = [...batch.values()];
+      const remaining = (browserAnnotations.get(tab.label) ?? []).filter((note) => {
+        const sent = batch.get(note);
+        return !sent || sent.selector !== String(note.selector ?? "") || sent.comment !== String(note.comment ?? "");
+      });
+      if (remaining.length) browserAnnotations.set(tab.label, remaining);
+      else browserAnnotations.delete(tab.label);
       refreshGrabButtons();
       await recordArtifactFeedback(place, delivered, recipient);
     },

@@ -17,9 +17,12 @@ mod mention_rerank;
 mod metadata;
 mod patch_review;
 mod claim_check;
+mod project_rules;
 mod vault_pairs;
 pub mod jev_summary;
 mod plan_shadow;
+mod plan_control;
+mod plan_usage;
 mod planner;
 mod probe_exec;
 mod probe_gate;
@@ -31,6 +34,12 @@ mod roads_tests;
 mod route_label;
 #[cfg(test)]
 mod question_discovery;
+#[cfg(test)]
+mod review_replay;
+#[cfg(test)]
+mod skills_impact;
+#[cfg(test)]
+mod retention_impact;
 #[cfg(test)]
 mod routing_replay;
 mod skill_search;
@@ -96,6 +105,7 @@ pub use patch_review::{
     PATCH_REVIEW_DEADLINE, PATCH_REVIEW_FILE, PATCH_REVIEW_OUTCOME_ANSWERED,
 };
 pub use claim_check::{claim_check_path, note_claim_turn, ClaimCheckRow, ClaimLabelRow};
+pub use project_rules::{note_project_rule_turn, pending_project_rule_advice, project_rule_advice_delivered};
 pub use vault_pairs::{
     judge_vault_pairs, mark_vault_pair, recorded_vault_pair_proposals,
     PairJudgment, PairLabel, PairRun,
@@ -115,7 +125,7 @@ pub use mention_rerank::{
     MENTION_RERANK_FILE, MENTION_RUBRIC_VERSION,
 };
 pub use skill_search::{
-    note_loaded_skill, note_search_answer, search as skill_search,
+    note_loaded_skill, note_search_answer, search as skill_search, search_for_session as skill_search_for_session,
     skill_search_path, Chosen, Searched, SkillLabelRow, SkillRequestName, SkillSearchRow,
     SkillSuggestionJudge, SKILL_OUTCOME_ANSWERED, SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE,
 };
@@ -126,10 +136,12 @@ pub use step_effort::{
     JUDGMENT_ROW_KIND, STEP_EFFORT_FILE, STEP_EFFORT_SETTING, STEP_JUDGMENT_DEADLINE,
 };
 pub use plan_shadow::{
-    build_plan_shadow, model_options_for, model_price_for, plan_priors_for, plan_shadow_path,
+    build_plan_shadow, model_options_for, model_price_for, plan_cohort_for_turn, plan_priors_for, plan_shadow_path,
     record_plan_shadow, switch_candidates,
     PlanShadowActual, PlanShadowCandidate, PlanShadowInputs, PlanShadowRow,
 };
+pub use plan_control::{choose_measured_plan, plan_pins_allow, read_plan_receipts, record_plan_receipt, PlanRunReceipt};
+pub use plan_usage::{measure_plan_usage, PlanUsage};
 pub(crate) use settings::live_agent_model_policy;
 pub use settings::{
     agent_tool_mode_from, decision_shadow_mode_from, jev_challenger_mode_from, jev_compaction_mode_from,

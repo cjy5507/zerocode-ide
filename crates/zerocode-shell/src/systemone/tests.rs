@@ -356,6 +356,138 @@ fn shared_and_cached_answers_add_no_new_usage() {
 }
 
 #[test]
+fn the_window_wire_retains_reviewable_evidence_only_when_the_existing_settings_allow_it() {
+    use zerocode_core::jev::{AGENT_TOOL, learning::store::Store};
+    let home = tempfile::tempdir().expect("a settings home");
+    let workspace = tempfile::tempdir().expect("a consented workspace");
+    let path = home.path().join("settings.json");
+    let mut settings = json!({"smart":{"agentTool":"on","jev":{"enabled":true,
+        "labelDrafts":true,"workspaces":[door::resolved_path(workspace.path())]}}});
+    std::fs::write(&path, settings.to_string()).expect("settings");
+    let endpoint = Endpoint::serving(
+        "HTTP/1.1 200 OK",
+        json!({"model":ANSWERING_VERSION,
+        "answers":{"q":{"type":"noul","noul":0.5}},
+        "usage":{"input_tokens":10,"output_tokens":0}})
+        .to_string(),
+        0,
+    );
+    let wire = Wire::at(&endpoint.base(), "test-key", Some(path.clone()));
+    let ask = |context: &str| {
+        wire.ask(
+            &AGENT_TOOL,
+            Some(workspace.path()),
+            request_body(
+                &json!({"context":context}),
+                &json!({"q":{"type":"noul","instructions":"Is this useful?"}}),
+            ),
+            Duration::from_secs(5),
+        )
+    };
+    let first = ask("first observation");
+    assert!(first.answer.is_ok());
+    assert_eq!(
+        first.spent.input_tokens,
+        Some(10),
+        "retention is not another billed request"
+    );
+    let saved = Store::at(home.path()).snapshot().expect("review evidence");
+    assert_eq!(saved.cases.len(), 1);
+    assert_eq!(
+        saved.cases[0].request["state"]["context"],
+        "first observation"
+    );
+    settings["smart"]["jev"]["labelDrafts"] = json!(false);
+    std::fs::write(&path, settings.to_string()).expect("disable retention");
+    assert!(ask("second observation").answer.is_ok());
+    assert_eq!(Store::at(home.path()).snapshot().unwrap().cases.len(), 1);
+    settings["smart"]["jev"]["enabled"] = json!(false);
+    std::fs::write(&path, settings.to_string()).expect("disable Jev");
+    assert!(ask("third observation").answer.is_err());
+    assert_eq!(endpoint.asked().len(), 2, "off sends no third request");
+}
+
+#[test]
+fn a_late_window_answer_rechecks_settings_without_losing_its_actual_bill() {
+    use zerocode_core::jev::AGENT_TOOL;
+    for change in ["none", "off", "shadow", "global_off", "consent", "model"] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let root = json!({"smart":{"agentTool":"on","jev":{"enabled":true,
+            "workspaces":[door::resolved_path(workspace.path())]}}});
+        std::fs::write(&path, root.to_string()).unwrap();
+        let settings = path.clone();
+        let endpoint = Endpoint::answering_each(
+            "HTTP/1.1 200 OK",
+            move |_| {
+                let mut root = root.clone();
+                match change {
+                    "none" => {}
+                    "global_off" => root["smart"]["jev"]["enabled"] = json!(false),
+                    "consent" => root["smart"]["jev"]["workspaces"] = json!([]),
+                    "model" => root["smart"]["jevModel"] = json!("jev-new-pin"),
+                    word => root["smart"][AGENT_TOOL.setting] = json!(word),
+                }
+                std::fs::write(&settings, root.to_string()).unwrap();
+                json!({"model":ANSWERING_VERSION,"answers":{},
+                "usage":{"input_tokens":7,"output_tokens":3}})
+                .to_string()
+            },
+            0,
+        );
+        let wire = Wire::at(&endpoint.base(), "test-key", Some(path.clone()));
+        let request = || {
+            request_body(
+                &json!({"context":"settings regression"}),
+                &json!({"q":{"type":"noul","instructions":"Is this useful?"}}),
+            )
+        };
+        let asked = wire.ask(
+            &AGENT_TOOL,
+            Some(workspace.path()),
+            request(),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            asked.answer.is_ok(),
+            change == "none",
+            "{change}: {asked:?}"
+        );
+        assert_eq!(
+            (
+                asked.spent.requests,
+                asked.spent.input_tokens,
+                asked.spent.output_tokens
+            ),
+            (1, Some(7), Some(3))
+        );
+        assert_eq!(asked.spent.model.as_deref(), Some(ANSWERING_VERSION));
+        if matches!(change, "global_off" | "consent") {
+            assert!(!applies_in_project(&wire, &AGENT_TOOL, workspace.path()));
+        }
+        if change == "global_off" {
+            assert!(!applies(&wire, &AGENT_TOOL));
+            assert!(!applies_once_risen(&wire, &AGENT_TOOL));
+        }
+        if change == "off" {
+            let off = wire.ask(
+                &AGENT_TOOL,
+                Some(workspace.path()),
+                request(),
+                Duration::from_secs(5),
+            );
+            assert_eq!(off.spent.requests, 0);
+            assert_eq!(
+                endpoint.asked().len(),
+                1,
+                "a disabled feature sends no new request"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_request_without_usage_keeps_a_combined_bill_unknown() {
     let known = Spent {
         requests: 1,

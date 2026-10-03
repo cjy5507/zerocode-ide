@@ -61,6 +61,7 @@ mod accounts;
 mod agent_teams;
 mod agent_tools_runtime;
 mod agent_trust_presets;
+mod answer_door;
 pub(crate) mod api_routers;
 mod app_paths;
 mod artifact_render;
@@ -119,6 +120,7 @@ mod glab;
 mod google_login;
 mod hang_sample;
 mod hang_watchdog;
+mod harness_settings;
 mod hooks;
 mod human_input;
 mod icon;
@@ -128,6 +130,7 @@ mod jira_attachments;
 mod jira_store;
 mod keyboard_input_source;
 mod last_status;
+mod launch_budget_door;
 mod native_tray;
 mod notify_call;
 mod opencode_home;
@@ -139,6 +142,7 @@ mod pane_guard;
 mod pane_layout;
 mod pane_runtime;
 mod pick_runtime;
+mod preference_runtime;
 mod primary_selection;
 mod proc;
 mod project_runtime;
@@ -194,6 +198,7 @@ mod terminal_prefs_runtime;
 mod terminal_registry;
 mod terminal_theme_import;
 mod token_scan;
+mod tree_selection;
 mod type_value_keys;
 mod typesafe_settings;
 mod ui_source;
@@ -273,14 +278,14 @@ use cmd::{
     gitlab_pipeline_jobs, gitlab_project_members, gitlab_retry_job, gitlab_set_item_open,
     gitlab_set_mr_reviewers, gitlab_status, gitlab_todos, gitlab_update_mr, gitlab_work_items,
     google_account, google_login_finish, google_login_start, google_logout, grok_usage,
-    hooks_report, hosted_review_eligibility, image_diff, import_browser_cookies,
+    harness_status, hooks_report, hosted_review_eligibility, image_diff, import_browser_cookies,
     import_cookie_file, import_external_worktrees, install_bundled_skill, install_hooks, jev_day,
-    jev_summary, judge_worker_room, key_input, kimi_usage, lane_fold, lane_lines, lane_scroll,
-    launch_agent_tab, launch_plan_for_action, launch_recipes, leave_cancel, leave_now,
-    leave_when_idle, ledger_agents, list_agents, list_automation_runs, list_automations,
-    list_branches, list_claude_sessions, list_diff_notes, list_dir, list_quick_commands,
-    list_run_evidence, list_skills, list_system_fonts, list_worktrees, listening_ports,
-    log_window_error, logout_codex_login, machine_load, mark_default_tabs_applied,
+    jev_review, jev_review_outcome, jev_summary, judge_worker_room, key_input, kimi_usage,
+    lane_fold, lane_lines, lane_scroll, launch_agent_tab, launch_plan_for_action, launch_recipes,
+    leave_cancel, leave_now, leave_when_idle, ledger_agents, list_agents, list_automation_runs,
+    list_automations, list_branches, list_claude_sessions, list_diff_notes, list_dir,
+    list_quick_commands, list_run_evidence, list_skills, list_system_fonts, list_worktrees,
+    listening_ports, log_window_error, logout_codex_login, machine_load, mark_default_tabs_applied,
     mark_first_run_seen, mark_onboarding, merge_and_remove_worktree, mirror_ready, mouse_input,
     note_webview_error, note_worker_room_change, note_worker_room_seen, notification_probe,
     open_board_popout, open_browser_pane, open_commit_remote, open_computer_use_permission,
@@ -310,24 +315,25 @@ use cmd::{
     save_agent_launch_env, save_api_router, save_automation, save_clipboard_image, save_diff_note,
     save_launch_recipe, save_onboarding_step, save_pane_layouts, save_quick_command,
     save_remote_server, save_remote_workspace, save_ssh_host, save_stage_layouts,
-    save_type_value_key, save_typesafe_key, save_worktree_prefs, scm_fetch, scm_pull, scm_push,
-    scm_status, scm_tree_rows, search_files, search_text, second_brain_export_html,
-    second_brain_graph, second_brain_link, second_brain_open, second_brain_page,
-    second_brain_paths, second_brain_relate, second_brain_seat_recalls, second_brain_setup,
-    second_brain_status, select_claude_account, select_codex_account, send_prompt, session_info,
-    set_active_worktree, set_agent_activity_display, set_agent_permission_mode,
-    set_agent_teams_mode, set_app_font_family, set_browser_default_profile,
-    set_browser_default_zoom, set_browser_home_page, set_browser_open_tabs,
-    set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
+    save_type_value_key, save_typesafe_key, save_worktree_prefs, scm_fetch, scm_observer_health,
+    scm_observer_retry, scm_pull, scm_push, scm_status, scm_tree_rows, search_files, search_text,
+    second_brain_export_html, second_brain_graph, second_brain_link, second_brain_open,
+    second_brain_page, second_brain_paths, second_brain_relate, second_brain_seat_recalls,
+    second_brain_setup, second_brain_status, select_claude_account, select_codex_account,
+    send_prompt, session_info, set_active_worktree, set_agent_activity_display,
+    set_agent_permission_mode, set_agent_teams_mode, set_app_font_family,
+    set_browser_default_profile, set_browser_default_zoom, set_browser_home_page,
+    set_browser_open_tabs, set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
     set_claude_autoswitch_mode, set_clipboard_image, set_compact_worktree_cards,
     set_computer_awake_mode, set_computer_confirm, set_computer_generator_road,
     set_computer_live_reflex, set_confirm_close_pinned, set_conversation_focus_view,
     set_crash_watchdog, set_ctrl_tab_order_mode, set_default_agent, set_default_task_source,
     set_diff_side_by_side, set_dock_badge, set_external_worktree_visibility, set_guide_dismissed,
-    set_hidden_shortcuts, set_hidden_task_sources, set_hide_agent_scratch_workspaces,
-    set_hide_automation_workspaces, set_hide_default_branch_workspaces,
-    set_hide_detached_head_workspaces, set_hide_sleeping_workspaces, set_hooks_enabled,
-    set_jev_enabled, set_jev_model, set_keep_default_branch_awake, set_keybinding, set_locale,
+    set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
+    set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
+    set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
+    set_hide_sleeping_workspaces, set_hooks_enabled, set_jev_enabled, set_jev_model,
+    set_jev_review_enabled, set_keep_default_branch_awake, set_keybinding, set_locale,
     set_minimize_to_tray_on_close, set_notification_preference, set_opencode_cookie,
     set_opencode_workspace, set_panel_width, set_panel_widths, set_previewed_terms,
     set_project_script_policy, set_project_script_setting,
@@ -356,8 +362,8 @@ use cmd::{
     term_snapshot, term_text, term_view_to_line, terminal_command, terminal_command_argv,
     terminal_prefs, terminal_sessions, terminal_windows_status, test_local_network_permission,
     test_remote_server, test_remote_workspace, test_router_connection, test_ssh_host, text_input,
-    tip_verdict, tour_decision, type_value_keys, typesafe_settings, unstage_path, unstage_paths,
-    update_check, update_download, update_history, update_install, upstream_status,
+    tip_verdict, tour_decision, tree_selection, type_value_keys, typesafe_settings, unstage_path,
+    unstage_paths, update_check, update_download, update_history, update_install, upstream_status,
     use_system_claude_login, validate_branch_name, vault_sessions, verify_claude_accounts,
     verify_codex_accounts, watch_files, wire_answer, wire_image, wire_interrupt, wire_log,
     wire_models, wire_send, wire_set_mode, wire_set_model, wire_start, wire_stop, work_item_seed,
@@ -369,9 +375,10 @@ use cmd::{
 use cmd::{
     artifact_copy_path, artifact_counts, artifact_delete, artifact_document, artifact_export,
     artifact_feedback_record, artifact_import_transcripts, artifact_open, artifact_page_at,
-    artifact_preview, artifact_register, artifact_reveal, artifact_search, artifact_thumbnail,
-    artifact_versions, artifacts_list, set_artifacts_auto_open_beside,
-    set_artifacts_retention_days, set_vault_session_limit,
+    artifact_preference_revoke, artifact_preference_save, artifact_preferences, artifact_preview,
+    artifact_register, artifact_reveal, artifact_search, artifact_thumbnail, artifact_versions,
+    artifacts_list, set_artifacts_auto_open_beside, set_artifacts_retention_days,
+    set_vault_session_limit,
 };
 use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
@@ -1170,19 +1177,15 @@ struct ShellRuntime {
     pending_done: Mutex<HashMap<TermId, (String, hooks::PaneHookReport)>>,
     /// The last few things each agent DID, by card — see `activities()`.
     activities: Mutex<HashMap<String, ActivityRing>>,
-    /// Which [`answer_ask`] walk each pane is on. A new answer bumps the
-    /// pane's generation and the previous walk's thread stops at its next
-    /// step — Orca's `cancelInFlight`, held here because the timers are here.
-    ask_sends: Mutex<HashMap<TermId, u64>>,
     /// Each pane's stop-gesture inference — the per-terminal machine that
     /// decides whether an Escape or a Ctrl+C meant "stop this turn"
     /// ([`zerocode_core::interrupt::InterruptInference`]).
     ///
-    /// Here rather than in core for the same reason `ask_sends` is: the rules
-    /// are pure and the CLOCK is ours.
+    /// Here rather than in core because the rules are pure and the CLOCK is
+    /// ours.
     interrupt_inference: Mutex<HashMap<TermId, zerocode_core::interrupt::InterruptInference>>,
-    /// Which settle each pane is on, in the shape `ask_sends` already uses. A
-    /// newer gesture bumps the generation and the sleeping thread from the
+    /// Which settle each pane is on, as a generation per pane. A newer
+    /// gesture bumps the generation and the sleeping thread from the
     /// older one finds its stamp gone and says nothing — otherwise two
     /// gestures 200ms apart both flush and the second reads a baseline the
     /// first already spent.
@@ -1668,12 +1671,6 @@ impl ShellRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn ask_sends(&self) -> MutexGuard<'_, HashMap<TermId, u64>> {
-        self.ask_sends
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     fn interrupt_inference(
         &self,
     ) -> MutexGuard<'_, HashMap<TermId, zerocode_core::interrupt::InterruptInference>> {
@@ -1824,7 +1821,6 @@ trait ShellStateExt {
     fn activities(&self) -> MutexGuard<'_, HashMap<String, ActivityRing>>;
     fn forget_activities(&self, term: TermId);
     fn team_envs(&self) -> MutexGuard<'_, HashMap<TermId, Vec<(String, String)>>>;
-    fn ask_sends(&self) -> MutexGuard<'_, HashMap<TermId, u64>>;
     fn interrupt_inference(
         &self,
     ) -> MutexGuard<'_, HashMap<TermId, zerocode_core::interrupt::InterruptInference>>;
@@ -2097,10 +2093,6 @@ impl ShellStateExt for AppState {
         self.shell_runtime().team_envs()
     }
 
-    fn ask_sends(&self) -> MutexGuard<'_, HashMap<TermId, u64>> {
-        self.shell_runtime().ask_sends()
-    }
-
     fn interrupt_inference(
         &self,
     ) -> MutexGuard<'_, HashMap<TermId, zerocode_core::interrupt::InterruptInference>> {
@@ -2370,7 +2362,6 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         unpublished_rosters: Mutex::default(),
         pane_cwds: Mutex::default(),
         team_envs: Mutex::new(HashMap::new()),
-        ask_sends: Mutex::new(HashMap::new()),
         // 제스처의 기억도 늘 빈 손으로 시작한다 — 지난 프로세스가 반쯤
         // 누른 이중 Escape를 이 프로세스가 이어받을 이유가 없다.
         interrupt_inference: Mutex::new(HashMap::new()),
@@ -2532,6 +2523,9 @@ fn main() -> ExitCode {
             set_summon_profiles,
             check_typesafe_key,
             jev_summary,
+            jev_review,
+            jev_review_outcome,
+            set_jev_review_enabled,
             jev_day,
             judge_worker_room,
             note_worker_room_change,
@@ -2609,6 +2603,8 @@ fn main() -> ExitCode {
             session_info,
             stop_pane_helper,
             scm_status,
+            scm_observer_health,
+            scm_observer_retry,
             stage_path,
             unstage_path,
             stage_paths,
@@ -2652,6 +2648,7 @@ fn main() -> ExitCode {
             fs_reveal,
             paths_exist,
             fs_open_default,
+            tree_selection,
             orchestration_report,
             orchestration_runtime_state,
             computer_use_skill_report,
@@ -3027,6 +3024,9 @@ fn main() -> ExitCode {
             artifact_versions,
             artifact_page_at,
             artifact_feedback_record,
+            artifact_preferences,
+            artifact_preference_save,
+            artifact_preference_revoke,
             artifact_export,
             artifact_export_formats,
             artifact_export_reveal,
@@ -3050,6 +3050,8 @@ fn main() -> ExitCode {
             agent_teams_mode,
             set_claude_autoswitch_mode,
             claude_autoswitch_mode,
+            set_harness_settings,
+            harness_status,
             set_confirm_close_pinned,
             set_computer_confirm,
             set_computer_generator_road,
@@ -3283,6 +3285,10 @@ fn main() -> ExitCode {
             managed.native_tray().install_handler(&handle);
             let boot_settings = load_settings_for_boot(managed.settings()).document;
             hang_watchdog::configure(crash::Limits::overlay(&boot_settings.crash));
+            // The launch ledger and the continue gate, with what a person set
+            // for them and the day the window had already counted (t-26583).
+            launch_budget_door::open(managed.config_root(), boot_settings.harness.launches);
+            orchestration::gate_book::open(managed.config_root(), boot_settings.harness.gate);
             // The readiness probe reads the account stores under this root
             // and no other; until it is named, every door answers unknown.
             readiness_runtime::configure_root(managed.config_root());

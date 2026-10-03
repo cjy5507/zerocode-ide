@@ -30,7 +30,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use api::{SystemOneQuestion, SystemOneQuestionKind, SystemOneResponse};
+use api::{SystemOneQuestion, SystemOneResponse};
 use core_types::text::levenshtein_distance;
 use futures_util::future::BoxFuture;
 use serde_json::{json, Value};
@@ -113,23 +113,14 @@ pub struct WideReading {
 fn checked_choice(
     response: &SystemOneResponse,
     allowed: &BTreeSet<String>,
-) -> Result<api::SystemOneChoiceAnswer, &'static str> {
-    let answer = response
-        .choice_answer(WHICH)
-        .ok_or("missing_choice")?
-        .map_err(|_| "invalid_choice")?;
-    if answer.kind != SystemOneQuestionKind::Choice
-        || !allowed.contains(&answer.choice)
-        || !answer.confidence.is_finite()
-        || !(0.0..=1.0).contains(&answer.confidence)
-        || answer.probabilities.keys().collect::<BTreeSet<_>>()
-            != allowed.iter().collect::<BTreeSet<_>>()
-        || answer.probabilities.values().any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))
-        || (answer.probabilities.values().sum::<f64>() - 1.0).abs() > 0.02
-    {
-        return Err("invalid_choice");
-    }
-    Ok(answer)
+) -> Result<zerocode_core::jev::choice::Choice, &'static str> {
+    let answer = response.answers.get(WHICH).ok_or("missing_choice")?;
+    zerocode_core::jev::choice::read_value(answer, allowed).map_err(|_| "invalid_choice")
+}
+
+fn checked_noul(response: &SystemOneResponse, question: &str) -> Result<f64, &'static str> {
+    let answer = response.answers.get(question).ok_or("invalid_noul")?;
+    noul::read_value(answer).map_err(|_| "invalid_noul")
 }
 
 /// Validate every answer before letting a low gate prevent the second request.
@@ -143,10 +134,9 @@ pub fn read_wide(
         .chain(std::iter::once(SKILL_NO_MATCH.into()))
         .collect();
     let choice = checked_choice(response, &allowed)?;
-    let answers = serde_json::to_value(&response.answers).map_err(|_| "invalid_noul")?;
-    let acts = noul::read(&answers, ACTS_ON_SYSTEM).map_err(|_| "invalid_noul")?;
-    let procedure = noul::read(&answers, FOLLOWS_PROCEDURE).map_err(|_| "invalid_noul")?;
-    let prose = noul::read(&answers, PROSE_SUFFICES).map_err(|_| "invalid_noul")?;
+    let acts = checked_noul(response, ACTS_ON_SYSTEM)?;
+    let procedure = checked_noul(response, FOLLOWS_PROCEDURE)?;
+    let prose = checked_noul(response, PROSE_SUFFICES)?;
     let gate = (acts + procedure + (1.0 - prose)) / 3.0;
     let mut ranked: Vec<(usize, f64)> = candidates
         .iter()
@@ -154,7 +144,7 @@ pub fn read_wide(
         .collect();
     ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
     let shortlist = if gate < f64::from(SKILL_GATE_FLOOR_PERMILLE) / 1_000.0
-        || choice.choice == SKILL_NO_MATCH
+        || choice.chosen == SKILL_NO_MATCH
     {
         Vec::new()
     } else {
@@ -227,22 +217,21 @@ pub fn read_narrow(
         .map(|(candidate, _)| candidate.question_id.clone())
         .chain(std::iter::once(SKILL_NO_MATCH.into())).collect();
     let choice = checked_choice(response, &allowed)?;
-    let answers = serde_json::to_value(&response.answers).map_err(|_| "invalid_noul")?;
     let best_fit = shortlisted(candidates, details)
-        .map(|(candidate, _)| noul::read(&answers, &format!("{FITS_PREFIX}{}", candidate.question_id)))
+        .map(|(candidate, _)| checked_noul(response, &format!("{FITS_PREFIX}{}", candidate.question_id)))
         .collect::<Result<Vec<_>, _>>().map_err(|_| "invalid_noul")?
         .into_iter().fold(0.0, f64::max);
     if best_fit < f64::from(SKILL_FITS_FLOOR_PERMILLE) / 1_000.0
-        || choice.choice == SKILL_NO_MATCH {
+        || choice.chosen == SKILL_NO_MATCH {
         return Ok(None);
     }
-    let candidate = candidates.iter().find(|candidate| candidate.question_id == choice.choice)
+    let candidate = candidates.iter().find(|candidate| candidate.question_id == choice.chosen)
         .ok_or("invalid_choice")?;
     Ok(Some(SkillReading {
         position: candidate.position,
         name: candidate.name.clone(),
-        score: choice.probabilities[&choice.choice] * SKILL_SCALE.top(),
-        normalised: choice.probabilities[&choice.choice],
+        score: choice.probabilities[&choice.chosen] * SKILL_SCALE.top(),
+        normalised: choice.probabilities[&choice.chosen],
         confidence: choice.confidence,
     }))
 }

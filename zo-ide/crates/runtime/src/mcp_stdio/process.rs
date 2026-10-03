@@ -515,8 +515,12 @@ fn encode_frame(payload: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{inbound_event_for_notification, merge_path_dirs, InboundEvent, McpStdioProcess};
+    use super::{inbound_event_for_notification, merge_path_dirs, InboundEvent};
+    #[cfg(unix)]
+    use super::McpStdioProcess;
+    #[cfg(unix)]
     use crate::mcp_client::McpStdioTransport;
+    #[cfg(unix)]
     use crate::mcp_limits::MAX_MCP_MESSAGE_BYTES;
     use serde_json::json;
 

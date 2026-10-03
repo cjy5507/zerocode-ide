@@ -567,6 +567,10 @@ pub fn step_request<'a>(model: &'a str, state: &'a Value) -> SystemOneRequest<'a
 pub trait StepEffortSeat: Send + Sync {
     fn ask(&self, ask: &StepAskContext<'_>);
     fn take(&self) -> Option<StepJudgment>;
+    /// Whether a retained judgment still belongs to the current settings.
+    fn judgment_current(&self) -> bool { true }
+    /// Whether the host currently permits this seat to affect a request.
+    fn permits_application(&self) -> bool { true }
 }
 
 /// Everything the host installs for one turn.
@@ -769,7 +773,7 @@ where
         }
         self.step_effort
             .as_ref()
-            .filter(|state| state.config.applies)
+            .filter(|state| state.applies_now())
             .and_then(|state| state.next)
     }
 
@@ -939,14 +943,14 @@ impl StepEffortState {
     /// whether it moved the effort away from what the table alone would have
     /// given the request (`shifted` against the table's own), and whether
     /// the request carried it.
-    fn owe_label(&mut self, step: u32, asked_at_step: u32, signals: &StepSignals, shifted: EffortStep) {
+    fn owe_label(&mut self, step: u32, asked_at_step: u32, signals: &StepSignals, shifted: EffortStep, carried: bool) {
         let table = decide(step, signals, None);
         let ruled = shift(self.config.floor, self.config.ceiling, self.config.cap(), table.delta);
         self.label_due = Some(LabelDue {
             step,
             asked_at_step,
             seat_moved_it: shifted != ruled,
-            carried: self.config.applies,
+            carried,
         });
     }
 
@@ -961,9 +965,11 @@ impl StepEffortState {
             self.error_streak = if batch.errored { self.error_streak + 1 } else { 0 };
             self.routine_streak = if kind == StepBatch::ReadOnly { self.routine_streak + 1 } else { 0 };
         }
-        // A judgment that arrived since the last step speaks from this one.
-        if let Some(answer) = self.config.seat.as_ref().and_then(|seat| seat.take()) {
-            self.judgment = Some(answer);
+        // Revocation drains a waiting answer and retires any retained one.
+        if let Some(seat) = self.config.seat.as_ref() {
+            let answer = seat.take();
+            if !seat.judgment_current() { self.judgment = None; }
+            else if let Some(answer) = answer { self.judgment = Some(answer); }
         }
         let signals = StepSignals {
             batch: kind,
@@ -978,12 +984,12 @@ impl StepEffortState {
         let progressed = batch.calls > 0 && !decision.strong && !decision.slipping && !batch.check_red;
         let label = self.label_owed(attempt, progressed);
         let shifted = shift(self.config.floor, self.config.ceiling, self.config.cap(), decision.delta);
+        let applied = self.applies_now();
         if let Some(judged) = decision.judged {
-            self.owe_label(step, judged.at_step, &signals, shifted);
+            self.owe_label(step, judged.at_step, &signals, shifted, applied);
         }
         self.next = Some(shifted);
         let rung_move = plan_move(&self.config, &decision, self.strong_streak, self.routine_streak, shifted);
-        let applied = self.config.applies;
         let (planned_model, move_row) = match rung_move {
             Some((kind, to)) => {
                 let can_apply = applied && kind != RungMove::CrossTop;
@@ -997,7 +1003,7 @@ impl StepEffortState {
         let previously = self.moved_to.clone();
         let stays_put = planned_model.is_none();
         let moved_to = planned_model.filter(|to| previously.as_deref() != Some(to.as_str()));
-        let return_home = previously.is_some() && stays_put && (decision.strong || decision.slipping);
+        let return_home = previously.is_some() && stays_put && (!applied || decision.strong || decision.slipping);
         if moved_to.is_some() {
             self.moved_to.clone_from(&moved_to);
         } else if return_home {
@@ -1040,6 +1046,10 @@ impl StepEffortState {
             ask: decision.ask.filter(|_| self.config.seat.is_some()),
             signals,
         }
+    }
+
+    fn applies_now(&self) -> bool {
+        self.config.applies && self.config.seat.as_ref().is_none_or(|seat| seat.permits_application())
     }
 }
 
@@ -1293,6 +1303,44 @@ mod tests {
         fn take(&self) -> Option<StepJudgment> {
             self.0.lock().ok().and_then(|mut held| held.take())
         }
+    }
+
+    #[test]
+    fn withdrawing_a_step_seat_retires_its_retained_judgment_and_returns_home() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Revocable {
+            answer: std::sync::Mutex<Option<StepJudgment>>,
+            enabled: AtomicBool,
+            applying: AtomicBool,
+        }
+        impl StepEffortSeat for Revocable {
+            fn ask(&self, _: &StepAskContext<'_>) {}
+            fn take(&self) -> Option<StepJudgment> { self.answer.lock().unwrap().take() }
+            fn judgment_current(&self) -> bool { self.enabled.load(Ordering::SeqCst) }
+            fn permits_application(&self) -> bool { self.applying.load(Ordering::SeqCst) }
+        }
+        let seat = Arc::new(Revocable {
+            answer: std::sync::Mutex::new(Some(StepJudgment { complexity: RouteTaskComplexity::Large, at_step: 1 })),
+            enabled: AtomicBool::new(true), applying: AtomicBool::new(true),
+        });
+        let mut configured = config(true);
+        configured.seat = Some(seat.clone());
+        let mut state = StepEffortState::new(configured);
+        state.step = 1;
+        state.routine_streak = 1;
+        state.batch = BatchSeen { calls: 1, read_only: true, ..BatchSeen::default() };
+        let first = state.plan(Some("main-model"), "settings-step");
+        assert!(first.row.applied && first.row.jev.is_some());
+        seat.applying.store(false, Ordering::SeqCst);
+        state.moved_to = Some("lighter-model".into());
+        state.batch = BatchSeen { calls: 1, read_only: true, ..BatchSeen::default() };
+        let recording = state.plan(Some("lighter-model"), "settings-step");
+        assert!(!recording.row.applied && recording.row.jev.is_some());
+        assert!(recording.return_home);
+        assert!(!state.applies_now());
+        seat.enabled.store(false, Ordering::SeqCst);
+        let off = state.plan(Some("main-model"), "settings-step");
+        assert!(off.row.jev.is_none() && !off.row.applied);
     }
 
     /// The turn's steps after a judgment answered at step 1 that the task is

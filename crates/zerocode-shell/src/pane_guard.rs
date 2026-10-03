@@ -73,6 +73,8 @@ use zerocode_core::transcript::SaidAt;
 
 use crate::systemone::{self, SCHEMA, Wire, request_body};
 
+mod project_rules;
+
 /// What the two guards differ in, as this file asks them.
 struct Guard {
     seat: &'static JevUse,
@@ -92,7 +94,11 @@ const TEXT: Guard = Guard {
 
 /// The wall one question of `seat`'s waits for its answer — the seat's own.
 fn deadline_of(seat: &JevUse) -> Duration {
-    Duration::from_millis(seat.apply_deadline_ms.unwrap_or_default())
+    Duration::from_millis(if seat.id == zerocode_core::jev::PROJECT_RULES.id {
+        zerocode_core::jev::project_rules::REQUEST_DEADLINE_MS
+    } else {
+        seat.apply_deadline_ms.unwrap_or_default()
+    })
 }
 
 /* ---- which seats are asked ------------------------------------------------------ */
@@ -374,6 +380,7 @@ impl PaneBook {
 /// A question to ask off the hook loop.
 #[derive(Debug, Clone)]
 enum Question {
+    ProjectRules(project_rules::Turn),
     Command {
         judged: u64,
         attempt: String,
@@ -810,28 +817,40 @@ fn file(
             end_turn(book, stopped, at, labels);
             settle_picks(book, pane, at, labels);
             count_turn(book, pane, at);
-            book.turn_edited.clear();
+            let edited = std::mem::take(&mut book.turn_edited);
             let evidence = std::mem::take(&mut book.evidence);
             if let Some(said) = said {
-                let judged = task_fingerprint(&book.owner, &book.attempt());
-                shelve(
-                    &mut book.claims,
-                    ClaimEntry {
-                        waiting: ClaimWaiting {
-                            judged,
-                            verdict: None,
-                            failure: None,
-                            confidence: None,
-                            compared: false,
+                if !stopped && asking.project_rules {
+                    questions.push(Question::ProjectRules(project_rules::Turn {
+                        id: book.attempt(),
+                        at,
+                        task: book.persons.clone(),
+                        edited,
+                        said: said.clone(),
+                        evidence: evidence.clone(),
+                    }));
+                }
+                if asking.claim {
+                    let judged = task_fingerprint(&book.owner, &book.attempt());
+                    shelve(
+                        &mut book.claims,
+                        ClaimEntry {
+                            waiting: ClaimWaiting {
+                                judged,
+                                verdict: None,
+                                failure: None,
+                                confidence: None,
+                                compared: false,
+                            },
+                            ledger: None,
                         },
-                        ledger: None,
-                    },
-                );
-                questions.push(Question::Claim {
-                    judged,
-                    said,
-                    evidence,
-                });
+                    );
+                    questions.push(Question::Claim {
+                        judged,
+                        said,
+                        evidence,
+                    });
+                }
             }
             book.turns += 1;
         }
@@ -1039,22 +1058,123 @@ fn record_turns(wire: &Wire, rows: Vec<Value>) {
 
 /* ---- the turn's brief (t-14869) --------------------------------------------------- */
 
+/// One voice in a turn's brief (t-24298): what it has to tell the agent in
+/// the asking pane as the person's prompt begins, in at most the characters
+/// it is given — the room the voices before it left — or nothing. Answered
+/// within the ask's wall.
+pub(crate) type BriefContributor = fn(&zerocode_hookd::TurnBriefAsk, usize) -> Option<String>;
+
+/// The voices a turn's brief is made of, in the order the agent reads them:
+/// the person's selection first, then likely files and project-rule advice.
+const BRIEF_CONTRIBUTORS: &[BriefContributor] = &[
+    crate::tree_selection::brief_line,
+    file_pick_line,
+    project_rules::brief_line,
+];
+
+/// What separates two voices in a brief: a blank line, the way the bridge
+/// itself sets the vault's block apart from the contract.
+const BRIEF_VOICE_GAP: &str = "\n\n";
+
+/// The voices' lines joined a blank line apart, in order, each voice handed
+/// the room the ones before it left under `cap` — the bridge's cap, past
+/// which it drops a brief whole (`zerocode_hookd::TURN_BRIEF_CHAR_CAP`).
+///
+/// A voice answers inside its room or not at all, so a line it returns is
+/// never thrown away after it was given (a voice that records having said
+/// something can trust that it reached the agent); a voice left no room is
+/// not asked. A line over its room breaks that promise and is left out —
+/// the bridge would drop every voice's line with it.
+///
+/// Time is spent the same way. The bridge's timeout wraps the whole brief
+/// (`ask.wall`), so each voice is handed what is left of it, and once it has
+/// run out no voice is asked: a voice waiting out a full wall after another
+/// spent part of it would have the bridge drop every line.
+pub(crate) fn compose_brief(
+    voices: &[BriefContributor],
+    ask: &zerocode_hookd::TurnBriefAsk,
+    cap: usize,
+) -> Option<String> {
+    let began = Instant::now();
+    let mut brief = String::new();
+    let mut used = 0;
+    for voice in voices {
+        let wall = ask.wall.saturating_sub(began.elapsed());
+        if wall.is_zero() {
+            break;
+        }
+        let gap = if brief.is_empty() {
+            0
+        } else {
+            BRIEF_VOICE_GAP.chars().count()
+        };
+        let room = cap.saturating_sub(used + gap);
+        if room == 0 {
+            continue;
+        }
+        let asked = zerocode_hookd::TurnBriefAsk {
+            wall,
+            ..ask.clone()
+        };
+        let Some(line) = voice(&asked, room) else {
+            continue;
+        };
+        let line = line.trim();
+        let size = line.chars().count();
+        if size == 0 {
+            continue;
+        }
+        debug_assert!(
+            size <= room,
+            "a brief voice said {size} characters in a room of {room}"
+        );
+        if size > room {
+            continue;
+        }
+        if gap > 0 {
+            brief.push_str(BRIEF_VOICE_GAP);
+        }
+        brief.push_str(line);
+        used += gap + size;
+    }
+    (!brief.is_empty()).then_some(brief)
+}
+
+/// The file pick seat's voice: its likely files, while it acts for a
+/// summoned worker's pane, when they fit the room it is handed.
+fn file_pick_line(ask: &zerocode_hookd::TurnBriefAsk, room: usize) -> Option<String> {
+    if !STANDING.asking().file_pick {
+        return None;
+    }
+    let term = crate::hooks::term_of_pane_key(&ask.pane_key)?;
+    brief_for(
+        &GUARDS,
+        &Wire::of_this_machine(),
+        term,
+        summoned(term),
+        ask,
+        room,
+    )
+}
+
 /// The window's answer to a turn's brief, installed on the bridge.
 pub(crate) struct PaneBrief;
 
 impl zerocode_hookd::TurnBrief for PaneBrief {
     fn brief(&self, ask: zerocode_hookd::TurnBriefAsk) -> Option<String> {
-        if !STANDING.asking().file_pick {
-            return None;
-        }
-        let term = crate::hooks::term_of_pane_key(&ask.pane_key)?;
-        brief_for(
-            &GUARDS,
-            &Wire::of_this_machine(),
-            term,
-            summoned(term),
+        compose_brief(
+            BRIEF_CONTRIBUTORS,
             &ask,
+            zerocode_hookd::TURN_BRIEF_CHAR_CAP,
         )
+    }
+
+    fn needs_receipt(&self, text: &str) -> bool {
+        zerocode_core::jev::project_rules::window_receipt(text).is_some()
+    }
+
+    fn delivered(&self, ask: &zerocode_hookd::TurnBriefAsk, text: &str) -> std::io::Result<()> {
+        project_rules::delivered(ask, text)
     }
 }
 
@@ -1086,6 +1206,7 @@ pub(crate) fn brief_for(
     term: u32,
     worker: bool,
     ask: &zerocode_hookd::TurnBriefAsk,
+    room: usize,
 ) -> Option<String> {
     if !worker {
         return None;
@@ -1109,6 +1230,12 @@ pub(crate) fn brief_for(
             {
                 briefing.until.get_or_insert(until);
                 match &briefing.said {
+                    // A pick that does not fit the room the voices before it
+                    // left is not said — and is not recorded as said.
+                    Said::Ready(line) if line.chars().count() > room => {
+                        briefing.said = Said::Nothing;
+                        return None;
+                    }
                     Said::Ready(line) => {
                         let line = line.clone();
                         briefing.said = Said::Taken;
@@ -1180,7 +1307,13 @@ fn briefing_of(held: &mut Guards, term: u32, judged: u64) -> Option<&mut Briefin
 
 /// Ask one question and file what came of it.
 fn ask(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question: Question) {
+    let scoped = pane
+        .session
+        .as_deref()
+        .map(|session| wire.for_origin(&format!("{}/session", pane.agent.slug()), session));
+    let wire = scoped.as_ref().unwrap_or(wire);
     match question {
+        Question::ProjectRules(turn) => project_rules::check(wire, pane, &turn),
         Question::Claim {
             judged,
             said,
@@ -1203,7 +1336,7 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
     let (guard, judged) = match &question {
         Question::Command { judged, .. } => (&COMMAND, *judged),
         Question::Text { judged, .. } => (&TEXT, *judged),
-        Question::Claim { .. } | Question::FilePick { .. } => return,
+        Question::Claim { .. } | Question::FilePick { .. } | Question::ProjectRules(_) => return,
     };
     let (mode, _) = systemone::standing_in(wire, guard.seat, Run::Fresh);
     let Some(ledger) = systemone::ledger_of(wire, guard.seat).filter(|_| mode.asks()) else {
@@ -1288,7 +1421,7 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
             };
             (serde_json::to_value(row).ok(), verdict, confidence)
         }
-        Question::Claim { .. } | Question::FilePick { .. } => return,
+        Question::Claim { .. } | Question::FilePick { .. } | Question::ProjectRules(_) => return,
     };
     if let Some(row) = row {
         systemone::record_rows(guard.seat, &ledger, &[row], now_ms);
@@ -1495,6 +1628,11 @@ fn put_pick(
     mode: JevMode,
     ask: &PickAsk<'_>,
 ) -> (FilePickRow, Option<Vec<String>>) {
+    let scoped = pane
+        .session
+        .as_deref()
+        .map(|session| wire.for_origin(&format!("{}/session", pane.agent.slug()), session));
+    let wire = scoped.as_ref().unwrap_or(wire);
     let batch = ask.batch;
     let asked = FilePickAsk {
         attempt: ask.attempt.clone(),

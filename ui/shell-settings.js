@@ -304,6 +304,12 @@ function applyAgentSettingsSnapshot(snapshot) {
     claudeAutoSwitchMode = snapshot.claude_autoswitch_mode ?? "ask";
     el("account-autoswitch").value = claudeAutoSwitchMode;
   }
+  // 토큰 낭비 막기(t-26583): 워커 계속 판정과 호출 한도는 문서의 한 레코드라, 권위 있는
+  // 스냅샷이 올 때마다 칸들이 그 값을 따라간다.
+  if (hasSetting(snapshot, "harness")) {
+    harnessSettings = snapshot.harness;
+    paintHarnessSettings();
+  }
   // 대화의 Focus view(확장 2.1.221): 이 창의 모든 대화가 입는 한 값이라,
   // 권위 있는 스냅샷이 올 때마다 서 있는 목록들이 그 값을 따라간다.
   if (hasSetting(snapshot, "conversation_focus_view")) {
@@ -976,6 +982,7 @@ function showSettingsPane(pane) {
     if (!held && !usageStatsScanning) void refreshUsageStats(false);
   }
   if (pane === "provider-accounts" && arriving) {
+    void refreshHarnessStatus();
     void refreshClaudeAccounts();
     void refreshCodexAccounts();
     void refreshGoogleAccount();
@@ -2596,6 +2603,20 @@ function agentRow(row) {
     }
   }
   line.querySelector(".agent-row-name").textContent = row.name;
+  if (row.support) {
+    const support = document.createElement("span");
+    support.className = "agent-support";
+    const yes = t("settings.agents.supportYes", "지원");
+    const no = t("settings.agents.supportNo", "미지원");
+    support.textContent = t("settings.agents.support", "지원 범위 · 실행 {{execution}} / 구조화 관찰 {{observation}} / 추가 문맥 {{context}} / 직접 제어 {{control}}", {
+      execution: row.support.execution ? yes : no,
+      observation: row.support.structured_observation ? yes : no,
+      context: row.support.additional_context ? yes : no,
+      control: row.support.direct_control ? yes : no,
+    });
+    support.dataset.tip = t("settings.agents.supportHint", "연결 방식의 지원 범위입니다. 설치·로그인·현재 실행·권한 허용이나 작업 완료를 뜻하지 않습니다. 직접 제어는 프로토콜 API, 추가 문맥은 수명주기 훅을 뜻합니다.");
+    line.querySelector(".agent-row-body").appendChild(support);
+  }
   const command = line.querySelector(".agent-row-cmd");
   if (row.installed) command.textContent = row.found_as ?? "";
   else command.textContent = row.found_as ?? row.id;
@@ -4000,20 +4021,17 @@ function agentName(slug) {
   return agentRows.find((row) => row.id === slug)?.name ?? slug;
 }
 
-/* The mark and the working word an agent's own screen uses — `✻ Pondering…`
- * for Claude Code — ridden on its `list_agents` row from the core catalog's
- * one table (`zerocode_core::agent_voice`). Every agent the table does not
- * voice (Kimi, Grok, …) shares one mark and the window's own word, so the
- * page never invents a CLI's vocabulary and the rest stay uniform. */
+/* The mark an agent's own screen wears — `✻` for Claude Code — and the
+ * catalog's other facts about it, ridden on its `list_agents` row from the core
+ * catalog's one table (`zerocode_core::agent_voice`). Every agent the table
+ * does not voice (Kimi, Grok, …) shares one mark, so the page never invents a
+ * CLI's vocabulary and the rest stay uniform. The CLI's working words — its
+ * turning verbs, its spinner's cycle — are not read here (t-22100): the live
+ * line says what the agent is doing in the window's own words. */
 function agentVoice(id) {
   const row = agentRows.find((one) => one.id === id);
   return {
     glyph: row?.glyph || "●",
-    // The marks its spinner cycles through, in order; empty for a still mark.
-    glyph_cycle: Array.isArray(row?.glyph_cycle) ? row.glyph_cycle : [],
-    busy_word: row?.busy_word || t("worker.busy", "작업 중…"),
-    // The verbs its spinner turns through while it works (t-6323 A4).
-    spinner_verbs: Array.isArray(row?.spinner_verbs) ? row.spinner_verbs : [],
     // The tool it keeps its todo list with (t-6323 A7).
     todo_tool: row?.todo_tool ?? null,
     // Whether its CLI can stop one helper by id (t-16031): the helper page
@@ -4627,6 +4645,10 @@ async function pickClaudeAccount(id) {
  * `plan.next`로 온다 — 여기서는 낱말만 고른다. */
 let accountUsageReport = null;
 let claudeAutoSwitchMode = "ask";
+/* 토큰 낭비 막기(t-26583)의 문서 레코드와 창이 센 값. 스냅샷이 처음 오기 전에도 이름이 서 있도록
+ * 자동 전환 모드 옆에 둔다. */
+let harnessSettings = null;
+let harnessStatus = null;
 let applyingAccountSwitch = false;
 /* The token the window last applied: the same plan on the next beat is
  * not applied again from here — the backend re-plans and would refuse it
@@ -4932,6 +4954,105 @@ el("account-autoswitch").addEventListener("change", (event) => {
     mode: claudeAutoSwitchMode,
   });
 });
+
+/* ---- 토큰 낭비 막기 (t-26583) ---------------------------------------------
+ *
+ * 워커 계속 판정의 모드와 예산, 에이전트 호출 한도. 문서의 한 레코드(`harness`)이고 다른 모든
+ * 설정처럼 `commitSetting`이 쓴다 — 쓴 뒤에는 문서의 스냅샷이 칸을 다시 그린다. 칸의 숫자가
+ * 무엇을 뜻하는지는 백엔드의 것이다: 예산이 아닌 숫자는 예산 없음으로 읽고, 호출 한도가 정수가
+ * 아니면 저장을 거절하며 칸이 저장된 값으로 돌아간다. 아래 줄의 센 값(`harness_status`)은 이
+ * 판을 열 때 한 번 읽는다 — 도는 박자는 없다. */
+const HARNESS_GATE_FIELDS = Object.freeze({
+  task_usd: "harness-task-usd",
+  day_usd: "harness-day-usd",
+});
+const HARNESS_LAUNCH_FIELDS = Object.freeze({
+  concurrent: "harness-concurrent",
+  per_hour: "harness-per-hour",
+  per_day: "harness-per-day",
+});
+
+/* 칸의 숫자: 빈칸은 null(예산·한도 없음), 브라우저가 숫자로 읽지 못한 글자는 NaN — 보내지
+ * 않고 저장된 값으로 되돌린다. */
+function harnessFieldValue(id) {
+  const field = el(id);
+  if (field.validity.badInput) return Number.NaN;
+  const text = field.value.trim();
+  return text === "" ? null : Number(text);
+}
+
+function harnessFromFields() {
+  const read = (fields) => Object.fromEntries(
+    Object.entries(fields).map(([key, id]) => [key, harnessFieldValue(id)]),
+  );
+  return {
+    gate: { mode: el("harness-gate-mode").value, ...read(HARNESS_GATE_FIELDS) },
+    launches: read(HARNESS_LAUNCH_FIELDS),
+  };
+}
+
+function setHarnessField(id, value) {
+  const field = el(id);
+  const words = value === null || value === undefined ? "" : String(value);
+  if (field.value !== words) field.value = words;
+}
+
+function paintHarnessSettings() {
+  if (!harnessSettings) return;
+  const { gate, launches } = harnessSettings;
+  setHarnessField("harness-gate-mode", gate.mode);
+  for (const [key, id] of Object.entries(HARNESS_GATE_FIELDS)) setHarnessField(id, gate[key]);
+  for (const [key, id] of Object.entries(HARNESS_LAUNCH_FIELDS)) setHarnessField(id, launches[key]);
+}
+
+/* 창이 센 것: 지금 도는 호출, 한 시간과 하루 몫, 쉬는 제공자, 오늘 워커 비용. 비용이 0이면
+ * 말하지 않는다 — 읽은 것이 없다는 뜻이지 쓰지 않았다는 뜻이 아니다. */
+function paintHarnessStatus() {
+  const note = el("harness-status");
+  const counters = harnessStatus?.counters;
+  const now = Date.now();
+  const words = counters ? [
+    t("settings.harness.statusActive", "지금 {{count}}개 실행 중", { count: counters.active }),
+    t("settings.harness.statusHour", "최근 한 시간 {{count}}번", { count: counters.last_hour }),
+    t("settings.harness.statusDay", "오늘 {{count}}번", { count: counters.last_day }),
+    ...counters.resting.map((one) => t("settings.harness.statusResting", "쉬는 중: {{provider}} {{minutes}}분", {
+      provider: agentName(one.provider),
+      minutes: Math.max(1, Math.ceil((one.until_ms - now) / 60000)),
+    })),
+    harnessStatus.day_spent_usd > 0
+      ? t("settings.harness.statusSpent", "오늘 워커 비용 약 {{spent}}", { spent: formatCost(harnessStatus.day_spent_usd) })
+      : "",
+  ].filter(Boolean).join(" · ") : "";
+  if (note.textContent !== words) note.textContent = words;
+}
+
+async function refreshHarnessStatus() {
+  try {
+    harnessStatus = await invoke("harness_status");
+  } catch (error) {
+    showError(error);
+    return;
+  }
+  paintHarnessStatus();
+}
+
+function commitHarnessSettings() {
+  const harness = harnessFromFields();
+  const typed = [...Object.values(harness.gate), ...Object.values(harness.launches)];
+  if (typed.some((value) => typeof value === "number" && !Number.isFinite(value))) {
+    paintHarnessSettings();
+    return;
+  }
+  void commitSetting("harness", "set_harness_settings", { harness });
+}
+
+for (const id of [
+  "harness-gate-mode",
+  ...Object.values(HARNESS_GATE_FIELDS),
+  ...Object.values(HARNESS_LAUNCH_FIELDS),
+]) {
+  el(id).addEventListener("change", commitHarnessSettings);
+}
 
 /* Removing an account deletes its credentials with it, so it asks first.
  *

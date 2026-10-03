@@ -1572,6 +1572,7 @@ export async function testJevDashboard(browser, origin, ok) {
         measured: rows.length, least: Math.min(...rows.filter((row) => row.ratio !== null).map((row) => row.ratio)),
         under: under.slice(0, 6), unknown: unknown.slice(0, 6) }));
 
+    await testJevReview(page, ok);
     ok("the dashboard raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();
@@ -2234,4 +2235,108 @@ export async function testJevDashboardScope(browser, origin, ok) {
   } finally {
     await page.close();
   }
+}
+
+async function testJevReview(page, ok) {
+  const seen = await page.evaluate(async () => {
+    const view = document.querySelector("#jev-view");
+    const calls = [];
+    const until = (ready) => new Promise((resolve, reject) => {
+      const end = performance.now() + 3000;
+      const tick = () => {
+        if (ready()) resolve();
+        else if (performance.now() >= end) reject(new Error("review operation did not reach its expected state"));
+        else requestAnimationFrame(tick);
+      };
+      tick();
+    });
+    const sample = (id, words) => ({ case: { id, seat: "routing", rubricVersion: 1, model: "jev-test",
+      request: { state: words, questions: { q: { type: "noul" } } }, answers: { q: { type: "noul", noul: 0.5 } } },
+      reason: "uncertain", remaining: ["q"] });
+    const answer = (id, words) => ({ enabled: true, samples: [sample(id, words)], total: 1, capacity: 512, invalid: 0 });
+    window.__ANSWER__.jev_review = (args) => { calls.push(args); return answer("case-one", "<img data-review-injection onerror=alert(1)>"); };
+    let finishOutcome;
+    const outcomes = [];
+    window.__ANSWER__.jev_review_outcome = (args) => { outcomes.push(args); return new Promise((resolve) => { finishOutcome = resolve; }); };
+    jevToggleDrawer(view, null);
+    jevToggleDrawer(view, "routing");
+    const drawer = view.querySelector(".jev-drawer");
+    const noCallsFromPainting = calls.length === 0;
+    await jevLoadReviews(drawer);
+    const form = drawer.querySelector(".jev-review-case form");
+    const note = form.querySelector("textarea");
+    const buttons = [...form.querySelectorAll("button")];
+    const emptyHeld = buttons.every((button) => button.disabled);
+    note.value = "The observed result contradicted the answer.";
+    note.dispatchEvent(new Event("input", { bubbles: true }));
+    buttons[1].click();
+    await until(() => typeof finishOutcome === "function");
+    const pendingHeld = buttons.every((button) => button.disabled) && note.disabled;
+    const safeText = !drawer.querySelector("[data-review-injection]") && drawer.querySelector(".jev-review-case pre").textContent.includes("<img");
+    // Move the drawer while the write is pending: its captured case must still be the one reviewed.
+    jevReviewPart(drawer, "recall");
+    finishOutcome(null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    let finishOld;
+    window.__ANSWER__.jev_review = () => new Promise((resolve) => { finishOld = resolve; });
+    const old = jevLoadReviews(drawer);
+    await until(() => typeof finishOld === "function");
+    jevReviewPart(drawer, "skills");
+    window.__ANSWER__.jev_review = () => answer("case-new", "current evidence");
+    await jevLoadReviews(drawer);
+    finishOld(answer("case-old", "stale evidence"));
+    await old;
+    const staleHeld = drawer.querySelector(".jev-review-cases").textContent.includes("current evidence")
+      && !drawer.querySelector(".jev-review-cases").textContent.includes("stale evidence");
+
+    const priorScope = jevScopeChoice;
+    jevScopeChoice = priorScope === "projects" ? "workspace" : "projects";
+    jevReviewPart(drawer, "skills");
+    const scopeCleared = !drawer.querySelector(".jev-review-case");
+    let askedScope;
+    window.__ANSWER__.jev_review = (args) => { askedScope = args.scope; return answer("case-scope", "scoped evidence\n".repeat(80)); };
+    await jevLoadReviews(drawer);
+    const scopeMatched = askedScope === jevScopeChoice;
+    jevScopeChoice = priorScope;
+    jevReviewPart(drawer, "skills");
+    await jevLoadReviews(drawer);
+
+    window.__ANSWER__.set_jev_review_enabled = () => { throw new Error("settings write refused"); };
+    const checkbox = drawer.querySelector(".jev-review-toggle input");
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return { noCallsFromPainting, calls, emptyHeld, pendingHeld, safeText, staleHeld, scopeCleared, scopeMatched,
+      rolledBack: checkbox.checked && !checkbox.disabled, outcomes };
+  }).catch((error) => ({ error: String(error) }));
+  ok("Jev review reads local evidence only after an explicit load", !seen.error && seen.noCallsFromPainting
+    && seen.calls.length === 1 && seen.calls[0].seat === "routing", JSON.stringify(seen));
+  ok("a Jev review needs evidence and prevents duplicate writes while saving", !seen.error && seen.emptyHeld && seen.pendingHeld,
+    JSON.stringify(seen));
+  ok("Jev source text is inert and an outcome stays with the displayed case after navigation", !seen.error && seen.safeText
+    && seen.outcomes.length === 1 && seen.outcomes[0].caseId === "case-one" && seen.outcomes[0].question === "q"
+    && seen.outcomes[0].correct === false, JSON.stringify(seen));
+  ok("an old Jev review response cannot replace a newly selected feature", !seen.error && seen.staleHeld, JSON.stringify(seen));
+  ok("Jev review changes scope with the dashboard and clears the old workspace's evidence",
+    !seen.error && seen.scopeCleared && seen.scopeMatched, JSON.stringify(seen));
+  ok("a refused review setting write restores the previous checkbox", !seen.error && seen.rolledBack, JSON.stringify(seen));
+  let keyboard = { error: seen.error ?? null };
+  if (!seen.error) {
+    try {
+      await page.locator(".jev-review-case details").evaluate((node) => { node.open = true; });
+      const evidence = page.locator(".jev-review-case pre");
+      await evidence.scrollIntoViewIfNeeded();
+      await evidence.focus();
+      const before = await page.evaluate(() => window.__COUNTS__?.key_input ?? 0);
+      await page.keyboard.press("PageDown");
+      await page.waitForFunction(() => document.querySelector(".jev-review-case pre")?.scrollTop > 0, null, { timeout: 2000 });
+      keyboard = await evidence.evaluate((node, count) => ({
+        focused: document.activeElement === node, scrolled: node.scrollTop > 0,
+        terminalKeys: (window.__COUNTS__?.key_input ?? 0) - count,
+      }), before);
+    } catch (error) { keyboard = { error: String(error) }; }
+  }
+  ok("the Jev evidence owns PageDown and scrolls without sending a key to the terminal",
+    !keyboard.error && keyboard.focused && keyboard.scrolled && keyboard.terminalKeys === 0, JSON.stringify(keyboard));
 }

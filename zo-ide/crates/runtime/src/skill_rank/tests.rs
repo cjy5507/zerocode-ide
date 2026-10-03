@@ -71,6 +71,29 @@ fn fifty_skills_fit_one_choice_without_shards() {
     assert_eq!(state["skills"][7]["description"], "does thing 7");
 }
 
+#[test]
+fn a_wide_choice_accepts_rounding_for_its_actual_option_count() {
+    let candidates = skill_candidates(&catalog(29));
+    // Thirty equally likely options round from 1/30 to .03 each. Their
+    // reported sum is .90, which the old fixed .02 tolerance refused.
+    let probabilities: BTreeMap<String, Value> = candidates.iter()
+        .map(|candidate| (candidate.question_id.clone(), json!(0.03)))
+        .chain(std::iter::once((SKILL_NO_MATCH.to_string(), json!(0.03)))).collect();
+    let mut response = SystemOneResponse {
+        model: "jev-test".into(),
+        answers: BTreeMap::from([
+            (WHICH.into(), json!({"type":"choice","choice":"s0","confidence":0.0,"probabilities":probabilities})),
+            (ACTS_ON_SYSTEM.into(), json!({"type":"noul","noul":1.0})),
+            (FOLLOWS_PROCEDURE.into(), json!({"type":"noul","noul":1.0})),
+            (PROSE_SUFFICES.into(), json!({"type":"noul","noul":0.0})),
+        ]),
+        usage: SystemOneUsage { input_tokens: 20, output_tokens: 4 },
+    };
+    assert_eq!(read_wide(&response, &candidates).unwrap().shortlist, [0, 1, 2]);
+    response.answers.get_mut(WHICH).unwrap()["probabilities"]["s0"] = json!(0.9);
+    assert!(read_wide(&response, &candidates).is_err(), "rounding does not excuse an invalid spread");
+}
+
 /// Every skill's words ride the request once (t-10010): a description or an
 /// excerpt is state, and no option or question carries it again. Version 2
 /// carried a shortlisted skill's description three times — the state, its

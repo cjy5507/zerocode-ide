@@ -298,6 +298,17 @@ pub(super) async fn hook_loop(
             );
             skills_runtime::note_hook(&app.state::<AppState>(), &envelope, &activity);
             file_tree_hooks::note_hook(&app, &app.state::<AppState>(), &envelope, activity.phase);
+            // What the continue gate counts: one more call of this pane's agent,
+            // for every CLI the same way (t-26583).
+            if let Some(term) = hooks::term_of_pane_key(&envelope.pane_key) {
+                orchestration::gate_book::note_hook(
+                    term,
+                    &envelope.launch_token,
+                    &activity,
+                    &envelope.payload,
+                    now_epoch_ms(),
+                );
+            }
             let phase = activity.phase;
             // Whose card this is, read BEFORE the name travels — the emit
             // below takes it — because a helper's tool call is also a NUMBER.
@@ -2304,8 +2315,8 @@ pub(super) fn observe_stop_gesture(app: &AppHandle, term: TermId, bytes: &[u8]) 
         Observed::Nothing | Observed::FirstEscape { .. } => {}
         Observed::Infer(call) => apply_inferred_interrupt(app, term, &call),
         Observed::Armed { flush_at } => {
-            // The settle, on the shape `answer_ask` already uses: a newer
-            // gesture bumps the stamp and this thread finds its own gone.
+            // The settle: a newer gesture bumps the stamp and this thread
+            // finds its own gone.
             let generation = {
                 let mut sends = state.inference_sends();
                 let slot = sends.entry(term).or_insert(0);

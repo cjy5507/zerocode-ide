@@ -83,31 +83,17 @@ pub fn observe(
         retry_count,
         wall_ms: dispatch
             .ended_ms
-            .map(|end| end.saturating_sub(dispatch.started_ms)),
+            .and_then(|end| end.checked_sub(dispatch.started_ms))
+            .filter(|elapsed| dispatch.started_ms >= 0 && *elapsed >= 0),
         tokens,
         tokens_reason: tokens.is_none().then_some(generation.usd_reason).flatten(),
         task_tokens: known_tokens(&total.generation),
-        task_wall_ms: total.wall_ms,
+        task_wall_ms: total.completion_wall_ms,
     })
 }
 
 fn known_tokens(generation: &task_cost::GenerationCost) -> Option<i64> {
-    let known = generation.sessions_linked > 0
-        && generation.sessions_linked == generation.sessions_known
-        && !matches!(
-            generation.usd_reason,
-            Some(
-                task_cost::UsdReason::Unlinked
-                    | task_cost::UsdReason::Unscanned
-                    | task_cost::UsdReason::UnsupportedAgent
-            )
-        );
-    known.then_some(
-        generation.input_tokens
-            + generation.output_tokens
-            + generation.cache_read_tokens
-            + generation.cache_write_tokens,
-    )
+    generation.measured_tokens()
 }
 
 /// Latest observation per request; a later retry revokes an earlier success.

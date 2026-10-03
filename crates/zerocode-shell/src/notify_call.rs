@@ -386,7 +386,12 @@ pub(crate) fn call_at_the_bell(app: &AppHandle, bell: &Bell<'_>) -> Call {
         return today;
     };
     let wire = Wire::of_this_machine();
-    let mode = NOTIFY.mode_in(&wire.settings_root());
+    let settings = wire.settings_root();
+    let mode = NOTIFY.mode_in(&settings);
+    let model = zerocode_core::jev::door::JevSettings::from_root(&settings)
+        .resolved()
+        .model;
+    drop(settings);
     if !mode.asks() {
         return today;
     }
@@ -440,6 +445,7 @@ pub(crate) fn call_at_the_bell(app: &AppHandle, bell: &Bell<'_>) -> Call {
     let thread_handoff = Arc::clone(&handoff);
     let thread_app = app.clone();
     let thread_ledger = ledger.clone();
+    let applying_wire = wire.clone();
     let spawned = std::thread::Builder::new()
         .name("jev-notify-call".to_string())
         .spawn(move || {
@@ -461,14 +467,35 @@ pub(crate) fn call_at_the_bell(app: &AppHandle, bell: &Bell<'_>) -> Call {
     let Some((mut row, waiting)) = handoff.take(NOTIFY_CALL_DEADLINE) else {
         return today;
     };
-    let (call, applied) = chosen(
-        true,
+    let (call, applied) = chosen_now(
+        &applying_wire,
+        Path::new(bell.worktree),
+        &model,
         waiting.as_ref().map(|one| (one.call, one.confidence)),
         line,
     );
     row[APPLIED.canonical] = json!(applied);
     record(app, &ledger, row, waiting);
     call
+}
+
+fn chosen_now(
+    wire: &Wire,
+    workspace: &Path,
+    model: &str,
+    answer: Option<(Call, f64)>,
+    line: Option<u16>,
+) -> (Call, bool) {
+    chosen(
+        crate::systemone::applies(wire, &NOTIFY)
+            && wire.permits_workspace_now(Some(workspace))
+            && zerocode_core::jev::door::JevSettings::from_root(&wire.settings_root())
+                .resolved()
+                .model
+                == model,
+        answer,
+        line,
+    )
 }
 
 /// Ask one question and write down what came of it: the row, and — for an

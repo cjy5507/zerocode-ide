@@ -129,18 +129,25 @@ fn the_crash_task_walks_the_task_create_argv_road_and_no_second_ledger_api_exist
         assert!(road.contains(needed), "the crash task road lost `{needed}`");
     }
     // The seat road itself (one function, shared with the QA road): the
-    // newest seated coordinator this window can sign for, the argv door.
+    // newest seated coordinator this window can sign for, the argv door. Who
+    // can be presented is one helper's answer — the same one the gate's stop
+    // asks (t-26583) — and it presents the pane's own capability.
     let seat = super::support::block_after(&orchestration, "pub(crate) fn file_task_through_seat(");
-    for needed in ["crate::agent_teams::current_pane_capability(", "run(\n"] {
+    for needed in ["presentable_seat(", "run(\n"] {
         assert!(seat.contains(needed), "the seat road lost `{needed}`");
     }
+    let presentable = super::support::block_after(&orchestration, "fn presentable_seat(");
+    assert!(
+        presentable.contains("crate::agent_teams::current_pane_capability("),
+        "the seat helper stopped presenting the pane's own capability"
+    );
     assert!(
         !road.contains("create_task(") && !road.contains("actor.plan("),
         "the crash task reaches the ledger without the argv road"
     );
     let seat = super::support::block_after(&orchestration, "pub(crate) fn file_task_through_seat(");
     assert!(
-        seat.contains("crate::agent_teams::current_pane_capability(") && seat.contains("run(\n"),
+        seat.contains("presentable_seat(") && seat.contains("run(\n"),
         "the shared filing road must present the seat through the argv door"
     );
     assert!(!seat.contains("create_task(") && !seat.contains("actor.plan("));

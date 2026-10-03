@@ -116,6 +116,7 @@ pub use misc_tools::{
 };
 pub use misc_tools::{
     claim_check_path, jev_claim_mode_from, note_claim_turn, ClaimCheckRow, ClaimLabelRow,
+    note_project_rule_turn, pending_project_rule_advice, project_rule_advice_delivered,
     judge_vault_pairs, mark_vault_pair, recorded_vault_pair_proposals,
     PairJudgment, PairLabel, PairRun,
     jev_patch_review_mode_from, note_patch_review_turn, patch_review_path, PatchReviewJudge,
@@ -155,9 +156,11 @@ pub use misc_tools::{
 };
 pub use misc_tools::{
     build_plan_shadow, conversation_anchor_ttl_for, conversation_anchor_ttl_from_root,
-    model_options_for, model_price_for, plan_priors_for, plan_shadow_path,
+    model_options_for, model_price_for, plan_cohort_for_turn, plan_priors_for, plan_shadow_path,
     record_plan_shadow, switch_candidates, CACHE_ANCHOR_TTL_ENV,
     PlanShadowActual, PlanShadowCandidate, PlanShadowInputs, PlanShadowRow,
+    choose_measured_plan, plan_pins_allow, read_plan_receipts, record_plan_receipt, PlanRunReceipt,
+    measure_plan_usage, PlanUsage,
 };
 pub use misc_tools::{
     mark_session_process, registry_locator_for, store_root_for, AgentRegistry, RegistryRecord,

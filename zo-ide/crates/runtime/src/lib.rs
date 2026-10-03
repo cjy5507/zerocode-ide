@@ -281,7 +281,7 @@ pub use model_router::{
     OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_STOPPED,
     choose_plan, plan_candidates, plan_evidence_from_records, score_plan, ChoiceReason,
     CostBreakdown, CostTerm, ModelOption,
-    ModelPrice, PlanCacheState, PlanCandidate, PlanChoice, PlanContext, PlanEstimate, PlanEvidence,
+    ModelPrice, PlanCacheState, PlanCandidate, PlanChoice, PlanCohort, PlanContext, PlanEstimate, PlanEvidence,
     PlanPriors, ScoredPlan, SwitchTrigger, VerifyMode,
     DecisionOutcomeStat, EffortCeiling, FreshnessPolicy, LaneRouteMetadata,
     learned_rate, LearnedSpecialtyEntry, LearnedSpecialtyHint, VerdictBasis, VerdictSubject, VerifyMetrics,

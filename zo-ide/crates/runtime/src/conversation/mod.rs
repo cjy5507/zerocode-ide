@@ -320,7 +320,7 @@ fn format_auto_compaction_start_notice(message_count: usize) -> String {
     // Claude Code-style notice: a single "Compacting conversation…" line shown
     // while the summary request is in flight. The CLI upgrades this into a live
     // status indicator; the wording is kept stable so both surfaces match.
-    format!("Compacting conversation… (summarizing {message_count} messages)")
+    format!("Compacting conversation… ({message_count} messages)")
 }
 
 fn format_auto_compaction_done_notice(
@@ -328,6 +328,10 @@ fn format_auto_compaction_done_notice(
     tokens_before: usize,
     tokens_after: usize,
 ) -> String {
+    if removed_message_count == 0 && tokens_after < tokens_before {
+        return format!("Compacted conversation · original messages retained · {} → {} tokens",
+            format_kilo_tokens(tokens_before), format_kilo_tokens(tokens_after));
+    }
     format!(
         "Compacted conversation · {removed_message_count} messages summarized · {} → {} tokens",
         format_kilo_tokens(tokens_before),
@@ -699,6 +703,7 @@ pub struct ConversationRuntime<C, T> {
     /// off the drive-loop thread (FREEZE-1). `recall` takes `&self`, so the
     /// shared handle is a drop-in for the prior owned box.
     memory_retriever: Option<Arc<dyn MemoryRetriever + Send + Sync>>,
+    user_preference_source: Option<Arc<crate::memory::user_preferences::UserPreferenceSource>>,
     /// Seated beside the retriever and shown every recall after it settles;
     /// its answer is the order the turn reads. See [`crate::RecallSeat`].
     recall_seat: Option<Arc<dyn crate::RecallSeat>>,
@@ -1767,6 +1772,7 @@ where
             inherited_attempt: None,
             attempt_cache_scope: None,
             memory_retriever: None,
+            user_preference_source: None,
             recall_seat: None,
             compaction_seat: None,
             patch_review_seat: None,

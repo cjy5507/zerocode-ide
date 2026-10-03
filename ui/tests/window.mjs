@@ -30,6 +30,9 @@ import { testLedgerPoll } from "./ledger-poll.mjs";
 import { testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
 import { testAccountSwitch } from "./account-switch.mjs";
 import { testTaskBoard } from "./task-board.mjs";
+import { testScmHealth } from "./scm-health.mjs";
+import { testArtifactPreferences } from "./artifact-preferences.mjs";
+import { testAgentSupport } from "./agent-support.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
@@ -67,6 +70,7 @@ import { installHarnessWaits } from "./harness-waits.mjs";
 import { installBoardWaits, testBoardWaits } from "./board-waits.mjs";
 
 import { testExplorer } from "./explorer.mjs";
+import { testExplorerAgentActivity, testExplorerAgentBurst, testExplorerGit, testExplorerKeys, testExplorerMentions, testExplorerRoot, testExplorerSelection, testExplorerVcs } from "./explorer-agent.mjs";
 import { testPathBrowser } from "./path-browser.mjs";
 import { testNativeFolderPicker } from "./native-folder-picker.mjs";
 import { testSftpAndTeam } from "./sftp.mjs";
@@ -74,6 +78,7 @@ import { testPaneFollowsCwd } from "./pane-follow.mjs";
 import { testZoRestore } from "./zo-restore.mjs";
 import { testRestartSamePanes } from "./restart-same-panes.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
+import { testAnswerDoor } from "./answer-door.mjs";
 import { testAskPopup } from "./ask-popup.mjs";
 import { testEditorSelection } from "./editor-selection.mjs";
 import { testEditorRecovery } from "./editor-recovery.mjs";
@@ -86,6 +91,7 @@ import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
 import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
+import { testConversationRedesign } from "./conversation-redesign.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -209,6 +215,16 @@ suite("explorer", async ({ browser, origin, ok }) => {
     await page.close();
   }
 });
+/* The tree wears what the agents do, git's numbers and the keyboard
+ * (t-24298): one suite per slice, so each red and green is one name. */
+suite("explorer-agent-activity", ({ browser, origin, ok }) => testExplorerAgentActivity(browser, origin, ok));
+suite("explorer-agent-burst", ({ browser, origin, ok }) => testExplorerAgentBurst(browser, origin, ok));
+suite("explorer-git", ({ browser, origin, ok }) => testExplorerGit(browser, origin, ok));
+suite("explorer-mentions", ({ browser, origin, ok }) => testExplorerMentions(browser, origin, ok));
+suite("explorer-keys", ({ browser, origin, ok }) => testExplorerKeys(browser, origin, ok));
+suite("explorer-root", ({ browser, origin, ok }) => testExplorerRoot(browser, origin, ok));
+suite("explorer-vcs", ({ browser, origin, ok }) => testExplorerVcs(browser, origin, ok));
+suite("explorer-selection", ({ browser, origin, ok }) => testExplorerSelection(browser, origin, ok));
 suite("crash", ({ browser, origin, ok }) => testCrashReport(browser, origin, standBackend, ok));
 suite("ledger-poll", ({ browser, origin, ok }) => testLedgerPoll(browser, origin, standBackend, ok));
 suite("usage-refresh", async ({ browser, origin, ok }) => {
@@ -217,8 +233,12 @@ suite("usage-refresh", async ({ browser, origin, ok }) => {
 });
 suite("account-switch", ({ browser, origin, ok }) => testAccountSwitch(browser, origin, standBackend, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
+suite("answer-door", ({ browser, origin, ok }) => testAnswerDoor(browser, origin, ok));
 // Vault state stays local to this fixture, just like the explorer fixture.
 suite("task-board", ({ browser, origin, ok }) => testTaskBoard(browser, origin, ok));
+suite("scm-health", ({ browser, origin, ok }) => testScmHealth(browser, origin, ok));
+suite("artifact-preferences", ({ browser, origin, ok }) => testArtifactPreferences(browser, origin, ok));
+suite("agent-support", ({ browser, origin, ok }) => testAgentSupport(browser, origin, ok));
 // The coordinator's desk above the task list (t-6588, docs/design/agent-board-round4.md).
 suite("coordinator-desk", ({ browser, origin, ok }) => testCoordinatorDesk(browser, origin, ok));
 suite("coordinator-desk-layout", ({ browser, origin, ok }) => testCoordinatorDeskLayout(browser, origin, ok));
@@ -319,6 +339,9 @@ suite("conversation-stream-work", ({ browser, origin, ok }) => testConversationS
 /* 키의 값 — 줄이 넘어가 도크가 자라도 그 높이는 그것을 읽는 둘(목록의 발밑 여백,
  * 맨 아래로 단추)에만 닿고 행마다 닿지 않는다 (t-22095). */
 suite("conversation-typing-work", ({ browser, origin, ok }) => testConversationTypingWork(browser, origin, ok));
+/* 사람이 승인한 대화창 (2026-10-02 23:4x, t-22100) — 머리줄·사람의 말·생각·걸음·셸의 첫 줄·울타리·지금
+ * 줄·턴 레일·입력창 위 상태 묶음·입력창, 평평하게, 두 테마와 줄인 움직임에서. */
+suite("conversation-redesign", ({ browser, origin, ok }) => testConversationRedesign(browser, origin, ok));
 /* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
  * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
  * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs
@@ -16621,7 +16644,10 @@ ok(
 const scmFollows = await page.evaluate(async () => {
   const seen = {};
   const ran = () => window.__COUNTS__.scm_status ?? 0;
-  // 판이 닫혀 있으면 한 번도 돌지 않는다.
+  // 판이 닫혀 있으면 한 번도 돌지 않는다. 파일 트리도 같은 답을 입으므로
+  // (t-24298) "아무도 안 본다"는 트리까지 닫혀 있다는 뜻이다.
+  const filesWere = el("activity-files").hidden;
+  el("activity-files").hidden = true;
   el("activity-scm").hidden = true;
   const closed = ran();
   noteScmMayHaveChanged();
@@ -16660,6 +16686,7 @@ const scmFollows = await page.evaluate(async () => {
   // 그리고 에이전트 소식이 실제로 이 문을 지난다.
   seen.beatCarriesIt = String(noteAgentsStirred).includes("noteScmMayHaveChanged");
   el("activity-scm").hidden = true;
+  el("activity-files").hidden = filesWere;
   return seen;
 });
 ok(
@@ -33607,6 +33634,8 @@ const scmRowGrammar = await page.evaluate(async () => {
       t("worktree.openIn", "{{app}}에서 열기", { app: application.label })),
     revealSays,
     t("worktree.customizeApps", "앱 사용자화…"),
+    // 원본의 마지막 줄 — 제 파일 패널에서 보기(t-24298).
+    t("sourceControl.revealInTree", "파일 트리에서 보기"),
   ];
   seen.separators = menu.querySelectorAll(".sidebar-menu-separator").length;
   closeSidebarMenu();
@@ -36269,13 +36298,15 @@ const chatFace = await page.evaluate(async () => {
   seen.count = turns.length;
   seen.assistantNamed = [turns[1]?.getAttribute("aria-label"), agentName("claude")];
   seen.toolNamed = [turns[3]?.getAttribute("aria-label"), t("worker.toolRow", "{{name}} 도구", { name: "Read" })];
-  // The first user turn is the briefing box — the extension's `userMessage`:
-  // a bordered box on the left, in a row that sticks to the top while its
-  // answer scrolls under it, with every other thing the person said, whole.
+  // The first user turn is the briefing box: the person's words on the soft
+  // fill with no edge (t-22100, the approved conversation), on the left, in a
+  // row that sticks to the top while its answer scrolls under it, with every
+  // other thing the person said, whole.
   const briefingSaid = turns[0]?.querySelector(":scope > .helper-said") ?? null;
   seen.briefingBubble = turns[0]?.tagName === "ARTICLE" &&
     turns[0]?.classList.contains("is-briefing") && getComputedStyle(turns[0]).position === "sticky" &&
-    briefingSaid !== null && getComputedStyle(briefingSaid).borderTopWidth === "1px" &&
+    briefingSaid !== null && getComputedStyle(briefingSaid).borderTopWidth === "0px" &&
+    getComputedStyle(briefingSaid).backgroundColor !== "rgba(0, 0, 0, 0)" &&
     Math.abs(briefingSaid.getBoundingClientRect().left - turns[0].getBoundingClientRect().left) <= 2;
   seen.briefingSaid = turns[0]?.querySelector(".helper-said")?.textContent?.split("\n", 1)[0];
   seen.briefingWho = turns[0]?.querySelector(".helper-who") === null
@@ -36317,8 +36348,9 @@ const chatFace = await page.evaluate(async () => {
   seen.readArg = turns[3]?.querySelector(".helper-step-target")?.textContent;
   seen.readBare = turns[3]?.querySelector(".helper-tool-body") === null &&
     turns[3]?.querySelector(".helper-step-res")?.textContent === t("worker.stepLive", "진행 중");
-  const mark = turns[3]?.querySelector(".helper-step-icon");
-  seen.liveMark = mark ? getComputedStyle(mark).color === probe("--agent-accent-claude") : false;
+  // The step that is out wears the agent's accent on its dot (t-22100: a dot where its mark stood).
+  const mark = turns[3]?.querySelector(".helper-step-dot");
+  seen.liveMark = mark ? getComputedStyle(mark).backgroundColor === probe("--agent-accent-claude", "backgroundColor") : false;
   // The page wears the agent: its accent, its mark before the name, its own
   // busy word under the transcript.
   seen.agent = face.dataset.agent;
@@ -36328,13 +36360,14 @@ const chatFace = await page.evaluate(async () => {
   seen.headMarkAccent = headMark ? getComputedStyle(headMark).color === probe("--agent-accent-claude") : false;
   const status = face.querySelector(".helper-status");
   seen.statusShown = status ? !status.hidden : false;
-  seen.statusMark = status?.querySelector(".helper-status-mark")?.textContent;
-  // The CLI's one word stays on the line; the verb the eye sees turns
-  // (t-6323 A4) and is hidden from the reader, who is told aloud what is going
-  // on — the step that is out, in the words of its row (t-15682).
-  seen.statusWord = status?.querySelector(".helper-status-word")?.textContent;
+  // The live line (t-22100): 「지금」 and the step that is out, in the words of
+  // its row (t-15682) — for the eye, and once, as one sentence, aloud.
+  seen.statusLead = status?.querySelector(".helper-status-lead")?.textContent;
+  seen.statusNow = status?.querySelector(".helper-status-now")?.textContent;
   seen.statusSaid = status?.querySelector(".helper-status-said")?.textContent;
-  seen.statusTurns = status?.querySelector(".helper-status-word")?.getAttribute("aria-hidden") === "true";
+  seen.statusHidden = [".helper-status-lead", ".helper-status-now"]
+    .every((part) => status?.querySelector(part)?.getAttribute("aria-hidden") === "true");
+  seen.wantNow = t("worker.now", "지금");
   seen.statusVoice = agentVoice("claude");
   // 입력줄: 부모 판이 서 있으니 composer가 서고, 보내면 부모 판으로
   // 붙여넣기 → 한 숨 → Enter가 그 순서로 간다. 상자는 비워진다.
@@ -36426,9 +36459,15 @@ const chatFace = await page.evaluate(async () => {
   // `--chat-send-bg`), so the token is read where the button stands.
   seen.sendFromToken = sendStyle?.backgroundColor ===
     probe(sendStops ? "--chat-send-stop-bg" : "--chat-send-bg", "backgroundColor", composer);
+  // The composer wears the token's corners — its top two joined to the
+  // conversation's state when that stands over it (t-22100), which wears them.
   const root = getComputedStyle(document.documentElement);
+  const corner = root.getPropertyValue("--chat-radius-composer").trim();
+  const stackOver = composer.previousElementSibling?.matches(".chat-stack:not([hidden])") ? composer.previousElementSibling : null;
   seen.composerRadius = getComputedStyle(composer).borderRadius;
-  seen.wantComposerRadius = root.getPropertyValue("--chat-radius-composer").trim();
+  seen.wantComposerRadius = stackOver ? `0px 0px ${corner} ${corner}` : corner;
+  seen.stackRadius = stackOver ? getComputedStyle(stackOver).borderRadius : null;
+  seen.wantStackRadius = stackOver ? `${corner} ${corner} 0px 0px` : null;
   // The composer floats in the extension's dock, no wider than the token.
   const chatDock = composer?.closest(".chat-dock") ?? null;
   seen.dockMax = chatDock ? getComputedStyle(chatDock).maxWidth : "";
@@ -36474,14 +36513,13 @@ ok(
   JSON.stringify(chatFace),
 );
 ok(
-  "the page wears its agent: data-agent picks the accent, the head and the chip carry the agent's own mark, and the status line under the transcript keeps the CLI's own busy word while the run is out and says aloud the step that is out",
+  "the page wears its agent: data-agent picks the accent, the head and the chip carry the agent's own mark, and the live line under the transcript says 「지금」 and the step that is out while the run is out — for the eye, and aloud as one sentence",
   chatFace.agent === "claude" && chatFace.pageAccent !== "" &&
     chatFace.headMark === chatFace.statusVoice.glyph && chatFace.headMark !== "" && chatFace.headMarkAccent &&
     chatFace.statusShown &&
-    (chatFace.statusMark === chatFace.statusVoice.glyph || chatFace.statusVoice.glyph_cycle.includes(chatFace.statusMark)) &&
-    chatFace.statusWord === chatFace.statusVoice.busy_word && chatFace.statusWord === "Pondering…" &&
-    chatFace.statusSaid === `${chatFace.wantReadName} one line` &&
-    chatFace.statusTurns &&
+    chatFace.statusLead === chatFace.wantNow && chatFace.statusNow === `${chatFace.wantReadName} one line` &&
+    chatFace.statusSaid === `${chatFace.wantNow} ${chatFace.wantReadName} one line` &&
+    chatFace.statusHidden &&
     chatFace.focusEdge && chatFace.modelMark === chatFace.statusVoice.glyph,
   JSON.stringify(chatFace),
 );
@@ -36567,7 +36605,9 @@ const helperGrammar = await page.evaluate(async () => {
   seen.headNoRule = head ? getComputedStyle(head).borderBottomWidth === "0px" : false;
   seen.ground = getComputedStyle(face).backgroundColor === probe("--chat-ground", "backgroundColor");
   // Two tool rows under their kind's word, closed by the answer after them:
-  // the mark quiet, not on the accent, the target in mono beside the word.
+  // the dot quiet — no result came back to say how they went — and not on the
+  // accent (t-22100: a dot where the mark stood), the target in mono beside
+  // the word.
   const tools = turns.filter((one) => one.classList.contains("is-tool"));
   seen.toolCount = `×${tools.length}`;
   seen.toolBody = tools
@@ -36577,7 +36617,7 @@ const helperGrammar = await page.evaluate(async () => {
   seen.toolNames = tools.map((row) => row.getAttribute("aria-label")).join(",");
   seen.wantToolNames = ["read_file", "grep_search"].map((name) => t("worker.toolRow", "{{name}} 도구", { name })).join(",");
   seen.toolsSettled = tools.every((row) => !row.classList.contains("is-live")) &&
-    tools.every((row) => getComputedStyle(row.querySelector(".helper-step-icon")).color === probe("--ink-mist"));
+    tools.every((row) => getComputedStyle(row.querySelector(".helper-step-dot")).backgroundColor === probe("--ink-mist", "backgroundColor"));
   seen.argMono = tools[0] ? /mono/i.test(getComputedStyle(tools[0].querySelector(".helper-step-target")).fontFamily) : false;
   // zo has an accent of its own but the harness catalog gives it no voice: the
   // page wears zo's accent and the window's one mark and word — what every
@@ -36586,8 +36626,9 @@ const helperGrammar = await page.evaluate(async () => {
   seen.zoAccent = getComputedStyle(face.querySelector(".worker-mark")).color === probe("--agent-accent-zo");
   const status = face.querySelector(".helper-status");
   seen.statusShown = status ? !status.hidden : false;
-  seen.statusMark = status?.querySelector(".helper-status-mark")?.textContent;
-  seen.statusWord = status?.querySelector(".helper-status-word")?.textContent;
+  seen.statusLead = status?.querySelector(".helper-status-lead")?.textContent;
+  seen.statusNow = status?.querySelector(".helper-status-now")?.textContent;
+  seen.wantLead = t("worker.now", "지금");
   seen.wantBusy = t("worker.busy", "작업 중…");
   seen.headMark = face.querySelector(".worker-mark")?.textContent;
   // 묶음 뒤의 말은 제 턴으로 이어진다.
@@ -36612,7 +36653,7 @@ ok(
   JSON.stringify(helperGrammar),
 );
 ok(
-  "the prose wears the grammar's type — --chat-prose-size at --chat-prose-leading, inline code a rounded chip from --chat-chip-bg — the head is a 600 name with one quiet meta cluster and no rule, the page stands on one --chat-ground, and an agent the catalog does not voice wears the window's one mark and word",
+  "the prose wears the grammar's type — --chat-prose-size at --chat-prose-leading, inline code a rounded chip from --chat-chip-bg — the head is a 600 name with one quiet meta cluster and no rule, the page stands on one --chat-ground, an agent the catalog does not voice wears the window's one mark, and the live line says the window's 「지금 작업 중…」",
   helperGrammar.proseSize === helperGrammar.wantProseSize &&
     helperGrammar.proseLeading === helperGrammar.wantProseLeading &&
     helperGrammar.chipBg === helperGrammar.wantChipBg && helperGrammar.chipBg !== "rgba(0, 0, 0, 0)" &&
@@ -36620,8 +36661,8 @@ ok(
     helperGrammar.nameSize && helperGrammar.metaHolds && helperGrammar.headNoRule &&
     helperGrammar.ground &&
     helperGrammar.agent === "zo" && helperGrammar.zoAccent &&
-    helperGrammar.statusShown && helperGrammar.statusMark === "●" && helperGrammar.headMark === "●" &&
-    helperGrammar.statusWord === helperGrammar.wantBusy,
+    helperGrammar.statusShown && helperGrammar.headMark === "●" &&
+    helperGrammar.statusLead === helperGrammar.wantLead && helperGrammar.statusNow === helperGrammar.wantBusy,
   JSON.stringify(helperGrammar),
 );
 
@@ -36674,7 +36715,8 @@ const toolStates = await page.evaluate(async () => {
     span.remove();
     return value;
   };
-  const markOf = (row) => getComputedStyle(row.querySelector(".helper-step-icon"));
+  // A step's state is worn on its dot (t-22100: the dot stands where the mark stood).
+  const markOf = (row) => getComputedStyle(row.querySelector(".helper-step-dot"));
   const tools = [...list.querySelectorAll(".helper-turn.is-tool")];
   // The turns alone — the status row is the list's last child, never a turn.
   seen.rowsTotal = list.querySelectorAll(":scope > .helper-turn").length;
@@ -36684,7 +36726,7 @@ const toolStates = await page.evaluate(async () => {
   seen.wantFourNames = [t("worker.stepRead", "파일 읽기"), t("worker.stepSearch", "검색"),
     t("worker.stepEdit", "파일 수정"), t("worker.stepShell", "셸")].join(",");
   seen.fourPlain = tools.slice(0, 4).every((row) => !row.classList.contains("is-live") &&
-    markOf(row).color === probe("--ink-mist"));
+    markOf(row).backgroundColor === probe("--ink-mist", "backgroundColor"));
   // The one still out: the mark on the accent, "in progress" where its result
   // will be, and the status line. Its target is the transcript line's, not
   // the first line of the argument object ("{").
@@ -36693,14 +36735,14 @@ const toolStates = await page.evaluate(async () => {
   seen.wantOutWords = `${t("worker.stepRead", "파일 읽기")} · /repo/c.rs`;
   seen.outRes = out?.querySelector(".helper-step-res")?.textContent;
   seen.wantOutRes = t("worker.stepLive", "진행 중");
-  seen.oneLive = out?.classList.contains("is-live") === true && markOf(out).color === probe("--agent-accent-claude");
+  seen.oneLive = out?.classList.contains("is-live") === true &&
+    markOf(out).backgroundColor === probe("--agent-accent-claude", "backgroundColor");
   const status = face.querySelector(".helper-status");
   seen.statusShown = status ? !status.hidden : false;
-  seen.statusMark = status?.querySelector(".helper-status-mark")?.textContent;
-  seen.statusWord = status?.querySelector(".helper-status-word")?.textContent;
+  seen.statusNow = status?.querySelector(".helper-status-now")?.textContent;
+  seen.wantStatusNow = `${t("worker.stepRead", "파일 읽기")} /repo/c.rs`;
   seen.statusSaid = status?.querySelector(".helper-status-said")?.textContent;
-  seen.wantStatusSaid = `${t("worker.stepRead", "파일 읽기")} /repo/c.rs`;
-  seen.voice = agentVoice("claude");
+  seen.wantStatusSaid = `${t("worker.now", "지금")} ${seen.wantStatusNow}`;
   // Its result joins by call id: the same row, now done, saying what came of
   // it on its line and the two raw sides one press away.
   const tab = tabs.find((one) => one.id === `helper:${term}:folds`);
@@ -36711,7 +36753,7 @@ const toolStates = await page.evaluate(async () => {
   const after = [...list.querySelectorAll(".helper-turn.is-tool")];
   seen.sameRow = after[4] === out && after.length === 5;
   seen.doneMark = out.classList.contains("is-done") && !out.classList.contains("is-live") &&
-    markOf(out).color === probe("--ink-mist");
+    markOf(out).backgroundColor === probe("--chat-dot-done", "backgroundColor");
   const result = out.querySelector(".helper-step-res");
   seen.resultLine = result?.textContent;
   seen.wantResultLine = t("worker.stepLines", "{{n}}줄", { n: 2 });
@@ -36737,7 +36779,7 @@ const toolStates = await page.evaluate(async () => {
   const failed = lastTurnOf(list);
   seen.failedRow = failed.classList.contains("is-tool") && failed.classList.contains("is-failed") &&
     !failed.classList.contains("is-done") && !failed.classList.contains("is-live") &&
-    markOf(failed).color === probe("--signal-halt-ink");
+    markOf(failed).backgroundColor === probe("--chat-dot-failed", "backgroundColor");
   seen.failedLine = failed.querySelector(".helper-step-res")?.textContent;
   seen.wantFailedLine = t("worker.stepFailed", "실패: {{why}}", { why: "exit 1" });
   seen.failedInk = failed.querySelector(".helper-step-res")
@@ -36807,13 +36849,11 @@ const toolStates = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a step's mark is the call's state: calls the answer closed stand plain under their kinds' words, the one still out wears the accent and says \"in progress\" while the status line says what it is, a result joining by call id says what came of it on the same row with both raw sides one press away (short sides whole, no door), a failed result wears the halt ink, an edit's row wears the inline diff cut from its input once opened (the review rows and word marks, blank gutters for a snippet, the rows past the ceiling counted, no input well, a path over each file of a patch), a quiet paint touches nothing, and the roster's done takes the accent and the status away",
+  "a step's dot is the call's state: calls the answer closed stand plain under their kinds' words, the one still out wears the accent and says \"in progress\" while the live line says what it is, a result joining by call id turns the dot to the done ink and says what came of it on the same row with both raw sides one press away (short sides whole, no door), a failed result wears the failure's dot and its words the halt ink, an edit's row wears the inline diff cut from its input once opened (the review rows and word marks, blank gutters for a snippet, the rows past the ceiling counted, no input well, a path over each file of a patch), a quiet paint touches nothing, and the roster's done takes the accent and the status away",
   toolStates.rowsTotal === 8 && toolStates.toolCount === 5 &&
     toolStates.fourNames === toolStates.wantFourNames && toolStates.fourPlain &&
     toolStates.oneLive && toolStates.outRes === toolStates.wantOutRes && toolStates.statusShown &&
-    (toolStates.statusMark === toolStates.voice.glyph || toolStates.voice.glyph_cycle.includes(toolStates.statusMark)) &&
-    toolStates.statusWord === toolStates.voice.busy_word && toolStates.statusWord === "Pondering…" &&
-    toolStates.statusSaid === toolStates.wantStatusSaid &&
+    toolStates.statusNow === toolStates.wantStatusNow && toolStates.statusSaid === toolStates.wantStatusSaid &&
     toolStates.sameRow && toolStates.doneMark &&
     toolStates.resultLine === toolStates.wantResultLine && !toolStates.resultMono &&
     toolStates.outWords === toolStates.wantOutWords &&
@@ -37011,11 +37051,14 @@ const helperWide = await page.evaluate(async () => {
   const listBox = list.getBoundingClientRect();
   const proseBox = prose.getBoundingClientRect();
   const gutter = Number.parseFloat(getComputedStyle(list).paddingLeft);
-  seen.paneWidth = Math.round(listBox.width);
+  // The pane is the face; the list is the pane beside the turn rail (t-22100).
+  seen.paneWidth = Math.round(face.getBoundingClientRect().width);
+  seen.listWidth = Math.round(listBox.width);
   seen.columnWidth = Math.round(proseBox.width);
   seen.gutter = gutter;
-  // The extension's list holds no reading column: the rows take the pane
-  // behind the list's own gutters, the same on both sides.
+  // The extension's list holds no reading column: the rows take the list —
+  // the pane beside the turn rail — behind its own gutters, the same on
+  // both sides.
   seen.fillsPane = Math.abs(proseBox.width - (listBox.width - 2 * gutter)) <= 2;
   seen.centered =
     Math.abs((proseBox.left - listBox.left) - (listBox.right - proseBox.right)) <= 2;
@@ -37032,11 +37075,13 @@ const helperWide = await page.evaluate(async () => {
     ? speakBox.left >= footBox.left && speakBox.right <= footBox.right
     : false;
   seen.noDock = face.querySelector(".chat-dock") === null && face.querySelector(".worker-composer") === null;
-  // While the helper runs, the status line under the transcript says the
-  // agent's word on the transcript's axis, and the tail calls are out.
+  // While the helper runs, the live line under the transcript says 「지금」
+  // and the call that is out in its row's words (t-22100), on the
+  // transcript's axis, and the tail calls are out.
   const status = face.querySelector(".helper-status");
   seen.liveShows = status !== null && !status.hidden &&
-    status.textContent.includes(agentVoice("zo").busy_word);
+    status.querySelector(".helper-status-lead")?.textContent === t("worker.now", "지금") &&
+    (status.querySelector(".helper-status-now")?.textContent ?? "").startsWith(t("worker.stepSearch", "검색"));
   seen.liveOnAxis = status
     ? Math.abs(status.getBoundingClientRect().left - proseBox.left) <= 2
     : false;
@@ -37084,7 +37129,9 @@ const helperNarrow = await page.evaluate(async (term) => {
   const listBox = list.getBoundingClientRect();
   const proseBox = prose.getBoundingClientRect();
   const gutter = Number.parseFloat(getComputedStyle(list).paddingLeft);
-  seen.paneWidth = Math.round(listBox.width);
+  // The pane is the face; the list is the pane beside the turn rail (t-22100).
+  seen.paneWidth = Math.round(face.getBoundingClientRect().width);
+  seen.listWidth = Math.round(listBox.width);
   seen.columnWidth = Math.round(proseBox.width);
   // 좁아지면 단이 남은 폭을 다 갖는다 — 여백만 한 단 줄어든다.
   seen.fillsPane = Math.abs(proseBox.width - (listBox.width - 2 * gutter)) <= 2;
@@ -37152,7 +37199,7 @@ ok(
     chatFace.enterSent && chatFace.grows &&
     chatFace.noDoorOnPane && chatFace.noWhereLine &&
     chatFace.sendNamed && chatFace.sendSquare && chatFace.sendFromToken &&
-    chatFace.composerRadius === chatFace.wantComposerRadius &&
+    chatFace.composerRadius === chatFace.wantComposerRadius && chatFace.stackRadius === chatFace.wantStackRadius &&
     chatFace.composerRadius !== "" && chatFace.dockMax === chatFace.wantDockMax && chatFace.dockMax !== "" &&
     chatFace.modelWords === chatFace.wantModel && chatFace.wantModel !== null,
   JSON.stringify(chatFace),
@@ -37204,20 +37251,21 @@ const paneDock = await page.evaluate(async () => {
   }
   const listBox = list.getBoundingClientRect();
   const proseBox = prose.getBoundingClientRect();
-  seen.paneWidth = Math.round(listBox.width);
+  // The pane is the face; the list is the pane beside the turn rail (t-22100).
+  seen.paneWidth = Math.round(face.getBoundingClientRect().width);
+  seen.listWidth = Math.round(listBox.width);
   seen.columnWidth = Math.round(proseBox.width);
-  // The composer floats in the extension's dock: inset from the pane's edges,
-  // no wider than the token, centered on the pane's axis, and the composer
-  // as wide as the dock.
+  // The composer floats in the extension's dock: inset from the list's edges,
+  // no wider than the token, centered on the list's axis — the turn rail
+  // stands at its left (t-22100) — and the composer as wide as the dock.
   const rootTokens = getComputedStyle(document.documentElement);
   const dockInset = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-inset"));
   const dockMax = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-max"));
-  const faceBox = face.getBoundingClientRect();
   const dockBox = face.querySelector(".chat-dock")?.getBoundingClientRect() ?? null;
   seen.dockWidth = dockBox ? Math.round(dockBox.width) : 0;
-  seen.wantDockWidth = Math.round(Math.min(faceBox.width - 2 * dockInset, dockMax));
+  seen.wantDockWidth = Math.round(Math.min(listBox.width - 2 * dockInset, dockMax));
   seen.dockCentered = dockBox
-    ? Math.abs((dockBox.left - faceBox.left) - (faceBox.right - dockBox.right)) <= 2
+    ? Math.abs((dockBox.left - listBox.left) - (listBox.right - dockBox.right)) <= 2
     : false;
   const composerBox = face.querySelector(".worker-composer")?.getBoundingClientRect() ?? null;
   seen.composerOnAxis = composerBox && dockBox
@@ -37256,7 +37304,7 @@ const paneDock = await page.evaluate(async () => {
   face.style.width = "420px";
   await new Promise(requestAnimationFrame);
   const narrowList = list.getBoundingClientRect();
-  seen.narrowWidth = Math.round(narrowList.width);
+  seen.narrowWidth = Math.round(face.getBoundingClientRect().width);
   seen.composerInside = box ? box.getBoundingClientRect().right <= narrowList.right + 1 : false;
   seen.composerOn = composerForm ? composerForm.getBoundingClientRect().bottom <= innerHeight + 1 : false;
   face.style.flex = "";
@@ -37428,15 +37476,13 @@ const flatTranscript = await page.evaluate(async () => {
   // 400턴이 세우는 노드의 수 — 「동안 작업」 접힘이 도구 카드를 대신해도
   // 이 수는 오르지 않아야 한다(t-2973). 접힌 몸은 펼칠 때 짓는다.
   seen.listNodes = list.querySelectorAll("*").length;
-  // t-16914: a step's mark stands no svg and no use (each is a shadow copy of the
-  // symbol the element count does not see); it is a mask in the sprite's glyph.
-  const marks = [...list.querySelectorAll(".helper-step-icon")];
+  // t-16914: a step's mark stood no svg and no use (each is a shadow copy of the
+  // symbol the element count does not see); since t-22100 it is a dot — one
+  // empty round span, no glyph at all.
+  const marks = [...list.querySelectorAll(".helper-step-dot")];
   seen.markCount = marks.length;
-  seen.markSvgs = list.querySelectorAll(".helper-step-icon svg, .helper-step-icon use").length;
-  seen.marksMasked = marks.length > 0 && marks.every((mark) => {
-    const mask = getComputedStyle(mark, "::before").maskImage;
-    return mask && mask !== "none";
-  });
+  seen.markSvgs = list.querySelectorAll(".helper-step-dot svg, .helper-step-dot use").length;
+  seen.marksMasked = marks.length > 0 && marks.every((mark) => mark.childElementCount === 0 && getComputedStyle(mark).borderRadius === "50%");
 
   // 위계의 실측 — 에이전트의 말은 창의 글꼴에 맨몸으로.
   const prose = list.querySelector(".helper-turn.is-assistant");
@@ -37453,8 +37499,8 @@ const flatTranscript = await page.evaluate(async () => {
   document.body.appendChild(probe);
   seen.inkFromToken = proseStyle.color === getComputedStyle(probe).color;
   probe.remove();
-  // 브리핑도 그 뒤 사람의 말도 같은 왼쪽 상자(확장 2.1.278의 `userMessage`)
-  // — 라벨 없이, 1px 테두리, 이름은 aria-label이 말한다.
+  // 브리핑도 그 뒤 사람의 말도 같은 왼쪽 상자 — 라벨 없이, 테두리 없이 부드러운
+  // 바탕 위에(t-22100), 이름은 aria-label이 말한다.
   // The row is the extension's sticky header; the box with the words is
   // its child (2.1.278 `stickyHeader` > `userMessage`, 09-21).
   const brief = list.querySelector(".helper-turn.is-briefing");
@@ -37469,7 +37515,7 @@ const flatTranscript = await page.evaluate(async () => {
   seen.userQuiet = personStyle.position === briefStyle.position &&
     personBox.backgroundColor === briefBox.backgroundColor &&
     personBox.borderRadius === briefBox.borderRadius &&
-    personBox.borderLeftWidth === "1px" && briefBox.borderLeftWidth === "1px" &&
+    personBox.borderLeftWidth === "0px" && briefBox.borderLeftWidth === "0px" &&
     person.className === brief.className.replace(" is-briefing", "") &&
     !brief.querySelector(".helper-who") && !person.querySelector(".helper-who") &&
     brief.getAttribute("aria-label") === t("worker.briefing", "브리핑") &&
@@ -37667,15 +37713,26 @@ const flatNarrow = await page.evaluate(async () => {
     noSideScroll: list.scrollWidth <= list.clientWidth + 1 &&
       document.documentElement.scrollWidth <= innerWidth,
     // What reaches furthest right, for the day this goes red: the class and
-    // the overshoot of the widest descendant, so the culprit is named.
+    // the overshoot of the widest descendant, so the culprit is named — the
+    // widest of all, and the widest no box between it and the list cuts
+    // (t-22100: a clipped target is no scroll; the one nothing cuts is).
     widest: (() => {
       const edge = list.getBoundingClientRect().right;
+      const cut = (node) => {
+        for (let up = node.parentElement; up && up !== list; up = up.parentElement) {
+          if (getComputedStyle(up).overflowX !== "visible") return true;
+        }
+        return false;
+      };
       let worst = { cls: null, over: 0 };
+      let uncut = { cls: null, over: 0 };
       for (const node of list.querySelectorAll("*")) {
         const over = Math.round(node.getBoundingClientRect().right - edge);
-        if (over > worst.over) worst = { cls: `${node.tagName}.${node.className}`.slice(0, 60), over };
+        const named = { cls: `${node.tagName}.${node.className}`.slice(0, 60), over };
+        if (over > worst.over) worst = named;
+        if (over > uncut.over && !cut(node)) uncut = named;
       }
-      return worst;
+      return { ...worst, uncut };
     })(),
     footOn: foot.getBoundingClientRect().bottom <= innerHeight + 1,
     frame: getComputedStyle(face).overflowY === "hidden" &&
@@ -37712,7 +37769,7 @@ ok(
   JSON.stringify(flatTranscript),
 );
 ok(
-  "a step's mark is one span with its glyph as a mask — no svg and no use under any row's line, so a page of hundreds does not stand a shadow copy of the sprite per row",
+  "a step's dot is one empty round span — no svg, no use and no glyph under any row's line, so a page of hundreds stands no shadow copy of the sprite per row",
   flatTranscript.markCount > 0 && flatTranscript.markSvgs === 0 && flatTranscript.marksMasked,
   JSON.stringify({ marks: flatTranscript.markCount, svgs: flatTranscript.markSvgs, masked: flatTranscript.marksMasked }),
 );
@@ -50078,7 +50135,8 @@ const treeMenu = await page.evaluate(async () => {
       reveal,
       ...tail,
     ],
-    wantDir: [...common, word("tree.menu.openInTerminal", "터미널에서 열기"), reveal, ...tail],
+    // A folder can also become the tree's root (t-24298).
+    wantDir: [...common, word("tree.menu.openInTerminal", "터미널에서 열기"), reveal, word("tree.menu.pinRoot", "트리 루트로 고정"), ...tail],
     wantDanger: [word("tree.menu.delete", "삭제")],
   };
 });
@@ -55651,7 +55709,8 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       const composer = chat?.querySelector(".worker-composer");
       const box = composer?.querySelector(".worker-composer-box");
       seen.placeholder = box?.placeholder;
-      seen.wantPlaceholder = t("worker.sayTo", "{{name}}에게 보내기…", { name: agentName("claude") });
+      // A conversation's own box says one sentence, working or resting (t-22100).
+      seen.wantPlaceholder = t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다");
       seen.noDoorOnOwnPane = composer?.querySelector(".worker-composer-door") === null;
       // The tool row, left to right: + · agent chip · mode chip … / · send.
       const tools = composer?.querySelector(".worker-composer-tools");
@@ -56016,7 +56075,11 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       seen.cardTool = card?.querySelector(".board-approve-title")?.textContent ?? "";
       seen.wantCardTool = t("board.approve.title", "{{tool}} 허용할까요?", { tool: "Edit" });
       seen.cardDiff = card?.querySelectorAll(".helper-tool-diff .diff-line").length ?? 0;
-      seen.cardBeforeComposer = card?.nextElementSibling?.classList.contains("worker-composer") === true;
+      // The card stands over the composer — over the conversation's state, which stands joined to the
+      // composer's top when it has something to say (t-22100).
+      const underCard = card?.nextElementSibling;
+      seen.cardBeforeComposer = underCard?.classList.contains("worker-composer") === true ||
+        (underCard?.classList.contains("chat-stack") === true && underCard.nextElementSibling?.classList.contains("worker-composer") === true);
       seen.cardActs = [...(card?.querySelectorAll(".board-approve-act") ?? [])].map((act) => act.className.replace("board-approve-act ", "")).join(",");
       // The card stands in the dock with the composer, as the extension's
       // does in its `inputContainer` — no accent rail of its own.
@@ -56069,6 +56132,19 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       await settle();
       const quietChat = document.querySelector(`.pane-slot[data-term="${quiet}"] .pane-chat`);
       seen.noticeSaid = Boolean(quietChat?.querySelector('.pane-chat-notice[data-says="worker.noPaneTranscript"]'));
+      // A notice is a line of the conversation above its body, as wide as the
+      // list — never a cell of the body's rail | list grid, where it fell into
+      // the rail's column and stood one word a line down the composer's left
+      // (1.1.50, the person's photo).
+      const noticeAboveBody = (chat, key) => {
+        const notice = chat?.querySelector(`.pane-chat-notice[data-says="${key}"]`);
+        const body = chat?.querySelector(":scope > .helper-body");
+        if (!notice || !body || body.contains(notice)) return false;
+        const line = notice.getBoundingClientRect();
+        const list = body.querySelector(":scope > .helper-turns")?.getBoundingClientRect();
+        return Boolean(list) && line.bottom <= body.getBoundingClientRect().top + 0.5 && line.width >= list.width / 2;
+      };
+      seen.noticeAbove = noticeAboveBody(quietChat, "worker.noPaneTranscript");
       // A long transcript is read to its end the moment the view opens — the
       // backend says the file goes on (`more`) and the page reads on at once,
       // not one chunk a beat — and the head counts THIS turn from the state
@@ -56102,6 +56178,19 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       seen.openedAtTail = firstAfter === null &&
         longChat?.querySelector('.pane-chat-notice[data-says="worker.historyFolded"]')?.textContent ===
           t("worker.historyFolded", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다.");
+      seen.foldedAbove = noticeAboveBody(longChat, "worker.historyFolded");
+      // Two notices at once, as in the person's photo (a hand-over waiting
+      // beside the folded history): both stand above the body, one under the
+      // other, each as wide as the list.
+      noticeOnPaneChat(paneChats.get(long), "worker.handoverPending", true,
+        t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간 세션(선)으로 이어집니다."));
+      const pairBox = (key) => longChat?.querySelector(`.pane-chat-notice[data-says="${key}"]`)?.getBoundingClientRect();
+      const folded = pairBox("worker.historyFolded");
+      const pending = pairBox("worker.handoverPending");
+      seen.pairAbove = noticeAboveBody(longChat, "worker.historyFolded") &&
+        noticeAboveBody(longChat, "worker.handoverPending") &&
+        Boolean(folded && pending) && (pending.top >= folded.bottom - 0.5 || folded.top >= pending.bottom - 0.5);
+      noticeOnPaneChat(paneChats.get(long), "worker.handoverPending", false);
       seen.turnClock = paneChats.get(long)?.run.startedAt === hookStamps.get(long) &&
         Date.now() - paneChats.get(long).run.startedAt < bornAgo / 2;
       // The permission mode's reach colours the send and the spinner's mark
@@ -56157,6 +56246,11 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
         seen.noticeSaid && seen.caughtUp && seen.openedAtTail && seen.turnClock && seen.hiddenOnPlain && seen.forgotten &&
         seen.toggleMs < 50,
       JSON.stringify(seen),
+    );
+    ok(
+      "a conversation's notice (no transcript named, history folded, two at once) is a line above the conversation's body as wide as its list, never a cell of the body's rail | list grid",
+      seen.noticeAbove && seen.foldedAbove && seen.pairAbove,
+      JSON.stringify({ noticeAbove: seen.noticeAbove, foldedAbove: seen.foldedAbove, pairAbove: seen.pairAbove }),
     );
   } finally {
     await page.close();
@@ -56466,7 +56560,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       seen.wantHead = agentName("codex");
       seen.composer = Boolean(face?.querySelector(".worker-composer"));
       seen.placeholder = face?.querySelector(".worker-composer-box")?.placeholder ?? "";
-      seen.wantPlaceholder = t("worker.sayTo", "{{name}}에게 보내기…", { name: agentName("codex") });
+      seen.wantPlaceholder = t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다");
       seen.noDoor = !face?.querySelector(".worker-composer-door");
       seen.chipModel = face?.querySelector(".worker-composer-model-words")?.textContent ?? "";
       seen.idleWords = face?.querySelector(".worker-state")?.textContent ?? "";
@@ -56707,9 +56801,10 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
       const box = composer?.querySelector(".worker-composer-box");
       const items = () => [...(composer?.querySelectorAll(".composer-queue-item") ?? [])]
         .map((item) => item.querySelector(".composer-queue-words")?.textContent);
-      // 실행 중에는 상자가 대기열이라고 말한다.
+      // 실행 중에도 쉬는 동안에도 상자는 한 문장 — 일하는 중이면 대기열에 든다고 —
+      // 을 말한다(t-22100).
       seen.workingPlaceholder = box?.placeholder;
-      seen.wantWorkingPlaceholder = t("composer.queue.placeholder", "다음 메시지 대기열에 추가…");
+      seen.wantWorkingPlaceholder = t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다");
       const before = calls.length;
       type(box, "첫째");
       await settle();
@@ -56753,7 +56848,7 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
       seen.straightOut = JSON.stringify(calls.slice(straight));
       seen.wantStraightOut = JSON.stringify([["paste", term, "지금"], ["key", term, "Enter"]]);
       seen.idlePlaceholder = box?.placeholder;
-      seen.wantIdlePlaceholder = t("worker.sayTo", "{{name}}에게 보내기…", { name: agentName("claude") });
+      seen.wantIdlePlaceholder = t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다");
       // 훅만으로 입력줄이 옷을 갈아입는다 — 제출 없이도 중지↔보내기, 자리말도
       // 제 것으로. 상태가 움직인 뒤에 그려야 옛 낱말을 입지 않는다.
       const send = () => composer?.querySelector(".worker-composer-send");
@@ -56780,6 +56875,9 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
       window.__ANSWER__.wire_log = (args) => ({ ...log, turns: log.turns.slice(args.after), next: log.turns.length });
       window.__ANSWER__.wire_send = (args) => { calls.push(["wire", args.id, args.text]); return null; };
       window.__ANSWER__.wire_stop = () => null;
+      for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "codex"); tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
       const tabId = await openWirePage("codex", "/tmp/zerocode-window-test");
       // 선의 상태는 첫 `wire_log` 읽기가 실어 온다(`holdWireState`) — 시계가
       // 아니라 그 읽기를 기다린다(부하 아래 120 ms가 모자라 보내기가 먼저 나갔다).
@@ -57013,6 +57111,10 @@ suite("context-meter", async ({ browser, origin, ok }) => {
       window.__ANSWER__.wire_log = (args) => ({ ...log, turns: log.turns.slice(args.after), next: log.turns.length });
       window.__ANSWER__.wire_send = (args) => { calls.push(["wire", args.id, args.text]); return null; };
       window.__ANSWER__.wire_stop = () => null;
+      for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "codex"); tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
+      seen.agentsReady = installedAgents().some((row) => row.id === "codex");
       const tabId = await openWirePage("codex", "/tmp/zerocode-window-test");
       await window.__PAINTED__();
       await pollHelperPages();
@@ -57314,6 +57416,9 @@ suite("plan-card", async ({ browser, origin, ok }) => {
       window.__ANSWER__.wire_log = (args) => ({ ...log, turns: log.turns.slice(args.after), next: log.turns.length });
       window.__ANSWER__.wire_answer = (args) => { calls.push(["answer", args]); return null; };
       window.__ANSWER__.wire_stop = () => null;
+      for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "claude"); tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
       await openWirePage("claude", "/tmp/zerocode-window-test");
       await pollHelperPages();
       await window.__PAINTED__();
@@ -57487,6 +57592,9 @@ suite("wire-live-stream", async ({ browser, origin, ok }) => {
       window.__ANSWER__.wire_start = (args) => ({ id: 21, agent: args.agent, protocol: "claude-stream", version: "2.1.278", model: null, session: null });
       window.__ANSWER__.wire_log = (args) => { const held = log(); return { ...held, turns: held.turns.slice(args.after), next: held.turns.length }; };
       window.__ANSWER__.wire_stop = () => null;
+      for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "claude"); tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
       await openWirePage("claude", "/tmp/zerocode-window-test");
       await pollHelperPages();
       await window.__PAINTED__();

@@ -214,10 +214,12 @@ pub fn ledger_roots(cwd: &Path) -> [PathBuf; 2] {
 /// refuse the other nine hundred.
 #[must_use]
 pub fn read_rows(path: &Path) -> Vec<Value> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect()
+    let rows = zerocode_core::jev::journal::read(path).unwrap_or_default();
+    if path.file_name().is_some_and(|name| name == zerocode_core::jev::PROJECT_RULES.ledger) {
+        zerocode_core::jev::project_rules::observed_rows(rows)
+    } else {
+        rows
+    }
 }
 
 /// Whether `seat`'s ledger says it has been raised to acting: its last

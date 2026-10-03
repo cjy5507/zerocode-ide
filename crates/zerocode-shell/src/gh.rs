@@ -130,12 +130,17 @@ pub enum GhError {
     Refused(String),
     /// `gh` answered something that is not the JSON its API returns.
     Unreadable(String),
+    Fetch(zerocode_core::scm_observer::Failure),
+    Budget,
 }
 
 impl From<CliError> for GhError {
     fn from(error: CliError) -> Self {
         match error {
             CliError::Missing => Self::Missing,
+            CliError::TimedOut => {
+                Self::Fetch(zerocode_core::scm_observer::FailureKind::Timeout.into())
+            }
             CliError::Refused(message) => Self::Refused(message),
         }
     }
@@ -148,15 +153,27 @@ impl GhError {
     pub fn reason(&self) -> &'static str {
         match self {
             Self::Missing => "missing",
-            Self::Refused(_) => "refused",
+            Self::Refused(_) | Self::Fetch(_) | Self::Budget => "refused",
             Self::Unreadable(_) => "unreadable",
         }
     }
 
     pub fn detail(&self) -> Option<&str> {
         match self {
-            Self::Missing => None,
+            Self::Missing | Self::Fetch(_) => None,
+            Self::Budget => Some("SCM tick call budget exhausted"),
             Self::Refused(text) | Self::Unreadable(text) => Some(text.as_str()),
+        }
+    }
+
+    pub(crate) fn fetch_failure(&self) -> Option<zerocode_core::scm_observer::Failure> {
+        use zerocode_core::scm_observer::FailureKind;
+        match self {
+            Self::Missing => Some(FailureKind::MissingTool.into()),
+            Self::Refused(_) => Some(FailureKind::Refused.into()),
+            Self::Unreadable(_) => Some(FailureKind::InvalidResponse.into()),
+            Self::Fetch(failure) => Some(*failure),
+            Self::Budget => None,
         }
     }
 }

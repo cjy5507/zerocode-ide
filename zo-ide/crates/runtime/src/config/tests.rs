@@ -3,11 +3,12 @@ use super::parsers::{
 };
 use super::{
     is_trusted_uncommitted_zo_file_with_git, merge_allow_always_rules,
-    persist_allow_always_rules, resolve_trusted_git_program_from,
-    trusted_uncommitted_zo_file_snapshot_with_git, ConfigLoader, ConfigSource, HookMatcher,
+    persist_allow_always_rules, ConfigLoader, ConfigSource, HookMatcher,
     HookRule, LspServerConfig, McpServerConfig, McpTransport, ResolvedPermissionMode,
     RuntimeHookConfig, RuntimePluginConfig, ZO_SETTINGS_SCHEMA_NAME,
 };
+#[cfg(unix)]
+use super::{resolve_trusted_git_program_from, trusted_uncommitted_zo_file_snapshot_with_git};
 use crate::json::JsonValue;
 use crate::sandbox::FilesystemIsolationMode;
 use std::fs;

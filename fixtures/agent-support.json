@@ -1,0 +1,4 @@
+[
+  {"id":"codex","support":{"execution":true,"structured_observation":true,"additional_context":true,"direct_control":true}},
+  {"id":"zo","support":{"execution":true,"structured_observation":true,"additional_context":false,"direct_control":true}}
+]

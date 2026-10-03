@@ -2297,6 +2297,22 @@
   --git-decoration-untracked: #73c991;
   --git-decoration-copied: #73c991;
   --git-decoration-ignored: #6e6e6e;
+  /* A merge conflict in the file tree's roll-up (t-24298) — the decoration
+   * every git client gives an unmerged file (VS Code's
+   * conflictingResourceForeground), distinct from a deletion's red so a
+   * folder holding both says which one outranks. */
+  --git-decoration-conflict: #e4676b;
+
+  /* What an agent is touching, worn by the file tree (t-24298): reading,
+   * writing, committing — the three kinds the claude-code-filetree mod draws
+   * (purple, orange, green), on this window's surfaces. Each is 9:1 or better
+   * on `--surface-deck`, so a lit name is still a name you can read. */
+  --tree-touch-read: #c4a5ff;
+  --tree-touch-write: #f2a65a;
+  --tree-touch-commit: #6fdc9c;
+  /* How long the mark takes to leave once its hold is over — slower than a
+   * hover, so the eye that arrives late still sees where it was. */
+  --tree-touch-fade: 600ms;
 
   /* A search hit, and the one the cursor is on. Two colours because a list of
    * matches with no current member is a list you cannot walk (:24144~24145 —
@@ -2367,6 +2383,12 @@
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 4%, transparent);
   --chat-code-bg: color-mix(in srgb, var(--ink-chalk) 8%, transparent);
+  /* The approved conversation (t-22100): a step's argument in a soft link
+   * ink — the link's colour leaning to the words', so a column of addresses,
+   * queries and commands reads as the machine's without shouting — and the
+   * turn rail's resting tick, a third of the quiet ink. */
+  --chat-arg-ink: color-mix(in srgb, var(--chat-link) 62%, var(--ink-chalk));
+  --chat-rail-tick: color-mix(in srgb, var(--ink-mist) 34%, transparent);
   /* The conversation's grammar is Claude Code's (2026-09-15): a 10px bubble,
    * 13px prose at 1.5, an 8px composer — and one accent per agent, worn by the
    * page through `data-agent` (`--chat-accent` is what the rules read). */
@@ -2379,7 +2401,6 @@
   --chat-bubble-pad-y: 4px;
   --chat-bubble-gap: 4px;
   --chat-radius-composer: 8px;
-  --chat-bubble-max: 100%;
   --chat-prose-size: var(--text-sm);
   --chat-prose-leading: 1.5;
   --chat-dot: 7px;
@@ -2426,8 +2447,7 @@
    * dock's own height, and fades its last 150px under the dock. The
    * person's words are a sticky header 14px above the box and 12px below,
    * the last 12px fading to the ground. The spinner row (`spinnerRow`) is
-   * 1.85em tall; its mark is a 1.5em mono glyph in a 1.5em column, which
-   * puts it where the rail's dots stand; it fades in over 300ms. An
+   * at least 1.85em tall and fades in over 300ms. An
    * answer's action row is 16px tall with a 20px copy padded 2px. The
    * composer's box pads 10×14 and grows to 200px; its footer pads 5px and
    * gaps 6px. Meta lines (`metaMessage`) pad 8px, sit 4px off their
@@ -2454,18 +2474,31 @@
   --chat-sticky-pad-bottom: 12px;
   --chat-sticky-fade: 12px;
   --chat-status-h: 1.85em;
-  --chat-status-mark-w: 1.5em;
-  --chat-status-mark-size: 1.5em;
   --chat-status-in: 300ms;
-  /* A step is one line (t-15682): a 30px row whose mark is a 22px box with
-   * the glyph 4px inside it, its opened body indented to stand under the
-   * words, and the foot line's spinner ring 12px across, 2px thick. */
+  /* A step is one line (t-15682): a 30px row whose state dot stands centred in
+   * the 22px column its kind's mark stood in (t-22100), its opened body
+   * indented to stand under the words, and the foot line's spinner ring 12px
+   * across, 2px thick. */
   --chat-step-h: 30px;
   --chat-step-icon: 22px;
-  --chat-step-icon-pad: 4px;
   --chat-step-body-indent: 38px;
   --chat-status-ring: 12px;
   --chat-status-ring-stroke: 2px;
+  /* The approved conversation (t-22100, read off its mockup): the flat panels
+   * — the person's words, a fence, the live line — round at 10px and the
+   * person's stand within 92% of the list; the turn rail is a 26px column of
+   * 2px ticks 7px apart, 9px wide and the person's 13px; the head's running
+   * dot is 6px; a shell step's first lines stand at a 1.6 leading. */
+  --chat-panel-radius: 10px;
+  --chat-said-max: 92%;
+  --chat-turn-rail-w: 26px;
+  --chat-turn-tick-w: 9px;
+  --chat-turn-tick-long: 13px;
+  --chat-turn-tick-h: 2px;
+  --chat-turn-tick-gap: 7px;
+  --chat-run-dot: 6px;
+  --chat-out-leading: 1.6;
+  --chat-stack-box: 12px;
   /* The strip under a helper's brief that counts what it did (t-18702): its
    * bar is 4px tall and never narrower than 80px, so a helper with two kinds
    * of step still draws a bar whose shares can be read. */
@@ -2996,6 +3029,14 @@
   --git-decoration-untracked: #007100;
   --git-decoration-copied: #007acc;
   --git-decoration-ignored: #8c8c8c;
+  /* Not the deletion's #ad0707 the light ramp borrows from VS Code: the
+   * roll-up ranks the two apart, so they must read apart (7.2:1 on white). */
+  --git-decoration-conflict: #9b1d8a;
+  /* The same three kinds on white: 5.7:1 or better on `--surface-deck` and
+   * 5.2:1 on `--surface-well`. */
+  --tree-touch-read: #6b3fc0;
+  --tree-touch-write: #a3470a;
+  --tree-touch-commit: #18753c;
   --annotation-highlight: #f59e0b;
   --tab-group-split-divider: #868690;
   --tab-group-split-divider-strong: #71717a;
@@ -3030,6 +3071,8 @@
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 3%, transparent);
   --chat-code-bg: color-mix(in srgb, var(--ink-chalk) 6%, transparent);
+  --chat-arg-ink: color-mix(in srgb, var(--chat-link) 78%, var(--ink-chalk));
+  --chat-rail-tick: color-mix(in srgb, var(--ink-mist) 30%, transparent);
   --chat-accent: var(--ai-accent);
   --agent-accent-claude: #c8643a;
   --agent-send-claude: #c6613f;

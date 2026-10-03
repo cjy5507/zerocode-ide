@@ -915,6 +915,7 @@ fn an_unreadable_spend_book_never_becomes_an_empty_budget() {
 }
 
 /// The name the test harness knows the lock holder by.
+#[cfg(unix)]
 const LOCK_HOLDER_TEST: &str = "hold_a_spend_book_lock_until_killed";
 /// Where the holder is told which book to lock, and where to say it holds it.
 const HOLD_BOOK_ENV: &str = "ZO_TEST_CHALLENGER_HOLD_BOOK";
@@ -1560,6 +1561,16 @@ fn the_arms_samples_teach_the_router_only_while_the_seat_stands_behind_them() {
     let (acting, others) = read();
     let moved = acting.expect("a person's on: the samples teach");
     assert!(moved > 0, "the challenger won its window: {moved}");
+
+    for withheld in [DoorWords { enabled: false, ..DoorWords::OPEN },
+        DoorWords { consented: false, ..DoorWords::OPEN }] {
+        rig.write_settings(Some(JevMode::On), withheld);
+        let (held, unchanged) = read();
+        assert_eq!(held, None, "explicit on cannot override withdrawn global permission: {withheld:?}");
+        assert_eq!(unchanged, others);
+        rig.write_settings(Some(JevMode::On), DoorWords::OPEN);
+        assert_eq!(read().0, Some(moved), "authorization restores the same historical evidence");
+    }
 
     rig.write_settings(Some(JevMode::Off), DoorWords::OPEN);
     let (off, off_others) = read();

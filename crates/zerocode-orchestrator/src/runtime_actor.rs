@@ -630,6 +630,12 @@ pub enum RuntimeRequest {
         receipt: Box<zerocode_core::orchestration::AccountSwitchReceipt>,
         now_ms: i64,
     },
+    /// The window's gate judged an attempt past a line, and the ledger writes
+    /// its receipt once per key (t-26583).
+    GateJudged {
+        receipt: Box<zerocode_core::orchestration::GateReceipt>,
+        now_ms: i64,
+    },
     /// A pane the plan asked for never opened: the worker row it minted
     /// goes back, durably — the third host fact, and the rollback half of
     /// the effect round trip.
@@ -1057,6 +1063,11 @@ impl std::fmt::Debug for RuntimeRequest {
                 .finish(),
             Self::AccountSwitched { receipt, now_ms } => formatter
                 .debug_struct("RuntimeRequest::AccountSwitched")
+                .field("key_bytes", &receipt.key.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::GateJudged { receipt, now_ms } => formatter
+                .debug_struct("RuntimeRequest::GateJudged")
                 .field("key_bytes", &receipt.key.len())
                 .field("now_ms", now_ms)
                 .finish(),
@@ -2468,6 +2479,22 @@ impl RuntimeActor {
         }
     }
 
+    /// The receipt for one gate judgment (t-26583). Answers whether a row was
+    /// written — the same key again writes none — and the revision.
+    pub fn gate_judged(
+        &self,
+        receipt: zerocode_core::orchestration::GateReceipt,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::GateJudged {
+            receipt: Box::new(receipt),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// A pane the plan asked for never opened; the worker row goes back.
     pub fn seat_never_opened(
         &self,
@@ -3307,6 +3334,7 @@ impl RuntimeState {
             RuntimeRequest::AccountSwitched { receipt, now_ms } => {
                 self.account_switched(&receipt, now_ms)
             }
+            RuntimeRequest::GateJudged { receipt, now_ms } => self.gate_judged(&receipt, now_ms),
             RuntimeRequest::SeatNeverOpened { worker, now_ms } => {
                 self.seat_never_opened(&worker, now_ms)
             }
@@ -4209,6 +4237,34 @@ impl RuntimeState {
             .account_switched(receipt, now_ms)
             .map_err(|_| RuntimeError::AuthorityRejected)?;
         if written.is_empty() {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn gate_judged(
+        &mut self,
+        receipt: &zerocode_core::orchestration::GateReceipt,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0 || receipt.key.is_empty() || receipt.key.len() > MAX_NAME {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let written = self
+            .ledger
+            .gate_judged(receipt, now_ms)
+            .map_err(|_| RuntimeError::AuthorityRejected)?;
+        if written.is_none() {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,
@@ -9285,6 +9341,7 @@ mod tests {
                 None,
                 Some(r#"{"note":"original","ok":false}"#.into()),
                 zerocode_core::orchestration::ResultAuthor::Ledger,
+                2,
             )
             .expect("prior result");
         let other = ledger
@@ -9879,6 +9936,65 @@ mod tests {
             .expect("the stored worker has its conversation");
         assert_eq!(carried, &session);
         reopened.shutdown().expect("join reopened actor");
+    }
+
+    #[test]
+    fn an_attempt_session_history_survives_authority_reopen_without_completing_legacy_history() {
+        let fixture = Fixture::new();
+        let mut old = serde_json::to_value(a_seated_legacy()).expect("the old projection");
+        for dispatch in old["dispatches"].as_array_mut().expect("dispatch rows") {
+            dispatch
+                .as_object_mut()
+                .expect("a row")
+                .remove("session_history");
+        }
+        let legacy = serde_json::from_value(old).expect("the legacy shape reads");
+        let first = ProviderSession {
+            key: zerocode_core::provider_session::SessionKey::SessionId,
+            id: "conversation-first".into(),
+            transcript_path: None,
+        };
+        let second = ProviderSession {
+            key: zerocode_core::provider_session::SessionKey::SessionId,
+            id: "conversation-second".into(),
+            transcript_path: Some("/transcripts/second.jsonl".into()),
+        };
+        let actor = start_with(
+            &fixture,
+            cutover(Some(legacy), 10),
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        assert!(
+            actor
+                .worker_session_reported(7, first.clone(), 20)
+                .expect("first session")
+                .0
+        );
+        assert!(
+            actor
+                .worker_session_reported(7, second.clone(), 30)
+                .expect("second session")
+                .0
+        );
+        actor.shutdown().expect("the first actor closes");
+        let reopened = start_with(
+            &fixture,
+            RuntimeBoot::Reopen,
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        let image = reopened.view().expect("the actor reopens");
+        let projected = serde_json::to_value(image.projection()).expect("the durable projection");
+        assert_eq!(
+            projected["dispatches"][0]["session_history"]["sessions"],
+            serde_json::json!([first, second])
+        );
+        assert_eq!(
+            projected["dispatches"][0]["session_history"]["complete"],
+            false
+        );
+        reopened.shutdown().expect("the reopened actor closes");
     }
 
     /// Stage one and stage two meet in this exact durable shape: an open

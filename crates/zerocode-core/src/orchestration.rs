@@ -35,8 +35,12 @@
 //! that read the clock could not be tested at a chosen instant, and a ledger
 //! that opened a file could not be tested at all.
 
+mod completion;
 pub mod coordinator_handover;
+mod session_history;
 pub mod task_cost;
+
+pub use session_history::SessionHistory;
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -496,6 +500,16 @@ pub enum MessageKind {
     /// account ids, percentages and the reason; never a credential, never
     /// an email. The road that writes it is [`Ledger::account_switched`].
     AccountSwitched,
+    /// Nobody said this either: the LEDGER's receipt that the window's gate
+    /// (t-26583, [`crate::continue_gate`]) judged one attempt past a line — it
+    /// is repeating itself, a budget a person set is nearly spent, or its
+    /// worker was stopped because the next calls would have spent it. Written
+    /// only from the window's own gate road, once per attempt and level,
+    /// never from a peer's `send`: a body wearing this kind from a worker
+    /// would be a judgment nobody made. The row carries ids, the reasons with
+    /// their numbers, and what the window did; never a word a worker said.
+    /// The road that writes it is [`Ledger::gate_judged`].
+    GateJudged,
 }
 
 impl MessageKind {
@@ -519,6 +533,7 @@ impl MessageKind {
             Self::ClassifierDeclined => "classifier_declined",
             Self::ModelDeviated => "model_deviated",
             Self::AccountSwitched => "account_switched",
+            Self::GateJudged => "gate_judged",
         }
     }
 
@@ -544,6 +559,7 @@ impl MessageKind {
                 | Self::ClassifierDeclined
                 | Self::ModelDeviated
                 | Self::AccountSwitched
+                | Self::GateJudged
         )
     }
 }
@@ -571,6 +587,7 @@ impl std::str::FromStr for MessageKind {
             "classifier_declined" => Self::ClassifierDeclined,
             "model_deviated" => Self::ModelDeviated,
             "account_switched" => Self::AccountSwitched,
+            "gate_judged" => Self::GateJudged,
             _ => return Err(format!("unknown message type: {word}")),
         })
     }
@@ -745,6 +762,8 @@ pub enum ResultAuthor {
         attempt: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completed_ms: Option<i64>,
     },
     /// The ledger's own note — a stop, an abandon, a death it witnessed.
     Ledger,
@@ -1056,6 +1075,8 @@ pub struct Dispatch {
     /// coordinator's review is bound to it ([`Run::review_of`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_history: Option<SessionHistory>,
 }
 
 impl Dispatch {
@@ -7784,6 +7805,7 @@ impl Ledger {
         status: Option<TaskStatus>,
         result: Option<String>,
         author: ResultAuthor,
+        now_ms: i64,
     ) -> Result<TaskStatus, String> {
         let run = self.run_mut(run_id).ok_or_else(|| unknown_run(run_id))?;
         let at = run
@@ -7822,6 +7844,9 @@ impl Ledger {
                 gate.id
             ));
         }
+        let previous_review = run.review_of(&run.tasks[at]);
+        let previous_completed = run.completion_ms(&run.tasks[at]);
+        let wrote_result = result.is_some();
         if let Some(result) = result {
             run.tasks[at].result = result.into();
             run.tasks[at].result_author = Some(author);
@@ -7834,6 +7859,13 @@ impl Ledger {
                 run.tasks[at].failures = 0;
             }
         }
+        run.stamp_completion(
+            at,
+            previous_review,
+            previous_completed,
+            wrote_result,
+            now_ms,
+        );
         let now = run.tasks[at].status;
         Self::refresh_ready(run);
         Ok(now)
@@ -8147,6 +8179,7 @@ impl Ledger {
             retry_of: None,
             remote: None,
             source: None,
+            session_history: Some(SessionHistory::from_start()),
         });
         let at = run
             .workers
@@ -8323,6 +8356,7 @@ impl Ledger {
                 retry_of: tuning.retry_of,
                 remote: None,
                 source: None,
+                session_history: Some(SessionHistory::from_start()),
             });
             // The set half of the compare-and-set above. Unconditional here is
             // right BECAUSE the compare already happened, under this same
@@ -9525,6 +9559,16 @@ impl Ledger {
                         ));
                     }
                     (None, _) => named(&workers, "dispatch's worker", &dispatch.worker)?,
+                }
+                if dispatch
+                    .session_history
+                    .as_ref()
+                    .is_some_and(|history| !history.valid())
+                {
+                    return Err(format!(
+                        "run {} holds dispatch {} with invalid session history",
+                        run.id, dispatch.id
+                    ));
                 }
             }
             /* Sleeping and orphaned are very specific promises, not generic
@@ -12138,36 +12182,6 @@ impl Ledger {
         false
     }
 
-    /// The window reports the provider conversation in a worker's pane.
-    ///
-    /// Unlike [`Self::worker_seated`], this fact is replaceable: a person can
-    /// quit one agent in a pane and start another, so a later hook may name a
-    /// different conversation. The whole [`ProviderSession`] is compared — a
-    /// later hook can add `transcript_path` to the same id, and that is durable
-    /// information rather than a duplicate report. Only the row that may still
-    /// occupy the pane can take it: a sleeping historical row may share the
-    /// seat name with its current replacement.
-    pub fn worker_session_reported(
-        &mut self,
-        seat: (&str, &str),
-        session: ProviderSession,
-    ) -> bool {
-        let (team, pane) = seat;
-        for run in &mut self.runs {
-            for worker in &mut run.workers {
-                if worker.team == team
-                    && worker.pane == pane
-                    && worker.state.may_occupy_pane()
-                    && worker.session.as_ref() != Some(&session)
-                {
-                    worker.session = Some(session);
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     /// Move a kept worker from the seat it can no longer be reached at to the
     /// pane that has just been opened for it.
     ///
@@ -12728,6 +12742,7 @@ impl Ledger {
                 exported_seq: 0,
             }),
             source: None,
+            session_history: None,
         });
         if let Some(one) = run.tasks.iter_mut().find(|task| task.id == task_id) {
             one.status = TaskStatus::Dispatched;
@@ -13593,6 +13608,55 @@ impl Ledger {
             }
         }
         Ok(written)
+    }
+
+    /// The receipt for one gate judgment (t-26583), in the ledger's own voice,
+    /// to the run that holds the attempt — once per `key`, however many times
+    /// the window asks. Answers the row's id, or `None` when the attempt is in
+    /// no run of this ledger or the row already stands.
+    pub fn gate_judged(
+        &mut self,
+        receipt: &GateReceipt,
+        now_ms: i64,
+    ) -> Result<Option<String>, String> {
+        if receipt.key.trim().is_empty() {
+            return Err("a gate receipt needs a key".to_string());
+        }
+        let Some((run_id, task)) = self.runs.iter().find_map(|run| {
+            let attempt = run.dispatch(&receipt.dispatch)?;
+            (attempt.worker == receipt.worker).then(|| (run.id.clone(), attempt.task.clone()))
+        }) else {
+            return Ok(None);
+        };
+        let stands = self.run(&run_id).is_some_and(|run| {
+            run.messages.iter().any(|row| {
+                row.kind == MessageKind::GateJudged
+                    && serde_json::from_str::<serde_json::Value>(row.body.as_str())
+                        .ok()
+                        .and_then(|body| body["key"].as_str().map(str::to_string))
+                        .as_deref()
+                        == Some(receipt.key.as_str())
+            })
+        });
+        if stands {
+            return Ok(None);
+        }
+        let Some(to) = self.run(&run_id).map(Run::address) else {
+            return Ok(None);
+        };
+        let draft = Draft {
+            from: LEDGER_ITSELF.to_string(),
+            to,
+            kind: MessageKind::GateJudged,
+            body: receipt.body(&task, now_ms).to_string().into(),
+            subject: Text::default(),
+            priority: Priority::Normal,
+            payload: Text::default(),
+            thread: None,
+            task: Some(task),
+            dispatch: Some(receipt.dispatch.clone()),
+        };
+        self.post(&run_id, draft, now_ms).map(Some)
     }
 
     /// A sleeping worker cannot be seated again, and this is the end of it.
@@ -14984,6 +15048,68 @@ impl AccountSwitchReceipt {
             }
         }
         body
+    }
+}
+
+/// What the window's gate judged about one attempt (t-26583), for the receipt
+/// row: ids, words and numbers; nothing a worker said.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct GateReceipt {
+    /// The window's idempotency key — one attempt, one level: the same
+    /// judgment told twice writes one row.
+    pub key: String,
+    pub worker: String,
+    pub dispatch: String,
+    /// `pause` or `stop`: the levels a coordinator is told.
+    pub verdict: crate::continue_gate::Verdict,
+    /// What the window did about it.
+    pub acted: crate::continue_gate::Acted,
+    pub reasons: Vec<crate::continue_gate::Reason>,
+    pub metrics: crate::continue_gate::Metrics,
+    /// The restore point the window saved before it acted, when it saved one.
+    pub snapshot: Option<String>,
+}
+
+impl GateReceipt {
+    fn body(&self, task: &str, now_ms: i64) -> serde_json::Value {
+        serde_json::json!({
+            "key": self.key,
+            "workerId": self.worker,
+            "dispatchId": self.dispatch,
+            "taskId": task,
+            "verdict": self.verdict,
+            "acted": self.acted,
+            "reasons": self.reasons,
+            "metrics": self.metrics,
+            "snapshot": self.snapshot,
+            "gateAtMs": now_ms,
+            "next": self.next(),
+        })
+    }
+
+    /// What the coordinator reading the row can do about it.
+    fn next(&self) -> &'static str {
+        use crate::continue_gate::{Acted, Verdict};
+        match (self.verdict, self.acted) {
+            (Verdict::Stop, Acted::Stopped) => {
+                "the window ended this worker after saving its tree (`snapshot`) and put a \
+                 decision gate in front of the task; answer the gate to go on, or raise the \
+                 budget in the window's settings"
+            }
+            (Verdict::Stop, Acted::StopFailed) => {
+                "the window tried to end this worker and could not; end it yourself with \
+                 `worker-stop`"
+            }
+            (Verdict::Stop, Acted::Told) => {
+                "the next calls of this worker would spend a budget a person set; the gate is \
+                 set to tell and not to end work, so end it yourself with `worker-stop`, or \
+                 raise the budget"
+            }
+            _ => {
+                "this worker is repeating itself, or a budget a person set is nearly spent; \
+                 read it (`worker-read`, `worker-transcript`) and steer it, or end it"
+            }
+        }
     }
 }
 
@@ -20179,11 +20305,11 @@ fn plan_inner(
             let now = match closure {
                 Some(closure) => {
                     if let Some(result) = result {
-                        ledger.update_task(&run_id, task_id, None, Some(result), author)?;
+                        ledger.update_task(&run_id, task_id, None, Some(result), author, now_ms)?;
                     }
                     ledger.close_task(&run_id, task_id, closure)?
                 }
-                None => ledger.update_task(&run_id, task_id, status, result, author)?,
+                None => ledger.update_task(&run_id, task_id, status, result, author, now_ms)?,
             };
             said(serde_json::json!({
                 "taskId": task_id,
@@ -22644,6 +22770,7 @@ fn correction_author(
         generation: Some(held.generation),
         attempt: newest_id.map(str::to_string),
         source: observed.source.map(|named| named.trim().to_string()),
+        completed_ms: None,
     })
 }
 
@@ -23314,6 +23441,8 @@ pub struct DispatchRow {
     /// store written before hand-ins were recorded (t-6815).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_history: Option<SessionHistory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -23672,6 +23801,7 @@ impl Ledger {
                     retry_of: dispatch.retry_of.clone(),
                     remote: dispatch.remote.clone(),
                     source: dispatch.source.clone(),
+                    session_history: dispatch.session_history.clone(),
                 });
             }
             for worker in &run.workers {
@@ -23891,6 +24021,7 @@ impl Ledger {
                     retry_of: row.retry_of,
                     remote: row.remote,
                     source: row.source,
+                    session_history: row.session_history,
                 });
         }
         for row in projected.attachments {

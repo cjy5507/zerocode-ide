@@ -8,6 +8,7 @@ pub mod paths;
 pub mod recall;
 pub mod recall_seat;
 pub mod rerank;
+pub mod user_preferences;
 
 pub use classification::{
     MemoryClassification, MemoryKind, MemoryScope, MemorySource, classify_memory_body,

@@ -20,6 +20,10 @@ function scmCleanText() {
  * lists ignored paths because it is answering "what is in this directory",
  * and this panel is answering "what might I commit". */
 let scmEntries = [];
+/* The checkout `scmEntries` is the status of — the one in front when the
+ * answer landed, `null` before the first or after git failed. Its count is
+ * said of that checkout only (the conversation's state, t-22100). */
+let scmStatusOf = null;
 /* What git is halfway through here — `merge`, `rebase`, `cherry-pick`,
  * `unknown`, or null when nothing is. Comes with the status rather than from a
  * second ask, because the panel needs it on every repaint. */
@@ -499,7 +503,14 @@ function scmRefusalText(action, kind, text) {
   return t("sourceControl.pushFailed", "푸시에 실패했습니다. 연결을 확인한 뒤 다시 시도하세요.");
 }
 
-async function refreshUpstream() {
+/* The one ask for where the branch stands. Two surfaces wear the answer —
+ * this panel's sync row and the file tree's head (t-24298) — so both ask
+ * through here, and the tree's head is painted from every answer either of
+ * them got. The head alone asks from `refreshScmIfShowing`: on the moments
+ * git can have moved, never on a workspace switch, which asks only what the
+ * move itself needs. */
+async function askUpstream() {
+  const root = activeWorktreePath;
   try {
     upstreamState = await invoke("upstream_status");
   } catch {
@@ -508,6 +519,11 @@ async function refreshUpstream() {
     // the table rather than guessing one.
     upstreamState = null;
   }
+  paintTreeHead(root);
+}
+
+async function refreshUpstream() {
+  await askUpstream();
   paintScmPrimary();
   // 같은 사실의 다른 두 얼굴 — 컨텍스트 행의 ↑↓와 포크 알림도 이 답을 입는다.
   paintCompareStats();
@@ -957,6 +973,129 @@ function scmPanelShowing() {
   return el("activity-scm").hidden === false && !folded.aside;
 }
 
+let scmObserverHealthRows = [];
+let scmObserverHealthErrorRoot = null;
+let scmObserverRetryRoot = null;
+let scmObserverHealthRead = 0;
+
+function scmObserverFailureWords(kind) {
+  const words = {
+    missing_tool: t("scm.health.missingTool", "gh 명령을 찾지 못함 — 설치와 PATH를 확인하세요"),
+    authentication: t("scm.health.authentication", "GitHub 인증 실패 — GitHub 설정에서 다시 로그인하세요"),
+    forbidden: t("scm.health.forbidden", "접근 거절 — 계정의 저장소 권한을 확인하세요"),
+    not_found: t("scm.health.notFound", "대상을 찾지 못함 — 저장소와 접근 권한을 확인하세요"),
+    rate_limited: t("scm.health.rateLimited", "GitHub 요청 제한 — 안내된 재시도 시각까지 기다립니다"),
+    timeout: t("scm.health.timeout", "응답 시간 초과 — 네트워크를 확인하세요"),
+    unavailable: t("scm.health.unavailable", "GitHub 서버 응답 오류"),
+    invalid_response: t("scm.health.invalidResponse", "응답 형식을 읽지 못함"),
+    refused: t("scm.health.refused", "요청 거절 — 로그인·권한·네트워크를 확인하세요 (원인 미확정)"),
+  };
+  return words[kind] ?? words.refused;
+}
+
+function scmObserverOperationWords(operation) {
+  const words = {
+    discovery: t("scm.health.discovery", "PR 찾기"), checks: t("scm.health.checks", "CI 확인"),
+    details: t("scm.health.details", "CI 상세"), reviews: t("scm.health.reviews", "리뷰"), stack: t("scm.health.stack", "연관 PR"),
+  };
+  return words[operation] ?? words.discovery;
+}
+
+function paintScmObserverHealth() {
+  let panel = el("scm-observer-health");
+  const root = activeWorktreePath;
+  const rows = scmObserverHealthRows.filter((row) => row?.root === root);
+  const failed = rows.filter((row) => row.failure);
+  const unreadable = scmObserverHealthErrorRoot === root;
+  if (!scmPanelShowing() || (!rows.length && !unreadable)) {
+    panel?.remove();
+    return;
+  }
+  const signature = JSON.stringify([root, rows, unreadable, scmObserverRetryRoot === root]);
+  if (panel?.dataset.signature === signature) return;
+  if (!panel) {
+    panel = document.createElement("section");
+    panel.id = "scm-observer-health";
+    panel.className = "scm-observer-health";
+    panel.setAttribute("role", "status");
+    panel.setAttribute("aria-live", "polite");
+    el("scm-pr-note").after(panel);
+  }
+  panel.dataset.signature = signature;
+  panel.classList.toggle("is-degraded", unreadable || failed.length > 0);
+  panel.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = unreadable
+    ? t("scm.health.unreadable", "SCM 연동 상태를 읽지 못했습니다")
+    : failed.length ? t("scm.health.degraded", "SCM 자동 확인 지연") : t("scm.health.healthy", "SCM 자동 확인 정상");
+  panel.append(heading);
+  const timestamp = (value) => Number.isFinite(value) ? new Date(value).toLocaleString() : t("scm.health.never", "기록 없음");
+  const details = failed.length ? failed : rows.slice(0, 1);
+  for (const row of details) {
+    const line = document.createElement("p");
+    const parts = [scmObserverOperationWords(row.operation)];
+    if (row.failure) parts.push(scmObserverFailureWords(row.failure));
+    parts.push(t("scm.health.lastSuccess", "마지막 성공 {{at}}", { at: timestamp(row.lastSuccessMs) }));
+    if (row.failure) {
+      parts.push(t("scm.health.failures", "연속 {{count}}회 실패", { count: row.consecutiveFailures }));
+      parts.push(t("scm.health.nextRetry", "다음 재시도 {{at}}", { at: timestamp(row.nextRetryMs) }));
+    }
+    line.textContent = parts.join(" · ");
+    panel.append(line);
+  }
+  if (failed.length || unreadable) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "btn";
+    retry.disabled = scmObserverRetryRoot === root;
+    retry.textContent = retry.disabled ? t("scm.health.retrying", "재시도 요청 중…") : t("scm.health.retry", "지금 재시도");
+    retry.addEventListener("click", () => void retryScmObserver(root));
+    panel.append(retry);
+  }
+}
+
+function acceptScmObserverSnapshot(snapshot, root) {
+  if (activeWorktreePath !== root || snapshot?.root !== root || !Array.isArray(snapshot.rows)) return;
+  scmObserverHealthRows = scmObserverHealthRows.filter((row) => row?.root !== root).concat(snapshot.rows);
+  scmObserverHealthErrorRoot = null;
+  paintScmObserverHealth();
+}
+
+async function refreshScmObserverHealth() {
+  const root = activeWorktreePath;
+  const read = ++scmObserverHealthRead;
+  try {
+    const snapshot = await invoke("scm_observer_health");
+    if (read === scmObserverHealthRead) acceptScmObserverSnapshot(snapshot, root);
+  } catch {
+    if (read !== scmObserverHealthRead || activeWorktreePath !== root) return;
+    scmObserverHealthErrorRoot = root;
+    paintScmObserverHealth();
+  }
+}
+
+async function retryScmObserver(root) {
+  if (activeWorktreePath !== root || scmObserverRetryRoot === root) return;
+  scmObserverRetryRoot = root;
+  paintScmObserverHealth();
+  try {
+    const snapshot = await invoke("scm_observer_retry", { root });
+    acceptScmObserverSnapshot(snapshot, root);
+  } catch {
+    if (activeWorktreePath === root) scmObserverHealthErrorRoot = root;
+  } finally {
+    if (scmObserverRetryRoot === root) scmObserverRetryRoot = null;
+    paintScmObserverHealth();
+  }
+}
+
+listen("scm:health", (event) => {
+  if (!Array.isArray(event.payload)) return;
+  scmObserverHealthRows = event.payload;
+  if (event.payload.some((row) => row?.root === activeWorktreePath)) scmObserverHealthErrorRoot = null;
+  paintScmObserverHealth();
+});
+
 async function refreshScm({ uncapped = false } = {}) {
   // 다른 체크아웃으로 건너온 참이면 메시지 칸부터 그 체크아웃의 드래프트로 —
   // 상태를 그리기 전에: 아래 결정표(hasMessage)가 남의 초안을 읽으면 안 된다.
@@ -990,6 +1129,7 @@ async function refreshScm({ uncapped = false } = {}) {
     // Rust's 60-second cache) is only worth spawning for a panel somebody is
     // looking at. Its own promise — the file list never waits on the network.
     void refreshScmReview();
+    void refreshScmObserverHealth();
     scmPanelOwed = false;
   } else {
     scmPanelOwed = true;
@@ -997,8 +1137,10 @@ async function refreshScm({ uncapped = false } = {}) {
   try {
     // `uncapped` is the banner's one-shot retry (Orca's
     // `resolveGitStatusLimit(0)` road); every ordinary refresh caps again.
+    const asked = activeWorktreePath;
     const tree = await invoke("scm_status", { uncapped });
     scmEntries = tree?.changed ?? [];
+    scmStatusOf = asked;
     // The operation this checkout is halfway through, whether or not anything
     // is still unresolved — a rebase between steps has neither a conflicted
     // row nor a reason to be silent.
@@ -1011,6 +1153,9 @@ async function refreshScm({ uncapped = false } = {}) {
       ...scmEntries.map((entry) => [entry.path, entry.code.trim()]),
       ...(tree?.ignored ?? []).map((path) => [path, "!!"]),
     ];
+    // The rows already on screen wear the answer now (t-24298) — in place,
+    // without listing the tree again.
+    paintTreeGit();
   } catch (error) {
     vcsCodes = [];
     // git failing is not the same as nothing having changed, and this panel
@@ -1018,9 +1163,13 @@ async function refreshScm({ uncapped = false } = {}) {
     // list empties because it is no longer describing anything, and the
     // place that would have said "no changes" says what happened instead.
     scmEntries = [];
+    scmStatusOf = null;
     scmOperation = null;
     conflictCard = null;
     scmCapState = null;
+    // A count nobody holds any more is not said (t-22100).
+    paintChatStacks();
+    paintTreeGit();
     // No repository, no commits — the COMMITS head must not stand over a
     // section that can only open to nothing.
     el("scm-history-title").hidden = true;
@@ -1031,6 +1180,9 @@ async function refreshScm({ uncapped = false } = {}) {
     scmEmpty.hidden = false;
     return;
   }
+  // The conversation's state over its composer counts this checkout's changes
+  // (t-22100) — said the moment they landed, not on that page's next paint.
+  paintChatStacks();
   await refreshConflictCard();
   // 펼쳐 둔 서브모듈은 부모가 새로고침될 때마다 함께 신선해진다 — 접힌 것은
   // 아무 일도 만들지 않는다.
@@ -1374,6 +1526,7 @@ paintScmFilter();
 paintScmPrimary();
 
 function paintScm() {
+  paintScmObserverHealth();
   const conflicted = scmEntries.filter((entry) => entry.conflict);
   const staged = scmEntries.filter((entry) => entry.staged && !entry.conflict);
   // The filter narrows what the ordinary GROUPS show and nothing else — Orca
@@ -2371,8 +2524,8 @@ function scmRow(entry, group) {
   // (our reveal — the original's file-manager entry plays that role on a
   // file), and the customize door. Flat with a separator rather than a
   // submenu: the workspace menu's own recorded adaptation of the same list.
-  // (The original's last row reveals in its OWN file panel — ours has no
-  // tree-reveal door yet; honest gap, the tree lane's to close.)
+  // The original's last row reveals the file in its OWN file panel, and so
+  // does ours now (t-24298): the tree's one reveal door, `showInTree`.
   row.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     const revealLabel = usesCommandModifier
@@ -2416,6 +2569,10 @@ function scmRow(entry, group) {
       {
         label: t("worktree.customizeApps", "앱 사용자화…"),
         run: () => setSettingsOpen(true, "settings-open-in-apps"),
+      },
+      {
+        label: t("sourceControl.revealInTree", "파일 트리에서 보기"),
+        run: () => void showInTree(entry.path),
       },
     ]);
   });

@@ -1,11 +1,13 @@
 mod act_lines;
 mod agent_capabilities;
+mod answer_door;
 mod artifact_export;
 mod ask_popup;
 mod bundle_resources;
 mod cli_login;
 mod computer_use_mirrors;
 mod computer_use_tcc;
+mod continue_gate;
 mod coordinator_desk;
 mod crash_report;
 mod fixture_cases;
@@ -435,6 +437,7 @@ mod tests {
                         "explorer_policy.rs"
                             | "crash.rs" | "crumbs.rs" | "hang_watchdog.rs" | "hang_sample.rs"
                             | "artifact_runtime.rs"
+                            | "preference_runtime.rs"
                             // t-2733: the checks numbers/memory/cache file
                             // tests its LRU and its change fence beside them.
                             | "checks_runtime.rs"
@@ -5946,11 +5949,13 @@ mod tests {
             "the diff head stopped quoting the panel's own row — or quotes \
              it for a diff the panel is not showing:\n{painting}"
         );
+        // The builder, and its three readers: the panel's row, the diff
+        // head and the file tree's row (t-24298).
         assert_eq!(
             window.matches("paintScmTally(").count(),
-            3,
-            "the ± tally grew a second builder — the row and the diff head \
-             must read one"
+            4,
+            "the ± tally grew a second builder — the row, the diff head and \
+             the file tree's row must read one"
         );
 
         // The scroll seat: remembered per file, restored on repaint, bounded,
@@ -7140,10 +7145,17 @@ mod tests {
              that mean something:\n{letter}"
         );
 
+        // Built rows and rows re-dressed by a fresh answer share one painter
+        // (t-24298), and the letter is its.
         let tree = block_after(window, "async function loadTree(container, path) {");
         assert!(
-            tree.contains("badgeLetter(code)"),
-            "the tree still writes the raw code into the badge:\n{tree}"
+            tree.contains("paintTreeBadge(row, relative, entry.is_dir, code);"),
+            "a built row no longer goes through the tree's one badge painter:\n{tree}"
+        );
+        let painting = block_after(window, "function paintTreeBadge(");
+        assert!(
+            painting.contains("badgeLetter(code)"),
+            "the tree still writes the raw code into the badge:\n{painting}"
         );
     }
 
@@ -10657,11 +10669,23 @@ mod tests {
             "the source-control re-read is no longer settled, so a working \
              agent runs `git status` continuously:\n{noting}"
         );
+        // Two surfaces wear the one `scm_status` answer — the panel's list and
+        // the file tree's badges, numbers and head (t-24298) — so the re-read
+        // runs while either is on screen, and never while neither is.
         let showing = block_after(window, "function refreshScmIfShowing() {");
         assert!(
-            showing.contains("if (el(\"activity-scm\").hidden) return;")
+            showing.contains("if (el(\"activity-scm\").hidden && !fileTreeShowing()) return;")
                 && showing.contains("refreshScm()"),
-            "source control is re-read for a panel nobody is looking at:\n{showing}"
+            "source control is re-read while neither its panel nor the file \
+             tree that wears the same answer is on screen:\n{showing}"
+        );
+        let tree_showing = block_after(window, "function fileTreeShowing() {");
+        assert!(
+            tree_showing.contains("!el(\"activity-files\").hidden")
+                && tree_showing.contains("!folded.aside")
+                && tree_showing.contains("!fileTree.hidden"),
+            "the file tree counts as looked at while its panel is down, its \
+             column folded or a search list stands in its place:\n{tree_showing}"
         );
         // The guard has to be asked when the work would run, not when it was
         // scheduled — the panel can close inside the settle.
@@ -20095,9 +20119,7 @@ mod tests {
         let backend = shipped_backend();
         let (shipped, _) = backend.split_once("#[cfg(test)]").unwrap_or((backend, ""));
 
-        // The door names every map keyed by a shell. `ask_sends` is in the list
-        // because it was in no list at all — nothing removed from it anywhere,
-        // not even the deliberate close.
+        // The door names every map keyed by a shell.
         let forgetting = block_after(shipped, "fn forget_term_state(");
         for map in [
             "state.agent_terms().remove(&term);",
@@ -20110,7 +20132,6 @@ mod tests {
             // names, and a pane's helpers own keys no `&term` could reach.
             "state.forget_activities(term);",
             "state.team_envs().remove(&term);",
-            "state.ask_sends().remove(&term);",
             "agent_teams::forget_term(term);",
         ] {
             assert!(
@@ -27245,9 +27266,14 @@ mod tests {
         let drafting_road = block_after(shipped, "fn run_text_generation(");
         let account = block_after(shipped, "fn claude_reading_env(");
         let running = block_after(shipped, "fn run_once(");
+        let ledgers_door = block_after(
+            include_str!("../../src/launch_budget_door.rs"),
+            "pub(crate) fn run_budgeted(",
+        );
         assert!(
             drafting_road.contains("claude_reading_env(config_root)")
-                && drafting_road.contains("run_once(")
+                && drafting_road.contains("run_budgeted(")
+                && ledgers_door.contains("run_once(")
                 && account.contains("accounts::reading_env_for(config_root, \"claude\")")
                 && account.contains("accounts::prepare_selected_store(config_root)")
                 && running.contains("shell_path::hydrated()")
@@ -30384,20 +30410,31 @@ mod tests {
         }
         // The walk itself — the pacing between groups and the paste envelope
         // for text — is the one walker the card shares with a pane's
-        // hand-over (`walk_key_groups`), so the two cannot type differently.
+        // hand-over (`walk_key_groups`), so the two cannot type differently;
+        // what a group IS as bytes has one home (`key_group_bytes`), which
+        // the card's first key (typed through the answer door) shares too.
         let walking = block_after(shipped, "fn walk_key_groups(");
         assert!(
-            walking.contains("std::thread::sleep(step)") && walking.contains("encode_paste(text"),
-            "the walk no longer paces its groups or pastes its text:\n{walking}"
+            walking.contains("std::thread::sleep(step)")
+                && walking.contains("key_group_bytes(group)"),
+            "the walk no longer paces its groups or spells them through the one \
+             table of bytes:\n{walking}"
         );
-        // A second answer for the same pane stops the first mid-walk —
-        // otherwise both type into one TUI and the interleaving answers
-        // neither question. The card hands the walker that question.
         assert!(
-            answering.contains("ask_sends")
-                && answering.contains("== Some(&generation)")
-                && answering.contains("walk_key_groups(&state, term, &groups, step, same_send)"),
-            "a newer answer no longer cancels the walk in flight:\n{answering}"
+            block_after(shipped, "fn key_group_bytes(").contains("encode_paste(text"),
+            "a key group's text no longer travels as a paste"
+        );
+        // A second answer for the same pane is REFUSED while the first is on
+        // its way in — otherwise both type into one TUI and the interleaving
+        // answers neither question. The pane takes one answer at a time, on
+        // the lease a send already takes, and the first key is typed only if
+        // the screen still shows the question (`answer_door`).
+        assert!(
+            answering.contains("answer_door::answer_lease(term)")
+                && answering.contains("answer_door::type_if_up(")
+                && answering.contains("answer_door::Expect::question(question)")
+                && answering.contains("walk_key_groups(&state, term, &rest, step)"),
+            "the card's answer no longer goes through the answer door:\n{answering}"
         );
 
         // The full shape rides only the asking event, exactly like the
@@ -30439,9 +30476,14 @@ mod tests {
             "BoardCard dropped the prompt, so the columns strip the choices \
              off every card on the way to the screen"
         );
+        // What the agent described, and — for a pane that described nothing — the
+        // numbered menu on its screen (`answer_door`), in that order.
+        let listing = block_after(shipped, "fn pane_agents(");
         assert!(
-            shipped.contains("ask_prompt: held.and_then(|one| one.ask_prompt.clone())"),
-            "pane_agents stopped shipping the question's shape"
+            listing.contains(".and_then(|one| one.ask_prompt.clone())")
+                && listing.contains(".or_else(|| screen_cards.get(term).cloned())"),
+            "pane_agents stopped shipping the question's shape, or the screen's menu \
+             for a pane that described none:\n{listing}"
         );
 
         // The window: the amber box opens into the panel, the picks travel
@@ -30513,8 +30555,11 @@ mod tests {
         assert!(
             answering.contains("ask::APPROVAL_ALLOW")
                 && answering.contains("ask::APPROVAL_DENY")
-                && answering.contains("with_terminal"),
-            "answer_approval no longer spends the measured keys:\n{answering}"
+                && answering.contains("answer_door::type_if_up(")
+                && answering.contains("answer_door::Expect::any_menu()")
+                && answering.contains("row.approval.is_some()"),
+            "answer_approval no longer spends the measured keys through the \
+             answer door, for a permission the pane still holds:\n{answering}"
         );
 
         // The panel: both verbs through the command, dismissed on press.
@@ -35992,14 +36037,12 @@ mod tests {
         // Err로 돌아오고, 카드는 그 Err에서 돌아선다.
         let walker = block_after(shipped, "fn walk_key_groups(");
         assert!(
-            walker.contains("with_terminal(state, term, |pty| pty.write_input(&bytes))?;")
-                && walker.contains("if !keep_going() {"),
-            "the walk stopped giving up on a failed write or a superseded \
-             answer:\n{walker}"
+            walker.contains("with_terminal(state, term, |pty| pty.write_input(&bytes))?;"),
+            "the walk stopped giving up on a failed write:\n{walker}"
         );
         let walking = block_after(shipped, "fn answer_ask(");
         let failed = walking
-            .find("if walk_key_groups(&state, term, &groups, step, same_send).is_err() {")
+            .find("walk_key_groups(&state, term, &rest, step).is_ok()")
             .expect("the card's answer no longer turns back on a walk that did not land");
         let cleared = walking
             .find("clear_answered_wait(&app, term, &AnswerRoad::Card);")

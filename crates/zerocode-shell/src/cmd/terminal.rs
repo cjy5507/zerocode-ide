@@ -1826,14 +1826,23 @@ pub(crate) fn term_paste(
 /// The keys are the measured protocol (`zerocode_core::ask`), and this
 /// command owns only what Orca's renderer owned around them
 /// (`sendNativeChatAskAnswer`, index-ftls8Hg_.js:65269): one key group per
-/// second — the TUI redraws between groups, and a burst outruns it — text
+/// second — the TUI redraws between groups, and a burst outruns it — and text
 /// travelling as a paste (`buildNativeChatPasteBytes`: multiline wrapped,
-/// a single line sanitized bare), and a new answer for the same pane
-/// cancelling the one still being typed (`cancelInFlight`, :69780).
+/// a single line sanitized bare).
 ///
-/// An agent whose TUI nobody measured gets the answer as a sentence instead
-/// (`sendNativeChatMessage`, :65167): the text, then Enter after the submit
-/// delay.
+/// **Typed through the answer door** ([`answer_door`]). The card was drawn
+/// from what the agent said it asked, and the pane may have moved on since:
+/// the first key is typed only if the screen still shows that question, read
+/// and written in one hold of the pane's lock, and the pane takes one answer
+/// at a time — a second press is refused, not typed over the first. A refusal
+/// is an `Err` carrying [`answer_door::QUESTION_CHANGED`] or
+/// [`answer_door::ANSWER_IN_FLIGHT`], which the page turns into words.
+///
+/// An agent whose TUI nobody measured, stopped on a numbered menu, gets the
+/// menu's own way of choosing: the selection walked to the row, looked at,
+/// and taken ([`answer_door::choose_row`]). A question with no rows to choose
+/// from gets the answer as a sentence instead (`sendNativeChatMessage`,
+/// :65167): the text, then Enter after the submit delay.
 ///
 /// Refused outright when nothing was answered — `hasAskAnswer` is the send
 /// button's rule and this side holds it too, because an empty walk would
@@ -1851,66 +1860,120 @@ pub(crate) fn answer_ask(
     if !ask::has_answer(&prompt, &selections) {
         return Err("고른 답이 없습니다".to_string());
     }
-    if !state.terminals().contains_key(&term) {
+    let Some(held) = state.terminals().handle(term) else {
         return Err("터미널이 떠 있지 않습니다".to_string());
-    }
+    };
+    let lease = answer_door::answer_lease(term).map_err(answer_door::Refusal::into_message)?;
+    // `has_answer` found an answered question, so there is a first one.
+    let question = &prompt.questions[0];
     let (groups, step) = match ask::keys_for(&agent, &prompt, &selections) {
         Some(groups) => (
             groups,
             std::time::Duration::from_millis(ask::QUESTION_STEP_MS),
         ),
+        None if prompt.questions.len() == 1 && !question.options.is_empty() => {
+            return answer_on_menu(&app, &state, &held, term, question, &selections, lease);
+        }
         None => ask::line_keys(&ask::format_answer(&prompt, &selections)),
     };
-    // The generation this send belongs to. A newer answer for the same pane
-    // bumps it, and the older thread sees the bump and stops mid-walk.
-    let generation = {
-        let mut sends = state.ask_sends();
-        let slot = sends.entry(term).or_insert(0);
-        *slot += 1;
-        *slot
+    let Some((first, rest)) = groups.split_first() else {
+        return Ok(());
     };
+    let typed = answer_door::type_if_up(
+        &held,
+        &answer_door::Expect::question(question),
+        &key_group_bytes(first),
+    )
+    .map_err(|error| error.to_string())?;
+    state.cadence().wake();
+    if !typed {
+        return Err(answer_door::QUESTION_CHANGED.to_string());
+    }
+    let rest = rest.to_vec();
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
-        let same_send = || state.ask_sends().get(&term) == Some(&generation);
-        if walk_key_groups(&state, term, &groups, step, same_send).is_err() {
-            return;
+        let walked = rest.is_empty() || {
+            std::thread::sleep(step);
+            walk_key_groups(&state, term, &rest, step).is_ok()
+        };
+        if walked {
+            // Every group landed, so the walk reached its own submitting
+            // Enter — the early returns above are the paths where it did not,
+            // and none of them arrives here. The card knows what it
+            // answered, so its road skips the keystroke test and only the
+            // pane's own gates remain; Orca gives this surface a separate
+            // door for exactly that reason
+            // (`inferQuestionAnsweredFromCurrentStatus`).
+            clear_answered_wait(&app, term, &AnswerRoad::Card);
         }
-        // Every group landed, so the walk reached its own submitting Enter —
-        // the three `return`s above are the paths where it did not, and none
-        // of them arrives here. The card knows what it answered, so its road
-        // skips the keystroke test and only the pane's own gates remain;
-        // Orca gives this surface a separate door for exactly that reason
-        // (`inferQuestionAnsweredFromCurrentStatus`).
-        clear_answered_wait(&app, term, &AnswerRoad::Card);
+        answer_door::settle(lease);
     });
     Ok(())
 }
 
+/// A card's choice on the numbered menu of a CLI whose TUI nobody measured:
+/// the row it picked, walked to and taken through the answer door.
+///
+/// A menu takes a row, not a sentence and not a set — an answer that is only
+/// typed text, several picks or a multi-select has no one row to take and is
+/// refused with [`answer_door::MENU_NEEDS_A_ROW`].
+fn answer_on_menu(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    held: &crate::terminal_registry::HeldTerminal,
+    term: TermId,
+    question: &zerocode_core::ask::AskQuestion,
+    selections: &[zerocode_core::ask::AskSelection],
+    lease: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<(), String> {
+    use zerocode_core::ask;
+    let row = answer_door::chosen_row(question, selections)
+        .ok_or_else(|| answer_door::MENU_NEEDS_A_ROW.to_string())?;
+    answer_door::choose_row(
+        held,
+        question,
+        row,
+        std::time::Duration::from_millis(ask::ROW_STEP_MS),
+        std::time::Duration::from_millis(ask::ROW_SETTLE_MS),
+        &|| state.cadence().wake(),
+    )
+    .map_err(answer_door::Refusal::into_message)?;
+    clear_answered_wait(app, term, &AnswerRoad::Card);
+    answer_door::settle_in_background(lease);
+    Ok(())
+}
+
+/// What one key group is, as the bytes the pty takes: keys as themselves,
+/// text as a paste.
+pub(crate) fn key_group_bytes(group: &zerocode_core::ask::KeyGroup) -> Vec<u8> {
+    use zerocode_core::ask::KeyGroup;
+    match group {
+        KeyGroup::Raw(raw) => raw.clone().into_bytes(),
+        KeyGroup::Text(text) => encode_paste(text, text.contains(['\r', '\n'])),
+    }
+}
+
 /// Walk key groups into a pane the way a person's answer walks a TUI: each
 /// group after `step`, text as a paste and keys as their bytes, through the
-/// one door every write to a shell takes (`with_terminal`). `keep_going` is
-/// asked before every group — a newer answer for the same pane stops an older
-/// walk mid-way. Ok when every group landed; Err names why the walk stopped:
-/// a pane that left, a child that stopped reading, or a walk told to stop.
+/// one door every write to a shell takes (`with_terminal`). Ok when every
+/// group landed; Err names why the walk stopped: a pane that left or a child
+/// that stopped reading.
+///
+/// What the walk does NOT ask is whether the screen is still the question it
+/// began on — a walk's own keys change the screen, so the question is asked
+/// once, before the first group, by whoever started the walk
+/// ([`answer_door::type_if_up`]).
 pub(crate) fn walk_key_groups(
     state: &State<'_, AppState>,
     term: TermId,
     groups: &[zerocode_core::ask::KeyGroup],
     step: std::time::Duration,
-    keep_going: impl Fn() -> bool,
 ) -> Result<(), String> {
-    use zerocode_core::ask::KeyGroup;
     for (i, group) in groups.iter().enumerate() {
         if i > 0 {
             std::thread::sleep(step);
         }
-        if !keep_going() {
-            return Err("a newer answer took the pane".to_string());
-        }
-        let bytes = match group {
-            KeyGroup::Raw(raw) => raw.clone().into_bytes(),
-            KeyGroup::Text(text) => encode_paste(text, text.contains(['\r', '\n'])),
-        };
+        let bytes = key_group_bytes(group);
         with_terminal(state, term, |pty| pty.write_input(&bytes))?;
     }
     Ok(())
@@ -1924,6 +1987,12 @@ pub(crate) fn walk_key_groups(
 /// picks the first row and Deny is escape, which is a refusal everywhere
 /// (`parseApprovalFromStatus`, :69216). Which byte means which lives in the
 /// tested crate; this command only spends it.
+///
+/// Spent through the answer door, because both keys are harmful on the wrong
+/// screen: Allow is a digit that picks the first row of whatever menu is up,
+/// and Deny is the Escape that stops a running turn. So the pane must still
+/// hold the permission it asked (the hook's word) AND still show a numbered
+/// menu (the screen's).
 #[tauri::command(async)]
 pub(crate) fn answer_approval(
     state: State<'_, AppState>,
@@ -1935,7 +2004,26 @@ pub(crate) fn answer_approval(
     } else {
         zerocode_core::ask::APPROVAL_DENY
     };
-    with_terminal(&state, term, |pty| pty.write_input(key.as_bytes()))
+    let holds_a_permission = state
+        .pane_states()
+        .get(&term)
+        .is_some_and(|row| row.approval.is_some());
+    if !holds_a_permission {
+        return Err(answer_door::QUESTION_CHANGED.to_string());
+    }
+    let Some(held) = state.terminals().handle(term) else {
+        return Err("터미널이 떠 있지 않습니다".to_string());
+    };
+    let lease = answer_door::answer_lease(term).map_err(answer_door::Refusal::into_message)?;
+    let typed = answer_door::type_if_up(&held, &answer_door::Expect::any_menu(), key.as_bytes())
+        .map_err(|error| error.to_string())?;
+    state.cadence().wake();
+    answer_door::settle_in_background(lease);
+    if typed {
+        Ok(())
+    } else {
+        Err(answer_door::QUESTION_CHANGED.to_string())
+    }
 }
 
 #[tauri::command(async)]

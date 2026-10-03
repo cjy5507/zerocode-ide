@@ -180,6 +180,14 @@ pub fn read(
     offered: &BTreeSet<String>,
 ) -> Result<Choice, ChoiceRefusal> {
     let answer = answers.get(question).ok_or(ChoiceRefusal::NoAnswer)?;
+    read_value(answer, offered)
+}
+
+/// Read a single borrowed answer through the same closed-choice contract.
+///
+/// # Errors
+/// Returns the first answer rule that fails.
+pub fn read_value(answer: &Value, offered: &BTreeSet<String>) -> Result<Choice, ChoiceRefusal> {
     if !tagged(answer, CHOICE) {
         return Err(ChoiceRefusal::NotAChoice);
     }

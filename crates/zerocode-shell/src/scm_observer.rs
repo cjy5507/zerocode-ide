@@ -8,8 +8,11 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 use zerocode_core::checks::Limits;
 use zerocode_core::scm_observer::{
-    self as core, Book, Ci, Effects, FactKind, Observation, PrState, Subject,
+    self as core, Book, Ci, Effects, FactKind, Observation, Operation, PrState, Subject,
 };
+
+mod health;
+use health::TickHealth;
 
 #[derive(Default)]
 pub(crate) struct Observer {
@@ -18,6 +21,7 @@ pub(crate) struct Observer {
     clients: BTreeMap<PathBuf, Client>,
     times: BTreeMap<PathBuf, Times>,
     next_root: usize,
+    retry_roots: BTreeSet<PathBuf>,
 }
 #[derive(Default)]
 struct Times {
@@ -33,6 +37,19 @@ struct CacheUpdate {
     reviewed: bool,
 }
 impl Observer {
+    fn request_retry(
+        &mut self,
+        root: &Path,
+        now_ms: i64,
+        effects: &mut impl Effects,
+    ) -> Result<(), String> {
+        let mut health = self.book.health.clone();
+        health.retry(&root.to_string_lossy(), now_ms);
+        self.book.update_health(health, effects)?;
+        self.retry_roots.insert(root.to_path_buf());
+        Ok(())
+    }
+
     fn finish_refreshes(
         &mut self,
         updates: Vec<CacheUpdate>,
@@ -207,12 +224,15 @@ pub(crate) fn sweep(app: &AppHandle, now_ms: i64) {
 fn poll(app: &AppHandle, limits: &Limits, now_ms: i64) -> Result<(), String> {
     let started = std::time::Instant::now();
     let state = app.state::<AppState>();
-    let roots = live_roots(&state);
+    let mut roots = live_roots(&state);
     let path = state_path(&state);
     let mut held = checks_runtime::remembered()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     held.load(&path)?;
+    roots.extend(held.retry_roots.iter().cloned());
+    roots.sort();
+    roots.dedup();
     if roots.is_empty() {
         publish_notices(app, &held.book, &roots);
         return Ok(());
@@ -265,6 +285,7 @@ impl Observer {
             return Ok(());
         };
         let mut candidates = Vec::new();
+        let mut health = TickHealth::new(&self.book, now_ms);
         let mut visited = 0;
         let mut reserved = 0;
         // Reserve complete subjects before discovery so the first root cannot
@@ -280,6 +301,10 @@ impl Observer {
                 continue;
             };
             if !on_a_branch(&branch) {
+                self.retry_roots.remove(root);
+                continue;
+            }
+            if !health.due(root, Operation::Discovery, &branch) {
                 continue;
             }
             if self.book.subjects.values().any(|t| {
@@ -287,11 +312,17 @@ impl Observer {
                     && t.subject.branch == branch
                     && t.record.stopped
             }) {
+                self.retry_roots.remove(root);
                 continue;
             }
             reserved += 1;
             let client = self.clients.get(root).cloned().unwrap_or_default();
-            match client.discover(root, budget) {
+            let discovery = client.discover(root, budget);
+            if !matches!(discovery, Err(gh::GhError::Budget)) {
+                self.retry_roots.remove(root);
+            }
+            health.observe(root, Operation::Discovery, &branch, &discovery);
+            match discovery {
                 Ok(Some(review)) => {
                     let discovered = subject(root, &review, branch);
                     if review.state == "open" || self.book.subjects.contains_key(&discovered.key())
@@ -299,12 +330,17 @@ impl Observer {
                         candidates.push((root.clone(), review, discovered, client));
                     }
                 }
-                Ok(None) => {}
-                // This checkout's alone: it is asked again next tick, and its
-                // subject stays as it was — the book never reads an unanswered
-                // checkout as a closed PR. Discovery reads no cache and moves
-                // no cursor, so no other checkout's refresh is held back for it.
-                Err(error) => log_fetch(log_root, "discovery", &error),
+                Ok(None) => {
+                    for operation in [
+                        Operation::Checks,
+                        Operation::Details,
+                        Operation::Reviews,
+                        Operation::Stack,
+                    ] {
+                        health.forget(root, operation);
+                    }
+                }
+                Err(_) => {}
             }
         }
         self.next_root = (rotate + visited) % roots.len();
@@ -329,8 +365,15 @@ impl Observer {
             let mut complete = true;
             if observed.state == Some(PrState::Open) {
                 // Fact families are independent: an unreadable review must not hide CI.
-                match candidate.checks(&root, &review, force, budget) {
-                    Ok(mut ci) => {
+                let checks = if health.due(&root, Operation::Checks, &review.head_sha) {
+                    let checks = candidate.checks(&root, &review, force, budget);
+                    health.observe(&root, Operation::Checks, &review.head_sha, &checks);
+                    Some(checks)
+                } else {
+                    None
+                };
+                match checks {
+                    Some(Ok(mut ci)) => {
                         let needs_detail = self.book.subjects.get(&key).is_some_and(|held| {
                             core::react(
                                 &held.record,
@@ -343,39 +386,69 @@ impl Observer {
                             .iter()
                             .any(|r| r.body.is_some())
                         });
-                        if needs_detail
-                            && let Err(error) =
-                                candidate.detail(&root, &review, &mut ci, force, budget)
-                        {
-                            complete = false;
-                            log_fetch(log_root, "CI details", &error);
+                        if needs_detail {
+                            if health.due(&root, Operation::Details, &review.head_sha) {
+                                let detail =
+                                    candidate.detail(&root, &review, &mut ci, force, budget);
+                                health.observe(
+                                    &root,
+                                    Operation::Details,
+                                    &review.head_sha,
+                                    &detail,
+                                );
+                                if detail.is_ok() {
+                                    observed.ci = Some(ci);
+                                } else {
+                                    complete = false;
+                                }
+                            } else {
+                                complete = false;
+                            }
                         } else {
+                            health.forget(&root, Operation::Details);
                             observed.ci = Some(ci);
                         }
                     }
-                    Err(error) => {
+                    Some(Err(_)) | None => {
                         complete = false;
-                        log_fetch(log_root, "CI", &error);
                     }
                 }
                 if reviews_due || force {
-                    match candidate.reviews(&root, &review, budget) {
-                        Ok(reviews) => observed.reviews = Some(reviews),
-                        Err(error) => {
-                            complete = false;
-                            log_fetch(log_root, "reviews", &error);
+                    if health.due(&root, Operation::Reviews, &review.head_sha) {
+                        let reviews = candidate.reviews(&root, &review, budget);
+                        health.observe(&root, Operation::Reviews, &review.head_sha, &reviews);
+                        match reviews {
+                            Ok(reviews) => observed.reviews = Some(reviews),
+                            Err(_) => complete = false,
                         }
+                    } else {
+                        complete = false;
                     }
                 }
                 observed.mergeable = read_mergeability(review.mergeable.as_deref());
                 if observed.mergeable == Some(core::Mergeability::Conflicting) {
-                    match candidate.stack(&root, &review, limits.stack_prs_max, force, budget) {
-                        Ok(stacked) => observed.stacked = Some(stacked),
-                        Err(error) => {
-                            complete = false;
-                            log_fetch(log_root, "stack", &error);
+                    if health.due(&root, Operation::Stack, &review.head_sha) {
+                        let stack =
+                            candidate.stack(&root, &review, limits.stack_prs_max, force, budget);
+                        health.observe(&root, Operation::Stack, &review.head_sha, &stack);
+                        match stack {
+                            Ok(stacked) => observed.stacked = Some(stacked),
+                            Err(_) => complete = false,
                         }
+                    } else {
+                        complete = false;
                     }
+                } else {
+                    health.forget(&root, Operation::Stack);
+                }
+            } else {
+                for operation in [
+                    Operation::Checks,
+                    Operation::Details,
+                    Operation::Reviews,
+                    Operation::Stack,
+                ] {
+                    health.forget(&root, operation);
                 }
             }
             if let Err(error) = self.book.apply(&key, &observed, limits, now_ms, effects) {
@@ -397,14 +470,9 @@ impl Observer {
         self.finish_refreshes(cache_updates, &failed_repos, now_ms);
         self.clients.retain(|root, _| roots.contains(root));
         self.times.retain(|root, _| roots.contains(root));
+        health.commit(&mut self.book, effects, log_root)?;
         Ok(())
     }
-}
-fn log_fetch(log_root: &Path, kind: &str, error: &gh::GhError) {
-    crate::note_window_event(
-        log_root,
-        &format!("scm-observer: {kind} fetch {}", error.reason()),
-    );
 }
 
 /// Panel and background observations use this same durable book and delivery receipt.
@@ -488,11 +556,64 @@ fn publish_notices(app: &AppHandle, book: &Book, roots: &[PathBuf]) {
         })
         .collect();
     let _ = app.emit("scm:notices", rows);
+    let _ = app.emit("scm:health", book.health.rows());
+}
+
+#[derive(Serialize)]
+pub(crate) struct HealthSnapshot {
+    root: String,
+    rows: Vec<core::HealthRow>,
+}
+
+pub(crate) fn health_snapshot(state: &AppState) -> Result<HealthSnapshot, String> {
+    let root = state.active().root.to_string_lossy().into_owned();
+    let mut held = checks_runtime::remembered()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.load(&state_path(state))?;
+    Ok(HealthSnapshot {
+        rows: held
+            .book
+            .health
+            .rows()
+            .into_iter()
+            .filter(|row| row.root == root)
+            .collect(),
+        root,
+    })
+}
+
+pub(crate) fn retry(app: &AppHandle, root: &Path) -> Result<HealthSnapshot, String> {
+    let state = app.state::<AppState>();
+    let here = state.active();
+    if here.root != root || here.orchestrator.is_none() {
+        return Err("the selected checkout changed or is not a repository".into());
+    }
+    let now_ms = crate::now_epoch_ms();
+    let path = state_path(&state);
+    {
+        let mut held = checks_runtime::remembered()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.load(&path)?;
+        held.request_retry(
+            root,
+            now_ms,
+            &mut WindowEffects {
+                path: &path,
+                now_ms,
+            },
+        )?;
+    }
+    NEXT.store(0, Ordering::Release);
+    sweep(app, now_ms);
+    health_snapshot(&state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod health;
     #[test]
     fn observer_cadences_are_independent_and_failures_do_not_spend_them() {
         let limits = Limits::default();
@@ -650,9 +771,7 @@ mod tests {
         if call.args.first().is_some_and(|verb| verb == "pr")
             && checkout_name(call) == Some("flaky")
         {
-            return Err(CliError::Refused(
-                "the vendor CLI ran past its budget".into(),
-            ));
+            return Err(CliError::TimedOut);
         }
         github(call)
     }
@@ -688,7 +807,7 @@ mod tests {
     fn logged_discovery_refusals(log_root: &Path) -> usize {
         std::fs::read_to_string(log_root.join("window-errors.log"))
             .unwrap_or_default()
-            .matches("scm-observer: discovery fetch refused")
+            .matches("scm-observer: discovery fetch timeout")
             .count()
     }
 

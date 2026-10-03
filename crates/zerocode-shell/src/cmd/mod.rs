@@ -72,7 +72,8 @@ pub(crate) use fs::{
     fs_trash, fs_undo, image_diff, list_dir, open_computer_use_permission, open_download,
     orchestration_runtime_state, path_kinds, paths_exist, read_image_file, read_text_file,
     render_mermaid, reset_computer_use_permissions, resume_vault_session, reveal_vault_session,
-    set_clipboard_image, show_download, vault_sessions, watch_files, write_text_file,
+    set_clipboard_image, show_download, tree_selection, vault_sessions, watch_files,
+    write_text_file,
 };
 
 pub(crate) use usage::{
@@ -140,8 +141,9 @@ pub(crate) use api_routers::{
 
 pub(crate) mod typesafe;
 pub(crate) use typesafe::{
-    check_typesafe_key, jev_day, jev_summary, remove_typesafe_key, save_typesafe_key,
-    set_jev_enabled, set_jev_model, set_route_classifier, set_summon_profiles, typesafe_settings,
+    check_typesafe_key, jev_day, jev_review, jev_review_outcome, jev_summary, remove_typesafe_key,
+    save_typesafe_key, set_jev_enabled, set_jev_model, set_jev_review_enabled,
+    set_route_classifier, set_summon_profiles, typesafe_settings,
 };
 
 pub(crate) mod type_value;
@@ -190,10 +192,10 @@ pub(crate) use scm::{
     abort_conflict_operation, commit_failure_card, commit_file_diff, commit_files, commit_staged,
     conflict_card, create_pull_request, delete_untracked, discard_paths, file_diff,
     generate_branch_name, generate_commit_message, generate_pull_request, git_history,
-    hosted_review_eligibility, open_commit_remote, pull_request_seed, scm_fetch, scm_pull,
-    scm_push, scm_status, set_worktree_compare_base, source_control_compare_context, stage_path,
-    stage_paths, submodule_status, unstage_path, unstage_paths, upstream_status,
-    worktree_committed_diff,
+    hosted_review_eligibility, open_commit_remote, pull_request_seed, scm_fetch,
+    scm_observer_health, scm_observer_retry, scm_pull, scm_push, scm_status,
+    set_worktree_compare_base, source_control_compare_context, stage_path, stage_paths,
+    submodule_status, unstage_path, unstage_paths, upstream_status, worktree_committed_diff,
 };
 
 pub(crate) use system::{build_stamp, release_status};
@@ -217,18 +219,18 @@ pub(crate) use worktree::{
 
 pub(crate) use settings::{
     agent_teams_mode, claude_autoswitch_mode, computer_confirm_answer, computer_guard_status,
-    computer_resume, computer_stop, floating_workspace_seat, list_system_fonts, pane_layouts,
-    patch_editing_prefs, patch_floating_workspace, patch_open_in_applications,
+    computer_resume, computer_stop, floating_workspace_seat, harness_status, list_system_fonts,
+    pane_layouts, patch_editing_prefs, patch_floating_workspace, patch_open_in_applications,
     patch_workspace_board_items, patch_workspace_board_status, patch_workspace_creation_prefs,
     read_primary_selection, save_pane_layouts, save_stage_layouts, scm_tree_rows,
     set_agent_teams_mode, set_artifacts_auto_open_beside, set_artifacts_retention_days,
     set_claude_autoswitch_mode, set_computer_confirm, set_computer_generator_road,
     set_computer_live_reflex, set_confirm_close_pinned, set_conversation_focus_view,
-    set_ctrl_tab_order_mode, set_default_task_source, set_diff_side_by_side, set_hidden_shortcuts,
-    set_hidden_task_sources, set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
-    set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
-    set_hide_sleeping_workspaces, set_keep_default_branch_awake, set_keybinding, set_panel_width,
-    set_panel_widths, set_shortcut_visibility, set_sidebar_view,
+    set_ctrl_tab_order_mode, set_default_task_source, set_diff_side_by_side, set_harness_settings,
+    set_hidden_shortcuts, set_hidden_task_sources, set_hide_agent_scratch_workspaces,
+    set_hide_automation_workspaces, set_hide_default_branch_workspaces,
+    set_hide_detached_head_workspaces, set_hide_sleeping_workspaces, set_keep_default_branch_awake,
+    set_keybinding, set_panel_width, set_panel_widths, set_shortcut_visibility, set_sidebar_view,
     set_skip_close_terminal_with_running_process_confirm, set_skip_delete_automation_confirm,
     set_skip_delete_worktree_confirm, set_source_control_view_mode, set_status_bar_usage_mode,
     set_task_source_visibility, set_terminal_command, set_usage_analytics_enabled,
@@ -254,9 +256,9 @@ pub(crate) use supply_chain::{supply_chain_graph, supply_chain_report};
 pub(crate) use artifacts::{
     artifact_copy_path, artifact_counts, artifact_delete, artifact_document, artifact_export,
     artifact_export_formats, artifact_export_reveal, artifact_feedback_record,
-    artifact_import_transcripts, artifact_open, artifact_page_at, artifact_preview,
-    artifact_register, artifact_reveal, artifact_search, artifact_thumbnail, artifact_versions,
-    artifacts_list,
+    artifact_import_transcripts, artifact_open, artifact_page_at, artifact_preference_revoke,
+    artifact_preference_save, artifact_preferences, artifact_preview, artifact_register,
+    artifact_reveal, artifact_search, artifact_thumbnail, artifact_versions, artifacts_list,
 };
 pub(crate) use skills::{
     computer_use_skill_report, install_bundled_skill, list_skills, orchestration_report,

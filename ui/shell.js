@@ -773,11 +773,36 @@ function confirmAsk(card, draft, fromKeyboard = false) {
   }
 }
 
+/* What a refused answer says.
+ *
+ * The backend refuses with a WORD (`answer_door`) rather than a sentence this
+ * side would have to match: the question the answer was prepared for is no
+ * longer found on the pane's screen (`question-changed` — it changed, or the
+ * screen is not a numbered menu this window can read), another answer to
+ * the pane is still on its way in (`answer-in-flight`), or a numbered menu
+ * was answered with only words (`menu-needs-a-row`). Anything else is the
+ * error's own text. */
+function answerRefusalWords(error) {
+  const said = String(error);
+  if (said.includes("question-changed")) {
+    return t("board.ask.changed", "화면에서 이 질문을 찾지 못해 답을 보내지 않았어요 — 터미널을 확인해 주세요");
+  }
+  if (said.includes("answer-in-flight")) {
+    return t("board.ask.inFlight", "앞서 누른 답을 보내는 중이에요");
+  }
+  if (said.includes("menu-needs-a-row")) {
+    return t("board.ask.needsRow", "이 메뉴는 목록에서 고른 답만 받아요");
+  }
+  return said;
+}
+
 /* Hand the picks to the backend, which walks the agent's own TUI with them
  * (`answer_ask` — the keys and their pacing live over there). The panel goes
  * quiet while the keys are being typed; the hook event that follows the
  * agent moving on clears the ask and takes the card out of the attention
- * column, draft and all. */
+ * column, draft and all. A refused answer says why and repaints from the
+ * pane as it is now — which is how the question that replaced this one
+ * reaches the person. */
 function submitAsk(card, draft) {
   const selections = card.ask_prompt.questions.map((unused, i) => ({
     indices: [...(draft.selections[i] ?? [])],
@@ -791,7 +816,7 @@ function submitAsk(card, draft) {
     : invoke("answer_ask", { term, agent: card.agent, prompt: card.ask_prompt, selections });
   road.catch((error) => {
     draft.sending = false;
-    showError(String(error));
+    showError(answerRefusalWords(error));
     repaintAsk(draft);
   });
 }
@@ -832,6 +857,9 @@ function askPanelNode(card, draft) {
   title.className = "board-ask-question";
   title.textContent = question.question;
   title.dataset.tip = question.question;
+  // A question read off a pane's screen can run over several rows — the command
+  // and then the ask — and is shown as the rows it is; an agent's own stays one line.
+  if (question.question.includes("\n")) title.classList.add("is-multiline");
   panel.appendChild(title);
 
   const rows = document.createElement("span");
@@ -1007,7 +1035,11 @@ function approvalPanelNode(card, draft) {
       event.stopPropagation();
       draft.sending = true;
       draft.open = false;
-      decide(choice, says?.() || null).catch((error) => showError(String(error)));
+      decide(choice, says?.() || null).catch((error) => {
+        draft.sending = false;
+        showError(answerRefusalWords(error));
+        repaintAsk(draft);
+      });
       repaintAsk(draft);
       then?.();
     };
@@ -1490,6 +1522,33 @@ async function boardCardsAndLedger(ask = null, surface = "graph") {
  * the live map's waits (the badge). */
 async function boardCards() {
   return (await boardCardsAndLedger()).cards;
+}
+
+/* A wait the hook only SIGNALLED — a menu, a prompt with no payload — has its
+ * question on the program's own screen, and the backend reads it there when the
+ * board asks (`pane_agents`). The hook fires before the program has
+ * necessarily drawn that menu, so the board is asked again a few times as the
+ * screen settles and then left alone: three asks per wait, not a poll. */
+const SIGNALLED_WAIT_REPAINT_MS = [400, 1500, 4000];
+const signalledWaitTimers = new Map();
+
+function clearSignalledWait(term) {
+  for (const timer of signalledWaitTimers.get(term) ?? []) clearTimeout(timer);
+  signalledWaitTimers.delete(term);
+}
+
+function watchSignalledWait(term) {
+  clearSignalledWait(term);
+  const last = SIGNALLED_WAIT_REPAINT_MS.length - 1;
+  signalledWaitTimers.set(
+    term,
+    SIGNALLED_WAIT_REPAINT_MS.map((after, at) =>
+      setTimeout(() => {
+        scheduleAgentPaint(["cards", "board"]);
+        // The last ask is the end of this wait's watching: nothing is left to hold.
+        if (at === last) signalledWaitTimers.delete(term);
+      }, after)),
+  );
 }
 
 /* 판 하나가 떠날 때 받는 표 (t-7288).
@@ -9345,6 +9404,9 @@ listen("hook:activity", (event) => {
   // 모아서 함께 싣는다. 이어 붙이고 스무 개에서 끊는다.
   const held = [...(paneActivities.get(pane) ?? []), ...activities];
   paneActivities.set(pane, held.slice(-ACTIVITY_RING));
+  // The file tree wears the files these name (t-24298) — the batch as it
+  // came, never the ring: a file already lit is not lit again by a replay.
+  noteTreeActivities(pane, activities);
   // A helper's page says what its own card last did when no row is out to say
   // it (`nowActivityOf`): the card's news is the foot line's, not the list's.
   const page = activeHelperPage();
@@ -11395,6 +11457,8 @@ listen("hook:agent", (event) => {
   }
   const wasMidTurn = isMidTurn(hookStates.get(term));
   hookStates.set(term, state);
+  if (asking && !shaped) watchSignalledWait(term);
+  else clearSignalledWait(term);
   // The state moved: whatever the notify seat said about the LAST ring of
   // this pane is over with it (t-6043) — and so is what was withheld from
   // it: a person's own Enter starts a turn, so the next refusal there is
@@ -11722,24 +11786,35 @@ function helperSpanWords(run) {
 }
 
 /* The clock alone, so a second's tick never rebuilds the page under a
- * person reading the command. */
-function activeRunningWorker() {
+ * person reading the command — on the page on screen whose run is out, with
+ * the host it stands in: a worker tab (a command run, a helper, a wire
+ * session) or a pane wearing its own conversation (t-22100: a pane's head was
+ * painted once when its turn began and never ticked, so it said 「0초」 for the
+ * whole turn). */
+function activeRunningPage() {
   const active = tabs.find((tab) => tab.id === activeTabId);
-  return active?.kind === "worker" && active.worker.status === "running" ? active : null;
+  if (active?.kind === "worker" && active.worker.status === "running") {
+    return { run: active.worker, host: docHost(active.pane, "worker") };
+  }
+  const page = activeHelperPage();
+  if (page?.kind === "chat" && page.worker.status === "running") {
+    const host = paneChats.get(page.term)?.host ?? null;
+    return host ? { run: page.worker, host } : null;
+  }
+  return null;
 }
 
 const workerClock = idlePoller({
-  wanted: () => activeRunningWorker() !== null,
+  wanted: () => activeRunningPage() !== null,
   every: WORKER_TICK_MS,
   tick: tickWorkers,
 });
 
 function tickWorkers() {
-  const active = activeRunningWorker();
+  const active = activeRunningPage();
   if (!active) return;
-  const host = docHost(active.pane, "worker");
-  const face = host.querySelector(".worker-elapsed");
-  if (face) face.textContent = workerElapsedWords(active.worker);
+  const face = active.host.querySelector(".worker-elapsed");
+  if (face) writeTextContent(face, workerElapsedWords(active.run));
 }
 
 function workerStatusWords(run) {
@@ -11796,6 +11871,9 @@ function holdHelperTurns(held, turns) {
       if (call) {
         call.output = turn.text;
         call.outputError = turn.tool.is_error === true;
+        // What the CLI recorded of a page it fetched — its HTTP status and
+        // size, beside the words (`tool.facts`, t-22100).
+        if (turn.tool.facts) call.outputFacts = turn.tool.facts;
         call.outputAt = stamp ?? now;
         // A length is said only between two times the file itself gave (`stepTook`).
         call.outputFromClock = stamp === null;
@@ -12077,8 +12155,23 @@ function wireRunStatus(status) {
 function holdWireState(run, log) {
   const before = run.wireLog ? wireStateKey(run.wireLog) : "";
   const live = run.wireLog ? JSON.stringify(run.wireLog.live) : "";
+  const was = run.status;
+  const seen = run.wireLog?.seen === true;
   run.wireLog = log;
+  log.seen = true;
   run.status = wireRunStatus(log.status);
+  // The head counts THIS turn (t-22100): a turn the page saw begin is counted
+  // from the moment its session said so, and a page that opens on a turn
+  // already out counts from the newest thing the person said — where that
+  // turn began. The page's own opening is no moment of the turn's: a second
+  // turn read the page's age.
+  if (run.status === "running" && was !== "running") {
+    run.startedAt = seen ? Date.now() : run.helper.turns.findLast((turn) => turn.role === "user")?.at ?? Date.now();
+    run.endedAt = null;
+    workerClock.sync();
+  } else if (run.status !== "running" && was === "running") {
+    run.endedAt = Date.now();
+  }
   if (log.status === "ended" && run.endedAt === null) run.endedAt = Date.now();
   run.toolCalls = run.helper.turns.filter((turn) => turn.role === "tool").length;
   return { state: before !== wireStateKey(log), live: live !== JSON.stringify(log.live) };
@@ -12138,7 +12231,8 @@ function standAskCard(host, panel) {
   const dock = host.querySelector(".chat-dock");
   const home = dock ?? host;
   if (card.parentElement !== home) {
-    const anchor = dock?.querySelector(":scope > .worker-composer") ?? null;
+    // Over the conversation's state, which stands joined to the composer (t-22100).
+    const anchor = dock?.querySelector(":scope > :is(.chat-stack, .worker-composer)") ?? null;
     if (anchor) anchor.before(card);
     else home.appendChild(card);
   }
@@ -12438,6 +12532,8 @@ function paintPaneChat(term) {
     } else {
       run.endedAt = stamp ?? Date.now();
     }
+    // The head's clock ticks while the turn is out (t-22100).
+    workerClock.sync();
   }
   paintHelperPage(held.host, held.tab);
   // The composer's send is a stop while the turn is out and the send again
@@ -12499,7 +12595,10 @@ function noticeOnPaneChat(held, key, wanted, words) {
   said.className = "pane-chat-notice";
   said.dataset.says = key;
   said.textContent = words;
-  held.host.querySelector(".helper-turns")?.before(said);
+  // Above the body, not inside it: the body is the rail | list grid
+  // (t-22100), where a line of its own would become a grid cell and fall into
+  // the rail's narrow column.
+  held.host.querySelector(":scope > .helper-body")?.before(said);
 }
 
 /* The question the pane's program is asking, as the extension's card in the
@@ -12864,7 +12963,7 @@ function cleanseAssistantText(text) {
  * (person or agent): a call after it with no result yet is still out. */
 function helperTurnRowNode(run, turn, spoken, cold = false) {
   if (turn.role === "thinking") return thoughtTurnNode(run, turn);
-  if (turn.role === "tool" || turn.role === "tool_result") return stepRowNode(run, turn, spoken);
+  if (turn.role === "tool" || turn.role === "tool_result") return stepRowNode(run, turn, spoken, cold);
   const briefing = turn.role === "user" && turn.seq === 0;
   const row = document.createElement("article");
   const said = document.createElement("div");
@@ -13011,89 +13110,41 @@ function agentMarkNode(className, glyph) {
   return mark;
 }
 
-/* `✻ Pondering…` — the line under the transcript while the run is out, in
- * the CLI's own mark and word. Hidden the moment the run is not running. */
+/* The live line (t-22100, the approved conversation): while the run is out,
+ * 「지금」 and what the agent is doing now — the call that is out, the thought
+ * that is going, the answer being written, what its card or channel says
+ * (`nowSaidOf`) — and with nothing known that it is working, in the window's
+ * words for every agent. The CLI's turning verbs and its mark's cycle are gone
+ * from it: they were the CLI's filler, said aloud by the window. A ring turns
+ * beside the words; asked for less motion, it holds still. Hidden the moment
+ * the run is not running. */
 function helperStatusNode(run) {
   const line = document.createElement("p");
   line.className = "helper-status";
   const ring = agentMarkNode("helper-status-ring", "");
-  const mark = agentMarkNode("helper-status-mark", "");
-  const word = agentMarkNode("helper-status-word", "");
+  const lead = document.createElement("b");
+  lead.className = "helper-status-lead";
   const now = agentMarkNode("helper-status-now", "");
-  // The turning ring, glyph and verb, and the words of what is going on, are
-  // for the eye; the list is a log a screen reader reads out, so it hears one
-  // sentence instead, once (the extension's own "Claude is working").
-  for (const node of [ring, mark, word, now]) node.setAttribute("aria-hidden", "true");
-  line.append(ring, mark, word, now, agentMarkNode("helper-status-said sr", ""));
+  // The ring and the words are for the eye; the list is a log a screen reader
+  // reads out, so it hears the line once, as one sentence.
+  for (const node of [ring, lead, now]) node.setAttribute("aria-hidden", "true");
+  line.append(ring, lead, now, agentMarkNode("helper-status-said sr", ""));
   updateHelperStatus(line, run);
   return line;
 }
 
-/* The spinner's own cadence: Claude Code's panel and its TUI both turn the
- * mark every 120 ms through `·✢*✶✻✽` and back (`agent_voice.glyph_cycle`). */
-const STATUS_CYCLE_MS = 120;
-
 function updateHelperStatus(line, run) {
-  const voice = agentVoice(run.agent);
   const shown = run.status === "running";
   writeHidden(line, !shown);
-  // The mark wears the permission mode's reach, as the extension's spinner
+  // The ring wears the permission mode's reach, as the extension's spinner
   // does (`[data-permission-mode]` on its container).
   wearReach(line, composerReachOf(run));
-  const mark = line.querySelector(".helper-status-mark");
-  // What is going on now, in the words its row wears (t-15682): the step that
-  // is out, else the thought that is going, else what the card's activity says
-  // (t-18702). With nothing to name a voice that turns through verbs keeps the
-  // CLI's own, which holds still for a person who asked for less motion; a
-  // voice with one static word gives way to the window's own.
-  const naming = shown ? nowSaidOf(line.parentElement, run, voice) : "";
-  writeClass(line, "is-naming", naming !== "");
-  writeTextContent(line.querySelector(".helper-status-now"), naming === "" ? "" : `${t("worker.now", "지금")} · ${naming}`);
-  writeTextContent(line.querySelector(".helper-status-said"), naming === "" ? voice.busy_word : naming);
-  const turning = shown && naming === "" && !motionReduced();
-  // A CLI with verbs turns through them while the turn is out (t-6323 A4);
-  // the rest say their one word.
-  const word = line.querySelector(".helper-status-word");
-  if (turning && voice.spinner_verbs.length > 0) {
-    turnStatusVerb(word, voice.spinner_verbs);
-  } else {
-    stopStatusVerb(word);
-    writeTextContent(word, voice.busy_word);
-  }
-  // Forward and back, as the CLI plays it; a console with one mark keeps it.
-  const cycle = turning && voice.glyph_cycle.length > 1
-    ? [...voice.glyph_cycle, ...[...voice.glyph_cycle].reverse()]
-    : [];
-  const key = cycle.join("");
-  if (line.__cycleKey === key) {
-    if (!key) writeTextContent(mark, voice.glyph);
-    return;
-  }
-  stopStatusCycle(line);
-  line.__cycleKey = key;
-  if (!key) {
-    writeTextContent(mark, voice.glyph);
-    mark.classList.remove("is-cycling");
-    return;
-  }
-  mark.classList.add("is-cycling");
-  let at = Math.max(0, cycle.indexOf(voice.glyph));
-  writeTextContent(mark, cycle[at]);
-  line.__cycle = window.setInterval(() => {
-    if (!line.isConnected) {
-      stopStatusCycle(line);
-      return;
-    }
-    if (document.hidden) return;
-    at = (at + 1) % cycle.length;
-    writeTextContent(mark, cycle[at]);
-  }, STATUS_CYCLE_MS);
-}
-
-function stopStatusCycle(line) {
-  if (line.__cycle) clearInterval(line.__cycle);
-  line.__cycle = null;
-  line.__cycleKey = undefined;
+  if (!shown) return;
+  const lead = t("worker.now", "지금");
+  const doing = nowSaidOf(line.parentElement, run);
+  writeTextContent(line.querySelector(".helper-status-lead"), lead);
+  writeTextContent(line.querySelector(".helper-status-now"), doing);
+  writeTextContent(line.querySelector(".helper-status-said"), `${lead} ${doing}`);
 }
 
 /* The agent's prose, drawn as the document viewer draws markdown — the one
@@ -13562,6 +13613,8 @@ function openFocusGroup(group, open) {
     row = row.nextElementSibling;
   }
   if (list) askShelfAgain(list);
+  // The rows it let out, or folded away, are the rail's to stand for (t-22100).
+  if (list) askTurnRail(list);
   paintFocusGroup(group);
 }
 
@@ -13630,6 +13683,7 @@ function syncHelperTurns(list, run) {
     syncHelperTasks(list, run);
     syncStreamingTurns(list, run);
     syncHelperReport(list, run);
+    askTurnRail(list);
     return;
   }
   const first = held[0].seq;
@@ -13722,6 +13776,9 @@ function syncHelperTurns(list, run) {
   let touched = null;
   for (const row of list.querySelectorAll(":scope > .is-tool.is-live")) {
     dressToolTurn(row, row.__turn, run, spoken);
+    // A shell step that came back shows its first lines, which the shelf
+    // keeps to the rows in reach (t-22100).
+    watchShelf(list, row);
     if (!focus) foldSettledStep(row, run);
     const group = row.__group;
     if (!group) continue;
@@ -13747,6 +13804,8 @@ function syncHelperTurns(list, run) {
   if (people.length && list.isConnected) clipPersonRows(people);
   else if (people.length) requestAnimationFrame(() => clipPersonRows(people.filter((row) => row.isConnected)));
   if (follow && !reported) scrollHelperToBottom(list);
+  // The rows changed: the rail is asked on the next frame (t-22100).
+  askTurnRail(list);
 }
 
 /* The words the agent is saying right now, under the last turn — the rows
@@ -14028,9 +14087,13 @@ function workerComposerNode(run, owner = null) {
   // A pane's own conversation sends to the pane; a helper's page sends to the
   // parent that runs it, and says so.
   const ownPane = run.helper?.id === PANE_LOG_ID || Boolean(run.wire);
+  // A conversation's own box says one sentence whether the agent works or
+  // rests — what goes in, and that it waits its turn while the agent works
+  // (t-22100, the approved composer).
   box.placeholder = ownPane
-    ? t("worker.sayTo", "{{name}}에게 보내기…", { name: run.name || agentName(run.agent) })
+    ? t("composer.placeholder", "다음 지시를 쓰세요. 일하는 중이면 대기열에 들어갑니다")
     : t("worker.say", "부모 에이전트에게 보내기…");
+  form.__composerOwn = ownPane;
   box.setAttribute("aria-label", box.placeholder);
   // 실행 중에는 상자가 「대기열에 추가」라고 말하고 턴 사이에는 제 본래의
   // 말로 돌아온다 — 그 본래의 말은 여기서 한 번 정해지므로, 갈아입히는
@@ -14181,7 +14244,7 @@ function paintWorkerComposerState(form, run, delivered = null) {
   // 기다리는 글들, 그리고 상자가 무엇을 하겠다고 말하는지: 실행 중이면
   // 「대기열에 추가」, 턴 사이면 제 본래의 말.
   paintComposerQueue(form, run);
-  const saying = working
+  const saying = working && !form.__composerOwn
     ? t("composer.queue.placeholder", "다음 메시지 대기열에 추가…")
     : form.__composerSay;
   writeAttribute(box, "placeholder", saying);
@@ -14201,7 +14264,7 @@ function paintWorkerComposerState(form, run, delivered = null) {
 
   const spec = installedAgents().find((row) => row.id === run.agent) ?? null;
   const agentChip = form.querySelector(".worker-composer-agent");
-  if (agentChip) paintComposerAgentChip(agentChip, run, agentModelLists.get(run.agent)?.rows ?? run.wireModels ?? null);
+  if (agentChip) paintComposerAgentChip(agentChip, run, runModelList(run));
   const modeChip = form.querySelector(".worker-composer-mode");
   if (modeChip && spec) paintComposerModeChip(modeChip, run, spec);
   const agentsChip = form.querySelector(".worker-composer-agents");
@@ -14212,6 +14275,9 @@ function paintWorkerComposerState(form, run, delivered = null) {
   // extension colours both by it (`[data-permission-mode]`).
   wearReach(form, composerReachOf(run));
   form.querySelector(".worker-delivery").hidden = !run.sendUncertain;
+  // The state over the composer counts what waits (t-22100).
+  const stack = form.parentElement?.querySelector(":scope > .chat-stack");
+  if (stack) paintChatStack(stack, run);
 }
 
 function syncWorkerComposers(run, delivered = null) {
@@ -14251,6 +14317,7 @@ function paintWorkerScreen(pane) {
  * 갈아입고(`updateWorkerHead`), 명령 실행의 페이지는 세울 때마다 새로
  * 받는다. */
 function workerHeadNode(run) {
+  if (run.helper) return chatHeadNode(run);
   const head = document.createElement("header");
   head.className = "worker-head";
   // The agent's own mark (`✻` for Claude Code) in the accent, then the name.
@@ -14266,12 +14333,10 @@ function workerHeadNode(run) {
   uses.className = "worker-uses";
   const state = document.createElement("span");
   state.className = "worker-state";
-  // 이름은 왼쪽, 나머지는 오른쪽의 연한 메타 한 덩이(t-2973). 그 덩이의
-  // 맨 앞에 Focus view의 토글이 선다 — 턴을 가진 페이지에만: 명령 실행의
-  // 페이지가 그리는 것은 화면이지 턴이 아니라, 접을 것이 없다.
+  // 이름은 왼쪽, 나머지는 오른쪽의 연한 메타 한 덩이(t-2973). 명령 실행의
+  // 페이지가 그리는 것은 화면이지 턴이 아니라, 접을 것도 셀 것도 없다.
   const meta = document.createElement("span");
   meta.className = "worker-meta";
-  if (run.helper) meta.appendChild(focusViewButtonNode());
   meta.append(clock, uses, state);
   head.append(mark, name, meta);
   updateWorkerHead(head, run);
@@ -14279,6 +14344,10 @@ function workerHeadNode(run) {
 }
 
 function updateWorkerHead(head, run) {
+  if (head.classList.contains("chat-head")) {
+    updateChatHead(head, run);
+    return;
+  }
   writeTextContent(head.querySelector(".worker-mark"), agentVoice(run.agent).glyph);
   // 토글의 눌림은 창의 한 값이라, 다른 페이지에서 바뀌었어도 이 머리가
   // 다음 그림에 따라온다 — 값이 움직였을 때만 쓴다.
@@ -14290,6 +14359,110 @@ function updateWorkerHead(head, run) {
   const state = head.querySelector(".worker-state");
   state.className = `worker-state is-${run.status}`;
   state.textContent = workerStatusWords(run);
+}
+
+/* The head of a conversation's page — a pane's own, or a wire session's
+ * (t-22100, the approved conversation): the agent's mark and name, the model
+ * it runs on as a chip, a chip that says what the conversation is doing —
+ * running and for how long, waiting, ended — and on the right what it did,
+ * counted (`paintChatTally`), then the Focus view's toggle. One hairline under
+ * it (shell.css). The state's words are announced when they change; the clock
+ * beside them is outside that region, or it would be read out every second. */
+function chatHeadNode(run) {
+  const head = document.createElement("header");
+  head.className = "worker-head chat-head";
+  const mark = agentMarkNode("worker-mark", "");
+  const name = document.createElement("span");
+  name.className = "worker-name";
+  const meta = document.createElement("span");
+  meta.className = "worker-meta";
+  const model = document.createElement("span");
+  model.className = "chat-model";
+  const chip = document.createElement("span");
+  chip.className = "chat-run";
+  const dot = document.createElement("span");
+  dot.className = "chat-run-dot";
+  dot.setAttribute("aria-hidden", "true");
+  const state = document.createElement("span");
+  state.className = "worker-state";
+  state.setAttribute("role", "status");
+  const clock = document.createElement("span");
+  clock.className = "worker-elapsed";
+  chip.append(dot, state, clock);
+  const tally = document.createElement("span");
+  tally.className = "chat-tally";
+  tally.hidden = true;
+  meta.append(model, chip, tally, focusViewButtonNode());
+  head.append(mark, name, meta);
+  updateChatHead(head, run);
+  return head;
+}
+
+/* The head's words as the run stands — every write guarded, so a quiet poll
+ * costs no mutation. The clock says THIS turn's time while the agent works
+ * (`workerElapsedWords`) and nothing between turns. */
+function updateChatHead(head, run) {
+  writeTextContent(head.querySelector(".worker-mark"), agentVoice(run.agent).glyph);
+  const focus = head.querySelector(".worker-focus");
+  if (focus) writeAttribute(focus, "aria-pressed", focusViewOn() ? "true" : "false");
+  writeTextContent(head.querySelector(".worker-name"), run.name);
+  const model = runModelWords(run) ?? "";
+  const pill = head.querySelector(".chat-model");
+  writeHidden(pill, model === "");
+  writeTextContent(pill, model);
+  const chip = head.querySelector(".chat-run");
+  writeAttribute(chip, "class", `chat-run is-${run.status}`);
+  writeTextContent(chip.querySelector(".worker-state"), workerStatusWords(run));
+  writeTextContent(chip.querySelector(".worker-elapsed"), run.status === "running" ? workerElapsedWords(run) : "");
+  paintChatTally(head.querySelector(".chat-tally"), run);
+}
+
+/* The head's count of what the conversation did (t-22100, the mockup's
+ * 「도구 9 · 웹 2 · 셸 1 · 파일 6 · 실패 0」): every call the page holds, each
+ * family of them in the order it first came, how many failed — counted by the
+ * steps' own table (`helperTally`, `stepLook`), so the head and the rows say
+ * one thing. Repainted only when the log moved. */
+function paintChatTally(strip, run) {
+  const said = `${run.helper.seq}|${locale}`;
+  if (strip.__said === said) return;
+  strip.__said = said;
+  const { total, failed, kinds, partial } = helperTally(run);
+  writeHidden(strip, total === 0);
+  if (total === 0) {
+    strip.replaceChildren();
+    return;
+  }
+  const families = new Map();
+  for (const [kind, count] of kinds) {
+    const family = stepLook(kind).family;
+    families.set(family, (families.get(family) ?? 0) + count);
+  }
+  const whole = document.createElement("span");
+  whole.className = "chat-tally-total";
+  whole.textContent = tallyTotalWords(total, partial);
+  const parts = [...families].map(([family, count]) => {
+    const one = document.createElement("span");
+    one.className = "chat-tally-kind";
+    one.textContent = `${STEP_FAMILY_WORDS[family]()} ${count}`;
+    return one;
+  });
+  strip.replaceChildren(whole, ...parts, tallyFailedNode("chat-tally-failed", failed));
+}
+
+/* The two ends of a tally, the helper's strip's and the head's alike: the
+ * whole — or, once the page has let its oldest turns go, the recent ones —
+ * and how many failed. */
+function tallyTotalWords(total, partial) {
+  return partial
+    ? t("worker.tallyRecent", "최근 도구 {{n}}", { n: total })
+    : t("worker.tallyTotal", "도구 {{n}}", { n: total });
+}
+
+function tallyFailedNode(className, failed) {
+  const lost = document.createElement("span");
+  lost.className = `${className} ${failed > 0 ? "is-failed" : "is-ok"}`;
+  lost.textContent = t("worker.tallyFailed", "실패 {{n}}", { n: failed });
+  return lost;
 }
 
 /* Where it runs: the parent pane by its own tab name, or the fact that
@@ -14691,9 +14864,7 @@ function paintHelperPageTally(strip, run) {
   // Said as what it counts: the whole of the helper's steps, or — once the page
   // has let its oldest turns go — the recent ones, with the tip saying why the
   // head's count is a bigger number.
-  whole.textContent = partial
-    ? t("worker.tallyRecent", "최근 도구 {{n}}", { n: total })
-    : t("worker.tallyTotal", "도구 {{n}}", { n: total });
+  whole.textContent = tallyTotalWords(total, partial);
   if (partial) strip.dataset.tip = t("worker.tallyRecentTip", "이 화면은 도우미 기록의 마지막 {{cap}}줄만 들고 있어, 도구 수는 그 안의 것입니다 — 머리의 횟수는 처음부터의 전체입니다", { cap: HELPER_TURN_CAP });
   else delete strip.dataset.tip;
   const parts = [...kinds].map(([kind, count]) => {
@@ -14702,9 +14873,7 @@ function paintHelperPageTally(strip, run) {
     one.textContent = `${stepLook(kind).word()} ${count}`;
     return one;
   });
-  const lost = document.createElement("span");
-  lost.className = `helper-tally-failed ${failed > 0 ? "is-failed" : "is-ok"}`;
-  lost.textContent = t("worker.tallyFailed", "실패 {{n}}", { n: failed });
+  const lost = tallyFailedNode("helper-tally-failed", failed);
   const bar = document.createElement("span");
   bar.className = "helper-tally-bar";
   bar.setAttribute("aria-hidden", "true");
@@ -15034,11 +15203,9 @@ function paintHelperPageOwn(host, tab, run, owner) {
   const status = helperStatusNode(run);
   turns.appendChild(status);
   updateHelperStatus(status, run);
-  // The way back to the list's foot stands over the list and under nothing
-  // else: its own box, so the footer below never covers it.
-  const body = document.createElement("div");
-  body.className = "helper-body";
-  body.append(turns, chatFootDoorNode(turns));
+  // The rail, the list and the way back to its foot, in their own box, so the
+  // footer below never covers the door.
+  const body = chatBodyNode(turns);
   const page = {
     id: tab.id,
     own: true,
@@ -15056,6 +15223,7 @@ function paintHelperPageOwn(host, tab, run, owner) {
   host.append(page.head, page.sibs, page.brief, page.tally, body, page.foot);
   updateHelperPageChrome(page, run, owner);
   standChatPlace(turns);
+  askTurnRail(turns);
   host.__helperPage = page;
   interruptOnEscape(host);
 }
@@ -15081,6 +15249,7 @@ function paintHelperPage(host, tab) {
     updateWorkerHead(held.head, run);
     syncHelperTurns(held.turns, run);
     updateHelperStatus(held.status, run);
+    if (held.stack) paintChatStack(held.stack, run);
     if (run.wire) paintWireAsk(host, run);
     return;
   }
@@ -15101,20 +15270,39 @@ function paintHelperPage(host, tab) {
   const status = helperStatusNode(run);
   turns.appendChild(status);
   updateHelperStatus(status, run);
-  host.append(head, turns, chatFootDoorNode(turns));
+  const body = chatBodyNode(turns);
+  host.append(head, body);
   // 문맥은 입력줄의 알약이 말한다. 부모가 없으면 입력줄도 없으므로 그 사실
   // 한 줄만 남는다 — 선 위의 세션은 부모 없이도 제 입력줄을 가진다(보내기가
   // 선으로 간다). The composer floats over the list's foot in the
-  // extension's dock (`inputContainer`), the question card inside it.
-  if (owner || run.wire) host.appendChild(chatDockNode(host, workerComposerNode(run, owner)));
-  else host.insertBefore(workerWhereNode(run, null), turns);
+  // extension's dock (`inputContainer`), the question card inside it, and
+  // the conversation's state over the composer (t-22100).
+  let stack = null;
+  if (owner || run.wire) {
+    stack = chatStackNode(run);
+    host.appendChild(chatDockNode(host, workerComposerNode(run, owner), stack));
+    paintChatStack(stack, run);
+  } else {
+    host.insertBefore(workerWhereNode(run, null), body);
+  }
   if (run.wire) paintWireAsk(host, run);
   // 처음 서는 페이지는 끝에서 연다 — 사람이 읽는 것은 언제나 끝이다. 읽던
   // 사람이 위에 두고 간 페이지는 그 행에서 연다(t-6824).
   standChatPlace(turns);
-  host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status, run };
+  askTurnRail(turns);
+  host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status, run, stack };
   // A plain Esc on the page interrupts its turn (t-6323 A3).
   interruptOnEscape(host);
+}
+
+/* A conversation's body (t-22100): the turn rail, the list beside it, and the
+ * way back to the list's foot over the list — its own box, so a helper's
+ * footer below never covers that door. */
+function chatBodyNode(turns) {
+  const body = document.createElement("div");
+  body.className = "helper-body";
+  body.append(turnRailNode(turns), turns, chatFootDoorNode(turns));
+  return body;
 }
 
 /* A closed conversation's page leaves the host it stood in (t-6323 B2). The
@@ -15123,16 +15311,15 @@ function paintHelperPage(host, tab) {
  * dock's observer) until another page took the host: after the last
  * conversation in a leaf closed, for the window's life. Measured on the
  * 400-turn page: closing it left 14,000 nodes and 4.5 MB of the embedder's
- * heap behind, every time; with the page released, the status line's verb
- * clock still held it until its next pick, so the clocks stop here too. */
+ * heap behind, every time. A frame the page asked for (the rail's) would hold
+ * it until the frame came, so it is let go here too. */
 function releaseWorkerPage(tab) {
   const host = groups.get(tab.pane)?.workerView;
   const held = host?.__helperPage;
   if (!held || held.id !== tab.id) return;
-  // The status line's clocks — the verb's, which would otherwise keep the
-  // page alive up to its next pick (5 s), and the glyph's.
-  stopStatusVerb(held.status.querySelector(".helper-status-word"));
-  stopStatusCycle(held.status);
+  // The rail's frame and its scroll's pace, if either was asked for (t-22100).
+  if (held.turns.__rail?.__frame) cancelAnimationFrame(held.turns.__rail.__frame);
+  clearTimeout(held.turns.__rail?.__scrolled);
   held.turns.__shelf?.disconnect();
   held.turns.__imageWatch?.disconnect();
   held.turns.__footWatch?.disconnect();
@@ -15145,13 +15332,15 @@ function releaseWorkerPage(tab) {
 }
 
 /* The extension's dock at the foot of the conversation (`inputContainer`):
- * the composer — and the question card, when one stands — floating over the
- * list's last rows, inset by the dock's margins and no wider than its
+ * the composer — and the question card, when one stands, and the
+ * conversation's state joined to the composer's top (t-22100) — floating
+ * over the list's last rows, inset by the dock's margins and no wider than its
  * measure. The list keeps room under its words for it: the dock's height,
  * watched, rides the page as `--chat-dock-h`. */
-function chatDockNode(host, composer) {
+function chatDockNode(host, composer, stack = null) {
   const dock = document.createElement("div");
   dock.className = "chat-dock";
+  if (stack) dock.appendChild(stack);
   dock.appendChild(composer);
   if (typeof ResizeObserver === "function") {
     const watch = new ResizeObserver(() => {
@@ -15164,7 +15353,7 @@ function chatDockNode(host, composer) {
       const list = host.__helperPage?.turns ?? null;
       const follow = chatFollows(list);
       const height = `${dock.offsetHeight}px`;
-      for (const reader of host.querySelectorAll(":scope > .helper-turns, :scope > .chat-foot-door")) {
+      for (const reader of host.querySelectorAll(":scope > .helper-body > :is(.helper-turns, .chat-foot-door)")) {
         reader.style.setProperty("--chat-dock-h", height);
       }
       if (follow) carryToFoot(list);

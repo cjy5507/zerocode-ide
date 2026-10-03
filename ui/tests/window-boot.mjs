@@ -393,6 +393,8 @@ const pollers = await derivePollerCommands();
 const POLLER_COMMANDS = [...pollers.commands.keys()];
 
 const stubBackend = ({ boot, pollers }) => {
+  window.__SCM_OBSERVER_HEALTH__ = { root: boot.active_root, rows: [] };
+  window.__SCM_OBSERVER_RETRIES__ = [];
   window.__CALLS__ = [];
   window.__LISTENERS__ = {};
   window.__CLIPBOARD_TEXT__ = "";
@@ -1155,6 +1157,12 @@ const stubBackend = ({ boot, pollers }) => {
       checklist: { chose_agent: false, dismissed: false },
     }),
     scm_status: () => ({ changed: [], ignored: [] }),
+    scm_observer_health: () => window.__SCM_OBSERVER_HEALTH__,
+    scm_observer_retry: ({ root }) => {
+      window.__SCM_OBSERVER_RETRIES__.push(root);
+      if (window.__SCM_OBSERVER_RETRY_HOLD__) return new Promise((done) => { window.__SCM_OBSERVER_RETRY_FINISH__ = done; });
+      return window.__SCM_OBSERVER_HEALTH__;
+    },
     scm_tree_rows: (args) => scmTreeRows(args.area, args.paths, args.folded ?? []),
     // 토큰 원장 둘 — 스캔 전 상태가 이 스텁의 기본값이다(게이지의 답과
     // 모양이 다르다: 원장은 report·scanning·scanned_at을 준다).
@@ -1418,12 +1426,16 @@ const stubBackend = ({ boot, pollers }) => {
     // verbatim, through this one door.
     answer_ask: (args) => {
       window.__ANSWERED__ = JSON.parse(JSON.stringify(args));
+      // A refused answer, as the backend says it (`answer_door`): a word the
+      // page turns into its own sentence.
+      if (window.__ANSWER_REFUSES__) throw new Error(window.__ANSWER_REFUSES__);
       return null;
     },
     // A permission request's one-key answer — which byte means Allow is the
     // backend's; this side only says which way the person pressed.
     answer_approval: (args) => {
       window.__APPROVED__ = JSON.parse(JSON.stringify(args));
+      if (window.__ANSWER_REFUSES__) throw new Error(window.__ANSWER_REFUSES__);
       return null;
     },
     // The vault, the same way: the filtering, sorting and grouping are Rust's and
@@ -1778,6 +1790,12 @@ const stubBackend = ({ boot, pollers }) => {
     set_claude_autoswitch_mode: (args) => {
       window.__AUTOSWITCH_MODE__ = args.mode;
       return { revision: 1, claude_autoswitch_mode: args.mode };
+    },
+    // The settings card's one read of what the window has counted (t-26583):
+    // nothing launched, nothing resting, nothing spent yet.
+    harness_status: () => window.__HARNESS__ ?? {
+      counters: { active: 0, last_hour: 0, last_day: 0, resting: [] },
+      day_spent_usd: 0,
     },
     list_claude_sessions: () => [],
     // 만들기 다이얼로그가 읽는 넷. 판정 규칙은 Rust의 것이고

@@ -366,10 +366,22 @@ function catalogModelWords(said, models = null) {
   return known ? known.display_name : said;
 }
 
+/* The model list the window holds for a run's agent: the catalog road's,
+ * else what the wire said it can switch to. */
+function runModelList(run) {
+  return agentModelLists.get(run.agent)?.rows ?? run.wireModels ?? null;
+}
+
+/* The words for the model a run runs on — one answer for the composer's chip
+ * and the page's head (t-22100), so one model is never worded two ways. */
+function runModelWords(run, models = runModelList(run)) {
+  return catalogModelWords(composerRoad(run).model(), models);
+}
+
 /* The words the chip shows for the pane's model: the catalog's display name
  * when the model list knows the id, else the id as the hook said it. */
 function paintComposerAgentChip(chip, run, models = null) {
-  const words = catalogModelWords(composerRoad(run).model(), models);
+  const words = runModelWords(run, models);
   writeTextContent(chip.querySelector(".worker-composer-model-words"), words ? ` · ${words}` : "");
 }
 

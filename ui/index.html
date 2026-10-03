@@ -2774,12 +2774,54 @@
               <span data-i18n="file.content">내용</span>
             </button>
           </div>
-          <div class="file-tree" id="file-tree" tabindex="0"></div>
+          <!-- The tree's head (t-24298): where this checkout stands in git,
+               and whether the tree follows what the agents touch. -->
+          <div class="tree-head" id="tree-head">
+            <span class="tree-head-branch" id="tree-head-branch"></span>
+            <span class="tree-pin" id="tree-pin" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-pin"></use></svg>
+              <span class="tree-pin-path" id="tree-pin-path"></span>
+              <button
+                class="tree-head-button"
+                id="tree-unpin"
+                type="button"
+                data-i18n-aria="tree.unpin" aria-label="고정 풀기"
+                data-i18n-title="tree.unpin" data-tip="고정 풀기"
+              >
+                <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+              </button>
+            </span>
+            <span class="tree-head-space" aria-hidden="true"></span>
+            <button
+              class="tree-head-button"
+              id="tree-follow"
+              type="button"
+              aria-pressed="true"
+              data-i18n-aria="tree.follow" aria-label="에이전트 따라가기"
+              data-i18n-title="tree.followTip" data-tip="에이전트가 읽고 쓰는 파일로 트리를 펼칩니다"
+            >
+              <svg class="icon" aria-hidden="true"><use href="#i-crosshair"></use></svg>
+            </button>
+          </div>
+          <!-- A tree to a screen reader, with one tab stop on its rows (the
+               cursor's); the box itself is focusable only for code that
+               hands it the keyboard, and it keeps its own keys (t-24298). -->
+          <div
+            class="file-tree"
+            id="file-tree"
+            tabindex="-1"
+            role="tree"
+            data-keyboard-owner="true"
+            data-i18n-aria="tree.label" aria-label="파일 트리"
+          ></div>
           <div class="file-tree" id="file-hits" hidden></div>
           <!-- Content hits are three facts wide — file, line, the line — so
                they get their own host rather than being squeezed into the
                name list's single column. -->
           <div class="text-hits" id="file-text-hits" hidden></div>
+          <!-- What an agent is doing in git right now (t-24298), one line
+               under the tree while it runs. -->
+          <div class="tree-ops" id="tree-ops" role="status" aria-live="polite" hidden></div>
         </section>
 
         <!-- What has moved since the last commit. Clicking one opens its diff
@@ -3926,6 +3968,70 @@
         <div class="agent-list" id="cli-login-list"></div>
         <p class="settings-hint" id="cli-login-note"></p>
         </div>
+
+        <!-- What keeps a day of agents from spending the plan before anyone looks
+             (t-26583). The window judges every worker it watches — go on, save a
+             checkpoint, pause, stop — from what it already holds of it, and counts
+             the calls it makes of an agent's CLI on the person's behalf as one
+             person's. The budget is set here and nowhere else, and a blank is none:
+             nobody is stopped on a number nobody gave. -->
+        <div class="settings-card" id="harness-settings">
+          <div class="settings-subhead">
+            <h3 class="settings-subhead-title" data-i18n="settings.harness.title">토큰 낭비 막기</h3>
+            <p class="settings-subhead-desc" data-i18n="settings.harness.about">
+              창이 일하는 워커를 지켜보다가 같은 일의 되풀이나 비용 급증이 보이면 알리고, 예산을 넘기 전에 멈출 수 있습니다. 판정과 그 근거는 작업 보드의 워커 줄에 보입니다.
+            </p>
+          </div>
+          <label class="settings-field" data-field="md" for="harness-gate-mode">
+            <span class="settings-label" data-i18n="settings.harness.mode">워커 계속 판정</span>
+            <span class="settings-hint" id="harness-gate-mode-hint" data-i18n="settings.harness.modeHint">
+              알리기만: 판정을 보드에 보이고 코디네이터에게 알립니다. 워커는 끝내지 않습니다. 중지: 예산을 넘기 전에 워커의 작업물을 복원점으로 저장하고 그 워커를 끝냅니다.
+            </span>
+            <select class="settings-input" id="harness-gate-mode" aria-describedby="harness-gate-mode-hint">
+              <option value="off" data-i18n="settings.harness.modeOff">끔</option>
+              <option value="notify" data-i18n="settings.harness.modeNotify">알리기만</option>
+              <option value="stop" data-i18n="settings.harness.modeStop">예산을 넘기 전에 중지</option>
+            </select>
+          </label>
+          <label class="settings-field" data-field="sm" for="harness-task-usd">
+            <span class="settings-label" data-i18n="settings.harness.taskBudget">과업 하나의 예산 (달러)</span>
+            <span class="settings-hint" id="harness-task-usd-hint" data-i18n="settings.harness.taskBudgetHint">
+              API 요금으로 환산한 값입니다. 비워 두면 예산이 없습니다.
+            </span>
+            <input class="settings-input" id="harness-task-usd" type="number" inputmode="decimal"
+                   min="0" step="any" aria-describedby="harness-task-usd-hint" />
+          </label>
+          <label class="settings-field" data-field="sm" for="harness-day-usd">
+            <span class="settings-label" data-i18n="settings.harness.dayBudget">하루 예산 (달러)</span>
+            <span class="settings-hint" id="harness-day-usd-hint" data-i18n="settings.harness.dayBudgetHint">
+              모든 워커의 합계이고 24시간을 이어서 셉니다. 비워 두면 예산이 없습니다.
+            </span>
+            <input class="settings-input" id="harness-day-usd" type="number" inputmode="decimal"
+                   min="0" step="any" aria-describedby="harness-day-usd-hint" />
+          </label>
+          <div class="settings-subhead">
+            <h3 class="settings-subhead-title" data-i18n="settings.harness.launchesTitle">에이전트 호출 한도</h3>
+            <p class="settings-subhead-desc" data-i18n="settings.harness.launchesAbout">
+              창이 사용자 대신 에이전트 CLI를 부르는 호출(커밋 메시지 초안, 로그인 갱신 등)을 한 사람의 몫으로 셉니다. 한도(429)를 만난 CLI는 잠시 쉬고, 같은 일은 한 번만 돌립니다. 비워 두면 그 한도는 없습니다.
+            </p>
+          </div>
+          <label class="settings-field" data-field="sm" for="harness-concurrent">
+            <span class="settings-label" data-i18n="settings.harness.concurrent">동시에 도는 호출</span>
+            <input class="settings-input" id="harness-concurrent" type="number" inputmode="numeric"
+                   min="0" step="1" />
+          </label>
+          <label class="settings-field" data-field="sm" for="harness-per-hour">
+            <span class="settings-label" data-i18n="settings.harness.perHour">한 시간에 부를 수 있는 횟수</span>
+            <input class="settings-input" id="harness-per-hour" type="number" inputmode="numeric"
+                   min="0" step="1" />
+          </label>
+          <label class="settings-field" data-field="sm" for="harness-per-day">
+            <span class="settings-label" data-i18n="settings.harness.perDay">하루에 부를 수 있는 횟수</span>
+            <input class="settings-input" id="harness-per-day" type="number" inputmode="numeric"
+                   min="0" step="1" />
+          </label>
+          <p class="settings-hint" id="harness-status"></p>
+        </div>
         </section>
 
         <!-- API Routers: connect OpenRouter, AgentRouter, or custom endpoints.
@@ -4279,6 +4385,11 @@
             <span data-jev-name data-i18n="settings.typesafe.agent_tool">에이전트용 판단 도구</span>
             <span data-jev-summary data-i18n="settings.typesafe.agent_toolSummary">워커와 에이전트가 예/아니오·고르기·점수 매기기를 자기 모델 대신 Jev에 맡깁니다. 켜면 그 답을 에이전트에게 돌려줍니다.</span>
             <p data-jev-hint data-i18n="settings.typesafe.agent_toolHint">zo의 Jev 도구와 zo jev ask|choose|score 명령이 이 기능입니다. 에이전트가 스스로 부를 때만 판단을 요청하고, 제품이 대신 부르는 일은 없습니다. 보내는 것은 에이전트가 적은 질문·맥락·선택지·수준·항목뿐이며, 각각 앞 2,000자로 자르고 비밀처럼 보이는 줄은 지웁니다. 「기록만」에서는 답을 기록만 하고 에이전트에게 넘기지 않아 무엇을 얼마나 묻는지 먼저 볼 수 있고, 켜면 답을 넘깁니다. 채점할 정답이 없어 자동으로 적용되지 않고, 건수·토큰·지연만 셉니다.</p>
+          </div>
+          <div data-jev-feature="project_rules">
+            <span data-jev-name data-i18n="settings.typesafe.project_rules">프로젝트 규칙 점검</span>
+            <span data-jev-summary data-i18n="settings.typesafe.project_rulesSummary">턴이 끝나면 등록된 프로젝트 지침과 작업 근거를 대조합니다. 켜면 확인할 규칙을 다음 턴에 한 번 전달합니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.project_rulesHint">원문과 해시가 확인된 규칙만 점검하며, 지침이 바뀌면 정의를 다시 준비할 때까지 적용하지 않습니다. 확정적으로 검사할 항목은 코드로 확인하고, 해석이 필요한 규칙만 Jev에 묻습니다. 보내는 것은 해당 규칙, 요청·작업 근거·최종 응답의 제한된 부분입니다. 기록만 하는 모드에서는 알림을 전달하지 않으며, 판단이 오지 않거나 근거가 부족하면 위반으로 단정하지 않습니다.</p>
           </div>
           <div data-jev-feature="browser_read">
             <span data-jev-name data-i18n="settings.typesafe.browser_read">웹페이지 잡음 제거</span>

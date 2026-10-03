@@ -58,7 +58,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use api::{SystemOneClient, SystemOneConfig, SystemOneFailure, SystemOneQuestion, SystemOneRequest, SYSTEMONE_MODEL};
@@ -456,7 +456,8 @@ fn command_book() -> &'static Mutex<CommandBook> {
     BOOK.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-type Pending = HashMap<(PathBuf, String, String), (Instant, Shared<BoxFuture<'static, Option<String>>>)>;
+type CommandNote = (String, Arc<JevDoor>);
+type Pending = HashMap<(PathBuf, String, String), (Instant, Shared<BoxFuture<'static, Option<CommandNote>>>)>;
 
 /// The judgments an acting command guard will want its line from once the
 /// command has run, by project and call.
@@ -520,7 +521,7 @@ async fn judge_command(
     mut row: CommandGuardRow,
     mode: JevMode,
     acting: bool,
-) -> Option<String> {
+) -> Option<CommandNote> {
     let Some((door, client)) = door_and_client(&project).await else {
         forget_command(&project, row.judged);
         return None;
@@ -536,14 +537,16 @@ async fn judge_command(
     )
     .await;
     let verdict = Verdict::of(row.asked.answers.as_ref(), COMMAND.flag_floor_permille);
-    settle(&mut row.asked, mode, acting, verdict);
+    let still_acts = acting && door.permits_application_with(&project, COMMAND.seat, || raised(&COMMAND));
+    let mode = if acting && !still_acts { JevMode::Shadow } else { mode };
+    settle(&mut row.asked, mode, still_acts, verdict);
     row.verdict = verdict.word().to_string();
     let note = row.asked.answers.as_ref().filter(|_| row.asked.applied).and_then(command_note);
     row.noted = note.is_some();
     let confidence = row.asked.answers.as_ref().and_then(confidence_of);
     settle_command(&project, &ledger, row.judged, verdict, confidence, row.asked.applied);
     write_row(ledger, COMMAND.seat, row);
-    note
+    note.map(|note| (note, Arc::new(door)))
 }
 
 /// A shell command has run: stamp its paths again for the label — what moved
@@ -558,9 +561,10 @@ async fn command_ran(project: PathBuf, ran: CommandRan) -> Option<String> {
             one.ran(ran.failed, ran.cancelled);
         }
     }
-    let (asked_at, judgment) = pending().lock().ok()?.remove(&(project, ran.owner, ran.tool_use_id))?;
+    let (asked_at, judgment) = pending().lock().ok()?.remove(&(project.clone(), ran.owner, ran.tool_use_id))?;
     let wall = COMMAND.deadline.saturating_sub(asked_at.elapsed());
-    tokio::time::timeout(wall, judgment).await.ok().flatten()
+    let (note, door) = tokio::time::timeout(wall, judgment).await.ok().flatten()?;
+    door.permits_application_with(&project, COMMAND.seat, || raised(&COMMAND)).then_some(note)
 }
 
 fn forget_command(project: &Path, judged: u64) {
@@ -741,7 +745,9 @@ async fn judge_text(project: PathBuf, ledger: PathBuf, ask: TextAsk, judged: u64
     )
     .await;
     let verdict = Verdict::of(asked.answers.as_ref(), TEXT.flag_floor_permille);
-    settle(&mut asked, mode, acting, verdict);
+    let still_acts = acting && door.permits_application_with(&project, TEXT.seat, || raised(&TEXT));
+    let mode = if acting && !still_acts { JevMode::Shadow } else { mode };
+    settle(&mut asked, mode, still_acts, verdict);
     let guard = asked
         .answers
         .as_ref()

@@ -2546,6 +2546,24 @@ fn compaction_conflict_rolls_back_in_memory() {
     let _ = fs::remove_file(super::lock_sibling_path(&path));
 }
 
+#[test]
+fn a_retained_context_edit_preserves_indices_times_and_rolls_back_a_stale_writer() {
+    let path = temp_session_path("retained-context");
+    let mut writer = persisted_session(&path);
+    push_text(&mut writer, "first original").unwrap();
+    push_text(&mut writer, "second original").unwrap();
+    let mut stale = Session::load_from_path(&path).unwrap();
+    let before = stale.clone();
+    push_text(&mut writer, "newer writer").unwrap();
+    drop(writer);
+    let mut changed = stale.messages.to_vec();
+    changed[0].blocks = vec![ContentBlock::Text { text: "trimmed".into() }];
+    assert!(is_conflict(&stale.replace_context_atomic(std::sync::Arc::new(changed))));
+    assert_eq!(stale, before, "the full in-memory state rolls back");
+    assert!(Session::load_from_path(&path).unwrap().messages.len() > stale.messages.len());
+    cleanup_session_file(&path);
+}
+
 /// When rewind cannot persist due to a peer conflict, it must report 0 removed
 /// and leave the in-memory messages intact (no divergence).
 #[test]
@@ -2823,6 +2841,7 @@ fn expected_fingerprint(session: &Session) -> Option<super::FileFingerprint> {
     state.expected.clone()
 }
 
+#[cfg(unix)]
 fn full_file_reads() -> u64 {
     super::FULL_FILE_READS.with(std::cell::Cell::get)
 }

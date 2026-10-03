@@ -82,6 +82,10 @@ pub(crate) const BACKEND_PARTS: &[(&str, &str)] = &[
     ("pane_runtime.rs", include_str!("../../src/pane_runtime.rs")),
     ("pick_runtime.rs", include_str!("../../src/pick_runtime.rs")),
     (
+        "preference_runtime.rs",
+        include_str!("../../src/preference_runtime.rs"),
+    ),
+    (
         "restart_nudge_runtime.rs",
         include_str!("../../src/restart_nudge_runtime.rs"),
     ),

@@ -458,13 +458,12 @@ pub fn stderr_log_path() -> std::path::PathBuf {
 /// 실패 안내 — 는 이미 패인에 닿은 뒤다. 그것까지 걷어내려면 호출부가 세션을
 /// 열기 **전에** 이 함수를 한 번 부르면 된다(두 번 불러도 안전하다).
 pub fn install_stderr_redirect(flags: RenderFlags) {
-    if flags.verbose_stderr || !std::io::stderr().is_terminal() {
-        return;
-    }
     #[cfg(unix)]
-    {
+    if !flags.verbose_stderr && std::io::stderr().is_terminal() {
         let _ = redirect_stderr_to_log();
     }
+    #[cfg(not(unix))]
+    let _ = flags;
 }
 
 #[cfg(unix)]
