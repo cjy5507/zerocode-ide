@@ -270,11 +270,11 @@ const TREE_WRITING_MIN_MS = 1_000;
  * wears the still line reduced motion wears, and says the same words. */
 const TREE_WRITING_MOVING_MAX = 4;
 
-/* How long after a write ends the tree waits before asking git about every
- * file written since: the one window one scoped question covers. The backend
- * already coalesces what arrives within 100 ms of each other; this coalesces
- * what arrives after it, so a burst of two hundred calls is one question and
- * the +N -N still lands well inside a glance. */
+/* How long after a write ends the tree waits before asking git about the files
+ * written since: what one window's question covers. The backend already
+ * coalesces what arrives within 100 ms of each other; this coalesces what
+ * arrives after it, so a burst of two hundred calls is a question a window —
+ * never one a call — and the +N -N still lands well inside a glance. */
 const TREE_NUMSTAT_WINDOW_MS = 150;
 
 /* The most files one scoped question names. A patch over a hundred files is
@@ -563,7 +563,8 @@ function paintTreeTouches() {
       }
     };
     for (const [relative, held] of treeTouches) mark(relative, "agentTouch", "agentTouchWithin", (row, slot) => want(row, slot, held.kind));
-    // The newest writes first: the first rows to be marked are the ones that move.
+    // The newest writes first, the ones still open before the ones only waiting out
+    // their showing: the first rows to be marked are the ones that move.
     let moving = TREE_WRITING_MOVING_MAX;
     const wantWriting = (row, slot) => {
       if (wanted.get(row)?.[slot]) return;
@@ -571,7 +572,8 @@ function paintTreeTouches() {
       if (sheen === TREE_WRITING_ON) moving -= 1;
       want(row, slot, sheen);
     };
-    for (const held of [...treeWrites.values()].reverse()) {
+    const newestFirst = [...treeWrites.values()].reverse().sort((one, other) => Number(one.closed) - Number(other.closed));
+    for (const held of newestFirst) {
       for (const relative of held.paths) mark(relative, "agentWriting", "agentWritingWithin", wantWriting);
     }
   }
@@ -640,6 +642,11 @@ function armTreeTouchSweep() {
 }
 
 function sweepTreeTouches() {
+  // The timer that called this is spent: whatever happens below, the next arming
+  // must not take it for one still pending.
+  clearTimeout(treeTouchSweep);
+  treeTouchSweep = null;
+  treeTouchSweepAt = Infinity;
   const now = performance.now();
   for (const [relative, held] of treeTouches) if (held.until <= now) treeTouches.delete(relative);
   for (const [key, held] of treeWrites) {
@@ -758,9 +765,29 @@ function openTreeWrite(pane, activity, paths, now) {
   // A start said again for a call still open is the same call, restarted.
   treeWrites.delete(key);
   treeWrites.set(key, { paths, pane, verb: activity.verb, since: now, until: now + TREE_WRITING_MAX_MS, closed: false });
-  while (treeWrites.size > TREE_TOUCH_CAP) treeWrites.delete(treeWrites.keys().next().value);
+  while (treeWrites.size > TREE_TOUCH_CAP) evictTreeWrite();
   armTreeTouchSweepFor(now + TREE_WRITING_MAX_MS);
   return true;
+}
+
+/* The write to let go of when more are held than the cap allows: one that has
+ * ended and is only waiting out its showing goes before one still open — an open
+ * write's end may name no file (a wire session's names only its call id), and
+ * then only its start knows what it wrote — and the oldest goes before the
+ * newer. An open write that must go is asked about once, as at its bound: it may
+ * have landed. */
+function evictTreeWrite() {
+  let gone;
+  for (const [key, held] of treeWrites) {
+    if (held.closed) {
+      gone = key;
+      break;
+    }
+  }
+  if (gone === undefined) gone = treeWrites.keys().next().value;
+  const held = treeWrites.get(gone);
+  treeWrites.delete(gone);
+  if (!held.closed) wantTreeNumstat(held.paths);
 }
 
 /* The call an end belongs to: by key, else — an end that names no file and no
@@ -810,10 +837,11 @@ function finishTreeWrite(held, now) {
 /* ---- the one scoped question after a write ends (t-31715) ----
  *
  * Every file whose write ended joins one set; one timer, armed by the first,
- * asks the backend about the whole set once the window has passed
- * (`scm_numstat`: git for just those files, never the whole repository). A
- * burst of two hundred calls over forty files is one question naming forty
- * files. One question is in flight at a time, and none is asked while the
+ * asks the backend about the set once the window has passed (`scm_numstat`: git
+ * for just those files, never the whole repository), a few files a question
+ * (`TREE_NUMSTAT_PATHS_MAX`) and a window apart. A burst of two hundred calls
+ * over forty files is five questions naming eight files each. One question is
+ * in flight at a time, and none is asked while the
  * whole-repository status is being read — an answer taken before it must not
  * land after it. The tree asks nothing while nobody can see it: the periodic
  * refresh pays when somebody looks. */
