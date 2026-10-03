@@ -155,13 +155,15 @@ fn a_flapping_attempt_is_one_episode_and_a_calm_one_is_told_about_afresh() {
         standing.plan(&pause, Mode::Notify, NOW + 2 * SECOND),
         vec![]
     );
-    // Calm, but not for the whole of the time: wrong again, still one episode.
+    // Calm, but not for the whole of the time: wrong again, still one episode — no
+    // second word to the coordinator, though the ten minutes it has been are past the
+    // five that make a restore point due again.
     let calm_from = NOW + 3 * SECOND;
     standing.plan(&calm, Mode::Notify, calm_from);
     standing.plan(&calm, Mode::Notify, calm_from + REARM_MS - 1);
     assert_eq!(
         standing.plan(&pause, Mode::Notify, calm_from + REARM_MS - 1),
-        vec![]
+        vec![Act::Snapshot]
     );
     // Calm for the whole of it: the next time it goes wrong is a new episode.
     let calm_again = calm_from + REARM_MS;
