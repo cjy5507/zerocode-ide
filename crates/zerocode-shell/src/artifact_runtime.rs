@@ -2276,18 +2276,20 @@ impl Store {
                     .read_to_end(&mut held)
                     .map_err(|error| error.to_string())?;
                 let text = String::from_utf8_lossy(&held).into_owned();
+                let prose = matches!(artifact.kind, ArtifactKind::Report | ArtifactKind::Document);
+                // A report's words are linted here, once, and the counts ride the
+                // cached preview (t-32786). What is not prose, and a text with
+                // nothing to count, carry none.
+                let writing = prose
+                    .then(|| zerocode_core::plain_text::lint(&text))
+                    .filter(|found| found.sentences > 0);
                 PreviewPayload {
-                    kind: if matches!(artifact.kind, ArtifactKind::Report | ArtifactKind::Document)
-                    {
-                        "markdown"
-                    } else {
-                        "text"
-                    },
+                    kind: if prose { "markdown" } else { "text" },
                     text: Some(text),
                     data_url: None,
                     bytes,
                     truncated: bytes > limits.preview_text_bytes_max,
-                    writing: None,
+                    writing,
                 }
             }
         };

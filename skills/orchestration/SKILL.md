@@ -997,6 +997,20 @@ worktree, without stashing or committing another pane's changes.
 Exception: update the main checkout's release lane driver from the landed commit
 when the lane needs it; replace the file atomically (git checkout or temp + rename).
 
+### Reports are for a person: the plain-report skill
+
+A person reads a worker's summary, a report and a notice. The person asked
+for plain writing. Put the result first, write one fact in a sentence, give
+every number a unit and use no codebase metaphors. Where you explain a
+structure, add a diagram.
+
+The shared worker briefing says so once, at launch. The plain-report skill
+holds the rule and its word list. An agent reads it when it writes such a text,
+not every turn. When you report to the person yourself, follow it too.
+
+The window counts a worker's summary and a report against the rule and shows
+the counts beside them. It only counts. It never refuses a report.
+
 ## Merging results
 
 When the children are done, the coordinator reviews before merging:

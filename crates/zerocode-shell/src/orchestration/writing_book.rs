@@ -2,17 +2,26 @@
 //! summary its own worker handed in, linted once and remembered, so a beat
 //! that moved nothing works out nothing.
 //!
-//! This is the red skeleton: the book is held and dresses nothing yet.
+//! The rule is the core's ([`zerocode_core::plain_text::lint`]): a pure
+//! function of the text that counts and never refuses. This is where the
+//! counts are held. Nothing is stored in the ledger: the summary is already
+//! there, and a count worked out from it again is the same count. The board's
+//! beat asks about the finished rows of two surfaces — the worker rows the task
+//! board lists and the desk's pipeline, at most [`super::desk::STAGE_ROWS`] a
+//! stage — and both ask by the same task, so one lint serves both. The book
+//! holds at most the rows a beat asked for and lets go of the rest. A beat that
+//! finds a row's report unchanged neither parses it nor lints it again.
 
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
-use zerocode_core::orchestration::Ledger;
-use zerocode_core::plain_text::LintMemo;
+use zerocode_core::orchestration::{Ledger, Run, Task, is_workers_own, worker_summary_in};
+use zerocode_core::plain_text::{LintMemo, TextLint};
 
 use super::LedgerAgent;
-use super::desk::{self, DeskSnapshot};
+use super::desk::{self, DeskSnapshot, FINISHED_STAGES};
 
-/// What the writing lint counted in each finished task's summary.
+/// What the writing lint counted in each finished task's summary, as far as the
+/// board's beat has asked.
 #[derive(Debug, Default)]
 pub(crate) struct WritingBook {
     memo: LintMemo,
@@ -36,13 +45,15 @@ impl WritingBook {
         self.memo.end();
     }
 
-    /// The desk, with the lint of the summary on each finished row.
+    /// The desk, with the lint of the summary on each finished row whose worker
+    /// wrote one.
     pub(crate) fn dress_desk(&mut self, ledger: &Ledger, mut desk: DeskSnapshot) -> DeskSnapshot {
         dress_desk_with(&mut self.memo, ledger, &mut desk);
         desk
     }
 
-    /// The worker rows, each carrying its finished task's lint.
+    /// The worker rows the task board lists, each carrying its finished task's
+    /// lint where its worker wrote a summary.
     pub(crate) fn dress_agents(
         &mut self,
         ledger: &Ledger,
@@ -53,9 +64,52 @@ impl WritingBook {
     }
 }
 
-fn dress_desk_with(_memo: &mut LintMemo, _ledger: &Ledger, _desk: &mut DeskSnapshot) {}
+/// Every finished row the desk carries asks the memo for the lint of its
+/// worker's summary. A row whose worker wrote none, and a summary with nothing
+/// to count, wear nothing.
+fn dress_desk_with(memo: &mut LintMemo, ledger: &Ledger, desk: &mut DeskSnapshot) {
+    for row in desk
+        .tasks
+        .iter_mut()
+        .filter(|row| FINISHED_STAGES.contains(&row.stage))
+    {
+        let Some(run) = ledger.run(&row.run) else {
+            continue;
+        };
+        let Some(task) = run.task(&row.id) else {
+            continue;
+        };
+        row.writing = writing_of(memo, run, task);
+    }
+}
 
-fn dress_agents_with(_memo: &mut LintMemo, _ledger: &Ledger, _agents: &mut [LedgerAgent]) {}
+/// The same for the worker rows: the lint rides the row whose task is finished
+/// ([`desk::finished`]), as its cost does.
+fn dress_agents_with(memo: &mut LintMemo, ledger: &Ledger, agents: &mut [LedgerAgent]) {
+    for row in agents.iter_mut() {
+        let Some(run) = ledger.run(&row.run) else {
+            continue;
+        };
+        let Some(task) = run.task(&row.task_id) else {
+            continue;
+        };
+        if desk::finished(run, task) {
+            row.writing = writing_of(memo, run, task);
+        }
+    }
+}
+
+/// The lint of what a task's own worker wrote for a person, asked of the memo
+/// by what the summary is read from: the result's words and whether the worker
+/// wrote them. While both stand, the beat parses and lints nothing — not even
+/// when a coordinator replaced the result and the summary is read from the
+/// worker's report in the run's mail, which is searched once.
+fn writing_of(memo: &mut LintMemo, run: &Run, task: &Task) -> Option<TextLint> {
+    let author = task.result_author.as_ref();
+    let stamp = (task.result.as_str(), is_workers_own(author));
+    memo.lint_in(&run.id, &task.id, &stamp, || worker_summary_in(run, task))
+        .filter(|found| found.sentences > 0)
+}
 
 #[cfg(test)]
 mod tests {
