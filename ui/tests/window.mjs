@@ -67,6 +67,7 @@ import { installHarnessWaits } from "./harness-waits.mjs";
 import { installBoardWaits, testBoardWaits } from "./board-waits.mjs";
 
 import { testExplorer } from "./explorer.mjs";
+import { testExplorerAgentActivity, testExplorerAgentBurst, testExplorerGit, testExplorerKeys, testExplorerMentions } from "./explorer-agent.mjs";
 import { testPathBrowser } from "./path-browser.mjs";
 import { testNativeFolderPicker } from "./native-folder-picker.mjs";
 import { testSftpAndTeam } from "./sftp.mjs";
@@ -210,6 +211,13 @@ suite("explorer", async ({ browser, origin, ok }) => {
     await page.close();
   }
 });
+/* The tree wears what the agents do, git's numbers and the keyboard
+ * (t-24298): one suite per slice, so each red and green is one name. */
+suite("explorer-agent-activity", ({ browser, origin, ok }) => testExplorerAgentActivity(browser, origin, ok));
+suite("explorer-agent-burst", ({ browser, origin, ok }) => testExplorerAgentBurst(browser, origin, ok));
+suite("explorer-git", ({ browser, origin, ok }) => testExplorerGit(browser, origin, ok));
+suite("explorer-mentions", ({ browser, origin, ok }) => testExplorerMentions(browser, origin, ok));
+suite("explorer-keys", ({ browser, origin, ok }) => testExplorerKeys(browser, origin, ok));
 suite("crash", ({ browser, origin, ok }) => testCrashReport(browser, origin, standBackend, ok));
 suite("ledger-poll", ({ browser, origin, ok }) => testLedgerPoll(browser, origin, standBackend, ok));
 suite("usage-refresh", async ({ browser, origin, ok }) => {
