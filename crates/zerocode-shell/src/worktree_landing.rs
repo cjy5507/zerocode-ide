@@ -103,7 +103,20 @@ pub(super) fn resolve_landing_base(
         .map(str::trim)
         .filter(|one| !one.is_empty())
         .map(str::to_string)
-        .or_else(|| default_base_probe(host, repo_root));
+        .or_else(|| {
+            // A repository whose `origin/HEAD` was never set probes down to a
+            // bare local `main`, which moves the moment somebody merges locally
+            // and would call unpushed work landed. The remote-tracking ref of the
+            // same name is the one to compare with, when there is one.
+            default_base_probe(host, repo_root).map(|probed| {
+                let remote = format!("origin/{probed}");
+                if !probed.contains('/') && ref_exists(host, repo_root, &remote) {
+                    remote
+                } else {
+                    probed
+                }
+            })
+        });
     let Some(name) = name else {
         return LandingBase {
             name: None,
