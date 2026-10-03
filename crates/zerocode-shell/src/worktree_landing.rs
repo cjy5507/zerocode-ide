@@ -151,6 +151,14 @@ fn now_ms() -> i64 {
         })
 }
 
+/// A cache lock that survives a panic that held it. These maps hold answers,
+/// not invariants: a poisoned lock read as "empty" would leave every row
+/// `pending` for good while each refresh queued the same work again.
+fn unpoisoned<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[derive(Clone)]
 struct HeldLanding {
     key: String,
@@ -176,7 +184,7 @@ fn landing_key(head: Option<&str>, branch: Option<&str>, base: &LandingBase) -> 
 }
 
 fn held_landing(path: &Path) -> Option<HeldLanding> {
-    landing_cache().lock().ok()?.get(path).cloned()
+    unpoisoned(landing_cache()).get(path).cloned()
 }
 
 /// Whether a held answer still answers for these facts: the same key, and an
@@ -305,9 +313,7 @@ fn run_landing_job(job: &LandingJob, notify: &(dyn Fn() + Sync)) {
     // behind the first and finds its rows already standing, which is cheaper
     // than answering them twice.
     let gate = repo_gate(&job.repo_root);
-    let _turn = gate
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _turn = unpoisoned(&gate);
     let moved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| answer_rows(job)))
         .unwrap_or_else(|_| {
             for row in &job.rows {
@@ -360,24 +366,19 @@ fn answer_row(host: &Host, row: &LandingRow, base: &LandingBase) -> bool {
 /// the next read asks again; the window is told, because it differs from what it
 /// was given.
 fn hold_failure(path: &Path, base: Option<&LandingBase>) {
-    if let Ok(mut cache) = landing_cache().lock() {
-        cache.insert(
-            path.to_path_buf(),
-            HeldLanding {
-                key: String::new(),
-                landing: WorktreeLanding::failed(base),
-            },
-        );
-    }
+    unpoisoned(landing_cache()).insert(
+        path.to_path_buf(),
+        HeldLanding {
+            key: String::new(),
+            landing: WorktreeLanding::failed(base),
+        },
+    );
 }
 
 fn refresh_row(host: &Host, row: &LandingRow, base: &LandingBase) -> bool {
     #[cfg(test)]
     {
-        if tests::PANIC_AT
-            .lock()
-            .is_ok_and(|at| at.as_deref() == Some(row.path.as_path()))
-        {
+        if unpoisoned(&tests::PANIC_AT).as_deref() == Some(row.path.as_path()) {
             panic!("a landing job that dies (test)");
         }
     }
@@ -401,10 +402,7 @@ fn refresh_row(host: &Host, row: &LandingRow, base: &LandingBase) -> bool {
 
 fn repo_gate(repo_root: &Path) -> Arc<Mutex<()>> {
     static GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
-    let mut gates = GATES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut gates = unpoisoned(GATES.get_or_init(|| Mutex::new(HashMap::new())));
     Arc::clone(gates.entry(repo_root.to_path_buf()).or_default())
 }
 
@@ -457,15 +455,13 @@ fn worktree_landing_within(
     landing.ref_updated_ms = base.updated_ms;
     landing.dirty = !status.trim().is_empty();
     landing.dirty_checked_ms = Some(now_ms());
-    if let Ok(mut cache) = landing_cache().lock() {
-        cache.insert(
-            path.to_path_buf(),
-            HeldLanding {
-                key,
-                landing: landing.clone(),
-            },
-        );
-    }
+    unpoisoned(landing_cache()).insert(
+        path.to_path_buf(),
+        HeldLanding {
+            key,
+            landing: landing.clone(),
+        },
+    );
     landing
 }
 
@@ -513,7 +509,7 @@ fn known_landing_base(repo_root: &Path, pinned: Option<&str>) -> Option<LandingB
     if !git_dir.is_dir() {
         return None;
     }
-    let cache = base_cache().lock().ok()?;
+    let cache = unpoisoned(base_cache());
     let held = cache.get(repo_root)?;
     (held.pinned.as_deref() == pinned
         && held.stamp == base_stamp(&git_dir, held.base.name.as_deref()))
@@ -531,16 +527,14 @@ fn landing_base(host: &Host, repo_root: &Path, pinned: Option<&str>) -> LandingB
     let git_dir = repo_root.join(".git");
     if git_dir.is_dir() {
         let stamp = base_stamp(&git_dir, base.name.as_deref());
-        if let Ok(mut held) = base_cache().lock() {
-            held.insert(
-                repo_root.to_path_buf(),
-                HeldBase {
-                    pinned: pinned.map(str::to_string),
-                    stamp,
-                    base: base.clone(),
-                },
-            );
-        }
+        unpoisoned(base_cache()).insert(
+            repo_root.to_path_buf(),
+            HeldBase {
+                pinned: pinned.map(str::to_string),
+                stamp,
+                base: base.clone(),
+            },
+        );
     }
     base
 }
@@ -564,10 +558,9 @@ pub(crate) fn landing_stamp_of(roots: Vec<String>) -> String {
         said.push(':');
         let root = Path::new(&root);
         let git_dir = root.join(".git");
-        let name = base_cache()
-            .lock()
-            .ok()
-            .and_then(|cache| cache.get(root).and_then(|held| held.base.name.clone()));
+        let name = unpoisoned(base_cache())
+            .get(root)
+            .and_then(|held| held.base.name.clone());
         for mark in base_stamp(&git_dir, name.as_deref()) {
             said.push_str(&format!("{mark:?},"));
         }
@@ -1207,13 +1200,13 @@ mod tests {
         let moved = git(&wt, &["rev-parse", "HEAD"]);
         let mut next = [entry(&wt, "wt/dies", &moved)];
         let job = plan_landings(&mut next, &bench.repo, None).expect("the head moved");
-        *PANIC_AT.lock().expect("seam") = Some(wt.clone());
+        *unpoisoned(&PANIC_AT) = Some(wt.clone());
         assert_eq!(
             noticed(&job),
             1,
             "the window is told, because the answer changed"
         );
-        *PANIC_AT.lock().expect("seam") = None;
+        *unpoisoned(&PANIC_AT) = None;
         let mut failed = [entry(&wt, "wt/dies", &moved)];
         let retry = plan_landings(&mut failed, &bench.repo, None).expect("failed never stands");
         assert_eq!(
