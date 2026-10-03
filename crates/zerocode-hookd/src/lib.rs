@@ -554,7 +554,8 @@ pub trait TurnBrief: Send + Sync {
         false
     }
     /// Commit only after the matching hook client has received and forwarded
-    /// the response. Returning an error leaves the receipt retryable.
+    /// the response. An error permits another acknowledgment until the slot
+    /// expires; installed hook scripts make one attempt.
     ///
     /// # Errors
     /// The host could not persist its acknowledgment.

@@ -573,6 +573,81 @@ fn a_suggestion_label_that_completes_the_evidence_records_its_own_rise() {
 }
 
 #[test]
+fn an_explicit_search_rechecks_settings_after_the_reply_and_before_reusing_a_memo() {
+    use super::super::jev_mock::{machine, Mock};
+    use std::sync::Arc;
+    let mut failures = Vec::new();
+    for (initial, change, applied) in [
+        ("on", "none", true), ("on", "off", false), ("on", "shadow", false),
+        ("on", "global_off", false), ("on", "consent", false), ("on", "model", false),
+        ("on", "auto", false), ("shadow", "on", false),
+    ] {
+        let path = Arc::new(Mutex::new(None::<PathBuf>));
+        let settings = Arc::clone(&path);
+        let mock = Mock::answering(move |body| {
+            let path = settings.lock().unwrap().clone().unwrap();
+            let mut root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            match change {
+                "none" => {},
+                "global_off" => root["smart"]["jev"]["enabled"] = json!(false),
+                "consent" => root["smart"]["jev"]["workspaces"] = json!([]),
+                "model" => root["smart"]["jevModel"] = json!("jev-new-pin"),
+                _ => root["smart"][SKILLS.setting] = json!(change),
+            }
+            std::fs::write(path, root.to_string()).unwrap();
+            let request: Value = serde_json::from_str(body).unwrap();
+            let legend: serde_json::Map<String, Value> = zerocode_core::jev::SKILL_LEVELS
+                .iter().enumerate().map(|(i, text)| (i.to_string(), json!(text))).collect();
+            let answers: serde_json::Map<String, Value> = request["questions"].as_object().unwrap()
+                .keys().map(|id| (id.clone(), json!({"type":"score","score":2.0,"confidence":1.0,
+                    "legend":legend,"probabilities":{"0":0.0,"1":0.0,"2":1.0}}))).collect();
+            (200, json!({"model":"jev-test","answers":answers,
+                "usage":{"input_tokens":10,"output_tokens":0}}).to_string())
+        });
+        machine(&SKILLS, initial, &mock.base_url, |cwd| {
+            let settings_path = runtime::default_config_home().join("settings.json");
+            *path.lock().unwrap() = Some(settings_path.clone());
+            let original: Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+            let skills = [SkillIndexEntry::new("docx".into(), Some("Write Word files".into()), cwd.join("SKILL.md"))];
+            let task = format!("explicit settings regression {initial} {change}");
+            let baseline = lexical_rank(&task, &skill_candidates(&skills));
+            let searched = search_for_session(cwd, &task, &skills, Some("settings-session"));
+            assert_eq!(searched.outcome, SKILL_OUTCOME_ANSWERED, "{initial}/{change}: {searched:?}");
+            assert_eq!(mock.requests().len(), 1, "{initial}/{change}");
+            let rows = super::super::jev_summary::read_rows(&skill_search_path(cwd));
+            assert_eq!(rows.len(), 1);
+            let correct_ranking = if applied {
+                searched.ranked.first().is_some_and(|reading| reading.name == "docx")
+            } else { searched.ranked == baseline };
+            let correct = searched.judged() == applied && correct_ranking
+                && (rows[0]["routeUse"] == ROUTE_USE_APPLIED) == applied;
+            println!("explicit settings case {initial}/{change}: {correct}");
+            if !correct { failures.push(format!("{initial}/{change}: {searched:?}")); }
+            if change == "none" {
+                // The exact successful ranking is now memoized. Turning off
+                // either permission must also withhold that zero-request road.
+                for revoke in ["global", "consent"] {
+                    let mut root = original.clone();
+                    if revoke == "global" { root["smart"]["jev"]["enabled"] = json!(false); }
+                    else { root["smart"]["jev"]["workspaces"] = json!([]); }
+                    std::fs::write(&settings_path, root.to_string()).unwrap();
+                    let cached = search_for_session(cwd, &task, &skills, Some("settings-session"));
+                    assert_eq!(mock.requests().len(), 1, "a withheld memo sends nothing");
+                    let rows = super::super::jev_summary::read_rows(&skill_search_path(cwd));
+                    assert_eq!(rows.last().unwrap()["cached"], true);
+                    assert_eq!(rows.last().unwrap()["requests"], 0);
+                    let correct = !cached.judged() && cached.ranked == baseline
+                        && rows.last().unwrap()["routeUse"] != ROUTE_USE_APPLIED;
+                    println!("explicit settings case memo/{revoke}: {correct}");
+                    if !correct { failures.push(format!("memo/{revoke}: {cached:?}")); }
+                }
+            }
+        });
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn an_in_flight_suggestion_cannot_outlive_its_settings() {
     use super::super::jev_mock::{machine_words, Mock};
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};

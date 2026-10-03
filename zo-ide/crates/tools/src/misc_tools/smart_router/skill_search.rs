@@ -388,11 +388,10 @@ pub fn search_for_session(cwd: &Path, task: &str, skills: &[SkillIndexEntry], se
     let Some(mode) = asking_mode(cwd, &SKILLS) else {
         return fallback(JevMode::Off.key());
     };
-    // Read once, here: the standing decides both whether the tool result is
-    // the judgment's and whether a second request is worth buying, and two
-    // readings of one ledger could answer those two questions differently.
+    // This standing decides whether an acting request is worth buying. The
+    // final application check may withhold it, never upgrade a recording call.
     let acting = mode.applies_with(runtime::jev_seat_applies(cwd, &SKILLS));
-    let (mut row, ranked) =
+    let (mut row, ranked, still_acts) =
         api::sync_bridge::run_blocking(judge(cwd, task, &candidates, acting, session));
     let judged = row.outcome == SKILL_OUTCOME_ANSWERED;
     let judged_names = judged.then(|| {
@@ -405,7 +404,7 @@ pub fn search_for_session(cwd: &Path, task: &str, skills: &[SkillIndexEntry], se
     // A recording mode asked and wrote the row down; what the turn reads is
     // still the word match's ranking, exactly as it would be with the switch
     // off. That is what makes the two readable side by side.
-    let searched = if judged && acting {
+    let searched = if judged && still_acts {
         Searched {
             ranked,
             route_use: ROUTE_USE_APPLIED.to_string(),
@@ -417,7 +416,9 @@ pub fn search_for_session(cwd: &Path, task: &str, skills: &[SkillIndexEntry], se
     } else {
         Searched {
             ranked: baseline,
-            route_use: if judged {
+            route_use: if judged && acting {
+                JevMode::Shadow.key().to_string()
+            } else if judged {
                 mode.key().to_string()
             } else {
                 ROUTE_USE_FALLBACK.to_string()
@@ -1009,7 +1010,7 @@ async fn judge(
     candidates: &[SkillCandidate],
     acting: bool,
     session: Option<&str>,
-) -> (SkillSearchRow, Vec<SkillReading>) {
+) -> (SkillSearchRow, Vec<SkillReading>, bool) {
     let shards = skill_shards(candidates);
     // The door before the memo: what a ranking is remembered under is the
     // model the door asks for, and only the person's settings say which.
@@ -1022,12 +1023,17 @@ async fn judge(
             shards.len(),
             FAIL_SETTINGS_UNAVAILABLE.to_string(),
         );
-        return (row, Vec::new());
+        return (row, Vec::new(), false);
     };
     let door = match session {
         Some(session) => door.with_origin("zo/session", session),
         None => door,
     };
+    // Cached and newly received rankings have the same live application gate.
+    // A recording request cannot become acting while its reply is in flight.
+    let still_acts = || acting && door.permits_application_now()
+        && asking_mode(cwd, &SKILLS).is_some_and(|current|
+            current.applies_with(runtime::jev_seat_applies(cwd, &SKILLS)));
     let key = MemoKey::for_search(task, candidates, door.model_key());
     if let Some(remembered) = memo().lock().ok().and_then(|memo| memo.get(&key).cloned()) {
         telemetry::attest_fired(telemetry::HarnessFeature::SkillSearch);
@@ -1040,7 +1046,7 @@ async fn judge(
         row.cached = true;
         row.shards_answered = shards.len();
         row.chosen = remembered.iter().map(Chosen::from).collect();
-        return (row, remembered);
+        return (row, remembered, still_acts());
     }
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
     // Every shard at once: they are independent requests over disjoint
@@ -1050,7 +1056,8 @@ async fn judge(
         .iter()
         .map(|shard| ask_one(&door, client.as_ref(), task, shard, acting));
     let answers = futures_util::future::join_all(asked).await;
-    fold(key, candidates, &shards, answers)
+    let (row, ranked) = fold(key, candidates, &shards, answers);
+    (row, ranked, still_acts())
 }
 
 /// What one shard's request came back with.
