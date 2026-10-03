@@ -37024,11 +37024,14 @@ const helperWide = await page.evaluate(async () => {
   const listBox = list.getBoundingClientRect();
   const proseBox = prose.getBoundingClientRect();
   const gutter = Number.parseFloat(getComputedStyle(list).paddingLeft);
-  seen.paneWidth = Math.round(listBox.width);
+  // The pane is the face; the list is the pane beside the turn rail (t-22100).
+  seen.paneWidth = Math.round(face.getBoundingClientRect().width);
+  seen.listWidth = Math.round(listBox.width);
   seen.columnWidth = Math.round(proseBox.width);
   seen.gutter = gutter;
-  // The extension's list holds no reading column: the rows take the pane
-  // behind the list's own gutters, the same on both sides.
+  // The extension's list holds no reading column: the rows take the list —
+  // the pane beside the turn rail — behind its own gutters, the same on
+  // both sides.
   seen.fillsPane = Math.abs(proseBox.width - (listBox.width - 2 * gutter)) <= 2;
   seen.centered =
     Math.abs((proseBox.left - listBox.left) - (listBox.right - proseBox.right)) <= 2;
@@ -37099,7 +37102,9 @@ const helperNarrow = await page.evaluate(async (term) => {
   const listBox = list.getBoundingClientRect();
   const proseBox = prose.getBoundingClientRect();
   const gutter = Number.parseFloat(getComputedStyle(list).paddingLeft);
-  seen.paneWidth = Math.round(listBox.width);
+  // The pane is the face; the list is the pane beside the turn rail (t-22100).
+  seen.paneWidth = Math.round(face.getBoundingClientRect().width);
+  seen.listWidth = Math.round(listBox.width);
   seen.columnWidth = Math.round(proseBox.width);
   // 좁아지면 단이 남은 폭을 다 갖는다 — 여백만 한 단 줄어든다.
   seen.fillsPane = Math.abs(proseBox.width - (listBox.width - 2 * gutter)) <= 2;
@@ -37219,7 +37224,9 @@ const paneDock = await page.evaluate(async () => {
   }
   const listBox = list.getBoundingClientRect();
   const proseBox = prose.getBoundingClientRect();
-  seen.paneWidth = Math.round(listBox.width);
+  // The pane is the face; the list is the pane beside the turn rail (t-22100).
+  seen.paneWidth = Math.round(face.getBoundingClientRect().width);
+  seen.listWidth = Math.round(listBox.width);
   seen.columnWidth = Math.round(proseBox.width);
   // The composer floats in the extension's dock: inset from the list's edges,
   // no wider than the token, centered on the list's axis — the turn rail
@@ -37270,7 +37277,7 @@ const paneDock = await page.evaluate(async () => {
   face.style.width = "420px";
   await new Promise(requestAnimationFrame);
   const narrowList = list.getBoundingClientRect();
-  seen.narrowWidth = Math.round(narrowList.width);
+  seen.narrowWidth = Math.round(face.getBoundingClientRect().width);
   seen.composerInside = box ? box.getBoundingClientRect().right <= narrowList.right + 1 : false;
   seen.composerOn = composerForm ? composerForm.getBoundingClientRect().bottom <= innerHeight + 1 : false;
   face.style.flex = "";
