@@ -1229,6 +1229,12 @@ class Desk:
               f"{self.values['reflex_round']['run_s']} s — any keyboard or mouse input stops it", flush=True)
         time.sleep(safety["announce_s"])
         run = self.run_folder(run_name(seed, cover, cover_mode))
+        # The round's kind and the plan's glide are the desk's before the
+        # launch writes round.json off them: set after it, the fixture played
+        # the plain round under a config that named a kind (the red of
+        # test_a_run_of_a_kind_plays_that_kinds_round_and_its_row_and_config_say_so).
+        self.pointer_ms = pointer_ms
+        self.kind = kind or PLAIN
         # A run with no cover calls launch as it always has, so a harness
         # that overrides launch(run, seed) keeps working (t-12979).
         ready = self.launch(run, seed) if cover is None else self.launch(run, seed, cover)
@@ -1238,10 +1244,8 @@ class Desk:
             config += f"+autopilot-{autopilot['generator']}"
             if autopilot["l1"] != goal["l1"]:
                 config += f"-l1{autopilot['l1']}"
-        self.pointer_ms = pointer_ms
         if pointer_ms is not None:
             config += f"+pointer{pointer_ms}"
-        self.kind = kind or PLAIN
         if self.kind != PLAIN:
             config += f"+kind-{self.kind}"
         record = {"owner": self.session["owner"], "seed": seed, "fixturePid": ready["pid"], "rules": many,

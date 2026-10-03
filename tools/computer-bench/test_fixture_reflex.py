@@ -597,6 +597,11 @@ class Runner(unittest.TestCase):
                     self.folder / f"run-{seed}")
 
     def test_a_run_of_a_kind_plays_that_kinds_round_and_its_row_and_config_say_so(self):
+        # The runner's short round (run_s above) ends before the table's first sweeper could arrive;
+        # this round lasts past the latest launch and the longest flight, so an avoid round holds one.
+        table, safety = self.values["reflex_kind"]["avoid"], self.values["reflex_safety"]
+        latest_arrival_ms = self.values["reflex_round"]["lead_ms"] + table["every_ms"][1] + table["flight_ms"][1]
+        self.values["reflex_round"]["run_s"] = latest_arrival_ms / 1_000 - safety["prep_s"] + safety["poll_ms"] / 1_000
         result, run = self.run_desk(39, kind="avoid")
         self.assertEqual(json.loads((run / "round.json").read_text()).get("kind"), "avoid")
         self.assertTrue(json.loads((run / "round.json").read_text())["schedule"].get("sweeps"), "the round has sweepers")
