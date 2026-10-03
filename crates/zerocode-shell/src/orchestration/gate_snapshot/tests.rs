@@ -163,3 +163,96 @@ fn a_worker_id_a_ref_cannot_carry_is_refused_before_git_is_asked() {
         "only the branch"
     );
 }
+
+/// A restore point of an earlier day: a commit of HEAD's tree made at `date`,
+/// with `reference` pointing at it.
+fn old_checkpoint(repo: &Path, reference: &str, date: &str) {
+    let tree = run(repo, &["rev-parse", "HEAD^{tree}"]).trim().to_string();
+    let output = crate::proc::quiet_command("git")
+        .arg("-C")
+        .arg(repo)
+        .env("GIT_COMMITTER_DATE", date)
+        .env("GIT_AUTHOR_DATE", date)
+        .args(["commit-tree", &tree, "-m", "an earlier restore point"])
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    run(repo, &["update-ref", reference, &commit]);
+}
+
+fn checkpoint_refs(repo: &Path) -> Vec<String> {
+    let listed = run(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/zerocode/checkpoints/",
+        ],
+    );
+    let mut refs: Vec<String> = listed.lines().map(str::to_string).collect();
+    refs.sort_unstable();
+    refs
+}
+
+#[test]
+fn the_newest_checkpoints_are_kept_by_their_time_when_a_later_attempt_numbers_from_one_again() {
+    let dir = checkout();
+    let repo = dir.path();
+    for (number, date) in [
+        (3, "2020-01-01T00:00:03Z"),
+        (4, "2020-01-01T00:00:04Z"),
+        (5, "2020-01-01T00:00:05Z"),
+    ] {
+        old_checkpoint(
+            repo,
+            &format!("refs/zerocode/checkpoints/w-1/{number}"),
+            date,
+        );
+    }
+    std::fs::write(repo.join("a.txt"), "a later attempt\n").expect("a change");
+    save(repo, "w-1", 1).expect("a snapshot");
+    assert_eq!(
+        checkpoint_refs(repo),
+        [
+            "refs/zerocode/checkpoints/w-1/1",
+            "refs/zerocode/checkpoints/w-1/4",
+            "refs/zerocode/checkpoints/w-1/5",
+        ],
+        "the restore point just made is the newest, whatever its number"
+    );
+}
+
+#[test]
+fn a_repository_holds_a_bounded_number_of_checkpoints_across_every_worker_that_ever_ran() {
+    let dir = checkout();
+    let repo = dir.path();
+    let extra = 10;
+    for index in 0..REFS_KEPT_MAX + extra {
+        old_checkpoint(
+            repo,
+            &format!("refs/zerocode/checkpoints/w-{index}/1"),
+            &format!("2020-01-01T00:{:02}:{:02}Z", index / 60, index % 60),
+        );
+    }
+    std::fs::write(repo.join("a.txt"), "now\n").expect("a change");
+    save(repo, "w-new", 1).expect("a snapshot");
+    let refs = checkpoint_refs(repo);
+    assert_eq!(refs.len(), REFS_KEPT_MAX, "{refs:?}");
+    assert!(refs.contains(&"refs/zerocode/checkpoints/w-new/1".to_string()));
+    assert!(
+        !refs.contains(&"refs/zerocode/checkpoints/w-0/1".to_string()),
+        "the oldest go first"
+    );
+    assert!(
+        refs.contains(&format!(
+            "refs/zerocode/checkpoints/w-{}/1",
+            REFS_KEPT_MAX + extra - 1
+        )),
+        "and the newest of the old stay"
+    );
+}

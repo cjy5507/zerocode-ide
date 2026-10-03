@@ -26,6 +26,11 @@ const REF_ROOT: &str = "refs/zerocode/checkpoints";
 /// minutes of a worker's life is the cost to a person's repository.
 pub(super) const KEPT: usize = 3;
 
+/// How many checkpoints one repository holds in all, whoever's they are: sixty,
+/// twenty workers' worth of the newest three. Without a bound the refs of every
+/// worker that ever ran would stay in a person's repository for good.
+pub(super) const REFS_KEPT_MAX: usize = 60;
+
 /// The identity the commit is made under: nobody's, and not a real address.
 const IDENTITY: [&str; 4] = [
     "-c",
