@@ -703,12 +703,13 @@ pub enum Within {
     Silent,
 }
 
-/// 이 호스트의 git — **지금 실제로 쓰이는 세 모양뿐**이다.
+/// 이 호스트의 git — **지금 실제로 쓰이는 네 모양뿐**이다.
 ///
-/// 셋은 편의가 아니라 서로 다른 실패 모드다. [`Vcs::text`]는 git이 한 말을
+/// 넷은 편의가 아니라 서로 다른 실패 모드다. [`Vcs::text`]는 git이 한 말을
 /// 그대로 사람에게 전하고, [`Vcs::text_within`]은 **답을 못 받았음**을 빈
 /// 문자열과 구별해서 돌려주며, [`Vcs::try_within`]은 그 위에 **왜 못 받았는지**를
-/// 얹는다. 하나로 합치면 셋 중 둘을 잃는다.
+/// 얹고, [`Vcs::text_and_code`]는 **0이 아닌 종료값도 답인 명령**(충돌을 1로 알리는
+/// `merge-tree`)의 종료값과 표준 출력을 함께 준다. 하나로 합치면 넷 중 셋을 잃는다.
 pub trait Vcs: Send + Sync {
     /// `root`에서 git을 돌리고 표준 출력을 준다. 실패하면 git이 표준 오류에
     /// 적은 말을 그대로 준다.
@@ -716,6 +717,13 @@ pub trait Vcs: Send + Sync {
     /// `!status.success()`를 잊은 복사본은 스테이지가 빈 것과 명령이 실패한
     /// 것을 같은 빈 문자열로 답한다. 그 실패를 막으려고 이 함수가 하나다.
     fn text(&self, root: &Path, args: &[&str]) -> Result<String, String>;
+
+    /// `root`에서 git을 돌리고 **종료값과 표준 출력을 함께** 준다. 0이 아닌
+    /// 종료값이 오류가 아니라 답인 명령을 위한 얼굴이다 — `merge-tree --write-tree`는
+    /// 충돌을 1로 알리면서 충돌한 파일 이름을 표준 출력에 적는다. [`Vcs::text`]는
+    /// 그 경우 표준 오류만 돌려주어 이름이 사라진다. 띄우지 못했거나 신호로
+    /// 죽었으면 [`Err`].
+    fn text_and_code(&self, root: &Path, args: &[&str]) -> Result<(i32, String), String>;
 
     /// 같은 일을 하되 `budget` 안에 끝나지 않으면 **죽인다**. 실패의 이유까지
     /// 준다 — [`Within`]을 볼 것.
@@ -928,6 +936,20 @@ impl Vcs for LocalVcs {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn text_and_code(&self, root: &Path, args: &[&str]) -> Result<(i32, String), String> {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| error.to_string())?;
+        let code = out
+            .status
+            .code()
+            .ok_or_else(|| "git이 신호로 끝났습니다".to_string())?;
+        Ok((code, String::from_utf8_lossy(&out.stdout).into_owned()))
     }
 
     fn try_within(&self, root: &Path, args: &[&str], budget: Duration) -> Within {

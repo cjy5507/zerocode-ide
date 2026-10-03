@@ -49,6 +49,24 @@ pub(super) struct WorktreeLanding {
     /// 경우에만 안다 — 내용으로만 들어간 것은 그런 커밋이 없다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) landed_in: Option<LandedIn>,
+    /// `unlanded`일 때 비교 ref에는 있고 이 머리에는 없는 **커밋** 수(`ahead`는
+    /// 내용 기준, 이것은 커밋 기준이다). 못 읽었거나 `unlanded`가 아니면 없다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) behind: Option<u32>,
+    /// `unlanded`일 때 비교 ref에 합치면 충돌하는 파일. 충돌이 없거나 git이
+    /// 답하지 못했으면 없다 — 못 본 것을 충돌 없음이라 하지 않는다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) conflict: Option<LandingConflict>,
+}
+
+/// 이름을 적는 충돌 파일의 수. 더 있으면 `total`만 센다.
+pub(super) const LANDING_CONFLICT_NAMES: usize = 5;
+
+/// 합치면 충돌하는 파일: 전체 수와, 이름을 적는 앞쪽 몇 개.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct LandingConflict {
+    pub(super) total: u32,
+    pub(super) files: Vec<String>,
 }
 
 impl WorktreeLanding {
@@ -74,6 +92,8 @@ impl WorktreeLanding {
             compare_ref: None,
             ref_updated_ms: None,
             landed_in: None,
+            behind: None,
+            conflict: None,
         }
     }
 }
@@ -644,6 +664,8 @@ fn classify_landing(
         compare_ref: base.name.clone(),
         ref_updated_ms: base.updated_ms,
         landed_in: None,
+        behind: None,
+        conflict: None,
     };
     let Some(target) = base.oid.as_deref() else {
         landing.state = "no_ref";
@@ -683,6 +705,22 @@ fn classify_landing(
         landing.ahead = u32::try_from(ahead).unwrap_or(u32::MAX);
     }
     landing
+}
+
+/// 병합 시험(`merge-tree --write-tree --name-only`)의 답.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MergeProbe {
+    /// 충돌 없이 합쳐진다 — 합친 나무의 oid.
+    Clean(String),
+    /// 충돌한다 — 충돌한 파일(중복 없이, git이 적은 순서).
+    Conflict(Vec<String>),
+    /// git이 답하지 못했다.
+    Failed,
+}
+
+/// 종료값과 표준 출력을 병합 시험의 답으로 읽는다.
+fn parse_merge_probe(_code: i32, _said: &str) -> MergeProbe {
+    MergeProbe::Failed
 }
 
 /// 브랜치가 만들어진 커밋 — 그 브랜치 reflog의 가장 오래된 줄.
@@ -973,6 +1011,102 @@ mod tests {
         let landing = bench.landing(&wt);
         assert!(landing.dirty);
         assert_eq!(landing.state, "no_commits");
+    }
+
+    #[test]
+    fn the_probe_reads_a_clean_merge_a_conflict_and_a_failure_apart() {
+        let tree = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            parse_merge_probe(0, &format!("{tree}\n")),
+            MergeProbe::Clean(tree.to_string())
+        );
+        // 충돌은 1로 끝나고 첫 줄은 나무, 그다음이 파일 이름이며, 중복은 한 번만.
+        assert_eq!(
+            parse_merge_probe(1, &format!("{tree}\nsrc/a.rs\nsrc/a.rs\nb.txt\n")),
+            MergeProbe::Conflict(vec!["src/a.rs".into(), "b.txt".into()])
+        );
+        // 빈 줄 뒤는 사람이 읽는 메시지이지 파일이 아니다.
+        assert_eq!(
+            parse_merge_probe(1, &format!("{tree}\nb.txt\n\nAuto-merging b.txt\nCONFLICT (content)\n")),
+            MergeProbe::Conflict(vec!["b.txt".into()])
+        );
+        // 128 같은 값은 충돌이 아니라 git이 못 답한 것이다.
+        assert_eq!(parse_merge_probe(128, "fatal"), MergeProbe::Failed);
+        assert_eq!(parse_merge_probe(0, ""), MergeProbe::Failed);
+    }
+
+    #[test]
+    fn an_unlanded_branch_counts_the_commits_the_compare_ref_has_and_it_lacks() {
+        let bench = Bench::open();
+        let wt = bench.worktree("behind");
+        bench.commit(&wt, "w.txt", "work\n");
+        let level = bench.landing(&wt);
+        assert_eq!((level.state, level.behind), ("unlanded", Some(0)));
+        bench.commit(&bench.repo, "m1.txt", "one\n");
+        bench.commit(&bench.repo, "m2.txt", "two\n");
+        // 비교 ref가 안 움직였으니 캐시한 답이 서 있다.
+        assert_eq!(bench.landing(&wt).behind, Some(0));
+        bench.publish();
+        let landing = bench.landing(&wt);
+        assert_eq!((landing.state, landing.ahead), ("unlanded", 1));
+        assert_eq!(landing.behind, Some(2));
+        assert_eq!(landing.conflict, None, "different files merge cleanly");
+    }
+
+    #[test]
+    fn a_merge_that_would_conflict_names_the_files_and_counts_them_all() {
+        let bench = Bench::open();
+        for index in 1..=7 {
+            bench.commit(&bench.repo, &format!("f{index}.txt"), "base\n");
+        }
+        bench.publish();
+        let wt = bench.worktree("clash");
+        for index in 1..=7 {
+            std::fs::write(wt.join(format!("f{index}.txt")), "worker\n").expect("write");
+        }
+        git(&wt, &["add", "."]);
+        git(&wt, &["commit", "-q", "-m", "worker edits"]);
+        for index in 1..=7 {
+            std::fs::write(bench.repo.join(format!("f{index}.txt")), "main\n").expect("write");
+        }
+        git(&bench.repo, &["add", "."]);
+        git(&bench.repo, &["commit", "-q", "-m", "main edits"]);
+        bench.publish();
+        let landing = bench.landing(&wt);
+        assert_eq!((landing.state, landing.behind), ("unlanded", Some(1)));
+        let conflict = landing.conflict.expect("the merge conflicts");
+        assert_eq!(conflict.total, 7);
+        assert_eq!(conflict.files.len(), LANDING_CONFLICT_NAMES);
+        assert_eq!(conflict.files[0], "f1.txt");
+    }
+
+    #[test]
+    fn a_landed_or_idle_row_carries_no_drift() {
+        let bench = Bench::open();
+        let idle = bench.worktree("drift-idle");
+        bench.commit(&bench.repo, "m.txt", "moves\n");
+        bench.publish();
+        let landing = bench.landing(&idle);
+        assert_eq!(landing.state, "no_commits");
+        assert_eq!((landing.behind, landing.conflict), (None, None));
+    }
+
+    #[test]
+    fn drift_is_counted_again_only_when_the_head_or_the_compare_ref_moves() {
+        let bench = Bench::open();
+        let wt = bench.worktree("recount");
+        bench.commit(&wt, "a.txt", "worker\n");
+        bench.commit(&bench.repo, "a.txt", "main\n");
+        bench.publish();
+        assert!(bench.landing(&wt).conflict.is_some());
+        // main이 충돌을 풀어도 비교 ref가 안 움직이면 옛 답이 선다.
+        git(&bench.repo, &["reset", "-q", "--hard", "HEAD~1"]);
+        assert!(bench.landing(&wt).conflict.is_some());
+        // ref가 움직이면 다시 센다: 이제 main에는 합칠 것이 없다.
+        bench.publish();
+        let landing = bench.landing(&wt);
+        assert_eq!((landing.state, landing.conflict), ("unlanded", None));
+        assert_eq!(landing.behind, Some(0));
     }
 
     #[test]
