@@ -39,6 +39,10 @@ impl Workspace {
         for path in [&cwd, &home, &sessions, &state] {
             fs::create_dir_all(path).unwrap();
         }
+        let cwd = cwd.canonicalize().unwrap();
+        let home = home.canonicalize().unwrap();
+        let sessions = sessions.canonicalize().unwrap();
+        let state = state.canonicalize().unwrap();
         fs::write(home.join("settings.json"), serde_json::to_vec(&json!({
             "smart": { "autoClassifier": "off", "orchestration": "model" }
         })).unwrap()).unwrap();
