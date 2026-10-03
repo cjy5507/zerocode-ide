@@ -62,7 +62,8 @@ fn door_in(home: &tempfile::TempDir, consented: &str) -> Doorway {
     std::fs::write(
         &settings,
         json!({ "smart": { zerocode_core::jev::BROWSER.setting: "on",
-            "jev": { "workspaces": [root.display().to_string()] } } }).to_string(),
+            "jev": { "workspaces": [root.display().to_string()] } } })
+        .to_string(),
     )
     .expect("zo's settings");
     Doorway {
