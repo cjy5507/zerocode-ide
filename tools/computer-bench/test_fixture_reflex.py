@@ -1136,9 +1136,6 @@ class DeskHooks(unittest.TestCase):
                              reflex.plan(GEOMETRY, VALUES, desk.session['bundle'], reflex.contract(), table_limits=LIMITS))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 def of_kind(kind, seed=7, press_after_ms=60):
     """A record of a round of `kind` that did its job, in the shapes the fixture
@@ -1149,7 +1146,16 @@ def of_kind(kind, seed=7, press_after_ms=60):
     schedule = reflex.schedule(seed, VALUES, kind=kind)
     record["schedule"] = schedule
     accepted, deadline = run_window(record)
-    events, frames = [], []
+    events, frames, receipts = [], [], []
+
+    def receipt(rule, action, decided, first_event, frame, down=None, up=None, events_posted=1):
+        """One finished action as the runtime writes it (`clean`'s shapes), so the trace the verdict
+        reads is whole: every receipt issued is on disk and every done click is a fixture hit."""
+        receipts.append({"seq": len(receipts) + 1, "ruleId": rule, "actionId": action, "outcome": "done",
+                         "decidedHostNs": decided, "admittedHostNs": decided + MS, "captureWaitNs": MS,
+                         "firstEventHostNs": first_event, "firstEventFrameHostNs": frame, "downHostNs": down,
+                         "upHostNs": up, "endedHostNs": (up or first_event) + MS, "events": events_posted})
+
     for target in schedule["targets"]:
         appear, expire = T0 + target["appearMs"] * MS, T0 + target["expireMs"] * MS
         armed = T0 + target.get("armMs", target["appearMs"]) * MS
@@ -1163,6 +1169,8 @@ def of_kind(kind, seed=7, press_after_ms=60):
                        "sourcePid": HELPER, "userData": 99, "button": 0, "judged": {"hit": target["id"]}})
         events.append({"n": 0, "kind": "up", "evNs": at + 8 * MS, "rxNs": at + 8 * MS + MS // 2, "x": target["x"],
                        "y": target["y"], "sourcePid": HELPER, "userData": 99, "button": 0})
+        receipt(f"hit_{target['colour']}", f"click_{target['colour']}", decided=armed + 10 * MS, first_event=at + MS // 4,
+                frame=at - 5 * MS, down=at + MS // 4, up=at + 8 * MS, events_posted=2)
     scenes = []
     for sweep in schedule.get("sweeps") or []:
         launched = T0 + sweep["appearMs"] * MS
@@ -1172,13 +1180,16 @@ def of_kind(kind, seed=7, press_after_ms=60):
         moved = launched + 90 * MS
         events.append({"n": 0, "kind": "move", "evNs": moved, "rxNs": moved + MS // 2, "x": sweep["padX"], "y": sweep["padY"],
                        "sourcePid": HELPER, "userData": 99})
+        receipt("to_pad", "move_pad", decided=launched + 30 * MS, first_event=moved, frame=launched + 20 * MS)
         scenes.append({"kind": "sweep", "id": sweep["id"], "launchedNs": launched, "arrivedNs": arrived, "outcome": "clear"})
     events.sort(key=lambda event: event["evNs"])
     for number, event in enumerate(events, start=1):
         event["n"] = number
     hits = sum(1 for event in events if "hit" in (event.get("judged") or {}))
-    record.update(events=events, frames=frames, scenes=scenes, receipts=[])
+    record.update(events=events, frames=frames, scenes=scenes, receipts=receipts)
     record["fixture"].update(downs=hits, ups=hits, hits=hits, misses={}, frames=len(frames))
+    record["ended"]["report"]["through"] = len(receipts)
+    record["ended"]["status"].update(receiptsIssued=len(receipts), fires=hits)
     record["run"]["kind"] = kind
     return record
 
@@ -1332,3 +1343,7 @@ class Kinds(unittest.TestCase):
         measured = reflex.measure(clean(), VALUES, LIMITS)
         self.assertIsNone(measured.get("kind"))
         self.assertNotIn("kind", reflex.floors(measured, VALUES))
+
+
+if __name__ == "__main__":
+    unittest.main()
