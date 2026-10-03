@@ -14816,7 +14816,12 @@ details[open] > .helper-step-line::after {
 }
 
 /* The live line's ring turns in the agent's colour, or the permission mode's
- * reach; asked for less motion, it is a still ring and the words hold. */
+ * reach; asked for less motion, it is a still ring and the words hold. It
+ * turns in eight steps a turn (t-22100): it stands the whole time the agent
+ * works, and the engine turns it on the page's own thread — turned every
+ * frame it cost 680 ms of that thread over 120 typed keys at a 4x CPU and
+ * 2 ms on the typical key; a layer of its own changed nothing, and in steps
+ * it costs about what a still ring does. */
 .helper-status-ring {
   flex: none;
   box-sizing: border-box;
@@ -14825,7 +14830,7 @@ details[open] > .helper-step-line::after {
   border: var(--chat-status-ring-stroke) solid color-mix(in srgb, var(--chat-reach, var(--chat-accent)) 30%, transparent);
   border-top-color: var(--chat-reach, var(--chat-accent));
   border-radius: 50%;
-  animation: helper-status-spin 0.9s linear infinite;
+  animation: helper-status-spin 0.9s steps(8, end) infinite;
 }
 
 @keyframes helper-status-spin {
