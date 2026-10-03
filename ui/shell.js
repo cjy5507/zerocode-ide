@@ -7922,6 +7922,9 @@ function agentGraphSaid(columns, reviews, places, now, ledger = null) {
     /* 그리고 과업 카드가 원장 행에서 읽는 비용 (t-9470). 카드는 비용을 싣지 않으므로,
      * 여기 없으면 비용만 바뀐 판을 서명이 모른다. 끝난 과업의 행만 비용을 든다. */
     costs: ledger ? [...ledger].filter(([, row]) => row?.cost).map(([pane, row]) => [pane, row.cost]) : [],
+    /* 그리고 과업 카드가 원장 행에서 읽는 글 점검의 센 수 (t-32786). 카드는 센 수를 싣지 않으므로,
+     * 여기 없으면 센 수만 바뀐 판을 서명이 모른다. 끝난 과업의 행만 센 수를 든다. */
+    writings: ledger ? [...ledger].filter(([, row]) => row?.writing).map(([pane, row]) => [pane, row.writing]) : [],
     following: agentGraphFollowing,
     draft: selectedDraft
       ? {
