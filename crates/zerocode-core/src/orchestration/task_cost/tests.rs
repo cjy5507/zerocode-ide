@@ -3,13 +3,35 @@ use serde_json::{Value, json};
 use super::*;
 use crate::usage_ledger::ModelBreakdown;
 
+mod boundaries;
+
 const MINUTE: i64 = 60_000;
 const OPUS: &str = "claude-opus-5-5";
 const SOL: &str = "gpt-5.6-sol";
 
+fn task_cost(run: &Run, task_id: &str, sessions: &SessionBook, jev: JevTally) -> TaskCost {
+    super::task_cost(run, task_id, sessions, jev, &SessionAttribution::new([run]))
+}
+
+fn attempt_generation(run: &Run, attempt: &Dispatch, sessions: &SessionBook) -> GenerationCost {
+    super::attempt_generation(run, attempt, sessions, &SessionAttribution::new([run]))
+}
+
 /// A run holding the attempts, workers and mail of one test, with two tasks
 /// written down — the one being costed, and another a shared worker carried.
-fn run(dispatches: Value, workers: Value, messages: Value) -> Run {
+fn run(mut dispatches: Value, workers: Value, messages: Value) -> Run {
+    for dispatch in dispatches.as_array_mut().expect("attempts") {
+        if dispatch.get("session_history").is_none() {
+            let session = workers
+                .as_array()
+                .expect("workers")
+                .iter()
+                .find(|worker| worker["id"] == dispatch["worker"])
+                .and_then(|worker| worker.get("session"))
+                .filter(|session| !session.is_null());
+            dispatch["session_history"] = json!({"complete": true, "sessions": session.into_iter().cloned().collect::<Vec<_>>()});
+        }
+    }
     let task = |id: &str| {
         json!({
             "id": id, "spec": "", "title": "", "deps": [], "parent": null,
@@ -131,6 +153,184 @@ fn book_of(claude_sessions: Vec<usage_stats::Session>) -> SessionBook {
 
 fn close(left: Option<f64>, right: f64) -> bool {
     left.is_some_and(|left| (left - right).abs() < 1e-9)
+}
+
+fn with_history(mut attempt: Value, sessions: &[&str]) -> Value {
+    attempt["session_history"] = json!({
+        "complete": true,
+        "sessions": sessions.iter().map(|id| json!({"key": "session_id", "id": id})).collect::<Vec<_>>()
+    });
+    attempt
+}
+
+#[test]
+fn every_session_of_an_attempt_contributes_to_its_total() {
+    let held = run(
+        json!([with_history(
+            attempt("dp-1", "t-1", "w-1", 0, Some(MINUTE)),
+            &["conv-first", "conv-second"]
+        )]),
+        json!([worker("w-1", "claude", Some("conv-second"))]),
+        json!([]),
+    );
+    let book = book_of(vec![
+        claude_session("conv-first", OPUS, [100, 10, 0, 0]),
+        claude_session("conv-second", OPUS, [200, 20, 0, 0]),
+    ]);
+    let cost = task_cost(&held, "t-1", &book, JevTally::default());
+    assert_eq!(
+        (
+            cost.generation.sessions_known,
+            cost.generation.sessions_linked
+        ),
+        (2, 2)
+    );
+    assert_eq!(
+        (cost.generation.input_tokens, cost.generation.output_tokens),
+        (300, 30)
+    );
+    assert!(cost.generation.usd.is_some());
+}
+
+#[test]
+fn a_reused_worker_keeps_distinct_task_sessions_separate() {
+    let held = run(
+        json!([
+            with_history(
+                attempt("dp-1", "t-1", "w-1", 0, Some(MINUTE)),
+                &["conv-first"]
+            ),
+            with_history(
+                attempt("dp-2", "t-2", "w-1", 2 * MINUTE, Some(3 * MINUTE)),
+                &["conv-second"]
+            ),
+        ]),
+        json!([worker("w-1", "claude", Some("conv-second"))]),
+        json!([]),
+    );
+    let book = book_of(vec![
+        claude_session("conv-first", OPUS, [100, 10, 0, 0]),
+        claude_session("conv-second", OPUS, [900, 90, 0, 0]),
+    ]);
+    let first = task_cost(&held, "t-1", &book, JevTally::default());
+    let second = task_cost(&held, "t-2", &book, JevTally::default());
+    assert_eq!(
+        (
+            first.generation.input_tokens,
+            second.generation.input_tokens
+        ),
+        (100, 900)
+    );
+    assert!(first.generation.usd.is_some() && second.generation.usd.is_some());
+}
+
+#[test]
+fn a_session_shared_by_distinct_workers_on_different_tasks_is_unlinked() {
+    let held = run(
+        json!([
+            with_history(
+                attempt("dp-1", "t-1", "w-1", 0, Some(MINUTE)),
+                &["conv-shared"]
+            ),
+            with_history(
+                attempt("dp-2", "t-2", "w-2", 0, Some(MINUTE)),
+                &["conv-shared"]
+            ),
+        ]),
+        json!([
+            worker("w-1", "claude", Some("conv-shared")),
+            worker("w-2", "claude", Some("conv-shared"))
+        ]),
+        json!([]),
+    );
+    let book = book_of(vec![claude_session("conv-shared", OPUS, [100, 10, 0, 0])]);
+    let cost = task_cost(&held, "t-1", &book, JevTally::default());
+    assert_eq!(cost.generation.usd_reason, Some(UsdReason::Unlinked));
+    assert_eq!(cost.generation.usd, None);
+}
+
+#[test]
+fn equal_session_ids_on_different_providers_are_not_the_same_usage() {
+    let held = run(
+        json!([
+            attempt("dp-1", "t-1", "w-1", 0, Some(MINUTE)),
+            attempt("dp-2", "t-1", "w-2", 0, Some(MINUTE)),
+        ]),
+        json!([
+            worker("w-1", "claude", Some("conv-shared-name")),
+            worker("w-2", "codex", Some("conv-shared-name"))
+        ]),
+        json!([]),
+    );
+    let mut book = book_of(vec![claude_session(
+        "conv-shared-name",
+        OPUS,
+        [100, 10, 0, 0],
+    )]);
+    book.read_codex(
+        &vendor(vec![codex_session(
+            "conv-shared-name",
+            &[SOL],
+            400,
+            100,
+            20,
+        )]),
+        READ_AT,
+    );
+    let cost = task_cost(&held, "t-1", &book, JevTally::default());
+    assert_eq!(
+        (
+            cost.generation.sessions_linked,
+            cost.generation.input_tokens
+        ),
+        (2, 400)
+    );
+}
+
+#[test]
+fn distinct_attempt_sessions_on_one_worker_can_be_costed_independently() {
+    let held = run(
+        json!([
+            with_history(
+                attempt("dp-1", "t-1", "w-1", 0, Some(MINUTE)),
+                &["conv-first"]
+            ),
+            with_history(
+                attempt("dp-2", "t-1", "w-1", 2 * MINUTE, Some(3 * MINUTE)),
+                &["conv-second"]
+            ),
+        ]),
+        json!([worker("w-1", "claude", Some("conv-second"))]),
+        json!([]),
+    );
+    let book = book_of(vec![
+        claude_session("conv-first", OPUS, [100, 10, 0, 0]),
+        claude_session("conv-second", OPUS, [900, 90, 0, 0]),
+    ]);
+    let first = attempt_generation(&held, &held.dispatches[0], &book);
+    let second = attempt_generation(&held, &held.dispatches[1], &book);
+    assert_eq!((first.input_tokens, second.input_tokens), (100, 900));
+    assert!(first.usd.is_some() && second.usd.is_some());
+}
+
+#[test]
+fn legacy_session_history_is_not_reported_as_a_complete_bill() {
+    let mut old = attempt("dp-1", "t-1", "w-1", 0, Some(MINUTE));
+    old["session_history"] = Value::Null;
+    let held = run(
+        json!([old]),
+        json!([worker("w-1", "claude", Some("conv-last"))]),
+        json!([]),
+    );
+    let book = book_of(vec![claude_session("conv-last", OPUS, [100, 10, 0, 0])]);
+    let cost = task_cost(&held, "t-1", &book, JevTally::default());
+    let value = serde_json::to_value(&cost).expect("public cost");
+    assert_eq!(value["generation"]["usd"], Value::Null);
+    assert_eq!(value["generation"]["historyComplete"], false);
+    assert_eq!(
+        value["generation"]["usdReason"],
+        "incomplete_session_history"
+    );
 }
 
 /// A task is its attempts — every dispatch of it, the rows `newest_attempt`
@@ -514,6 +714,36 @@ fn opencode_carries_the_dollars_it_reported() {
 /// Only the rows stamped with the task count, and only what they asked: a
 /// label, the judge's own note and another task's row add nothing. The seats
 /// read are the stamping ones, and the rest are said as a number.
+#[test]
+fn cached_shared_and_refused_jev_rows_bill_no_new_tokens() {
+    let mut book = JevBook::default();
+    for row in [
+        json!({"task": "t-1", "outcome": "answered", "requests": 1, "inputTokens": 90, "outputTokens": 10}),
+        json!({"task": "t-1", "outcome": "answered", "requests": 1, "cached": true, "inputTokens": 900}),
+        json!({"task": "t-1", "outcome": "answered", "requests": 0, "inputTokens": 800}),
+        json!({"task": "t-1", "outcome": "not_consented"}),
+    ] {
+        book.read(&row);
+    }
+    let cost = JevCost::of(book.tally("t-1"));
+    assert_eq!(cost.requests, 1);
+    assert_eq!(cost.input_tokens, Some(90));
+}
+
+#[test]
+fn invalid_session_counters_do_not_become_negative_bills_or_learning_evidence() {
+    let held = run(
+        json!([attempt("dp-1", "t-1", "w-1", 0, Some(MINUTE))]),
+        json!([worker("w-1", "claude", Some("conv-invalid"))]),
+        json!([]),
+    );
+    let book = book_of(vec![claude_session("conv-invalid", OPUS, [-1, 4, 0, 0])]);
+    let cost = task_cost(&held, "t-1", &book, JevTally::default());
+    assert_eq!(cost.generation.usd, None);
+    assert_eq!(cost.generation.input_tokens, 0);
+    assert_eq!(cost.generation.measured_tokens(), None);
+}
+
 #[test]
 fn jev_counts_the_requests_of_the_rows_stamped_with_the_task() {
     let mut jev = JevBook::default();

@@ -11,15 +11,16 @@
 //! way. The wall clock runs from the first attempt's start to the last one's
 //! end, and the waits between them are in it.
 //!
-//! An attempt's tokens are its worker's conversation's, joined by the
-//! provider's own id ([`super::Worker::session`]) to the vendor ledger the
+//! An attempt's tokens are its recorded conversations', joined by the
+//! provider's own id to the vendor ledger the
 //! usage scan already holds — Claude's transcripts ([`crate::usage_stats`]),
 //! Codex's rollouts and OpenCode's database ([`crate::usage_ledger`]). The
-//! worker row keeps only the LAST conversation its pane reported
-//! ([`super::Ledger::worker_session_reported`] replaces it), so the sum is the
-//! last conversation of every worker, and says so:
-//! [`GenerationCost::sessions_known`] counts the conversations the ledger
-//! knows, never the attempts.
+//! worker retains its latest conversation for resume while each dispatch
+//! keeps the session history its reports established. Old dispatches without
+//! a complete history expose the known usage without calling it a complete
+//! bill. [`GenerationCost::sessions_known`] counts distinct provider sessions,
+//! never attempts, and a conversation shared outside the requested scope is
+//! not apportioned by guessing.
 //!
 //! ## What is never a number
 //!
@@ -42,10 +43,10 @@
 //! id — the seats the window stamps ([`TASK_STAMPED`]). Every other seat, and
 //! zo's own project ledgers, write no task and are not counted;
 //! [`JevCost::unstamped_seats`] says how many seats that leaves out. The
-//! stamping seats record no input tokens, and the window holds no Jev price
-//! (zo prices its own rows), so a task's Jev spend is its requests.
+//! stamping seats carry the common wire's input-token accounting when known.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -54,6 +55,9 @@ use super::{Dispatch, MessageKind, Run};
 use crate::agent::AgentKind;
 use crate::jev::{self, JevUse, summary};
 use crate::{usage_ledger, usage_stats, usage_stats_codex};
+
+mod session_attribution;
+pub use session_attribution::SessionAttribution;
 
 /// The key a stamping seat writes the ledger's task id under.
 pub const TASK_STAMP: &str = "task";
@@ -109,6 +113,28 @@ pub struct SessionSpend {
     pub usd: Option<f64>,
     /// Whether the vendor's own ledger saw more than one model in it.
     pub mixed_models: bool,
+    invalid_usage: bool,
+}
+
+impl SessionSpend {
+    fn counters(&self) -> Option<[i64; 4]> {
+        let counters = [
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.cache_write_tokens,
+        ];
+        if self.invalid_usage || self.usd.is_some_and(|usd| !usd.is_finite() || usd < 0.0) {
+            return None;
+        }
+        token_sum(counters).map(|_| counters)
+    }
+}
+
+fn token_sum(counters: [i64; 4]) -> Option<i64> {
+    counters.into_iter().try_fold(0_i64, |total, tokens| {
+        (tokens >= 0).then(|| total.checked_add(tokens)).flatten()
+    })
 }
 
 /// Every conversation the held usage scans know, by vendor and the provider's
@@ -142,6 +168,7 @@ impl SessionBook {
                         session.total_cache_write_tokens,
                     ),
                     mixed_models: false,
+                    invalid_usage: false,
                 },
             );
         }
@@ -158,10 +185,11 @@ impl SessionBook {
         self.scanned_at.insert(UsageSource::Codex, scanned_at);
         for session in &ledger.sessions {
             let cached = session.cached_input_tokens.min(session.input_tokens);
+            let fresh = session.input_tokens.checked_sub(cached);
             self.sessions.insert(
                 (UsageSource::Codex, session.session_id.clone()),
                 SessionSpend {
-                    input_tokens: session.input_tokens - cached,
+                    input_tokens: fresh.unwrap_or(0),
                     output_tokens: session.output_tokens,
                     cache_read_tokens: cached,
                     cache_write_tokens: 0,
@@ -172,6 +200,12 @@ impl SessionBook {
                         session.output_tokens,
                     ),
                     mixed_models: session.model_breakdown.len() > 1,
+                    invalid_usage: fresh.is_none()
+                        || session.input_tokens < 0
+                        || session.cached_input_tokens < 0
+                        || session.cached_input_tokens > session.input_tokens
+                        || session.reasoning_output_tokens < 0
+                        || session.reasoning_output_tokens > session.output_tokens,
                 },
             );
         }
@@ -184,15 +218,21 @@ impl SessionBook {
     pub fn read_opencode(&mut self, ledger: &usage_ledger::Ledger, scanned_at: i64) {
         self.scanned_at.insert(UsageSource::OpenCode, scanned_at);
         for session in &ledger.sessions {
+            let output = session
+                .output_tokens
+                .checked_add(session.reasoning_output_tokens);
             self.sessions.insert(
                 (UsageSource::OpenCode, session.session_id.clone()),
                 SessionSpend {
                     input_tokens: session.input_tokens,
-                    output_tokens: session.output_tokens + session.reasoning_output_tokens,
+                    output_tokens: output.unwrap_or(0),
                     cache_read_tokens: session.cached_input_tokens,
                     cache_write_tokens: 0,
                     usd: session.estimated_cost_usd,
                     mixed_models: false,
+                    invalid_usage: output.is_none()
+                        || session.output_tokens < 0
+                        || session.reasoning_output_tokens < 0,
                 },
             );
         }
@@ -251,17 +291,19 @@ impl JevBook {
         let Some(task) = row.get(TASK_STAMP).and_then(Value::as_str) else {
             return;
         };
-        if summary::asked_something(row).is_none() {
+        let Some(outcome) = summary::asked_something(row) else {
             return;
-        }
+        };
+        let usage = summary::summarize_rows([row], i64::MIN);
         let tally = self.by_task.entry(task.to_string()).or_default();
         tally.rows += 1;
-        tally.requests += summary::REQUESTS
-            .read(row)
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        if let Some(tokens) = summary::INPUT_TOKENS.read(row).and_then(Value::as_u64) {
-            tally.input_tokens += tokens;
+        if summary::CACHED.read(row).and_then(Value::as_bool) != Some(true)
+            && !summary::is_refusal(outcome)
+        {
+            tally.requests += usage.requests;
+        }
+        tally.input_tokens += usage.input_tokens;
+        if usage.unmetered_requests == 0 {
             tally.rows_with_tokens += 1;
         }
     }
@@ -290,6 +332,8 @@ pub enum UsdReason {
     /// no worker row here or reported none, the scan does not hold it, or
     /// its worker carried another task's attempt in it too.
     Unlinked,
+    IncompleteSessionHistory,
+    InvalidUsage,
     /// A conversation switched models mid-way — a switch the ledger wrote
     /// against the attempt, or more than one model in the vendor's own
     /// ledger — and its vendor keeps one price per conversation.
@@ -298,13 +342,12 @@ pub enum UsdReason {
     UnpricedModel,
 }
 
-/// What the generation model spent on the task: the last conversation of
-/// every worker that carried it.
+/// What the generation model spent in the task's recorded conversations.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationCost {
-    /// Conversations the ledger knows for the task's workers — one per
-    /// worker at most, whatever the attempts.
+    pub history_complete: bool,
+    /// Distinct provider conversations recorded for the task's attempts.
     pub sessions_known: usize,
     /// Those of them found in a scan and tied to this task alone.
     pub sessions_linked: usize,
@@ -317,6 +360,52 @@ pub struct GenerationCost {
     /// [`Self::usd_reason`] wherever one attempt's price cannot be read whole.
     pub usd: Option<f64>,
     pub usd_reason: Option<UsdReason>,
+}
+
+impl GenerationCost {
+    #[must_use]
+    pub fn measured_tokens(&self) -> Option<i64> {
+        if !self.history_complete
+            || self.sessions_linked == 0
+            || self.sessions_linked != self.sessions_known
+            || matches!(
+                self.usd_reason,
+                Some(
+                    UsdReason::UnsupportedAgent
+                        | UsdReason::Unscanned
+                        | UsdReason::Unlinked
+                        | UsdReason::IncompleteSessionHistory
+                        | UsdReason::InvalidUsage
+                )
+            )
+        {
+            return None;
+        }
+        token_sum([
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.cache_write_tokens,
+        ])
+    }
+
+    fn add_tokens(&mut self, spend: &SessionSpend) -> Option<()> {
+        let [input, output, cache_read, cache_write] = spend.counters()?;
+        let counters = [
+            self.input_tokens.checked_add(input)?,
+            self.output_tokens.checked_add(output)?,
+            self.cache_read_tokens.checked_add(cache_read)?,
+            self.cache_write_tokens.checked_add(cache_write)?,
+        ];
+        token_sum(counters)?;
+        [
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.cache_write_tokens,
+        ] = counters;
+        Some(())
+    }
 }
 
 /// What Jev spent on the task: the requests of the rows stamped with it.
@@ -353,6 +442,7 @@ pub struct TaskCost {
     /// From the first attempt's start to the last one's end, waits included;
     /// `None` while an attempt is open, and for a task never attempted.
     pub wall_ms: Option<i64>,
+    pub completion_wall_ms: Option<i64>,
     pub generation: GenerationCost,
     pub jev: JevCost,
 }
@@ -371,49 +461,109 @@ pub fn attempts<'run>(run: &'run Run, task_id: &str) -> Vec<&'run Dispatch> {
 /// conversations in `sessions`, and what its stamped Jev rows came to
 /// (`jev`, [`JevBook::tally`] — summed over the stamping seats' ledgers).
 #[must_use]
-pub fn task_cost(run: &Run, task_id: &str, sessions: &SessionBook, jev: JevTally) -> TaskCost {
+pub fn task_cost(
+    run: &Run,
+    task_id: &str,
+    sessions: &SessionBook,
+    jev: JevTally,
+    attribution: &SessionAttribution,
+) -> TaskCost {
     let attempts = attempts(run, task_id);
     TaskCost {
         attempts: attempts.len(),
         wall_ms: wall_ms(&attempts),
-        generation: generation(run, task_id, &attempts, sessions),
+        completion_wall_ms: run.task(task_id).and_then(|task| {
+            let completed = run.completion_ms(task)?;
+            let first = attempts.iter().map(|attempt| attempt.started_ms).min()?;
+            completed.checked_sub(first).filter(|elapsed| *elapsed >= 0)
+        }),
+        generation: generation(run, &attempts, sessions, attribution),
         jev: JevCost::of(jev),
     }
 }
 
-/// One attempt's usage, only when its worker carried exactly this attempt.
-/// Session totals cannot be split across repeated dispatches on one pane.
+/// One attempt's usage when its recorded conversations belong to it alone.
+/// Session totals shared with another attempt remain unlinked.
 #[must_use]
-pub fn attempt_generation(run: &Run, attempt: &Dispatch, sessions: &SessionBook) -> GenerationCost {
-    if run
-        .dispatches
-        .iter()
-        .filter(|d| d.worker == attempt.worker)
-        .count()
-        != 1
-    {
-        return GenerationCost {
-            usd_reason: Some(UsdReason::Unlinked),
-            ..GenerationCost::default()
-        };
+pub fn attempt_generation(
+    run: &Run,
+    attempt: &Dispatch,
+    sessions: &SessionBook,
+    attribution: &SessionAttribution,
+) -> GenerationCost {
+    generation(run, &[attempt], sessions, attribution)
+}
+
+fn reported_sessions<'run>(
+    run: &'run Run,
+    attempt: &'run Dispatch,
+) -> Vec<&'run crate::ProviderSession> {
+    if let Some(history) = &attempt.session_history {
+        history.sessions.iter().collect()
+    } else {
+        run.worker(&attempt.worker)
+            .and_then(|worker| worker.session.as_ref())
+            .into_iter()
+            .collect()
     }
-    generation(run, &attempt.task, &[attempt], sessions)
+}
+
+#[must_use]
+pub fn generation_fingerprint(run: &Run) -> u64 {
+    let mut digest = std::hash::DefaultHasher::new();
+    for worker in &run.workers {
+        (&worker.id, &worker.agent).hash(&mut digest);
+        worker
+            .session
+            .as_ref()
+            .map(|session| (session.key, session.id.as_str()))
+            .hash(&mut digest);
+    }
+    for attempt in &run.dispatches {
+        (
+            &attempt.id,
+            &attempt.task,
+            &attempt.worker,
+            attempt.started_ms,
+            attempt.ended_ms,
+        )
+            .hash(&mut digest);
+        attempt
+            .session_history
+            .as_ref()
+            .map(|history| history.complete)
+            .hash(&mut digest);
+        for session in reported_sessions(run, attempt) {
+            (session.key, session.id.as_str()).hash(&mut digest);
+        }
+    }
+    for message in run
+        .messages()
+        .iter()
+        .filter(|message| message.kind == MessageKind::ModelDeviated)
+    {
+        message.dispatch.hash(&mut digest);
+    }
+    digest.finish()
 }
 
 /// First start to last end, or `None` while any attempt is open.
 fn wall_ms(attempts: &[&Dispatch]) -> Option<i64> {
     let first = attempts.iter().map(|one| one.started_ms).min()?;
-    let ends: Option<Vec<i64>> = attempts.iter().map(|one| one.ended_ms).collect();
-    Some(ends?.into_iter().max()?.saturating_sub(first))
+    let last = attempts.iter().try_fold(first, |latest, attempt| {
+        let ended = attempt.ended_ms?;
+        (attempt.started_ms >= 0 && ended >= attempt.started_ms).then_some(latest.max(ended))
+    })?;
+    last.checked_sub(first)
 }
 
 /// The linked conversations' tokens and dollars, and the first reason the
 /// dollars are not a number.
 fn generation(
     run: &Run,
-    task_id: &str,
     attempts: &[&Dispatch],
     sessions: &SessionBook,
+    attribution: &SessionAttribution,
 ) -> GenerationCost {
     let switched: HashSet<&str> = run
         .messages()
@@ -421,69 +571,93 @@ fn generation(
         .filter(|message| message.kind == MessageKind::ModelDeviated)
         .filter_map(|message| message.dispatch.as_deref())
         .collect();
-    let mut cost = GenerationCost::default();
+    let included: HashSet<&str> = attempts.iter().map(|attempt| attempt.id.as_str()).collect();
+    let mut cost = GenerationCost {
+        history_complete: true,
+        ..GenerationCost::default()
+    };
     let mut dollars = 0.0;
     let mut reason: Option<UsdReason> = None;
     let mut worse = |why: UsdReason| reason = Some(reason.map_or(why, |held| held.min(why)));
-    let mut counted: HashSet<&str> = HashSet::new();
+    let mut counted = HashSet::new();
     for attempt in attempts {
         let Some(worker) = run.worker(&attempt.worker) else {
+            cost.history_complete = false;
             worse(UsdReason::Unlinked);
             continue;
         };
-        if let Some(session) = worker.session.as_ref() {
-            if !counted.insert(session.id.as_str()) {
+        if !attempt
+            .session_history
+            .as_ref()
+            .is_some_and(|history| history.complete)
+        {
+            cost.history_complete = false;
+            worse(UsdReason::IncompleteSessionHistory);
+        }
+        let conversations = reported_sessions(run, attempt);
+        if conversations.is_empty() {
+            worse(UsdReason::Unlinked);
+            continue;
+        }
+        let source = UsageSource::of_agent(&worker.agent);
+        for session in conversations {
+            if !counted.insert((
+                source,
+                source.is_none().then_some(worker.agent.as_str()),
+                session.id.as_str(),
+            )) {
                 continue;
             }
             cost.sessions_known += 1;
-        }
-        let Some(source) = UsageSource::of_agent(&worker.agent) else {
-            worse(UsdReason::UnsupportedAgent);
-            continue;
-        };
-        let Some(session) = worker.session.as_ref() else {
-            worse(UsdReason::Unlinked);
-            continue;
-        };
-        // Every attempt this conversation carried: all of this task's, or
-        // it holds another task's work too and no rule splits it.
-        let carried: Vec<&Dispatch> = run
-            .dispatches
-            .iter()
-            .filter(|one| one.worker == worker.id)
-            .collect();
-        if carried.iter().any(|one| one.task != task_id) {
-            worse(UsdReason::Unlinked);
-            continue;
-        }
-        let ended = carried
-            .iter()
-            .map(|one| one.ended_ms)
-            .collect::<Option<Vec<i64>>>()
-            .and_then(|ends| ends.into_iter().max());
-        let read_after = sessions
-            .scanned_at(source)
-            .zip(ended)
-            .is_some_and(|(read, ended)| read >= ended);
-        if !read_after {
-            worse(UsdReason::Unscanned);
-            continue;
-        }
-        let Some(spend) = sessions.spend(source, &session.id) else {
-            worse(UsdReason::Unlinked);
-            continue;
-        };
-        cost.sessions_linked += 1;
-        cost.input_tokens += spend.input_tokens;
-        cost.output_tokens += spend.output_tokens;
-        cost.cache_read_tokens += spend.cache_read_tokens;
-        cost.cache_write_tokens += spend.cache_write_tokens;
-        if spend.mixed_models || carried.iter().any(|one| switched.contains(one.id.as_str())) {
-            worse(UsdReason::MixedModels);
-        } else if let Some(usd) = spend.usd {
-            dollars += usd;
-        } else {
-            worse(UsdReason::UnpricedModel);
+            let Some(source) = source else {
+                worse(UsdReason::UnsupportedAgent);
+                continue;
+            };
+            let carried = attribution.owners(source, session);
+            if carried.is_empty()
+                || carried
+                    .iter()
+                    .any(|other| other.run != run.id || !included.contains(other.dispatch.as_str()))
+            {
+                worse(UsdReason::Unlinked);
+                continue;
+            }
+            let ended = carried
+                .iter()
+                .map(|other| other.ended_ms)
+                .collect::<Option<Vec<_>>>()
+                .and_then(|ends| ends.into_iter().max());
+            if sessions
+                .scanned_at(source)
+                .zip(ended)
+                .is_none_or(|(read, ended)| read < ended)
+            {
+                worse(UsdReason::Unscanned);
+                continue;
+            }
+            let Some(spend) = sessions.spend(source, &session.id) else {
+                worse(UsdReason::Unlinked);
+                continue;
+            };
+            if cost.add_tokens(spend).is_none() {
+                worse(UsdReason::InvalidUsage);
+                continue;
+            }
+            cost.sessions_linked += 1;
+            if spend.mixed_models
+                || carried
+                    .iter()
+                    .any(|other| switched.contains(other.dispatch.as_str()))
+            {
+                worse(UsdReason::MixedModels);
+            } else if let Some(usd) = spend.usd {
+                dollars += usd;
+                if !dollars.is_finite() {
+                    worse(UsdReason::InvalidUsage);
+                }
+            } else {
+                worse(UsdReason::UnpricedModel);
+            }
         }
     }
     cost.usd = reason.is_none().then_some(dollars);

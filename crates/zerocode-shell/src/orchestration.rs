@@ -2257,7 +2257,7 @@ pub(crate) fn refresh_board_ledger() {
         // A finished task's cost is worked out once and remembered; the
         // beat only asks (t-9470, [`cost_book`]).
         let mut costs = cost_book::book();
-        costs.begin();
+        costs.begin(ledger);
         let next = BoardLedgerSnapshot {
             agents: Arc::new(costs.dress(ledger, ledger_agents_for_seats(ledger, seats))),
             states: Arc::new(ledger_states_for_seats(ledger, seats)),

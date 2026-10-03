@@ -434,6 +434,7 @@ mod tests {
                         "explorer_policy.rs"
                             | "crash.rs" | "crumbs.rs" | "hang_watchdog.rs" | "hang_sample.rs"
                             | "artifact_runtime.rs"
+                            | "preference_runtime.rs"
                             // t-2733: the checks numbers/memory/cache file
                             // tests its LRU and its change fence beside them.
                             | "checks_runtime.rs"

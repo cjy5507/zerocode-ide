@@ -20,7 +20,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use zerocode_core::orchestration::task_cost::{
-    self, JevBook, JevTally, SessionBook, TASK_STAMPED, TaskCost,
+    self, JevBook, JevTally, SessionAttribution, SessionBook, TASK_STAMPED, TaskCost,
 };
 use zerocode_core::orchestration::{Ledger, Run, Task};
 
@@ -37,9 +37,8 @@ pub(crate) type ScansAt = [Option<i64>; 3];
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MemoKey {
     ended_ms: Vec<Option<i64>>,
-    /// Each attempt's worker: the conversation it holds now, and how many
-    /// attempts it carried in all.
-    workers: Vec<(Option<String>, usize)>,
+    completed_ms: Option<i64>,
+    generation: Option<u64>,
     scans: ScansAt,
     jev: JevTally,
 }
@@ -136,6 +135,7 @@ struct Memo {
 pub(crate) struct CostBook {
     scans: Option<ScansAt>,
     sessions: SessionBook,
+    attribution: SessionAttribution,
     jev: Vec<JevLedger>,
     /// Ledger reads that read something, since the book was made.
     jev_reads: usize,
@@ -156,8 +156,8 @@ pub(crate) fn book() -> MutexGuard<'static, CostBook> {
 impl CostBook {
     /// Opens a beat on the facts held now: the scans the usage panes read,
     /// and the stamping seats' ledgers under zo's config home.
-    pub(crate) fn begin(&mut self) {
-        self.begin_with(held_scans(), read_held_scans, &stamping_ledgers());
+    pub(crate) fn begin(&mut self, ledger: &Ledger) {
+        self.begin_with(ledger, held_scans(), read_held_scans, &stamping_ledgers());
     }
 
     /// Opens a beat on the facts handed in: when each scan was read, how to
@@ -165,11 +165,13 @@ impl CostBook {
     /// the ledgers to read on in.
     fn begin_with(
         &mut self,
+        ledger: &Ledger,
         scans: ScansAt,
         read: impl FnOnce(&mut SessionBook),
         ledgers: &[PathBuf],
     ) {
         self.beat += 1;
+        self.attribution = SessionAttribution::new(ledger.runs());
         if self.scans != Some(scans) {
             let mut sessions = SessionBook::default();
             read(&mut sessions);
@@ -197,7 +199,7 @@ impl CostBook {
             memo.beat = beat;
             return memo.cost.clone();
         }
-        let cost = task_cost::task_cost(run, &task.id, &self.sessions, key.jev);
+        let cost = task_cost::task_cost(run, &task.id, &self.sessions, key.jev, &self.attribution);
         self.worked += 1;
         self.memo.insert(
             slot,
@@ -215,7 +217,7 @@ impl CostBook {
         run: &Run,
         dispatch: &zerocode_core::orchestration::Dispatch,
     ) -> task_cost::GenerationCost {
-        task_cost::attempt_generation(run, dispatch, &self.sessions)
+        task_cost::attempt_generation(run, dispatch, &self.sessions, &self.attribution)
     }
 
     /// The worker rows the board draws, each carrying its task's cost where
@@ -243,21 +245,8 @@ impl CostBook {
         let attempts = task_cost::attempts(run, &task.id);
         MemoKey {
             ended_ms: attempts.iter().map(|one| one.ended_ms).collect(),
-            workers: attempts
-                .iter()
-                .map(|one| {
-                    let conversation = run
-                        .worker(&one.worker)
-                        .and_then(|worker| worker.session.as_ref())
-                        .map(|session| session.id.clone());
-                    let carried = run
-                        .dispatches
-                        .iter()
-                        .filter(|other| other.worker == one.worker)
-                        .count();
-                    (conversation, carried)
-                })
-                .collect(),
+            completed_ms: run.completion_ms(task),
+            generation: self.attribution.generation_fingerprint(&run.id),
             scans: self.scans.unwrap_or_default(),
             jev: self.jev_tally(&task.id),
         }

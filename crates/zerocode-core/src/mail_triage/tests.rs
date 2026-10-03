@@ -88,6 +88,7 @@ fn attempt(id: &str, task: &str, worker: &str, started: i64) -> Dispatch {
         retry_of: None,
         remote: None,
         source: None,
+        session_history: None,
     }
 }
 

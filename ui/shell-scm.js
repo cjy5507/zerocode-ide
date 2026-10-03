@@ -941,6 +941,131 @@ function scmPanelShowing() {
   return el("activity-scm").hidden === false && !folded.aside;
 }
 
+let scmObserverHealthRows = [];
+let scmObserverHealthErrorRoot = null;
+let scmObserverRetryRoot = null;
+let scmObserverHealthRead = 0;
+
+function scmObserverFailureWords(kind) {
+  const words = {
+    missing_tool: ["scm.health.missingTool", "gh 명령을 찾지 못함 — 설치와 PATH를 확인하세요"],
+    authentication: ["scm.health.authentication", "GitHub 인증 실패 — GitHub 설정에서 다시 로그인하세요"],
+    forbidden: ["scm.health.forbidden", "접근 거절 — 계정의 저장소 권한을 확인하세요"],
+    not_found: ["scm.health.notFound", "대상을 찾지 못함 — 저장소와 접근 권한을 확인하세요"],
+    rate_limited: ["scm.health.rateLimited", "GitHub 요청 제한 — 안내된 재시도 시각까지 기다립니다"],
+    timeout: ["scm.health.timeout", "응답 시간 초과 — 네트워크를 확인하세요"],
+    unavailable: ["scm.health.unavailable", "GitHub 서버 응답 오류"],
+    invalid_response: ["scm.health.invalidResponse", "응답 형식을 읽지 못함"],
+    refused: ["scm.health.refused", "요청 거절 — 로그인·권한·네트워크를 확인하세요 (원인 미확정)"],
+  };
+  const [key, fallback] = words[kind] ?? words.refused;
+  return t(key, fallback);
+}
+
+function scmObserverOperationWords(operation) {
+  const words = {
+    discovery: ["scm.health.discovery", "PR 찾기"], checks: ["scm.health.checks", "CI 확인"],
+    details: ["scm.health.details", "CI 상세"], reviews: ["scm.health.reviews", "리뷰"], stack: ["scm.health.stack", "연관 PR"],
+  };
+  const [key, fallback] = words[operation] ?? words.discovery;
+  return t(key, fallback);
+}
+
+function paintScmObserverHealth() {
+  let panel = el("scm-observer-health");
+  const root = activeWorktreePath;
+  const rows = scmObserverHealthRows.filter((row) => row?.root === root);
+  const failed = rows.filter((row) => row.failure);
+  const unreadable = scmObserverHealthErrorRoot === root;
+  if (!scmPanelShowing() || (!rows.length && !unreadable)) {
+    panel?.remove();
+    return;
+  }
+  const signature = JSON.stringify([root, rows, unreadable, scmObserverRetryRoot === root]);
+  if (panel?.dataset.signature === signature) return;
+  if (!panel) {
+    panel = document.createElement("section");
+    panel.id = "scm-observer-health";
+    panel.className = "scm-observer-health";
+    panel.setAttribute("role", "status");
+    panel.setAttribute("aria-live", "polite");
+    el("scm-pr-note").after(panel);
+  }
+  panel.dataset.signature = signature;
+  panel.classList.toggle("is-degraded", unreadable || failed.length > 0);
+  panel.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = unreadable
+    ? t("scm.health.unreadable", "SCM 연동 상태를 읽지 못했습니다")
+    : failed.length ? t("scm.health.degraded", "SCM 자동 확인 지연") : t("scm.health.healthy", "SCM 자동 확인 정상");
+  panel.append(heading);
+  const timestamp = (value) => Number.isFinite(value) ? new Date(value).toLocaleString() : t("scm.health.never", "기록 없음");
+  const details = failed.length ? failed : rows.slice(0, 1);
+  for (const row of details) {
+    const line = document.createElement("p");
+    const parts = [scmObserverOperationWords(row.operation)];
+    if (row.failure) parts.push(scmObserverFailureWords(row.failure));
+    parts.push(t("scm.health.lastSuccess", "마지막 성공 {{at}}", { at: timestamp(row.lastSuccessMs) }));
+    if (row.failure) {
+      parts.push(t("scm.health.failures", "연속 {{count}}회 실패", { count: row.consecutiveFailures }));
+      parts.push(t("scm.health.nextRetry", "다음 재시도 {{at}}", { at: timestamp(row.nextRetryMs) }));
+    }
+    line.textContent = parts.join(" · ");
+    panel.append(line);
+  }
+  if (failed.length || unreadable) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "btn";
+    retry.disabled = scmObserverRetryRoot === root;
+    retry.textContent = retry.disabled ? t("scm.health.retrying", "재시도 요청 중…") : t("scm.health.retry", "지금 재시도");
+    retry.addEventListener("click", () => void retryScmObserver(root));
+    panel.append(retry);
+  }
+}
+
+function acceptScmObserverSnapshot(snapshot, root) {
+  if (activeWorktreePath !== root || snapshot?.root !== root || !Array.isArray(snapshot.rows)) return;
+  scmObserverHealthRows = scmObserverHealthRows.filter((row) => row?.root !== root).concat(snapshot.rows);
+  scmObserverHealthErrorRoot = null;
+  paintScmObserverHealth();
+}
+
+async function refreshScmObserverHealth() {
+  const root = activeWorktreePath;
+  const read = ++scmObserverHealthRead;
+  try {
+    const snapshot = await invoke("scm_observer_health");
+    if (read === scmObserverHealthRead) acceptScmObserverSnapshot(snapshot, root);
+  } catch {
+    if (read !== scmObserverHealthRead || activeWorktreePath !== root) return;
+    scmObserverHealthErrorRoot = root;
+    paintScmObserverHealth();
+  }
+}
+
+async function retryScmObserver(root) {
+  if (activeWorktreePath !== root || scmObserverRetryRoot === root) return;
+  scmObserverRetryRoot = root;
+  paintScmObserverHealth();
+  try {
+    const snapshot = await invoke("scm_observer_retry", { root });
+    acceptScmObserverSnapshot(snapshot, root);
+  } catch {
+    if (activeWorktreePath === root) scmObserverHealthErrorRoot = root;
+  } finally {
+    if (scmObserverRetryRoot === root) scmObserverRetryRoot = null;
+    paintScmObserverHealth();
+  }
+}
+
+listen("scm:health", (event) => {
+  if (!Array.isArray(event.payload)) return;
+  scmObserverHealthRows = event.payload;
+  if (event.payload.some((row) => row?.root === activeWorktreePath)) scmObserverHealthErrorRoot = null;
+  paintScmObserverHealth();
+});
+
 async function refreshScm({ uncapped = false } = {}) {
   // 다른 체크아웃으로 건너온 참이면 메시지 칸부터 그 체크아웃의 드래프트로 —
   // 상태를 그리기 전에: 아래 결정표(hasMessage)가 남의 초안을 읽으면 안 된다.
@@ -974,6 +1099,7 @@ async function refreshScm({ uncapped = false } = {}) {
     // Rust's 60-second cache) is only worth spawning for a panel somebody is
     // looking at. Its own promise — the file list never waits on the network.
     void refreshScmReview();
+    void refreshScmObserverHealth();
     scmPanelOwed = false;
   } else {
     scmPanelOwed = true;
@@ -1358,6 +1484,7 @@ paintScmFilter();
 paintScmPrimary();
 
 function paintScm() {
+  paintScmObserverHealth();
   const conflicted = scmEntries.filter((entry) => entry.conflict);
   const staged = scmEntries.filter((entry) => entry.staged && !entry.conflict);
   // The filter narrows what the ordinary GROUPS show and nothing else — Orca

@@ -105,7 +105,11 @@ jobs:
   # drift, the zo-ide justfile is the one that is right. Its e2e suite is
   # mock-based and touches no network.
   zo-ide-verify:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: zo-ide
@@ -120,7 +124,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: zo-ide
+          key: zo-ide-${{ matrix.os }}
           workspaces: zo-ide
 
       - uses: taiki-e/install-action@9d3c324c3d96aa345b0602e11b7ca196bcd2d282 # just

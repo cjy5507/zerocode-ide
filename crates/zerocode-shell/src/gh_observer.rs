@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 use zerocode_core::checks::Limits;
-use zerocode_core::scm_observer::{Ci, Mergeability, PrState, ReviewItem};
+use zerocode_core::scm_observer::{Ci, Failure, FailureKind, Mergeability, PrState, ReviewItem};
 
 /// Discovery + three CI endpoints + one annotation + one review query + one stack page.
 pub(crate) const SUBJECT_CALLS_MAX: usize = 7;
@@ -40,7 +40,7 @@ impl Budget<'_> {
     }
     fn call(&mut self, cwd: &Path, args: &[String]) -> Result<CliOutput, GhError> {
         if self.remaining() == 0 {
-            return Err(GhError::Refused("SCM tick call budget exhausted".into()));
+            return Err(GhError::Budget);
         }
         self.used += 1;
         let _auth = AUTH_LIFECYCLE
@@ -67,7 +67,48 @@ fn unreadable(message: &str) -> GhError {
     GhError::Unreadable(message.into())
 }
 
+fn http_failure(raw: &str) -> Option<Failure> {
+    let first = raw.lines().next()?.strip_prefix("HTTP/")?;
+    let status = first.split_whitespace().nth(1)?.parse::<u16>().ok()?;
+    if !(400..600).contains(&status) {
+        return None;
+    }
+    let headers: Vec<_> = raw
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .collect();
+    let header = |wanted: &str| {
+        headers.iter().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case(wanted).then_some(value.trim())
+        })
+    };
+    let retry_after_ms = header("retry-after")
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|seconds| seconds.saturating_mul(1000));
+    let kind = match status {
+        401 => FailureKind::Authentication,
+        403 if header("x-ratelimit-remaining") == Some("0") || retry_after_ms.is_some() => {
+            FailureKind::RateLimited
+        }
+        403 => FailureKind::Forbidden,
+        404 => FailureKind::NotFound,
+        408 | 504 => FailureKind::Timeout,
+        429 => FailureKind::RateLimited,
+        500..=599 => FailureKind::Unavailable,
+        _ => FailureKind::Refused,
+    };
+    Some(Failure {
+        kind,
+        retry_after_ms,
+    })
+}
+
 fn read_http(raw: &str, cached: Option<&HttpSnapshot>) -> Result<HttpSnapshot, GhError> {
+    if let Some(failure) = http_failure(raw) {
+        return Err(GhError::Fetch(failure));
+    }
     let normalized = raw.replace("\r\n", "\n");
     let (headers, body) = normalized
         .split_once("\n\n")
@@ -122,7 +163,9 @@ impl Client {
                 .next()
                 .is_none_or(|line| line.split_whitespace().nth(1) != Some("304"))
         {
-            return Err(GhError::Refused(output.stderr));
+            return Err(http_failure(&output.stdout)
+                .map(GhError::Fetch)
+                .unwrap_or(GhError::Refused(output.stderr)));
         }
         let snapshot = read_http(&output.stdout, old)?;
         if snapshot.more && !path.contains("/annotations?") {
@@ -147,7 +190,9 @@ impl Client {
             if output.stderr.contains("no pull requests found for branch") {
                 return Ok(None);
             }
-            return Err(GhError::Refused(output.stderr));
+            return Err(http_failure(&output.stdout)
+                .map(GhError::Fetch)
+                .unwrap_or(GhError::Refused(output.stderr)));
         }
         let mut review =
             read_pull_request(&output.stdout)?.ok_or_else(|| unreadable("missing PR identity"))?;
@@ -468,6 +513,43 @@ pub(crate) fn read_mergeability(word: Option<&str>) -> Option<Mergeability> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_failure_classification_uses_status_and_headers_not_error_text() {
+        for (status, expected) in [
+            (401, FailureKind::Authentication),
+            (403, FailureKind::Forbidden),
+            (404, FailureKind::NotFound),
+            (429, FailureKind::RateLimited),
+            (502, FailureKind::Unavailable),
+            (504, FailureKind::Timeout),
+        ] {
+            let raw = format!("HTTP/2.0 {status}\r\n\r\nprivate-response-body");
+            assert_eq!(http_failure(&raw).unwrap().kind, expected);
+        }
+        let limited = http_failure(
+            "HTTP/2.0 403 Forbidden\r\nX-RateLimit-Remaining: 0\r\nRetry-After: 123\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(limited.kind, FailureKind::RateLimited);
+        assert_eq!(limited.retry_after_ms, Some(123_000));
+        assert_eq!(http_failure("private text claims HTTP 401"), None);
+        assert_eq!(
+            GhError::Refused("please authenticate".into())
+                .fetch_failure()
+                .unwrap()
+                .kind,
+            FailureKind::Refused
+        );
+        assert_eq!(GhError::Budget.fetch_failure(), None);
+        assert_eq!(
+            GhError::from(CliError::TimedOut)
+                .fetch_failure()
+                .unwrap()
+                .kind,
+            FailureKind::Timeout
+        );
+    }
 
     #[test]
     fn read_http_requires_a_cached_body_for_304_and_preserves_etags() {

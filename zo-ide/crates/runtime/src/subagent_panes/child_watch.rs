@@ -324,14 +324,16 @@ mod imp {
     use super::Woken;
 
     /// No watch on this platform: [`ChildWatch::open`] never answers one.
-    pub struct ChildWatch;
+    pub enum ChildWatch {}
 
     /// No watch, so nothing to wake: a wait without one looks on a timer.
     #[derive(Clone)]
-    pub(crate) struct Waker;
+    pub(crate) enum Waker {}
 
     impl Waker {
-        pub(crate) fn wake(&self) {}
+        pub(crate) fn wake(&self) {
+            match *self {}
+        }
     }
 
     /// The kernel is not asked here: the caller looks for the exit itself.
@@ -347,21 +349,25 @@ mod imp {
 
         #[must_use]
         pub fn holds_channel(&self) -> bool {
-            false
+            match *self {}
         }
 
         pub fn hold_channel(&mut self, _addr: SocketAddr) -> bool {
-            false
+            match *self {}
         }
 
         pub(crate) fn waker(&self) -> Waker {
-            Waker
+            match *self {}
         }
 
-        pub fn wait(&mut self, timeout: Duration) -> Woken {
-            std::thread::sleep(timeout);
-            Woken::UNKNOWN
+        pub fn wait(&mut self, _timeout: Duration) -> Woken {
+            match *self {}
         }
+    }
+
+    #[test]
+    fn unsupported_platforms_never_open_a_native_watcher() {
+        assert!(ChildWatch::open(Path::new(".")).is_none());
     }
 }
 

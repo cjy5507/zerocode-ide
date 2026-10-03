@@ -36,9 +36,10 @@ use crate::jsonl_log::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use crate::memory::{
-    MemoryClassification, MemoryKind, MemoryModelTag, MemorySource, classify_memory_body,
-    memory_body_has_classification_metadata,
+    MemoryClassification, MemoryKind, MemoryModelTag,
 };
+#[cfg(unix)]
+use crate::memory::{MemorySource, classify_memory_body, memory_body_has_classification_metadata};
 #[cfg(unix)]
 use crate::secure_fs::RetainedDir;
 use decision_core::dreamer::{
@@ -67,6 +68,7 @@ const MAX_QUARANTINE_RUNS: usize = 32;
 /// Where the decay pass moves expired dreamer entries (under the memory store,
 /// not `.zo/`). Archiving rather than deleting keeps a wrongly-decayed lesson
 /// recoverable.
+#[cfg(any(unix, test))]
 const DECAY_ARCHIVE_DIR: &str = "archive";
 const AUTO_DREAM_ERROR_FILE: &str = ".last_auto_dream_error.json";
 const SELF_IMPROVE_ATTEMPT_MARKER: &str = ".last_self_improve_attempt";
@@ -74,6 +76,7 @@ const SELF_IMPROVE_ERROR_FILE: &str = ".last_self_improve_error.json";
 const SELF_IMPROVE_LOCK_FILE: &str = ".self_improve.lock";
 pub(crate) const MEMORY_STORE_LOCK_FILE: &str = ".memory-store.lock";
 const MEMORY_WRITE_JOURNAL_FILE: &str = ".memory-write-journal.json";
+#[cfg(unix)]
 const MEMORY_DECAY_JOURNAL_FILE: &str = ".memory-decay-journal.json";
 const MEMORY_STORE_LOCK_RETRY_COUNT: usize = 40;
 const MEMORY_STORE_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
@@ -101,7 +104,7 @@ const MAX_AUTOMATION_DIGESTS: usize = 10_000;
 
 #[cfg(test)]
 const MAX_SELF_IMPROVE_CANDIDATE_LINES: usize = 4;
-#[cfg(not(test))]
+#[cfg(all(unix, not(test)))]
 const MAX_SELF_IMPROVE_CANDIDATE_LINES: usize = 2_000;
 
 #[cfg(test)]
@@ -454,6 +457,7 @@ fn render_entry_body(
 /// What a [`render_entry_body`]-shaped entry tells the decay pass: whether it is
 /// dreamer-owned, and (when stamped) its write time and revisit window.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg(unix)]
 struct EntryDecayFields {
     is_dreamer: bool,
     written_secs: Option<u64>,
@@ -463,6 +467,7 @@ struct EntryDecayFields {
 /// Parse the decay-relevant trailer lines out of an entry-file body. Pure and
 /// tolerant: any missing or unparseable field reads as absent, so a malformed
 /// entry simply never decays rather than being wrongly archived.
+#[cfg(unix)]
 fn parse_entry_decay_fields(body: &str) -> EntryDecayFields {
     let mut fields = EntryDecayFields::default();
     let Some(trailer) = body.rsplit_once("
@@ -491,6 +496,7 @@ fn parse_entry_decay_fields(body: &str) -> EntryDecayFields {
 /// missing a stamp, future-dated writes (clock skew) — is kept. This is the
 /// age-threshold guard the spec requires: a verified high-value lesson is never
 /// lost until it is genuinely past its revisit window.
+#[cfg(unix)]
 fn entry_is_expired(fields: EntryDecayFields, now_secs: u64) -> bool {
     if !fields.is_dreamer {
         return false;
@@ -754,12 +760,13 @@ fn lock_candidate_store(cwd: &Path, dir: &Path) -> std::io::Result<CandidateStor
     let process = CANDIDATE_STORE_PROCESS_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir = ensure_repo_dream_child_dir_no_symlink(
-        cwd,
-        SELF_IMPROVE_CANDIDATES_DIR,
-    )?;
     #[cfg(unix)]
-    let dir = crate::secure_fs::RetainedDir::open(&dir)?;
+    let dir = {
+        let directory = ensure_repo_dream_child_dir_no_symlink(cwd, SELF_IMPROVE_CANDIDATES_DIR)?;
+        crate::secure_fs::RetainedDir::open(&directory)?
+    };
+    #[cfg(not(unix))]
+    ensure_repo_dream_child_dir_no_symlink(cwd, SELF_IMPROVE_CANDIDATES_DIR)?;
 
     for attempt in 0..CANDIDATE_STORE_LOCK_ATTEMPTS {
         #[cfg(unix)]
@@ -927,6 +934,7 @@ fn merge_candidate(existing: &mut SelfImproveCandidate, incoming: SelfImproveCan
     merge_evidence(&mut existing.evidence, incoming.evidence);
 }
 
+#[cfg(unix)]
 fn merge_candidate_snapshot_lines(
     lines: Vec<String>,
     incoming: &mut SelfImproveCandidate,
@@ -1756,7 +1764,7 @@ fn prune_quarantine_runs(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 fn quarantine_dir(cwd: &Path) -> PathBuf {
     dream_dir(cwd).join(DREAM_QUARANTINE_DIR)
 }
@@ -1771,7 +1779,7 @@ fn quarantine_storage_id(run_id: &str) -> String {
     format!("{stem}-{:x}", Sha256::digest(run_id.as_bytes()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 fn quarantine_run_dir(cwd: &Path, run_id: &str) -> PathBuf {
     quarantine_dir(cwd).join(run_id)
 }
@@ -2926,6 +2934,7 @@ fn recover_memory_write_journal_retained(memory: &RetainedDir) -> Result<(), Dre
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg(unix)]
 enum MemoryDecayJournalState {
     Prepared,
     EntryArchived,
@@ -2934,12 +2943,14 @@ enum MemoryDecayJournalState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(unix)]
 struct MemoryDecayJournal {
     state: MemoryDecayJournalState,
     slug: String,
     entry_body_hash: u64,
 }
 
+#[cfg(unix)]
 fn decay_journal_path() -> &'static Path {
     Path::new(MEMORY_DECAY_JOURNAL_FILE)
 }

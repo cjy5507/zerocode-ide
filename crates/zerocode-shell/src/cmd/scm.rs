@@ -3,6 +3,27 @@
 use crate::*;
 
 #[tauri::command]
+pub(crate) async fn scm_observer_health(
+    app: AppHandle,
+) -> Result<scm_observer::HealthSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        scm_observer::health_snapshot(&app.state::<AppState>())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn scm_observer_retry(
+    app: AppHandle,
+    root: String,
+) -> Result<scm_observer::HealthSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || scm_observer::retry(&app, Path::new(&root)))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub(crate) async fn scm_status(
     state: State<'_, AppState>,
     uncapped: Option<bool>,
@@ -733,6 +754,10 @@ pub(crate) async fn create_pull_request(
             match error {
                 gh::GhError::Missing => "GitHub CLI(gh)를 찾지 못했습니다".to_string(),
                 gh::GhError::Refused(said) | gh::GhError::Unreadable(said) => said,
+                gh::GhError::Fetch(failure) => {
+                    format!("GitHub 요청 실패: {}", failure.kind.token())
+                }
+                gh::GhError::Budget => "SCM 확인 예산을 모두 사용했습니다".into(),
             }
         })
     })

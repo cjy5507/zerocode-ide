@@ -35,8 +35,12 @@
 //! that read the clock could not be tested at a chosen instant, and a ledger
 //! that opened a file could not be tested at all.
 
+mod completion;
 pub mod coordinator_handover;
+mod session_history;
 pub mod task_cost;
+
+pub use session_history::SessionHistory;
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -745,6 +749,8 @@ pub enum ResultAuthor {
         attempt: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completed_ms: Option<i64>,
     },
     /// The ledger's own note — a stop, an abandon, a death it witnessed.
     Ledger,
@@ -1056,6 +1062,8 @@ pub struct Dispatch {
     /// coordinator's review is bound to it ([`Run::review_of`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_history: Option<SessionHistory>,
 }
 
 impl Dispatch {
@@ -7784,6 +7792,7 @@ impl Ledger {
         status: Option<TaskStatus>,
         result: Option<String>,
         author: ResultAuthor,
+        now_ms: i64,
     ) -> Result<TaskStatus, String> {
         let run = self.run_mut(run_id).ok_or_else(|| unknown_run(run_id))?;
         let at = run
@@ -7822,6 +7831,9 @@ impl Ledger {
                 gate.id
             ));
         }
+        let previous_review = run.review_of(&run.tasks[at]);
+        let previous_completed = run.completion_ms(&run.tasks[at]);
+        let wrote_result = result.is_some();
         if let Some(result) = result {
             run.tasks[at].result = result.into();
             run.tasks[at].result_author = Some(author);
@@ -7834,6 +7846,13 @@ impl Ledger {
                 run.tasks[at].failures = 0;
             }
         }
+        run.stamp_completion(
+            at,
+            previous_review,
+            previous_completed,
+            wrote_result,
+            now_ms,
+        );
         let now = run.tasks[at].status;
         Self::refresh_ready(run);
         Ok(now)
@@ -8147,6 +8166,7 @@ impl Ledger {
             retry_of: None,
             remote: None,
             source: None,
+            session_history: Some(SessionHistory::from_start()),
         });
         let at = run
             .workers
@@ -8323,6 +8343,7 @@ impl Ledger {
                 retry_of: tuning.retry_of,
                 remote: None,
                 source: None,
+                session_history: Some(SessionHistory::from_start()),
             });
             // The set half of the compare-and-set above. Unconditional here is
             // right BECAUSE the compare already happened, under this same
@@ -9525,6 +9546,16 @@ impl Ledger {
                         ));
                     }
                     (None, _) => named(&workers, "dispatch's worker", &dispatch.worker)?,
+                }
+                if dispatch
+                    .session_history
+                    .as_ref()
+                    .is_some_and(|history| !history.valid())
+                {
+                    return Err(format!(
+                        "run {} holds dispatch {} with invalid session history",
+                        run.id, dispatch.id
+                    ));
                 }
             }
             /* Sleeping and orphaned are very specific promises, not generic
@@ -12138,36 +12169,6 @@ impl Ledger {
         false
     }
 
-    /// The window reports the provider conversation in a worker's pane.
-    ///
-    /// Unlike [`Self::worker_seated`], this fact is replaceable: a person can
-    /// quit one agent in a pane and start another, so a later hook may name a
-    /// different conversation. The whole [`ProviderSession`] is compared — a
-    /// later hook can add `transcript_path` to the same id, and that is durable
-    /// information rather than a duplicate report. Only the row that may still
-    /// occupy the pane can take it: a sleeping historical row may share the
-    /// seat name with its current replacement.
-    pub fn worker_session_reported(
-        &mut self,
-        seat: (&str, &str),
-        session: ProviderSession,
-    ) -> bool {
-        let (team, pane) = seat;
-        for run in &mut self.runs {
-            for worker in &mut run.workers {
-                if worker.team == team
-                    && worker.pane == pane
-                    && worker.state.may_occupy_pane()
-                    && worker.session.as_ref() != Some(&session)
-                {
-                    worker.session = Some(session);
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     /// Move a kept worker from the seat it can no longer be reached at to the
     /// pane that has just been opened for it.
     ///
@@ -12728,6 +12729,7 @@ impl Ledger {
                 exported_seq: 0,
             }),
             source: None,
+            session_history: None,
         });
         if let Some(one) = run.tasks.iter_mut().find(|task| task.id == task_id) {
             one.status = TaskStatus::Dispatched;
@@ -20179,11 +20181,11 @@ fn plan_inner(
             let now = match closure {
                 Some(closure) => {
                     if let Some(result) = result {
-                        ledger.update_task(&run_id, task_id, None, Some(result), author)?;
+                        ledger.update_task(&run_id, task_id, None, Some(result), author, now_ms)?;
                     }
                     ledger.close_task(&run_id, task_id, closure)?
                 }
-                None => ledger.update_task(&run_id, task_id, status, result, author)?,
+                None => ledger.update_task(&run_id, task_id, status, result, author, now_ms)?,
             };
             said(serde_json::json!({
                 "taskId": task_id,
@@ -22644,6 +22646,7 @@ fn correction_author(
         generation: Some(held.generation),
         attempt: newest_id.map(str::to_string),
         source: observed.source.map(|named| named.trim().to_string()),
+        completed_ms: None,
     })
 }
 
@@ -23314,6 +23317,8 @@ pub struct DispatchRow {
     /// store written before hand-ins were recorded (t-6815).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_history: Option<SessionHistory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -23672,6 +23677,7 @@ impl Ledger {
                     retry_of: dispatch.retry_of.clone(),
                     remote: dispatch.remote.clone(),
                     source: dispatch.source.clone(),
+                    session_history: dispatch.session_history.clone(),
                 });
             }
             for worker in &run.workers {
@@ -23891,6 +23897,7 @@ impl Ledger {
                     retry_of: row.retry_of,
                     remote: row.remote,
                     source: row.source,
+                    session_history: row.session_history,
                 });
         }
         for row in projected.attachments {

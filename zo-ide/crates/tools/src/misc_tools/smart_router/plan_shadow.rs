@@ -162,7 +162,7 @@ impl PlanShadowCandidate {
         self.model == actual.model
             && self.shape == actual.shape
             && self.verify == actual.verify
-            && (self.effort.is_none() || actual.effort.is_none() || self.effort == actual.effort)
+            && self.effort == actual.effort
     }
 }
 
@@ -429,6 +429,23 @@ mod tests {
             shape: PlanShape::Solo.label(),
             verify: VerifyMode::ModelJudge.as_str().to_string(),
         }
+    }
+
+    #[test]
+    fn an_unrecorded_effort_is_not_agreement_with_a_named_effort() {
+        let mut candidate = PlanShadowCandidate {
+            model: "a".into(), effort: Some("high".into()), shape: PlanShape::Solo.label(),
+            verify: VerifyMode::ModelJudge.as_str().into(), p_verified: 0.9, confidence: 1.0,
+            t_verified_ms: 1_000, tokens: 100, cost_usd: Some(0.01), interventions: 0.0,
+        };
+        let mut executed = actual("a");
+        assert!(candidate.matches(&executed));
+        executed.effort = None;
+        assert!(!candidate.matches(&executed));
+        candidate.effort = None;
+        assert!(candidate.matches(&executed));
+        executed.effort = Some("high".into());
+        assert!(!candidate.matches(&executed));
     }
 
     fn context(current: &str) -> PlanContext<'_> {

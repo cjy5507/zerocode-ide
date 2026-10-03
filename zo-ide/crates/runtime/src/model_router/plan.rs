@@ -486,6 +486,9 @@ pub fn plan_candidates(ctx: &PlanContext<'_>, models: &[ModelOption]) -> Vec<Pla
             continue;
         }
         let efforts: Vec<Option<String>> = if model.efforts.is_empty() {
+            if ctx.pinned_effort.is_some() {
+                continue;
+            }
             vec![None]
         } else {
             model
@@ -853,6 +856,24 @@ mod tests {
         let candidates = plan_candidates(&context, &models);
         assert!(candidates.iter().all(|candidate| candidate.effort.as_deref() == Some("max")));
         assert!(candidates.iter().all(|candidate| candidate.model == "a"));
+    }
+
+    #[test]
+    fn an_effort_pin_excludes_models_without_that_capability() {
+        let models = [
+            model("thinking", ModelBand::Top, &["high"]),
+            model("no-effort", ModelBand::Second, &[]),
+        ];
+        let mut context = ctx("thinking");
+        context.pinned_effort = Some("high");
+        let candidates = plan_candidates(&context, &models);
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(|candidate| candidate.model == "thinking"
+            && candidate.effort.as_deref() == Some("high")));
+        context.pinned_model = Some("no-effort");
+        assert!(plan_candidates(&context, &models).is_empty());
+        context.pinned_effort = None;
+        assert!(!plan_candidates(&context, &models).is_empty());
     }
 
     #[test]

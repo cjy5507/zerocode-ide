@@ -858,6 +858,8 @@ const TASK_COST_REASONS = Object.freeze({
   unsupported_agent: { key: "board.desk.cost.reasonUnsupported", word: "사용량 원장 없는 에이전트" },
   unscanned: { key: "board.desk.cost.reasonUnscanned", word: "끝난 뒤 읽은 사용량 스캔 없음 — 통계에서 읽으면 채워짐" },
   unlinked: { key: "board.desk.cost.reasonUnlinked", word: "잇지 못한 세션" },
+  incomplete_session_history: { key: "board.desk.cost.reasonIncompleteHistory", word: "과거 세션 이력이 완전하지 않음" },
+  invalid_usage: { key: "board.desk.cost.reasonInvalidUsage", word: "사용량 수치를 검증할 수 없음" },
   mixed_models: { key: "board.desk.cost.reasonMixed", word: "세션 중 모델이 바뀜" },
   unpriced_model: { key: "board.desk.cost.reasonUnpriced", word: "가격표에 없는 모델" },
 });
@@ -867,6 +869,8 @@ function taskCostWords(cost) {
   const generation = cost.generation ?? {};
   const jev = cost.jev ?? {};
   const wall = Number.isFinite(cost.wallMs) ? usageDuration(Math.max(1, cost.wallMs)) : null;
+  const completed = Number.isFinite(cost.completionWallMs)
+    ? usageDuration(Math.max(1, cost.completionWallMs)) : null;
   const tokens = (Number(generation.inputTokens) || 0) + (Number(generation.outputTokens) || 0) +
     (Number(generation.cacheReadTokens) || 0) + (Number(generation.cacheWriteTokens) || 0);
   const reason = TASK_COST_REASONS[generation.usdReason];
@@ -882,8 +886,12 @@ function taskCostWords(cost) {
   ].join(" · ");
   const seats = { stamped: Number(jev.stampedSeats) || 0, unstamped: Number(jev.unstampedSeats) || 0 };
   const tip = [
-    t("board.desk.cost.tipSessions", "생성은 워커마다 마지막 세션 기준 합 · 이은 세션 {{linked}}/{{known}}",
+    completed
+      ? t("board.desk.cost.tipCompletion", "첫 시도부터 검증·반영 확인까지 {{time}}", { time: completed })
+      : t("board.desk.cost.tipCompletionUnknown", "검증·반영 완료 시간 미기록 — 시도 종료 시간과 다름"),
+    t("board.desk.cost.tipSessions", "생성은 시도별 기록된 세션의 합 · 이은 세션 {{linked}}/{{known}}",
       { linked: Number(generation.sessionsLinked) || 0, known: Number(generation.sessionsKnown) || 0 }),
+    ...(generation.historyComplete === false ? [t("board.desk.cost.reasonIncompleteHistory", "과거 세션 이력이 완전하지 않음")] : []),
     t("board.desk.cost.tipUsd", "API 환산가(구독 사용자는 청구액 아님)"),
     Number.isFinite(jev.inputTokens)
       ? t("board.desk.cost.tipJevTokens", "Jev 요청은 스탬프 좌석 {{stamped}}개만 셈 — 나머지 {{unstamped}}좌석과 zo 원장은 과업 id가 없음 · 입력 {{tokens}} 토큰",

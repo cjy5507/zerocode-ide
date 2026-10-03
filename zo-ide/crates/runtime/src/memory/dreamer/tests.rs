@@ -1493,6 +1493,7 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn registered_worktrees(cwd: &Path) -> Vec<std::path::PathBuf> {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -1512,6 +1513,7 @@ fn registered_worktrees(cwd: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn quarantine_run_entries(cwd: &Path) -> Vec<String> {
     let root = super::quarantine_dir(cwd);
     let Ok(entries) = fs::read_dir(root) else {

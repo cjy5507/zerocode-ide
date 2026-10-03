@@ -33,6 +33,9 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         .auto_memory_enabled()
         .then(|| load_runtime_memory_retriever(cwd, active_model, Arc::clone(&recall_seat)))
         .flatten();
+    let user_preference_source = runtime_config.auto_memory_enabled().then(|| {
+        Arc::new(runtime::memory::user_preferences::UserPreferenceSource::at(&runtime::default_config_home(), cwd))
+    });
     let plugin_hook_config =
         runtime_hook_config_from_plugin_hooks(plugin_registry.aggregated_hooks()?);
     let feature_config = runtime_config
@@ -94,6 +97,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         tool_registry,
         plugin_registry,
         memory_retriever,
+        user_preference_source,
         // Seated whenever there is a retriever to sit beside; what it may do
         // per recall — record, or settle the order — is `smart.rerankShadow`.
         recall_seat: Some(recall_seat),
