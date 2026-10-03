@@ -43691,6 +43691,12 @@ button.jev-token:hover {
   .file-tree .tree-row { transition: none; }
 }
 
+/* The keyboard's place in the tree, and the row a reveal pointed at — an
+ * `@path` in a prompt, a menu's "show in the file tree". Both are rings and
+ * grounds the rest of the explorer already uses. */
+.tree-row:focus-visible { outline: 1px solid var(--nav-plane-ring); outline-offset: -1px; }
+.tree-row.is-revealed:not(.is-selected) { background: var(--row-hover); }
+
 /* ---- 아티팩트 뷰 (t-2720, Orca 갭 #1) --------------------------------------
  *
  * 카드 그리드 + 오른쪽 서랍. 숫자는 tokens.css의 `--artifact-*`이고, 색은

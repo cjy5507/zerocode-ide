@@ -2399,8 +2399,8 @@ function scmRow(entry, group) {
   // (our reveal — the original's file-manager entry plays that role on a
   // file), and the customize door. Flat with a separator rather than a
   // submenu: the workspace menu's own recorded adaptation of the same list.
-  // (The original's last row reveals in its OWN file panel — ours has no
-  // tree-reveal door yet; honest gap, the tree lane's to close.)
+  // The original's last row reveals the file in its OWN file panel, and so
+  // does ours now (t-24298): the tree's one reveal door, `showInTree`.
   row.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     const revealLabel = usesCommandModifier
@@ -2444,6 +2444,10 @@ function scmRow(entry, group) {
       {
         label: t("worktree.customizeApps", "앱 사용자화…"),
         run: () => setSettingsOpen(true, "settings-open-in-apps"),
+      },
+      {
+        label: t("sourceControl.revealInTree", "파일 트리에서 보기"),
+        run: () => void showInTree(entry.path),
       },
     ]);
   });

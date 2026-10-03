@@ -33623,6 +33623,8 @@ const scmRowGrammar = await page.evaluate(async () => {
       t("worktree.openIn", "{{app}}에서 열기", { app: application.label })),
     revealSays,
     t("worktree.customizeApps", "앱 사용자화…"),
+    // 원본의 마지막 줄 — 제 파일 패널에서 보기(t-24298).
+    t("sourceControl.revealInTree", "파일 트리에서 보기"),
   ];
   seen.separators = menu.querySelectorAll(".sidebar-menu-separator").length;
   closeSidebarMenu();

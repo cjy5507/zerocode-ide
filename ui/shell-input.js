@@ -2377,6 +2377,7 @@ function paintTreeBadge(row, relative, isDir, code = badgeFor(relative)) {
   badge.dataset.tip = code.trim();
   badge.dataset.git = gitDecorationOf(code);
   dressTreeGit(row, relative, isDir, ignored);
+  labelTreeRow(row);
 }
 
 /* One folder's entries, from the backend or from the answer already fetched.

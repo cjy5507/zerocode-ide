@@ -2790,7 +2790,17 @@
               <svg class="icon" aria-hidden="true"><use href="#i-crosshair"></use></svg>
             </button>
           </div>
-          <div class="file-tree" id="file-tree" tabindex="0"></div>
+          <!-- A tree to a screen reader, with one tab stop on its rows (the
+               cursor's); the box itself is focusable only for code that
+               hands it the keyboard, and it keeps its own keys (t-24298). -->
+          <div
+            class="file-tree"
+            id="file-tree"
+            tabindex="-1"
+            role="tree"
+            data-keyboard-owner="true"
+            data-i18n-aria="tree.label" aria-label="파일 트리"
+          ></div>
           <div class="file-tree" id="file-hits" hidden></div>
           <!-- Content hits are three facts wide — file, line, the line — so
                they get their own host rather than being squeezed into the

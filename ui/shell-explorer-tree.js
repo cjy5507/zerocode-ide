@@ -17,7 +17,9 @@ function paintTreeSelection() {
   for (const row of fileTree.querySelectorAll('.tree-row[data-tree-path]')) {
     const selected = selectedTreePaths.has(row.dataset.treePath);
     row.classList.toggle('is-selected', selected);
-    row.setAttribute('aria-pressed', String(selected));
+    // A treeitem says it is chosen with aria-selected (t-24298); pressed is a
+    // toggle button's word and was never true of a row.
+    row.setAttribute('aria-selected', String(selected));
   }
 }
 
@@ -41,6 +43,8 @@ function selectTreeRow(row, event) {
     treeSelectionAnchor = path;
   }
   paintTreeSelection();
+  clearTreeReveal(row);
+  setTreeCursor(row);
   row.focus({ preventScroll: true });
 }
 
@@ -386,6 +390,10 @@ function noteTreeActivities(pane, activities) {
   for (const stamped of activities) {
     const activity = stamped?.activity;
     if (!activity) continue;
+    if (activity.phase === "prompted") {
+      revealTreeMentions(pane, activity.target);
+      continue;
+    }
     const touch = treeTouchOf(activity);
     if (!touch) continue;
     for (const target of touch.targets) {
@@ -437,15 +445,21 @@ function paintTreeTouches() {
     if (wanted.has(row)) continue;
     delete row.dataset.agentTouch;
     delete row.dataset.agentTouchWithin;
+    labelTreeRow(row);
   }
   for (const [row, marks] of wanted) {
+    let moved = false;
     for (const slot of ["agentTouch", "agentTouchWithin"]) {
       if (marks[slot]) {
-        if (row.dataset[slot] !== marks[slot]) row.dataset[slot] = marks[slot];
+        if (row.dataset[slot] === marks[slot]) continue;
+        row.dataset[slot] = marks[slot];
+        moved = true;
       } else if (slot in row.dataset) {
         delete row.dataset[slot];
+        moved = true;
       }
     }
+    if (moved) labelTreeRow(row);
   }
 }
 
@@ -669,9 +683,195 @@ function paintTreeHead(asked = null) {
 }
 
 /* What `loadTree` calls once it has built a folder's rows: they wear what the
- * tree already knows — the agents' marks — and a fresh root wears its
- * branch at once. */
+ * tree already knows — the agents' marks, the roles and the one tab stop —
+ * and a fresh root wears its branch at once. */
 function dressTreeRows(container) {
-  if (container === fileTree) paintTreeHead();
+  for (const row of container.querySelectorAll(":scope > .tree-row[data-tree-path]")) {
+    const path = row.dataset.treePath;
+    row.setAttribute("role", "treeitem");
+    row.setAttribute("aria-level", String(path.split("/").length));
+    row.setAttribute("aria-selected", String(selectedTreePaths.has(path)));
+    row.tabIndex = path === treeCursorPath ? 0 : -1;
+  }
+  for (const group of container.querySelectorAll(":scope > .tree-children")) group.setAttribute("role", "group");
+  if (container === fileTree) {
+    paintTreeHead();
+    if (!fileTree.querySelector('.tree-row[tabindex="0"]')) {
+      const first = fileTree.querySelector(":scope > .tree-row[data-tree-path]");
+      if (first) first.tabIndex = 0;
+    }
+  }
   if (treeTouches.size > 0) scheduleTreeTouchPaint();
+}
+
+/* ---- the keyboard and the screen reader (t-24298) ----
+ *
+ * The tree is a `tree` of `treeitem`s with one tab stop that moves with the
+ * cursor (`treeCursorPath`), the way every file explorer walks: the arrows
+ * move through the visible rows and carry the selection, Right opens a
+ * folder and then steps into it, Left climbs to the folder and then folds
+ * it, Home and End reach the ends, Enter and Space are the row's own door
+ * (`actsAsButton`). The tree is marked a keyboard owner, so the window's key
+ * sink leaves these keys with it instead of sending them to a terminal. */
+let treeCursorPath = null;
+
+function setTreeCursor(row) {
+  const path = row.dataset.treePath;
+  if (path === treeCursorPath && row.tabIndex === 0) return;
+  for (const held of fileTree.querySelectorAll('.tree-row[tabindex="0"]')) if (held !== row) held.tabIndex = -1;
+  treeCursorPath = path;
+  row.tabIndex = 0;
+}
+
+function visibleTreeRows() {
+  return [...fileTree.querySelectorAll(".tree-row[data-tree-path]")].filter((row) => !row.closest(".tree-children[hidden]"));
+}
+
+fileTree.addEventListener("focusin", (event) => {
+  const row = event.target.closest?.(".tree-row[data-tree-path]");
+  if (row) setTreeCursor(row);
+});
+
+/* The tree itself is focusable for the code that hands it the keyboard (its
+ * undo chord, a drop); a person tabbing in lands on the cursor's row. */
+fileTree.addEventListener("focus", () => {
+  const row = (treeCursorPath === null ? null : treeRowOf(treeCursorPath)) ??
+    fileTree.querySelector(":scope > .tree-row[data-tree-path]");
+  row?.focus({ preventScroll: true });
+});
+
+fileTree.addEventListener("keydown", (event) => {
+  const row = event.target.closest?.(".tree-row[data-tree-path]");
+  if (!row || event.target.closest("input") || hasPrimaryModifier(event) || event.altKey) return;
+  const rows = visibleTreeRows();
+  const at = rows.indexOf(row);
+  let next = null;
+  switch (event.key) {
+    case "ArrowDown":
+      next = rows[Math.min(rows.length - 1, at + 1)];
+      break;
+    case "ArrowUp":
+      next = rows[Math.max(0, at - 1)];
+      break;
+    case "Home":
+      next = rows[0];
+      break;
+    case "End":
+      next = rows[rows.length - 1];
+      break;
+    case "ArrowRight":
+      if (!row.classList.contains("is-dir")) return;
+      if (row.getAttribute("aria-expanded") !== "true") {
+        event.preventDefault();
+        void row._treeUnfold?.(true);
+        return;
+      }
+      next = row.nextElementSibling?.querySelector(":scope > .tree-row[data-tree-path]") ?? null;
+      break;
+    case "ArrowLeft":
+      if (row.classList.contains("is-dir") && row.getAttribute("aria-expanded") === "true") {
+        event.preventDefault();
+        void row._treeUnfold?.(false);
+        return;
+      }
+      next = row.parentElement?.closest(".tree-children")?.previousElementSibling ?? null;
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+  if (!next || next === row) return;
+  selectTreeRow(next, { shiftKey: event.shiftKey });
+  next.scrollIntoView({ block: "nearest" });
+});
+
+/* A double-click hands the file to the system's own app for it — the click
+ * before it already opened the preview here. */
+fileTree.addEventListener("dblclick", (event) => {
+  const row = event.target.closest?.(".tree-row.is-file[data-tree-path]");
+  if (!row || event.target.closest("input")) return;
+  invoke("fs_open_default", { path: treeAbsolute(row.dataset.treePath) }).catch((error) => showError(String(error)));
+});
+
+function treeTouchWord(kind) {
+  switch (kind) {
+    case "read":
+      return t("tree.touch.read", "에이전트가 읽는 중");
+    case "write":
+      return t("tree.touch.write", "에이전트가 쓰는 중");
+    case "commit":
+      return t("tree.touch.commit", "에이전트가 커밋함");
+    default:
+      return "";
+  }
+}
+
+/* What a screen reader says for a row: its name, its git state in words
+ * (and a file's +N -N), and what an agent is doing to it — the same facts
+ * the row shows, never a raw letter. Rewritten whenever one of them moves. */
+function labelTreeRow(row) {
+  const path = row.dataset.treePath;
+  const words = [row.querySelector(".tree-name")?.textContent ?? ""];
+  if (row.classList.contains("is-ignored")) {
+    words.push(t("tree.git.ignored", "무시됨"));
+  } else if (row.classList.contains("is-dir")) {
+    if (treeGit.folders.has(path)) words.push(row.querySelector(".badge")?.dataset.tip ?? "");
+  } else {
+    const entry = treeGit.files.get(path);
+    if (entry) words.push(treeGitWord(treeGitKind(entry)), row.querySelector(".tree-tally")?.textContent ?? "");
+  }
+  words.push(treeTouchWord(row.dataset.agentTouch ?? row.dataset.agentTouchWithin));
+  row.setAttribute("aria-label", words.filter(Boolean).join(", "));
+}
+
+/* ---- the person's own pointer: `@path` in a prompt (t-24298) ----
+ *
+ * A prompt the person sends is an activity too (the `prompt` verb every hook
+ * agent reports), and an `@path` in it names a file the person is thinking
+ * about. The tree unfolds to it whether follow is on or not — it is the
+ * person's pointer, not the agent's. Read from the start of the line or after
+ * a space, so a mail address is not a mention; trailing punctuation is the
+ * sentence's, not the path's. */
+const TREE_MENTION = /(?:^|\s)@([^\s"'`]+)/g;
+const TREE_MENTION_TAIL = /[.,;:!?)\]]+$/;
+let treeMentionWalk = Promise.resolve();
+
+function revealTreeMentions(pane, text) {
+  if (typeof text !== "string" || !fileTreeShowing()) return;
+  for (const match of text.matchAll(TREE_MENTION)) {
+    const said = match[1].replace(TREE_MENTION_TAIL, "");
+    if (said.endsWith("…")) continue;
+    const relative = treeRelative(said, pane);
+    if (relative === null) continue;
+    treeMentionWalk = treeMentionWalk.then(() => revealTreePath(relative)).catch(() => {});
+  }
+}
+
+function clearTreeReveal(keep = null) {
+  for (const held of fileTree.querySelectorAll(".tree-row.is-revealed")) if (held !== keep) held.classList.remove("is-revealed");
+}
+
+/* Unfold to a path, mark its row as the one pointed at and make it the tab
+ * stop — focused only when the person asked from a menu, never from a
+ * prompt they are still looking past. */
+async function revealTreePath(relative, { focus = false } = {}) {
+  const row = await revealInTree(relative);
+  if (!row) return null;
+  clearTreeReveal(row);
+  row.classList.add("is-revealed");
+  setTreeCursor(row);
+  if (focus) row.focus({ preventScroll: true });
+  return row;
+}
+
+/* "Show in the file tree" from another surface's menu: the files panel up, any
+ * search list put away, the row revealed and focused. */
+async function showInTree(relative) {
+  setPanelFolded("aside", false);
+  setActivityItem("files");
+  if (fileTree.hidden) {
+    fileSearch.value = "";
+    await runFileSearch();
+  }
+  return revealTreePath(relative, { focus: true });
 }

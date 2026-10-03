@@ -367,8 +367,8 @@ export async function testExplorerGit(browser, origin, ok) {
  *
  * An `@path` in a prompt the person sent (the prompt event every hook agent
  * reports) unfolds the tree to that file, follow or not — it is the person's
- * own pointer, not the agent's. The terminal's file-link menu shares the same
- * reveal. */
+ * own pointer, not the agent's. The source-control row's menu shares the
+ * same reveal. */
 export async function testExplorerMentions(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -384,19 +384,26 @@ export async function testExplorerMentions(browser, origin, ok) {
       out.revealed = open("src") && open("src/deep") && row("src/deep/x.rs")?.classList.contains("is-revealed");
       out.outsideIgnored = !fileTree.querySelector(".tree-row.is-revealed:not([data-tree-path='src/deep/x.rs'])");
       document.getElementById("tree-follow")?.click();
-      // The terminal's file-link menu offers the same reveal for a path in
-      // this checkout.
+      // The source-control row's menu offers the same reveal as its last row
+      // (the original's own order: its last row reveals in its file panel).
       await row("src")._treeUnfold(false);
-      openFileLinkMenu("src/main.rs", 40, 40);
-      const offered = [...document.querySelectorAll("#link-menu-body > *")].find((entry) => entry.textContent.includes(t("links.revealInTree", "파일 트리에서 보기")));
-      out.offered = Boolean(offered);
-      offered?.click();
+      window.__ANSWER__.scm_status = () => ({ changed: [{ path: "src/main.rs", code: " M", staged: false, changed: true, added: 1, removed: 0, conflict: null, origin: null }], ignored: [] });
+      setActivityItem("scm");
+      await refreshScm();
+      const changed = [...document.querySelectorAll("#activity-scm .scm-row")].find((one) => one.textContent.includes("main.rs"));
+      changed?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 60, clientY: 60 }));
+      await settle();
+      const items = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")];
+      const offered = items.find((item) => item.textContent.includes(t("sourceControl.revealInTree", "파일 트리에서 보기")));
+      out.offered = Boolean(offered) && items.at(-1) === offered;
+      if (offered) offered.click();
+      else closeSidebarMenu();
       await settle(8);
-      out.menuRevealed = open("src") && row("src/main.rs")?.classList.contains("is-revealed");
+      out.menuRevealed = !document.getElementById("activity-files").hidden && open("src") && row("src/main.rs")?.classList.contains("is-revealed") && document.activeElement === row("src/main.rs");
       return out;
     });
     ok("an @path in the person's prompt unfolds the tree to that file even with follow off; paths outside the checkout are ignored", seen.followOff === "false" && seen.revealed === true && seen.outsideIgnored === true, JSON.stringify(seen));
-    ok("the terminal's file-link menu offers the same reveal in the tree", seen.offered === true && seen.menuRevealed === true, JSON.stringify(seen));
+    ok("the source-control row's menu ends with the same reveal: the files panel comes up and the row is revealed and focused", seen.offered === true && seen.menuRevealed === true, JSON.stringify(seen));
     ok("the mentions suite raised no renderer faults", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();
