@@ -136,6 +136,10 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
           tone: chip?.dataset.landing ?? null,
           tip: shown ? chip.dataset.tip ?? "" : null,
           cleanable: chip?.dataset.cleanable === "1",
+          // The ellipsis cuts what does not fit (`textContent` is the whole word either way), so the
+          // room the chip has is read beside it: a measurement, not a check (SIDEBAR_LANDING_WIDTHS).
+          scroll: chip ? chip.scrollWidth : null,
+          client: chip ? chip.clientWidth : null,
           dotTip: row?.querySelector(".wt-dot")?.dataset.tip ?? "",
           phaseWord: row?.querySelector(".wt-phase")?.textContent ?? "",
           height: row ? row.getBoundingClientRect().height : 0,
@@ -156,6 +160,12 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
 
     const chips = await page.evaluate((paths) => Object.fromEntries(paths.map((path) => [path, window.__CHIP__(path)])),
       SCENE.map((one) => one.path));
+
+    if (process.env.SIDEBAR_LANDING_WIDTHS) {
+      console.log("LANDING_CHIP_WIDTHS " + JSON.stringify(Object.fromEntries(Object.entries(chips)
+        .filter(([, one]) => one.word)
+        .map(([path, one]) => [path, { word: one.word, scroll: one.scroll, client: one.client, cut: one.scroll > one.client }]))));
+    }
 
     ok(
       "each kind of landing wears its own word on a second chip beside the ledger's: 반영됨, 미반영 N, 커밋 없음, 저장 안 한 변경, 비교 기준 없음 — and 커밋 없음 is never 반영됨",
