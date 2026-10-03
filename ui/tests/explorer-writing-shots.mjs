@@ -24,9 +24,9 @@ await mkdir(folder, { recursive: true });
 const SHEEN_HELD_AT_MS = 440;
 
 /* How long after the writes end the second picture waits, in ms: the window the
- * numstat is asked in (150), the shortest showing of the mark (1000) and the
- * time the answer takes to be drawn, with a margin. */
-const LANDED_AFTER_MS = 2200;
+ * numstat is asked in (150) and the time the answer takes to be drawn, with a
+ * margin. */
+const LANDED_AFTER_MS = 1200;
 
 /* The checkout the pictures stand in. */
 const LISTINGS = {
@@ -47,7 +47,10 @@ const LISTINGS = {
 };
 
 /* What the scoped question answers for the two files the agent writes: one
- * edited with counts, one new (git has no counts for a file it has not seen). */
+ * edited with counts, one new (git has no counts for a file it has not seen).
+ * The whole-repository status says the same once the writes have ended — the
+ * page re-reads it itself 1.5 s after the last activity, and a status that
+ * disagreed with the scoped answer would take the numbers off the rows. */
 const ANSWER = {
   "src/parser.rs": { code: " M", added: 42, removed: 7 },
   "tests/smoke.rs": { code: "??", added: null, removed: null },
@@ -65,7 +68,9 @@ async function look(theme, motion) {
     await page.evaluate(async ({ listed, answer, one }) => {
       document.documentElement.dataset.theme = one;
       window.__ANSWER__.list_dir = ({ path }) => listed[path] ?? [];
-      window.__ANSWER__.scm_numstat = ({ paths }) => paths.filter((path) => answer[path]).map((path) => ({ path, staged: false, changed: true, conflict: null, origin: null, ...answer[path] }));
+      const entryOf = (path) => ({ path, staged: false, changed: true, conflict: null, origin: null, ...answer[path] });
+      window.__ANSWER__.scm_numstat = ({ paths }) => paths.filter((path) => answer[path]).map(entryOf);
+      window.__ANSWER__.scm_status = () => ({ changed: window.__LANDED__ ? Object.keys(answer).map(entryOf) : [], ignored: [] });
       revealActivity("files", "name");
       fileSearch.blur();
       resetTreeSelection();
@@ -103,6 +108,7 @@ async function look(theme, motion) {
     }, SHEEN_HELD_AT_MS);
     await shoot("1-writing");
 
+    await page.evaluate(() => { window.__LANDED__ = true; });
     await fire([
       { verb: "edit", path: "src/parser.rs", phase: "finished", call: "call-1" },
       { verb: "write", path: "tests/smoke.rs", phase: "finished", call: "call-2" },
