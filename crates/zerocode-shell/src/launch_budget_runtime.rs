@@ -217,7 +217,7 @@ pub(crate) fn run_budgeted(
 /// A refusal in a sentence — what a person reads where the draft would have been.
 pub(crate) fn refusal_said(refusal: &Refusal) -> String {
     let now_ms = crate::now_epoch_ms();
-    let minutes = |ms: i64| zerocode_core::orchestration::minutes_up(ms);
+    let minutes = zerocode_core::orchestration::minutes_up;
     match refusal {
         Refusal::Resting { until_ms } => format!(
             "한도 벽에 막혀 쉬는 중입니다 — 약 {}분 뒤에 다시 시도합니다",

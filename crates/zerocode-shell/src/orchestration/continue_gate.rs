@@ -153,7 +153,6 @@ fn record(
         // so a checkout that cannot be saved is not asked again every beat.
         gate.book.checkpointed(now_ms);
     }
-    gate.cost = around.cost;
     gate.reading = Some(GateReading {
         mode: settings.mode,
         verdict: decided.judgement.verdict,
