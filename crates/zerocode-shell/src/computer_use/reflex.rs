@@ -561,6 +561,10 @@ pub(crate) trait Carrier {
     fn mode(&mut self) -> JevMode;
     /// Milliseconds on the window's steady clock.
     fn now_ms(&self) -> u64;
+    /// The pass's own reading of the run, before any question that settles
+    /// in this pass is judged (t-22110): what the helper says it runs now is
+    /// what an answer is held to, never what the pass before it read.
+    fn reading(&mut self, _read: &Value) {}
     /// A question came back: its row, stamped with the run's provenance and
     /// the pass's mode, is this carrier's to judge before it is recorded.
     fn settled(&mut self, pending: &Pending, row: &mut Value);
@@ -696,6 +700,7 @@ impl Watch {
                 read: Some(read),
             };
         }
+        carrier.reading(&read);
         self.keep(&read, call, sink);
         let mut rows = Vec::new();
         let asks = mode.asks();

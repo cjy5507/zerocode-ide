@@ -21,7 +21,8 @@
 //! runs only the time that is left; `shadow` and `off` change no input —
 //! their rows say `applied: false` and why; a person's input, the operator's
 //! stop or a `reflex-stop` ends the autopilot and nothing re-plans after it;
-//! no picture of the screen goes to any model. The helper's verbs are the
+//! an answer is judged on the run as the pass it settles in has just read it,
+//! never on an older reading; no picture of the screen goes to any model. The helper's verbs are the
 //! five it answers (`reflexStart`, `reflexStatus`, `reflexStop`,
 //! `reflexReceipts`, `reflexAck`): a pause is a stop, and its reason is the
 //! autopilot's to say (`ended`), never the helper's to be told.
@@ -443,6 +444,32 @@ impl Carrier for Seat<'_> {
 
     fn now_ms(&self) -> u64 {
         self.now_ms
+    }
+
+    /// The run standing, as this pass has just read it: the plan the helper
+    /// says it runs now, and no run at all once the helper ended, held or
+    /// forgot it — so an answer that lands inside this very pass is judged on
+    /// the same reading the next pass would judge it on. A finishing run's
+    /// reading says nothing about the run standing.
+    fn reading(&mut self, read: &Value) {
+        let read_run = read.get("runId").and_then(Value::as_str);
+        if !self
+            .running
+            .as_ref()
+            .is_some_and(|(id, _, _)| read_run == Some(id.as_str()))
+        {
+            return;
+        }
+        if let Some("stopped" | "paused" | "missing") = read.get("state").and_then(Value::as_str) {
+            self.running = None;
+            return;
+        }
+        if let (Some((_, _, plan_hash)), Some(hash)) = (
+            self.running.as_mut(),
+            read.get("planHash").and_then(Value::as_str),
+        ) {
+            *plan_hash = hash.to_string();
+        }
     }
 
     fn settled(&mut self, pending: &Pending, row: &mut Value) {
