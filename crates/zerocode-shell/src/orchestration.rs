@@ -25,9 +25,13 @@
 //!
 //! [`RuntimeActor`]: zerocode_orchestrator::runtime_actor::RuntimeActor
 
+mod continue_gate;
 pub(crate) mod coordinator_handover;
 pub(crate) mod cost_book;
 pub(crate) mod desk;
+pub(crate) mod gate_book;
+mod gate_meter;
+mod gate_snapshot;
 mod mail_triage;
 pub(crate) mod restart_census;
 mod stall_cause;
@@ -1379,6 +1383,22 @@ pub(crate) fn record_account_switch(
         .map_err(|why| format!("원장이 전환 영수증을 거절했습니다: {why:?}"))
 }
 
+/// The receipt for one gate judgment, in the ledger's own voice (t-26583).
+/// Answers whether a row was written (the same key again writes none).
+pub(crate) fn record_gate_judgement(
+    receipt: zerocode_core::orchestration::GateReceipt,
+    now_ms: i64,
+) -> Result<bool, String> {
+    if let Some(why) = unavailable() {
+        return Err(why);
+    }
+    let held = runtime().ok_or_else(|| "이 창에는 열린 원장이 없습니다".to_string())?;
+    held.actor
+        .gate_judged(receipt, now_ms)
+        .map(|(moved, _)| moved)
+        .map_err(|why| format!("원장이 판정 영수증을 거절했습니다: {why:?}"))
+}
+
 /// One worker as the ledger holds it now, with the terminal its seat
 /// resolves to (when it does) — what the switch road compares its plan
 /// and its journal with: the seat, the state, the attempt and the
@@ -1953,6 +1973,11 @@ pub(crate) struct LedgerAgent {
     /// the board's beat from the window's cost book ([`cost_book::CostBook::dress`]);
     /// `None` for a task still moving, and on every row read another way.
     pub(crate) cost: Option<zerocode_core::orchestration::task_cost::TaskCost>,
+    /// What the continue gate last judged of this worker (t-26583) — the verdict
+    /// and every fact behind it, with the numbers — laid on by the board's beat
+    /// ([`gate_book::dress`]); `None` for a worker nobody watches and for a gate
+    /// that is off.
+    pub(crate) gate: Option<gate_book::GateReading>,
 }
 
 /// Volatile relations layered over the board's two permanent graph edges.
@@ -2259,7 +2284,9 @@ pub(crate) fn refresh_board_ledger() {
         let mut costs = cost_book::book();
         costs.begin(ledger);
         let next = BoardLedgerSnapshot {
-            agents: Arc::new(costs.dress(ledger, ledger_agents_for_seats(ledger, seats))),
+            agents: Arc::new(gate_book::dress(
+                costs.dress(ledger, ledger_agents_for_seats(ledger, seats)),
+            )),
             states: Arc::new(ledger_states_for_seats(ledger, seats)),
             overlays: Arc::new(graph_overlay_snapshot_for_seats(ledger, seats)),
             held_checkouts: zerocode_core::orchestration::held_checkouts(ledger).len(),
@@ -2445,6 +2472,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 quiet_at: worker.quiet_at,
                 pane_missing_since_ms: worker.pane_missing_since_ms,
                 cost: None,
+                gate: None,
             });
         }
     }
@@ -6920,6 +6948,10 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // A worker whose turn just ended is read, and its effort moved before
     // the pointer below can start its next turn (t-5637).
     step_effort::sweep(host, now_ms);
+    // Every live worker judged on what the window holds of it — its calls, what
+    // its model calls cost, the budget a person set — and what the judgment calls
+    // for done: a restore point, a word to the coordinator, a stop (t-26583).
+    continue_gate::sweep(host, overrides, now_ms);
     // And the placement seat's quiet labels: a pane the person left where
     // the seat put it for the whole window is graded on this beat (t-5806).
     crate::cmd::worker_room::sweep(host, now_ms);
@@ -8355,6 +8387,115 @@ pub(crate) fn walk_handover(
     }
 }
 
+/// The seat a run's coordinator holds, as a verb presents it to [`run`]:
+/// `(since, team, pane, capability)` — or `None` for a run whose chair is empty
+/// or proven gone (`vacated_ms`: a chair, not a caller), or whose leader pane
+/// this window cannot sign for.
+fn presentable_seat(
+    run: &zerocode_core::orchestration::Run,
+) -> Option<(i64, String, String, String)> {
+    let held_seat = run
+        .coordinator
+        .as_ref()
+        .filter(|one| one.vacated_ms.is_none())?;
+    let (team, pane) = held_seat.seat.split_once('/')?;
+    let capability = crate::agent_teams::current_pane_capability(team, pane)?;
+    Some((
+        held_seat.since_ms,
+        team.to_string(),
+        pane.to_string(),
+        capability,
+    ))
+}
+
+/// What the gate ends a worker for (t-26583): whose attempt, which task, and why.
+struct GateStop<'a> {
+    run: &'a str,
+    worker: &'a str,
+    dispatch: &'a str,
+    task: &'a str,
+    why: &'a str,
+}
+
+/// Ends a worker the gate judged past its budget, through the same seat and the
+/// same verb a coordinator ends one with, and puts a decision gate in front of
+/// the task — so the next summons is somebody's answer and not a loop (the
+/// task is `blocked` until the gate is answered, and `run-auto` does not take a
+/// blocked task). The verb names the attempt, so a worker that has since moved
+/// on to another is not the one ended.
+fn stop_worker_for_gate(
+    host: &dyn Host,
+    overrides: &[(String, LaunchOverride)],
+    stop: &GateStop<'_>,
+    now_ms: i64,
+) -> Result<(), String> {
+    let held = runtime().ok_or_else(|| "the runtime never started".to_string())?;
+    let image = held
+        .actor
+        .view()
+        .map_err(|_| "the ledger could not be read".to_string())?;
+    let rows =
+        cached_ledger(&held, &image).map_err(|_| "the ledger could not be rebuilt".to_string())?;
+    let (_, team, pane, capability) = rows
+        .run(stop.run)
+        .and_then(presentable_seat)
+        .ok_or_else(|| "no seated coordinator of that run sits in this window".to_string())?;
+    drop(rows);
+    let word = |text: &str| text.to_string();
+    let stopped = run(
+        host,
+        overrides.to_vec(),
+        &team,
+        &pane,
+        &capability,
+        &[
+            word("worker-stop"),
+            word("--worker"),
+            word(stop.worker),
+            word("--dispatch"),
+            word(stop.dispatch),
+            word("--reason"),
+            word(stop.why),
+            word("--retry-request"),
+            format!("gate-stop-{}", stop.dispatch),
+        ],
+        now_ms,
+    );
+    if stopped.exit_code != 0 {
+        return Err(stopped
+            .stderr
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string());
+    }
+    let question = format!(
+        "The window's gate ended this attempt ({}). Raise the budget in the window's settings \
+         and answer this to go on, or close the task.",
+        stop.why
+    );
+    // The worker is already ended; a gate the ledger refuses leaves the task
+    // `ready`, which is the coordinator's to read in the notice that follows.
+    let _ = run(
+        host,
+        overrides.to_vec(),
+        &team,
+        &pane,
+        &capability,
+        &[
+            word("gate-create"),
+            word("--task"),
+            word(stop.task),
+            word("--question"),
+            question,
+            word("--retry-request"),
+            format!("gate-ask-{}", stop.dispatch),
+        ],
+        now_ms,
+    );
+    Ok(())
+}
+
 /// The crash that becomes a task, walked down the ledger's one door
 /// (t-3014 §2.4).
 ///
@@ -8423,32 +8564,14 @@ pub(crate) fn file_task_through_seat(
         ));
     };
     // The newest seated coordinator whose leader pane this window can sign
-    // for. A seat proven gone (`vacated_ms`) is a chair, not a caller.
+    // for.
     let mut seat: Option<(i64, String, String, String)> = None;
     for run in rows.runs() {
-        let Some(held_seat) = run
-            .coordinator
-            .as_ref()
-            .filter(|one| one.vacated_ms.is_none())
-        else {
+        let Some(found) = presentable_seat(run) else {
             continue;
         };
-        let Some((team, pane)) = held_seat.seat.split_once('/') else {
-            continue;
-        };
-        let Some(capability) = crate::agent_teams::current_pane_capability(team, pane) else {
-            continue;
-        };
-        if seat
-            .as_ref()
-            .is_none_or(|(since, ..)| held_seat.since_ms > *since)
-        {
-            seat = Some((
-                held_seat.since_ms,
-                team.to_string(),
-                pane.to_string(),
-                capability,
-            ));
+        if seat.as_ref().is_none_or(|(since, ..)| found.0 > *since) {
+            seat = Some(found);
         }
     }
     drop(rows);

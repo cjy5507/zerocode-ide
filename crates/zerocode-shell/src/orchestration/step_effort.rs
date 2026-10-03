@@ -247,21 +247,21 @@ pub(super) fn sweep(host: &dyn Host, now_ms: i64) {
 
 /// One live worker pane the seat may read: the attempt, the pane, the agent
 /// and the words it was summoned with.
-struct WorkerPane {
-    run: String,
-    worker: String,
-    dispatch: String,
-    task: String,
-    agent: String,
-    term: u32,
+pub(super) struct WorkerPane {
+    pub(super) run: String,
+    pub(super) worker: String,
+    pub(super) dispatch: String,
+    pub(super) task: String,
+    pub(super) agent: String,
+    pub(super) term: u32,
     /// The effort the summons carried — the floor a lower never goes under.
-    floor: Option<String>,
-    checkout: Option<String>,
+    pub(super) floor: Option<String>,
+    pub(super) checkout: Option<String>,
 }
 
 /// Every live worker carrying an open attempt in a pane this window holds
 /// and no person has taken over.
-fn worker_panes(ledger: &Ledger, seats: &super::TeamSeatIndex) -> Vec<WorkerPane> {
+pub(super) fn worker_panes(ledger: &Ledger, seats: &super::TeamSeatIndex) -> Vec<WorkerPane> {
     ledger
         .runs()
         .iter()
