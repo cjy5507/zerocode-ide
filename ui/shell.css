@@ -6600,6 +6600,64 @@ body.is-dragging-pane {
   background: var(--surface-deck);
 }
 
+.artifact-preferences-panel {
+  box-sizing: border-box;
+  width: min(460px, calc(100vw - 24px));
+  min-width: 0;
+  max-width: min(460px, calc(100vw - 24px));
+  max-height: calc(100vh - 72px);
+  overflow: auto;
+  padding: var(--space-3);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.artifact-preferences-panel header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.artifact-preferences-panel form,
+.artifact-preferences-panel label,
+.artifact-preferences-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.artifact-preferences-panel input,
+.artifact-preferences-panel select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-2);
+  color: var(--ink-chalk);
+  background: var(--surface-deck);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-edge);
+  font: inherit;
+}
+
+.artifact-preferences-panel p {
+  margin-block: var(--space-2);
+}
+
+.artifact-preferences-list article {
+  padding-block: var(--space-2);
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+
+.artifact-preferences-list small {
+  display: block;
+  margin-bottom: var(--space-2);
+  color: var(--ink-mist);
+}
+
+.artifact-preferences-status {
+  color: var(--ink-mist);
+}
+
 .note-pop-label {
   padding: var(--space-1) var(--space-2);
   color: var(--ink-mist);
@@ -9687,6 +9745,24 @@ body.is-dragging-pane {
 
 .scm-pr-note[data-tone="halt"] {
   color: var(--signal-halt);
+}
+
+.scm-observer-health {
+  margin: var(--space-2) var(--space-3);
+  padding: var(--space-2);
+  border: var(--rule-width) solid color-mix(in srgb, var(--ink-mist) 25%, transparent);
+  border-radius: var(--radius-edge);
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+  overflow-wrap: anywhere;
+}
+
+.scm-observer-health.is-degraded {
+  border-color: var(--signal-halt);
+}
+
+.scm-observer-health p {
+  margin-block: var(--space-1);
 }
 
 .scm-head {
@@ -21040,6 +21116,13 @@ button.helper-sib:hover {
   color: var(--ink-mist);
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
+}
+.agent-support {
+  display: block;
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* What this agent does when it is ready for keys, for the two that say so.

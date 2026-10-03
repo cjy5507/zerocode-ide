@@ -915,6 +915,7 @@ fn an_unreadable_spend_book_never_becomes_an_empty_budget() {
 }
 
 /// The name the test harness knows the lock holder by.
+#[cfg(unix)]
 const LOCK_HOLDER_TEST: &str = "hold_a_spend_book_lock_until_killed";
 /// Where the holder is told which book to lock, and where to say it holds it.
 const HOLD_BOOK_ENV: &str = "ZO_TEST_CHALLENGER_HOLD_BOOK";

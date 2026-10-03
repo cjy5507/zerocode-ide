@@ -9285,6 +9285,7 @@ mod tests {
                 None,
                 Some(r#"{"note":"original","ok":false}"#.into()),
                 zerocode_core::orchestration::ResultAuthor::Ledger,
+                2,
             )
             .expect("prior result");
         let other = ledger
@@ -9879,6 +9880,65 @@ mod tests {
             .expect("the stored worker has its conversation");
         assert_eq!(carried, &session);
         reopened.shutdown().expect("join reopened actor");
+    }
+
+    #[test]
+    fn an_attempt_session_history_survives_authority_reopen_without_completing_legacy_history() {
+        let fixture = Fixture::new();
+        let mut old = serde_json::to_value(a_seated_legacy()).expect("the old projection");
+        for dispatch in old["dispatches"].as_array_mut().expect("dispatch rows") {
+            dispatch
+                .as_object_mut()
+                .expect("a row")
+                .remove("session_history");
+        }
+        let legacy = serde_json::from_value(old).expect("the legacy shape reads");
+        let first = ProviderSession {
+            key: zerocode_core::provider_session::SessionKey::SessionId,
+            id: "conversation-first".into(),
+            transcript_path: None,
+        };
+        let second = ProviderSession {
+            key: zerocode_core::provider_session::SessionKey::SessionId,
+            id: "conversation-second".into(),
+            transcript_path: Some("/transcripts/second.jsonl".into()),
+        };
+        let actor = start_with(
+            &fixture,
+            cutover(Some(legacy), 10),
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        assert!(
+            actor
+                .worker_session_reported(7, first.clone(), 20)
+                .expect("first session")
+                .0
+        );
+        assert!(
+            actor
+                .worker_session_reported(7, second.clone(), 30)
+                .expect("second session")
+                .0
+        );
+        actor.shutdown().expect("the first actor closes");
+        let reopened = start_with(
+            &fixture,
+            RuntimeBoot::Reopen,
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        let image = reopened.view().expect("the actor reopens");
+        let projected = serde_json::to_value(image.projection()).expect("the durable projection");
+        assert_eq!(
+            projected["dispatches"][0]["session_history"]["sessions"],
+            serde_json::json!([first, second])
+        );
+        assert_eq!(
+            projected["dispatches"][0]["session_history"]["complete"],
+            false
+        );
+        reopened.shutdown().expect("the reopened actor closes");
     }
 
     /// Stage one and stage two meet in this exact durable shape: an open

@@ -24,6 +24,46 @@ use super::outcome::{PlanShape, CONFIDENT_DECISIVE_SAMPLES};
 use super::policy::RouteTaskComplexity;
 use super::tiering::ModelBand;
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlanCohort {
+    pub route_key: String,
+    pub role: String,
+    pub complexity: String,
+    pub risk: String,
+}
+
+impl PlanCohort {
+    #[must_use]
+    pub fn new(
+        target_kind: &str,
+        target: &str,
+        role: super::target::RouteRole,
+        complexity: RouteTaskComplexity,
+        risk: super::policy::RouteTaskRisk,
+    ) -> Option<Self> {
+        if target_kind.trim().is_empty() || target.trim().is_empty()
+            || complexity == RouteTaskComplexity::Unknown
+            || risk == super::policy::RouteTaskRisk::Unknown
+        {
+            return None;
+        }
+        Some(Self {
+            route_key: format!("{target_kind}:{target}"), role: role.key().into(),
+            complexity: complexity.as_label().into(), risk: risk.as_label().into(),
+        })
+    }
+
+    fn matches(&self, record: &super::outcome::RouteOutcomeRecord) -> bool {
+        let Some((kind, target)) = self.route_key.split_once(':') else { return false; };
+        record.route_key == self.route_key && record.target_kind == kind && record.target == target
+            && record.role.as_deref() == Some(self.role.as_str())
+            && record.complexity.as_deref() == Some(self.complexity.as_str())
+            && record.risk.as_deref() == Some(self.risk.as_str())
+            && self.complexity != "unknown" && self.risk != "unknown"
+    }
+}
+
 /// How a plan's result would be checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum VerifyMode {
@@ -81,11 +121,12 @@ pub enum SwitchTrigger {
     /// after a run of routine steps on the floor
     /// (`conversation/step_effort.rs`, t-5633).
     Step,
+    Plan,
 }
 
 impl SwitchTrigger {
     /// Every trigger, the one place the set is enumerated.
-    pub const ALL: [SwitchTrigger; 8] = [
+    pub const ALL: [SwitchTrigger; 9] = [
         Self::Person,
         Self::Quota,
         Self::Refusal,
@@ -94,6 +135,7 @@ impl SwitchTrigger {
         Self::VerifyLeg,
         Self::ExecLeg,
         Self::Step,
+        Self::Plan,
     ];
 
     /// Canonical label, as the shadow ledger's `trigger` column spells it.
@@ -108,6 +150,7 @@ impl SwitchTrigger {
             Self::VerifyLeg => "verify-leg",
             Self::ExecLeg => "exec-leg",
             Self::Step => "step",
+            Self::Plan => "plan",
         }
     }
 
@@ -203,47 +246,57 @@ impl PlanEvidence {
     }
 }
 
-/// What the outcome store says about one candidate: the verified verdicts
-/// (`decision: verify`, a settled pass or failure about the work) and the run
-/// medians, over the records that match the candidate's model always and its
-/// effort and shape whenever the record carries them — a record written
-/// before those columns existed is a wildcard on them, never a mismatch. The
-/// pure half of the evidence lookup; the tools layer hands it the records it
-/// already loads for the router and the canonical form of the model id.
+/// Verified attempts in the same route, task role, difficulty and risk.
+/// Missing dimensions are not wildcards; a repeated verdict is one sample.
 #[must_use]
 pub fn plan_evidence_from_records(
     records: &[super::outcome::RouteOutcomeRecord],
     candidate: &PlanCandidate,
+    cohort: &PlanCohort,
     canonical: impl Fn(&str) -> String,
 ) -> Option<PlanEvidence> {
-    use super::outcome::{DecisionKind, VerdictSubject};
+    use super::outcome::{DecisionKind, VerdictBasis, VerdictSubject, learning_samples};
     let model = canonical(&candidate.model);
     let shape = candidate.shape.label();
-    let matching = records.iter().filter(|record| {
+    let matching = |record: &super::outcome::RouteOutcomeRecord| {
         canonical(&record.selected_model) == model
-            && record
-                .effort_level
-                .as_deref()
-                .is_none_or(|effort| Some(effort) == candidate.effort.as_deref())
-            && record.shape.as_deref().is_none_or(|label| label == shape)
-    });
+            && cohort.matches(record)
+            && record.intervened != Some(true)
+            && record.run_id.as_deref().is_some_and(|attempt| !attempt.is_empty())
+            && record.effort_level.as_deref() == candidate.effort.as_deref()
+            && record.shape.as_deref() == Some(shape.as_str())
+    };
     let mut evidence = PlanEvidence::default();
     let mut durations = Vec::new();
     let mut outputs = Vec::new();
     let mut seen = false;
-    for record in matching {
-        seen = true;
-        match record.decision_kind() {
-            DecisionKind::Verify if record.verdict_subject_kind() == VerdictSubject::Work => {
-                match record.status.as_str() {
-                    "completed" => evidence.verified_passes = evidence.verified_passes.saturating_add(1),
-                    "failed" => evidence.verified_failures = evidence.verified_failures.saturating_add(1),
-                    _ => {}
-                }
-            }
-            kind if kind.is_bookkeeping() => continue,
-            _ => {}
+    for record in learning_samples(records) {
+        if !matching(&record) || record.decision_kind() != DecisionKind::Verify
+            || record.verdict_subject_kind() != VerdictSubject::Work
+        { continue; }
+        let checked = match candidate.verify {
+            VerifyMode::Objective => record.verdict_basis_kind() == VerdictBasis::Objective,
+            VerifyMode::ModelJudge => record.verdict_basis_kind() == VerdictBasis::Model,
+            VerifyMode::None => false,
+        };
+        if !checked { continue; }
+        match record.status.as_str() {
+            "completed" => evidence.verified_passes = evidence.verified_passes.saturating_add(1),
+            "failed" => evidence.verified_failures = evidence.verified_failures.saturating_add(1),
+            _ => continue,
         }
+        seen = true;
+    }
+    let mut runs = std::collections::BTreeMap::new();
+    for record in records.iter().filter(|record| matching(record)
+        && record.decision_kind() == DecisionKind::Model && record.signal.is_none()
+        && (!record.is_seat_sample() || record.admitted)
+        && matches!(record.status.as_str(), "completed" | "failed" | "stopped"))
+    {
+        runs.insert(record.run_id.as_deref(), record);
+    }
+    for record in runs.values() {
+        seen = true;
         if let Some(duration) = record.duration_ms {
             durations.push(duration);
         }
@@ -313,6 +366,7 @@ impl PlanPriors {
 /// The turn as the planner sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanContext<'a> {
+    pub cohort: Option<&'a PlanCohort>,
     pub complexity: RouteTaskComplexity,
     /// The conversation's current wire model and effort — the stay candidate.
     pub current_model: &'a str,
@@ -486,6 +540,9 @@ pub fn plan_candidates(ctx: &PlanContext<'_>, models: &[ModelOption]) -> Vec<Pla
             continue;
         }
         let efforts: Vec<Option<String>> = if model.efforts.is_empty() {
+            if ctx.pinned_effort.is_some() {
+                continue;
+            }
             vec![None]
         } else {
             model
@@ -797,6 +854,7 @@ mod tests {
 
     fn ctx(current: &str) -> PlanContext<'_> {
         PlanContext {
+            cohort: None,
             complexity: RouteTaskComplexity::Medium,
             current_model: current,
             current_effort: Some("high"),
@@ -853,6 +911,24 @@ mod tests {
         let candidates = plan_candidates(&context, &models);
         assert!(candidates.iter().all(|candidate| candidate.effort.as_deref() == Some("max")));
         assert!(candidates.iter().all(|candidate| candidate.model == "a"));
+    }
+
+    #[test]
+    fn an_effort_pin_excludes_models_without_that_capability() {
+        let models = [
+            model("thinking", ModelBand::Top, &["high"]),
+            model("no-effort", ModelBand::Second, &[]),
+        ];
+        let mut context = ctx("thinking");
+        context.pinned_effort = Some("high");
+        let candidates = plan_candidates(&context, &models);
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(|candidate| candidate.model == "thinking"
+            && candidate.effort.as_deref() == Some("high")));
+        context.pinned_model = Some("no-effort");
+        assert!(plan_candidates(&context, &models).is_empty());
+        context.pinned_effort = None;
+        assert!(!plan_candidates(&context, &models).is_empty());
     }
 
     #[test]
@@ -1031,48 +1107,67 @@ mod tests {
     }
 
     #[test]
-    fn evidence_counts_verified_verdicts_about_the_work_and_treats_old_rows_as_wildcards() {
-        use super::super::outcome::{DecisionKind, RouteOutcomeRecord, VerdictSubject, VERDICT_SIGNAL};
-        let verdict = |status: &str| {
-            RouteOutcomeRecord::new("main", "turn", "a", status)
-                .with_signal(VERDICT_SIGNAL)
-                .with_decision(DecisionKind::Verify)
-        };
-        let records = vec![
-            // Two verified passes and one failure on this model, one of them
-            // stamped with the effort and shape, the others older wildcards.
-            verdict("completed").with_effort_level(Some("high".into())).with_shape(PlanShape::Solo),
-            verdict("completed"),
-            verdict("failed"),
-            // A validator fault is about the validator, not the work.
-            verdict("failed").with_verdict_subject(VerdictSubject::Validator),
-            // A run row brings a duration and an output figure.
-            RouteOutcomeRecord::new("subagent", "Explore", "a", "completed")
-                .with_decision(DecisionKind::Model)
-                .with_duration_ms(Some(30_000))
-                .with_output_tokens(2_000),
-            // A row at another effort is not this candidate's evidence.
-            verdict("failed").with_effort_level(Some("low".into())),
-            // A classify row on this model is bookkeeping.
-            RouteOutcomeRecord::new("main", "probe", "a", "failed")
-                .with_decision(DecisionKind::Classify)
-                .with_output_tokens(9_999),
-            // Another model entirely.
-            verdict("failed").with_shape(PlanShape::Solo),
-        ];
-        let mut other = records;
-        other.last_mut().unwrap().selected_model = "b".into();
-        let evidence = plan_evidence_from_records(&other, &solo("a", "high"), str::to_string).unwrap();
-        assert_eq!(evidence.verified_passes, 2);
-        assert_eq!(evidence.verified_failures, 1);
+    fn evidence_uses_matched_unique_verdicts_and_never_turns_legacy_rows_into_wildcards() {
+        use super::super::outcome::{DecisionKind, VerdictBasis, VerdictSubject};
+        let cohort = evidence_cohort();
+        let run = observed_run("first", "completed").with_duration_ms(Some(30_000)).with_output_tokens(2_000);
+        let verdict = |attempt: &str, status: &str| observed_run(attempt, status)
+            .with_signal("verdict").with_decision(DecisionKind::Verify).with_verdict_basis(VerdictBasis::Objective);
+        let mut legacy = verdict("legacy", "completed");
+        legacy.effort_level = None;
+        legacy.shape = None;
+        let rows = vec![run.clone(), run, verdict("first", "completed"), verdict("first", "completed"), legacy,
+            verdict("second", "failed"),
+            verdict("validator", "failed").with_verdict_subject(VerdictSubject::Validator)];
+        let evidence = plan_evidence_from_records(&rows, &solo("a", "high"), &cohort, str::to_string).unwrap();
+        assert_eq!((evidence.verified_passes, evidence.verified_failures), (1, 1));
         assert_eq!(evidence.median_duration_ms, Some(30_000));
         assert_eq!(evidence.median_output_tokens, Some(2_000));
-        // A model the store never saw has no evidence at all, not empty evidence.
-        assert_eq!(plan_evidence_from_records(&other, &solo("zzz", "high"), str::to_string), None);
-        // A shape the store never saw on this model falls back to the wildcard rows.
         let split = PlanCandidate { shape: PlanShape::Parallel { width: 2 }, ..solo("a", "high") };
-        let evidence = plan_evidence_from_records(&other, &split, str::to_string).unwrap();
-        assert_eq!((evidence.verified_passes, evidence.verified_failures), (1, 1));
+        assert_eq!(plan_evidence_from_records(&rows, &split, &cohort, str::to_string), None);
+        assert_eq!(plan_evidence_from_records(&rows, &solo("zzz", "high"), &cohort, str::to_string), None);
+    }
+
+    fn evidence_cohort() -> PlanCohort {
+        PlanCohort::new("main", "turn", super::super::target::RouteRole::Coding,
+            RouteTaskComplexity::Medium, super::super::policy::RouteTaskRisk::Low).unwrap()
+    }
+
+    fn observed_run(attempt: &str, status: &str) -> super::super::outcome::RouteOutcomeRecord {
+        super::super::outcome::RouteOutcomeRecord::new("main", "turn", "a", status)
+            .with_attempt_key(attempt).with_role(Some("coding".into()))
+            .with_complexity(Some("medium".into())).with_risk(Some("low".into()))
+            .with_effort_level(Some("high".into())).with_shape(PlanShape::Solo)
+    }
+
+    #[test]
+    fn a_failed_attempt_does_not_become_two_successes_when_a_verdict_is_repeated() {
+        use super::super::outcome::{DecisionKind, VerdictBasis};
+        let verdict = |status| observed_run("one", status).with_signal("verdict").with_decision(DecisionKind::Verify)
+            .with_verdict_basis(VerdictBasis::Objective);
+        let rows = [verdict("completed"), verdict("failed"), verdict("completed")];
+        let evidence = plan_evidence_from_records(&rows, &solo("a", "high"), &evidence_cohort(), str::to_string).unwrap();
+        assert_eq!((evidence.verified_passes, evidence.verified_failures), (0, 1));
+    }
+
+    #[test]
+    fn another_route_role_difficulty_risk_effort_or_verification_is_not_this_plans_evidence() {
+        use super::super::outcome::{DecisionKind, VerdictBasis};
+        let base = observed_run("one", "completed").with_signal("verdict").with_decision(DecisionKind::Verify)
+            .with_verdict_basis(VerdictBasis::Objective);
+        let mutations: Vec<super::super::outcome::RouteOutcomeRecord> = vec![
+            super::super::outcome::RouteOutcomeRecord { role: Some("analysis".into()), ..base.clone() },
+            super::super::outcome::RouteOutcomeRecord { complexity: Some("small".into()), ..base.clone() },
+            super::super::outcome::RouteOutcomeRecord { risk: Some("high".into()), ..base.clone() },
+            super::super::outcome::RouteOutcomeRecord { route_key: "subagent:turn".into(), ..base.clone() },
+            super::super::outcome::RouteOutcomeRecord { effort_level: None, ..base.clone() },
+            super::super::outcome::RouteOutcomeRecord { run_id: None, ..base.clone() },
+            super::super::outcome::RouteOutcomeRecord { intervened: Some(true), ..base.clone() },
+            base.with_verdict_basis(VerdictBasis::Model),
+        ];
+        for record in mutations {
+            assert_eq!(plan_evidence_from_records(&[record], &solo("a", "high"), &evidence_cohort(), str::to_string), None);
+        }
     }
 
     #[test]

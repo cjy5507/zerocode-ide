@@ -339,6 +339,7 @@ fn a_closed_task_is_never_graded_as_a_failed_attempt() {
             &id,
             &task_cost::SessionBook::default(),
             task_cost::JevTally::default(),
+            &task_cost::SessionAttribution::new(bench.ledger.runs()),
         );
         observe(
             run,

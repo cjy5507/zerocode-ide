@@ -230,13 +230,45 @@ pub fn read_regular_file_absolute_no_follow(path: &Path) -> io::Result<Option<St
     }
 }
 
+pub fn read_regular_file_absolute_no_follow_bounded(path: &Path, cap: u64) -> io::Result<Option<String>> {
+    #[cfg(unix)]
+    {
+        let Some(mut file) = open_regular_file_absolute_no_follow(path)? else { return Ok(None); };
+        let length = file.metadata()?.len();
+        read_capped_file(&mut file, length, cap).map(Some)
+    }
+    #[cfg(windows)]
+    {
+        windows_impl::read_regular_file_absolute_no_follow_bounded(path, cap)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, cap);
+        Err(unsupported_secure_mutation())
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn read_capped_file(file: &mut impl io::Read, length: u64, cap: u64) -> io::Result<String> {
+    use std::io::Read as _;
+    if length > cap {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "secure file exceeds its read budget"));
+    }
+    let mut contents = String::new();
+    file.take(cap.saturating_add(1)).read_to_string(&mut contents)?;
+    if u64::try_from(contents.len()).unwrap_or(u64::MAX) > cap {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "secure file exceeds its read budget"));
+    }
+    Ok(contents)
+}
+
 /// Whether the regular file named by the absolute `path` currently exists as a
 /// safe, current-user-owned, non-symlink regular file, established by opening
 /// every component (including the leaf) `O_NOFOLLOW`. `Ok(true)` means a safe
 /// regular file is present; `Ok(false)` means it is absent. A symlink at any
 /// component, a non-regular leaf, or a foreign-owned leaf is an `Err` so callers
 /// can distinguish "safely absent" from "present but unsafe". Fails closed on
-/// non-Unix.
+/// unsupported targets.
 pub fn is_safe_regular_file_absolute_no_follow(path: &Path) -> io::Result<bool> {
     #[cfg(unix)]
     {
@@ -1826,6 +1858,14 @@ mod windows_impl {
         Ok(Some(contents))
     }
 
+    pub(super) fn read_regular_file_absolute_no_follow_bounded(path: &Path, cap: u64) -> io::Result<Option<String>> {
+        let Some((parent, leaf, mut file)) = open_absolute_regular(path)? else { return Ok(None); };
+        let length = file.metadata()?.len();
+        let contents = super::read_capped_file(&mut file, length, cap)?;
+        validate_file(&parent, &leaf, &file)?;
+        Ok(Some(contents))
+    }
+
     pub(super) fn is_safe_regular_file_absolute_no_follow(path: &Path) -> io::Result<bool> {
         Ok(open_absolute_regular(path)?.is_some())
     }
@@ -2087,6 +2127,35 @@ fn sync_parent_directory_impl(_root: &Path, _relative: &Path) -> io::Result<()> 
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn bounded_read_refuses_large_metadata_before_consuming_the_handle() {
+        let mut reader = io::Cursor::new(b"file contents");
+        let error = read_capped_file(&mut reader, 13, 4).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(reader.position(), 0);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn bounded_read_stops_a_file_that_grew_after_its_metadata_was_read() {
+        let mut reader = io::Cursor::new(b"file contents");
+        let error = read_capped_file(&mut reader, 0, 4).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(reader.position(), 5);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn bounded_read_keeps_utf8_exactly_at_the_byte_budget() {
+        let root = TestRoot::new();
+        let home = root.path().canonicalize().unwrap();
+        let contents = "짧게";
+        write_atomic_owner_only(&home, Path::new("bounded.txt"), contents.as_bytes()).unwrap();
+        assert_eq!(read_regular_file_absolute_no_follow_bounded(
+            &home.join("bounded.txt"), u64::try_from(contents.len()).unwrap()).unwrap().as_deref(), Some(contents));
+    }
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 

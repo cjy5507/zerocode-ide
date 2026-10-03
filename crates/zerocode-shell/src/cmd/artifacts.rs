@@ -202,6 +202,97 @@ pub(crate) fn artifact_feedback_record(
     Ok(summary)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PreferenceSnapshot {
+    project_key: Option<String>,
+    entries: Vec<zerocode_core::user_preferences::SavedPreference>,
+    supported_agent: &'static str,
+    max_text_bytes: usize,
+    max_per_scope: usize,
+}
+
+fn preference_snapshot(state: &AppState) -> Result<PreferenceSnapshot, String> {
+    use zerocode_core::user_preferences::{
+        MAX_PER_SCOPE, MAX_TEXT_BYTES, PreferenceScope, project_key,
+    };
+    let current = project_key(&state.active().root);
+    let entries = crate::preference_runtime::PreferenceStore::of_this_machine()?.list()?;
+    Ok(PreferenceSnapshot {
+        entries: entries
+            .into_iter()
+            .filter(|entry| match &entry.scope {
+                PreferenceScope::Personal => true,
+                PreferenceScope::Project { key } => Some(key) == current.as_ref(),
+            })
+            .collect(),
+        project_key: current,
+        supported_agent: "zo",
+        max_text_bytes: MAX_TEXT_BYTES,
+        max_per_scope: MAX_PER_SCOPE,
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn artifact_preferences(
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+) -> Result<PreferenceSnapshot, String> {
+    from_the_main_webview(&webview)?;
+    preference_snapshot(&state)
+}
+
+#[tauri::command(async)]
+pub(crate) fn artifact_preference_save(
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    feedback: artifact_runtime::FeedbackAsk,
+    text: String,
+    scope: String,
+    expected_project: Option<String>,
+) -> Result<PreferenceSnapshot, String> {
+    use zerocode_core::user_preferences::{PreferenceScope, project_key};
+    from_the_main_webview(&webview)?;
+    let scope = match scope.as_str() {
+        "personal" => PreferenceScope::Personal,
+        "project" => {
+            let current =
+                project_key(&state.active().root).ok_or("the current project is unavailable")?;
+            if expected_project.as_ref() != Some(&current) {
+                return Err("the selected project changed; reopen the preference editor".into());
+            }
+            PreferenceScope::Project { key: current }
+        }
+        _ => return Err("unknown preference scope".into()),
+    };
+    let origin = store_or_refuse()?.feedback_origin(&feedback)?;
+    crate::preference_runtime::PreferenceStore::of_this_machine()?.save(
+        &text,
+        scope,
+        origin,
+        now_epoch_ms(),
+    )?;
+    preference_snapshot(&state)
+}
+
+#[tauri::command(async)]
+pub(crate) fn artifact_preference_revoke(
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<PreferenceSnapshot, String> {
+    from_the_main_webview(&webview)?;
+    let visible = preference_snapshot(&state)?;
+    let store = crate::preference_runtime::PreferenceStore::of_this_machine()?;
+    if !visible.entries.iter().any(|entry| entry.id == id)
+        && store.list()?.iter().any(|entry| entry.id == id)
+    {
+        return Err("that preference is not in the selected project or personal scope".into());
+    }
+    store.revoke(&id)?;
+    preference_snapshot(&state)
+}
+
 /// 머리띠의 「내보내기」: 발행물의 한 판을 사람이 고른 폴더에 새 파일로 쓴다 — HTML은
 /// 복사하고, PDF와 PNG는 창의 WebKit이 숨은 판에서 그린다(t-18558). 폴더는 창이 폴더
 /// 대화상자(`choose_project`)로 받아 온 것이고, 쓰는 것은 문의 내보내기와 같은 불변

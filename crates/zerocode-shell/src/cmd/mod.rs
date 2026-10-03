@@ -192,10 +192,10 @@ pub(crate) use scm::{
     abort_conflict_operation, commit_failure_card, commit_file_diff, commit_files, commit_staged,
     conflict_card, create_pull_request, delete_untracked, discard_paths, file_diff,
     generate_branch_name, generate_commit_message, generate_pull_request, git_history,
-    hosted_review_eligibility, open_commit_remote, pull_request_seed, scm_fetch, scm_pull,
-    scm_push, scm_status, set_worktree_compare_base, source_control_compare_context, stage_path,
-    stage_paths, submodule_status, unstage_path, unstage_paths, upstream_status,
-    worktree_committed_diff,
+    hosted_review_eligibility, open_commit_remote, pull_request_seed, scm_fetch,
+    scm_observer_health, scm_observer_retry, scm_pull, scm_push, scm_status,
+    set_worktree_compare_base, source_control_compare_context, stage_path, stage_paths,
+    submodule_status, unstage_path, unstage_paths, upstream_status, worktree_committed_diff,
 };
 
 pub(crate) use system::{build_stamp, release_status};
@@ -256,9 +256,9 @@ pub(crate) use supply_chain::{supply_chain_graph, supply_chain_report};
 pub(crate) use artifacts::{
     artifact_copy_path, artifact_counts, artifact_delete, artifact_document, artifact_export,
     artifact_export_formats, artifact_export_reveal, artifact_feedback_record,
-    artifact_import_transcripts, artifact_open, artifact_page_at, artifact_preview,
-    artifact_register, artifact_reveal, artifact_search, artifact_thumbnail, artifact_versions,
-    artifacts_list,
+    artifact_import_transcripts, artifact_open, artifact_page_at, artifact_preference_revoke,
+    artifact_preference_save, artifact_preferences, artifact_preview, artifact_register,
+    artifact_reveal, artifact_search, artifact_thumbnail, artifact_versions, artifacts_list,
 };
 pub(crate) use skills::{
     computer_use_skill_report, install_bundled_skill, list_skills, orchestration_report,

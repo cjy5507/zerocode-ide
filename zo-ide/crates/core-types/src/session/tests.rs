@@ -2841,6 +2841,7 @@ fn expected_fingerprint(session: &Session) -> Option<super::FileFingerprint> {
     state.expected.clone()
 }
 
+#[cfg(unix)]
 fn full_file_reads() -> u64 {
     super::FULL_FILE_READS.with(std::cell::Cell::get)
 }

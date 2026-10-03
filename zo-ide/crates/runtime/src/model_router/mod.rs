@@ -39,7 +39,7 @@ pub use tiering::{classify_model_tiers, ImplRung, ModelBand, ModelTierAssignment
 pub use plan::{
     choose_plan, plan_candidates, plan_evidence_from_records, score_plan,
     CacheState as PlanCacheState, ChoiceReason,
-    CostBreakdown, CostTerm, ModelOption, ModelPrice, PlanCandidate, PlanChoice, PlanContext,
+    CostBreakdown, CostTerm, ModelOption, ModelPrice, PlanCandidate, PlanChoice, PlanCohort, PlanContext,
     PlanEstimate, PlanEvidence, PlanPriors, ScoredPlan, SwitchTrigger, VerifyMode,
 };
 pub use accuracy::{

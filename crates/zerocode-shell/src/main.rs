@@ -139,6 +139,7 @@ mod pane_guard;
 mod pane_layout;
 mod pane_runtime;
 mod pick_runtime;
+mod preference_runtime;
 mod primary_selection;
 mod proc;
 mod project_runtime;
@@ -311,15 +312,15 @@ use cmd::{
     save_agent_launch_env, save_api_router, save_automation, save_clipboard_image, save_diff_note,
     save_launch_recipe, save_onboarding_step, save_pane_layouts, save_quick_command,
     save_remote_server, save_remote_workspace, save_ssh_host, save_stage_layouts,
-    save_type_value_key, save_typesafe_key, save_worktree_prefs, scm_fetch, scm_pull, scm_push,
-    scm_status, scm_tree_rows, search_files, search_text, second_brain_export_html,
-    second_brain_graph, second_brain_link, second_brain_open, second_brain_page,
-    second_brain_paths, second_brain_relate, second_brain_seat_recalls, second_brain_setup,
-    second_brain_status, select_claude_account, select_codex_account, send_prompt, session_info,
-    set_active_worktree, set_agent_activity_display, set_agent_permission_mode,
-    set_agent_teams_mode, set_app_font_family, set_browser_default_profile,
-    set_browser_default_zoom, set_browser_home_page, set_browser_open_tabs,
-    set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
+    save_type_value_key, save_typesafe_key, save_worktree_prefs, scm_fetch, scm_observer_health,
+    scm_observer_retry, scm_pull, scm_push, scm_status, scm_tree_rows, search_files, search_text,
+    second_brain_export_html, second_brain_graph, second_brain_link, second_brain_open,
+    second_brain_page, second_brain_paths, second_brain_relate, second_brain_seat_recalls,
+    second_brain_setup, second_brain_status, select_claude_account, select_codex_account,
+    send_prompt, session_info, set_active_worktree, set_agent_activity_display,
+    set_agent_permission_mode, set_agent_teams_mode, set_app_font_family,
+    set_browser_default_profile, set_browser_default_zoom, set_browser_home_page,
+    set_browser_open_tabs, set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
     set_claude_autoswitch_mode, set_clipboard_image, set_compact_worktree_cards,
     set_computer_awake_mode, set_computer_confirm, set_computer_generator_road,
     set_computer_live_reflex, set_confirm_close_pinned, set_conversation_focus_view,
@@ -370,9 +371,10 @@ use cmd::{
 use cmd::{
     artifact_copy_path, artifact_counts, artifact_delete, artifact_document, artifact_export,
     artifact_feedback_record, artifact_import_transcripts, artifact_open, artifact_page_at,
-    artifact_preview, artifact_register, artifact_reveal, artifact_search, artifact_thumbnail,
-    artifact_versions, artifacts_list, set_artifacts_auto_open_beside,
-    set_artifacts_retention_days, set_vault_session_limit,
+    artifact_preference_revoke, artifact_preference_save, artifact_preferences, artifact_preview,
+    artifact_register, artifact_reveal, artifact_search, artifact_thumbnail, artifact_versions,
+    artifacts_list, set_artifacts_auto_open_beside, set_artifacts_retention_days,
+    set_vault_session_limit,
 };
 use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
@@ -2613,6 +2615,8 @@ fn main() -> ExitCode {
             session_info,
             stop_pane_helper,
             scm_status,
+            scm_observer_health,
+            scm_observer_retry,
             stage_path,
             unstage_path,
             stage_paths,
@@ -3032,6 +3036,9 @@ fn main() -> ExitCode {
             artifact_versions,
             artifact_page_at,
             artifact_feedback_record,
+            artifact_preferences,
+            artifact_preference_save,
+            artifact_preference_revoke,
             artifact_export,
             artifact_export_formats,
             artifact_export_reveal,

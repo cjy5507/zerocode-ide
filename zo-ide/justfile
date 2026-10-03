@@ -29,8 +29,9 @@ test:
     # The costly workflow lane has its own warning-only CI job. Its schema stays covered.
     cargo test --workspace --lib --bins --tests --no-fail-fast -- --skip lane_a_repeats_have_identical_verdicts
 
+[env("ZO_DISABLE_KEYCHAIN", "1")]
 e2e:
-    ZO_DISABLE_KEYCHAIN=1 cargo test -p zo-ide --test e2e_hermetic --no-fail-fast -- --test-threads=1
+    cargo test -p zo-ide --test e2e_hermetic --test portable_workflow_acceptance --no-fail-fast -- --test-threads=1
 
 # 병렬 플레이크 자 — 런타임 스위트를 두 번 연속 돌린다. 한 번 초록은 운일 수
 # 있고, 두 번 연속 초록이 아니면 env 경주가 남아 있다는 뜻이다(r45).

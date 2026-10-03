@@ -156,9 +156,11 @@ pub use misc_tools::{
 };
 pub use misc_tools::{
     build_plan_shadow, conversation_anchor_ttl_for, conversation_anchor_ttl_from_root,
-    model_options_for, model_price_for, plan_priors_for, plan_shadow_path,
+    model_options_for, model_price_for, plan_cohort_for_turn, plan_priors_for, plan_shadow_path,
     record_plan_shadow, switch_candidates, CACHE_ANCHOR_TTL_ENV,
     PlanShadowActual, PlanShadowCandidate, PlanShadowInputs, PlanShadowRow,
+    choose_measured_plan, plan_pins_allow, read_plan_receipts, record_plan_receipt, PlanRunReceipt,
+    measure_plan_usage, PlanUsage,
 };
 pub use misc_tools::{
     mark_session_process, registry_locator_for, store_root_for, AgentRegistry, RegistryRecord,

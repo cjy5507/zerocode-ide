@@ -19135,6 +19135,7 @@ fn an_open_task_is_found_by_the_words_its_title_carries_and_a_final_one_is_not()
             Some(zerocode_core::orchestration::TaskStatus::Completed),
             None,
             zerocode_core::orchestration::ResultAuthor::Ledger,
+            2,
         )
         .expect("completed");
     assert_eq!(
@@ -19968,6 +19969,7 @@ fn relation_dependencies_keep_completed_task_facts_after_its_latest_worker_is_re
             Some(TaskStatus::Ready),
             None,
             zerocode_core::orchestration::ResultAuthor::Ledger,
+            4,
         )
         .unwrap();
     let latest = ledger
@@ -20310,7 +20312,9 @@ fn a_finished_workers_row_says_whether_its_task_can_take_a_review() {
                 generation: Some(1),
                 attempt: None,
                 source: None,
+                completed_ms: None,
             },
+            10,
         )
         .unwrap();
 
@@ -21275,7 +21279,9 @@ fn a_workers_claimed_merge_reaches_the_roster_row_as_a_claim() {
                 generation: Some(1),
                 attempt: started.dispatch.clone(),
                 source,
+                completed_ms: None,
             },
+            10,
         )
         .expect("the coordinator corrects");
     let rebuilt = Ledger::rebuild(ledger.export()).expect("a readable ledger");

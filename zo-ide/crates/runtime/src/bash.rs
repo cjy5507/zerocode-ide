@@ -1209,6 +1209,7 @@ pub fn interrupt_foreground_bash(session_id: Option<&str>) -> usize {
 /// Non-Unix stub: no process-group signalling is available, so a cancelled bash
 /// keeps running to completion in the background while its tool result settles.
 #[cfg(not(unix))]
+#[must_use]
 pub fn interrupt_foreground_bash(_session_id: Option<&str>) -> usize {
     0
 }

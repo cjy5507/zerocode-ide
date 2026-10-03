@@ -703,6 +703,7 @@ pub struct ConversationRuntime<C, T> {
     /// off the drive-loop thread (FREEZE-1). `recall` takes `&self`, so the
     /// shared handle is a drop-in for the prior owned box.
     memory_retriever: Option<Arc<dyn MemoryRetriever + Send + Sync>>,
+    user_preference_source: Option<Arc<crate::memory::user_preferences::UserPreferenceSource>>,
     /// Seated beside the retriever and shown every recall after it settles;
     /// its answer is the order the turn reads. See [`crate::RecallSeat`].
     recall_seat: Option<Arc<dyn crate::RecallSeat>>,
@@ -1771,6 +1772,7 @@ where
             inherited_attempt: None,
             attempt_cache_scope: None,
             memory_retriever: None,
+            user_preference_source: None,
             recall_seat: None,
             compaction_seat: None,
             patch_review_seat: None,
