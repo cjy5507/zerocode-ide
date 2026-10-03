@@ -210,7 +210,8 @@ class Desk(reflex.Desk):
         super().__init__(folder, values, table_limits)
         self.stress = stress
 
-    def round(self, seed):
+    def round(self, seed, scene=None):
+        # The launch hook's cover scene (t-12979): the RTS round carries none, so it is not read.
         return the_round(self.session['owner'], seed, self.values, self.limits, self.stress)
 
     def plan(self, geometry, rules):
