@@ -772,7 +772,7 @@ pub fn command_guard_rubric_fingerprint() -> String {
 /// question of each branch the next reading may take
 /// ([`REFLEX_DECIDE_BRANCHES`]); the question about the reading as it is
 /// keeps version 2's every word.
-pub const REFLEX_DECIDE_RUBRIC_VERSION: u32 = 2;
+pub const REFLEX_DECIDE_RUBRIC_VERSION: u32 = 3;
 /// The keys the reflex decision's state carries, in the order the use table
 /// declares them: each detector's newest sighting, how the run's actions
 /// ended so far, how the actions the hand finished since the last reading
@@ -837,9 +837,11 @@ pub const REFLEX_DECIDE_BRANCHES: [(&str, &str); 3] = [
 /// its asking sentence replaced by the supposition and what it asks then.
 #[must_use]
 pub fn reflex_ahead_instructions(supposes: &str) -> String {
-    // stub until asking ahead lands (t-32797)
-    let _ = (supposes, REFLEX_AHEAD_SUPPOSE, REFLEX_AHEAD_ASKS_WHAT);
-    REFLEX_DECIDE_ASKS.to_string()
+    REFLEX_DECIDE_ASKS.replacen(
+        REFLEX_DECIDE_ASKS_WHAT,
+        &format!("{REFLEX_AHEAD_SUPPOSE} {supposes}. {REFLEX_AHEAD_ASKS_WHAT}"),
+        1,
+    )
 }
 
 /// One fingerprint over the question, its options, the state it reads and
@@ -856,6 +858,18 @@ pub fn reflex_decide_rubric_fingerprint() -> String {
             words.push(covers.to_string());
         }
         words.push(REFLEX_DECIDE_STATE_KEYS.join(","));
+        words.extend(
+            [
+                REFLEX_DECIDE_ASKS_WHAT,
+                REFLEX_AHEAD_SUPPOSE,
+                REFLEX_AHEAD_ASKS_WHAT,
+            ]
+            .map(str::to_string),
+        );
+        for (word, supposes) in REFLEX_DECIDE_BRANCHES {
+            words.push(word.to_string());
+            words.push(supposes.to_string());
+        }
         words.join("\n")
     })
 }

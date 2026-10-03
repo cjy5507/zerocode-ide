@@ -863,9 +863,25 @@ impl Watch {
         carrier: &mut dyn Carrier,
         mode: JevMode,
     ) -> Option<Value> {
-        // stub until asking ahead lands (t-32797)
-        let _ = (reading, carrier, mode, Snapshot::provenance);
-        None
+        let taken = self.ahead.take(reading, carrier.now_ms());
+        self.report.ahead.dropped += taken.dropped as u64;
+        let held = match taken.held {
+            Ok(held) => held,
+            Err(why) => {
+                *self.report.ahead.unheld.entry(why.word()).or_default() += 1;
+                return None;
+            }
+        };
+        let own = self.decider.newest();
+        let pending = self.decider.decided(reading.clone());
+        let mut row = reflex_decide::held_row(&self.run, &pending, &held);
+        row[DECISION_WAIT_MS] = json!(0);
+        self.stamp(&mut row, mode);
+        carrier.settled(&pending, &mut row);
+        self.count(reflex_decide::ROAD_AHEAD, 0);
+        self.report.ahead.used += 1;
+        self.decided_ahead.insert(own, (pending.id, held.chosen));
+        Some(row)
     }
 
     fn send(&mut self, pending: Pending, ask: &Asker, now_ms: u64) {
@@ -955,10 +971,25 @@ impl Watch {
                 .saturating_sub(asked_ms)
                 .saturating_sub(wired.rtt_ms)
         );
+        row[DECISION_WAIT_MS] = json!(
+            pending
+                .snapshot
+                .read_ms
+                .map(|read| settled_ms.saturating_sub(read))
+        );
         spent.stamp(&mut row);
         self.stamp(&mut row, mode);
         self.agree_with_ahead(&pending, &mut row);
-        let _ = (ANSWERED, ended);
+        // Held for the next reading while this one is still the newest: its
+        // branches are about the reading after it and no later one.
+        if row["outcome"] == json!(ANSWERED)
+            && !ended
+            && self.decider.newest() == pending.id
+            && let Ok(body) = &wired.answer
+        {
+            self.report.ahead.dropped += self.ahead.hold(&pending, body) as u64;
+            self.report.ahead.held += self.ahead.len() as u64;
+        }
         carrier.settled(&pending, &mut row);
         let road = row["road"].as_str().unwrap_or_default().to_string();
         self.count(&road, u64::from(wired.attempts));
@@ -971,8 +1002,19 @@ impl Watch {
     /// A reading a held answer decided, its own question come back (t-32797):
     /// whether the two answers chose alike, on the question's row.
     fn agree_with_ahead(&mut self, pending: &Pending, row: &mut Value) {
-        // stub until asking ahead lands (t-32797)
-        let _ = (pending, row);
+        let Some((decision, chosen)) = self.decided_ahead.remove(&pending.id) else {
+            return;
+        };
+        let agreed = row
+            .get("chosen")
+            .and_then(Value::as_str)
+            .map(|own| own == chosen);
+        match agreed {
+            Some(true) => self.report.ahead.agreed += 1,
+            Some(false) => self.report.ahead.disagreed += 1,
+            None => {}
+        }
+        row["held"] = json!({ "decision": decision, "chosen": chosen, "agreed": agreed });
     }
 
     /// The run's provenance and the pass's mode on a row it leaves.

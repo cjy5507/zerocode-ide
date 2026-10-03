@@ -129,7 +129,7 @@ impl Tally {
     fn new() -> Self {
         let zero = |words: &[&'static str]| words.iter().map(|word| (*word, 0)).collect();
         Self {
-            roads: zero(&ANSWERING_ROADS[..3]),
+            roads: zero(&ANSWERING_ROADS),
             applied: zero(&[CONTINUE, PAUSE, REPLAN]),
             invalid: zero(&Why::ALL.map(Why::word)),
             ..Self::default()

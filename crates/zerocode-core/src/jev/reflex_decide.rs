@@ -232,19 +232,7 @@ fn reading_key(state: &Value) -> Value {
 /// sightings at all (§2.2: "every detector unknown or absent").
 #[must_use]
 pub fn finds_nothing(state: &Value) -> bool {
-    let [sightings_key, ..] = REFLEX_DECIDE_STATE_KEYS;
-    !state
-        .get(sightings_key)
-        .and_then(Value::as_array)
-        .is_some_and(|sightings| {
-            sightings.iter().any(|sighting| {
-                sighting.get("unknown").is_none_or(Value::is_null)
-                    && sighting
-                        .get("value")
-                        .and_then(Value::as_i64)
-                        .is_some_and(|value| value != 0)
-            })
-        })
+    !facts_of(state).target
 }
 
 /// What a reading is, as the options are written (t-32797): whether the
@@ -295,9 +283,45 @@ impl Facts {
 /// The [`Facts`] of a question's state ([`snapshot_of`]).
 #[must_use]
 pub fn facts_of(state: &Value) -> Facts {
-    // stub until asking ahead lands (t-32797)
-    let _ = state;
-    Facts::default()
+    let [sightings_key, _, activity_key, freshness_key] = REFLEX_DECIDE_STATE_KEYS;
+    let freshness = state.get(freshness_key);
+    let limit = freshness
+        .and_then(|freshness| freshness.get("max_frame_age_ms"))
+        .and_then(Value::as_u64);
+    let counted = |key: &str| {
+        state
+            .get(activity_key)
+            .and_then(|activity| activity.get(key))
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0)
+    };
+    let mut facts = Facts {
+        capture_over: freshness
+            .and_then(|freshness| freshness.get("over_age"))
+            .and_then(Value::as_bool),
+        done: counted("done"),
+        missed: counted("missed"),
+        ..Facts::default()
+    };
+    for sighting in state
+        .get(sightings_key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let known = sighting
+            .get("value")
+            .and_then(Value::as_i64)
+            .filter(|_| sighting.get("unknown").is_none_or(Value::is_null));
+        match known {
+            None => facts.unknown = true,
+            Some(0) => facts.none = true,
+            Some(_) => facts.target = true,
+        }
+        let age = sighting.get("age_ms").and_then(Value::as_u64);
+        facts.frame_over |= matches!((age, limit), (Some(age), Some(limit)) if age > limit);
+    }
+    facts
 }
 
 /// The request's `questions`: the one closed choice, its options asked by
@@ -409,9 +433,17 @@ const BRANCH_JOIN: &str = "_if_";
 /// reading as it is — its own question answers that.
 #[must_use]
 pub fn branches_of(state: &Value) -> Vec<(Branch, Facts)> {
-    // stub until asking ahead lands (t-32797)
-    let _ = state;
-    Vec::new()
+    let now = facts_of(state);
+    let mut branches: Vec<(Branch, Facts)> = Vec::with_capacity(AHEAD_BRANCHES);
+    for branch in Branch::ALL {
+        if let Some(facts) = branch.edit(now)
+            && facts != now
+            && branches.iter().all(|(_, other)| *other != facts)
+        {
+            branches.push((branch, facts));
+        }
+    }
+    branches
 }
 
 /// A request's `questions` for a reading with `state`: [`questions`] as it
@@ -419,9 +451,16 @@ pub fn branches_of(state: &Value) -> Vec<(Branch, Facts)> {
 /// — one request, its state carried once.
 #[must_use]
 pub fn questions_for(state: &Value) -> Value {
-    // stub until asking ahead lands (t-32797)
-    let _ = state;
-    questions()
+    let mut asked = questions();
+    if let Some(asked) = asked.as_object_mut() {
+        for (branch, _) in branches_of(state) {
+            asked.insert(
+                branch.question(),
+                choice::question(branch.instructions(), &REFLEX_DECIDE_OPTIONS),
+            );
+        }
+    }
+    asked
 }
 
 /// One answer held for the reading after the one it was asked beside.
@@ -526,9 +565,42 @@ impl Ahead {
     /// at all — in place of whatever was held. Answers how many held answers
     /// it let go unused.
     pub fn hold(&mut self, pending: &Pending, body: &str) -> usize {
-        // stub until asking ahead lands (t-32797)
-        let _ = (pending, body, WIRE_MODEL_KEY);
-        self.clear()
+        let dropped = self.clear();
+        let Some(parsed) = serde_json::from_str::<Value>(body).ok() else {
+            return dropped;
+        };
+        let Some(answers) = parsed.get("answers") else {
+            return dropped;
+        };
+        let model = parsed
+            .get(WIRE_MODEL_KEY)
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let state = &pending.snapshot.state;
+        let offered = offered();
+        let asked = std::iter::once((None, REFLEX_DECIDE_QUESTION.to_string(), facts_of(state)))
+            .chain(
+                branches_of(state)
+                    .into_iter()
+                    .map(|(branch, facts)| (Some(branch), branch.question(), facts)),
+            );
+        for (branch, question, facts) in asked {
+            if let Ok(pick) = choice::read(answers, &question, &offered) {
+                self.held.push(Held {
+                    branch,
+                    facts,
+                    asked_with: pending.id,
+                    chosen: pick.chosen,
+                    probabilities: pick.probabilities,
+                    confidence: pick.confidence,
+                    model: model.clone(),
+                });
+            }
+        }
+        if !self.held.is_empty() {
+            self.base = Some(pending.snapshot.clone());
+        }
+        dropped
     }
 
     /// The held answer `reading` may be decided by at `now_ms` (its reader's
@@ -536,12 +608,29 @@ impl Ahead {
     /// older than [`REFLEX_APPLY_MAX_AGE_MS`], whose facts are the reading's
     /// own. Everything held is let go, used or not.
     pub fn take(&mut self, reading: &Snapshot, now_ms: u64) -> Taken {
-        // stub until asking ahead lands (t-32797)
-        let _ = (reading, now_ms);
-        self.clear();
-        Taken {
-            held: Err(Unheld::Nothing),
-            dropped: 0,
+        let held = std::mem::take(&mut self.held);
+        let base = self.base.take();
+        let count = held.len();
+        let unheld = |why| Taken {
+            held: Err(why),
+            dropped: count,
+        };
+        let Some(base) = base.filter(|_| count > 0) else {
+            return unheld(Unheld::Nothing);
+        };
+        if base.scene.is_none() || base.scene != reading.scene {
+            return unheld(Unheld::Scene);
+        }
+        if age_at(&base, now_ms).is_none_or(|age| age > REFLEX_APPLY_MAX_AGE_MS) {
+            return unheld(Unheld::Stale);
+        }
+        let facts = facts_of(&reading.state);
+        match held.into_iter().find(|held| held.facts == facts) {
+            Some(held) => Taken {
+                held: Ok(held),
+                dropped: count - 1,
+            },
+            None => unheld(Unheld::Facts),
         }
     }
 
@@ -556,9 +645,18 @@ impl Ahead {
 /// of the scene and the facts.
 #[must_use]
 pub fn premise_of(snapshot: &Snapshot) -> String {
-    // stub until asking ahead lands (t-32797)
-    let _ = snapshot;
-    String::new()
+    let scene = snapshot.scene.as_ref();
+    super::fingerprint_of(
+        &json!({
+            "run": scene.map(|scene| scene.run.clone()),
+            "stream": scene.map(|scene| scene.stream),
+            "geometry": scene.map(|scene| scene.geometry),
+            "owner": scene.map(|scene| scene.owner),
+            "plan": scene.map(|scene| scene.plan),
+            "facts": facts_of(&snapshot.state).json(),
+        })
+        .to_string(),
+    )
 }
 
 /// One decision the run asked, or is waiting to ask.
@@ -621,6 +719,7 @@ impl Decider {
         }
         self.last = Some(key);
         let pending = self.number(snapshot);
+        self.newest = pending.id;
         if self.in_flight.is_some() {
             let coalesced = self.waiting.replace(pending);
             return Offer::Waiting { coalesced };
@@ -731,6 +830,11 @@ pub fn asked_row(
         "requestBytes": wired.request_bytes,
         "rttMs": wired.rtt_ms,
         "applied": false,
+        // What the request asked ahead of beside it ([`questions_for`]).
+        "branches": branches_of(&pending.snapshot.state)
+            .into_iter()
+            .map(|(branch, _)| branch.word())
+            .collect::<Vec<_>>(),
     });
     let body = match &wired.answer {
         Err(token) => {
@@ -773,9 +877,31 @@ pub fn asked_row(
 /// premise it was used on. It leaves `applied` false, as an asked row does.
 #[must_use]
 pub fn held_row(run: &str, pending: &Pending, held: &Held) -> Value {
-    // stub until asking ahead lands (t-32797)
-    let _ = (run, pending, held, CACHED, REQUESTS, INPUT_TOKENS, MODEL);
-    json!({})
+    json!({
+        "run": run,
+        "decision": pending.id,
+        "road": ROAD_AHEAD,
+        "rubricVersion": REFLEX_DECIDE_RUBRIC_VERSION,
+        "rubric": reflex_decide_rubric_fingerprint(),
+        "state": pending.snapshot.state,
+        "provenance": pending.snapshot.provenance(),
+        "attempts": 0,
+        "applied": false,
+        "outcome": ANSWERED,
+        "chosen": held.chosen,
+        "probabilities": held.probabilities,
+        "confidence": held.confidence,
+        "labelSource": "teacher",
+        "staleForCurrent": false,
+        "late": false,
+        (CACHED.canonical): true,
+        (REQUESTS.canonical): 0,
+        (INPUT_TOKENS.canonical): 0,
+        (MODEL.canonical): held.model,
+        "branch": held.branch_word(),
+        "askedWith": held.asked_with,
+        "premise": premise_of(&pending.snapshot),
+    })
 }
 
 /// The row a merged decision leaves: its number and where its reading came
