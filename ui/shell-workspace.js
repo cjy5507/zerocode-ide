@@ -3810,8 +3810,17 @@ function worktreeLedgerMerged(path) {
  * tooltip, and a row rebuilt for it would hop under the pointer. */
 function landingShape(landing) {
   if (!landing) return "";
-  return `${landing.state}.${landing.ahead}.${landing.dirty ? 1 : 0}.${landing.detached ? 1 : 0}` +
-    `.${landing.compare_ref ?? ""}.${landing.landed_in?.sha ?? ""}`;
+  return `${landing.state}.${landing.ahead}.${landing.dirty ? 1 : 0}.${landing.ignored ? 1 : 0}` +
+    `.${landing.detached ? 1 : 0}.${landing.compare_ref ?? ""}.${landing.landed_in?.sha ?? ""}`;
+}
+
+/* The words for "files git ignores are still here" — a build's output, a
+ * `node_modules`, a `.env` (t-34315). One reader for two places: the sidebar
+ * chip ends with it (`반영됨 · 무시된 파일 남음`) and the evidence panel's row
+ * for the same fact is named by it, so the chip and the panel say one thing in
+ * one set of words. */
+function worktreeIgnoredWord() {
+  return t("worktree.landIgnored", "무시된 파일 남음");
 }
 
 /* What git says about one checkout's work, in a word and a tooltip (t-22104).
@@ -3888,6 +3897,10 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
     tone = "none";
   }
   if (landing.dirty && !check) word += t("worktree.landDirty", " · 저장 안 한 변경");
+  // Said of work that is in the compare ref and of nothing else: the backend
+  // asks only landed rows, and a row that is in doubt says nothing more.
+  const holdsIgnored = gitIn && !check && landing.ignored === true;
+  if (holdsIgnored) word += ` · ${worktreeIgnoredWord()}`;
   const lines = [];
   if (ledgerLine) lines.push(ledgerLine);
   if (state === "landed") {
@@ -3920,6 +3933,9 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
       : t("worktree.landTipRefUnknown", "비교: {{ref}} · 마지막 갱신 시각을 알 수 없음", { ref }));
   }
   if (landing.dirty) lines.push(t("worktree.landTipDirty", "추적 중인 파일에 커밋하지 않은 변경이 있습니다"));
+  if (holdsIgnored) {
+    lines.push(t("worktree.landTipIgnored", "git이 무시하는 파일이 남아 있습니다 — 폴더를 지우면 함께 사라집니다. 크기와 폴더는 근거 보기에서 볼 수 있습니다"));
+  }
   if (landing.dirty_checked_ms) {
     lines.push(t("worktree.landTipDirtyAge", "저장 안 한 변경은 {{time}}에 확인한 값입니다", {
       time: new Date(landing.dirty_checked_ms).toLocaleTimeString(),
@@ -6983,6 +6999,44 @@ const WORKTREE_EVIDENCE_UNRECORDED = {
   ci_checks: () => t("evidence.unrecorded.ci", "CI 검사"),
 };
 
+/* Why an observation did not cover everything, in words (t-34315). The backend
+ * names each gap with a stable tag — a word for a program — and a tag is not a
+ * sentence: the panel used to print `ignored_content` after a sentence that had
+ * no words for it either. This table is the one road from a tag to a person's
+ * language. Which tags the backend can write is read out of its `gap_tag` by a
+ * Rust source contract, so a gap kind learned tomorrow is a red there and not a
+ * raw tag on somebody's screen. */
+const WORKTREE_EVIDENCE_GAPS = {
+  ignored_content: () => t("evidence.gap.ignoredContent", "git이 무시하는 파일은 읽지 않았습니다"),
+  untracked_content: () => t("evidence.gap.untrackedContent", "새 파일의 내용은 읽지 않았습니다"),
+  changed_path_limit: () => t("evidence.gap.changedPathLimit", "바뀐 파일이 너무 많아 일부만 읽었습니다"),
+  content_byte_limit: () => t("evidence.gap.contentByteLimit", "바뀐 내용이 너무 커서 일부만 읽었습니다"),
+  dirty_submodule: () => t("evidence.gap.dirtySubmodule", "서브모듈 안의 변경은 읽지 않았습니다"),
+  index_hidden_content: () => t("evidence.gap.indexHiddenContent", "git이 변경을 숨기도록 표시한 파일은 읽지 않았습니다"),
+};
+
+/* A tag this table does not know is said as "unknown", never printed as it came.
+ * `hasOwnProperty`, because a tag named like an inherited property must not
+ * find one. */
+function worktreeEvidenceGapWord(tag) {
+  const word = Object.prototype.hasOwnProperty.call(WORKTREE_EVIDENCE_GAPS, tag)
+    ? WORKTREE_EVIDENCE_GAPS[tag]
+    : null;
+  return word ? word() : t("evidence.gap.unknown", "알 수 없는 이유로 일부를 읽지 못했습니다");
+}
+
+/* What the observation could not read, as sentences — once each, so two gaps
+ * this window has no words for are one "unknown". The gap for ignored files is
+ * left out when the panel has the row that says that fact; saying it twice
+ * would make a plain fact read like a fault. */
+function worktreeEvidenceGapWords(snapshot) {
+  const hasItsOwnRow = snapshot.ignored?.count > 0 ? "ignored_content" : null;
+  const words = snapshot.coverageGaps
+    .filter((tag) => tag !== hasItsOwnRow)
+    .map(worktreeEvidenceGapWord);
+  return [...new Set(words)];
+}
+
 function worktreeEvidenceStateLabel(state) {
   return (WORKTREE_EVIDENCE_STATES[state] ?? WORKTREE_EVIDENCE_STATES.error)();
 }
@@ -7050,22 +7104,62 @@ function worktreeEvidenceSection(name, source, rows) {
   return section;
 }
 
+/* The row for "files git ignores are still here" (t-34315): one plain fact, not
+ * a warning. They are not uncommitted changes — nothing here could be committed
+ * — and they are not nothing either: deleting the folder takes them. The label
+ * is the word the sidebar chip ends with (`worktreeIgnoredWord`), so the two
+ * places say it the same way; the size is a floor when the walk was cut short. */
+function worktreeEvidenceIgnoredRow(ignored) {
+  const row = worktreeEvidenceRow("wt-evidence-row");
+  row.dataset.evidenceIgnored = "1";
+  row.appendChild(worktreeEvidenceLine(worktreeIgnoredWord(), "wt-evidence-strong wt-evidence-ignored-word"));
+  const size = ignored.complete
+    ? ignored.sizeText
+    : t("evidence.ignoredAtLeast", "{{size}} 이상", { size: ignored.sizeText });
+  row.appendChild(worktreeEvidenceLine(
+    t("evidence.ignored", "git이 무시하는 파일 {{count}}개 항목 · {{size}}", { count: ignored.count, size }),
+    "wt-evidence-line",
+  ));
+  if (ignored.top.length > 0) {
+    row.appendChild(worktreeEvidenceLine(
+      ignored.top.map((one) => `${one.dir ? `${one.name}/` : one.name} (${one.sizeText})`).join(" · "),
+      "wt-evidence-path",
+    ));
+  }
+  const more = ignored.count - ignored.top.length;
+  if (more > 0) {
+    row.appendChild(worktreeEvidenceLine(
+      t("evidence.ignoredMore", "외 {{count}}개", { count: more }),
+      "wt-evidence-note",
+    ));
+  }
+  row.appendChild(worktreeEvidenceLine(
+    t("evidence.ignoredCaveat", "폴더를 지우면 함께 사라지며, 시험 영수증과 비교하는 내용에는 들어가지 않습니다"),
+    "wt-evidence-caveat",
+  ));
+  return row;
+}
+
+/* The changes section says two separate facts: what git lists as uncommitted
+ * (the head line and the rows under it) and, apart, the ignored files that are
+ * still here. The head line is about changes only — `uncommitted`, never
+ * `dirty`, which also counts the ignored files and is the safety question
+ * handoff and cleanup ask, not what a person means (t-34315). */
 function worktreeEvidenceChangeRows(snapshot) {
   if (!snapshot) return [];
   const rows = [];
   const head = worktreeEvidenceRow("wt-evidence-row");
   head.appendChild(worktreeEvidenceLine(
-    snapshot.dirty
-      ? t("evidence.dirty", "커밋되지 않은 내용이 있습니다")
-      : t("evidence.clean", "커밋되지 않은 내용이 없습니다"),
+    snapshot.uncommitted
+      ? t("evidence.dirty", "커밋하지 않은 변경이 있습니다")
+      : t("evidence.clean", "커밋하지 않은 변경이 없습니다"),
     "wt-evidence-strong",
   ));
   head.appendChild(worktreeEvidenceLine(snapshot.headOid.slice(0, 12), "wt-evidence-mono"));
-  if (!snapshot.complete) {
+  const unread = worktreeEvidenceGapWords(snapshot);
+  if (unread.length > 0) {
     head.appendChild(worktreeEvidenceLine(
-      t("evidence.incomplete", "관측이 전부를 덮지 못했습니다 — {{gaps}}", {
-        gaps: snapshot.coverageGaps.join(", "),
-      }),
+      t("evidence.incomplete", "다 읽지는 못했습니다 — {{gaps}}", { gaps: unread.join(" · ") }),
       "wt-evidence-warn",
     ));
   }
@@ -7079,6 +7173,7 @@ function worktreeEvidenceChangeRows(snapshot) {
     }
     rows.push(row);
   }
+  if (snapshot.ignored?.count > 0) rows.push(worktreeEvidenceIgnoredRow(snapshot.ignored));
   return rows;
 }
 

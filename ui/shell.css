@@ -45866,6 +45866,15 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   font-weight: 600;
 }
 
+/* The row for files git ignores is named by the same words the sidebar chip ends
+ * with (`반영됨 · 무시된 파일 남음`). The chip's words are a fragment — lower case
+ * in the Latin languages, after a separator — and the row starts a line, so only
+ * the first letter is raised; the text itself, and what a reader of the page
+ * hears, stay identical to the chip's (t-34315). */
+.wt-evidence-ignored-word::first-letter {
+  text-transform: uppercase;
+}
+
 .wt-evidence-path {
   font-family: var(--font-mono);
   color: var(--ink-chalk);

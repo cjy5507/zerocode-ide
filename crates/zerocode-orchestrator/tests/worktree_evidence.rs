@@ -1219,3 +1219,111 @@ fn ignored_files_alone_keep_every_refusal_they_had() {
     assert!(loss.uncommitted.is_empty(), "{loss:?}");
     assert_eq!(loss.ignored.len(), IGNORED_LEFTOVERS, "{loss:?}");
 }
+
+/// MEASUREMENT (ignored): what one evidence read costs on a checkout shaped
+/// like the one a person reported — a couple of thousand tracked files and
+/// tens of thousands of ignored ones (a dependency tree, build output, a
+/// scratch folder, about 250 MB on disk).
+///
+/// Before this change the read was the snapshot alone, so `snapshot` is the
+/// "before" and `read` the "after" of the SAME binary; the test also compiles
+/// against main's sources, which is the other half. After a long run of reads
+/// the resident size is read again: a measurement that grew would be a leak.
+///
+/// Run on purpose, normally and under `taskpolicy -b`:
+/// `cargo test -p zerocode-orchestrator --test worktree_evidence measure_ -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement, run on purpose: -- --ignored --nocapture"]
+fn measure_what_an_evidence_read_costs_beside_ignored_trees() {
+    use std::time::Instant;
+    // (directory, subdirectories, files in each): 40,000 + 20,000 + 1,000 + 200.
+    const TREES: [(&str, usize, usize); 4] = [
+        ("node_modules", 400, 100),
+        ("target", 100, 200),
+        ("output", 50, 20),
+        (".zo", 20, 10),
+    ];
+    const TRACKED_DIRS: usize = 100;
+    const TRACKED_PER_DIR: usize = 20;
+    const ROUNDS: usize = 7;
+    const READS_FOR_MEMORY: usize = 40;
+
+    let rss_kib = || -> u64 {
+        let out = Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    };
+    let median = |mut times: Vec<f64>| {
+        times.sort_by(f64::total_cmp);
+        times[times.len() / 2]
+    };
+
+    let root = repository();
+    for dir in 0..TRACKED_DIRS {
+        let at = root.path().join(format!("src/d{dir}"));
+        std::fs::create_dir_all(&at).expect("a tracked directory");
+        for file in 0..TRACKED_PER_DIR {
+            std::fs::write(at.join(format!("f{file}.txt")), format!("{dir} {file}\n"))
+                .expect("a tracked file");
+        }
+    }
+    let rules: String = TREES.iter().map(|(name, ..)| format!("{name}/\n")).collect();
+    std::fs::write(root.path().join(".gitignore"), rules).expect("ignore rules");
+    git(root.path(), &["add", "-A"]);
+    git(root.path(), &["commit", "-q", "-m", "a project with its sources"]);
+    let mut ignored_files = 0;
+    for (name, dirs, files) in TREES {
+        for dir in 0..dirs {
+            let at = root.path().join(format!("{name}/d{dir}"));
+            std::fs::create_dir_all(&at).expect("an ignored directory");
+            for file in 0..files {
+                std::fs::write(at.join(format!("f{file}")), "x").expect("an ignored file");
+                ignored_files += 1;
+            }
+        }
+    }
+
+    let orchestrator = Orchestrator::open(root.path()).expect("repository");
+    let mut snapshot_ms = Vec::new();
+    let mut read_ms = Vec::new();
+    let mut said = serde_json::Value::Null;
+    for round in 0..ROUNDS {
+        let began = Instant::now();
+        orchestrator
+            .handoff_snapshot(root.path(), 1)
+            .expect("a snapshot");
+        snapshot_ms.push(began.elapsed().as_secs_f64() * 1_000.0);
+        let began = Instant::now();
+        let read = observe(root.path(), None, None, 2);
+        read_ms.push(began.elapsed().as_secs_f64() * 1_000.0);
+        if round == 0 {
+            said = snapshot_data(&read)["ignored"].clone();
+        }
+    }
+
+    let before_rss = rss_kib();
+    let mut resident = Vec::new();
+    for read in 0..READS_FOR_MEMORY {
+        let _ = observe(root.path(), None, None, 3);
+        if (read + 1).is_multiple_of(10) {
+            resident.push(rss_kib());
+        }
+    }
+    println!(
+        "EVIDENCE_READ_BENCH {}",
+        serde_json::json!({
+            "ignoredFiles": ignored_files,
+            "snapshotMsMedian": median(snapshot_ms),
+            "readMsMedian": median(read_ms),
+            "ignoredAnswer": said,
+            "rssKiBBefore": before_rss,
+            "rssKiBEveryTenReads": resident,
+        })
+    );
+}
+

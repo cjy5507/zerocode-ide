@@ -44,6 +44,10 @@ const EVIDENCE = {
       detached: false,
       locked: false,
       dirty: true,
+      // 백엔드의 답 그대로의 모양이다: 변경은 있고(`uncommitted`), 무시된 파일은
+      // 없다(`ignored`). 두 사실은 `dirty` 하나로 접히지 않는다 (t-34315).
+      uncommitted: true,
+      ignored: { count: 0, bytes: 0, sizeText: "0 B", complete: true, top: [] },
       complete: false,
       coverageGaps: ["untracked_content"],
       changes: [
@@ -581,6 +585,65 @@ export async function testWorktreeEvidence(browser, origin, ok) {
           await page.locator(".qo--evidence").screenshot({ path: `${capture}/${name}-${which}.png`, animations: "disabled" });
         }
       }
+      await page.evaluate((held) => { window.__EVIDENCE_ANSWER__ = held; return refreshWorktreeEvidence(); }, EVIDENCE);
+    }
+
+    /* ---- 전/후 숫자 (t-34315) ----
+     *
+     * 환경 변수가 있을 때만 잰다 — 검사가 아니라 측정이다. 같은 합성 답 셋을 옛
+     * 코드와 새 코드에 먹여 (1) 몸통을 한 번 짓는 데 드는 시간(짓고 배치까지),
+     * (2) 사이드바 뱃지의 말을 짓는 함수의 한 번 값(프레임마다 행마다 도는 길이다),
+     * (3) 긴 반복 뒤의 메모리와 노드 수(쌓이는 것이 없는가)를 쟨다. 낮은 사양은
+     * `WINDOW_CPU_THROTTLE=4`로 같은 하네스를 돌려 얻는다. */
+    if (process.env.WORKTREE_EVIDENCE_BENCH) {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Performance.enable");
+      const gauge = async () => {
+        await cdp.send("HeapProfiler.collectGarbage");
+        const { metrics } = await cdp.send("Performance.getMetrics");
+        const named = Object.fromEntries(metrics.map((one) => [one.name, one.value]));
+        return { heapKiB: Math.round(named.JSHeapUsedSize / 1024), nodes: named.Nodes, listeners: named.JSEventListeners };
+      };
+      const answers = { onlyIgnored: ONLY_IGNORED, onlyChanges: ONLY_CHANGES, both: BOTH, clean: CLEAN };
+      const before = await gauge();
+      const result = await page.evaluate(async ({ answers, rounds, reads }) => {
+        const percentile = (sorted, at) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * at))];
+        const out = { paintMs: {}, chipUs: {}, reads: null };
+        for (const [name, answer] of Object.entries(answers)) {
+          window.__EVIDENCE_ANSWER__ = answer;
+          await refreshWorktreeEvidence();
+          const body = document.getElementById("wt-evidence-body");
+          const times = [];
+          for (let round = 0; round < rounds; round += 1) {
+            delete body.dataset.evidenceSignature;
+            const began = performance.now();
+            paintWorktreeEvidence();
+            void body.offsetHeight;
+            times.push(performance.now() - began);
+          }
+          times.sort((a, b) => a - b);
+          out.paintMs[name] = { p50: +percentile(times, 0.5).toFixed(3), p95: +percentile(times, 0.95).toFixed(3) };
+        }
+        const landing = { state: "landed", detached: false, ahead: 0, dirty: false, ignored: true,
+          compare_ref: "origin/main", ref_updated_ms: Date.now() - 86_400_000, dirty_checked_ms: Date.now(),
+          landed_in: { sha: "0123456789abcdef0123456789abcdef01234567", time_ms: Date.now() - 3_600_000 } };
+        for (const [name, held] of Object.entries({ landedWithIgnored: landing, landedPlain: { ...landing, ignored: false } })) {
+          const calls = 20_000;
+          for (let warm = 0; warm < 500; warm += 1) worktreeLandingSay(held, { idle: true });
+          const began = performance.now();
+          for (let call = 0; call < calls; call += 1) worktreeLandingSay(held, { idle: true });
+          out.chipUs[name] = +(((performance.now() - began) / calls) * 1000).toFixed(2);
+        }
+        const flip = [answers.onlyIgnored, answers.both];
+        for (let read = 0; read < reads; read += 1) {
+          window.__EVIDENCE_ANSWER__ = flip[read % 2];
+          await refreshWorktreeEvidence();
+        }
+        out.reads = reads;
+        return out;
+      }, { answers, rounds: 400, reads: 3000 });
+      const after = await gauge();
+      console.log("EVIDENCE_BENCH " + JSON.stringify({ throttle: process.env.WINDOW_CPU_THROTTLE ?? "1", ...result, before, after }));
       await page.evaluate((held) => { window.__EVIDENCE_ANSWER__ = held; return refreshWorktreeEvidence(); }, EVIDENCE);
     }
 

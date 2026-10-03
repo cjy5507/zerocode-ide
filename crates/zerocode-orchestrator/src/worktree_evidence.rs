@@ -41,6 +41,7 @@ use zerocode_core::orchestration::{Ledger, ReviewFacts};
 
 use crate::Orchestrator;
 use crate::handoff::{CoverageGap, GitOperation, HandoffError, WorktreeSnapshot};
+use crate::ignored_usage::{self, IgnoredFacts};
 use crate::workflow_store::{
     ReadOnlyWorkflows, StoredReview, TrustedReceiptRow, WorkflowStoreError,
 };
@@ -322,8 +323,10 @@ pub struct WorktreeEvidenceV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvidenceSummary {
-    /// Whether the checkout has uncommitted or ignored bytes right now.
-    /// `None` where Git was not read.
+    /// Whether a deletion of the checkout would take anything a commit does
+    /// not hold right now — changes git lists OR ignored files. A safety
+    /// fact, not the person's "uncommitted": the snapshot's `uncommitted` and
+    /// `ignored` say the two apart. `None` where Git was not read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dirty: Option<bool>,
     pub changed_paths: usize,
@@ -350,7 +353,20 @@ pub struct SnapshotFacts {
     pub content_digest: String,
     pub detached: bool,
     pub locked: bool,
+    /// Whether a deletion would take anything a commit does not hold: changes
+    /// git lists OR ignored files ([`WorktreeSnapshot::is_dirty`]). This is
+    /// the safety question handoff and cleanup ask, and it stays one. It is
+    /// NOT what a person means by "uncommitted" — a landed checkout a build has
+    /// used is `dirty` and has nothing to commit — so a reader that words it
+    /// for a person reads `uncommitted` and `ignored` instead.
     pub dirty: bool,
+    /// Whether git lists a change: an edit to a tracked file, or a new file it
+    /// has not been told to ignore. What a commit would carry. Ignored files
+    /// are not this (t-34315).
+    pub uncommitted: bool,
+    /// The paths git is told to ignore that are here: how many, how big, which
+    /// are biggest. What a deletion takes that no commit holds.
+    pub ignored: IgnoredFacts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -360,6 +376,9 @@ pub struct SnapshotFacts {
     /// Whether the digest covers every byte in the checkout. A `false` here
     /// is why no receipt may be called current.
     pub complete: bool,
+    /// Why `complete` is false, one stable tag per gap (`gap_tag`). A tag is
+    /// for a program: a reader that shows a person words for it owns the
+    /// words, in every language it speaks.
     pub coverage_gaps: Vec<String>,
     pub changes: Vec<ChangedPath>,
 }
@@ -525,7 +544,11 @@ impl<'a> GitSnapshotSource<'a> {
         };
         match orchestrator.handoff_snapshot(path, observed_at_ms) {
             Ok(snapshot) => {
-                let facts = snapshot_facts(&snapshot);
+                // The one place this read touches the disk beyond Git: how big
+                // the ignored leftovers are. Bounded in entries and in time
+                // (`ignored_usage`), and skipped when there are none.
+                let ignored = ignored_usage::measure(path, &snapshot.ignored);
+                let facts = snapshot_facts(&snapshot, ignored);
                 let counted = snapshot.changes.len();
                 let returned = facts.changes.len();
                 (
@@ -926,13 +949,17 @@ fn bounded<T>(mut rows: Vec<T>, limit: usize) -> Source<Vec<T>> {
     Source::observed(rows, SourceCoverage::of(counted, returned))
 }
 
-fn snapshot_facts(snapshot: &WorktreeSnapshot) -> SnapshotFacts {
+/// The snapshot's facts, with the ignored leftovers already measured: reading
+/// the disk is the caller's business, so this stays a pure translation.
+fn snapshot_facts(snapshot: &WorktreeSnapshot, ignored: IgnoredFacts) -> SnapshotFacts {
     SnapshotFacts {
         head_oid: snapshot.head_oid.clone(),
         content_digest: snapshot.content_digest.clone(),
         detached: snapshot.detached,
         locked: snapshot.locked,
         dirty: snapshot.is_dirty(),
+        uncommitted: snapshot.has_uncommitted_changes(),
+        ignored,
         operation: snapshot.operation.map(|held| {
             match held {
                 GitOperation::Merge => "merge",
@@ -1082,7 +1109,7 @@ fn roster_name(task: &zerocode_core::orchestration::Task) -> String {
     }
 }
 
-fn clipped(text: &str) -> String {
+pub(crate) fn clipped(text: &str) -> String {
     match text.chars().count() > MAX_TEXT_CHARS {
         true => text.chars().take(MAX_TEXT_CHARS).collect::<String>() + "…",
         false => text.to_string(),
