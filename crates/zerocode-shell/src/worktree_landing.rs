@@ -92,6 +92,34 @@ pub(super) struct LandingBase {
     pub(super) updated_ms: Option<i64>,
 }
 
+/// The one door the git of this module goes through, with `--no-optional-locks`
+/// first. The classification runs in the background for every checkout, and a
+/// plain `status` refreshes the stat data kept in the index and writes it back
+/// under `index.lock`: a `commit`, `add` or `merge --ff-only` that a person or a
+/// worker starts in that checkout meanwhile is refused. Only `status` needs the
+/// flag; the other calls take the same door, as the background git of the zo
+/// runtime does, so that none is the one missed.
+///
+/// `resolve_landing_base` also asks the two probes it shares with the
+/// worktree-creation path, `default_base_probe` and `ref_exists`; those are
+/// `symbolic-ref` and `rev-parse --verify`, which take no optional lock.
+fn landing_git(host: &Host, root: &Path, args: &[&str]) -> Result<String, String> {
+    host.vcs().text(root, &lock_free(args))
+}
+
+/// [`landing_git`] as [`optional_git_text`] answers: trimmed, and [`None`] when
+/// git refused or said nothing.
+fn landing_git_text(host: &Host, root: &Path, args: &[&str]) -> Option<String> {
+    optional_git_text(host, root, &lock_free(args))
+}
+
+/// A global option, so it stands before the subcommand.
+fn lock_free<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    std::iter::once("--no-optional-locks")
+        .chain(args.iter().copied())
+        .collect()
+}
+
 /// 비교 ref를 정한다: 프로젝트의 `worktree_base_ref`가 있으면 그것, 없으면
 /// 저장소의 기본 브랜치(`default_base_probe`). 이름만 묻고 가져오지 않는다.
 pub(super) fn resolve_landing_base(
@@ -124,7 +152,7 @@ pub(super) fn resolve_landing_base(
             updated_ms: None,
         };
     };
-    let oid = optional_git_text(
+    let oid = landing_git_text(
         host,
         repo_root,
         &[
@@ -135,7 +163,7 @@ pub(super) fn resolve_landing_base(
         ],
     );
     let updated_ms = oid.as_ref().and_then(|_| {
-        optional_git_text(
+        landing_git_text(
             host,
             repo_root,
             &["reflog", "show", "--format=%ct", "-1", &name],
@@ -453,10 +481,11 @@ fn worktree_landing_within(
     // The `status` goes first: it is what proves git can answer for this
     // directory at all. A directory that is gone, or not a repository, is
     // `failed` — held so it is asked again, never answered with a guess.
-    let Ok(status) = host
-        .vcs()
-        .text(path, &["status", "--porcelain", "--untracked-files=no"])
-    else {
+    let Ok(status) = landing_git(
+        host,
+        path,
+        &["status", "--porcelain", "--untracked-files=no"],
+    ) else {
         hold_failure(path, Some(base));
         return WorktreeLanding::failed(Some(base));
     };
@@ -628,10 +657,7 @@ fn classify_landing(
         landing.state = "no_commits";
         return landing;
     }
-    let ancestor = host
-        .vcs()
-        .text(path, &["merge-base", "--is-ancestor", head, target])
-        .is_ok();
+    let ancestor = landing_git(host, path, &["merge-base", "--is-ancestor", head, target]).is_ok();
     if ancestor {
         if branch.is_some() && creation.is_none() {
             return landing;
@@ -646,7 +672,7 @@ fn classify_landing(
     }
     // A `cherry` git could not run says nothing about the work; counting it as
     // zero would be calling the work landed.
-    let Ok(cherry) = host.vcs().text(path, &["cherry", target, head]) else {
+    let Ok(cherry) = landing_git(host, path, &["cherry", target, head]) else {
         return landing;
     };
     let ahead = cherry.lines().filter(|line| line.starts_with('+')).count();
@@ -661,18 +687,17 @@ fn classify_landing(
 
 /// 브랜치가 만들어진 커밋 — 그 브랜치 reflog의 가장 오래된 줄.
 fn creation_point(host: &Host, path: &Path, branch: &str) -> Option<String> {
-    let said = host
-        .vcs()
-        .text(
-            path,
-            &[
-                "reflog",
-                "show",
-                "--format=%H",
-                &format!("refs/heads/{branch}"),
-            ],
-        )
-        .ok()?;
+    let said = landing_git(
+        host,
+        path,
+        &[
+            "reflog",
+            "show",
+            "--format=%H",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .ok()?;
     said.lines()
         .map(str::trim)
         .rfind(|line| !line.is_empty())
@@ -683,16 +708,13 @@ fn creation_point(host: &Host, path: &Path, branch: &str) -> Option<String> {
 /// 내용만 들어간 작업이 여기서 잡힌다. 충돌하면(git이 0이 아닌 값으로 끝난다)
 /// 같다고 말하지 않는다.
 fn merge_changes_nothing(host: &Host, path: &Path, head: &str, target: &str) -> bool {
-    let Ok(merged) = host
-        .vcs()
-        .text(path, &["merge-tree", "--write-tree", target, head])
-    else {
+    let Ok(merged) = landing_git(host, path, &["merge-tree", "--write-tree", target, head]) else {
         return false;
     };
     let Some(tree) = merged.lines().next().map(str::trim) else {
         return false;
     };
-    optional_git_text(host, path, &["rev-parse", &format!("{target}^{{tree}}")])
+    landing_git_text(host, path, &["rev-parse", &format!("{target}^{{tree}}")])
         .is_some_and(|target_tree| target_tree == tree)
 }
 
@@ -700,19 +722,18 @@ fn merge_changes_nothing(host: &Host, path: &Path, head: &str, target: &str) -> 
 /// 있으면(빨리감기) `head` 자신이다.
 fn landed_commit(host: &Host, path: &Path, head: &str, target: &str) -> Option<LandedIn> {
     let range = format!("{head}..{target}");
-    let said = host
-        .vcs()
-        .text(
-            path,
-            &[
-                "log",
-                "--first-parent",
-                "--ancestry-path",
-                "--format=%H %ct %P",
-                &range,
-            ],
-        )
-        .ok()?;
+    let said = landing_git(
+        host,
+        path,
+        &[
+            "log",
+            "--first-parent",
+            "--ancestry-path",
+            "--format=%H %ct %P",
+            &range,
+        ],
+    )
+    .ok()?;
     let oldest = said.lines().map(str::trim).rfind(|line| !line.is_empty());
     let (sha, seconds) = match oldest {
         Some(line) => {
@@ -743,7 +764,7 @@ fn landed_commit(host: &Host, path: &Path, head: &str, target: &str) -> Option<L
 }
 
 fn commit_time(host: &Host, path: &Path, commit: &str) -> Option<i64> {
-    optional_git_text(host, path, &["log", "-1", "--format=%ct", commit])
+    landing_git_text(host, path, &["log", "-1", "--format=%ct", commit])
         .and_then(|said| said.parse::<i64>().ok())
         .map(|seconds| seconds.saturating_mul(1000))
 }
