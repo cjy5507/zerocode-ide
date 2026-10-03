@@ -1669,7 +1669,10 @@ fn a_turns_brief_hands_each_voice_the_room_the_ones_before_it_left() {
     );
     let narrow = crate::tree_selection::brief_line(&ask, narrow_room).expect("a narrow selection");
     assert!(narrow.chars().count() <= narrow_room, "{narrow}");
-    assert!(narrow.contains("src/three.rs") && !narrow.contains("src/four.rs"), "{narrow}");
+    assert!(
+        narrow.contains("src/three.rs") && !narrow.contains("src/four.rs"),
+        "{narrow}"
+    );
     let first = BRIEF_CONTRIBUTORS.first().map(|voice| *voice as usize);
     let selection: BriefContributor = crate::tree_selection::brief_line;
     assert_eq!(first, Some(selection as usize));

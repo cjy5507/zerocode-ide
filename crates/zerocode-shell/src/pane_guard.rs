@@ -1089,7 +1089,10 @@ pub(crate) fn compose_brief(
         if size == 0 {
             continue;
         }
-        debug_assert!(size <= room, "a brief voice said {size} characters in a room of {room}");
+        debug_assert!(
+            size <= room,
+            "a brief voice said {size} characters in a room of {room}"
+        );
         if size > room {
             continue;
         }

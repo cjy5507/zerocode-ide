@@ -135,8 +135,13 @@ mod tests {
         // The same selection said again is not news; a new one is.
         held.hold(ROOT, vec!["src/main.rs".to_string()]);
         assert_eq!(held.offer(ROOT, "term-1", ROOM), None);
-        held.hold(ROOT, vec!["src/lib.rs".to_string(), "README.md".to_string()]);
-        let again = held.offer(ROOT, "term-1", ROOM).expect("a new selection was not offered");
+        held.hold(
+            ROOT,
+            vec!["src/lib.rs".to_string(), "README.md".to_string()],
+        );
+        let again = held
+            .offer(ROOT, "term-1", ROOM)
+            .expect("a new selection was not offered");
         assert!(
             again.contains("/Users/dev/repo/src/lib.rs")
                 && again.contains("/Users/dev/repo/README.md")
@@ -156,7 +161,9 @@ mod tests {
         paths.push("/etc/hosts".to_string());
         paths.insert(0, "../escape.rs".to_string());
         held.hold(ROOT, paths);
-        let said = held.offer(ROOT, "term-1", ROOM).expect("a selection said nothing");
+        let said = held
+            .offer(ROOT, "term-1", ROOM)
+            .expect("a selection said nothing");
         assert_eq!(
             said.matches("/Users/dev/repo/src/").count(),
             TREE_SELECTION_PATHS,
@@ -170,14 +177,19 @@ mod tests {
     fn a_selection_says_only_what_fits_its_room_and_tells_nobody_it_could_not_reach() {
         let mut held = Selections::default();
         held.hold(ROOT, vec!["src/a.rs".to_string(), "src/b.rs".to_string()]);
-        let whole = held.offer(ROOT, "term-1", ROOM).expect("the whole selection");
+        let whole = held
+            .offer(ROOT, "term-1", ROOM)
+            .expect("the whole selection");
         // One path less fits in a room cut just short of the whole line.
         let mut cut = Selections::default();
         cut.hold(ROOT, vec!["src/a.rs".to_string(), "src/b.rs".to_string()]);
         let room = whole.chars().count() - 1;
         let shorter = cut.offer(ROOT, "term-1", room).expect("a shorter line");
         assert!(shorter.chars().count() <= room, "{shorter}");
-        assert!(shorter.contains("src/a.rs") && !shorter.contains("src/b.rs"), "{shorter}");
+        assert!(
+            shorter.contains("src/a.rs") && !shorter.contains("src/b.rs"),
+            "{shorter}"
+        );
         // No room for even one path says nothing — and that pane is still
         // owed the selection, which a roomier turn then says.
         let mut tight = Selections::default();

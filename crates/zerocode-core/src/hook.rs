@@ -1205,7 +1205,12 @@ fn segment_program(segment: Vec<ShellWord>) -> Option<(String, Vec<ShellWord>)> 
     if head.quoted {
         return None;
     }
-    let name = head.text.rsplit('/').next().unwrap_or(&head.text).to_string();
+    let name = head
+        .text
+        .rsplit('/')
+        .next()
+        .unwrap_or(&head.text)
+        .to_string();
     Some((name, words.collect()))
 }
 
@@ -1298,10 +1303,26 @@ const FILE_READERS: &[(&str, &[&str])] = &[
     ("ls", &[]),
     ("more", &[]),
     ("nl", &[]),
-    ("rg", &[
-        "-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-M", "--glob", "--type",
-        "--type-not", "--max-count", "--max-columns",
-    ]),
+    (
+        "rg",
+        &[
+            "-e",
+            "-f",
+            "-g",
+            "-t",
+            "-T",
+            "-m",
+            "-A",
+            "-B",
+            "-C",
+            "-M",
+            "--glob",
+            "--type",
+            "--type-not",
+            "--max-count",
+            "--max-columns",
+        ],
+    ),
     ("sed", &["-e", "-f"]),
     ("tail", &["-n", "-c"]),
     ("tree", &["-L", "-I", "-P"]),
@@ -1309,7 +1330,15 @@ const FILE_READERS: &[(&str, &[&str])] = &[
 ];
 
 const GREP_VALUED: &[&str] = &[
-    "-e", "-f", "-m", "-A", "-B", "-C", "--include", "--exclude", "--exclude-dir",
+    "-e",
+    "-f",
+    "-m",
+    "-A",
+    "-B",
+    "-C",
+    "--include",
+    "--exclude",
+    "--exclude-dir",
 ];
 
 /// The readers whose first plain word is what they look for or run, not a
@@ -1336,17 +1365,19 @@ pub fn read_paths(command: &str) -> Vec<String> {
     {
         if program == "cd" || program == "pushd" {
             let to = rest.first().map(|word| word.text.as_str()).unwrap_or("");
-            base = Some(if to.is_empty() || to == "-" || to.starts_with('~') || to.contains('$') {
-                None
-            } else if to.starts_with('/') {
-                Some(to.trim_end_matches('/').to_string())
-            } else {
-                match &base {
-                    Some(Some(from)) => Some(format!("{from}/{}", to.trim_end_matches('/'))),
-                    Some(None) => None,
-                    None => Some(to.trim_end_matches('/').to_string()),
-                }
-            });
+            base = Some(
+                if to.is_empty() || to == "-" || to.starts_with('~') || to.contains('$') {
+                    None
+                } else if to.starts_with('/') {
+                    Some(to.trim_end_matches('/').to_string())
+                } else {
+                    match &base {
+                        Some(Some(from)) => Some(format!("{from}/{}", to.trim_end_matches('/'))),
+                        Some(None) => None,
+                        None => Some(to.trim_end_matches('/').to_string()),
+                    }
+                },
+            );
             continue;
         }
         let Some((_, valued)) = FILE_READERS.iter().find(|(name, _)| *name == program) else {
@@ -1377,9 +1408,7 @@ pub fn read_paths(command: &str) -> Vec<String> {
                 pattern_owed = false;
                 continue;
             }
-            if text.is_empty()
-                || text.contains(['>', '<', '*', '?', '[', '$', '`'])
-                || text == "{}"
+            if text.is_empty() || text.contains(['>', '<', '*', '?', '[', '$', '`']) || text == "{}"
             {
                 continue;
             }
@@ -3422,7 +3451,10 @@ mod tests {
             steps("git merge --no-ff side || git merge --abort"),
             ["git merge", "git merge"]
         );
-        assert_eq!(steps("gh pr create --fill && gh pr view --web"), ["gh pr create"]);
+        assert_eq!(
+            steps("gh pr create --fill && gh pr view --web"),
+            ["gh pr create"]
+        );
         assert_eq!(steps("gh pr merge 42 --squash"), ["gh pr merge"]);
         assert_eq!(
             steps("git branch -D old && git stash pop && git tag v1.2.0"),
@@ -3461,13 +3493,19 @@ mod tests {
         let none: Vec<String> = Vec::new();
         assert_eq!(read_paths("sed -n '1,200p' src/main.rs"), ["src/main.rs"]);
         assert_eq!(read_paths("cat a.rs b.rs | head -n 20"), ["a.rs", "b.rs"]);
-        assert_eq!(read_paths("head -n 50 README.md 2>/dev/null"), ["README.md"]);
+        assert_eq!(
+            read_paths("head -n 50 README.md 2>/dev/null"),
+            ["README.md"]
+        );
         assert_eq!(
             read_paths("rg -n 'fn main' crates/core --glob '*.rs'"),
             ["crates/core"]
         );
         assert_eq!(read_paths("grep -e needle -r src tests"), ["src", "tests"]);
-        assert_eq!(read_paths("cd ui && sed -n 10,40p shell.js"), ["ui/shell.js"]);
+        assert_eq!(
+            read_paths("cd ui && sed -n 10,40p shell.js"),
+            ["ui/shell.js"]
+        );
         assert_eq!(
             read_paths("cd /Users/dev/repo && cat docs/a.md"),
             ["/Users/dev/repo/docs/a.md"]
