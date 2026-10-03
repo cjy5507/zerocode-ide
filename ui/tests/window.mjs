@@ -67,7 +67,7 @@ import { installHarnessWaits } from "./harness-waits.mjs";
 import { installBoardWaits, testBoardWaits } from "./board-waits.mjs";
 
 import { testExplorer } from "./explorer.mjs";
-import { testExplorerAgentActivity, testExplorerAgentBurst, testExplorerGit, testExplorerKeys, testExplorerMentions } from "./explorer-agent.mjs";
+import { testExplorerAgentActivity, testExplorerAgentBurst, testExplorerGit, testExplorerKeys, testExplorerMentions, testExplorerRoot } from "./explorer-agent.mjs";
 import { testPathBrowser } from "./path-browser.mjs";
 import { testNativeFolderPicker } from "./native-folder-picker.mjs";
 import { testSftpAndTeam } from "./sftp.mjs";
@@ -218,6 +218,7 @@ suite("explorer-agent-burst", ({ browser, origin, ok }) => testExplorerAgentBurs
 suite("explorer-git", ({ browser, origin, ok }) => testExplorerGit(browser, origin, ok));
 suite("explorer-mentions", ({ browser, origin, ok }) => testExplorerMentions(browser, origin, ok));
 suite("explorer-keys", ({ browser, origin, ok }) => testExplorerKeys(browser, origin, ok));
+suite("explorer-root", ({ browser, origin, ok }) => testExplorerRoot(browser, origin, ok));
 suite("crash", ({ browser, origin, ok }) => testCrashReport(browser, origin, standBackend, ok));
 suite("ledger-poll", ({ browser, origin, ok }) => testLedgerPoll(browser, origin, standBackend, ok));
 suite("usage-refresh", async ({ browser, origin, ok }) => {

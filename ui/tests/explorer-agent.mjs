@@ -486,3 +486,73 @@ export async function testExplorerKeys(browser, origin, ok) {
     await page.close();
   }
 }
+
+/* ---- slice 6: the tree's root — the agent's folder, or one the person pins
+ *
+ * The tree is the active workspace's; inside it, an agent's pane that stands
+ * in a folder (`term:cwd`) has that folder revealed and marked while follow
+ * is on. And the person can pin any folder as the tree's root: the tree
+ * shows that folder alone until it is unpinned, every reload keeps it, and
+ * what happens outside it is not drawn. */
+export async function testExplorerRoot(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standTree(page);
+    const seen = await page.evaluate(async () => {
+      const { root, fire, act, settle, open, row } = window.__XT__;
+      const out = {};
+      const cwd = (term, path) => {
+        for (const handler of window.__LISTENERS__["term:cwd"] ?? []) handler({ payload: { term, cwd: path } });
+      };
+      // An agent's pane in this workspace moves into a folder: the tree
+      // unfolds to it and marks it as where the agent stands.
+      mountTermTab(9873, { agent: "claude", worktree: root }, { placement: "tab", focus: false });
+      paneAgents.set(9873, "claude");
+      cwd(9873, `${root}/src/deep`);
+      await settle(8);
+      out.cwdRevealed = open("src") && row("src/deep")?.dataset.agentCwd === "true";
+      cwd(9873, root);
+      await settle();
+      out.cwdCleared = !fileTree.querySelector("[data-agent-cwd]");
+      // Pinning a folder from its own menu.
+      row("src").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
+      await settle();
+      const pin = [...document.querySelectorAll("#sidebar-menu .sidebar-menu-item")]
+        .find((item) => item.textContent.includes(t("tree.menu.pinRoot", "트리 루트로 고정")));
+      out.offered = Boolean(pin);
+      if (pin) pin.click();
+      else closeSidebarMenu();
+      await settle(8);
+      const top = () => [...fileTree.querySelectorAll(":scope > .tree-row")].map((one) => one.dataset.treePath);
+      out.pinnedTop = top();
+      out.levels = row("src/lib.rs")?.getAttribute("aria-level") ?? null;
+      const chip = document.getElementById("tree-pin");
+      out.chip = chip ? { hidden: chip.hidden, text: chip.textContent.replace(/\s+/g, " ").trim() } : null;
+      // Every reload keeps the pin — the many roads that reload the tree
+      // all ask for its root.
+      await loadTree(fileTree, "");
+      out.reloadKept = JSON.stringify(top()) === JSON.stringify(out.pinnedTop);
+      // What happens outside the pinned folder is not drawn, and costs no
+      // listing; inside it is.
+      const listed = window.__COUNTS__.list_dir ?? 0;
+      fire("term:1", [act("read", `${root}/docs/guide.md`)]);
+      await settle();
+      out.outsideQuiet = (window.__COUNTS__.list_dir ?? 0) === listed && !fileTree.querySelector("[data-agent-touch]");
+      fire("term:1", [act("edit", `${root}/src/deep/x.rs`)]);
+      await settle(6);
+      out.insideLit = row("src/deep/x.rs")?.dataset.agentTouch === "write";
+      // Unpinned from the head: the workspace's root is back.
+      document.getElementById("tree-unpin")?.click();
+      await settle(6);
+      out.unpinnedTop = top();
+      out.chipGone = document.getElementById("tree-pin")?.hidden ?? null;
+      return out;
+    });
+    ok("an agent's pane standing in a folder of this workspace has it revealed and marked, and the mark leaves when it steps back to the root", seen.cwdRevealed === true && seen.cwdCleared === true, JSON.stringify(seen));
+    ok("a folder's menu pins it as the tree's root: its rows stand at the top, levels count from it, the head says the pin, and every reload keeps it", seen.offered === true && JSON.stringify(seen.pinnedTop) === JSON.stringify(["src/deep", "src/lib.rs", "src/main.rs"]) && seen.levels === "1" && seen.chip?.hidden === false && seen.chip.text.includes("src") && seen.reloadKept === true, JSON.stringify(seen));
+    ok("with a pinned root, work outside it is not drawn and costs no listing, work inside it is; unpinning brings the workspace back", seen.outsideQuiet === true && seen.insideLit === true && JSON.stringify(seen.unpinnedTop) === JSON.stringify(["docs", "src", "README.md"]) && seen.chipGone === true, JSON.stringify(seen));
+    ok("the root suite raised no renderer faults", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
