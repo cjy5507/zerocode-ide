@@ -9345,6 +9345,9 @@ listen("hook:activity", (event) => {
   // 모아서 함께 싣는다. 이어 붙이고 스무 개에서 끊는다.
   const held = [...(paneActivities.get(pane) ?? []), ...activities];
   paneActivities.set(pane, held.slice(-ACTIVITY_RING));
+  // The file tree wears the files these name (t-24298) — the batch as it
+  // came, never the ring: a file already lit is not lit again by a replay.
+  noteTreeActivities(pane, activities);
   // A helper's page says what its own card last did when no row is out to say
   // it (`nowActivityOf`): the card's news is the foot line's, not the list's.
   const page = activeHelperPage();

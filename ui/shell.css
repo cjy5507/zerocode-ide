@@ -43611,6 +43611,123 @@ button.jev-token:hover {
 .tree-row.is-drop-conflict { outline: 1px solid var(--signal-halt-ink); outline-offset: -1px; }
 @media (prefers-reduced-motion: reduce) { .explorer-filters *, .tree-row.is-selected, .tree-undo-toast { transition: none; animation: none; } }
 
+/* ---- the tree's head and what the agents touch (t-24298) -------------------
+ *
+ * The head is one row: where the checkout stands in git on the left, the
+ * explorer's own switches on the right — the source-control head's grammar
+ * (`.scm-head-row`, `.scm-filter-toggle`) at the tree's top. */
+.tree-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 var(--space-3);
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+}
+.tree-head-space { flex: 1; min-width: 0; }
+.tree-head-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-mist);
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
+}
+.tree-head-button .icon { width: 14px; height: 14px; }
+.tree-head-button:hover { background: var(--row-hover); color: var(--ink-chalk); }
+.tree-head-button.is-active { color: var(--nav-plane-ring); }
+.tree-head-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.tree-head-branch[hidden] { display: none; }
+.tree-head-branch .icon { width: 12px; height: 12px; flex: none; }
+.tree-head-name { color: var(--ink-chalk); overflow: hidden; text-overflow: ellipsis; }
+.tree-head-upstream { overflow: hidden; text-overflow: ellipsis; }
+.tree-head-ahead,
+.tree-head-behind { flex: none; font-variant-numeric: tabular-nums; color: var(--ink-chalk); }
+
+/* A changed file's +N -N sits between its name and its letter, in the
+ * source-control row's own tally (`.scm-tally`, `paintScmTally`); the empty
+ * slot keeps the letter at the row's edge. A folder's badge is its counts,
+ * each chip in its kind's decoration (`.git-ink`). */
+.tree-row .tree-tally { margin-left: auto; }
+.tree-row .tree-tally + .badge { margin-left: var(--space-1); }
+.tree-row .badge .tree-count + .tree-count { margin-left: 3px; }
+.badge[data-git="conflict"],
+.git-ink[data-git="conflict"] { color: var(--git-decoration-conflict); }
+
+/* A lit row: the name in the kind's colour and a bar at the row's edge. The
+ * bar is what fades — slower than a hover (`--tree-touch-fade`), so the eye
+ * that arrives late still sees where it was — while the name returns to its
+ * ink at the row's own pace. A folder lit for what is beneath it takes the
+ * colour without the bar: it is pointing, not being touched. */
+.file-tree .tree-row {
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--tree-touch-fade) var(--ease-standard);
+}
+.tree-row[data-agent-touch="read"],
+.tree-row[data-agent-touch-within="read"] { color: var(--tree-touch-read); }
+.tree-row[data-agent-touch="write"],
+.tree-row[data-agent-touch-within="write"] { color: var(--tree-touch-write); }
+.tree-row[data-agent-touch="commit"],
+.tree-row[data-agent-touch-within="commit"] { color: var(--tree-touch-commit); }
+.tree-row[data-agent-touch="read"] { box-shadow: inset 2px 0 0 var(--tree-touch-read); }
+.tree-row[data-agent-touch="write"] { box-shadow: inset 2px 0 0 var(--tree-touch-write); }
+.tree-row[data-agent-touch="commit"] { box-shadow: inset 2px 0 0 var(--tree-touch-commit); }
+@media (prefers-reduced-motion: reduce) {
+  .file-tree .tree-row { transition: none; }
+}
+
+/* The keyboard's place in the tree, and the row a reveal pointed at — an
+ * `@path` in a prompt, a menu's "show in the file tree". Both are rings and
+ * grounds the rest of the explorer already uses. */
+.tree-row:focus-visible { outline: 1px solid var(--nav-plane-ring); outline-offset: -1px; }
+.tree-row.is-revealed:not(.is-selected) { background: var(--row-hover); }
+
+/* The folder an agent's pane stands in: its glyph in the ring's colour and
+ * its name underlined lightly — a place, not an event, so it neither fades
+ * nor competes with the touch colours. And the pin the person put on the
+ * tree's root, in the head, with its own way out. */
+.tree-row[data-agent-cwd] .tree-glyph { color: var(--nav-plane-ring); }
+.tree-row[data-agent-cwd] .tree-name { text-decoration: underline dotted; text-underline-offset: 2px; }
+.tree-pin { display: inline-flex; align-items: center; gap: 2px; min-width: 0; color: var(--ink-chalk); }
+.tree-pin[hidden] { display: none; }
+.tree-pin > .icon { width: 12px; height: 12px; flex: none; }
+.tree-pin-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The git line under the tree: the head's type and ink, the branch glyph in
+ * the commit colour so it reads as the agents' git and not the window's. */
+.tree-ops {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: var(--space-1) var(--space-3);
+  border-top: var(--rule-width) solid var(--edge-rule);
+  font-size: var(--text-2xs);
+  color: var(--ink-chalk);
+}
+.tree-ops[hidden] { display: none; }
+.tree-ops .icon { width: 12px; height: 12px; flex: none; color: var(--tree-touch-commit); }
+.tree-ops-said { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-ops-more { flex: none; color: var(--ink-mist); }
+
 /* ---- 아티팩트 뷰 (t-2720, Orca 갭 #1) --------------------------------------
  *
  * 카드 그리드 + 오른쪽 서랍. 숫자는 tokens.css의 `--artifact-*`이고, 색은

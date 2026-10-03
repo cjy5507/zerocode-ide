@@ -72,7 +72,8 @@ pub(crate) use fs::{
     fs_trash, fs_undo, image_diff, list_dir, open_computer_use_permission, open_download,
     orchestration_runtime_state, path_kinds, paths_exist, read_image_file, read_text_file,
     render_mermaid, reset_computer_use_permissions, resume_vault_session, reveal_vault_session,
-    set_clipboard_image, show_download, vault_sessions, watch_files, write_text_file,
+    set_clipboard_image, show_download, tree_selection, vault_sessions, watch_files,
+    write_text_file,
 };
 
 pub(crate) use usage::{

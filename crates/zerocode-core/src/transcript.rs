@@ -1088,6 +1088,10 @@ impl TranscriptEdit {
     }
 }
 
+/// How a patch in Codex's envelope begins — the line every reader of one
+/// keys on (this file's patch readers, `hook::touched_in`).
+pub(crate) const PATCH_BEGINS: &str = "*** Begin Patch";
+
 /// The edits a tool call describes, read from the shapes the vendors write:
 ///
 /// - Claude Code — `Edit {file_path, old_string, new_string}`, `MultiEdit
@@ -1134,7 +1138,7 @@ fn edits_of_object(
     match tool {
         Some(crate::hook::Tool::Edit) => {
             if let Some(patch) = text(&["input", "patch"])
-                && patch.contains("*** Begin Patch")
+                && patch.contains(PATCH_BEGINS)
             {
                 return patch_edits(patch);
             }
@@ -1294,7 +1298,7 @@ fn script_patch_edits(script: &str) -> Vec<TranscriptEdit> {
         let rest = &script[open..];
         let quote_at = open + rest.len() - rest.trim_start().len();
         if let Some(literal) = js_string_literal(script, quote_at)
-            && literal.contains("*** Begin Patch")
+            && literal.contains(PATCH_BEGINS)
         {
             edits.extend(patch_edits(&literal));
         }

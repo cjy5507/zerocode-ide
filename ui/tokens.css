@@ -2297,6 +2297,22 @@
   --git-decoration-untracked: #73c991;
   --git-decoration-copied: #73c991;
   --git-decoration-ignored: #6e6e6e;
+  /* A merge conflict in the file tree's roll-up (t-24298) — the decoration
+   * every git client gives an unmerged file (VS Code's
+   * conflictingResourceForeground), distinct from a deletion's red so a
+   * folder holding both says which one outranks. */
+  --git-decoration-conflict: #e4676b;
+
+  /* What an agent is touching, worn by the file tree (t-24298): reading,
+   * writing, committing — the three kinds the claude-code-filetree mod draws
+   * (purple, orange, green), on this window's surfaces. Each is 9:1 or better
+   * on `--surface-deck`, so a lit name is still a name you can read. */
+  --tree-touch-read: #c4a5ff;
+  --tree-touch-write: #f2a65a;
+  --tree-touch-commit: #6fdc9c;
+  /* How long the mark takes to leave once its hold is over — slower than a
+   * hover, so the eye that arrives late still sees where it was. */
+  --tree-touch-fade: 600ms;
 
   /* A search hit, and the one the cursor is on. Two colours because a list of
    * matches with no current member is a list you cannot walk (:24144~24145 —
@@ -3013,6 +3029,14 @@
   --git-decoration-untracked: #007100;
   --git-decoration-copied: #007acc;
   --git-decoration-ignored: #8c8c8c;
+  /* Not the deletion's #ad0707 the light ramp borrows from VS Code: the
+   * roll-up ranks the two apart, so they must read apart (7.2:1 on white). */
+  --git-decoration-conflict: #9b1d8a;
+  /* The same three kinds on white: 5.7:1 or better on `--surface-deck` and
+   * 5.2:1 on `--surface-well`. */
+  --tree-touch-read: #6b3fc0;
+  --tree-touch-write: #a3470a;
+  --tree-touch-commit: #18753c;
   --annotation-highlight: #f59e0b;
   --tab-group-split-divider: #868690;
   --tab-group-split-divider-strong: #71717a;

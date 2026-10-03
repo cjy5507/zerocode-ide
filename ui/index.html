@@ -2774,12 +2774,54 @@
               <span data-i18n="file.content">내용</span>
             </button>
           </div>
-          <div class="file-tree" id="file-tree" tabindex="0"></div>
+          <!-- The tree's head (t-24298): where this checkout stands in git,
+               and whether the tree follows what the agents touch. -->
+          <div class="tree-head" id="tree-head">
+            <span class="tree-head-branch" id="tree-head-branch"></span>
+            <span class="tree-pin" id="tree-pin" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-pin"></use></svg>
+              <span class="tree-pin-path" id="tree-pin-path"></span>
+              <button
+                class="tree-head-button"
+                id="tree-unpin"
+                type="button"
+                data-i18n-aria="tree.unpin" aria-label="고정 풀기"
+                data-i18n-title="tree.unpin" data-tip="고정 풀기"
+              >
+                <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+              </button>
+            </span>
+            <span class="tree-head-space" aria-hidden="true"></span>
+            <button
+              class="tree-head-button"
+              id="tree-follow"
+              type="button"
+              aria-pressed="true"
+              data-i18n-aria="tree.follow" aria-label="에이전트 따라가기"
+              data-i18n-title="tree.followTip" data-tip="에이전트가 읽고 쓰는 파일로 트리를 펼칩니다"
+            >
+              <svg class="icon" aria-hidden="true"><use href="#i-crosshair"></use></svg>
+            </button>
+          </div>
+          <!-- A tree to a screen reader, with one tab stop on its rows (the
+               cursor's); the box itself is focusable only for code that
+               hands it the keyboard, and it keeps its own keys (t-24298). -->
+          <div
+            class="file-tree"
+            id="file-tree"
+            tabindex="-1"
+            role="tree"
+            data-keyboard-owner="true"
+            data-i18n-aria="tree.label" aria-label="파일 트리"
+          ></div>
           <div class="file-tree" id="file-hits" hidden></div>
           <!-- Content hits are three facts wide — file, line, the line — so
                they get their own host rather than being squeezed into the
                name list's single column. -->
           <div class="text-hits" id="file-text-hits" hidden></div>
+          <!-- What an agent is doing in git right now (t-24298), one line
+               under the tree while it runs. -->
+          <div class="tree-ops" id="tree-ops" role="status" aria-live="polite" hidden></div>
         </section>
 
         <!-- What has moved since the last commit. Clicking one opens its diff

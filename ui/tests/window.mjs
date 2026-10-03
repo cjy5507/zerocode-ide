@@ -67,6 +67,7 @@ import { installHarnessWaits } from "./harness-waits.mjs";
 import { installBoardWaits, testBoardWaits } from "./board-waits.mjs";
 
 import { testExplorer } from "./explorer.mjs";
+import { testExplorerAgentActivity, testExplorerAgentBurst, testExplorerGit, testExplorerKeys, testExplorerMentions, testExplorerRoot, testExplorerSelection, testExplorerVcs } from "./explorer-agent.mjs";
 import { testPathBrowser } from "./path-browser.mjs";
 import { testNativeFolderPicker } from "./native-folder-picker.mjs";
 import { testSftpAndTeam } from "./sftp.mjs";
@@ -210,6 +211,16 @@ suite("explorer", async ({ browser, origin, ok }) => {
     await page.close();
   }
 });
+/* The tree wears what the agents do, git's numbers and the keyboard
+ * (t-24298): one suite per slice, so each red and green is one name. */
+suite("explorer-agent-activity", ({ browser, origin, ok }) => testExplorerAgentActivity(browser, origin, ok));
+suite("explorer-agent-burst", ({ browser, origin, ok }) => testExplorerAgentBurst(browser, origin, ok));
+suite("explorer-git", ({ browser, origin, ok }) => testExplorerGit(browser, origin, ok));
+suite("explorer-mentions", ({ browser, origin, ok }) => testExplorerMentions(browser, origin, ok));
+suite("explorer-keys", ({ browser, origin, ok }) => testExplorerKeys(browser, origin, ok));
+suite("explorer-root", ({ browser, origin, ok }) => testExplorerRoot(browser, origin, ok));
+suite("explorer-vcs", ({ browser, origin, ok }) => testExplorerVcs(browser, origin, ok));
+suite("explorer-selection", ({ browser, origin, ok }) => testExplorerSelection(browser, origin, ok));
 suite("crash", ({ browser, origin, ok }) => testCrashReport(browser, origin, standBackend, ok));
 suite("ledger-poll", ({ browser, origin, ok }) => testLedgerPoll(browser, origin, standBackend, ok));
 suite("usage-refresh", async ({ browser, origin, ok }) => {
@@ -16625,7 +16636,10 @@ ok(
 const scmFollows = await page.evaluate(async () => {
   const seen = {};
   const ran = () => window.__COUNTS__.scm_status ?? 0;
-  // 판이 닫혀 있으면 한 번도 돌지 않는다.
+  // 판이 닫혀 있으면 한 번도 돌지 않는다. 파일 트리도 같은 답을 입으므로
+  // (t-24298) "아무도 안 본다"는 트리까지 닫혀 있다는 뜻이다.
+  const filesWere = el("activity-files").hidden;
+  el("activity-files").hidden = true;
   el("activity-scm").hidden = true;
   const closed = ran();
   noteScmMayHaveChanged();
@@ -16664,6 +16678,7 @@ const scmFollows = await page.evaluate(async () => {
   // 그리고 에이전트 소식이 실제로 이 문을 지난다.
   seen.beatCarriesIt = String(noteAgentsStirred).includes("noteScmMayHaveChanged");
   el("activity-scm").hidden = true;
+  el("activity-files").hidden = filesWere;
   return seen;
 });
 ok(
@@ -33611,6 +33626,8 @@ const scmRowGrammar = await page.evaluate(async () => {
       t("worktree.openIn", "{{app}}에서 열기", { app: application.label })),
     revealSays,
     t("worktree.customizeApps", "앱 사용자화…"),
+    // 원본의 마지막 줄 — 제 파일 패널에서 보기(t-24298).
+    t("sourceControl.revealInTree", "파일 트리에서 보기"),
   ];
   seen.separators = menu.querySelectorAll(".sidebar-menu-separator").length;
   closeSidebarMenu();
@@ -50110,7 +50127,8 @@ const treeMenu = await page.evaluate(async () => {
       reveal,
       ...tail,
     ],
-    wantDir: [...common, word("tree.menu.openInTerminal", "터미널에서 열기"), reveal, ...tail],
+    // A folder can also become the tree's root (t-24298).
+    wantDir: [...common, word("tree.menu.openInTerminal", "터미널에서 열기"), reveal, word("tree.menu.pinRoot", "트리 루트로 고정"), ...tail],
     wantDanger: [word("tree.menu.delete", "삭제")],
   };
 });

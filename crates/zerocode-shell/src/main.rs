@@ -194,6 +194,7 @@ mod terminal_prefs_runtime;
 mod terminal_registry;
 mod terminal_theme_import;
 mod token_scan;
+mod tree_selection;
 mod type_value_keys;
 mod typesafe_settings;
 mod ui_source;
@@ -356,8 +357,8 @@ use cmd::{
     term_snapshot, term_text, term_view_to_line, terminal_command, terminal_command_argv,
     terminal_prefs, terminal_sessions, terminal_windows_status, test_local_network_permission,
     test_remote_server, test_remote_workspace, test_router_connection, test_ssh_host, text_input,
-    tip_verdict, tour_decision, type_value_keys, typesafe_settings, unstage_path, unstage_paths,
-    update_check, update_download, update_history, update_install, upstream_status,
+    tip_verdict, tour_decision, tree_selection, type_value_keys, typesafe_settings, unstage_path,
+    unstage_paths, update_check, update_download, update_history, update_install, upstream_status,
     use_system_claude_login, validate_branch_name, vault_sessions, verify_claude_accounts,
     verify_codex_accounts, watch_files, wire_answer, wire_image, wire_interrupt, wire_log,
     wire_models, wire_send, wire_set_mode, wire_set_model, wire_start, wire_stop, work_item_seed,
@@ -2652,6 +2653,7 @@ fn main() -> ExitCode {
             fs_reveal,
             paths_exist,
             fs_open_default,
+            tree_selection,
             orchestration_report,
             orchestration_runtime_state,
             computer_use_skill_report,

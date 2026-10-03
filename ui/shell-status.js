@@ -3783,8 +3783,14 @@ function noteUsageMayHaveMoved() {
 const SCM_SETTLE_MS = 1_500;
 
 function refreshScmIfShowing() {
-  if (el("activity-scm").hidden) return;
+  // The file tree wears the same answer (t-24298): its badges, numbers and
+  // head go stale exactly like the panel's list, so either one on screen is
+  // somebody looking.
+  if (el("activity-scm").hidden && !fileTreeShowing()) return;
   refreshScm().catch(() => {});
+  // The panel's own refresh asks where the branch stands; with only the tree
+  // up, its head asks for that alone.
+  if (el("activity-scm").hidden) void askUpstream();
 }
 
 function noteScmMayHaveChanged() {

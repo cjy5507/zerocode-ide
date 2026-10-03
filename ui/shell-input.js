@@ -2359,6 +2359,29 @@ function badgeFor(relativePath) {
   return "";
 }
 
+/* One row's git face, painted the same way whether the row was just built or
+ * a fresh `scm_status` answer is being worn by rows already on screen
+ * (t-24298) — one painter, so the two cannot learn to disagree.
+ *
+ * One letter, the way Orca's explorer prints it — except "ignored", which
+ * Orca says with a ⊘ at the row's edge rather than with another letter
+ * competing with the real ones (measured live: `.re-scratch`, `target/` and
+ * `.DS_Store` each carry the circle-slash). The numbers and a folder's
+ * roll-up are the tree module's (`dressTreeGit`). */
+function paintTreeBadge(row, relative, isDir, code = badgeFor(relative)) {
+  const badge = row.querySelector(".badge");
+  const ignored = code === "!!";
+  row.classList.toggle("is-ignored", ignored);
+  if (ignored) badge.innerHTML = icon("ban");
+  else badge.textContent = badgeLetter(code);
+  badge.dataset.tip = code.trim();
+  badge.dataset.git = gitDecorationOf(code);
+  dressTreeGit(row, relative, isDir, ignored);
+  // The path is handed over: a row being built is labelled before it is
+  // bound, so it does not carry its own path yet.
+  labelTreeRow(row, relative);
+}
+
 /* One folder's entries, from the backend or from the answer already fetched.
  *
  * A workspace switch reads the root directory and runs git at the same time,
@@ -2662,11 +2685,19 @@ function treeMenuAt(x, y, seat) {
       },
     });
   }
+  items.push({
+    label: revealLabel,
+    run: ask("fs_reveal", { path: treeAbsolute(relative) }),
+  });
+  // A folder can become the tree's whole view (t-24298) — the mod's pinned
+  // folder, undone from the tree's head.
+  if (entry.is_dir) {
+    items.push({
+      label: t("tree.menu.pinRoot", "트리 루트로 고정"),
+      run: () => void pinTreeRoot(relative),
+    });
+  }
   items.push(
-    {
-      label: revealLabel,
-      run: ask("fs_reveal", { path: treeAbsolute(relative) }),
-    },
     { separator: true },
     {
       label: t("tree.menu.rename", "이름 바꾸기"),
@@ -2682,12 +2713,21 @@ function treeMenuAt(x, y, seat) {
 }
 
 async function loadTree(container, path) {
+  // The whole tree is the folder the person pinned, if they pinned one
+  // (t-24298): every road that reloads the tree from its top keeps the pin.
+  if (container === fileTree && path === "") path = treePinnedRoot();
   let entries = [];
   const ahead = listedAhead;
   listedAhead = null;
   try {
     entries = ahead?.path === path ? ahead.entries : await invoke("list_dir", { path });
   } catch {
+    // A pinned folder that is gone gives the tree back its workspace rather
+    // than a view of nothing.
+    if (container === fileTree && path !== "") {
+      forgetTreeRoot();
+      return loadTree(fileTree, "");
+    }
     return;
   }
   container.replaceChildren();
@@ -2704,9 +2744,12 @@ async function loadTree(container, path) {
     // file panel tells you `target/` is build output instead of pretending
     // it does not exist.
     row.className = `tree-row${entry.is_dir ? " is-dir" : ""}${ignored ? " is-ignored" : ""}`;
+    // The tally slot (t-24298) carries a changed file's +N -N, the way the
+    // source-control rows do, between the name and the letter.
     row.innerHTML =
       '<span class="twist"></span><span class="tree-glyph"></span>' +
-      '<span class="tree-name"></span><span class="badge"></span>';
+      '<span class="tree-name"></span><span class="scm-tally tree-tally"></span>' +
+      '<span class="badge"></span>';
     // A folder can be opened and a file cannot, so only one of them gets a
     // chevron — and the space is kept either way so every name in the tree
     // starts on the same vertical line.
@@ -2718,14 +2761,7 @@ async function loadTree(container, path) {
       entry.is_dir ? "folder" : fileTypeIcon(entry.name),
     );
     row.querySelector(".tree-name").textContent = entry.name;
-    // One letter, the way Orca's explorer prints it — except "ignored",
-    // which Orca says with a ⊘ at the row's edge rather than with another
-    // letter competing with the real ones (measured live: `.re-scratch`,
-    // `target/` and `.DS_Store` each carry the circle-slash).
-    if (ignored) row.querySelector(".badge").innerHTML = icon("ban");
-    else row.querySelector(".badge").textContent = badgeLetter(code);
-    row.querySelector(".badge").dataset.tip = code.trim();
-    row.querySelector(".badge").dataset.git = gitDecorationOf(code);
+    paintTreeBadge(row, relative, entry.is_dir, code);
     container.appendChild(row);
     bindExplorerRow(row, relative, entry);
     if (!entry.is_dir) {
@@ -2765,6 +2801,10 @@ async function loadTree(container, path) {
       treeMenuAt(event.clientX, event.clientY, { row, container, path, relative, entry });
     });
   }
+  // Rows built just now wear what the tree already knows about them — the
+  // agents' marks, the branch (t-24298) — rather than waiting for the next
+  // event.
+  dressTreeRows(container);
 }
 
 /* ---- searching the checkout: by name, or by what is inside ----

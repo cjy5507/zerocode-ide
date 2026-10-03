@@ -503,7 +503,14 @@ function scmRefusalText(action, kind, text) {
   return t("sourceControl.pushFailed", "푸시에 실패했습니다. 연결을 확인한 뒤 다시 시도하세요.");
 }
 
-async function refreshUpstream() {
+/* The one ask for where the branch stands. Two surfaces wear the answer —
+ * this panel's sync row and the file tree's head (t-24298) — so both ask
+ * through here, and the tree's head is painted from every answer either of
+ * them got. The head alone asks from `refreshScmIfShowing`: on the moments
+ * git can have moved, never on a workspace switch, which asks only what the
+ * move itself needs. */
+async function askUpstream() {
+  const root = activeWorktreePath;
   try {
     upstreamState = await invoke("upstream_status");
   } catch {
@@ -512,6 +519,11 @@ async function refreshUpstream() {
     // the table rather than guessing one.
     upstreamState = null;
   }
+  paintTreeHead(root);
+}
+
+async function refreshUpstream() {
+  await askUpstream();
   paintScmPrimary();
   // 같은 사실의 다른 두 얼굴 — 컨텍스트 행의 ↑↓와 포크 알림도 이 답을 입는다.
   paintCompareStats();
@@ -1017,6 +1029,9 @@ async function refreshScm({ uncapped = false } = {}) {
       ...scmEntries.map((entry) => [entry.path, entry.code.trim()]),
       ...(tree?.ignored ?? []).map((path) => [path, "!!"]),
     ];
+    // The rows already on screen wear the answer now (t-24298) — in place,
+    // without listing the tree again.
+    paintTreeGit();
   } catch (error) {
     vcsCodes = [];
     // git failing is not the same as nothing having changed, and this panel
@@ -1030,6 +1045,7 @@ async function refreshScm({ uncapped = false } = {}) {
     scmCapState = null;
     // A count nobody holds any more is not said (t-22100).
     paintChatStacks();
+    paintTreeGit();
     // No repository, no commits — the COMMITS head must not stand over a
     // section that can only open to nothing.
     el("scm-history-title").hidden = true;
@@ -2383,8 +2399,8 @@ function scmRow(entry, group) {
   // (our reveal — the original's file-manager entry plays that role on a
   // file), and the customize door. Flat with a separator rather than a
   // submenu: the workspace menu's own recorded adaptation of the same list.
-  // (The original's last row reveals in its OWN file panel — ours has no
-  // tree-reveal door yet; honest gap, the tree lane's to close.)
+  // The original's last row reveals the file in its OWN file panel, and so
+  // does ours now (t-24298): the tree's one reveal door, `showInTree`.
   row.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     const revealLabel = usesCommandModifier
@@ -2428,6 +2444,10 @@ function scmRow(entry, group) {
       {
         label: t("worktree.customizeApps", "앱 사용자화…"),
         run: () => setSettingsOpen(true, "settings-open-in-apps"),
+      },
+      {
+        label: t("sourceControl.revealInTree", "파일 트리에서 보기"),
+        run: () => void showInTree(entry.path),
       },
     ]);
   });

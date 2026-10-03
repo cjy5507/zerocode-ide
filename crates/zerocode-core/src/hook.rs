@@ -1079,6 +1079,433 @@ pub struct Activity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     pub phase: Phase,
+    /// Files the call reads besides its target (t-24298): the paths a reading
+    /// shell command opens — `sed -n 1,80p src/a.rs` — as the command wrote
+    /// them, a relative one to the folder the call runs in. What lets the
+    /// file tree light a file an agent read through its shell, which is how
+    /// Codex reads everything. Empty for most calls, and then not on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<String>,
+    /// Files the call writes besides its target: the files a patch names
+    /// (Codex's `apply_patch`, whose target is the patch itself).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writes: Vec<String>,
+    /// The git and gh operations a shell command runs, in order — what the
+    /// file tree's status line names while the command runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vcs: Vec<VcsStep>,
+    /// The folder the call ran in, as the payload said it (Claude's and
+    /// Cursor's `cwd`) — carried only beside [`Activity::reads`] or
+    /// [`Activity::writes`], the relative paths it is the base of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// One git or gh operation a shell command runs (t-24298): the program and
+/// the operation it was asked for — `git` · `commit`, `gh` · `pr create`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsStep {
+    pub tool: String,
+    pub verb: String,
+}
+
+/// The most files one shell command is read as opening. A command naming
+/// more than this is a search, and its first dozen already say where it
+/// looked; the file tree lights no more than a glance can follow anyway.
+pub const READ_PATHS_PER_COMMAND: usize = 12;
+
+/// The git verbs that change a repository or what it points at. Everything
+/// else git is asked — `status`, `log`, `diff`, `show`, `config` — is a
+/// question, and a question is not an operation a status line waits on.
+const GIT_OPERATIONS: &[&str] = &[
+    "add",
+    "branch",
+    "checkout",
+    "cherry-pick",
+    "clean",
+    "clone",
+    "commit",
+    "fetch",
+    "init",
+    "merge",
+    "mv",
+    "pull",
+    "push",
+    "rebase",
+    "reset",
+    "restore",
+    "revert",
+    "rm",
+    "stash",
+    "switch",
+    "tag",
+];
+
+/// The gh operations, by their two words: what opens, merges, checks out or
+/// comments on a review, an issue or a release. `gh pr view` and the other
+/// readers are questions.
+const GH_OPERATIONS: &[&str] = &[
+    "issue close",
+    "issue comment",
+    "issue create",
+    "pr checkout",
+    "pr close",
+    "pr comment",
+    "pr create",
+    "pr edit",
+    "pr merge",
+    "pr ready",
+    "pr review",
+    "release create",
+    "repo clone",
+    "repo create",
+];
+
+/// git's global options that take the next word as their value — what has
+/// to be stepped over to reach the verb in `git -C dir commit`.
+const GIT_VALUED_OPTIONS: &[&str] = &[
+    "-C",
+    "-c",
+    "--config-env",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
+];
+
+/// The flags that make `git branch` and `git tag` list rather than change.
+const GIT_LISTING_FLAGS: &[&str] = &[
+    "-l",
+    "--list",
+    "--show-current",
+    "--contains",
+    "--no-contains",
+    "--merged",
+    "--no-merged",
+    "--points-at",
+    "-v",
+    "--verify",
+];
+
+/// The program a shell segment runs and the words after it — past the
+/// wrappers and assignments a command hides behind (`env`, `FOO=1`, `exec`,
+/// `command`, `nohup`, `time`, `sudo`) — named by its last path part, so
+/// `/usr/bin/git` is `git`. `None` for a segment whose head is quoted: a
+/// string is not a program.
+fn segment_program(segment: Vec<ShellWord>) -> Option<(String, Vec<ShellWord>)> {
+    let mut words = segment.into_iter().skip_while(|word| {
+        !word.quoted
+            && (word.text.contains('=')
+                || matches!(
+                    word.text.as_str(),
+                    "env" | "exec" | "command" | "nohup" | "time" | "sudo"
+                ))
+    });
+    let head = words.next()?;
+    if head.quoted {
+        return None;
+    }
+    let name = head
+        .text
+        .rsplit('/')
+        .next()
+        .unwrap_or(&head.text)
+        .to_string();
+    Some((name, words.collect()))
+}
+
+/// The git and gh operations a shell command runs, in order (t-24298), read
+/// with the shell's own grammar ([`shell_segments`]): a `&&` inside quotes is
+/// a message, a heredoc's body is a document, and every segment of a chain
+/// is its own command.
+#[must_use]
+pub fn vcs_steps(command: &str) -> Vec<VcsStep> {
+    shell_segments(command)
+        .into_iter()
+        .filter_map(segment_program)
+        .filter_map(|(program, rest)| match program.as_str() {
+            "git" => git_step(&rest),
+            "gh" => gh_step(&rest),
+            _ => None,
+        })
+        .collect()
+}
+
+fn git_step(words: &[ShellWord]) -> Option<VcsStep> {
+    let mut at = 0;
+    while let Some(word) = words.get(at) {
+        if !word.text.starts_with('-') {
+            break;
+        }
+        at += if GIT_VALUED_OPTIONS.contains(&word.text.as_str()) {
+            2
+        } else {
+            1
+        };
+    }
+    let verb = words.get(at)?.text.as_str();
+    let rest = &words[at + 1..];
+    if !GIT_OPERATIONS.contains(&verb) || git_only_asks(verb, rest) {
+        return None;
+    }
+    // `checkout -- paths` puts files back; it moves no branch.
+    let verb = if verb == "checkout" && rest.iter().any(|word| word.text == "--") {
+        "restore"
+    } else {
+        verb
+    };
+    Some(VcsStep {
+        tool: "git".to_string(),
+        verb: verb.to_string(),
+    })
+}
+
+/// Whether `git <verb> <rest>` only asks: a branch or tag command that lists,
+/// a stash that is listed or shown.
+fn git_only_asks(verb: &str, rest: &[ShellWord]) -> bool {
+    let listing = || {
+        rest.iter().all(|word| word.text.starts_with('-'))
+            || rest
+                .iter()
+                .any(|word| GIT_LISTING_FLAGS.contains(&word.text.as_str()))
+    };
+    match verb {
+        "branch" | "tag" => listing(),
+        "stash" => rest
+            .first()
+            .is_some_and(|word| matches!(word.text.as_str(), "list" | "show")),
+        _ => false,
+    }
+}
+
+fn gh_step(words: &[ShellWord]) -> Option<VcsStep> {
+    let verb = format!("{} {}", words.first()?.text, words.get(1)?.text);
+    GH_OPERATIONS.contains(&verb.as_str()).then(|| VcsStep {
+        tool: "gh".to_string(),
+        verb,
+    })
+}
+
+/// The programs that read the files they are given, each with the options
+/// that take the next word as their value — so a value is never read as a
+/// file. Programs whose first plain word is a pattern or a script are named
+/// in [`READ_PATTERN_FIRST`].
+const FILE_READERS: &[(&str, &[&str])] = &[
+    ("awk", &["-f", "-v", "-F"]),
+    ("bat", &["-l", "--language", "-r", "--line-range"]),
+    ("cat", &[]),
+    ("egrep", GREP_VALUED),
+    ("fgrep", GREP_VALUED),
+    ("grep", GREP_VALUED),
+    ("head", &["-n", "-c"]),
+    ("jq", &[]),
+    ("less", &[]),
+    ("ls", &[]),
+    ("more", &[]),
+    ("nl", &[]),
+    (
+        "rg",
+        &[
+            "-e",
+            "-f",
+            "-g",
+            "-t",
+            "-T",
+            "-m",
+            "-A",
+            "-B",
+            "-C",
+            "-M",
+            "--glob",
+            "--type",
+            "--type-not",
+            "--max-count",
+            "--max-columns",
+        ],
+    ),
+    ("sed", &["-e", "-f"]),
+    ("tail", &["-n", "-c"]),
+    ("tree", &["-L", "-I", "-P"]),
+    ("wc", &[]),
+];
+
+const GREP_VALUED: &[&str] = &[
+    "-e",
+    "-f",
+    "-m",
+    "-A",
+    "-B",
+    "-C",
+    "--include",
+    "--exclude",
+    "--exclude-dir",
+];
+
+/// The readers whose first plain word is what they look for or run, not a
+/// file — unless the pattern came with an option (`-e`, `-f`, `--files`).
+const READ_PATTERN_FIRST: &[&str] = &["awk", "egrep", "fgrep", "grep", "jq", "rg", "sed"];
+
+/// The options that hand a pattern-first reader its pattern, or tell it
+/// there is none.
+const READ_PATTERN_GIVEN: &[&str] = &["-e", "-f", "--regexp", "--file", "--files"];
+
+/// The files a reading shell command opens, as it named them (t-24298) —
+/// relative ones joined to a folder an earlier `cd` in the same command
+/// moved to. Globs, redirections, expansions and in-place edits name no file
+/// read; at most [`READ_PATHS_PER_COMMAND`].
+#[must_use]
+pub fn read_paths(command: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    // Where an earlier `cd` moved; `None` once it moved somewhere this
+    // reader cannot follow (`cd -`, `cd ~`, `cd $DIR`).
+    let mut base: Option<Option<String>> = None;
+    for (program, rest) in shell_segments(command)
+        .into_iter()
+        .filter_map(segment_program)
+    {
+        if program == "cd" || program == "pushd" {
+            let to = rest.first().map(|word| word.text.as_str()).unwrap_or("");
+            base = Some(
+                if to.is_empty() || to == "-" || to.starts_with('~') || to.contains('$') {
+                    None
+                } else if to.starts_with('/') {
+                    Some(to.trim_end_matches('/').to_string())
+                } else {
+                    match &base {
+                        Some(Some(from)) => Some(format!("{from}/{}", to.trim_end_matches('/'))),
+                        Some(None) => None,
+                        None => Some(to.trim_end_matches('/').to_string()),
+                    }
+                },
+            );
+            continue;
+        }
+        let Some((_, valued)) = FILE_READERS.iter().find(|(name, _)| *name == program) else {
+            continue;
+        };
+        if program == "sed"
+            && rest
+                .iter()
+                .any(|word| word.text.starts_with("-i") || word.text.starts_with("--in-place"))
+        {
+            continue;
+        }
+        let mut pattern_owed = READ_PATTERN_FIRST.contains(&program.as_str())
+            && !rest
+                .iter()
+                .any(|word| READ_PATTERN_GIVEN.contains(&word.text.as_str()));
+        let mut at = 0;
+        while let Some(word) = rest.get(at) {
+            at += 1;
+            let text = word.text.as_str();
+            if text.starts_with('-') {
+                if valued.contains(&text) {
+                    at += 1;
+                }
+                continue;
+            }
+            if pattern_owed {
+                pattern_owed = false;
+                continue;
+            }
+            if text.is_empty() || text.contains(['>', '<', '*', '?', '[', '$', '`']) || text == "{}"
+            {
+                continue;
+            }
+            let path = match (&base, text.starts_with('/')) {
+                (_, true) | (None, false) => text.to_string(),
+                (Some(Some(from)), false) => format!("{from}/{text}"),
+                (Some(None), false) => continue,
+            };
+            if !found.contains(&path) {
+                found.push(path);
+            }
+            if found.len() == READ_PATHS_PER_COMMAND {
+                return found;
+            }
+        }
+    }
+    found
+}
+
+/// The script a shell call runs: its command as written, or — when the
+/// vendor passed an argv (`["bash", "-lc", "…"]`, Codex) — the shell's own
+/// script word, so the script is read as a script and not as the shell's
+/// arguments. Cursor's shell event keeps the command at the payload's top.
+fn shell_script_in(parsed: &serde_json::Value) -> Option<String> {
+    let input = INPUT_KEYS
+        .iter()
+        .find_map(|key| parsed.get(*key))
+        .unwrap_or(parsed);
+    let held = ["command", "cmd"]
+        .iter()
+        .find_map(|key| input.get(*key).or_else(|| parsed.get(*key)))?;
+    if let Some(argv) = held.as_array() {
+        let words: Vec<&str> = argv.iter().filter_map(serde_json::Value::as_str).collect();
+        if let [shell, flag, script, ..] = words.as_slice()
+            && matches!(shell.rsplit('/').next(), Some("bash" | "sh" | "zsh"))
+            && flag.starts_with('-')
+            && flag.ends_with('c')
+        {
+            return Some((*script).to_string());
+        }
+        return Some(words.join(" "));
+    }
+    held.as_str().map(str::to_string)
+}
+
+/// Whether a call's input carries a patch in Codex's envelope anywhere — the
+/// one test that keeps the patch reader (which diffs) off every ordinary
+/// edit and write.
+fn names_a_patch(input: &serde_json::Value) -> bool {
+    match input {
+        serde_json::Value::String(text) => text.contains(crate::transcript::PATCH_BEGINS),
+        serde_json::Value::Array(items) => items.iter().any(names_a_patch),
+        serde_json::Value::Object(map) => map.values().any(names_a_patch),
+        _ => false,
+    }
+}
+
+/// What a tool call reads, writes and runs in git beyond its target, and the
+/// folder its relative paths are relative to — the four fields
+/// [`activity_of_parsed`] adds to a tool call's verb, target and phase.
+#[derive(Default)]
+struct Touched {
+    reads: Vec<String>,
+    writes: Vec<String>,
+    vcs: Vec<VcsStep>,
+    cwd: Option<String>,
+}
+
+fn touched_in(verb: &Tool, parsed: &serde_json::Value) -> Touched {
+    let input = INPUT_KEYS.iter().find_map(|key| parsed.get(*key));
+    let writes: Vec<String> = match input {
+        Some(input) if matches!(verb, Tool::Edit | Tool::Bash) && names_a_patch(input) => {
+            crate::transcript::edits_in(tool_named_in(parsed).unwrap_or_default(), Some(input))
+                .into_iter()
+                .map(|edit| edit.path)
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    let (reads, vcs) = match verb {
+        Tool::Bash => shell_script_in(parsed)
+            .map(|script| (read_paths(&script), vcs_steps(&script)))
+            .unwrap_or_default(),
+        _ => (Vec::new(), Vec::new()),
+    };
+    // Raw, not through the row's clamp: a base cut at 120 characters would
+    // put every path under it somewhere else.
+    let cwd = (!reads.is_empty() || !writes.is_empty())
+        .then(|| parsed.get("cwd").and_then(serde_json::Value::as_str))
+        .flatten()
+        .map(str::to_string);
+    Touched {
+        reads,
+        writes,
+        vcs,
+        cwd,
+    }
 }
 
 /// What one event says a tool call is doing, or `None` when it is not about a
@@ -1217,6 +1644,10 @@ pub fn activity_said(line: &str) -> Option<Activity> {
         verb: Tool::named(verb)?,
         target: target.and_then(activity_text),
         phase: Phase::Started,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        vcs: Vec::new(),
+        cwd: None,
     })
 }
 
@@ -1354,10 +1785,15 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
         } else {
             phase
         };
+        let touched = touched_in(&verb, parsed);
         return Some(Activity {
             verb,
             target,
             phase,
+            reads: touched.reads,
+            writes: touched.writes,
+            vcs: touched.vcs,
+            cwd: touched.cwd,
         });
     }
     if word == "userpromptsubmit" || word == "beforesubmitprompt" {
@@ -1365,6 +1801,10 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             verb: Tool::Other(PROMPT_VERB.to_string()),
             target: first_text(parsed, &["prompt", "message", "user_prompt", "userPrompt"]),
             phase: Phase::Prompted,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            vcs: Vec::new(),
+            cwd: None,
         });
     }
     // Every way a turn ends, borrowed from the one table that already knows
@@ -1374,6 +1814,10 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             verb: Tool::Other(STOP_VERB.to_string()),
             target: None,
             phase: Phase::Stopped,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            vcs: Vec::new(),
+            cwd: None,
         });
     }
     None
@@ -1406,19 +1850,7 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
 #[must_use]
 pub fn nested_agent_of(command: &str) -> Option<crate::agent::AgentKind> {
     shell_segments(command).into_iter().find_map(|segment| {
-        let mut words = segment.into_iter().skip_while(|word| {
-            !word.quoted
-                && (word.text.contains('=')
-                    || matches!(
-                        word.text.as_str(),
-                        "env" | "exec" | "command" | "nohup" | "time" | "sudo"
-                    ))
-        });
-        let head = words.next()?;
-        if head.quoted {
-            return None;
-        }
-        let name = head.text.rsplit('/').next().unwrap_or(&head.text);
+        let (name, rest) = segment_program(segment)?;
         // EVERY name that means this agent on PATH, not only the primary
         // one: Cursor's CLI is `agent` now and `cursor-agent` is the legacy
         // link its installer still makes, so a person's muscle memory names
@@ -1430,7 +1862,6 @@ pub fn nested_agent_of(command: &str) -> Option<crate::agent::AgentKind> {
                 crate::agent::agent_spec(kind.slug())
                     .is_some_and(|spec| spec.detect_names().any(|said| said == name))
             })?;
-        let rest: Vec<ShellWord> = words.collect();
         if is_agent_probe(&rest) {
             return None;
         }
@@ -2977,6 +3408,196 @@ mod tests {
 
         // Nothing said is nothing drawn.
         assert!(activity_said("   ").is_none());
+    }
+
+    /// The git and gh operations a shell command runs, read with the shell's
+    /// own grammar (t-24298): chains, wrappers, assignments, `git -C dir`,
+    /// quotes that hide a `&&`, heredoc bodies that are documents — and the
+    /// questions git answers are not operations.
+    #[test]
+    fn a_shell_command_names_the_git_and_gh_operations_it_runs() {
+        let steps = |command: &str| {
+            vcs_steps(command)
+                .into_iter()
+                .map(|step| format!("{} {}", step.tool, step.verb))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(steps("git commit -m 'fix: a && b'"), ["git commit"]);
+        assert_eq!(
+            steps("cd crates/core && git add -A && git commit -m \"wip; again\""),
+            ["git add", "git commit"]
+        );
+        assert_eq!(
+            steps("GIT_AUTHOR_NAME=dev git -C /Users/dev/repo push origin main"),
+            ["git push"]
+        );
+        assert_eq!(
+            steps("env GIT_EDITOR=true git -c core.editor=true rebase --continue"),
+            ["git rebase"]
+        );
+        assert_eq!(
+            steps("git --git-dir .git --work-tree . commit --amend --no-edit"),
+            ["git commit"]
+        );
+        assert_eq!(
+            steps("/usr/bin/git pull --ff-only && sudo git fetch --all"),
+            ["git pull", "git fetch"]
+        );
+        assert_eq!(
+            steps("git checkout -b feat/tree && git checkout -- src/a.rs"),
+            ["git checkout", "git restore"]
+        );
+        assert_eq!(
+            steps("git merge --no-ff side || git merge --abort"),
+            ["git merge", "git merge"]
+        );
+        assert_eq!(
+            steps("gh pr create --fill && gh pr view --web"),
+            ["gh pr create"]
+        );
+        assert_eq!(steps("gh pr merge 42 --squash"), ["gh pr merge"]);
+        assert_eq!(
+            steps("git branch -D old && git stash pop && git tag v1.2.0"),
+            ["git branch", "git stash", "git tag"]
+        );
+        // A heredoc's body is a document, not commands.
+        assert_eq!(
+            steps("git commit -F - <<'EOF'\ngit push --force\nEOF\n"),
+            ["git commit"]
+        );
+        for asked in [
+            "git status --short",
+            "git log --oneline -3",
+            "git diff HEAD~1",
+            "git --no-pager show",
+            "git branch",
+            "git branch -a -vv",
+            "git stash list",
+            "git tag",
+            "git tag -l 'v*'",
+            "gh pr view 42",
+            "echo 'git push'",
+            "grep -r \"git commit\" docs",
+        ] {
+            assert!(
+                vcs_steps(asked).is_empty(),
+                "{asked} asks git a question and runs no operation"
+            );
+        }
+    }
+
+    /// The files a reading shell command opens, as it named them — what
+    /// lights a file the agent read through its shell.
+    #[test]
+    fn a_reading_shell_command_names_the_files_it_opens() {
+        let none: Vec<String> = Vec::new();
+        assert_eq!(read_paths("sed -n '1,200p' src/main.rs"), ["src/main.rs"]);
+        assert_eq!(read_paths("cat a.rs b.rs | head -n 20"), ["a.rs", "b.rs"]);
+        assert_eq!(
+            read_paths("head -n 50 README.md 2>/dev/null"),
+            ["README.md"]
+        );
+        assert_eq!(
+            read_paths("rg -n 'fn main' crates/core --glob '*.rs'"),
+            ["crates/core"]
+        );
+        assert_eq!(read_paths("grep -e needle -r src tests"), ["src", "tests"]);
+        assert_eq!(
+            read_paths("cd ui && sed -n 10,40p shell.js"),
+            ["ui/shell.js"]
+        );
+        assert_eq!(
+            read_paths("cd /Users/dev/repo && cat docs/a.md"),
+            ["/Users/dev/repo/docs/a.md"]
+        );
+        // A glob names no one file, an in-place edit is a write, and a
+        // command that is not a reader opens nothing it names.
+        assert_eq!(read_paths("wc -l ui/*.js"), none);
+        assert_eq!(read_paths("sed -i 's/a/b/' x.rs"), none);
+        assert_eq!(read_paths("cargo test -p zerocode-core"), none);
+        let many = format!(
+            "cat {}",
+            (0..30)
+                .map(|at| format!("f{at}.rs"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        assert_eq!(read_paths(&many).len(), READ_PATHS_PER_COMMAND);
+    }
+
+    /// A tool call carries what it read, wrote and ran in git, from every
+    /// shape the vendors write it in — and a call that names none of them
+    /// travels exactly as before.
+    #[test]
+    fn a_tool_call_carries_what_it_reads_writes_and_runs_in_git() {
+        let verbs = |activity: &Activity| {
+            activity
+                .vcs
+                .iter()
+                .map(|step| step.verb.clone())
+                .collect::<Vec<_>>()
+        };
+        let bash = activity_of(
+            "PreToolUse",
+            r#"{"tool_name":"Bash","tool_input":{"command":"sed -n 1,80p src/lib.rs && git add -A && git commit -m done"}}"#,
+        )
+        .expect("a shell call said nothing");
+        assert_eq!(bash.reads, ["src/lib.rs"]);
+        assert_eq!(verbs(&bash), ["add", "commit"]);
+        // The folder a relative read is relative to rides beside it, and
+        // only beside it.
+        let located = activity_of(
+            "PreToolUse",
+            r#"{"cwd":"/Users/dev/repo/ui","tool_name":"Bash","tool_input":{"command":"cat shell.js"}}"#,
+        )
+        .expect("a located shell call said nothing");
+        assert_eq!(located.cwd.as_deref(), Some("/Users/dev/repo/ui"));
+        let unlocated = activity_of(
+            "PreToolUse",
+            r#"{"cwd":"/Users/dev/repo","tool_name":"Bash","tool_input":{"command":"cargo test"}}"#,
+        )
+        .expect("a plain shell call said nothing");
+        assert_eq!(unlocated.cwd, None);
+        // Codex's argv: the script is the shell's third word.
+        let codex = activity_of(
+            "PreToolUse",
+            r#"{"tool_name":"shell","tool_input":{"command":["bash","-lc","git push origin HEAD"]}}"#,
+        )
+        .expect("an argv call said nothing");
+        assert_eq!(verbs(&codex), ["push"]);
+        // Cursor's shell event names the command at the payload's top.
+        let cursor = activity_of(
+            "beforeShellExecution",
+            r#"{"command":"cat docs/a.md","cwd":"/repo"}"#,
+        )
+        .expect("cursor's shell event said nothing");
+        assert_eq!(cursor.reads, ["docs/a.md"]);
+        // A patch's files are what it writes; its target is the patch.
+        let patch = activity_of(
+            "PreToolUse",
+            r#"{"tool_name":"apply_patch","tool_input":{"input":"*** Begin Patch\n*** Update File: src/a.rs\n@@\n-old\n+new\n*** Add File: src/b.rs\n+x\n*** End Patch\n"}}"#,
+        )
+        .expect("a patch said nothing");
+        assert_eq!(patch.verb, Tool::Edit);
+        assert_eq!(patch.writes, ["src/a.rs", "src/b.rs"]);
+        // A plain edit is its target and nothing more, on the wire too.
+        let edit = activity_of(
+            "PreToolUse",
+            r#"{"tool_name":"Edit","tool_input":{"file_path":"/repo/a.rs","old_string":"a","new_string":"b"}}"#,
+        )
+        .expect("an edit said nothing");
+        assert!(edit.reads.is_empty() && edit.writes.is_empty() && edit.vcs.is_empty());
+        let plain = serde_json::to_value(&edit).expect("serialize");
+        assert!(
+            plain.get("reads").is_none()
+                && plain.get("writes").is_none()
+                && plain.get("vcs").is_none()
+        );
+        let carried = serde_json::to_value(&bash).expect("serialize");
+        assert_eq!(
+            carried["vcs"][1],
+            serde_json::json!({"tool": "git", "verb": "commit"})
+        );
     }
 
     /// The verb travels as a plain word, because the window draws a word.
