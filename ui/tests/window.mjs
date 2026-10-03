@@ -56177,6 +56177,18 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
         longChat?.querySelector('.pane-chat-notice[data-says="worker.historyFolded"]')?.textContent ===
           t("worker.historyFolded", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다.");
       seen.foldedAbove = noticeAboveBody(longChat, "worker.historyFolded");
+      // Two notices at once, as in the person's photo (a hand-over waiting
+      // beside the folded history): both stand above the body, one under the
+      // other, each as wide as the list.
+      noticeOnPaneChat(paneChats.get(long), "worker.handoverPending", true,
+        t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간 세션(선)으로 이어집니다."));
+      const pairBox = (key) => longChat?.querySelector(`.pane-chat-notice[data-says="${key}"]`)?.getBoundingClientRect();
+      const folded = pairBox("worker.historyFolded");
+      const pending = pairBox("worker.handoverPending");
+      seen.pairAbove = noticeAboveBody(longChat, "worker.historyFolded") &&
+        noticeAboveBody(longChat, "worker.handoverPending") &&
+        Boolean(folded && pending) && (pending.top >= folded.bottom - 0.5 || folded.top >= pending.bottom - 0.5);
+      noticeOnPaneChat(paneChats.get(long), "worker.handoverPending", false);
       seen.turnClock = paneChats.get(long)?.run.startedAt === hookStamps.get(long) &&
         Date.now() - paneChats.get(long).run.startedAt < bornAgo / 2;
       // The permission mode's reach colours the send and the spinner's mark
@@ -56234,9 +56246,9 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       JSON.stringify(seen),
     );
     ok(
-      "a conversation's notice (no transcript named, history folded) is a line above the conversation's body as wide as its list, never a cell of the body's rail | list grid",
-      seen.noticeAbove && seen.foldedAbove,
-      JSON.stringify({ noticeAbove: seen.noticeAbove, foldedAbove: seen.foldedAbove }),
+      "a conversation's notice (no transcript named, history folded, two at once) is a line above the conversation's body as wide as its list, never a cell of the body's rail | list grid",
+      seen.noticeAbove && seen.foldedAbove && seen.pairAbove,
+      JSON.stringify({ noticeAbove: seen.noticeAbove, foldedAbove: seen.foldedAbove, pairAbove: seen.pairAbove }),
     );
   } finally {
     await page.close();
