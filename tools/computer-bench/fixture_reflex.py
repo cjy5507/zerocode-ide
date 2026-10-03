@@ -45,6 +45,12 @@ HERE = pathlib.Path(__file__).resolve().parent
 FIXTURES = HERE.parents[1] / "crates/zerocode-core/fixtures"
 COLOURS = ("red", "blue")
 SCENARIO = "reflex-fixture"
+# The round's kinds beyond the plain one (t-26708): a preview before each target arms; a sweeper
+# toward the pointer with a pad to move to; a card among decoys for a limited time.
+PLAIN = "plain"
+KINDS = ("timing", "avoid", "panel")
+# The colours a kind adds to the palette and to every detector's classes, in class order.
+KIND_COLOURS = ("preview", "sweeper", "pad")
 # The road this bench drives: the helper straight over its socket (pre-check (iii)).
 CONFIG = "helper-direct"
 # The generator that stands in for a model: this runner's plan, counted as its own.
@@ -91,6 +97,8 @@ def schedule(seed, values, kind=None):
     draw = random.Random(seed)
     target, phase, decoy, curtain, rounds = (values[name] for name in (
         "reflex_target", "reflex_phase", "reflex_decoy", "reflex_curtain", "reflex_round"))
+    kind = kind or PLAIN
+    kinds = values["reflex_kind"]
     length_ms = (values["reflex_safety"]["prep_s"] + rounds["run_s"]) * 1_000
     box = field(values)
     phases = []
@@ -106,13 +114,17 @@ def schedule(seed, values, kind=None):
     targets, decoys = [], []
     at = rounds["lead_ms"]
     while at < length_ms:
-        gap, life = draw.randint(*target["gap_ms"]), draw.randint(*target["life_ms"])
+        gap = draw.randint(*target["gap_ms"])
+        life = draw.randint(*(kinds["panel"]["life_ms"] if kind == "panel" else target["life_ms"]))
+        # A timing round shows the target as a preview this long before it arms; its life runs from the arm.
+        preview = draw.randint(*kinds["timing"]["preview_ms"]) if kind == "timing" else 0
         appear = at + gap
         if appear >= length_ms:
             break
         current = phase_at(appear)
         appear = max(appear, current["startMs"] + phase["settle_ms"])
-        expire = appear + life
+        arm = appear + preview
+        expire = arm + life
         if expire > current["endMs"]:
             # A target never outlives its phase's colour: the next phase's first one comes after its settle.
             at = current["endMs"]
@@ -121,15 +133,27 @@ def schedule(seed, values, kind=None):
         speed = draw.uniform(*target["speed_pt_s"]) if draw.random() < target["moving_share"] else 0.0
         heading = draw.uniform(0, 2 * math.pi)
         vx, vy = round(speed * math.cos(heading), 2) or 0.0, round(speed * math.sin(heading), 2) or 0.0
-        dx, dy = vx * life / 1_000, vy * life / 1_000
+        dx, dy = vx * (preview + life) / 1_000, vy * (preview + life) / 1_000
         inset = radius + target["edge_pt"]
         x = draw.uniform(box["x"] + inset - min(0, dx), box["x"] + box["width"] - inset - max(0, dx))
         y = draw.uniform(box["y"] + inset - min(0, dy), box["y"] + box["height"] - inset - max(0, dy))
         row = {"id": f"t{len(targets) + 1}", "phase": current["index"], "colour": current["colour"],
                "appearMs": appear, "expireMs": expire, "x": round(x, 2), "y": round(y, 2), "vx": vx, "vy": vy,
                "radius": radius}
+        if kind == "timing":
+            row["armMs"] = arm
         targets.append(row)
-        if draw.random() < decoy["share"]:
+        if kind == "panel":
+            # A panel: the card among the table's decoys, all shown together for the card's life.
+            placed_all = []
+            for _ in range(kinds["panel"]["cards"] - 1):
+                placed = decoy_beside(row, draw, values, taken=placed_all)
+                if not placed:
+                    break
+                placed_all.append(placed)
+                decoys.append({"id": f"d{len(decoys) + 1}", "colour": other(current["colour"]),
+                               "appearMs": appear, "expireMs": expire, "beside": row["id"], **placed})
+        elif draw.random() < decoy["share"]:
             placed = decoy_beside(row, draw, values)
             if placed:
                 decoys.append({"id": f"d{len(decoys) + 1}", "colour": other(current["colour"]),
@@ -145,13 +169,45 @@ def schedule(seed, values, kind=None):
         curtains.append({"id": f"c{len(curtains) + 1}", "appearMs": at, "expireMs": at + sweep, "x": start,
                          "y": box["y"], "width": width, "height": box["height"], "vx": speed if rightward else -speed})
         at += sweep + draw.randint(*curtain["every_ms"])
-    return {"seed": seed, "lengthMs": length_ms, "field": box, "phases": phases, "targets": targets,
-            "decoys": decoys, "curtains": curtains}
+    drawn = {"seed": seed, "lengthMs": length_ms, "field": box, "phases": phases, "targets": targets,
+             "decoys": decoys, "curtains": curtains}
+    if kind != PLAIN:
+        drawn["kind"] = kind
+    if kind == "avoid":
+        drawn["sweeps"] = sweeps(draw, values, box, length_ms)
+    return drawn
 
 
-def decoy_beside(target, draw, values):
+def sweeps(draw, values, box, length_ms):
+    """An avoid round's sweepers, one at a time: each launched from outside the
+    field's left or right edge toward where the pointer rests then (the
+    fixture reads that at the launch), over its flight, with a pad to move to
+    on the far side of the field, inside it."""
+    table, lead = values["reflex_kind"]["avoid"], values["reflex_round"]["lead_ms"]
+    width, height, radius = table["width_pt"], table["height_pt"], table["pad_radius_pt"]
+    middle = box["x"] + box["width"] // 2
+    rows = []
+    at = lead + draw.randint(*table["every_ms"])
+    while True:
+        flight = draw.randint(*table["flight_ms"])
+        if at + flight >= length_ms:
+            break
+        from_left = draw.random() < 0.5
+        rows.append({"id": f"s{len(rows) + 1}", "appearMs": at, "flightMs": flight,
+                     "fromX": box["x"] - width if from_left else box["x"] + box["width"],
+                     "fromY": draw.randint(box["y"] + height // 2, box["y"] + box["height"] - height // 2),
+                     "width": width, "height": height,
+                     "padX": (draw.randint(middle + radius, box["x"] + box["width"] - radius) if from_left
+                              else draw.randint(box["x"] + radius, middle - radius)),
+                     "padY": draw.randint(box["y"] + radius, box["y"] + box["height"] - radius), "padRadius": radius})
+        at += flight + draw.randint(*table["every_ms"])
+    return rows
+
+
+def decoy_beside(target, draw, values, taken=()):
     """A still decoy clear of the target's whole drift: one of the field's
-    lattice points a decoy's width apart, drawn among those clear of it."""
+    lattice points a decoy's width apart, drawn among those clear of it — and
+    clear of every decoy in `taken` (a panel's other cards)."""
     clearance = values["reflex_decoy"]["clearance_pt"]
     edge = values["reflex_target"]["edge_pt"]
     radius = draw.randint(*values["reflex_target"]["radius_pt"])
@@ -164,7 +220,8 @@ def decoy_beside(target, draw, values):
     candidates = [(x, y)
                   for x in range(box["x"] + inset, box["x"] + box["width"] - inset + 1, pitch)
                   for y in range(box["y"] + inset, box["y"] + box["height"] - inset + 1, pitch)
-                  if apart((x, y), start, end) >= target["radius"] + radius + clearance]
+                  if apart((x, y), start, end) >= target["radius"] + radius + clearance
+                  and all(math.hypot(x - card["x"], y - card["y"]) >= radius + card["radius"] + clearance for card in taken)]
     if not candidates:
         return None
     x, y = draw.choice(candidates)
@@ -208,26 +265,32 @@ def plan(geometry, values, bundle, contract_version, rules=None, table_limits=No
     edge = values["reflex_target"]["edge_pt"]
     roi = {"height": window["height"] - hud - 2 * edge, "space": "pixel", "width": window["width"] - 2 * edge,
            "x": x + edge, "y": y + hud + edge}
-    classes = [colour_class(palette[name]) for name in COLOURS]
-    detectors = []
-    for number, colour in enumerate(COLOURS, start=1):
-        detectors.append({
-            "color": {
-                "anchors": [{"class": number, "x": x + int(share * window["width"]), "y": y + hud // 2}
-                            for share in chosen["anchors"]],
-                "classes": classes,
-                "confirm": chosen["confirm"],
-                "ground": colour_class(palette["ground"]),
-                "layout": {"class": number, "gate": chosen["gate_pt"], "kind": "blobs",
-                           "max_blobs": chosen["max_blobs"], "min_samples": chosen["min_samples"],
-                           "step": chosen["step_pt"]},
-                "reference_height": int(display["height"]),
-                "reference_width": int(display["width"]),
-                "space": "srgb",
-            },
-            "id": colour, "kind": "color", "patches": 1, "roi": roi,
-            "scale": {"denominator": 1, "numerator": 1},
-        })
+    kind = kind or PLAIN
+    added = values["reflex_kind_palette"] if kind != PLAIN else {}
+    classes = [colour_class(palette[name]) for name in COLOURS] + [colour_class(added[name]) for name in KIND_COLOURS
+                                                                   if name in added]
+
+    def detector(name, number, anchors):
+        """One colour detector over the field: its class, the anchors that gate it (none reads always)."""
+        spec = {
+            "classes": classes,
+            "confirm": chosen["confirm"],
+            "ground": colour_class(palette["ground"]),
+            "layout": {"class": number, "gate": chosen["gate_pt"], "kind": "blobs",
+                       "max_blobs": chosen["max_blobs"], "min_samples": chosen["min_samples"],
+                       "step": chosen["step_pt"]},
+            "reference_height": int(display["height"]),
+            "reference_width": int(display["width"]),
+            "space": "srgb",
+        }
+        if anchors:
+            spec["anchors"] = anchors
+        return {"color": spec, "id": name, "kind": "color", "patches": 1, "roi": roi,
+                "scale": {"denominator": 1, "numerator": 1}}
+
+    detectors = [detector(colour, number, [{"class": number, "x": x + int(share * window["width"]), "y": y + hud // 2}
+                                           for share in chosen["anchors"]])
+                 for number, colour in enumerate(COLOURS, start=1)]
     # One rule a colour, or several: a rule that fired is spent until its
     # colour reads false again, so a rule beside it — armed, lower in priority —
     # tries the same target again while it stands when the first try ended
@@ -235,8 +298,10 @@ def plan(geometry, values, bundle, contract_version, rules=None, table_limits=No
     # expanded-action budget (two leaves a fire).
     many = rules or chosen["rules_per_colour"]
     leaves = 2
+    # An avoid round's pad: one move leaf a fire, above every colour's rule.
+    pad_leaves = 1 if kind == "avoid" else 0
     budget = (table_limits or limits())["max_expanded_actions"]
-    quota = min(chosen["quota"], budget // (len(COLOURS) * many * leaves))
+    quota = min(chosen["quota"], budget // (len(COLOURS) * many * leaves + pad_leaves))
     rules = [{"cooldown_ms": 0, "detector": colour, "id": f"hit_{colour}" + (f"_{try_}" if try_ > 1 else ""),
               "macro_id": f"tap_{colour}", "max_fires": quota, "predicate": {"op": "eq", "value": 1},
               "priority": many - try_ + 1}
@@ -245,6 +310,11 @@ def plan(geometry, values, bundle, contract_version, rules=None, table_limits=No
                            {"id": f"click_{colour}", "kind": "click", "target": colour}],
                "id": f"tap_{colour}", "repeat": 1}
               for colour in COLOURS]
+    if pad_leaves:
+        detectors.append(detector("pad", len(COLOURS) + KIND_COLOURS.index("pad") + 1, []))
+        rules.append({"cooldown_ms": 0, "detector": "pad", "id": "to_pad", "macro_id": "go_pad", "max_fires": quota,
+                      "predicate": {"op": "eq", "value": 1}, "priority": many + 1})
+        macros.append({"actions": [{"id": "move_pad", "kind": "move", "target": "pad"}], "id": "go_pad", "repeat": 1})
     return {"detectors": detectors, "macros": macros, "plan_hash": "",
             "pointer": {"curve": "cosine", "duration_ms": glide(pointer_ms, chosen["pointer_ms"]), "instant": False},
             "rules": rules, "scope": {"surface": "macos_desktop", "target": bundle}, "version": contract_version}
@@ -624,7 +694,48 @@ def measure(record, values, limits):
         "plan_rtt_ms": spread([row["rttMs"] for row in plan_rows(record) if isinstance(row.get("rttMs"), (int, float))]),
         "pointer": {"positions_per_press": spread(moves), "visible_glides": glides, "presses": len(moves)},
         "end": {"reason": (record["ended"].get("status") or {}).get("reason"), "held": record["fixture"].get("held")},
+        "kind": kind_numbers(record, values, shown, judged_hits, facts, mistakes),
     }
+
+
+def kind_numbers(record, values, shown, judged_hits, facts, mistakes):
+    """A kind's own numbers (t-26708), or None for the plain round: timing —
+    each hit against the frame its target armed on, and the presses the fixture
+    judged early; avoid — the sweepers the fixture wrote as clear or struck,
+    the first move after each launch and its margin before the arrival; panel
+    — the due panels whose card was pressed inside its life, against the
+    random pick of one card in `cards`."""
+    kind = (record.get("run") or {}).get("kind")
+    if kind in (None, PLAIN):
+        return None
+    targets = {target["id"]: target for target in record["schedule"]["targets"]}
+    if kind == "timing":
+        armed = [(event["evNs"] - shown[event["judged"]["hit"]]) / 1e6 for event in judged_hits
+                 if event["judged"]["hit"] in shown and "armMs" in targets.get(event["judged"]["hit"], {})]
+        return {"timing": {"targets_with_window": sum("armMs" in target for target in targets.values()),
+                           "arm_to_press_ms": spread(armed), "early": mistakes.get("early", 0)}}
+    if kind == "avoid":
+        rows = [row for row in record.get("scenes") or [] if row.get("kind") == "sweep"]
+        moves = sorted(event["evNs"] for event in record["events"] if event["kind"] == "move")
+        reactions, margins = [], []
+        for row in rows:
+            launched, arrived = row.get("launchedNs"), row.get("arrivedNs")
+            if type(launched) is not int or type(arrived) is not int:
+                continue
+            first = next((at for at in moves if launched < at <= arrived), None)
+            if first is not None:
+                reactions.append((first - launched) / 1e6)
+                margins.append((arrived - first) / 1e6)
+        clear = sum(row.get("outcome") == "clear" for row in rows)
+        return {"avoid": {"launched": len(rows), "clear": clear, "struck": sum(row.get("outcome") == "struck" for row in rows),
+                          "clear_share": clear / len(rows) if rows else None,
+                          "reaction_ms": spread(reactions), "margin_ms": spread(margins)}}
+    due = set(facts["run"])
+    in_time = {event["judged"]["hit"] for event in judged_hits if event["judged"]["hit"] in due
+               and at_ns(record, targets[event["judged"]["hit"]]["appearMs"]) <= event["evNs"]
+               <= at_ns(record, targets[event["judged"]["hit"]]["expireMs"])}
+    return {"panel": {"panels": len(due), "in_time": len(in_time), "in_time_share": len(in_time) / len(due) if due else None,
+                      "baseline_share": 1 / values["reflex_kind"]["panel"]["cards"]}}
 
 
 def autopilot_numbers(record):
@@ -747,7 +858,30 @@ def floors(measured, values):
         rows["model_plans"] = piloted["plans"] > 0 and set(piloted["sources"]) == {MODEL}
         rows["roads_add_up"] = piloted["roads_add_up"]
         rows["l1_forced"] = asked.get("asked", 0) > 0 and asked.get("forced") == asked.get("asked")
+    numbers = measured.get("kind")
+    if numbers:
+        gate, kinds = values["reflex_kind_floor"], {}
+        if "timing" in numbers:
+            arm = numbers["timing"]["arm_to_press_ms"]
+            kinds["timing"] = (arm["p50"] is not None and arm["p50"] <= gate["timing"]["p50_ms"]
+                               and arm["p95"] <= gate["timing"]["p95_ms"])
+        if "avoid" in numbers:
+            kinds["avoid"] = (numbers["avoid"]["clear_share"] or 0) >= gate["avoid"]["clear_share"]
+        if "panel" in numbers:
+            kinds["panel"] = (numbers["panel"]["in_time_share"] or 0) >= gate["panel"]["in_time_share"]
+        rows["kind"] = kinds
     return {"apm_floor": apm_floor, **{name: passed for name, passed in rows.items()}}
+
+
+def every_floor(gate):
+    """Each floor's word, a kind's lines among them: what a run's success needs whole."""
+    for name, value in gate.items():
+        if name == "apm_floor":
+            continue
+        if isinstance(value, dict):
+            yield from value.values()
+        else:
+            yield value
 
 
 def judged(record, values, limits):
@@ -771,8 +905,7 @@ def judged(record, values, limits):
         "verdict": result,
         "measure": measured,
         "floors": gate,
-        "success": None if result["verdict"] == "aborted" else (
-            result["verdict"] == "pass" and all(value for name, value in gate.items() if name != "apm_floor")),
+        "success": None if result["verdict"] == "aborted" else (result["verdict"] == "pass" and all(every_floor(gate))),
     }
 
 
@@ -936,6 +1069,7 @@ def load(folder):
         "receipts": receipts,
         "ended": ended,
         "calls": lines("calls.jsonl"),
+        "scenes": lines("oracle.jsonl"),
         "decisions": lines(ledgers["decisions"]) if ledgers.get("decisions") else [],
         "plans": lines(ledgers["plans"]) if ledgers.get("plans") else [],
     }
@@ -943,10 +1077,16 @@ def load(folder):
 
 def the_round(owner, seed, values, table_limits, kind=None):
     """What the fixture plays: the round and everything it draws it with — no
-    number of the fixture's own."""
-    return {"owner": owner, "seed": seed, "canvas": values["reflex_canvas_pt"], "hud": values["reflex_hud_pt"],
-            "palette": values["reflex_palette"], "framesPerSecond": table_limits["frames_per_second"],
-            "frameAgeNs": table_limits["max_frame_age_ns"], "schedule": schedule(seed, values)}
+    number of the fixture's own. A kind beyond the plain round names itself and
+    adds its colours to the palette; the plain round's bytes are untouched."""
+    kind = kind or PLAIN
+    played = {"owner": owner, "seed": seed, "canvas": values["reflex_canvas_pt"], "hud": values["reflex_hud_pt"],
+              "palette": values["reflex_palette"], "framesPerSecond": table_limits["frames_per_second"],
+              "frameAgeNs": table_limits["max_frame_age_ns"], "schedule": schedule(seed, values, kind)}
+    if kind != PLAIN:
+        played["kind"] = kind
+        played["palette"] = {**values["reflex_palette"], **values["reflex_kind_palette"]}
+    return played
 
 
 def prepare(folder):
@@ -982,7 +1122,7 @@ class Desk:
 
     def round(self, seed, scene=None):
         import cover_scenes
-        played = the_round(self.session["owner"], seed, self.values, self.limits)
+        played = the_round(self.session["owner"], seed, self.values, self.limits, kind=self.kind)
         sheet = cover_scenes.in_round(scene)
         if sheet is not None:
             played["cover"] = sheet
@@ -990,7 +1130,7 @@ class Desk:
 
     def plan(self, geometry, rules):
         return plan(geometry, self.values, self.session["bundle"], contract(), rules=rules,
-                    table_limits=self.limits, pointer_ms=self.pointer_ms)
+                    table_limits=self.limits, pointer_ms=self.pointer_ms, kind=self.kind)
 
     def table_glide_ms(self):
         """The glide this scene's plan writes when a run asks for none."""
@@ -1101,9 +1241,12 @@ class Desk:
         self.pointer_ms = pointer_ms
         if pointer_ms is not None:
             config += f"+pointer{pointer_ms}"
+        self.kind = kind or PLAIN
+        if self.kind != PLAIN:
+            config += f"+kind-{self.kind}"
         record = {"owner": self.session["owner"], "seed": seed, "fixturePid": ready["pid"], "rules": many,
                   "config": config, "readyNs": ready["readyNs"], "stoppedBy": None,
-                  "pointerMs": glide(pointer_ms, self.table_glide_ms())}
+                  "pointerMs": glide(pointer_ms, self.table_glide_ms()), "kind": self.kind}
         if autopilot is not None:
             record["autopilot"] = {"generator": autopilot["generator"], "l1": autopilot["l1"]}
         driver_process = cover_process = None

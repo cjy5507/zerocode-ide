@@ -784,9 +784,9 @@
   "reflex_kind_floor": {
     "value": {
       "timing": {"p50_ms": 120, "p95_ms": 200},
-      "avoid": {"clear_share": 0.95},
+      "avoid": {"clear_share": 0.98},
       "panel": {"in_time_share": 0.95}
     },
-    "why": "The lines a kind's run is held to (t-26708, the person's targets): arm → press p50 and p95 for timing (a pro's visuomotor reaction measures 175 ± 26 ms, the press itself after it); the share of sweepers the pointer was clear of at arrival; the share of panels whose right card was pressed inside its life — a random pick gets 1/cards."
+    "why": "The lines a kind's run is held to (t-26708, the person's targets): arm → press p50 and p95 for timing (a pro's visuomotor reaction measures 175 ± 26 ms, the press itself after it); the share of sweepers the pointer was clear of at arrival (one struck of a minute's launches fails it); the share of panels whose right card was pressed inside its life — a random pick gets 1/cards."
   }
 }

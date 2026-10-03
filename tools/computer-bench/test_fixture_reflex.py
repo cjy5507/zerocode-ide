@@ -1256,7 +1256,7 @@ class Kinds(unittest.TestCase):
             classes = [(c["r"], c["g"], c["b"]) for c in detector["color"]["classes"]]
             for name in ("preview", "sweeper", "pad"):
                 self.assertIn((added[name]["r"], added[name]["g"], added[name]["b"]), classes, detector["id"])
-        self.assertEqual(by_id["pad"]["color"]["anchors"], [], "the pad reads under either strip colour")
+        self.assertNotIn("anchors", by_id["pad"]["color"], "the pad reads under either strip colour; the wire carries no empty list")
         rule = next(row for row in avoid["rules"] if row["detector"] == "pad")
         self.assertGreater(rule["priority"], max(row["priority"] for row in avoid["rules"] if row["detector"] != "pad"))
         macro = next(row for row in avoid["macros"] if row["id"] == rule["macro_id"])

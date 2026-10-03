@@ -12,6 +12,14 @@
 // the palette, the frame rate, how far a press may lag the frame it answers
 // (the reflex table's frame age) and the round. It never activates itself,
 // reads nothing but its own files, and writes only into its state folder.
+//
+// A round's kind (t-26708) adds to the same scene: `timing` shows a target in
+// the preview colour until its arm, and a press before the arm is `early`;
+// `avoid` sends a sweeper from outside the field toward where the pointer
+// rested at its launch, with a pad shown on the far side — at arrival the
+// pointer under the sweeper is `struck`, else `clear`, written to the oracle
+// stream; `panel` is the plain scene with more decoys. The plain round reads
+// none of these fields.
 import AppKit
 import SpriteKit
 
@@ -50,12 +58,35 @@ struct Mover: Decodable {
     let width: Double?
     let height: Double?
 
+    /// When a target becomes right to press (a timing round's preview ends); absent, at its appearance.
+    let armMs: Double?
+
     func at(_ ms: Double) -> CGPoint {
         let elapsed = (ms - appearMs) / 1_000
         return CGPoint(x: x + (vx ?? 0) * elapsed, y: y + (vy ?? 0) * elapsed)
     }
 
     func shows(at ms: Double) -> Bool { appearMs <= ms && ms < expireMs }
+    func armed(at ms: Double) -> Bool { (armMs ?? appearMs) <= ms }
+}
+
+/// A sweeper of an avoid round: launched at `appearMs` from a point outside
+/// the field toward where the pointer rests then, arriving `flightMs` later,
+/// with a pad to move to shown on the far side while it flies.
+struct Sweep: Decodable {
+    let id: String
+    let appearMs: Double
+    let flightMs: Double
+    let fromX: Double
+    let fromY: Double
+    let width: Double
+    let height: Double
+    let padX: Double
+    let padY: Double
+    let padRadius: Double
+
+    var arriveMs: Double { appearMs + flightMs }
+    func flies(at ms: Double) -> Bool { appearMs <= ms && ms < arriveMs }
 }
 
 struct Schedule: Decodable {
@@ -65,6 +96,7 @@ struct Schedule: Decodable {
     let targets: [Mover]
     let decoys: [Mover]
     let curtains: [Mover]
+    let sweeps: [Sweep]?
 }
 
 /// What a covered round (t-12979) puts over the field from the fixture's own
@@ -89,6 +121,8 @@ struct Round: Decodable {
     let frameAgeNs: UInt64
     let schedule: Schedule
     let cover: CoverSpec?
+    /// The round's kind (t-26708); absent for the plain round.
+    let kind: String?
 }
 
 /// One shape as a frame drew it, in the window's content points (top-left origin).
@@ -99,6 +133,8 @@ struct Drawn {
     let colour: String
     let centre: CGPoint
     let radius: Double
+    /// A target right to press; a preview is not, and a decoy never is.
+    let armed: Bool
 
     func covers(_ point: CGPoint) -> Bool { hypot(point.x - centre.x, point.y - centre.y) <= radius }
 }
@@ -139,6 +175,12 @@ final class Arena: SKScene {
     /// Called once, when the round's cover is due (t-12979).
     var onCover: (@MainActor (CoverSpec) -> Void)?
     private var covered = false
+    /// Where the pointer rests now, in the window's content points — read off
+    /// the window server, never off an event the hand must post first.
+    var pointerNow: (@MainActor () -> CGPoint?)?
+    /// Each sweeper in flight: where it heads (the pointer's rest at its launch) and when it left.
+    private var flights: [String: (end: CGPoint, launchedNs: UInt64)] = [:]
+    private var arrived: Set<String> = []
 
     init(round: Round, recorder: Recorder) {
         self.round = round
@@ -188,13 +230,15 @@ final class Arena: SKScene {
         strip.color = round.palette[phase.colour]?.color ?? .gray
         var shapes: [Drawn] = []
         for mover in round.schedule.targets where mover.shows(at: ms) && hitAt[mover.id] == nil {
-            shapes.append(Drawn(id: mover.id, kind: .target, colour: mover.colour ?? phase.colour,
-                                centre: mover.at(ms), radius: mover.radius ?? 0))
+            let armed = mover.armed(at: ms)
+            shapes.append(Drawn(id: mover.id, kind: .target, colour: armed ? mover.colour ?? phase.colour : "preview",
+                                centre: mover.at(ms), radius: mover.radius ?? 0, armed: armed))
         }
         for mover in round.schedule.decoys where mover.shows(at: ms) {
             shapes.append(Drawn(id: mover.id, kind: .decoy, colour: mover.colour ?? phase.colour,
-                                centre: mover.at(ms), radius: mover.radius ?? 0))
+                                centre: mover.at(ms), radius: mover.radius ?? 0, armed: false))
         }
+        let sweeps = sweepers(at: ms, now: now)
         var curtains: [(String, CGRect)] = []
         for mover in round.schedule.curtains where mover.shows(at: ms) {
             let corner = mover.at(ms)
@@ -203,9 +247,10 @@ final class Arena: SKScene {
         var showing = Set<String>()
         for shape in shapes {
             showing.insert(shape.id)
+            let colour = round.palette[shape.colour]?.color ?? .white
             let node = nodes[shape.id] ?? {
                 let disc = SKShapeNode(circleOfRadius: shape.radius)
-                disc.fillColor = round.palette[shape.colour]?.color ?? .white
+                disc.fillColor = colour
                 disc.strokeColor = .clear
                 disc.lineWidth = 0
                 disc.zPosition = 1
@@ -213,7 +258,33 @@ final class Arena: SKScene {
                 nodes[shape.id] = disc
                 return disc
             }()
+            // A target's colour changes once, at its arm: set when it differs, never every frame.
+            if let disc = node as? SKShapeNode, disc.fillColor != colour { disc.fillColor = colour }
             node.position = scene(shape.centre)
+        }
+        for (id, rect, pad, radius) in sweeps {
+            showing.insert(id)
+            showing.insert(id + ":pad")
+            let sheet = nodes[id] ?? {
+                let sheet = SKSpriteNode(color: round.palette["sweeper"]?.color ?? .orange, size: rect.size)
+                sheet.anchorPoint = CGPoint(x: 0, y: 1)
+                sheet.zPosition = 1
+                addChild(sheet)
+                nodes[id] = sheet
+                return sheet
+            }()
+            sheet.position = scene(rect.origin)
+            let disc = nodes[id + ":pad"] ?? {
+                let disc = SKShapeNode(circleOfRadius: radius)
+                disc.fillColor = round.palette["pad"]?.color ?? .green
+                disc.strokeColor = .clear
+                disc.lineWidth = 0
+                disc.zPosition = 1
+                addChild(disc)
+                nodes[id + ":pad"] = disc
+                return disc
+            }()
+            disc.position = scene(pad)
         }
         for (id, rect) in curtains {
             showing.insert(id)
@@ -243,7 +314,40 @@ final class Arena: SKScene {
             ring.removeFirst(first - 1)
         }
         recorder.frame(["seq": seq, "ns": now, "tMs": ms, "phase": phase.index,
-                        "shown": shapes.map(\.id) + curtains.map(\.0)])
+                        "shown": shapes.map { $0.kind == .target && !$0.armed ? $0.id + ":preview" : $0.id }
+                            + curtains.map(\.0) + sweeps.map(\.0)])
+    }
+
+    /// The sweepers in flight at `ms`: each one's rectangle on this frame, its
+    /// pad and the pad's radius. A sweeper first seen now heads for where the
+    /// pointer rests at this moment; one past its arrival is judged once —
+    /// the pointer under it is struck, else clear — and written to the oracle
+    /// stream with the moments it left and arrived.
+    private func sweepers(at ms: Double, now: UInt64) -> [(String, CGRect, CGPoint, Double)] {
+        var flying: [(String, CGRect, CGPoint, Double)] = []
+        for sweep in round.schedule.sweeps ?? [] where sweep.appearMs <= ms && !arrived.contains(sweep.id) {
+            let start = CGPoint(x: sweep.fromX, y: sweep.fromY)
+            let flight = flights[sweep.id] ?? {
+                let end = pointerNow?() ?? CGPoint(x: round.canvas.width / 2, y: (round.hud + round.canvas.height) / 2)
+                flights[sweep.id] = (end, now)
+                return (end, now)
+            }()
+            let share = min(1, (ms - sweep.appearMs) / sweep.flightMs)
+            let centre = CGPoint(x: start.x + (flight.end.x - start.x) * share, y: start.y + (flight.end.y - start.y) * share)
+            let rect = CGRect(x: centre.x - sweep.width / 2, y: centre.y - sweep.height / 2, width: sweep.width, height: sweep.height)
+            if ms >= sweep.arriveMs {
+                arrived.insert(sweep.id)
+                let pointer = pointerNow?()
+                let struck = pointer.map { rect.contains($0) } ?? false
+                var row: [String: Any] = ["kind": "sweep", "id": sweep.id, "launchedNs": flight.launchedNs, "arrivedNs": now,
+                                          "outcome": struck ? "struck" : "clear"]
+                if let pointer { row["pointer"] = ["x": Double(pointer.x), "y": Double(pointer.y)] }
+                recorder.scene(row)
+                continue
+            }
+            flying.append((sweep.id, rect, CGPoint(x: sweep.padX, y: sweep.padY), sweep.padRadius))
+        }
+        return flying
     }
 
     /// A press at `point` at `atNs`: a hit when a target of the phase's colour
@@ -256,7 +360,7 @@ final class Arena: SKScene {
         var seen = ring.filter { $0.ns > from && $0.ns <= atNs }
         if let before = ring.last(where: { $0.ns <= from }) { seen.insert(before, at: 0) }
         for frame in seen.reversed() {
-            for shape in frame.shapes where shape.kind == .target && shape.colour == frame.colour
+            for shape in frame.shapes where shape.kind == .target && shape.armed && shape.colour == frame.colour
                 && hitAt[shape.id] == nil && shape.covers(point) && !frame.curtained(point) {
                 hitAt[shape.id] = atNs
                 return ["hit": shape.id]
@@ -264,6 +368,9 @@ final class Arena: SKScene {
         }
         let newest = ring.last { $0.ns <= atNs }
         if newest?.curtained(point) == true { return ["miss": "curtain"] }
+        if let preview = newest?.shapes.first(where: { $0.kind == .target && !$0.armed && $0.covers(point) }) {
+            return ["miss": "early", "near": preview.id]
+        }
         if let decoy = newest?.shapes.first(where: { $0.kind == .decoy && $0.covers(point) }) {
             return ["miss": "decoy", "near": decoy.id]
         }
@@ -381,6 +488,11 @@ final class Fixture: NSObject, NSApplicationDelegate {
         self.panel = window.panel
         self.arena = arena
         arena.onCover = { [weak self] spec in self?.showCover(spec) }
+        arena.pointerNow = { [weak view] in
+            guard let view, let window = view.window else { return nil }
+            let local = view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            return CGPoint(x: local.x, y: view.bounds.height - local.y)
+        }
         recorder.write("ready.json", window.ready)
         lifetime = FixtureLifetime(flush: { [weak self] wait in self?.flush(wait: wait) },
                                    becameActive: { [weak self] in self?.becameActive = true })
