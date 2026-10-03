@@ -467,6 +467,10 @@ mod tests {
                             // human-input line through the one door
                             // `note_pane_state` calls, tested beside that door.
                             | "pane_runtime.rs"
+                            // t-24545: the cleanup evidence's index-write proof
+                            // runs the real door against a real repository,
+                            // beside the function it reads.
+                            | "worktree_runtime.rs"
                     ),
                 "`{name}` acquired a test fence; only the shell and command crates \
                  may own source-contract fences"
