@@ -377,6 +377,7 @@ fn tally_json(tally: &jev_summary::SeatTally) -> Value {
         "requests": tally.requests,
         "redactedLines": tally.redacted_lines,
         "inputTokens": tally.input_tokens,
+        "unmeteredRequests": tally.unmetered_requests,
         "p50Ms": tally.p50_ms,
         "p95Ms": tally.p95_ms,
         // What a screen seat's guards stopped and the controls it handed to

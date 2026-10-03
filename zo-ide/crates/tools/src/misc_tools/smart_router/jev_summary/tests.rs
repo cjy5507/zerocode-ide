@@ -609,6 +609,19 @@ fn a_windows_cost_is_read_from_the_judgment_rate_and_not_the_chat_table() {
 }
 
 #[test]
+fn sent_requests_without_usage_do_not_report_a_zero_bill() {
+    let home = tempfile::tempdir().expect("a ledger root");
+    let seat = &zerocode_core::jev::NOTIFY;
+    write(
+        home.path(),
+        seat.ledger,
+        &[asked_by(seat, json!({"at": 10, "outcome": "answered", "requests": 1}))],
+    );
+    let report = one(seat, &[home.path().to_path_buf()], None, None, 1_000, 0);
+    assert_eq!(report.cost_usd, None);
+}
+
+#[test]
 fn a_draft_is_the_shape_the_label_reader_takes_and_only_when_it_was_asked_for() {
     // Nobody could label a seat's work: the ledger keeps fingerprints and the
     // transcripts kept none of the ten judged tasks (2026-09-19). The draft is

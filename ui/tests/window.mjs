@@ -1,6 +1,6 @@
 import { endRun } from "./end-run.mjs";
 import "./scm-notices.mjs";
-import { BOOT, chromium, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { BOOT, launchWindowBrowser, pollers, POLLER_COMMANDS, PRIMARY_EVENT, standBackend, createWindowServer, openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 import { createRunner } from "./window-runner.mjs";
 /* The window, driven for real.
  *
@@ -40,6 +40,8 @@ import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
 import { testTabstripOverflow } from "./tabstrip-overflow.mjs";
 import { testPasteRoad } from "./paste-road.mjs";
+import { testTermMouseMotion } from "./term-mouse-motion.mjs";
+import { testFaultReportStorm } from "./fault-report-storm.mjs";
 import { testStartupProjects } from "./startup-projects.mjs";
 import { testWorkspaceBoard } from "./workspace-board.mjs";
 import { testFlowConsole } from "./flow-console.mjs";
@@ -82,7 +84,7 @@ import { testWorkers } from "./workers.mjs";
 import { testSidebarAgents } from "./sidebar-agents.mjs";
 import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
-import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps } from "./conversation-parity.mjs";
+import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -159,7 +161,7 @@ const faults = [];
 
 const { files, origin } = await createWindowServer();
 
-const browser = await chromium.launch();
+const browser = await launchWindowBrowser();
 
 /* The artifact gallery, as one set of hands: the shared flow runs it near its
  * end, and the focused suite runs the same set alone on a fresh page. */
@@ -181,6 +183,24 @@ const artifactGallery = async (page, ok) => {
  * Each of these opens a page of its own and closes it; the shared flow
  * (`window`, below) boots last, so the idle-budget scenarios at its head
  * measure the primary window's first few seconds with the rigs already gone. */
+/* What every other suite stands on: the browser says the same two things on any
+ * host (`WINDOW_BROWSER_ARGS`, `WINDOW_MOTION_REST`). A host that answered
+ * otherwise would turn nineteen unrelated checks red with the cause nowhere in
+ * their names (the GitHub macOS runner, 2026-10-02), so this one names it. */
+suite("window-harness", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    const host = await page.evaluate(() => ({
+      webgl2: document.createElement("canvas").getContext("webgl2") !== null,
+      reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches,
+    }));
+    ok("the window harness draws the 2D painter: the browser offers no WebGL2 whatever the host", host.webgl2 === false, JSON.stringify(host));
+    ok("the window harness runs with motion on: the host's Reduce Motion switch is not read", host.reducedMotion === false, JSON.stringify(host));
+  } finally {
+    await page.close();
+  }
+});
+
 suite("explorer", async ({ browser, origin, ok }) => {
   const { page } = await openWindowTestPage(browser, origin);
   try {
@@ -217,6 +237,9 @@ suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsi
 suite("tabstrip-overflow", ({ browser, origin, ok }) => testTabstripOverflow(browser, origin, ok));
 // A paste never stops the window's main thread (t-19409).
 suite("paste-road", ({ browser, origin, ok }) => testPasteRoad(browser, origin, ok));
+// A pointer over a program that asked for motion is reported once per cell (t-20972).
+suite("term-mouse-motion", ({ browser, origin, ok }) => testTermMouseMotion(browser, origin, ok));
+suite("fault-report-storm", ({ browser, origin, ok }) => testFaultReportStorm(browser, origin, ok));
 suite("startup-projects", ({ browser, origin, ok }) => testStartupProjects(browser, origin, ok));
 suite("workspace-board", ({ browser, origin, ok }) => testWorkspaceBoard(browser, origin, ok));
 suite("flow-console", ({ browser, origin, ok }) => testFlowConsole(browser, origin, ok));
@@ -286,6 +309,16 @@ suite("conversation-release", ({ browser, origin, ok }) => testConversationRelea
  * 발밑 줄은 지금 나간 걸음을 말하고, 끝난 헬퍼의 페이지는 보고로 열린다
  * (t-15682). */
 suite("conversation-steps", ({ browser, origin, ok }) => testConversationSteps(browser, origin, ok));
+/* 울타리의 코드가 편집기의 색을 입는다 — 역할마다 하이라이트 하나, 노드는 그대로,
+ * 쓰는 중인 울타리는 평문, 선반의 행은 색을 내려놓고, 조각은 4 ms를 넘지 않는다
+ * (t-22095). */
+suite("conversation-code-colours", ({ browser, origin, ok }) => testConversationCodeColours(browser, origin, ok));
+/* 흐르는 답의 값 — 닫힌 블록은 한 번씩만 그리고, 글자만 움직이는 델타는 입력창을
+ * 건드리지 않는다 (t-22095). */
+suite("conversation-stream-work", ({ browser, origin, ok }) => testConversationStreamWork(browser, origin, ok));
+/* 키의 값 — 줄이 넘어가 도크가 자라도 그 높이는 그것을 읽는 둘(목록의 발밑 여백,
+ * 맨 아래로 단추)에만 닿고 행마다 닿지 않는다 (t-22095). */
+suite("conversation-typing-work", ({ browser, origin, ok }) => testConversationTypingWork(browser, origin, ok));
 /* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
  * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
  * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs
@@ -3141,7 +3174,7 @@ const stilled = await page.evaluate(
   () => getComputedStyle(document.getElementById("settings-view")).animationName,
 );
 ok("reduced motion stills the window", stilled === "none", stilled);
-await page.emulateMedia({ reducedMotion: null });
+await page.emulateMedia({ reducedMotion: WINDOW_MOTION_REST });
 await page.evaluate(() => setSettingsOpen(false));
 
 /* ---- a save cannot overwrite what changed underneath it ---- */
@@ -14624,6 +14657,31 @@ ok(
   "a bell's return lands on the exact pane, flashes once, and lets go",
   called.listens && called.front && called.focused && called.flashed && called.flashOff,
   JSON.stringify(called),
+);
+
+/* 움직임 줄이기가 켜진 창의 벨 — 번쩍임의 애니메이션은 none으로 계산되어 돌지 않고, 돌지
+ * 않은 애니메이션은 animationend를 내지 않는다. 클래스는 스스로 벗어야 하고(GitHub
+ * macOS 러너의 실제 상태, 2026-10-02), 번쩍임이 없으니 서 있을 일도 없다. */
+await page.emulateMedia({ reducedMotion: "reduce" });
+const calledStill = await page.evaluate(async () => {
+  const tab = tabs.find((one) => one.kind === "term" && one.layout !== null);
+  const term = paneLeaves(tab.layout)[0];
+  for (const hear of window.__LISTENERS__["notify:activate"] ?? []) {
+    hear({ payload: { worktree: activeWorktreePath, term } });
+  }
+  await new Promise((done) => setTimeout(done, 60));
+  const slot = document.querySelector(`.pane-slot[data-term="${term}"]`);
+  return {
+    front: activeTabId === tab.id,
+    standing: slot?.classList.contains("is-called") === true,
+    animation: slot ? getComputedStyle(slot).animationName : null,
+  };
+});
+await page.emulateMedia({ reducedMotion: WINDOW_MOTION_REST });
+ok(
+  "under reduced motion a bell's return still lands on its pane and leaves no flash mark behind",
+  calledStill.front && !calledStill.standing && calledStill.animation === "none",
+  JSON.stringify(calledStill),
 );
 
 /* A scan that could not run says why. An empty list would read as "nothing is
@@ -37598,7 +37656,7 @@ const flatReduced = await page.evaluate(async () => {
     door: door ? getComputedStyle(door).transitionDuration : "0s",
   };
 });
-await page.emulateMedia({ reducedMotion: null });
+await page.emulateMedia({ reducedMotion: WINDOW_MOTION_REST });
 await page.setViewportSize({ width: 720, height: 640 });
 const flatNarrow = await page.evaluate(async () => {
   await new Promise(requestAnimationFrame);
@@ -43409,7 +43467,7 @@ const tunnel = await page.evaluate(async () => {
       encoder.encode(drawn, { keyFrame: step === 0 });
       drawn.close();
     }
-    await encoder.flush();
+    await window.__FLUSH_ENCODER__(encoder);
     encoder.close();
   } catch (error) {
     seen.encodeFell = String(error);
@@ -43558,7 +43616,7 @@ const fitting = await page.evaluate(async () => {
     encoder.encode(drawn, { keyFrame: step === 0 });
     drawn.close();
   }
-  await encoder.flush();
+  await window.__FLUSH_ENCODER__(encoder);
   encoder.close();
   let raw = "";
   for (const one of packets) for (const byte of one) raw += String.fromCharCode(byte);
@@ -49496,7 +49554,7 @@ const jiraDetailDismiss = await page.evaluate(async () => {
   setTaskOpen(false);
   return result;
 });
-await page.emulateMedia({ reducedMotion: null });
+await page.emulateMedia({ reducedMotion: WINDOW_MOTION_REST });
 await page.setViewportSize({ width: 1440, height: 900 });
 
 ok(
@@ -52408,6 +52466,11 @@ for (const combo of freezeCombos) {
     const writes = Object.fromEntries([...written].sort((a, b) => b[1] - a[1]));
     return {
       reads, mutations, writes, frames: deltas.length, tabRenders,
+      // The wall time the frames took, and how long one step of the workspace
+      // spinner lasts: a spinner writes once per step crossed, and the steps
+      // crossed are a matter of the clock, not of the frame count.
+      elapsedMs: Math.round(deltas.reduce((sum, one) => sum + one, 0)),
+      spinStepMs: WORKTREE_SPIN_PERIOD_MS / WORKTREE_SPIN_STEPS,
       frameP50: Math.round(at(0.5) * 10) / 10, frameP95: Math.round(at(0.95) * 10) / 10,
     };
   }, { combo, frames: FREEZE_FRAMES });
@@ -52559,12 +52622,19 @@ ok(
   JSON.stringify(freezeRenaming),
 );
 /* The workspace spinner writes a class only when it crosses one of its
- * twelve steps: sixty frames are under one 700 ms turn, so four dots take at
- * most 4 × (12 + 1) writes — where a write a frame was 240. */
+ * twelve steps, so four dots take at most 4 × (the steps the run's own clock
+ * crossed + 1) writes — where a write a frame was 240. The bound was once
+ * 4 × 13, true while sixty frames fit under one 700 ms turn; on a 60 Hz runner
+ * sixty frames last 1.2 s and cross twenty steps (80 writes, each one correct).
+ * The steps are counted from the elapsed time the segment measured, so the
+ * bound follows the machine's frame rate and a write-per-frame still fails it. */
+const FREEZE_SPIN_DOTS = 4;
 const freezeSpinOnly = freezeSegments.find((one) => !one.stream && one.wsSpin && !one.rowSpin);
+const freezeSpinWritesAllowed = (one) => FREEZE_SPIN_DOTS * (Math.ceil(one.elapsedMs / one.spinStepMs) + 1);
 ok(
   "the workspace spinner writes its four dots once a step, not once a frame",
-  freezeSpinOnly !== undefined && freezeSpinOnly.mutations > 0 && freezeSpinOnly.mutations <= 4 * 13 &&
+  freezeSpinOnly !== undefined && freezeSpinOnly.mutations > 0 &&
+    freezeSpinOnly.mutations <= freezeSpinWritesAllowed(freezeSpinOnly) &&
     freezeWrites(freezeSpinOnly, "span.wt-dot.is-working class") > 0 &&
     freezeWrites(freezeSpinOnly, "span.wt-dot.is-working style") === 0,
   JSON.stringify(freezeSpinOnly),
@@ -55308,6 +55378,13 @@ suite("sidebar-nav-redesign", async ({ browser, origin, ok }) => {
         { path: wt, branch: "wt/t-4238/2-b-trigger", base: "main", is_main: false, active: false },
       ] }];
       await refreshWorktrees();
+      // The ledger's facts come through the ledger's own door. `refreshPaneLedger`
+      // replaces the whole `paneLedger` with what that door answers, so a fact set
+      // into the map by hand lasts only until the window's first poll lands — which
+      // is later on a slow machine than on a fast one (the GitHub macOS runner lost
+      // the task title and the verified mark that way, 2026-10-02).
+      const ledgerRows = [];
+      window.__LEDGER__ = ledgerRows;
       const hook = (term, state, agent) => {
         for (const handler of window.__LISTENERS__["hook:agent"] ?? []) {
           handler({ payload: { term, state, agent, session: `nav-${term}`, resumable: false } });
@@ -55316,7 +55393,7 @@ suite("sidebar-nav-redesign", async ({ browser, origin, ok }) => {
       const live = await openTermTab({ placement: "tab" });
       tabOfTerm(live).worktree = wt;
       paneModels.set(live, "claude-fable-5-1");
-      paneLedger.set(live, { run: "run-1", worker: "w-1", task: "방아쇠·반복·경기장", taskId: "t-4238", ledger: "", reported: false, review: null });
+      ledgerRows.push({ term: live, run: "run-1", worker: "w-1", task: "방아쇠·반복·경기장", task_id: "t-4238", ledger: "", reported: false, review: null });
       paneActivities.set(`term:${live}`, [{ activity: { verb: "read", target: "ui/shell.js" } }]);
       const settled = await openTermTab({ placement: "tab" });
       tabOfTerm(settled).worktree = wt;
@@ -55324,10 +55401,11 @@ suite("sidebar-nav-redesign", async ({ browser, origin, ok }) => {
       const verified = await openTermTab({ placement: "tab" });
       tabOfTerm(verified).worktree = wt;
       panePrompts.set(verified, "검증된 일");
-      paneLedger.set(verified, { run: "run-1", worker: "w-2", task: "", taskId: "", ledger: "", reported: true, review: { verified: true } });
+      ledgerRows.push({ term: verified, run: "run-1", worker: "w-2", task: "", task_id: "", ledger: "", reported: true, review: { verified: true } });
       hook(live, "working", "claude");
       hook(settled, "done", "codex");
       hook(verified, "done", "codex");
+      await refreshPaneLedger();
       await window.__PAINTED__();
       window.__NAV_READ__ = () => {
         const cards = [...document.querySelectorAll("#worktrees .wt-row")].map((row) => ({
@@ -56368,6 +56446,13 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       ];
       window.__ANSWER__.wire_set_model = (args) => { calls.push(["model", args]); return null; };
       window.__ANSWER__.wire_stop = (args) => { calls.push(["stop", args]); return null; };
+      // The composer draws the agent chip from the installed catalog at the moment
+      // it is built and is not rebuilt when the catalog arrives, so a page opened
+      // before the catalog lands has no chip. On a slow core the catalog lands
+      // later than the page opens (the runner, 2026-10-02) — the page waits for it.
+      for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "codex"); tries += 1) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
       const spec = installedAgents().find((row) => row.id === "codex");
       const tabId = await openWirePage("codex", "/tmp/zerocode-window-test");
       await window.__PAINTED__();
@@ -56486,11 +56571,33 @@ suite("wire-session", async ({ browser, origin, ok }) => {
         face.querySelectorAll(".helper-turn.is-streaming")[1] === liveRow;
       // The session's own news (`wire:update`) reads at once — this wire's,
       // not another's — and news during a read is read right after it.
+      // The page's own one-second clock reads the log too, and a count of reads
+      // cannot tell its read from the news's: on a slow core a beat lands inside
+      // the wait and one event "reads twice". So the clock is put to sleep for the
+      // count the way the window itself puts it to sleep — a window nobody looks
+      // at (`idlePoller`) — and woken after. The news is read whether or not the
+      // window is looked at (`wire:update` → `pollHelperPages`).
+      const lookAway = (away) => {
+        for (const [key, value] of [["hidden", away], ["visibilityState", away ? "hidden" : "visible"]]) {
+          if (away) Object.defineProperty(document, key, { configurable: true, get: () => value });
+          else delete document[key];
+        }
+        document.dispatchEvent(new Event("visibilitychange"));
+      };
+      lookAway(true);
       let polled = 0;
       const answerLog = window.__ANSWER__.wire_log;
       window.__ANSWER__.wire_log = (args) => { polled += 1; return answerLog(args); };
+      // A read the news asked for starts on the window's own clock, so the check
+      // waits for it to start rather than for a fixed 60 ms a slow core outlasts
+      // (the runner, 2026-10-02) — then gives a further read the same breath to
+      // show itself, because "exactly this many reads" is the claim.
+      const readsReach = async (count) => {
+        for (let tries = 0; tries < 200 && polled < count; tries += 1) await new Promise((done) => setTimeout(done, 25));
+        await settle();
+      };
       for (const l of window.__LISTENERS__["wire:update"] ?? []) l({ payload: { id: 7 } });
-      await settle();
+      await readsReach(1);
       seen.eventPolled = polled === 1;
       for (const l of window.__LISTENERS__["wire:update"] ?? []) l({ payload: { id: 8 } });
       await settle();
@@ -56498,8 +56605,9 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       const first = pollHelperPages();
       for (const l of window.__LISTENERS__["wire:update"] ?? []) l({ payload: { id: 7 } });
       await first;
-      await settle();
+      await readsReach(3);
       seen.newsDuringReadReadAgain = polled === 3;
+      lookAway(false);
       window.__ANSWER__.wire_log = answerLog;
       log = {
         ...log, status: "idle", live: [],

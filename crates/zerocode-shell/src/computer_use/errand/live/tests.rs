@@ -386,6 +386,8 @@ fn a_credential_on_the_screen_never_reaches_the_wire() {
         Some(Spent {
             requests: 1,
             redacted_lines: 3,
+            input_tokens: Some(120),
+            output_tokens: Some(0),
             model: Some(ANSWERING_VERSION.to_string()),
             version: Some(version_word(reqwest::Version::HTTP_11)),
         })
@@ -579,6 +581,8 @@ fn a_comparison_is_asked_under_the_branching_row_and_read_by_its_own_question() 
         Some(Spent {
             requests: 1,
             redacted_lines: 0,
+            input_tokens: Some(140),
+            output_tokens: Some(0),
             model: Some(ANSWERING_VERSION.to_string()),
             version: Some(version_word(reqwest::Version::HTTP_11)),
         })
@@ -795,6 +799,8 @@ fn a_risen_auto_answers_the_same_bytes_from_the_memo_and_sends_nothing() {
         Some(Spent {
             requests: 0,
             redacted_lines: 0,
+            input_tokens: Some(0),
+            output_tokens: Some(0),
             // The version that gave the answer the memo kept, and no HTTP
             // version: the memo's answer crossed no wire.
             model: Some(ANSWERING_VERSION.to_string()),

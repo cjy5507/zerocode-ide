@@ -3270,6 +3270,47 @@ fn a_one_sided_record_holds_a_rise_and_takes_back_nothing() {
     assert_eq!(judge(Stand::Applying, &evidence), Verdict::Keep);
 }
 
+#[test]
+fn a_fallen_summon_recovers_on_fresh_coordinator_comparisons_without_a_circular_baseline() {
+    let seat = &crate::jev::SUMMON;
+    let wanted = window_wanted_for(seat).expect("summon has a judgment window");
+    let mut rows = recording(seat);
+    rows.extend((0..wanted).map(|at| {
+        let mut row = asked_by(seat, at);
+        row["agreed"] = json!(at >= crate::jev::NEGATIVES_WANTED);
+        row
+    }));
+    let judged = judge_seat(seat, &rows).expect("a full window is judged");
+    assert_eq!(judged.verdict, Verdict::Rise);
+    let transition = transition_row(
+        seat,
+        i64::try_from(wanted).expect("the window fits"),
+        judged.verdict,
+        &judged.window,
+    )
+    .expect("a rise is recorded");
+    rows.push(transition);
+    assert_eq!(standing(seat, &rows), Stand::Applying);
+}
+
+#[test]
+fn a_fallen_summon_keeps_recording_when_coordinator_comparisons_are_poor() {
+    let seat = &crate::jev::SUMMON;
+    let wanted = window_wanted_for(seat).expect("summon has a judgment window");
+    let mut rows = recording(seat);
+    rows.extend((0..wanted).map(|at| {
+        let mut row = asked_by(seat, at);
+        row["agreed"] = json!(at.is_multiple_of(2));
+        row
+    }));
+    assert!(matches!(
+        judge_seat(seat, &rows)
+            .expect("a full window is judged")
+            .verdict,
+        Verdict::Hold(Line::Agreement { .. })
+    ));
+}
+
 /// A seat that starts acting is taken back on its marks alone (t-11989): a
 /// summons seat whose answers came slower than its wall, or not at all
 /// three times running, keeps acting — each late answer already fell back to

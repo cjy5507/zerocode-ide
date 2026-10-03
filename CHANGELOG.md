@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.1.49] — 2026-10-03
+
+### feat
+
+- feat(computer-use): Computer Use keeps watching the screen and judging with Jev while a big model writes a new plan — the re-plan is written in the background and runs only if the run, plan and screen it was asked about still stand; a stale reading holds the plan instead of acting on it; the newest re-plan request wins. Measured with a stand-in model that thinks 1.5 s: screen reads during the think 0 → 51, the longest read 1508 → 1.6 ms (t-21754, taking over t-21494).
+- feat(conversation): code in a conversation's answers is coloured with the editor's own parser and theme colours, light and dark — the colouring runs in slices under 4 ms, a block still being streamed stays plain until it closes, and copying gives the code unchanged (t-22095).
+
+### fix
+
+- fix(orchestration): a mail pointer the window cannot type is no longer dropped in silence — the person at that pane sees a notice in their language saying mail is waiting and why it was not typed, and the sender's ledger gets a letter naming the pane and the reason (never the message's body), once (t-21017 part 2).
+- fix(zo): switching a long conversation from a GPT model to Claude with /model no longer gets every request declined as "reasoning extraction" — the other model's reasoning summaries are not sent to Claude as text any more (the answers and tool calls still are), so the conversation goes on instead of having to start over (t-21709).
+- fix(orchestration): a coordinator's mail no longer waits forever for a pane whose turn ended without the window hearing it — the pane's own terminal (its agent's ready prompt, or a long silence) ends the hold; mail for a pane the person took over, or for a run a restart left unbound, is told to its sender once instead of waiting in silence (t-21565).
+- fix(zo): a window that connects the moment zo starts now finds the session's capabilities, status and history from its first request — zo writes its events address and starts answering only after they are in, so the first subscribe can no longer come back without them; two tests that read zo's advertised tools no longer race a loop test in CI (t-21349).
+- fix(computer-use): a start's own settings close the live road for good — the setting read again later can close it but never reopen it (t-21754).
+- fix(window): the window no longer floods itself with its own error reports — a refused report is caught and rationed (ten at once, then one a second), a hidden page the window draws for a thumbnail or an export gets no line to the backend, a terminal's mouse motion is sent once per cell instead of once per pixel, and a hang report lists the work that took the most time first (t-20972; the 7.4 s hang of 10-01 itself was not reproduced — the chain these close is the cause the evidence fits).
+- fix(jev): Jev's automatic choice of a summons' model and effort can be promoted again — it no longer has to beat a baseline no summons could measure, and its quality checks stay; each model's record is kept for each effort that actually ran, a request's tokens are counted once, and a project whose cost is unknown leaves the total unknown instead of adding it as zero.
+- fix(window): a pane's bell flash lets go under Reduce Motion instead of staying lit (t-21351).
+
+### perf
+
+- perf(conversation): while an answer streams, a new word repaints only the words — the composer and the page's head stay still and finished blocks are drawn once — so typing keeps up: the slowest 1 % of keys while streaming 13.6 → 11.6 ms on Chromium and 27 → 23 ms on WebKit (the installed app's engine; its 60 Hz frame keeps it above 12 ms), and the line that wraps the composer to a second row no longer restyles every row of a long conversation (t-22095).
+
+### internal
+
+- internal(ci): every CI leg runs every recipe of its verify and ends naming each red one, so one run shows every failure instead of stopping at the first — a Windows flake had hidden the window crate's tests for days (t-21326).
+- internal(ci): the Windows CI leg's two failures are fixed — a store sidecar SQLite is still deleting is waited out on SQLite's own terms instead of being called an unsafe path, and the silent-server test's deadline follows the machine's measured python start (t-21270).
+- internal(tests): the code-sign-clone hard-link test runs a clone of its own test binary, because macOS now kills a copied system program at launch (red in every full shell suite since this morning).
+- internal(ci): the window tests judge the same page on the public macOS CI runner as on a Mac — the harness pins the runner's WebGL and Reduce Motion differences that turned 19 checks red there (t-21351).
+
 ## [1.1.48] — 2026-10-02
 
 ### feat

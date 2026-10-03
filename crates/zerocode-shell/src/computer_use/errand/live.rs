@@ -279,6 +279,7 @@ impl LiveJudge {
             redacted_lines: 0,
             model: crate::systemone::answered_by(&recalled.answer),
             version: None,
+            ..Spent::default()
         }
         .stamp(&mut row);
         if memoed.answered {

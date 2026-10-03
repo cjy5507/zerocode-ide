@@ -12071,19 +12071,25 @@ function wireRunStatus(status) {
   return "idle";
 }
 
-/* Keep a `wire_log` answer's state on the run; true when something the page
- * or the composer draws from it changed. */
+/* Keep a `wire_log` answer's state on the run, and say what moved: `state`,
+ * what the composer and the page's chrome draw from, and `live`, the words
+ * being said — the page draws either, the composer only the first. */
 function holdWireState(run, log) {
-  const before = run.wireLog
-    ? JSON.stringify([run.wireLog.status, run.wireLog.asks, run.wireLog.model, run.wireLog.mode,
-      run.wireLog.modes, run.wireLog.commands, run.wireLog.live, run.wireLog.usage ?? null, run.wireLog.tasks ?? []])
-    : "";
+  const before = run.wireLog ? wireStateKey(run.wireLog) : "";
+  const live = run.wireLog ? JSON.stringify(run.wireLog.live) : "";
   run.wireLog = log;
   run.status = wireRunStatus(log.status);
   if (log.status === "ended" && run.endedAt === null) run.endedAt = Date.now();
   run.toolCalls = run.helper.turns.filter((turn) => turn.role === "tool").length;
-  return before !== JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands,
-    log.live, log.usage ?? null, log.tasks ?? []]);
+  return { state: before !== wireStateKey(log), live: live !== JSON.stringify(log.live) };
+}
+
+/* What a wire's log says about the session apart from the words it is
+ * saying now — what the composer and the page's chrome are drawn from. A
+ * delta moves only the words (t-22095: the composer was repainted with every
+ * one, under the person's typing). */
+function wireStateKey(log) {
+  return JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands, log.usage ?? null, log.tasks ?? []]);
 }
 
 /* A wire session said it has something new — a delta of what it is saying, a
@@ -12531,6 +12537,24 @@ function paintHelperSurface(tab) {
   else paintWorkerView(tab);
 }
 
+/* The words a wire's page is saying now, drawn into the rows they stream into
+ * and named on the foot line — a delta that moves only the words moves
+ * nothing else on the page: its head, its turns and its composer stand as
+ * they were (t-22095: each delta drew the whole page again, under the
+ * person's typing). The head's clock keeps its own beat (`tickWorkers`). A
+ * page that does not stand as drawn is drawn whole. */
+function paintHelperWords(tab) {
+  const host = docHost(tab.pane, "worker");
+  const held = host.__helperPage;
+  const run = tab.worker;
+  if (!held || held.id !== tab.id || held.own || held.owned !== Boolean(tabOfTerm(run.term)) || held.locale !== locale) {
+    paintHelperSurface(tab);
+    return;
+  }
+  syncStreamingTurns(held.turns, run);
+  updateHelperStatus(held.status, run);
+}
+
 function activeHelperPage() {
   const active = tabs.find((tab) => tab.id === activeTabId);
   if (active?.kind === "worker" && active.worker.helper) return active;
@@ -12632,19 +12656,24 @@ async function pollHelperPages() {
   // A wire's log carries the session's state beside its turns — status, the
   // open question, model, mode, commands. It lives on the run (the page and
   // the composer read it there), and a change repaints with no new turn.
-  const wireChanged = held.id === WIRE_LOG_ID && holdWireState(tab.worker, more);
+  const wireMoved = held.id === WIRE_LOG_ID ? holdWireState(tab.worker, more) : { state: false, live: false };
+  const wireChanged = wireMoved.state || wireMoved.live;
   if (document.hidden || activeHelperPage() !== tab) return;
   // A pane's page shows its hooks as well as its file (`paneChatKey`): a read
   // that brought no new line repaints once when a hook moved since the paint.
   const hooksMoved = held.id === PANE_LOG_ID && held.hookKey !== paneChatKey(tab.worker.term);
   if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved && !hooksMoved && !aboutMoved) return;
-  if (wireChanged) syncWorkerComposers(tab.worker);
-  if (wireChanged) settleComposerQueue(tab.worker);
+  if (wireMoved.state) syncWorkerComposers(tab.worker);
+  if (wireMoved.state) settleComposerQueue(tab.worker);
   // 컨텍스트가 움직였다 — 미터만 갈아입는다(턴은 그대로일 수 있다).
   if (usageMoved) syncWorkerComposers(tab.worker);
   // 새로 온 것이 있을 때에만 다시 그린다 — 쉬는 페이지는 아무 값도 치르지
-  // 않고, 그림도 온 턴만 잇는다(`syncHelperTurns`).
-  paintHelperSurface(tab);
+  // 않고, 그림도 온 턴만 잇는다(`syncHelperTurns`). 말만 움직였으면 그 말이
+  // 흐르는 행과 발밑 줄만 그린다(t-22095).
+  const wordsOnly = wireMoved.live && !wireMoved.state && !more?.turns?.length && !replaced && !skippedNow &&
+    !usageMoved && !hooksMoved && !aboutMoved;
+  if (wordsOnly) paintHelperWords(tab);
+  else paintHelperSurface(tab);
   // The file goes on past this chunk (a page opened late on a long
   // transcript): read on now, chunk after chunk, rather than one chunk a
   // beat — the history a person asked for must not stream in as if it were
@@ -13072,8 +13101,10 @@ function stopStatusCycle(line) {
  * checkout (`mdWhere.base`), so a relative path in the answer opens the file
  * it names there; an image stays its caption; and a renderer that trips on a
  * line leaves the words standing as text rather than a blank turn. Bare paths
- * and addresses become the same doors a markdown link is (t-2973). */
-function paintHelperProse(host, text, base) {
+ * and addresses become the same doors a markdown link is (t-2973). Its code
+ * takes its colours (`colourCodeIn`, t-22095) — unless `colour` is false: the
+ * block still being written, which the next frame draws again. */
+function paintHelperProse(host, text, base, { colour = true } = {}) {
   const previous = mdWhere;
   mdWhere = { base, page: null };
   try {
@@ -13087,6 +13118,7 @@ function paintHelperProse(host, text, base) {
   } finally {
     mdWhere = previous;
   }
+  if (colour) colourCodeIn(host);
 }
 
 /* 답이 이름한 파일과 주소(t-2973) — 「완성했습니다: index.html」의 그 낱말.
@@ -13790,9 +13822,13 @@ function paintLiveAnswer(row, text, run) {
 }
 
 /* The blocks that closed (a blank line outside a fence, `settledCut`) as
- * markdown, painted once each; the block still being written as markdown
- * too, repainted with each frame that brought a delta — a paragraph at
- * most, so the repaint is cheap, and never behind what arrived. */
+ * markdown, painted once each — a frame draws only the blocks that closed
+ * since the last and lays them after the ones before, which is the page one
+ * drawing of the settled words makes: a blank line ends every block the
+ * renderer knows (t-22095; the whole settled part was drawn again each time
+ * it grew). The block still being written as markdown too, repainted with
+ * each frame that brought a delta — a paragraph at most, so the repaint is
+ * cheap, and never behind what arrived. */
 function paintLiveAnswerNow(row, text, run) {
   const said = row.querySelector(".helper-said");
   let settled = said.querySelector(":scope > .helper-said-settled");
@@ -13810,15 +13846,16 @@ function paintLiveAnswerNow(row, text, run) {
   const follow = chatFollows(list);
   const cut = settledCut(text, text.length);
   if (cut > row.__settledEnd) {
-    settled.replaceChildren();
-    paintHelperProse(settled, text.slice(0, cut), helperBase(run));
+    const closed = document.createDocumentFragment();
+    paintHelperProse(closed, text.slice(row.__settledEnd, cut), helperBase(run));
+    settled.append(closed);
     row.__settledEnd = cut;
   }
   const rest = text.slice(row.__settledEnd);
   if (rest !== row.__tailText) {
     row.__tailText = rest;
     tail.replaceChildren();
-    if (rest.trim() !== "") paintHelperProse(tail, rest, helperBase(run));
+    if (rest.trim() !== "") paintHelperProse(tail, rest, helperBase(run), { colour: false });
   }
   if (follow) carryToFoot(list);
 }
@@ -14992,7 +15029,6 @@ function paintHelperPageOwn(host, tab, run, owner) {
   // control here (or on the list, which takes focus) is pulled away to the sink
   // (`rearmKeySink`) and never reaches the page.
   host.dataset.keyboardOwner = "true";
-  host.style.removeProperty("--chat-dock-h");
   host.replaceChildren();
   const turns = helperTurnsNode(run);
   const status = helperStatusNode(run);
@@ -15121,10 +15157,16 @@ function chatDockNode(host, composer) {
     const watch = new ResizeObserver(() => {
       // The list's foot moves with the dock (the dock's height is the list's
       // padding): a list at its foot stays there, as the extension's follows
-      // its input's height (t-6323 A5).
+      // its input's height (t-6323 A5). The height is written on the two
+      // that read it and no further — it is not inherited (shell.css): written
+      // on the page, every row restyled at the key that wrapped a draft
+      // (t-22095).
       const list = host.__helperPage?.turns ?? null;
       const follow = chatFollows(list);
-      host.style.setProperty("--chat-dock-h", `${dock.offsetHeight}px`);
+      const height = `${dock.offsetHeight}px`;
+      for (const reader of host.querySelectorAll(":scope > .helper-turns, :scope > .chat-foot-door")) {
+        reader.style.setProperty("--chat-dock-h", height);
+      }
       if (follow) carryToFoot(list);
     });
     watch.observe(dock);

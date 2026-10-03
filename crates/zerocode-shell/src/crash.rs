@@ -31,6 +31,12 @@ impl Limits {
     #[cfg(target_os = "macos")]
     pub(crate) const SAMPLE_BYTES: u64 = 2 * 1024 * 1024;
     pub(crate) const SAMPLE_FRAMES: usize = 64;
+    /// How many of the symbols the main thread stood IN, most samples first,
+    /// head the sample's frames (`hang_sample::main_sample_frames`), and the
+    /// fewest samples that make one: a symbol seen once is inside the
+    /// sampler's own noise.
+    pub(crate) const SAMPLE_LEADERS: usize = 5;
+    pub(crate) const SAMPLE_LEADER_MIN_SAMPLES: u64 = 2;
     pub(crate) const RING_SIZE: usize = 256;
     pub(crate) const LAST_CRUMBS: usize = 96;
     pub(crate) const TEXT_BYTES: usize = 384;
@@ -41,7 +47,7 @@ impl Limits {
     /// and how many of the LAST crumbs ride in the task body, how far back
     /// the same `file:line` is counted as a repeat, and how many history
     /// rows a boot loop may leave behind.
-    pub(crate) const TASK_FRAMES: usize = 12;
+    pub(crate) const TASK_FRAMES: usize = 20;
     pub(crate) const TASK_CRUMBS: usize = 24;
     pub(crate) const REPEAT_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
     pub(crate) const HISTORY_ROWS: usize = 128;
@@ -633,10 +639,20 @@ fn task_body(report: &Report, repeats: usize) -> String {
             body.push('\n');
         }
     }
-    let skip = report.crumbs.len().saturating_sub(Limits::TASK_CRUMBS);
-    if skip < report.crumbs.len() {
+    // The last crumbs are the story before and during the hang. The sample's own
+    // frames are in the ring too (one crumb each, written last) and are already
+    // the `frames:` above; listed again they were all 24 crumbs of the hang of
+    // 2026-10-01 and the commands and hooks around it were left out.
+    let story = || {
+        report
+            .crumbs
+            .iter()
+            .filter(|row| !row.line.starts_with(crate::hang_sample::SAMPLE_CRUMB))
+    };
+    let skip = story().count().saturating_sub(Limits::TASK_CRUMBS);
+    if story().count() > 0 {
         body.push_str("crumbs:\n");
-        for row in &report.crumbs[skip..] {
+        for row in story().skip(skip) {
             body.push_str(&format!(
                 "  {} {}\n",
                 row.at_ms,
@@ -1104,6 +1120,49 @@ mod tests {
         report.crumbs = ring.snapshot();
         write_json(&root.join("crash/last.json"), &report).expect("the fixture snapshot");
         report
+    }
+
+    /// The hang of 2026-10-01 filed the sample's frames twice: as `frames:` and
+    /// as its last 24 crumbs, so no command or hook around the hang reached the
+    /// task. The task's crumbs are the story, with the sample left to `frames:`.
+    #[test]
+    fn a_hang_tasks_crumbs_are_the_story_and_not_the_sample_it_carries_as_frames() {
+        let root = tempfile::tempdir().unwrap();
+        let mut report = a_loud_panic(root.path());
+        let ring = crumbs::RingStorage::<{ Limits::LAST_CRUMBS }>::new();
+        for index in 0..(Limits::TASK_CRUMBS * 2) {
+            ring.write(
+                index as u64,
+                &format!("command enter ledger_agents n={index}"),
+            );
+        }
+        for index in 0..Limits::SAMPLE_FRAMES {
+            ring.write(
+                1_000 + index as u64,
+                &format!(
+                    "{} {index}: native::samples_1::frame_{index}",
+                    crate::hang_sample::SAMPLE_CRUMB
+                ),
+            );
+        }
+        report.crumbs = ring.snapshot();
+        let body = task_body(&report, 1);
+        let story: Vec<&str> = body
+            .lines()
+            .filter(|line| line.contains("command enter ledger_agents"))
+            .collect();
+        assert_eq!(story.len(), Limits::TASK_CRUMBS, "{body}");
+        assert!(
+            story
+                .last()
+                .unwrap()
+                .ends_with(&format!("n={}", Limits::TASK_CRUMBS * 2 - 1)),
+            "the last of the story travels: {story:?}"
+        );
+        assert!(
+            !body.contains(crate::hang_sample::SAMPLE_CRUMB),
+            "the sample is listed twice:\n{body}"
+        );
     }
 
     #[test]

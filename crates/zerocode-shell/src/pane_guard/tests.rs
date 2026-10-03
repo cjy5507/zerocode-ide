@@ -280,6 +280,8 @@ fn a_repeated_command_is_answered_once() {
         (&json!(0), &json!(true))
     );
     assert_eq!(asked[1]["from"], "codex");
+    assert_eq!(asked[0]["inputTokens"], json!(212));
+    assert_eq!(asked[1]["inputTokens"], json!(0));
     assert_eq!(
         endpoint.asked().len(),
         1,

@@ -33,7 +33,7 @@ pub const QUESTION: &str = "summon_model";
 /// The option that leaves the ladder's default in place.
 pub const ABSTAIN: &str = "abstain";
 /// The version of the words below; bump it when any of them changes.
-pub const RUBRIC_VERSION: u32 = 1;
+pub const RUBRIC_VERSION: u32 = 2;
 /// The fewest models that make a choice: one model beside `abstain` is a
 /// yes-or-no about a default, not a pick.
 pub const FEWEST_MODELS: usize = 2;
@@ -44,12 +44,12 @@ pub const EFFORT_KEY: &str = "chosenEffort";
 /// The row key that marks a summons a challenger's turn launched.
 pub const CHALLENGE_KEY: &str = "challenge";
 
-const INSTRUCTIONS: &str = "A worker is about to be summoned to carry out the work in `title` and `spec` (the first 400 characters). Choose the model it runs on and the effort it runs at: each option names one model and one effort that model accepts, as `model|effort`. `models` holds every model this agent's command line accepts today, each under its `id`: where its provider's own classifier ranks it (`band`: `top` plans and verifies, `second` takes hard implementation, `rest` ordinary and easy work; `rungs` the implementation work it serves; both null when unranked), the `efforts` it accepts from lowest to highest, whether it arrived recently (`new`), how much of its provider's quota is spent (`quotaSpentPercent` of its `quotaWindow`, both null when unread), and this ledger's record of the summonses it carried here: how many (`summoned`), how many have `ended`, how many of those passed on the first attempt (`passedFirstTry`), and the median rework rounds, tokens and minutes of the ended ones (`medianReworkRounds`, `medianTokens`, `medianMinutes`). A record built on a handful of summonses is weak evidence, and a model with none has not been shown either way. `attempt` counts earlier summonses of this task, `failures` its consecutive failures, and `retryOf` says whether this summons replaces an ended attempt. Choose the least costly pair that will carry this work well on the first attempt. Choose `abstain` when nothing here tells the models apart for this work.";
+const INSTRUCTIONS: &str = "A worker is about to be summoned to carry out the work in `title` and `spec` (the first 400 characters). Choose the model it runs on and the effort it runs at: each option names one model and one effort that model accepts, as `model|effort`. `models` holds every model this agent's command line accepts today, each under its `id`: where its provider's own classifier ranks it (`band`: `top` plans and verifies, `second` takes hard implementation, `rest` ordinary and easy work; `rungs` the implementation work it serves; both null when unranked), the `efforts` it accepts from lowest to highest, whether it arrived recently (`new`), how much of its provider's quota is spent (`quotaSpentPercent` of its `quotaWindow`, both null when unread), and this ledger's record of the summonses it carried here: how many (`summoned`), how many have `ended`, how many of those passed on the first attempt (`passedFirstTry`), and the median rework rounds, tokens and minutes of the ended ones (`medianReworkRounds`, `medianTokens`, `medianMinutes`). `byEffort` holds those same measurements separately for each effort that actually ran; null means that pair has no measured history. The model-wide record is only a prior for a pair with little evidence, not a measurement of every effort. A record built on a handful of summonses is weak evidence, and a model with none has not been shown either way. `attempt` counts earlier summonses of this task, `failures` its consecutive failures, and `retryOf` says whether this summons replaces an ended attempt. Choose the least costly pair that will carry this work well on the first attempt. Choose `abstain` when nothing here tells the models apart for this work.";
 const OPTION_MEANS: &str =
     "The worker runs on {model} at {effort} effort; the model's facts are its entry in `models`.";
 const ABSTAIN_MEANS: &str = "Nothing here tells the models apart for this work; the ladder's default for its difficulty runs.";
 const STATE_KEYS: [&str; 6] = ["title", "spec", "attempt", "failures", "retryOf", "models"];
-const MODEL_KEYS: [&str; 13] = [
+const MODEL_KEYS: [&str; 14] = [
     "id",
     "band",
     "rungs",
@@ -63,6 +63,7 @@ const MODEL_KEYS: [&str; 13] = [
     "medianReworkRounds",
     "medianTokens",
     "medianMinutes",
+    "byEffort",
 ];
 
 /// What this ledger saw one model do: every summons that ran on it and the
@@ -71,6 +72,15 @@ const MODEL_KEYS: [&str; 13] = [
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRecord {
+    #[serde(flatten)]
+    pub overall: ModelPerformance,
+    #[serde(default)]
+    pub by_effort: BTreeMap<String, ModelPerformance>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPerformance {
     pub summoned: usize,
     pub ended: usize,
     pub passed_first_try: usize,
@@ -99,25 +109,53 @@ pub fn records<'a>(
         let (Some(run), Some(dispatch)) = (row["run"].as_str(), row["dispatch"].as_str()) else {
             continue;
         };
-        by_summons.insert((run, dispatch), row);
+        let newest = by_summons.entry((run, dispatch)).or_insert(row);
+        if row["at"].as_i64().unwrap_or(0) >= newest["at"].as_i64().unwrap_or(0) {
+            *newest = row;
+        }
     }
-    let mut records: BTreeMap<String, ModelRecord> = BTreeMap::new();
-    // Each model's samples, in the order the record names their medians:
-    // rework rounds, tokens, minutes.
-    let mut samples: BTreeMap<String, [Vec<u64>; 3]> = BTreeMap::new();
+    let mut models: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
     for row in by_summons.into_values() {
         let Some(model) = row["executionModel"].as_str().map(&canonical) else {
             continue;
         };
-        let outcome = &row[KEY];
-        let record = records.entry(model.clone()).or_default();
+        models.entry(model).or_default().push(row);
+    }
+    models
+        .into_iter()
+        .map(|(model, rows)| {
+            let mut efforts: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+            for row in &rows {
+                if let Some(effort) = row["effort"]
+                    .as_str()
+                    .filter(|effort| !effort.trim().is_empty())
+                {
+                    efforts.entry(effort).or_default().push(row);
+                }
+            }
+            let record = ModelRecord {
+                overall: performance_of(&rows),
+                by_effort: efforts
+                    .into_iter()
+                    .map(|(effort, rows)| (effort.to_string(), performance_of(&rows)))
+                    .collect(),
+            };
+            (model, record)
+        })
+        .collect()
+}
+
+fn performance_of(rows: &[&Value]) -> ModelPerformance {
+    let mut record = ModelPerformance::default();
+    let mut samples: [Vec<u64>; 3] = Default::default();
+    for row in rows {
+        let outcome = &row[crate::summon_difficulty::outcomes::KEY];
         record.summoned += 1;
         let Some(first) = outcome["firstAttemptSuccess"].as_bool() else {
             continue;
         };
         record.ended += 1;
         record.passed_first_try += usize::from(first);
-        let held = samples.entry(model).or_default();
         for (at, sample) in [
             outcome["reworkRounds"].as_u64(),
             outcome["tokens"].as_u64(),
@@ -126,21 +164,17 @@ pub fn records<'a>(
         .into_iter()
         .enumerate()
         {
-            held[at].extend(sample);
+            samples[at].extend(sample);
         }
     }
-    for (model, held) in samples {
-        let [rework, tokens, minutes] = held.map(|mut held| {
-            held.sort_unstable();
-            crate::jev::summary::percentile(&held, 0.50)
-        });
-        if let Some(record) = records.get_mut(&model) {
-            record.median_rework_rounds = rework;
-            record.median_tokens = tokens;
-            record.median_minutes = minutes;
-        }
-    }
-    records
+    let [rework, tokens, minutes] = samples.map(|mut samples| {
+        samples.sort_unstable();
+        crate::jev::summary::percentile(&samples, 0.50)
+    });
+    record.median_rework_rounds = rework;
+    record.median_tokens = tokens;
+    record.median_minutes = minutes;
+    record
 }
 
 /// Milliseconds in the minute a record's wall time is said in.
@@ -304,7 +338,7 @@ fn ask_in(scope: Option<&str>, look: &Look, options: &[ModelOption]) -> Option<M
             );
             offered.push((option.id.clone(), effort.clone()));
         }
-        let record = &option.record;
+        let record = &option.record.overall;
         models.push(Value::Object(Map::from_iter(
             MODEL_KEYS.map(String::from).into_iter().zip([
                 Value::from(option.id.as_str()),
@@ -324,6 +358,19 @@ fn ask_in(scope: Option<&str>, look: &Look, options: &[ModelOption]) -> Option<M
                 Value::from(record.median_rework_rounds),
                 Value::from(record.median_tokens),
                 Value::from(record.median_minutes),
+                Value::Object(
+                    option
+                        .efforts
+                        .iter()
+                        .map(|effort| {
+                            (
+                                effort.clone(),
+                                serde_json::to_value(option.record.by_effort.get(effort))
+                                    .unwrap_or_default(),
+                            )
+                        })
+                        .collect(),
+                ),
             ]),
         )));
     }
@@ -420,7 +467,7 @@ pub fn challenger<'a>(
     {
         return None;
     }
-    let ended = |model: &str| records.get(model).map_or(0, |record| record.ended);
+    let ended = |model: &str| records.get(model).map_or(0, |record| record.overall.ended);
     row.candidates
         .iter()
         .filter(|candidate| ended(&candidate.model) < lineup::CHALLENGE_MIN_SAMPLES)
@@ -492,7 +539,7 @@ mod tests {
         });
         let a = records.get("model-a");
         assert!(a.is_some(), "the release's record: {records:?}");
-        let a = a.unwrap();
+        let a = &a.unwrap().overall;
         assert_eq!(
             a.summoned, 3,
             "an alias is its release; one summons counted once"
@@ -534,6 +581,57 @@ mod tests {
             (Some(40), Some("weekly"))
         );
         assert!(!options[0].fresh, "a shipped model is not");
+    }
+
+    #[test]
+    fn the_model_question_distinguishes_the_efforts_that_actually_ran() {
+        let mut low = outcome("claude", "model-b", "dp-low", Some(true), 100);
+        low["effort"] = json!("low");
+        low["chosenEffort"] = json!("high");
+        let mut high = outcome("claude", "model-b", "dp-high", Some(false), 900);
+        high["effort"] = json!("high");
+        let legacy = outcome("claude", "model-b", "dp-legacy", Some(true), 500);
+        let records = records([&low, &high, &legacy], "claude", str::to_string);
+        let options = options(
+            "claude",
+            &lineup(),
+            None,
+            &records,
+            &["medium"],
+            |_| None,
+            NOW,
+        );
+        let asked = ask(&look(), &options).expect("two models are offered");
+        let model = asked.state["models"]
+            .as_array()
+            .expect("model evidence")
+            .iter()
+            .find(|model| model["id"] == "model-b")
+            .expect("model-b is offered");
+        assert_eq!(model["byEffort"]["low"]["passedFirstTry"], json!(1));
+        assert_eq!(model["byEffort"]["low"]["medianTokens"], json!(100));
+        assert_eq!(model["byEffort"]["high"]["passedFirstTry"], json!(0));
+        assert_eq!(model["byEffort"]["high"]["medianTokens"], json!(900));
+        assert_eq!(model["byEffort"]["medium"], Value::Null);
+        assert_eq!(model["summoned"], json!(3));
+    }
+
+    #[test]
+    fn repeated_observations_keep_the_newest_result_for_each_executed_pair() {
+        let mut earlier = outcome("claude", "model-alias", "dp-1", Some(true), 100);
+        earlier["at"] = json!(10);
+        earlier["effort"] = json!("high");
+        let mut later = outcome("claude", "model-a", "dp-1", Some(false), 300);
+        later["at"] = json!(20);
+        later["effort"] = json!("high");
+        let lineup = lineup();
+        let records = records([&later, &earlier], "claude", |model| {
+            lineup.canonical(model).to_string()
+        });
+        let held = &records["model-a"].by_effort["high"];
+        assert_eq!(held.summoned, 1);
+        assert_eq!(held.passed_first_try, 0);
+        assert_eq!(held.median_tokens, Some(300));
     }
 
     #[test]
@@ -604,10 +702,10 @@ mod tests {
 
     #[test]
     fn the_version_is_pinned_to_the_words() {
-        assert_eq!(RUBRIC_VERSION, 1);
+        assert_eq!(RUBRIC_VERSION, 2);
         assert_eq!(
             crate::jev::rubric_fingerprint(rubric_words),
-            "29fa93424248ad8b"
+            "fee41e1fe99e1749"
         );
     }
 
@@ -638,7 +736,10 @@ mod tests {
         records.insert(
             "model-b".to_string(),
             ModelRecord {
-                ended: 1,
+                overall: ModelPerformance {
+                    ended: 1,
+                    ..ModelPerformance::default()
+                },
                 ..ModelRecord::default()
             },
         );
@@ -660,7 +761,10 @@ mod tests {
         records.insert(
             "model-c".to_string(),
             ModelRecord {
-                ended: lineup::CHALLENGE_MIN_SAMPLES,
+                overall: ModelPerformance {
+                    ended: lineup::CHALLENGE_MIN_SAMPLES,
+                    ..ModelPerformance::default()
+                },
                 ..ModelRecord::default()
             },
         );
@@ -672,7 +776,10 @@ mod tests {
         records.insert(
             "model-b".to_string(),
             ModelRecord {
-                ended: lineup::CHALLENGE_MIN_SAMPLES,
+                overall: ModelPerformance {
+                    ended: lineup::CHALLENGE_MIN_SAMPLES,
+                    ..ModelPerformance::default()
+                },
                 ..ModelRecord::default()
             },
         );

@@ -42,7 +42,10 @@ fn records() -> std::collections::BTreeMap<String, ModelRecord> {
             (
                 id.to_string(),
                 ModelRecord {
-                    ended: lineup::CHALLENGE_MIN_SAMPLES,
+                    overall: model::ModelPerformance {
+                        ended: lineup::CHALLENGE_MIN_SAMPLES,
+                        ..model::ModelPerformance::default()
+                    },
                     ..ModelRecord::default()
                 },
             )
@@ -303,7 +306,10 @@ impl zerocode_core::orchestration::Launcher for Wired<'_> {
                     (
                         held.id.clone(),
                         ModelRecord {
-                            ended: lineup::CHALLENGE_MIN_SAMPLES,
+                            overall: model::ModelPerformance {
+                                ended: lineup::CHALLENGE_MIN_SAMPLES,
+                                ..model::ModelPerformance::default()
+                            },
                             ..ModelRecord::default()
                         },
                     )
@@ -958,7 +964,10 @@ fn live_difficulty_answers_alone_and_joint() {
             (
                 model.id.clone(),
                 ModelRecord {
-                    ended: lineup::CHALLENGE_MIN_SAMPLES,
+                    overall: model::ModelPerformance {
+                        ended: lineup::CHALLENGE_MIN_SAMPLES,
+                        ..model::ModelPerformance::default()
+                    },
                     ..ModelRecord::default()
                 },
             )

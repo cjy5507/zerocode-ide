@@ -1,0 +1,130 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ipc-road</title>
+<script>
+"use strict";
+/* The page of `ipc-road`: it sends requests shaped like Tauri's `invoke` over a
+ * custom scheme and tells the tool where each stretch begins and ends. Its own
+ * timings are not the result — the tool reads the main thread's side — and the
+ * only number it hands over is the wall time of a stretch. */
+const quick = new URLSearchParams(location.search).has("quick");
+const KB = 1024;
+const MB = KB * KB;
+// The shape of Tauri's per-page invoke key (24 characters).
+const KEY = "Zk3p9Qm2Xv7LrT5nBw8YcD4a";
+let serial = 0;
+
+/* Tauri's own request (`scripts/ipc-protocol.js`): a POST to
+ * `ipc://localhost/<command>` from a page on another scheme, with a content
+ * type, two callback ids and the invoke key — so WebKit asks the scheme for a
+ * preflight, as it does for the window. */
+const headers = (type) => {
+  serial += 1;
+  return new Headers({
+    "Content-Type": type,
+    "Tauri-Callback": String(3841592 + serial),
+    "Tauri-Error": String(3841593 + serial),
+    "Tauri-Invoke-Key": KEY,
+  });
+};
+const send = (command, body, type) =>
+  fetch(`ipc://localhost/${command}`, { method: "POST", body, headers: headers(type) })
+    .then((response) => response.arrayBuffer());
+const control = (command, text) => send(command, text, "text/plain");
+
+/* The three encodings an `invoke`'s arguments take (`process-ipc-message-fn.js`):
+ * a JSON object with a string in it, a raw buffer at the top level, and a typed
+ * array INSIDE an object, which Tauri's replacer turns into a JSON array of
+ * numbers. */
+const noise = (count) => {
+  const bytes = new Uint8Array(count);
+  for (let at = 0; at < count; at += 65536) {
+    crypto.getRandomValues(bytes.subarray(at, Math.min(count, at + 65536)));
+  }
+  return bytes;
+};
+const bodyOf = (kind, count) => {
+  if (kind === "raw") return { body: new Uint8Array(count).buffer, type: "application/octet-stream" };
+  if (kind === "numbers") {
+    return { body: JSON.stringify({ bytes: Array.from(noise(count)) }), type: "application/json" };
+  }
+  return { body: JSON.stringify({ text: "x".repeat(Math.max(0, count - 12)) }), type: "application/json" };
+};
+
+const phase = async (name, run) => {
+  await control("__phase", name);
+  const started = performance.now();
+  await run();
+  await control("__phase_end", String(performance.now() - started));
+};
+const repeat = async (times, once) => {
+  for (let at = 0; at < times; at += 1) await once(at);
+};
+
+/* [encoding, body bytes, repetitions]. The small ones are what the window
+ * sends all day; the large ones are what a paste, a save or a picture sends. */
+const ladder = quick
+  ? [["json", 100, 100], ["json", 100 * KB, 30], ["json", MB, 10], ["raw", MB, 10]]
+  : [
+      ["json", 100, 300], ["json", KB, 300], ["json", 10 * KB, 200], ["json", 100 * KB, 100],
+      ["json", MB, 40], ["json", 4 * MB, 15], ["json", 16 * MB, 6], ["json", 64 * MB, 3],
+      ["raw", MB, 40], ["raw", 16 * MB, 6],
+      ["numbers", 100 * KB, 20], ["numbers", MB, 6],
+    ];
+const widths = quick ? [10, 100] : [10, 100, 1000];
+const evals = quick
+  ? [[100, 50], [100 * KB, 20], [MB, 8]]
+  : [[100, 200], [KB, 200], [10 * KB, 100], [100 * KB, 50], [MB, 20], [4 * MB, 8]];
+
+const burst = async (width, distinct, round) => {
+  const calls = [];
+  for (let at = 0; at < width; at += 1) {
+    const command = distinct ? `command_${round}_${at}` : "burst";
+    calls.push(send(command, "{}", "application/json"));
+  }
+  await Promise.all(calls);
+};
+
+const run = async () => {
+  // Warm-up outside any phase: the first requests pay for WebKit's own setup.
+  await repeat(50, () => send("ping", "{}", "application/json"));
+
+  for (const [kind, count, times] of ladder) {
+    const { body, type } = bodyOf(kind, count);
+    await phase(`${kind}-${count}`, () => repeat(times, () => send("ping", body, type)));
+  }
+
+  // The same ladder's small rungs where the command answers on the spot, the
+  // way one that is not `async` does.
+  await control("__sync", "1");
+  for (const count of [100, 100 * KB, MB]) {
+    const { body, type } = bodyOf("json", count);
+    await phase(`sync-json-${count}`, () => repeat(quick ? 10 : 40, () => send("ping", body, type)));
+  }
+  await control("__sync", "0");
+
+  // A line of requests at once: one command's url (one preflight) and a
+  // different url for each (a preflight each).
+  for (const width of widths) {
+    const rounds = width >= 1000 ? 3 : 5;
+    await phase(`burst-same-${width}`, () => repeat(rounds, (round) => burst(width, false, round)));
+    await phase(`burst-distinct-${width}`, () => repeat(rounds, (round) => burst(width, true, round)));
+  }
+
+  // One request at a time to a url never seen: every one is preceded by its
+  // preflight, which is the whole price of a command called rarely.
+  await phase("cold-urls-sequential", () =>
+    repeat(quick ? 40 : 200, (at) => send(`cold_${at}`, "{}", "application/json")));
+
+  // What an event of this size costs the main thread (`evaluate_script`).
+  for (const [count, times] of evals) {
+    await control("__eval", JSON.stringify({ bytes: count, reps: times }));
+  }
+  await control("__done", "");
+};
+
+window.addEventListener("error", (event) => control("__error", String(event.message)));
+window.addEventListener("unhandledrejection", (event) => control("__error", String(event.reason)));
+window.__sink = () => {};
+run().catch((error) => control("__error", String(error?.stack ?? error)).then(() => control("__done", "")));
+</script>

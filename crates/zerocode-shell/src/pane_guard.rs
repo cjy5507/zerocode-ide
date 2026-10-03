@@ -1777,6 +1777,8 @@ fn put<R>(
         model: answered.spent.model.clone(),
         request_bytes: (answered.request_bytes > 0).then_some(answered.request_bytes),
         cached,
+        input_tokens: answered.spent.input_tokens,
+        output_tokens: answered.spent.output_tokens,
         ..Trip::default()
     };
     let body = match answered.answer {
@@ -1787,12 +1789,6 @@ fn put<R>(
         }
     };
     let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    trip.input_tokens = parsed
-        .pointer("/usage/input_tokens")
-        .and_then(Value::as_u64);
-    trip.output_tokens = parsed
-        .pointer("/usage/output_tokens")
-        .and_then(Value::as_u64);
     let answers = parsed.get("answers").cloned().unwrap_or(Value::Null);
     match read(&answers) {
         Ok(read) => {

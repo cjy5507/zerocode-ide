@@ -16965,7 +16965,7 @@ fn dials_why(
         },
         "samples": model
             .and_then(|model| facts?.records.get(model))
-            .map_or(0, |record| record.ended),
+            .map_or(0, |record| record.overall.ended),
         "confidence": turn
             .and_then(|(_, receipt, _, _)| receipt.as_ref())
             .filter(|_| jev)

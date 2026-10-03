@@ -307,6 +307,13 @@ function flashPane(term) {
   // 리플로우 없이는 아무 일도 아니다.
   void slot.offsetWidth;
   slot.classList.add("is-called");
+  // 움직임 줄이기가 켜진 창에서는 규칙의 애니메이션이 none으로 계산되어 돌지 않고,
+  // 돌지 않은 애니메이션은 animationend도 내지 않는다 — 클래스가 영영 남아 다음
+  // 벨이 「이미 불린 판」을 보게 된다. 그래서 애니메이션이 서지 않았으면 바로 벗는다.
+  if (!slot.getAnimations().some((one) => one.animationName === "pane-called")) {
+    slot.classList.remove("is-called");
+    return;
+  }
   slot.addEventListener("animationend", () => slot.classList.remove("is-called"), {
     once: true,
   });

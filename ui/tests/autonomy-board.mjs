@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { createWindowServer, launchWindowBrowser, openWindowTestPage } from "./window-boot.mjs";
 
 export async function testAutonomyBoard(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
@@ -230,7 +230,7 @@ export async function testAutonomyBoard(browser, origin, ok) {
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const { files, origin } = await createWindowServer();
-  const browser = await chromium.launch({ headless: true });
+  const browser = await launchWindowBrowser();
   let failures = 0;
   try {
     await testAutonomyBoard(browser, origin, (name, pass, detail = "") => {

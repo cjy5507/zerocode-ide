@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use zerocode_core::jev::door::{
     self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
 };
-use zerocode_core::jev::summary::{HTTP_VERSION, MODEL};
+use zerocode_core::jev::summary::{HTTP_VERSION, INPUT_TOKENS, MODEL};
 use zerocode_core::jev::{JevUse, count, memo};
 
 use crate::api_routers::{Keychain, RouterKeys};
@@ -353,6 +353,8 @@ pub(crate) fn base_url() -> String {
 pub struct Spent {
     pub requests: u32,
     pub redacted_lines: usize,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
     /// The version the answer named ([`answered_by`], t-6187); `None` when
     /// nothing answered — a refusal at the door, a failure, a wall.
     pub model: Option<String>,
@@ -377,6 +379,22 @@ impl Spent {
         };
         fields.insert(REQUESTS_KEY.to_string(), json!(self.requests));
         fields.insert(REDACTED_LINES_KEY.to_string(), json!(self.redacted_lines));
+        fields.insert(
+            INPUT_TOKENS.canonical.to_string(),
+            json!(if self.requests == 0 {
+                Some(0)
+            } else {
+                self.input_tokens
+            }),
+        );
+        fields.insert(
+            "outputTokens".to_string(),
+            json!(if self.requests == 0 {
+                Some(0)
+            } else {
+                self.output_tokens
+            }),
+        );
         if let Some(model) = self.model.as_deref() {
             fields.insert(MODEL.canonical.to_string(), json!(model));
         }
@@ -391,7 +409,22 @@ impl Spent {
     /// over.
     #[must_use]
     pub fn together<'spent>(asks: impl IntoIterator<Item = &'spent Self>) -> Self {
-        asks.into_iter().fold(Self::default(), |mut all, one| {
+        let empty = Self {
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            ..Self::default()
+        };
+        asks.into_iter().fold(empty, |mut all, one| {
+            if one.requests > 0 {
+                all.input_tokens = all
+                    .input_tokens
+                    .zip(one.input_tokens)
+                    .map(|(held, added)| held + added);
+                all.output_tokens = all
+                    .output_tokens
+                    .zip(one.output_tokens)
+                    .map(|(held, added)| held + added);
+            }
             all.requests += one.requests;
             all.redacted_lines += one.redacted_lines;
             if all.model.is_none() {
@@ -676,6 +709,8 @@ impl Wire {
                 spent: Spent {
                     requests: 0,
                     redacted_lines,
+                    input_tokens: Some(0),
+                    output_tokens: Some(0),
                     // The version that gave the remembered answer, read off
                     // the body the memo kept whole.
                     model: answered_by(&remembered.answer),
@@ -690,9 +725,22 @@ impl Wire {
         // runtime the same way.
         let (answer, version) =
             tauri::async_runtime::block_on(self.ask_once(&key, cleared, deadline));
+        let usage = answer
+            .as_deref()
+            .ok()
+            .and_then(|body| serde_json::from_str::<Value>(body).ok())
+            .and_then(|body| body.get("usage").cloned());
         let spent = Spent {
             requests: 1,
             redacted_lines,
+            input_tokens: usage
+                .as_ref()
+                .and_then(|usage| usage.get("input_tokens"))
+                .and_then(Value::as_u64),
+            output_tokens: usage
+                .as_ref()
+                .and_then(|usage| usage.get("output_tokens"))
+                .and_then(Value::as_u64),
             model: answer.as_deref().ok().and_then(answered_by),
             version,
         };

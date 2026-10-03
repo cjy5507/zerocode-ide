@@ -13837,6 +13837,27 @@ details.worker-command {
   margin: 0;
 }
 
+/* The code in a fence, coloured by the editor's own ramp (t-22095): each
+ * role `editorHighlightStyle` colours is a span of the fence's words
+ * (`colourCodeIn`). Colours only — weight and slant stay the words' own —
+ * and both treatments, because every role is a token of the ramp; names and
+ * punctuation stay the code's ink (`CODE_PLAIN_ROLES`). */
+pre.md-block > .chat-code-keyword { color: var(--syntax-keyword); }
+pre.md-block > .chat-code-string { color: var(--syntax-string); }
+pre.md-block > .chat-code-number { color: var(--syntax-number); }
+pre.md-block > .chat-code-comment { color: var(--syntax-comment); }
+pre.md-block > .chat-code-function { color: var(--syntax-function); }
+pre.md-block > .chat-code-type { color: var(--syntax-type); }
+pre.md-block > .chat-code-constant { color: var(--syntax-constant); }
+pre.md-block > .chat-code-operator { color: var(--syntax-operator); }
+pre.md-block > .chat-code-tag { color: var(--syntax-tag); }
+pre.md-block > .chat-code-attribute { color: var(--syntax-attribute); }
+pre.md-block > .chat-code-meta { color: var(--syntax-meta); }
+pre.md-block > .chat-code-link { color: var(--syntax-link); }
+pre.md-block > .chat-code-invalid { color: var(--syntax-invalid); }
+pre.md-block > .chat-code-inserted { color: var(--syntax-inserted); }
+pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
+
 .helper-code-copy {
   position: absolute;
   top: var(--chat-code-copy-inset);
@@ -15237,6 +15258,17 @@ details[open] > .helper-cap::after {
   gap: var(--space-2);
   max-width: var(--chat-dock-max);
   margin: 0 auto;
+}
+
+/* The dock's watched height (`chatDockNode`), on the two that read it — the
+ * list's foot room above and the way back to the foot below. Not inherited:
+ * it moves each time a draft wraps, and a value every row of a 400-turn page
+ * inherits restyles every row, which made the key that wrapped a 50–85 ms
+ * frame (t-22095). A third reader is written by the observer too. */
+@property --chat-dock-h {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
 }
 
 /* The way back to the foot (t-6824, the person's ask — the extension has
