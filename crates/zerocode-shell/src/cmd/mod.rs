@@ -211,7 +211,8 @@ pub(crate) use worktree::{
     gitlab_todos, gitlab_update_mr, gitlab_work_items, list_branches, list_worktrees,
     merge_and_remove_worktree, remove_worktree, resolve_mr_base, resolve_pr_base,
     save_worktree_prefs, set_active_worktree, validate_branch_name, work_item_seed,
-    worktree_evidence, worktree_last_agent, worktree_loss, worktree_prefs, worktree_stamp,
+    worktree_evidence, worktree_landing_stamp, worktree_last_agent, worktree_loss, worktree_prefs,
+    worktree_stamp,
 };
 
 pub(crate) use settings::{

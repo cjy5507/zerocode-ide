@@ -92,6 +92,16 @@ pub(super) struct WorktreeEntry {
     /// A durable external work item attached to this checkout, when any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) linked_item: Option<zerocode_core::LinkedWorkItem>,
+    /// The commit this checkout is on, as `git worktree list` said it. Not sent:
+    /// it is the one input of [`worktree_landing`] the listing already holds,
+    /// so the landing does not ask git for it again.
+    #[serde(skip)]
+    pub(super) head: Option<String>,
+    /// What git says about whether this checkout's work is in the compare ref
+    /// (t-22104). A fact of its own beside the ledger's phase, never folded into
+    /// it; absent for the repository's own checkout, a folder and a prunable row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) landing: Option<WorktreeLanding>,
 }
 
 impl WorktreeEntry {
@@ -117,6 +127,8 @@ impl WorktreeEntry {
             // knows the host to ask. Born as "no mark read", never as a date.
             last_activity_ms: 0,
             linked_item: None,
+            head: worktree.head,
+            landing: None,
         }
     }
 
@@ -136,6 +148,8 @@ impl WorktreeEntry {
             external_hidden: false,
             last_activity_ms: 0,
             linked_item: None,
+            head: None,
+            landing: None,
         }
     }
 }
