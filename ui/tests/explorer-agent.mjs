@@ -427,9 +427,11 @@ export async function testExplorerKeys(browser, origin, ok) {
         level: row("src")?.getAttribute("aria-level"),
         stops: [...fileTree.querySelectorAll(".tree-row")].filter((one) => one.tabIndex === 0).length,
         label: row("README.md")?.getAttribute("aria-label") ?? "",
+        // The word in whatever language the page reads in.
+        added: t("tree.git.added", "추가됨"),
       };
     }, STATUS);
-    ok("the tree is a tree to a screen reader: role tree, treeitems with levels, one tab stop, names that say the git state", roles.tree === "tree" && roles.owner === "true" && roles.item === "treeitem" && roles.level === "1" && roles.stops === 1 && roles.label.includes("README.md") && roles.label.includes("추가됨"), JSON.stringify(roles));
+    ok("the tree is a tree to a screen reader: role tree, treeitems with levels, one tab stop, names that say the git state", roles.tree === "tree" && roles.owner === "true" && roles.item === "treeitem" && roles.level === "1" && roles.stops === 1 && roles.label.includes("README.md") && roles.label.includes(roles.added), JSON.stringify(roles));
 
     await page.evaluate(() => window.__XT__.row("docs").focus());
     const at = () => page.evaluate(() => document.activeElement?.dataset?.treePath ?? document.activeElement?.id ?? null);
