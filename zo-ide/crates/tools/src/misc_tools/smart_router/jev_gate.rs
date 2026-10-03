@@ -179,6 +179,12 @@ impl JevDoor {
                 })
     }
 
+    fn seat_asks_now(&self, seat: &JevUse) -> bool {
+        self.settings_file.is_none() || self.workspace.as_deref().and_then(|cwd|
+            super::settings::merged_settings_root_from(&runtime::ConfigLoader::default_for(Path::new(cwd))))
+            .is_some_and(|root| seat.mode_in(&root).asks())
+    }
+
     /// [`Self::model`] as the fingerprint an in-process memo keys on
     /// ([`model_key`]).
     #[must_use]
@@ -196,7 +202,8 @@ impl JevDoor {
         door::pass(
             |asking| {
                 let cleared = door::may_send(row, asking, body)?;
-                if settings.model == self.settings.model { Ok(cleared) }
+                if !self.seat_asks_now(row) { Err(Refused::Off) }
+                else if settings.model == self.settings.model { Ok(cleared) }
                 else { Err(Refused::SettingsChanged) }
             },
             key,
@@ -236,7 +243,8 @@ impl JevDoor {
             sent_today: count::sent(&self.requests),
         };
         let cleared = door::may_send(row, &asking, body)?;
-        if settings.model == self.settings.model { Ok(cleared) }
+        if !self.seat_asks_now(row) { Err(Refused::Off) }
+        else if settings.model == self.settings.model { Ok(cleared) }
         else { Err(Refused::SettingsChanged) }
     }
 
@@ -547,6 +555,12 @@ mod tests {
             assert_eq!(door.pass(&AGENT_TOOL, true, body()).unwrap_err(), Refused::Off);
             assert_eq!(door.clear(&AGENT_TOOL, true, body()).unwrap_err(), Refused::Off);
             assert_eq!(door.count_a_hedge(), Err(Refused::Off));
+            root["smart"]["jev"]["enabled"] = Value::Bool(true);
+            root["smart"]["jevModel"] = Value::String(door.model().to_string());
+            root["smart"][AGENT_TOOL.setting] = Value::String("off".into());
+            std::fs::write(&path, root.to_string()).unwrap();
+            assert_eq!(door.pass(&AGENT_TOOL, true, body()).unwrap_err(), Refused::Off);
+            assert_eq!(door.clear(&AGENT_TOOL, true, body()).unwrap_err(), Refused::Off);
             assert_eq!(count::sent(&door.requests), 0, "withheld requests are not counted as sent");
             assert!(endpoint.requests().is_empty());
         });

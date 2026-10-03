@@ -358,6 +358,12 @@ fn an_armed_page_rechecks_permissions_for_late_and_cached_rankings() {
                 let rows = rows_settled(cwd, 2);
                 assert!(rows[1].cached && !rows[1].applied);
                 assert_eq!(mock.requests().len(), 1);
+            } else if change == "off" {
+                assert!(seat.ask(page("a different page after the seat was switched off")).is_some());
+                let rows = rows_settled(cwd, 2);
+                assert_eq!(rows[1].outcome, "off");
+                assert_eq!(mock.requests().len(), 1, "an armed seat cannot send a new request after off");
+                assert!(rx.try_recv().is_err());
             }
             seat.disarm();
         });
