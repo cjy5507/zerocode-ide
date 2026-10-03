@@ -94,7 +94,8 @@ def plan(geometry, values, bundle, contract_version, rules=None, table_limits=No
              for kind in inputs]
     return {'version': contract_version, 'plan_hash': '', 'scope': {'surface': 'macos_desktop', 'target': bundle},
             'detectors': detectors, 'rules': rules, 'macros': macros,
-            'pointer': {'curve': 'cosine', 'duration_ms': values['rts_plan']['pointer_ms'], 'instant': False}}
+            'pointer': {'curve': 'cosine', 'duration_ms': reflex.glide(pointer_ms, values['rts_plan']['pointer_ms']),
+                        'instant': False}}
 
 
 def the_round(owner, seed, values, table_limits, stress=False):
@@ -213,7 +214,11 @@ class Desk(reflex.Desk):
         return the_round(self.session['owner'], seed, self.values, self.limits, self.stress)
 
     def plan(self, geometry, rules):
-        return plan(geometry, self.values, self.session['bundle'], reflex.contract(), table_limits=self.limits)
+        return plan(geometry, self.values, self.session['bundle'], reflex.contract(), table_limits=self.limits,
+                    pointer_ms=self.pointer_ms)
+
+    def table_glide_ms(self):
+        return self.values['rts_plan']['pointer_ms']
 
     def result(self, record):
         return judged(record, self.values, self.limits)

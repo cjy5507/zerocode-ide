@@ -206,7 +206,9 @@ fn append(path: &Path, value: &Value) {
 
 /// The line `calls.jsonl` keeps for a start or a stop: the method, the run
 /// it named or was given, when it was asked and answered on the host clock,
-/// the deadline a start was given, and the helper's refusal.
+/// the deadline a start was given, the helper's refusal — and, for a start,
+/// the glide its plan asked for (`pointerMs`), read off the plan's own wire,
+/// so a measurement knows the pace every plan ran at (t-26708).
 fn call_row(
     method: &str,
     params: &Value,
@@ -222,7 +224,19 @@ fn call_row(
         "answeredNs": answered_ns,
         "deadlineNs": answered.and_then(|answer| answer.get("deadlineNs")),
         "refused": answer.err(),
+        "pointerMs": pointer_ms_of(params),
     })
+}
+
+/// The glide a start's plan asks for, in milliseconds: the start carries its
+/// plan as the contract's canonical wire text, and the pace is the plan's
+/// `pointer.duration_ms`. `None` for a call that carries no plan.
+fn pointer_ms_of(params: &Value) -> Option<u64> {
+    params
+        .get("plan")
+        .and_then(Value::as_str)
+        .and_then(|wire| serde_json::from_str::<Value>(wire).ok())
+        .and_then(|plan| plan["pointer"]["duration_ms"].as_u64())
 }
 
 #[cfg(test)]

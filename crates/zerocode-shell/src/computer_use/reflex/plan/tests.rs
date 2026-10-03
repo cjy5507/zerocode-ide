@@ -660,10 +660,10 @@ fn a_plan_is_asked_from_words_and_numbers_with_no_picture() {
 /// version is red here, because a plan's label is read per version.
 #[test]
 fn the_version_is_pinned_to_the_words() {
-    assert_eq!(PROMPT_VERSION, 3);
+    assert_eq!(PROMPT_VERSION, 4);
     assert_eq!(
         zerocode_core::jev::fingerprint_of(INSTRUCTIONS),
-        "278ea90b68f98c91"
+        "6a6a0d7e654286a2"
     );
 }
 

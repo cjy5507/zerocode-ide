@@ -180,6 +180,11 @@ def apart(point, start, end):
     return math.hypot(px - (ax + share * dx), py - (ay + share * dy))
 
 
+def glide(pointer_ms, table_ms):
+    """The glide a plan writes: the one a run asked for (`--pointer-ms`), else the table's (t-26708)."""
+    return table_ms if pointer_ms is None else pointer_ms
+
+
 def colour_class(entry, tolerance=True):
     words = ("r", "g", "b", "tolerance") if tolerance else ("r", "g", "b")
     return {word: entry[word] for word in words}
@@ -241,7 +246,7 @@ def plan(geometry, values, bundle, contract_version, rules=None, table_limits=No
                "id": f"tap_{colour}", "repeat": 1}
               for colour in COLOURS]
     return {"detectors": detectors, "macros": macros, "plan_hash": "",
-            "pointer": {"curve": "cosine", "duration_ms": chosen["pointer_ms"], "instant": False},
+            "pointer": {"curve": "cosine", "duration_ms": glide(pointer_ms, chosen["pointer_ms"]), "instant": False},
             "rules": rules, "scope": {"surface": "macos_desktop", "target": bundle}, "version": contract_version}
 
 
@@ -964,6 +969,8 @@ class Desk:
         self.limits = table_limits
         self.session = json.loads((folder / "session.json").read_text())
         self.fixture = None
+        # The glide the current run asked its plan for; None is the table's.
+        self.pointer_ms = None
 
     def run_folder(self, seed):
         # One run a seed, never reset: a folder that exists is a run that happened.
@@ -981,7 +988,11 @@ class Desk:
 
     def plan(self, geometry, rules):
         return plan(geometry, self.values, self.session["bundle"], contract(), rules=rules,
-                    table_limits=self.limits)
+                    table_limits=self.limits, pointer_ms=self.pointer_ms)
+
+    def table_glide_ms(self):
+        """The glide this scene's plan writes when a run asks for none."""
+        return self.values["reflex_plan"]["pointer_ms"]
 
     def result(self, record):
         return judged(record, self.values, self.limits)
@@ -1085,8 +1096,12 @@ class Desk:
             config += f"+autopilot-{autopilot['generator']}"
             if autopilot["l1"] != goal["l1"]:
                 config += f"-l1{autopilot['l1']}"
+        self.pointer_ms = pointer_ms
+        if pointer_ms is not None:
+            config += f"+pointer{pointer_ms}"
         record = {"owner": self.session["owner"], "seed": seed, "fixturePid": ready["pid"], "rules": many,
-                  "config": config, "readyNs": ready["readyNs"], "stoppedBy": None}
+                  "config": config, "readyNs": ready["readyNs"], "stoppedBy": None,
+                  "pointerMs": glide(pointer_ms, self.table_glide_ms())}
         if autopilot is not None:
             record["autopilot"] = {"generator": autopilot["generator"], "l1": autopilot["l1"]}
         driver_process = cover_process = None
