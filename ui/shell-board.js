@@ -128,6 +128,10 @@ function primeCoordinatorDesk() {
 
 function refreshDeskAmbient() {
   deskAmbientAt = Date.now();
+  // The gate's numbers (calls, spend) move while the ledger does not, and a ledger
+  // that did not move tells the desk nothing — so the rows are read again on the
+  // slow beat, unless a read is already out (a first paint asks for one itself).
+  if (!deskLedgerAsking) refreshDeskLedger();
   void askReleaseStatus().then(scheduleDeskPaint);
   void askMachineLoad();
   void askDeskCheckouts();
@@ -784,6 +788,126 @@ function deskWorkerFacts(row, now) {
   ].filter(Boolean).join(" · ");
 }
 
+/* ---- 계속 판정 (t-26583) -----------------------------------------------------
+ *
+ * 워커 줄 밑의 한 줄: 창의 계속 판정이 그 워커를 어떻게 보는가와 그 근거. 판정·사유·숫자는
+ * 백엔드의 것이고(`continue_gate`, 행의 `gate`로 온다) 여기는 낱말과 서식만 붙인다 — 같은
+ * 사실을 두 곳에서 세면 두 답이 된다. 근거 줄은 판정이 「계속」일 때도 그린다: 말없이 두는 것도
+ * 읽은 숫자 위의 판정이라 무엇을 읽었는지 보여야 믿을 수 있다. 비용을 못 읽는 에이전트는 0원이
+ * 아니라 「비용 모름」과 그 까닭으로 적는다. 아래 표의 이름은 백엔드가 직렬화하는 그대로이고
+ * (`Verdict::word`·`Code::word`·`CostNote`), 모든 이름에 낱말이 있는지는 소스 계약이 지킨다. */
+const GATE_VERDICTS = Object.freeze({
+  continue: { key: "board.desk.gate.continue", word: "계속" },
+  checkpoint: { key: "board.desk.gate.checkpoint", word: "체크포인트" },
+  pause: { key: "board.desk.gate.pause", word: "멈춤" },
+  stop: { key: "board.desk.gate.stop", word: "중지" },
+});
+
+/* 사유의 `value`·`limit`은 사유마다 단위가 다르다(`Code`의 문서): 횟수, 천분율(되풀이)과 천분율로
+ * 적은 배수(비용 상승), 달러. `show`가 그 단위를 읽는 말로 바꾼다. 한국어 문장은 `key:`와 같은 줄에 둔다 —
+ * 「창에 박힌 라벨」 검사(`no_label_reaches_the_window_hardcoded`)가 줄 단위로 읽는다. */
+const gateCount = (value) => String(Math.round(value));
+const gatePercent = (permille) => String(Math.round(permille / 10));
+const gateTimes = (permille) => (permille / 1000).toFixed(1);
+const GATE_REASONS = Object.freeze({
+  checkpoint_due: { show: gateCount,
+    key: "board.desk.gate.reasonCheckpoint", word: "마지막 체크포인트 뒤 호출 {{value}}번 (간격 {{limit}}번)" },
+  cost_rising: { show: gateTimes,
+    key: "board.desk.gate.reasonRising", word: "호출당 비용이 직전의 {{value}}배 (기준 {{limit}}배)" },
+  rework_loop: { show: gatePercent,
+    key: "board.desk.gate.reasonRework", word: "되풀이·실패 {{value}}% (한도 {{limit}}%)" },
+  task_budget_near: { show: formatCost,
+    key: "board.desk.gate.reasonTaskNear", word: "과업 예산 {{limit}} 중 {{value}} 씀" },
+  day_budget_near: { show: formatCost,
+    key: "board.desk.gate.reasonDayNear", word: "오늘 예산 {{limit}} 중 {{value}} 씀" },
+  task_budget_stop: { show: formatCost,
+    key: "board.desk.gate.reasonTaskStop", word: "과업 예산 {{limit}} 초과 예상 — {{value}}" },
+  day_budget_stop: { show: formatCost,
+    key: "board.desk.gate.reasonDayStop", word: "오늘 예산 {{limit}} 초과 예상 — {{value}}" },
+});
+
+/* 비용이 숫자가 아닌 까닭, 창의 미터가 말하는 그대로(`CostNote`). `read`만 숫자다. */
+const GATE_COST_NOTES = Object.freeze({
+  no_reader: { key: "board.desk.gate.costNoReader", word: "이 CLI의 기록 형식은 아직 못 읽음" },
+  no_transcript: { key: "board.desk.gate.costNoTranscript", word: "이 CLI가 대화 기록 위치를 알려 주지 않음" },
+  unreadable: { key: "board.desk.gate.costUnreadable", word: "대화 기록을 열 수 없음" },
+});
+
+/* 새 백엔드가 준 사유를 이 화면이 아직 모르면 그 이름 그대로 둔다 — 지어낸 문장보다 낫다. */
+function gateReasonWords(reason) {
+  const held = GATE_REASONS[reason.code];
+  if (!held) return String(reason.code);
+  return t(held.key, held.word, { value: held.show(reason.value), limit: held.show(reason.limit) });
+}
+
+/* 읽은 숫자: 호출 수, 되풀이 비율, 과업이 쓴 비용과 예산, 하루 합계와 예산, 저장한 체크포인트. */
+function gateBasisWords(gate) {
+  const metrics = gate.metrics ?? {};
+  const known = Number.isFinite;
+  const note = GATE_COST_NOTES[gate.cost];
+  const spent = formatCost(gate.task_spent_usd) + (metrics.unpriced_calls > 0 ? "+" : "");
+  let cost;
+  if (gate.cost !== "read") {
+    cost = t("board.desk.gate.costUnknown", "비용 모름 — {{why}}",
+      { why: note ? t(note.key, note.word) : String(gate.cost) });
+  } else if (known(gate.task_limit_usd)) {
+    cost = t("board.desk.gate.basisTaskOf", "이 과업 {{spent}} / 예산 {{limit}}",
+      { spent, limit: formatCost(gate.task_limit_usd) });
+  } else {
+    cost = t("board.desk.gate.basisTask", "이 과업 {{spent}}", { spent });
+  }
+  return [
+    t("board.desk.gate.basisCalls", "호출 {{count}}번", { count: metrics.steps ?? 0 }),
+    known(metrics.rework_permille)
+      ? t("board.desk.gate.basisRework", "되풀이 {{percent}}%", { percent: gatePercent(metrics.rework_permille) }) : "",
+    cost,
+    known(gate.day_limit_usd)
+      ? t("board.desk.gate.basisDay", "오늘 {{spent}} / 예산 {{limit}}",
+        { spent: formatCost(gate.day_spent_usd), limit: formatCost(gate.day_limit_usd) }) : "",
+    metrics.checkpoints > 0
+      ? t("board.desk.gate.basisCheckpoints", "체크포인트 {{count}}회", { count: metrics.checkpoints }) : "",
+  ].filter(Boolean).join(" · ");
+}
+
+/* 줄에 다 안 들어가는 것: 모드가 무엇을 하는가, 가격표 밖 호출, 저장한 복원점이나 못 만든 까닭. */
+function gateTipWords(gate) {
+  const saved = gate.snapshot;
+  const snapshot = saved?.reference
+    ? t("board.desk.gate.tipSnapshot", "복원점 {{ref}}", { ref: saved.reference })
+    : saved?.error
+      ? t("board.desk.gate.tipSnapshotFailed", "복원점을 못 만듦 — {{error}}", { error: saved.error })
+      : saved ? t("board.desk.gate.tipSnapshotClean", "복원점: 저장할 변경 없음") : "";
+  return [
+    gate.mode === "stop"
+      ? t("board.desk.gate.tipModeStop", "예산을 넘기 전에 중지하는 모드")
+      : t("board.desk.gate.tipModeNotify", "알리기만 하는 모드 — 워커를 끝내지 않음"),
+    gate.metrics?.unpriced_calls > 0
+      ? t("board.desk.gate.tipUnpriced", "가격표에 없는 호출 {{count}}번은 비용에서 빠짐", { count: gate.metrics.unpriced_calls }) : "",
+    snapshot,
+  ].filter(Boolean).join(" · ");
+}
+
+function deskGateWords(gate) {
+  const verdict = GATE_VERDICTS[gate.verdict];
+  return {
+    verdict: verdict ? t(verdict.key, verdict.word) : String(gate.verdict),
+    why: (gate.reasons ?? []).map(gateReasonWords).join(" · "),
+    basis: gateBasisWords(gate),
+    tip: gateTipWords(gate),
+  };
+}
+
+function paintDeskGate(line, gate) {
+  writeHidden(line, !gate);
+  if (!gate) return;
+  const words = deskGateWords(gate);
+  writeAttribute(line, "data-verdict", gate.verdict);
+  writeAttribute(line, "title", words.tip);
+  writeTextContent(line.querySelector(".board-desk-worker-gate-verdict"), words.verdict);
+  writeTextContent(line.querySelector(".board-desk-worker-gate-why"), words.why);
+  writeTextContent(line.querySelector(".board-desk-worker-gate-basis"), words.basis);
+}
+
 function deskWorkerRow(view) {
   const row = deskElement("li", "board-desk-worker");
   const button = deskElement("button", "board-desk-worker-main");
@@ -793,7 +917,11 @@ function deskWorkerRow(view) {
     deskElement("span", "board-desk-worker-health"), deskElement("span", "board-desk-worker-age"));
   const what = deskElement("span", "board-desk-worker-what");
   what.append(deskElement("span", "board-desk-worker-task"), deskElement("span", "board-desk-worker-facts"));
-  button.append(line, what);
+  const gate = deskElement("span", "board-desk-worker-gate");
+  gate.hidden = true;
+  gate.append(deskElement("strong", "board-desk-worker-gate-verdict"),
+    deskElement("span", "board-desk-worker-gate-why"), deskElement("span", "board-desk-worker-gate-basis"));
+  button.append(line, what, gate);
   button.onclick = () => {
     const term = row.__term;
     if (term != null) selectTaskBoardMember(view, `agent:term:${term}`);
@@ -838,6 +966,7 @@ function paintDeskWorkers(block, now, view) {
     writeTextContent(node.querySelector(".board-desk-worker-task"),
       [row.task || row.task_id, review, ledgerClosedReason(row.closed)].filter(Boolean).join(" · "));
     writeTextContent(node.querySelector(".board-desk-worker-facts"), deskWorkerFacts(row, now));
+    paintDeskGate(node.querySelector(".board-desk-worker-gate"), row.gate);
     const main = node.querySelector(".board-desk-worker-main");
     writeDisabled(main, node.__term == null);
     return node;

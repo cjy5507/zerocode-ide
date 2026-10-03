@@ -47,3 +47,15 @@ harness = false
 [[bench]]
 name = "hook_payload"
 harness = false
+
+# What the continue gate costs: one hook event, one beat's judgment, one look at a
+# growing transcript (t-26583) — the three places it spends a slow machine's time.
+[[bench]]
+name = "continue_gate"
+harness = false
+
+# What the gate's memory does over a long run: three bounded stores fed far more
+# than a month would, and the process's resident size after each step.
+[[bench]]
+name = "continue_gate_memory"
+harness = false

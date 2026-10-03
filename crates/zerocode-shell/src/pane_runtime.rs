@@ -298,6 +298,17 @@ pub(super) async fn hook_loop(
             );
             skills_runtime::note_hook(&app.state::<AppState>(), &envelope, &activity);
             file_tree_hooks::note_hook(&app, &app.state::<AppState>(), &envelope, activity.phase);
+            // What the continue gate counts: one more call of this pane's agent,
+            // for every CLI the same way (t-26583).
+            if let Some(term) = hooks::term_of_pane_key(&envelope.pane_key) {
+                orchestration::gate_book::note_hook(
+                    term,
+                    &envelope.launch_token,
+                    &activity,
+                    &envelope.payload,
+                    now_epoch_ms(),
+                );
+            }
             let phase = activity.phase;
             // Whose card this is, read BEFORE the name travels — the emit
             // below takes it — because a helper's tool call is also a NUMBER.

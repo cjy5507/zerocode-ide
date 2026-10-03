@@ -6,6 +6,7 @@ mod bundle_resources;
 mod cli_login;
 mod computer_use_mirrors;
 mod computer_use_tcc;
+mod continue_gate;
 mod coordinator_desk;
 mod crash_report;
 mod fixture_cases;
@@ -27262,9 +27263,14 @@ mod tests {
         let drafting_road = block_after(shipped, "fn run_text_generation(");
         let account = block_after(shipped, "fn claude_reading_env(");
         let running = block_after(shipped, "fn run_once(");
+        let ledgers_door = block_after(
+            include_str!("../../src/launch_budget_door.rs"),
+            "pub(crate) fn run_budgeted(",
+        );
         assert!(
             drafting_road.contains("claude_reading_env(config_root)")
-                && drafting_road.contains("run_once(")
+                && drafting_road.contains("run_budgeted(")
+                && ledgers_door.contains("run_once(")
                 && account.contains("accounts::reading_env_for(config_root, \"claude\")")
                 && account.contains("accounts::prepare_selected_store(config_root)")
                 && running.contains("shell_path::hydrated()")

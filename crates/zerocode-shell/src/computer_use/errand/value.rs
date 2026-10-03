@@ -45,6 +45,7 @@ use zerocode_core::type_value::{ANTHROPIC_WIRE, FieldLook, GeneratorRoad, Road, 
 use zerocode_harness::SERVICE_KEYCHAIN_SERVICE_PREFIX;
 
 use crate::api_routers::{Keychain, RouterKeys};
+use crate::launch_budget_door::{Budgeted, Launch, run_budgeted};
 use crate::quota_wall::StallCause;
 use crate::scm_runtime::{Once, OnceFailure};
 use crate::systemone::{SCHEMA, TIMEOUT, TRANSPORT, token_for};
@@ -67,6 +68,11 @@ pub const NO_LOGIN: &str = "value_no_login";
 pub const QUOTA_WALL: &str = "quota_wall";
 pub const CLI_REFUSED: &str = "value_cli_refused";
 pub const GENERATOR_OFF: &str = "value_generator_off";
+
+/// Why a login road was not asked (t-26583): the window's launch ledger held the
+/// run back — the provider is resting at its wall, a ceiling a person set is
+/// reached, or the same job is running.
+pub const LAUNCH_BUDGET: &str = "launch_budget";
 
 /// What a window's writer is built from (t-10372): the road the person chose
 /// in the Computer Use pane (`computer_generator_road`), and where the window
@@ -904,8 +910,22 @@ impl LiveWriter {
             .map_err(|_| NO_LOGIN.to_string())?;
         env.extend(extra.iter().cloned());
         let cwd = one_shot_dir();
-        crate::scm_runtime::run_once(&program, cwd.as_deref(), argv, &env, stdin, left)
-            .map_err(once_word)
+        // Counted in the window's one launch ledger: this walk is nobody's
+        // button, so it is held to the ceilings, and a provider at its wall is
+        // not asked again until the wall's time (t-26583).
+        let launch = Launch {
+            provider: match road {
+                Road::CodexCli => "codex",
+                _ => "claude",
+            },
+            job: None,
+            fresh_ms: None,
+            requested: false,
+        };
+        match run_budgeted(&launch, &program, cwd.as_deref(), argv, &env, stdin, left) {
+            Budgeted::Refused(_) => Err(LAUNCH_BUDGET.to_string()),
+            Budgeted::Ran(ran) => ran.map_err(once_word),
+        }
     }
 }
 

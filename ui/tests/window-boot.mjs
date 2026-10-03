@@ -1787,6 +1787,12 @@ const stubBackend = ({ boot, pollers }) => {
       window.__AUTOSWITCH_MODE__ = args.mode;
       return { revision: 1, claude_autoswitch_mode: args.mode };
     },
+    // The settings card's one read of what the window has counted (t-26583):
+    // nothing launched, nothing resting, nothing spent yet.
+    harness_status: () => window.__HARNESS__ ?? {
+      counters: { active: 0, last_hour: 0, last_day: 0, resting: [] },
+      day_spent_usd: 0,
+    },
     list_claude_sessions: () => [],
     // 만들기 다이얼로그가 읽는 넷. 판정 규칙은 Rust의 것이고
     // (`zerocode_core::workitem`, 거기서 표로 시험된다) 여기 있는 것은 그

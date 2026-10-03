@@ -304,6 +304,12 @@ function applyAgentSettingsSnapshot(snapshot) {
     claudeAutoSwitchMode = snapshot.claude_autoswitch_mode ?? "ask";
     el("account-autoswitch").value = claudeAutoSwitchMode;
   }
+  // 토큰 낭비 막기(t-26583): 워커 계속 판정과 호출 한도는 문서의 한 레코드라, 권위 있는
+  // 스냅샷이 올 때마다 칸들이 그 값을 따라간다.
+  if (hasSetting(snapshot, "harness")) {
+    harnessSettings = snapshot.harness;
+    paintHarnessSettings();
+  }
   // 대화의 Focus view(확장 2.1.221): 이 창의 모든 대화가 입는 한 값이라,
   // 권위 있는 스냅샷이 올 때마다 서 있는 목록들이 그 값을 따라간다.
   if (hasSetting(snapshot, "conversation_focus_view")) {
@@ -976,6 +982,7 @@ function showSettingsPane(pane) {
     if (!held && !usageStatsScanning) void refreshUsageStats(false);
   }
   if (pane === "provider-accounts" && arriving) {
+    void refreshHarnessStatus();
     void refreshClaudeAccounts();
     void refreshCodexAccounts();
     void refreshGoogleAccount();
@@ -4638,6 +4645,10 @@ async function pickClaudeAccount(id) {
  * `plan.next`로 온다 — 여기서는 낱말만 고른다. */
 let accountUsageReport = null;
 let claudeAutoSwitchMode = "ask";
+/* 토큰 낭비 막기(t-26583)의 문서 레코드와 창이 센 값. 스냅샷이 처음 오기 전에도 이름이 서 있도록
+ * 자동 전환 모드 옆에 둔다. */
+let harnessSettings = null;
+let harnessStatus = null;
 let applyingAccountSwitch = false;
 /* The token the window last applied: the same plan on the next beat is
  * not applied again from here — the backend re-plans and would refuse it
@@ -4943,6 +4954,105 @@ el("account-autoswitch").addEventListener("change", (event) => {
     mode: claudeAutoSwitchMode,
   });
 });
+
+/* ---- 토큰 낭비 막기 (t-26583) ---------------------------------------------
+ *
+ * 워커 계속 판정의 모드와 예산, 에이전트 호출 한도. 문서의 한 레코드(`harness`)이고 다른 모든
+ * 설정처럼 `commitSetting`이 쓴다 — 쓴 뒤에는 문서의 스냅샷이 칸을 다시 그린다. 칸의 숫자가
+ * 무엇을 뜻하는지는 백엔드의 것이다: 예산이 아닌 숫자는 예산 없음으로 읽고, 호출 한도가 정수가
+ * 아니면 저장을 거절하며 칸이 저장된 값으로 돌아간다. 아래 줄의 센 값(`harness_status`)은 이
+ * 판을 열 때 한 번 읽는다 — 도는 박자는 없다. */
+const HARNESS_GATE_FIELDS = Object.freeze({
+  task_usd: "harness-task-usd",
+  day_usd: "harness-day-usd",
+});
+const HARNESS_LAUNCH_FIELDS = Object.freeze({
+  concurrent: "harness-concurrent",
+  per_hour: "harness-per-hour",
+  per_day: "harness-per-day",
+});
+
+/* 칸의 숫자: 빈칸은 null(예산·한도 없음), 브라우저가 숫자로 읽지 못한 글자는 NaN — 보내지
+ * 않고 저장된 값으로 되돌린다. */
+function harnessFieldValue(id) {
+  const field = el(id);
+  if (field.validity.badInput) return Number.NaN;
+  const text = field.value.trim();
+  return text === "" ? null : Number(text);
+}
+
+function harnessFromFields() {
+  const read = (fields) => Object.fromEntries(
+    Object.entries(fields).map(([key, id]) => [key, harnessFieldValue(id)]),
+  );
+  return {
+    gate: { mode: el("harness-gate-mode").value, ...read(HARNESS_GATE_FIELDS) },
+    launches: read(HARNESS_LAUNCH_FIELDS),
+  };
+}
+
+function setHarnessField(id, value) {
+  const field = el(id);
+  const words = value === null || value === undefined ? "" : String(value);
+  if (field.value !== words) field.value = words;
+}
+
+function paintHarnessSettings() {
+  if (!harnessSettings) return;
+  const { gate, launches } = harnessSettings;
+  setHarnessField("harness-gate-mode", gate.mode);
+  for (const [key, id] of Object.entries(HARNESS_GATE_FIELDS)) setHarnessField(id, gate[key]);
+  for (const [key, id] of Object.entries(HARNESS_LAUNCH_FIELDS)) setHarnessField(id, launches[key]);
+}
+
+/* 창이 센 것: 지금 도는 호출, 한 시간과 하루 몫, 쉬는 제공자, 오늘 워커 비용. 비용이 0이면
+ * 말하지 않는다 — 읽은 것이 없다는 뜻이지 쓰지 않았다는 뜻이 아니다. */
+function paintHarnessStatus() {
+  const note = el("harness-status");
+  const counters = harnessStatus?.counters;
+  const now = Date.now();
+  const words = counters ? [
+    t("settings.harness.statusActive", "지금 {{count}}개 실행 중", { count: counters.active }),
+    t("settings.harness.statusHour", "최근 한 시간 {{count}}번", { count: counters.last_hour }),
+    t("settings.harness.statusDay", "오늘 {{count}}번", { count: counters.last_day }),
+    ...counters.resting.map((one) => t("settings.harness.statusResting", "쉬는 중: {{provider}} {{minutes}}분", {
+      provider: agentName(one.provider),
+      minutes: Math.max(1, Math.ceil((one.until_ms - now) / 60000)),
+    })),
+    harnessStatus.day_spent_usd > 0
+      ? t("settings.harness.statusSpent", "오늘 워커 비용 약 {{spent}}", { spent: formatCost(harnessStatus.day_spent_usd) })
+      : "",
+  ].filter(Boolean).join(" · ") : "";
+  if (note.textContent !== words) note.textContent = words;
+}
+
+async function refreshHarnessStatus() {
+  try {
+    harnessStatus = await invoke("harness_status");
+  } catch (error) {
+    showError(error);
+    return;
+  }
+  paintHarnessStatus();
+}
+
+function commitHarnessSettings() {
+  const harness = harnessFromFields();
+  const typed = [...Object.values(harness.gate), ...Object.values(harness.launches)];
+  if (typed.some((value) => typeof value === "number" && !Number.isFinite(value))) {
+    paintHarnessSettings();
+    return;
+  }
+  void commitSetting("harness", "set_harness_settings", { harness });
+}
+
+for (const id of [
+  "harness-gate-mode",
+  ...Object.values(HARNESS_GATE_FIELDS),
+  ...Object.values(HARNESS_LAUNCH_FIELDS),
+]) {
+  el(id).addEventListener("change", commitHarnessSettings);
+}
 
 /* Removing an account deletes its credentials with it, so it asks first.
  *

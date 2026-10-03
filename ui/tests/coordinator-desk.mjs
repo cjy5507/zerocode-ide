@@ -20,7 +20,7 @@ import { installBoardWaits } from "./board-waits.mjs";
 
 /* The fixture, run inside the page. Self-contained: a page function carries
  * no closure. `now` is passed so a before/after pair draws the same clocks. */
-export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, folded = 0, now = Date.now() } = {}) {
+export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, folded = 0, gates = false, now = Date.now() } = {}) {
   const minute = 60_000;
   const run = "run-desk";
   const checkout = (n) => `/repos/zerocode/workspaces/t-${n}`;
@@ -34,6 +34,28 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
     worktree: "main", task: "", ask: "", said: "", you: "", parent: "",
     ledger: "active", at: now - 2 * minute, changed_at: now - 9 * minute, unseen: false, ...extra,
   });
+  /* The continue gate's reading of a worker, as the backend lays it on a row
+   * (t-26583) — asked for by the measurements and by no suite that counts a
+   * row's words: three in four calm, one in four repeating itself, and one of
+   * those over its budget with the restore point it was saved under. */
+  const gateOf = (n) => {
+    const steps = 40 + n * 17;
+    const calm = n % 4 !== 0;
+    const over = n % 8 === 0;
+    return {
+      mode: "stop", verdict: over ? "stop" : calm ? "continue" : "pause",
+      reasons: over ? [{ code: "task_budget_stop", value: 21.6, limit: 20 }]
+        : calm ? [] : [{ code: "rework_loop", value: 333, limit: 300 }],
+      metrics: {
+        steps, since_checkpoint: steps % 200, checkpoints: Math.floor(steps / 200),
+        rework_permille: calm ? 83 : 333, rise_permille: null, step_usd: 0.04,
+        spent_usd: 3.41 + n, unpriced_calls: n % 3,
+      },
+      cost: "read", task_spent_usd: 3.41 + n, task_limit_usd: 20, day_spent_usd: 7.5 + n, day_limit_usd: 60,
+      snapshot: { at_ms: now - 4 * minute, reference: `refs/zerocode/checkpoints/w-${n}/1`, error: null },
+      at_ms: now,
+    };
+  };
   const columns = { attention: [], working: [], done: [], idle: [] };
   const ledger = [];
   for (let n = 1; n <= workers; n += 1) {
@@ -64,6 +86,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
         : null,
       quiet_at: word === "idle" ? now - 6 * minute : null,
       pane_missing_since_ms: word === "dead" ? now - 12 * minute : null,
+      ...(gates ? { gate: gateOf(n) } : {}),
     });
     if (!seated) continue;
     const state = word === "turn" ? "working" : word === "asking" ? "needs-attention"
@@ -849,6 +872,119 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       ended.red.verdict === "빨강" && ended.red.reasonShown && ended.red.reason === "gate-zo rc=101" &&
       ended.red.failed === "build-app 288초" && ended.red.mark.includes("is-failed") &&
       ended.red.clock.includes("걸림") && ended.gone, JSON.stringify(ended));
+
+    /* ---- 계속 판정 (t-26583): 워커 줄 밑의 판정 한 줄과 그 근거 ------------------
+     *
+     * 판정·사유·숫자는 백엔드의 것이고(`continue_gate`) 행의 `gate`로 온다; 여기서 재는 것은
+     * 그 낱말과 서식이다. 판정을 받은 워커에만 줄이 서고, 「계속」이어도 읽은 숫자가 보이며,
+     * 비용을 못 읽으면 0원이 아니라 까닭이 보이고, 조용한 폴은 아무것도 다시 쓰지 않는다. */
+    const metricsOf = (extra = {}) => ({
+      steps: 142, since_checkpoint: 142, checkpoints: 0, rework_permille: 83, rise_permille: null,
+      step_usd: 0.04, spent_usd: 3.41, unpriced_calls: 0, ...extra,
+    });
+    const gateOf = (verdict, extra = {}) => ({
+      mode: "notify", verdict, reasons: [], metrics: metricsOf(), cost: "read",
+      task_spent_usd: 3.41, task_limit_usd: 20, day_spent_usd: 7.5, day_limit_usd: null,
+      snapshot: null, at_ms: 1_800_000_000_000, ...extra,
+    });
+    const gates = {
+      "w-1": gateOf("continue"),
+      "w-3": gateOf("pause", {
+        mode: "stop",
+        reasons: [{ code: "rework_loop", value: 333, limit: 300 }],
+        metrics: metricsOf({ steps: 61, since_checkpoint: 12, checkpoints: 1, rework_permille: 333 }),
+        task_spent_usd: 1.2, task_limit_usd: null,
+        snapshot: { at_ms: 1_800_000_000_000, reference: "refs/zerocode/checkpoints/w-3/1", error: null },
+      }),
+      "w-4": gateOf("continue", {
+        cost: "no_reader", task_spent_usd: 0, task_limit_usd: null,
+        metrics: metricsOf({ steps: 90, since_checkpoint: 90, rework_permille: null, spent_usd: null }),
+      }),
+      "w-5": gateOf("stop", {
+        mode: "stop",
+        reasons: [{ code: "task_budget_stop", value: 21.6, limit: 20 }],
+        metrics: metricsOf({ steps: 310, since_checkpoint: 110, checkpoints: 1, rework_permille: null, spent_usd: 18.9 }),
+        task_spent_usd: 18.9, day_spent_usd: 42, day_limit_usd: 60,
+      }),
+    };
+    await page.evaluate(async (held) => {
+      for (const [worker, gate] of Object.entries(held)) {
+        window.__LEDGER__.find((row) => row.worker === worker).gate = gate;
+      }
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+    }, gates);
+    await settleMail();
+    const readGates = () => page.evaluate(() => Object.fromEntries(
+      [...document.querySelectorAll('#board-view [data-desk-block="workers"] .board-desk-worker')].map((row) => {
+        const line = row.querySelector(".board-desk-worker-gate");
+        return [row.dataset.worker.split("/")[1], line ? {
+          hidden: line.hidden,
+          verdict: line.querySelector(".board-desk-worker-gate-verdict")?.textContent ?? null,
+          why: line.querySelector(".board-desk-worker-gate-why")?.textContent ?? null,
+          basis: line.querySelector(".board-desk-worker-gate-basis")?.textContent ?? null,
+          state: line.dataset.verdict ?? null,
+          tip: line.title,
+        } : null];
+      })));
+    const judged = await readGates();
+    ok("a worker the gate judged shows its verdict and the numbers it was read at, even when the verdict is to go on; a worker it did not judge shows no line",
+      judged["w-1"]?.hidden === false && judged["w-1"].verdict === "계속" && judged["w-1"].state === "continue" &&
+      judged["w-1"].why === "" &&
+      judged["w-1"].basis === "호출 142번 · 되풀이 8% · 이 과업 $3.41 / 예산 $20.00" &&
+      judged["w-2"]?.hidden === true, JSON.stringify(judged));
+    ok("a pause names its reason in words with the number and the line it was held to, and the checkpoint the gate saved",
+      judged["w-3"]?.verdict === "멈춤" && judged["w-3"].state === "pause" &&
+      judged["w-3"].why === "되풀이·실패 33% (한도 30%)" &&
+      judged["w-3"].basis === "호출 61번 · 되풀이 33% · 이 과업 $1.20 · 체크포인트 1회" &&
+      judged["w-3"].tip.includes("refs/zerocode/checkpoints/w-3/1"), JSON.stringify(judged["w-3"]));
+    ok("a stop names the budget it would have passed, with the day's budget beside the task's",
+      judged["w-5"]?.verdict === "중지" && judged["w-5"].state === "stop" &&
+      judged["w-5"].why === "과업 예산 $20.00 초과 예상 — $21.60" &&
+      judged["w-5"].basis === "호출 310번 · 이 과업 $18.90 / 예산 $20.00 · 오늘 $42.00 / 예산 $60.00 · 체크포인트 1회",
+      JSON.stringify(judged["w-5"]));
+    ok("a cost the window cannot read says why and is never drawn as nothing spent",
+      judged["w-4"]?.basis === "호출 90번 · 비용 모름 — 이 CLI의 기록 형식은 아직 못 읽음" &&
+      !(judged["w-4"]?.basis ?? "").includes("$0"), JSON.stringify(judged["w-4"]));
+    const sentences = await page.evaluate(() => typeof deskGateWords !== "function" ? [] : ["checkpoint_due", "cost_rising",
+      "rework_loop", "task_budget_near", "day_budget_near", "task_budget_stop", "day_budget_stop"].map((code) => deskGateWords({
+      verdict: "pause", mode: "notify", reasons: [{ code, value: 1500, limit: 2000 }], metrics: {}, cost: "read",
+      task_spent_usd: 0, task_limit_usd: null, day_spent_usd: 0, day_limit_usd: null, snapshot: null,
+    }, Date.now()).why));
+    ok("every reason the backend can give has a sentence of its own, never the raw code",
+      sentences.length === 7 && sentences.every((one) => typeof one === "string" && one !== "" && !/[a-z]+_[a-z]+/.test(one)),
+      JSON.stringify(sentences));
+    const gateQuiet = await deskMutations(page, async () => {
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+    });
+    ok("a poll that brings the same judgements writes nothing", gateQuiet === 0, `mutations ${gateQuiet}`);
+    const gateMoved = await deskMutations(page, async () => {
+      window.__LEDGER__.find((row) => row.worker === "w-1").gate = {
+        ...window.__LEDGER__.find((row) => row.worker === "w-1").gate,
+        metrics: { ...window.__LEDGER__.find((row) => row.worker === "w-1").gate.metrics, steps: 143 },
+      };
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    const afterMove = await readGates();
+    ok("a poll that brings one more call writes that worker's basis and nothing else",
+      gateMoved > 0 && gateMoved <= 2 && afterMove["w-1"]?.basis?.startsWith("호출 143번"), `mutations ${gateMoved} ${afterMove["w-1"]?.basis}`);
+    await page.evaluate(async () => {
+      window.__LEDGER__.find((row) => row.worker === "w-1").gate = null;
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    await settleMail();
+    const withdrawn = await readGates();
+    ok("a gate that is switched off takes its line away", withdrawn["w-1"]?.hidden === true, JSON.stringify(withdrawn["w-1"]));
+    await page.evaluate(async (held) => {
+      window.__LEDGER__.find((row) => row.worker === "w-1").gate = held;
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+    }, gates["w-1"]);
+    await settleMail();
 
     /* ---- 조용한 폴은 아무것도 다시 쓰지 않는다 ------------------------------ */
     await page.evaluate(async () => {

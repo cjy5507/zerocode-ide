@@ -630,6 +630,12 @@ pub enum RuntimeRequest {
         receipt: Box<zerocode_core::orchestration::AccountSwitchReceipt>,
         now_ms: i64,
     },
+    /// The window's gate judged an attempt past a line, and the ledger writes
+    /// its receipt once per key (t-26583).
+    GateJudged {
+        receipt: Box<zerocode_core::orchestration::GateReceipt>,
+        now_ms: i64,
+    },
     /// A pane the plan asked for never opened: the worker row it minted
     /// goes back, durably — the third host fact, and the rollback half of
     /// the effect round trip.
@@ -1057,6 +1063,11 @@ impl std::fmt::Debug for RuntimeRequest {
                 .finish(),
             Self::AccountSwitched { receipt, now_ms } => formatter
                 .debug_struct("RuntimeRequest::AccountSwitched")
+                .field("key_bytes", &receipt.key.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::GateJudged { receipt, now_ms } => formatter
+                .debug_struct("RuntimeRequest::GateJudged")
                 .field("key_bytes", &receipt.key.len())
                 .field("now_ms", now_ms)
                 .finish(),
@@ -2468,6 +2479,22 @@ impl RuntimeActor {
         }
     }
 
+    /// The receipt for one gate judgment (t-26583). Answers whether a row was
+    /// written — the same key again writes none — and the revision.
+    pub fn gate_judged(
+        &self,
+        receipt: zerocode_core::orchestration::GateReceipt,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::GateJudged {
+            receipt: Box::new(receipt),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// A pane the plan asked for never opened; the worker row goes back.
     pub fn seat_never_opened(
         &self,
@@ -3307,6 +3334,7 @@ impl RuntimeState {
             RuntimeRequest::AccountSwitched { receipt, now_ms } => {
                 self.account_switched(&receipt, now_ms)
             }
+            RuntimeRequest::GateJudged { receipt, now_ms } => self.gate_judged(&receipt, now_ms),
             RuntimeRequest::SeatNeverOpened { worker, now_ms } => {
                 self.seat_never_opened(&worker, now_ms)
             }
@@ -4209,6 +4237,34 @@ impl RuntimeState {
             .account_switched(receipt, now_ms)
             .map_err(|_| RuntimeError::AuthorityRejected)?;
         if written.is_empty() {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn gate_judged(
+        &mut self,
+        receipt: &zerocode_core::orchestration::GateReceipt,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0 || receipt.key.is_empty() || receipt.key.len() > MAX_NAME {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let written = self
+            .ledger
+            .gate_judged(receipt, now_ms)
+            .map_err(|_| RuntimeError::AuthorityRejected)?;
+        if written.is_none() {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,

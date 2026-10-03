@@ -19,7 +19,9 @@
  * 실행:
  *   node ui/tests/coordinator-desk-perf.mjs                  Chromium, 5판 중앙값
  *   node ui/tests/coordinator-desk-perf.mjs --engine webkit  설치 앱 웹뷰의 엔진
- *   node ui/tests/coordinator-desk-perf.mjs --rounds 3 --polls 40 --json out.json */
+ *   node ui/tests/coordinator-desk-perf.mjs --rounds 3 --polls 40 --json out.json
+ *   node ui/tests/coordinator-desk-perf.mjs --workers 30 --gates   a heavy day, each worker with its gate's line (t-26583)
+ *   WINDOW_CPU_THROTTLE=4 node ui/tests/coordinator-desk-perf.mjs   the low-spec profile: the page's CPU slowed 4x */
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -123,13 +125,13 @@ async function onePoll(page, moved, index) {
   }, { moved, index });
 }
 
-export async function measureDesk(page, { polls = 40, now } = {}) {
+export async function measureDesk(page, { polls = 40, now, workers = 5, gates = false } = {}) {
   await installPerfHands(page);
   // The fixture is handed over as source (a page function carries no closure)
   // and started inside the timed evaluation, so the clock does not include
   // the round trip that carried it.
   await page.evaluate(`window.__DESK_FIXTURE__ = ${coordinatorDeskFixture.toString()};`);
-  const first = await page.evaluate(async ({ now }) => {
+  const first = await page.evaluate(async ({ now, workers, gates }) => {
     // Where the first task row stood on the first frame it existed, and where
     // it stands once everything settled: the difference is the layout shift a
     // person sees when the desk arrives after the list.
@@ -142,14 +144,14 @@ export async function measureDesk(page, { polls = 40, now } = {}) {
     requestAnimationFrame(watch);
     window.__PERF_PAINT__ = 0;
     const from = performance.now();
-    window.__DESK_FIXTURE__({ now });
+    window.__DESK_FIXTURE__({ now, workers, gates });
     await window.__PERF_SETTLED__();
     const js = window.__PERF_PAINT__;
     const layout = window.__PERF_LAYOUT__();
     const settledTop = document.querySelector("#board-view .task-board-row")?.getBoundingClientRect().top ?? null;
     return { ms: performance.now() - from, js, layout,
       shift: firstTop === null || settledTop === null ? null : Math.round(settledTop - firstTop) };
-  }, { now });
+  }, { now, workers, gates });
   // Two more beats for anything the first paint deferred (a lazy fetch).
   await page.evaluate(async () => { await window.__PERF_SETTLED__(); await window.__PERF_SETTLED__(); });
   const dom = await page.evaluate(() => {
@@ -201,7 +203,7 @@ export function webkitType() {
   return require(entry).webkit;
 }
 
-export async function measureDeskRounds({ engine = "chromium", rounds = 5, polls = 40, width = 1280, height = 800 } = {}) {
+export async function measureDeskRounds({ engine = "chromium", rounds = 5, polls = 40, width = 1280, height = 800, workers = 5, gates = false } = {}) {
   const { files, origin } = await createWindowServer();
   const browserType = engine === "webkit" ? webkitType() : chromium;
   const browser = await browserType.launch({ headless: true });
@@ -213,7 +215,7 @@ export async function measureDeskRounds({ engine = "chromium", rounds = 5, polls
       const { page, faults } = await openWindowTestPage(browser, origin);
       try {
         await page.setViewportSize({ width, height });
-        taken.push(await measureDesk(page, { polls, now }));
+        taken.push(await measureDesk(page, { polls, now, workers, gates }));
         if (faults.length) taken.at(-1).faults = faults.slice(0, 3);
       } finally {
         await page.close();
@@ -223,7 +225,7 @@ export async function measureDeskRounds({ engine = "chromium", rounds = 5, polls
     await browser.close();
     files.close();
   }
-  const summary = { engine, rounds, width, height, load: loadNote(), loud: machineIsLoud };
+  const summary = { engine, rounds, width, height, workers, gates, load: loadNote(), loud: machineIsLoud };
   for (const key of Object.keys(taken[0]).filter((one) => typeof taken[0][one] === "number")) {
     summary[key] = median(taken.map((one) => one[key]));
   }
@@ -241,9 +243,11 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     engine: option("--engine", "chromium"),
     rounds: Number(option("--rounds", "5")),
     polls: Number(option("--polls", "40")),
+    workers: Number(option("--workers", "5")),
+    gates: argv.includes("--gates"),
   });
   const ms = (value) => (value === null ? "—" : `${value.toFixed(2)} ms`);
-  console.log(`engine ${summary.engine}, ${summary.rounds} rounds (medians), ${summary.width}×${summary.height}, ${summary.load}`);
+  console.log(`engine ${summary.engine}, ${summary.rounds} rounds (medians), ${summary.width}×${summary.height}, ${summary.workers} workers${summary.gates ? " with a gate reading each" : ""}, cpu ×${Number(process.env.WINDOW_CPU_THROTTLE ?? 0) || 1}, ${summary.load}`);
   console.log(`  first paint ${ms(summary.firstPaintMs)} (paint JS ${ms(summary.firstPaintJsMs)}, forced layout after it ${ms(summary.firstLayoutMs)}, first task row moved ${summary.firstRowShiftPx} px after it first stood)`);
   console.log(`  rows ${summary.rows} · surface elements ${summary.surfaceElements} · board elements ${summary.boardElements} · desk elements ${summary.deskElements} [${summary.deskBlocks.join(",")}]`);
   console.log(`  quiet poll: paint p50 ${ms(summary.quietPaintP50)} · p95 ${ms(summary.quietPaintP95)} · layout p50 ${ms(summary.quietLayoutP50)} · mutations max ${summary.quietMutationsMax}`);

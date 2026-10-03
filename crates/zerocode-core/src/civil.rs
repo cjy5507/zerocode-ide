@@ -13,6 +13,12 @@
 //! it is signed for the whole range rather than for the half that happened to
 //! be exercised: `i64` on both ends, negative days meaning before 1970.
 
+/// One hour, in the milliseconds every epoch stamp in this tree is written in.
+pub const MS_PER_HOUR: i64 = 3_600_000;
+
+/// One day, in milliseconds.
+pub const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
+
 /// Days since 1970-01-01 for a proleptic Gregorian date.
 ///
 /// `month` is 1-12 and `day` is 1-31; a date that does not exist answers as

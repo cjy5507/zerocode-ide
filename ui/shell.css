@@ -32926,6 +32926,42 @@ details.task-board-section > summary {
   overflow-wrap: anywhere;
 }
 
+/* 계속 판정 (t-26583): 워커 줄 밑의 한 줄. 판정 낱말만 제 신호의 잉크를 입고(체크포인트는
+ * 준비의 초록, 멈춤은 기다림, 중지는 멈춤), 사유는 본문 잉크, 근거 숫자는 조용한 글씨다 —
+ * 「계속」은 아무 색도 입지 않는다. 줄에 움직임이 없으니 줄일 움직임도 없다. */
+.board-desk-worker-gate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  min-width: 0;
+  font-size: var(--text-2xs);
+}
+
+.board-desk-worker-gate[hidden],
+.board-desk-worker-gate-why:empty {
+  display: none;
+}
+
+.board-desk-worker-gate-verdict {
+  color: var(--ink-label);
+  font-weight: 600;
+}
+
+.board-desk-worker-gate[data-verdict="checkpoint"] .board-desk-worker-gate-verdict { color: var(--signal-ready-ink); }
+.board-desk-worker-gate[data-verdict="pause"] .board-desk-worker-gate-verdict { color: var(--signal-wait-ink); }
+.board-desk-worker-gate[data-verdict="stop"] .board-desk-worker-gate-verdict { color: var(--signal-halt-ink); }
+
+.board-desk-worker-gate-why {
+  overflow-wrap: anywhere;
+}
+
+.board-desk-worker-gate-basis {
+  color: var(--ink-label);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
 /* 과업 흐름: 흐름의 다섯 단계는 작은 꺾쇠로 이어지고, 멈춰 선 셋은 한 칸 떨어져
  * 선다. 과업이 있는 멈춘 단계만 제 신호의 잉크를 입는다. 누른 단계는 필터 알약과
  * 같은 옷(보기의 색)이다. */
