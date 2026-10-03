@@ -71,6 +71,20 @@ pub fn reader_for(agent: &str) -> Option<Box<dyn CostReader>> {
     }
 }
 
+/// Codex's rollout (stub until its reader lands): reads nothing.
+#[derive(Debug, Default)]
+pub struct CodexFormat;
+
+impl CostReader for CodexFormat {
+    fn feed(&mut self, _lines: &str) -> Vec<CallCost> {
+        Vec::new()
+    }
+
+    fn flush(&mut self) -> Option<CallCost> {
+        None
+    }
+}
+
 /// Claude Code's transcript: one JSON record a line, an assistant record's
 /// `message.usage` carrying the call's tokens, the same `message.id` and
 /// `requestId` on every record one call is written as — the identity

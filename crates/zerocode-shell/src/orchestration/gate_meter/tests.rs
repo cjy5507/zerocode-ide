@@ -200,10 +200,68 @@ fn what_cannot_be_read_says_why_and_costs_nothing() {
     claude.poll(Some(path_text(&path)), POLL_MS);
     assert_eq!(claude.note(true), CostNote::Read);
 
-    for agent in ["codex", "zo", "kimi", "grok", "antigravity"] {
+    for agent in ["zo", "kimi", "grok", "antigravity"] {
         let mut meter = Meter::new(agent);
         append(&path, &format!("{}\n", record("m2", 0)));
         assert!(meter.poll(Some(path_text(&path)), 0).is_empty());
         assert_eq!(meter.note(true), CostNote::NoReader, "{agent}");
     }
+}
+
+/// One line of a Codex rollout: a record of `kind` carrying `payload`.
+fn rollout(kind: &str, stamp: u32, payload: serde_json::Value) -> String {
+    serde_json::json!({
+        "timestamp": format!("2026-10-03T00:00:{stamp:02}.000Z"),
+        "type": kind,
+        "payload": payload,
+    })
+    .to_string()
+}
+
+#[test]
+fn a_codex_worker_is_read_through_its_rollout_the_way_a_claude_worker_is() {
+    let (_dir, path) = transcript();
+    let usage = |input: i64, output: i64| {
+        serde_json::json!({
+            "input_tokens": input, "cached_input_tokens": 0, "output_tokens": output,
+            "reasoning_output_tokens": 0, "total_tokens": input + output,
+        })
+    };
+    let count = |stamp: u32, total: (i64, i64), last: (i64, i64)| {
+        rollout(
+            "event_msg",
+            stamp,
+            serde_json::json!({
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": usage(total.0, total.1),
+                    "last_token_usage": usage(last.0, last.1),
+                },
+            }),
+        )
+    };
+    let written = [
+        rollout(
+            "turn_context",
+            1,
+            serde_json::json!({"cwd": "/Users/dev/repo", "model": "gpt-5.1"}),
+        ),
+        count(2, (1_000_000, 0), (1_000_000, 0)),
+        count(3, (2_000_000, 100_000), (1_000_000, 100_000)),
+    ]
+    .join("\n");
+    append(&path, &format!("{written}\n"));
+    let mut meter = Meter::new("codex");
+    let looked = meter.poll(Some(path_text(&path)), 0);
+    assert_eq!(
+        dollars(&looked),
+        vec![1.25, 2.25],
+        "$1.25 per million input, $10 per million output"
+    );
+    assert_eq!(meter.note(true), CostNote::Read);
+    assert_eq!(
+        meter.note(false),
+        CostNote::Read,
+        "it has said where it writes"
+    );
 }
