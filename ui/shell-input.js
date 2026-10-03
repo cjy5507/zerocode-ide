@@ -2765,6 +2765,9 @@ async function loadTree(container, path) {
       treeMenuAt(event.clientX, event.clientY, { row, container, path, relative, entry });
     });
   }
+  // Rows built just now wear what the tree already knows about them — the
+  // agents' marks (t-24298) — rather than waiting for the next event.
+  dressTreeRows();
 }
 
 /* ---- searching the checkout: by name, or by what is inside ----

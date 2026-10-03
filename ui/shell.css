@@ -43611,6 +43611,62 @@ button.jev-token:hover {
 .tree-row.is-drop-conflict { outline: 1px solid var(--signal-halt-ink); outline-offset: -1px; }
 @media (prefers-reduced-motion: reduce) { .explorer-filters *, .tree-row.is-selected, .tree-undo-toast { transition: none; animation: none; } }
 
+/* ---- the tree's head and what the agents touch (t-24298) -------------------
+ *
+ * The head is one row: where the checkout stands in git on the left, the
+ * explorer's own switches on the right — the source-control head's grammar
+ * (`.scm-head-row`, `.scm-filter-toggle`) at the tree's top. */
+.tree-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 var(--space-3);
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+}
+.tree-head-space { flex: 1; min-width: 0; }
+.tree-head-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-mist);
+  cursor: pointer;
+}
+.tree-head-button .icon { width: 14px; height: 14px; }
+.tree-head-button:hover { background: var(--row-hover); color: var(--ink-chalk); }
+.tree-head-button.is-active { color: var(--nav-plane-ring); }
+
+/* A lit row: the name in the kind's colour and a bar at the row's edge. The
+ * bar is what fades — slower than a hover (`--tree-touch-fade`), so the eye
+ * that arrives late still sees where it was — while the name returns to its
+ * ink at the row's own pace. A folder lit for what is beneath it takes the
+ * colour without the bar: it is pointing, not being touched. */
+.file-tree .tree-row {
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--tree-touch-fade) var(--ease-standard);
+}
+.tree-row[data-agent-touch="read"],
+.tree-row[data-agent-touch-within="read"] { color: var(--tree-touch-read); }
+.tree-row[data-agent-touch="write"],
+.tree-row[data-agent-touch-within="write"] { color: var(--tree-touch-write); }
+.tree-row[data-agent-touch="commit"],
+.tree-row[data-agent-touch-within="commit"] { color: var(--tree-touch-commit); }
+.tree-row[data-agent-touch="read"] { box-shadow: inset 2px 0 0 var(--tree-touch-read); }
+.tree-row[data-agent-touch="write"] { box-shadow: inset 2px 0 0 var(--tree-touch-write); }
+.tree-row[data-agent-touch="commit"] { box-shadow: inset 2px 0 0 var(--tree-touch-commit); }
+@media (prefers-reduced-motion: reduce) {
+  .file-tree .tree-row { transition: none; }
+}
+
 /* ---- 아티팩트 뷰 (t-2720, Orca 갭 #1) --------------------------------------
  *
  * 카드 그리드 + 오른쪽 서랍. 숫자는 tokens.css의 `--artifact-*`이고, 색은

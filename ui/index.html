@@ -2774,6 +2774,22 @@
               <span data-i18n="file.content">내용</span>
             </button>
           </div>
+          <!-- The tree's head (t-24298): where this checkout stands in git,
+               and whether the tree follows what the agents touch. -->
+          <div class="tree-head" id="tree-head">
+            <span class="tree-head-branch" id="tree-head-branch"></span>
+            <span class="tree-head-space" aria-hidden="true"></span>
+            <button
+              class="tree-head-button"
+              id="tree-follow"
+              type="button"
+              aria-pressed="true"
+              data-i18n-aria="tree.follow" aria-label="에이전트 따라가기"
+              data-i18n-title="tree.followTip" data-tip="에이전트가 읽고 쓰는 파일로 트리를 펼칩니다"
+            >
+              <svg class="icon" aria-hidden="true"><use href="#i-crosshair"></use></svg>
+            </button>
+          </div>
           <div class="file-tree" id="file-tree" tabindex="0"></div>
           <div class="file-tree" id="file-hits" hidden></div>
           <!-- Content hits are three facts wide — file, line, the line — so
