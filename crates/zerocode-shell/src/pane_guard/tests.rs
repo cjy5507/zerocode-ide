@@ -1598,28 +1598,71 @@ fn a_panes_folder_is_named_as_zo_names_it_from_inside() {
     );
 }
 
-/// A turn's brief is its voices, in order, a blank line apart — and within
-/// the bridge's cap, because the bridge drops a longer brief whole: a voice
-/// that would cross it is left out, the ones before it (and a short one
-/// after) still reach the agent (t-24298). The person's own selection in the
-/// file tree is the first voice.
+/// A turn's brief is its voices, in order, a blank line apart, and each
+/// voice is handed the room the ones before it left under the bridge's cap
+/// (which drops a longer brief whole) — so a line a voice returns always
+/// fits and is never thrown away after it was given, and a voice with no
+/// room left is not asked at all (t-24298, the coordinator's 14:09 shape).
+/// The person's own selection in the file tree is the first voice.
 #[test]
-fn a_turns_brief_reads_its_voices_in_order_within_the_bridges_cap() {
-    let voices = |lines: &[Option<&str>]| {
-        lines
-            .iter()
-            .map(|line| line.map(str::to_string))
-            .collect::<Vec<_>>()
-    };
+fn a_turns_brief_hands_each_voice_the_room_the_ones_before_it_left() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static ASKED_WITH_NOTHING: AtomicUsize = AtomicUsize::new(0);
+    fn selected(_: &zerocode_hookd::TurnBriefAsk, _: usize) -> Option<String> {
+        Some("selected".to_string())
+    }
+    fn silent(_: &zerocode_hookd::TurnBriefAsk, _: usize) -> Option<String> {
+        None
+    }
+    fn picked(_: &zerocode_hookd::TurnBriefAsk, _: usize) -> Option<String> {
+        Some("picked".to_string())
+    }
+    // Leaves exactly five characters of the room it was given.
+    fn wide(_: &zerocode_hookd::TurnBriefAsk, room: usize) -> Option<String> {
+        Some("w".repeat(room.saturating_sub(5)))
+    }
+    // Says as much as it is let, up to its own eight.
+    fn fitting(_: &zerocode_hookd::TurnBriefAsk, room: usize) -> Option<String> {
+        if room == 0 {
+            ASKED_WITH_NOTHING.fetch_add(1, Ordering::SeqCst);
+        }
+        Some("f".repeat(room.min(8)))
+    }
+    // Takes the whole room.
+    fn greedy(_: &zerocode_hookd::TurnBriefAsk, room: usize) -> Option<String> {
+        Some("g".repeat(room))
+    }
+    let ask = brief_ask(Path::new("/Users/dev/repo"), Duration::from_millis(10));
     assert_eq!(
-        compose_brief(voices(&[Some("selected"), None, Some("picked")]), 100).as_deref(),
+        compose_brief(&[selected, silent, picked], &ask, 100).as_deref(),
         Some("selected\n\npicked")
     );
+    // The first voice leaves five; the gap takes two; the next is handed
+    // three and says three — the whole brief is exactly the cap.
+    let tight = compose_brief(&[wide, fitting], &ask, 20).expect("a brief");
+    assert_eq!(tight, format!("{}\n\nfff", "w".repeat(15)));
+    assert_eq!(tight.chars().count(), 20);
+    // A voice that took the whole room leaves none, and the next is not asked.
     assert_eq!(
-        compose_brief(voices(&[Some("12345"), Some("1234567890"), Some("xy")]), 10).as_deref(),
-        Some("12345\n\nxy")
+        compose_brief(&[greedy, fitting], &ask, 12).as_deref(),
+        Some("gggggggggggg")
     );
-    assert_eq!(compose_brief(voices(&[None, Some("  ")]), 100), None);
+    assert_eq!(ASKED_WITH_NOTHING.load(Ordering::SeqCst), 0);
+    // The real first voice keeps to the room it is handed: a selection with
+    // more paths than fit says the ones that do.
+    crate::tree_selection::hold(
+        "/Users/dev/repo",
+        vec!["src/one.rs".to_string(), "src/two.rs".to_string()],
+    );
+    let roomy = crate::tree_selection::brief_line(&ask, 1_000).expect("a roomy selection");
+    let narrow_room = roomy.chars().count() - 5;
+    crate::tree_selection::hold(
+        "/Users/dev/repo",
+        vec!["src/three.rs".to_string(), "src/four.rs".to_string()],
+    );
+    let narrow = crate::tree_selection::brief_line(&ask, narrow_room).expect("a narrow selection");
+    assert!(narrow.chars().count() <= narrow_room, "{narrow}");
+    assert!(narrow.contains("src/three.rs") && !narrow.contains("src/four.rs"), "{narrow}");
     let first = BRIEF_CONTRIBUTORS.first().map(|voice| *voice as usize);
     let selection: BriefContributor = crate::tree_selection::brief_line;
     assert_eq!(first, Some(selection as usize));

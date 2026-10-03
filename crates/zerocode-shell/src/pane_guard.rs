@@ -1040,18 +1040,20 @@ fn record_turns(wire: &Wire, rows: Vec<Value>) {
 /* ---- the turn's brief (t-14869) --------------------------------------------------- */
 
 /// One voice in a turn's brief (t-24298): what it has to tell the agent in
-/// the asking pane as the person's prompt begins, or nothing — answered
+/// the asking pane as the person's prompt begins, in at most the characters
+/// it is given — the room the voices before it left — or nothing. Answered
 /// within the ask's wall.
-pub(crate) type BriefContributor = fn(&zerocode_hookd::TurnBriefAsk) -> Option<String>;
+pub(crate) type BriefContributor = fn(&zerocode_hookd::TurnBriefAsk, usize) -> Option<String>;
 
 /// The voices a turn's brief is made of, in the order the agent reads them.
 /// Stub (red).
 const BRIEF_CONTRIBUTORS: &[BriefContributor] = &[];
 
-/// The voices joined a blank line apart, in order, within `cap` characters.
-/// Stub (red).
+/// The voices' lines joined a blank line apart, in order, each voice given
+/// the room left under `cap`. Stub (red).
 pub(crate) fn compose_brief(
-    _voices: impl IntoIterator<Item = Option<String>>,
+    _voices: &[BriefContributor],
+    _ask: &zerocode_hookd::TurnBriefAsk,
     _cap: usize,
 ) -> Option<String> {
     None
