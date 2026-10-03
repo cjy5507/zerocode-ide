@@ -996,6 +996,39 @@ export async function testExplorerWriting(browser, origin, ok) {
     });
     ok("the writes held open are bounded by the touch cap however many calls start and never end", Number.isFinite(held.writes) && held.writes <= held.cap, JSON.stringify(held));
 
+    /* the sheen is a theme token and the name stays readable under its peak */
+    const sheen = await page.evaluate(async () => {
+      const prior = document.documentElement.dataset.theme;
+      const channels = (value) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+      const luminance = (values) => values.map((v) => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+      const ratio = (a, b) => { const pair = [luminance(a), luminance(b)].sort((x, y) => y - x); return (pair[0] + .05) / (pair[1] + .05); };
+      const resolved = (property, value) => {
+        const probe = document.createElement("span");
+        probe.style[property] = value;
+        document.body.append(probe);
+        const read = getComputedStyle(probe)[property];
+        probe.remove();
+        return channels(read);
+      };
+      const out = [];
+      for (const theme of ["dark", "light"]) {
+        document.documentElement.dataset.theme = theme;
+        await new Promise((done) => setTimeout(done, 250));
+        const tokens = getComputedStyle(document.documentElement);
+        const raw = tokens.getPropertyValue("--tree-writing-sheen").trim();
+        const share = Number(raw.match(/(\d+(?:\.\d+)?)%/)?.[1]) / 100;
+        const ink = resolved("color", tokens.getPropertyValue("--tree-touch-write"));
+        const ratios = ["--surface-deck", "--surface-well"].map((name) => {
+          const ground = resolved("backgroundColor", tokens.getPropertyValue(name));
+          return ratio(ink, ground.map((value, at) => value * (1 - share) + ink[at] * share));
+        });
+        out.push({ theme, raw, share, ratios: ratios.map((one) => Math.round(one * 100) / 100), sweepMs: parseFloat(tokens.getPropertyValue("--tree-writing-sweep")) });
+      }
+      document.documentElement.dataset.theme = prior;
+      return out;
+    });
+    ok("the sheen is a theme token — its own in each theme — and the written name stays 4.5:1 readable under its peak on both grounds; one sweep lasts at least the shortest showing", sheen.length === 2 && sheen.every((one) => one.share > 0 && one.share < .5 && one.ratios.every((ratio) => ratio >= 4.5) && one.sweepMs >= min) && sheen[0].raw !== sheen[1].raw, JSON.stringify(sheen));
+
     /* reduced motion: nothing moves, a static marker stands, the words are the same */
     await page.evaluate(() => { for (const key of [...treeWrites.keys()]) treeWrites.delete(key); });
     await page.emulateMedia({ reducedMotion: "reduce" });

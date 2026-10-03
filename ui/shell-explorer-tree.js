@@ -241,6 +241,35 @@ const TREE_TOUCH_HOLD_MS = 6_000;
  * first. It also bounds what one paint walks. */
 const TREE_TOUCH_CAP = 64;
 
+/* ---- how long and how many, for the writing mark (t-31715) ---- */
+
+/* A write call this long has an end the tree never heard — the batch carrying
+ * it was lost, the agent died mid-call, or the call is parked on an approval
+ * nobody answered. A real write takes seconds (a patch over many files, a
+ * large generated file); a shimmer that outlives the agent is a lie, so past
+ * this the call is let go and git is asked once for what it may have written. */
+const TREE_WRITING_MAX_MS = 60_000;
+
+/* The shortest a write is shown. A hook agent's start and end often reach the
+ * window in one batch (the backend sends at most one per card per 100 ms), so
+ * a call that took 20 ms would be on and off between two frames and never
+ * seen. The mark stays until it has had one sweep of the sheen — the
+ * duration of `--tree-writing-sweep` (tokens.css), a little under it so the
+ * mark does not outstay its motion. */
+const TREE_WRITING_MIN_MS = 1_000;
+
+/* How long after a write ends the tree waits before asking git about every
+ * file written since: the one window one scoped question covers. The backend
+ * already coalesces what arrives within 100 ms of each other; this coalesces
+ * what arrives after it, so a burst of two hundred calls is one question and
+ * the +N -N still lands well inside a glance. */
+const TREE_NUMSTAT_WINDOW_MS = 150;
+
+/* The most files one scoped question names. A patch over a hundred files is
+ * rare, and a question that long is a slow git; what does not fit waits for
+ * the next window, in order. */
+const TREE_NUMSTAT_PATHS_MAX = 64;
+
 /* Which kind of touch a verb is. Searches are reads; edits and writes are
  * writes. A verb not here (a shell command, a fetch, a delegation) names no
  * file of its own. */
@@ -264,6 +293,19 @@ const treeTouches = new Map();
 let treeTouchRoot = null;
 let treeTouchFrame = 0;
 let treeTouchSweep = null;
+/* The write calls open right now, newest last (t-31715): a call key → { paths
+ * (relative), pane, verb, since, until, closed }. `closed` is a call that has
+ * ended and is only waiting out its shortest showing. Bounded like the touches
+ * (`TREE_TOUCH_CAP`), and relative to `treeTouchRoot` like them. */
+const treeWrites = new Map();
+/* The files whose write ended and that git has not been asked about yet, and
+ * the one timer and one flight that ask (`askTreeNumstat`). */
+const treeNumstatWanted = new Set();
+let treeNumstatTimer = null;
+let treeNumstatBusy = false;
+/* The rows the last paint dressed — what the next paint undresses once they
+ * are no longer wanted, so a paint never walks the whole tree to find them. */
+let treeDressedRows = new Set();
 /* How many times the tree's marks were painted — a burst of activity paints
  * once a frame, and the harness counts it (`explorer-agent-burst`). */
 let treeTouchPaints = 0;
@@ -378,17 +420,23 @@ function treeRelative(target, pane, cwd = null) {
  * the shell's grammar (`reads`, `writes`); when it named those, the target is
  * the command or the patch itself and names no file. */
 function treeTouchesOf(activity) {
-  if (activity.phase !== "started" && activity.phase !== "finished") return [];
-  const touches = [];
+  return activity.phase === "started" || activity.phase === "finished" ? treeTargetsOf(activity) : [];
+}
+
+/* Every file an activity names, with the kind of touch — whatever its phase:
+ * a call that failed names the same files (it touched none, but it ends the
+ * write that was open on them). */
+function treeTargetsOf(activity) {
+  const targets = [];
   const named = (activity.reads?.length ?? 0) + (activity.writes?.length ?? 0) > 0;
   const kind = TREE_TOUCH_OF_VERB[activity.verb];
   if (kind && !named && typeof activity.target === "string" &&
       !(activity.verb === "grep" && TREE_PATTERN_SIGNS.test(activity.target))) {
-    touches.push({ kind, target: activity.target });
+    targets.push({ kind, target: activity.target });
   }
-  for (const target of activity.reads ?? []) touches.push({ kind: "read", target });
-  for (const target of activity.writes ?? []) touches.push({ kind: "write", target });
-  return touches;
+  for (const target of activity.reads ?? []) targets.push({ kind: "read", target });
+  for (const target of activity.writes ?? []) targets.push({ kind: "write", target });
+  return targets;
 }
 
 function touchTree(relative, kind, now) {
@@ -404,12 +452,10 @@ function touchTree(relative, kind, now) {
  * the unfolding happen once per frame however many events arrived. */
 function noteTreeActivities(pane, activities) {
   if (!activeWorktreePath) return;
-  if (treeTouchRoot !== activeWorktreePath) {
-    treeTouches.clear();
-    treeTouchRoot = activeWorktreePath;
-  }
+  holdTreeTouchRoot();
   const now = performance.now();
   let newest = null;
+  let wrote = false;
   for (const stamped of activities) {
     const activity = stamped?.activity;
     if (!activity) continue;
@@ -417,6 +463,7 @@ function noteTreeActivities(pane, activities) {
       revealTreeMentions(pane, activity.target);
       continue;
     }
+    if (activity.phase === "stopped") wrote = closeTreeWritesOf(pane, now) || wrote;
     noteTreeVcs(pane, activity, now);
     for (const { kind, target } of treeTouchesOf(activity)) {
       const relative = treeRelative(target, pane, activity.cwd);
@@ -424,11 +471,23 @@ function noteTreeActivities(pane, activities) {
       touchTree(relative, kind, now);
       newest = relative;
     }
+    wrote = noteTreeWrite(pane, activity, now) || wrote;
   }
-  if (newest === null) return;
+  if (newest === null && !wrote) return;
   scheduleTreeTouchPaint();
-  if (treeTouchSweep === null) armTreeTouchSweep();
-  if (treeFollowsAgent && fileTreeShowing()) followTreeTo(newest);
+  armTreeTouchSweep();
+  if (newest !== null && treeFollowsAgent && fileTreeShowing()) followTreeTo(newest);
+}
+
+/* What the tree holds belongs to one workspace: when the one in front is not
+ * the one it was holding for, it lets go of the other's marks, writes and the
+ * files it still meant to ask git about. */
+function holdTreeTouchRoot() {
+  if (treeTouchRoot === activeWorktreePath) return;
+  treeTouches.clear();
+  treeWrites.clear();
+  treeNumstatWanted.clear();
+  treeTouchRoot = activeWorktreePath;
 }
 
 function scheduleTreeTouchPaint() {
@@ -449,29 +508,35 @@ function paintTreeTouches() {
   const wanted = new Map();
   const want = (row, slot, kind) => {
     const marks = wanted.get(row) ?? {};
-    if (!marks[slot] || TREE_TOUCH_RANK[kind] > TREE_TOUCH_RANK[marks[slot]]) marks[slot] = kind;
+    if (!marks[slot] || (TREE_TOUCH_RANK[kind] ?? 0) > (TREE_TOUCH_RANK[marks[slot]] ?? 0)) marks[slot] = kind;
     wanted.set(row, marks);
   };
-  if (treeTouchRoot === activeWorktreePath) {
-    for (const [relative, held] of treeTouches) {
-      const row = treeRowOf(relative);
-      if (row) want(row, "agentTouch", held.kind);
+  if (treeTouchRoot === activeWorktreePath && (treeTouches.size > 0 || treeWrites.size > 0)) {
+    // One walk of the tree for every lookup below: a lookup by selector walks
+    // it again each time, and a busy turn asks for a few hundred.
+    const rows = treeRowIndex();
+    const mark = (relative, slot, withinSlot, kind) => {
+      const row = rows.get(relative);
+      if (row) want(row, slot, kind);
       const parts = relative.split("/");
       for (let depth = parts.length - 1; depth >= 1; depth -= 1) {
-        const folder = treeRowOf(parts.slice(0, depth).join("/"));
-        if (folder && folder.getAttribute("aria-expanded") !== "true") want(folder, "agentTouchWithin", held.kind);
+        const folder = rows.get(parts.slice(0, depth).join("/"));
+        if (folder && folder.getAttribute("aria-expanded") !== "true") want(folder, withinSlot, kind);
       }
+    };
+    for (const [relative, held] of treeTouches) mark(relative, "agentTouch", "agentTouchWithin", held.kind);
+    for (const held of treeWrites.values()) {
+      for (const relative of held.paths) mark(relative, "agentWriting", "agentWritingWithin", TREE_WRITING_ON);
     }
   }
-  for (const row of fileTree.querySelectorAll("[data-agent-touch], [data-agent-touch-within]")) {
-    if (wanted.has(row)) continue;
-    delete row.dataset.agentTouch;
-    delete row.dataset.agentTouchWithin;
+  for (const row of treeDressedRows) {
+    if (wanted.has(row) || !row.isConnected) continue;
+    for (const slot of TREE_MARK_SLOTS) delete row.dataset[slot];
     labelTreeRow(row);
   }
   for (const [row, marks] of wanted) {
     let moved = false;
-    for (const slot of ["agentTouch", "agentTouchWithin"]) {
+    for (const slot of TREE_MARK_SLOTS) {
       if (marks[slot]) {
         if (row.dataset[slot] === marks[slot]) continue;
         row.dataset[slot] = marks[slot];
@@ -483,14 +548,34 @@ function paintTreeTouches() {
     }
     if (moved) labelTreeRow(row);
   }
+  treeDressedRows = new Set(wanted.keys());
 }
 
-/* One timer for every mark: armed for the soonest expiry while any is held,
- * and gone when none is. */
+/* The attributes a row wears for what agents do to it: touched (read, written,
+ * committed) and being written, each for the row itself and for a shut folder
+ * over it. */
+const TREE_MARK_SLOTS = Object.freeze(["agentTouch", "agentTouchWithin", "agentWriting", "agentWritingWithin"]);
+
+/* What a writing row's attribute says. The state has one kind, so the value
+ * only has to be present. */
+const TREE_WRITING_ON = "true";
+
+/* Every row the tree holds, by its path — one walk for a pass's many lookups. */
+function treeRowIndex() {
+  const rows = new Map();
+  for (const row of fileTree.querySelectorAll(".tree-row[data-tree-path]")) rows.set(row.dataset.treePath, row);
+  return rows;
+}
+
+/* One timer for every mark and every write: armed for the soonest expiry
+ * while any is held, and gone when none is. Armed again whenever something
+ * new is held, because the new expiry may be the soonest. */
 function armTreeTouchSweep() {
+  clearTimeout(treeTouchSweep);
   treeTouchSweep = null;
   let soonest = Infinity;
   for (const held of treeTouches.values()) soonest = Math.min(soonest, held.until);
+  for (const held of treeWrites.values()) soonest = Math.min(soonest, held.until);
   if (soonest === Infinity) return;
   treeTouchSweep = setTimeout(sweepTreeTouches, Math.max(0, soonest - performance.now()));
 }
@@ -498,6 +583,12 @@ function armTreeTouchSweep() {
 function sweepTreeTouches() {
   const now = performance.now();
   for (const [relative, held] of treeTouches) if (held.until <= now) treeTouches.delete(relative);
+  for (const [key, held] of treeWrites) {
+    if (held.until > now) continue;
+    treeWrites.delete(key);
+    // A call let go at its bound never said it ended: it may have landed.
+    if (!held.closed) wantTreeNumstat(held.paths);
+  }
   scheduleTreeTouchPaint();
   armTreeTouchSweep();
 }
@@ -546,6 +637,166 @@ function followTreeTo(relative) {
       scheduleTreeTouchPaint();
     }
   })();
+}
+
+/* ---- the write an agent has open right now (t-31715) ----
+ *
+ * A write is a tool call that has started and not ended. The tree shows it as
+ * it happens — its file shimmers, and so does every shut folder above it —
+ * and the moment it ends, the file's +N -N is on its row.
+ *
+ * It is the same for every agent because the tree reads one shape: the
+ * activity every road puts on `hook:activity` — hook agents through the
+ * backend's one table of their spellings, wire sessions (`wire:<n>`) through
+ * their transcript turns, zo's main pane through the hooks zo itself sends.
+ * Each road says a call's start and its end, and says the call's id on both
+ * when its agent has one (`activity.call`). A start and an end are one call
+ * when they share the id; where an agent gives none, when they share verb and
+ * target; an end that names no file at all closes the pane's oldest open call
+ * of its verb. There is no agent's name below. */
+
+/* Is this activity's call one the tree can see the end of? A helper's card
+ * with no call id is fed a snapshot of what the helper is doing now (zo's
+ * `subagents` frame): it says "editing x" for as long as it is, and nothing in
+ * it ever says the editing is over. A write opened for it would shimmer until
+ * its bound. Every other activity is an event. */
+function treeWriteIsEvent(pane, activity) {
+  return Boolean(activity.call) || !pane.startsWith("sub:");
+}
+
+/* One call's key: its pane and its id, or — with no id — its pane, verb and
+ * target. */
+function treeWriteKey(pane, activity) {
+  return activity.call
+    ? `${pane}\u0000${activity.call}`
+    : `${pane}\u0000${activity.verb}\u0000${activity.target ?? ""}`;
+}
+
+/* What one activity does to the writes open: a start opens one, an end closes
+ * it. True when the open set moved. */
+function noteTreeWrite(pane, activity, now) {
+  const phase = activity.phase;
+  if (phase !== "started" && phase !== "finished" && phase !== "failed") return false;
+  const paths = [];
+  for (const { kind, target } of treeTargetsOf(activity)) {
+    const relative = kind === "write" ? treeRelative(target, pane, activity.cwd) : null;
+    if (relative !== null) paths.push(relative);
+  }
+  return phase === "started"
+    ? openTreeWrite(pane, activity, paths, now)
+    : closeTreeWrite(pane, activity, paths, now, phase === "finished");
+}
+
+function openTreeWrite(pane, activity, paths, now) {
+  if (paths.length === 0 || !treeWriteIsEvent(pane, activity)) return false;
+  const key = treeWriteKey(pane, activity);
+  // A start said again for a call still open is the same call, restarted.
+  treeWrites.delete(key);
+  treeWrites.set(key, { paths, pane, verb: activity.verb, since: now, until: now + TREE_WRITING_MAX_MS, closed: false });
+  while (treeWrites.size > TREE_TOUCH_CAP) treeWrites.delete(treeWrites.keys().next().value);
+  return true;
+}
+
+/* The call an end belongs to: by key, else — an end that names no file and no
+ * id — the pane's oldest call of its verb that is still open. */
+function heldTreeWrite(pane, activity) {
+  const exact = treeWrites.get(treeWriteKey(pane, activity));
+  if (exact || activity.call || activity.target !== undefined || activity.writes?.length) return exact;
+  for (const held of treeWrites.values()) {
+    if (!held.closed && held.pane === pane && held.verb === activity.verb) return held;
+  }
+  return undefined;
+}
+
+/* A call ends. `landed` is whether it did what it set out to: a failed call
+ * closes its mark and asks git nothing. An end whose start the tree never
+ * heard (a batch lost, a window opened mid-turn) still names its files, and
+ * git is asked about those. */
+function closeTreeWrite(pane, activity, paths, now, landed) {
+  const held = heldTreeWrite(pane, activity);
+  const moved = held ? finishTreeWrite(held, now) : false;
+  if (landed) wantTreeNumstat(held?.paths ?? paths);
+  return moved;
+}
+
+/* The turn ended: whatever it left open is over, and may have landed. */
+function closeTreeWritesOf(pane, now) {
+  let moved = false;
+  for (const held of treeWrites.values()) {
+    if (held.pane !== pane || held.closed) continue;
+    finishTreeWrite(held, now);
+    wantTreeNumstat(held.paths);
+    moved = true;
+  }
+  return moved;
+}
+
+/* A call closed: its mark stays until it has been shown for its shortest
+ * (`TREE_WRITING_MIN_MS`), then the sweep takes it. True when it was open. */
+function finishTreeWrite(held, now) {
+  if (held.closed) return false;
+  held.closed = true;
+  held.until = Math.max(now, held.since + TREE_WRITING_MIN_MS);
+  return true;
+}
+
+/* ---- the one scoped question after a write ends (t-31715) ----
+ *
+ * Every file whose write ended joins one set; one timer, armed by the first,
+ * asks the backend about the whole set once the window has passed
+ * (`scm_numstat`: git for just those files, never the whole repository). A
+ * burst of two hundred calls over forty files is one question naming forty
+ * files. One question is in flight at a time, and none is asked while the
+ * whole-repository status is being read — an answer taken before it must not
+ * land after it. The tree asks nothing while nobody can see it: the periodic
+ * refresh pays when somebody looks. */
+function wantTreeNumstat(paths) {
+  if (!fileTreeShowing()) return;
+  for (const path of paths) treeNumstatWanted.add(path);
+  armTreeNumstat();
+}
+
+function armTreeNumstat() {
+  if (treeNumstatTimer !== null || treeNumstatBusy || treeNumstatWanted.size === 0) return;
+  treeNumstatTimer = setTimeout(askTreeNumstat, TREE_NUMSTAT_WINDOW_MS);
+}
+
+async function askTreeNumstat() {
+  treeNumstatTimer = null;
+  const root = activeWorktreePath;
+  const paths = [...treeNumstatWanted].slice(0, TREE_NUMSTAT_PATHS_MAX);
+  for (const path of paths) treeNumstatWanted.delete(path);
+  if (!root || paths.length === 0) return;
+  treeNumstatBusy = true;
+  try {
+    await scmStatusAsking;
+    const entries = await invoke("scm_numstat", { paths });
+    if (root === activeWorktreePath) applyScmScoped(paths, entries ?? []);
+  } catch {
+    // A backend without the door, or git refusing: the periodic refresh is
+    // the fallback, and it is what the tree showed before this.
+  } finally {
+    treeNumstatBusy = false;
+    armTreeNumstat();
+  }
+}
+
+/* The rows a scoped answer moved, worn in place: each file asked about and
+ * every folder above it (its roll-up counts moved with it). */
+function paintTreeGitOf(paths) {
+  indexTreeGit();
+  const rows = treeRowIndex();
+  const painted = new Set();
+  for (const relative of paths) {
+    const parts = relative.split("/");
+    for (let depth = 1; depth <= parts.length; depth += 1) {
+      const path = parts.slice(0, depth).join("/");
+      if (painted.has(path)) continue;
+      painted.add(path);
+      const row = rows.get(path);
+      if (row) paintTreeBadge(row, path, row.classList.contains("is-dir"));
+    }
+  }
 }
 
 /* ---- git on the tree's rows (t-24298) ----
@@ -728,7 +979,7 @@ function dressTreeRows(container) {
       if (first) first.tabIndex = 0;
     }
   }
-  if (treeTouches.size > 0) scheduleTreeTouchPaint();
+  if (treeTouches.size > 0 || treeWrites.size > 0) scheduleTreeTouchPaint();
   if (treeAgentFolder !== null) paintAgentFolder();
   if (container === fileTree) paintTreeVcs();
 }
@@ -835,6 +1086,14 @@ function treeTouchWord(kind) {
   }
 }
 
+/* What an agent is doing to a row right now, in words: the file itself, or a
+ * file inside the shut folder. */
+function treeWritingWord(row) {
+  if (row.dataset.agentWriting) return t("tree.writing.file", "에이전트가 지금 쓰는 중");
+  if (row.dataset.agentWritingWithin) return t("tree.writing.within", "안의 파일에 에이전트가 쓰는 중");
+  return "";
+}
+
 /* What a screen reader says for a row: its name, its git state in words
  * (and a file's +N -N), and what an agent is doing to it — the same facts
  * the row shows, never a raw letter. Rewritten whenever one of them moves. */
@@ -848,9 +1107,15 @@ function labelTreeRow(row, path = row.dataset.treePath) {
     const entry = treeGit.files.get(path);
     if (entry) words.push(treeGitWord(treeGitKind(entry)), row.querySelector(".tree-tally")?.textContent ?? "");
   }
-  words.push(treeTouchWord(row.dataset.agentTouch ?? row.dataset.agentTouchWithin));
+  // What is happening now says it; the touch's own word is for the hold after.
+  const writing = treeWritingWord(row);
+  words.push(writing || treeTouchWord(row.dataset.agentTouch ?? row.dataset.agentTouchWithin));
   if (row.dataset.agentCwd === "true") words.push(t("tree.agentHere", "에이전트 작업 폴더"));
   row.setAttribute("aria-label", words.filter(Boolean).join(", "));
+  // The same words are the row's tooltip while it is being written, and the
+  // row has no other tooltip to give way to.
+  if (writing) row.dataset.tip = writing;
+  else delete row.dataset.tip;
 }
 
 /* ---- the person's own pointer: `@path` in a prompt (t-24298) ----
@@ -1091,10 +1356,7 @@ function settleTreeCommit() {
   if (!watch) return;
   treeCommitWatch = null;
   if (watch.root !== activeWorktreePath) return;
-  if (treeTouchRoot !== activeWorktreePath) {
-    treeTouches.clear();
-    treeTouchRoot = activeWorktreePath;
-  }
+  holdTreeTouchRoot();
   const now = performance.now();
   let newest = null;
   for (const path of watch.before) {
@@ -1104,7 +1366,7 @@ function settleTreeCommit() {
   }
   if (newest === null) return;
   scheduleTreeTouchPaint();
-  if (treeTouchSweep === null) armTreeTouchSweep();
+  armTreeTouchSweep();
   if (treeFollowsAgent && fileTreeShowing()) followTreeTo(newest);
 }
 

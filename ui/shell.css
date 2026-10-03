@@ -43694,6 +43694,54 @@ button.jev-token:hover {
   .file-tree .tree-row { transition: none; }
 }
 
+/* The row an agent is writing right now (t-31715): the write colour, and a
+ * sheen that sweeps across it. The sheen is a pseudo-element moved by
+ * `transform` alone — the compositor's work: no layout, no paint, and no
+ * script per frame — and it exists only while the row wears the state, so a
+ * tree nobody is writing in runs no animation at all. A folder shut over a
+ * file being written wears it too (it is pointing, as it does for a touch).
+ * `overflow: hidden` is the row's own; `position: relative` is what lets the
+ * sheen stand inside it. */
+.tree-row[data-agent-writing],
+.tree-row[data-agent-writing-within] {
+  position: relative;
+  color: var(--tree-touch-write);
+}
+.tree-row[data-agent-writing]::after,
+.tree-row[data-agent-writing-within]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent 0, var(--tree-writing-sheen) 50%, transparent 100%);
+  transform: translateX(-100%);
+  will-change: transform;
+  animation: tree-writing-sweep var(--tree-writing-sweep) linear infinite;
+}
+@keyframes tree-writing-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+/* Nothing moves under reduced motion: the sheen becomes a still line along the
+ * row's foot, in the write colour — the state is still on the row, and the
+ * words for it are on the row too (`labelTreeRow`). */
+@media (prefers-reduced-motion: reduce) {
+  .tree-row[data-agent-writing]::after,
+  .tree-row[data-agent-writing-within]::after {
+    animation: none;
+    will-change: auto;
+    transform: none;
+    top: auto;
+    width: auto;
+    right: 0;
+    height: 2px;
+    background: var(--tree-touch-write);
+  }
+}
+
 /* The keyboard's place in the tree, and the row a reveal pointed at — an
  * `@path` in a prompt, a menu's "show in the file tree". Both are rings and
  * grounds the rest of the explorer already uses. */
