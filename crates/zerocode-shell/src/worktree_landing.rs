@@ -1,3 +1,14 @@
+/// 병합 시험의 나무가 `target`의 나무와 같은가 — 병합해도 나무가 바뀌지 않는가.
+/// squash나 cherry-pick으로 내용만 들어간 작업이 여기서 잡힌다. 충돌하거나 git이
+/// 답하지 못했으면 같다고 말하지 않는다.
+fn merge_changes_nothing(host: &Host, path: &Path, target: &str, probe: &MergeProbe) -> bool {
+    let MergeProbe::Clean(tree) = probe else {
+        return false;
+    };
+    landing_git_text(host, path, &["rev-parse", &format!("{target}^{{tree}}")])
+        .is_some_and(|target_tree| target_tree == *tree)
+}
+
 use super::*;
 
 /// 한 작업 폴더가 비교 ref(기본은 원격 추적 main)에 들어갔는지, git이 직접 한
@@ -688,7 +699,10 @@ fn classify_landing(
         landing.landed_in = landed_commit(host, path, head, target);
         return landing;
     }
-    if merge_changes_nothing(host, path, head, target) {
+    // 한 번만 띄운다: 같은 답이 「나무가 안 바뀐다(squash·cherry-pick)」와
+    // 「충돌한다」를 모두 알려 준다.
+    let probe = merge_probe(host, path, head, target);
+    if merge_changes_nothing(host, path, target, &probe) {
         landing.state = "landed";
         return landing;
     }
@@ -703,8 +717,25 @@ fn classify_landing(
     } else {
         landing.state = "unlanded";
         landing.ahead = u32::try_from(ahead).unwrap_or(u32::MAX);
+        landing.behind = commits_behind(host, path, head, target);
+        if let MergeProbe::Conflict(files) = probe {
+            landing.conflict = Some(LandingConflict {
+                total: u32::try_from(files.len()).unwrap_or(u32::MAX),
+                files: files.into_iter().take(LANDING_CONFLICT_NAMES).collect(),
+            });
+        }
     }
     landing
+}
+
+/// 비교 ref에는 있고 `head`에는 없는 커밋 수. 못 읽으면 없다 — 0이라 하지 않는다.
+fn commits_behind(host: &Host, path: &Path, head: &str, target: &str) -> Option<u32> {
+    landing_git_text(
+        host,
+        path,
+        &["rev-list", "--count", &format!("{head}..{target}")],
+    )
+    .and_then(|said| said.parse().ok())
 }
 
 /// 병합 시험(`merge-tree --write-tree --name-only`)의 답.
@@ -719,8 +750,44 @@ enum MergeProbe {
 }
 
 /// 종료값과 표준 출력을 병합 시험의 답으로 읽는다.
-fn parse_merge_probe(_code: i32, _said: &str) -> MergeProbe {
-    MergeProbe::Failed
+///
+/// `--name-only`의 표준 출력은 첫 줄이 합친 나무, 충돌이면 이어서 파일 이름이고,
+/// 빈 줄 뒤는 사람이 읽는 메시지다. 종료값 1만 충돌이다 — 128 같은 값은 git이
+/// 답하지 못한 것이라 충돌 없음으로 읽지 않는다.
+fn parse_merge_probe(code: i32, said: &str) -> MergeProbe {
+    let mut lines = said.lines().map(str::trim_end);
+    let Some(tree) = lines.next().map(str::trim).filter(|tree| !tree.is_empty()) else {
+        return MergeProbe::Failed;
+    };
+    match code {
+        0 => MergeProbe::Clean(tree.to_string()),
+        1 => {
+            let mut files: Vec<String> = Vec::new();
+            for line in lines.take_while(|line| !line.is_empty()) {
+                if !files.iter().any(|seen| seen == line) {
+                    files.push(line.to_string());
+                }
+            }
+            MergeProbe::Conflict(files)
+        }
+        _ => MergeProbe::Failed,
+    }
+}
+
+/// `head`를 `target`에 합친 결과를 작업 폴더를 건드리지 않고 본다.
+fn merge_probe(host: &Host, path: &Path, head: &str, target: &str) -> MergeProbe {
+    let args = lock_free(&[
+        "merge-tree",
+        "--write-tree",
+        "--name-only",
+        "--no-messages",
+        target,
+        head,
+    ]);
+    match host.vcs().text_and_code(path, &args) {
+        Ok((code, said)) => parse_merge_probe(code, &said),
+        Err(_) => MergeProbe::Failed,
+    }
 }
 
 /// 브랜치가 만들어진 커밋 — 그 브랜치 reflog의 가장 오래된 줄.
@@ -1027,12 +1094,56 @@ mod tests {
         );
         // 빈 줄 뒤는 사람이 읽는 메시지이지 파일이 아니다.
         assert_eq!(
-            parse_merge_probe(1, &format!("{tree}\nb.txt\n\nAuto-merging b.txt\nCONFLICT (content)\n")),
+            parse_merge_probe(
+                1,
+                &format!("{tree}\nb.txt\n\nAuto-merging b.txt\nCONFLICT (content)\n")
+            ),
             MergeProbe::Conflict(vec!["b.txt".into()])
         );
         // 128 같은 값은 충돌이 아니라 git이 못 답한 것이다.
         assert_eq!(parse_merge_probe(128, "fatal"), MergeProbe::Failed);
         assert_eq!(parse_merge_probe(0, ""), MergeProbe::Failed);
+    }
+
+    #[test]
+    fn the_fourth_git_shape_tells_a_conflict_from_a_git_that_failed() {
+        let bench = Bench::open();
+        let wt = bench.worktree("shapes");
+        bench.commit(&wt, "a.txt", "worker\n");
+        bench.commit(&bench.repo, "a.txt", "main\n");
+        let host = Host::for_workspace(&bench.repo);
+        let (worker, main) = (
+            git(&wt, &["rev-parse", "HEAD"]),
+            git(&bench.repo, &["rev-parse", "main"]),
+        );
+        let (code, said) = host
+            .vcs()
+            .text_and_code(
+                &bench.repo,
+                &["merge-tree", "--write-tree", "--name-only", &main, &worker],
+            )
+            .expect("git ran");
+        assert_eq!(code, 1, "a conflict is an answer, not a failure");
+        assert!(said.lines().any(|line| line == "a.txt"), "{said}");
+        let (code, _) = host
+            .vcs()
+            .text_and_code(
+                &bench.repo,
+                &[
+                    "merge-tree",
+                    "--write-tree",
+                    "--name-only",
+                    &main,
+                    "0123456789abcdef0123456789abcdef01234567",
+                ],
+            )
+            .expect("git ran");
+        assert_eq!(code, 128, "a commit git does not have is a failure");
+        assert!(
+            host.vcs()
+                .text_and_code(&bench.repo.join("nowhere"), &["status"])
+                .is_err()
+        );
     }
 
     #[test]
