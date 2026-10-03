@@ -198,7 +198,7 @@ fn a_call_that_failed_is_rework_and_a_few_failures_are_not_a_loop() {
     let mut few = Drive::new();
     for step in 0..REWORK_WINDOW_STEPS {
         few.call_of(read_of(&format!("/repo/src/f{step}.rs"), 0));
-        if step % 12 == 0 {
+        if step.is_multiple_of(12) {
             few.fail();
         }
     }
@@ -209,7 +209,7 @@ fn a_call_that_failed_is_rework_and_a_few_failures_are_not_a_loop() {
     let mut many = Drive::new();
     for step in 0..REWORK_WINDOW_STEPS {
         many.call_of(read_of(&format!("/repo/src/f{step}.rs"), 0));
-        if step % 3 == 0 {
+        if step.is_multiple_of(3) {
             many.fail();
         }
     }
@@ -711,7 +711,7 @@ fn what_a_book_remembers_is_bounded() {
     for step in 0..50_000_usize {
         drive.call("Read", &format!(r#"{{"file_path":"/f{}"}}"#, step % 97));
         drive.cost(0.1);
-        if step % 11 == 0 {
+        if step.is_multiple_of(11) {
             drive.fail();
         }
     }
