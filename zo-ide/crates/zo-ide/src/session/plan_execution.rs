@@ -29,7 +29,7 @@ pub(crate) fn now_ms() -> u64 {
 impl PlanTurn {
     pub(crate) fn begin(runtime: &mut BuiltRuntime, start: PlanStart<'_>) -> Option<Self> {
         let cohort = tools::plan_cohort_for_turn(start.input, start.setup.assessment.complexity, start.setup.orchestration.risk)?;
-        let current = runtime.api_client().model().to_string();
+        let current = api::resolve_model_alias(runtime.api_client().model());
         let shape = super::smart_runtime::plan_shape_of(start.prelude);
         let objective = runtime.deep_gate().is_some_and(|gate| gate.check_command.is_some());
         let actual = tools::PlanShadowActual {

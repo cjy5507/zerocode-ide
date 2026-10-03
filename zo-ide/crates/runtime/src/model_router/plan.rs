@@ -121,11 +121,12 @@ pub enum SwitchTrigger {
     /// after a run of routine steps on the floor
     /// (`conversation/step_effort.rs`, t-5633).
     Step,
+    Plan,
 }
 
 impl SwitchTrigger {
     /// Every trigger, the one place the set is enumerated.
-    pub const ALL: [SwitchTrigger; 8] = [
+    pub const ALL: [SwitchTrigger; 9] = [
         Self::Person,
         Self::Quota,
         Self::Refusal,
@@ -134,6 +135,7 @@ impl SwitchTrigger {
         Self::VerifyLeg,
         Self::ExecLeg,
         Self::Step,
+        Self::Plan,
     ];
 
     /// Canonical label, as the shadow ledger's `trigger` column spells it.
@@ -148,6 +150,7 @@ impl SwitchTrigger {
             Self::VerifyLeg => "verify-leg",
             Self::ExecLeg => "exec-leg",
             Self::Step => "step",
+            Self::Plan => "plan",
         }
     }
 

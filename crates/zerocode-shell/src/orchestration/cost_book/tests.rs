@@ -159,7 +159,7 @@ fn row(task: &str, requests: u64) -> String {
 }
 
 fn row_in(run: &str, task: &str, requests: u64) -> String {
-    let mut value: Value = serde_json::from_str(&row(task, requests)).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&row(task, requests)).unwrap();
     value["run"] = json!(run);
     format!("{value}\n")
 }

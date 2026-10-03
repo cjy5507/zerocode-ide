@@ -872,6 +872,7 @@ impl PlainSession {
         if let Some(plan) = plan_turn.as_mut() {
             if let Some(client) = plan.client(&self.runtime, &self.handle.id, self.allowed_tools.clone()) {
                 live_client = client;
+                installed.route_watch.plan_applied();
                 if let Some(inner) = self.runtime.try_runtime_mut() {
                     inner.set_step_effort(None);
                     inner.set_exec_contract(None);
@@ -885,11 +886,13 @@ impl PlainSession {
         }
         self.arm_turn_limits();
         self.begin_workspace_checkpoint();
+        let mut host_turn = installed.host_turn();
+        host_turn.applied = plan_turn.as_ref().and_then(|plan| plan.selected.as_ref());
         // 난이도가 넓다고 하면 호스트가 먼저 갈라 읽는다(`orchestration`): 결과는
         // 이 턴의 문맥에 앉고, 모델은 그 위에서 시작한다. 예산·출석 선언 뒤라
         // 헬퍼도 같은 한도를 받는다.
         let input = self
-            .input_after_host_prelude(installed.host_turn(), &turn_setup, input, &block_tx, || {
+            .input_after_host_prelude(host_turn, &turn_setup, input, &block_tx, || {
                 user_cancel_requested.load(Ordering::SeqCst) || hook_abort_signal.is_aborted()
             })
             .await;

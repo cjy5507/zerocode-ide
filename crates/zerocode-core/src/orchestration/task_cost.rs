@@ -563,7 +563,7 @@ pub fn attempt_generation(
     generation(run, &[attempt], sessions, attribution)
 }
 
-fn reported_sessions<'run>(
+pub fn reported_sessions<'run>(
     run: &'run Run,
     attempt: &'run Dispatch,
 ) -> Vec<&'run crate::ProviderSession> {

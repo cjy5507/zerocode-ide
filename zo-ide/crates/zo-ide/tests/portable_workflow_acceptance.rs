@@ -20,6 +20,8 @@ const ORIGINAL: &str = "PORTABLE_ORIGINAL_TASK: write the requested file and ret
 const CONTENT: &str = "independently verified file contents\n";
 
 struct Workspace {
+    auto_plan: bool,
+    objective_check: bool,
     _root: TempDir,
     cwd: PathBuf,
     home: PathBuf,
@@ -40,7 +42,7 @@ impl Workspace {
         fs::write(home.join("settings.json"), serde_json::to_vec(&json!({
             "smart": { "autoClassifier": "off", "orchestration": "model" }
         })).unwrap()).unwrap();
-        Self { _root: root, cwd, home, sessions, state }
+        Self { _root: root, cwd, home, sessions, state, auto_plan: false, objective_check: false }
     }
 
     async fn start(&self, service: &ScriptedAnthropicService, resume: bool, input: &str) -> Child {
@@ -52,7 +54,7 @@ impl Workspace {
             if let Some(value) = std::env::var_os(name) { command.env(name, value); }
         }
         command
-            .args(["--plain", "--model", "claude-sonnet-4-6", "--permission-mode", "danger-full-access"])
+            .args(["--plain", "--permission-mode", "danger-full-access"])
             .current_dir(&self.cwd)
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
@@ -74,6 +76,8 @@ impl Workspace {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if !self.auto_plan { command.args(["--model", "claude-sonnet-4-6"]); }
+        if self.objective_check { command.env("ZO_AUTO_VERIFY", "on").env("ZO_AUTO_VERIFY_CMD", "echo checked"); }
         if resume { command.arg("--continue"); }
         let mut child = command.spawn().expect("start the real zo binary");
         child.stdin.as_mut().unwrap().write_all(input.as_bytes()).await.unwrap();
@@ -92,6 +96,69 @@ async fn finish(mut child: Child) -> Output {
 
 fn assert_success(output: &Output) {
     assert!(output.status.success(), "zo exited {:?}: {}", output.status, String::from_utf8_lossy(&output.stderr));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn measured_plan_changes_the_real_wire_then_falls_back_and_respects_a_pin() {
+    let mut workspace = Workspace::new();
+    workspace.auto_plan = true;
+    workspace.objective_check = true;
+    fs::write(workspace.home.join("settings.json"), serde_json::to_vec(&json!({
+        "smart": { "autoClassifier": "off", "orchestration": "model", "plan": { "apply": true } }
+    })).unwrap()).unwrap();
+    let input = "Implement a small low-risk Rust helper in a single file without delegation.";
+    let assessment = tools::assess_turn_deterministic(input);
+    let hint = tools::assess_turn_orchestration(input);
+    let cohort = tools::plan_cohort_for_turn(input, assessment.complexity, hint.risk).unwrap();
+    let current = api::resolve_model_alias(api::ANTHROPIC_LATEST_MODEL_ALIAS);
+    let models: BTreeSet<_> = api::builtin_provider_catalog().iter()
+        .filter(|entry| entry.provider == api::ProviderKind::Anthropic)
+        .map(|entry| entry.canonical_model_id)
+        .filter(|model| api::model_accepts_effort(model, api::EffortLevel::High)).collect();
+    assert!(models.contains(current.as_str()) && models.len() >= 2);
+    let now = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap();
+    let mut receipts = Vec::new();
+    for model in &models {
+        for index in 0..12 {
+            receipts.push(tools::PlanRunReceipt {
+                version: 1, at_ms: now - 2_000, attempt: format!("fixture-{model}@{index}"), cohort: cohort.clone(),
+                plan: tools::PlanShadowActual { model: (*model).into(), effort: Some("high".into()), shape: "solo".into(), verify: "objective".into() },
+                verified: Some(true), duration_ms: 10_000, total_tokens: Some(5_000),
+                total_usd: Some(if *model == current { 100.0 } else { 1.0 }), held: Vec::new(),
+            });
+        }
+    }
+    let ledger = workspace.state.join("projects").join(runtime::project_slug(&workspace.cwd))
+        .join("state/smart-router/plan-receipts.jsonl");
+    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    let write = |receipts: &[tools::PlanRunReceipt]| {
+        fs::write(&ledger, receipts.iter().map(|receipt| format!("{}\n", serde_json::to_string(receipt).unwrap())).collect::<String>()).unwrap();
+    };
+    write(&receipts);
+    let service = ScriptedAnthropicService::text("fixture response without a completion claim").await.unwrap();
+    let output = workspace.run(&service, false, &format!("{input}\n/exit\n")).await;
+    assert_success(&output);
+    let requests = service.request_bodies().await;
+    let selected: Value = serde_json::from_str(&requests[0]).unwrap();
+    assert_ne!(selected["model"].as_str(), Some(current.as_str()), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(models.contains(selected["model"].as_str().unwrap()));
+    for receipt in &mut receipts {
+        if receipt.plan.model != current { receipt.verified = Some(false); }
+    }
+    write(&receipts);
+    let before = requests.len();
+    assert_success(&workspace.run(&service, false, &format!("{input}\n/exit\n")).await);
+    let requests = service.request_bodies().await;
+    let fallback: Value = serde_json::from_str(&requests[before]).unwrap();
+    assert_eq!(fallback["model"].as_str(), Some(current.as_str()));
+    workspace.auto_plan = false;
+    for receipt in &mut receipts { receipt.verified = Some(true); }
+    write(&receipts);
+    let before = requests.len();
+    assert_success(&workspace.run(&service, false, &format!("{input}\n/exit\n")).await);
+    let requests = service.request_bodies().await;
+    let pinned: Value = serde_json::from_str(&requests[before]).unwrap();
+    assert_eq!(pinned["model"], "claude-sonnet-4-6");
 }
 
 fn assert_restored_tool_pairs(body: &str) {

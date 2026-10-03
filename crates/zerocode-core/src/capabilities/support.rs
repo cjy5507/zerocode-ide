@@ -36,7 +36,7 @@ mod tests {
     #[test]
     fn support_is_derived_from_the_same_catalog_as_execution() {
         for spec in AGENT_SPECS {
-            let support = AgentSupport::for_agent(spec);
+            let support = AgentSupport::for_agent(&spec);
             assert_eq!(
                 support.direct_control,
                 spec.harness.spawn == SpawnRoad::SocketPane || agent_voice(spec.id).wire.is_some(),

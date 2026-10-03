@@ -29,6 +29,11 @@
   `session_status`/`turn`/`subagents` 프레임). 계약은 [`docs/events-channel.md`](docs/events-channel.md), JSON 출력은 [`docs/json-contract.md`](docs/json-contract.md).
 
 ## 사용
+
+`smart.plan.apply: true`는 비용 기반 턴 선택을 명시적으로 켠다(기본 `false`). 같은 프로젝트·역할·난이도·위험도와 정확한 모델·effort·실행 형태·검증 방식으로 비교하며, 최근 28일 안의 독립 과업 영수증이 현재 경로와 대안 각각 12개 이상 있어야 한다. 객관 검사 통과율은 최소 90%, 전체 관측 비용 절감은 최소 10%를 요구한다. 모델 변경의 문맥 재전송 비용도 더하며, 명시한 모델·effort는 변경하지 않는다.
+
+현재 적용 가능한 형태는 객관 검사 명령이 있는 단독 턴이다. 기록은 `smart-router/plan-receipts.jsonl`에 남으며, 부족한 표본·실패한 검사·손상된 기록·클라이언트 준비 실패는 기존 실행으로 돌아간다. 하위 작업 비용 미정산, 압축, 모델/effort 변경, 누락된 사용량, 혼합 캐시 TTL 등은 미상으로 남겨 자동 선택 근거에서 제외한다. 달러는 공개 단가로 계산한 API 환산값이며 구독 요금 청구액이 아니다. 적용 시 턴에 선택한 모델이 표시된다.
+
 ```bash
 zo                                   # 대화형 TUI (이벤트 채널 :0 자동)
 zo --model astra --effort xhigh      # 별칭 또는 릴리즈 id (gpt-6-astra)

@@ -30,6 +30,15 @@ pub(super) fn preserve(
     if crate::durable_file::require_plain_directory_if_present(root).is_err() {
         return;
     }
+    if crate::durable_file::ensure_private_directory(root).is_err() {
+        return;
+    }
+    let Ok(lock) = crate::durable_file::private_lock_file(&root.join(".receipts.lock")) else {
+        return;
+    };
+    if lock.try_lock().is_err() {
+        return;
+    }
     let previous = read(&file).filter(|receipt| {
         receipt.version == 1
             && receipt.run == run
@@ -44,6 +53,17 @@ pub(super) fn preserve(
     if spend.measured_tokens().is_some()
         && spend.usd.is_some_and(|usd| usd.is_finite() && usd >= 0.0)
     {
+        if previous.as_ref().is_some_and(|receipt| {
+            spend.input_tokens < receipt.spend.input_tokens
+                || spend.output_tokens < receipt.spend.output_tokens
+                || spend.cache_read_tokens < receipt.spend.cache_read_tokens
+                || spend.cache_write_tokens < receipt.spend.cache_write_tokens
+        }) {
+            spend.usd = None;
+            spend.usd_reason = Some(UsdReason::InvalidUsage);
+            let _ = crate::durable_file::remove_file(&file);
+            return;
+        }
         let receipt = Receipt {
             version: 1,
             run: run.into(),

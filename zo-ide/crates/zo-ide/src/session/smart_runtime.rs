@@ -182,6 +182,10 @@ pub(crate) struct SmartTurnInstalled {
 pub(crate) struct RouteWatch(std::sync::Mutex<Option<runtime::SwitchTrigger>>);
 
 impl RouteWatch {
+    pub(crate) fn plan_applied(&self) {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert(runtime::SwitchTrigger::Plan);
+    }
     fn note(&self, trigger: runtime::SwitchTrigger) {
         if !tools::route_unseated_by(trigger) {
             return;
@@ -203,6 +207,7 @@ impl SmartTurnInstalled {
         HostTurn {
             policy: self.orchestration,
             plan_shadow: self.plan_shadow.as_deref(),
+            applied: None,
         }
     }
 }
@@ -213,6 +218,7 @@ impl SmartTurnInstalled {
 pub(crate) struct HostTurn<'a> {
     pub(crate) policy: tools::HostOrchestration,
     pub(crate) plan_shadow: Option<&'a PlanShadowTurn>,
+    pub(crate) applied: Option<&'a runtime::PlanCandidate>,
 }
 
 /// The plan scorer's shadow inputs gathered at turn start, from the same
@@ -613,6 +619,7 @@ pub(crate) fn record_plan_shadow_turn(
     decision: tools::HostPrelude,
     session_id: &str,
     input: &str,
+    applied: Option<&runtime::PlanCandidate>,
 ) {
     let cohort = tools::plan_cohort_for_turn(input, setup.assessment.complexity, setup.orchestration.risk);
     let current_model = runtime.api_client().model().to_string();
@@ -620,7 +627,9 @@ pub(crate) fn record_plan_shadow_turn(
         .try_runtime_mut()
         .map_or(0, |inner| u64::try_from(inner.estimated_tokens()).unwrap_or(u64::MAX));
     let shape = plan_shape_of(decision);
-    let verify = if shadow.verify_leg {
+    let verify = if runtime.deep_gate().is_some_and(|gate| gate.check_command.is_some()) {
+        runtime::VerifyMode::Objective
+    } else if shadow.verify_leg {
         runtime::VerifyMode::ModelJudge
     } else {
         runtime::VerifyMode::None
@@ -643,8 +652,8 @@ pub(crate) fn record_plan_shadow_turn(
             pinned_model: setup.orchestration.user_named_model,
             shape,
             actual: tools::PlanShadowActual {
-                model: current_model.clone(),
-                effort: shadow.effort.clone(),
+                model: applied.map_or_else(|| current_model.clone(), |plan| plan.model.clone()),
+                effort: applied.map_or_else(|| shadow.effort.clone(), |plan| plan.effort.clone()),
                 shape: shape.label(),
                 verify: verify.as_str().to_string(),
             },
