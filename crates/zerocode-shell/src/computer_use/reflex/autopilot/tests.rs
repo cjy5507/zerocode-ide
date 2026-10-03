@@ -51,6 +51,10 @@ struct Helper {
     /// Every window on the screen at every layer, front to back, when the
     /// test lays one out (t-12979); none answers the list as an old helper.
     desk: Vec<Value>,
+    /// A gate the helper opens while it answers a reading that names another
+    /// plan (t-22110): the teacher's held answer then lands inside the very
+    /// pass that reads the new plan, before that pass judges it.
+    answers_on_read: Option<mpsc::Sender<()>>,
 }
 
 impl Helper {
@@ -68,6 +72,7 @@ impl Helper {
             moment: 0,
             scene: json!({ "stream": 1, "geometry": 1, "owner": 3, "plan": 1 }),
             desk: Vec::new(),
+            answers_on_read: None,
         }
     }
 
@@ -117,6 +122,12 @@ impl Helper {
                 json!({ "runId": id, "state": "running" })
             }
             "reflexReceipts" => {
+                if self.plan_hash.is_some()
+                    && let Some(open) = self.answers_on_read.take()
+                {
+                    let _ = open.send(());
+                    std::thread::sleep(Duration::from_millis(50));
+                }
                 let Some(held) = self.held.get(&run) else {
                     return Ok(json!({ "runId": run, "state": "missing" }));
                 };
@@ -1284,4 +1295,43 @@ fn measure_how_long_an_answer_waits_for_the_window() {
             "settleMs": REFLEX_SETTLE_MS,
         })
     );
+}
+
+/// An answer that lands inside the very pass that reads a new plan is judged
+/// against that plan, not against the one the pass before it read (t-22110):
+/// the helper lets the teacher's held answer through while it answers the
+/// reading that names another plan, and the row says `plan_mismatch` with
+/// the hand untouched. Seen first as a race in
+/// `a_stale_or_mismatched_or_late_answer_is_never_carried_out` under load (31
+/// of 50 runs on this branch, 0 of 50 on its base): the collect's settle
+/// read the question in flight a few microseconds later than before, and
+/// the seat still judged it on the run as the pass before had read it.
+#[test]
+fn an_answer_landing_in_the_pass_that_reads_a_new_plan_is_refused_as_mismatched() {
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good()]);
+    let open = fake.teacher.holds(PAUSE);
+    let (mut autopilot, answer) = fake.start(asked(None)).expect("started");
+    let run = answer["runId"].as_str().expect("a run").to_string();
+    // The collect that asks: the answer waits on the test's gate.
+    fake.tick(&mut autopilot);
+    assert!(fake.asked_rows().is_empty(), "the question is in flight");
+    // The next reading names another plan, and the helper opens the gate
+    // while it is being read: the answer lands before the pass judges it.
+    fake.helper.plan_hash = Some("another");
+    fake.helper.answers_on_read = Some(open);
+    fake.until_rows(&mut autopilot, 1);
+    assert!(
+        fake.helper.answers_on_read.is_none(),
+        "the gate was opened during the reading"
+    );
+    let row = fake.asked_rows()[0].clone();
+    assert_eq!(row["why"], json!(Why::PlanMismatch.word()));
+    assert_eq!(row["applied"], json!(false));
+    assert!(
+        fake.helper.stops().is_empty(),
+        "nothing is carried out on a plan the helper no longer runs"
+    );
+    let status = report(&run).expect("the account");
+    assert_eq!(status["invalid"]["plan_mismatch"], json!(1));
+    assert_eq!(status["applied"][PAUSE], json!(0));
 }
