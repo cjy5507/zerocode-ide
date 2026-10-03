@@ -876,3 +876,26 @@ fn the_ios_exporter_counts_a_revisited_child_before_it_calls_a_subtree_truncated
         "a spent element budget no longer says the tree is truncated"
     );
 }
+
+/// t-15517 (D): a look that cannot be compared — no earlier look of the same
+/// place at the same scale — answers `changed: null`. That is unknown, not
+/// "nothing changed"; the skill says so where it teaches the diff, or a model
+/// reads the null as nothing and stops looking.
+#[test]
+fn the_skill_says_a_look_that_cannot_be_compared_is_unknown_not_nothing() {
+    let skill = include_str!("../../../../skills/computer-use/SKILL.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let start = skill
+        .find("with `--diff` the rectangles that changed")
+        .expect("the skill teaches the diff");
+    let end = skill[start..]
+        .find(" - **")
+        .map_or(skill.len(), |at| start + at);
+    let teaching = &skill[start..end];
+    assert!(
+        teaching.contains("`null`") && teaching.contains("unknown"),
+        "the skill's diff does not say that `changed: null` is unknown, not nothing: {teaching}"
+    );
+}

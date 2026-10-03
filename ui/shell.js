@@ -15860,6 +15860,13 @@ listen("worktree:removed", () => {
   void refreshWorktrees();
 });
 
+/* The backend finished answering what the catalog sent out as 「확인 중」 — or a
+ * row's answer moved. It says so only when something differs, so this re-read
+ * cannot start a loop (t-22104). */
+listen("worktree:landing", () => {
+  void refreshWorktrees();
+});
+
 /* A worker finished and the window took its workspace back.
  *
  * This is the one deletion in the product that nobody asked for in the

@@ -60,6 +60,7 @@ fn workspace_task_from_spec(spec: &str) -> WorktreeTask {
 /// project header.
 #[tauri::command]
 pub(crate) async fn list_worktrees(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<WorktreeEntry>, String> {
     let here = state.active();
@@ -76,6 +77,9 @@ pub(crate) async fn list_worktrees(
         decorate_worktree_link(entry, &links);
     }
     attach_creation_bases_from(&mut entries, &orchestrator.creation_bases());
+    if let Some(job) = attach_landings(&mut entries, orchestrator.repo_root(), state.settings()) {
+        spawn_landing_jobs(&app, vec![job]);
+    }
     Ok(entries)
 }
 
@@ -118,6 +122,17 @@ pub(crate) fn worktree_stamp(
 ) -> String {
     file_tree_hooks::reconcile(&app, &state);
     worktree_stamp_of(roots)
+}
+
+/// What the window polls, only while it is visible and no oftener than every
+/// five seconds, to learn that a checkout's landing may have moved (t-22104):
+/// the modification times of the files a commit, a checkout, a branch move or a
+/// fetch writes. `stat` alone — no git process, no network — and a change here
+/// only makes the window re-read the catalog, which answers from the cache or
+/// queues the rows behind the list.
+#[tauri::command(async)]
+pub(crate) fn worktree_landing_stamp(roots: Vec<String>) -> String {
+    landing_stamp_of(roots)
 }
 
 /// Create a worktree for a task, named from its spec.

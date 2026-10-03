@@ -219,6 +219,7 @@ mod window_runtime;
 mod wire_runtime;
 mod work_item_store;
 mod worktree_evidence_runtime;
+mod worktree_landing;
 mod worktree_reclaim;
 mod worktree_runtime;
 mod worktree_shared;
@@ -362,8 +363,9 @@ use cmd::{
     verify_codex_accounts, watch_files, wire_answer, wire_image, wire_interrupt, wire_log,
     wire_models, wire_send, wire_set_mode, wire_set_model, wire_start, wire_stop, work_item_seed,
     worker_screen, workspace_cleanup_scan, workspace_space_cancel, workspace_space_git,
-    workspace_space_scan, worktree_committed_diff, worktree_evidence, worktree_last_agent,
-    worktree_loss, worktree_prefs, worktree_stamp, write_primary_selection, write_text_file,
+    workspace_space_scan, worktree_committed_diff, worktree_evidence, worktree_landing_stamp,
+    worktree_last_agent, worktree_loss, worktree_prefs, worktree_stamp, write_primary_selection,
+    write_text_file,
 };
 use cmd::{
     artifact_copy_path, artifact_counts, artifact_delete, artifact_document, artifact_export,
@@ -411,6 +413,9 @@ use terminal_theme_import::{
 };
 use usage_runtime::*;
 use window_runtime::*;
+use worktree_landing::{
+    LandingJob, WorktreeLanding, attach_landings, landing_stamp_of, spawn_landing_jobs,
+};
 use worktree_runtime::*;
 #[allow(unused_imports)]
 use zerocode_shell_cmd_jira::commands::{
@@ -2686,6 +2691,7 @@ fn main() -> ExitCode {
             set_clipboard_image,
             list_worktrees,
             worktree_stamp,
+            worktree_landing_stamp,
             create_worktree,
             worktree_prefs,
             worktree_last_agent,

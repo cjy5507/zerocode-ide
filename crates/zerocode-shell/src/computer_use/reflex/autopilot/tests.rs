@@ -12,6 +12,7 @@ use super::super::tests::{answer_naming, open, reading_handshake};
 use super::*;
 use crate::systemone::Spent;
 use crate::systemone::tests::ANSWERING_VERSION;
+use zerocode_core::computer_use::REFLEX_SETTLE_MS;
 
 /// The epoch milliseconds the test's steady clock starts at.
 const WALL: i64 = 1_790_000_000_000;
@@ -50,6 +51,10 @@ struct Helper {
     /// Every window on the screen at every layer, front to back, when the
     /// test lays one out (t-12979); none answers the list as an old helper.
     desk: Vec<Value>,
+    /// A gate the helper opens while it answers a reading that names another
+    /// plan (t-22110): the teacher's held answer then lands inside the very
+    /// pass that reads the new plan, before that pass judges it.
+    answers_on_read: Option<mpsc::Sender<()>>,
 }
 
 impl Helper {
@@ -67,6 +72,7 @@ impl Helper {
             moment: 0,
             scene: json!({ "stream": 1, "geometry": 1, "owner": 3, "plan": 1 }),
             desk: Vec::new(),
+            answers_on_read: None,
         }
     }
 
@@ -116,6 +122,12 @@ impl Helper {
                 json!({ "runId": id, "state": "running" })
             }
             "reflexReceipts" => {
+                if self.plan_hash.is_some()
+                    && let Some(open) = self.answers_on_read.take()
+                {
+                    let _ = open.send(());
+                    std::thread::sleep(Duration::from_millis(50));
+                }
                 let Some(held) = self.held.get(&run) else {
                     return Ok(json!({ "runId": run, "state": "missing" }));
                 };
@@ -417,6 +429,12 @@ impl Fake {
         self.with(None, |world| autopilot.tick(world))
     }
 
+    /// One settle between collects, the clock moved on by one settle.
+    fn settle(&mut self, autopilot: &mut Autopilot) {
+        self.now += REFLEX_SETTLE_MS;
+        self.with(None, |world| autopilot.settle(world));
+    }
+
     /// The rows every settled question left, in order.
     fn asked_rows(&self) -> Vec<&Value> {
         self.decisions
@@ -580,13 +598,38 @@ fn a_replan_carried_out_runs_the_next_plan_and_is_graded_across_both_runs() {
         "what is left of the wall: {run_ns}"
     );
     assert_eq!(fake.asked_rows()[0]["applied"], json!(true));
-    // The new run asks under its own epoch.
+    // The new run asks under its own epoch. (The first run, read quiet once
+    // after its presses, asked one more question before it was stopped — the
+    // hand going quiet is a reading that changed, t-22110 — which settles
+    // late, about a run no longer the hand's, and is not carried out.)
     fake.helper.press(&second, 3, 1);
     fake.now += REFLEX_COLLECT_MS;
-    fake.until_settled(&mut autopilot);
-    let asked_new = fake.asked_rows().last().copied().cloned().expect("a row");
-    assert_eq!(asked_new["run"], json!(second));
+    for _ in 0..400 {
+        if fake
+            .asked_rows()
+            .iter()
+            .any(|row| row["run"] == json!(second))
+        {
+            break;
+        }
+        fake.tick(&mut autopilot);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let asked_new = fake
+        .asked_rows()
+        .into_iter()
+        .rev()
+        .find(|row| row["run"] == json!(second))
+        .cloned()
+        .expect("the new run's question");
     assert_eq!(asked_new["provenance"]["epoch"], json!(2));
+    for late in fake
+        .asked_rows()
+        .iter()
+        .filter(|row| row["run"] == json!(first) && row["decision"] != json!(1))
+    {
+        assert_eq!(late["applied"], json!(false), "{late}");
+    }
     fake.now += REFLEX_REPLAN_COMPARE_MS;
     fake.tick(&mut autopilot);
     let label = fake
@@ -1173,4 +1216,147 @@ fn a_sliver_over_the_windows_edge_leaves_the_run_standing() {
             .iter()
             .all(|(method, _)| method != "windowAction")
     );
+}
+
+/// One autopilot whose teacher's pause is held until the test lets it go
+/// (t-22110): the collect that asked has passed, the answer comes back
+/// between collects, and settles alone — nothing read from the helper — are
+/// given `settles` chances to carry it out before the next collect does —
+/// few enough (ten) that the collect's reading is still young when the next
+/// collect reads the answer instead, on the test's clock.
+/// What stopped the hand, how long the answer waited for the window after it
+/// came back (the row's own number) and how many settles it took.
+fn a_pause_answered_between_collects(settles: usize) -> (String, Option<u64>, usize) {
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good()]);
+    let open = fake.teacher.holds(PAUSE);
+    let (mut pilot, answer) = fake.start(asked(None)).expect("started");
+    let run = answer["runId"].as_str().expect("a run").to_string();
+    // The collect that asks: the reading is new, so the question goes out
+    // and waits on the test's gate.
+    fake.now += REFLEX_COLLECT_MS;
+    fake.tick(&mut pilot);
+    assert!(fake.asked_rows().is_empty(), "the question is in flight");
+    open.send(()).expect("the teacher answers");
+    let reads = |fake: &Fake| {
+        fake.helper
+            .calls
+            .iter()
+            .filter(|(method, _)| method == "reflexReceipts")
+            .count()
+    };
+    let read_before = reads(&fake);
+    let mut taken = 0;
+    for _ in 0..settles {
+        fake.settle(&mut pilot);
+        taken += 1;
+        if !fake.helper.stops().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        reads(&fake),
+        read_before,
+        "a settle reads nothing from the helper"
+    );
+    let stopped_by = if fake.helper.stops().is_empty() {
+        // The next collect reads the answer, as every collect did before.
+        fake.now += REFLEX_COLLECT_MS;
+        fake.until_settled(&mut pilot);
+        "collect"
+    } else {
+        "settle"
+    };
+    assert_eq!(fake.helper.stops(), std::slice::from_ref(&run));
+    let rows = fake.asked_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["chosen"], json!(PAUSE));
+    assert_eq!(rows[0]["applied"], json!(true));
+    assert_eq!(
+        pilot.ended().map(|ended| ended["reason"].clone()),
+        Some(json!(PAUSED))
+    );
+    // How long the answer waited for the window after it came back: the
+    // row's own number, absent on a row written before it was kept.
+    let waited = rows[0]["waitedMs"].as_u64();
+    (stopped_by.to_string(), waited, taken)
+}
+
+/// An answer that comes back between two collects is carried out before the
+/// next collect, by a settle that reads nothing from the helper, and its row
+/// says the answer waited a settle at most (t-22110). Before, the stop
+/// waited for the next collect, up to a whole one, and the hand went on
+/// pressing on a premise the teacher had already refused.
+#[test]
+fn an_answer_that_came_back_between_collects_is_carried_out_before_the_next_collect() {
+    let (stopped_by, waited, _) = a_pause_answered_between_collects(10);
+    assert_eq!(
+        stopped_by, "settle",
+        "the pause is carried out between collects"
+    );
+    let waited = waited.expect("the row says how long the answer waited for the window");
+    // A few settles at most on the test's clock, never a collect's worth.
+    assert!(
+        waited < REFLEX_COLLECT_MS / 2,
+        "waited {waited} ms; far less than a collect"
+    );
+}
+
+/// Printed, never asserted: what stopped the hand and how long the answer
+/// waited for the window, on the test's own clock (one collect a tick, one
+/// settle a settle). Fake only — no input, no frames, no live model.
+#[test]
+#[ignore = "a measurement printed by the line, fake only"]
+fn measure_how_long_an_answer_waits_for_the_window() {
+    let (stopped_by, waited, settles) = a_pause_answered_between_collects(10);
+    println!(
+        "{}",
+        json!({
+            "basis": "fake helper, fake teacher, the test's clock: no input, no frame, no live model",
+            "stoppedBy": stopped_by,
+            "waitedMs": waited,
+            "settlesUntilStop": settles,
+            "collectMs": REFLEX_COLLECT_MS,
+            "settleMs": REFLEX_SETTLE_MS,
+        })
+    );
+}
+
+/// An answer that lands inside the very pass that reads a new plan is judged
+/// against that plan, not against the one the pass before it read (t-22110):
+/// the helper lets the teacher's held answer through while it answers the
+/// reading that names another plan, and the row says `plan_mismatch` with
+/// the hand untouched. Seen first as a race in
+/// `a_stale_or_mismatched_or_late_answer_is_never_carried_out` under load (31
+/// of 50 runs on this branch, 0 of 50 on its base): the collect's settle
+/// read the question in flight a few microseconds later than before, and
+/// the seat still judged it on the run as the pass before had read it.
+#[test]
+fn an_answer_landing_in_the_pass_that_reads_a_new_plan_is_refused_as_mismatched() {
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good()]);
+    let open = fake.teacher.holds(PAUSE);
+    let (mut autopilot, answer) = fake.start(asked(None)).expect("started");
+    let run = answer["runId"].as_str().expect("a run").to_string();
+    // The collect that asks: the answer waits on the test's gate.
+    fake.tick(&mut autopilot);
+    assert!(fake.asked_rows().is_empty(), "the question is in flight");
+    // The next reading names another plan, and the helper opens the gate
+    // while it is being read: the answer lands before the pass judges it.
+    fake.helper.plan_hash = Some("another");
+    fake.helper.answers_on_read = Some(open);
+    fake.until_rows(&mut autopilot, 1);
+    assert!(
+        fake.helper.answers_on_read.is_none(),
+        "the gate was opened during the reading"
+    );
+    let row = fake.asked_rows()[0].clone();
+    assert_eq!(row["why"], json!(Why::PlanMismatch.word()));
+    assert_eq!(row["applied"], json!(false));
+    assert!(
+        fake.helper.stops().is_empty(),
+        "nothing is carried out on a plan the helper no longer runs"
+    );
+    let status = report(&run).expect("the account");
+    assert_eq!(status["invalid"]["plan_mismatch"], json!(1));
+    assert_eq!(status["applied"][PAUSE], json!(0));
 }

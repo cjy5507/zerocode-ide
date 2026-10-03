@@ -133,6 +133,21 @@ function paintForkPushNotice() {
     t("sourceControl.pushesToForkTip", "{{remote}} 포크로 푸시합니다 (origin 아님)", { remote });
 }
 
+/* 머리의 「반영됨 · 미반영 N」 — 사이드바 행이 쓰는 같은 함수가 같은 말을 한다
+ * (t-22104). git이 말한 것이 없으면 자리도 남기지 않는다. */
+function paintScmLanding() {
+  const chip = el("scm-compare-landing");
+  const say = activeWorktreePath ? worktreeLandingSayFor(activeWorktreePath, { current: true }) : null;
+  chip.hidden = say == null;
+  if (!say) {
+    chip.textContent = "";
+    return;
+  }
+  chip.textContent = say.word;
+  chip.dataset.landing = say.tone;
+  chip.dataset.tip = say.tip;
+}
+
 function paintSourceControlCompare() {
   const panel = el("scm-compare");
   const context = scmCompareContext;
@@ -141,6 +156,7 @@ function paintSourceControlCompare() {
 
   el("scm-compare-head").textContent = scmRefLabel(context.head) || "HEAD";
   paintCompareTotal(context);
+  paintScmLanding();
   paintCompareStats();
   const select = el("scm-compare-base");
   select.replaceChildren();

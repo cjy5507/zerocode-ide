@@ -3048,6 +3048,20 @@ fn helper_named(frames: &Frames, word: &str) -> Option<String> {
         .and_then(|row| row["id"].as_str().map(str::to_string))
 }
 
+/// Whether the helper `id` has started a tool step, read off any roster the
+/// channel has published (`tool_calls` counts the calls it has begun). A model
+/// message streams its prose before its tool call, so a helper that is seen in
+/// a step has already put its prose into its work so far — what a stop of it
+/// carries to the main. Being on the roster says only that it was spawned.
+fn helper_in_a_step(frames: &Frames, id: &str) -> bool {
+    let frames = frames.lock().unwrap();
+    frames
+        .iter()
+        .filter(|frame| frame["type"] == "subagents")
+        .flat_map(|frame| frame["running"].as_array().into_iter().flatten())
+        .any(|row| row["id"] == id && row["tool_calls"].as_u64().is_some_and(|calls| calls > 0))
+}
+
 /// The turn the parent has open now: the newest `turn` frame is a start.
 fn open_turn(frames: &Frames) -> Option<u64> {
     let frames = frames.lock().unwrap();
@@ -3235,6 +3249,23 @@ async fn e2e_the_person_stops_one_helper_by_id_and_the_parent_and_the_other_help
         || scenario_ready(&stopping.frames),
     )
     .await;
+    // The stop is the person's, aimed at work in progress: wait until the first
+    // helper has begun its long step (its prose is then in its work so far)
+    // rather than racing its first response under load (t-22035). The main is
+    // still busy: its own step runs ten seconds.
+    wait_for_state(
+        "the first helper in its long step",
+        Duration::from_secs(30),
+        &stopping,
+        &service,
+        || helper_in_a_step(&stopping.frames, &alpha).then_some(()),
+    )
+    .await;
+    assert_eq!(
+        open_turn(&stopping.frames),
+        Some(turn),
+        "the main's turn ended before the first helper went into its step"
+    );
     let session = stopping.session.clone();
 
     // Another session's id is refused, and stops nothing.

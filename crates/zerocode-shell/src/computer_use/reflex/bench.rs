@@ -653,6 +653,10 @@ impl Bench<'_> {
                 if pilot.tick(&mut world!()) {
                     break;
                 }
+            } else {
+                // Between collects, as the window does (t-22110): an answer
+                // or a plan that came back since is carried out at the poll.
+                pilot.settle(&mut world!());
             }
             std::thread::sleep(self.poll);
         }

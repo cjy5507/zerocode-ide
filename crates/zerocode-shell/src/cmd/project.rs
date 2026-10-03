@@ -80,6 +80,7 @@ pub(crate) fn reorder_projects(
 /// Every repository and every one of its worktrees, in one stable snapshot.
 #[tauri::command]
 pub(crate) async fn project_catalog(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<ProjectEntry>, String> {
     let here = state.active();
@@ -111,6 +112,8 @@ pub(crate) async fn project_catalog(
     // back in the catalog's own order, so the dedupe by shared root still keeps
     // the first-listed block.
     type Owner = (String, Orchestrator, Worktree);
+    // What each repository's landing answers still owe, run behind the list.
+    let landing_jobs: Mutex<Vec<LandingJob>> = Mutex::new(Vec::new());
     let gather = |path: &String| -> Option<(PathBuf, Vec<Owner>, ProjectEntry)> {
         let Ok(canonical) = PathBuf::from(path).canonicalize() else {
             return None;
@@ -205,6 +208,17 @@ pub(crate) async fn project_catalog(
             );
             decorate_worktree_link(entry, &linked_items);
         }
+        // What git says about each checkout's work and the compare ref, beside
+        // the ledger's phase. Only a repository git could list has anything to
+        // ask about. The list goes out with what the cache knows (`pending` for
+        // a row it never answered); the rest is answered after it.
+        if orchestrator.is_some()
+            && authoritative
+            && let Some(job) = attach_landings(&mut worktrees, &root, state.settings())
+            && let Ok(mut owed) = landing_jobs.lock()
+        {
+            owed.push(job);
+        }
         Some((
             identity,
             owners,
@@ -243,6 +257,7 @@ pub(crate) async fn project_catalog(
         projects.push(entry);
     }
     *state.catalog_owners() = owners;
+    spawn_landing_jobs(&app, landing_jobs.into_inner().unwrap_or_default());
     Ok(projects)
 }
 

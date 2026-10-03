@@ -906,6 +906,14 @@ pub const WATCH_UNTIL: &[&str] = &["change", "quiet"];
 /// the helper keeps each one until the window has it on disk and says so, and
 /// a queue the window left full ends the run instead of the receipts.
 pub const REFLEX_COLLECT_MS: u64 = 1_000;
+/// How often, between two collects, an autopilot carries out what came back
+/// since the last one — a reflex decision's answer, a plan a model finished
+/// writing — without reading anything from the helper (t-22110). Before it,
+/// an answer waited for the next collect, up to a whole one: the hand kept
+/// pressing on a premise the teacher had already refused. A twentieth of a
+/// collect: the bench's own poll of the run's status (`reflex_safety.poll_ms`,
+/// 50 ms), short against the collect and long against the wire's jitter.
+pub const REFLEX_SETTLE_MS: u64 = REFLEX_COLLECT_MS / 20;
 /// The oldest a reading may be when the reflex decision about it is carried
 /// out (t-10223 §2.2): the time since the window read the run's status plus
 /// the age its capture already had then (`lastCaptureAgeNs`). An answer is

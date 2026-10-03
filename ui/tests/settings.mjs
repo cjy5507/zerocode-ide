@@ -1926,6 +1926,7 @@ class StatefulBackend {
       // 창이 보이는 동안 2초마다 묻는 도장 — 이 픽스처의 체크아웃은 움직이지
       // 않으므로 늘 같은 답이고, 목록은 다시 읽히지 않는다.
       case "worktree_stamp": return "";
+      case "worktree_landing_stamp": return "";
       // The release lane's two files, read once at boot and on the usage
       // gauge's period (t-3005). This fixture's machine has no lane: two
       // nulls and no notice, which is what a fresh install answers.
