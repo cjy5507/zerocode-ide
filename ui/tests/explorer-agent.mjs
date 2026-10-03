@@ -1030,7 +1030,8 @@ export async function testExplorerWriting(browser, origin, ok) {
     ok("the sheen is a theme token — its own in each theme — and the written name stays 4.5:1 readable under its peak on both grounds; one sweep lasts at least the shortest showing", sheen.length === 2 && sheen.every((one) => one.share > 0 && one.share < .5 && one.ratios.every((ratio) => ratio >= 4.5) && one.sweepMs >= min) && sheen[0].raw !== sheen[1].raw, JSON.stringify(sheen));
 
     /* reduced motion: nothing moves, a static marker stands, the words are the same */
-    await page.evaluate(() => { for (const key of [...treeWrites.keys()]) treeWrites.delete(key); });
+    // Nothing writing from here on, whatever the cases above left open.
+    await page.evaluate(() => { if (typeof treeWrites === "object") treeWrites.clear(); });
     await page.emulateMedia({ reducedMotion: "reduce" });
     const still = await page.evaluate(async () => {
       const { root, fire, act, settle, row, writing, sweeping } = window.__XT__;
