@@ -141,7 +141,11 @@ async fn measured_plan_changes_the_real_wire_then_falls_back_and_respects_a_pin(
     assert_success(&output);
     let requests = service.request_bodies().await;
     let selected: Value = serde_json::from_str(&requests[0]).unwrap();
-    assert_ne!(selected["model"].as_str(), Some(current.as_str()), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_ne!(selected["model"].as_str(), Some(current.as_str()),
+        "stdout: {}\nstderr: {}\nreceipt: {}\nshadow: {}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&ledger).unwrap_or_default().lines().last().unwrap_or("missing"),
+        fs::read_to_string(ledger.with_file_name("plan-shadow.jsonl")).unwrap_or_default().lines().last().unwrap_or("missing"));
     assert!(models.contains(selected["model"].as_str().unwrap()));
     for receipt in &mut receipts {
         if receipt.plan.model != current { receipt.verified = Some(false); }
