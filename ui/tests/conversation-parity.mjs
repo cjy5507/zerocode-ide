@@ -1837,16 +1837,20 @@ async function stepsOnTheWire(browser, origin, ok) {
       const standing = steps();
       seen.stepCount = standing.length;
       seen.tags = standing.map((row) => `${row.tagName}${row.open ? "+open" : ""}`);
-      // A shell step's first lines stand under its line (t-22100): the line itself is the one line.
+      // A shell step's first lines stand under its line (t-22100): the line itself is still one line —
+      // its words as tall as a page read's 260-character address, that row as tall as a short one's.
       const outOf = (row) => lineOf(row)?.querySelector(":scope > .helper-step-out") ?? null;
       const lineTall = (row) => tall(row) - Math.round(outOf(row)?.getBoundingClientRect().height ?? 0);
+      const wordsTall = (row) => tall(lineOf(row).querySelector(":scope > .helper-step-what"));
       seen.heights = standing.map(lineTall);
       seen.parts = standing.map((row) => row.getElementsByTagName("*").length);
       const bash = standing.find((row) => wordsOf(lineOf(row)).includes("SCREEN_WIDTH"));
       const web = standing.find((row) => wordsOf(lineOf(row)).includes("example.com/products"));
       seen.bashLine = wordsOf(lineOf(bash));
       seen.webLine = wordsOf(lineOf(web));
-      seen.sameHeight = bash !== undefined && web !== undefined && Math.abs(lineTall(bash) - tall(web)) <= 1;
+      seen.wordsHeights = [bash, web].map((row) => (row ? wordsTall(row) : null));
+      seen.sameHeight = bash !== undefined && web !== undefined && Math.abs(wordsTall(bash) - wordsTall(web)) <= 1 &&
+        Math.abs(tall(web) - tall(standing[0])) <= 1;
       seen.bashOutLines = (outOf(bash)?.textContent ?? "").split("\n").length;
       seen.outsOnlyShell = standing.filter((row) => outOf(row)).every((row) => row === bash);
       // Six reads in a row are one row; the read that failed stands apart, in
@@ -1907,7 +1911,7 @@ async function stepsOnTheWire(browser, origin, ok) {
       JSON.stringify(shape),
     );
 
-    const opened = await page.evaluate(async () => {
+    const opened = await page.evaluate(async ({ first }) => {
       const { list, rows, steps, lineOf, wordsOf, tall, shown, settle } = window.__STEPS__;
       const seen = {};
       const bash = steps().find((row) => wordsOf(lineOf(row)).includes("SCREEN_WIDTH"));
@@ -1915,7 +1919,7 @@ async function stepsOnTheWire(browser, origin, ok) {
       const at = rows().indexOf(bash);
       const before = { top: bash.offsetTop, height: tall(bash), next: rows()[at + 1]?.offsetTop };
       // Its first lines stand under its line (t-22100); a line past them does not until it is opened.
-      const pastFirst = `${READ_FIRST[5]}:16`;
+      const pastFirst = `${first[5]}:16`;
       seen.rawHidden = !shown(bash, pastFirst) && shown(bash, "MARK_TWO_BASH");
       lineOf(bash).click();
       await settle();
@@ -1951,7 +1955,7 @@ async function stepsOnTheWire(browser, origin, ok) {
       await settle();
       seen.closedAgain = bash.open === false && tall(bash) === before.height;
       return seen;
-    });
+    }, { first: READ_FIRST });
     ok(
       "C2: the raw words are one press away — a closed step keeps its input and its output out of sight, past a shell step's first lines (t-22100), pressing its line opens the row in place (the same row, the same top, the rows below moved down by what it grew), and the command and what it printed each have their own copy",
       opened.rawHidden && opened.opened && opened.rawShown && opened.inPlace && opened.copies >= 2 &&
