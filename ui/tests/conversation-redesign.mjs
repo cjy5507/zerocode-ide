@@ -622,6 +622,45 @@ async function redesignRail(browser, origin, ok) {
       seen.ticks > 0 && seen.ticks <= seen.room && seen.ticks < seen.rows,
       JSON.stringify(seen),
     );
+    // A second of scrolling, a step every frame: the rail follows the list at its own pace, not every
+    // frame's (B0 at a 4x CPU: a paint every scroll frame put 7 % more of them over 20 ms), and once the
+    // list rests it stands on a row in view.
+    const scrolled = await long.page.evaluate(async () => {
+      const list = document.querySelector("#worker-view .helper-turns");
+      const rail = document.querySelector("#worker-view .chat-rail");
+      const frame = () => new Promise((done) => requestAnimationFrame(() => done()));
+      const pace = (() => {
+        try {
+          return CHAT_RAIL_SCROLL_MS;
+        } catch {
+          return null;
+        }
+      })();
+      const before = rail?.__paints ?? 0;
+      const start = performance.now();
+      let frames = 0;
+      while (performance.now() - start < 1000) {
+        list.scrollTop = Math.max(0, list.scrollTop - 40);
+        await frame();
+        frames += 1;
+      }
+      await new Promise((done) => setTimeout(done, (pace ?? 0) * 2 + 50));
+      await frame();
+      await frame();
+      const current = rail?.querySelector(".chat-rail-tick.is-current")?.__row ?? null;
+      const view = list.getBoundingClientRect();
+      const box = current?.getBoundingClientRect() ?? null;
+      return {
+        pace, frames, paints: (rail?.__paints ?? 0) - before,
+        restsInView: box !== null && box.bottom > view.top && box.top < view.bottom,
+      };
+    });
+    ok(
+      "R8: while the list scrolls the rail follows it at its own pace — no more paints than a second holds of it, and one when the list rests — and then stands on a row in view",
+      scrolled.pace !== null && scrolled.paints <= Math.ceil(1000 / scrolled.pace) + 2 && scrolled.paints < scrolled.frames &&
+        scrolled.restsInView,
+      JSON.stringify(scrolled),
+    );
     ok("R8: the long rail raised no page errors", long.faults.length === 0, long.faults.join("\n"));
   } finally {
     await long.page.close();
