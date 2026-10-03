@@ -87,6 +87,19 @@ fn judging() -> FakeJudge {
     judge
 }
 
+#[test]
+fn withdrawal_during_a_preview_restores_it_and_stops_further_presses() {
+    let allowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut judge = super::super::tests::RevocableJudge { inner: judging(), allowed: allowed.clone() };
+    let mut world = phone();
+    world.withdraw_after_press = Some(allowed);
+    let walked = run_with(Mode::On, true, RAISED, &goal(2), &mut judge, &mut world, Options::default(), None);
+    assert_eq!(world.presses, [2], "only the first preview ran; the live walk made no press");
+    assert_eq!(world.snapshot_log.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(), ["save", "load", "forget"]);
+    assert_eq!(walked.reached, None);
+    assert_eq!(walked.rows.last().unwrap()["pressed"], false);
+}
+
 /// The rows of a walk with the clock's stamps taken off, so two walks can
 /// be compared word for word.
 fn unstamped(rows: &[Value]) -> Vec<Value> {

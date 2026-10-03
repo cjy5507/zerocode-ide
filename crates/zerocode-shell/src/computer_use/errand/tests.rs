@@ -245,6 +245,7 @@ pub(super) fn memory() -> Arc<Mutex<Values>> {
 pub(super) struct FakeWorld {
     screen: Option<Screen>,
     pub(super) presses: Vec<usize>,
+    pub(super) withdraw_after_press: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub(super) observed: Vec<Option<Value>>,
     press_takes: bool,
     walked_from: Vec<usize>,
@@ -341,6 +342,7 @@ impl FakeWorld {
                 snapshot: Snapshot::default(),
             }),
             presses: Vec::new(),
+            withdraw_after_press: None,
             observed: Vec::new(),
             press_takes: true,
             walked_from: Vec::new(),
@@ -437,6 +439,9 @@ impl World for FakeWorld {
     fn press(&mut self, mark: usize) -> bool {
         self.observed.push(crate::run_evidence::observation());
         self.presses.push(mark);
+        if let Some(allowed) = &self.withdraw_after_press {
+            allowed.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
         self.settling = self.press_takes && self.settles_later.is_some();
         self.settled_inside = None;
         let pressed_on = self.screen.as_ref().map(|screen| screen.items.clone());
@@ -815,6 +820,32 @@ fn a_walk_withdrawn_while_choosing_neither_presses_nor_claims_the_goal() {
         assert_eq!(walked.rows[0]["routeUse"], USE_SHADOW);
         assert_eq!(walked.rows[0]["pressed"], false);
     }
+}
+
+pub(super) struct RevocableJudge {
+    pub(super) inner: FakeJudge,
+    pub(super) allowed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ActionJudge for RevocableJudge {
+    fn choose(&mut self, ask: &ActionAsk) -> Judged { self.inner.choose(ask) }
+    fn compare(&mut self, ask: &BranchAsk) -> Compared { self.inner.compare(ask) }
+    fn permits_application(&self) -> bool { self.allowed.load(std::sync::atomic::Ordering::SeqCst) }
+    fn branching_now(&self, configured: Branching) -> Branching {
+        if self.permits_application() { configured } else { Branching::OFF }
+    }
+}
+
+#[test]
+fn a_walk_withdrawn_after_its_first_press_makes_no_second_press() {
+    let allowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut judge = RevocableJudge { inner: FakeJudge::chose(&[1, 2, 3]), allowed: allowed.clone() };
+    let mut world = FakeWorld::that_moves(&[1, 2, 3]);
+    world.withdraw_after_press = Some(allowed);
+    let walked = run(Mode::On, true, &goal(3), &mut judge, &mut world);
+    assert_eq!(world.presses, [1]);
+    assert_eq!(walked.reached, None);
+    assert_eq!(walked.rows.last().unwrap()["routeUse"], USE_SHADOW);
 }
 
 #[test]

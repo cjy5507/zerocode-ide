@@ -389,6 +389,7 @@ pub(crate) fn call_at_the_bell(app: &AppHandle, bell: &Bell<'_>) -> Call {
     let settings = wire.settings_root();
     let mode = NOTIFY.mode_in(&settings);
     let model = zerocode_core::jev::door::JevSettings::from_root(&settings).resolved().model;
+    drop(settings);
     if !mode.asks() {
         return today;
     }
@@ -464,16 +465,24 @@ pub(crate) fn call_at_the_bell(app: &AppHandle, bell: &Bell<'_>) -> Call {
     let Some((mut row, waiting)) = handoff.take(NOTIFY_CALL_DEADLINE) else {
         return today;
     };
-    let (call, applied) = chosen(
-        crate::systemone::applies(&applying_wire, &NOTIFY)
-            && applying_wire.permits_workspace_now(Some(Path::new(bell.worktree)))
-            && zerocode_core::jev::door::JevSettings::from_root(&applying_wire.settings_root()).resolved().model == model,
+    let (call, applied) = chosen_now(
+        &applying_wire,
+        Path::new(bell.worktree),
+        &model,
         waiting.as_ref().map(|one| (one.call, one.confidence)),
         line,
     );
     row[APPLIED.canonical] = json!(applied);
     record(app, &ledger, row, waiting);
     call
+}
+
+fn chosen_now(wire: &Wire, workspace: &Path, model: &str,
+    answer: Option<(Call, f64)>, line: Option<u16>) -> (Call, bool) {
+    chosen(crate::systemone::applies(wire, &NOTIFY)
+        && wire.permits_workspace_now(Some(workspace))
+        && zerocode_core::jev::door::JevSettings::from_root(&wire.settings_root()).resolved().model == model,
+        answer, line)
 }
 
 /// Ask one question and write down what came of it: the row, and — for an

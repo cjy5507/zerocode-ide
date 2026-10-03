@@ -1872,6 +1872,9 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
         // Only cmd builtins and the existing curl are needed. Numeric status
         // comes from curl's formatter, never from untrusted response text.
         lines.extend([
+            "set \"brief_attempt=0\"".into(),
+            ":brief_nonce".into(),
+            "set /a brief_attempt+=1 >nul 2>nul".into(),
             "set \"brief_clock=%TIME: =0%\"".into(),
             "set \"brief_clock=%brief_clock::=%\"".into(),
             "set \"brief_clock=%brief_clock:.=%\"".into(),
@@ -1879,7 +1882,10 @@ pub fn hook_script_cmd(agent: AgentKind) -> String {
             "set \"brief_id=w-%brief_clock%-%RANDOM%-%RANDOM%-%RANDOM%\"".into(),
             "set \"brief_dir=%TEMP%\\zerocode-hook-%brief_id%\"".into(),
             "mkdir \"%brief_dir%\" >nul 2>nul".into(),
-            "if errorlevel 1 goto :plain_post".into(),
+            "if not errorlevel 1 goto :brief_post".into(),
+            "if %brief_attempt% LSS 3 goto :brief_nonce".into(),
+            "goto :plain_post".into(),
+            ":brief_post".into(),
             format!("{post} --data-urlencode \"delivery_id=%brief_id%\" -o \"%brief_dir%\\reply\" -w \"%%{{http_code}}\" >\"%brief_dir%\\status\" 2>nul"),
             "set \"curl_exit=%ERRORLEVEL%\"".into(),
             "if not \"%curl_exit%\"==\"0\" (call :gave_up %curl_exit% & goto :brief_cleanup)".into(),

@@ -32,6 +32,28 @@ fn settings_consenting_to(
     settings
 }
 
+#[test]
+fn a_settled_call_is_withheld_if_permission_changes_before_the_bell_takes_it() {
+    for change in ["none", "off", "shadow", "global_off", "consent", "model"] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let path = settings_consenting_to(&home, &zerocode_core::jev::door::resolved_path(workspace.path()), JevMode::On);
+        let mut root: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let model = zerocode_core::jev::door::JevSettings::from_root(&root).resolved().model;
+        match change {
+            "none" => {},
+            "global_off" => root[SMART_SETTINGS_KEY]["jev"]["enabled"] = json!(false),
+            "consent" => root[SMART_SETTINGS_KEY]["jev"]["workspaces"] = json!([]),
+            "model" => root[SMART_SETTINGS_KEY]["jevModel"] = json!("jev-new-pin"),
+            word => root[SMART_SETTINGS_KEY][NOTIFY.setting] = json!(word),
+        }
+        std::fs::write(&path, root.to_string()).unwrap();
+        let wire = Wire::at("http://127.0.0.1:9", "test-key", Some(path));
+        let decided = chosen_now(&wire, workspace.path(), &model, Some((Call::Ignore, 1.0)), None);
+        assert_eq!(decided, if change == "none" { (Call::Ignore, true) } else { (Call::today(), false) }, "{change}");
+    }
+}
+
 /// The endpoint's answer: `chosen`, with the rest of the room split over
 /// the other two.
 fn a_call_answer(chosen: &str) -> String {
