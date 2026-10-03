@@ -906,6 +906,41 @@ pub struct TranscriptTool {
     /// what the page's tool row opens. `None` for a call that names none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<TranscriptFile>,
+    /// What a result recorded of itself beside its words ([`ToolFacts`]) —
+    /// `None` on a call, and on a result that recorded nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<ToolFacts>,
+}
+
+/// What a tool's result recorded of itself beside its words (t-22100): the
+/// HTTP status and the size of a page it fetched, as Claude Code writes them on
+/// the result's line — `toolUseResult` in a session file, `tool_use_result` on
+/// its stream — under `code` and `bytes`. The conversation says a page read's
+/// result with them (「200 · 256 KB」): the words the model wrote about a page
+/// are not the page's size. Numbers only, read as they are; a result that
+/// recorded neither carries none, and a status outside HTTP's three-digit codes
+/// is no status.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ToolFacts {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+}
+
+/// The status codes HTTP defines: three digits, 100 through 599 (RFC 9110 §15).
+const HTTP_STATUS_CODES: std::ops::Range<u64> = 100..600;
+
+/// The facts a result line recorded of its result ([`ToolFacts`]), or `None`.
+fn facts_in(record: Option<&serde_json::Value>) -> Option<ToolFacts> {
+    let record = record?.as_object()?;
+    let status = record
+        .get("code")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|code| HTTP_STATUS_CODES.contains(code))
+        .and_then(|code| u16::try_from(code).ok());
+    let bytes = record.get("bytes").and_then(serde_json::Value::as_u64);
+    (status.is_some() || bytes.is_some()).then_some(ToolFacts { status, bytes })
 }
 
 /// The file a tool call read or wrote, and where in it — what the Claude
@@ -1590,6 +1625,7 @@ fn transcript_tool(part: &serde_json::Value, result: bool, detail: Detail) -> Tr
             .get("is_error")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+        facts: None,
     }
 }
 
@@ -1987,6 +2023,25 @@ pub fn turns_in_with(chunk: &str, detail: Detail) -> Vec<TranscriptTurn> {
         // The parts of the message: `content` for Claude Code, `blocks` for zo.
         let content = message.get("content").or_else(|| message.get("blocks"));
         let at_ms = moment_of(&row);
+        // What the line recorded of its result ([`ToolFacts`]) is the line's,
+        // not one part's: it is read for a line that carries one result, as
+        // Claude Code writes them, and for no other.
+        let results = content
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|part| {
+                part.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+            })
+            .count();
+        let facts = if results == 1 {
+            facts_in(
+                row.get("toolUseResult")
+                    .or_else(|| row.get("tool_use_result")),
+            )
+        } else {
+            None
+        };
         // Reasoning first — it precedes the answer it led to — as its own
         // turns; the answer's text is read from the parts that are not it.
         let mut spoken = Vec::new();
@@ -1996,7 +2051,11 @@ pub fn turns_in_with(chunk: &str, detail: Detail) -> Vec<TranscriptTurn> {
             .flatten()
         {
             if part.get("type").and_then(serde_json::Value::as_str) == Some("tool_result") {
-                turns.push(tool_result_turn(part, at_ms, detail));
+                let mut turn = tool_result_turn(part, at_ms, detail);
+                if let Some(tool) = turn.tool.as_mut() {
+                    tool.facts.clone_from(&facts);
+                }
+                turns.push(turn);
                 continue;
             }
             match reasoning_text(part) {
@@ -2366,6 +2425,68 @@ mod tests {
             json["tool"]["edits"][0].get("truncated").is_none(),
             "zero is left off the wire"
         );
+    }
+
+    /// What a result recorded of itself rides its turn (t-22100): a page
+    /// fetched carries the HTTP status and size Claude Code wrote beside it —
+    /// `toolUseResult` in a session file, `tool_use_result` on its stream —
+    /// and the page says 「200 · 256 KB」 from them, not from the words the
+    /// model wrote about the page. A result that recorded no such numbers,
+    /// a status no HTTP code, and a line of two results carry none.
+    #[test]
+    fn a_result_carries_the_facts_its_line_recorded() {
+        use serde_json::json;
+        let result = |record: serde_json::Value, key: &str| {
+            let mut line = json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "f1", "content": "24 products."}
+            ]}});
+            line[key] = record;
+            turns_in(&format!("{line}\n"))
+                .remove(0)
+                .tool
+                .expect("a result turn")
+        };
+        let fetched = json!({
+            "bytes": 262_144, "code": 200, "codeText": "OK", "result": "…",
+            "durationMs": 3912, "url": "https://example.com/products"
+        });
+        let want = Some(ToolFacts {
+            status: Some(200),
+            bytes: Some(262_144),
+        });
+        assert_eq!(result(fetched.clone(), "toolUseResult").facts, want);
+        assert_eq!(result(fetched, "tool_use_result").facts, want);
+        // A shell's record names no status and no size.
+        let shell = json!({"stdout": "", "stderr": "", "interrupted": false});
+        assert_eq!(result(shell, "toolUseResult").facts, None);
+        // A code no HTTP status is none; the size still stands.
+        let odd = json!({"code": 1, "bytes": 10});
+        let sized = Some(ToolFacts {
+            status: None,
+            bytes: Some(10),
+        });
+        assert_eq!(result(odd, "toolUseResult").facts, sized);
+        // Two results on one line: the line's record is not one of theirs.
+        let two = json!({"type": "user", "toolUseResult": {"code": 200, "bytes": 5},
+        "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "a", "content": "one"},
+            {"type": "tool_result", "tool_use_id": "b", "content": "two"}
+        ]}});
+        let both = turns_in(&format!("{two}\n"));
+        assert_eq!(both.len(), 2);
+        for turn in &both {
+            assert_eq!(
+                turn.tool.as_ref().map(|tool| tool.facts.clone()),
+                Some(None)
+            );
+        }
+        // And it rides the wire as the page reads it — left off when there is none.
+        let gone = result(json!({"code": 404, "bytes": 2048}), "toolUseResult");
+        let wire = serde_json::to_value(gone).expect("serializes");
+        assert_eq!(wire["facts"], json!({"status": 404, "bytes": 2048}));
+        let quiet = result(json!({"stdout": ""}), "toolUseResult");
+        let bare = serde_json::to_value(quiet).expect("serializes");
+        assert!(bare.get("facts").is_none());
     }
 
     /// The word a step is drawn by comes with the call, from the one table

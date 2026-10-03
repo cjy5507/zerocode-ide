@@ -408,6 +408,7 @@ impl WireState {
                 is_error: false,
                 edits,
                 file,
+                facts: None,
             }),
             images: Vec::new(),
         });
@@ -433,6 +434,7 @@ impl WireState {
                 is_error,
                 edits,
                 file: None,
+                facts: None,
             }),
             images: Vec::new(),
         });

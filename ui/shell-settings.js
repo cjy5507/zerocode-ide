@@ -4014,20 +4014,17 @@ function agentName(slug) {
   return agentRows.find((row) => row.id === slug)?.name ?? slug;
 }
 
-/* The mark and the working word an agent's own screen uses — `✻ Pondering…`
- * for Claude Code — ridden on its `list_agents` row from the core catalog's
- * one table (`zerocode_core::agent_voice`). Every agent the table does not
- * voice (Kimi, Grok, …) shares one mark and the window's own word, so the
- * page never invents a CLI's vocabulary and the rest stay uniform. */
+/* The mark an agent's own screen wears — `✻` for Claude Code — and the
+ * catalog's other facts about it, ridden on its `list_agents` row from the core
+ * catalog's one table (`zerocode_core::agent_voice`). Every agent the table
+ * does not voice (Kimi, Grok, …) shares one mark, so the page never invents a
+ * CLI's vocabulary and the rest stay uniform. The CLI's working words — its
+ * turning verbs, its spinner's cycle — are not read here (t-22100): the live
+ * line says what the agent is doing in the window's own words. */
 function agentVoice(id) {
   const row = agentRows.find((one) => one.id === id);
   return {
     glyph: row?.glyph || "●",
-    // The marks its spinner cycles through, in order; empty for a still mark.
-    glyph_cycle: Array.isArray(row?.glyph_cycle) ? row.glyph_cycle : [],
-    busy_word: row?.busy_word || t("worker.busy", "작업 중…"),
-    // The verbs its spinner turns through while it works (t-6323 A4).
-    spinner_verbs: Array.isArray(row?.spinner_verbs) ? row.spinner_verbs : [],
     // The tool it keeps its todo list with (t-6323 A7).
     todo_tool: row?.todo_tool ?? null,
     // Whether its CLI can stop one helper by id (t-16031): the helper page

@@ -4311,6 +4311,12 @@ function renderMarkdownPage(page, text, base) {
   railMdBlocks(page, text);
 }
 
+/* 울타리 머리가 그 코드를 부르는 말 — 울타리가 적은 언어, 없으면 창의 「코드」.
+ * 문서 뷰어의 울타리와 대화의 울타리(t-22100)가 이 한 규칙을 읽는다. */
+function fenceLanguageWords(fence) {
+  return fence.dataset.language || t("mdview.code", "코드");
+}
+
 /* 코드 울타리에 언어 딱지와 복사 단추를 달아 준다.
  *
  * 워커 안의 가지가 아니라 뒤따르는 비질인 이유는 다이어그램 비질과 같다:
@@ -4325,7 +4331,7 @@ function dressMarkdownFences(page) {
     head.className = "mdview-fence-head";
     const language = document.createElement("span");
     language.className = "mdview-fence-language";
-    language.textContent = fence.dataset.language || t("mdview.code", "코드");
+    language.textContent = fenceLanguageWords(fence);
     const copy = document.createElement("button");
     copy.type = "button";
     copy.className = "mdview-copy";

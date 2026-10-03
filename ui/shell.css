@@ -13603,6 +13603,114 @@ body.mod-held .term-link,
   padding: var(--space-3) var(--helper-gutter) 0;
 }
 
+/* The head of a conversation's page (t-22100, the approved conversation): one
+ * row on one hairline — the agent's mark and name, its model as a chip, a chip
+ * that says what the conversation is doing, and on the right what it did. */
+.is-chat-page .worker-head.chat-head {
+  flex-wrap: nowrap;
+  align-items: center;
+  padding: var(--space-2) var(--helper-gutter);
+  border-bottom: var(--rule-width) solid var(--chat-divider);
+}
+
+/* One row however long the name: the name gives way first, then the tally. */
+.chat-head > .worker-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-head > .worker-meta {
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  align-items: center;
+  margin-left: 0;
+}
+
+.chat-model,
+.chat-run {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--chat-pill-height);
+  padding: 0 var(--chat-pill-pad-x);
+  border: var(--rule-width) solid var(--chat-divider);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+  white-space: nowrap;
+}
+
+.chat-model[hidden] {
+  display: none;
+}
+
+.chat-run > .worker-state {
+  font-size: inherit;
+  color: inherit;
+}
+
+.chat-run > .worker-elapsed:not(:empty)::before {
+  content: "· ";
+}
+
+.chat-run-dot {
+  flex: none;
+  width: var(--chat-run-dot);
+  height: var(--chat-run-dot);
+  border-radius: 50%;
+  background: var(--ink-mist);
+}
+
+/* Running: the dot in the done ink, the words in the ready signal's text ink
+ * (4.5:1 in both treatments); failed, the halt's. */
+.chat-run.is-running {
+  border-color: color-mix(in srgb, var(--chat-dot-done) 40%, transparent);
+  color: var(--signal-ready-ink);
+}
+
+.chat-run.is-running > .chat-run-dot {
+  background: var(--chat-dot-done);
+}
+
+.chat-run.is-failed {
+  color: var(--signal-halt-ink);
+}
+
+.chat-run.is-failed > .chat-run-dot {
+  background: var(--chat-dot-failed);
+}
+
+/* What it did, counted: the whole, each family, how many failed — at the
+ * right, cut before it can push the chips. */
+.chat-tally {
+  display: inline-flex;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  color: var(--ink-mist);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-tally[hidden] {
+  display: none;
+}
+
+.chat-tally-total {
+  color: var(--ink-figure);
+}
+
+.chat-tally-failed.is-failed {
+  color: var(--signal-halt-ink);
+}
+
 .is-chat-page .worker-where {
   padding-inline: var(--helper-gutter);
 }
@@ -13899,18 +14007,51 @@ details.worker-command {
   background: var(--chat-code-bg);
 }
 
-/* A code block's wrapper (`codeBlockWrapper`, t-6323 A9) keeps the block's
- * place and hangs the copy over its top right corner, 4px in, shown while
- * the block is under the pointer — or while the copy has the keyboard's
- * focus, which the extension's leaves unseen. A pressed copy wears a check
- * for 2 s. */
+/* A code block (t-22100, the approved conversation): one flat panel on the
+ * code's ground, no edge — a bar over the code with the fence's language and
+ * its copy, a word that is there without hovering — and the code under it on
+ * the panel's own ground. */
 .is-chat-page .helper-said .helper-code {
   position: relative;
   margin: var(--space-2) 0;
+  border-radius: var(--chat-panel-radius);
+  background: var(--chat-code-bg);
+  overflow: hidden;
 }
 
 .is-chat-page .helper-said .helper-code > pre {
   margin: 0;
+  padding: var(--space-1) var(--space-3) var(--space-3);
+  border-radius: 0;
+  background: none;
+}
+
+.helper-code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+}
+
+.helper-code-bar > .helper-code-copy {
+  position: static;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  opacity: 1;
+}
+
+.helper-code-bar > .helper-code-copy:hover,
+.helper-code-bar > .helper-code-copy.is-copied {
+  background: none;
+  color: var(--ink-chalk);
 }
 
 /* The code in a fence, coloured by the editor's own ramp (t-22095): each
@@ -14159,17 +14300,20 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
  * is the aria-label). The side is the reader's bearing: what they typed sits
  * under their hand, and the agent's answers keep the left margin they are
  * read down. The briefing wears the same bubble. */
-/* What the person said: the extension's box — a 1px edge in the input's
- * colour on the input's ground, 6px corners, and as wide as the list, since
- * the panel's sticky mode makes every box a block (2.1.278 `userMessage`,
- * `stickyMode`). A stuck box is a door home (`helperTurnsNode`). */
+/* What the person said (t-22100, the approved conversation): their words on
+ * the bubble's soft fill — no edge — rounded like the page's other flat
+ * panels, as wide as the words and never past the measure, at the list's
+ * left. The row is still the extension's sticky header, and a stuck box is a
+ * door home (`helperTurnsNode`). */
 .helper-turn.is-user > .helper-said {
   display: block;
-  max-width: var(--chat-bubble-max);
-  padding: var(--chat-bubble-pad-y) var(--chat-bubble-pad-x);
-  border: 1px solid var(--chat-composer-edge);
-  border-radius: var(--chat-radius-bubble);
-  background: var(--chat-composer-bg);
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: var(--chat-said-max);
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--chat-panel-radius);
+  background: var(--chat-bubble);
   color: var(--chat-bubble-ink);
   font-size: var(--chat-prose-size);
   line-height: var(--chat-prose-leading);
@@ -14177,11 +14321,11 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 }
 
 /* What the person said, taller than the extension's clip: 60px of its words
- * (the box keeps its padding and edge around them), the last 50px fading to
- * the box's ground, the door over the fade (`EV0`). */
+ * (the box keeps its padding around them), the last 50px fading to the box's
+ * fill, the door over the fade (`EV0`). */
 .helper-turn.is-user > .helper-said.is-clipped:not(.is-open) {
   position: relative;
-  max-height: calc(var(--chat-user-clip-h) + 2 * (var(--chat-bubble-pad-y) + 1px));
+  max-height: calc(var(--chat-user-clip-h) + 2 * var(--space-2));
   overflow: hidden;
 }
 
@@ -14192,7 +14336,7 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   bottom: 0;
   left: 0;
   height: var(--chat-user-clip-fade);
-  background: linear-gradient(to bottom, transparent, var(--chat-composer-bg));
+  background: linear-gradient(to bottom, transparent, var(--chat-bubble));
   pointer-events: none;
 }
 
@@ -14461,14 +14605,24 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   width: 4ch;
 }
 
-/* A thought is one line, like a step: its mark, what it was about — the
- * heading the model wrote, or its newest sentence — in the quiet italic, and
- * how long it lasted (the extension's 「Thought for 3s」) where a step says
- * what came of it. Pressed, it opens in place to everything it thought. */
+/* A thought is one line (t-22100): how long it lasted leads — the
+ * extension's 「Thought for 3s」, 「생각 2초」 — then what it was about, the
+ * heading the model wrote or its newest sentence, in the quiet italic. No
+ * mark: a thought is no step. Pressed, it opens in place to everything it
+ * thought. */
 .helper-turn.is-thinking > .helper-step-line .helper-step-target {
   font-family: var(--font-ui);
   font-size: 1em;
   font-style: italic;
+  color: var(--ink-mist);
+}
+
+.helper-turn.is-thinking > .helper-step-line > .helper-thought-lead {
+  max-width: none;
+  overflow: visible;
+  font-size: 1em;
+  font-weight: 600;
+  color: var(--ink-figure);
 }
 
 .helper-thought-body {
@@ -14495,23 +14649,33 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   margin-bottom: 0;
 }
 
-/* `✻ Pondering…` — under the transcript, above the composer, while the run
- * is out. The mark breathes on the accent; the word is the CLI's own. */
-/* The extension's spinner row (`spinnerRow`): the list's last row, a beat
- * tall, fading in; its mark a mono glyph in a column as wide as itself,
- * which puts it where the rail's dots stand, the word beside it in the
- * primary ink at a medium weight. */
+/* The live line (t-22100, the approved conversation): the list's last row
+ * while the run is out — a flat panel on the tool's ground, a turning ring,
+ * 「지금」 in the primary ink and what the agent is doing beside it, fading in
+ * as the extension's spinner row does. In a pane narrower than its words (an
+ * 89 px pane at 720 px) it cuts them at its own edge rather than push the
+ * list sideways. */
 .helper-status {
   flex: none;
   display: flex;
   align-items: center;
-  gap: var(--space-1);
-  height: var(--chat-status-h);
-  margin: var(--chat-meta-gap) 0 0;
-  padding: 0;
-  font-size: var(--chat-prose-size);
-  color: var(--ink-chalk);
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--chat-status-h);
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--chat-panel-radius);
+  background: var(--chat-tool-bg);
+  font-size: var(--text-sm);
+  color: var(--ink-figure);
+  overflow: hidden;
   animation: helper-status-in var(--chat-status-in) var(--ease-standard);
+}
+
+.helper-status-lead {
+  flex: none;
+  font-weight: 600;
+  color: var(--ink-chalk);
 }
 
 @keyframes helper-status-in {
@@ -14523,21 +14687,22 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   display: none;
 }
 
-/* ---- Steps (t-15682) ----
+/* ---- Steps (t-15682, t-22100) ----
  *
  * What the agent did stands as steps a person takes in at a glance: one
- * closed line each — a mark for the kind of thing it was, the kind in words
- * and what it touched, what came of it, how long it took — and everything
- * else one press away. A step is a `<details>`, so its line is a summary the
- * keyboard reaches by itself and the engine announces closed or open; the
- * body is built by the press (`paintStepBody`). The row is off the rail —
- * that is the answer's, and the Focus group's — and its state is worn on the
- * mark: quiet once it is in, the agent's accent on the extension's beat while
- * it is out, the halt ink when it failed. */
+ * closed line each — a dot for how it stands, the kind in words and what it
+ * touched, what came of it, how long it took — and everything else one press
+ * away. A step is a `<details>`, so its line is a summary the keyboard
+ * reaches by itself and the engine announces closed or open; the body is
+ * built by the press (`paintStepBody`). Flat (the approved conversation): no
+ * box around a row, opened or not — an opened row stands on the tool's
+ * ground. Its state is worn on the dot: quiet before its answer, the done ink
+ * once it came back, the failure's ink when it failed, the agent's accent on
+ * the extension's beat while it is out. */
 .helper-turn:is(.is-tool, .is-thinking) {
   min-width: 0;
   margin: 1px 0;
-  border: var(--rule-width) solid transparent;
+  border: 0;
   border-radius: var(--radius-md);
   font-size: var(--chat-prose-size);
   line-height: var(--chat-prose-leading);
@@ -14545,12 +14710,12 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
 }
 
 .helper-turn:is(.is-tool, .is-thinking)[open] {
-  border-color: var(--edge-rule);
   background: var(--chat-tool-bg);
 }
 
 .helper-step-line {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
@@ -14582,45 +14747,50 @@ details[open] > .helper-step-line::after {
   transform: rotate(90deg);
 }
 
-.helper-step-line > .helper-step-icon {
+/* A step's dot stands where a kind's icon stood, centred in that column, so
+ * the words of every row start on one axis. */
+.helper-step-line > .helper-step-dot {
   flex: none;
-  box-sizing: border-box;
-  width: var(--chat-step-icon);
-  height: var(--chat-step-icon);
-  padding: var(--chat-step-icon-pad);
-  border-radius: var(--radius-sm);
-  background: var(--surface-raised);
-  color: var(--ink-mist);
+  width: var(--chat-dot);
+  height: var(--chat-dot);
+  margin-inline: calc((var(--chat-step-icon) - var(--chat-dot)) / 2);
+  border-radius: 50%;
+  background: var(--ink-mist);
 }
 
-/* The glyph: a mask in the ink colour, sized to the tile's content box. */
-.helper-step-icon::before {
-  content: "";
-  display: block;
-  width: 100%;
-  height: 100%;
-  background: currentColor;
-  mask-position: center;
-  mask-size: contain;
-  mask-repeat: no-repeat;
+.helper-turn.is-tool.is-done > .helper-step-line > .helper-step-dot {
+  background: var(--chat-dot-done);
 }
 
-.helper-turn.is-tool.is-live > .helper-step-line > .helper-step-icon {
-  color: var(--chat-accent);
+.helper-turn.is-tool.is-failed > .helper-step-line > .helper-step-dot {
+  background: var(--chat-dot-failed);
+}
+
+.helper-turn.is-tool.is-live > .helper-step-line > .helper-step-dot {
+  background: var(--chat-accent);
+  box-shadow: 0 0 0 var(--chat-dot-halo) color-mix(in srgb, var(--chat-accent) 18%, transparent);
   animation: helper-live-pulse 1s linear infinite;
 }
 
-.helper-turn.is-tool.is-failed > .helper-step-line > .helper-step-icon {
-  background: color-mix(in srgb, var(--signal-halt) 14%, transparent);
-  color: var(--signal-halt-ink);
+/* The chevron of a step that shows no lines of its own comes when the row is
+ * pointed at or reached, as the approved rows draw it; a shell step's — its
+ * lines say there is more — and an opened row's stand. */
+.helper-turn.is-tool:not(.has-out):not([open]) > .helper-step-line::after {
+  opacity: 0;
+}
+
+.helper-turn.is-tool > .helper-step-line:is(:hover, :focus-visible)::after {
+  opacity: 1;
 }
 
 /* What it was and what it touched: one line, cut with an ellipsis where the
  * address or the path is longer than the pane — the file's name is the end of
  * it, which the words already keep (`stepTargetWords`), and the whole of it
- * stands in the opened row. */
+ * stands in the opened row. It grows from nothing: the line wraps only to put
+ * a shell step's lines under it (`flex-wrap`), and a basis of its own width
+ * would wrap what came of the step to the next line before cutting the words. */
 .helper-step-what {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -14635,7 +14805,7 @@ details[open] > .helper-step-line::after {
 .helper-step-target {
   font-family: var(--font-mono);
   font-size: var(--chat-mono-size);
-  color: var(--ink-mist);
+  color: var(--chat-arg-ink);
 }
 
 /* What came of it, and how long it took. */
@@ -14656,6 +14826,60 @@ details[open] > .helper-step-line::after {
 
 .helper-step-meta {
   font-variant-numeric: tabular-nums;
+}
+
+/* What came of it and how long it took read as one phrase — 「200 · 256 KB ·
+ * 3.9초」 — and a page read's status wears the ink of how it went: the
+ * signals' text inks, which read at 4.5:1 in both treatments (the dots' own
+ * colours are for marks, not words). */
+.helper-step-res:not(:empty) + .helper-step-meta:not(:empty)::before {
+  content: "· ";
+}
+
+.helper-step-status.is-ok {
+  color: var(--signal-ready-ink);
+}
+
+.helper-step-status.is-bad {
+  color: var(--signal-halt-ink);
+}
+
+/* A shell step's first lines (`dressStepOut`, t-22100): under its line, on a
+ * hairline at the words' axis, in the machine's mono at a reading leading;
+ * each line cut at the row's edge rather than wrapped, and each `path:line`
+ * a door in the argument's ink — the link's colour leaning to the words', so
+ * it reads at 4.5:1 on the light ground too (the bare link read 4.4). The box
+ * is the line less the indent its hairline stands at, so with that indent it
+ * is the line's whole width: a line of its own, inside the row. */
+.helper-step-out {
+  order: 1;
+  flex: 0 0 calc(100% - var(--chat-step-icon) - var(--space-2));
+  min-width: 0;
+  margin: 0 0 var(--space-1) calc(var(--chat-step-icon) + var(--space-2));
+  padding: 0 0 0 var(--space-3);
+  border-left: var(--rule-width) solid var(--chat-divider);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--chat-out-leading);
+  color: var(--ink-figure);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A door's underline comes in as it is pointed at or reached by the
+ * keyboard, eased as the window's other states are. */
+.helper-out-path {
+  border-radius: var(--radius-xs);
+  color: var(--chat-arg-ink);
+  text-decoration: underline transparent;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+  transition: text-decoration-color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-out-path:is(:hover, :focus-visible) {
+  text-decoration-color: currentColor;
 }
 
 .helper-step-res:empty,
@@ -14694,36 +14918,13 @@ details[open] > .helper-step-line::after {
   min-width: 0;
 }
 
-/* The foot line says what is going on (t-15682): while a step is out, or a
- * thought is going, the ring and the words of that step — the row's own
- * words, after 「지금」 — take the place of the CLI's turning glyph and verb,
- * on a band of the agent's own colour; with nothing to name it is the CLI's
- * line as it was. The ring turns; asked for less motion, it is a still ring
- * and the words hold. */
-.helper-status-ring,
-.helper-status-now {
-  display: none;
-}
-
-.helper-status.is-naming > :is(.helper-status-ring, .helper-status-now) {
-  display: block;
-}
-
-.helper-status.is-naming > :is(.helper-status-mark, .helper-status-word) {
-  display: none;
-}
-
-.helper-status.is-naming {
-  height: auto;
-  min-height: var(--chat-status-h);
-  margin-top: var(--space-2);
-  padding: var(--space-1) var(--space-3);
-  gap: var(--space-2);
-  border: var(--rule-width) solid color-mix(in srgb, var(--chat-reach, var(--chat-accent)) 28%, transparent);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--chat-reach, var(--chat-accent)) 6%, transparent);
-}
-
+/* The live line's ring turns in the agent's colour, or the permission mode's
+ * reach; asked for less motion, it is a still ring and the words hold. It
+ * turns in eight steps a turn (t-22100): it stands the whole time the agent
+ * works, and the engine turns it on the page's own thread — turned every
+ * frame it cost 680 ms of that thread over 120 typed keys at a 4x CPU and
+ * 2 ms on the typical key; a layer of its own changed nothing, and in steps
+ * it costs about what a still ring does. */
 .helper-status-ring {
   flex: none;
   box-sizing: border-box;
@@ -14732,7 +14933,7 @@ details[open] > .helper-step-line::after {
   border: var(--chat-status-ring-stroke) solid color-mix(in srgb, var(--chat-reach, var(--chat-accent)) 30%, transparent);
   border-top-color: var(--chat-reach, var(--chat-accent));
   border-radius: 50%;
-  animation: helper-status-spin 0.9s linear infinite;
+  animation: helper-status-spin 0.9s steps(8, end) infinite;
 }
 
 @keyframes helper-status-spin {
@@ -14744,8 +14945,6 @@ details[open] > .helper-step-line::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--text-xs);
-  color: var(--ink-chalk);
 }
 
 /* A finished helper opens on its report (t-15682): the answer it ended on,
@@ -15155,32 +15354,6 @@ details[open] > .helper-step-line::after {
   height: var(--icon-size);
 }
 
-.helper-status-mark {
-  display: inline-block;
-  width: var(--chat-status-mark-w);
-  text-align: center;
-  font-family: var(--font-mono);
-  font-size: var(--chat-status-mark-size);
-  color: var(--chat-accent);
-  animation: helper-live-pulse 1.6s var(--ease-standard) infinite;
-}
-
-/* A mark that turns through the CLI's own cycle (`updateHelperStatus`)
- * moves enough; it does not also breathe. */
-.helper-status-mark.is-cycling {
-  animation: none;
-}
-
-.helper-status-word {
-  /* One word, never a second line: it ends in an ellipsis before it can
-   * widen the list (`.helper-tool-arg` does the same on the tool row). */
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 500;
-}
-
 /* 접힘의 요약 줄: 라벨, 발췌, 제 상태를 말하는 셰브런. 네 접힘(도구의 나머지·
  * 생각·exec·결과)이 같은 줄을 입는다. */
 .helper-cap {
@@ -15327,7 +15500,8 @@ details[open] > .helper-cap::after {
   position: absolute;
   right: var(--chat-dock-inset);
   bottom: var(--chat-dock-inset);
-  left: var(--chat-dock-inset);
+  /* Beside the turn rail, never over it (t-22100). */
+  left: calc(var(--chat-turn-rail-w) + var(--chat-dock-inset));
   z-index: 3;
   display: flex;
   flex-direction: column;
@@ -15414,11 +15588,160 @@ details[open] > .helper-cap::after {
   position: absolute;
   right: 0;
   bottom: 0;
-  left: 0;
+  left: var(--chat-turn-rail-w);
   z-index: 2;
   height: var(--chat-fade);
   background: linear-gradient(to bottom, transparent 0%, var(--chat-ground) 100%);
   pointer-events: none;
+}
+
+/* The conversation's state over the composer (`paintChatStack`, t-22100):
+ * one flat panel joined to the composer under it — the composer's edge and
+ * ground, its top corners — rows of quiet words: the todo list's count and
+ * items, the work in the background and what waits, the branch and its
+ * changes; opened, the items one row each with its state. */
+.chat-stack {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: var(--rule-width) solid var(--chat-composer-edge);
+  border-bottom: 0;
+  border-radius: var(--chat-radius-composer) var(--chat-radius-composer) 0 0;
+  background: var(--chat-composer-bg);
+  font-size: var(--text-xs);
+  color: var(--ink-mist);
+}
+
+.chat-stack[hidden] {
+  display: none;
+}
+
+.chat-dock > .chat-stack:not([hidden]) + .worker-composer {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.chat-stack-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.chat-stack-mark {
+  flex: none;
+  box-sizing: border-box;
+  width: var(--chat-stack-box);
+  height: var(--chat-stack-box);
+  border: var(--rule-width) solid var(--ink-mist);
+  border-radius: var(--radius-xs);
+}
+
+.chat-stack-mark.is-going {
+  border-color: var(--chat-accent);
+}
+
+.chat-stack-mark.is-done {
+  border-color: var(--chat-dot-done);
+  background: var(--chat-dot-done);
+}
+
+.chat-stack-todo-count {
+  flex: none;
+  font-weight: 600;
+  color: var(--ink-figure);
+}
+
+.chat-stack-todo-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-stack-git {
+  margin-left: auto;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-stack-toggle {
+  flex: none;
+  display: inline-flex;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--ink-mist);
+  cursor: pointer;
+}
+
+.chat-stack-toggle:hover {
+  color: var(--ink-chalk);
+}
+
+/* One chevron: up while the items wait above, down once they stand. */
+.chat-stack-toggle .icon {
+  transform: rotate(-90deg);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.chat-stack-toggle[aria-expanded="true"] .icon {
+  transform: rotate(90deg);
+}
+
+.chat-stack-items {
+  display: grid;
+  gap: var(--space-1);
+  max-height: var(--chat-queue-max-h);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.chat-stack-items[hidden] {
+  display: none;
+}
+
+.chat-stack-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--ink-figure);
+}
+
+.chat-stack-item.is-done {
+  opacity: var(--chat-todo-done-alpha);
+  text-decoration: line-through;
+}
+
+.chat-stack-box {
+  flex: none;
+  margin: 0;
+}
+
+.chat-stack-work-dot {
+  flex: none;
+  width: var(--chat-dot);
+  height: var(--chat-dot);
+  border-radius: 50%;
+  background: var(--chat-accent);
+}
+
+.chat-stack-item-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-stack-toggle .icon {
+    transition: none;
+  }
 }
 
 /* The permission mode's reach, worn as one colour by the send, the focus
@@ -15445,10 +15768,6 @@ details[open] > .helper-cap::after {
 .worker-composer[data-permission-reach] .worker-composer-send:not(.is-stop) {
   background: var(--chat-reach);
   color: var(--chat-reach-ink);
-}
-
-.helper-status[data-permission-reach] .helper-status-mark {
-  color: var(--chat-reach);
 }
 
 /* The question the program asks, as the extension's card in the
@@ -16491,12 +16810,74 @@ button.helper-sib:hover {
 
 /* The list and the way back to its foot share one box, so the foot's door
  * stands over the list and never under the footer. */
+/* A conversation's body (t-22100): the turn rail in its own column at the
+ * left, the list beside it, and the way back to the list's foot over the
+ * list. */
 .helper-body {
   position: relative;
-  display: flex;
+  display: grid;
+  grid-template-columns: var(--chat-turn-rail-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   flex: 1 1 0;
-  flex-direction: column;
   min-height: 0;
+}
+
+.helper-body > .helper-turns {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+/* The turn rail (`turnRailNode`): a tick per row, 2px tall and 7px apart down
+ * a column of its own on one hairline — the person's longer and in the
+ * quiet ink, the row the rail stands at as long on the agent's accent, a
+ * failed step in the failure's ink. The handle lies over the whole column: a press anywhere goes
+ * to the nearest tick's row, and the keyboard's ring is drawn inside it. */
+.chat-rail {
+  grid-column: 1;
+  grid-row: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--chat-turn-tick-gap);
+  min-height: 0;
+  padding: var(--chat-list-pad-top) 0;
+  border-right: var(--rule-width) solid var(--chat-divider);
+  overflow: hidden;
+}
+
+.chat-rail-handle {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  cursor: pointer;
+}
+
+.chat-rail-handle:focus-visible {
+  box-shadow: inset 0 0 0 var(--ring-width) color-mix(in srgb, var(--ring) 50%, transparent);
+}
+
+.chat-rail-tick {
+  flex: none;
+  display: block;
+  width: var(--chat-turn-tick-w);
+  height: var(--chat-turn-tick-h);
+  border-radius: var(--chat-turn-tick-h);
+  background: var(--chat-rail-tick);
+}
+
+.chat-rail-tick.is-user {
+  width: var(--chat-turn-tick-long);
+  background: var(--ink-mist);
+}
+
+.chat-rail-tick.is-current {
+  width: var(--chat-turn-tick-long);
+  background: var(--chat-accent);
+}
+
+.chat-rail-tick.is-failed {
+  background: var(--chat-dot-failed);
 }
 
 .helper-foot {
@@ -16624,13 +17005,13 @@ button.helper-sib:hover {
     transition: none;
   }
 
-  .helper-turn.is-tool.is-live > .helper-step-line > .helper-step-icon,
+  .helper-turn.is-tool.is-live > .helper-step-line > .helper-step-dot,
   .helper-group.is-live::before,
   .helper-state-dot,
   .helper-agent-dot,
   .helper-status,
-  .helper-status-mark,
-  .helper-status-ring {
+  .helper-status-ring,
+  .chat-run-dot {
     animation: none;
   }
 
