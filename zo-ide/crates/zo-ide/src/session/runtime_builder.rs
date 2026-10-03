@@ -185,19 +185,30 @@ pub(crate) fn build_smart_live_client(
     named_effort: Option<api::EffortLevel>,
     effort_band_ceiling: Option<api::EffortLevel>,
 ) -> Option<Arc<dyn runtime::AsyncApiClient>> {
-    let auth_route = crate::runtime_support::catalog_auth_route_for_model(model);
-    let provider = if let Some(provider_kind) =
-        crate::runtime_support::catalog_provider_for_model(model)
-    {
-        api::ProviderClient::from_provider_kind_with_auth_route(provider_kind, auth_route)
-    } else {
-        api::ProviderClient::from_model_with_auth_route(model, auth_route)
-    }
-    .ok()?
-    .with_cache_scope(session_id);
+    let requested_auth = crate::runtime_support::catalog_auth_route_for_model(model);
     let main = runtime.api_client();
+    let native_provider = |selected: &str| {
+        crate::runtime_support::catalog_provider_for_model(selected).or_else(|| {
+            api::provider_catalog().iter().find(|entry|
+                entry.alias == selected || entry.canonical_model_id == selected).map(|entry| entry.provider)
+        })
+    };
+    let same_provider = native_provider(main.model()).zip(native_provider(model))
+        .is_some_and(|(current, selected)| current == selected && current == main.provider_kind());
+    let (provider, auth_route) = if same_provider
+        && (requested_auth == api::AuthRoute::Auto || requested_auth == main.auth_route())
+    {
+        (main.client(), main.auth_route())
+    } else {
+        let provider = if let Some(provider_kind) = crate::runtime_support::catalog_provider_for_model(model) {
+            api::ProviderClient::from_provider_kind_with_auth_route(provider_kind, requested_auth)
+        } else {
+            api::ProviderClient::from_model_with_auth_route(model, requested_auth)
+        }.ok()?;
+        (provider, requested_auth)
+    };
     Some(Arc::new(super::runtime_bridge::LiveAsyncApiClient::new(
-        provider,
+        provider.with_cache_scope(session_id),
         model.to_string(),
         auth_route,
         main.enable_tools(),
