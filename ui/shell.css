@@ -43638,6 +43638,9 @@ button.jev-token:hover {
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
 }
 .tree-head-button .icon { width: 14px; height: 14px; }
 .tree-head-button:hover { background: var(--row-hover); color: var(--ink-chalk); }

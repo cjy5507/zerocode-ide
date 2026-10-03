@@ -5941,11 +5941,13 @@ mod tests {
             "the diff head stopped quoting the panel's own row — or quotes \
              it for a diff the panel is not showing:\n{painting}"
         );
+        // The builder, and its three readers: the panel's row, the diff
+        // head and the file tree's row (t-24298).
         assert_eq!(
             window.matches("paintScmTally(").count(),
-            3,
-            "the ± tally grew a second builder — the row and the diff head \
-             must read one"
+            4,
+            "the ± tally grew a second builder — the row, the diff head and \
+             the file tree's row must read one"
         );
 
         // The scroll seat: remembered per file, restored on repaint, bounded,

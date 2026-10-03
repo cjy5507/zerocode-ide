@@ -500,6 +500,7 @@ pub(crate) fn fs_open_default(state: State<'_, AppState>, path: String) -> Resul
 /// (`crate::tree_selection`).
 #[tauri::command]
 pub(crate) fn tree_selection(root: String, paths: Vec<String>) {
+    let _crumb = crate::crumbs::Command::enter("tree_selection");
     crate::tree_selection::hold(&root, paths);
 }
 
