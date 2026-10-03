@@ -25,6 +25,15 @@ const treeConstant = async (name) => {
   return Number(source.match(new RegExp(`const ${name} = ([\\d_]+);`))?.[1]?.replace(/_/g, ""));
 };
 
+/* How long the burst measurements watch the window after a burst, in ms. A
+ * number of this test's own — never derived from the feature's constants — so
+ * that a before (a window without the feature) and an after watch the same time
+ * and their frame, paint and long-frame counts are counts of the same thing. */
+const BURST_WATCH_MS = 800;
+
+/* How long the memory run breathes between its rounds, in ms: the same reason. */
+const MEMORY_BREATH_MS = 190;
+
 /* The synthetic checkout every suite here stands in. Three levels, so a file
  * can sit under a folder that is itself under a folder. */
 const LISTINGS = {
@@ -281,7 +290,7 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
      * git: one scoped question per window, never a whole-repo status. Printed as
      * `EXPLORER_AGENT_PAIR_NUMBERS`, so a before and an after are two log lines
      * (and `WINDOW_CPU_THROTTLE=4` is the low-spec profile). */
-    const pairs = await page.evaluate(async ({ hold, windowMs }) => {
+    const pairs = await page.evaluate(async ({ hold, watchMs }) => {
       const { root, fire, act, settle } = window.__XT__;
       const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
       // The first burst's marks fade before this one is measured.
@@ -324,7 +333,7 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
       await settle(3);
       const settled = performance.now() - started;
       const shown = fileTree.querySelectorAll("[data-agent-writing]").length;
-      await sleep(windowMs + 500);
+      await sleep(watchMs);
       counting = false;
       observer.disconnect();
       const after = counts();
@@ -355,9 +364,9 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
         listDir: delta("list_dir"),
         idle,
       };
-    }, { hold, windowMs });
+    }, { hold, watchMs: BURST_WATCH_MS });
     console.log(`EXPLORER_AGENT_PAIR_NUMBERS ${JSON.stringify(pairs)}`);
-    ok("a burst of 200 start/end pairs shows the writing state, paints at most once a frame, asks git one scoped question per window and never a whole-repo status", pairs.shown > 0 && pairs.paints >= 1 && pairs.paints <= pairs.frames && pairs.numstat >= 1 && pairs.numstat <= Math.ceil((pairs.settledMs + windowMs + 500) / windowMs) && pairs.wholeRepo === 0 && pairs.listDir === 0 && pairs.tallied > 0, JSON.stringify(pairs));
+    ok("a burst of 200 start/end pairs shows the writing state, paints at most once a frame, asks git one scoped question per window and never a whole-repo status", pairs.shown > 0 && pairs.paints >= 1 && pairs.paints <= pairs.frames && pairs.numstat >= 1 && pairs.numstat <= Math.ceil((pairs.settledMs + BURST_WATCH_MS) / windowMs) && pairs.wholeRepo === 0 && pairs.listDir === 0 && pairs.tallied > 0, JSON.stringify(pairs));
     ok("an idle tree runs no animation and holds no timer once the writing has ended and the marks have faded", pairs.idle.animations === 0 && pairs.idle.timers === 0, JSON.stringify(pairs.idle));
     ok("the burst suite raised no renderer faults", faults.length === 0, faults.join(" | "));
   } finally {
@@ -1123,7 +1132,6 @@ export async function testExplorerAgentMemory(browser, origin, ok) {
     listings[name] = [];
     for (let file = 0; file < 20; file += 1) listings[name].push({ name: `f${String(file).padStart(2, "0")}.rs`, is_dir: false });
   }
-  const windowMs = await treeConstant("TREE_NUMSTAT_WINDOW_MS");
   const { page, faults } = await openWindowTestPage(browser, origin);
   const cdp = await page.context().newCDPSession(page);
   const heap = async () => {
@@ -1141,7 +1149,7 @@ export async function testExplorerAgentMemory(browser, origin, ok) {
     });
     // One round: 200 calls — half end, half never do — each with an id nobody
     // has used, over the 400 files, then a breath.
-    const round = (rounds, windowMs) => page.evaluate(async ({ rounds, windowMs }) => {
+    const round = (rounds, breathMs) => page.evaluate(async ({ rounds, breathMs }) => {
       const { root, fire, act } = window.__XT__;
       const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
       let calls = window.__MEMORY_CALLS__ ?? 0;
@@ -1154,15 +1162,15 @@ export async function testExplorerAgentMemory(browser, origin, ok) {
           if (one % 2 === 0) fire("term:1", [act("edit", target, "finished", { call: `mem${calls}` })]);
           calls += 1;
         }
-        await sleep(windowMs + 40);
+        await sleep(breathMs);
       }
       window.__MEMORY_CALLS__ = calls;
       return calls;
-    }, { rounds, windowMs });
+    }, { rounds, breathMs });
     // Warm: the first rounds build what any long run keeps (rows dressed, maps filled).
-    await round(5, windowMs);
+    await round(5, MEMORY_BREATH_MS);
     const before = await heap();
-    const calls = await round(100, windowMs);
+    const calls = await round(100, MEMORY_BREATH_MS);
     const after = await heap();
     const held = await page.evaluate(() => ({
       writes: typeof treeWrites === "object" ? treeWrites.size : NaN,
