@@ -1064,14 +1064,24 @@ const BRIEF_VOICE_GAP: &str = "\n\n";
 /// something can trust that it reached the agent); a voice left no room is
 /// not asked. A line over its room breaks that promise and is left out —
 /// the bridge would drop every voice's line with it.
+///
+/// Time is spent the same way. The bridge's timeout wraps the whole brief
+/// (`ask.wall`), so each voice is handed what is left of it, and once it has
+/// run out no voice is asked: a voice waiting out a full wall after another
+/// spent part of it would have the bridge drop every line.
 pub(crate) fn compose_brief(
     voices: &[BriefContributor],
     ask: &zerocode_hookd::TurnBriefAsk,
     cap: usize,
 ) -> Option<String> {
+    let began = Instant::now();
     let mut brief = String::new();
     let mut used = 0;
     for voice in voices {
+        let wall = ask.wall.saturating_sub(began.elapsed());
+        if wall.is_zero() {
+            break;
+        }
         let gap = if brief.is_empty() {
             0
         } else {
@@ -1081,7 +1091,11 @@ pub(crate) fn compose_brief(
         if room == 0 {
             continue;
         }
-        let Some(line) = voice(ask, room) else {
+        let asked = zerocode_hookd::TurnBriefAsk {
+            wall,
+            ..ask.clone()
+        };
+        let Some(line) = voice(&asked, room) else {
             continue;
         };
         let line = line.trim();
