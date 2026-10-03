@@ -2,7 +2,7 @@
 name: plain-report
 description: 사람이 읽을 보고서·요약·완료 알림·worker_done 요약을 짧고 쉬운 글로 쓰는 규칙(한국어·English). 구조·흐름을 설명하는 보고에는 그림을 같이 둔다. 코드·커밋 메시지·작업 중 대화에는 쓰지 않는다. Use it when you write a report, summary or notice that a person will read.
 invocation: auto
-keywords: [보고서 작성, 작업 보고, 결과 보고, 완료 보고, 완료 알림, worker_done, status report, completion notice, write a report, plain language]
+keywords: [보고서 작성, 작업 보고, 결과 보고, 완료 보고, status report, completion notice, write a report, plain language]
 ---
 
 # 쉬운 글로 보고하기
