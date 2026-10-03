@@ -797,21 +797,65 @@ fn settings_are_read_field_by_field_and_a_budget_must_be_one() {
     assert_eq!(read(serde_json::Value::Null), Settings::default());
 }
 
+/// What the settings file holds is read the way what the settings pane sends is:
+/// field by field. A budget of nothing, or less, is no budget — read as one it
+/// would stop a worker on its first call — and a field of the wrong type must not
+/// make the whole file unreadable, because the settings document is one file and
+/// an unreadable one is set aside with every other setting in it.
+#[test]
+fn a_stored_budget_that_is_not_a_budget_is_none_and_a_stored_mess_still_reads() {
+    let stored = |json: &str| serde_json::from_str::<Settings>(json).ok();
+    assert_eq!(
+        stored(r#"{"mode":"stop","task_usd":0,"day_usd":-3}"#),
+        Some(Settings {
+            mode: Mode::Stop,
+            task_usd: None,
+            day_usd: None,
+        }),
+        "a budget of nothing is none, not a stop on the first call"
+    );
+    assert_eq!(
+        stored(r#"{"mode":"stop","task_usd":20.5}"#),
+        Some(Settings {
+            mode: Mode::Stop,
+            task_usd: Some(20.5),
+            day_usd: None,
+        })
+    );
+    assert_eq!(
+        stored(r#"{"mode":"bogus","task_usd":"lots","day_usd":1e9}"#),
+        Some(Settings::default()),
+        "a field that is not what it should be falls back alone and the read goes on"
+    );
+    assert_eq!(
+        stored("5"),
+        Some(Settings::default()),
+        "and so does a value that is not even an object"
+    );
+}
+
 #[test]
 fn every_code_has_the_word_it_is_serialized_as() {
-    for code in [
-        Code::CheckpointDue,
-        Code::CostRising,
-        Code::ReworkLoop,
-        Code::TaskBudgetNear,
-        Code::DayBudgetNear,
-        Code::TaskBudgetStop,
-        Code::DayBudgetStop,
-    ] {
+    for code in Code::ALL {
         assert_eq!(
             serde_json::to_string(&code).expect("serializes"),
             format!("\"{}\"", code.word()),
             "{code:?}"
         );
     }
+}
+
+#[test]
+fn every_verdict_has_the_word_it_is_serialized_as_and_they_rise_in_the_order_of_all() {
+    for verdict in Verdict::ALL {
+        assert_eq!(
+            serde_json::to_string(&verdict).expect("serializes"),
+            format!("\"{}\"", verdict.word()),
+            "{verdict:?}"
+        );
+    }
+    assert!(
+        Verdict::ALL.windows(2).all(|pair| pair[0] < pair[1]),
+        "ALL is lowest first: the board lists them that way"
+    );
 }

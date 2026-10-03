@@ -155,6 +155,10 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    /// Every verdict, lowest first — what a surface that must have a word for each
+    /// walks.
+    pub const ALL: [Self; 4] = [Self::Continue, Self::Checkpoint, Self::Pause, Self::Stop];
+
     /// The word a row and a screen key on.
     #[must_use]
     pub const fn word(self) -> &'static str {
@@ -205,6 +209,17 @@ pub enum Code {
 }
 
 impl Code {
+    /// Every code — what a surface that must have a sentence for each walks.
+    pub const ALL: [Self; 7] = [
+        Self::CheckpointDue,
+        Self::CostRising,
+        Self::ReworkLoop,
+        Self::TaskBudgetNear,
+        Self::DayBudgetNear,
+        Self::TaskBudgetStop,
+        Self::DayBudgetStop,
+    ];
+
     /// The verdict this fact alone earns.
     #[must_use]
     pub const fn verdict(self) -> Verdict {
@@ -214,9 +229,7 @@ impl Code {
             Self::TaskBudgetStop | Self::DayBudgetStop => Verdict::Stop,
         }
     }
-}
 
-impl Code {
     /// The word this code is serialized as — what a row and a screen key on.
     #[must_use]
     pub const fn word(self) -> &'static str {

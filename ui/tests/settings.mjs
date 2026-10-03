@@ -349,6 +349,10 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "default_agent": { "kind": "auto" },
   "agent_teams_mode": "panes",
   "claude_autoswitch_mode": "ask",
+  "harness": {
+    "gate": { "mode": "notify", "task_usd": null, "day_usd": null },
+    "launches": { "concurrent": 4, "per_hour": 300, "per_day": 2000 }
+  },
   "worktree_prefs": { "branch_prefix": "git-username" },
   "notifications": { "enabled": true, "agent_attention": true, "agent_completion": true },
   "computer_awake_mode": "off",
@@ -758,7 +762,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_notification_preference", "set_browser_home_page", "set_browser_search_engine",
   "patch_browser_link_routing", "patch_browser_user_agents", "set_browser_restore_tabs", "set_browser_default_zoom", "set_browser_open_tabs",
   "set_terminal_opacity",
-  "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_default_agent",
+  "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_harness_settings", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
   "set_diff_side_by_side", "set_conversation_focus_view", "set_confirm_close_pinned",
   "set_computer_live_reflex", "set_computer_generator_road",
@@ -1621,6 +1625,33 @@ class StatefulBackend {
         this.settings.claude_autoswitch_mode = args.mode;
         keys = ["claude_autoswitch_mode"];
         break;
+      case "set_harness_settings": {
+        // The Rust contract (`HarnessSettings::parse`): a launch ceiling is a whole
+        // number of launches or blank — anything else refuses the save, so a typo
+        // never silently lifts a ceiling — and a budget that is not a positive
+        // amount under the typo guard is none, field by field.
+        const asked = args.harness ?? {};
+        const launches = { ...this.settings.harness.launches };
+        for (const key of ["concurrent", "per_hour", "per_day"]) {
+          if (!(key in (asked.launches ?? {}))) continue;
+          const value = asked.launches[key];
+          if (value !== null && !(Number.isInteger(value) && value >= 0)) {
+            throw new Error("실행 한도는 0 이상의 정수나 빈칸(한도 없음)이어야 합니다");
+          }
+          launches[key] = value;
+        }
+        const budget = (value) => (Number.isFinite(value) && value > 0 && value <= 100_000 ? value : null);
+        this.settings.harness = {
+          gate: {
+            mode: ["off", "notify", "stop"].includes(asked.gate?.mode) ? asked.gate.mode : "notify",
+            task_usd: budget(asked.gate?.task_usd),
+            day_usd: budget(asked.gate?.day_usd),
+          },
+          launches,
+        };
+        keys = ["harness"];
+        break;
+      }
       case "set_default_agent":
         this.settings.default_agent = clone(args.preference);
         keys = ["default_agent"];
@@ -2359,6 +2390,18 @@ class StatefulBackend {
       case "terminal_command_argv": return [this.settings.terminal_command];
       case "agent_teams_mode": return this.settings.agent_teams_mode;
       case "claude_autoswitch_mode": return this.settings.claude_autoswitch_mode;
+      // What the card says of the window's counting: what is running, what the
+      // last hour and day let through, which provider rests, what the day cost.
+      case "harness_status":
+        return {
+          gate: clone(this.settings.harness.gate),
+          launches: clone(this.settings.harness.launches),
+          counters: {
+            active: 1, last_hour: 3, last_day: 12,
+            resting: [{ provider: "claude", until_ms: Date.now() + 11 * 60_000 }],
+          },
+          day_spent_usd: 4.2,
+        };
       case "project_scripts":
         return {
           root: BOOT_BASE.project_root,
@@ -3237,6 +3280,7 @@ const controlValue = async (page, kind) => page.evaluate((name) => {
     blur: () => document.getElementById("window-blur")?.checked,
     teams: () => document.getElementById("orch-teams-mode")?.value,
     claude_autoswitch: () => document.getElementById("account-autoswitch")?.value,
+    harness_mode: () => document.getElementById("harness-gate-mode")?.value,
     setup_script_launch_mode: () => document.querySelector(
       "[data-setup-launch-mode][aria-pressed='true']",
     )?.dataset.setupLaunchMode,
@@ -3357,6 +3401,7 @@ const chooseControl = async (page, kind, value) => {
     );
     case "teams": return page.selectOption("#orch-teams-mode", value);
     case "claude_autoswitch": return page.selectOption("#account-autoswitch", value);
+    case "harness_mode": return page.selectOption("#harness-gate-mode", value);
     case "setup_script_launch_mode": return page.click(
       `[data-setup-launch-mode="${value}"]`,
     );
@@ -7866,6 +7911,7 @@ await test("non-default writes become canonical state before the second window b
     ["workspace_directory", "patch_workspace_creation_prefs", "/tmp/zerocode-workspaces", "general"],
     ["nest_workspaces", "patch_workspace_creation_prefs", false, "general"],
     ["default_agent", "set_default_agent", "blank", "agents"],
+    ["harness_mode", "set_harness_settings", "stop", "provider-accounts"],
   ];
   for (const [kind, command, value, pane] of writes) {
     await pageA.evaluate((wanted) => showSettingsPane(wanted), pane);
@@ -8352,6 +8398,7 @@ const ROLLBACKS = [
   { kind: "blur", command: "set_window_blur", pane: "appearance", asked: false, canonical: true },
   { kind: "teams", command: "set_agent_teams_mode", pane: "orchestration", asked: "panes", canonical: "off" },
   { kind: "claude_autoswitch", command: "set_claude_autoswitch_mode", pane: "provider-accounts", asked: "off", canonical: "auto" },
+  { kind: "harness_mode", command: "set_harness_settings", pane: "provider-accounts", asked: "off", canonical: "stop" },
   {
     kind: "setup_script_launch_mode", command: "set_setup_script_launch_mode", pane: "terminal",
     asked: "split-vertical", canonical: "split-horizontal",
@@ -8444,6 +8491,7 @@ for (const row of ROLLBACKS) {
           delete_automation_confirm: () => document.getElementById("ask-before-delete-automation")?.checked,
     artifacts_retention: () => Number(document.getElementById("artifacts-retention-days")?.value),
           claude_autoswitch: () => document.getElementById("account-autoswitch")?.value,
+          harness_mode: () => document.getElementById("harness-gate-mode")?.value,
           default_agent: () => ({ auto: pressed("auto"), blank: pressed("blank"), codex: pressed("codex") }),
         }[kind]();
         return JSON.stringify(actual) === JSON.stringify(canonical);
@@ -8460,6 +8508,71 @@ for (const row of ROLLBACKS) {
     assertEqual(await controlValue(pageB, row.kind), row.canonical, "reopen did not preserve rollback");
   });
 }
+
+await test("the harness card shows what a person set and what the window counted, and saves each field as the person typed it (t-26583)", async () => {
+  backend.settings.harness = clone(DEFAULT_SETTINGS.harness);
+  await reopenSettings(pageB, "B", "provider-accounts");
+  const card = () => pageB.evaluate(() => {
+    const field = (id) => document.getElementById(id);
+    return {
+      mode: field("harness-gate-mode")?.value ?? null,
+      task: field("harness-task-usd")?.value ?? null,
+      day: field("harness-day-usd")?.value ?? null,
+      concurrent: field("harness-concurrent")?.value ?? null,
+      perHour: field("harness-per-hour")?.value ?? null,
+      perDay: field("harness-per-day")?.value ?? null,
+      status: field("harness-status")?.textContent ?? null,
+    };
+  });
+  const shown = await card();
+  assert(
+    shown.mode === "notify" && shown.task === "" && shown.day === "" &&
+      shown.concurrent === "4" && shown.perHour === "300" && shown.perDay === "2000",
+    "the card does not show the document's gate and ceilings", shown,
+  );
+  assert(
+    /^지금 1개 실행 중 · 최근 한 시간 3번 · 오늘 12번 · 쉬는 중: claude 1[01]분 · 오늘 워커 비용 약 \$4\.20$/.test(shown.status ?? ""),
+    "the card does not say what the launch ledger and the day's spend hold", shown.status,
+  );
+  assert(await pageB.$("#harness-task-usd"), "the card has no task budget field");
+  const budget = await gestureAndWait(pageB, "B", "set_harness_settings", () =>
+    changeField(pageB, "#harness-task-usd", 12.5));
+  assertEqual(
+    budget.args,
+    {
+      harness: {
+        gate: { mode: "notify", task_usd: 12.5, day_usd: null },
+        launches: { concurrent: 4, per_hour: 300, per_day: 2000 },
+      },
+    },
+    "a budget was sent as something other than the whole record with the number typed",
+  );
+  await waitForSettingsIdle(pageB);
+  const lifted = await gestureAndWait(pageB, "B", "set_harness_settings", () =>
+    changeField(pageB, "#harness-per-day", ""));
+  assertEqual(
+    lifted.args.harness,
+    {
+      gate: { mode: "notify", task_usd: 12.5, day_usd: null },
+      launches: { concurrent: 4, per_hour: 300, per_day: null },
+    },
+    "a blank ceiling is no ceiling, and the budget saved before it stays",
+  );
+  await waitForSettingsIdle(pageB);
+  await gestureAndWait(pageB, "B", "set_harness_settings", () =>
+    changeField(pageB, "#harness-per-hour", 1.5));
+  await waitForSettingsIdle(pageB);
+  const refused = await card();
+  assert(
+    refused.perHour === "300" && refused.perDay === "" && refused.task === "12.5",
+    "a ceiling the backend refused did not go back to the saved one, or took the others with it", refused,
+  );
+  assertEqual(
+    backend.settings.harness.launches,
+    { concurrent: 4, per_hour: 300, per_day: null },
+    "a refused ceiling reached the stored document",
+  );
+});
 
 await test("Tab Order persists its Orca MRU/sequential choice", async () => {
   await openSettings(pageB, "general");
