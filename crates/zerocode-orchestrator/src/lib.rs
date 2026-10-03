@@ -2447,8 +2447,8 @@ prunable gitdir file points to non-existent location
             .expect("touch");
         drop(file);
         let index = || std::fs::read(root.join(".git").join("index")).expect("the index");
-        let before = index();
         let orchestrator = Orchestrator::open(root).expect("open");
+        let before = index();
 
         orchestrator
             .status_of(root, &["a.txt"])
