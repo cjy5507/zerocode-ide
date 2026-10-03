@@ -284,6 +284,12 @@ const TREE_NUMSTAT_WINDOW_MS = 150;
  * a quarter of its CPU) sixty-four files were frames made late; eight are not. */
 const TREE_NUMSTAT_PATHS_MAX = 8;
 
+/* The most files waiting for git at once: eight questions' worth, about a
+ * second of them. A flood of writes outruns the questions (one a window, a few
+ * files each); what waits is bounded, and a flood loses its oldest, which the
+ * next whole refresh answers anyway — the tree holds nothing without a cap. */
+const TREE_NUMSTAT_WAITING_MAX = 64;
+
 /* Which kind of touch a verb is. Searches are reads; edits and writes are
  * writes. A verb not here (a shell command, a fetch, a delegation) names no
  * file of its own. */
@@ -814,6 +820,7 @@ function finishTreeWrite(held, now) {
 function wantTreeNumstat(paths) {
   if (!fileTreeShowing()) return;
   for (const path of paths) treeNumstatWanted.add(path);
+  while (treeNumstatWanted.size > TREE_NUMSTAT_WAITING_MAX) treeNumstatWanted.delete(treeNumstatWanted.values().next().value);
   armTreeNumstat();
 }
 

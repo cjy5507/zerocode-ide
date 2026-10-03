@@ -1230,12 +1230,13 @@ export async function testExplorerAgentMemory(browser, origin, ok) {
       dressed: typeof treeDressedRows === "object" ? treeDressedRows.size : NaN,
       touches: treeTouches.size,
       cap: typeof TREE_TOUCH_CAP === "number" ? TREE_TOUCH_CAP : NaN,
+      waitingMax: typeof TREE_NUMSTAT_WAITING_MAX === "number" ? TREE_NUMSTAT_WAITING_MAX : NaN,
       activityRing: [...paneActivities.values()].reduce((sum, list) => sum + list.length, 0),
     }));
     const growthKiB = Math.round((after - before) / 1024);
     const numbers = { calls, beforeKiB: Math.round(before / 1024), afterKiB: Math.round(after / 1024), growthKiB, ...held };
     console.log(`EXPLORER_AGENT_MEMORY ${JSON.stringify(numbers)}`);
-    ok("what the tree holds for a long run is bounded by its caps: the open writes, the files waiting for git, the rows dressed and the window's ring", held.writes <= held.cap && held.wanted <= held.cap * 8 && held.dressed <= held.cap * 8 && held.touches <= held.cap && held.activityRing <= 20 * 4, JSON.stringify(numbers));
+    ok("what the tree holds for a long run is bounded by its caps: the open writes, the files waiting for git, the rows dressed and the window's ring", held.writes <= held.cap && held.wanted <= held.waitingMax && held.dressed <= held.cap * 8 && held.touches <= held.cap && held.activityRing <= 20 * 4, JSON.stringify(numbers));
     ok("a hundred rounds of two hundred calls — half of them never ended — leave the heap, garbage collected, where it was (growth under 3 MiB: a leak of one small object per call would be larger)", Number.isFinite(growthKiB) && growthKiB < 3072 && held.writes <= held.cap, JSON.stringify(numbers));
     ok("the memory suite raised no renderer faults", faults.length === 0, faults.join(" | "));
   } finally {
