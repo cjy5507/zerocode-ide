@@ -7992,6 +7992,9 @@ fn a_helpers_line_counts_its_tool_uses_whoever_counted_them() {
         verb: zerocode_core::hook::Tool::Read,
         target: Some(target.to_string()),
         phase: zerocode_core::hook::Phase::Started,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        vcs: Vec::new(),
     };
     assert!(ring.note_fresh(doing("src/x.rs")));
     assert!(
@@ -8444,6 +8447,9 @@ fn a_ring_keeps_the_last_twenty_and_speaks_at_most_ten_times_a_second() {
         verb: Tool::Bash,
         target: Some(target.to_string()),
         phase: Phase::Started,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        vcs: Vec::new(),
     };
     let mut ring = ActivityRing::default();
     let start = Instant::now();

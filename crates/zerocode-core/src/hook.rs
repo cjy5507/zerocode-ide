@@ -1079,6 +1079,46 @@ pub struct Activity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     pub phase: Phase,
+    /// Files the call reads besides its target (t-24298): the paths a reading
+    /// shell command opens — `sed -n 1,80p src/a.rs` — as the command wrote
+    /// them, a relative one to the folder the call runs in. What lets the
+    /// file tree light a file an agent read through its shell, which is how
+    /// Codex reads everything. Empty for most calls, and then not on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<String>,
+    /// Files the call writes besides its target: the files a patch names
+    /// (Codex's `apply_patch`, whose target is the patch itself).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writes: Vec<String>,
+    /// The git and gh operations a shell command runs, in order — what the
+    /// file tree's status line names while the command runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vcs: Vec<VcsStep>,
+}
+
+/// One git or gh operation a shell command runs (t-24298): the program and
+/// the operation it was asked for — `git` · `commit`, `gh` · `pr create`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsStep {
+    pub tool: String,
+    pub verb: String,
+}
+
+/// The most files one shell command is read as opening. A command naming
+/// more than this is a search, and its first dozen already say where it
+/// looked; the file tree lights no more than a glance can follow anyway.
+pub const READ_PATHS_PER_COMMAND: usize = 12;
+
+/// The git and gh operations a shell command runs, in order.
+#[must_use]
+pub fn vcs_steps(_command: &str) -> Vec<VcsStep> {
+    Vec::new()
+}
+
+/// The files a reading shell command opens, as it named them.
+#[must_use]
+pub fn read_paths(_command: &str) -> Vec<String> {
+    Vec::new()
 }
 
 /// What one event says a tool call is doing, or `None` when it is not about a
@@ -1217,6 +1257,9 @@ pub fn activity_said(line: &str) -> Option<Activity> {
         verb: Tool::named(verb)?,
         target: target.and_then(activity_text),
         phase: Phase::Started,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        vcs: Vec::new(),
     })
 }
 
@@ -1358,6 +1401,9 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             verb,
             target,
             phase,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            vcs: Vec::new(),
         });
     }
     if word == "userpromptsubmit" || word == "beforesubmitprompt" {
@@ -1365,6 +1411,9 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             verb: Tool::Other(PROMPT_VERB.to_string()),
             target: first_text(parsed, &["prompt", "message", "user_prompt", "userPrompt"]),
             phase: Phase::Prompted,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            vcs: Vec::new(),
         });
     }
     // Every way a turn ends, borrowed from the one table that already knows
@@ -1374,6 +1423,9 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             verb: Tool::Other(STOP_VERB.to_string()),
             target: None,
             phase: Phase::Stopped,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            vcs: Vec::new(),
         });
     }
     None
@@ -2977,6 +3029,173 @@ mod tests {
 
         // Nothing said is nothing drawn.
         assert!(activity_said("   ").is_none());
+    }
+
+    /// The git and gh operations a shell command runs, read with the shell's
+    /// own grammar (t-24298): chains, wrappers, assignments, `git -C dir`,
+    /// quotes that hide a `&&`, heredoc bodies that are documents — and the
+    /// questions git answers are not operations.
+    #[test]
+    fn a_shell_command_names_the_git_and_gh_operations_it_runs() {
+        let steps = |command: &str| {
+            vcs_steps(command)
+                .into_iter()
+                .map(|step| format!("{} {}", step.tool, step.verb))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(steps("git commit -m 'fix: a && b'"), ["git commit"]);
+        assert_eq!(
+            steps("cd crates/core && git add -A && git commit -m \"wip; again\""),
+            ["git add", "git commit"]
+        );
+        assert_eq!(
+            steps("GIT_AUTHOR_NAME=dev git -C /Users/dev/repo push origin main"),
+            ["git push"]
+        );
+        assert_eq!(
+            steps("env GIT_EDITOR=true git -c core.editor=true rebase --continue"),
+            ["git rebase"]
+        );
+        assert_eq!(
+            steps("git --git-dir .git --work-tree . commit --amend --no-edit"),
+            ["git commit"]
+        );
+        assert_eq!(
+            steps("/usr/bin/git pull --ff-only && sudo git fetch --all"),
+            ["git pull", "git fetch"]
+        );
+        assert_eq!(
+            steps("git checkout -b feat/tree && git checkout -- src/a.rs"),
+            ["git checkout", "git restore"]
+        );
+        assert_eq!(
+            steps("git merge --no-ff side || git merge --abort"),
+            ["git merge", "git merge"]
+        );
+        assert_eq!(steps("gh pr create --fill && gh pr view --web"), ["gh pr create"]);
+        assert_eq!(steps("gh pr merge 42 --squash"), ["gh pr merge"]);
+        assert_eq!(
+            steps("git branch -D old && git stash pop && git tag v1.2.0"),
+            ["git branch", "git stash", "git tag"]
+        );
+        // A heredoc's body is a document, not commands.
+        assert_eq!(
+            steps("git commit -F - <<'EOF'\ngit push --force\nEOF\n"),
+            ["git commit"]
+        );
+        for asked in [
+            "git status --short",
+            "git log --oneline -3",
+            "git diff HEAD~1",
+            "git --no-pager show",
+            "git branch",
+            "git branch -a -vv",
+            "git stash list",
+            "git tag",
+            "git tag -l 'v*'",
+            "gh pr view 42",
+            "echo 'git push'",
+            "grep -r \"git commit\" docs",
+        ] {
+            assert!(
+                vcs_steps(asked).is_empty(),
+                "{asked} asks git a question and runs no operation"
+            );
+        }
+    }
+
+    /// The files a reading shell command opens, as it named them — what
+    /// lights a file the agent read through its shell.
+    #[test]
+    fn a_reading_shell_command_names_the_files_it_opens() {
+        let none: Vec<String> = Vec::new();
+        assert_eq!(read_paths("sed -n '1,200p' src/main.rs"), ["src/main.rs"]);
+        assert_eq!(read_paths("cat a.rs b.rs | head -n 20"), ["a.rs", "b.rs"]);
+        assert_eq!(read_paths("head -n 50 README.md 2>/dev/null"), ["README.md"]);
+        assert_eq!(
+            read_paths("rg -n 'fn main' crates/core --glob '*.rs'"),
+            ["crates/core"]
+        );
+        assert_eq!(read_paths("grep -e needle -r src tests"), ["src", "tests"]);
+        assert_eq!(read_paths("cd ui && sed -n 10,40p shell.js"), ["ui/shell.js"]);
+        assert_eq!(
+            read_paths("cd /Users/dev/repo && cat docs/a.md"),
+            ["/Users/dev/repo/docs/a.md"]
+        );
+        // A glob names no one file, an in-place edit is a write, and a
+        // command that is not a reader opens nothing it names.
+        assert_eq!(read_paths("wc -l ui/*.js"), none);
+        assert_eq!(read_paths("sed -i 's/a/b/' x.rs"), none);
+        assert_eq!(read_paths("cargo test -p zerocode-core"), none);
+        let many = format!(
+            "cat {}",
+            (0..30)
+                .map(|at| format!("f{at}.rs"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        assert_eq!(read_paths(&many).len(), READ_PATHS_PER_COMMAND);
+    }
+
+    /// A tool call carries what it read, wrote and ran in git, from every
+    /// shape the vendors write it in — and a call that names none of them
+    /// travels exactly as before.
+    #[test]
+    fn a_tool_call_carries_what_it_reads_writes_and_runs_in_git() {
+        let verbs = |activity: &Activity| {
+            activity
+                .vcs
+                .iter()
+                .map(|step| step.verb.clone())
+                .collect::<Vec<_>>()
+        };
+        let bash = activity_of(
+            "PreToolUse",
+            r#"{"tool_name":"Bash","tool_input":{"command":"sed -n 1,80p src/lib.rs && git add -A && git commit -m done"}}"#,
+        )
+        .expect("a shell call said nothing");
+        assert_eq!(bash.reads, ["src/lib.rs"]);
+        assert_eq!(verbs(&bash), ["add", "commit"]);
+        // Codex's argv: the script is the shell's third word.
+        let codex = activity_of(
+            "PreToolUse",
+            r#"{"tool_name":"shell","tool_input":{"command":["bash","-lc","git push origin HEAD"]}}"#,
+        )
+        .expect("an argv call said nothing");
+        assert_eq!(verbs(&codex), ["push"]);
+        // Cursor's shell event names the command at the payload's top.
+        let cursor = activity_of(
+            "beforeShellExecution",
+            r#"{"command":"cat docs/a.md","cwd":"/repo"}"#,
+        )
+        .expect("cursor's shell event said nothing");
+        assert_eq!(cursor.reads, ["docs/a.md"]);
+        // A patch's files are what it writes; its target is the patch.
+        let patch = activity_of(
+            "PreToolUse",
+            r#"{"tool_name":"apply_patch","tool_input":{"input":"*** Begin Patch\n*** Update File: src/a.rs\n@@\n-old\n+new\n*** Add File: src/b.rs\n+x\n*** End Patch\n"}}"#,
+        )
+        .expect("a patch said nothing");
+        assert_eq!(patch.verb, Tool::Edit);
+        assert_eq!(patch.writes, ["src/a.rs", "src/b.rs"]);
+        // A plain edit is its target and nothing more, on the wire too.
+        let edit = activity_of(
+            "PreToolUse",
+            r#"{"tool_name":"Edit","tool_input":{"file_path":"/repo/a.rs","old_string":"a","new_string":"b"}}"#,
+        )
+        .expect("an edit said nothing");
+        assert!(edit.reads.is_empty() && edit.writes.is_empty() && edit.vcs.is_empty());
+        let plain = serde_json::to_value(&edit).expect("serialize");
+        assert!(
+            plain.get("reads").is_none()
+                && plain.get("writes").is_none()
+                && plain.get("vcs").is_none()
+        );
+        let carried = serde_json::to_value(&bash).expect("serialize");
+        assert_eq!(
+            carried["vcs"][1],
+            serde_json::json!({"tool": "git", "verb": "commit"})
+        );
     }
 
     /// The verb travels as a plain word, because the window draws a word.
