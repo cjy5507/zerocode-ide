@@ -20,6 +20,10 @@ function scmCleanText() {
  * lists ignored paths because it is answering "what is in this directory",
  * and this panel is answering "what might I commit". */
 let scmEntries = [];
+/* The checkout `scmEntries` is the status of — the one in front when the
+ * answer landed, `null` before the first or after git failed. Its count is
+ * said of that checkout only (the conversation's state, t-22100). */
+let scmStatusOf = null;
 /* What git is halfway through here — `merge`, `rebase`, `cherry-pick`,
  * `unknown`, or null when nothing is. Comes with the status rather than from a
  * second ask, because the panel needs it on every repaint. */
@@ -997,8 +1001,10 @@ async function refreshScm({ uncapped = false } = {}) {
   try {
     // `uncapped` is the banner's one-shot retry (Orca's
     // `resolveGitStatusLimit(0)` road); every ordinary refresh caps again.
+    const asked = activeWorktreePath;
     const tree = await invoke("scm_status", { uncapped });
     scmEntries = tree?.changed ?? [];
+    scmStatusOf = asked;
     // The operation this checkout is halfway through, whether or not anything
     // is still unresolved — a rebase between steps has neither a conflicted
     // row nor a reason to be silent.
@@ -1018,9 +1024,12 @@ async function refreshScm({ uncapped = false } = {}) {
     // list empties because it is no longer describing anything, and the
     // place that would have said "no changes" says what happened instead.
     scmEntries = [];
+    scmStatusOf = null;
     scmOperation = null;
     conflictCard = null;
     scmCapState = null;
+    // A count nobody holds any more is not said (t-22100).
+    paintChatStacks();
     // No repository, no commits — the COMMITS head must not stand over a
     // section that can only open to nothing.
     el("scm-history-title").hidden = true;
@@ -1031,6 +1040,9 @@ async function refreshScm({ uncapped = false } = {}) {
     scmEmpty.hidden = false;
     return;
   }
+  // The conversation's state over its composer counts this checkout's changes
+  // (t-22100) — said the moment they landed, not on that page's next paint.
+  paintChatStacks();
   await refreshConflictCard();
   // 펼쳐 둔 서브모듈은 부모가 새로고침될 때마다 함께 신선해진다 — 접힌 것은
   // 아무 일도 만들지 않는다.

@@ -412,24 +412,24 @@ export async function testPaneConversation(browser, origin, ok) {
       const session = "s-zo-live";
       const status = () => document.querySelector(".pane-chat .helper-status");
       const words = () => status()?.querySelector(".helper-status-now")?.textContent ?? "";
-      const seeing = () => (status()?.innerText ?? "").replace(/\s+/g, " ").trim();
-      const state = () => ({ now: words(), seeing: seeing(), naming: status()?.classList.contains("is-naming") ?? false });
+      const seeing = () => (status()?.textContent ?? "").replace(/\s+/g, " ").trim();
+      const state = () => ({ now: words(), seeing: seeing(), lead: status()?.querySelector(".helper-status-lead")?.textContent ?? "" });
       const say = async (activity) => {
         tell("session:frame", { session, frame: { type: "session_status", session, model: "claude-opus-5", ...(activity && { activity }) } });
         await frame();
         await frame();
         return state();
       };
-      const voice = agentVoice("zo");
-      const now = t("worker.now", "지금");
       const seen = {
-        busy: voice.busy_word,
-        wordNode: status()?.querySelector(".helper-status-word")?.textContent ?? "",
-        wantNothing: `${now} · ${t("worker.busy", "작업 중…")}`,
-        wantRead: `${now} · ${t("worker.stepRead", "파일 읽기")} src/tui/view.rs`,
-        wantWaiting: `${now} · ${t("worker.nowWaiting", "답을 기다리는 중")}`,
-        wantReconnecting: `${now} · ${t("worker.nowReconnecting", "다시 연결하는 중")}`,
-        wantThinking: `${now} · ${t("worker.nowThinking", "생각하는 중")}`,
+        // zo's own English word for a turn that is out — its catalog row still carries it; the page does
+        // not say it (t-22100).
+        busy: installedAgents().find((row) => row.id === "zo")?.busy_word ?? "",
+        lead: t("worker.now", "지금"),
+        wantNothing: t("worker.busy", "작업 중…"),
+        wantRead: `${t("worker.stepRead", "파일 읽기")} src/tui/view.rs`,
+        wantWaiting: t("worker.nowWaiting", "답을 기다리는 중"),
+        wantReconnecting: t("worker.nowReconnecting", "다시 연결하는 중"),
+        wantThinking: t("worker.nowThinking", "생각하는 중"),
       };
       tell("session:frame", { session, frame: { type: "turn", turn_id: 20, phase: "start" } });
       await frame();
@@ -464,16 +464,16 @@ export async function testPaneConversation(browser, origin, ok) {
       seen.elsewhere = state();
       return seen;
     });
-    const nothingKnown = (one) => one.now === nowLine.wantNothing && one.naming && !one.seeing.includes(nowLine.busy);
-    ok("a zo pane with no step out and no activity known says the window's own 「지금 · 작업 중…」 — zo's English word is not on the page, though the word's own node still holds it",
-      nowLine.busy !== "" && nothingKnown(nowLine.nothing) && nowLine.wordNode === nowLine.busy,
+    const nothingKnown = (one) => one.now === nowLine.wantNothing && one.lead === nowLine.lead && !one.seeing.includes(nowLine.busy);
+    ok("a zo pane with no step out and no activity known says the window's own 「지금」 and 「작업 중…」 — zo's English word is nowhere on the line",
+      nowLine.busy !== "" && nothingKnown(nowLine.nothing),
       JSON.stringify(nowLine.nothing));
     ok("the activity in zo's session status is said on the foot line — a file read in the step rows' words, a shell command by its title (the command's first words and the folder, no cd) — and waiting, reconnecting and thinking in the page's own words",
       nowLine.read.now === nowLine.wantRead && nowLine.bash.now.includes("make test") &&
       nowLine.bash.now.endsWith(" · shop-app") && !/(^|\s)cd\s/.test(nowLine.bash.now) &&
       nowLine.waiting.now === nowLine.wantWaiting && nowLine.reconnecting.now === nowLine.wantReconnecting &&
       nowLine.thinking.now === nowLine.wantThinking &&
-      [nowLine.read, nowLine.bash, nowLine.waiting, nowLine.reconnecting, nowLine.thinking].every((one) => one.naming && !one.seeing.includes(nowLine.busy)),
+      [nowLine.read, nowLine.bash, nowLine.waiting, nowLine.reconnecting, nowLine.thinking].every((one) => one.lead === nowLine.lead && !one.seeing.includes(nowLine.busy)),
       JSON.stringify(nowLine));
     ok("a status that says quiet names nothing the page can name, and a status frame with no activity takes the line back to 「작업 중…」",
       nothingKnown(nowLine.quiet) && nothingKnown(nowLine.cleared),
