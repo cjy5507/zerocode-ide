@@ -62,12 +62,6 @@ struct Decided {
     number: u32,
 }
 
-/// What carrying the plan out came to.
-struct Done {
-    snapshot: Option<SnapshotNote>,
-    acted: Acted,
-}
-
 /// A judgment and a plan from the pane's record — the part that runs under the
 /// book's lock.
 fn decide(gate: &mut PaneGate, settings: Settings, allowance: &Allowance, now_ms: i64) -> Decided {
@@ -81,14 +75,15 @@ fn decide(gate: &mut PaneGate, settings: Settings, allowance: &Allowance, now_ms
 }
 
 /// The plan carried out, in the order that makes it safe: the tree saved first,
-/// then the worker ended, then the coordinator told what was done.
+/// then the worker ended, then the coordinator told what was done. Answers what
+/// was saved, when a restore point was asked for.
 fn carry_out(
     door: &dyn GateDoor,
     pane: &WorkerPane,
     decided: &Decided,
     earlier: Option<&SnapshotNote>,
     now_ms: i64,
-) -> Done {
+) -> Option<SnapshotNote> {
     let snapshot =
         decided
             .acts
@@ -135,19 +130,19 @@ fn carry_out(
             now_ms,
         );
     }
-    Done { snapshot, acted }
+    snapshot
 }
 
 /// What happened, into the pane's record — and the reading the board shows.
 fn record(
     gate: &mut PaneGate,
     decided: Decided,
-    done: &Done,
+    saved: Option<&SnapshotNote>,
     settings: Settings,
     around: &Around,
     now_ms: i64,
 ) {
-    if let Some(note) = &done.snapshot {
+    if let Some(note) = saved {
         gate.snapshot = Some(note.clone());
         // An attempt was made: the count starts over whether or not git agreed,
         // so a checkout that cannot be saved is not asked again every beat.
@@ -199,8 +194,8 @@ pub(super) fn step(
     now_ms: i64,
 ) {
     let decided = decide(gate, settings, &around.allowance, now_ms);
-    let done = carry_out(door, pane, &decided, gate.snapshot.as_ref(), now_ms);
-    record(gate, decided, &done, settings, around, now_ms);
+    let saved = carry_out(door, pane, &decided, gate.snapshot.as_ref(), now_ms);
+    record(gate, decided, saved.as_ref(), settings, around, now_ms);
 }
 
 /// The budgets that apply to one worker, from what a person set and what the
@@ -287,9 +282,9 @@ pub(super) fn sweep(host: &dyn Host, overrides: &[(String, LaunchOverride)], now
         let earlier = gate_book::book()
             .pane_mut(pane.term)
             .and_then(|gate| gate.snapshot.clone());
-        let done = carry_out(&door, pane, &decided, earlier.as_ref(), now_ms);
+        let saved = carry_out(&door, pane, &decided, earlier.as_ref(), now_ms);
         if let Some(gate) = gate_book::book().pane_mut(pane.term) {
-            record(gate, decided, &done, settings, &around, now_ms);
+            record(gate, decided, saved.as_ref(), settings, &around, now_ms);
         }
     }
 }
