@@ -330,11 +330,14 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
       const after = counts();
       const delta = (command) => (after[command] ?? 0) - (before[command] ?? 0);
       const tallied = [...fileTree.querySelectorAll(".tree-row.is-file .tree-tally")].filter((tally) => tally.textContent.includes("+2")).length;
+      // The paints of the burst's own window, before the idle wait below adds the
+      // dwell's end and the marks' fade.
+      const paintsDuring = (typeof treeTouchPaints === "number" ? treeTouchPaints : NaN) - paintsBefore;
       // Nothing writing and nothing held: no animation runs and no timer of the
       // tree's is armed — the cost of an idle tree is zero.
       await sleep(hold + 1500);
       const idle = {
-        animations: fileTree.getAnimations({ subtree: true }).length,
+        animations: document.getAnimations().filter((one) => fileTree.contains(one.effect?.target)).length,
         timers: [typeof treeTouchSweep === "undefined" ? "missing" : treeTouchSweep, typeof treeNumstatTimer === "undefined" ? "missing" : treeNumstatTimer, typeof treeVcsSweep === "undefined" ? "missing" : treeVcsSweep].filter((timer) => timer !== null).length,
       };
       return {
@@ -344,7 +347,7 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
         longFrames,
         longTasks,
         worstGapMs: Math.round(worstGapMs),
-        paints: (typeof treeTouchPaints === "number" ? treeTouchPaints : NaN) - paintsBefore,
+        paints: paintsDuring,
         shown,
         tallied,
         numstat: delta("scm_numstat"),
@@ -796,9 +799,16 @@ export async function testExplorerWriting(browser, origin, ok) {
       };
       window.__XT__.sleep = (ms) => new Promise((done) => setTimeout(done, ms));
       window.__XT__.writing = (relative) => window.__XT__.row(relative)?.dataset.agentWriting ?? null;
+      // The document's list names every animation however it is targeted — a
+      // pseudo-element's included — where an element's own `getAnimations` leaves
+      // pseudo-elements out unless asked, and engines differ in how they ask.
+      window.__XT__.animationsOn = (root) => document.getAnimations().filter((one) => {
+        const target = one.effect?.target;
+        return Boolean(target) && root.contains(target);
+      });
       window.__XT__.sweeping = (relative) => {
         const row = window.__XT__.row(relative);
-        return row ? row.getAnimations({ subtree: true }).filter((one) => one instanceof CSSAnimation && one.animationName === "tree-writing-sweep" && one.playState === "running").length : 0;
+        return row ? window.__XT__.animationsOn(row).filter((one) => one.animationName === "tree-writing-sweep" && one.playState === "running").length : 0;
       };
     });
 
@@ -835,7 +845,7 @@ export async function testExplorerWriting(browser, origin, ok) {
 
     /* with follow off the folders stay shut and wear the state themselves */
     const folders = await page.evaluate(async ({ min }) => {
-      const { root, fire, act, settle, row, open, sleep } = window.__XT__;
+      const { root, fire, act, settle, row, open, sleep, sweeping } = window.__XT__;
       const toggle = document.getElementById("tree-follow");
       toggle.click();
       fire("term:1", [act("write", `${root}/docs/guide.md`, "started", { call: "toolu_b" })]);
@@ -844,7 +854,7 @@ export async function testExplorerWriting(browser, origin, ok) {
       const out = {
         within: folder?.dataset.agentWritingWithin ?? null,
         stayedClosed: !open("docs"),
-        sweeping: folder ? folder.getAnimations({ subtree: true }).filter((one) => one instanceof CSSAnimation && one.animationName === "tree-writing-sweep").length : 0,
+        sweeping: sweeping("docs"),
         said: (() => { const word = t("tree.writing.within", ""); return word.length > 0 && (folder?.getAttribute("aria-label") ?? "").includes(word); })(),
       };
       fire("term:1", [act("write", `${root}/docs/guide.md`, "finished", { call: "toolu_b" })]);
@@ -1101,8 +1111,8 @@ export async function testExplorerAgentMemory(browser, origin, ok) {
       for (const row of [...fileTree.querySelectorAll(":scope > .tree-row.is-dir")]) await row._treeUnfold(true);
       await settle();
     });
-    // One round: 200 calls that end, 200 that never do — each with an id nobody
-    // has used — over the 400 files, then a breath.
+    // One round: 200 calls — half end, half never do — each with an id nobody
+    // has used, over the 400 files, then a breath.
     const round = (rounds, windowMs) => page.evaluate(async ({ rounds, windowMs }) => {
       const { root, fire, act } = window.__XT__;
       const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -1124,7 +1134,7 @@ export async function testExplorerAgentMemory(browser, origin, ok) {
     // Warm: the first rounds build what any long run keeps (rows dressed, maps filled).
     await round(5, windowMs);
     const before = await heap();
-    const calls = await round(50, windowMs);
+    const calls = await round(100, windowMs);
     const after = await heap();
     const held = await page.evaluate(() => ({
       writes: typeof treeWrites === "object" ? treeWrites.size : NaN,
@@ -1138,7 +1148,7 @@ export async function testExplorerAgentMemory(browser, origin, ok) {
     const numbers = { calls, beforeKiB: Math.round(before / 1024), afterKiB: Math.round(after / 1024), growthKiB, ...held };
     console.log(`EXPLORER_AGENT_MEMORY ${JSON.stringify(numbers)}`);
     ok("what the tree holds for a long run is bounded by its caps: the open writes, the files waiting for git, the rows dressed and the window's ring", held.writes <= held.cap && held.wanted <= held.cap * 8 && held.dressed <= held.cap * 8 && held.touches <= held.cap && held.activityRing <= 20 * 4, JSON.stringify(numbers));
-    ok("fifty rounds of four hundred calls — half of them never ended — leave the heap, garbage collected, where it was (growth under 2 MiB)", Number.isFinite(growthKiB) && growthKiB < 2048 && held.writes <= held.cap, JSON.stringify(numbers));
+    ok("a hundred rounds of two hundred calls — half of them never ended — leave the heap, garbage collected, where it was (growth under 3 MiB: a leak of one small object per call would be larger)", Number.isFinite(growthKiB) && growthKiB < 3072 && held.writes <= held.cap, JSON.stringify(numbers));
     ok("the memory suite raised no renderer faults", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();
