@@ -8,13 +8,16 @@
 //! ignore rules do not name — and saves it as a commit under a ref of its own,
 //! `refs/zerocode/checkpoints/<worker>/<number>`. The worker's files, index,
 //! branch and stash are exactly as they were; what was saved is one `git show`
-//! or `git checkout <ref> -- .` away, and the newest few are kept.
+//! or `git checkout <ref> -- .` away. The newest few of each worker are kept
+//! ([`KEPT`]) and no more than [`REFS_KEPT_MAX`] in all, so that a repository the
+//! gate has worked in for a month holds what it held on the first day.
 //!
 //! Two things keep it cheap on a machine that cannot spare it, because it runs
 //! on the beat while the worker works: the copy of the index carries each file's
 //! stat, so `add` hashes only what changed and not the whole tree; and one
 //! `rev-parse` answers everything the snapshot needs to know of the checkout.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 /// The refs under which checkpoints live.
@@ -110,31 +113,47 @@ fn save_with(
     let commit = git(checkout, &commit, None)?;
     let reference = format!("{REF_ROOT}/{worker}/{number}");
     git(checkout, &["update-ref", &reference, commit.trim()], None)?;
-    prune(checkout, worker);
+    prune(checkout);
     Ok(Some(reference))
 }
 
-/// Lets go of all but the newest [`KEPT`] checkpoints of `worker`.
-fn prune(checkout: &Path, worker: &str) {
+/// Lets go of what a restore point is not for: all but the newest [`KEPT`] of each
+/// worker, and everything past the newest [`REFS_KEPT_MAX`] in the repository.
+/// Newest by the commit's time and never by number — a later attempt of a worker
+/// numbers its checkpoints from one again, and its first is the newest there is.
+fn prune(checkout: &Path) {
     let Ok(listed) = git(
         checkout,
         &[
             "for-each-ref",
+            "--sort=-refname",
+            "--sort=-committerdate",
             "--format=%(refname)",
-            &format!("{REF_ROOT}/{worker}/"),
+            &format!("{REF_ROOT}/"),
         ],
         None,
     ) else {
         return;
     };
-    let mut held: Vec<(u32, &str)> = listed
-        .lines()
-        .filter_map(|line| Some((line.rsplit('/').next()?.parse().ok()?, line)))
-        .collect();
-    held.sort_unstable_by_key(|(number, _)| std::cmp::Reverse(*number));
-    for (_, reference) in held.into_iter().skip(KEPT) {
-        let _ = git(checkout, &["update-ref", "-d", reference], None);
+    let mut of_worker: HashMap<&str, usize> = HashMap::new();
+    let mut kept = 0;
+    for reference in listed.lines() {
+        let count = of_worker.entry(worker_of(reference)).or_insert(0);
+        if *count < KEPT && kept < REFS_KEPT_MAX {
+            *count += 1;
+            kept += 1;
+        } else {
+            let _ = git(checkout, &["update-ref", "-d", reference], None);
+        }
     }
+}
+
+/// `refs/zerocode/checkpoints/<worker>/<number>` → `<worker>`.
+fn worker_of(reference: &str) -> &str {
+    reference
+        .strip_prefix(REF_ROOT)
+        .and_then(|rest| rest.trim_start_matches('/').split('/').next())
+        .unwrap_or_default()
 }
 
 /// Whether a worker's id can be one component of a ref: letters, digits and the
@@ -148,10 +167,16 @@ fn is_ref_part(worker: &str) -> bool {
 }
 
 /// One git command in `checkout`, its output, or git's own first line. With
-/// `index` it works in that index file and not the checkout's own.
+/// `index` it works in that index file and not the checkout's own. The one door
+/// every git of this module goes in by, so that none is the one that takes an
+/// optional lock a worker's own `add` or `commit` would wait for.
 fn git(checkout: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
     let mut command = crate::proc::quiet_command("git");
-    command.arg("-C").arg(checkout).args(args);
+    command
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(checkout)
+        .args(args);
     if let Some(index) = index {
         command.env("GIT_INDEX_FILE", index);
     }
