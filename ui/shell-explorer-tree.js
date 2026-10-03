@@ -660,8 +660,17 @@ function followTreeTo(relative) {
  * Each road says a call's start and its end, and says the call's id on both
  * when its agent has one (`activity.call`). A start and an end are one call
  * when they share the id; where an agent gives none, when they share verb and
- * target; an end that names no file at all closes the pane's oldest open call
- * of its verb. There is no agent's name below. */
+ * files (as the tree resolved them, so a path spelled absolutely on one end and
+ * relatively on the other is still one); an end that names no file at all closes
+ * the pane's oldest open call of its verb. There is no agent's name below. */
+
+/* How a helper's card is named (`sub:<term>:<id>`, the backend's
+ * `hooks::activity_subagent`). */
+const TREE_HELPER_CARD_PREFIX = "sub:";
+
+/* What keeps the parts of a call's key apart: a character no pane name, id,
+ * verb or path holds. */
+const TREE_WRITE_KEY_GAP = "\u0000";
 
 /* Is this activity's call one the tree can see the end of? A helper's card
  * with no call id is fed a snapshot of what the helper is doing now (zo's
@@ -669,15 +678,14 @@ function followTreeTo(relative) {
  * it ever says the editing is over. A write opened for it would shimmer until
  * its bound. Every other activity is an event. */
 function treeWriteIsEvent(pane, activity) {
-  return Boolean(activity.call) || !pane.startsWith("sub:");
+  return Boolean(activity.call) || !pane.startsWith(TREE_HELPER_CARD_PREFIX);
 }
 
 /* One call's key: its pane and its id, or — with no id — its pane, verb and
- * target. */
-function treeWriteKey(pane, activity) {
-  return activity.call
-    ? `${pane}\u0000${activity.call}`
-    : `${pane}\u0000${activity.verb}\u0000${activity.target ?? ""}`;
+ * the files it writes. */
+function treeWriteKey(pane, activity, paths) {
+  const parts = activity.call ? [pane, activity.call] : [pane, activity.verb, ...paths];
+  return parts.join(TREE_WRITE_KEY_GAP);
 }
 
 /* What one activity does to the writes open: a start opens one, an end closes
@@ -694,7 +702,7 @@ function noteTreeWrite(pane, activity, files, now) {
 
 function openTreeWrite(pane, activity, paths, now) {
   if (paths.length === 0 || !treeWriteIsEvent(pane, activity)) return false;
-  const key = treeWriteKey(pane, activity);
+  const key = treeWriteKey(pane, activity, paths);
   // A start said again for a call still open is the same call, restarted.
   treeWrites.delete(key);
   treeWrites.set(key, { paths, pane, verb: activity.verb, since: now, until: now + TREE_WRITING_MAX_MS, closed: false });
@@ -704,9 +712,9 @@ function openTreeWrite(pane, activity, paths, now) {
 
 /* The call an end belongs to: by key, else — an end that names no file and no
  * id — the pane's oldest call of its verb that is still open. */
-function heldTreeWrite(pane, activity) {
-  const exact = treeWrites.get(treeWriteKey(pane, activity));
-  if (exact || activity.call || activity.target !== undefined || activity.writes?.length) return exact;
+function heldTreeWrite(pane, activity, paths) {
+  const exact = treeWrites.get(treeWriteKey(pane, activity, paths));
+  if (exact || activity.call || paths.length > 0) return exact;
   for (const held of treeWrites.values()) {
     if (!held.closed && held.pane === pane && held.verb === activity.verb) return held;
   }
@@ -718,7 +726,7 @@ function heldTreeWrite(pane, activity) {
  * heard (a batch lost, a window opened mid-turn) still names its files, and
  * git is asked about those. */
 function closeTreeWrite(pane, activity, paths, now, landed) {
-  const held = heldTreeWrite(pane, activity);
+  const held = heldTreeWrite(pane, activity, paths);
   const moved = held ? finishTreeWrite(held, now) : false;
   if (landed) wantTreeNumstat(held?.paths ?? paths);
   return moved;
