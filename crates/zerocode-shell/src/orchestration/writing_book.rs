@@ -432,6 +432,13 @@ mod tests {
         }
         let bare_us = micros(started) / BEATS as u128;
         let bare = desk_of(&ledger);
+        // What a beat pays for the copy of the desk alone, so the book's own part
+        // is the warm beat less this.
+        let started = std::time::Instant::now();
+        for _ in 0..BEATS {
+            std::hint::black_box(bare.clone());
+        }
+        let clone_us = micros(started) / BEATS as u128;
         let mut memo = LintMemo::default();
         let started = std::time::Instant::now();
         memo.begin();
@@ -451,9 +458,10 @@ mod tests {
         let rss_after = resident_kb();
         assert_eq!(memo.worked(), desk::STAGE_ROWS);
         eprintln!(
-            "WRITING_BOOK_NUMBERS rows={} summary_bytes={} beats={BEATS} desk_snapshot_us={bare_us} cold_dress_us={cold_us} warm_beat_us={warm_us} rss_kb_before={rss_before} rss_kb_after={rss_after} held={}",
+            "WRITING_BOOK_NUMBERS rows={} summary_bytes={} beats={BEATS} desk_snapshot_us={bare_us} desk_clone_us={clone_us} cold_dress_us={cold_us} warm_beat_us={warm_us} warm_book_us={} rss_kb_before={rss_before} rss_kb_after={rss_after} held={}",
             desk::STAGE_ROWS,
             summary.len(),
+            warm_us.saturating_sub(clone_us),
             memo.len()
         );
     }
