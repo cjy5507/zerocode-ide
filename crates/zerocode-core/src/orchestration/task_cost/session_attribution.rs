@@ -109,10 +109,10 @@ pub(super) fn covers(owners: &[SessionOwner], bounds: Option<(i64, i64)>) -> boo
         }
         if covered.is_none() && start <= first && end >= first {
             covered = Some(end);
-        } else if let Some(previous) = covered {
-            if start <= previous {
-                covered = Some(previous.max(end));
-            }
+        } else if let Some(previous) = covered
+            && start <= previous
+        {
+            covered = Some(previous.max(end));
         }
     }
     covered.is_some_and(|end| end >= last)

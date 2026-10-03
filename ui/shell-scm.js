@@ -980,27 +980,25 @@ let scmObserverHealthRead = 0;
 
 function scmObserverFailureWords(kind) {
   const words = {
-    missing_tool: ["scm.health.missingTool", "gh 명령을 찾지 못함 — 설치와 PATH를 확인하세요"],
-    authentication: ["scm.health.authentication", "GitHub 인증 실패 — GitHub 설정에서 다시 로그인하세요"],
-    forbidden: ["scm.health.forbidden", "접근 거절 — 계정의 저장소 권한을 확인하세요"],
-    not_found: ["scm.health.notFound", "대상을 찾지 못함 — 저장소와 접근 권한을 확인하세요"],
-    rate_limited: ["scm.health.rateLimited", "GitHub 요청 제한 — 안내된 재시도 시각까지 기다립니다"],
-    timeout: ["scm.health.timeout", "응답 시간 초과 — 네트워크를 확인하세요"],
-    unavailable: ["scm.health.unavailable", "GitHub 서버 응답 오류"],
-    invalid_response: ["scm.health.invalidResponse", "응답 형식을 읽지 못함"],
-    refused: ["scm.health.refused", "요청 거절 — 로그인·권한·네트워크를 확인하세요 (원인 미확정)"],
+    missing_tool: t("scm.health.missingTool", "gh 명령을 찾지 못함 — 설치와 PATH를 확인하세요"),
+    authentication: t("scm.health.authentication", "GitHub 인증 실패 — GitHub 설정에서 다시 로그인하세요"),
+    forbidden: t("scm.health.forbidden", "접근 거절 — 계정의 저장소 권한을 확인하세요"),
+    not_found: t("scm.health.notFound", "대상을 찾지 못함 — 저장소와 접근 권한을 확인하세요"),
+    rate_limited: t("scm.health.rateLimited", "GitHub 요청 제한 — 안내된 재시도 시각까지 기다립니다"),
+    timeout: t("scm.health.timeout", "응답 시간 초과 — 네트워크를 확인하세요"),
+    unavailable: t("scm.health.unavailable", "GitHub 서버 응답 오류"),
+    invalid_response: t("scm.health.invalidResponse", "응답 형식을 읽지 못함"),
+    refused: t("scm.health.refused", "요청 거절 — 로그인·권한·네트워크를 확인하세요 (원인 미확정)"),
   };
-  const [key, fallback] = words[kind] ?? words.refused;
-  return t(key, fallback);
+  return words[kind] ?? words.refused;
 }
 
 function scmObserverOperationWords(operation) {
   const words = {
-    discovery: ["scm.health.discovery", "PR 찾기"], checks: ["scm.health.checks", "CI 확인"],
-    details: ["scm.health.details", "CI 상세"], reviews: ["scm.health.reviews", "리뷰"], stack: ["scm.health.stack", "연관 PR"],
+    discovery: t("scm.health.discovery", "PR 찾기"), checks: t("scm.health.checks", "CI 확인"),
+    details: t("scm.health.details", "CI 상세"), reviews: t("scm.health.reviews", "리뷰"), stack: t("scm.health.stack", "연관 PR"),
   };
-  const [key, fallback] = words[operation] ?? words.discovery;
-  return t(key, fallback);
+  return words[operation] ?? words.discovery;
 }
 
 function paintScmObserverHealth() {

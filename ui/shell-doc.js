@@ -8705,12 +8705,12 @@ async function openArtifactPreferences(feedback = null) {
     scopeLabel.textContent = t("artifacts.preferences.scope", "적용 범위");
     scope = document.createElement("select");
     scope.name = "scope";
-    for (const [value, key, word] of [
-      ["project", "project", "이 프로젝트 — 작업트리 공유"],
-      ["personal", "personal", "개인 — 이 기기의 모든 프로젝트"],
+    for (const [value, word] of [
+      ["project", t("artifacts.preferences.project", "이 프로젝트 — 작업트리 공유")],
+      ["personal", t("artifacts.preferences.personal", "개인 — 이 기기의 모든 프로젝트")],
     ]) {
       const option = document.createElement("option");
-      option.value = value; option.textContent = t(`artifacts.preferences.${key}`, word);
+      option.value = value; option.textContent = word;
       scope.append(option);
     }
     scope.addEventListener("change", refreshControls);
