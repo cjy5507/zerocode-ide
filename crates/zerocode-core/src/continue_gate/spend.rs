@@ -22,6 +22,12 @@ use crate::usage_stats::{SourceTurn, estimate_cost_usd, parse_record};
 /// reader judges one file and never looks at the id.
 const NO_SESSION: &str = "-";
 
+/// What every billable record carries and most of a transcript does not: the
+/// word `usage`, looked for before a line is parsed. A transcript is mostly tool
+/// results — file contents, command output, many kilobytes a line — and parsing a
+/// megabyte of them to learn that none is a model call is the cost this avoids.
+const USAGE_MARK: &str = "\"usage\"";
+
 /// One model call's cost.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CallCost {
@@ -101,7 +107,7 @@ fn cost_of(turn: &SourceTurn) -> CallCost {
 impl CostReader for ClaudeFormat {
     fn feed(&mut self, lines: &str) -> Vec<CallCost> {
         let mut finished = Vec::new();
-        for line in lines.lines() {
+        for line in lines.lines().filter(|line| line.contains(USAGE_MARK)) {
             let Some(turn) = parse_record(line, Some(NO_SESSION)) else {
                 continue;
             };

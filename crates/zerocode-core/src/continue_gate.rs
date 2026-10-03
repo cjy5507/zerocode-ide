@@ -221,13 +221,13 @@ impl Code {
     #[must_use]
     pub const fn word(self) -> &'static str {
         match self {
-            Self::CheckpointDue
-            | Self::CostRising
-            | Self::ReworkLoop
-            | Self::TaskBudgetNear
-            | Self::DayBudgetNear
-            | Self::TaskBudgetStop
-            | Self::DayBudgetStop => "",
+            Self::CheckpointDue => "checkpoint_due",
+            Self::CostRising => "cost_rising",
+            Self::ReworkLoop => "rework_loop",
+            Self::TaskBudgetNear => "task_budget_near",
+            Self::DayBudgetNear => "day_budget_near",
+            Self::TaskBudgetStop => "task_budget_stop",
+            Self::DayBudgetStop => "day_budget_stop",
         }
     }
 }

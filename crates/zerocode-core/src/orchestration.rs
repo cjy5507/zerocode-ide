@@ -559,6 +559,7 @@ impl MessageKind {
                 | Self::ClassifierDeclined
                 | Self::ModelDeviated
                 | Self::AccountSwitched
+                | Self::GateJudged
         )
     }
 }
@@ -13615,10 +13616,47 @@ impl Ledger {
     /// no run of this ledger or the row already stands.
     pub fn gate_judged(
         &mut self,
-        _receipt: &GateReceipt,
-        _now_ms: i64,
+        receipt: &GateReceipt,
+        now_ms: i64,
     ) -> Result<Option<String>, String> {
-        Ok(None)
+        if receipt.key.trim().is_empty() {
+            return Err("a gate receipt needs a key".to_string());
+        }
+        let Some((run_id, task)) = self.runs.iter().find_map(|run| {
+            let attempt = run.dispatch(&receipt.dispatch)?;
+            (attempt.worker == receipt.worker).then(|| (run.id.clone(), attempt.task.clone()))
+        }) else {
+            return Ok(None);
+        };
+        let stands = self.run(&run_id).is_some_and(|run| {
+            run.messages.iter().any(|row| {
+                row.kind == MessageKind::GateJudged
+                    && serde_json::from_str::<serde_json::Value>(row.body.as_str())
+                        .ok()
+                        .and_then(|body| body["key"].as_str().map(str::to_string))
+                        .as_deref()
+                        == Some(receipt.key.as_str())
+            })
+        });
+        if stands {
+            return Ok(None);
+        }
+        let Some(to) = self.run(&run_id).map(Run::address) else {
+            return Ok(None);
+        };
+        let draft = Draft {
+            from: LEDGER_ITSELF.to_string(),
+            to,
+            kind: MessageKind::GateJudged,
+            body: receipt.body(&task, now_ms).to_string().into(),
+            subject: Text::default(),
+            priority: Priority::Normal,
+            payload: Text::default(),
+            thread: None,
+            task: Some(task),
+            dispatch: Some(receipt.dispatch.clone()),
+        };
+        self.post(&run_id, draft, now_ms).map(Some)
     }
 
     /// A sleeping worker cannot be seated again, and this is the end of it.
