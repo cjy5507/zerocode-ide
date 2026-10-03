@@ -10,7 +10,8 @@
 //!
 //! What it does not read, and why:
 //! - the tests: from a `#[cfg(test)] mod` to the end of the file, and the
-//!   files that are wholly test code (`main_unit_tests.rs`, `orchestration/tests.rs`);
+//!   files that are wholly test code (`main_unit_tests.rs`, `orchestration/tests.rs`,
+//!   `orchestration/gate_snapshot/tests.rs`);
 //! - `build.rs`, which is not under `src` and runs at build time;
 //! - `crates/zo-ide`, the zo runtime, which has its own background git
 //!   (`--no-optional-locks` in `commit_ledger.rs` and `deep_gate.rs`).
@@ -27,6 +28,10 @@ const EXEMPT_CRATES: &[(&str, &str)] = &[(
 const EXEMPT_FILES: &[(&str, &str)] = &[
     ("zerocode-shell/src/main_unit_tests.rs", "test code"),
     ("zerocode-shell/src/orchestration/tests.rs", "test code"),
+    (
+        "zerocode-shell/src/orchestration/gate_snapshot/tests.rs",
+        "test code",
+    ),
 ];
 
 /// The three ways a child is started in this repository.
