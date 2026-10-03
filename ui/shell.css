@@ -529,8 +529,11 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   }
 }
 
+/* A notice stands above the conversation's body, its words on the list's
+ * left edge: the rail's column and the list's gutter, as the rows below. */
 .pane-chat-notice {
-  margin: var(--space-3) var(--space-4) 0;
+  margin: var(--space-3) var(--helper-gutter, var(--chat-list-pad-x)) 0
+    calc(var(--chat-turn-rail-w) + var(--helper-gutter, var(--chat-list-pad-x)));
   color: var(--ink-mist);
   font-size: var(--text-xs);
 }
