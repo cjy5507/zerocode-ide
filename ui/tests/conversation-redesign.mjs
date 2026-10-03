@@ -389,6 +389,14 @@ async function redesignShellOutput(browser, origin, ok) {
           doors: doors.map((door) => door.textContent),
           mono: out ? /mono/i.test(getComputedStyle(out).fontFamily) : false,
         };
+        // The lines stand inside their row — their hairline at the words' axis, their box no wider than
+        // the line less that indent — and nothing the step shows pushes the list sideways.
+        const list = row.parentElement;
+        const rowBox = row.getBoundingClientRect();
+        const outBox = out?.getBoundingClientRect() ?? null;
+        seen.overshoot = outBox ? Math.round(outBox.right - rowBox.right) : null;
+        seen.inside = outBox !== null && outBox.left >= rowBox.left && outBox.right <= rowBox.right + 0.5;
+        seen.noSideScroll = list.scrollWidth <= list.clientWidth + 1;
         doors[0]?.click();
         await settle();
         seen.byPointer = opened.at(-1) ?? null;
@@ -407,6 +415,11 @@ async function redesignShellOutput(browser, origin, ok) {
     ok(
       "R5: a shell step's first lines stand under its row while the row is closed, in mono",
       seen.shown && seen.closed && seen.lines === 3 && seen.mono,
+      JSON.stringify(seen),
+    );
+    ok(
+      "R5: a shell step's first lines stand inside its row — they never reach past it, and never push the list sideways",
+      seen.inside && seen.noSideScroll,
       JSON.stringify(seen),
     );
     ok(

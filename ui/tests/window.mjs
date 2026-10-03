@@ -37671,15 +37671,26 @@ const flatNarrow = await page.evaluate(async () => {
     noSideScroll: list.scrollWidth <= list.clientWidth + 1 &&
       document.documentElement.scrollWidth <= innerWidth,
     // What reaches furthest right, for the day this goes red: the class and
-    // the overshoot of the widest descendant, so the culprit is named.
+    // the overshoot of the widest descendant, so the culprit is named — the
+    // widest of all, and the widest no box between it and the list cuts
+    // (t-22100: a clipped target is no scroll; the one nothing cuts is).
     widest: (() => {
       const edge = list.getBoundingClientRect().right;
+      const cut = (node) => {
+        for (let up = node.parentElement; up && up !== list; up = up.parentElement) {
+          if (getComputedStyle(up).overflowX !== "visible") return true;
+        }
+        return false;
+      };
       let worst = { cls: null, over: 0 };
+      let uncut = { cls: null, over: 0 };
       for (const node of list.querySelectorAll("*")) {
         const over = Math.round(node.getBoundingClientRect().right - edge);
-        if (over > worst.over) worst = { cls: `${node.tagName}.${node.className}`.slice(0, 60), over };
+        const named = { cls: `${node.tagName}.${node.className}`.slice(0, 60), over };
+        if (over > worst.over) worst = named;
+        if (over > uncut.over && !cut(node)) uncut = named;
       }
-      return worst;
+      return { ...worst, uncut };
     })(),
     footOn: foot.getBoundingClientRect().bottom <= innerHeight + 1,
     frame: getComputedStyle(face).overflowY === "hidden" &&
