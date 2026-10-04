@@ -89,6 +89,7 @@ import { testWorkers } from "./workers.mjs";
 import { testSidebarAgents } from "./sidebar-agents.mjs";
 import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
+import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationFoot, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf, testConversationRelease, testConversationSteps, testConversationCodeColours, testConversationStreamWork, testConversationTypingWork } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
@@ -314,6 +315,7 @@ suite("sidebar-agents", testSidebarAgents);
 // The sidebar tells 작업 중, 검증 대기 and 완료 apart, by the ledger (t-18902).
 suite("sidebar-review-state", testSidebarReviewState);
 suite("sidebar-landing-state", testSidebarLandingState);
+suite("landing-alerts", testLandingAlerts);
 /* The conversation view against the Claude Code extension's own webview
  * (t-6323, docs/design/agent-conversation-claude-code-grammar-20260915.md
  * §10): each suite one difference that was closed, read off the laid-out page. */

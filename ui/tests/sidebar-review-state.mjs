@@ -102,7 +102,7 @@ const TALL = 2400;
 const WANT_PHASE = {
   reported: "review", "claimed-verified": "review", "claimed-merged": "review", "claimed-deployed": "review",
   verified: "vouched", merged: "vouched", deployed: "vouched", failed: "", closed: "closed",
-  unreviewable: "unreviewable",
+  unreviewable: "unreviewable", "nothing-to-land": "vouched",
 };
 
 export async function testSidebarReviewState({ browser, origin, ok, faults }) {
