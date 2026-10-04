@@ -32,6 +32,7 @@ pub(crate) mod desk;
 pub(crate) mod gate_book;
 mod gate_meter;
 mod gate_snapshot;
+pub(crate) mod hand_in_keep;
 mod mail_triage;
 pub(crate) mod restart_census;
 mod stall_cause;
@@ -1985,6 +1986,11 @@ pub(crate) struct LedgerAgent {
     /// beside the cost. `None` for a task still moving, for a worker who wrote
     /// no summary, and on every row read another way.
     pub(crate) writing: Option<zerocode_core::plain_text::TextLint>,
+    /// What was kept of what this worker handed in (t-32798) — laid on by the
+    /// board's beat from the artifact store ([`hand_in_keep::dress`]); `None` for
+    /// a worker that handed nothing in by name, and on every row read another way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) kept: Option<zerocode_core::hand_in::Facts>,
 }
 
 /// Volatile relations layered over the board's two permanent graph edges.
@@ -2324,6 +2330,10 @@ pub(crate) fn refresh_board_ledger() {
     summon_difficulty::record_observations(outcomes, crate::now_epoch_ms());
     summon_model::record_observations(model_outcomes, crate::now_epoch_ms());
     summon_choice::record_observations(agent_outcomes, crate::now_epoch_ms());
+    // What was kept of what workers handed in is laid over the rows here, from the
+    // store's book in memory, outside the ledger's view (t-32798).
+    let mut next = next;
+    hand_in_keep::dress(&mut next);
     // Build, allocate and drop old rows outside the publication lock. The
     // main-thread reader holds it only long enough to clone an Arc.
     let next = Arc::new(next);
@@ -2490,6 +2500,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 cost: None,
                 gate: None,
                 writing: None,
+                kept: None,
             });
         }
     }
@@ -9075,7 +9086,7 @@ fn run_seated(
     garnish_idle_since(argv.first().map(String::as_str), &mut answered);
     garnish_federation_help(argv.first().map(String::as_str), &mut answered);
     garnish_artifacts(argv.first().map(String::as_str), &mut answered);
-    note_worker_report(argv, team_id, pane, &answered, now_ms);
+    hand_in_keep::after_send(argv, &answered);
     answered
 }
 
@@ -9110,48 +9121,6 @@ fn garnish_artifacts(verb: Option<&str>, reply: &mut zerocode_hookd::TeamAnswer)
         None => garnish(&mut answer),
     }
     reply.stdout = format!("{answer}\n");
-}
-
-/// A report a `send` names — `--payload {"reportPath":…}` first, an absolute
-/// `.md` path in the body second — copied into the artifact store under the
-/// origin the seat's ledger row vouches for (t-2720 §4: reports leave
-/// `/tmp`). Read only after the send succeeded, so a refused message registers
-/// nothing; best-effort, so a copy that failed leaves the answer as it was.
-fn note_worker_report(
-    argv: &[String],
-    team_id: &str,
-    pane: &str,
-    reply: &zerocode_hookd::TeamAnswer,
-    now_ms: i64,
-) {
-    if reply.exit_code != 0 || argv.first().map(String::as_str) != Some("send") {
-        return;
-    }
-    let value = |flag: &str| {
-        argv.iter()
-            .position(|word| word == flag)
-            .and_then(|at| argv.get(at + 1))
-            .map(String::as_str)
-    };
-    let Some(path) =
-        crate::artifact_runtime::report_path_in(value("--payload"), value("--body").unwrap_or(""))
-    else {
-        return;
-    };
-    let Some(store) = crate::artifact_runtime::store() else {
-        return;
-    };
-    let origin = with_ledger_seats(|ledger, _| {
-        ledger.runs().iter().find_map(|run| {
-            run.worker_in_pane(team_id, pane)
-                .map(|worker| crate::artifact_runtime::origin_of_worker(run, worker))
-        })
-    })
-    .flatten()
-    .unwrap_or_default();
-    // The kind of report the worker stated, when it stated one (t-36910).
-    let stated = crate::artifact_runtime::report_kind_in(value("--payload"));
-    let _ = store.register_report(&path, origin, stated.as_deref(), now_ms);
 }
 
 /// Carry out the EFFECT of one decision, and say what the shim should print.
@@ -10006,6 +9975,9 @@ fn carried(
                 target.remove_pane(&seat.pane);
                 drop(tables);
                 host.close(term);
+                // What the worker handed in is kept before anything else can take
+                // its checkout (t-32798): asynchronous, and idempotent.
+                hand_in_keep::note_release(&seat.worker);
             }
             let reply = zerocode_core::agent_teams::Reply::ok(format!(
                 "{}\n",

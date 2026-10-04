@@ -21,7 +21,7 @@
 //! - It does not know where evidence folders are. The automation runtime
 //!   REGISTERS them ([`Store::adopt_source`]) with the origin it holds; this
 //!   file only scans what it was handed. The orchestration runtime hands in
-//!   worker reports the same way ([`Store::register_report`]).
+//!   worker reports the same way ([`Store::register_kept`]).
 //! - It does not delete without being told the person confirmed
 //!   ([`Store::delete`] with `confirmed == false` is a no-op), and it never
 //!   deletes a file outside the app's own data root.
@@ -40,6 +40,10 @@ use zerocode_core::artifact::{
 use zerocode_core::artifact_publish::{ExportFormat, PageRenderer};
 use zerocode_core::artifact_transcript::{PageFact, RemoteFact};
 use zerocode_core::evidence_digest::Digest;
+
+mod kept;
+
+pub(crate) use kept::KeptFile;
 
 /// The store's folder under the local data root.
 pub(crate) const STORE_DIR_NAME: &str = "artifacts";
@@ -472,6 +476,9 @@ pub(crate) struct Store {
     /// 이 창이 방금 내보낸 파일들, 오래된 것부터. 토스트의 「Finder에서 보기」는 이 밖의
     /// 경로를 보이지 않는다.
     exported: Mutex<VecDeque<PathBuf>>,
+    /// What a worker's hand-in named and the store kept of it, one manifest each
+    /// (t-32798, [`kept`]).
+    hand_ins: Mutex<kept::HandIns>,
 }
 
 fn store_cell() -> &'static Mutex<Option<Arc<Store>>> {
@@ -571,6 +578,7 @@ impl Store {
         }
         // Tokens are rebuilt from disk lazily by the first scan; the rows the
         // catalog named are re-stamped there too.
+        let hand_ins = kept::HandIns::load(&root);
         Self {
             root,
             local_data_root: local_data_root.to_path_buf(),
@@ -588,6 +596,7 @@ impl Store {
             feedback: Mutex::new(HashMap::new()),
             renderer: Mutex::new(None),
             exported: Mutex::new(VecDeque::new()),
+            hand_ins: Mutex::new(hand_ins),
         }
     }
 
@@ -796,23 +805,10 @@ impl Store {
         Ok(())
     }
 
-    /// Copy a worker's report into the store and catalog it. Idempotent: the
-    /// same file under the same origin is the same artifact, and a source that
-    /// has not changed since the copy is not copied again. `stated` is the kind
-    /// of report the worker said it is ([`report_kind_in`]); `None` leaves the
-    /// kind to the file's name.
-    pub(crate) fn register_report(
-        &self,
-        source_path: &Path,
-        origin: Origin,
-        stated: Option<&str>,
-        now_ms: i64,
-    ) -> Result<Artifact, String> {
-        self.register_copy_as(source_path, Source::WorkerReport, origin, stated, now_ms)
-    }
-
-    /// Copy any file into the store under its source's bucket — the
-    /// hand-registration road (`manual`); nobody states a kind on it.
+    /// Copy any file into the store under its source's bucket — the hand-
+    /// registration road (`manual`), and, in the store's own tests, a report
+    /// copied verbatim (a worker's report is kept by [`Store::register_kept`],
+    /// which masks, caps and writes a manifest).
     pub(crate) fn register_copy(
         &self,
         source_path: &Path,
@@ -2039,6 +2035,9 @@ impl Store {
                 .unwrap_or_else(PoisonError::into_inner)
                 .evict(&artifact.id);
         }
+        // The manifests of what a worker handed in go on the same age as the rows
+        // they point at (t-32798).
+        self.prune_hand_ins(horizon);
         if pruned.rows > 0 || index.appended > 0 {
             let _ = self.compact(&mut index);
         }
@@ -2723,35 +2722,6 @@ fn worker_task_id<'a>(
         .map(|dispatch| dispatch.task.as_str())
 }
 
-/// The report path a `worker_done` names: the payload's `reportPath` first,
-/// else the first absolute Markdown path the body mentions. `None` when the
-/// message names nothing — most `worker_done`s do not.
-pub(crate) fn report_path_in(payload: Option<&str>, body: &str) -> Option<PathBuf> {
-    if let Some(payload) = payload
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(payload)
-        && let Some(path) = value["reportPath"].as_str()
-        && Path::new(path).is_absolute()
-    {
-        return Some(PathBuf::from(path));
-    }
-    body.split(|ch: char| ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | '(' | ')' | ','))
-        .find(|word| {
-            word.ends_with(".md") && (word.starts_with('/') || Path::new(word).is_absolute())
-        })
-        .map(PathBuf::from)
-}
-
-/// The kind of report a `worker_done` states (t-36910): the payload's
-/// `reportKind`, as the worker wrote it. `None` when the payload states none —
-/// the file's name is read instead ([`ReportSubtype::of`]).
-pub(crate) fn report_kind_in(payload: Option<&str>) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(payload?).ok()?;
-    value
-        .get(artifact::REPORT_KIND_KEY)?
-        .as_str()
-        .map(str::to_string)
-}
-
 /// The window's road after the file watcher's lane reported movement, or
 /// after boot: one bounded pass, then the watcher's lane is re-aimed at the
 /// folders the store now knows, and the window hears about any change.
@@ -3206,6 +3176,19 @@ mod tests {
             let mut index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
             self.register_in_place_locked(&mut index, path, source, origin, now_ms, &limits)
                 .map(|(artifact, _)| artifact)
+        }
+
+        /// Copy a report into the store verbatim and catalog it — the road a
+        /// worker's report took before the keeping, and the shortest way to a
+        /// report row in these tests. Nothing shipped calls it.
+        pub(crate) fn register_report(
+            &self,
+            source_path: &Path,
+            origin: Origin,
+            stated: Option<&str>,
+            now_ms: i64,
+        ) -> Result<Artifact, String> {
+            self.register_copy_as(source_path, Source::WorkerReport, origin, stated, now_ms)
         }
 
         /// Bytes the preview cache holds right now — the number the tests pin.
@@ -5277,32 +5260,6 @@ mod tests {
         }
     }
 
-    /// The report path a `worker_done` names, from the payload or the body.
-    #[test]
-    fn a_worker_done_names_its_report_in_the_payload_or_the_body() {
-        // The path the host spells: `C:\tmp\…` is where a Windows worker's
-        // report is, in the payload (escaped) and in the body (as written).
-        let report = crate::test_host::absolute("/tmp/t-9-report.md");
-        let payload = serde_json::json!({ "reportPath": report, "lifetime": "ephemeral" });
-        assert_eq!(
-            report_path_in(Some(&payload.to_string()), "done"),
-            Some(report.clone())
-        );
-        assert_eq!(
-            report_path_in(
-                None,
-                &format!("landed; report at `{}` (ephemeral)", report.display())
-            ),
-            Some(report)
-        );
-        assert_eq!(report_path_in(None, "done, nothing to read"), None);
-        assert_eq!(
-            report_path_in(Some(r#"{"reportPath":"relative.md"}"#), "done"),
-            None,
-            "a relative path is not a report"
-        );
-    }
-
     /// 두 판을 발행한 페이지 하나와 그 id, 고칠 원본 — 피드백 시험의 바탕.
     fn published_twice(dir: &Path) -> (Store, String, PathBuf) {
         let store = Store::open(&dir.join("store"), Limits::default());
@@ -6004,23 +5961,6 @@ mod tests {
             None,
             "only a report has a subtype"
         );
-    }
-
-    /// The kind a `worker_done` states is read out of its payload, as the worker
-    /// wrote it; a payload that states none, or is not one, says nothing.
-    #[test]
-    fn a_worker_done_states_its_report_kind_in_the_payload() {
-        let payload =
-            serde_json::json!({ "reportPath": "/tmp/r.md", "reportKind": "review" }).to_string();
-        assert_eq!(report_kind_in(Some(&payload)).as_deref(), Some("review"));
-        assert_eq!(report_kind_in(Some(r#"{"reportPath":"/tmp/r.md"}"#)), None);
-        assert_eq!(
-            report_kind_in(Some(r#"{"reportKind":3}"#)),
-            None,
-            "a kind is a word"
-        );
-        assert_eq!(report_kind_in(Some("not json")), None);
-        assert_eq!(report_kind_in(None), None);
     }
 
     /// A catalog whose report titles are the names of their tasks — what every

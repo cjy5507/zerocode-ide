@@ -405,6 +405,11 @@ pub(crate) struct DeskTask {
     /// [`super::writing_book`]). The board shows the counts beside the row;
     /// nothing here refuses a report.
     pub(crate) writing: Option<TextLint>,
+    /// What was kept of what this task's workers handed in (t-32798) — laid on by
+    /// [`super::hand_in_keep::dress`] from the artifact store's book; `None` for a
+    /// task nobody handed anything in on by name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) kept: Option<zerocode_core::hand_in::Facts>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -552,6 +557,7 @@ pub(crate) fn desk_snapshot(
                     created_ms: task.created_ms,
                     cost: None,
                     writing: None,
+                    kept: None,
                 },
             ));
         }

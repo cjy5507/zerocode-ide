@@ -99,27 +99,14 @@ impl ArtifactKind {
     }
 }
 
-/// What a worker's report is, beyond "a report" (t-36910). The reports tab held
-/// every text a worker handed in — closing reports, reviews, briefs, handovers
-/// and proposals alike — under one glyph; a card now says which, as a chip.
-///
-/// The worker states it when it reports ([`REPORT_KIND_KEY`]); when it does not,
-/// the file name is read by one table (`REPORT_SUBTYPE_BY_NAME`). A report no
-/// row of the table names is a `Report`, which is what it was handed in as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReportSubtype {
-    Report,
-    Review,
-    Brief,
-    Handover,
-    Proposal,
-}
-
-/// The key of a `worker_done` payload a worker states its report's kind under:
-/// `{"reportPath": "/abs/r.md", "reportKind": "review"}`. The value is one of
-/// [`ReportSubtype::as_str`]'s words; any other word states nothing.
-pub const REPORT_KIND_KEY: &str = "reportKind";
+/// What a worker's report is, beyond "a report" (t-36910): the kind the worker
+/// states when it hands in — [`crate::hand_in::ReportKind`], under
+/// [`crate::hand_in::REPORT_KIND_KEY`] — and the catalog row's `subtype`. One
+/// type, defined once, so the hand-in and the catalog say the same word for the
+/// same thing. When the worker states none, the file name is read by one table
+/// (`REPORT_SUBTYPE_BY_NAME`); a report no row of the table names is a `Report`,
+/// which is what it was handed in as.
+pub use crate::hand_in::ReportKind as ReportSubtype;
 
 /// The table the inference reads, and the only place a file name is judged: a
 /// row names the beginnings of a word, and the first row any word of the file
@@ -145,33 +132,11 @@ const REPORT_SUBTYPE_BY_NAME: &[(&[&str], ReportSubtype)] = &[
 ];
 
 impl ReportSubtype {
-    /// Every subtype, in the order a legend lists them.
-    pub const ALL: [Self; 5] = [
-        Self::Report,
-        Self::Review,
-        Self::Brief,
-        Self::Handover,
-        Self::Proposal,
-    ];
-
-    /// The wire word — the same one `serde` writes, spelled once.
+    /// The wire word under the name the catalog's readers use — [`Self::word`],
+    /// spelled once in `hand_in`.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Report => "report",
-            Self::Review => "review",
-            Self::Brief => "brief",
-            Self::Handover => "handover",
-            Self::Proposal => "proposal",
-        }
-    }
-
-    /// The wire word read back, as [`ArtifactKind::parse`] reads its own:
-    /// exactly. `None` for a word this build does not know, so a kind a worker
-    /// misspelled is read off the file name rather than invented.
-    #[must_use]
-    pub fn parse(word: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.as_str() == word)
+        self.word()
     }
 
     /// The kind of one report: what its worker stated, else what its file name
@@ -208,6 +173,9 @@ impl ReportSubtype {
 pub enum Source {
     /// A worker's closing report, copied into the store on `worker_done`.
     WorkerReport,
+    /// A file a worker's `worker_done` names as evidence (t-32798): kept in the
+    /// store the same way, so it outlives the checkout it was written in.
+    WorkerEvidence,
     /// A file inside an automation run's evidence folder, registered in place.
     Evidence,
     /// A file from a folder the person named as an export folder.
@@ -230,7 +198,7 @@ impl Source {
     #[must_use]
     pub const fn bucket(self) -> &'static str {
         match self {
-            Self::WorkerReport => "run",
+            Self::WorkerReport | Self::WorkerEvidence => "run",
             Self::Evidence => "automation",
             Self::Export | Self::Manual | Self::AgentPage | Self::Remote => "manual",
         }
@@ -300,8 +268,10 @@ pub fn kind_of(path: &Path, source: Source) -> ArtifactKind {
             .find(|(names, _)| names.contains(&extension.as_str()))
             .map_or(ArtifactKind::Other, |(_, kind)| *kind),
         (Source::Remote, _) => ArtifactKind::Web,
-        (Source::Evidence, ArtifactKind::Screenshot) => ArtifactKind::Screenshot,
-        (Source::Evidence, _) => ArtifactKind::Evidence,
+        (Source::Evidence | Source::WorkerEvidence, ArtifactKind::Screenshot) => {
+            ArtifactKind::Screenshot
+        }
+        (Source::Evidence | Source::WorkerEvidence, _) => ArtifactKind::Evidence,
         (Source::WorkerReport, ArtifactKind::Report | ArtifactKind::Other) => ArtifactKind::Report,
         (Source::Export, ArtifactKind::Other) => ArtifactKind::Export,
         (_, kind) => kind,
@@ -1121,6 +1091,17 @@ mod tests {
             ("shot.png", Source::Evidence, ArtifactKind::Screenshot),
             ("steps.jsonl", Source::Evidence, ArtifactKind::Evidence),
             ("report.md", Source::Evidence, ArtifactKind::Evidence),
+            // What a worker's hand-in names as evidence is evidence too — a log
+            // and a report written as evidence alike — and its pictures stay
+            // pictures (t-32798).
+            ("run.log", Source::WorkerEvidence, ArtifactKind::Evidence),
+            (
+                "steps.jsonl",
+                Source::WorkerEvidence,
+                ArtifactKind::Evidence,
+            ),
+            ("report.md", Source::WorkerEvidence, ArtifactKind::Evidence),
+            ("dark.png", Source::WorkerEvidence, ArtifactKind::Screenshot),
             ("turns.jsonl", Source::Manual, ArtifactKind::Transcript),
             ("rows.csv", Source::Manual, ArtifactKind::Export),
             ("bundle.bin", Source::Export, ArtifactKind::Export),
