@@ -82,6 +82,14 @@ pub struct ApiRequest {
     /// It is Anthropic-only in practice — a refusal never arises on a
     /// non-Anthropic provider — and never persists past the current turn.
     pub model_override: Option<String>,
+    /// The most pictures (the newest) this request may carry, or `None` to let
+    /// the provider's byte budget alone decide what is left out
+    /// ([`crate::WireTarget`]). The runtime sets it when a provider refused a
+    /// request body as too large — `Some(2)`, then `Some(1)` — and it holds for
+    /// the rest of the turn; clients put it on their lowering target and
+    /// otherwise ignore it. Stored history is never rewritten by it: the next
+    /// turn starts again from the budget.
+    pub picture_cap: Option<usize>,
 }
 
 pub const GEMINI_THOUGHT_SIGNATURE_PROVIDER_STATE: &str = "gemini.thought_signature";

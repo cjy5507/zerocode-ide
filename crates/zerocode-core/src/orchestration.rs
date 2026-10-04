@@ -37,6 +37,7 @@
 
 mod completion;
 pub mod coordinator_handover;
+pub mod delegate;
 mod session_history;
 pub mod task_cost;
 
@@ -17640,6 +17641,16 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::Mutation,
     ),
     (
+        delegate::VERB,
+        "--spec <text> --agent <a> [--title <t>] [--deps a,b] [--parent <id>] [--prompt <p>] \
+         [--model <id> [--effort <level>]] [--on-quota-wall wait|<agent[:model[:effort]]>] \
+         [--worktree] [--horizontal] [--timeout-ms <ms>] [--wait] · write the work down, summon a \
+         worker on it and leave the worker a letter with its own ids, in one step; --wait holds \
+         the answer until the worker reports or asks (--timeout-ms is then how long, up to ten \
+         minutes); without --wait, --timeout-ms is the readiness window, as for worker-start",
+        Doing::Mutation,
+    ),
+    (
         "worker-list",
         "[--all] [--terminal-state <s>] · every worker in this run, with terminal counts",
         Doing::FreshRead,
@@ -19479,7 +19490,13 @@ fn plan_inner(
     let (verb, rest) = argv
         .split_first()
         .ok_or_else(|| "a verb is required — try `help`".to_string())?;
-    let words = split_words(rest, BOOL_FLAGS);
+    let words = {
+        let mut words = split_words(rest, BOOL_FLAGS);
+        if verb == delegate::VERB {
+            delegate::strip_wait(&mut words);
+        }
+        words
+    };
     within_bounds(&words)?;
 
     // A retry is answered with the first answer, not by doing the thing again.
@@ -20572,6 +20589,10 @@ fn plan_inner(
                 "detected": measured.is_some(),
             }))
         }
+
+        delegate::VERB => delegate::plan(
+            ledger, team, launcher, &words, pane, now_ms, actor, &caller, &seat,
+        )?,
 
         "worker-start" => {
             let run_id = bound(ledger, &words, &caller, &seat)?;
