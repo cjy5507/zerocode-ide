@@ -1,5 +1,5 @@
-//! The one-time code a person hands an agent on the person's-turn card
-//! (t-40807).
+//! The one-time code a person types on the person's-turn card, for the window
+//! to put in the field an agent named (t-40807).
 //!
 //! `zerocode-computer handoff --ask-code --reason "…" --into '[…]'` puts the
 //! usual card in front of the person with one line to type in. What they send
@@ -268,8 +268,9 @@ impl OneTimeCode {
         self.0.chars().count()
     }
 
-    /// The code itself: the one place it leaves, for the answer the agent
-    /// asked for.
+    /// The code itself: the one place it leaves, for the window to type into
+    /// the field the agent named (`computer_use::enter`, in the window). It is
+    /// never an answer.
     #[must_use]
     pub fn reveal(&self) -> &str {
         &self.0

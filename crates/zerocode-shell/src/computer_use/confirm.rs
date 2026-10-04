@@ -338,7 +338,9 @@ pub fn answer(id: &str, allow: bool) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CodeVerdict {
-    /// The code is on its way to the agent that asked, once.
+    /// The code is on its way to the handoff that waits, once: the window
+    /// types it into the field that handoff named, and the agent is told how
+    /// many characters went in.
     Delivered,
     /// What was typed is not a code: the card stays, the person types again.
     Invalid,
@@ -349,7 +351,7 @@ pub enum CodeVerdict {
 
 /// The person's code for a card that offers a line for one. What is typed is
 /// judged here, by core's one rule; a wrong code leaves the card standing, a
-/// right one goes to the agent that asked, once, and closes the card. A card
+/// right one goes to the handoff that waits, once, and closes the card. A card
 /// that asks yes or no is never answered by a code.
 pub fn answer_code(id: &str, typed: &str) -> CodeVerdict {
     let mut pending = PENDING
@@ -564,8 +566,8 @@ mod tests {
     }
 
     /// A card with a line takes the code the person types, once, and the
-    /// agent that asked gets it as the answer. A code is no yes either: it
-    /// never answers a card that asks yes or no.
+    /// handoff that waits holds it for the window to type. A code is no yes
+    /// either: it never answers a card that asks yes or no.
     #[test]
     fn a_code_card_takes_one_code_and_then_it_is_gone() {
         let _hand = one_hand();
@@ -629,8 +631,8 @@ mod tests {
     }
 
     /// A bare "done" is the person saying they did a thing on their own
-    /// device; on a card that asked for a code it says nothing the agent
-    /// can use, so only a code or a cancel closes it.
+    /// device; on a card that asked for a code it says nothing the window
+    /// can type, so only a code or a cancel closes it.
     #[test]
     fn a_bare_done_cannot_stand_in_for_a_code_but_a_cancel_can() {
         let _hand = one_hand();
