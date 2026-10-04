@@ -1800,6 +1800,137 @@ fn artifact_skills_frontmatter_routes_korean_and_english_deliverables() {
     }
 }
 
+/// What a person says when a phone is on the other end: five sentences in
+/// Korean and five in English, all made up. A Korean sentence carries the bare
+/// noun a person says ("아이폰 연결해놨어"): neither word matcher sees through a
+/// particle glued to a word, and that is the model-led path's job (see
+/// `skills.rs`).
+const PHONE_SENTENCES: [&str; 10] = [
+    "아이폰 연결해놨어, 앱 켜서 로그인 화면 확인해줘",
+    "안드로이드 폰에 앱 설치해뒀어. 첫 화면 스크린샷 찍어줘",
+    "시뮬레이터 열어서 설정 탭 눌러보고 뭐가 보이는지 알려줘",
+    "에뮬레이터 띄우고 이메일 칸에 테스트 계정 입력해서 로그인 버튼 눌러줘",
+    "IDE에 아이패드 연결돼 있는지 보고 앱 화면을 스와이프 해봐",
+    "The iPhone is connected to the IDE, open the app and check the login screen.",
+    "I installed the app on my Android phone, take a screenshot of the first screen.",
+    "Use the iOS simulator to tap the Settings tab and type my email into the form.",
+    "Is an iPad connected? Swipe through the onboarding screens in the app and tell me what you see.",
+    "Boot an Android emulator, launch the app, press the back button and screenshot the result.",
+];
+
+/// Every skill this product ships, read the way zo reads one.
+fn shipped_skills() -> Vec<SkillIndexEntry> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../skills");
+    let mut files: Vec<PathBuf> = fs::read_dir(&root)
+        .expect("bundled skills")
+        .flatten()
+        .map(|entry| entry.path().join("SKILL.md"))
+        .filter(|path| path.is_file())
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let body = fs::read_to_string(&path).ok()?;
+            super::parse_skill_index_entry(path, &body)
+        })
+        .collect()
+}
+
+/// The ten sentences put to the two matchers zo has that need no model: the
+/// skill search's word match (`lexical_rank`, which the turn-start suggestion
+/// and the explicit search both fall back to) and the turn matcher
+/// (`recommend_skills`). Over the skills this product ships, the mobile skill is
+/// first for every one (t-36920).
+#[test]
+fn the_mobile_skill_ranks_first_for_what_a_person_says_about_a_phone() {
+    let entries = shipped_skills();
+    let mobile = zerocode_core::agent_emulator::MOBILE_SKILL_NAME;
+    assert!(
+        entries.iter().any(|entry| entry.name == mobile),
+        "the shipped skills have no `{mobile}`"
+    );
+    let candidates = crate::skill_rank::skill_candidates(&entries);
+    for sentence in PHONE_SENTENCES {
+        let ranked = crate::skill_rank::lexical_rank(sentence, &candidates);
+        assert_eq!(
+            ranked.first().map(|reading| reading.name.as_str()),
+            Some(mobile),
+            "the word match for `{sentence}`: {ranked:?}"
+        );
+        let found = crate::skills::recommend_skills(
+            &crate::skills::SkillMatchInput { user_text: sentence, touched_paths: &[] },
+            &entries,
+        );
+        assert_eq!(
+            found.first().map(|rec| rec.name.as_str()),
+            Some(mobile),
+            "the turn matcher for `{sentence}`: {found:?}"
+        );
+    }
+}
+
+/// The ten sentences' numbers as the two matchers give them — the table of the
+/// t-36920 report: the two best skills of the word match with their share of the
+/// sentence's words, and the two best of the turn matcher with score and decision.
+/// Run on purpose: `cargo test -p runtime --lib -- --ignored --nocapture the_ten_sentences_table`.
+#[test]
+#[ignore = "a measurement: run on purpose, with --nocapture"]
+fn the_ten_sentences_table() {
+    let entries = shipped_skills();
+    let candidates = crate::skill_rank::skill_candidates(&entries);
+    for sentence in PHONE_SENTENCES {
+        let ranked = crate::skill_rank::lexical_rank(sentence, &candidates);
+        let found = crate::skills::recommend_skills(
+            &crate::skills::SkillMatchInput { user_text: sentence, touched_paths: &[] },
+            &entries,
+        );
+        let word_match: Vec<(&str, f64)> = ranked
+            .iter()
+            .take(2)
+            .map(|reading| (reading.name.as_str(), (reading.normalised * 100.0).round() / 100.0))
+            .collect();
+        let turn_matcher: Vec<(&str, f32, String)> = found
+            .iter()
+            .take(2)
+            .map(|rec| (rec.name.as_str(), rec.score, format!("{:?}", rec.decision)))
+            .collect();
+        println!(
+            "TEN_SENTENCES {}",
+            serde_json::json!({ "sentence": sentence, "word_match": word_match, "turn_matcher": turn_matcher })
+        );
+    }
+}
+
+/// What the mobile skill adds to the index zo's prompt carries on every
+/// request, measured over the skills this product ships (t-36920): the whole
+/// index's tokens without it and with it, against the budget, and what zo's
+/// always-present line shows of its description. Run on purpose:
+/// `cargo test -p runtime --lib -- --ignored --nocapture the_mobile_skills_cost_in_zos_index`.
+#[test]
+#[ignore = "a measurement: run on purpose, with --nocapture"]
+fn the_mobile_skills_cost_in_zos_index() {
+    let mut entries = shipped_skills();
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    let mobile = zerocode_core::agent_emulator::MOBILE_SKILL_NAME;
+    let others: Vec<SkillIndexEntry> =
+        entries.iter().filter(|entry| entry.name != mobile).cloned().collect();
+    let tokens_without = super::estimated_tokens(&super::render_skills_index(&others));
+    let tokens_with = super::estimated_tokens(&super::render_skills_index(&entries));
+    let line = super::render_skills_index(&entries)
+        .lines()
+        .find(|line| line.contains(&format!("`{mobile}`")))
+        .map(str::to_string)
+        .unwrap_or_default();
+    println!(
+        "MOBILE_SKILL_INDEX_NUMBERS {{\"skills_with\":{},\"index_tokens_without\":{tokens_without},\
+         \"index_tokens_with\":{tokens_with},\"budget\":{},\"its_line_chars\":{},\"its_line\":{line:?}}}",
+        entries.len(),
+        super::SKILL_INDEX_BUDGET_TOKENS,
+        line.chars().count()
+    );
+}
+
 /// The index is paid on every request, so it stays inside the skill budget
 /// whatever the machine has installed: the highest-precedence skills keep
 /// their lines, the tail folds into one line that says how many were left out

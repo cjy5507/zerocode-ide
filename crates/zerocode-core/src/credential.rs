@@ -112,14 +112,52 @@ const NETRC_LEADS: [&str; 2] = ["machine", "default"];
 /// withholds the line instead.
 #[must_use]
 pub fn mask_values(text: &str) -> String {
+    mask_text(text, Reading::ByNameAndShape)
+}
+
+/// `text` with the credential values that something NAMES masked, and nothing
+/// else (t-32798): `KEY=value` whose key names a credential, a header that is
+/// one (`Authorization:`, `Cookie:`), a flag that names one (`--password x`),
+/// an auth scheme (`Bearer x`), a `.netrc` password, a password glued to its
+/// flag, and a URL's userinfo.
+///
+/// The same pass as [`mask_values`] minus the two readings that destroy prose:
+/// no word is masked for how it LOOKS (`sk-` sits inside `disk-guard`,
+/// `task-list` and `ask-wait`, and a long path with a digit reads as an opaque
+/// token), and a word that merely ends in a colon (`tokens: 5000`) is prose,
+/// not a header. For a road that keeps a person's report whole — and masks the
+/// provider shapes by its own table ([`crate::private_data`]) — rather than a
+/// recap that may be handed to another provider's model.
+#[must_use]
+pub fn mask_named_values(text: &str) -> String {
+    mask_text(text, Reading::ByName)
+}
+
+/// What a masking pass reads a word as. One pass, two readings: the recap's
+/// ([`mask_values`]) and the report keeper's ([`mask_named_values`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    /// A word that names a credential's value, and a word that looks like one.
+    ByNameAndShape,
+    /// Only a word that names one — and only as an assignment or a header.
+    ByName,
+}
+
+fn mask_text(text: &str, reading: Reading) -> String {
     let mut out = String::with_capacity(text.len());
     for (index, line) in text.split('\n').enumerate() {
         if index > 0 {
             out.push('\n');
         }
-        mask_line(&crate::clone::scrub_credentials(line), &mut out);
+        mask_line(&crate::clone::scrub_credentials(line), &mut out, reading);
     }
     out
+}
+
+/// Headers whose whole value is a credential, by the key words that are header
+/// names: the colon ends the word and the rest of the line is the value.
+fn names_a_header(word: &str) -> bool {
+    contains_ascii_case(word, "authorization") || contains_ascii_case(word, "cookie")
 }
 
 /// Whether `line` carries anything that is, or could introduce, a
@@ -165,7 +203,7 @@ fn unclosed_quote(value: &str) -> Option<char> {
     (!value[quote.len_utf8()..].contains(quote)).then_some(quote)
 }
 
-fn mask_line(line: &str, out: &mut String) {
+fn mask_line(line: &str, out: &mut String, reading: Reading) {
     let netrc = line
         .split_whitespace()
         .next()
@@ -193,13 +231,17 @@ fn mask_line(line: &str, out: &mut String) {
         if word.is_empty() {
             continue;
         }
-        if mask_next || looks_like_a_credential(word) {
+        if mask_next || (reading == Reading::ByNameAndShape && looks_like_a_credential(word)) {
             out.push_str(MASK);
             quoted = unclosed_quote(word);
             mask_next = false;
             continue;
         }
-        if let Some(split) = word.find(['=', ':'])
+        let separators: &[char] = match reading {
+            Reading::ByNameAndShape => &['=', ':'],
+            Reading::ByName => &['='],
+        };
+        if let Some(split) = word.find(separators)
             && split + 1 < word.len()
             && names_a_credential(&word[..split])
         {
@@ -217,7 +259,10 @@ fn mask_line(line: &str, out: &mut String) {
             continue;
         }
         let bare = word.trim_matches(|glyph: char| glyph == '"' || glyph == '\'');
-        if names_a_credential(bare) && bare.ends_with(':') {
+        if names_a_credential(bare)
+            && bare.ends_with(':')
+            && (reading == Reading::ByNameAndShape || names_a_header(bare))
+        {
             out.push_str(word);
             if !rest.trim().is_empty() {
                 out.push(' ');
@@ -358,5 +403,50 @@ mod tests {
             mask_values(said),
             "first  line\n\tpassword: [redacted]\nthird"
         );
+    }
+
+    /// The report keeper's reading (t-32798): what NAMES a value is masked, and
+    /// no word is masked for how it looks — one pass, two readings.
+    #[test]
+    fn the_named_reading_masks_assignments_and_headers_and_leaves_prose_alone() {
+        for (said, kept, gone) in [
+            (
+                "export DB_PASSWORD=hunter2 && make",
+                "DB_PASSWORD=[redacted] && make",
+                "hunter2",
+            ),
+            (
+                "curl -H 'Authorization: Bearer abc.def' x",
+                "'Authorization: [redacted]",
+                "abc.def",
+            ),
+            (
+                "gh --token ghx12345 pr list",
+                "--token [redacted] pr list",
+                "ghx12345",
+            ),
+            (
+                "git clone https://user:tok3n@host.test/r.git now",
+                "https://***@host.test/r.git now",
+                "tok3n",
+            ),
+        ] {
+            let masked = mask_named_values(said);
+            assert!(masked.contains(kept), "{said:?} lost {kept:?}: {masked:?}");
+            assert!(!masked.contains(gone), "{said:?} kept {gone:?}: {masked:?}");
+        }
+        for prose in [
+            "the disk-guard job DISK_FLOOR task-list ask-wait",
+            "1791083855-w-35393-t32796-red-run crates/zerocode-core/src/orchestration/tests.rs:6430",
+            "Jev tokens: 5000 and a cookie budget",
+            "key Xk9pQ2mZ7vL4nR8sT1wY6bC3dF5g",
+        ] {
+            assert_eq!(mask_named_values(prose), prose, "prose was read as a key");
+            assert_ne!(
+                mask_values(prose),
+                prose,
+                "the recap's reading masks this; the two readings must differ here"
+            );
+        }
     }
 }

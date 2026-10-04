@@ -12,6 +12,7 @@ mod coordinator_desk;
 mod crash_report;
 mod fixture_cases;
 mod git_doors;
+mod hand_in_keep;
 mod jev_pane_seats;
 mod quiet_children;
 mod quota_wall;
@@ -8793,12 +8794,29 @@ mod tests {
         }
         // And `adb` alone carries a device that is already running: the
         // emulator package is asked for the AVD list, never for the frames,
-        // taps or tree of a device adb can already see.
-        let listing = block_after(android_emulator, "fn list_android_devices(");
+        // taps or tree of a device adb can already see. The rule is one
+        // function's (`emulators_listed`, t-36920), and both roads to the list
+        // — the panes' device list and the one `zerocode-emulator list`
+        // answers with the phones beside it — read adb first and hand what is
+        // running to it, so neither can hide a running device behind a missing
+        // package.
+        let listing = block_after(android_emulator, "fn emulators_listed(");
         assert!(
-            listing.contains("android_running(&sdk.adb)")
-                && listing.contains("if devices.is_empty()"),
+            listing.contains("if devices.is_empty()"),
             "a missing emulator package hides devices adb can already reach:\n{listing}"
+        );
+        let panes_list = block_after(android_emulator, "fn list_android_devices(");
+        assert!(
+            panes_list.contains("android_running(&sdk.adb)")
+                && panes_list.contains("emulators_listed(&sdk, &running)"),
+            "the panes' device list has its own rule for a missing emulator package:\n{panes_list}"
+        );
+        let answer_list = block_after(android_emulator, "fn android_listing_with(");
+        assert!(
+            answer_list.contains("adb_rows(&sdk.adb)")
+                && answer_list.contains("running_emulators(&sdk.adb, rows)")
+                && answer_list.contains("emulators_listed(sdk, &running)"),
+            "`zerocode-emulator list` has its own rule for a missing emulator package, or asks adb again:\n{answer_list}"
         );
         let videoing = block_after(android_emulator, "fn pump_android_video(");
         assert!(
@@ -9375,8 +9393,9 @@ mod tests {
         );
         let mobile = block_after(shell, "async fn answer_emulator_command(");
         for owned in [
-            "mobile_emulators_direct()",
-            "android_emulators_direct()",
+            // The list is one function of the emulator module (t-36920); the
+            // door only calls it.
+            "crate::emulator::list_answer_now()",
             r#"emit_to("main", "emulator:agent-open""#,
             // Seated in the asking pane's checkout (t-6379): the payload
             // names the terminal the door's pane key reads as.
@@ -9396,6 +9415,33 @@ mod tests {
             !mobile.contains("Command::new") && !mobile.contains("open_mobile_emulator_direct"),
             "the agent route opens or drives an external emulator instead of ZeroCode's pane"
         );
+        // `list` reads the simulators, Android (the emulators and the phones
+        // from ONE `adb devices -l`) and the real iPhones and iPads the window
+        // sees and cannot drive side by side, and puts them in the one answer
+        // the core writes — never a reader of its own.
+        let list = block_after(
+            include_str!("../../src/emulator/physical.rs"),
+            "pub(crate) async fn list_answer_now(",
+        );
+        for owned in [
+            "mobile_emulators_direct()",
+            "android_listing_now()",
+            "physical_ios()",
+            "list_answer(",
+        ] {
+            assert!(
+                list.contains(owned),
+                "the emulator list lost {owned}:\n{list}"
+            );
+        }
+        // A second reader of the same `adb devices -l` is a second process on
+        // the efficiency cores: +122 ms on 194 (t-36920, `taskpolicy -b`).
+        for second in ["android_emulators_direct()", "physical_android()"] {
+            assert!(
+                !list.contains(second),
+                "the emulator list asks adb again through {second}:\n{list}"
+            );
+        }
         // The frame comes from the backend that paints the pane, through the
         // one helper both the agent's `screenshot` and a run's evidence use.
         let frame = block_after(shell, "async fn emulator_screenshot_bytes(");
@@ -9465,13 +9511,23 @@ mod tests {
             4,
             "`emulator.agentOpenUnseated` is missing from one of the en/ja/zh/es catalogs"
         );
+        // The mobile road has a skill of its own (t-36920): computer-use
+        // routes to it by name, and it holds the commands.
+        let mobile_skill = zerocode_core::skill_install::bundled_skill(
+            zerocode_core::agent_emulator::MOBILE_SKILL_NAME,
+        )
+        .map_or("", |skill| skill.content);
         assert!(
             skill.contains("Website or web app: use `zerocode-browser")
-                && skill.contains("Never assume a specific phone")
-                && skill.contains("zerocode-emulator list --json")
                 && skill.contains("zerocode-browser screenshot <pane-label>")
-                && skill.contains("zerocode-emulator screenshot --platform ios|android"),
-            "the installed skill no longer teaches dynamic built-in routing"
+                && skill.contains(&format!(
+                    "`{}` skill",
+                    zerocode_core::agent_emulator::MOBILE_SKILL_NAME
+                ))
+                && mobile_skill.contains("Never assume a specific phone")
+                && mobile_skill.contains("zerocode-emulator list --json")
+                && mobile_skill.contains("zerocode-emulator screenshot --platform ios|android"),
+            "the installed skills no longer teach dynamic built-in routing"
         );
         // The remote route, whole: the router owns the word, the verbs reach
         // this window's own machinery, the pane is mounted by the window, and
@@ -36921,12 +36977,20 @@ mod tests {
             road.contains("ids_for_worker(") && road.contains("\"artifacts\""),
             "the garnish does not read the store by worker:\n{road}"
         );
+        // The road moved (t-32798): a send that names files is handed to the
+        // keeping, which reads them once through the one parser, masks them and
+        // copies them into the store under the origin the worker's row vouches for.
         assert!(
-            shipped.contains("report_path_in(") && shipped.contains("register_report("),
-            "a worker_done's report is not copied into the store"
+            shipped.contains("hand_in_keep::after_send("),
+            "a worker_done's report is not handed to the keeping"
+        );
+        let keeping = include_str!("../../src/orchestration/hand_in_keep.rs");
+        assert!(
+            keeping.contains("hand_in::named(") && keeping.contains("register_kept("),
+            "what a hand-in names is not copied into the store"
         );
         assert!(
-            shipped.contains("origin_of_worker("),
+            keeping.contains("origin_of_worker("),
             "the report's origin is not read from the ledger row"
         );
     }

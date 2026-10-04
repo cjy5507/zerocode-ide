@@ -1021,7 +1021,7 @@ pub const NO_ATTEMPT: &str = "none";
 
 /// A commit, as a person or an agent writes one: seven hex digits or more.
 /// Anything else is not a commit — a report id, a branch name, a sentence.
-fn commit_named(text: &str) -> Option<String> {
+pub(crate) fn commit_named(text: &str) -> Option<String> {
     let text = text.trim();
     (text.len() >= 7 && text.chars().all(|c| c.is_ascii_hexdigit())).then(|| text.to_string())
 }
@@ -18359,9 +18359,24 @@ is left — and when the real answer is longer than that, write it to a file \
 and carry the path instead: `--payload '{{\"reportPath\":\"/abs/path\",\"lifetime\":\"ephemeral\"}}'`, \
 with the same path named once in the summary. Say in the summary if that \
 file dies with your worktree, because the coordinator reads it before \
-anything is cleaned up. Every command that CHANGES anything needs --retry-request: repeat \
+anything is cleaned up. Screenshots, logs or a folder of them go in the same \
+payload as `\"{evidence}\":[\"/abs/file\",\"/abs/folder\"]`: the window keeps a copy of \
+what you name before your checkout is cleaned (text and pictures only, private \
+values masked, {cap_mb} MB at most). An intended failure is evidence too — name it \
+`{{\"path\":\"/abs/red.log\",\"{expect}\":\"fail\"}}` so nobody guesses it from the file \
+name — and a report that is not a plain report says what it is: `\"{report_kind}\":\"review\"` \
+(one of {kinds}). Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
 a new request. `zerocode-orc help` lists the rest. {find} {plain} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+        evidence = crate::hand_in::EVIDENCE_KEY,
+        expect = crate::hand_in::EXPECT_KEY,
+        report_kind = crate::hand_in::REPORT_KIND_KEY,
+        kinds = crate::hand_in::ReportKind::ALL
+            .iter()
+            .map(|kind| kind.word())
+            .collect::<Vec<_>>()
+            .join(", "),
+        cap_mb = crate::hand_in::HAND_IN_BYTES_MAX / (1024 * 1024),
         find = worker_find_context(),
         plain = WORKER_PLAIN_REPORT_CONTEXT,
         purpose = WORKER_PURPOSE_CONTEXT,

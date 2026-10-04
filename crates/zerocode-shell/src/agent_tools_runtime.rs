@@ -3841,18 +3841,7 @@ pub(super) async fn answer_emulator_command(
         | EmulatorMethod::Foreground => {
             return answer_emulator_observation(command).await;
         }
-        EmulatorMethod::List => {
-            let (ios, android) =
-                tokio::join!(mobile_emulators_direct(), android_emulators_direct());
-            match (ios, android) {
-                (Ok(ios), Ok(android)) => Ok(json!({
-                    "surface": "zerocode-built-in",
-                    "ios": ios,
-                    "android": android,
-                })),
-                (Err(error), _) | (_, Err(error)) => Err(error),
-            }
-        }
+        EmulatorMethod::List => crate::emulator::list_answer_now().await,
         EmulatorMethod::Open => {
             let platform = platform.expect("parser requires a platform");
             // Seated where it was asked for, not where the person is looking

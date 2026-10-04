@@ -4651,10 +4651,17 @@ fn computer_door<'a>(
 
 #[must_use]
 pub fn emulator_usage() -> String {
+    use crate::agent_emulator::physical::{PHYSICAL_KEY, UNCHECKED_KEY};
+    let list_note = format!(
+        "    Answers the simulators and emulators this window drives (ios, android), the real phones it\n\
+         \x20   sees and cannot drive ({PHYSICAL_KEY}, each with drivable: false and a reason), and a tool that\n\
+         \x20   gave no answer ({UNCHECKED_KEY}, with why). Start here when a phone is said to be connected."
+    );
     [
         "zerocode-emulator — control ZeroCode's built-in iOS and Android surfaces",
         "",
         "  zerocode-emulator list [--json]",
+        list_note.as_str(),
         "  zerocode-emulator open --platform ios|android [--device <id>] [--json]",
         "  zerocode-emulator tree --platform ios|android --device <id> [--json]",
         "  zerocode-emulator marks --platform ios|android --device <id> [--text <fragment>] [--json]",

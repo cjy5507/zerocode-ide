@@ -8,10 +8,11 @@ mailbox, a live key — must not be in the tree. Finding them once is a sweep;
 keeping them out is this file. `just pii-check` runs it, root `verify` includes
 it, and it exits 1 while it holds a finding.
 
-Everything it knows is the `RULES` table below: one row per category, each row
-carrying what it finds, what it forgives and which paths it does not read.
-Nothing else in this file names a value — a new exception is a new entry in
-that row's `allow`, never a branch somewhere further down. `--table` prints it.
+Everything it knows is the table in `pii-rules.json`, beside this file: one row
+per category, each row carrying what it finds, what it forgives and which paths
+it does not read. Nothing else in this file names a value — a new exception is a
+new entry in that row's `allow`, never a branch somewhere further down.
+`--table` prints it.
 
 A single site that cannot be rewritten says so where it stands, by carrying
 `pii-scan: allow <category> — <why>` on its own line or the line above it. A
@@ -45,73 +46,29 @@ from pathlib import Path
 #         carries its authors' real addresses on purpose and is not ours to
 #         rewrite, so the rows about people skip `ui/vendor/`.
 #
-# fmt: off
-RULES = (
-    dict(
-        name="home-path",
-        says="a real account's home directory, written out or slugged into a session id",
-        # Both separators, and a Rust string's doubled backslash. There is no
-        # `/home/` row: every `/home/` path in this tree is a container root
-        # (`codex-runtime-home/home/…`) or a role (`builder`, `codex`), so the
-        # row would be noise — a remote account's name is what the banished
-        # row and the diff catch.
-        find=r"(?:[/\\]{1,2}Users[/\\]{1,2}|\bUsers-)[A-Za-z0-9._]+",
-        allow=r"(?:[/\\]{1,2}Users[/\\]{1,2}|Users-)"
-              r"(?:dev|you|user|someone|somebody|me|person|people|fixture|tester|test|example"
-              r"|other|another|private|Public|Shared|[A-Za-z]{1,2})"
-              r"(?:\.[A-Za-z0-9]+)?",
-        skip=(),
-    ),
-    dict(
-        name="private-ip",
-        says="an address on a real private network (RFC 1918), which names an office",
-        find=r"\b(?:10\.[0-9]{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])|192\.168)"
-             r"\.[0-9]{1,3}\.[0-9]{1,3}\b",
-        # The private subnets this repository's fixtures stand on: the two every
-        # manual uses for an example, and the single address that pins the
-        # RFC 1918 boundary itself. Loopback and link-local are not here because
-        # they are not in `find` — they name the machine, never an office.
-        allow=r"(?:10\.0\.0\.[0-9]{1,3}|10\.1\.2\.3|172\.16\.0\.1|192\.168\.[01]\.[0-9]{1,3})",
-        skip=(),
-    ),
-    dict(
-        name="email",
-        says="a mailbox outside the reserved example domains — a real person or service",
-        find=r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-        # Reserved and fictional domains, the public code hosts a `git@` URL
-        # names, Google's own service-account example — and a retina asset
-        # (`icon@2x.png`, `128x128@2x.png`), whose `@2x` is a scale, not a
-        # mailbox.
-        allow=r"(?i)[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)*"
-              r"(?:example\.(?:com|org|net)|acme\.com|github\.com|gitlab\.com|azure\.com"
-              r"|gserviceaccount\.com|zerocode\.[a-z]+"
-              r"|test|example|invalid|local|localhost)"
-              r"|[A-Za-z0-9._%+-]+@[0-9]+x\.(?:png|jpe?g|gif|svg|webp|ico)",
-        skip=(("ui/vendor/", "third-party bundles and their authors' own copyright notices"),),
-    ),
-    dict(
-        name="credential",
-        says="a token or key of a shape a provider actually issues, carrying a body",
-        find=r"sk-ant-[a-z0-9]{3,}-[A-Za-z0-9_-]{24,}"
-             r"|sk-proj-[A-Za-z0-9_-]{24,}"
-             r"|gh[pousr]_[A-Za-z0-9]{36}"
-             r"|github_pat_[A-Za-z0-9_]{50,}"
-             r"|AKIA[0-9A-Z]{16}"
-             r"|xox[baprs]-[A-Za-z0-9-]{20,}"
-             r"|AIza[0-9A-Za-z_-]{35}"
-             r"|ya29\.[A-Za-z0-9_-]{30,}"
-             # A PEM header is a shape a test writes freely; only one carrying
-             # real base64 after it is a key. Three wrapped runs, at any width
-             # a writer chose, and `\nxx\n` is not one of them.
-             r"|-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
-             r"(?:[^A-Za-z0-9+/]{0,6}[A-Za-z0-9+/]{16,}){3,}",
-        # A fixture says so in its own body; a leaked token never would.
-        allow=r"(?i).*(?:example|secret|sample|fake|dummy|test|canary|never|should"
-              r"|placeholder|redacted|abcdef|0123456789|xxxx).*",
-        skip=(("ui/vendor/", "third-party bundles carry minified strings of every shape"),),
-    ),
-)
-# fmt: on
+# The table lives in `pii-rules.json`, beside this file, because it has two
+# readers: this gate, over tracked files, and `private_data.rs` in the core
+# crate, over the copy of a worker's report the ledger keeps. One file means the
+# shape the gate refuses and the shape the keeper masks cannot drift apart.
+RULES_FILE = Path(__file__).with_name("pii-rules.json")
+
+
+def load_rules(path=RULES_FILE):
+    """The rows of the table, as the dicts the rest of this file reads."""
+    table = json.loads(path.read_text(encoding="utf-8"))
+    return tuple(
+        dict(
+            name=row["name"],
+            says=row["says"],
+            find=row["find"],
+            allow=row["allow"],
+            skip=tuple((prefix, why) for prefix, why in row["skip"]),
+        )
+        for row in table["rules"]
+    )
+
+
+RULES = load_rules()
 
 # --- the words that left ----------------------------------------------------
 #

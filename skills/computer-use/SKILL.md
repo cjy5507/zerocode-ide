@@ -8,7 +8,7 @@ description: Inspect and operate local desktop app windows through ZeroCode when
 Use the narrowest ZeroCode surface that owns the target:
 
 - Website or web app: use `zerocode-browser --help` and the built-in browser.
-- iOS Simulator or Android Emulator: use `zerocode-emulator --help` and the built-in emulator's direct input/accessibility bridge.
+- iOS Simulator, Android Emulator, or a phone the person says is connected or open in the IDE: use the `mobile-device` skill — it starts with `zerocode-emulator list`.
 - A shell, a saved SSH host, a remote workspace or remote server: use
   `zerocode-ssh --help` and the terminal panes this window owns.
 - Any other local desktop app: use `zerocode-computer` below.
@@ -65,7 +65,7 @@ presses, an `ok` or the judgment's own `done` alone:
 - `failed`: a press or a look failed, or the screen would not move. `at.step`
   names where; recover from there.
 
-## Built-in browser and emulator
+## Built-in browser
 
 For a website, open and inspect the page through the pane ZeroCode owns:
 
@@ -186,40 +186,10 @@ status and timing but never a header or a body. Each answer ends with a
 `# seq … · last …` line: pass `--since <last>` to read what came after. A
 pane opened before the ring existed answers that it has no ring; reload it.
 
-For mobile, discover the installed fleet first. Never assume a specific phone
-family or model, AVD name, UDID, or Android serial:
-
-```text
-zerocode-emulator list --json
-zerocode-emulator open --platform ios|android [--device <listed-id>] --json
-zerocode-emulator tree --platform ios|android --device <listed-id> --json
-zerocode-emulator tap --platform ios|android --device <listed-id> --x <0..1> --y <0..1> --json
-zerocode-emulator swipe --platform ios|android --device <listed-id> --x1 <0..1> --y1 <0..1> --x2 <0..1> --y2 <0..1> [--ms <50..3000>] --json
-zerocode-emulator text --platform ios|android --device <listed-id> --text <text> --json
-zerocode-emulator button --platform ios|android --device <listed-id> --name <button> --json
-zerocode-emulator rotate --platform ios|android --device <listed-id> --rotation <0..3> --json
-zerocode-emulator screenshot --platform ios|android --device <listed-id> [--out <path>] --json
-```
-
-Both screenshot commands write PNG bytes to a file and return its path; they
-never print image bytes to the terminal. Omit `--out` for a private scratch
-path, or pass a destination when the artifact belongs in the worktree; the
-emulator takes a relative `--out` from the shell's own folder.
-
-The mirror `open` makes is seated in your own pane's checkout, not in front of
-whatever the person is looking at. Let `open` boot the device rather than
-booting it yourself: a device `open` boots is lent to your pane, and ZeroCode
-shuts it down when your pane closes, when you send `worker_done`, or when your
-session ends. A device that was already running is left as it was, and a
-device you created for the task is still yours to delete.
-
-Omit `--device` on `open` to let the built-in backend choose an already-running
-device or the first installed one. After opening, use the ID returned by
-`list`; Android accepts either its AVD name or its current serial. Coordinates
-are normalized to the device screen, not desktop pixels. Observe again after
-each action because mobile accessibility trees also become stale. If the pane
-is still starting, poll `list --json` until the selected device reports itself
-booted, then request its tree; do not fall back to desktop clicks.
+For an iPhone, an iPad, an Android phone, a simulator or an emulator, use the
+`mobile-device` skill. It holds every `zerocode-emulator` command, the look →
+press loop and what to say about a phone this window cannot drive; this skill
+keeps no copy of them.
 
 ## Terminals, SSH hosts and remote workspaces
 
@@ -331,8 +301,6 @@ flags, result schema and error codes apply, with these platform facts:
   `Select`, `Expand`, `Collapse`, `ScrollDownByPage`, …) instead of macOS
   action names; `--action` matches either spelling case-insensitively.
 - `CmdOrCtrl` is Ctrl; `Cmd`/`Meta`/`Super`/`Win` is the Windows key.
-- iOS Simulator does not exist on Windows; `zerocode-emulator` lists Android
-  devices only.
 
 ## Core loop
 
