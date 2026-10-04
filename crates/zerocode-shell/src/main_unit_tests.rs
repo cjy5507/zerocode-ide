@@ -20308,6 +20308,64 @@ pub(crate) mod computer_desktop_wait {
         );
     }
 
+    /// t-37883: a click by the words a mirrored phone shows reads the app's
+    /// window once, presses the chosen line's centre (nudged) as a click at a
+    /// point, and declares a payment its words name — handed back unpressed
+    /// to a walk with nobody to ask.
+    #[test]
+    fn a_click_by_the_words_a_screen_shows_presses_the_lines_centre() {
+        use crate::agent_tools_runtime::click_by_words;
+        use crate::computer_use::confirm::{self, Asking};
+        use zerocode_core::computer_use_protocol::error_code;
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        confirm::set_policy(confirm::Policy::default());
+        let words = |argv: &[&str]| {
+            argv.iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        };
+        let screen = serde_json::json!({ "source": "ocr", "lines": [
+            { "text": "No", "x": 1060.0, "y": 300.0, "width": 20.0, "height": 17.0 },
+            { "text": "Have you visited a farm?", "x": 760.0, "y": 380.0, "width": 300.0, "height": 17.0 },
+            { "text": "No", "x": 1060.0, "y": 420.0, "width": 20.0, "height": 17.0 },
+            { "text": "Pay 30 USD", "x": 880.0, "y": 900.0, "width": 100.0, "height": 20.0 },
+        ] });
+        let command = zerocode_core::computer_use::parse_command(&words(&[
+            "click", "--app", "iPhone Mirroring", "--ocr", "--text", "No", "--after-text", "farm", "--dy", "2",
+        ]))
+        .expect("a click by words");
+        let mut asked = Vec::new();
+        let answer = click_by_words(&command, Asking::Person, &mut |method, params| {
+            asked.push((method.to_string(), params));
+            Ok(if method == "readText" { screen.clone() } else { serde_json::json!({ "path": "synthetic" }) })
+        })
+        .expect("pressed");
+        let methods: Vec<&str> = asked.iter().map(|(method, _)| method.as_str()).collect();
+        assert_eq!(methods, ["readText", "mouseClick"], "one reading, one press");
+        assert_eq!((&asked[0].1["app"], &asked[0].1["ocr"]), (&serde_json::json!("iPhone Mirroring"), &serde_json::json!(true)));
+        assert_eq!(
+            (asked[1].1["x"].as_f64(), asked[1].1["y"].as_f64()),
+            (Some(1070.0), Some(430.5)),
+            "the No after the farm question, two points lower"
+        );
+        assert_eq!(answer["pressed"]["words"], "No");
+        let pay = zerocode_core::computer_use::parse_command(&words(&[
+            "click", "--app", "iPhone Mirroring", "--ocr", "--text", "Pay",
+        ]))
+        .expect("a click by words");
+        let mut presses = 0;
+        let handed = click_by_words(&pay, Asking::HandBack, &mut |method, _| {
+            if method != "readText" {
+                presses += 1;
+            }
+            Ok(screen.clone())
+        });
+        assert_eq!(handed.expect_err("held for the person").code, error_code::CONFIRMATION_REQUIRED);
+        assert_eq!(presses, 0, "a payment the words name never reaches the helper unasked");
+    }
+
     /// Every request that types text as keys carries the keyboard's table —
     /// the helper keeps no numbers of its own and, without it, types no text
     /// that moves the focus; nothing else carries it.

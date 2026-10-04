@@ -794,6 +794,8 @@ pub const COMPUTER_BATCH_ANSWER_MARGIN_MS: u64 = 2_000;
 pub const COMPUTER_WALK_MAX_GLIDE_STEPS: u64 = 60;
 /// The flag a batch carries its steps in: a JSON array of command lines.
 pub const BATCH_COMMANDS_FLAG: &str = "commands";
+/// The flag a `wait` ends on its act's settle by (`wait --settle`).
+pub const WAIT_SETTLE_FLAG: &str = "settle";
 /// The flag every walked step — a batch's or a recipe's — carries where its
 /// own table allows it: every step answers an envelope.
 pub const WALKED_STEP_FLAGS: &[&str] = &["json"];
@@ -883,6 +885,8 @@ pub const EYE_QUIET_MS: u64 = 100;
 /// or a window animates for at most half a second, and motion past a second
 /// is content — a spinner, a video — shown as it is (`settled: false`).
 pub const EYE_SETTLE_MAX_MS: u64 = 1_000;
+/// How long the screen must hold still before a `wait --settle` ends.
+pub const EYE_WAIT_QUIET_MS: u64 = 300;
 /// What was repainting this long before an act (or a watch) began is the
 /// screen's own motion — a clock, a video, a spinner — not the act's doing.
 pub const EYE_BACKGROUND_MS: u64 = 500;
@@ -8429,5 +8433,87 @@ mod tests {
             );
         }
         assert!(parse_command(&words(&["key", "--key", "a", "--instant"])).is_err());
+    }
+
+    /// t-37883: a control on a window with no tree is named by the words its
+    /// pixels show — the line it follows tells recurring words apart, a nudge
+    /// moves the press off the words — and by nothing else at once.
+    #[test]
+    fn a_click_by_the_words_a_screen_shows_is_parsed_and_its_other_names_refused() {
+        let parsed = parse_command(&words(&[
+            "click",
+            "--app",
+            "iPhone Mirroring",
+            "--ocr",
+            "--text",
+            "No",
+            "--after-text",
+            "visited a farm",
+            "--dy",
+            "4",
+            "--json",
+        ]));
+        assert!(parsed.is_ok(), "{parsed:?}");
+        let command = parsed.unwrap_or_else(|_| unreachable!());
+        assert_eq!(command.method, ComputerMethod::Click);
+        assert_eq!(command.params["ocr"], true);
+        assert_eq!(command.params["text"], "No");
+        assert_eq!(command.params["afterText"], "visited a farm");
+        assert_eq!(command.params["dy"], 4.0);
+        let refused = |argv: &[&str]| parse_command(&words(argv)).err().unwrap_or_default();
+        assert!(
+            refused(&["click", "--app", "A", "--ocr", "--text", " "])
+                .contains("must read something")
+        );
+        assert!(refused(&["click", "--app", "A", "--ocr", "--label", "No"]).contains("--label"));
+        assert!(
+            refused(&[
+                "click", "--app", "A", "--ocr", "--text", "No", "--x", "1", "--y", "2"
+            ])
+            .contains("--x")
+        );
+        assert!(
+            refused(&[
+                "click",
+                "--app",
+                "A",
+                "--text",
+                "No",
+                "--after-text",
+                "farm"
+            ])
+            .contains("--ocr")
+        );
+        assert!(
+            refused(&["click", "--app", "A", "--x", "1", "--y", "2", "--dx", "3"])
+                .contains("--ocr")
+        );
+        assert!(usage().contains("--ocr --text <words>"));
+    }
+
+    /// t-37883: a batch's wait right after a step that acts ends once that
+    /// act's paint has held still (`--settle`); a wait after a wait, or one
+    /// at a batch's start, is as it was written.
+    #[test]
+    fn a_batch_wait_after_an_act_ends_on_that_acts_settle() {
+        let command = batch(&json!([
+            ["wait", "--ms", "50"],
+            ["mouse-click", "--x", "10", "--y", "20"],
+            ["wait", "--ms", "4000"],
+            ["wait", "--ms", "5"],
+        ]))
+        .expect("a batch");
+        let settles = |at: usize| {
+            command.params[BATCH_COMMANDS_FLAG][at]
+                .as_array()
+                .is_some_and(|step| {
+                    step.iter()
+                        .any(|word| word == &json!(format!("--{WAIT_SETTLE_FLAG}")))
+                })
+        };
+        assert_eq!((settles(0), settles(2), settles(3)), (false, true, false));
+        let alone = parse_command(&words(&["wait", "--ms", "10", "--settle"]));
+        assert!(alone.is_ok_and(|command| command.params[WAIT_SETTLE_FLAG] == true));
+        assert!(usage().contains("wait --ms N [--settle]"));
     }
 }

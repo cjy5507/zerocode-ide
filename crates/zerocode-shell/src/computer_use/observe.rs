@@ -1295,6 +1295,52 @@ mod tests {
         );
     }
 
+    /// t-37883: one window asked for by its English name, its own-language
+    /// name and its bundle id is one place — the next look compares with the
+    /// first — and the look says who it saw.
+    #[test]
+    fn an_apps_window_named_three_ways_keeps_one_last_frame() {
+        let picture = png(8, 8, |_, _| [9, 9, 9, 255]);
+        let mut call = |method: &str, _: Value| -> Result<Value, ComputerUseError> {
+            match method {
+                "getAppState" => {
+                    let mut frame = answered(&picture, (8, 8), (742.0, 61.0), 1.0);
+                    frame["snapshot"] = serde_json::json!({
+                        "app": { "name": "iPhone Mirroring", "bundleId": "com.apple.ScreenContinuity", "pid": 4243 },
+                        "window": { "id": 77, "title": "iPhone Mirroring" },
+                        "treeText": "",
+                        "elementCount": 1,
+                    });
+                    Ok(frame)
+                }
+                other => Err(ComputerUseError::new(
+                    error_code::UNSUPPORTED_CAPABILITY,
+                    format!("not asked here: {other}"),
+                )),
+            }
+        };
+        let memory = super::super::eye::Memory::new();
+        let look = |name: &str| {
+            let mut params = diff_look("t-37883-names");
+            params.insert("app".into(), name.into());
+            params
+        };
+        let first =
+            observe_with(&look("iPhone Mirroring"), &memory, &mut call, &mut |_| {}).unwrap();
+        assert_eq!(
+            first["app"]["bundleId"], "com.apple.ScreenContinuity",
+            "the look says who it saw"
+        );
+        for name in ["iPhone 미러링", "com.apple.ScreenContinuity"] {
+            let again = observe_with(&look(name), &memory, &mut call, &mut |_| {}).unwrap();
+            assert_eq!(
+                again["changed"],
+                serde_json::json!([]),
+                "{name}: the same window, and nothing changed"
+            );
+        }
+    }
+
     /// The measurement: every look leaves one line of numbers — how many
     /// rectangles changed and what share, the frame's and the last act's
     /// stamps, the picture's size and scale — and nothing it saw: no

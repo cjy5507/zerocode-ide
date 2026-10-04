@@ -380,3 +380,84 @@ fn malformed_stream_metadata_and_change_lists_are_not_empty_intervals() {
         assert!(Changes::from_answer(&answer).is_none(), "{answer}");
     }
 }
+
+/// t-37883: a phone mirrored on the Mac answers a tap a quarter of a second
+/// late and its picture keeps repainting past a second (the session's looks
+/// after a batch hit a one-second cap 18 times in 110, and each was looked
+/// at again — a model round trip). The look after the act waits for it to
+/// finish and says it settled.
+#[test]
+fn the_look_after_an_act_waits_out_a_mirrored_screens_late_long_answer() {
+    let desk = desk();
+    let at = |ms: i64| ACT.at_ms + ms;
+    let phone = (742.0, 75.0, 436.0, 800.0);
+    let answer: Vec<Change> = (0..36)
+        .map(|frame| {
+            change(
+                11 + frame,
+                at(250 + 33 * i64::try_from(frame).unwrap()),
+                phone,
+            )
+        })
+        .collect();
+    let last = answer.last().unwrap().at_ms;
+    assert_eq!(
+        settle(&answer, ACT, &desk, at(1_100)),
+        Settle::Wait,
+        "still moving at 1.1 s: the phone is still answering"
+    );
+    let quiet = i64::try_from(EYE_QUIET_MS).unwrap();
+    assert_eq!(
+        settle(&answer, ACT, &desk, last + quiet),
+        Settle::Look { settled: true }
+    );
+}
+
+/// t-37883: a `wait --settle` after a tap ends once the tap's paint has held
+/// still for the wait's quiet — longer than a look's, so the pause between a
+/// row's highlight and the sheet it opens does not end it — and a screen the
+/// tap has not moved yet runs the wait's whole time.
+#[test]
+fn a_settling_wait_ends_on_the_acts_paint_holding_still_and_never_before_it_paints() {
+    let desk = desk();
+    let at = |ms: i64| ACT.at_ms + ms;
+    let until = at(4_000);
+    assert_eq!(
+        wait_settled(&[], ACT, &desk, at(1_000), until),
+        Settle::Wait,
+        "nothing painted yet"
+    );
+    assert_eq!(
+        wait_settled(&[], ACT, &desk, until, until),
+        Settle::Look { settled: false }
+    );
+    let phone = (742.0, 75.0, 436.0, 800.0);
+    // The row's highlight at 250 ms, a 200 ms pause, the sheet from 450 to 750 ms.
+    let mut paint = vec![change(11, at(250), phone)];
+    paint.extend((0..10).map(|frame| {
+        change(
+            12 + frame,
+            at(450 + 30 * i64::try_from(frame).unwrap()),
+            phone,
+        )
+    }));
+    let quiet = i64::try_from(EYE_WAIT_QUIET_MS).unwrap();
+    assert_eq!(
+        wait_settled(&paint[..1], ACT, &desk, at(250) + quiet - 1, until),
+        Settle::Wait,
+        "the pause after the highlight is shorter than the wait's quiet"
+    );
+    let last = paint.last().unwrap().at_ms;
+    assert_eq!(
+        wait_settled(&paint, ACT, &desk, last + quiet - 1, until),
+        Settle::Wait
+    );
+    assert_eq!(
+        wait_settled(&paint, ACT, &desk, last + quiet, until),
+        Settle::Look { settled: true }
+    );
+    assert!(
+        last + quiet < until,
+        "it ended well before the 4 s it was given"
+    );
+}

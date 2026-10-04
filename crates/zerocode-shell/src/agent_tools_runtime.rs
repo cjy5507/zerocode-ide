@@ -5133,6 +5133,22 @@ fn click_by_mark(
         .map_err(|error| computer_use::marks::click_refusal(error, &mark))
 }
 
+/// `click --app A --ocr --text T` (red: not written yet).
+pub(crate) fn click_by_words(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    asking: computer_use::confirm::Asking,
+    call: &mut dyn FnMut(
+        &str,
+        serde_json::Value,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError>,
+) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+    let _ = (command, asking, call);
+    Err(computer_use::ComputerUseError::new(
+        zerocode_core::computer_use_protocol::error_code::UNSUPPORTED_CAPABILITY,
+        "a click by words is not written yet",
+    ))
+}
+
 /// Call the helper for a command, holding a press that lands on a payment,
 /// transfer or delete control for the person (§1.5): the policy's words ride
 /// with a pressing request, the helper answers `confirmation_required` with

@@ -274,6 +274,17 @@ impl Listed {
     }
 }
 
+/// `wait --settle` (red: not written yet — the caller waits the whole time).
+pub(super) fn wait_settled(
+    memory: &Memory,
+    asked_ms: u64,
+    call: Call<'_>,
+    pause: &mut dyn FnMut(Duration),
+) -> Option<Settled> {
+    let _ = (memory, asked_ms, call, pause);
+    None
+}
+
 /// `watch`, through the helper, waiting on the thread.
 pub fn watch_desktop(params: &Value) -> Result<Value, ComputerUseError> {
     watch(&MEMORY, params, &mut super::call, &mut std::thread::sleep)

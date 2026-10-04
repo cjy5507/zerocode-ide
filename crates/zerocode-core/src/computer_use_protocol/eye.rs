@@ -19,7 +19,9 @@ use serde_json::Value;
 
 use super::marks::DesktopWindow;
 use super::render::{Rect, fully_covered};
-use crate::computer_use::{COMPUTER_SETTLE_MS, EYE_BACKGROUND_MS, EYE_QUIET_MS, EYE_SETTLE_MAX_MS};
+use crate::computer_use::{
+    COMPUTER_SETTLE_MS, EYE_BACKGROUND_MS, EYE_QUIET_MS, EYE_SETTLE_MAX_MS, EYE_WAIT_QUIET_MS,
+};
 
 /// The helper's methods: open the eye, ask for its repaints, read its
 /// newest frame; and its word for an eye that is not open.
@@ -297,6 +299,28 @@ pub fn settle(changes: &[Change], act: Mark, windows: &[DesktopWindow], now_ms: 
         }
         Some(_) if reached(EYE_SETTLE_MAX_MS) => Settle::Look { settled: false },
         Some(_) => Settle::Wait,
+    }
+}
+
+/// Where a `wait --settle` stands (t-37883): over once what the act before
+/// it painted has held still for `EYE_WAIT_QUIET_MS` (`Look { settled:
+/// true }`), and otherwise when its own time is up at `until_ms` (`Look {
+/// settled: false }`). A screen the act has not moved yet never ends it
+/// early — a mirrored phone paints a quarter of a second late, a slow app
+/// later still — so the wait a plan asked for is the most it costs.
+#[must_use]
+pub fn wait_settled(
+    changes: &[Change],
+    act: Mark,
+    windows: &[DesktopWindow],
+    now_ms: i64,
+    until_ms: i64,
+) -> Settle {
+    let _ = (changes, act, windows, EYE_WAIT_QUIET_MS);
+    if now_ms >= until_ms {
+        Settle::Look { settled: false }
+    } else {
+        Settle::Wait
     }
 }
 

@@ -272,6 +272,10 @@ pub(crate) struct ComputerInput {
     /// A `left_click`'s target by its index in the named app's tree (as an
     /// `observe` with `app` shows it), pressed through accessibility.
     pub element_index: Option<u64>,
+    /// A `left_click` by the words a window shows (red: read by nothing yet).
+    pub after_text: Option<String>,
+    /// A `left_click` by words: `[dx, dy]` in pixels (red: read by nothing yet).
+    pub offset: Option<[f64; 2]>,
     /// Whether the look after an action waits for quiet. Continuous motion
     /// can be sampled immediately, while ordinary UI actions wait by default.
     pub settle: Option<bool>,
@@ -2609,13 +2613,20 @@ printf '%s
                 "app": "A", "url": "u", "path": "/p", "program": "/bin/p", "args": "a", "role": "r", "label": "l",
                 "ocr": true, "window": "w", "window_id": 7, "kind": "move", "x": 5, "y": 6, "width": 7, "height": 8,
                 "timeout_ms": 100, "absent": true, "confirming": "payment", "force": true, "reset_budget": true,
-                "last": 3, "after": 2, "min_confidence": 0.5, "until": "quiet"
+                "last": 3, "after": 2, "min_confidence": 0.5, "until": "quiet", "after_text": "f",
+                "offset": [1, 2]
             })
         };
         let argv = |fields: &Value| argv_for(&input(fields.clone())).map_err(|error| error.to_string());
+        // A click by words reads its own fields only when no coordinate
+        // competes for its one target: every set is also tried without one.
+        let without_coordinate = |mut fields: Value| {
+            fields.as_object_mut().unwrap().remove("coordinate");
+            fields
+        };
         let mut read = std::collections::BTreeSet::from(["action".to_string()]);
         for action in action_names(|action| methods(action).any(ComputerMethod::batches)) {
-            let whole = full(action);
+            for whole in [full(action), without_coordinate(full(action))] {
             for field in whole.as_object().unwrap().keys().filter(|field| *field != "action") {
                 let mut without = whole.clone();
                 without.as_object_mut().unwrap().remove(field);
@@ -2623,9 +2634,50 @@ printf '%s
                     read.insert(field.clone());
                 }
             }
+            }
         }
         let listed: std::collections::BTreeSet<String> = STEP_FIELDS.iter().map(|field| (*field).to_string()).collect();
         assert_eq!(listed, read, "STEP_FIELDS is what the step actions read");
+    }
+
+    /// t-37883: a press by the words a window with no tree shows is the
+    /// core's `click --ocr`, its nudge in the picture's pixels moved into
+    /// points like every other place the model names.
+    #[test]
+    fn a_click_by_the_words_a_window_shows_is_the_cores_ocr_click() {
+        let frame = half((100.0, 0.0));
+        let click = input(json!({ "action": "left_click", "app": "iPhone Mirroring", "label": "No", "ocr": true,
+            "after_text": "visited a farm", "offset": [0, 4] }));
+        assert!(speaks_in_pixels(&click), "a nudge is a length in the picture's pixels");
+        let argv = argv_for(&in_points(click, frame).unwrap()).unwrap();
+        assert_eq!(
+            argv,
+            ["click", "--app", "iPhone Mirroring", "--ocr", "--text", "No", "--after-text", "visited a farm", "--dx", "0", "--dy", "8",
+                "--mouse-button", "left", "--click-count", "1", "--json"]
+        );
+        assert!(zerocode_core::computer_use::parse_command(&argv).is_ok(), "the window takes it");
+    }
+
+    /// t-37883: a batch whose steps acted in an app is looked at in that
+    /// app's window, not the whole desktop the model would only look at
+    /// again; with no app named, the window the model last looked at.
+    #[cfg(unix)]
+    #[test]
+    fn the_look_after_a_batch_is_of_the_app_it_acted_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (road, _) = fake_shim(dir.path());
+        let ran: Vec<Value> = (1..=2).map(|n| json!({ "n": n, "verb": "x", "ok": true, "ms": 1, "result": {} })).collect();
+        std::fs::write(dir.path().join("batch"), json!({ "ok": true, "result": { "ran": 2, "of": 2, "steps": ran } }).to_string()).unwrap();
+        let ctx = ToolContext::new();
+        ctx.set_computer_frame(half((0.0, 0.0)));
+        let steps = json!([{ "action": "activate", "app": "iPhone Mirroring" }, { "action": "left_click", "coordinate": [10, 10] }]);
+        let answer: Value = serde_json::from_str(&run_computer(&json!({ "action": "batch", "steps": steps }), &ctx, &road).expect("an answer")).unwrap();
+        let said = answer["looked_after"]["screen"]["said"].as_str().unwrap_or_default().to_string();
+        assert!(said.contains("observe --diff --settle --app iPhone Mirroring"), "the look after: {said}");
+        let unnamed = json!([{ "action": "left_click", "coordinate": [10, 10] }, { "action": "key", "text": "a" }]);
+        let answer: Value = serde_json::from_str(&run_computer(&json!({ "action": "batch", "steps": unnamed }), &ctx, &road).expect("an answer")).unwrap();
+        let said = answer["looked_after"]["screen"]["said"].as_str().unwrap_or_default().to_string();
+        assert!(said.contains("--app iPhone Mirroring"), "the app the model last looked at: {said}");
     }
 
     /// The tool's seat in a conversation once it is looked up, measured the
