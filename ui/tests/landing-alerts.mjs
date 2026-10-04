@@ -1,3 +1,5 @@
+import { mkdir } from "node:fs/promises";
+import { resolve } from "node:path";
 import { openWindowTestPage } from "./window-boot.mjs";
 
 /* The ledger's alerts about late landings, as the window words them (t-34501 stage 2, t-22105).
@@ -133,6 +135,23 @@ export async function testLandingAlerts({ browser, origin, ok, faults }) {
         !rows["/r/merged"].dotTip.includes("병합 기록 없이") && !rows["/r/nothing"].dotTip.includes("병합 기록 없이"),
       JSON.stringify(rows),
     );
+
+    // Pictures of the waiting rows for the stage report, when asked for (LANDING_ALERTS_CAPTURE=dir).
+    const capture = process.env.LANDING_ALERTS_CAPTURE ?? null;
+    if (capture) {
+      await mkdir(capture, { recursive: true });
+      for (const [name, width] of [["", null], ["-narrow", "180px"]]) {
+        for (const theme of ["dark", "light"]) {
+          await page.evaluate(async ([which, wide]) => {
+            document.documentElement.dataset.theme = which;
+            if (wide) document.documentElement.style.setProperty("--sidebar-width", wide);
+            else document.documentElement.style.removeProperty("--sidebar-width");
+            await window.__PAINTED__();
+          }, [theme, width]);
+          await page.locator(".threads").screenshot({ path: resolve(capture, `waiting-${theme}${name}.png`), animations: "disabled" });
+        }
+      }
+    }
   } finally {
     await page.close();
   }
