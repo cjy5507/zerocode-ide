@@ -71,6 +71,8 @@ const MARK_CLICKS: &[&str] = &["left_click", "right_click", "middle_click", "dou
 /// The click an element of an app's tree is pressed by: the element's own
 /// press, which has no button or count.
 const ELEMENT_CLICK: &str = "left_click";
+/// The action that leaves no window of its app to look at after it.
+const QUIT_ACTION: &str = "quit";
 /// Actions whose answer names places on the screen: before the first of them
 /// the model is shown a picture, so what they answer is in its pixels.
 const ANSWERS_PLACES: &[&str] = &["find", "read", "wait_for", "list_windows", "cursor_position"];
@@ -171,6 +173,8 @@ const STEP_FIELDS: &[&str] = &[
     "after",
     "min_confidence",
     "until",
+    "after_text",
+    "offset",
 ];
 
 /// The core methods an action may run: its own, or — for `window` — every
@@ -272,9 +276,11 @@ pub(crate) struct ComputerInput {
     /// A `left_click`'s target by its index in the named app's tree (as an
     /// `observe` with `app` shows it), pressed through accessibility.
     pub element_index: Option<u64>,
-    /// A `left_click` by the words a window shows (red: read by nothing yet).
+    /// A `left_click` by the words a window shows (`app`, `label`, `ocr`):
+    /// the line those words come after, telling recurring words apart.
     pub after_text: Option<String>,
-    /// A `left_click` by words: `[dx, dy]` in pixels (red: read by nothing yet).
+    /// A `left_click` by words: `[dx, dy]` from the words' centre, in the
+    /// last screenshot's pixels.
     pub offset: Option<[f64; 2]>,
     /// Whether the look after an action waits for quiet. Continuous motion
     /// can be sampled immediately, while ordinary UI actions wait by default.
@@ -324,6 +330,8 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "min_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
         "until": { "type": "string", "description": format!("watch: {}; walk: the text on screen when it worked", WATCH_UNTIL.join("|")) },
         "element_index": { "type": "integer", "minimum": 0 },
+        "after_text": { "type": "string" },
+        "offset": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
         "settle": { "type": "boolean",
             "description": "Action/batch: false samples immediately, without confirming completion. Default true waits for quiet." },
         "name": { "type": "string" },
@@ -376,7 +384,10 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             tree, each line led by an element_index a left_click with app presses; app + label (and role) presses \
             the control that reads so, chosen at the press — never stale, so a batch step can name it. A familiar run \
             of hand steps you would not look between is one batch (steps: [...]): one call, one look after — plan it \
-            whole (left_click by label, type, key, wait_for) rather than a look per press. recipe_save \
+            whole (left_click by label, type, key, wait_for) rather than a look per press. A window with no tree (a \
+            mirrored phone): left_click {app, label: the words shown, ocr: true, after_text: the line they follow} \
+            presses them as read at the press — batch a whole screen, wait_for {app, ocr: true, text} checks each \
+            value, a wait after a press ends once the screen is still, and the look after shows that app. recipe_save \
             keeps a procedure that worked; recipe_run walks it again in one call (params fill its \
             {{names}}) and says where it stopped and the start to resume from. walk (goal: one sentence; one of \
             app, pane, or platform with device; until: the text on screen when it worked; max_steps) walks there \
@@ -487,6 +498,7 @@ fn point(value: Option<[f64; 2]>, action: &str, field: &str) -> Result<[f64; 2],
 /// Whether the model gave a position or a length — words in pixels.
 fn speaks_in_pixels(input: &ComputerInput) -> bool {
     input.coordinate.is_some()
+        || input.offset.is_some()
         || input.start_coordinate.is_some()
         || input.region.is_some()
         || input.x.is_some()
@@ -500,6 +512,7 @@ fn speaks_in_pixels(input: &ComputerInput) -> bool {
 /// region's two corners become the CLI's corner and size.
 fn in_points(mut input: ComputerInput, frame: ShotFrame) -> Result<ComputerInput, ToolError> {
     input.coordinate = input.coordinate.map(|pixel| frame.to_point(pixel));
+    input.offset = input.offset.map(|[dx, dy]| [frame.length_to_point(dx), frame.length_to_point(dy)]);
     input.start_coordinate = input.start_coordinate.map(|pixel| frame.to_point(pixel));
     input.region = match input.region {
         Some([x0, y0, x1, y1]) if x1 > x0 && y1 > y0 => Some(frame.rect_to_point([x0, y0, x1 - x0, y1 - y0])),
@@ -611,6 +624,19 @@ fn argv_click(action: &str, input: &ComputerInput, argv: &mut Vec<String>) -> Re
         if let Some(index) = input.element_index {
             let app = need(input.app.as_deref(), action, "app")?;
             push(argv, &["click", "--app", app, "--element-index", &index.to_string(), "--no-screenshot"]);
+        } else if by_reading && input.ocr == Some(true) {
+            // A window with no tree (a mirrored phone): the words its pixels
+            // show, read at the press — the core's `click --ocr`.
+            let app = need(input.app.as_deref(), action, "app")?;
+            let words = need(input.label.as_deref(), action, "label")?;
+            push(argv, &["click", "--app", app, "--ocr", "--text", words]);
+            if let Some(after) = input.after_text.as_deref() {
+                push(argv, &["--after-text", after]);
+            }
+            if let Some([dx, dy]) = input.offset {
+                push(argv, &["--dx", &number(dx), "--dy", &number(dy)]);
+            }
+            push(argv, &["--mouse-button", button, "--click-count", count]);
         } else if by_reading {
             let app = need(input.app.as_deref(), action, "app")?;
             push(argv, &["click", "--app", app]);
@@ -1097,8 +1123,15 @@ fn present_observation(
     window_id: Option<u64>,
     diff: bool,
 ) -> Option<Value> {
+    // An app's look is the app the window resolved, whatever name the
+    // model asked it by — one window under three names is one observation.
+    let app = answer
+        .pointer("/result/app/bundleId")
+        .and_then(Value::as_str)
+        .or(app)
+        .map(str::to_string);
     let observation = answer.get("result").and_then(ShotFrame::from_answer).map(|frame| ComputerObservation {
-        app: app.map(str::to_string),
+        app: app.clone(),
         window_id,
         frame,
         marked_look: answer.pointer(&format!("/result/marks/{LOOK_ID_KEY}")).and_then(Value::as_str).map(str::to_string),
@@ -1232,8 +1265,12 @@ fn with_marked_look(mut argv: Vec<String>, ctx: &ToolContext) -> Result<Vec<Stri
 /// changed since the model's own last look is not shown — the model's last
 /// picture is still the screen — and says so (`changed` is null when there
 /// was nothing to compare with).
-fn look(road: &ComputerRoad, ctx: &ToolContext, words: &[&str]) -> Result<Value, LookError> {
-    let argv = look_argv(words, looks_carry_marks());
+fn look(road: &ComputerRoad, ctx: &ToolContext, words: &[&str], app: Option<&str>) -> Result<Value, LookError> {
+    let mut asked = words.to_vec();
+    if let Some(app) = app {
+        asked.extend(["--app", app]);
+    }
+    let argv = look_argv(&asked, looks_carry_marks());
     let mut answer = call_shim(road, &as_viewer(argv, ctx), ctx.cwd.as_deref()).map_err(LookError::Road)?;
     if let Some(refused) = refusal(&answer) {
         return Err(LookError::Refused(refused));
@@ -1243,8 +1280,13 @@ fn look(road: &ComputerRoad, ctx: &ToolContext, words: &[&str]) -> Result<Value,
     } else {
         None
     };
-    let staged = present_observation(&mut answer, ctx, None, None, words.contains(&LOOK_DIFF_FLAG));
+    let staged = present_observation(&mut answer, ctx, app, None, words.contains(&LOOK_DIFF_FLAG));
     let mut screen = shown(answer.get("result").cloned().unwrap_or(Value::Null), ctx.computer_frame());
+    // This look is a picture: an app's whole tree is the model's to ask for
+    // (`observe` with `app`), not a cost every look after a batch pays.
+    if let Some(tree) = screen.get_mut("tree").and_then(Value::as_object_mut) {
+        tree.remove("text");
+    }
     // A look that showed no new picture leaves the model's numbers as they were.
     if staged.is_some() {
         present_marks(&mut screen, ctx);
@@ -1278,10 +1320,11 @@ fn looks_carry_marks() -> bool {
 /// The look after an act. The window waits for what the act did to finish
 /// painting (`observe --settle`: on the eye's repaints, or by looking until
 /// the table's settle), then looks once; nothing changed says
-/// `changed: false`.
-fn look_after(road: &ComputerRoad, ctx: &ToolContext, settle: bool) -> Value {
+/// `changed: false`. It looks at `app`'s window when the acts were in one.
+fn look_after(road: &ComputerRoad, ctx: &ToolContext, settle: bool, app: Option<&str>) -> Value {
     let words = if settle { LOOK_AFTER_ARGV } else { FRAME_LOOK_ARGV };
-    let mut answer = look(road, ctx, words).unwrap_or_else(|error| json!({ "error": ToolError::from(error).to_string() }));
+    let mut answer =
+        look(road, ctx, words, app).unwrap_or_else(|error| json!({ "error": ToolError::from(error).to_string() }));
     if !settle {
         answer["waited_for_settle"] = Value::Bool(false);
     }
@@ -1297,7 +1340,7 @@ fn first_look(inputs: &[&ComputerInput], ctx: &ToolContext, road: &ComputerRoad)
     if ctx.computer_frame().is_some() || !inputs.iter().any(|input| needs_a_frame(input)) {
         return Ok(None);
     }
-    match look(road, ctx, FRAME_LOOK_ARGV) {
+    match look(road, ctx, FRAME_LOOK_ARGV, None) {
         Ok(seen) if seen["staged"] != true || ctx.computer_frame().is_none() => Err(ToolError::Execution(
             "the first desktop picture could not be shown with its coordinate frame; observe again before acting in picture pixels".into(),
         )),
@@ -1308,6 +1351,19 @@ fn first_look(inputs: &[&ComputerInput], ctx: &ToolContext, road: &ComputerRoad)
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// The app the look after acts is of (t-37883): the last app the acts named
+/// (a quit's leaves no window to look at), else the one the model last
+/// looked at — so a batch on a phone's mirrored window is shown that window,
+/// settled and legible, not the whole desktop the model would only look at
+/// again.
+fn acted_in(acts: &[&ComputerInput], ctx: &ToolContext) -> Option<String> {
+    acts.iter()
+        .rev()
+        .filter(|act| act.action.trim() != QUIT_ACTION)
+        .find_map(|act| act.app.clone())
+        .or_else(|| ctx.computer_observed_app())
 }
 
 /// A batch's command line: each step spelled exactly as the same action
@@ -1382,11 +1438,9 @@ fn run_computer_batch(input: ComputerInput, ctx: &ToolContext, road: &ComputerRo
             .map(|step| step.action.trim().to_string());
         json!({ "step": at, "action": action, "code": refused.code, "message": refused.message })
     });
-    let acted = steps
-        .iter()
-        .take(ran)
-        .any(|step| acts(step.action.trim()));
-    let looked_after = (LOOK_AFTER_ACT && acted).then(|| look_after(road, ctx, settle));
+    let ran_steps: Vec<&ComputerInput> = steps.iter().take(ran).collect();
+    let acted = ran_steps.iter().any(|step| acts(step.action.trim()));
+    let looked_after = (LOOK_AFTER_ACT && acted).then(|| look_after(road, ctx, settle, acted_in(&ran_steps, ctx).as_deref()));
     to_pretty_json(json!({
         "ok": refused.is_none(),
         "action": BATCH_ACTION,
@@ -1572,7 +1626,7 @@ fn run_computer_walk(input: &ComputerInput, ctx: &ToolContext, road: &ComputerRo
         .find_map(|(surface, target)| target.as_deref().map(|target| (surface, target)))
         .unwrap_or_default();
     let looked_after = (LOOK_AFTER_ACT && walked.pressed > 0 && walked.status.leaves_an_unread_screen() && input.app.is_some())
-        .then(|| look_after(road, ctx, settle));
+        .then(|| look_after(road, ctx, settle, input.app.as_deref()));
     let mut result = answer.get("result").cloned().unwrap_or(Value::Null);
     let last = result.get(walk_words::ROWS).and_then(Value::as_array).and_then(|rows| rows.last()).cloned();
     if let Some(result) = result.as_object_mut() {
@@ -1640,7 +1694,8 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
         present_marks(&mut result, ctx);
     }
     // One look after the act, so the model sees what it did.
-    let looked_after = (LOOK_AFTER_ACT && acts(&action)).then(|| look_after(road, ctx, settle));
+    let looked_after =
+        (LOOK_AFTER_ACT && acts(&action)).then(|| look_after(road, ctx, settle, acted_in(&[&input], ctx).as_deref()));
     to_pretty_json(json!({
         "ok": true,
         "action": action,
@@ -2689,11 +2744,13 @@ printf '%s
     /// (one name in both enums, one field in both, one sentence) ~52, a
     /// look by `observe` and a press by `element_index` (one name, one field,
     /// one sentence; never a batch step) ~42, a press by reading (label and role
-    /// with app, a sentence and the plan-it-whole clause) ~40, a walk (one
+    /// with app, a sentence and the plan-it-whole clause) ~40, a press by the
+    /// words a window with no tree shows (two fields in the tool and in a
+    /// step, one sentence; t-37883) ~135, a walk (one
     /// name, eight fields, `until` read by two actions, one sentence) ~134.
     #[test]
     fn the_computer_schema_is_measured() {
-        const CEILING_TOKENS: usize = 1_820;
+        const CEILING_TOKENS: usize = 1_960;
         let spec = tool_specs().pop().expect("one spec");
         let definition = json!({ "name": spec.name, "description": spec.description, "input_schema": spec.input_schema });
         let compact = serde_json::to_string(&definition).unwrap().chars().count();

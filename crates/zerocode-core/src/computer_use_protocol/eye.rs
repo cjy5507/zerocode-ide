@@ -316,11 +316,12 @@ pub fn wait_settled(
     now_ms: i64,
     until_ms: i64,
 ) -> Settle {
-    let _ = (changes, act, windows, EYE_WAIT_QUIET_MS);
-    if now_ms >= until_ms {
-        Settle::Look { settled: false }
-    } else {
-        Settle::Wait
+    let ignore = Ignore::new(changes, act, windows);
+    let quiet = i64::try_from(EYE_WAIT_QUIET_MS).unwrap_or(i64::MAX);
+    match ignore.after(changes, act).last() {
+        Some(last) if now_ms - last.at_ms >= quiet => Settle::Look { settled: true },
+        _ if now_ms >= until_ms => Settle::Look { settled: false },
+        _ => Settle::Wait,
     }
 }
 

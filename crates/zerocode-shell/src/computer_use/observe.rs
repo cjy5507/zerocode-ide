@@ -154,10 +154,37 @@ fn frame_key(params: &Map<String, Value>) -> String {
         let region = text("region").unwrap_or_else(|| "full".to_string());
         format!("desktop:{display}/region:{region}")
     };
-    match text("viewer") {
+    viewers(params, place)
+}
+
+/// A place as one viewer keeps it: each model's looks are its own.
+fn viewers(params: &Map<String, Value>, place: String) -> String {
+    match params.get("viewer").and_then(Value::as_str) {
         Some(viewer) => format!("viewer:{viewer}/{place}"),
         None => place,
     }
+}
+
+/// An app look's place by what the helper resolved — the app's bundle id
+/// (its pid when it has none) and the window's id — so one window looked at
+/// under its English name, its own-language name or its bundle id keeps one
+/// last frame (t-37883: a mirrored phone's session named one window three
+/// ways). `None` when the helper's answer names neither.
+fn resolved_key(params: &Map<String, Value>, frame: &Value) -> Option<String> {
+    let app = frame.pointer("/snapshot/app")?;
+    let who = app
+        .get("bundleId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            app.get("pid")
+                .and_then(Value::as_i64)
+                .map(|pid| format!("pid:{pid}"))
+        })?;
+    let window = frame
+        .pointer("/snapshot/window/id")
+        .and_then(Value::as_i64)?;
+    Some(viewers(params, format!("app:{who}/window:id:{window}")))
 }
 
 fn take_last(key: &str) -> Option<LastFrame> {
@@ -544,6 +571,13 @@ fn look(
     } else {
         None
     };
+    // An app's window is kept under who the helper says it is, whatever
+    // name it was asked by.
+    let key = if app {
+        resolved_key(params, &frame).unwrap_or(key)
+    } else {
+        key
+    };
     // Taken out once the picture and its text are had: a look the helper
     // refused leaves the place's last look where it was.
     let held = take_last(&key);
@@ -632,6 +666,11 @@ fn look(
         "changed": changed,
         "changedShare": share,
     });
+    // Who an app look saw, as the helper resolved it — one name to keep
+    // asking by.
+    if let Some(resolved) = frame.pointer("/snapshot/app").filter(|_| app) {
+        answer["app"] = resolved.clone();
+    }
     if let Some(share) = share {
         let stuck = super::state::note_look(
             share > 0.0,

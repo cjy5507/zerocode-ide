@@ -427,9 +427,9 @@ pub const OBSERVE_FRAMES_MAX: usize = 8;
 pub const COMPUTER_HANDOFF_TIMEOUT_MS: u64 = 600_000;
 /// How long a hand whose place is covered waits before it lists the windows
 /// again, when what stands in front looks like it is passing — a
-/// notification sliding in or out, a window being dragged (t-12979): the
-/// eye's own longest settle, the most a repaint is given anywhere.
-pub const COVER_LOOK_AGAIN_MS: u64 = EYE_SETTLE_MAX_MS;
+/// notification sliding in or out, a window being dragged (t-12979): a
+/// sheet or a banner passes within a second.
+pub const COVER_LOOK_AGAIN_MS: u64 = 1_000;
 /// Stuck (§7.4): the same action this many times with nothing changing on
 /// the screen is a loop, not progress.
 pub const COMPUTER_STUCK_REPEATS: u32 = 2;
@@ -881,11 +881,19 @@ pub const EYE_FRAMES_PER_SECOND: u32 = 30;
 /// The screen has settled once nothing the look cares about repainted for
 /// this long: three frame intervals, and a transition paints every frame.
 pub const EYE_QUIET_MS: u64 = 100;
-/// The longest the look after an act waits for the screen to settle: a sheet
-/// or a window animates for at most half a second, and motion past a second
-/// is content — a spinner, a video — shown as it is (`settled: false`).
-pub const EYE_SETTLE_MAX_MS: u64 = 1_000;
-/// How long the screen must hold still before a `wait --settle` ends.
+/// The longest the look after an act waits for the screen to settle. A sheet
+/// on the Mac animates for half a second, but a mirrored or remote screen
+/// answers late and keeps repainting: the iPhone Mirroring session of
+/// t-37883 was still moving at a one-second cap 18 times in 110, each such
+/// picture distrusted and looked at again — a model round trip of about
+/// 17 s, against at most 2 s more of waiting here. Motion the act started
+/// that outlasts three seconds is content — a spinner, a video — shown as it
+/// is (`settled: false`); motion that was already there before the act never
+/// holds a look back at all (`EYE_BACKGROUND_MS`).
+pub const EYE_SETTLE_MAX_MS: u64 = 3_000;
+/// How long the screen must hold still before a `wait --settle` ends: three
+/// times a look's quiet, so the pause between a press's own paint (a row's
+/// highlight) and the screen it opens does not end the wait between the two.
 pub const EYE_WAIT_QUIET_MS: u64 = 300;
 /// What was repainting this long before an act (or a watch) began is the
 /// screen's own motion — a clock, a video, a spinner — not the act's doing.
@@ -1166,7 +1174,7 @@ pub fn batch_commands(raw: &str) -> Result<Vec<Vec<String>>, String> {
             ));
         }
         // A batch is looked at once, after: no frame of its steps.
-        let step = walked_step(step, false);
+        let step = settled_wait(walked_step(step, false), normalised.last());
         let command =
             parse_command(&step).map_err(|error| format!("step {n} ({verb}): {error}"))?;
         if let Some(why) = walked_step_refusal(&step, &command) {
@@ -1184,6 +1192,27 @@ pub fn batch_commands(raw: &str) -> Result<Vec<Vec<String>>, String> {
         normalised.push(step);
     }
     Ok(normalised)
+}
+
+/// A batch's `wait` right after a step that acts ends once what that act
+/// painted has held still (`wait --settle`, t-37883): a plan waits for the
+/// screen it acted on, not for a guess at how long the screen takes — the
+/// mirrored phone's session asked 311 waits for 401 s. Any other step is as
+/// it was written.
+#[must_use]
+pub fn settled_wait(step: Vec<String>, before: Option<&Vec<String>>) -> Vec<String> {
+    let acted = before
+        .and_then(|before| before.first())
+        .and_then(|verb| verb_method(verb))
+        .is_some_and(ComputerMethod::acts);
+    let is_wait = step.first().and_then(|verb| verb_method(verb)) == Some(ComputerMethod::Wait);
+    let settle = format!("--{WAIT_SETTLE_FLAG}");
+    if acted && is_wait && !step.contains(&settle) {
+        let mut step = step;
+        step.push(settle);
+        return step;
+    }
+    step
 }
 
 /// Whether answering a command rebuilds the element tree the model's indexes
@@ -3310,6 +3339,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ("flow", "flow"),
         ("run", "run"),
         ("l1", "l1"),
+        ("after-text", "afterText"),
     ] {
         if let Some(value) = optional_string_allowing_empty(&flags, flag)? {
             params.insert(key.into(), Value::String(value));
@@ -3501,6 +3531,10 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "text",
             "label",
             "role",
+            "ocr",
+            "after-text",
+            "dx",
+            "dy",
         ],
         ComputerMethod::PerformSecondaryAction => &[
             "json",
@@ -3611,7 +3645,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::Key => &["json", "key", "allow-self", "confirming"],
         ComputerMethod::HoldKey => &["json", "key", "ms", "allow-self", "confirming"],
         ComputerMethod::Type => &["json", "text", "allow-self"],
-        ComputerMethod::Wait => &["json", "ms"],
+        ComputerMethod::Wait => &["json", "ms", "settle"],
         ComputerMethod::Launch => &["json", "app", "args", "wait-ready"],
         ComputerMethod::Quit => &["json", "app", "force"],
         ComputerMethod::Activate => APP,
@@ -3800,7 +3834,17 @@ fn validate(
             }
         }
         ComputerMethod::Click | ComputerMethod::Scroll => {
-            if by_mark {
+            if method == ComputerMethod::Click
+                && !has("ocr")
+                && let Some((_, flag)) = WORDS_CLICK_ONLY.iter().find(|(key, _)| has(key))
+            {
+                return Err(format!(
+                    "{flag} belongs to a click by the words the screen shows: add --ocr --text"
+                ));
+            }
+            if method == ComputerMethod::Click && has("ocr") {
+                validate_words_click(params)?;
+            } else if by_mark {
                 validate_mark_click(params)?;
             } else if by_query {
                 validate_query_click(params)?;
@@ -4243,6 +4287,52 @@ const QUERY_CLICK_REFUSES: &[(&str, &str)] = &[
     ("look", "--look"),
 ];
 
+/// What a click by the words the pixels show takes no part of: an element's
+/// index, a point, a mark, and the tree's own names for a control.
+const WORDS_CLICK_REFUSES: &[(&str, &str)] = &[
+    ("elementIndex", "--element-index"),
+    ("x", "--x"),
+    ("y", "--y"),
+    ("mark", "--mark"),
+    ("look", "--look"),
+    ("label", "--label"),
+    ("role", "--role"),
+];
+/// What only a click by the pixels' words takes: the line it follows and the
+/// nudge from the line's centre.
+const WORDS_CLICK_ONLY: &[(&str, &str)] = &[
+    ("afterText", "--after-text"),
+    ("dx", "--dx"),
+    ("dy", "--dy"),
+];
+
+/// `click --app A --ocr --text T [--after-text W] [--dx N --dy N]` (t-37883):
+/// the control a window with no tree shows as words — the line OCR reads
+/// there at the press (`computer_use_protocol::words`) — and nothing that
+/// names it another way. The words must read something.
+fn validate_words_click(params: &Map<String, Value>) -> Result<(), String> {
+    for (key, flag) in WORDS_CLICK_REFUSES {
+        if params.contains_key(*key) {
+            return Err(format!(
+                "a click by the words the screen shows takes no {flag}: drop it, or drop --ocr"
+            ));
+        }
+    }
+    let reads = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|word| !word.trim().is_empty())
+    };
+    if !reads("text") {
+        return Err("--ocr --text must read something: the words the control shows".into());
+    }
+    if params.contains_key("afterText") && !reads("afterText") {
+        return Err("--after-text must read something: the line the control comes after".into());
+    }
+    Ok(())
+}
+
 /// `click --app A --text T | --label L | --role R [--label L]`: the control by
 /// what it reads, and nothing that names it another way. A word must read
 /// something — an empty `--text` would match every control.
@@ -4409,6 +4499,9 @@ pub fn usage() -> String {
         "  zerocode-computer click --app <app> (--element-index N|--x X --y Y|--text <t>|--role <r> [--label <l>]) [--mouse-button left|right|middle] [--click-count N] [--modifiers chord] [--json]",
         "    --text/--label/--role name the control by what it reads (find's matcher), read off a fresh tree right before the press —",
         "    the target a batch step may name after earlier steps; one match presses, none or several answers which",
+        "  zerocode-computer click --app <app> --ocr --text <words> [--after-text <words>] [--dx N] [--dy N] [--mouse-button left|right|middle] [--click-count N] [--json]",
+        "    a window with no tree (a mirrored phone, a remote desktop): presses the line OCR reads as <words> at the press, nudged",
+        "    by --dx/--dy points; words that recur are told apart by the line they come after; one line presses, none or several answers which",
         "  zerocode-computer click --mark N --look <lookId> [--mouse-button left|right|middle] [--click-count N] [--modifiers chord] [--viewer <id>] [--json]",
         "    presses the control numbered N on the marked look <lookId> (observe --marks) through the element path; refused if it moved or changed since",
         "  zerocode-computer perform-secondary-action --app <app> --element-index N --action <name> [--json]",
@@ -4431,7 +4524,8 @@ pub fn usage() -> String {
         "  zerocode-computer key --key <key|modifier+key> [--json]",
         "  zerocode-computer hold-key --key <key> --ms N [--json]",
         "  zerocode-computer type (--text text|--text-stdin) [--json]",
-        "  zerocode-computer wait --ms N [--json]",
+        "  zerocode-computer wait --ms N [--settle] [--json]",
+        "    --settle ends it once what the act before it painted has held still (a batch adds it to a wait after an act)",
         "  zerocode-computer displays [--json]",
         "",
         "  apps, windows and the system — what a person does around an app:",

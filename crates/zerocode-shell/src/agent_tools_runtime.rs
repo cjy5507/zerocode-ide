@@ -5038,15 +5038,44 @@ pub(super) fn answer_computer_command(
         // output as the result — the terminal a person would have opened.
         Ok(desktop_run(&command.params))
     } else if command.method == ComputerMethod::Wait {
-        // A wait is the window's to answer: a bounded pause, no helper round trip.
+        // A wait is the window's to answer: a bounded pause, no helper round
+        // trip — or, with `--settle` (a batch's wait after an act, t-37883),
+        // until what the act painted has held still on the eye's repaints,
+        // never longer than asked; without the eye, the whole pause.
         let asked = command
             .params
             .get("ms")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let (waited, capped) = zerocode_core::computer_use::desktop_wait_ms(asked);
-        std::thread::sleep(std::time::Duration::from_millis(waited));
-        Ok(serde_json::json!({ "waitedMs": waited, "capped": capped }))
+        let settles = command
+            .params
+            .get(zerocode_core::computer_use::WAIT_SETTLE_FLAG)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        match settles
+            .then(|| computer_use::eye::wait_settled_desktop(waited))
+            .flatten()
+        {
+            Some(settled) => Ok(serde_json::json!({
+                "waitedMs": settled["waitedMs"],
+                "askedMs": waited,
+                "capped": capped,
+                "settled": settled["settled"],
+            })),
+            None => {
+                std::thread::sleep(std::time::Duration::from_millis(waited));
+                Ok(serde_json::json!({ "waitedMs": waited, "capped": capped }))
+            }
+        }
+    } else if command.method == ComputerMethod::Click
+        && command
+            .params
+            .get("ocr")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        click_by_words(&command, asking, &mut computer_use::call)
     } else if command.method == ComputerMethod::Click && command.params.get("mark").is_some() {
         click_by_mark(&command, asking, workspace)
     } else if command.method == ComputerMethod::Find {
@@ -5133,7 +5162,16 @@ fn click_by_mark(
         .map_err(|error| computer_use::marks::click_refusal(error, &mark))
 }
 
-/// `click --app A --ocr --text T` (red: not written yet).
+/// `click --app A --ocr --text T [--after-text W] [--dx N --dy N]`
+/// (t-37883): a control on a window with no tree — a mirrored phone, a
+/// remote desktop — named by the words its pixels show. The helper reads the
+/// app's window (`readText --ocr`, lines in screen points) and the core
+/// chooses the line (`computer_use_protocol::words`) at the press, so a batch
+/// step may name it after earlier steps scrolled or opened a sheet. The press
+/// is a click at the line's centre, nudged by `--dx/--dy`, down the road
+/// every press takes; words that name a payment, a transfer or a delete
+/// declare that step, so the person is asked before the helper moves — the
+/// helper cannot read a label off pixels itself.
 pub(crate) fn click_by_words(
     command: &zerocode_core::computer_use::ComputerCommand,
     asking: computer_use::confirm::Asking,
@@ -5142,11 +5180,48 @@ pub(crate) fn click_by_words(
         serde_json::Value,
     ) -> Result<serde_json::Value, computer_use::ComputerUseError>,
 ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
-    let _ = (command, asking, call);
-    Err(computer_use::ComputerUseError::new(
-        zerocode_core::computer_use_protocol::error_code::UNSUPPORTED_CAPABILITY,
-        "a click by words is not written yet",
-    ))
+    use zerocode_core::computer_use::{ComputerCommand, ComputerMethod};
+    use zerocode_core::computer_use_protocol::words;
+    let params = &command.params;
+    let word = |key: &str| params.get(key).and_then(serde_json::Value::as_str);
+    let mut read = serde_json::Map::new();
+    for key in ["app", "windowId", "windowIndex"] {
+        if let Some(value) = params.get(key) {
+            read.insert(key.into(), value.clone());
+        }
+    }
+    read.insert("ocr".into(), serde_json::Value::Bool(true));
+    let lines = words::lines(&call("readText", serde_json::Value::Object(read))?);
+    let line = words::choose(&lines, word("text").unwrap_or_default(), word("afterText"))?;
+    let (x, y) = line.center();
+    let nudge = |key: &str| {
+        params
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0)
+    };
+    let mut press =
+        serde_json::json!({ "x": x + nudge("dx"), "y": y + nudge("dy"), "label": line.text });
+    for key in ["mouseButton", "clickCount", "modifiers", "confirming"] {
+        if let Some(value) = params.get(key) {
+            press[key] = value.clone();
+        }
+    }
+    if press.get("confirming").is_none()
+        && let Some(kind) = zerocode_core::guarded::confirm_kind_of(&line.text)
+    {
+        press["confirming"] = kind.as_str().into();
+    }
+    let resolved = ComputerCommand {
+        method: ComputerMethod::MouseClick,
+        params: press,
+        json: command.json,
+    };
+    let clicked = call_with_the_persons_last_step(&resolved, asking, call)?;
+    Ok(serde_json::json!({
+        "pressed": { "words": line.text, "x": x, "y": y },
+        "click": clicked,
+    }))
 }
 
 /// Call the helper for a command, holding a press that lands on a payment,

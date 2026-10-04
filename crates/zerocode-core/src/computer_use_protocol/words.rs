@@ -18,6 +18,13 @@ use serde_json::Value;
 
 use super::{ProviderError, error_code};
 
+/// How many candidates an ambiguous answer names.
+const NAMED_CANDIDATES: usize = 5;
+/// Two lines share a row when their vertical centres are closer than this
+/// share of the taller one's height — the same row of a form, read left to
+/// right, even when OCR boxes the words a few points apart.
+const SAME_ROW_SHARE: f64 = 0.5;
+
 /// One line the helper read, in screen points.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadLine {
@@ -47,33 +54,145 @@ impl ReadLine {
     pub fn center(&self) -> (f64, f64) {
         (self.x + self.width / 2.0, self.y + self.height / 2.0)
     }
+
+    fn center_y(&self) -> f64 {
+        self.y + self.height / 2.0
+    }
+
+    /// Whether `other` shares this line's row: their vertical centres closer
+    /// than half the taller one.
+    fn shares_row(&self, other: &Self) -> bool {
+        (self.center_y() - other.center_y()).abs() < self.height.max(other.height) * SAME_ROW_SHARE
+    }
+
+    /// Whether `self` comes before `other` as a person reads the screen: an
+    /// earlier row, or the same row further left.
+    fn reads_before(&self, other: &Self) -> bool {
+        if self.shares_row(other) {
+            self.x < other.x
+        } else {
+            self.center_y() < other.center_y()
+        }
+    }
 }
 
-/// The lines of a `readText --ocr` answer (red: as the helper listed them).
+/// The lines of a `readText --ocr` answer, in the order a person reads them:
+/// top to bottom by row (a row starts at the first line its successors share
+/// it with), left to right inside a row.
 #[must_use]
 pub fn lines(answer: &Value) -> Vec<ReadLine> {
-    answer
+    let mut read: Vec<ReadLine> = answer
         .get("lines")
         .and_then(Value::as_array)
         .map(|lines| lines.iter().filter_map(ReadLine::from_value).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    read.sort_by(|a, b| a.center_y().total_cmp(&b.center_y()));
+    let mut rows: Vec<Vec<ReadLine>> = Vec::new();
+    for line in read {
+        match rows.last_mut() {
+            Some(row) if row[0].shares_row(&line) => row.push(line),
+            _ => rows.push(vec![line]),
+        }
+    }
+    rows.into_iter()
+        .flat_map(|mut row| {
+            row.sort_by(|a, b| a.x.total_cmp(&b.x));
+            row
+        })
+        .collect()
 }
 
-/// The line a press on `words` means (red: none is chosen yet).
+/// Words as a person reads them: case and runs of space do not matter.
+fn plain(words: &str) -> String {
+    words
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// The line a press on `words` means among `lines` (in reading order): the
+/// first that reads them after the line reading `after`, when given;
+/// otherwise the only line that reads them, or the only one that reads them
+/// exactly. Refused by name when none or several do.
 ///
 /// # Errors
 ///
-/// Always, until the choice is written.
+/// `element_not_found` when no line reads the words (or the anchor), and
+/// `ambiguous_target` naming up to five candidates when several do.
 pub fn choose<'a>(
     lines: &'a [ReadLine],
     words: &str,
     after: Option<&str>,
 ) -> Result<&'a ReadLine, ProviderError> {
-    let _ = (lines, after);
-    Err(ProviderError::new(
-        error_code::ELEMENT_NOT_FOUND,
-        format!("no line is chosen for '{words}' yet"),
-    ))
+    let wanted = plain(words);
+    if wanted.is_empty() {
+        return Err(ProviderError::invalid_argument(
+            "--text must read something",
+        ));
+    }
+    let reading: Vec<&ReadLine> = lines
+        .iter()
+        .filter(|line| plain(&line.text).contains(&wanted))
+        .collect();
+    let exact: Vec<&ReadLine> = reading
+        .iter()
+        .copied()
+        .filter(|line| plain(&line.text) == wanted)
+        .collect();
+    if let Some(anchor_words) = after {
+        let anchor_words = plain(anchor_words);
+        let anchor = lines
+            .iter()
+            .find(|line| plain(&line.text).contains(&anchor_words))
+            .ok_or_else(|| {
+                ProviderError::new(
+                    error_code::ELEMENT_NOT_FOUND,
+                    format!("no line on the screen reads '{anchor_words}' to look after"),
+                )
+            })?;
+        let following =
+            |pool: &[&'a ReadLine]| pool.iter().copied().find(|line| anchor.reads_before(line));
+        return following(&exact)
+            .or_else(|| following(&reading))
+            .ok_or_else(|| {
+                ProviderError::new(
+                    error_code::ELEMENT_NOT_FOUND,
+                    format!("no line after '{anchor_words}' reads '{wanted}'"),
+                )
+            });
+    }
+    match (exact.as_slice(), reading.as_slice()) {
+        ([one], _) | ([], [one]) => Ok(*one),
+        (_, []) => Err(ProviderError::new(
+            error_code::ELEMENT_NOT_FOUND,
+            format!(
+                "no line on the screen reads '{wanted}' ({} lines read: {})",
+                lines.len(),
+                lines
+                    .iter()
+                    .take(NAMED_CANDIDATES)
+                    .map(|line| format!("'{}'", line.text))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )),
+        ([], many) | (many, _) => Err(ProviderError::new(
+            error_code::AMBIGUOUS_TARGET,
+            format!(
+                "{} lines read '{wanted}': {} — name the line it follows with after-text, or press a coordinate",
+                many.len(),
+                many.iter()
+                    .take(NAMED_CANDIDATES)
+                    .map(|line| {
+                        let (x, y) = line.center();
+                        format!("'{}' at ({x:.0}, {y:.0})", line.text)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )),
+    }
 }
 
 #[cfg(test)]

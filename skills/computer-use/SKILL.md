@@ -436,6 +436,39 @@ zerocode-computer batch --commands '[["mouse-click","--x","640","--y","412"],["t
   not survive; use PowerShell or Git Bash.
 - In zo, the `Computer` tool's `batch` takes `steps: [...]` in the same
   action vocabulary and the same screenshot pixels as single actions.
+- A `wait` right after a step that acts ends once what that act painted has
+  held still (the batch adds `--settle`); it never ends before the screen
+  moves, so the time you give it is the most it costs.
+
+### A window with no tree: a mirrored phone, a remote desktop
+
+An iPhone Mirroring window (or a remote desktop, or a game's menu) shows its
+controls only as pixels: `observe --app` gives its picture and a tree with
+nothing but the window. Plan a whole screen from one look and send it as one
+batch — every step naming its control by the words the screen shows, read
+again at the press, so a step may follow a scroll or a sheet the step before
+it opened:
+
+```text
+zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr","--text","Nationality"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Search","--timeout-ms","3000"],["click","--app","iPhone Mirroring","--ocr","--text","Search"],["type","--text","Korea"],["click","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of"],["wait-for","--app","iPhone Mirroring","--ocr","--text","Korea, Republic of","--timeout-ms","3000"]]' --json
+```
+
+- `click --app A --ocr --text <words>` presses the line OCR reads as those
+  words; words that recur ("Yes", "No", "Select") take `--after-text <the
+  line they follow>`, and `--dx/--dy` nudge the press off the words (a field
+  under its label). One line presses; none or several stops the batch and
+  names what it read. Words that name a payment, a transfer or a delete are
+  held for the person as that step.
+- Check each value inside the batch: `wait-for --app A --ocr --text <the
+  value> --timeout-ms N` ends the moment the screen shows it and stops the
+  batch when it does not — the check and the wait in one step.
+- Name the app once, by the name `observe` answered (`app`); every name of
+  the same window reaches it. A click brings its window forward: `activate`
+  is only for keys into an app that is not in front.
+- In zo: `left_click` with `app`, `label` (the words), `ocr: true`,
+  `after_text` and `offset` (pixels); `wait_for` with `app`, `ocr: true`,
+  `text`. The batch's look after shows that app's window once it has settled
+  — no need to look again before planning the next screen.
 
 ## Hearing
 

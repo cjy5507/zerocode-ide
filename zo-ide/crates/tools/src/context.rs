@@ -597,6 +597,18 @@ impl ToolContext {
         self.computer.observation.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() == Some(observation)
     }
 
+    /// The app of the last picture staged for this model, as the window
+    /// resolved it — where the look after an act looks when the act named
+    /// none (t-37883).
+    pub(crate) fn computer_observed_app(&self) -> Option<String> {
+        self.computer
+            .observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|seen| seen.app.clone())
+    }
+
     pub(crate) fn set_computer_observation(&self, observation: Option<ComputerObservation>) {
         *self.computer.observation.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = observation;
     }
