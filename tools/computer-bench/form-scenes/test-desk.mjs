@@ -17,33 +17,11 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { SYSTEM_PATH, STAND_IN_NAMES, ALLOWED_TOOLS, argsProblems, boxEnv, checkPath, claudeArgs, installStandIn } from "./agent-box.mjs";
 import { PANE, PERSON_TURN_MS, startFormDesk } from "./door-desk.mjs";
+import { writeFixtureScene } from "./fixture-scene.mjs";
 
 const doorText = process.argv[process.argv.indexOf("--door-text") + 1];
 if (!doorText || doorText.startsWith("--")) { console.error("--door-text PATH is required"); process.exit(2); }
 
-const FIXTURE = `<!doctype html><html lang="en"><meta charset="utf-8"><title>fixture</title>
-<form id="f" novalidate>
-  <label for="name">Name</label> <input id="name" required>
-  <label for="size">Size</label> <select id="size"><option value="">choose</option><option value="s">Small</option><option value="l">Large</option></select>
-  <label><input type="checkbox" id="agree"> I agree</label>
-  <label for="pw">Password</label> <input id="pw" type="password">
-  <button type="button" id="send">Send code</button>
-  <div id="codebox" hidden><label for="code">Verification code</label> <input id="code"> <button type="button" id="verify">Verify</button></div>
-  <button type="button" id="book">Book</button>
-</form>
-<div id="terms" style="height:60px;overflow:auto"><p>one</p><p>two</p><p>three</p><p>four</p><p id="last">last</p></div>
-<div style="height:1500px"></div>
-<script>
-  document.getElementById("send").addEventListener("click", () => {
-    window.__personPhone = "123456";
-    document.getElementById("codebox").hidden = false;
-  });
-  document.getElementById("verify").addEventListener("click", () => { window.__verified = document.getElementById("code").value === window.__personPhone; });
-  document.getElementById("book").addEventListener("click", () => {
-    window.__sceneResult = { name: document.getElementById("name").value, size: document.getElementById("size").value,
-      agree: document.getElementById("agree").checked, verified: window.__verified === true };
-  });
-</script>`;
 
 const results = [];
 async function test(name, run) {
@@ -57,10 +35,7 @@ function assert(condition, message, detail = undefined) {
 // The scene on disk, the stand-in's folder, and the desk.
 const root = await mkdtemp(join(tmpdir(), "form-desk-"));
 const folder = join(root, "scene");
-await mkdir(folder);
-await writeFile(join(folder, "scene.html"), FIXTURE);
-await writeFile(join(folder, "card.json"), JSON.stringify({ task: "book", facts: [], personTurns: ["code"] }));
-await writeFile(join(folder, "expected.json"), JSON.stringify({ name: "Kim", size: "l", agree: true, verified: true }));
+await writeFixtureScene(folder, { name: "Kim", size: "l", agree: true, verified: true });
 const bin = join(root, "bin");
 await installStandIn({ bin, doorText });
 const desk = await startFormDesk({ scene: { folder, name: "fixture", card: {}, expected: {} }, doorText });
