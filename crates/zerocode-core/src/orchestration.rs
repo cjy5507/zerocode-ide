@@ -929,17 +929,22 @@ impl ReviewFacts {
         let read = Self::from_result(result);
         match author {
             Some(ResultAuthor::Coordinator {
-                attempt, source, ..
+                attempt,
+                source,
+                verified_ms,
+                ..
             }) => Self {
                 author: ReviewAuthor::Coordinator,
                 attempt: attempt.clone(),
                 source: source.clone(),
+                verified_ms: verified_ms.filter(|_| read.verified),
                 ..read
             },
             other => Self {
                 claimed_verified: read.verified,
                 claimed_merged: read.merged,
                 claimed_deployed: read.deployed,
+                claimed_nothing_to_land: read.nothing_to_land,
                 author: other.map_or(ReviewAuthor::Unknown, ResultAuthor::kind),
                 ..Self::default()
             },
@@ -963,6 +968,8 @@ impl ReviewFacts {
         let sha = |value: &serde_json::Value| value.as_str().and_then(commit_named);
         let verified_keys = ["verified", "reviewedBy", "coordinatorTests", "testedHead"];
         let merged_keys = ["merged", "mergeHead", "mergedInto"];
+        // A coordinator's mark that there is no code to land (research, a review, a design).
+        let nothing_keys = ["nothingToLand", "noCodeChange"];
         // Explicit decisions override older metadata left on the result.
         let verified = map.get("verified").map_or_else(
             || map.get("reviewedBy").is_some_and(named),
@@ -977,9 +984,13 @@ impl ReviewFacts {
         );
         let merge_head = candidate_head.filter(|_| merged);
         let deployed = map.get("deployed").and_then(serde_json::Value::as_bool) == Some(true);
+        let nothing_to_land = nothing_keys
+            .iter()
+            .any(|key| map.get(*key).and_then(serde_json::Value::as_bool) == Some(true));
         let written = verified_keys
             .iter()
             .chain(merged_keys.iter())
+            .chain(nothing_keys.iter())
             .chain(["deployed"].iter())
             .any(|key| map.contains_key(*key));
         Self {
@@ -987,6 +998,7 @@ impl ReviewFacts {
             merged,
             merge_head,
             deployed,
+            nothing_to_land,
             written,
             ..Self::default()
         }
@@ -3549,6 +3561,8 @@ impl Run {
             merged: false,
             merge_head: None,
             deployed: false,
+            nothing_to_land: false,
+            verified_ms: None,
             written: false,
             superseded_by: attempt_moved
                 .then(|| newest_id.map(str::to_string))

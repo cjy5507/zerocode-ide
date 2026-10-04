@@ -227,7 +227,7 @@ fn work_git_has_in_main_that_the_ledger_never_recorded_is_told_after_thirty_minu
     assert_eq!(
         other
             .ledger
-            .landing_watch(&elsewhere, handed.done_at + 10 * MERGED_UNRECORDED_GRACE_MS),
+            .landing_watch(&elsewhere, handed.done_at + 3 * MERGED_UNRECORDED_GRACE_MS),
         0
     );
 }
@@ -580,46 +580,50 @@ fn the_two_new_kinds_are_the_ledgers_own_voice_and_can_be_asked_for() {
 
 #[test]
 fn nothing_to_land_is_the_coordinators_fact_and_a_workers_word_for_it_is_a_claim() {
-    let mut bench = Bench::new();
-    let handed = handed_in(&mut bench, CHECKOUT, HEAD);
-    let facts = |bench: &Bench| {
-        let run = &bench.ledger.runs()[0];
-        run.review_of(run.task(&handed.task).expect("the task"))
-    };
     // A worker's result carrying the key: kept apart as a claim, and not a fact.
-    bench.json_at(
-        &handed.pane,
-        "send --type worker_done --body {\"ok\":true,\"nothingToLand\":true}",
+    let mut claim = Bench::new();
+    claim.json("run-create --name watch");
+    let task = claim.json("task-create --spec claimed-task")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (_, pane) = claim.seat(&format!("worker-start --agent claude --task {task}"));
+    claim.json_at(
+        &pane,
+        &format!("send --type worker_done --body {{\"ok\":true,\"head\":\"{HEAD}\",\"nothingToLand\":true}}"),
     );
-    let claimed = facts(&bench);
+    let run = &claim.ledger.runs()[0];
+    let claimed = run.review_of(run.task(&task).expect("the task"));
     assert!(
         !claimed.nothing_to_land && claimed.claimed_nothing_to_land,
         "{claimed:?}"
     );
 
     // The coordinator's, bound to the attempt and the source it looked at, under either spelling.
+    let facts = |bench: &Bench, task: &str| {
+        let run = &bench.ledger.runs()[0];
+        run.review_of(run.task(task).expect("the task"))
+    };
+    let mut bench = Bench::new();
+    let handed = handed_in(&mut bench, CHECKOUT, HEAD);
     review(
         &mut bench,
         &handed,
         "\"verified\":true,\"nothingToLand\":true",
     );
-    let believed = facts(&bench);
+    let believed = facts(&bench, &handed.task);
     assert!(
         believed.verified && believed.nothing_to_land && !believed.merged,
         "{believed:?}"
     );
-    let alias = {
-        let mut other = Bench::new();
-        let handed = handed_in(&mut other, CHECKOUT, HEAD);
-        review(
-            &mut other,
-            &handed,
-            "\"verified\":true,\"noCodeChange\":true",
-        );
-        let run = &other.ledger.runs()[0];
-        run.review_of(run.task(&handed.task).expect("the task"))
-    };
-    assert!(alias.nothing_to_land, "{alias:?}");
+    let mut other = Bench::new();
+    let handed_other = handed_in(&mut other, CHECKOUT, HEAD);
+    review(
+        &mut other,
+        &handed_other,
+        "\"verified\":true,\"noCodeChange\":true",
+    );
+    assert!(facts(&other, &handed_other.task).nothing_to_land);
 
     // It survives a rebuild from the stored rows.
     let carried = Ledger::rebuild(bench.ledger.export()).expect("a readable ledger");
