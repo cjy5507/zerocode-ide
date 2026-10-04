@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.1.51] — 2026-10-04
+
+### feat
+
+- feat(orchestration): a worker that runs away is stopped before it spends the budget you set — each worker's steps, cost trend and rework decide continue, checkpoint, pause or stop, a checkpoint is forced every N steps, and the board and the settings card say why; a normal day's workers are never paused or stopped (24,000 decisions over 8 simulated days, 0 pauses). Cost is read for Claude Code and Codex; other CLIs say "cost unknown" rather than guess (t-26583).
+- feat(orchestration): an answer a card prepared is typed only while its question is still on the screen — the window reads the screen again just before typing and says so on the card when the question changed — and a CLI that waits on a numbered menu without a structured question gets a generic menu card (t-26594).
+- feat(file-tree): live progress in the file tree — a file an agent is writing shimmers from the moment the write starts until it ends, the folders above it too, and its +N −N lands right after the end from a git question about just those files, never a whole-repository status; Claude Code, Codex, the wire sessions and zo's main pane reach it the same way. Built for low-spec machines: at most 8 rows lit and 4 moving, one timer, and an idle tree runs no animation and no timer (t-31715).
+- feat(computer-use): on the synthetic practice scenes Computer Use reacts like a strong player — RTS scenes at 339–343 actions a minute with every target hit and a median reaction of 48–50 ms, the pointer's glide cut from 80 to 16 ms — and Jev's reflex decision starts acting under Auto, because its measured accuracy passed every rule written before the run; it still acts only with your live-reflex setting on. On an efficiency-cores profile the hit rate is 0.98, under the bench's 0.99 floor, and is kept as a failure (t-26708).
+
+### fix
+
+- fix(git): the git the app runs in the background (the source-control panel's change counts and history, the orchestrator's status and diffs, the worktree clean-up and the landing gate's snapshot) no longer takes .git/index.lock, so a commit, add or merge that you or a worker start in the same checkout at that moment is no longer refused with "Unable to create '.git/index.lock': File exists".
+- fix(conversation): a notice above a conversation — that a turn will go on as a live session, or that older history is folded — stands above the conversation as wide as its list again, instead of one word a line down the narrow turn rail (since 1.1.50's redesign).
+- fix(jev): Jev's live decisions answer from the evidence scoped to them; a seat whose feature you turned off stops sending, and every delayed effect (a native action, a skill-search reply, page folding, a notification) checks your current permission again when it is delivered; manual and overflow compaction finish with their bookkeeping intact; and the review store lets go of its lock however its file handle was inherited. Memory: the ledger reader -37%, review selection -89% and 46% faster. Turning some seats On still costs more than it saves, so no default changes.
+- fix(board): a finished task whose old report named no commit no longer waits as awaiting review for ever because the report said "merged" — it stands with the other finished work that can take no review (47 such tasks moved on one machine), so the awaiting-review lane holds only what a coordinator can still review (t-34904).
+
+### internal
+
+- internal(tools): the ask-wait replay seed knows the ledger's gate receipt (gate_judged), so tools-test is green again (t-26583's kind).
+
 ## [1.1.50] — 2026-10-03
 
 ### feat
