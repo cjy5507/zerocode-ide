@@ -174,6 +174,11 @@ async function fillPhone(desk) {
     } else if (field.kind === "checkbox" && value) {
       answers.push(await tap(desk, SEES.choice, { label: field.label, words: null }));
     } else if (field.kind === "file") {
+      // The person takes the phone once the road's last tap has reached it:
+      // their attach closes whatever sheet is open, and a tap still in the
+      // mirror's lag would land on the form behind it (the second
+      // nationality's choice did, with this test's 10 ms person).
+      await desk.settled();
       answers.push(await shim(desk, ["handoff", "--reason", "attach the passport photo", "--json"]));
     }
   }
