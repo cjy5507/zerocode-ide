@@ -6027,23 +6027,6 @@ fn typed_answer(
     }
 }
 
-/// An eval's answer: the value, pretty, inside the page's fence.
-fn eval_answer(
-    label: &str,
-    evaluated: Result<serde_json::Value, String>,
-) -> zerocode_hookd::TeamAnswer {
-    match evaluated {
-        Ok(value) => page_said(
-            label,
-            format!(
-                "{}\n",
-                serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string())
-            ),
-        ),
-        Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
-    }
-}
-
 pub(super) async fn answer_browser_command(
     app: &AppHandle,
     argv: &[String],
@@ -6234,10 +6217,16 @@ pub(super) async fn answer_browser_command(
                     );
                 }
             };
-            eval_answer(
-                &argv[1],
-                cmd::browser::automate_eval(app, &state, &argv[1], expression).await,
-            )
+            match cmd::browser::automate_eval(app, &state, &argv[1], expression).await {
+                Ok(value) => page_said(
+                    &argv[1],
+                    format!(
+                        "{}\n",
+                        serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string())
+                    ),
+                ),
+                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+            }
         }
         // `read <label> [css]` reads the page or a selector; `read <label>
         // --full` reads the page whole, whatever the read seat would fold.

@@ -72,7 +72,9 @@ export const FORM_REQUEST = {
 export const doorScript = (request, body) =>
   `(() => {\n${need("BROWSER_AUTOMATION_HELPERS", HELPERS)}\nconst request = ${JSON.stringify(request)};\ntry {\n${body}\n} catch (_) { return zcFail("evaluation_failed"); }\n})()`;
 const formScript = (request, body) => {
-  need("BROWSER_FORM_CONTROLS", FORM_REQUEST.controls);
+  // Every table and cap of the request, by name: a constant the reader
+  // missed would otherwise surface as the page script's `evaluation_failed`.
+  for (const [key, value] of Object.entries(FORM_REQUEST)) need(`form_request().${key}`, value);
   return doorScript(request, `${need("BROWSER_OBSERVE_HELPERS", OBSERVE_HELPERS)}\n${need("BROWSER_MARK_HELPERS", MARK_HELPERS)}\n`
     + `${need("BROWSER_FORM_HELPERS", FORM_HELPERS)}\n${body}`);
 };
