@@ -8,12 +8,24 @@
 //! state is charged once however many questions read it: input tokens only,
 //! output free (`docs.typesafe.ai/models`; the same fact a guard question
 //! beside a seat's own rides on, [`crate::jev::noul`]). So what every item
-//! shares — the rubric, the facts that hold for the whole batch — stands once
-//! in the state; what each item is stands once, as an entry of a list under
-//! the seat's [`Judgment::items_key`]; and each item is asked its own closed
+//! shares — the facts that hold for the whole batch — stands once in the
+//! state; what each item is stands once, as an entry of a list under the
+//! seat's [`Judgment::items_key`]; and each item is asked its own closed
 //! questions by its place in that list (`letters[3]`), the way every seat
 //! that asks about a list does ([`crate::browser_read`],
 //! [`crate::jev::claim`]).
+//!
+//! **The words of the judgment do not stand in the state.** A question is
+//! judged on its own words — its instructions and the descriptions of its
+//! options, which the endpoint takes whole with each question and cannot share
+//! between them (`docs.typesafe.ai/primitives/choice`) — and a rule left in
+//! the state is read as data. The mail triage first said its explanation of the
+//! fields and its options' meanings once in the state, a line of each option in
+//! the questions, and agreed with what the coordinator did next in 192 of 406
+//! comparisons, where the per-letter road agreed in 216 and the same words in
+//! each letter's question in 218 (the real model, 2026-10-04). A seat on this
+//! road pays its words for each item: what the road saves is the requests, and
+//! the wait for them, not the words.
 //!
 //! **Stage one: independent verdicts.** A request of this road asks nothing
 //! BETWEEN items. Each question is built from one item's place and the words
@@ -90,12 +102,14 @@ pub trait Judgment {
     /// The key of the state the items' facts stand under, in order.
     fn items_key(&self) -> &'static str;
 
-    /// The state every item shares — the words and the facts that hold for
-    /// the whole batch — written once into each request, beside the items.
+    /// The state every item shares — the facts that hold for the whole batch,
+    /// never the words of the judgment, which stand in each item's questions —
+    /// written once into each request, beside the items.
     fn shared(&self) -> Map<String, Value>;
 
-    /// One item's questions, each under a suffix of its own: none for the
-    /// first, a word for each of the others, never the same twice for one item.
+    /// One item's questions, with the words of the judgment in each, under a
+    /// suffix of their own: none for the first, a word for each of the others,
+    /// never the same twice for one item.
     /// `at` is the item's place in THIS request's list of items, which the
     /// questions' words call it by (`numbers[2]`) — the questions' NAMES are
     /// made from its place in the whole batch; `at` is all a question is built

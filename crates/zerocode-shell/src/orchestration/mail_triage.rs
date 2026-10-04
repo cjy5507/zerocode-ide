@@ -4,10 +4,11 @@
 //! On the beat, for every run whose coordinator seat this window holds, the
 //! letters to the coordinator that it can still be handed — waiting in its
 //! inbox, or in the batch it holds open — and nobody has asked about are put
-//! to Jev TOGETHER (t-32796): one request holds the rubric and the
-//! coordinator's situation once and each letter's structure, never its words
-//! (`zerocode_core::mail_triage::MailTriage`), through the Jev door with the
-//! coordinator's own checkout as the workspace consented to. A burst above
+//! to Jev TOGETHER (t-32796): one request holds the coordinator's situation
+//! once and each letter's structure, never its words, and asks each letter its
+//! own question (`zerocode_core::mail_triage::MailTriage`), through the Jev
+//! door with the coordinator's own checkout as the workspace consented to. A
+//! burst above
 //! the cap is cut evenly into requests that leave side by side, a few at a
 //! time ([`crate::systemone::TOGETHER_LANES`]), and a wave's rows are written
 //! before the next wave leaves. Each letter has a row of its own in

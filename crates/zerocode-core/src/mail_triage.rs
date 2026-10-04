@@ -5,11 +5,13 @@
 //! own next acts write afterwards ([`Mailroom::label`]).
 //!
 //! A run's fresh letters are asked TOGETHER (t-32796, [`crate::jev::batch`]):
-//! one request holds the rubric and the coordinator's situation once, each
-//! letter as an entry of its own, and a closed choice and a Noul about each
-//! ([`MailTriage`]). A request a batch rather than a request a letter: what
-//! the rubric weighs on the wire is paid once per request, and the letters of
-//! a burst are no longer asked one after another.
+//! one request holds the coordinator's situation once and each letter as an
+//! entry of its own, and asks a closed choice and a Noul about each
+//! ([`MailTriage`]). A request a batch rather than a request a letter: the
+//! letters of a burst leave in a few requests, side by side, and are no longer
+//! asked one after another. The words of the judgment stand in each letter's
+//! own question and not once in the state: a question is judged on its own
+//! words, and a rule left in the state is read as data (`INSTRUCTIONS`).
 //!
 //! A letter's entry carries its structure and nothing it says: its kind, the
 //! kind of address that sent it, the worker and task it concerns and where
@@ -51,21 +53,28 @@ use crate::orchestration::{
     PEEK_MODE, Run, VERBS, WORKER_ADDRESS_PREFIX,
 };
 
-/// The words that say what a request is and how to read its state: said ONCE
-/// per request, in the state's `rubric`, and never again for each letter. The
+/// What a letter's fields are and what the question asks: said in EVERY
+/// letter's choice question, ahead of that letter's own words, and not once in
+/// the state. The model reads a rule left in the state as data and one in the
+/// question as the question. Said once in the state's `rubric`, with a line of
+/// each option in the questions, the day's letters agreed with what the
+/// coordinator did next in 192 of 406 comparisons — the status letters went
+/// to `no_need` — and said in the question, in 218 of 406, where the
+/// per-letter road, asked again the same hour, agreed in 216 (the real model,
+/// 2026-10-04, `measure_agreement_on_the_real_wire`). What the answers hang on
+/// in it is the list of the kinds a letter may be: without it, 163. The
 /// letters reach the model as state, never as an instruction — and never as
 /// their words, which are not in it.
-const INSTRUCTIONS: &str = "A coordinator agent runs a team of worker agents and reads its mail between the things it does. `letters` lists letters that have just reached its inbox, each described by its structure and never by its words: `kind` is what the letter is — `question` (its sender waits for an answer), `worker_done` (a worker reports its task finished and waits for review), `status` (a worker's news), or one of the notices the orchestration writes itself about a worker (`went_quiet`, `worker_died`, `quota_walled`, `classifier_declined`, `deadlocked`, `handover`, `resumed`, `model_deviated`, `account_switched`) — `from` is the kind of address that sent it (`worker`, `ledger` for the orchestration's own notices, `pane`, `run`, `home`, `remote`), `worker` and `task` the worker and the task it concerns, `taskStatus` where that task stands, `priority` the priority its sender set, `awaitsAnswer` whether it is a question nobody has answered yet, `threadDepth` how many replies deep it sits, `ageSeconds` how long it has waited, `delivered` whether the coordinator has been handed it yet, and `repeats` how many earlier letters of the same kind about the same worker and task came in the day before it. `coordinator` describes the coordinator all of those letters are for: `busy` is whether it is in the middle of a turn (null when unknown) and `openQuestions` how many questions put to it wait for an answer. Each question names one letter by its place in `letters` and asks when the coordinator should deal with that letter, by what `rubric.answers` says each option means.";
+const INSTRUCTIONS: &str = "A coordinator agent runs a team of worker agents and reads its mail between the things it does. `letters` lists letters that have just reached its inbox, each described by its structure and never by its words: `kind` is what the letter is — `question` (its sender waits for an answer), `worker_done` (a worker reports its task finished and waits for review), `status` (a worker's news), or one of the notices the orchestration writes itself about a worker (`went_quiet`, `worker_died`, `quota_walled`, `classifier_declined`, `deadlocked`, `handover`, `resumed`, `model_deviated`, `account_switched`) — `from` is the kind of address that sent it (`worker`, `ledger` for the orchestration's own notices, `pane`, `run`, `home`, `remote`), `worker` and `task` the worker and the task it concerns, `taskStatus` where that task stands, `priority` the priority its sender set, `awaitsAnswer` whether it is a question nobody has answered yet, `threadDepth` how many replies deep it sits, `ageSeconds` how long it has waited, `delivered` whether the coordinator has been handed it yet, and `repeats` how many earlier letters of the same kind about the same worker and task came in the day before it. `coordinator` describes the coordinator all of those letters are for: `busy` is whether it is in the middle of a turn (null when unknown) and `openQuestions` how many questions put to it wait for an answer. Each question names one letter by its place in `letters` and asks when the coordinator should deal with that letter, by what each option of the question means.";
 
 /// Where in a letter's question its place in the request's list of letters
 /// goes: a request cut into shards renumbers, so a question is built for the
 /// place its letter stands in.
 const AT_PLACEHOLDER: &str = "{at}";
 
-/// The words of one letter's choice: which letter, and where the meaning of
-/// each option stands in full — once, in the rubric. What a question carries of
-/// an option is its [`Triage::gist`].
-const ITEM_INSTRUCTIONS: &str = "When should the coordinator deal with `letters[{at}]`? Judge that letter alone — its own facts and `coordinator` — by what `rubric.answers` says each option means.";
+/// The words of one letter's choice, after the explanation of the fields:
+/// which letter, and that it is judged alone.
+const ITEM_INSTRUCTIONS: &str = "When should the coordinator deal with `letters[{at}]`? Judge that letter alone — its own facts and `coordinator`.";
 
 /// The words of the Noul asked beside each letter's choice.
 const URGENT_INSTRUCTIONS: &str = "Should `letters[{at}]` be the very next thing the coordinator deals with, ahead of every other letter and every other piece of work?";
@@ -77,13 +86,9 @@ const URGENT_YES: &str = "Its very next action should be about that letter: some
 const URGENT_NO: &str = "At least one other thing can come first without harm.";
 
 /// What a request's state holds, at its top level, in the order the
-/// fingerprint reads them: the rubric once, what holds for the coordinator
-/// once, and the letters, each in an entry of its own.
-pub const REQUEST_KEYS: [&str; 3] = ["rubric", "coordinator", "letters"];
-
-/// The two parts of the state's `rubric`: what the question is, and what each
-/// option means.
-pub const RUBRIC_KEYS: [&str; 2] = ["about", "answers"];
+/// fingerprint reads them: what holds for the coordinator once, and the
+/// letters, each in an entry of its own. No words of the question are in it.
+pub const REQUEST_KEYS: [&str; 2] = ["coordinator", "letters"];
 
 /// What the state's `coordinator` carries: what holds for every letter of the
 /// batch at once.
@@ -106,7 +111,7 @@ pub const LETTER_KEYS: [&str; 11] = [
 ];
 
 /// The key the letters stand under in a request's state.
-const LETTERS_KEY: &str = REQUEST_KEYS[2];
+const LETTERS_KEY: &str = REQUEST_KEYS[1];
 
 /// The suffixes a letter's two questions stand under beside its place in the
 /// batch ([`crate::jev::batch::question_name`]): the choice under none, the
@@ -120,10 +125,13 @@ const URGENT_SUFFIX: &str = "urgent";
 /// `the_version_is_pinned_to_the_words` holds it to
 /// [`crate::jev::rubric_fingerprint`].
 ///
-/// Version 2 (t-32796) is the batch road's: the rubric moved out of every
-/// letter's question into the request's state, said once, and each question
-/// carries a line of each option. The seat records and never rises, so there
-/// is no standing for the bump to reset.
+/// Version 2 (t-32796) is the batch road's: a request holds the coordinator's
+/// situation once and each letter in an entry of its own, and each letter's
+/// choice question says what the fields are and what each option means, with
+/// the examples that tell which letters it is meant for. Its first wording —
+/// those words once in the state — was withdrawn before any release, measured
+/// 24 agreements of 406 under the per-letter road's. The seat records and
+/// never rises, so there is no standing for the bump to reset.
 pub const MAIL_TRIAGE_RUBRIC_VERSION: u32 = 2;
 
 /// When a coordinator should deal with one letter — the question's closed
@@ -153,28 +161,24 @@ impl Triage {
     }
 
     /// What the option means, written as the situation the letter's facts
-    /// show.
+    /// show, with the examples that tell which letters it is meant for. It
+    /// stands in every letter's question: an option's words are judged where
+    /// the question is, and shorter ones, naming a status report as news it
+    /// will act on later, kept the status letters at `can_wait` where the
+    /// longer ones, which made it a report "that changes a plan", sent 22 of
+    /// 69 to `no_need`.
     const fn means(self) -> &'static str {
         match self {
             Self::AnswerNow => {
-                "Deal with it before anything else: somebody is blocked until the coordinator acts — a question its asker waits on, a finished task that waits for review before the next one can start, a worker that died or hit a wall and needs a replacement, a decision only the coordinator can make."
+                "Deal with it before anything else: somebody is blocked until the coordinator acts — a question, a finished task waiting for review, a worker that died or hit a wall."
             }
             Self::CanWait => {
-                "It needs the coordinator, but not before what it is doing now: news it will act on later — a status report that changes a plan, a notice about a worker that is still making progress, a receipt of something the orchestration already did on the coordinator's behalf."
+                "It needs the coordinator, but not before what it is doing now: news it will act on later — a status report, a notice about a worker still making progress."
             }
             Self::NoNeed => {
-                "Nothing to do beyond reading it: a repeat of a notice the coordinator has already seen about the same worker, a routine heartbeat, a notice that resolves itself, chatter that waits on nobody."
+                "Nothing to do beyond reading it: a repeat of a notice already seen, a routine heartbeat, chatter that waits on nobody."
             }
         }
-    }
-
-    /// The option's meaning in a line: the lead of its full meaning, up to the
-    /// first colon — what each letter's own question carries, the whole
-    /// meaning standing once in the request's rubric.
-    #[must_use]
-    pub fn gist(self) -> &'static str {
-        let means = self.means();
-        means.split_once(':').map_or(means, |(lead, _)| lead)
     }
 
     /// The answer an option names, if it names one.
@@ -246,12 +250,7 @@ pub fn rubric_words() -> String {
         words.push('\n');
         words.push_str(said);
     }
-    for keys in [
-        &REQUEST_KEYS[..],
-        &RUBRIC_KEYS[..],
-        &COORDINATOR_KEYS[..],
-        &LETTER_KEYS[..],
-    ] {
+    for keys in [&REQUEST_KEYS[..], &COORDINATOR_KEYS[..], &LETTER_KEYS[..]] {
         words.push('\n');
         words.push_str(&keys.join(","));
     }
@@ -319,16 +318,6 @@ impl Situation {
     }
 }
 
-/// The state's `rubric`: what the request is, and in full what each option
-/// means — said once in a request, whatever the number of letters in it.
-fn rubric() -> Value {
-    let answers: Map<String, Value> = Triage::ALL
-        .iter()
-        .map(|triage| (triage.word().to_string(), Value::from(triage.means())))
-        .collect();
-    json!({ RUBRIC_KEYS[0]: INSTRUCTIONS, RUBRIC_KEYS[1]: answers })
-}
-
 /// The options a letter's choice offers, as the closed choice's reader wants
 /// them: spelled once for the process, not once per letter read.
 fn offered() -> &'static BTreeSet<String> {
@@ -343,7 +332,8 @@ fn offered() -> &'static BTreeSet<String> {
 
 /// A coordinator's batch of letters, asked on the batch road
 /// ([`crate::jev::batch`]): one closed choice and one Noul about each letter,
-/// over one state that holds the rubric and the coordinator's situation once.
+/// over one state that holds the coordinator's situation once and the letters'
+/// entries. The words of the judgment are in the questions.
 #[derive(Debug, Clone, Copy)]
 pub struct MailTriage {
     situation: Situation,
@@ -370,20 +360,18 @@ impl Judgment for MailTriage {
     }
 
     fn shared(&self) -> Map<String, Value> {
-        Map::from_iter([
-            (REQUEST_KEYS[0].to_string(), rubric()),
-            (REQUEST_KEYS[1].to_string(), self.situation.facts()),
-        ])
+        Map::from_iter([(REQUEST_KEYS[0].to_string(), self.situation.facts())])
     }
 
     fn questions(&self, at: usize) -> Vec<(&'static str, Value)> {
         let at = at.to_string();
-        let gists = Triage::ALL.map(|triage| (triage.word(), triage.gist()));
+        let means = Triage::ALL.map(|triage| (triage.word(), triage.means()));
+        let asked = format!(
+            "{INSTRUCTIONS} {}",
+            ITEM_INSTRUCTIONS.replace(AT_PLACEHOLDER, &at)
+        );
         vec![
-            (
-                TRIAGE_SUFFIX,
-                choice::question(&ITEM_INSTRUCTIONS.replace(AT_PLACEHOLDER, &at), &gists),
-            ),
+            (TRIAGE_SUFFIX, choice::question(&asked, &means)),
             (
                 URGENT_SUFFIX,
                 noul::question(
