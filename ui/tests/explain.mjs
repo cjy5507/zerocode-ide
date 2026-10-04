@@ -335,6 +335,10 @@ export async function testExplain(browser, origin, ok) {
       document.querySelector("#note-pop .note-pop-row")?.click();
       await window.__SETTLE__();
       seen.request = window.__EXPLAIN__.starts.at(-1);
+      // 이 길로 청한 페이지도 발행되면 탭으로 열린다 — 세 자리가 같은 소식 길을 쓴다.
+      window.__SAY__({ id: seen.request?.id, state: "ready", term, agent: "zo", artifact: window.__PAGE__(term, "p-explain-turn") });
+      await window.__SETTLE__();
+      seen.opened = tabs.filter((one) => one.kind === "browser" && one.artifact?.id === "p-explain-turn").length;
       return seen;
     });
     ok(
@@ -344,12 +348,12 @@ export async function testExplain(browser, origin, ok) {
       JSON.stringify(turn),
     );
     ok(
-      "a turn goes with the person's question before it, to the pane the conversation lives in",
+      "a turn goes with the person's question before it, to the pane the conversation lives in, and the page the agent publishes opens",
       turn.preview?.kind === "turn" &&
         turn.preview?.text === "Person:\n이 화면 버그 좀 봐줘.\n\nAgent:\n원인은 스트리밍 경로입니다.\n\n그래서 한 번에 그렸습니다." &&
         turn.names[0] === "ZO" &&
         turn.request?.kind === "turn" && turn.request?.title === "원인은 스트리밍 경로입니다." &&
-        turn.request?.route?.via === "conversation" && turn.request?.route?.term === turn.term,
+        turn.request?.route?.via === "conversation" && turn.request?.route?.term === turn.term && turn.opened === 1,
       JSON.stringify({ preview: turn.preview, request: turn.request }),
     );
 
@@ -394,6 +398,9 @@ export async function testExplain(browser, origin, ok) {
       await window.__SETTLE__();
       seen.request = window.__EXPLAIN__.starts.at(-1);
       seen.term = term;
+      window.__SAY__({ id: seen.request?.id, state: "ready", term, agent: "codex", artifact: window.__PAGE__(term, "p-explain-report") });
+      await window.__SETTLE__();
+      seen.opened = tabs.filter((one) => one.kind === "browser" && one.artifact?.id === "p-explain-report").length;
       actions.remove();
       return seen;
     });
@@ -403,12 +410,12 @@ export async function testExplain(browser, origin, ok) {
       JSON.stringify(report),
     );
     ok(
-      "a report goes by its artifact id to the worker's pane, and the backend reads the file",
+      "a report goes by its artifact id to the worker's pane, the backend reads the file, and the page the agent publishes opens",
       report.shown && report.kind === "report" && report.once === 1 && report.next &&
         report.preview?.kind === "report" && report.preview?.report === "rep-1" && report.preview?.text === null &&
         report.names[0] === "Codex" &&
         report.request?.kind === "report" && report.request?.report === "rep-1" && report.request?.text === null &&
-        report.request?.title === "w-9 · codex" && report.request?.route?.term === report.term,
+        report.request?.title === "w-9 · codex" && report.request?.route?.term === report.term && report.opened === 1,
       JSON.stringify(report),
     );
 
