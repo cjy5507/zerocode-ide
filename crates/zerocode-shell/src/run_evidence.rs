@@ -13,6 +13,7 @@ use tauri::Manager as _;
 
 use serde::{Deserialize, Serialize};
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
+use zerocode_core::evidence_digest::{STEP_PANE_KEY, STEP_TASK_KEY};
 
 /// The step log: one JSON object per line, in the order things happened.
 pub const STEPS_FILE: &str = "steps.jsonl";
@@ -38,8 +39,10 @@ pub struct Step {
     pub verb: String,
     pub argv: Vec<String>,
     pub ok: bool,
-    /// Measurements and recipe origin supplied by the actual step call.
-    /// Absent in old logs; neither timing nor retry origin is inferred by UI.
+    /// Measurements and recipe origin supplied by the actual step call — and
+    /// who the call was for ([`Actor`]): the pane it came from and the task of
+    /// the worker the ledger seats there. Absent in old logs; neither timing,
+    /// retry origin nor task is inferred by UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -283,12 +286,75 @@ pub fn emit<T: Serialize>(event: &str, value: T) {
 
 thread_local! {
     static OBSERVATION: std::cell::RefCell<Option<serde_json::Value>> = const { std::cell::RefCell::new(None) };
+    static ACTOR: std::cell::RefCell<Option<Actor>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The synchronous recipe/goal road's measured context. A road entering an
-/// async operation copies it before awaiting, so another task cannot own it.
+/// Who a step is taken for (t-36910): the pane its command came from, and the
+/// task of the worker the ledger seats in that pane. Both are laid on the
+/// step's observation under the keys the catalog's digest reads, so a task
+/// finds the steps taken for it. What no seat vouches for is absent: a step
+/// from a pane the ledger seats nobody in names no task.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Actor {
+    pub pane: Option<String>,
+    pub task: Option<String>,
+}
+
+impl Actor {
+    /// The observation with what this actor knows laid on it. An actor that
+    /// knows nothing leaves the observation as it was — absent when it was
+    /// absent — and so does an observation that is not a record.
+    #[must_use]
+    pub fn on(&self, observed: Option<serde_json::Value>) -> Option<serde_json::Value> {
+        let known = [
+            (STEP_PANE_KEY, self.pane.as_deref()),
+            (STEP_TASK_KEY, self.task.as_deref()),
+        ];
+        if known.iter().all(|(_, held)| held.is_none()) {
+            return observed;
+        }
+        let mut value = match observed {
+            None => serde_json::json!({}),
+            Some(value) if value.is_object() => value,
+            other => return other,
+        };
+        for (key, held) in known {
+            if let Some(held) = held {
+                value[key] = serde_json::json!(held);
+            }
+        }
+        Some(value)
+    }
+}
+
+/// The actor of every step this thread records until the guard drops.
+#[must_use = "the actor stands only while the guard lives"]
+pub struct ActingFor(Option<Actor>);
+
+impl Drop for ActingFor {
+    fn drop(&mut self) {
+        ACTOR.with(|held| *held.borrow_mut() = self.0.take());
+    }
+}
+
+/// Say who the steps of this thread are taken for. A walk's steps are asked
+/// through one door and recorded down several roads; each road reads its
+/// observation once ([`observation`]), and that read is where the actor
+/// joins it — whatever a recipe or a judgment put in the observation
+/// meanwhile. The guard puts back who stood before, on unwinding as well.
+pub fn acting_for(actor: Actor) -> ActingFor {
+    ActingFor(ACTOR.with(|held| held.replace(Some(actor))))
+}
+
+/// The synchronous recipe/goal road's measured context, with the thread's
+/// actor laid on it ([`acting_for`]). A road entering an async operation
+/// copies it before awaiting, so another task cannot own it.
 pub fn observation() -> Option<serde_json::Value> {
-    OBSERVATION.with(|held| held.borrow().clone())
+    let observed = OBSERVATION.with(|held| held.borrow().clone());
+    ACTOR.with(|held| match held.borrow().as_ref() {
+        Some(actor) => actor.on(observed),
+        None => observed,
+    })
 }
 
 /// Scope a measured look/judgment to the press it caused. Unwinding restores
@@ -699,6 +765,93 @@ mod tests {
         assert_eq!(read["elapsed_ms"], 5);
         assert!(read.get("act_ms").is_none());
         assert!(read.get("judgment").is_none());
+    }
+
+    /// A step taken for a worker's task says so on its line (t-36910): the pane
+    /// and the task join the observation where a road reads it — beside what a
+    /// judgment put there — and a step taken outside the scope names neither.
+    #[test]
+    fn a_step_taken_for_a_task_names_the_task_and_the_pane_on_its_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let press = |at: i64| {
+            let line = words(&["click", "page", "#ok"]);
+            let observed = measured(
+                observation(),
+                "browser",
+                &line,
+                std::time::Duration::from_millis(8),
+            );
+            record_with(
+                dir.path(),
+                (at, observed),
+                "browser",
+                &line,
+                Ok(()),
+                Framing::None,
+                |_, _| {},
+            );
+        };
+        {
+            let _acting = acting_for(Actor {
+                pane: Some("term-3".into()),
+                task: Some("t-10".into()),
+            });
+            press(1);
+            // A recipe's own observation replaces the thread's; the actor
+            // still joins it where the road reads it.
+            observing(serde_json::json!({"judgment": {"asked": false}}), || {
+                press(2)
+            });
+            {
+                // A pane the ledger seats nobody in: its key, and no task.
+                let _other = acting_for(Actor {
+                    pane: Some("term-4".into()),
+                    task: None,
+                });
+                press(3);
+            }
+            press(4);
+        }
+        press(5);
+        let observed: Vec<serde_json::Value> = steps_in(dir.path())
+            .into_iter()
+            .map(|step| step.observation.unwrap_or_default())
+            .collect();
+        let who = |at: usize| {
+            (
+                observed[at]
+                    .get(STEP_PANE_KEY)
+                    .and_then(|held| held.as_str()),
+                observed[at]
+                    .get(STEP_TASK_KEY)
+                    .and_then(|held| held.as_str()),
+            )
+        };
+        assert_eq!(observed.len(), 5);
+        assert_eq!(who(0), (Some("term-3"), Some("t-10")));
+        assert_eq!(who(1), (Some("term-3"), Some("t-10")));
+        assert_eq!(
+            observed[1]["judgment"]["asked"], false,
+            "what the recipe observed stays beside the actor"
+        );
+        assert_eq!(who(2), (Some("term-4"), None));
+        assert_eq!(
+            who(3),
+            (Some("term-3"), Some("t-10")),
+            "the guard puts back who stood before"
+        );
+        assert_eq!(who(4), (None, None));
+        assert_eq!(observed[4]["act_ms"], 8, "and the measurement is as before");
+        assert!(observation().is_none(), "nobody stands once the scope ends");
+        // What the catalog's digest reads off the same lines.
+        let log = std::fs::read(dir.path().join(STEPS_FILE)).unwrap();
+        assert_eq!(
+            zerocode_core::evidence_digest::tasks_named(
+                log.as_slice(),
+                &zerocode_core::artifact::Limits::default()
+            ),
+            ["t-10"]
+        );
     }
 
     #[test]

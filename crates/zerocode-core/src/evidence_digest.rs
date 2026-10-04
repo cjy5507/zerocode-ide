@@ -16,11 +16,18 @@
 //!   rows;
 //! - the operator's state record (an object with `actions` and
 //!   `consecutiveFailures`) is [`Digest::State`];
-//! - any other JSON is [`Digest::Facts`]: its top-level values, bounded.
+//! - any other JSON is [`Digest::Facts`]: its top-level values, bounded;
+//! - a log that holds a test runner's summary or a failed test's line is
+//!   [`Digest::Tests`]: the tests that passed, failed and were ignored, and
+//!   the names of the failed ones (`run_log`).
 //!
-//! The extension only says how to read the bytes ([`Format`]): line by line,
-//! or as one document. A file that is not JSON has no digest and is shown as
-//! the text it is.
+//! The extension only says how to read the bytes ([`Format`]): as JSON line by
+//! line or as one document, as the lines of a text log, or as the one number
+//! of an exit-code file. A text file with nothing to count has no digest and
+//! is shown as the text it is.
+//!
+//! What a file cannot say of itself — the exit code of the run that wrote it,
+//! and whether the run was meant to fail — is told from outside ([`told`]).
 //!
 //! Every number is a field of the artifact table ([`Limits`]). A log is read
 //! one line at a time and only counters and the kept rows are held, so its
@@ -34,6 +41,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::artifact::Limits;
 
+mod run_log;
+
+pub use run_log::{Tests, Told, Verdict, exit_code};
+
 /// How an evidence file's bytes are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -41,19 +52,40 @@ pub enum Format {
     Lines,
     /// One JSON document (`.json`).
     Document,
+    /// The lines of a text log (`.log`, `.out`, `.txt`).
+    Text,
+    /// The exit code of a run, alone in its file (`.rc`).
+    ExitCode,
 }
 
 /// The extensions a digest is read from, lower-cased and without the dot.
-const FORMAT_BY_EXTENSION: &[(&str, Format)] =
-    &[("jsonl", Format::Lines), ("json", Format::Document)];
+const FORMAT_BY_EXTENSION: &[(&str, Format)] = &[
+    ("jsonl", Format::Lines),
+    ("json", Format::Document),
+    ("log", Format::Text),
+    ("out", Format::Text),
+    ("txt", Format::Text),
+    ("rc", Format::ExitCode),
+];
 
 /// How many different verbs a log's count may name before the rest are summed
 /// unnamed: a log is not trusted to hold few of them.
 const VERBS_TRACKED_MAX: usize = 64;
 
+/// How many different tasks a log's count may name, for the same reason. A
+/// step of a task past it is still counted as a step that names a task.
+const TASKS_TRACKED_MAX: usize = 64;
+
+/// The keys of a step's `observation` that say who the step was taken for: the
+/// task of the worker the ledger seats in the pane the command came from, and
+/// that pane. The window's recorder writes them and this module reads the
+/// task; a step no seated worker asked for carries neither.
+pub const STEP_TASK_KEY: &str = "task";
+pub const STEP_PANE_KEY: &str = "pane";
+
 impl Format {
-    /// The format a path's extension names; `None` for a file that is not
-    /// JSON, which has no digest.
+    /// The format a path's extension names; `None` for a file no digest is
+    /// read from.
     #[must_use]
     pub fn of(path: &Path) -> Option<Self> {
         let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
@@ -71,6 +103,7 @@ pub enum Digest {
     Steps(Steps),
     State(State),
     Facts(Facts),
+    Tests(Tests),
 }
 
 /// What one listed row weighs beside its texts — its numbers, its flags and the
@@ -80,7 +113,8 @@ const ROW_WEIGHT: u64 = 96;
 
 impl Digest {
     /// About how many bytes the digest holds: every text it keeps, and
-    /// a fixed weight (`ROW_WEIGHT`) for each row, verb, fact and for itself.
+    /// a fixed weight (`ROW_WEIGHT`) for each row, verb, fact, name and for
+    /// itself.
     #[must_use]
     pub fn weight(&self) -> u64 {
         let text = |held: &str| held.len() as u64;
@@ -108,7 +142,12 @@ impl Digest {
                         .iter()
                         .map(|held| ROW_WEIGHT + text(&held.verb))
                         .sum();
-                    rows + verbs
+                    let tasks: u64 = steps
+                        .tasks
+                        .iter()
+                        .map(|held| ROW_WEIGHT + text(&held.task))
+                        .sum();
+                    rows + verbs + tasks
                 }
                 Self::State(state) => {
                     optional(&state.last_verb)
@@ -130,6 +169,11 @@ impl Digest {
                                 _ => 0,
                             }
                     })
+                    .sum(),
+                Self::Tests(tests) => tests
+                    .failed_names
+                    .iter()
+                    .map(|name| ROW_WEIGHT + text(name))
                     .sum(),
             }
     }
@@ -155,8 +199,22 @@ pub struct Steps {
     pub verbs: Vec<VerbCount>,
     /// Steps of every verb `verbs` does not name.
     pub other_verbs: usize,
+    /// Steps that name the task they were taken for. A session's log runs
+    /// across tasks, and a step taken for none names none.
+    pub tasked: usize,
+    /// The tasks named, the one with most steps first, as many as the table
+    /// lists.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<TaskSteps>,
     /// What the drawer lists: steps, and the folded runs between them.
     pub rows: Vec<Row>,
+}
+
+/// How many steps of a log one task has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TaskSteps {
+    pub task: String,
+    pub steps: usize,
 }
 
 /// How many steps one verb has.
@@ -254,13 +312,28 @@ pub enum FactValue {
     Nothing,
 }
 
-/// Read one evidence file into its digest; `None` when it holds no JSON
-/// record at all.
+/// Read one evidence file into its digest; `None` when it holds nothing the
+/// format's reader counts.
 #[must_use]
 pub fn read(format: Format, reader: impl BufRead, limits: &Limits) -> Option<Digest> {
     match format {
         Format::Lines => read_lines(reader, limits),
         Format::Document => read_document(reader, limits),
+        Format::Text => read_text(reader, limits),
+        Format::ExitCode => run_log::read_exit_code(reader).map(Digest::Tests),
+    }
+}
+
+/// A file's digest as what is known from outside the file qualifies it: a test
+/// log is judged again with the run's exit code and with what the hand-in said
+/// to expect; a file with nothing to count becomes a verdict once an exit code
+/// is known for it; a digest of any other shape is as it was.
+#[must_use]
+pub fn told(digest: Option<Digest>, said: Told) -> Option<Digest> {
+    match digest {
+        Some(Digest::Tests(tests)) => Some(Digest::Tests(tests.judged(said))),
+        None if said.rc.is_some() => Some(Digest::Tests(Tests::default().judged(said))),
+        other => other,
     }
 }
 
@@ -288,37 +361,53 @@ struct StepRead {
     shot: Option<String>,
 }
 
+impl StepRead {
+    /// The task the step was taken for, when its observation names one.
+    fn task(&self) -> Option<&str> {
+        self.observation
+            .as_ref()?
+            .get(STEP_TASK_KEY)?
+            .as_str()
+            .filter(|task| !task.is_empty())
+    }
+}
+
 /// The keys of a step's `observation` that say how long it took, in the order
 /// they are tried.
 const DURATION_KEYS: [&str; 2] = ["act_ms", "elapsed_ms"];
 
-fn read_lines(mut reader: impl BufRead, limits: &Limits) -> Option<Digest> {
+/// Hand a reader's lines to `see`, one at a time and each with its newline,
+/// until the table's bytes are spent; answers whether the file goes on past
+/// them. A line the last byte fell inside is not handed over: it is where the
+/// reading stopped, not a torn line of the file.
+fn each_line(mut reader: impl BufRead, limits: &Limits, mut see: impl FnMut(&[u8])) -> bool {
     let mut budget = limits.digest_bytes_max;
     let mut line: Vec<u8> = Vec::new();
+    loop {
+        line.clear();
+        let Ok(read) = (&mut reader).take(budget).read_until(b'\n', &mut line) else {
+            return false;
+        };
+        if read == 0 {
+            return budget == 0 && more_to_read(&mut reader);
+        }
+        budget = budget.saturating_sub(read as u64);
+        if budget == 0 && !line.ends_with(b"\n") && more_to_read(&mut reader) {
+            return true;
+        }
+        see(&line);
+    }
+}
+
+fn read_lines(reader: impl BufRead, limits: &Limits) -> Option<Digest> {
     let mut fold = StepFold::new(limits);
     let mut other: Option<serde_json::Value> = None;
     let mut records = 0usize;
     let mut skipped = 0usize;
-    let mut cut = false;
-    loop {
-        line.clear();
-        let Ok(read) = (&mut reader).take(budget).read_until(b'\n', &mut line) else {
-            break;
-        };
-        if read == 0 {
-            cut = budget == 0 && more_to_read(&mut reader);
-            break;
-        }
-        budget = budget.saturating_sub(read as u64);
-        if budget == 0 && !line.ends_with(b"\n") && more_to_read(&mut reader) {
-            // The table's last byte fell inside this line: it is not a torn
-            // line of the log, it is where the reading stopped.
-            cut = true;
-            break;
-        }
+    let cut = each_line(reader, limits, |line| {
         let text = line.trim_ascii();
         if text.is_empty() {
-            continue;
+            return;
         }
         if let Ok(step) = serde_json::from_slice::<StepRead>(text) {
             fold.push(step);
@@ -332,12 +421,47 @@ fn read_lines(mut reader: impl BufRead, limits: &Limits) -> Option<Digest> {
         } else {
             skipped += 1;
         }
-    }
+    });
     if fold.out.total > 0 {
         return Some(Digest::Steps(fold.finish(skipped + records, cut)));
     }
     let first = other?;
     Some(Digest::Facts(facts_of(&first, records, cut, limits)))
+}
+
+/// The tasks the step lines of a log name, each once and in the order first
+/// named, as many as the table lists — what the catalog tags a step log's row
+/// with, so a task finds the sessions that worked for it without reading them.
+#[must_use]
+pub fn tasks_named(reader: impl BufRead, limits: &Limits) -> Vec<String> {
+    // Looked for in a line's bytes before the line is parsed: a log that names
+    // no task costs a scan and no parsing.
+    let key = format!("\"{STEP_TASK_KEY}\"");
+    let key = key.as_bytes();
+    let mut named: Vec<String> = Vec::new();
+    each_line(reader, limits, |line| {
+        if named.len() >= limits.digest_tasks_max
+            || !line.windows(key.len()).any(|bytes| bytes == key)
+        {
+            return;
+        }
+        let Ok(step) = serde_json::from_slice::<StepRead>(line.trim_ascii()) else {
+            return;
+        };
+        if let Some(task) = step.task()
+            && !named.iter().any(|held| held == task)
+        {
+            named.push(task.to_string());
+        }
+    });
+    named
+}
+
+/// A text log, read for what its test runners said.
+fn read_text(reader: impl BufRead, limits: &Limits) -> Option<Digest> {
+    let mut fold = run_log::TestsFold::new(limits);
+    let cut = each_line(reader, limits, |line| fold.see(line));
+    fold.finish(cut).map(Digest::Tests)
 }
 
 /// Whether the reader still holds bytes — asked only once the table's bytes
@@ -456,12 +580,34 @@ fn duration_of(observation: Option<&serde_json::Value>) -> Option<u64> {
         .find_map(|key| observation.get(*key)?.as_u64())
 }
 
+/// Count one more of `name` — unless the count already names `cap` others, and
+/// then answer that it was not counted by name.
+fn count_by_name(counts: &mut BTreeMap<String, usize>, name: &str, cap: usize) -> bool {
+    if let Some(held) = counts.get_mut(name) {
+        *held += 1;
+    } else if counts.len() < cap {
+        counts.insert(name.to_string(), 1);
+    } else {
+        return false;
+    }
+    true
+}
+
+/// A count by name as a list, the most counted first. The map already ordered
+/// equal counts by name, and the sort keeps that order.
+fn most_first(counts: BTreeMap<String, usize>) -> Vec<(String, usize)> {
+    let mut held: Vec<(String, usize)> = counts.into_iter().collect();
+    held.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    held
+}
+
 /// The single pass over a log's steps: counts everything, keeps the rows worth
 /// showing and folds the runs between them.
 struct StepFold<'a> {
     limits: &'a Limits,
     out: Steps,
     verbs: BTreeMap<String, usize>,
+    tasks: BTreeMap<String, usize>,
     /// Passed steps that may still be shown: as the neighbours of a failed
     /// step that follows them, or as the end of the log.
     held: VecDeque<StepRow>,
@@ -480,6 +626,7 @@ impl<'a> StepFold<'a> {
             limits,
             out: Steps::default(),
             verbs: BTreeMap::new(),
+            tasks: BTreeMap::new(),
             held: VecDeque::new(),
             folded: 0,
             folded_failed: 0,
@@ -498,7 +645,13 @@ impl<'a> StepFold<'a> {
             self.out.started_ms = Some(read.at_epoch_ms);
         }
         self.out.ended_ms = Some(read.at_epoch_ms);
-        self.count_verb(&read.verb);
+        if !count_by_name(&mut self.verbs, &read.verb, VERBS_TRACKED_MAX) {
+            self.out.other_verbs += 1;
+        }
+        if let Some(task) = read.task() {
+            self.out.tasked += 1;
+            count_by_name(&mut self.tasks, task, TASKS_TRACKED_MAX);
+        }
         let words: &[String] = match read.argv.split_first() {
             Some((first, rest)) if *first == read.verb => rest,
             _ => &read.argv,
@@ -535,16 +688,6 @@ impl<'a> StepFold<'a> {
             self.held.push_back(row);
             let room = limits.digest_context_steps.max(limits.digest_tail_steps);
             self.fold_held_down_to(room);
-        }
-    }
-
-    fn count_verb(&mut self, verb: &str) {
-        if let Some(steps) = self.verbs.get_mut(verb) {
-            *steps += 1;
-        } else if self.verbs.len() < VERBS_TRACKED_MAX {
-            self.verbs.insert(verb.to_string(), 1);
-        } else {
-            self.out.other_verbs += 1;
         }
     }
 
@@ -590,17 +733,19 @@ impl<'a> StepFold<'a> {
             self.show(last);
         }
         self.close_fold();
-        let mut verbs: Vec<VerbCount> = std::mem::take(&mut self.verbs)
+        let mut verbs = most_first(std::mem::take(&mut self.verbs));
+        let named = self.limits.digest_verbs_max.min(verbs.len());
+        self.out.other_verbs += verbs[named..].iter().map(|(_, steps)| steps).sum::<usize>();
+        verbs.truncate(named);
+        self.out.verbs = verbs
             .into_iter()
             .map(|(verb, steps)| VerbCount { verb, steps })
             .collect();
-        // The most used first; the map already ordered equal counts by name,
-        // and the sort keeps that order.
-        verbs.sort_by_key(|held| std::cmp::Reverse(held.steps));
-        let named = self.limits.digest_verbs_max.min(verbs.len());
-        self.out.other_verbs += verbs[named..].iter().map(|held| held.steps).sum::<usize>();
-        verbs.truncate(named);
-        self.out.verbs = verbs;
+        self.out.tasks = most_first(std::mem::take(&mut self.tasks))
+            .into_iter()
+            .take(self.limits.digest_tasks_max)
+            .map(|(task, steps)| TaskSteps { task, steps })
+            .collect();
         self.out.skipped = skipped;
         self.out.cut = cut;
         self.out
