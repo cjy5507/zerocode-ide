@@ -2745,6 +2745,8 @@ pub(super) enum TermLedgerSettlement {
 }
 
 pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: TermLedgerSettlement) {
+    // The requests an explanation holds for this pane go with it (t-32787).
+    crate::explain_door::note_pane_gone(term);
     // A worker still inside its launch-readiness transaction has not started
     // an attempt yet. The reaper may win the race to this door, so preserve
     // its screen for the post-fence waiter and suppress the ordinary terminal

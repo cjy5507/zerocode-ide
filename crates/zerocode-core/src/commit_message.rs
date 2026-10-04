@@ -182,13 +182,20 @@ fn allocate_budget_fairly(sizes: &[usize], budget: usize) -> Vec<usize> {
 /// length is budgeted too — a clip that overshoots by the size of its
 /// apology has not clipped.
 fn clip_on_line_boundary(section: &str, limit: usize) -> String {
+    clip_text_on_line_boundary(section, limit, "diff")
+}
+
+/// The same cut for any text. `what` is the word the marker calls the text by
+/// (`diff`, `conversation`): the model that reads a marker is told what was
+/// cut, and a conversation that says "(diff truncated)" is told wrongly.
+pub(crate) fn clip_text_on_line_boundary(section: &str, limit: usize, what: &str) -> String {
     if section.len() <= limit {
         return section.to_string();
     }
     if limit == 0 {
         return String::new();
     }
-    let marker_for = |omitted: usize| format!("\n...(diff truncated, {omitted} bytes omitted)\n");
+    let marker_for = |omitted: usize| format!("\n...({what} truncated, {omitted} bytes omitted)\n");
     let mut marker = marker_for(section.len());
     if marker.len() >= limit {
         marker.truncate(limit);
@@ -207,7 +214,7 @@ fn clip_on_line_boundary(section: &str, limit: usize) -> String {
 
 /// The largest char boundary at or under `at` — the JS slices by UTF-16 units
 /// and never notices; a Rust slice through a multibyte char panics.
-fn floor_char(text: &str, at: usize) -> usize {
+pub(crate) fn floor_char(text: &str, at: usize) -> usize {
     let mut boundary = at.min(text.len());
     while !text.is_char_boundary(boundary) {
         boundary -= 1;
@@ -268,7 +275,7 @@ pub fn tidy(raw: &str) -> String {
 }
 
 /// The body of a fence that encloses the WHOLE text, or nothing.
-fn fence_body(text: &str) -> Option<&str> {
+pub(crate) fn fence_body(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("```")?;
     let after_info = rest.split_once('\n')?.1;
     let inner = after_info.strip_suffix("```").or_else(|| {
