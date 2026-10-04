@@ -1,6 +1,6 @@
 ---
 name: mobile-device
-description: Use it when the person says an iPhone, iPad, Android phone, simulator or emulator (아이폰, 아이패드, 안드로이드 폰, 시뮬레이터, 에뮬레이터) is connected or open in the IDE, or that the app is installed on it, and you must see its screen, tap, type, swipe or take a screenshot. First step is always zerocode-emulator list, before the Mac window list, iPhone Mirroring or Xcode devicectl. 연결·설치된 기기의 화면 확인과 탭, 입력, 스와이프, 스크린샷 조작에 쓴다.
+description: Use when the person says a phone is connected, open in the IDE or has the app installed (iPhone, iPad, Android phone, simulator, emulator; 아이폰, 아이패드, 안드로이드 폰, 시뮬레이터, 에뮬레이터); start with zerocode-emulator list, then boot or open the device, launch the app, see the screen, tap, press buttons, type, swipe, screenshot, and only then turn to the Mac window list, iPhone Mirroring or Xcode devicectl. 연결·설치된 기기의 화면 확인과 탭, 입력, 스와이프, 스크린샷 조작에 쓴다.
 invocation: auto
 keywords: [아이폰, 아이패드, 안드로이드, 시뮬레이터, 에뮬레이터, iphone, ipad, android, simulator, emulator]
 ---
