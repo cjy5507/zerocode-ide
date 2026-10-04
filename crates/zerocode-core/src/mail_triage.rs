@@ -112,7 +112,7 @@ const LETTERS_KEY: &str = REQUEST_KEYS[2];
 /// batch ([`crate::jev::batch::question_name`]): the choice under none, the
 /// Noul under its own.
 const TRIAGE_SUFFIX: &str = "";
-const URGENT_SUFFIX: &str = "/urgent";
+const URGENT_SUFFIX: &str = "urgent";
 
 /// The version of the words in this module. Bump it when any of them changes,
 /// or when the label they are graded by changes: a judgment read under one

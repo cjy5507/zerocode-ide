@@ -11,7 +11,7 @@ use super::*;
 const SHARED_WORDS: &str = "judge each number alone, by its own value";
 
 /// The suffix of the toy seat's second question about an item.
-const WHOLE: &str = "/whole";
+const WHOLE: &str = "whole";
 
 /// A seat that judges numbers: one closed choice about each, and a Noul
 /// beside it.

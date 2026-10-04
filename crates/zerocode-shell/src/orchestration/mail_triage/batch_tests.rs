@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+use std::time::Instant;
 
 use serde_json::Map;
 use zerocode_core::jev::batch::{Answers, Judgment, Request};

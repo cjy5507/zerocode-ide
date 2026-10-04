@@ -496,6 +496,10 @@ pub struct Asked {
     /// before the memo was reached. When `memo.answered`, `answer` is the
     /// memo's and `spent.requests` is `0`: nothing left the machine.
     pub memo: Option<Memoed>,
+    /// How long this call took, from the door to the answer: its own wait,
+    /// whatever the requests asked beside it took — which a clock around
+    /// [`Wire::ask_together`] cannot say.
+    pub waited: Duration,
 }
 
 /// Where the key is read from.
@@ -783,18 +787,34 @@ impl Wire {
     pub fn ask_together(
         &self,
         row: &JevUse,
-        mut asks: Vec<(Option<&Path>, Value)>,
+        asks: Vec<(Option<&Path>, Value)>,
         deadline: Duration,
     ) -> Vec<Asked> {
-        let mut answered = Vec::with_capacity(asks.len());
-        while !asks.is_empty() {
-            let wave: Vec<_> = asks.drain(..asks.len().min(TOGETHER_LANES)).collect();
-            answered.extend(self.ask_in_one_wave(row, wave, deadline));
-        }
-        answered
+        self.ask_in_waves(row, asks, deadline).flatten().collect()
     }
 
-    /// One wave of [`Self::ask_together`]: its requests all in flight at once.
+    /// [`Self::ask_together`], one wave at a time: each item is the next wave's
+    /// answers, in the order its requests were handed in, and the wave leaves
+    /// when its item is asked for. A caller with something to do with a wave's
+    /// answers — write them down — does it before the next wave leaves, so a
+    /// window closed in between has lost the work of one wave and not of the
+    /// whole.
+    pub fn ask_in_waves<'a>(
+        &'a self,
+        row: &'a JevUse,
+        mut asks: Vec<(Option<&'a Path>, Value)>,
+        deadline: Duration,
+    ) -> impl Iterator<Item = Vec<Asked>> + 'a {
+        std::iter::from_fn(move || {
+            if asks.is_empty() {
+                return None;
+            }
+            let wave: Vec<_> = asks.drain(..asks.len().min(TOGETHER_LANES)).collect();
+            Some(self.ask_in_one_wave(row, wave, deadline))
+        })
+    }
+
+    /// One wave of [`Self::ask_in_waves`]: its requests all in flight at once.
     fn ask_in_one_wave(
         &self,
         row: &JevUse,
@@ -824,6 +844,7 @@ impl Wire {
                         spent: Spent::default(),
                         request_bytes: 0,
                         memo: None,
+                        waited: Duration::ZERO,
                     })
                 })
                 .collect()
@@ -846,12 +867,14 @@ impl Wire {
         deadline: Duration,
         memo: Option<Memo<'_>>,
     ) -> Asked {
-        let deadline = Instant::now() + deadline;
+        let began = Instant::now();
+        let deadline = began + deadline;
         let refused = |refusal: Refused| Asked {
             answer: Err(refusal.token().to_string()),
             spent: Spent::default(),
             request_bytes: 0,
             memo: None,
+            waited: began.elapsed(),
         };
         let key = self.key();
         let passed = match self.pass(row, key.is_some(), workspace, body, memo) {
@@ -888,6 +911,7 @@ impl Wire {
                 },
                 request_bytes,
                 memo,
+                waited: began.elapsed(),
             };
         }
         // Every caller is sync — a walk drives sync roads, a question asked
@@ -937,6 +961,7 @@ impl Wire {
             spent,
             request_bytes,
             memo,
+            waited: began.elapsed(),
         }
     }
 

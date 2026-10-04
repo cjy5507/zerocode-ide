@@ -3575,18 +3575,26 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     abstain: Abstain::NotAChoice,
 };
 
-/// The wall one mail triage question waits for its answer, in milliseconds —
+/// The wall one mail triage request waits for its answer, in milliseconds —
 /// the wire's own, since the seat never rises and names no apply wall.
 ///
-/// A record-only question asked off the beat holds nothing but its own
-/// thread, so its wall is set by the answers it would lose. The window's
-/// three seats that ask about orchestration facts got every one of their 967
-/// answers on this machine inside 2,517 ms (2026-09-26: the notify seat's
-/// 558 at p99 895 ms, the summons' 247 at p99 1,464 ms, the stall seat's 162
-/// — with a screen's 8 KB in each — at p99 2,003 ms), and a letter's facts
-/// are fewer bytes than any of them. Five seconds is twice the slowest; an
-/// answer later than that is the row's `timeout`, which says the service was
-/// slow as plainly.
+/// A record-only request asked off the beat holds nothing but its own thread,
+/// so its wall is set by the answers it would lose — and a request is a batch
+/// now: one that does not come back leaves up to [`MAIL_TRIAGE_BATCH_CAP`]
+/// rows `timeout` at once. What the model takes was measured on the real wire
+/// with one synthetic day's letters asked in requests of 1, 4, 8, 16, 32 and
+/// 48 letters (2026-10-04, three seeds; four requests side by side, the
+/// slowest of them timed): at sixteen letters — thirty-two answers, 17.5 KB —
+/// 338 ms at the median and 379 ms at most, at forty-eight (43.9 KB) 378 ms,
+/// and at one letter 264 ms: sixteen times the letters took 74 ms longer, as
+/// the model's time is its round trip and hardly its answers. Five seconds is
+/// thirteen times the slowest of those. The window's three seats that ask
+/// about orchestration facts got every one of their 967 answers on this machine
+/// inside 2,517 ms (2026-09-26: the notify seat's 558 at p99 895 ms, the
+/// summons' 247 at p99 1,464 ms, the stall seat's 162 — with a screen's 8 KB in
+/// each — at p99 2,003 ms), and five seconds is twice the slowest of those
+/// too. An answer later than that is the row's `timeout`, which says the
+/// service was slow as plainly.
 pub const MAIL_TRIAGE_DEADLINE_MS: u64 = 5_000;
 
 /// The most letters one mail triage request asks about ([`batch::Judgment::cap`]):
@@ -3595,7 +3603,7 @@ pub const MAIL_TRIAGE_DEADLINE_MS: u64 = 5_000;
 /// request or a few and not for its letters one after another.
 ///
 /// Sixteen, for three reasons that can be read off the words and one that
-/// has to be measured. A letter adds about a kilobyte to a request (964 B: its
+/// was measured. A letter adds about a kilobyte to a request (964 B: its
 /// entry and its two questions, at rubric version 2) beside the 2.5 KB the
 /// rubric and the coordinator's situation take once, so a full request is
 /// 17.9 KB — some 4,500 tokens of the 64,000 one request may carry
@@ -3604,9 +3612,13 @@ pub const MAIL_TRIAGE_DEADLINE_MS: u64 = 5_000;
 /// the skill and compaction seats put in one ([`SKILL_SHARD_TARGET`]). And it
 /// bounds what one request that does not come back costs: the seat only
 /// records, and the letters of that request are the ones left unrecorded.
-/// What size does to agreement with the coordinator's later acts is the thing
-/// to measure: `measure_agreement_by_batch_size_on_the_real_wire` asks the same
-/// letters in requests of 1, 4, 8, 16, 32 and 48.
+/// What size does to agreement with the coordinator's later acts was measured
+/// on the real wire (`measure_agreement_by_batch_size_on_the_real_wire`,
+/// 2026-10-04): the same 172 letters under three seeds, 406 of them compared,
+/// in requests of 1, 4, 8, 16, 32 and 48 — 190, 190, 202, 182, 198 and 173
+/// agreed. Up to thirty-two the sizes do not order, and the same letters asked
+/// twice at one size differ by a few (184 and 181); forty-eight is the lowest,
+/// and the cap sits well under it.
 pub const MAIL_TRIAGE_BATCH_CAP: usize = 16;
 
 /// The window's mail triage (t-9471, `crate::mail_triage`): for every letter
@@ -3619,8 +3631,9 @@ pub const MAIL_TRIAGE_BATCH_CAP: usize = 16;
 /// are the evidence the desk's order will be judged on before it may move a
 /// letter (the harness design's §H6, a later round). What it sends is a
 /// letter's structure — kinds, the ledger's own ids, counts, a priority word
-/// — and never a word of the letter; the table declares every text the
-/// state carries, each a word or an id the product wrote.
+/// — and never a word of the letter; the table declares every text of a
+/// letter's entry, each a word or an id the product wrote, and the rubric and
+/// the situation the state opens with are the product's own words besides.
 ///
 /// The label is what the coordinator did next, read off the ledger alone
 /// (`crate::mail_triage::Mailroom::label`): its acts after the hand-over, the

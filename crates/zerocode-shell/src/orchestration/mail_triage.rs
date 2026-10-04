@@ -9,12 +9,14 @@
 //! (`zerocode_core::mail_triage::MailTriage`), through the Jev door with the
 //! coordinator's own checkout as the workspace consented to. A burst above
 //! the cap is cut evenly into requests that leave side by side, a few at a
-//! time ([`crate::systemone::TOGETHER_LANES`]). Each letter
-//! has a row of its own in `mail-triage.jsonl`; the request's account — its
-//! count, its bytes, its tokens — is written on the one row that carries it
-//! and the rows riding it are charged nothing, so a ledger's sums still say
-//! what was sent. The rows change nothing the beat does: the seat only
-//! records, and nothing on the desk moves.
+//! time ([`crate::systemone::TOGETHER_LANES`]), and a wave's rows are written
+//! before the next wave leaves. Each letter has a row of its own in
+//! `mail-triage.jsonl`; the request's account — its count, its bytes, its
+//! tokens — is written on the one row that carries it (the first of its
+//! letters that names a task, so the cost of a task reads it) and the rows
+//! riding it are charged nothing, so a ledger's sums still say what was sent.
+//! The rows change nothing the beat does: the seat only records, and nothing
+//! on the desk moves.
 //!
 //! Later beats read what the coordinator did next off the ledger
 //! (`zerocode_core::mail_triage::Mailroom::label`) and write it as the row's
@@ -27,7 +29,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use zerocode_core::jev::batch::{Request, requests};
@@ -301,18 +303,24 @@ fn ask_about(
     let path = path.to_path_buf();
     let book = Arc::clone(book);
     host.off_the_beat(Box::new(move || {
-        let (rows, waiting) = settle(&wire, batches);
-        crate::systemone::record_rows(&MAIL_TRIAGE, &path, &rows, now_ms);
-        // A book that has not read the ledger's tail yet reads these rows
-        // there; one that has takes them here, once.
-        if let Some((_, held)) = kept(&book).waiting.as_mut() {
-            for one in waiting {
-                if !held.iter().any(|row| row.key == one.key) {
-                    held.push(one);
-                }
+        settle(&wire, batches, |rows, waiting| {
+            crate::systemone::record_rows(&MAIL_TRIAGE, &path, &rows, now_ms);
+            keep_waiting(&book, waiting);
+        });
+    }));
+}
+
+/// Keep each answer's wait for its label. A book that has not read the
+/// ledger's tail yet reads these rows there; one that has takes them here,
+/// once.
+fn keep_waiting(book: &Mutex<MailBook>, waiting: Vec<Waiting>) {
+    if let Some((_, held)) = kept(book).waiting.as_mut() {
+        for one in waiting {
+            if !held.iter().any(|row| row.key == one.key) {
+                held.push(one);
             }
         }
-    }));
+    }
 }
 
 /// What each letter of a request came to: the answer read in shape, or the
@@ -373,11 +381,12 @@ fn answered(row: &mut Value, read: &MailRead) {
     row["urgent"] = json!(read.urgent);
 }
 
-/// Ask every batch's requests side by side and write down what came of each
-/// letter: its row, and — for an answer — the wait for its label. A request's
-/// account is written on the first row it answered; the rows beside it ride
-/// the request and are charged nothing ([`crate::systemone::Spent::rider`]).
-fn settle(wire: &Wire, batches: Vec<Batch>) -> (Vec<Value>, Vec<Waiting>) {
+/// Ask every batch's requests side by side, a wave at a time
+/// ([`Wire::ask_in_waves`]), and hand `written` each wave's rows — what came of
+/// each letter: its row, and, for an answer, the wait for its label — before
+/// the next wave leaves, so a window closed meanwhile has lost one wave's rows
+/// and not the sweep's.
+fn settle(wire: &Wire, batches: Vec<Batch>, mut written: impl FnMut(Vec<Value>, Vec<Waiting>)) {
     let built: Vec<(Batch, MailTriage, Vec<Request>)> = batches
         .into_iter()
         .map(|mut batch| {
@@ -397,55 +406,79 @@ fn settle(wire: &Wire, batches: Vec<Batch>) -> (Vec<Value>, Vec<Waiting>) {
             })
         })
         .collect();
-    let began = Instant::now();
-    let mut answers = wire
-        .ask_together(&MAIL_TRIAGE, asks, MAIL_TRIAGE_DEADLINE)
-        .into_iter();
-    let elapsed = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let mut rows = Vec::new();
-    let mut waiting = Vec::new();
-    for (batch, judgment, asked) in &built {
-        for request in asked {
-            let Some(answer) = answers.next() else {
-                continue;
+    // The requests in the order they were handed to the wire, which is the
+    // order the waves bring their answers back in.
+    let mut owners = built.iter().flat_map(|(batch, judgment, asked)| {
+        asked.iter().map(move |request| (batch, judgment, request))
+    });
+    for wave in wire.ask_in_waves(&MAIL_TRIAGE, asks, MAIL_TRIAGE_DEADLINE) {
+        let mut rows = Vec::new();
+        let mut waiting = Vec::new();
+        for answer in &wave {
+            let Some((batch, judgment, request)) = owners.next() else {
+                break;
             };
-            let readings = read_request(judgment, request, &answer);
-            // What is the request's, worked out once and not once a letter:
-            // the letter that carries its account — its first — which names
-            // the batch for every row it answered, and what the rows riding
-            // it are charged.
-            let items = request.items();
-            let carrier = &batch.letters[items.start].key;
-            let riding = answer.spent.rider();
-            for (item, reading) in items.clone().zip(readings) {
-                let letter = &batch.letters[item];
-                let mut row = row_of(batch, letter);
-                row[ELAPSED_MS.canonical] = json!(elapsed);
-                if item == items.start {
-                    answer.spent.stamp(&mut row);
-                    row[REQUEST_BYTES] = json!(answer.request_bytes);
-                } else {
-                    riding.stamp(&mut row);
-                    row[REQUEST_BYTES] = json!(0);
-                }
-                row[BATCH] = json!(carrier);
-                row[BATCH_SIZE] = json!(items.len());
-                match reading {
-                    Ok(read) => {
-                        answered(&mut row, &read);
-                        waiting.push(Waiting {
-                            key: letter.key.clone(),
-                            run: batch.run.clone(),
-                            asked_ms: batch.asked_ms,
-                            triage: read.triage,
-                            delivered_ms: letter.delivered_ms,
-                        });
-                    }
-                    Err(token) => row[OUTCOME.canonical] = json!(token),
-                }
-                rows.push(row);
-            }
+            let (settled, awaiting) = rows_of(batch, judgment, request, answer);
+            rows.extend(settled);
+            waiting.extend(awaiting);
         }
+        written(rows, waiting);
+    }
+}
+
+/// The rows of one answered request: a row for each of its letters, and the
+/// wait for its label of each that was answered in shape. The request's
+/// account is written on the one row that carries it and the rows beside it
+/// ride it, charged nothing ([`crate::systemone::Spent::rider`]).
+fn rows_of(
+    batch: &Batch,
+    judgment: &MailTriage,
+    request: &Request,
+    answer: &Asked,
+) -> (Vec<Value>, Vec<Waiting>) {
+    let readings = read_request(judgment, request, answer);
+    // What is the request's, worked out once and not once a letter: its wait,
+    // the letter that carries its account — the first that names a task, so
+    // the cost of a task reads it as one's and not as nobody's; the first of
+    // all when none does — which names the batch for every row the request
+    // answered, and what the rows riding it are charged.
+    let items = request.items();
+    let carrier = items
+        .clone()
+        .find(|item| batch.letters[*item].task.is_some())
+        .unwrap_or(items.start);
+    let carrier_key = &batch.letters[carrier].key;
+    let riding = answer.spent.rider();
+    let waited = u64::try_from(answer.waited.as_millis()).unwrap_or(u64::MAX);
+    let mut rows = Vec::with_capacity(items.len());
+    let mut waiting = Vec::new();
+    for (item, reading) in items.clone().zip(readings) {
+        let letter = &batch.letters[item];
+        let mut row = row_of(batch, letter);
+        row[ELAPSED_MS.canonical] = json!(waited);
+        if item == carrier {
+            answer.spent.stamp(&mut row);
+            row[REQUEST_BYTES] = json!(answer.request_bytes);
+        } else {
+            riding.stamp(&mut row);
+            row[REQUEST_BYTES] = json!(0);
+        }
+        row[BATCH] = json!(carrier_key);
+        row[BATCH_SIZE] = json!(items.len());
+        match reading {
+            Ok(read) => {
+                answered(&mut row, &read);
+                waiting.push(Waiting {
+                    key: letter.key.clone(),
+                    run: batch.run.clone(),
+                    asked_ms: batch.asked_ms,
+                    triage: read.triage,
+                    delivered_ms: letter.delivered_ms,
+                });
+            }
+            Err(token) => row[OUTCOME.canonical] = json!(token),
+        }
+        rows.push(row);
     }
     (rows, waiting)
 }

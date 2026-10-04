@@ -31,8 +31,9 @@
 //!
 //! The cap ([`Judgment::cap`]) is the seat's, named with its reason where the
 //! seat names its numbers; above it the items are cut EVENLY
-//! ([`super::shard`]) and the requests are meant to leave side by side, so the
-//! one that decides the wait is the longest and not the sum.
+//! ([`super::shard`]) and the requests are meant to leave side by side, a few
+//! at a time, so a batch waits for the slowest request of each wave and not
+//! for its requests one after another.
 //!
 //! **The seam for the next seat.** The review of a finished worker's result
 //! is the second user of this road (t-32796 phase 2): its deterministic
@@ -51,16 +52,28 @@ use serde_json::{Map, Value};
 use super::shard;
 
 /// What every question name of a batch opens with: a letter, then the item's
-/// place in the WHOLE batch, then the question's suffix. One name per
-/// question, unique across every request of one batch, and the place an
-/// answer is read back by.
+/// place in the WHOLE batch, then — for every question but the item's first —
+/// a separator and the question's suffix. One name per question, unique across
+/// every request of one batch, and the place an answer is read back by.
 const QUESTION_PREFIX: &str = "q";
 
+/// What stands between an item's place and a suffix, so that a name reads back
+/// one way only: the digits up to the first separator are the place. Without
+/// it a suffix that starts with a digit would make another item's name (`q1`
+/// and `2` are `q12`, item 12's own).
+const SUFFIX_SEPARATOR: char = '/';
+
 /// The name of the question `suffix` of the item at `item`, counted from the
-/// first item of the whole batch — across its requests, not within one.
+/// first item of the whole batch — across its requests, not within one. The
+/// item's first question has no suffix (`q3`); the others have a word of their
+/// own (`q3/urgent`).
 #[must_use]
 pub fn question_name(item: usize, suffix: &str) -> String {
-    format!("{QUESTION_PREFIX}{item}{suffix}")
+    if suffix.is_empty() {
+        format!("{QUESTION_PREFIX}{item}")
+    } else {
+        format!("{QUESTION_PREFIX}{item}{SUFFIX_SEPARATOR}{suffix}")
+    }
 }
 
 /// A seat's side of the batch road: what it shares, what it asks of each
@@ -81,9 +94,12 @@ pub trait Judgment {
     /// the whole batch — written once into each request, beside the items.
     fn shared(&self) -> Map<String, Value>;
 
-    /// One item's questions, each under a suffix of its own. `at` is the
-    /// item's place in THIS request's list of items, which the questions name
-    /// it by; it is all a question is built from.
+    /// One item's questions, each under a suffix of its own: none for the
+    /// first, a word for each of the others, never the same twice for one item.
+    /// `at` is the item's place in THIS request's list of items, which the
+    /// questions' words call it by (`numbers[2]`) — the questions' NAMES are
+    /// made from its place in the whole batch; `at` is all a question is built
+    /// from.
     fn questions(&self, at: usize) -> Vec<(&'static str, Value)>;
 
     /// What one item's own answers say.
