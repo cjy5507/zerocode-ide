@@ -233,6 +233,9 @@ pub(crate) struct ComputerInput {
     /// The model's own declaration that this press is a payment, transfer
     /// or delete — the window asks the person before the helper moves.
     pub confirming: Option<String>,
+    /// `handoff`: ask for a one-time code on the person's card (the core's
+    /// `--ask-code`); the answer is the code.
+    pub ask_code: Option<bool>,
     pub force: Option<bool>,
     pub reset_budget: Option<bool>,
     pub last: Option<u64>,
@@ -1806,6 +1809,8 @@ mod tests {
                 &["recipe-run", "--name", "x", "--params", "{\"text-3\":\"hi\"}", "--start", "3", "--json"]),
             (json!({ "action": "handoff", "text": "Type your password", "timeout_ms": 60000 }),
                 &["handoff", "--reason", "Type your password", "--timeout-ms", "60000", "--json"]),
+            (json!({ "action": "handoff", "text": "카카오톡 인증번호", "ask_code": true, "timeout_ms": 180000 }),
+                &["handoff", "--reason", "카카오톡 인증번호", "--ask-code", "--timeout-ms", "180000", "--json"]),
             (json!({ "action": "walk", "goal": "도움말에서 설치 안내를 연다", "pane": "browser-13", "until": "설치 안내", "max_steps": 6 }),
                 &["walk", "--goal", "도움말에서 설치 안내를 연다", "--pane", "browser-13", "--until", "설치 안내", "--steps", "6", "--json"]),
         ];
@@ -1834,6 +1839,27 @@ mod tests {
         assert_eq!(spec.name, "Computer");
         assert_eq!(spec.required_permission, PermissionMode::DangerFullAccess);
         assert_eq!(spec.input_schema["properties"]["action"]["enum"].as_array().map(Vec::len), Some(ACTIONS.len()));
+    }
+
+    /// A one-time code is asked for with one boolean on the person's turn
+    /// (t-40807): the core's `--ask-code`, passed through and never judged
+    /// here — whether the reason names a secret is the window's to say — and
+    /// named once in the tool's sentence, so the model knows the road.
+    #[test]
+    fn the_persons_turn_asks_for_a_one_time_code_by_one_boolean() {
+        let spec = tool_specs().pop().expect("one spec");
+        assert_eq!(
+            spec.input_schema["properties"]["ask_code"]["type"],
+            json!("boolean"),
+            "the person's turn has no switch for a code"
+        );
+        assert!(spec.description.contains("ask_code"), "the tool's sentence does not say what ask_code is for");
+        assert!(
+            spec.input_schema["properties"]["steps"]["items"]["properties"].get("ask_code").is_none(),
+            "the person's turn is never a batch step"
+        );
+        let plain = argv_for(&input(json!({ "action": "handoff", "text": "x", "ask_code": false }))).expect("a handoff");
+        assert_eq!(plain, ["handoff", "--reason", "x", "--json"], "ask_code false is the plain turn");
     }
 
     /// Looks are not followed by a look; a type is not a press; the presses
