@@ -6201,6 +6201,9 @@ function noteArtifactSeats() {
  * 고른 행의 탭이거나 그 범위에 행이 있는 첫 탭이다 — 워크트리 칩의 「아티팩트
  * 6」이 페이지 탭의 빈 판으로 열리지 않게. */
 function openArtifacts({ origin, select = null, fresh = false } = {}) {
+  // 드러내 달라던 카드는 그 고름의 몸짓에 매인 것이다 — 탭을 새로 여는 것은 다른 몸짓이라, 앞선
+  // 고름의 드러내기가 새 판의 첫 크기 변화에 격자를 끌고 가지 않게 지운다.
+  artifactRevealPending = null;
   if (origin !== undefined) artifactFilter.origin = origin;
   if (select) artifactSelectedId = select;
   if (fresh) artifactAskedAt = 0;
