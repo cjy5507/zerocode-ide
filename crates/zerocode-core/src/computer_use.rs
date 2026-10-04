@@ -3340,6 +3340,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         (WALK_RESCUE_FLAG, WALK_RESCUE_PARAM),
         (WALK_REPLAY_FLAG, WALK_REPLAY_PARAM),
         ("renew", "renew"),
+        ("ask-code", "askCode"),
     ] {
         if flags.contains_key(flag) {
             params.insert(key.into(), Value::Bool(true));
@@ -3430,6 +3431,7 @@ fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
                 | "verify"
                 | "repeat"
                 | "renew"
+                | "ask-code"
                 | WALK_OVERLAP_FLAG
                 | WALK_RESCUE_FLAG
                 | WALK_REPLAY_FLAG
@@ -3675,7 +3677,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "marks",
             "settle",
         ],
-        ComputerMethod::Handoff => &["json", "reason", "timeout-ms"],
+        ComputerMethod::Handoff => &["json", "reason", "timeout-ms", "ask-code"],
         ComputerMethod::RecipeSave => &["json", "name", "from", "last", "note"],
         ComputerMethod::RecipeList => BASIC,
         ComputerMethod::RecipeShow => &["json", "name"],
@@ -4464,8 +4466,10 @@ pub fn usage() -> String {
         "  zerocode-computer watch [--until change|quiet] [--timeout-ms N] [--display N] [--json]",
         "      (waits for the screen to change, or to go still, from the display's repaints — no pictures taken;",
         "       answers where it changed; ZeroCode's own windows and what was already moving do not count)",
-        "  zerocode-computer handoff --reason <what the person must do> [--timeout-ms N] [--json]",
-        "      (2FA, CAPTCHA, the last step you may not press: the window shows a card and waits for the person)",
+        "  zerocode-computer handoff --reason <what the person must do> [--ask-code] [--timeout-ms N] [--json]",
+        "      (2FA, CAPTCHA, the last step you may not press: the window shows a card and waits for the person;",
+        "       --ask-code adds a line for a one-time code: the answer is that code, once, alone in text mode and as `code` with --json;",
+        "       never for a password or a card number — the person types those themselves)",
         "  zerocode-computer recipe-save --name <name> [--from <evidence dir>] [--last N] [--note <text>] [--json]",
         "      (this session's walked steps as a document a person can read and edit; next time, walk the recipe first)",
         "  zerocode-computer recipe-list [--json]",

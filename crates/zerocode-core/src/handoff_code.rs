@@ -159,11 +159,58 @@ pub const ONE_TIME_WORDS: &[&str] = &[
 ];
 
 /// Whether a handoff's reason asks for something the card must not take — the
-/// card is then the plain one, with no line to type in.
+/// card is then the plain one, with no line to type in. A secret word always
+/// decides it; a password word decides it unless the reason says the password
+/// is a one-time one.
 #[must_use]
 pub fn reason_names_a_secret(reason: &str) -> bool {
-    let _ = (reason, SECRET_WORDS, PASSWORD_WORDS, ONE_TIME_WORDS);
-    false
+    // Runs of whitespace are one space, so "card   number" is "card number".
+    let said = reason
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    mentions(&said, SECRET_WORDS)
+        || (mentions(&said, PASSWORD_WORDS) && !mentions(&said, ONE_TIME_WORDS))
+}
+
+fn mentions(said: &str, words: &[&str]) -> bool {
+    words.iter().any(|word| occurs(said, word))
+}
+
+/// Whether `word` stands in `said`. A word of the Latin script is a whole word
+/// — it may end in an `s` for its plural — so `pin` is not `shipping` and
+/// `otp` is not `footprint`; a word of any other script (Hangul, kana, Han)
+/// stands wherever it is, because a particle or the next word sticks to it.
+fn occurs(said: &str, word: &str) -> bool {
+    if !word.chars().all(is_latin_or_space) {
+        return said.contains(word);
+    }
+    said.match_indices(word).any(|(at, _)| {
+        let before = said[..at].chars().next_back();
+        before.is_none_or(|one| !is_latin(one)) && ends_a_word(&said[at + word.len()..])
+    })
+}
+
+/// The characters of a word of the Latin script: ASCII letters and digits and
+/// the accented letters Spanish writes.
+fn is_latin(one: char) -> bool {
+    one.is_ascii_alphanumeric() || matches!(one, 'á' | 'é' | 'í' | 'ó' | 'ú' | 'ñ' | 'ü')
+}
+
+fn is_latin_or_space(one: char) -> bool {
+    is_latin(one) || one == ' ' || one == '-'
+}
+
+/// Whether what follows a match ends the word: another script, a space, a
+/// mark, the end — or a plural `s` that ends it.
+fn ends_a_word(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    match chars.next() {
+        None => true,
+        Some('s') => chars.next().is_none_or(|one| !is_latin(one)),
+        Some(one) => !is_latin(one),
+    }
 }
 
 /// Why typed text is not a code.
@@ -184,8 +231,29 @@ impl OneTimeCode {
     /// hyphens between groups are dropped (`123 456` is `123456`); the
     /// characters are ASCII letters and digits, four to ten of them.
     pub fn parse(typed: &str) -> Result<Self, CodeRefusal> {
-        let _ = (typed, CODE_GROUP_SEPARATORS);
-        Err(CodeRefusal::Empty)
+        // Nothing past the field's own room is read: a paste of a page is
+        // refused before it is walked.
+        if typed.len() > CODE_TYPED_MAX_CHARS * 4 {
+            return Err(CodeRefusal::TooLong);
+        }
+        let joined: String = typed
+            .trim()
+            .chars()
+            .filter(|one| !CODE_GROUP_SEPARATORS.contains(one))
+            .collect();
+        if joined.is_empty() {
+            return Err(CodeRefusal::Empty);
+        }
+        if !joined.chars().all(|one| one.is_ascii_alphanumeric()) {
+            return Err(CodeRefusal::NotLettersOrDigits);
+        }
+        if joined.len() < CODE_MIN_CHARS {
+            Err(CodeRefusal::TooShort)
+        } else if joined.len() > CODE_MAX_CHARS {
+            Err(CodeRefusal::TooLong)
+        } else {
+            Ok(Self(joined))
+        }
     }
 
     /// How many characters the code has — the one thing a record may keep.

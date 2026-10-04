@@ -514,12 +514,42 @@ Recording permission the screenshots use — no new prompt.
 - **Undo before retry**: `key cmd+z`, the browser's back, `key escape` on a
   dialog, `window-close` on a stray window — the inverse of the last action,
   then look again.
-- **The person's turn** (`handoff`): a 2FA code, a CAPTCHA, a biometric
-  prompt, or a last step you may not press —
-  `zerocode-computer handoff --reason "휴대폰의 2FA 코드" --json` shows the
-  person a card and waits (10 minutes by default) until they press 「다
+- **The person's turn** (`handoff`): a CAPTCHA, a biometric prompt, an
+  approval they tap on their own phone, a password, or a last step you may not
+  press — `zerocode-computer handoff --reason "휴대폰의 승인 알림" --json` shows
+  the person a card and waits (10 minutes by default) until they press 「다
   했어요」; then look again and go on. A cancelled or unanswered handoff is a
   `confirmation_refused`/`confirmation_timeout` answer: report, do not retry.
+- **A one-time code** (`handoff --ask-code`): when the site sent a verification
+  code to the person's phone or mailbox, ask for it on the same card instead of
+  asking them to type it on their own device. The card gets one field and the
+  seconds left; they type, press Send, and the code is that command's answer —
+  once, and in no record the window writes: not its logs, its step lines or
+  the ledger (a frame of the screen shows what the site's own field shows).
+  Say what the code is for in `--reason` ("카카오톡 인증번호") and give it the
+  time the site gives its codes (`--timeout-ms 180000` for the usual three
+  minutes). Take it into the field in the same command line, so it is never
+  printed and never on a command line of its own — text mode prints the code
+  alone, and `--value-stdin` reads it from the pipe:
+
+  ```text
+  code=$(zerocode-computer handoff --ask-code --reason "카카오톡 인증번호" --timeout-ms 180000) \
+    && printf '%s' "$code" | zerocode-computer set-value --app <app> --element-index <n> --value-stdin --json
+  ```
+
+  The same pipe feeds `zerocode-browser type <pane-label> <css> --value-stdin`
+  and `zerocode-emulator text … --text-stdin`. With `--json` the answer is
+  `{"result": {"resumed": true, "code": "…", "codeLength": 6}}` for a script that
+  wants the fields. A code is four to ten letters or digits; if the person
+  cancels or nobody answers, you get `confirmation_refused` /
+  `confirmation_timeout` and the `&&` stops: report, do not ask again. A
+  password, a card number or a security code (CVC, PIN) is never asked this
+  way: name one in `--reason` and the window shows the plain card and takes no
+  value — the person types it themselves, as before, and the answer says so:
+  `"code": null, "codeRefused": "secret_reason"` with `--json`, and in text mode
+  an error (`no code was taken`) that stops the `&&` before anything is typed. After the code is in, look at the
+  screen: the site says whether it took it, and the last step (a payment, a
+  submit you may not press) is still the person's.
 - **Recipes** (`recipe-save --name <n> [--note …]`, `recipe-list`,
   `recipe-show --name <n>`, `recipe-run --name <n>`): when a procedure
   worked, save it — this session's steps become a document (a command line

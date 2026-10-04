@@ -315,6 +315,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "timeout_ms": { "type": "integer", "minimum": 1 },
         "absent": { "type": "boolean" },
         "confirming": { "type": "string", "enum": ["payment", "transfer", "delete"] },
+        "ask_code": { "type": "boolean" },
         "force": { "type": "boolean" },
         "reset_budget": { "type": "boolean" },
         "last": { "type": "integer", "minimum": 1 },
@@ -380,7 +381,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             {{names}}) and says where it stopped and the start to resume from. walk (goal: one sentence; one of \
             app, pane, or platform with device; until: the text on screen when it worked; max_steps) walks there \
             in one call on the window's own judgment and answers a status to act on. A code, CAPTCHA or \
-            password field (secure_input) is the person's: handoff (text: what they do) waits for them. \
+            password field (secure_input) is the person's: handoff (text: what they do; ask_code: a one-time code they read to you) waits for them. \
             The person keeps one hand on you: a \
             `stopped` answer means stop and report; a press on a payment, transfer or delete control is \
             held while the window asks them — say confirming: payment|transfer|delete when you know you \
@@ -890,13 +891,19 @@ fn argv_eye(action: &str, input: &ComputerInput, argv: &mut Vec<String>) -> bool
     true
 }
 
-/// The person's turn — a code, a CAPTCHA, a password field: they do it, and
-/// the call waits until they say so (or its `timeout_ms`).
+/// The person's turn — a CAPTCHA, a password field, a code they read to you
+/// (`ask_code`): they do it, and the call waits until they say so (or its
+/// `timeout_ms`).
 fn argv_persons_turn(action: &str, input: &ComputerInput, argv: &mut Vec<String>) -> Result<bool, ToolError> {
     if !methods(action).any(|method| method == ComputerMethod::Handoff) {
         return Ok(false);
     }
     push(argv, &[ComputerMethod::Handoff.verb_name(), "--reason", need(input.text.as_deref(), action, "text")?]);
+    // A one-time code the person reads out: the window gives the card its
+    // line, or refuses a reason that names a secret — never judged here.
+    if input.ask_code == Some(true) {
+        push(argv, &["--ask-code"]);
+    }
     if let Some(ms) = input.timeout_ms {
         push(argv, &["--timeout-ms", &ms.to_string()]);
     }
@@ -2665,10 +2672,12 @@ printf '%s
     /// look by `observe` and a press by `element_index` (one name, one field,
     /// one sentence; never a batch step) ~42, a press by reading (label and role
     /// with app, a sentence and the plan-it-whole clause) ~40, a walk (one
-    /// name, eight fields, `until` read by two actions, one sentence) ~134.
+    /// name, eight fields, `until` read by two actions, one sentence) ~134,
+    /// the person's turn asking for a one-time code (one boolean, one clause)
+    /// ~19.
     #[test]
     fn the_computer_schema_is_measured() {
-        const CEILING_TOKENS: usize = 1_820;
+        const CEILING_TOKENS: usize = 1_840;
         let spec = tool_specs().pop().expect("one spec");
         let definition = json!({ "name": spec.name, "description": spec.description, "input_schema": spec.input_schema });
         let compact = serde_json::to_string(&definition).unwrap().chars().count();

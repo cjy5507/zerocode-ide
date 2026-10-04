@@ -308,7 +308,7 @@ fn the_typed_code_is_read_once_sent_by_one_door_and_kept_nowhere() {
 
 /// The field is labelled, described, wired for a one-time code and for nothing
 /// else — not a password field, not an autofilled one — and drawn from the
-/// window's tokens with a focus ring of its own.
+/// window's tokens, with the window's one focus ring.
 #[test]
 fn the_field_is_labelled_wired_for_a_code_and_drawn_from_the_tokens() {
     let markup = ui_file("index.html");
@@ -349,9 +349,13 @@ fn the_field_is_labelled_wired_for_a_code_and_drawn_from_the_tokens() {
         !field.contains('#') && !field.contains("rgb(") && field.contains("var(--"),
         "the field is painted from something other than the window's tokens:\n{field}"
     );
+    // The ring is the window's one ring for fields, and nothing of this
+    // field's takes it off.
     assert!(
-        sheet.contains(".ask-code-input:focus-visible"),
-        "the field has no focus ring of its own"
+        sheet.contains("body :is(input, textarea, select):focus-visible")
+            && !field.contains("outline")
+            && !field.contains("box-shadow"),
+        "the field has no focus ring, or takes the window's off:\n{field}"
     );
 }
 

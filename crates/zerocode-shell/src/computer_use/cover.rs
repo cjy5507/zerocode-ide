@@ -470,7 +470,7 @@ fn record(
 }
 
 /// The page asks the person the way every handed-over desk is asked
-/// (`confirm::handoff`), bounded by the confirmation table.
+/// (`confirm::handoff_said`), bounded by the confirmation table.
 pub(crate) fn ask_the_person(line: &Said) -> Decision {
     super::confirm::handoff_said(
         &line.reason,

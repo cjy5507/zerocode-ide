@@ -108,6 +108,22 @@ names: `home`, `lock`, `volume-up`, `volume-down`, `enter` on both platforms;
 `back` and `recents` on Android; `action` on iOS. `tree` is the raw
 accessibility tree, for when `marks` is not enough.
 
+**A verification code the site sent to the person's own phone** is theirs to
+read to you, not yours to guess. Ask for it on the person's-turn card, in the
+same command that writes it, so it is never printed or put on a command line:
+
+```text
+code=$(zerocode-computer handoff --ask-code --reason "<what the code is for>" --timeout-ms 180000) \
+  && printf '%s' "$code" | zerocode-emulator text --platform ios|android --device <id> --text-stdin --json
+```
+
+Press the code's field first, as for any `text`. Through iPhone Mirroring the
+same code goes in with `zerocode-computer type --text-stdin`. If the person
+cancels or nobody answers, the `&&` stops: say so, do not ask again. A password,
+a card number or a security code (CVC, PIN) is never asked this way: the window
+shows the plain card for those and takes no value, and the person types them on
+the device themselves. The `computer-use` skill has the whole of it.
+
 ## 4. Show the screen
 
 ```text

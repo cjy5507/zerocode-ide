@@ -4889,7 +4889,7 @@ pub(super) fn answer_computer_command(
     } else if command.method == ComputerMethod::Handoff {
         // The person's turn: one function answers the plain card and the card
         // with a line for a one-time code.
-        computer_use::confirm::hand_the_desk(&command.params)
+        computer_use::confirm::hand_the_desk(&command.params, command.json)
     } else if matches!(
         command.method,
         ComputerMethod::ReflexStart
@@ -5831,6 +5831,12 @@ pub(super) fn computer_pretty(
                 .map(|path| format!("\nScreenshot: {path}"))
                 .unwrap_or_default();
             format!("{tree}{screenshot}")
+        }
+        // A person's turn that took a one-time code says the code and nothing
+        // else, so what a script holds in `$(…)` is just that; an answer with
+        // no code is the pretty JSON every other verb prints.
+        ComputerMethod::Handoff if value.get("code").is_some_and(serde_json::Value::is_string) => {
+            value["code"].as_str().unwrap_or_default().to_string()
         }
         _ => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
     }

@@ -138,26 +138,147 @@ registerAskKind("computer-confirm", {
 /* The person's turn (§7.4): the operator hands the desk over — a 2FA code, a
  * CAPTCHA, a press it may not make — and waits for 「다 했어요」. Same channel
  * as the question: the answer goes back by id. Enter says nothing; Tab reaches
- * 「다 했어요」, and Escape hands the desk back unfinished. */
+ * 「다 했어요」, and Escape hands the desk back unfinished.
+ *
+ * A card the window says has a line (`codeAsk`, t-40807) is the same turn with
+ * one field to type a one-time code in. The window decides which cards have
+ * it — the page never reads a reason for a secret — and says how much the
+ * field takes; the page paints, sends what was typed by the one door that
+ * takes it, and keeps nothing: the field is read once, emptied the moment
+ * the code has gone, and the card holds the keyboard in it. */
+const computerCodeInput = el("ask-code-input");
+/* The ask the field now belongs to, and whether the window judged what was
+ * typed no code (or nothing was typed). The field's text is the only copy of
+ * a typed code the page has. */
+let computerCodeOwner = null;
+let computerCodeRefused = false;
+
+/* What the window answers a typed code with — core's `CodeVerdict`, by name. */
+const COMPUTER_CODE_VERDICT = Object.freeze({ delivered: "delivered", invalid: "invalid", gone: "gone" });
+
+function paintComputerCodeError(limits) {
+  const error = el("ask-code-error");
+  error.hidden = !computerCodeRefused;
+  if (computerCodeRefused) {
+    say(error, () => t("computer.handoff.codeInvalid", "{{min}}~{{max}}자의 숫자·영문으로 입력해 주세요", limits));
+  } else {
+    say(error, null);
+    error.textContent = "";
+  }
+  computerCodeInput.setAttribute("aria-invalid", computerCodeRefused ? "true" : "false");
+}
+
+/* The line, drawn for the card on screen — the same card repainted (a language
+ * change) keeps what the hand has typed, a new card starts empty. */
+function paintComputerCode(ask) {
+  const limits = ask.payload.codeAsk;
+  el("ask-code").hidden = !limits;
+  if (!limits) return;
+  if (computerCodeOwner !== ask) {
+    computerCodeInput.value = "";
+    computerCodeRefused = false;
+    computerCodeOwner = ask;
+  }
+  computerCodeInput.maxLength = limits.typedMax;
+  computerCodeInput.readOnly = ask.sending === true;
+  say(el("ask-code-label"), () => t("computer.handoff.codeLabel", "인증번호"));
+  say(el("ask-code-hint"), () => t("computer.handoff.codeHint", "{{min}}~{{max}}자의 숫자·영문 · 에이전트에게 한 번만 전달되고 저장되지 않습니다", limits));
+  paintComputerCodeError(limits);
+}
+
+/* The card is over — answered, cancelled, or closed by the window — and what
+ * was typed goes with it. */
+function wipeComputerCode(ask) {
+  if (computerCodeOwner !== ask) return;
+  computerCodeInput.value = "";
+  computerCodeRefused = false;
+  computerCodeOwner = null;
+}
+
+/* The answer the card could not take, said in the card's words: the ask stays,
+ * the keyboard stays in the field, and the popup is told it is held (not
+ * failed) by the mark on what is thrown. */
+function holdComputerCode(ask) {
+  computerCodeRefused = true;
+  paintComputerCodeError(ask.payload.codeAsk);
+  computerCodeInput.focus({ preventScroll: true });
+  throw Object.assign(new Error("held"), { askHeld: true });
+}
+
+/* Send what is typed. Nothing typed is no round trip; the window's verdict is
+ * the only judge of the rest: `invalid` holds the card, `delivered` and `gone`
+ * both end it (a code the window no longer waits for is not one to retry). */
+async function sendComputerCode(ask) {
+  const typed = computerCodeInput.value;
+  if (typed.trim() === "") return holdComputerCode(ask);
+  computerCodeInput.readOnly = true;
+  let verdict;
+  try {
+    verdict = await invoke("computer_handoff_code", { id: ask.id, code: typed });
+  } finally {
+    computerCodeInput.readOnly = false;
+  }
+  if (verdict === COMPUTER_CODE_VERDICT.invalid) return holdComputerCode(ask);
+  if (verdict !== COMPUTER_CODE_VERDICT.delivered && verdict !== COMPUTER_CODE_VERDICT.gone) {
+    throw new Error("the window answered a code with a word this page does not know");
+  }
+  computerCodeInput.value = "";
+  return undefined;
+}
+
+computerCodeInput.addEventListener("input", () => {
+  if (!computerCodeRefused || computerCodeOwner === null) return;
+  computerCodeRefused = false;
+  paintComputerCodeError(computerCodeOwner.payload.codeAsk);
+});
+
+/* Enter in the field is Send, the way a button press is — a held key repeats
+ * and is the popup's to ignore, and a key that is part of composing text is
+ * the input method's. */
+computerCodeInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.isComposing || event.repeat) return;
+  event.preventDefault();
+  el("ask-choices").querySelector("button.btn--primary")?.click();
+});
+
 registerAskKind("computer-handoff", {
   ...computerAnswerRoad,
+  deliver: (ask, choice) =>
+    choice.allow && ask.payload.codeAsk ? sendComputerCode(ask) : computerAnswerRoad.deliver(ask, choice),
   tone: "computer-handoff",
-  view: (ask) => ({
-    agent: t("computerUse.title", "컴퓨터 사용"),
-    title: t("computer.handoff.title", "사람이 할 차례"),
-    why: computerHandoffText(ask.payload),
-    // Neither answer is the primary: the primary is the button Enter presses,
-    // and Enter answers nothing here. 「다 했어요」 says the person did a thing
-    // on their desktop, and a stray Enter must not say it for them. The
-    // keyboard starts on the frame; Tab reaches either answer, and Escape
-    // hands the desk back.
-    choices: [
-      { label: t("computer.handoff.cancel", "취소"), allow: false, tone: "plain" },
-      { label: t("computer.handoff.done", "다 했어요"), allow: true, tone: "plain" },
-    ],
-    initial: null,
-    safe: 0,
-  }),
+  view: (ask) => {
+    const line = ask.payload.codeAsk;
+    return {
+      agent: t("computerUse.title", "컴퓨터 사용"),
+      title: line ? t("computer.handoff.codeTitle", "인증번호를 입력해 주세요") : t("computer.handoff.title", "사람이 할 차례"),
+      why: computerHandoffText(ask.payload),
+      // Neither answer is the primary of the plain card: the primary is the
+      // button Enter presses, and Enter answers nothing here. 「다 했어요」 says
+      // the person did a thing on their desktop, and a stray Enter must not say
+      // it for them. The keyboard starts on the frame; Tab reaches either
+      // answer, and Escape hands the desk back. The card with a line starts the
+      // keyboard in its field, where Enter sends what the person typed — never
+      // an empty field — and Send is its primary.
+      choices: line
+        ? [
+            { label: t("computer.handoff.cancel", "취소"), allow: false, tone: "plain" },
+            { label: t("computer.handoff.codeSend", "보내기"), allow: true, tone: "primary" },
+          ]
+        : [
+            { label: t("computer.handoff.cancel", "취소"), allow: false, tone: "plain" },
+            { label: t("computer.handoff.done", "다 했어요"), allow: true, tone: "plain" },
+          ],
+      initial: null,
+      focus: line ? "ask-code-input" : null,
+      safe: 0,
+    };
+  },
+  paint: (ask) => paintComputerCode(ask),
+  clear: () => {
+    el("ask-code").hidden = true;
+  },
+  delivered: (ask) => wipeComputerCode(ask),
+  withdrawn: (ask) => wipeComputerCode(ask),
   clock: (ask) => t("computer.handoff.clock", "{{seconds}}초 남음", {
     seconds: computerAskSeconds(ask),
   }),

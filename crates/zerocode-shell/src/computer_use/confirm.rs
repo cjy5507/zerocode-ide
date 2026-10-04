@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zerocode_core::computer_use::{COMPUTER_CONFIRM_TIMEOUT_MS, ConfirmKind, handoff_ms};
 use zerocode_core::computer_use_protocol::error_code;
-use zerocode_core::handoff_code::{CodeLimits, OneTimeCode};
+use zerocode_core::handoff_code::{CodeLimits, OneTimeCode, reason_names_a_secret};
 
 use super::ComputerUseError;
 
@@ -176,6 +176,15 @@ impl Handed {
     }
 }
 
+/// What an agent that asked for a code is told when the reason it gave named
+/// a secret, so the card it got was the plain one and nothing was taken.
+const CODE_REFUSED_SECRET_REASON: &str = "secret_reason";
+
+/// The error a script gets in text mode when none was taken. The turn went by —
+/// the person had the plain card and typed the secret themselves — and there
+/// is nothing to type: an error, so a `&&` in front of the typing stops.
+const NO_CODE_TAKEN: &str = "no code was taken: the reason names a password, a card number or a security code, which the person types themselves — they had the plain card and the turn is over; look at the screen and go on, and do not ask again";
+
 type HandoffAsker = dyn Fn(&Handoff) -> Handed + Send + Sync;
 static HANDOFF_ASKER: OnceLock<Box<HandoffAsker>> = OnceLock::new();
 
@@ -210,12 +219,29 @@ fn hand_over(ask: &Handoff) -> Handed {
 /// What a `handoff` command is answered with: the card, the wait, and what
 /// comes back — one function for the plain turn and the card with a line for
 /// a code, so a cancel and a silence read the same either way.
-pub fn hand_the_desk(params: &Value) -> Result<Value, ComputerUseError> {
-    hand_the_desk_through(params, &hand_over)
+///
+/// In text mode the answer is what a script holds in `$(…)`: one that asked for
+/// a code and was given none is an error there (`NO_CODE_TAKEN`), never an
+/// answer a pipe would type into a field. With `--json` it is the envelope,
+/// `code: null` and why, for a reader that looks.
+pub fn hand_the_desk(params: &Value, json: bool) -> Result<Value, ComputerUseError> {
+    let answered = hand_the_desk_through(params, &hand_over)?;
+    if !json && answered.get("code").is_some_and(Value::is_null) {
+        return Err(ComputerUseError::new(
+            error_code::INVALID_ARGUMENT,
+            NO_CODE_TAKEN,
+        ));
+    }
+    Ok(answered)
 }
 
 /// [`hand_the_desk`] with whoever asks the person handed in — the window's
 /// asker in the app, a script in a test.
+///
+/// The card has a line for a code only when the agent asked for one and its
+/// reason does not name a secret; every other turn is the plain card. The code
+/// is read out of what came back into the answer of the agent that asked, and
+/// into nothing else: a turn that asked for no code is never handed one.
 fn hand_the_desk_through(
     params: &Value,
     over: &dyn Fn(&Handoff) -> Handed,
@@ -225,16 +251,17 @@ fn hand_the_desk_through(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let timeout = handoff_ms(params.get("timeoutMs").and_then(Value::as_u64));
+    let asked_code = params.get("askCode").and_then(Value::as_bool) == Some(true);
     let handed = over(&Handoff {
         id: next_id(),
         reason: reason.to_string(),
         reason_key: None,
         reason_args: Value::Null,
         timeout_ms: timeout,
-        code_ask: None,
+        code_ask: (asked_code && !reason_names_a_secret(reason)).then_some(CodeLimits::TABLE),
     });
     match handed.decision {
-        Decision::Allowed => Ok(serde_json::json!({ "resumed": true, "reason": reason })),
+        Decision::Allowed => Ok(resumed(reason, asked_code, handed.code)),
         Decision::Refused => Err(ComputerUseError::new(
             error_code::CONFIRMATION_REFUSED,
             format!("the person cancelled the handoff ({reason})"),
@@ -243,6 +270,26 @@ fn hand_the_desk_through(
             error_code::CONFIRMATION_TIMEOUT,
             format!("nobody took over within {timeout} ms ({reason})"),
         )),
+    }
+}
+
+/// The answer of a turn the person finished: the plain one, or — for an agent
+/// that asked for a code — the code and its length, or `code: null` and why.
+fn resumed(reason: &str, asked_code: bool, code: Option<OneTimeCode>) -> Value {
+    match (asked_code, code) {
+        (true, Some(code)) => serde_json::json!({
+            "resumed": true,
+            "reason": reason,
+            "code": code.reveal(),
+            "codeLength": code.chars(),
+        }),
+        (true, None) => serde_json::json!({
+            "resumed": true,
+            "reason": reason,
+            "code": null,
+            "codeRefused": CODE_REFUSED_SECRET_REASON,
+        }),
+        (false, _) => serde_json::json!({ "resumed": true, "reason": reason }),
     }
 }
 
@@ -281,17 +328,25 @@ pub fn open(id: &str) -> mpsc::Receiver<Reply> {
 /// Open a person's turn: with a line for a code when the card offers one.
 #[must_use]
 pub fn open_handoff(card: &Handoff) -> mpsc::Receiver<Reply> {
-    open_with(&card.id, false)
+    open_with(&card.id, card.code_ask.is_some())
 }
 
-/// The person's answer to a question — false when no such question waits.
+/// The person's answer to a question — false when no such question waits. A
+/// card with a line for a code takes a cancel, never a bare "done": that is
+/// left standing for the code it asked for.
 pub fn answer(id: &str, allow: bool) -> bool {
-    let waiting = PENDING
+    let mut pending = PENDING
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_mut()
-        .and_then(|pending| pending.remove(id));
-    waiting.is_some_and(|waiting| waiting.reply.send(Reply::Said(allow)).is_ok())
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(pending) = pending.as_mut() else {
+        return false;
+    };
+    if allow && pending.get(id).is_some_and(|waiting| waiting.takes_code) {
+        return false;
+    }
+    pending
+        .remove(id)
+        .is_some_and(|waiting| waiting.reply.send(Reply::Said(allow)).is_ok())
 }
 
 /// What became of a code the person typed on a card's line.
@@ -307,10 +362,31 @@ pub enum CodeVerdict {
     Gone,
 }
 
-/// The person's code for a card that offers a line for one.
+/// The person's code for a card that offers a line for one. What is typed is
+/// judged here, by core's one rule; a wrong code leaves the card standing, a
+/// right one goes to the agent that asked, once, and closes the card. A card
+/// that asks yes or no is never answered by a code.
 pub fn answer_code(id: &str, typed: &str) -> CodeVerdict {
-    let _ = (id, typed);
-    CodeVerdict::Gone
+    let mut pending = PENDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(pending) = pending.as_mut() else {
+        return CodeVerdict::Gone;
+    };
+    if !pending.get(id).is_some_and(|waiting| waiting.takes_code) {
+        return CodeVerdict::Gone;
+    }
+    let Ok(code) = OneTimeCode::parse(typed) else {
+        return CodeVerdict::Invalid;
+    };
+    let Some(waiting) = pending.remove(id) else {
+        return CodeVerdict::Gone;
+    };
+    if waiting.reply.send(Reply::Code(code)).is_ok() {
+        CodeVerdict::Delivered
+    } else {
+        CodeVerdict::Gone
+    }
 }
 
 /// How many questions are open now — what `status` says, so a caller that
