@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { standZo } from "./conversation-parity.mjs";
 import { openWindowTestPage } from "./window-boot.mjs";
 
 /* 「그림·페이지로 설명」 — 세 자리의 단추, 카드, 상태 줄, 열린 페이지 (t-32787).
@@ -101,7 +102,8 @@ export async function testExplain(browser, origin, ok) {
     /* ---- 1. diff 보기 ---- */
     const diff = await page.evaluate(async () => {
       const seen = {};
-      const term = await openTermTab();
+      // 제 탭을 가진 판 — 부팅이 먼저 연 터미널의 분할로 서면 카드의 행이 「· 분할」을 붙인다(그것도 맞다).
+      const term = await openTermTab({ placement: "tab" });
       window.__AGENT_TERMS__ = [[term, "claude"]];
       paneAgents.set(term, "claude");
       setDiffSideBySide(false);
@@ -297,6 +299,8 @@ export async function testExplain(browser, origin, ok) {
     );
 
     /* ---- 2. 대화의 한 턴 ---- */
+    // 하네스의 에이전트 목록에는 zo가 없다 — 판의 에이전트를 이름 붙일 수 없으면 카드는 그 판의 행을 내지 않는다.
+    await standZo(page);
     const turn = await page.evaluate(async () => {
       const seen = {};
       // 와이어 없는 에이전트(zo) — 판의 대화가 전사 쪽인 길이고, 같은 길을 `pane-conversation`이 쓴다.
