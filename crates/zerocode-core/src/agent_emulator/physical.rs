@@ -14,7 +14,10 @@
 //! A real device is never drivable here: the window's input roads are the
 //! simulator's and the emulator's (`emulator::android` keeps `emulator-`
 //! serials only, and says why in `device_presence`), so every row carries
-//! `drivable: false` and the reason in plain words.
+//! `drivable: false` and the reason in plain words. The reason also says the
+//! road a device takes instead when it has one: a real iPhone is driven through
+//! the Mac's iPhone Mirroring window with `zerocode-computer`, so `list` is the
+//! one step that tells an agent which road a device takes.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -54,10 +57,15 @@ pub const UNNAMED_ANDROID: &str = "Android device";
 pub const IPHONE_MIRRORING_APP: &str = "com.apple.ScreenContinuity";
 
 /// Why a real iPhone is not drivable by `zerocode-emulator`, and the road it
-/// takes instead, in the words an agent hands the person.
-pub const IPHONE_REASON: &str = "A real iPhone or iPad. This window drives only the iOS Simulator.";
-/// Why a real iPad is not drivable, and that no road reaches it from here.
-pub const IPAD_REASON: &str = "A real iPhone or iPad. This window drives only the iOS Simulator.";
+/// takes instead, in the words an agent acts on: which window, through which
+/// tool, the app by its id, and what to do when the window is not open (ask the
+/// person once; the app is theirs to open and the phone theirs to unlock). It is
+/// in the row itself so that `list` is the one step that tells which road a
+/// device takes. It must carry [`IPHONE_MIRRORING_APP`]; a test holds it to that.
+pub const IPHONE_REASON: &str = "A real iPhone. zerocode-emulator cannot drive it; the Mac's iPhone Mirroring window can, through zerocode-computer (--app com.apple.ScreenContinuity). If that window is not open, ask the person to open it once; do not open the app or unlock anything yourself.";
+/// Why a real iPad is not drivable, and that no road reaches it from here:
+/// iPhone Mirroring shows iPhones only.
+pub const IPAD_REASON: &str = "A real iPad. zerocode-emulator cannot drive it, and iPhone Mirroring shows iPhones only; tell the person so and offer a simulator, or work on the app's code.";
 /// Why a real Android phone or tablet is not drivable.
 pub const ANDROID_REASON: &str =
     "A real Android phone or tablet. This window drives only Android emulators.";
@@ -229,7 +237,12 @@ fn ios_row(device: &Value) -> Option<PhysicalDevice> {
     let model = text(DEVICECTL_MODEL_AT);
     let name = text(DEVICECTL_NAME_AT).or_else(|| model.clone())?;
     let state = tunnel_state(text(DEVICECTL_TUNNEL_AT).as_deref());
-    Some(PhysicalDevice::new(Hardware::IPhone, &name, model, state))
+    let hardware = if platform == DEVICECTL_IPAD_PLATFORM {
+        Hardware::IPad
+    } else {
+        Hardware::IPhone
+    };
+    Some(PhysicalDevice::new(hardware, &name, model, state))
 }
 
 /// What `devicectl`'s tunnel word means for the person. Its own table calls a

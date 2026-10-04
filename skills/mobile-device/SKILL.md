@@ -1,6 +1,6 @@
 ---
 name: mobile-device
-description: Use it when the person says an iPhone, iPad, Android phone, simulator or emulator (아이폰, 아이패드, 안드로이드 폰, 시뮬레이터, 에뮬레이터) is connected or open in the IDE, or that the app is installed on it, and you must see its screen, tap, type, swipe or take a screenshot. First step is always zerocode-emulator list, never the Mac window list, iPhone Mirroring or Xcode devicectl. 연결·설치된 기기의 화면 확인과 탭, 입력, 스와이프, 스크린샷 조작에 쓴다.
+description: Use it when the person says an iPhone, iPad, Android phone, simulator or emulator (아이폰, 아이패드, 안드로이드 폰, 시뮬레이터, 에뮬레이터) is connected or open in the IDE, or that the app is installed on it, and you must see its screen, tap, type, swipe or take a screenshot. First step is always zerocode-emulator list, before the Mac window list, iPhone Mirroring or Xcode devicectl. 연결·설치된 기기의 화면 확인과 탭, 입력, 스와이프, 스크린샷 조작에 쓴다.
 invocation: auto
 keywords: [아이폰, 아이패드, 안드로이드, 시뮬레이터, 에뮬레이터, iphone, ipad, android, simulator, emulator]
 ---
@@ -10,10 +10,11 @@ keywords: [아이폰, 아이패드, 안드로이드, 시뮬레이터, 에뮬레�
 ZeroCode's window carries its own iOS Simulator and Android Emulator and drives
 them directly through one command, `zerocode-emulator`. When the person says a
 phone is "connected", "open in the IDE" or "has the app installed" (아이폰
-연결해놨어, 앱 설치해뒀어), this is the road. Do not start from the Mac window
-list, iPhone Mirroring, Xcode's `devicectl` or `adb`, and never click the
-Simulator or Emulator window with `zerocode-computer`: the window already holds
-the device list and the input road.
+연결해놨어, 앱 설치해뒀어), start with `zerocode-emulator list`: one call tells
+you which road the device takes. Do not hunt for it first in the Mac window
+list, Xcode's `devicectl` or `adb`, and never click the Simulator or Emulator
+window with `zerocode-computer`: the window already holds the device list and
+the input road.
 
 This is the one place that holds the mobile commands. The `computer-use` skill
 points here and keeps no copy.
@@ -32,8 +33,9 @@ the answer is `{"ok": true, "result": {…}}`; read `result` in this order:
   or `serial` on Android) and `booted`. Never assume a specific phone family
   or model, AVD name, UDID, or Android serial; use what `list` gave.
 - `physical`: real iPhones, iPads and Android phones the Mac sees. Every row
-  has `drivable: false` and a plain `reason`; at most eight rows come, and
-  `omitted` counts the rest. Go to "A device this window cannot drive".
+  has `drivable: false` and a plain `reason` that names the road the device
+  takes instead; at most eight rows come, and `omitted` counts the rest. Go to
+  "A device this window cannot drive".
 - `unchecked`: a tool did not answer, and `why` says which. A gap is not
   "nothing is connected". When `why` says it is still looking, run `list` again
   in a few seconds.
@@ -46,7 +48,7 @@ here are made up):
 {"ok": true, "result": {"surface": "zerocode-built-in", "ios": [], "android": [],
  "physical": [{"platform": "ios", "name": "Synthetic Phone A", "model": "Synthetic iPhone",
    "state": "connected", "drivable": false,
-   "reason": "A real iPhone or iPad. This window drives only the iOS Simulator."}]}}
+   "reason": "A real iPhone. zerocode-emulator cannot drive it; the Mac's iPhone Mirroring window can, through zerocode-computer (--app com.apple.ScreenContinuity). If that window is not open, ask the person to open it once; do not open the app or unlock anything yourself."}]}}
 ```
 
 ## 2. Nothing booted: open one
@@ -119,21 +121,39 @@ shell's own folder).
 
 ## A device this window cannot drive
 
-`physical` rows are real hardware. This window drives simulators and emulators
-only. It has no road to press, type into or photograph a real iPhone, iPad or
-Android phone, and `list` never offers one as drivable. When the person's phone
-is one of these:
+`physical` rows are real hardware. `zerocode-emulator` drives simulators and
+emulators only: it has no road to press, type into or photograph a real device,
+and `list` never offers one as drivable. Each row's `reason` says the road the
+device takes instead.
 
-1. Tell them what you found, in their own language and in two sentences or
-   fewer: the device `name`, its `state` (`connected`; `unavailable` when the
-   Mac knows the phone but cannot reach it now; on Android also `unauthorized`
-   when the phone has not allowed this computer, or `offline`), and that this
-   window can drive only simulators and emulators.
-2. Offer what you can do instead: open a simulator or emulator with `open`, or
-   work on the app's code, build and logs.
-3. Ask before you touch the real phone any other way (`adb`, `devicectl`,
-   iPhone Mirroring, `zerocode-computer`). It is their device, and one tap on it
-   can send, buy or delete.
+**A real iPhone** is what "the iPhone is connected" nearly always means. Drive
+it through the Mac's iPhone Mirroring window with `zerocode-computer`, the
+desktop road in the `computer-use` skill. Name the app by its id,
+`com.apple.ScreenContinuity`: the window is titled "iPhone Mirroring" in
+English and "iPhone 미러링" in Korean, a name that does not match is a window
+that is not found, and the id is the same in every language.
+
+1. Look for the window:
+   `zerocode-computer list-windows --app com.apple.ScreenContinuity --json`.
+2. A window is up: look, press and look again as the `computer-use` skill
+   says, always with that `--app`.
+3. No window (`app_not_found` or `window_not_found`, not a sign the app does
+   not exist): ask the person once to open iPhone Mirroring on the Mac, then
+   look again; do not open the app for them and do not unlock anything, they
+   set this up and they unlock it.
+4. It is their own phone: do what they asked and stop before anything they did
+   not (a message sent, a purchase, a deletion).
+
+**A real iPad** has no road from this window: iPhone Mirroring shows iPhones
+only. **A real Android phone** has none today either: `zerocode-emulator`
+drives Android emulators only. For both, tell the person in two sentences or
+fewer what you found: the device `name`, its `state` (`connected`;
+`unavailable` when the Mac knows the device but cannot reach it now; on Android
+also `unauthorized` when the phone has not allowed this computer, or `offline`),
+and that this window cannot drive it. Then offer what you can do: open a
+simulator or emulator with `open`, or work on the app's code, build and logs.
+Ask before you touch such a device any other way (`adb`, `devicectl`): it is
+their device, and one tap on it can send, buy or delete.
 
 A `physical` row is not a device the window shows. If the person says the phone
 is open in the IDE and `list` has an `ios` or `android` row, that row is the
