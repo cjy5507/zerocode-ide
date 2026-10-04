@@ -45990,6 +45990,17 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+/* 이 단추의 전환은 클래스 규칙이라 `body :is(button…) { transition: none }`보다 구체적이다 —
+ * 움직임을 줄이는 사람에게는 여기서 직접 끈다. */
+@media (prefers-reduced-motion: reduce) {
+  .explain-open {
+    transition: none;
+  }
 }
 
 .explain-open:hover:not(:disabled) {
