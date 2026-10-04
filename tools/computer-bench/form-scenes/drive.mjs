@@ -27,8 +27,10 @@
  * What the numbers know (the report says it beside each one): the card's
  * facts; a stand-in for the model's reading — a fact goes to the field whose
  * words are the fact's words or hold them (parts `(i/n)` take the value's
- * number groups), a button's intent is read from a short list of words; and
- * nothing about any scene — no handle, label, order or step is written here.
+ * number groups), a button's intent is read from a short list of words, and
+ * the person's code goes, after a send, to the field whose words name a
+ * one-time code or that the send brought, required or not; and nothing
+ * about any scene — no handle, label, order or step is written here.
  * Between two round trips the driver waits THINK_MS: a model's turn is never
  * shorter, and a page's own late fields land inside it.
  *
@@ -54,11 +56,15 @@ const ROUND_TRIPS_MAX = 40;
 // The most presses a calendar is given by hand before the driver moves on.
 const HAND_PRESSES = 12;
 // A button's intent, read from its words — the model's reading, in the two
-// languages the bench's pages are written in.
+// languages the bench's pages are written in: a code to send, the step's
+// "next", the submit, and (the whole words) a code's own confirm button.
+// `oneTime` is a field's: what only the person's phone knows.
 const INTENT = {
   code: ["인증", "코드", "code", "verify", "otp", "발송", "전송"],
   next: ["다음", "next", "continue", "계속"],
   submit: ["예약", "결제", "신청", "제출", "등록", "완료", "확인", "submit", "book", "pay", "confirm", "finish", "register"],
+  confirm: ["확인", "인증", "인증하기", "verify", "confirm"],
+  oneTime: ["인증번호", "인증 번호", "인증코드", "일회용", "otp", "verification code", "one-time", "passcode"],
 };
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".json": "application/json" };
 
@@ -151,6 +157,10 @@ class Road {
     this.facts = card.facts.map((fact) => ({ ...fact }));
     this.codeTurn = (card.personTurns || []).includes("code");
     this.codeSent = false;
+    this.codeField = null;
+    this.codeConfirmed = false;
+    this.seen = [];
+    this.beforeSend = new Set();
     this.count = { roundTrips: 0, fields: 0, fill: 0, click: 0, eval: 0, handoff: 0, read: 0, fillPasses: 0, stale: 0 };
     this.form = null;
     this.byHandTried = new Set();
@@ -179,6 +189,7 @@ class Road {
     const read = await this.call("fields", () => this.run(fieldsScript()));
     if (!read.ok) throw new Error(`fields refused: ${JSON.stringify(read)}`);
     this.form = read.value.fingerprint;
+    this.seen = read.value.fields;
     return read.value;
   }
 
@@ -313,13 +324,8 @@ class Road {
       const { bundle, unplaced } = plan(read.fields, this.facts);
       if (this.price) this.priced += await this.today(read, bundle);
       if (await this.unknownRoad(read.unknowns, unplaced)) continue;
-      let left = read.fields.filter((field) => field.required && (field.value === "" || field.value === false));
-      if (Object.keys(bundle).length) {
-        const filled = await this.fill(bundle);
-        if (filled.stale) continue;
-        left = filled.left;
-      }
-      const owed = await this.code(left);
+      if (Object.keys(bundle).length && (await this.fill(bundle)).stale) continue;
+      const owed = await this.code(read.fields, bundle);
       if (owed && this.price) this.priced += 1;
       if (owed && (await this.fill(owed)).stale) continue;
       if (await this.step(read.actions)) return this.done();
@@ -327,26 +333,44 @@ class Road {
   }
 
   /* After a send: the person reads the code off the phone, and it goes into
-   * the required field no fact fills — the field the send brought. Answers
-   * the bundle that writes it, or null. */
-  async code(left) {
+   * the empty field no fact fills that asks for it — whether or not the page
+   * marks it required: the one whose words name a one-time code, else the one
+   * the send brought, else the one the page requires. A field the card has
+   * no value for is never made up. Answers the bundle that writes it, or
+   * null. */
+  async code(fields, bundle) {
     if (!this.codeSent || !this.codeTurn) return null;
-    const empty = left.filter((field) => !plan([field], this.facts).bundle[field.handle]);
-    if (!empty.length) return null;
+    const open = fields.filter((field) => field.value === "" && !(field.handle in bundle)
+      && !plan([field], this.facts).bundle[field.handle]);
+    const asks = open.find((field) => INTENT.oneTime.some((word) => fold(field.label).includes(word)))
+      || open.find((field) => !this.beforeSend.has(field.handle))
+      || open.find((field) => field.required);
+    if (!asks) return null;
     const code = await this.handoff();
-    this.facts.push({ says: empty[0].label, value: code });
-    return { [empty[0].handle]: code };
+    this.codeField = asks.handle;
+    this.facts.push({ says: asks.label, value: code });
+    return { [asks.handle]: code };
   }
 
-  /* The step's press: a code to send while one is owed, else "next", else
-   * the submit — true when the submit was pressed. */
+  /* The step's press: a code to send while one is owed, a code written
+   * confirmed by its own button once when the page has one, else "next",
+   * else the submit — true when the submit was pressed. */
   async step(actions) {
     const live = actions.filter((action) => !action.disabled);
     if (this.codeTurn && !this.codeSent) {
       const send = live.find((action) => intentOf(action.label, "code"));
       if (send) {
+        this.beforeSend = new Set(this.seen.map((field) => field.handle));
         await this.press(send);
         this.codeSent = true;
+        return false;
+      }
+    }
+    if (this.codeField && !this.codeConfirmed) {
+      this.codeConfirmed = true;
+      const confirm = live.find((action) => INTENT.confirm.includes(fold(action.label)));
+      if (confirm) {
+        await this.press(confirm);
         return false;
       }
     }
@@ -362,7 +386,9 @@ class Road {
   }
 
   /* The script road: one eval a step reads, fills by the words it read and
-   * presses the step's own "next"; sends and submits go by click. */
+   * presses the step's own "next" — or, while the person's code is owed and
+   * the step can send one, holds it; with a code just written, presses the
+   * code's own confirm button first. Sends and submits go by click. */
   async script() {
     const STEP = `(() => {
       const fold = ${fold.toString()};
@@ -373,32 +399,45 @@ class Road {
       const INTENT = ${JSON.stringify(INTENT)};
       const intentOf = ${intentOf.toString()};
       const facts = __FACTS__;
+      const turn = __TURN__;
       const read = zerocode.fields();
       const { bundle, unplaced } = plan(read.fields, facts);
       const filled = Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: read.fields
         .filter((field) => field.required && (field.value === "" || field.value === false)) };
       const clean = filled.results.every((result) => took(result.status)) && !filled.left.length;
-      const next = read.actions.find((action) => !action.disabled && intentOf(action.label, "next"));
-      const pressNext = clean && !!next && !next.handle.includes(${JSON.stringify(FORM_REQUEST.frameSeparator)});
+      const live = read.actions.filter((action) => !action.disabled);
+      const inFrame = (action) => action.handle.includes(${JSON.stringify(FORM_REQUEST.frameSeparator)});
+      const confirm = turn.confirm && clean
+        ? live.find((action) => !inFrame(action) && INTENT.confirm.includes(fold(action.label))) : null;
+      if (confirm) document.querySelector(confirm.handle).click();
+      const hold = turn.owed && live.some((action) => intentOf(action.label, "code"));
+      const next = live.find((action) => intentOf(action.label, "next"));
+      const pressNext = clean && !confirm && !hold && !!next && !inFrame(next);
       if (pressNext) document.querySelector(next.handle).click();
       const hand = filled.results.filter((result) => result.status === "no_option")
         .map((result) => ({ ...result, asked: bundle[result.handle] }));
       return { results: filled.results.map((result) => result.label + ":" + result.status), left: filled.left,
-        actions: read.actions, pressedNext: pressNext, hand, unknowns: read.unknowns, unplaced };
+        actions: read.actions, pressedNext: pressNext, hand, unknowns: read.unknowns, unplaced, clean,
+        confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, label: field.label,
+          value: field.value, required: field.required })) };
     })()`;
     for (;;) {
-      const source = evalFormScript(STEP.replace("__FACTS__", () => JSON.stringify(this.facts)));
+      const turn = { owed: this.codeTurn, confirm: Boolean(this.codeField) && !this.codeConfirmed };
+      const source = evalFormScript(STEP.replace("__FACTS__", () => JSON.stringify(this.facts))
+        .replace("__TURN__", () => JSON.stringify(turn)));
       const answer = await this.call("eval", () => this.run(source));
       if (!answer.ok) throw new Error(`eval refused: ${JSON.stringify(answer)}`);
       const said = answer.value;
-      this.trail.push({ script: said.results, pressedNext: said.pressedNext });
+      this.seen = said.fields;
+      if (turn.confirm && said.clean) this.codeConfirmed = true;
+      this.trail.push({ script: said.results, pressedNext: said.pressedNext, confirmed: said.confirmed });
       for (const result of said.hand || []) {
         if (result.widget) await this.byHand(result, result.asked);
         else await this.openAndPress(result, result.asked);
       }
-      if (said.pressedNext) continue;
+      if (said.pressedNext || said.confirmed) continue;
       if (await this.unknownRoad(said.unknowns, said.unplaced)) continue;
-      if (await this.code(said.left)) continue;
+      if (await this.code(said.fields, said.bundle)) continue;
       if (said.left.length || said.results.some((result) => !/:(set|same)$/.test(result))) continue;
       if (await this.step(said.actions)) return this.done();
     }
