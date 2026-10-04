@@ -144,10 +144,11 @@ impl Kind {
 
 /// The words a request fails with — tokens the window words in the person's
 /// language from its catalogs; none of them is a sentence. The two the desk
-/// itself refuses by ([`PARKED`], [`HOLDS_A_DRAFT`]) are spelled as the pty
-/// crate's guard spells them (`zerocode_pty::ready::Refusal::token`), so that a
-/// refusal made before a delivery and one made by it read alike; the rest of the
-/// guard's tokens come from the guard and are not repeated here.
+/// itself refuses by ([`crate::explain::why::PARKED`],
+/// [`crate::explain::why::HOLDS_A_DRAFT`]) are spelled as the pty crate's guard
+/// spells them (`zerocode_pty::ready::Refusal::token`), so that a refusal made
+/// before a delivery and one made by it read alike; the rest of the guard's
+/// tokens come from the guard and are not repeated here.
 pub mod why {
     /// A question or an approval is parked on the pane; answering it is the
     /// person's.
