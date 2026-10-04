@@ -60,6 +60,10 @@ pub const ANDROID_REASON: &str =
 /// same way.
 pub const ANDROID_EMULATOR_SERIAL_PREFIX: &str = "emulator-";
 
+/// The platforms `devicectl` reports as an iPhone or iPad. It also lists
+/// watches, TVs and headsets, which are not the person's phone.
+const DEVICECTL_PHONE_PLATFORMS: [&str; 2] = ["iOS", "iPadOS"];
+
 /// How the Mac stands with one real device, in plain words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -121,17 +125,68 @@ pub struct Unchecked {
     pub why: String,
 }
 
-/// A device's name as the answer carries it.
+/// A device's name as the answer carries it: one line, no control characters,
+/// cut at [`DEVICE_NAME_CHARS_MAX`].
 fn plain_name(raw: &str) -> String {
-    raw.to_string()
+    let one_line = raw
+        .split_whitespace()
+        .map(|word| {
+            word.chars()
+                .filter(|ch| !ch.is_control())
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    one_line.chars().take(DEVICE_NAME_CHARS_MAX).collect()
 }
 
 /// `devicectl list devices --json-output` → the iPhones and iPads in it.
 ///
 /// # Errors
-/// The text is not JSON, or has no device list.
-pub fn parse_devicectl(_json: &str) -> Result<Vec<PhysicalDevice>, String> {
-    Ok(Vec::new())
+/// The text is not JSON, or has no device list: the tool's answer changed shape
+/// or something else wrote the file.
+pub fn parse_devicectl(json: &str) -> Result<Vec<PhysicalDevice>, String> {
+    let document: Value = serde_json::from_str(json)
+        .map_err(|error| format!("devicectl wrote an answer this window cannot read: {error}"))?;
+    let devices = document
+        .pointer("/result/devices")
+        .and_then(Value::as_array)
+        .ok_or("devicectl's answer has no device list")?;
+    Ok(devices.iter().filter_map(ios_row).collect())
+}
+
+fn ios_row(device: &Value) -> Option<PhysicalDevice> {
+    let text = |at: &str| {
+        device
+            .pointer(at)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let platform = text("/hardwareProperties/platform")?;
+    if !DEVICECTL_PHONE_PLATFORMS.contains(&platform.as_str()) {
+        return None;
+    }
+    let model = text("/hardwareProperties/marketingName");
+    let name = text("/deviceProperties/name").or_else(|| model.clone())?;
+    let state = tunnel_state(text("/connectionProperties/tunnelState").as_deref());
+    Some(PhysicalDevice::new(
+        EmulatorPlatform::Ios,
+        &name,
+        model,
+        state,
+    ))
+}
+
+/// What `devicectl`'s tunnel word means for the person. Its own table calls a
+/// `disconnected` tunnel "available (paired)": the Mac reaches the phone and
+/// has not opened a tunnel yet. Only `unavailable` is a phone it cannot reach.
+fn tunnel_state(word: Option<&str>) -> LinkState {
+    match word {
+        Some("connected" | "disconnected") => LinkState::Connected,
+        Some("unavailable") => LinkState::Unavailable,
+        _ => LinkState::Unknown,
+    }
 }
 
 /// One device line of `adb devices -l`.
@@ -158,22 +213,66 @@ impl AdbRow {
     }
 }
 
-/// The device lines of `adb devices -l`.
+/// The device lines of `adb devices -l`: the header, the daemon's own notices
+/// (`* daemon started …`) and blank lines are not devices.
 #[must_use]
-pub fn parse_adb_rows(_listing: &str) -> Vec<AdbRow> {
-    Vec::new()
+pub fn parse_adb_rows(listing: &str) -> Vec<AdbRow> {
+    listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty() && !line.starts_with('*') && !line.starts_with("List of devices")
+        })
+        .filter_map(|line| {
+            let mut columns = line.split_whitespace();
+            let serial = columns.next()?.to_string();
+            let state = columns.next()?.to_string();
+            let model = columns
+                .find_map(|column| column.strip_prefix("model:"))
+                .map(|model| model.replace('_', " "));
+            Some(AdbRow {
+                serial,
+                state,
+                model,
+            })
+        })
+        .collect()
 }
 
-/// The real Android devices in an `adb devices -l` listing.
+/// The real Android devices in an `adb devices -l` listing: every row that is
+/// not an emulator.
 #[must_use]
-pub fn parse_adb_physical(_listing: &str) -> Vec<PhysicalDevice> {
-    Vec::new()
+pub fn parse_adb_physical(listing: &str) -> Vec<PhysicalDevice> {
+    parse_adb_rows(listing)
+        .into_iter()
+        .filter(|row| !row.is_emulator())
+        .map(|row| {
+            let state = match row.state.as_str() {
+                "device" => LinkState::Connected,
+                "unauthorized" => LinkState::Unauthorized,
+                "offline" => LinkState::Offline,
+                _ => LinkState::Unknown,
+            };
+            let name = row.model.clone().unwrap_or_else(|| UNNAMED_ANDROID.into());
+            PhysicalDevice::new(EmulatorPlatform::Android, &name, row.model, state)
+        })
+        .collect()
 }
 
-/// The rows an answer carries and how many were left out.
+/// The rows an answer carries and how many were left out: the ones the Mac
+/// reaches first, then by platform and name (the order the tool listed them in
+/// settles the rest), cut at [`PHYSICAL_ROWS_MAX`].
 #[must_use]
-pub fn bounded(rows: Vec<PhysicalDevice>) -> (Vec<PhysicalDevice>, usize) {
-    (rows, 0)
+pub fn bounded(mut rows: Vec<PhysicalDevice>) -> (Vec<PhysicalDevice>, usize) {
+    rows.sort_by(|left, right| {
+        (left.state != LinkState::Connected)
+            .cmp(&(right.state != LinkState::Connected))
+            .then_with(|| left.platform.as_str().cmp(right.platform.as_str()))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let omitted = rows.len().saturating_sub(PHYSICAL_ROWS_MAX);
+    rows.truncate(PHYSICAL_ROWS_MAX);
+    (rows, omitted)
 }
 
 /// What one platform's tools said to `list`.
@@ -185,17 +284,59 @@ pub struct PlatformReading {
     pub physical: Result<Vec<PhysicalDevice>, String>,
 }
 
-/// The `list` answer, as it was before real devices were named: the
-/// simulators and the emulators, or the first error.
+/// The `list` answer: what the window can drive, what it sees and cannot, and
+/// what nobody read.
+///
+/// One platform's missing tool does not hide the other platform's answer — a
+/// Mac with Xcode and no Android SDK still has simulators and phones to
+/// report. Only when neither platform answered is there no answer, and then it
+/// is the first platform's error, as it always was.
 ///
 /// # Errors
-/// Either platform's simulators or emulators could not be read.
+/// Neither platform's simulators or emulators could be read.
 pub fn list_answer(ios: PlatformReading, android: PlatformReading) -> Result<Value, String> {
-    Ok(json!({
+    if let (Err(first), Err(_)) = (&ios.simulated, &android.simulated) {
+        return Err(first.clone());
+    }
+    let mut unchecked = Vec::new();
+    let mut real = Vec::new();
+    let mut take = |reading: PlatformReading| {
+        let PlatformReading {
+            platform,
+            simulated,
+            physical,
+        } = reading;
+        let mut gaps = Vec::new();
+        let simulated = simulated.unwrap_or_else(|why| {
+            gaps.push(why);
+            json!([])
+        });
+        match physical {
+            Ok(found) => real.extend(found),
+            // One missing SDK stops both readers with the same sentence: that
+            // is one gap, said once.
+            Err(why) if !gaps.contains(&why) => gaps.push(why),
+            Err(_) => {}
+        }
+        unchecked.extend(gaps.into_iter().map(|why| Unchecked { platform, why }));
+        simulated
+    };
+    let simulators = take(ios);
+    let emulators = take(android);
+    let (real, omitted) = bounded(real);
+    let mut answer = json!({
         "surface": BUILT_IN_SURFACE,
-        "ios": ios.simulated?,
-        "android": android.simulated?,
-    }))
+        "ios": simulators,
+        "android": emulators,
+        PHYSICAL_KEY: real,
+    });
+    if omitted > 0 {
+        answer[OMITTED_KEY] = json!(omitted);
+    }
+    if !unchecked.is_empty() {
+        answer[UNCHECKED_KEY] = json!(unchecked);
+    }
+    Ok(answer)
 }
 
 #[cfg(test)]

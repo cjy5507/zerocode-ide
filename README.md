@@ -97,7 +97,7 @@ crates/
   zerocode-app           the `zerocode` CLI entry point
 ui/                      the window's screens (vanilla JS/CSS); ui/tokens.css holds the values
 zo-ide/                  the `zo` CLI workspace (runtime · api · tools)
-skills/                  skills installed into agents (orchestration, computer-use, second-brain)
+skills/                  skills installed into agents: one SKILL.md per directory, each one bundled by build.rs
 ```
 
 Rust owns the terminal grid, the PTYs, the ledger, and every process boundary. The window is

@@ -40,6 +40,11 @@ const PROBE_WAIT: Duration = Duration::from_millis(EMULATOR_HOLD_MS / 2);
 #[cfg(any(target_os = "macos", test))]
 const PROBE_TOOL_CAP: Duration = Duration::from_secs(10);
 
+/// How long `devicectl` is given by its own `--timeout`: less than
+/// [`PROBE_TOOL_CAP`], so it ends itself and says why before it is killed.
+#[cfg(any(target_os = "macos", test))]
+const DEVICECTL_TIMEOUT_SECS: u64 = 8;
+
 /// How long a `devicectl` reading is reused. Shorter than a person needs to
 /// plug a cable, say so to an agent and have it call `list`; longer than one
 /// agent's polling of `list` while a device boots, which is the call that
@@ -48,6 +53,11 @@ const PROBE_TOOL_CAP: Duration = Duration::from_secs(10);
 /// wrong, and five seconds is the most it can be wrong for.
 #[cfg(any(target_os = "macos", test))]
 const PROBE_TTL: Duration = Duration::from_secs(5);
+
+/// The most a tool's answer is read: a `devicectl` list of a drawer of paired
+/// phones is a few kilobytes, so this is a bound on a tool gone wrong.
+#[cfg(any(target_os = "macos", test))]
+const PROBE_OUTPUT_MAX_BYTES: usize = 256 * 1024;
 
 /// What `list` says while `devicectl` is still working.
 #[cfg(any(target_os = "macos", test))]
@@ -62,7 +72,7 @@ mod kept {
 
     use zerocode_core::agent_emulator::physical::PhysicalDevice;
 
-    use super::held;
+    use super::{STILL_LOOKING, held};
 
     /// What a probe found, or why it found nothing.
     pub(super) type Reading = Result<Vec<PhysicalDevice>, String>;
@@ -94,12 +104,77 @@ mod kept {
         }
 
         /// The reading if it is fresh; otherwise the one a probe started now
-        /// brings, waited for at most `wait`.
-        pub(super) fn read<F>(&'static self, _ttl: Duration, _wait: Duration, _probe: F) -> Reading
+        /// brings, waited for at most `wait`. A probe still running when the
+        /// wait ends is left to finish — its answer is the next call's — and
+        /// the reading handed back says it is still looking.
+        pub(super) fn read<F>(&'static self, ttl: Duration, wait: Duration, probe: F) -> Reading
         where
             F: FnOnce() -> Reading + Send + 'static,
         {
-            Err(String::new())
+            let began = Instant::now();
+            // A reading taken since this call began is fresh for it whatever
+            // the time to live: the call that waited for a probe gets that
+            // probe's answer, even when the answer is already old by the time
+            // the call wakes.
+            let usable = |taken: &Taken| taken.at >= began || taken.at.elapsed() < ttl;
+            let mut probe = Some(probe);
+            let mut slot = held(&self.slot);
+            loop {
+                if let Some(taken) = slot.taken.as_ref().filter(|taken| usable(taken)) {
+                    return taken.reading.clone();
+                }
+                if !slot.running
+                    && let Some(probe) = probe.take()
+                {
+                    slot.running = true;
+                    if let Err(error) = self.start(probe) {
+                        slot.running = false;
+                        return Err(format!("the probe could not start: {error}"));
+                    }
+                }
+                let Some(left) = wait.checked_sub(began.elapsed()) else {
+                    return Err(STILL_LOOKING.to_string());
+                };
+                let (waited, timeout) = self
+                    .arrived
+                    .wait_timeout(slot, left)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                slot = waited;
+                if timeout.timed_out() {
+                    return slot
+                        .taken
+                        .as_ref()
+                        .filter(|taken| usable(taken))
+                        .map_or_else(
+                            || Err(STILL_LOOKING.to_string()),
+                            |taken| taken.reading.clone(),
+                        );
+                }
+            }
+        }
+
+        /// Run `probe` on a thread of its own and put what it finds in the
+        /// slot. A probe that panics leaves a reason in the slot, not a slot
+        /// that is running forever.
+        fn start<F>(&'static self, probe: F) -> std::io::Result<()>
+        where
+            F: FnOnce() -> Reading + Send + 'static,
+        {
+            std::thread::Builder::new()
+                .name("physical-devices-probe".to_string())
+                .spawn(move || {
+                    let reading = std::panic::catch_unwind(std::panic::AssertUnwindSafe(probe))
+                        .unwrap_or_else(|_| Err("the probe stopped unexpectedly".to_string()));
+                    let mut slot = held(&self.slot);
+                    slot.taken = Some(Taken {
+                        at: Instant::now(),
+                        reading,
+                    });
+                    slot.running = false;
+                    drop(slot);
+                    self.arrived.notify_all();
+                })
+                .map(drop)
         }
 
         /// Forget the reading, for a measurement that wants a cold start.
@@ -117,8 +192,38 @@ use kept::{Kept, Reading};
 
 /// The iPhones and iPads Xcode's `devicectl` lists, run now.
 #[cfg(any(target_os = "macos", test))]
-fn ios_devices_with(_command: std::process::Command, _cap: Duration) -> Reading {
-    Ok(Vec::new())
+fn ios_devices_with(mut command: std::process::Command, cap: Duration) -> Reading {
+    const FAILED: &str = "Xcode's devicectl did not answer";
+    let directory = std::env::temp_dir().join("zerocode-emulator");
+    std::fs::create_dir_all(&directory).map_err(|error| format!("{FAILED}: {error}"))?;
+    let file = directory.join(format!("devicectl-{}.json", uuid::Uuid::new_v4()));
+    command
+        .args(["list", "devices", "--quiet", "--timeout"])
+        .arg(DEVICECTL_TIMEOUT_SECS.to_string())
+        .arg("--json-output")
+        .arg(&file);
+    let written = super::process::run_bounded(command, cap, PROBE_OUTPUT_MAX_BYTES)
+        .and_then(|out| out.ensure_success("devicectl"))
+        .map_err(|error| format!("{FAILED}: {error}"))
+        .and_then(|_| read_json(&file));
+    let _ = std::fs::remove_file(&file);
+    zerocode_core::agent_emulator::physical::parse_devicectl(&written?)
+}
+
+/// What `devicectl` wrote, bounded: a file is read whole only when it is small.
+#[cfg(any(target_os = "macos", test))]
+fn read_json(file: &std::path::Path) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    std::fs::File::open(file)
+        .map_err(|error| format!("devicectl wrote no answer file: {error}"))?
+        .take(PROBE_OUTPUT_MAX_BYTES as u64 + 1)
+        .read_to_string(&mut text)
+        .map_err(|error| format!("devicectl's answer could not be read: {error}"))?;
+    if text.len() > PROBE_OUTPUT_MAX_BYTES {
+        return Err("devicectl's answer is larger than this window reads".to_string());
+    }
+    Ok(text)
 }
 
 #[cfg(target_os = "macos")]

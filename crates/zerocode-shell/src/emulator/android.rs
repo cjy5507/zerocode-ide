@@ -22,7 +22,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
-use zerocode_core::agent_emulator::physical::PhysicalDevice;
+use zerocode_core::agent_emulator::physical::{
+    ANDROID_EMULATOR_SERIAL_PREFIX, PhysicalDevice, parse_adb_physical, parse_adb_rows,
+};
 
 use super::session::{FinishSession, SessionControl, SessionKey, StartClaim, registry};
 use super::{
@@ -65,8 +67,9 @@ const ANDROID_STREAM_BIT_RATE: &str = "8000000";
 /// instead, and the turn after asks the mirror once more.
 const SCRCPY_STOOD_UP: Duration = Duration::from_secs(1);
 const MISSES_BEFORE_NOTE: u32 = 2;
-/// The one spelling of what an emulator serial looks like.
-const EMULATOR_SERIAL_PREFIX: &str = "emulator-";
+/// The one spelling of what an emulator serial looks like, shared with the
+/// reader that names the devices that are not emulators.
+const EMULATOR_SERIAL_PREFIX: &str = ANDROID_EMULATOR_SERIAL_PREFIX;
 /// How long a pump waits before asking `adb` again about a device that is not
 /// on the bridge.
 ///
@@ -1297,20 +1300,41 @@ fn android_running(adb: &Path) -> Vec<(String, String)> {
     if !out.status.success() {
         return Vec::new();
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines()
-        .skip(1)
-        .filter_map(|line| {
-            let mut columns = line.split_whitespace();
-            let serial = columns.next()?;
-            let state = columns.next()?;
-            if state != "device" || !serial.starts_with(EMULATOR_SERIAL_PREFIX) {
-                return None;
-            }
-            let avd = android_avd_name(adb, serial).unwrap_or_default();
-            Some((serial.to_string(), avd))
+    parse_adb_rows(&String::from_utf8_lossy(&out.stdout))
+        .into_iter()
+        .filter(|row| row.is_up() && row.is_emulator())
+        .map(|row| {
+            let avd = android_avd_name(adb, &row.serial).unwrap_or_default();
+            (row.serial, avd)
         })
         .collect()
+}
+
+/// The most `adb devices -l` is read: a line is a hundred bytes and a person
+/// has a handful of devices, so this is a bound on a tool gone wrong.
+const ADB_LISTING_MAX_BYTES: usize = 64 * 1024;
+
+/// The real Android phones on the bridge, named for `zerocode-emulator list`
+/// and never driven (t-36920): the window's input roads are the emulator's, and
+/// `EMULATOR_SERIAL_PREFIX` is where [`android_running`] and `device_presence`
+/// stop a phone on a cable from reaching them. `cap` bounds the whole call.
+pub(super) fn physical_android_devices(cap: Duration) -> Result<Vec<PhysicalDevice>, String> {
+    let sdk = android_sdk().map_err(|search| search.to_string())?;
+    physical_android_with(&sdk.adb, cap)
+}
+
+pub(super) fn physical_android_with(
+    adb: &Path,
+    cap: Duration,
+) -> Result<Vec<PhysicalDevice>, String> {
+    let mut command = crate::proc::quiet_command(adb);
+    command.args(["devices", "-l"]);
+    super::process::run_bounded(command, cap, ADB_LISTING_MAX_BYTES)
+        .and_then(|out| out.ensure_success("adb devices"))
+        .map(|out| parse_adb_physical(&out.stdout_text()))
+        .map_err(|why| {
+            format!("adb did not list the devices ({why}); ask list again in a few seconds")
+        })
 }
 
 /// What a read of the AVD behind a serial answers when it names none.
@@ -1332,18 +1356,6 @@ fn android_avd_name(adb: &Path, serial: &str) -> Result<String, String> {
         return Err("Android AVD identity is ambiguous".into());
     }
     Ok(name.to_string())
-}
-
-/// The real Android phones on the bridge, named for `zerocode-emulator list`.
-pub(super) fn physical_android_devices(_cap: Duration) -> Result<Vec<PhysicalDevice>, String> {
-    Ok(Vec::new())
-}
-
-pub(super) fn physical_android_with(
-    _adb: &Path,
-    _cap: Duration,
-) -> Result<Vec<PhysicalDevice>, String> {
-    Ok(Vec::new())
 }
 
 fn recovered_managed_record(
@@ -3644,5 +3656,37 @@ mod tests {
         crate::durable_file::replace_bytes(&managed_file(root.path()), &bytes)
             .expect("durable owner");
         assert_eq!(read_managed_records(root.path()).unwrap(), vec![record]);
+    }
+
+    /// Today a real Android phone is listed by `adb` and not driven (t-36920):
+    /// of a listing with an emulator and two phones, the window keeps the
+    /// emulator, asks it — and only it — who it is, and offers nothing else as a
+    /// device to press. `zerocode-emulator list` names the phones in its
+    /// `physical` rows, with `drivable: false`.
+    #[cfg(unix)]
+    #[test]
+    fn a_phone_on_a_cable_is_listed_by_adb_and_never_a_device_the_window_drives() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = tempfile::tempdir().expect("scratch");
+        let asked = scratch.path().join("asked");
+        let adb = scratch.path().join("adb");
+        std::fs::write(
+            &adb,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  devices) printf 'List of devices attached\\nemulator-5554\\tdevice model:sdk_synthetic\\nSYN0000000001\\tdevice model:Synthetic_Pixel\\n192.0.2.7:5555\\tdevice model:Synthetic_Tab\\n' ;;\n  -s) printf 'Synthetic_AVD\\nOK\\n' ;;\nesac\n",
+                asked.display()
+            ),
+        )
+        .expect("fake adb");
+        std::fs::set_permissions(&adb, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(
+            android_running(&adb),
+            [("emulator-5554".to_string(), "Synthetic_AVD".to_string())]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&asked).unwrap_or_default(),
+            "devices -l\n-s emulator-5554 emu avd name\n",
+            "only the emulator is asked who it is"
+        );
     }
 }

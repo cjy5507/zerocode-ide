@@ -1863,6 +1863,44 @@ fn the_mobile_skill_ranks_first_for_what_a_person_says_about_a_phone() {
     }
 }
 
+/// What the mobile skill adds to the index zo's prompt carries on every
+/// request, measured over the skills this product ships (t-36920): the whole
+/// index's tokens without it and with it, against the budget, and what zo's
+/// always-present line shows of its description. Run on purpose:
+/// `cargo test -p runtime --lib -- --ignored --nocapture the_mobile_skills_cost_in_zos_index`.
+#[test]
+#[ignore = "a measurement: run on purpose, with --nocapture"]
+fn the_mobile_skills_cost_in_zos_index() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../skills");
+    let mut entries: Vec<SkillIndexEntry> = fs::read_dir(&root)
+        .expect("bundled skills")
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path().join("SKILL.md");
+            let body = fs::read_to_string(&path).ok()?;
+            super::parse_skill_index_entry(path, &body)
+        })
+        .collect();
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    let mobile = zerocode_core::agent_emulator::MOBILE_SKILL_NAME;
+    let others: Vec<SkillIndexEntry> =
+        entries.iter().filter(|entry| entry.name != mobile).cloned().collect();
+    let tokens_without = super::estimated_tokens(&super::render_skills_index(&others));
+    let tokens_with = super::estimated_tokens(&super::render_skills_index(&entries));
+    let line = super::render_skills_index(&entries)
+        .lines()
+        .find(|line| line.contains(&format!("`{mobile}`")))
+        .map(str::to_string)
+        .unwrap_or_default();
+    println!(
+        "MOBILE_SKILL_INDEX_NUMBERS {{\"skills_with\":{},\"index_tokens_without\":{tokens_without},\
+         \"index_tokens_with\":{tokens_with},\"budget\":{},\"its_line_chars\":{},\"its_line\":{line:?}}}",
+        entries.len(),
+        super::SKILL_INDEX_BUDGET_TOKENS,
+        line.chars().count()
+    );
+}
+
 /// The index is paid on every request, so it stays inside the skill budget
 /// whatever the machine has installed: the highest-precedence skills keep
 /// their lines, the tail folds into one line that says how many were left out

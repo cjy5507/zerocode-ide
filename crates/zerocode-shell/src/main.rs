@@ -395,10 +395,9 @@ use emulator::{
     ios_button_direct, ios_install_app, ios_launch_app, ios_logs, ios_multi_touch, ios_rotate,
     ios_rotate_direct, ios_screenshot_direct, ios_set_permission, ios_swipe, ios_swipe_direct,
     ios_tap, ios_tap_direct, ios_text, ios_text_direct, ios_touch, mobile_emulators,
-    mobile_emulators_direct, open_mobile_emulator, set_emulator_stream_engaged,
-    set_emulator_stream_paused, set_emulator_stream_viewport, shutdown_android_emulator,
-    shutdown_mobile_emulator, start_android_stream, start_emulator_stream, start_emulator_video,
-    stop_emulator_stream,
+    open_mobile_emulator, set_emulator_stream_engaged, set_emulator_stream_paused,
+    set_emulator_stream_viewport, shutdown_android_emulator, shutdown_mobile_emulator,
+    start_android_stream, start_emulator_stream, start_emulator_video, stop_emulator_stream,
 };
 use pane_runtime::*;
 use pick_runtime::*;

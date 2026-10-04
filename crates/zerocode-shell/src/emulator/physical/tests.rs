@@ -15,6 +15,7 @@ use super::*;
 
 /// A `devicectl` answer cut to what the reader uses: one phone the Mac reaches
 /// and one it only knows.
+#[cfg(unix)]
 const DEVICECTL_JSON: &str = r#"{"info":{"jsonVersion":3,"outcome":"success"},"result":{"devices":[
 {"identifier":"00000000-0000-0000-0000-0000000000a1","connectionProperties":{"tunnelState":"connected"},
  "deviceProperties":{"name":"Synthetic Phone A"},"hardwareProperties":{"platform":"iOS","marketingName":"Synthetic iPhone"}},
@@ -336,7 +337,7 @@ fn the_android_probe_names_phones_from_adb_and_leaves_the_emulators_out() {
     assert!(began.elapsed() < Duration::from_secs(5));
 }
 
-/// How long one of `n` runs took, as the middle, the 90th percentile and the
+/// How long each of `runs` took, as the middle, the 90th percentile and the
 /// worst, in milliseconds.
 fn spread(runs: usize, mut each: impl FnMut()) -> [f64; 3] {
     let mut took: Vec<f64> = (0..runs)
@@ -350,49 +351,97 @@ fn spread(runs: usize, mut each: impl FnMut()) -> [f64; 3] {
     [took[runs / 2], took[runs * 9 / 10], took[runs - 1]]
 }
 
-/// This process's resident memory, in KiB, from `ps`.
-fn resident_kib() -> Option<u64> {
-    let out = crate::proc::quiet_command("ps")
-        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+/// Start the next `list` from a cold reading, where there is a reading to forget.
+fn forget_the_reading() {
+    #[cfg(target_os = "macos")]
+    IOS_DEVICES.forget();
+}
+
+/// This process's resident memory in KiB and its thread count, from `ps`.
+fn resident_and_threads() -> (Option<u64>, Option<usize>) {
+    let pid = std::process::id().to_string();
+    let ps = |args: &[&str]| {
+        crate::proc::quiet_command("ps")
+            .args(args)
+            .args(["-p", &pid])
+            .output()
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let resident = ps(&["-o", "rss="]).and_then(|text| text.trim().parse().ok());
+    // `ps -M` prints one line for each thread under a header line.
+    let threads = ps(&["-M"]).map(|text| text.lines().count().saturating_sub(1));
+    (resident, threads)
 }
 
 /// The cost of one `list` with and without the real-device tools, on this
 /// machine's own `simctl`, `adb` and `devicectl`: what it was (the simulator
-/// and emulator readers), what it is with a cold reading, with a kept one, and
-/// what the tools cost alone. Prints counts and times, never a name or an id.
-/// Run on purpose, normal and under `taskpolicy -b`:
+/// and emulator readers alone), what it is with a cold reading and with a kept
+/// one, what each tool costs alone, what a machine without `devicectl` pays, how
+/// long a caller waits for a tool that takes three seconds, and the process's
+/// memory and threads over a long run. Prints counts and times, never a name or
+/// an id. Run on purpose, normal and under `taskpolicy -b`:
 /// `cargo test -p zerocode-shell --bin zerocode-shell -- --ignored --nocapture the_cost_of_one_list`.
 #[test]
 #[ignore = "a measurement: it runs this machine's simctl, adb and devicectl"]
 fn the_cost_of_one_list() {
     const RUNS: usize = 20;
-    let before_rss = resident_kib();
+    const LONG_RUN: usize = 300;
+    const SLOW_TOOL: Duration = Duration::from_secs(3);
+    let list = || {
+        let _ = tauri::async_runtime::block_on(list_answer_now());
+    };
     let was = spread(RUNS, || {
         tauri::async_runtime::block_on(async {
             let _ = tokio::join!(mobile_emulators_direct(), android_emulators_direct());
         });
     });
     let cold = spread(RUNS, || {
-        #[cfg(target_os = "macos")]
-        IOS_DEVICES.forget();
-        let _ = tauri::async_runtime::block_on(list_answer_now());
+        forget_the_reading();
+        list();
     });
-    let _ = tauri::async_runtime::block_on(list_answer_now());
-    let warm = spread(RUNS, || {
-        let _ = tauri::async_runtime::block_on(list_answer_now());
-    });
+    list();
+    let warm = spread(RUNS, list);
     #[cfg(target_os = "macos")]
     let devicectl = spread(RUNS, || {
         let _ = ios_devices_with(super::super::ios::devicectl_command(), PROBE_TOOL_CAP);
     });
     #[cfg(not(target_os = "macos"))]
     let devicectl = [0.0; 3];
+    let missing = spread(RUNS, || {
+        let _ = ios_devices_with(
+            crate::proc::quiet_command("/nonexistent/devicectl"),
+            PROBE_TOOL_CAP,
+        );
+    });
     let adb = spread(RUNS, || {
         let _ = super::super::android::physical_android_devices(PROBE_WAIT);
     });
+    let slow = {
+        let kept = kept();
+        let began = Instant::now();
+        let first = kept.read(PROBE_TTL, PROBE_WAIT, || {
+            std::thread::sleep(SLOW_TOOL);
+            Ok(Vec::new())
+        });
+        let waited = began.elapsed().as_secs_f64() * 1_000.0;
+        std::thread::sleep(SLOW_TOOL);
+        let began = Instant::now();
+        let second = kept.read(PROBE_TTL, PROBE_WAIT, || Ok(Vec::new()));
+        [
+            waited,
+            began.elapsed().as_secs_f64() * 1_000.0,
+            f64::from(u8::from(first.is_err() && second.is_ok())),
+        ]
+    };
+    let (rss_before, threads_before) = resident_and_threads();
+    for round in 0..LONG_RUN {
+        if round % 10 == 0 {
+            forget_the_reading();
+        }
+        list();
+    }
+    let (rss_after, threads_after) = resident_and_threads();
     let answer = tauri::async_runtime::block_on(list_answer_now()).unwrap_or_default();
     let keys: Vec<&str> = answer.as_object().map_or_else(Vec::new, |object| {
         object.keys().map(String::as_str).collect()
@@ -408,11 +457,18 @@ fn the_cost_of_one_list() {
             "list_after_cold": cold,
             "list_after_warm": warm,
             "devicectl_alone": devicectl,
+            "devicectl_missing": missing,
             "adb_physical_alone": adb,
+            "slow_tool_3s_ms [caller_waited, second_call, as_expected]": slow,
             "answer_keys": keys,
             "rows_ios_android_physical": counts,
-            "rss_kib_before": before_rss,
-            "rss_kib_after": resident_kib(),
+            "long_run": {
+                "lists": LONG_RUN,
+                "rss_kib_before": rss_before,
+                "rss_kib_after": rss_after,
+                "threads_before": threads_before,
+                "threads_after": threads_after,
+            },
         })
     );
 }
