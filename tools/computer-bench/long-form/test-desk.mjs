@@ -38,26 +38,38 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const option = (field, code) => SPEC.options[field.options].find(([value]) => value === code)[1];
 const monthName = (month) => new Date(Date.UTC(2000, Number(month) - 1, 1)).toLocaleString("en", { month: "long", timeZone: "UTC" });
 
-async function standing(scene, fn) {
+/* What the page says is wrong with its answer, and the alert it shows —
+ * read before the desk closes, for a run the oracle failed. */
+async function pageSays(desk) {
+  return desk.content().evaluate(() => ({
+    errors: LongForm.errors(() => false).map((error) => error.message),
+    alert: document.getElementById("alert")?.textContent || null,
+    unset: LongForm.fields().filter(LongForm.shown).filter((field) => field.required && LongForm.blank(field)).map((field) => field.id),
+  }));
+}
+
+async function standing(scene, fn, deskOptions = {}) {
   const out = await mkdtemp(join(tmpdir(), "long-form-"));
   const server = spawn("python3", [join(HERE, "server.py"), "--out", out], { stdio: ["ignore", "pipe", "inherit"] });
   const url = await new Promise((done) => server.stdout.on("data", (chunk) => {
     const said = String(chunk).match(/listening (\S+)/);
     if (said) done(said[1]);
   }));
-  const desk = await startDesk({ url, out, personAttachMs: PERSON_ATTACH_MS, scene });
+  const desk = await startDesk({ url, out, personAttachMs: PERSON_ATTACH_MS, scene, ...deskOptions });
+  let said = null;
   try {
     await fn({ desk, out });
     await desk.settled();
     // A submit's post leaves after the press reached the page.
     await sleep(SUBMIT_SETTLE_MS);
+    said = await pageSays(desk).catch(() => null);
   } finally {
     await desk.close();
     server.kill();
   }
   const scored = JSON.parse(spawnSync("python3", [join(HERE, "oracle.py"), "--out", out, "--json"], { encoding: "utf8" }).stdout);
   await rm(out, { recursive: true, force: true });
-  return scored;
+  return { ...scored, said };
 }
 
 /* The fake shim, called as an agent calls it — never synchronously: the
@@ -216,13 +228,13 @@ const chrome = await standing("chrome", async ({ desk }) => {
   const refused = (await fillChrome(desk)).filter((answer) => answer.code !== 0);
   check("chrome: every scripted step was answered", refused.length === 0, refused.map((answer) => answer.err).slice(0, 3).join(" | "));
 });
-check("chrome: the card filled through the desk passes the oracle", chrome.pass === true, JSON.stringify(chrome.reasons));
+check("chrome: the card filled through the desk passes the oracle", chrome.pass === true, JSON.stringify([chrome.reasons, chrome.said]));
 
 const phone = await standing("phone", async ({ desk }) => {
   const refused = (await fillPhone(desk)).filter((answer) => answer.code !== 0);
   check("phone: every scripted tap was answered", refused.length === 0, refused.map((answer) => answer.err).slice(0, 3).join(" | "));
 });
-check("phone: the card tapped in by pixels passes the oracle", phone.pass === true, JSON.stringify(phone.reasons));
+check("phone: the card tapped in by pixels passes the oracle", phone.pass === true, JSON.stringify([phone.reasons, phone.said]));
 
 await standing("phone", async ({ desk }) => {
   const names = ["iPhone 미러링", "com.apple.ScreenContinuity", PHONE];
@@ -244,6 +256,34 @@ await standing("phone", async ({ desk }) => {
   check("phone: a tap reaches the phone only after the mirror's lag", early === before && late === before + 1 && Date.now() - sent >= desk.scene.lagMs,
     `${before} → ${early} → ${late}`);
 });
+
+// The window with t-37883's levers (needs the core's `words_choose` example,
+// named by WORDS_CHOOSE): a press by the words the phone shows, a wait after
+// it that ends once the screen holds still, and looks that say who they saw.
+if (process.env.WORDS_CHOOSE) {
+  await standing("phone", async ({ desk }) => {
+    const ask = (argv) => shim(desk, argv);
+    const opened = await ask(["click", "--app", PHONE, "--ocr", "--text", "Title", "--json"]);
+    check("levers: a click by the words the phone shows presses them", opened.code === 0, opened.err);
+    const sheet = await ask(["wait-for", "--app", PHONE, "--ocr", "--text", "Cancel", "--timeout-ms", "3000", "--json"]);
+    check("levers: an OCR wait sees the sheet the press opened", sheet.code === 0, sheet.err);
+    await ask(["click", "--app", PHONE, "--ocr", "--text", "Mr", "--json"]);
+    await desk.settled();
+    check("levers: the words chose the option", (await desk.content().evaluate(() => LongForm.state.title)) === "mr");
+    // "name" is held by three labels on the first screen and read exactly by none.
+    const twice = await ask(["click", "--app", PHONE, "--ocr", "--text", "name", "--json"]);
+    check("levers: words that recur are refused by name", twice.code === 1 && JSON.parse(twice.err).error.code === "ambiguous_target", twice.err);
+    const batch = JSON.parse((await ask(["batch", "--commands", JSON.stringify([
+      ["click", "--app", PHONE, "--ocr", "--text", "Male", "--json"], ["wait", "--ms", "4000", "--json"]]), "--json"])).out);
+    const waited = batch.result.steps[1].result;
+    check("levers: a batch's wait after a press ends once the phone holds still", waited.settled === true && waited.waitedMs < 4000,
+      JSON.stringify(waited));
+    const look = JSON.parse((await ask(["observe", "--diff", "--app", "iPhone 미러링", "--json"])).out);
+    check("levers: a look says the app the window resolved", look.result.app.bundleId === "com.apple.ScreenContinuity", JSON.stringify(look.result.app));
+  }, { window: "levers", wordsChoose: process.env.WORDS_CHOOSE });
+} else {
+  console.log("SKIP  levers: WORDS_CHOOSE names no words_choose example");
+}
 
 await standing("chrome", async ({ desk }) => {
   const commands = JSON.stringify([["wait", "--ms", "1", "--json"], ["click", "--app", CHROME, "--label", "No such control", "--json"], ["wait", "--ms", "1", "--json"]]);

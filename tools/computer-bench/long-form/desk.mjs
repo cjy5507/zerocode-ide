@@ -24,9 +24,24 @@
  */
 
 import { createServer } from "node:http";
-import { mkdir, writeFile, appendFile } from "node:fs/promises";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { mkdir, writeFile, appendFile, readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
+import { rustNumber } from "../../../ui/tests/rust-source.mjs";
+
+// The window's own numbers, read from the source the measured build is made
+// of — never restated here: a look's settle, a wait's quiet, a wait-for's poll.
+const CORE = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../../crates/zerocode-core/src/computer_use.rs"), "utf8");
+const WINDOW = {
+  settleNothingMs: rustNumber(CORE, "COMPUTER_SETTLE_MS"),
+  quietMs: rustNumber(CORE, "EYE_QUIET_MS"),
+  settleMaxMs: rustNumber(CORE, "EYE_SETTLE_MAX_MS"),
+  waitQuietMs: rustNumber(CORE, "EYE_WAIT_QUIET_MS"),
+  waitForPollMs: rustNumber(CORE, "COMPUTER_WAIT_FOR_POLL_MS"),
+  batchDeadlineMs: rustNumber(CORE, "COMPUTER_USE_DEADLINE_SECONDS") * 1000,
+};
 
 // The scenes. A window rect is in display points; `screen` is the phone's
 // own CSS size, drawn into the window below its `screenTop` bar.
@@ -64,20 +79,20 @@ const LOOK_LONG_EDGE = 1280;
 // Each acting verb's hand time, the p50 of the person's session's batch
 // reports (coordinator m-37970, 10-04): activate 8, key 4, click 22, scroll 20.
 const HAND_MS = { activate: 8, key: 4, "mouse-click": 22, "mouse-scroll": 20, "mouse-move": 4, "mouse-drag": 22, type: 4, click: 22 };
-// The eye's settle (crates/zerocode-core/src/computer_use.rs
-// COMPUTER_SETTLE_MS, EYE_QUIET_MS, EYE_SETTLE_MAX_MS): a look after an act
-// that repainted nothing waits 350 ms, one that did waits for 100 ms of
-// quiet, and none waits past one second.
-const SETTLE_NOTHING_MS = 350;
-const SETTLE_QUIET_MS = 100;
-const SETTLE_MAX_MS = 1000;
-const SETTLE_POLL_MS = 25;
-// `wait-for` polls every 250 ms (COMPUTER_WAIT_FOR_POLL_MS).
-const WAIT_FOR_POLL_MS = 250;
+// How often the desk asks the page whether it is still changing: the eye's
+// own poll (EYE_POLL_MS).
+const SETTLE_POLL_MS = rustNumber(CORE, "EYE_POLL_MS");
 // A wheel line, in CSS pixels (Chromium's kPixelsPerLineStep).
 const PIXELS_PER_LINE = 40;
-// The batch's whole deadline (COMPUTER_USE_DEADLINE_SECONDS).
-const BATCH_DEADLINE_MS = 65_000;
+// One OCR read of the phone's window on the helper: about 60 ms before the
+// pixels, and a share of the whole display's 1,150 ms by area — the window is
+// a fifth of a 1920 x 1080 display (wiki: a look after an act waits for the
+// paint, not a timer; 2026-09-12 measures).
+const OCR_WINDOW_MS = 60 + Math.round(1150 * (436 * 958) / (1920 * 1080));
+// The verbs that act: a batch's wait right after one ends on its settle
+// when the window does that (the core's `ComputerMethod::acts`).
+const ACTING = new Set(["click", "mouse-move", "mouse-click", "mouse-drag", "mouse-scroll", "key", "hold-key", "type",
+  "activate", "launch", "quit", "open"]);
 // The tree a look carries at most (the helper's TreeRenderer maxNodes).
 const TREE_MAX_NODES = 1200;
 const WINDOW_ID = 1;
@@ -151,8 +166,16 @@ font:13px monospace;padding:16px;box-sizing:border-box;white-space:pre">zerocode
 transform:scale(${scale});transform-origin:0 0"></iframe></div></body></html>`;
 }
 
-export async function startDesk({ url, out, personAttachMs, scene: sceneName = "phone", headless = true, overrides = {} }) {
+/* `window`: "today" answers as the installed window does; "levers" adds
+ * what t-37883 changed in it — a batch's wait after an act ends on that
+ * act's settle (`wait --settle`), a click by the words the screen shows
+ * (`click --ocr`, chosen by the core's own rule through `wordsChoose`, the
+ * `words_choose` example), and an app's looks kept and answered under the
+ * app the helper resolved. The look's settle cap is the source's either way. */
+export async function startDesk({ url, out, personAttachMs, scene: sceneName = "phone", headless = true, overrides = {},
+  window = "today", wordsChoose = null }) {
   const scene = { ...SCENES[sceneName], ...overrides };
+  const levers = window === "levers";
   await mkdir(join(out, "shots"), { recursive: true });
   const browser = await chromium.launch({ headless });
   const page = await browser.newPage({ viewport: scene.display });
@@ -205,14 +228,75 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
       const since = now - actedAt;
       const last = await repaintedAt();
       const repainted = last > actedAt;
-      if (!repainted && since >= SETTLE_NOTHING_MS) break;
-      if (repainted && now - last >= SETTLE_QUIET_MS) break;
-      if (since >= SETTLE_MAX_MS) { settled = false; tally.settledFalse += 1; break; }
+      if (!repainted && since >= WINDOW.settleNothingMs) break;
+      if (repainted && now - last >= WINDOW.quietMs) break;
+      if (since >= WINDOW.settleMaxMs) { settled = false; tally.settledFalse += 1; break; }
       await sleep(SETTLE_POLL_MS);
     }
     const waitedMs = Date.now() - started;
     tally.settleMs += waitedMs;
     return settled ? { settled } : { settled, waitedMs };
+  }
+
+  /* `wait --settle`: over once the last act's paint has held still for the
+   * wait's quiet; a screen the act has not moved yet runs the asked time. */
+  async function waitSettled(askedMs) {
+    const began = Date.now();
+    for (;;) {
+      const now = Date.now();
+      const last = await repaintedAt();
+      const painted = actedAt !== null && last > actedAt;
+      if (painted && now - last >= WINDOW.waitQuietMs) return { waitedMs: now - began, askedMs, settled: true };
+      if (now - began >= askedMs) return { waitedMs: now - began, askedMs, settled: false };
+      await sleep(SETTLE_POLL_MS);
+    }
+  }
+
+  /* What OCR reads in the app's window: every visible run of text, and what
+   * a field shows (its value, else its placeholder), in screen points — what
+   * is covered (a sheet, the keyboard) is not read. */
+  async function ocrLines() {
+    const read = await content().evaluate(() => {
+      const lines = [];
+      const shows = (element, rect) => {
+        if (rect.width < 1 || rect.height < 1 || rect.bottom <= 0 || rect.top >= innerHeight) return false;
+        const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        return Boolean(hit) && (hit === element || element.contains(hit) || hit.contains(element));
+      };
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const text = node.textContent.replace(/\s+/g, " ").trim();
+        if (!text || node.parentElement.closest("input, textarea, script, style")) continue;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const rect = range.getBoundingClientRect();
+        if (shows(node.parentElement, rect)) lines.push({ text, x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+      }
+      for (const field of document.querySelectorAll("input, textarea")) {
+        const text = (field.value || field.placeholder || "").trim();
+        const rect = field.getBoundingClientRect();
+        if (text && field.type !== "file" && shows(field, rect)) lines.push({ text, x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+      }
+      return lines;
+    });
+    await sleep(OCR_WINDOW_MS);
+    const { window: box, screen } = scene;
+    const scale = scene.accessible ? 1 : box.width / screen.width;
+    const top = scene.accessible ? 0 : screen.top;
+    return read.map((line) => {
+      const placed = { text: line.text, confidence: 1, x: box.x + line.x * scale, y: box.y + top + line.y * scale,
+        width: line.width * scale, height: line.height * scale };
+      return { ...placed, centerX: placed.x + placed.width / 2, centerY: placed.y + placed.height / 2 };
+    });
+  }
+
+  /* The line a click by words means — the core's rule, through its example. */
+  function chosen(lines, text, after) {
+    const ran = spawnSync(wordsChoose, [], { input: JSON.stringify({ answer: { lines }, text, after }), encoding: "utf8" });
+    if (ran.status !== 0) throw new Refusal("unsupported_capability", `words_choose failed: ${ran.stderr}`);
+    const said = JSON.parse(ran.stdout);
+    if (!said.ok) throw new Refusal(said.code, said.message);
+    return said;
   }
 
   async function picture(clip) {
@@ -272,8 +356,10 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
     const app = flags.app ? appOf(flags.app) : null;
     const clip = app ? { ...scene.window } : { x: 0, y: 0, ...scene.display };
     const shot = await picture(clip);
-    // The window keeps a viewer's last picture per place, named as asked.
-    const place = `${flags.viewer || ""}/${app ? `app:${flags.app}` : "desktop"}`;
+    // The window keeps a viewer's last picture per place: today named as
+    // asked, with the levers under the app the helper resolved.
+    const asked = levers && app ? app.bundleId : flags.app;
+    const place = `${flags.viewer || ""}/${app ? `app:${asked}` : "desktop"}`;
     const before = lastLook.get(place);
     let changed = null;
     if (flags.diff && before) changed = before.equals(shot.png) ? [] : [{ x: clip.x, y: clip.y, width: clip.width, height: clip.height }];
@@ -286,6 +372,7 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
       text: null, changed,
     };
     if (settled) answer.settle = settled;
+    if (levers && app) answer.app = { name: app.names[0], bundleId: app.bundleId, pid: app.pid };
     return answer;
   }
 
@@ -307,7 +394,8 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
       const roleOf = (element) => element.getAttribute("role") || ({ INPUT: element.type === "radio" ? "radio" :
         element.type === "checkbox" ? "checkbox" : "textbox", SELECT: "combobox", TEXTAREA: "textbox", BUTTON: "button",
       A: "link" })[element.tagName] || element.tagName.toLowerCase();
-      const all = [...document.querySelectorAll("input, select, textarea, button, a, [role], label")]
+      // Controls only: a <label> names its control and is not a second one.
+      const all = [...document.querySelectorAll("input, select, textarea, button, a, [role]")]
         .filter((element) => element.getClientRects().length);
       const hits = all.filter((element) => nameOf(element).toLowerCase().includes(words) && (!role || roleOf(element).includes(role)));
       const exact = hits.filter((element) => nameOf(element).trim().toLowerCase() === words);
@@ -354,6 +442,15 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
       case "click": {
         if (!flags.app) throw new Refusal("invalid_request", "click needs --app with --label/--role, or use mouse-click");
         appOf(flags.app);
+        if (flags.ocr) {
+          if (!levers) throw new Refusal("invalid_argument", "unknown flag --ocr for click");
+          const line = chosen(await ocrLines(), String(flags.text || ""), flags["after-text"] || null);
+          const at = { x: line.x + Number(flags.dx || 0), y: line.y + Number(flags.dy || 0) };
+          pointer = at;
+          deliver(() => page.mouse.click(at.x, at.y));
+          await handStep("mouse-click", started);
+          return { pressed: { words: line.text, x: line.x, y: line.y }, click: { path: "synthetic", clickCount: 1 } };
+        }
         const target = await byReading(flags);
         const editable = await target.evaluate((element) => element.matches("input:not([type=radio]):not([type=checkbox]), textarea, select, [contenteditable]"));
         deliver(async () => {
@@ -396,6 +493,12 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
       }
       case "wait": {
         const ms = Number(flags.ms || 0);
+        if (flags.settle && !levers) throw new Refusal("invalid_argument", "unknown flag --settle for wait");
+        if (flags.settle) {
+          const waited = await waitSettled(ms);
+          tally.waitMs += waited.waitedMs;
+          return { ...waited, capped: false };
+        }
         await sleep(ms);
         tally.waitMs += ms;
         return { waitedMs: ms, capped: false };
@@ -419,18 +522,34 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
         return pointer;
       case "status":
         return { helper: { running: true }, pace: { mode: "unlimited" } };
-      case "read":
-      case "find":
+      case "read": {
         if (flags.app) appOf(flags.app);
-        return { text: (await tree()).text };
+        if (!flags.ocr) return { text: (await tree()).text };
+        const lines = await ocrLines();
+        return { source: "ocr", text: lines.map((line) => line.text).join("\n"), lines };
+      }
+      case "find": {
+        if (flags.app) appOf(flags.app);
+        if (!flags.ocr) return { text: (await tree()).text };
+        const words = String(flags.text || "").toLowerCase();
+        const lines = await ocrLines();
+        return { source: "ocr", coordinateSpace: "screen", matches: lines.filter((line) => line.text.toLowerCase().includes(words)),
+          linesRead: lines.length };
+      }
       case "wait-for": {
-        const deadline = Date.now() + Number(flags["timeout-ms"] || 0);
+        if (flags.app) appOf(flags.app);
+        const began = Date.now();
+        const deadline = began + Number(flags["timeout-ms"] || 0);
         const words = String(flags.text || flags.label || "").toLowerCase();
-        for (;;) {
-          const seen = (await tree()).text.toLowerCase().includes(words);
-          if (seen !== Boolean(flags.absent)) return { found: !flags.absent };
-          if (Date.now() >= deadline) throw new Refusal("timeout", `"${flags.text || flags.label}" did not ${flags.absent ? "leave" : "appear"}`);
-          await sleep(WAIT_FOR_POLL_MS);
+        for (let looks = 1; ; looks += 1) {
+          const seen = flags.ocr
+            ? (await ocrLines()).some((line) => line.text.toLowerCase().includes(words))
+            : (await tree()).text.toLowerCase().includes(words);
+          if (seen !== Boolean(flags.absent)) return { satisfied: true, absent: Boolean(flags.absent), looks, elapsedMs: Date.now() - began };
+          if (Date.now() + WINDOW.waitForPollMs >= deadline) {
+            throw new Refusal("timeout", `still ${flags.absent ? "present" : "absent"} after ${Date.now() - began} ms (${looks} looks)`);
+          }
+          await sleep(WINDOW.waitForPollMs);
         }
       }
       case "handoff": {
@@ -459,11 +578,16 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
     const began = Date.now();
     const steps = [];
     let refusedAt = null;
-    for (const [at, argv] of commands.entries()) {
+    for (const [at, written] of commands.entries()) {
+      // With the levers, a wait right after an acting step ends on its settle
+      // (the core's `settled_wait`).
+      const before = commands[at - 1];
+      const argv = levers && written[0] === "wait" && before && ACTING.has(before[0]) && !written.includes("--settle")
+        ? [...written, "--settle"] : written;
       count(tally.steps, argv[0]);
       const stepStarted = Date.now();
       try {
-        if (Date.now() - began > BATCH_DEADLINE_MS) throw new Refusal("timeout", "the batch ran out of time");
+        if (Date.now() - began > WINDOW.batchDeadlineMs) throw new Refusal("timeout", "the batch ran out of time");
         const result = await run(argv);
         steps.push({ n: at + 1, verb: argv[0], ok: true, result, ms: Date.now() - stepStarted });
       } catch (error) {

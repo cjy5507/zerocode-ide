@@ -6,6 +6,7 @@
  *
  *   node run.mjs --agent zo --scenario phone|chrome|url --out DIR
  *                [--cap-seconds N] [--model ID] [--bin PATH] [--note WORDS]
+ *                [--window today|levers] [--words-choose PATH]
  *
  * `phone`: the form stands open in a phone app the Mac mirrors, pixels only,
  * as it did in the person's session; `chrome`: in a desktop browser with its
@@ -47,7 +48,7 @@ const KEPT_ENV = ["HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "CLAUDE
 const SYSTEM_PATH = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
 function args(argv) {
-  const parsed = { agent: "zo", scenario: "phone", capSeconds: DEFAULT_CAP_SECONDS, note: "" };
+  const parsed = { agent: "zo", scenario: "phone", capSeconds: DEFAULT_CAP_SECONDS, note: "", window: "today" };
   for (let at = 0; at < argv.length; at += 2) {
     const [flag, value] = [argv[at], argv[at + 1]];
     const key = flag.replace(/^--/, "").replace(/-(\w)/g, (_, letter) => letter.toUpperCase());
@@ -152,7 +153,8 @@ async function main() {
   await mkdir(work, { recursive: true });
   await mkdir(join(options.out, "home"), { recursive: true });
   const { server, url } = await serve(options.out);
-  const desk = await startDesk({ url, out: options.out, personAttachMs: PERSON_ATTACH_MS, scene: SCENE_OF[options.scenario] });
+  const desk = await startDesk({ url, out: options.out, personAttachMs: PERSON_ATTACH_MS, scene: SCENE_OF[options.scenario],
+    window: options.window, wordsChoose: options.wordsChoose ? resolve(options.wordsChoose) : null });
   const bin = await shims(options.out);
   const env = Object.fromEntries(KEPT_ENV.filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
   Object.assign(env, agent.env(options), {
@@ -204,6 +206,7 @@ async function main() {
   const calls = agent.toolCalls(lines);
   const result = {
     schema: 1, agent: options.agent, model: options.model || null, scenario: options.scenario, note: options.note,
+    window: options.window,
     profile: process.env.LONG_FORM_PROFILE || "normal",
     wallSeconds: wallMs / 1000, exit, capSeconds: options.capSeconds,
     personSeconds: KLM.total_seconds, overPerson: wallMs / 1000 / KLM.total_seconds,
