@@ -401,8 +401,10 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             keeps a procedure that worked; recipe_run walks it again in one call (params fill its \
             {{names}}) and says where it stopped and the start to resume from. walk (goal: one sentence; one of \
             app, pane, or platform with device; until: the text on screen when it worked; max_steps) walks there \
-            in one call on the window's own judgment and answers a status to act on. A code, CAPTCHA or \
-            password field (secure_input) is the person's: handoff (text: what they do; ask_code: a one-time code they read to you) waits for them. \
+            in one call on the window's own judgment and answers a status to act on. A CAPTCHA or password \
+            field (secure_input) is the person's: handoff (text: what they do) waits for them. A one-time code they read out: \
+            handoff with ask_code and into (the input command's words, e.g. [\"set-value\",\"--app\",\"A\",\"--element-index\",\"3\"]) — \
+            the window types it, you never receive it, and a look after may show it. \
             The person keeps one hand on you: a \
             `stopped` answer means stop and report; a press on a payment, transfer or delete control is \
             held while the window asks them — say confirming: payment|transfer|delete when you know you \
@@ -927,18 +929,36 @@ fn argv_eye(action: &str, input: &ComputerInput, argv: &mut Vec<String>) -> bool
     true
 }
 
-/// The person's turn — a CAPTCHA, a password field, a code they read to you
-/// (`ask_code`): they do it, and the call waits until they say so (or its
-/// `timeout_ms`).
+/// What a one-time code asked for with no field to put it in is told: the
+/// code never comes back to the model, so the handoff needs `into`.
+const NO_FIELD_FOR_THE_CODE: &str = "`ask_code` needs `into`: the one-time code does not come back to you — the window types it \
+    into the field `into` names, so it never reaches this conversation. Give `into` the words of the input command that puts it \
+    there, for example [\"set-value\",\"--app\",\"Form\",\"--element-index\",\"3\"] or [\"browser\",\"type\",\"browser-1\",\"#otp\"]";
+
+/// What a field named with no code to put in it is told.
+const NO_CODE_FOR_THE_FIELD: &str = "`into` names the field a one-time code is typed into: it goes with `ask_code`";
+
+/// The person's turn — a CAPTCHA, a password field, a code they read out
+/// (`ask_code`, with the field it goes into, `into`): they do it, and the
+/// call waits until they say so (or its `timeout_ms`).
 fn argv_persons_turn(action: &str, input: &ComputerInput, argv: &mut Vec<String>) -> Result<bool, ToolError> {
     if !methods(action).any(|method| method == ComputerMethod::Handoff) {
         return Ok(false);
     }
     push(argv, &[ComputerMethod::Handoff.verb_name(), "--reason", need(input.text.as_deref(), action, "text")?]);
     // A one-time code the person reads out: the window gives the card its
-    // line, or refuses a reason that names a secret — never judged here.
-    if input.ask_code == Some(true) {
-        push(argv, &["--ask-code"]);
+    // line, types what is typed into the field `into` names and answers
+    // without it, or refuses a reason that names a secret — never judged
+    // here. A code with no field to go to, or a field with no code, is
+    // refused before the shell is called.
+    match (input.ask_code == Some(true), input.into.as_deref()) {
+        (true, Some(words)) if !words.is_empty() => {
+            let spelled = serde_json::to_string(words).map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+            push(argv, &["--ask-code", "--into", &spelled]);
+        }
+        (true, _) => return Err(ToolError::InvalidInput(NO_FIELD_FOR_THE_CODE.into())),
+        (false, Some(_)) => return Err(ToolError::InvalidInput(NO_CODE_FOR_THE_FIELD.into())),
+        (false, None) => {}
     }
     if let Some(ms) = input.timeout_ms {
         push(argv, &["--timeout-ms", &ms.to_string()]);
