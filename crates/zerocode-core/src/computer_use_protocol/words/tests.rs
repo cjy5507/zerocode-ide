@@ -131,3 +131,25 @@ fn a_line_missing_its_frame_is_not_one_a_press_can_land_on() {
         (21.0, 12.0)
     );
 }
+
+/// The measurement (t-37883; run with `--ignored --nocapture`, on the normal
+/// profile and under `taskpolicy -b`): a phone screen's worth of OCR lines
+/// read into reading order and chosen from — the window's own share of a
+/// press by words, beside the helper's OCR read.
+#[test]
+#[ignore = "a measurement: run with --ignored --nocapture"]
+fn measure_a_choice_on_a_full_screen() {
+    const LINES: u32 = 60;
+    const ROUNDS: u32 = 10_000;
+    let answer = json!({ "lines": (0..LINES).rev().map(|row| json!({
+        "text": format!("Line {row} of the form"),
+        "x": 760.0, "y": 80.0 + 15.0 * f64::from(row), "width": 200.0, "height": 14.0,
+    })).collect::<Vec<_>>() });
+    let started = std::time::Instant::now();
+    for _ in 0..ROUNDS {
+        let read = lines(&answer);
+        assert!(choose(&read, "Line 42 of the form", Some("Line 41")).is_ok());
+    }
+    let micros = started.elapsed().as_secs_f64() * 1e6 / f64::from(ROUNDS);
+    println!("{{\"measure\":\"words-choose\",\"lines\":{LINES},\"perChoiceMicros\":{micros:.2}}}");
+}
