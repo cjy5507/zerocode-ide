@@ -6,9 +6,10 @@ use serde_json::{Map, Value, json};
 
 use super::*;
 
-/// What every request of the toy seat carries once, in its shared part: the
-/// words the road must not repeat for each item.
-const SHARED_WORDS: &str = "judge each number alone, by its own value";
+/// What every request of the toy seat carries once, in its shared part: a fact
+/// of the whole batch, which the road must not repeat for each item. The words
+/// of the judgment are not in it: they stand in each item's questions.
+const SHARED_FACT: &str = "every number counts metres";
 
 /// The suffix of the toy seat's second question about an item.
 const WHOLE: &str = "whole";
@@ -32,7 +33,7 @@ impl Judgment for Toy {
     }
 
     fn shared(&self) -> Map<String, Value> {
-        Map::from_iter([("rubric".to_string(), Value::from(SHARED_WORDS))])
+        Map::from_iter([("unit".to_string(), Value::from(SHARED_FACT))])
     }
 
     fn questions(&self, at: usize) -> Vec<(&'static str, Value)> {
@@ -164,7 +165,7 @@ fn a_batch_is_cut_into_even_requests_none_over_the_cap_and_every_item_once() {
 /// What every item shares travels once in a request — not once per item —
 /// whatever the number of items: the whole point of asking them together.
 #[test]
-fn the_shared_words_travel_once_per_request_whatever_the_number_of_items() {
+fn the_shared_fact_travels_once_per_request_whatever_the_number_of_items() {
     let judgment = Toy { cap: 50 };
     for count in [1_usize, 2, 7, 50] {
         let asked = requests(&judgment, numbers(count));
@@ -175,12 +176,12 @@ fn the_shared_words_travel_once_per_request_whatever_the_number_of_items() {
         );
         let whole = json!({ "state": asked[0].state, "questions": asked[0].questions });
         assert_eq!(
-            whole.to_string().matches(SHARED_WORDS).count(),
+            whole.to_string().matches(SHARED_FACT).count(),
             1,
             "{count} items"
         );
         assert!(
-            !asked[0].questions.to_string().contains(SHARED_WORDS),
+            !asked[0].questions.to_string().contains(SHARED_FACT),
             "{count} items: a question repeats what the state says once"
         );
     }
@@ -216,7 +217,7 @@ fn a_question_names_its_item_by_its_place_in_its_own_request_and_in_the_whole_ba
 }
 
 /// Stage one's rule on the building side: a request is made of the items and
-/// the seat's shared words and of nothing else — the same again to the byte —
+/// the seat's shared facts and of nothing else — the same again to the byte —
 /// and every question of it is ONE item's: it names its own place and no
 /// other, and none stands under a name of its own, as a comparison between
 /// items would.

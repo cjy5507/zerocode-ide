@@ -165,7 +165,7 @@ fn room<'a>(
 #[test]
 fn the_version_is_pinned_to_the_words() {
     assert_eq!(MAIL_TRIAGE_RUBRIC_VERSION, 2);
-    assert_eq!(rubric_fingerprint(rubric_words), "082a013917c98431");
+    assert_eq!(rubric_fingerprint(rubric_words), "8951c3c165cdb853");
 }
 
 /// The answers are three words in the question's order, each reads back, and
@@ -278,10 +278,13 @@ fn replies(about: &[(usize, &str, Value)]) -> Value {
     Value::Object(answers)
 }
 
-/// A batch of letters is ONE request: the rubric and the coordinator's
-/// situation said once, each letter in an entry of its own.
+/// A batch of letters is ONE request: the coordinator's situation said once,
+/// each letter in an entry of its own — and not a word of the question in the
+/// state, where the model reads it as data (t-32796: the day's letters agreed
+/// with what the coordinator did next in 192 of 406 comparisons so, in 218
+/// with the words in the questions).
 #[test]
-fn a_batch_is_one_request_that_says_the_rubric_and_the_situation_once() {
+fn a_batch_is_one_request_that_says_the_situation_once_and_no_word_of_the_question() {
     let looks = three_letters();
     let asked = requests_for(&looks);
     assert_eq!(asked.len(), 1, "three letters are one request");
@@ -293,10 +296,15 @@ fn a_batch_is_one_request_that_says_the_rubric_and_the_situation_once() {
     let mut expected = REQUEST_KEYS.to_vec();
     expected.sort_unstable();
     assert_eq!(keys, expected);
-    assert_eq!(state["rubric"]["about"], INSTRUCTIONS);
-    for triage in Triage::ALL {
-        assert_eq!(state["rubric"]["answers"][triage.word()], triage.means());
-    }
+    assert_eq!(
+        REQUEST_KEYS[..],
+        ["coordinator", "letters"][..],
+        "the state holds what is true of the coordinator and the letters"
+    );
+    assert!(
+        state.get("rubric").is_none(),
+        "the words of the question stand in the questions: {state:?}"
+    );
     assert_eq!(state["coordinator"]["busy"], true);
     assert_eq!(state["coordinator"]["openQuestions"], 3);
     let letters = state["letters"].as_array().expect("the letters");
@@ -352,10 +360,12 @@ fn a_letters_entry_carries_its_structure_and_never_its_words() {
 }
 
 /// Each letter is asked one closed choice and one Noul, by its place in the
-/// list; the options say what they mean in a line, and the rubric — said
-/// once, in the state — is not said again in them.
+/// list. The choice says what the fields are and what each option means, with
+/// the examples that tell which letters it is for — in the question, once for
+/// each letter, and not once for the request: a question is judged on its own
+/// words.
 #[test]
-fn each_letter_is_asked_a_choice_and_a_noul_by_its_place_and_the_rubric_is_not_repeated() {
+fn each_letter_is_asked_a_choice_that_says_what_the_fields_are_and_what_each_option_means() {
     let looks = three_letters();
     let asked = requests_for(&looks);
     assert_eq!(asked.len(), 1);
@@ -369,6 +379,15 @@ fn each_letter_is_asked_a_choice_and_a_noul_by_its_place_and_the_rubric_is_not_r
         assert_eq!(choice["type"], "choice");
         let said = choice["instructions"].as_str().expect("words");
         assert!(said.contains(&format!("letters[{at}]")), "{said}");
+        assert_eq!(
+            said,
+            format!(
+                "{INSTRUCTIONS} {}",
+                ITEM_INSTRUCTIONS.replace(AT_PLACEHOLDER, &at.to_string())
+            ),
+            "what the fields are, then which letter it is"
+        );
+        assert!(!said.contains("rubric"), "{said}");
         let criteria = choice["criteria"].as_object().expect("the options");
         let mut offered: Vec<&str> = criteria.keys().map(String::as_str).collect();
         offered.sort_unstable();
@@ -376,8 +395,8 @@ fn each_letter_is_asked_a_choice_and_a_noul_by_its_place_and_the_rubric_is_not_r
         for triage in Triage::ALL {
             assert_eq!(
                 criteria[triage.word()],
-                triage.gist(),
-                "an option says what it means in a line"
+                triage.means(),
+                "an option says what it means, with its examples"
             );
         }
         let urgent = &questions[&question_name(item, URGENT_SUFFIX)];
@@ -386,21 +405,26 @@ fn each_letter_is_asked_a_choice_and_a_noul_by_its_place_and_the_rubric_is_not_r
         assert!(said.contains(&format!("letters[{at}]")), "{said}");
     }
     let whole = json!({ "state": request.state, "questions": request.questions }).to_string();
-    assert_eq!(whole.matches(INSTRUCTIONS).count(), 1, "the rubric, once");
+    assert_eq!(
+        whole.matches(INSTRUCTIONS).count(),
+        looks.len(),
+        "what the fields are, once for each letter"
+    );
     for triage in Triage::ALL {
         assert_eq!(
             whole.matches(triage.means()).count(),
-            1,
-            "{}: what the option means, once",
+            looks.len(),
+            "{}: what the option means, once for each letter",
             triage.word()
         );
     }
 }
 
-/// A batch above the cap is cut evenly, and every request of it says the
-/// rubric once.
+/// A batch above the cap is cut evenly, and every request of it carries the
+/// explanation of the fields with each of its letters' questions and none in
+/// its state.
 #[test]
-fn a_batch_above_the_cap_is_cut_evenly_and_every_request_says_the_rubric_once() {
+fn a_batch_above_the_cap_is_cut_evenly_and_every_letters_question_says_what_the_fields_are() {
     let letters = MAIL_TRIAGE_BATCH_CAP * 2 + 1;
     let looks: Vec<MailLook<'_>> = (0..letters).map(|_| look()).collect();
     let asked = requests_for(&looks);
@@ -417,7 +441,8 @@ fn a_batch_above_the_cap_is_cut_evenly_and_every_request_says_the_rubric_once() 
     assert!(widest - narrowest <= 1, "{sizes:?}");
     for request in &asked {
         let whole = json!({ "state": request.state, "questions": request.questions }).to_string();
-        assert_eq!(whole.matches(INSTRUCTIONS).count(), 1);
+        assert_eq!(whole.matches(INSTRUCTIONS).count(), request.items().len());
+        assert!(request.state.get("rubric").is_none());
         assert_eq!(
             request.state["letters"].as_array().expect("letters").len(),
             request.items().len()
