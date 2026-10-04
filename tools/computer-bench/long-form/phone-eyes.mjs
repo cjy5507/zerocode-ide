@@ -27,25 +27,50 @@ export const SEES = {
 };
 
 /* The display point where the phone shows what `find` locates, after the
- * phone has answered every input sent. With `scroll`, the eyes scroll it
- * into view first (the self-test's shortcut for the scrolling an agent does). */
-export async function pointOf(desk, find, arg, { scroll = true } = {}) {
+ * phone has answered every input sent: near the start of a control (a
+ * finger presses a row's words, not its middle). With `scroll`, the eyes
+ * scroll it into view first (the self-test's shortcut for the scrolling an
+ * agent does). With `words`, the point is the middle of the element's own
+ * run of text — where an OCR line of those words has its centre, which a
+ * press by words lands on before its nudge. `hit` says what stands at the
+ * point, for a trace. */
+export async function pointOf(desk, find, arg, { scroll = true, words = false } = {}) {
   await desk.settled();
   await sleep(desk.scene.lagMs + SLIDE_SETTLE_MS);
-  const box = await desk.content().evaluate(({ source, arg, scroll }) => {
+  const box = await desk.content().evaluate(({ source, arg, scroll, words }) => {
     const element = new Function("arg", source)(arg);
     if (!element) return null;
     if (scroll) element.scrollIntoView({ block: "center" });
-    const rect = element.getBoundingClientRect();
-    const x = rect.x + Math.min(rect.width / 2, 40);
-    const y = rect.y + rect.height / 2;
+    let x, y;
+    const run = words && [...element.childNodes].find((node) => node.nodeType === 3 && node.textContent.trim());
+    if (run) {
+      const range = document.createRange();
+      range.selectNodeContents(run);
+      const rect = range.getBoundingClientRect();
+      [x, y] = [rect.x + rect.width / 2, rect.y + rect.height / 2];
+    } else {
+      const rect = element.getBoundingClientRect();
+      [x, y] = [rect.x + Math.min(rect.width / 2, 40), rect.y + rect.height / 2];
+    }
     // In view is what a person could press there: the element itself on top
     // at that point, not one a list clips or the keyboard covers.
     const hit = document.elementFromPoint(x, y);
-    return { x, y, inView: Boolean(hit) && (element.contains(hit) || hit.contains(element)) };
-  }, { source: find, arg, scroll });
+    const said = hit ? `${hit.tagName.toLowerCase()}.${String(hit.className || "").split(" ")[0]} "${String(hit.textContent || hit.value || "").trim().slice(0, 30)}"` : "nothing";
+    return { x, y, inView: Boolean(hit) && (element.contains(hit) || hit.contains(element)), hit: said };
+  }, { source: find, arg, scroll, words });
   if (!box) throw new Error(`nothing on the phone answers ${find} (${JSON.stringify(arg)})`);
-  return { ...toDisplay(desk, box), inView: box.inView };
+  return { ...toDisplay(desk, box), inView: box.inView, hit: box.hit };
+}
+
+/* What the page says about a run, read before the desk closes: its own
+ * errors, the alert shown, and the shown required fields still blank — for
+ * a run the oracle failed. */
+export async function pageSays(desk) {
+  return desk.content().evaluate(() => ({
+    errors: LongForm.errors(() => false).map((error) => error.message),
+    alert: document.getElementById("alert")?.textContent || null,
+    unset: LongForm.fields().filter(LongForm.shown).filter((field) => field.required && LongForm.blank(field)).map((field) => field.id),
+  }));
 }
 
 /* A point in the phone's own CSS pixels, on the display. */
