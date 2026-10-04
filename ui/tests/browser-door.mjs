@@ -23,6 +23,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./playwright-chromium.mjs";
 import { rustList, rustNumber, rustText } from "./rust-source.mjs";
+import { FORM_REQUEST, evalFormScript, fieldsScript, fillPasses } from "./browser-scripts.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DOOR = await readFile(resolve(UI, "../crates/zerocode-shell/src/cmd/browser.rs"), "utf8");
@@ -681,64 +682,14 @@ await test("background_observation_does_not_focus_another_pane", async () => {
  * tables are read from the Rust the pane runs; the pages are the bench's
  * regression scenes (tools/computer-bench/form-scenes), each a shape real
  * sites build — the door is told nothing about them. */
-const FORM_DOOR = await readFile(resolve(UI, "../crates/zerocode-shell/src/cmd/browser/form.rs"), "utf8").catch(() => "");
-const FORM_CORE = await readFile(resolve(UI, "../crates/zerocode-core/src/browser_form.rs"), "utf8").catch(() => "");
-const FORM_HELPERS = rustText(FORM_DOOR, "BROWSER_FORM_HELPERS");
-const FIELDS_BODY = rustText(FORM_DOOR, "BROWSER_FIELDS_BODY");
-const FILL_BODY = rustText(FORM_DOOR, "BROWSER_FILL_BODY");
-const FILL_HELPERS = rustText(FORM_DOOR, "BROWSER_FILL_HELPERS");
-const EVAL_FORM = rustText(FORM_DOOR, "BROWSER_EVAL_FORM");
 const SCENES = resolve(UI, "../tools/computer-bench/form-scenes");
 const scene = async (name) => readFile(resolve(SCENES, name, "scene.html"), "utf8");
-/* The request `form_request` hands the page (cmd/browser/form.rs). */
-const FORM_REQUEST = {
-  controls: rustList(FORM_CORE, "BROWSER_FORM_CONTROLS"), notFields: rustList(FORM_CORE, "BROWSER_FORM_NOT_FIELDS"),
-  actions: rustList(FORM_CORE, "BROWSER_FORM_ACTIONS"), scopes: rustList(FORM_CORE, "BROWSER_FORM_SCOPES"),
-  options: rustList(FORM_CORE, "BROWSER_FORM_OPTIONS"), days: rustList(FORM_CORE, "BROWSER_FORM_DAYS"),
-  dayWords: rustList(FORM_CORE, "BROWSER_FORM_DAY_WORDS"), frameSeparator: rustText(FORM_CORE, "BROWSER_FORM_FRAME_SEPARATOR"),
-  frameDepth: rustNumber(FORM_CORE, "BROWSER_FORM_FRAME_DEPTH"), captionDepth: rustNumber(FORM_CORE, "BROWSER_FORM_CAPTION_DEPTH"),
-  on: rustList(FORM_CORE, "BROWSER_FILL_ON"), off: rustList(FORM_CORE, "BROWSER_FILL_OFF"),
-  field: MARKS_REQUEST.field,
-  fieldCap: rustNumber(FORM_CORE, "BROWSER_FORM_FIELD_CAP"), actionCap: rustNumber(FORM_CORE, "BROWSER_FORM_ACTION_CAP"),
-  optionCap: rustNumber(FORM_CORE, "BROWSER_FORM_OPTION_CAP"), wordCap: MARKS_REQUEST.wordCap,
-  valueCap: MARKS_REQUEST.valueCap, answerCap: MARKS_REQUEST.answerCap,
-};
-const PENDING_MS = rustNumber(FORM_CORE, "BROWSER_FILL_PENDING_MS");
-const MAX_PASSES = rustNumber(FORM_CORE, "BROWSER_FILL_PASSES");
-const formScript = (request, body) => {
-  need("BROWSER_FORM_HELPERS", FORM_HELPERS);
-  need("BROWSER_FORM_CONTROLS", FORM_REQUEST.controls);
-  return script(request, `${MARK_HELPERS}\n${FORM_HELPERS}\n${body}`);
-};
 const readFields = async (target) => {
-  need("BROWSER_FIELDS_BODY", FIELDS_BODY);
-  const read = await evalJson(target, formScript(FORM_REQUEST, FIELDS_BODY));
+  const read = await evalJson(target, fieldsScript());
   assert(read.ok, "the read was refused", read);
   return read.value;
 };
-/* The window's fill road (`fill_passes`): the whole bundle, then — every
- * poll, inside the pending wait — only what another pass may still find. */
-const RETRY = ["mismatch", "not_found", "no_option", "disabled"];
-const fillBundle = async (target, bundle) => {
-  need("BROWSER_FILL_BODY", FILL_BODY);
-  const entries = Object.entries(bundle).map(([handle, value]) => ({ handle, value }));
-  const last = new Map();
-  let passes = 0, left = [];
-  const began = Date.now();
-  let asked = entries;
-  while (asked.length) {
-    need("BROWSER_FILL_HELPERS", FILL_HELPERS);
-    const pass = await evalJson(target, formScript({ ...FORM_REQUEST, entries: asked }, `${FILL_HELPERS}\n${FILL_BODY}`));
-    assert(pass.ok, "a fill pass was refused", pass);
-    passes += 1;
-    for (const result of pass.value.results) last.set(result.handle, result);
-    left = pass.value.left;
-    asked = entries.filter((entry) => RETRY.includes(last.get(entry.handle)?.status));
-    if (!asked.length || passes >= MAX_PASSES || Date.now() - began >= PENDING_MS) break;
-    await new Promise((done) => setTimeout(done, rustNumber(CORE, "BROWSER_WAIT_POLL_MS")));
-  }
-  return { results: entries.map((entry) => last.get(entry.handle)), left, passes };
-};
+const fillBundle = (target, bundle) => fillPasses((source) => evalJson(target, source), bundle);
 const byHandle = (read) => Object.fromEntries(read.fields.map((field) => [field.handle, field]));
 const handleOf = (read, label) => {
   const found = read.fields.filter((field) => field.label === label);
@@ -899,13 +850,6 @@ await test("a_tab_nobody_looks_at_reads_and_fills_and_the_persons_tab_keeps_its_
 /* One eval, one step (`eval_script`): the expression reads the page's
  * fields, fills them by the words it read and says what is left — the
  * script the skill teaches, run as the door runs it. */
-const evalForm = (expression) => {
-  need("BROWSER_EVAL_FORM", EVAL_FORM);
-  need("BROWSER_FILL_HELPERS", FILL_HELPERS);
-  const body = `const value = (\n${expression}\n);\nif (value && typeof value.then === "function") return zcFail("async_value");\n`
-    + `const held = value === undefined ? { type: "undefined" } : value;\nreturn zcEncode({ ok: true, value: held });`;
-  return formScript(FORM_REQUEST, `${FILL_HELPERS}\n${EVAL_FORM}\n${body}`);
-};
 await test("one_eval_reads_fills_and_checks_a_step_by_the_words_it_read", async () => {
   const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
   try {
@@ -924,12 +868,12 @@ await test("one_eval_reads_fills_and_checks_a_step_by_the_words_it_read", async 
       const filled = zerocode.fill(bundle);
       return { statuses: filled.results.map((r) => r.label + ":" + r.status), left: filled.left.map((f) => f.label) };
     })()`;
-    const first = await evalJson(booking, evalForm(step));
+    const first = await evalJson(booking, evalFormScript(step));
     assert(first.ok, "the one script ran", first);
     const notSet = first.value.statuses.filter((said) => !said.endsWith(":set"));
     assert(JSON.stringify(notSet) === JSON.stringify(["입차 시간:disabled"]), "all but the list a date loads took in one call", first.value);
     await booking.waitForTimeout(350);
-    const second = await evalJson(booking, evalForm(step));
+    const second = await evalJson(booking, evalFormScript(step));
     assert(second.value.statuses.every((said) => said.endsWith(":set") || said.endsWith(":same")), "the next call finishes it", second.value);
     return `${first.value.statuses.length} fields in one call`;
   } finally { await booking.close(); }
