@@ -7132,6 +7132,16 @@ function taskBoardCost(members, rows) {
   return null;
 }
 
+/* 일꾼이 쓴 요약을 센 수 (t-32786): 비용과 같은 길 — 그 과업의 워커 행이 들고 온 것을 보드의
+ * 박자가 얹는다(`writing_book`). 쓴 요약이 없는 과업과 움직이는 과업의 행은 아무것도 들지 않는다. */
+function taskBoardWriting(members, rows) {
+  for (const entry of members) {
+    const writing = rows?.get(entry.card.pane)?.writing;
+    if (writing && typeof writing === "object") return writing;
+  }
+  return null;
+}
+
 function taskBoardModel(model, previous = null, now = Date.now(), workspacePath = null) {
   const entries = new Map(model.agents.map((entry) => [entry.card.pane, entry]));
   const rootOf = (entry) => {
@@ -7212,6 +7222,7 @@ function taskBoardModel(model, previous = null, now = Date.now(), workspacePath 
     group.at = Math.max(0, ...group.members.map((entry) => Number(entry.card.at) || 0));
     group.when = group.at > 0 ? agoWord(group.at, now) : "";
     group.cost = taskBoardCost(group.members, model.source?.ledger);
+    group.writing = taskBoardWriting(group.members, model.source?.ledger);
     group.stageWord = taskBoardStageWord(group, model.source?.ledger);
   }
   return { groups: ranked, counts: new Map(taskBoardSections().map(({ id }) =>
@@ -7296,7 +7307,8 @@ function taskBoardRow(group, view) {
   action.type = "button";
   action.onclick = () => selectTaskBoardMember(view, row.__group.lead.key);
   foot.append(action);
-  row.append(main, members, message, taskBoardElement("p", "task-board-cost"), foot);
+  row.append(main, members, message, taskBoardElement("p", "task-board-cost"),
+    taskBoardElement("p", "task-board-writing"), foot);
   return row;
 }
 
@@ -7345,6 +7357,12 @@ function updateTaskBoardRow(row, group, view) {
   writeTextContent(costLine, cost?.text ?? "");
   writeAttribute(costLine, "data-tip", cost?.tip ?? "");
   writeHidden(costLine, cost === null);
+  // 일꾼이 쓴 요약을 센 수 한 줄(t-32786): 끝난 과업의 카드에만 서고, 센 수가 없으면 숨는다.
+  const writingLine = row.querySelector(".task-board-writing");
+  const writing = writingBadgeWords(group.writing);
+  writeTextContent(writingLine, writing?.text ?? "");
+  writeAttribute(writingLine, "data-tip", writing?.tip ?? "");
+  writeHidden(writingLine, writing === null);
   writeTextContent(row.querySelector(".task-board-when"), [
     group.members.length === 1 ? group.lead.facts.model : agentGraphCountWord("agent", group.members.length),
     group.when ? t("board.tasks.lastActivity", "마지막 활동 {{time}}", { time: group.when }) : "",
@@ -7963,6 +7981,9 @@ function agentGraphSaid(columns, reviews, places, now, ledger = null) {
     /* 그리고 과업 카드가 원장 행에서 읽는 비용 (t-9470). 카드는 비용을 싣지 않으므로,
      * 여기 없으면 비용만 바뀐 판을 서명이 모른다. 끝난 과업의 행만 비용을 든다. */
     costs: ledger ? [...ledger].filter(([, row]) => row?.cost).map(([pane, row]) => [pane, row.cost]) : [],
+    /* 그리고 과업 카드가 원장 행에서 읽는 글 점검의 센 수 (t-32786). 카드는 센 수를 싣지 않으므로,
+     * 여기 없으면 센 수만 바뀐 판을 서명이 모른다. 끝난 과업의 행만 센 수를 든다. */
+    writings: ledger ? [...ledger].filter(([, row]) => row?.writing).map(([pane, row]) => [pane, row.writing]) : [],
     following: agentGraphFollowing,
     draft: selectedDraft
       ? {

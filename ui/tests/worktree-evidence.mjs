@@ -4,12 +4,15 @@ import { workspaceBoardFixture } from "./workspace-board.mjs";
 /* 워크스페이스 근거 화면 — 진짜 렌더러로.
  *
  * Rust 게이트는 이 화면의 말이 맞는지 읽을 수 있지만, 그 말이 화면에 실제로
- * 서는지는 레이아웃을 수행한 브라우저만 안다. 여기서 재는 것 넷:
+ * 서는지는 레이아웃을 수행한 브라우저만 안다. 여기서 재는 것 다섯:
  *
  * - 네 상태(읽음·없음·지원 안 함·읽지 못함)가 서로 다르게 읽히는가
  * - 묻지 않으면 묻지 않는가(닫힌 동안 조회 0, 같은 질문은 한 번)
  * - 늦게 온 답이 주인이 바뀐 화면을 덮지 않는가
- * - 다크·라이트·좁은 창·키보드에서 서는가 */
+ * - 다크·라이트·좁은 창·키보드에서 서는가
+ * - git이 무시하는 파일이 「커밋하지 않은 내용」으로 불리지 않는가(t-34315): 폴더
+ *   세 모양(무시된 파일만·진짜 변경만·둘 다)과 깨끗한 폴더가 말하는 문장,
+ *   틈의 이름이 다섯 언어의 사람 말로 서는가, 사이드바 뱃지와 같은 낱말인가 */
 
 const EVIDENCE = {
   schemaVersion: 1,
@@ -41,6 +44,10 @@ const EVIDENCE = {
       detached: false,
       locked: false,
       dirty: true,
+      // 백엔드의 답 그대로의 모양이다: 변경은 있고(`uncommitted`), 무시된 파일은
+      // 없다(`ignored`). 두 사실은 `dirty` 하나로 접히지 않는다 (t-34315).
+      uncommitted: true,
+      ignored: { count: 0, bytes: 0, sizeText: "0 B", complete: true, top: [] },
       complete: false,
       coverageGaps: ["untracked_content"],
       changes: [
@@ -101,6 +108,81 @@ const WITHOUT_A_STORE = {
   decisions: { state: "error", freshness: "unobserved", coverage: { counted: 0, returned: 0, truncated: false },
     error: { code: "store_unavailable", message: "the authority store could not be read", retryable: true }, data: [] },
 };
+
+/* 폴더 세 모양의 합성 답 (t-34315). 숫자와 이름은 지어낸 것이다 — 사람의
+ * 폴더에서 온 것이 아니다.
+ *
+ * 사람이 본 화면: 모든 커밋이 main에 들어가 있고 추적하는 파일의 변경도, 새
+ * 파일도 없는, git이 무시하는 파일(node_modules·빌드 결과·docs/·output/)만
+ * 270 MB 남은 폴더. 사이드바는 「반영됨」인데 근거 화면은 「커밋되지 않은
+ * 내용이 있습니다 · … ignored_content」였다.
+ *
+ * `dirty`는 옛 뜻 그대로(변경 또는 무시된 파일)다 — 새 사실 둘은 `uncommitted`
+ * 와 `ignored`다. 옛 코드에 이 답을 먹이면 사람이 본 그 문장이 그려진다. */
+const IGNORED_LEFT = {
+  count: 5, bytes: 283_115_520, sizeText: "270 MB", complete: true,
+  top: [
+    { name: "node_modules", bytes: 188_743_680, sizeText: "180 MB", dir: true },
+    { name: "target", bytes: 62_914_560, sizeText: "60 MB", dir: true },
+    { name: "output", bytes: 20_971_520, sizeText: "20 MB", dir: true },
+  ],
+};
+const NOTHING_IGNORED = { count: 0, bytes: 0, sizeText: "0 B", complete: true, top: [] };
+const A_CHANGE = { path: "ui/shell-workspace.js", code: " M", staged: false, unstaged: true, untracked: false, conflicted: false };
+const A_NEW_FILE = { path: "notes/draft.md", code: "??", staged: false, unstaged: false, untracked: true, conflicted: false };
+
+function folderLike({ changes, ignored, gaps }) {
+  const answer = structuredClone(EVIDENCE);
+  answer.snapshot.data = {
+    ...answer.snapshot.data,
+    dirty: changes.length > 0 || ignored.count > 0,
+    uncommitted: changes.length > 0,
+    ignored,
+    complete: gaps.length === 0,
+    coverageGaps: gaps,
+    changes,
+  };
+  answer.snapshot.coverage = { counted: changes.length, returned: changes.length, truncated: false };
+  answer.summary.dirty = answer.snapshot.data.dirty;
+  answer.summary.changedPaths = changes.length;
+  return answer;
+}
+
+const ONLY_IGNORED = folderLike({ changes: [], ignored: IGNORED_LEFT, gaps: ["ignored_content"] });
+const ONLY_CHANGES = folderLike({ changes: [A_CHANGE, A_NEW_FILE], ignored: NOTHING_IGNORED, gaps: ["untracked_content"] });
+const BOTH = folderLike({ changes: [A_CHANGE, A_NEW_FILE], ignored: IGNORED_LEFT, gaps: ["ignored_content", "untracked_content"] });
+const CLEAN = folderLike({ changes: [], ignored: NOTHING_IGNORED, gaps: [] });
+const SIZE_IS_A_FLOOR = folderLike({ changes: [], ignored: { ...IGNORED_LEFT, complete: false }, gaps: ["ignored_content"] });
+
+/* 백엔드가 지금 보낼 수 있는 틈의 이름 여섯. 여섯이 맞는지는 Rust 소스 계약이
+ * `gap_tag`에서 읽어 지킨다 — 여기서는 각각이 말이 되는지만 본다. */
+const GAP_TAGS = ["ignored_content", "untracked_content", "changed_path_limit",
+  "content_byte_limit", "dirty_submodule", "index_hidden_content"];
+const LOCALES = ["ko", "en", "ja", "zh", "es"];
+
+/* 이 답을 화면에 앉히고 「변경」 절이 말하는 것을 문장 단위로 읽는다. */
+const readChangesSection = (page, answer) => page.evaluate(async (held) => {
+  window.__EVIDENCE_ANSWER__ = held;
+  await refreshWorktreeEvidence();
+  const section = document.querySelector('[data-evidence-section="changes"]');
+  const said = (node, selector) => node?.querySelector(selector)?.textContent ?? null;
+  const rows = [...section.querySelectorAll(".wt-evidence-rows > .wt-evidence-row")];
+  const ignored = section.querySelector("[data-evidence-ignored]");
+  return {
+    text: section.textContent,
+    head: said(rows[0], ".wt-evidence-strong"),
+    warn: [...section.querySelectorAll(".wt-evidence-warn")].map((one) => one.textContent),
+    changes: rows.length - 1 - (ignored ? 1 : 0),
+    ignored: ignored && {
+      label: said(ignored, ".wt-evidence-strong"),
+      line: said(ignored, ".wt-evidence-line"),
+      names: said(ignored, ".wt-evidence-path"),
+      more: said(ignored, ".wt-evidence-note"),
+      caveat: said(ignored, ".wt-evidence-caveat"),
+      last: rows[rows.length - 1] === ignored,
+    },
+  };
+}, answer);
 
 function installEvidence(page, answer) {
   return page.evaluate((held) => {
@@ -378,6 +460,193 @@ export async function testWorktreeEvidence(browser, origin, ok) {
         size.bodyScroll <= size.body + 1 && size.left >= 0 && size.right <= size.page
         && size.pageScroll <= size.page + 1 && size.actionsInside, JSON.stringify(size));
       await page.screenshot({ path: `output/playwright/worktree-evidence/evidence-${width}.png` });
+    }
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+
+    /* ---- 무시된 파일은 「커밋하지 않은 내용」이 아니다 (t-34315) ----
+     *
+     * 두 사실이다: git이 변경으로 센 것(커밋하지 않은 변경)과, git이 무시하는
+     * 파일이 남아 있다는 것(폴더를 지우면 함께 사라지는 것). 폴더 세 모양과
+     * 깨끗한 폴더 하나가 말하는 문장을 글자 그대로 못 박는다. */
+    const shown = {
+      onlyIgnored: await readChangesSection(page, ONLY_IGNORED),
+      onlyChanges: await readChangesSection(page, ONLY_CHANGES),
+      both: await readChangesSection(page, BOTH),
+      clean: await readChangesSection(page, CLEAN),
+      floor: await readChangesSection(page, SIZE_IS_A_FLOOR),
+    };
+    const NO_TAG = (text) => !GAP_TAGS.some((tag) => text.includes(tag));
+    const IGNORED_SENTENCES = {
+      label: "무시된 파일 남음",
+      line: "git이 무시하는 파일 5개 항목 · 270 MB",
+      names: "node_modules/ (180 MB) · target/ (60 MB) · output/ (20 MB)",
+      more: "외 2개",
+      caveat: "폴더를 지우면 함께 사라집니다. 이 파일들은 읽지 않으므로, 남아 있는 동안 시험 영수증이 지금 내용과 맞는지는 확인되지 않습니다",
+    };
+    const sameSentences = (one, want) => Object.entries(want).every(([key, text]) => one?.[key] === text);
+    ok("무시된 파일만 남은 폴더: 「커밋하지 않은 변경이 없습니다」와 무시된 파일 한 줄의 사실 — 경고 줄도 날것의 이름도 없다",
+      shown.onlyIgnored.head === "커밋하지 않은 변경이 없습니다" && shown.onlyIgnored.warn.length === 0
+      && shown.onlyIgnored.changes === 0 && sameSentences(shown.onlyIgnored.ignored, IGNORED_SENTENCES)
+      && !shown.onlyIgnored.text.includes("커밋되지 않은") && NO_TAG(shown.onlyIgnored.text),
+      JSON.stringify(shown.onlyIgnored));
+    ok("진짜 변경만 있는 폴더: 「커밋하지 않은 변경이 있습니다」와 변경 두 줄 — 무시된 파일 줄은 없고, 읽지 못한 부분은 사람 말로 선다",
+      shown.onlyChanges.head === "커밋하지 않은 변경이 있습니다" && shown.onlyChanges.changes === 2
+      && shown.onlyChanges.ignored === null
+      && JSON.stringify(shown.onlyChanges.warn) === JSON.stringify(["다 읽지는 못했습니다 — 새 파일의 내용은 읽지 않았습니다"])
+      && NO_TAG(shown.onlyChanges.text),
+      JSON.stringify(shown.onlyChanges));
+    ok("둘 다 있는 폴더: 두 사실이 따로 선다 — 변경 줄들 뒤에 무시된 파일 줄, 그리고 틈 줄은 무시된 파일을 되풀이하지 않는다",
+      shown.both.head === "커밋하지 않은 변경이 있습니다" && shown.both.changes === 2
+      && sameSentences(shown.both.ignored, IGNORED_SENTENCES) && shown.both.ignored.last
+      && JSON.stringify(shown.both.warn) === JSON.stringify(["다 읽지는 못했습니다 — 새 파일의 내용은 읽지 않았습니다"])
+      && NO_TAG(shown.both.text),
+      JSON.stringify(shown.both));
+    ok("깨끗한 폴더: 「커밋하지 않은 변경이 없습니다」 한 줄뿐 — 경고도 무시된 파일 줄도 없다",
+      shown.clean.head === "커밋하지 않은 변경이 없습니다" && shown.clean.warn.length === 0
+      && shown.clean.changes === 0 && shown.clean.ignored === null,
+      JSON.stringify(shown.clean));
+    ok("무시된 파일의 크기를 끝까지 못 쟀으면 숫자를 「이상」으로 말한다 — 모자란 숫자를 정확한 것처럼 적지 않는다",
+      shown.floor.ignored?.line === "git이 무시하는 파일 5개 항목 · 270 MB 이상",
+      JSON.stringify(shown.floor.ignored));
+
+    /* 틈의 이름은 다섯 언어 모두에서 사람 말이다: 날것의 이름이 화면에 닿지 않고,
+     * 한국어가 다른 언어 화면으로 새지 않고, 여섯이 서로 다른 말이고, 백엔드가
+     * 아직 모르는 이름도 말로 나온다. */
+    const gapWords = await page.evaluate(async ({ held, tags, locales }) => {
+      const out = {};
+      for (const code of locales) {
+        setLocale(code, { persist: false, refresh: false });
+        out[code] = {};
+        for (const tag of [...tags, "a_gap_kind_from_the_future"]) {
+          const answer = structuredClone(held);
+          answer.snapshot.data = {
+            ...answer.snapshot.data, uncommitted: false, complete: false, coverageGaps: [tag], changes: [],
+            ignored: { count: 0, bytes: 0, sizeText: "0 B", complete: true, top: [] },
+          };
+          window.__EVIDENCE_ANSWER__ = answer;
+          await refreshWorktreeEvidence();
+          out[code][tag] = [...document.querySelectorAll('[data-evidence-section="changes"] .wt-evidence-warn')]
+            .map((one) => one.textContent);
+        }
+      }
+      setLocale("ko", { persist: false, refresh: false });
+      return out;
+    }, { held: ONLY_CHANGES, tags: GAP_TAGS, locales: LOCALES });
+    const everyTag = [...GAP_TAGS, "a_gap_kind_from_the_future"];
+    const hangul = /[가-힣]/;
+    const wordless = [];
+    for (const code of LOCALES) {
+      for (const tag of everyTag) {
+        const lines = gapWords[code][tag];
+        const line = lines?.[0] ?? "";
+        if (lines?.length !== 1 || line === "") wordless.push(`${code} ${tag}: ${JSON.stringify(lines)}`);
+        else if (line.includes(tag)) wordless.push(`${code} ${tag}: the raw tag reached the screen`);
+        else if (code !== "ko" && hangul.test(line)) wordless.push(`${code} ${tag}: Korean leaked into this language`);
+        else if (code !== "ko" && line === gapWords.ko[tag][0]) wordless.push(`${code} ${tag}: same as the Korean`);
+      }
+    }
+    const koWords = everyTag.map((tag) => gapWords.ko[tag]?.[0]);
+    ok("틈의 이름 여섯과 아직 모르는 이름은 다섯 언어 모두에서 사람 말로 선다 — 날것의 이름도, 새어 나온 한국어도 없다",
+      wordless.length === 0 && new Set(koWords).size === koWords.length,
+      JSON.stringify({ wordless, koWords }));
+
+    /* 사이드바 뱃지와 근거 화면은 같은 낱말로 말한다: 뱃지의 끝말이 패널 행의
+     * 이름표다 — 같은 함수가 같은 카탈로그 항목을 읽는다. */
+    const sameWords = await page.evaluate(async ({ held, locales }) => {
+      const out = {};
+      for (const code of locales) {
+        setLocale(code, { persist: false, refresh: false });
+        const chip = worktreeLandingSay({
+          state: "landed", detached: false, ahead: 0, dirty: false, ignored: true, compare_ref: "origin/main",
+        }, {});
+        window.__EVIDENCE_ANSWER__ = held;
+        await refreshWorktreeEvidence();
+        out[code] = {
+          chip: chip.word,
+          label: document.querySelector("[data-evidence-ignored] .wt-evidence-strong")?.textContent ?? null,
+        };
+      }
+      setLocale("ko", { persist: false, refresh: false });
+      return out;
+    }, { held: ONLY_IGNORED, locales: LOCALES });
+    ok("뱃지와 패널이 같은 말을 한다 — 다섯 언어 모두 뱃지가 「… · 〈패널 행의 이름표〉」로 끝난다",
+      LOCALES.every((code) => sameWords[code].label && sameWords[code].chip.endsWith(` · ${sameWords[code].label}`)),
+      JSON.stringify(sameWords));
+    await page.evaluate((held) => { window.__EVIDENCE_ANSWER__ = held; return refreshWorktreeEvidence(); }, EVIDENCE);
+
+    /* 사진: 옛 코드와 새 코드가 같은 합성 답을 어떻게 그리는지. 환경 변수가
+     * 있을 때만 찍는다 — 검사가 아니라 전/후 비교용이다. */
+    const capture = process.env.WORKTREE_EVIDENCE_CAPTURE ?? null;
+    if (capture) {
+      for (const [name, answer] of [["only-ignored", ONLY_IGNORED], ["only-changes", ONLY_CHANGES], ["both", BOTH]]) {
+        await readChangesSection(page, answer);
+        for (const which of ["dark", "light"]) {
+          await page.evaluate((wanted) => { theme = wanted; applyTheme(); }, which);
+          await page.waitForTimeout(400);
+          await page.locator(".qo--evidence").screenshot({ path: `${capture}/${name}-${which}.png`, animations: "disabled" });
+        }
+      }
+      await page.evaluate((held) => { window.__EVIDENCE_ANSWER__ = held; return refreshWorktreeEvidence(); }, EVIDENCE);
+    }
+
+    /* ---- 전/후 숫자 (t-34315) ----
+     *
+     * 환경 변수가 있을 때만 잰다 — 검사가 아니라 측정이다. 같은 합성 답 셋을 옛
+     * 코드와 새 코드에 먹여 (1) 몸통을 한 번 짓는 데 드는 시간(짓고 배치까지),
+     * (2) 사이드바 뱃지의 말을 짓는 함수의 한 번 값(프레임마다 행마다 도는 길이다),
+     * (3) 긴 반복 뒤의 메모리와 노드 수(쌓이는 것이 없는가)를 쟨다. 낮은 사양은
+     * `WINDOW_CPU_THROTTLE=4`로 같은 하네스를 돌려 얻는다. */
+    if (process.env.WORKTREE_EVIDENCE_BENCH) {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Performance.enable");
+      const gauge = async () => {
+        await cdp.send("HeapProfiler.collectGarbage");
+        const { metrics } = await cdp.send("Performance.getMetrics");
+        const named = Object.fromEntries(metrics.map((one) => [one.name, one.value]));
+        return { heapKiB: Math.round(named.JSHeapUsedSize / 1024), nodes: named.Nodes, listeners: named.JSEventListeners };
+      };
+      const answers = { onlyIgnored: ONLY_IGNORED, onlyChanges: ONLY_CHANGES, both: BOTH, clean: CLEAN };
+      const before = await gauge();
+      const result = await page.evaluate(async ({ answers, rounds, reads }) => {
+        const percentile = (sorted, at) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * at))];
+        const out = { paintMs: {}, chipUs: {}, reads: null };
+        for (const [name, answer] of Object.entries(answers)) {
+          window.__EVIDENCE_ANSWER__ = answer;
+          await refreshWorktreeEvidence();
+          const body = document.getElementById("wt-evidence-body");
+          const times = [];
+          for (let round = 0; round < rounds; round += 1) {
+            delete body.dataset.evidenceSignature;
+            const began = performance.now();
+            paintWorktreeEvidence();
+            void body.offsetHeight;
+            times.push(performance.now() - began);
+          }
+          times.sort((a, b) => a - b);
+          out.paintMs[name] = { p50: +percentile(times, 0.5).toFixed(3), p95: +percentile(times, 0.95).toFixed(3) };
+        }
+        const landing = { state: "landed", detached: false, ahead: 0, dirty: false, ignored: true,
+          compare_ref: "origin/main", ref_updated_ms: Date.now() - 86_400_000, dirty_checked_ms: Date.now(),
+          landed_in: { sha: "0123456789abcdef0123456789abcdef01234567", time_ms: Date.now() - 3_600_000 } };
+        for (const [name, held] of Object.entries({ landedWithIgnored: landing, landedPlain: { ...landing, ignored: false } })) {
+          const calls = 20_000;
+          for (let warm = 0; warm < 500; warm += 1) worktreeLandingSay(held, { idle: true });
+          const began = performance.now();
+          for (let call = 0; call < calls; call += 1) worktreeLandingSay(held, { idle: true });
+          out.chipUs[name] = +(((performance.now() - began) / calls) * 1000).toFixed(2);
+        }
+        const flip = [answers.onlyIgnored, answers.both];
+        for (let read = 0; read < reads; read += 1) {
+          window.__EVIDENCE_ANSWER__ = flip[read % 2];
+          await refreshWorktreeEvidence();
+        }
+        out.reads = reads;
+        return out;
+      }, { answers, rounds: 400, reads: 3000 });
+      const after = await gauge();
+      console.log("EVIDENCE_BENCH " + JSON.stringify({ throttle: process.env.WINDOW_CPU_THROTTLE ?? "1", ...result, before, after }));
+      await page.evaluate((held) => { window.__EVIDENCE_ANSWER__ = held; return refreshWorktreeEvidence(); }, EVIDENCE);
     }
 
     /* 라이트와 다크 — 파일 이름이 아니라 계산된 스타일로 확인한다. */

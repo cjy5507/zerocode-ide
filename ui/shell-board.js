@@ -1090,8 +1090,9 @@ function deskStageChip(host, stage, counts, view) {
 function deskTaskRow(held, task, runs) {
   const row = held ?? deskElement("li", "board-desk-task");
   if (!held) row.append(deskElement("code", "board-desk-task-id"), deskElement("span", "board-desk-task-title"),
-    deskElement("span", "board-desk-task-note"), deskElement("span", "board-desk-task-cost"));
-  const [, title, noteLine, costLine] = row.children;
+    deskElement("span", "board-desk-task-note"), deskElement("span", "board-desk-task-cost"),
+    deskElement("span", "board-desk-task-writing"));
+  const [, title, noteLine, costLine, writingLine] = row.children;
   writeAttribute(row, "data-task", `${task.run}/${task.id}`);
   writeTextContent(row.firstElementChild, task.id);
   writeTextContent(title, runs > 1 ? `${task.title} · ${task.run}` : task.title);
@@ -1109,6 +1110,11 @@ function deskTaskRow(held, task, runs) {
   writeTextContent(costLine, cost?.text ?? "");
   writeAttribute(costLine, "data-tip", cost?.tip ?? "");
   writeHidden(costLine, cost === null);
+  // 일꾼이 쓴 요약을 센 수 한 줄(t-32786): 끝난 행에만 서고, 센 수가 없으면 숨는다.
+  const writing = writingBadgeWords(task.writing);
+  writeTextContent(writingLine, writing?.text ?? "");
+  writeAttribute(writingLine, "data-tip", writing?.tip ?? "");
+  writeHidden(writingLine, writing === null);
   return row;
 }
 

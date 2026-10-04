@@ -32360,6 +32360,7 @@ details.task-board-section > summary {
 .task-board-members[hidden],
 .task-board-message[hidden],
 .task-board-cost[hidden],
+.task-board-writing[hidden],
 .task-board-empty[hidden] { display: none; }
 
 .task-board-member {
@@ -32389,7 +32390,8 @@ details.task-board-section > summary {
 .task-board-member-status { flex: none; font-size: var(--text-2xs); }
 
 .task-board-message,
-.task-board-cost {
+.task-board-cost,
+.task-board-writing {
   display: flex;
   gap: var(--space-3);
   margin: 0;
@@ -32511,7 +32513,7 @@ details.task-board-section > summary {
   .task-board-main { grid-template-columns: minmax(0, 1fr); padding-inline: var(--space-4); }
   .task-board-state { grid-column: 1; grid-row: 3; }
   .task-board-title { font-size: var(--text-md); }
-  .task-board-members, .task-board-message, .task-board-cost, .task-board-foot { padding-inline: var(--space-4); }
+  .task-board-members, .task-board-message, .task-board-cost, .task-board-writing, .task-board-foot { padding-inline: var(--space-4); }
 }
 
 /* ---- 코디네이터 데스크 (t-6588) --------------------------------------------
@@ -33072,7 +33074,8 @@ details.task-board-section > summary {
 }
 
 .board-desk-task-note,
-.board-desk-task-cost {
+.board-desk-task-cost,
+.board-desk-task-writing {
   grid-column: 2;
   color: var(--ink-label);
   overflow-wrap: anywhere;
@@ -33087,6 +33090,7 @@ details.task-board-section > summary {
 .board-desk-tasks[hidden],
 .board-desk-task-note[hidden],
 .board-desk-task-cost[hidden],
+.board-desk-task-writing[hidden],
 .board-desk-more[hidden] {
   display: none;
 }
@@ -44897,10 +44901,17 @@ button.jev-token:hover {
 }
 
 .artifact-preview-none,
-.artifact-preview-truncated {
+.artifact-preview-truncated,
+.artifact-preview-writing {
   margin: 0;
   color: var(--ink-label);
   font-size: var(--text-xs);
+}
+
+.artifact-preview-writing-line,
+.artifact-preview-writing-hits {
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 .artifact-meta {
@@ -45910,6 +45921,15 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .wt-evidence-strong {
   color: var(--ink-chalk);
   font-weight: 600;
+}
+
+/* The row for files git ignores is named by the same words the sidebar chip
+ * carries after 반영됨 (`반영됨 · 무시된 파일 남음`). The chip's words are a
+ * fragment — lower case in the Latin languages, after a separator — and the row
+ * starts a line, so only the first letter is raised; the text itself, and what a
+ * reader of the page hears, stay identical to the chip's (t-34315). */
+.wt-evidence-ignored-word::first-letter {
+  text-transform: uppercase;
 }
 
 .wt-evidence-path {

@@ -32,6 +32,19 @@ pub(super) struct WorktreeLanding {
     pub(super) ahead: u32,
     /// 추적 중인 파일에 커밋하지 않은 변경이 있다.
     pub(super) dirty: bool,
+    /// git이 무시하는 파일이 이 작업 폴더에 남아 있다 (t-34315): 빌드 결과,
+    /// `node_modules`, `.env`. 저장 안 한 변경이 아니다 — 그것은 `dirty`다 — 그리고
+    /// 경고로 말할 것도 아니다: 폴더를 지우면 함께 사라진다는 사실을 칩이 「반영됨」
+    /// 옆에서 말할 뿐이다. 칩이 그 말을 하는 것은 비교 ref에 들어 있는 작업뿐이므로
+    /// `landed`인 행만 묻는다 — 다른 상태에서는 폴더에 무엇이 있든 `false`다.
+    /// 읽는 명령은 정리 검토와 근거 화면이 묻는 것과 같다 — 칩과 화면이 있고 없음을
+    /// 두고 어긋나지 않게. 읽는 값은 `dirty`보다 오래 선다([`LANDING_IGNORED_TTL_FACTOR`]).
+    pub(super) ignored: bool,
+    /// When `ignored` was last read, epoch milliseconds — apart from
+    /// `dirty_checked_ms` because it stands longer. The window is not told: it
+    /// would only be a stamp that moves without the work moving.
+    #[serde(skip)]
+    pub(super) ignored_checked_ms: Option<i64>,
     /// When `dirty` was last read, epoch milliseconds. A `status` is the one
     /// thing no ref can key, so it is re-read in the background once it is
     /// [`LANDING_DIRTY_TTL`] old and the catalog is read again; the tooltip says
@@ -88,6 +101,8 @@ impl WorktreeLanding {
             detached: false,
             ahead: 0,
             dirty: false,
+            ignored: false,
+            ignored_checked_ms: None,
             dirty_checked_ms: None,
             compare_ref: None,
             ref_updated_ms: None,
@@ -204,6 +219,17 @@ pub(super) fn resolve_landing_base(
 /// and queues the re-read in the background; inside it nothing is asked.
 const LANDING_DIRTY_TTL: Duration = Duration::from_secs(5);
 
+/// How many times [`LANDING_DIRTY_TTL`] a landed row's ignored-files reading
+/// stands.
+///
+/// Twelve — a minute where the unsaved reading stands five seconds. Ignored
+/// files appear when a build runs and not when a commit lands, the chip words
+/// them as a hint, and the reading costs as much as the `status` that reads
+/// `dirty`: 20 ms and 23 ms on a checkout with 61,000 ignored files, 77 and 88 ms
+/// on efficiency cores. Asked every time `dirty` is, it would double what a
+/// landed row's refresh costs for a fact that moves this slowly.
+const LANDING_IGNORED_TTL_FACTOR: u32 = 12;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -248,10 +274,15 @@ fn held_landing(path: &Path) -> Option<HeldLanding> {
     unpoisoned(landing_cache()).get(path).cloned()
 }
 
+/// A TTL in the epoch milliseconds the readings are stamped in.
+fn millis(ttl: Duration) -> i64 {
+    i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX)
+}
+
 /// Whether a held answer still answers for these facts: the same key, and an
 /// unsaved-changes reading younger than `dirty_ttl`.
 fn stands(held: &HeldLanding, key: &str, dirty_ttl: Duration) -> bool {
-    let ttl_ms = i64::try_from(dirty_ttl.as_millis()).unwrap_or(i64::MAX);
+    let ttl_ms = millis(dirty_ttl);
     held.key == key
         && held
             .landing
@@ -259,12 +290,13 @@ fn stands(held: &HeldLanding, key: &str, dirty_ttl: Duration) -> bool {
             .is_some_and(|at| now_ms().saturating_sub(at) < ttl_ms)
 }
 
-/// Whether two answers say the same thing about the work. The two stamps that
-/// move without the work moving are left out: when `dirty` was read, and when
-/// the compare ref last moved (it only words the tooltip).
+/// Whether two answers say the same thing about the work. The stamps that move
+/// without the work moving are left out: when `dirty` and `ignored` were read,
+/// and when the compare ref last moved (it only words the tooltip).
 fn same_facts(left: &WorktreeLanding, right: &WorktreeLanding) -> bool {
     let mut other = right.clone();
     other.dirty_checked_ms = left.dirty_checked_ms;
+    other.ignored_checked_ms = left.ignored_checked_ms;
     other.ref_updated_ms = left.ref_updated_ms;
     *left == other
 }
@@ -516,6 +548,7 @@ fn worktree_landing_within(
     landing.compare_ref = base.name.clone();
     landing.ref_updated_ms = base.updated_ms;
     landing.dirty = !status.trim().is_empty();
+    refresh_ignored(host, path, &mut landing, dirty_ttl);
     landing.dirty_checked_ms = Some(now_ms());
     unpoisoned(landing_cache()).insert(
         path.to_path_buf(),
@@ -525,6 +558,56 @@ fn worktree_landing_within(
         },
     );
     landing
+}
+
+/// Bring a landed row's ignored-files reading up to date — and only once it has
+/// run out.
+///
+/// Asked of `landed` rows only, because the chip's word is said of work that is
+/// in the compare ref and of nothing else, and again when the reading is older
+/// than `LANDING_IGNORED_TTL_FACTOR` times the `dirty` TTL. A probe that fails
+/// keeps what the row last said rather than flipping the chip on a hiccup.
+fn refresh_ignored(host: &Host, path: &Path, landing: &mut WorktreeLanding, dirty_ttl: Duration) {
+    if landing.state != "landed" {
+        landing.ignored = false;
+        landing.ignored_checked_ms = None;
+        return;
+    }
+    let ttl_ms = millis(dirty_ttl.saturating_mul(LANDING_IGNORED_TTL_FACTOR));
+    if landing
+        .ignored_checked_ms
+        .is_some_and(|at| now_ms().saturating_sub(at) < ttl_ms)
+    {
+        return;
+    }
+    if let Some(found) = holds_ignored_files(host, path) {
+        landing.ignored = found;
+        landing.ignored_checked_ms = Some(now_ms());
+    }
+}
+
+/// Whether git is told to ignore anything that is in this checkout.
+///
+/// The same `status --ignored=matching` the cleanup review and the evidence
+/// read ask (`Orchestrator::pending_loss`), so the chip and the panel cannot
+/// disagree about whether such files exist. `matching` reads the ignore rules
+/// and collapses an ignored directory to one entry instead of walking into it:
+/// 21 ms against 438 ms for the traditional mode on a repository of this size.
+/// It is asked of `landed` rows only, because the chip's word is said of work
+/// that is in the compare ref and of nothing else.
+///
+/// The output is taken apart by the parser the cleanup review and the evidence
+/// read use, not by a scan of its own: a rename's second field is a path and
+/// not a record, and a second reading of that rule is a second chance to
+/// disagree.
+fn holds_ignored_files(host: &Host, path: &Path) -> Option<bool> {
+    let status = landing_git(
+        host,
+        path,
+        &["status", "--porcelain=v2", "-z", "--ignored=matching"],
+    )
+    .ok()?;
+    Some(zerocode_orchestrator::lists_ignored_paths(&status))
 }
 
 struct HeldBase {
@@ -660,6 +743,8 @@ fn classify_landing(
         detached: branch.is_none(),
         ahead: 0,
         dirty: false,
+        ignored: false,
+        ignored_checked_ms: None,
         dirty_checked_ms: None,
         compare_ref: base.name.clone(),
         ref_updated_ms: base.updated_ms,
@@ -1066,6 +1151,176 @@ mod tests {
         assert_eq!(landing.state, "no_commits");
     }
 
+    /// What the window is told, field by field: a field the landing does not
+    /// carry is a null here and not a compile error.
+    fn told(landing: &WorktreeLanding) -> serde_json::Value {
+        serde_json::to_value(landing).expect("a landing serializes")
+    }
+
+    /// A checkout whose work is in the compare ref, the way a project that
+    /// ignores its build output cuts one: the rule is on main before the
+    /// checkout exists.
+    fn landed_checkout(bench: &Bench, name: &str) -> PathBuf {
+        let wt = bench.worktree(name);
+        bench.commit(&wt, "w.txt", "work\n");
+        git(
+            &bench.repo,
+            &["merge", "--ff-only", "-q", &format!("wt/{name}")],
+        );
+        bench.commit(&bench.repo, &format!("{name}.txt"), "later\n");
+        bench.publish();
+        wt
+    }
+
+    fn leave_build_output(at: &Path) {
+        std::fs::create_dir_all(at.join("scratch")).expect("a build directory");
+        std::fs::write(at.join("scratch/out.bin"), "built\n").expect("build output");
+    }
+
+    #[test]
+    fn a_landed_checkout_says_whether_ignored_files_remain_and_others_are_not_asked() {
+        let bench = Bench::open();
+        std::fs::write(bench.repo.join(".gitignore"), "scratch/\n").expect("the project's rule");
+        git(&bench.repo, &["add", ".gitignore"]);
+        git(&bench.repo, &["commit", "-q", "-m", "ignore build output"]);
+        bench.publish();
+
+        let built = landed_checkout(&bench, "built");
+        let clean = bench.landing(&built);
+        assert_eq!(clean.state, "landed");
+        assert_eq!(told(&clean)["ignored"], serde_json::json!(false));
+
+        // A build leaves its output: nothing to commit, something to say.
+        leave_build_output(&built);
+        let left = bench.landing(&built);
+        assert_eq!(left.state, "landed");
+        assert_eq!(told(&left)["ignored"], serde_json::json!(true));
+        assert!(!left.dirty, "ignored files are not unsaved changes");
+
+        // The same leftovers beside work main does not have: the chip words only
+        // landed work, so nothing is asked about this one.
+        let ahead = bench.worktree("ahead");
+        bench.commit(&ahead, "x.txt", "x\n");
+        leave_build_output(&ahead);
+        let unlanded = bench.landing(&ahead);
+        assert_eq!(unlanded.state, "unlanded");
+        assert_eq!(told(&unlanded)["ignored"], serde_json::json!(false));
+    }
+
+    /// MEASUREMENT (ignored): what the ignored probe adds to the refresh of one
+    /// landed row, beside the `status` the row already paid for, on a checkout
+    /// shaped like the one a person reported — a couple of thousand tracked
+    /// files and tens of thousands of ignored ones. `status` is the "before" and
+    /// `status` plus the probe the "after", of the same binary; the resident
+    /// size after a long run of refreshes says whether anything accumulates.
+    ///
+    /// Run on purpose, normally and under `taskpolicy -b`:
+    /// `cargo test -p zerocode-shell --bin zerocode-shell worktree_landing::tests::measure -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, run on purpose: -- --ignored --nocapture"]
+    fn measure_the_ignored_probe_beside_the_status_a_landed_row_already_pays() {
+        use std::time::Instant;
+        const TRACKED_DIRS: usize = 100;
+        const TRACKED_PER_DIR: usize = 20;
+        // 400 directories of 100 files, 100 of 200, 50 of 20 — 61,000 files.
+        const TREES: [(&str, usize, usize); 3] = [
+            ("node_modules", 400, 100),
+            ("target", 100, 200),
+            ("output", 50, 20),
+        ];
+        const ROUNDS: usize = 9;
+        const REFRESHES_FOR_MEMORY: usize = 60;
+
+        let rss_kib = || -> u64 {
+            let out = crate::proc::quiet_command("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
+        };
+        let median = |mut times: Vec<f64>| {
+            times.sort_by(f64::total_cmp);
+            times[times.len() / 2]
+        };
+        let millis = |began: Instant| began.elapsed().as_secs_f64() * 1_000.0;
+
+        let bench = Bench::open();
+        for dir in 0..TRACKED_DIRS {
+            let at = bench.repo.join(format!("src/d{dir}"));
+            std::fs::create_dir_all(&at).expect("a tracked directory");
+            for file in 0..TRACKED_PER_DIR {
+                std::fs::write(at.join(format!("f{file}.txt")), format!("{dir} {file}\n"))
+                    .expect("a tracked file");
+            }
+        }
+        let rules: String = TREES
+            .iter()
+            .map(|(name, ..)| format!("{name}/\n"))
+            .collect();
+        std::fs::write(bench.repo.join(".gitignore"), rules).expect("the project's rules");
+        git(&bench.repo, &["add", "-A"]);
+        git(
+            &bench.repo,
+            &["commit", "-q", "-m", "a project with its sources"],
+        );
+        bench.publish();
+        let wt = landed_checkout(&bench, "built");
+        let mut ignored_files = 0;
+        for (name, dirs, files) in TREES {
+            for dir in 0..dirs {
+                let at = wt.join(format!("{name}/d{dir}"));
+                std::fs::create_dir_all(&at).expect("an ignored directory");
+                for file in 0..files {
+                    std::fs::write(at.join(format!("f{file}")), "x").expect("an ignored file");
+                    ignored_files += 1;
+                }
+            }
+        }
+
+        let host = Host::for_workspace(&bench.repo);
+        assert_eq!(bench.landing(&wt).state, "landed");
+        let (mut status_ms, mut probe_ms, mut refresh_ms) = (Vec::new(), Vec::new(), Vec::new());
+        let mut asked = None;
+        for _ in 0..ROUNDS {
+            let began = Instant::now();
+            let _ = landing_git(
+                &host,
+                &wt,
+                &["status", "--porcelain", "--untracked-files=no"],
+            );
+            status_ms.push(millis(began));
+            let began = Instant::now();
+            asked = holds_ignored_files(&host, &wt);
+            probe_ms.push(millis(began));
+            let began = Instant::now();
+            let _ = bench.landing(&wt);
+            refresh_ms.push(millis(began));
+        }
+        let before_rss = rss_kib();
+        let mut resident = Vec::new();
+        for refresh in 0..REFRESHES_FOR_MEMORY {
+            let _ = bench.landing(&wt);
+            if (refresh + 1).is_multiple_of(20) {
+                resident.push(rss_kib());
+            }
+        }
+        println!(
+            "LANDING_PROBE_BENCH {}",
+            serde_json::json!({
+                "ignoredFiles": ignored_files,
+                "statusMsMedian": median(status_ms),
+                "probeMsMedian": median(probe_ms),
+                "refreshMsMedian": median(refresh_ms),
+                "probeSaid": asked,
+                "rssKiBBefore": before_rss,
+                "rssKiBEveryTwentyRefreshes": resident,
+            })
+        );
+    }
+
     #[test]
     fn the_probe_reads_a_clean_merge_a_conflict_and_a_failure_apart() {
         let tree = "0123456789abcdef0123456789abcdef01234567";
@@ -1292,6 +1547,52 @@ mod tests {
         assert!(!ask(Duration::from_secs(3600)).dirty);
         // Past it, the one `status` runs and the edit is seen.
         assert!(ask(Duration::ZERO).dirty);
+    }
+
+    /// The ignored-files reading costs as much as the `status` that reads `dirty`
+    /// (20 ms and 23 ms on a checkout with 61,000 ignored files; 77 and 88 ms on
+    /// efficiency cores), and ignored files appear when a build runs, not when a
+    /// commit lands. Asked every time `dirty` is, it would double what a landed
+    /// row's refresh costs for a fact that moves this slowly — so it stands for
+    /// longer than the unsaved reading does.
+    #[test]
+    fn a_landed_rows_ignored_reading_stands_longer_than_its_unsaved_reading() {
+        let bench = Bench::open();
+        std::fs::write(bench.repo.join(".gitignore"), "scratch/\n").expect("the project's rule");
+        git(&bench.repo, &["add", ".gitignore"]);
+        git(&bench.repo, &["commit", "-q", "-m", "ignore build output"]);
+        bench.publish();
+        let wt = landed_checkout(&bench, "aged");
+        let host = Host::for_workspace(&bench.repo);
+        let base = resolve_landing_base(&host, &bench.repo, None);
+        let head = git(&wt, &["rev-parse", "HEAD"]);
+        let ask =
+            |ttl| worktree_landing_within(&host, &wt, Some("wt/aged"), Some(&head), &base, ttl);
+
+        // A zero TTL asks for everything: nothing is left over yet.
+        assert_eq!(
+            told(&ask(Duration::ZERO))["ignored"],
+            serde_json::json!(false)
+        );
+        leave_build_output(&wt);
+
+        // The unsaved reading is old enough to be taken again (50 ms against the
+        // 60 that passed); the ignored one is not, and the build output goes
+        // unseen until that one is old enough too.
+        std::thread::sleep(Duration::from_millis(60));
+        let again = ask(Duration::from_millis(50));
+        assert_eq!(
+            told(&again)["ignored"],
+            serde_json::json!(false),
+            "the ignored reading was asked again as often as the unsaved one"
+        );
+        assert!(again.dirty_checked_ms.is_some());
+
+        // Past its own TTL it is asked, and the output is seen.
+        assert_eq!(
+            told(&ask(Duration::ZERO))["ignored"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]

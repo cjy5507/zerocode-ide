@@ -246,9 +246,33 @@ pub struct WorktreeSnapshot {
 }
 
 impl WorktreeSnapshot {
+    /// Whether deleting this checkout would take anything a commit does not
+    /// hold: changes git lists, or paths it is told to ignore.
+    ///
+    /// This is the SAFETY question — publication refuses on it
+    /// ([`PublishBlocker::DirtySnapshotNotMaterialized`]) and so does every
+    /// cleanup that cannot show a person what would go. It is not what a
+    /// person means by "uncommitted": a landed checkout a build has used is
+    /// dirty here and has nothing to commit. A caller that words this for a
+    /// person asks [`Self::has_uncommitted_changes`] and
+    /// [`Self::has_ignored_files`], which are two facts (t-34315).
     #[must_use]
     pub fn is_dirty(&self) -> bool {
-        !self.changes.is_empty() || !self.ignored.is_empty()
+        self.has_uncommitted_changes() || self.has_ignored_files()
+    }
+
+    /// Changes git itself lists: edits to tracked files, and new files it has
+    /// not been told to ignore. What a commit would carry.
+    #[must_use]
+    pub fn has_uncommitted_changes(&self) -> bool {
+        !self.changes.is_empty()
+    }
+
+    /// Paths git is told to ignore that exist in the checkout. They are in no
+    /// commit and no digest, and a deletion takes them without a word.
+    #[must_use]
+    pub fn has_ignored_files(&self) -> bool {
+        !self.ignored.is_empty()
     }
 
     #[must_use]

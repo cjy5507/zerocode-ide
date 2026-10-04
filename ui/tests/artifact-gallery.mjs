@@ -1037,6 +1037,43 @@ ok(
   JSON.stringify(artifactDrawer),
 );
 
+/* 글 점검 (t-32786): 보고서의 미리보기가 센 수를 서랍이 한 줄로 말한다 — 거절 없이, 걸린 말과 바꿔 쓸 말까지.
+ * 센 수가 없는 미리보기는 아무것도 말하지 않고, 네 언어 카탈로그가 모든 문구를 가진다. */
+const artifactWriting = await page.evaluate(async () => {
+  const view = artifactsView();
+  const card = (id) => {
+    openArtifacts({ select: id });
+    selectArtifact(view, id, { reveal: true });
+    return view.querySelector(`.artifact-card[data-id="${id}"]`);
+  };
+  const line = () => view.querySelector(".artifact-preview-writing");
+  const seen = {};
+  window.__WRITING__ = { lang: "ko", sentences: 6, avg_len: 61, longest: 77, limit: 60, long_sentences: 4, words: 10,
+    patterns: 13, hits: [{ kind: "word", find: "박자", plain: "주기", count: 2 },
+      { kind: "pattern", find: "~하는 것이다", plain: "서술어로 바로 끝낸다 (~한다)", count: 2 }], cut: false };
+  card("art-6").click();
+  await new Promise((done) => setTimeout(done, 60));
+  seen.text = line() && !line().hidden ? line().querySelector(".artifact-preview-writing-line")?.textContent ?? "" : "";
+  seen.hits = line() && !line().hidden ? line().querySelector(".artifact-preview-writing-hits")?.textContent ?? "" : "";
+  window.__WRITING__ = null;
+  card("art-0").click();
+  await new Promise((done) => setTimeout(done, 60));
+  seen.quiet = line() ? line().hidden : null;
+  const keys = ["writing.badge", "writing.badgeClean", "writing.unitChars", "writing.unitWords", "writing.hit",
+    "writing.tip", "writing.tipCut"];
+  seen.catalogs = keys.map((key) => ["en", "ja", "zh", "es"].map((code) => CATALOG[code]?.[key] ?? ""));
+  return seen;
+});
+ok(
+  "the drawer says what the writing lint counted in a report — the mean sentence, the long ones, the words to replace and the translationese — lists the rules hit with what to write instead, says nothing for a preview with no count, and every phrase stands in four more languages",
+  artifactWriting.text === "글 점검 · 문장 평균 61자 · 긴 문장 4 · 바꿀 말 10 · 직역투 13" &&
+    artifactWriting.hits === "‘박자’ → 주기 ×2 · ‘~하는 것이다’ → 서술어로 바로 끝낸다 (~한다) ×2" &&
+    artifactWriting.quiet === true &&
+    artifactWriting.catalogs.length === 7 &&
+    artifactWriting.catalogs.every((words) => words.every((word) => word !== "") && new Set(words).size === 4),
+  JSON.stringify(artifactWriting),
+);
+
 /* 액션 넷과 키보드: 열기·Finder·경로 복사는 백엔드의 문이고, 삭제는 확인 대화가
  * 먼저 서며 거절하면 아무것도 묻지 않는다. ↓는 다음 카드, Enter는 열기, ⌘C는 경로. */
 const artifactActions = await page.evaluate(async () => {

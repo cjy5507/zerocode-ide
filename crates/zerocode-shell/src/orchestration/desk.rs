@@ -18,6 +18,7 @@ use zerocode_core::orchestration::{
     Closure, Delivery, Ledger, Message, MessageKind, Run, Task, TaskStatus, WorktreeRoom,
     worktree_room,
 };
+use zerocode_core::plain_text::TextLint;
 
 /// The desk's reading of the ledger, published beside the board's other
 /// readings on the standing-order beat ([`super::refresh_board_ledger`]) and
@@ -399,6 +400,11 @@ pub(crate) struct DeskTask {
     /// What the task cost, for a finished one ([`finished`], t-9470) —
     /// `None` while it is still moving.
     pub(crate) cost: Option<TaskCost>,
+    /// What the writing lint counted in the summary the task's own worker
+    /// handed in, for a finished task whose worker wrote one (t-32786,
+    /// [`super::writing_book`]). The board shows the counts beside the row;
+    /// nothing here refuses a report.
+    pub(crate) writing: Option<TextLint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -440,7 +446,7 @@ const OPEN_STAGES: [&str; 5] = ["pending", "ready", "dispatched", "gate", "block
 /// The stages a finished task stands in — reported, merged, and completed with
 /// nothing a coordinator could review — the ones whose rows carry the task's
 /// cost (t-9470).
-const FINISHED_STAGES: [&str; 3] = ["reported", "unreviewable", "merged"];
+pub(super) const FINISHED_STAGES: [&str; 3] = ["reported", "unreviewable", "merged"];
 
 /// The most rows one stage carries across the wire. Its count carries the
 /// rest: a run of two hundred finished tasks is two hundred numbers nobody
@@ -545,6 +551,7 @@ pub(crate) fn desk_snapshot(
                     closed: task.closed.clone(),
                     created_ms: task.created_ms,
                     cost: None,
+                    writing: None,
                 },
             ));
         }
