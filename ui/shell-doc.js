@@ -6103,6 +6103,10 @@ let artifactUnlinkedCounts = new Map();
  * 세고, 머리의 작업 고르개와 서랍의 보고서 고르개가 읽는다. 그리기마다 세지 않는다. */
 let artifactTaskChoices = [];
 let artifactTaskReports = new Map();
+/* 작업마다의 수를 다시 셀 때마다 오르는 수 — 머리의 작업 고르개는 이 수가 오른 때에만 제 칸을
+ * 다시 짓는다(t-40649): 칸은 작업마다 하나라, 그리기마다 짓고 견주면 탭을 옮길 때마다 작업
+ * 수만큼의 값을 낸다. */
+let artifactTaskIndexGeneration = 0;
 /* 프로젝트 고르개의 칸 — `{ value, label, roots }`. 창이 아는 프로젝트(뿌리와
  * 그 워크트리들)이거나, 창이 모르는 경로 하나다. */
 let artifactProjects = [];
@@ -6439,6 +6443,7 @@ function indexArtifactTasks() {
   for (const held of reports.values()) held.sort((a, b) => (b.modified_ms - a.modified_ms) || (a.id < b.id ? -1 : 1));
   artifactTaskChoices = [...seats.values()].sort((a, b) => (b.newest - a.newest) || (a.task < b.task ? -1 : 1));
   artifactTaskReports = reports;
+  artifactTaskIndexGeneration += 1;
 }
 
 /* 한 행이 무엇인지 한 낱말로 — 보고서는 하위 종류, 나머지는 종류. */
@@ -6451,7 +6456,7 @@ function artifactKindWord(row) {
 
 /* 수 한 낱말 — 로케일의 자릿수 구분으로(2,446). */
 function artifactCountWord(n) {
-  return Number(n).toLocaleString(locale === "system" ? systemLocale : locale);
+  return artifactFormatters().count.format(Number(n));
 }
 
 /* 작업 거르개의 값 하나: 그 작업, 어느 작업에도 연결 안 된 행, 또는 거르지 않음. */
@@ -7835,11 +7840,18 @@ function paintArtifactPicks(view) {
   const everything = t(ARTIFACT_PICK_ALL.key, ARTIFACT_PICK_ALL.word);
   const fill = (select, options, value) => fillArtifactSelect(select, [["", everything], ...options], value);
   const origin = artifactFilter.origin;
-  fill(
-    view.querySelector('[data-artifact-pick="task"]'),
-    artifactTaskOptions(),
-    origin?.field === "task" ? (origin.value === "" ? ARTIFACT_TASK_UNLINKED : origin.value) : "",
-  );
+  // 작업의 칸은 그 목록이 움직인 때에만 짓는다: 작업을 다시 셌거나, 로케일이 바뀌었거나, 든 행에
+  // 없는 작업으로 거르는 중일 때. 그 밖의 그리기는 고른 값만 맞춘다.
+  const tasks = view.querySelector('[data-artifact-pick="task"]');
+  const picked = origin?.field === "task" ? (origin.value === "" ? ARTIFACT_TASK_UNLINKED : origin.value) : "";
+  const stranger = picked !== "" && picked !== ARTIFACT_TASK_UNLINKED && !artifactTaskChoices.some((seat) => seat.task === picked) ? picked : "";
+  const listed = [artifactTaskIndexGeneration, artifactLocaleCode(), stranger].join("\n");
+  if (tasks._listed !== listed) {
+    tasks._listed = listed;
+    fill(tasks, artifactTaskOptions(), picked);
+  } else if (tasks.value !== picked) {
+    tasks.value = picked;
+  }
   const project = view.querySelector('[data-artifact-pick="project"]');
   fill(project, artifactProjects.map((row) => [row.value, row.label]), artifactFilter.project);
   fill(
@@ -7921,9 +7933,11 @@ function dressArtifactCard(node, row, selected) {
     dressArtifactLanding(landing, artifactLandingSay(row));
     node.querySelector(".artifact-card-chips").hidden = row.kind !== "report" && !row.origin?.task && landing.hidden;
   }
-  node.querySelector(".artifact-card-when").textContent = artifactWhenWords(row);
+  // 바뀐 것만 쓴다: 같은 글자와 같은 값을 다시 쓰는 것도 쓰기라, 고른 표시만 옮기는 그리기가
+  // 보이는 카드마다 글자 노드를 갈고 속성을 다시 세우게 된다(t-40649).
+  writeTextContent(node.querySelector(".artifact-card-when"), artifactWhenWords(row));
   node.classList.toggle("is-selected", selected);
-  node.setAttribute("aria-selected", selected ? "true" : "false");
+  writeAttribute(node, "aria-selected", selected ? "true" : "false");
 }
 
 /* 만든 이의 한 줄 — 에이전트의 표식(모델 계열), 판, 브랜치. 출처가 말하는 것만
@@ -7979,9 +7993,7 @@ function artifactEditedWords(ms) {
   if (!ms) return spaceAgo(ms);
   const then = new Date(ms);
   if (artifactIsToday(then)) return t("artifacts.editedAgo", "{{ago}} 편집됨", { ago: spaceAgo(ms) });
-  const code = locale === "system" ? systemLocale : locale;
-  const when = new Intl.DateTimeFormat(code, { month: "long", day: "numeric" }).format(then);
-  return t("artifacts.editedOn", "{{when}}에 편집됨", { when });
+  return t("artifacts.editedOn", "{{when}}에 편집됨", { when: artifactFormatters().day.format(then) });
 }
 
 function artifactIsToday(then, now = new Date()) {
@@ -7994,12 +8006,38 @@ function artifactIsToday(then, now = new Date()) {
  * 부르는 쪽이 앞에 붙인다(「보고서 12:58」): 시각만 서면 무엇의 시각인지 모른다. */
 const ARTIFACT_CLOCK_TODAY = Object.freeze({ hour: "2-digit", minute: "2-digit", hour12: false });
 const ARTIFACT_CLOCK_OLDER = Object.freeze({ month: "numeric", day: "numeric", ...ARTIFACT_CLOCK_TODAY });
+/* 카드 아래 줄의 날 — 「9월 1일」. */
+const ARTIFACT_DAY_WORDS = Object.freeze({ month: "long", day: "numeric" });
 
 function artifactClockWords(ms) {
   if (!ms) return "";
   const then = new Date(ms);
-  const code = locale === "system" ? systemLocale : locale;
-  return new Intl.DateTimeFormat(code, artifactIsToday(then) ? ARTIFACT_CLOCK_TODAY : ARTIFACT_CLOCK_OLDER).format(then);
+  const formats = artifactFormatters();
+  return (artifactIsToday(then) ? formats.clockToday : formats.clockOlder).format(then);
+}
+
+function artifactLocaleCode() {
+  return locale === "system" ? systemLocale : locale;
+}
+
+/* 이 탭의 형식기 — 로케일마다 한 번 짓는다(t-40649). 형식기를 짓는 값은 그것으로 한 번 쓰는 값의
+ * 몇십 배다: 카드마다 · 그리기마다 지으면 보이는 카드 수만큼 그 값을 내고, 느린 기계에서는 그것이
+ * 누름과 그림 사이의 틈이 된다. */
+let artifactFormatsCode = null;
+let artifactFormats = null;
+
+function artifactFormatters() {
+  const code = artifactLocaleCode();
+  if (artifactFormats === null || artifactFormatsCode !== code) {
+    artifactFormatsCode = code;
+    artifactFormats = {
+      count: new Intl.NumberFormat(code),
+      day: new Intl.DateTimeFormat(code, ARTIFACT_DAY_WORDS),
+      clockToday: new Intl.DateTimeFormat(code, ARTIFACT_CLOCK_TODAY),
+      clockOlder: new Intl.DateTimeFormat(code, ARTIFACT_CLOCK_OLDER),
+    };
+  }
+  return artifactFormats;
 }
 
 /* 마크다운 미리보기의 첫 활자 — 제목과 그 아래 첫 문단, 표식을 벗긴 글. 카드
@@ -8146,6 +8184,17 @@ function artifactVerticalStep(view, at, step) {
   return next.start + Math.min(nextRow * columns + column, next.count - 1);
 }
 
+/* 풀의 노드 하나를 제자리에 놓는다 — 자리가 달라진 때에만 쓴다: 같은 값을 다시 쓰는 것도
+ * 쓰기라, 고른 표시만 옮기는 그리기가 보이는 카드마다 스타일 셋을 다시 세우게 된다(t-40649). */
+function placeArtifactNode(node, x, y, width, height) {
+  const place = `${x},${y},${width},${height}`;
+  if (node._place === place) return;
+  node._place = place;
+  node.style.transform = `translate(${x}px, ${y}px)`;
+  node.style.width = `${width}px`;
+  node.style.height = `${height}px`;
+}
+
 function paintArtifactCards(view) {
   const layout = artifactGridLayout(view);
   const { tuning, grid, columns, cardWidth, cardHeight, rowHeight, places } = layout;
@@ -8157,16 +8206,15 @@ function paintArtifactCards(view) {
     pool = { nodes: [], byId: new Map() };
     artifactCardPools.set(view, pool);
   }
-  spacer.style.height = `${layout.height}px`;
+  writeStyleValue(spacer, "height", `${layout.height}px`);
   // 작업 거르개가 비운 탭은 「아직 없습니다」가 아니라 무엇이 연결 안 됐는지를 말한다(바닥의 한 줄).
-  empty.hidden = artifactOrder.length > 0 || artifactError !== null || artifactEmptiedByTask();
+  const hideEmpty = artifactOrder.length > 0 || artifactError !== null || artifactEmptiedByTask();
+  if (empty.hidden !== hideEmpty) empty.hidden = hideEmpty;
   for (const head of cards.querySelectorAll(".artifacts-group")) {
     const place = places.find((one) => one.period === head.dataset.period);
-    head.hidden = !place;
+    if (head.hidden !== !place) head.hidden = !place;
     if (!place) continue;
-    head.style.transform = `translate(${tuning.gap}px, ${place.head}px)`;
-    head.style.width = `${Math.max(0, grid.clientWidth - tuning.gap * 2)}px`;
-    head.style.height = `${tuning.groupHead}px`;
+    placeArtifactNode(head, tuning.gap, place.head, Math.max(0, grid.clientWidth - tuning.gap * 2), tuning.groupHead);
   }
   const lo = grid.scrollTop - tuning.overscan * rowHeight;
   const hi = grid.scrollTop + grid.clientHeight + tuning.overscan * rowHeight;
@@ -8182,20 +8230,35 @@ function paintArtifactCards(view) {
   for (let short = artifactPoolCapacity(layout) - pool.nodes.length; short > 0; short -= 1) {
     pool.nodes.push(makeArtifactCardNode());
   }
-  // Nodes that still show a wanted id keep it; the rest are free.
-  const free = [];
+  // 제 id를 아직 보이는 노드는 그대로 두고, 나머지는 풀로 돌아간다. 한 노드가 그 id의 것인지는
+  // 풀의 표(`byId`)가 말한다: 풀로 돌아간 노드에도 옛 id가 적혀 있어서, 적힌 id만 보면 그 id가 다시
+  // 보이게 된 뒤에도 — 그 자리를 다른 노드가 받았는데 — 「아직 보이는 중」으로 읽혀 영영 풀로
+  // 돌아오지 못한다. 그러면 열 수가 줄었다 늘 때마다(서랍을 여닫을 때마다) 풀이 새 노드를 짓고,
+  // 그리기는 그 풀을 처음부터 끝까지 걷는다(t-40649: 500번 여닫으면 노드 5,500개).
+  const free = new Set();
+  const worn = new Map();
   for (const node of pool.nodes) {
-    if (!wantedSet.has(node.dataset.id)) {
-      free.push(node);
-      pool.byId.delete(node.dataset.id);
-    }
+    const id = node.dataset.id;
+    const holds = pool.byId.get(id) === node;
+    if (holds && wantedSet.has(id)) continue;
+    if (holds) pool.byId.delete(id);
+    free.add(node);
+    if (id !== undefined) worn.set(id, node);
+  }
+  // 다시 보이게 된 id는 그 id를 입은 채 풀에 있던 노드가 먼저 받는다 — 옷이 그대로라 다시 입히지
+  // 않는다. 그다음에 남은 자리를 남은 노드가 받는다.
+  for (const id of wantedSet) {
+    const node = pool.byId.has(id) ? null : worn.get(id);
+    if (node && free.delete(node)) pool.byId.set(id, node);
   }
   for (const index of wanted) {
     const id = artifactOrder[index];
     let node = pool.byId.get(id);
     if (!node) {
-      node = free.pop();
-      if (!node) {
+      node = free.values().next().value;
+      if (node) {
+        free.delete(node);
+      } else {
         node = makeArtifactCardNode();
         pool.nodes.push(node);
       }
@@ -8208,13 +8271,12 @@ function paintArtifactCards(view) {
     const local = index - place.start;
     const x = tuning.gap + (local % columns) * (cardWidth + tuning.gap);
     const y = place.first + Math.floor(local / columns) * rowHeight;
-    node.style.transform = `translate(${x}px, ${y}px)`;
-    node.style.width = `${cardWidth}px`;
-    node.style.height = `${cardHeight}px`;
+    placeArtifactNode(node, x, y, cardWidth, cardHeight);
     if (node.parentElement !== cards) cards.appendChild(node);
   }
+  // 이번 그림에서 자리를 받지 못한 노드는 판에서 뗀다.
   for (const node of free) {
-    if (!wantedSet.has(node.dataset.id) && node.parentElement) node.remove();
+    if (node.parentElement) node.remove();
   }
 }
 
@@ -8447,6 +8509,12 @@ function paintArtifactDrawer(view) {
   drawer.querySelector('[data-artifact-jump="worktree"]').disabled = !row.origin?.worktree;
   if (detail.dataset.artifactId !== row.id) {
     detail.dataset.artifactId = row.id;
+    // 다른 아티팩트로 옮겼다: 그 미리보기가 올 때까지 읽는 자리를 비운다 — 한 보고서의 본문이
+    // 다른 보고서의 머리 아래 서지 않고, 그 사이의 배치가 버릴 본문을 재지 않는다(t-40649).
+    // 제목 줄은 이 행의 것이니 선다; 본문이 제 제목으로 시작하면 그때 물러난다.
+    drawer.querySelector(".artifact-preview").hidden = true;
+    drawer.querySelector(".artifact-outline").hidden = true;
+    drawer.querySelector(".artifact-detail-title").hidden = false;
     // 다른 아티팩트는 제 처음부터 읽는다.
     drawer.scrollTop = 0;
     void paintArtifactPreview(view, row);
@@ -8494,6 +8562,7 @@ async function paintArtifactPreview(view, row) {
       : await askArtifactPreview(row.id);
   // 기다리는 사이 다른 카드로 옮겼으면 그 카드의 그림이 이긴다.
   if (drawer.querySelector(".artifacts-detail").dataset.artifactId !== row.id) return;
+  drawer.querySelector(".artifact-preview").hidden = false;
   // 증거는 원문이 아니라 런타임이 읽어 준 요약으로 선다 — 요약이 있으면 원문은 접힌다.
   const digested = paintArtifactDigest(drawer, payload);
   md.hidden = payload.kind !== "markdown";
@@ -8556,6 +8625,8 @@ function paintArtifactOutline(view, body) {
   const heads = body ? [...body.querySelectorAll(".md-head")] : [];
   const long = heads.length >= ARTIFACT_OUTLINE_MIN_HEADS
     && body.scrollHeight > drawer.clientHeight * artifactTuning(view).outlineScreens;
+  // 읽는 자리는 본문을 잰 김에 함께 읽는다 — 아래의 쓰기 뒤에 읽으면 배치를 한 번 더 시킨다.
+  const fromTheTop = long && drawer.scrollTop === 0;
   strip.hidden = !long;
   strip._heads = long ? heads : null;
   strip._tops = null;
@@ -8576,7 +8647,14 @@ function paintArtifactOutline(view, body) {
     return item;
   }));
   strip.querySelector(".artifact-outline-toggle").textContent = t("artifacts.outline.toggle", "목차 · {{n}}", { n: heads.length });
-  noteArtifactOutlinePlace(view);
+  // 처음부터 읽는 보고서의 읽는 자리는 첫 머리말이다 — 재지 않고 안다. 머리말마다의 자리는 읽는
+  // 사람이 처음 스크롤할 때 한 번 잰다: 여는 순간에 재면 방금 세운 본문을 한 번 더 배치시킨다(t-40649).
+  if (fromTheTop) {
+    strip._at = 0;
+    writeTextContent(strip.querySelector(".artifact-outline-now"), heads[0].textContent);
+  } else {
+    noteArtifactOutlinePlace(view);
+  }
 }
 
 /* 머리말마다의 자리(서랍의 스크롤 좌표) — 한 번 재어 두고, 서랍의 폭이 바뀌거나 접힌 구역이
