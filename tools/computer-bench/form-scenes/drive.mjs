@@ -45,6 +45,8 @@ const THINK_MS = 1000;
 const SECONDS_PER_ROUND_TRIP = 17;
 // The most round trips a road is given before it is called stuck.
 const ROUND_TRIPS_MAX = 40;
+// The most presses a calendar is given by hand before the driver moves on.
+const HAND_PRESSES = 12;
 // A button's intent, read from its words — the model's reading, in the two
 // languages the bench's pages are written in.
 const INTENT = {
@@ -168,7 +170,51 @@ class Road {
     this.form = filled.fingerprint;
     this.count.fillPasses += filled.passes;
     this.trail.push({ fill: filled.results.map((result) => `${result.label}:${result.status}`) });
+    for (const result of filled.results) {
+      if (result?.status === "no_option" && result.widget) await this.byHand(result, bundle[result.handle]);
+    }
     return filled;
+  }
+
+  /* A date the fill could not pick, finished by hand from the calendar its
+   * answer showed, as a model reads it: open the field, page and look until
+   * the heading reads the month, press the day — each a round trip, at most
+   * HAND_PRESSES of them. */
+  async byHand(result, asked) {
+    const [year, month, day] = String(asked).match(/\d+/g).map(Number);
+    const target = year * 12 + month;
+    await this.press({ handle: result.handle, label: result.label });
+    const look = () => this.call("eval", () => this.page.evaluate(([box]) => {
+      const days = document.querySelector(box);
+      let root = days;
+      for (let level = 0; root && level < 3 && !/\d{4}/.test(root.innerText || ""); level += 1) root = root.parentElement;
+      return root ? String(root.innerText || "") : "";
+    }, [result.widget.days]));
+    const monthOf = (text) => {
+      const year4 = (text.match(/\d{4}/) || [])[0];
+      const rest = year4 ? text.replace(year4, " ") : "";
+      const number = rest.match(/(?:^|\D)(\d{1,2})(?:\D|$)/);
+      return year4 && number ? Number(year4) * 12 + Number(number[1]) : null;
+    };
+    for (let presses = 0, pager = 0; presses < HAND_PRESSES; presses += 1) {
+      const now = monthOf(await look());
+      if (now === target) break;
+      if (now === null || pager >= result.widget.pagers.length) return;
+      const before = now;
+      await this.press({ handle: result.widget.pagers[pager], label: "pager" });
+      const after = monthOf(await look());
+      if (after === null || Math.sign(after - before) !== Math.sign(target - before)) pager += 1;
+    }
+    await this.call("eval", () => this.page.evaluate(([box, wanted]) => {
+      const cells = [...document.querySelector(box).querySelectorAll("button, td, [role=gridcell]")]
+        .filter((cell) => !cell.querySelector("button, td, [role=gridcell]") && /^\d{1,2}$/.test(cell.innerText.trim()));
+      const numbers = cells.map((cell) => Number(cell.innerText.trim()));
+      const first = numbers.indexOf(1);
+      const end = numbers.indexOf(1, first + 1);
+      const cell = cells.slice(first, end < 0 ? undefined : end)[numbers.slice(first, end < 0 ? undefined : end).indexOf(wanted)];
+      if (cell) cell.click();
+      return Boolean(cell);
+    }, [result.widget.days, day]));
   }
 
   async press(action) {
@@ -270,8 +316,10 @@ class Road {
       const next = read.actions.find((action) => !action.disabled && intentOf(action.label, "next"));
       const pressNext = clean && !!next && !next.handle.includes(${JSON.stringify(FORM_REQUEST.frameSeparator)});
       if (pressNext) document.querySelector(next.handle).click();
+      const hand = filled.results.filter((result) => result.status === "no_option" && result.widget)
+        .map((result) => ({ ...result, asked: bundle[result.handle] }));
       return { results: filled.results.map((result) => result.label + ":" + result.status), left: filled.left,
-        actions: read.actions, pressedNext: pressNext };
+        actions: read.actions, pressedNext: pressNext, hand };
     })()`;
     for (;;) {
       const source = evalFormScript(STEP.replace("__FACTS__", () => JSON.stringify(this.facts)));
@@ -279,6 +327,7 @@ class Road {
       if (!answer.ok) throw new Error(`eval refused: ${JSON.stringify(answer)}`);
       const said = answer.value;
       this.trail.push({ script: said.results, pressedNext: said.pressedNext });
+      for (const result of said.hand || []) await this.byHand(result, result.asked);
       if (said.pressedNext) continue;
       if (await this.code(said.left)) continue;
       if (said.left.length || said.results.some((result) => !/:(set|same)$/.test(result))) continue;

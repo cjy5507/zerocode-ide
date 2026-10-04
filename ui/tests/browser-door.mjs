@@ -910,6 +910,119 @@ await test("a_fill_on_a_form_that_changed_since_its_read_writes_nothing", async 
   } finally { await booking.close(); }
 });
 
+/* Dates on a page's own widgets (t-37883, third part): a date field the
+ * page keeps from typing is filled on its calendar — the heading read as a
+ * year and a month (its numbers, or the month's name the platform knows),
+ * paged with its own controls, the day of that month pressed, never a day
+ * the grid borrows from the months around it — a day that says its whole
+ * date is trusted first, a field that takes typing gets its own format,
+ * three selects take a date's numbers, and a calendar the fill cannot read
+ * is answered `no_option` with what it shows. */
+const PICKERS = `<!doctype html><html lang="ko"><meta charset="utf-8"><title>pickers</title>
+<style>.pop{background:#fff;border:1px solid #999;padding:4px;display:inline-block}.pop .days{display:grid;grid-template-columns:repeat(7,30px)}</style>
+<form>
+  <div><label for="a">출발일</label> <input id="a" readonly></div>
+  <div><label for="b">Return</label> <input id="b" readonly></div>
+  <div><label for="c">체크인</label> <input id="c" readonly></div>
+  <div><label for="d">생일</label> <input id="d" placeholder="YYYY.MM.DD"></div>
+  <div><label for="e">기타일</label> <input id="e" readonly></div>
+  <div>방문일 <select id="vy"><option value="">년</option><option>2026</option><option>2027</option></select>
+    <select id="vm"><option value="">월</option></select> <select id="vd"><option value="">일</option></select></div>
+</form>
+<script>
+  const pad = (n) => String(n).padStart(2, "0");
+  for (let m = 1; m <= 12; m += 1) document.getElementById("vm").add(new Option(m + "월", String(m)));
+  for (let d = 1; d <= 31; d += 1) document.getElementById("vd").add(new Option(d + "일", String(d)));
+  const svg = '<svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 5h6"/></svg>';
+  // One calendar, shaped per field: a heading or none, pagers as symbols or
+  // as icons, days that carry their whole date or only their number.
+  function calendar(input, shape) {
+    input.addEventListener("click", () => {
+      if (input.parentElement.querySelector(".pop")) return;
+      let [y, m] = shape.start;
+      const pop = document.createElement("div");
+      pop.className = "pop";
+      const draw = () => {
+        pop.replaceChildren();
+        const top = document.createElement("div");
+        const pager = (step) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          if (shape.pagers === "icons") { button.innerHTML = svg; button.setAttribute("aria-label", step < 0 ? "Previous month" : "Next month"); }
+          else button.textContent = step < 0 ? "‹" : "›";
+          button.addEventListener("click", () => { m += step; if (m < 1) { m = 12; y -= 1; } if (m > 12) { m = 1; y += 1; } draw(); });
+          return button;
+        };
+        const close = document.createElement("button");
+        close.type = "button";
+        close.textContent = "×";
+        close.addEventListener("click", () => pop.remove());
+        if (shape.closeFirst) top.append(close);
+        if (shape.pagers) top.append(pager(-1));
+        if (shape.heading) { const h = document.createElement("strong"); h.textContent = shape.heading(y, m); top.append(h); }
+        if (shape.pagers) top.append(pager(1));
+        pop.append(top);
+        const days = document.createElement("div");
+        days.className = "days";
+        const first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+        const count = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        const before = new Date(Date.UTC(y, m - 1, 0)).getUTCDate();
+        const cell = (d, own) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = String(d);
+          if (shape.whole && own) button.dataset.date = y + "-" + pad(m) + "-" + pad(d);
+          if (own && shape.off && shape.off(y, m, d)) button.disabled = true;
+          button.addEventListener("click", () => { if (!own) return; input.value = y + "-" + pad(m) + "-" + pad(d); pop.remove(); });
+          days.append(button);
+        };
+        for (let i = first - 1; i >= 0; i -= 1) cell(before - i, false);
+        for (let d = 1; d <= count; d += 1) cell(d, true);
+        for (let d = 1; (first + count + d - 1) % 7 !== 0; d += 1) cell(d, false);
+        pop.append(days);
+      };
+      draw();
+      input.parentElement.append(pop);
+    });
+  }
+  const english = (y, m) => new Intl.DateTimeFormat("en", { month: "long", timeZone: "UTC" }).format(new Date(Date.UTC(y, m - 1, 1))) + " " + y;
+  calendar(document.getElementById("a"), { start: [2026, 10], heading: (y, m) => y + "년 " + m + "월", pagers: "symbols", closeFirst: true,
+    off: (y, m, d) => d === 31 });
+  calendar(document.getElementById("b"), { start: [2026, 11], heading: english, pagers: "icons" });
+  calendar(document.getElementById("c"), { start: [2026, 12], whole: true });
+  calendar(document.getElementById("e"), { start: [2026, 10], pagers: "symbols" });
+</script>`;
+
+await test("a_date_is_filled_on_the_pages_own_calendar_and_in_the_fields_own_format", async () => {
+  const pickers = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await pickers.setContent(PICKERS);
+    const filled = await fillBundle(pickers, { "#a": "2026-12-30", "#b": "2027-01-05", "#c": "2026-12-09", "#d": "2026-11-28",
+      "#vy": "2026", "#vm": "11", "#vd": "04" });
+    const said = Object.fromEntries(filled.results.map((result) => [result.handle, result.status]));
+    assert(Object.values(said).every((status) => status === "set"), "every date took", filled.results);
+    const held = await pickers.evaluate(() => ["a", "b", "c", "d", "vy", "vm", "vd"].map((id) => document.getElementById(id).value));
+    assert(JSON.stringify(held) === JSON.stringify(["2026-12-30", "2027-01-05", "2026-12-09", "2026.11.28", "2026", "11", "4"]),
+      "each field holds the asked date: paged two months past a closer, a month's name across a year, a day that says its date, the field's own format, three selects", held);
+    return JSON.stringify(said);
+  } finally { await pickers.close(); }
+});
+
+await test("a_calendar_the_fill_cannot_read_is_answered_with_what_it_shows", async () => {
+  const pickers = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await pickers.setContent(PICKERS);
+    const filled = await fillBundle(pickers, { "#e": "2026-12-09" });
+    const [only] = filled.results;
+    assert(only.status === "no_option" && only.widget && only.widget.days && only.widget.pagers.length === 2,
+      "no heading to read: no_option, with the calendar's days and pagers", only);
+    const off = await fillBundle(pickers, { "#a": "2026-10-31" });
+    assert(off.results[0].status === "no_option", "an off day is no choice", off.results[0]);
+    assert(await pickers.evaluate(() => document.getElementById("a").value) === "", "and nothing was written");
+    return JSON.stringify(only.widget);
+  } finally { await pickers.close(); }
+});
+
 await test("a_frame_of_another_origin_is_named_not_read", async () => {
   const sealed = await browser.newPage();
   try {

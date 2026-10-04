@@ -76,7 +76,20 @@ pub const BROWSER_FORM_DAYS: &[&str] = &["[role=gridcell]", "td", "button", "[da
 
 /// The attributes a day of a date picker says its whole date in, besides its
 /// words — ARIA's name, a title, and the data a picker keys its days by.
-pub const BROWSER_FORM_DAY_WORDS: &[&str] = &["aria-label", "title", "data-date", "data-value"];
+pub const BROWSER_FORM_DAY_WORDS: &[&str] = &[
+    "aria-label",
+    "title",
+    "data-date",
+    "data-value",
+    "datetime",
+];
+
+/// The fewest day cells a box holds to be a month's calendar (February's).
+pub const BROWSER_FORM_MONTH_DAYS: usize = 28;
+
+/// The most months a fill pages a calendar to reach a date — two years; a
+/// date further off is the agent's to reach by hand.
+pub const BROWSER_FORM_MONTH_PAGES: usize = 24;
 
 /// What separates a frame's handle from the handle inside it. Not CSS (a
 /// selector with it is refused by the platform), so a handle with it can
@@ -362,6 +375,21 @@ pub struct FillResult {
     pub error: String,
     /// The choices there were, when none read as the value.
     pub options: Vec<String>,
+    /// The page's own calendar, when a date could not be picked on it.
+    pub widget: Option<FormWidget>,
+}
+
+/// A calendar the fill could not pick a day on, as the page shows it: its
+/// heading's words and month, the controls that may page it, the box of its
+/// days — what the agent presses to finish by hand.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FormWidget {
+    pub heading: String,
+    /// `YYYY-MM`, when the heading read as one.
+    pub month: String,
+    pub pagers: Vec<String>,
+    pub days: String,
 }
 
 /// One pass of a fill, as the page answers it: each asked field's outcome,

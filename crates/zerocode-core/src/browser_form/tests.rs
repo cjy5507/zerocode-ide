@@ -337,3 +337,27 @@ fn a_fill_on_a_form_changed_since_its_read_ends_at_once_and_writes_nothing() {
         "{said}"
     );
 }
+
+/// A date the fill could not pick on the page's calendar is said with the
+/// calendar as the page shows it — what the agent presses to finish it.
+#[test]
+fn a_calendar_the_fill_could_not_pick_on_is_said_with_its_heading_pagers_and_days() {
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [{ "handle": "#out", "status": "no_option", "label": "Return",
+            "widget": { "heading": "2026년 10월", "month": "2026-10", "pagers": ["#prev", "#next"], "days": "div.days" } }],
+    }))
+    .expect("a pass with a calendar");
+    let bundle = vec![entry("#out", text("2026-12-03"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    let report = ledger.report();
+    assert_eq!(
+        report.results[0].widget.as_ref().map(|widget| widget.days.as_str()),
+        Some("div.days")
+    );
+    let lines = fill_lines(&report);
+    assert!(
+        lines.contains("달력 「2026년 10월」 넘김 #prev · #next · 날짜 칸 div.days"),
+        "{lines}"
+    );
+}
