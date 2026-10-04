@@ -437,7 +437,14 @@ impl Spent {
     /// make one request count as many.
     #[must_use]
     pub fn rider(&self) -> Self {
-        self.clone()
+        Self {
+            requests: 0,
+            redacted_lines: 0,
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            model: self.model.clone(),
+            version: self.version.clone(),
+        }
     }
 
     /// What several asks of one judgment came to together — a sharded
@@ -767,20 +774,60 @@ impl Wire {
     }
 
     /// Several requests of `row`'s, each with the workspace its words come
-    /// from, side by side under one `deadline` each: the answers come back in
-    /// the order the requests were handed in, and the wait is the slowest
-    /// one's — the road every seat that asks in shards takes (t-32796). Blocks
-    /// like [`Self::ask`].
+    /// from, under one `deadline` each: at most [`TOGETHER_LANES`] in flight at
+    /// once, side by side, and the rest in waves behind them. The answers come
+    /// back in the order the requests were handed in, and a wave's wait is its
+    /// slowest request's — the road every seat that asks in shards takes
+    /// (t-32796). Blocks like [`Self::ask`].
     #[must_use]
     pub fn ask_together(
         &self,
         row: &JevUse,
-        asks: Vec<(Option<&Path>, Value)>,
+        mut asks: Vec<(Option<&Path>, Value)>,
         deadline: Duration,
     ) -> Vec<Asked> {
-        asks.into_iter()
-            .map(|(workspace, body)| self.ask(row, workspace, body, deadline))
-            .collect()
+        let mut answered = Vec::with_capacity(asks.len());
+        while !asks.is_empty() {
+            let wave: Vec<_> = asks.drain(..asks.len().min(TOGETHER_LANES)).collect();
+            answered.extend(self.ask_in_one_wave(row, wave, deadline));
+        }
+        answered
+    }
+
+    /// One wave of [`Self::ask_together`]: its requests all in flight at once.
+    fn ask_in_one_wave(
+        &self,
+        row: &JevUse,
+        mut wave: Vec<(Option<&Path>, Value)>,
+        deadline: Duration,
+    ) -> Vec<Asked> {
+        // One request has nothing to leave beside: no thread for it.
+        if wave.len() == 1 {
+            return wave
+                .pop()
+                .map(|(workspace, body)| self.ask(row, workspace, body, deadline))
+                .into_iter()
+                .collect();
+        }
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = wave
+                .into_iter()
+                .map(|(workspace, body)| {
+                    scope.spawn(move || self.ask(row, workspace, body, deadline))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| Asked {
+                        answer: Err(TRANSPORT.to_string()),
+                        spent: Spent::default(),
+                        request_bytes: 0,
+                        memo: None,
+                    })
+                })
+                .collect()
+        })
     }
 
     /// [`Self::ask`], with a memo between the door and the socket

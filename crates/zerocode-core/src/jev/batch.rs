@@ -35,16 +35,20 @@
 //! one that decides the wait is the longest and not the sum.
 //!
 //! **The seam for the next seat.** The review of a finished worker's result
-//! is the second user of this road: its deterministic checks settle what code
-//! can settle first (a failing check is a verdict nobody asks a model for),
-//! and the items left — their evidence as facts, the task's own words as the
-//! shared part — ride one request, each read as a verdict with a confidence
-//! against that seat's own floor. That seat implements [`Judgment`] and
-//! nothing else here changes.
+//! is the second user of this road (t-32796 phase 2): its deterministic
+//! checks (t-26587) settle what code can settle first — a failing check is a
+//! verdict nobody asks a model for — and the items left, their evidence as
+//! facts and the task's own words as the shared part, ride one request, each
+//! read as a verdict with a confidence against that seat's own floor, which
+//! is what says pass or redo. That seat implements [`Judgment`] and nothing
+//! else here changes. It is not built here: the checks it waits for are not
+//! landed.
 
 use std::ops::Range;
 
 use serde_json::{Map, Value};
+
+use super::shard;
 
 /// What every question name of a batch opens with: a letter, then the item's
 /// place in the WHOLE batch, then the question's suffix. One name per
@@ -103,8 +107,7 @@ impl<'a> Answers<'a> {
     /// The reply's answer to this item's question `suffix`, when it gave one.
     #[must_use]
     pub fn get(&self, suffix: &str) -> Option<&'a Value> {
-        let _ = (self.all, self.item, suffix);
-        None
+        self.all.get(question_name(self.item, suffix))
     }
 }
 
@@ -137,8 +140,10 @@ impl Request {
         judgment: &J,
         answers: &Value,
     ) -> Vec<Result<J::Verdict, J::Refusal>> {
-        let _ = (judgment, answers);
-        Vec::new()
+        self.items
+            .clone()
+            .map(|item| judgment.read(&Answers { all: answers, item }))
+            .collect()
     }
 }
 
@@ -148,8 +153,28 @@ impl Request {
 /// questions.
 #[must_use]
 pub fn requests<J: Judgment>(judgment: &J, facts: Vec<Value>) -> Vec<Request> {
-    let _ = (judgment, facts);
-    Vec::new()
+    let mut facts = facts.into_iter();
+    shard::even_shards(facts.len(), judgment.cap())
+        .into_iter()
+        .map(|range| {
+            let mut state = judgment.shared();
+            state.insert(
+                judgment.items_key().to_string(),
+                Value::Array(facts.by_ref().take(range.len()).collect()),
+            );
+            let mut questions = Map::new();
+            for (at, item) in range.clone().enumerate() {
+                for (suffix, question) in judgment.questions(at) {
+                    questions.insert(question_name(item, suffix), question);
+                }
+            }
+            Request {
+                state: Value::Object(state),
+                questions: Value::Object(questions),
+                items: range,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

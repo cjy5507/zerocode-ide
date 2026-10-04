@@ -35,7 +35,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use zerocode_core::browser_read::{self, ReadAsk, Verdict, inside};
+use zerocode_core::browser_read::{self, Verdict, inside};
 use zerocode_core::jev::promote::SEAT_RECORDING;
 use zerocode_core::jev::summary::{AGREED, APPLIED, AT, ELAPSED_MS, LABEL, ROUTE_USE};
 use zerocode_core::jev::{
@@ -43,7 +43,7 @@ use zerocode_core::jev::{
 };
 
 use crate::cmd::browser::BrowserReadPage;
-use crate::systemone::{Asked, Wire, request_body};
+use crate::systemone::{Wire, request_body};
 
 /// How long one read waits for every shard's answer — the seat's own wall,
 /// read from the use table that judges a rising seat against it.
@@ -150,36 +150,6 @@ fn same_page(read: &str, now: &str) -> bool {
     cut(read) == cut(now)
 }
 
-/// Ask every shard side by side and wait for the slowest, under one wall.
-fn ask_shards(wire: &Wire, workspace: Option<&Path>, asks: &[ReadAsk]) -> Vec<Asked> {
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = asks
-            .iter()
-            .map(|ask| {
-                scope.spawn(move || {
-                    wire.ask(
-                        &BROWSER_READ,
-                        workspace,
-                        request_body(&ask.state, &ask.questions),
-                        READ_DEADLINE,
-                    )
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle.join().unwrap_or_else(|_| Asked {
-                    answer: Err(crate::systemone::TRANSPORT.to_string()),
-                    spent: crate::systemone::Spent::default(),
-                    request_bytes: 0,
-                    memo: None,
-                })
-            })
-            .collect()
-    })
-}
-
 /// Judge one read: ask, fold or record, and say what the agent reads.
 ///
 /// `acting` is whether the seat acts right now (`crate::systemone::applies`,
@@ -222,7 +192,14 @@ pub(crate) fn settle(
         "charsBefore": page.report.text.chars().count(),
     });
     let began = Instant::now();
-    let answers = ask_shards(wire, workspace, &asks);
+    // Every shard side by side, under one wall: the read waits for the slowest.
+    let answers = wire.ask_together(
+        &BROWSER_READ,
+        asks.iter()
+            .map(|ask| (workspace, request_body(&ask.state, &ask.questions)))
+            .collect(),
+        READ_DEADLINE,
+    );
     row[ELAPSED_MS.canonical] =
         json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
     crate::systemone::Spent::together(answers.iter().map(|asked| &asked.spent)).stamp(&mut row);

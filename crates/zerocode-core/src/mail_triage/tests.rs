@@ -210,125 +210,7 @@ fn look<'a>() -> MailLook<'a> {
         age_ms: 42_500,
         delivered: false,
         repeats: 2,
-        coordinator_busy: None,
-        open_questions: 3,
     }
-}
-
-/// The question carries a letter's structure under the table's keys — the
-/// texts only where the table declares them, numbers and flags elsewhere —
-/// and asks one closed choice and one Noul in one request.
-#[test]
-fn the_question_carries_the_letters_structure_and_never_its_words() {
-    let asked = ask(&look());
-    let state = asked.state.as_object().expect("a state");
-    let keys: Vec<&str> = state.keys().map(String::as_str).collect();
-    let mut expected = STATE_KEYS.to_vec();
-    expected.sort_unstable();
-    let mut keys_sorted = keys.clone();
-    keys_sorted.sort_unstable();
-    assert_eq!(keys_sorted, expected);
-    assert_eq!(asked.state["kind"], "question");
-    assert_eq!(asked.state["from"], "worker");
-    assert_eq!(asked.state["worker"], "w-7");
-    assert_eq!(asked.state["task"], "t-3");
-    assert_eq!(asked.state["taskStatus"], "dispatched");
-    assert_eq!(asked.state["priority"], "normal");
-    assert_eq!(asked.state["awaitsAnswer"], true);
-    assert_eq!(asked.state["threadDepth"], 0);
-    assert_eq!(asked.state["ageSeconds"], 42, "seconds a person would say");
-    assert_eq!(asked.state["delivered"], false);
-    assert_eq!(asked.state["repeats"], 2);
-    assert_eq!(
-        asked.state["coordinatorBusy"],
-        Value::Null,
-        "unknown is unknown"
-    );
-    assert_eq!(asked.state["openQuestions"], 3);
-    // Every text in the state is one the table declares; the rest are not
-    // texts at all.
-    let declared: Vec<&str> = MAIL_TRIAGE
-        .sends
-        .iter()
-        .map(|sent| sent.at.trim_start_matches("/state/"))
-        .collect();
-    for (key, value) in state {
-        assert_eq!(
-            value.is_string(),
-            declared.contains(&key.as_str()),
-            "{key}: {value}"
-        );
-    }
-    let questions = asked.questions.as_object().expect("questions");
-    assert_eq!(questions.len(), 2);
-    assert_eq!(asked.questions["triage"]["type"], "choice");
-    let criteria = asked.questions["triage"]["criteria"]
-        .as_object()
-        .expect("criteria");
-    let offered: Vec<&str> = criteria.keys().map(String::as_str).collect();
-    let mut words: Vec<&str> = Triage::ALL.map(Triage::word).to_vec();
-    words.sort_unstable();
-    let mut offered_sorted = offered.clone();
-    offered_sorted.sort_unstable();
-    assert_eq!(offered_sorted, words);
-    assert_eq!(asked.questions["urgent"]["type"], "noul");
-
-    // A busy coordinator is said as a flag, and a negative age as none.
-    let busy = ask(&MailLook {
-        coordinator_busy: Some(true),
-        age_ms: -5,
-        ..look()
-    });
-    assert_eq!(busy.state["coordinatorBusy"], true);
-    assert_eq!(busy.state["ageSeconds"], 0);
-}
-
-fn answer(chosen: &str, urgent: Value) -> Value {
-    json!({
-        "triage": {
-            "type": "choice",
-            "choice": chosen,
-            "probabilities": { "answer_now": 0.7, "can_wait": 0.2, "no_need": 0.1 },
-            "confidence": 0.6,
-        },
-        "urgent": { "type": "noul", "noul": urgent },
-    })
-}
-
-/// An answer needs both heads in shape; one broken rule in either discards
-/// it whole, and says which.
-#[test]
-fn an_answer_needs_both_heads_or_is_refused_whole() {
-    let asked = ask(&look());
-    let read = asked
-        .read(&answer("answer_now", json!(0.8)))
-        .expect("in shape");
-    assert_eq!(read.triage, Triage::AnswerNow);
-    assert_eq!(read.confidence, 0.6);
-    assert_eq!(read.urgent, 0.8);
-    assert_eq!(read.probabilities.len(), 3);
-    assert_eq!(
-        asked.read(&answer("later", json!(0.8))),
-        Err(MailRefusal::Triage(ChoiceRefusal::UnknownOption))
-    );
-    assert_eq!(
-        asked.read(&answer("answer_now", json!(1.5))),
-        Err(MailRefusal::Urgent(NoulRefusal::OutOfRange))
-    );
-    let mut lacking = answer("answer_now", json!(0.8));
-    lacking.as_object_mut().expect("answers").remove("urgent");
-    assert_eq!(
-        asked.read(&lacking),
-        Err(MailRefusal::Urgent(NoulRefusal::NoAnswer))
-    );
-    assert_eq!(
-        MailRefusal::Urgent(NoulRefusal::NoAnswer).token(),
-        "schema_no_noul"
-    );
-    assert_eq!(
-        MailRefusal::Triage(ChoiceRefusal::NotOne).token(),
-        "schema_not_one"
-    );
 }
 
 /* ---- the batch road (t-32796) ------------------------------------------- */
@@ -1144,8 +1026,9 @@ fn the_engine_takes_the_rule_it_is_handed() {
 }
 
 /// What the question reads about a letter off a live run: its sender's head,
-/// its worker and task and where the task stands, its depth, how many
-/// letters about the same thing came before it and how many questions wait.
+/// its worker and task and where the task stands, its depth and how many
+/// letters about the same thing came before it — and, once for the run, how
+/// many questions wait on the coordinator.
 #[test]
 fn the_look_reads_the_letters_facts_off_the_run() {
     let mut ledger = Ledger::new();
@@ -1179,9 +1062,15 @@ fn the_look_reads_the_letters_facts_off_the_run() {
     let receipts = Vec::new();
     let room = Mailroom::of_run(run, &receipts);
     let letter = room.message(&question).expect("the letter");
-    let open_questions = room.open_questions(run);
-    assert_eq!(open_questions, 1);
-    let look = room.look(run, letter, 20_010, Some(false), open_questions);
+    let situation = room.situation(run, Some(false));
+    assert_eq!(
+        situation,
+        Situation {
+            coordinator_busy: Some(false),
+            open_questions: 1,
+        }
+    );
+    let look = room.look(run, letter, 20_010);
     assert_eq!(look.kind, MessageKind::Question);
     assert_eq!(look.from, "worker");
     assert_eq!(look.worker, Some(started.worker.as_str()));
@@ -1193,10 +1082,9 @@ fn the_look_reads_the_letters_facts_off_the_run() {
     assert_eq!(look.age_ms, 20_000);
     assert!(!look.delivered);
     assert_eq!(look.repeats, 0);
-    assert_eq!(look.coordinator_busy, Some(false));
-    let asked = ask(&look);
+    let asked = requests_for(&[look]);
     assert!(
-        !asked.state.to_string().contains("읽지 않는다"),
+        !asked[0].state.to_string().contains("읽지 않는다"),
         "a letter's words never reach the question"
     );
 }

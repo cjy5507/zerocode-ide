@@ -3590,14 +3590,30 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
 pub const MAIL_TRIAGE_DEADLINE_MS: u64 = 5_000;
 
 /// The most letters one mail triage request asks about ([`batch::Judgment::cap`]):
-/// a run's fresh letters above it are cut evenly into requests that leave
-/// side by side.
+/// a run's fresh letters above it are cut evenly ([`shard::even_shards`]) into
+/// requests that leave side by side — four at a time — so a burst waits for a
+/// request or a few and not for its letters one after another.
+///
+/// Sixteen, for three reasons that can be read off the words and one that
+/// has to be measured. A letter adds about a kilobyte to a request (964 B: its
+/// entry and its two questions, at rubric version 2) beside the 2.5 KB the
+/// rubric and the coordinator's situation take once, so a full request is
+/// 17.9 KB — some 4,500 tokens of the 64,000 one request may carry
+/// (docs.typesafe.ai/models, read 2026-09-25). A letter asks two questions,
+/// the choice and the Noul, so a full request asks thirty-two, under the fifty
+/// the skill and compaction seats put in one ([`SKILL_SHARD_TARGET`]). And it
+/// bounds what one request that does not come back costs: the seat only
+/// records, and the letters of that request are the ones left unrecorded.
+/// What size does to agreement with the coordinator's later acts is the thing
+/// to measure: `measure_agreement_by_batch_size_on_the_real_wire` asks the same
+/// letters in requests of 1, 4, 8, 16, 32 and 48.
 pub const MAIL_TRIAGE_BATCH_CAP: usize = 16;
 
 /// The window's mail triage (t-9471, `crate::mail_triage`): for every letter
 /// a run's coordinator is handed while this window holds its seat, whether
 /// the coordinator should deal with it now, later, or not at all — and
-/// whether it should be the very next thing it does.
+/// whether it should be the very next thing it does. A run's fresh letters
+/// are asked in one request ([`batch`], t-32796), not one request each.
 ///
 /// Record-only: `shadow` is the most it offers and it never rises. Its rows
 /// are the evidence the desk's order will be judged on before it may move a
@@ -3619,32 +3635,39 @@ pub const MAIL_TRIAGE: JevUse = JevUse {
     modes: &[JevMode::Off, JevMode::Shadow],
     recommended: JevMode::Shadow,
     repeat: None,
-    // Every text the state carries: the letter's kind, its sender's address
+    // The list of letters, cut to the batch cap — the road never builds a
+    // request over it, so the door's cut is a belt beside its braces — and
+    // every text a letter's entry carries: its kind, its sender's address
     // head, the ledger's ids of the worker and the task, the task's stage
-    // word and the priority word. The rest are numbers and flags.
+    // word and the priority word. The rest are numbers and flags, and the
+    // rubric the state opens with is the product's own words.
     sends: &[
         Sent {
-            at: "/state/kind",
+            at: "/state/letters",
+            cap: Cap::Items(MAIL_TRIAGE_BATCH_CAP),
+        },
+        Sent {
+            at: "/state/letters/*/kind",
             cap: Cap::Uncut,
         },
         Sent {
-            at: "/state/from",
+            at: "/state/letters/*/from",
             cap: Cap::Uncut,
         },
         Sent {
-            at: "/state/worker",
+            at: "/state/letters/*/worker",
             cap: Cap::Uncut,
         },
         Sent {
-            at: "/state/task",
+            at: "/state/letters/*/task",
             cap: Cap::Uncut,
         },
         Sent {
-            at: "/state/taskStatus",
+            at: "/state/letters/*/taskStatus",
             cap: Cap::Uncut,
         },
         Sent {
-            at: "/state/priority",
+            at: "/state/letters/*/priority",
             cap: Cap::Uncut,
         },
     ],

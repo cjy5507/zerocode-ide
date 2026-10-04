@@ -3197,26 +3197,30 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
             ]
         }
         id if id == MAIL_TRIAGE.id => {
-            use crate::mail_triage::{MailLook, ask};
+            use crate::jev::batch::requests;
+            use crate::mail_triage::{MailLook, MailTriage, Situation};
             use crate::orchestration::MessageKind;
-            vec![
-                ask(&MailLook {
-                    kind: MessageKind::Question,
-                    from: "worker",
-                    worker: Some("w-7"),
-                    task: Some("t-3"),
-                    task_status: Some("dispatched"),
-                    priority: "normal",
-                    awaits_answer: true,
-                    thread_depth: 0,
-                    age_ms: 42_500,
-                    delivered: false,
-                    repeats: 0,
-                    coordinator_busy: None,
-                    open_questions: 1,
-                })
-                .questions,
-            ]
+            let look = MailLook {
+                kind: MessageKind::Question,
+                from: "worker",
+                worker: Some("w-7"),
+                task: Some("t-3"),
+                task_status: Some("dispatched"),
+                priority: "normal",
+                awaits_answer: true,
+                thread_depth: 0,
+                age_ms: 42_500,
+                delivered: false,
+                repeats: 0,
+            };
+            let situation = Situation {
+                coordinator_busy: None,
+                open_questions: 1,
+            };
+            requests(&MailTriage::new(situation), vec![look.facts()])
+                .into_iter()
+                .map(|request| request.questions)
+                .collect()
         }
         id if id == CHALLENGER.id => vec![
             challenger::ask(
