@@ -180,7 +180,7 @@ pub const BROWSER_VERBS: [BrowserVerb; 20] = [
     act_verb("goto", 2, 2, BROWSER_DOOR_BUDGET_MS),
     // `eval <label> <expr>` or `eval <label> --value <expr>` — the stdin road,
     // for a script that carries a person's details (t-37883).
-    act_verb("eval", 2, 2, BROWSER_CALLBACK_DEADLINE_MS),
+    act_verb("eval", 2, 3, BROWSER_CALLBACK_DEADLINE_MS),
     // `read <label> [css]` or `read <label> --full` — the same read, whole
     // when the agent says so (`parse_read`).
     verb("read", 1, 2, BROWSER_CALLBACK_DEADLINE_MS),
@@ -335,8 +335,8 @@ pub struct FieldsCommand {
 
 /// Parse the form read.
 pub fn parse_fields(argv: &[String]) -> Result<FieldsCommand, String> {
-    let _ = argv;
-    Err("fields는 아직 없습니다 (빨강)".to_string())
+    let (label, json) = label_and_json(argv, "fields")?;
+    Ok(FieldsCommand { label, json })
 }
 
 /// `fill <label> <bundle>` or `fill <label> --value <bundle>`.
@@ -349,8 +349,18 @@ pub struct FillCommand {
 /// Parse a fill: the bundle as one word, or after `--value` — the shape the
 /// shim sends for `--value-stdin`, which keeps the values off every argv.
 pub fn parse_fill(argv: &[String]) -> Result<FillCommand, String> {
-    let _ = argv;
-    Err("fill은 아직 없습니다 (빨강)".to_string())
+    let label = labelled(argv, "fill")?;
+    let bundle = match &argv[2..] {
+        [bundle] if !bundle.starts_with("--") => bundle,
+        [flag, bundle] if flag == TYPE_VALUE_FLAG => bundle,
+        _ => {
+            return Err(format!(
+                "fill <label> <bundle> 또는 fill <label> {TYPE_VALUE_STDIN_FLAG}"
+            ));
+        }
+    };
+    let entries = crate::browser_form::fill_entries(bundle)?;
+    Ok(FillCommand { label, entries })
 }
 
 /// What `click` names its control by: a CSS selector, or a number on the
@@ -1243,6 +1253,8 @@ pub fn usage() -> String {
         "  zerocode-browser close <label>        판을 닫음 (창이 닫고, 사라질 때까지 기다림)",
         "  zerocode-browser goto <label> <url>   그 판을 그 주소로",
         "  zerocode-browser eval <label> <expr>  게스트 페이지의 동기 식과 JSON 값",
+        "  zerocode-browser eval <label> --value-stdin",
+        "                                             식은 stdin에서 — 식 안의 zerocode.fields()·zerocode.fill({손잡이: 값})로 한 스크립트에 읽기·채우기·확인",
         "  zerocode-browser read <label> [css]   보이는 텍스트와 고른 DOM (본문 소음 판정이 켜져 있으면 nav·footer 같은 블록은 한 줄로 접음)",
         "  zerocode-browser read <label> --full  판정 없이 페이지 전체 텍스트",
         "  zerocode-browser click <label> <css>  보이는 첫 요소를 클릭",
@@ -1258,6 +1270,10 @@ pub fn usage() -> String {
         "                                             보이는 내장 브라우저를 PNG 파일로 저장 (--marks: 마지막 marks 번호를 얹음)",
         "  zerocode-browser marks <label> [--json]",
         "                                             뷰포트에서 누를 수 있는 컨트롤에 번호 매김 — 사진은 screenshot --marks",
+        "  zerocode-browser fields <label> [--json]",
+        "                                             양식의 모든 칸을 한 번에: 손잡이·종류·라벨·값·선택지·필수, 그리고 버튼 (화면 밖·같은 출처 틀 안의 칸도)",
+        "  zerocode-browser fill <label> --value-stdin",
+        "                                             stdin의 {\"손잡이\": 값, …}을 한 번에 채우고 칸마다 다시 읽어 확인 — 글·고르기·체크·날짜·직접 그린 목록; 늦게 뜨는 칸은 다시 시도; 비밀·파일 칸은 거절",
         "  zerocode-browser console <label> [--since N] [--level error|warn|all]",
         "                                             페이지 콘솔: seq·레벨·시각·문장 (--since 로 이어 읽기)",
         "  zerocode-browser network <label> [--since N] [--failed]",

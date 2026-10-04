@@ -666,8 +666,10 @@ const zcEncode = (answer, cap = 64000) => {
 const zcFail = (code) => zcEncode({ ok: false, code });
 // A password field is the platform's own fact — the input's type, or the
 // `current-password` a form declares — never a label's word: the one rule
-// the typing holds its keys by and a look calls a field secret by.
-const zcSecretField = (element) => element instanceof HTMLInputElement
+// the typing holds its keys by, a look and a form read call a field secret
+// by. Read by the element's tag, not its realm's class, so a field inside a
+// frame is judged as one on the page.
+const zcSecretField = (element) => String((element && element.tagName) || "").toLowerCase() === "input"
   && (String(element.type).toLowerCase() === "password"
     || String(element.autocomplete || "").toLowerCase() === "current-password");
 // The element a selector names is the first one a person could SEE, not the
@@ -2761,7 +2763,7 @@ const zcWords = (text, cap) => zcCut(String(text || "").replace(/\s+/g, " ").tri
 // another control inside it (a select's options, a textarea's text).
 const zcLabelWords = (label) => {
   const skip = "select, textarea, button, script, style, template";
-  const walker = document.createTreeWalker(label, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+  const walker = (label.ownerDocument || document).createTreeWalker(label, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => node.nodeType === 1 && node.matches(skip)
       ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
   const words = [];
@@ -2772,11 +2774,11 @@ const zcLabelWords = (label) => {
 };
 // An element's name in the order a reader takes it: the elements it is
 // labelled by, its own label, the labels that name it, a table's caption,
-// its title.
+// its title — each looked up in the element's own document (a frame's).
 const zcNameOf = (el) => {
   const by = el.getAttribute("aria-labelledby");
   if (by) {
-    const words = by.split(/\s+/).map((id) => document.getElementById(id)).filter(Boolean)
+    const words = by.split(/\s+/).map((id) => (el.ownerDocument || document).getElementById(id)).filter(Boolean)
       .map((node) => node.textContent).join(" ");
     if (words.trim()) return words;
   }
@@ -2794,7 +2796,7 @@ const zcNameOf = (el) => {
 const zcNear = (el, field) => {
   const around = el.closest(field.regions.join(","));
   const heading = (around && around.querySelector(field.headings.join(",")))
-    || document.querySelector("h1");
+    || (el.ownerDocument || document).querySelector("h1");
   return heading ? heading.textContent : "";
 };
 // A numbered control read as a field — its kind, whether it holds a secret,

@@ -123,8 +123,8 @@ pub fn captures(tool: &str, verb: &str) -> Option<bool> {
         ("emulator", "screenshot")
         | (
             "browser",
-            "goto" | "click" | "type" | "eval" | "wait" | "screenshot" | "viewport" | "scroll"
-            | "find",
+            "goto" | "click" | "type" | "fill" | "eval" | "wait" | "screenshot" | "viewport"
+            | "scroll" | "find",
         )
         | (
             "computer",
@@ -187,7 +187,10 @@ pub fn captures(tool: &str, verb: &str) -> Option<bool> {
 /// frames already hold, and a recipe replays it.
 #[must_use]
 pub fn redacted(tool: &str, argv: &[String]) -> Vec<String> {
-    let typing = tool == "browser" && argv.first().is_some_and(|verb| verb == "type");
+    // A browser `type` and a `fill` carry what was typed last, as one word
+    // or after `--value`.
+    let typing =
+        tool == "browser" && argv.first().is_some_and(|verb| verb == "type" || verb == "fill");
     let needle = tool == "computer"
         && argv
             .first()

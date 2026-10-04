@@ -5985,6 +5985,18 @@ pub(super) fn page_said(source: &str, words: impl Into<String>) -> zerocode_hook
 /// once (`list`, `tabs`) rather than one page.
 const EVERY_TAB: &str = "browser tabs";
 
+/// A refusal whose words the page wrote — a fill whose fields did not all
+/// take says each field's words and what it holds — in the same fence, on
+/// the road a refusal travels (the bridge hands an agent only stderr when
+/// the exit code is not zero).
+pub(super) fn page_refused(source: &str, words: impl Into<String>) -> zerocode_hookd::TeamAnswer {
+    browser_refused(zerocode_core::untrusted::fence(
+        source,
+        &words.into(),
+        usize::MAX,
+    ))
+}
+
 pub(super) fn browser_refused(stderr: impl Into<String>) -> zerocode_hookd::TeamAnswer {
     zerocode_hookd::TeamAnswer {
         stdout: String::new(),
@@ -6022,6 +6034,23 @@ fn typed_answer(
             "{}\n",
             cmd::browser::input_said(cmd::browser::TYPED_SAID, &report)
         )),
+        Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+    }
+}
+
+/// An eval's answer: the value, pretty, inside the page's fence.
+fn eval_answer(
+    label: &str,
+    evaluated: Result<serde_json::Value, String>,
+) -> zerocode_hookd::TeamAnswer {
+    match evaluated {
+        Ok(value) => page_said(
+            label,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string())
+            ),
+        ),
         Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
     }
 }
@@ -6201,16 +6230,26 @@ pub(super) async fn answer_browser_command(
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }
         }
-        ("eval", 3) => match cmd::browser::automate_eval(app, &state, &argv[1], &argv[2]).await {
-            Ok(value) => page_said(
+        // `eval <label> <expr>`, or `eval <label> --value <expr>` — the shape
+        // the shim sends for `--value-stdin`, so a script that fills a form
+        // keeps the person's details off every argv (t-37883).
+        ("eval", 3) | ("eval", 4) => {
+            let expression = match &argv[2..] {
+                [expression] => expression,
+                [flag, expression] if flag == zerocode_core::agent_browser::TYPE_VALUE_FLAG => {
+                    expression
+                }
+                _ => {
+                    return browser_refused(
+                        "zerocode-browser: eval <label> <expr> 또는 eval <label> --value-stdin\n",
+                    );
+                }
+            };
+            eval_answer(
                 &argv[1],
-                format!(
-                    "{}\n",
-                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string())
-                ),
-            ),
-            Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
-        },
+                cmd::browser::automate_eval(app, &state, &argv[1], expression).await,
+            )
+        }
         // `read <label> [css]` reads the page or a selector; `read <label>
         // --full` reads the page whole, whatever the read seat would fold.
         // The judged road and the plain road print through ONE formatter
@@ -6401,6 +6440,45 @@ pub(super) async fn answer_browser_command(
                     browser_said(format!("{}\n", cmd::browser::marks_json(&marks)))
                 }
                 Ok(marks) => page_said(&command.label, cmd::browser::marks_lines(&marks)),
+                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+            }
+        }
+        // `fields <label> [--json]` reads every field a page draws; `fill
+        // <label> <bundle>` — or `--value <bundle>`, the stdin road — writes a
+        // bundle and reads each field back (t-37883). Both answers carry the
+        // page's words: fenced, or flagged when a program reads the JSON.
+        ("fields", _) => {
+            let command = match zerocode_core::agent_browser::parse_fields(argv) {
+                Ok(command) => command,
+                Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
+            };
+            match cmd::browser::automate_fields(app, &state, &command.label).await {
+                Ok(read) if command.json => browser_said(format!(
+                    "{}\n",
+                    zerocode_core::browser_form::fields_json(&read)
+                )),
+                Ok(read) => page_said(
+                    &command.label,
+                    zerocode_core::browser_form::fields_lines(&read),
+                ),
+                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+            }
+        }
+        ("fill", _) => {
+            let command = match zerocode_core::agent_browser::parse_fill(argv) {
+                Ok(command) => command,
+                Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
+            };
+            let label = command.label.clone();
+            match cmd::browser::automate_fill(app, &state, &label, command.entries).await {
+                Ok(report) => {
+                    let words = zerocode_core::browser_form::fill_lines(&report);
+                    if report.all_took() {
+                        page_said(&label, words)
+                    } else {
+                        page_refused(&label, words)
+                    }
+                }
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }
         }
