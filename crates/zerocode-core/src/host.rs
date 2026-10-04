@@ -968,7 +968,7 @@ impl Vcs for LocalVcs {
     }
 
     fn text_and_code(&self, root: &Path, args: &[&str]) -> Result<(i32, String), String> {
-        let out = Command::new("git")
+        let out = lock_free_git(Command::new("git"))
             .args(args)
             .current_dir(root)
             .stdin(Stdio::null())
