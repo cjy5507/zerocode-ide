@@ -37,9 +37,14 @@ pub(super) struct WorktreeLanding {
     /// 경고로 말할 것도 아니다: 폴더를 지우면 함께 사라진다는 사실을 칩이 「반영됨」
     /// 옆에서 말할 뿐이다. 칩이 그 말을 하는 것은 비교 ref에 들어 있는 작업뿐이므로
     /// `landed`인 행만 묻는다 — 다른 상태에서는 폴더에 무엇이 있든 `false`다.
-    /// 시험은 `dirty`와 같은 때에 읽고(같은 TTL), 읽는 명령은 정리 검토와 근거 화면이
-    /// 묻는 것과 같다 — 칩과 화면이 있고 없음을 두고 어긋나지 않게.
+    /// 읽는 명령은 정리 검토와 근거 화면이 묻는 것과 같다 — 칩과 화면이 있고 없음을
+    /// 두고 어긋나지 않게. 읽는 값은 `dirty`보다 오래 선다([`LANDING_IGNORED_TTL_FACTOR`]).
     pub(super) ignored: bool,
+    /// When `ignored` was last read, epoch milliseconds — apart from
+    /// `dirty_checked_ms` because it stands longer. The window is not told: it
+    /// would only be a stamp that moves without the work moving.
+    #[serde(skip)]
+    pub(super) ignored_checked_ms: Option<i64>,
     /// When `dirty` was last read, epoch milliseconds. A `status` is the one
     /// thing no ref can key, so it is re-read in the background once it is
     /// [`LANDING_DIRTY_TTL`] old and the catalog is read again; the tooltip says
@@ -79,6 +84,7 @@ impl WorktreeLanding {
             ahead: 0,
             dirty: false,
             ignored: false,
+            ignored_checked_ms: None,
             dirty_checked_ms: None,
             compare_ref: None,
             ref_updated_ms: None,
@@ -193,6 +199,17 @@ pub(super) fn resolve_landing_base(
 /// and queues the re-read in the background; inside it nothing is asked.
 const LANDING_DIRTY_TTL: Duration = Duration::from_secs(5);
 
+/// How many times [`LANDING_DIRTY_TTL`] a landed row's ignored-files reading
+/// stands.
+///
+/// Twelve — a minute where the unsaved reading stands five seconds. Ignored
+/// files appear when a build runs and not when a commit lands, the chip words
+/// them as a hint, and the reading costs as much as the `status` that reads
+/// `dirty`: 20 ms and 23 ms on a checkout with 61,000 ignored files, 77 and 88 ms
+/// on efficiency cores. Asked every time `dirty` is, it would double what a
+/// landed row's refresh costs for a fact that moves this slowly.
+const LANDING_IGNORED_TTL_FACTOR: u32 = 12;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -237,10 +254,15 @@ fn held_landing(path: &Path) -> Option<HeldLanding> {
     unpoisoned(landing_cache()).get(path).cloned()
 }
 
+/// A TTL in the epoch milliseconds the readings are stamped in.
+fn millis(ttl: Duration) -> i64 {
+    i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX)
+}
+
 /// Whether a held answer still answers for these facts: the same key, and an
 /// unsaved-changes reading younger than `dirty_ttl`.
 fn stands(held: &HeldLanding, key: &str, dirty_ttl: Duration) -> bool {
-    let ttl_ms = i64::try_from(dirty_ttl.as_millis()).unwrap_or(i64::MAX);
+    let ttl_ms = millis(dirty_ttl);
     held.key == key
         && held
             .landing
@@ -248,12 +270,13 @@ fn stands(held: &HeldLanding, key: &str, dirty_ttl: Duration) -> bool {
             .is_some_and(|at| now_ms().saturating_sub(at) < ttl_ms)
 }
 
-/// Whether two answers say the same thing about the work. The two stamps that
-/// move without the work moving are left out: when `dirty` was read, and when
-/// the compare ref last moved (it only words the tooltip).
+/// Whether two answers say the same thing about the work. The stamps that move
+/// without the work moving are left out: when `dirty` and `ignored` were read,
+/// and when the compare ref last moved (it only words the tooltip).
 fn same_facts(left: &WorktreeLanding, right: &WorktreeLanding) -> bool {
     let mut other = right.clone();
     other.dirty_checked_ms = left.dirty_checked_ms;
+    other.ignored_checked_ms = left.ignored_checked_ms;
     other.ref_updated_ms = left.ref_updated_ms;
     *left == other
 }
@@ -505,10 +528,7 @@ fn worktree_landing_within(
     landing.compare_ref = base.name.clone();
     landing.ref_updated_ms = base.updated_ms;
     landing.dirty = !status.trim().is_empty();
-    // A probe that fails keeps what the row last said rather than flipping the
-    // chip on a hiccup; any state but `landed` is not asked at all.
-    landing.ignored =
-        landing.state == "landed" && holds_ignored_files(host, path).unwrap_or(landing.ignored);
+    refresh_ignored(host, path, &mut landing, dirty_ttl);
     landing.dirty_checked_ms = Some(now_ms());
     unpoisoned(landing_cache()).insert(
         path.to_path_buf(),
@@ -518,6 +538,32 @@ fn worktree_landing_within(
         },
     );
     landing
+}
+
+/// Bring a landed row's ignored-files reading up to date — and only once it has
+/// run out.
+///
+/// Asked of `landed` rows only, because the chip's word is said of work that is
+/// in the compare ref and of nothing else, and again when the reading is older
+/// than `LANDING_IGNORED_TTL_FACTOR` times the `dirty` TTL. A probe that fails
+/// keeps what the row last said rather than flipping the chip on a hiccup.
+fn refresh_ignored(host: &Host, path: &Path, landing: &mut WorktreeLanding, dirty_ttl: Duration) {
+    if landing.state != "landed" {
+        landing.ignored = false;
+        landing.ignored_checked_ms = None;
+        return;
+    }
+    let ttl_ms = millis(dirty_ttl.saturating_mul(LANDING_IGNORED_TTL_FACTOR));
+    if landing
+        .ignored_checked_ms
+        .is_some_and(|at| now_ms().saturating_sub(at) < ttl_ms)
+    {
+        return;
+    }
+    if let Some(found) = holds_ignored_files(host, path) {
+        landing.ignored = found;
+        landing.ignored_checked_ms = Some(now_ms());
+    }
 }
 
 /// Whether git is told to ignore anything that is in this checkout.
@@ -678,6 +724,7 @@ fn classify_landing(
         ahead: 0,
         dirty: false,
         ignored: false,
+        ignored_checked_ms: None,
         dirty_checked_ms: None,
         compare_ref: base.name.clone(),
         ref_updated_ms: base.updated_ms,
