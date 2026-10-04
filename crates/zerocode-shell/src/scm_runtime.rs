@@ -34,6 +34,70 @@ pub(super) fn line_counts_by_path(numstat: &str) -> std::collections::HashMap<St
     held
 }
 
+/// The panel's entries for git's status records: both columns verbatim, the
+/// staged/changed split, a conflict's word, a submodule's facts, and the counts
+/// numstat had for the path — none for a path it had none for (a binary file,
+/// an untracked one the diff has never seen). The one conversion for the
+/// whole-repository answer (`scm_status`) and the scoped one
+/// ([`scoped_scm_entries`]), so the two cannot learn to disagree.
+pub(super) fn scm_entries(
+    uncommitted: Vec<zerocode_orchestrator::StatusEntry>,
+    counts: &std::collections::HashMap<String, (u64, u64)>,
+) -> Vec<ScmEntry> {
+    uncommitted
+        .into_iter()
+        .map(|entry| {
+            let (staged, changed) = scm_flags(&entry.code);
+            let (added, removed) = counts
+                .get(&entry.path)
+                .copied()
+                .map_or((None, None), |(added, removed)| {
+                    (Some(added), Some(removed))
+                });
+            ScmEntry {
+                conflict: ConflictKind::from_code(&entry.code).map(ConflictKind::label),
+                submodule: entry.submodule.map(|found| ScmSubmodule::of(found, staged)),
+                path: entry.path,
+                code: entry.code,
+                staged,
+                changed,
+                origin: entry.origin,
+                added,
+                removed,
+            }
+        })
+        .collect()
+}
+
+/// The most paths one scoped question may name. A pathspec list is a command
+/// line, so past this the question is refused rather than handed to git. The
+/// file tree names at most its own cap in one (`TREE_NUMSTAT_PATHS_MAX`, far
+/// below this), so this only stops a caller that is not the tree.
+pub(super) const SCM_NUMSTAT_PATHS_MAX: usize = 256;
+
+/// What changed in just `paths` (t-31715), as the panel's own entries: the
+/// file tree asks it when an agent's write ends, so the counts appear on the
+/// row at once instead of at the next whole-repository read. Status and counts
+/// for exactly those files, from two reads of git each limited to them; a
+/// clean file, or one git has never heard of, has no entry.
+pub(super) fn scoped_scm_entries(
+    orchestrator: &zerocode_orchestrator::Orchestrator,
+    root: &Path,
+    paths: &[String],
+) -> Result<Vec<ScmEntry>, String> {
+    let uncommitted = orchestrator
+        .status_of(root, paths)
+        .map_err(|error| error.to_string())?;
+    // The tally is decoration on a record the status already stands for — as
+    // for the whole-repository answer, a numstat that fails leaves the rows
+    // without counts instead of blanking them.
+    let counts = orchestrator
+        .numstat_of(root, paths)
+        .map(|text| line_counts_by_path(&text))
+        .unwrap_or_default();
+    Ok(scm_entries(uncommitted, &counts))
+}
+
 /// A commit git refused, as the card needs to remember it.
 pub(super) struct CommitFailure {
     /// Both pipes of the refused `git commit`, as git and its hooks wrote it.

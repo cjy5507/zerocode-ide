@@ -48,6 +48,31 @@ pub const TOKEN_HEADER: &str = "x-zerocode-hook-token";
 const AGENT_SLUG: &str = "zo";
 const POST_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// What the window needs of a tool call to pair its start with its end and to
+/// find its file (t-31715): the id the runtime minted for it — the same on both
+/// ends — its name, and the file it reads or writes, whole, as the model named
+/// it (the working line's compact target keeps only the last two components,
+/// which no tree can resolve).
+#[derive(Debug, Clone, Copy)]
+pub struct ToolCallFacts<'a> {
+    pub call_id: &'a str,
+    pub name: &'a str,
+    pub file: Option<&'a str>,
+}
+
+impl ToolCallFacts<'_> {
+    /// What the window reads as the call's input: the file in Claude's spelling
+    /// (`{"file_path": …}`) when the call names one — the whole path, which is
+    /// what the file tree resolves and what every other agent's hook says —
+    /// else the compact input the working line shows, when there is one.
+    fn input(&self, compact: Option<&str>) -> Option<serde_json::Value> {
+        match self.file {
+            Some(file) => Some(serde_json::json!({ "file_path": file })),
+            None => compact.map(|text| serde_json::Value::String(text.to_string())),
+        }
+    }
+}
+
 /// hookd `HookJson` 과 같은 모양의 봉투. `payload` 는 이벤트별 JSON 객체.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HookEnvelope {
@@ -583,12 +608,15 @@ impl HookReporter {
     /// person to "working" every second and filled the window's activity ring
     /// with a stopwatch (t-2550).
     ///
-    /// `tool_input` is what the window's activity row shows as the target and
-    /// `activity` is the same compact fact `session_status.activity` carries
-    /// at the moment the call began.
+    /// `tool_input` is what the window's activity row shows as the target — the
+    /// whole path for a call that names a file (the compact tail the working
+    /// line shows cannot be resolved by a file tree), the compact input for
+    /// the rest — and `activity` is the same compact fact
+    /// `session_status.activity` carries at the moment the call began.
+    /// `tool_use_id` is the runtime's id for the call, the same on its end.
     pub fn pre_tool_use(
         &self,
-        tool_name: &str,
+        call: ToolCallFacts<'_>,
         tool_input: &str,
         activity: &crate::ide::channel::state::ActivityCard,
         session_id: &str,
@@ -596,18 +624,30 @@ impl HookReporter {
         self.post(
             "PreToolUse",
             serde_json::json!({
-                "tool_name": tool_name,
-                "tool_input": tool_input,
+                "tool_name": call.name,
+                "tool_use_id": call.call_id,
+                "tool_input": call.input(Some(tool_input)),
                 "activity": activity,
                 "session_id": session_id,
             }),
         );
     }
 
-    pub fn post_tool_use(&self, tool_name: &str, is_error: bool, session_id: &str) {
+    /// One tool END, in Claude's spelling: the id its start said, and — for a
+    /// call that named a file — the same input, so a window that missed the
+    /// start (a batch lost, opened mid-turn) still knows which file ended.
+    pub fn post_tool_use(&self, call: ToolCallFacts<'_>, is_error: bool, session_id: &str) {
+        let mut payload = serde_json::json!({
+            "tool_name": call.name,
+            "tool_use_id": call.call_id,
+            "session_id": session_id,
+        });
+        if let Some(input) = call.input(None) {
+            payload["tool_input"] = input;
+        }
         self.post(
             if is_error { "PostToolUseFailure" } else { "PostToolUse" },
-            serde_json::json!({ "tool_name": tool_name, "session_id": session_id }),
+            payload,
         );
     }
 
@@ -1015,7 +1055,16 @@ mod tests {
             phase: "started".to_string(),
             elapsed_secs: 0,
         };
-        reporter.pre_tool_use("Read", "tui/view.rs", &activity, "s-activity");
+        reporter.pre_tool_use(
+            ToolCallFacts {
+                call_id: "call-1",
+                name: "Read",
+                file: Some("/repo/zo-ide/crates/zo-ide/src/tui/view.rs"),
+            },
+            "tui/view.rs",
+            &activity,
+            "s-activity",
+        );
 
         let posted = captured.lock().expect("capture");
         assert_eq!(posted.len(), 1);
@@ -1023,10 +1072,16 @@ mod tests {
         assert_eq!(envelope.hook_event_name, "PreToolUse");
         assert_eq!(envelope.pane_key, "test/pane");
         // The REAL tool name, so the window's `AskUserQuestion` rule and its
-        // verb table keep working; the compact target the window's row shows;
-        // and the same fact `session_status.activity` says, at second zero.
+        // verb table keep working; the call's whole file, which the window's
+        // row shows and its file tree resolves (the compact tail stays in the
+        // activity fact beside it); and the same fact `session_status.activity`
+        // says, at second zero.
         assert_eq!(envelope.payload["tool_name"], "Read");
-        assert_eq!(envelope.payload["tool_input"], "tui/view.rs");
+        assert_eq!(
+            envelope.payload["tool_input"],
+            serde_json::json!({ "file_path": "/repo/zo-ide/crates/zo-ide/src/tui/view.rs" })
+        );
+        assert_eq!(envelope.payload["tool_use_id"], "call-1");
         assert_eq!(
             envelope.payload["activity"],
             serde_json::json!({
@@ -1037,6 +1092,62 @@ mod tests {
             })
         );
         assert_eq!(envelope.payload["session_id"], "s-activity");
+    }
+
+    /// A tool call's start and its end say the same id, in Claude's spelling,
+    /// and the whole path where the working line shows its tail (t-31715) — the
+    /// two things the window's file tree needs of zo's main pane: which write
+    /// has ended, and which file it was. A call that names no file keeps its
+    /// compact input, and its end says none.
+    #[test]
+    fn a_tool_start_and_its_end_say_the_same_call_id_and_the_whole_path() {
+        let (reporter, captured) = HookReporter::capturing();
+        let card = |verb: &str, target: &str| crate::ide::channel::state::ActivityCard {
+            verb: verb.to_string(),
+            target: Some(target.to_string()),
+            phase: "started".to_string(),
+            elapsed_secs: 0,
+        };
+        let edit = ToolCallFacts {
+            call_id: "call_7",
+            name: "Edit",
+            file: Some("/repo/zo-ide/crates/zo-ide/src/tui/view.rs"),
+        };
+        let bash = ToolCallFacts {
+            call_id: "call_8",
+            name: "Bash",
+            file: None,
+        };
+        reporter.pre_tool_use(edit, "tui/view.rs", &card("edit", "tui/view.rs"), "s-1");
+        reporter.post_tool_use(edit, false, "s-1");
+        reporter.pre_tool_use(bash, "cargo", &card("bash", "cargo"), "s-1");
+        reporter.post_tool_use(bash, true, "s-1");
+
+        let posted = captured.lock().expect("capture");
+        assert_eq!(posted.len(), 4);
+        let events: Vec<&str> = posted
+            .iter()
+            .map(|envelope| envelope.hook_event_name.as_str())
+            .collect();
+        assert_eq!(
+            events,
+            ["PreToolUse", "PostToolUse", "PreToolUse", "PostToolUseFailure"]
+        );
+        let ids: Vec<&serde_json::Value> = posted
+            .iter()
+            .map(|envelope| &envelope.payload["tool_use_id"])
+            .collect();
+        assert_eq!(ids, ["call_7", "call_7", "call_8", "call_8"]);
+        let whole = serde_json::json!({
+            "file_path": "/repo/zo-ide/crates/zo-ide/src/tui/view.rs"
+        });
+        assert_eq!(posted[0].payload["tool_input"], whole);
+        assert_eq!(posted[1].payload["tool_input"], whole);
+        // The working line's compact fact is unchanged beside it.
+        assert_eq!(posted[0].payload["activity"]["target"], "tui/view.rs");
+        // No file: the compact input as before on the start, nothing on the end.
+        assert_eq!(posted[2].payload["tool_input"], "cargo");
+        assert!(posted[3].payload.get("tool_input").is_none());
     }
 
     #[test]

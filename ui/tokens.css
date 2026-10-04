@@ -2313,6 +2313,16 @@
   /* How long the mark takes to leave once its hold is over — slower than a
    * hover, so the eye that arrives late still sees where it was. */
   --tree-touch-fade: 600ms;
+  /* A row an agent is writing right now (t-31715): a sheen sweeps across it,
+   * the write colour at a fifth of its strength — soft enough that the name
+   * under it keeps its contrast (the name is that colour at full strength; at
+   * the sheen's peak it is still 6:1 or better on `--surface-deck` and on
+   * `--surface-well`). One sweep takes the duration below; the tree shows a
+   * write for one sweep at least (`TREE_WRITING_MIN_MS`, a little under it),
+   * so even an edit that took 20 ms is seen to happen. Both themes read the
+   * same duration. */
+  --tree-writing-sheen: color-mix(in srgb, var(--tree-touch-write) 20%, transparent);
+  --tree-writing-sweep: 1100ms;
 
   /* A search hit, and the one the cursor is on. Two colours because a list of
    * matches with no current member is a list you cannot walk (:24144~24145 —
@@ -3037,6 +3047,10 @@
   --tree-touch-read: #6b3fc0;
   --tree-touch-write: #a3470a;
   --tree-touch-commit: #18753c;
+  /* The sheen on white, weaker than on dark because the name is darker than
+   * its ground by less: at 14% the name is still 4.5:1 or better under the
+   * sheen's peak, on `--surface-deck` and on `--surface-well`. */
+  --tree-writing-sheen: color-mix(in srgb, var(--tree-touch-write) 14%, transparent);
   --annotation-highlight: #f59e0b;
   --tab-group-split-divider: #868690;
   --tab-group-split-divider-strong: #71717a;

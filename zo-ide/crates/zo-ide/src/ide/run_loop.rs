@@ -22,7 +22,7 @@ use super::args::{HeadlessLoop, HeadlessLoopTrigger, RenderFlags};
 use super::events::{forward_subagent_frames, SubagentFrameSink};
 use super::input::{pump_stdin, InputEvent};
 use super::prompt::PendingPrompt;
-use super::reporter::HookReporter;
+use super::reporter::{HookReporter, ToolCallFacts};
 use super::channel::state::Command;
 use super::channel::wire::ResolvedBy;
 use super::events::{self, start_subagent_frame_relay, PromptKind};
@@ -671,7 +671,7 @@ async fn run_one_turn<W: Write>(
         reporter.user_prompt_submit(input, &session_id);
     }
     // 훅 보고용 관찰 상태: 툴 이름(id→name), 이번 턴의 마지막 어시스턴트 텍스트.
-    let mut tool_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut tool_names: std::collections::HashMap<String, ToolMemo> = std::collections::HashMap::new();
     let mut last_assistant = String::new();
     // 턴의 배선 한 벌 — 블록 채널·권한 펌프·질문 채널·취소 신호·스티어 큐,
     // 그리고 IDE 채널의 턴 경계까지 [`TurnScaffold`] 가 든다. 여기 남는 것은
@@ -975,6 +975,13 @@ async fn drive_autonomy<W: Write>(
     driver::drive(&mut front).await
 }
 
+/// What the run loop remembers of a tool call between its start and its end:
+/// the end names neither the tool nor its file, so the start's are kept.
+struct ToolMemo {
+    name: String,
+    file: Option<String>,
+}
+
 /// 블록을 렌더러에 넘기기 **전에** 훅 보고에 필요한 사실만 읽는다(블록은 소비하지
 /// 않는다 — 프롬프트 블록은 responder 를 들고 있어 Clone 이 없다).
 fn observe_for_reporter(
@@ -982,7 +989,7 @@ fn observe_for_reporter(
     registry: &tools::AgentRegistry,
     block: &RenderBlock,
     session_id: &str,
-    tool_names: &mut std::collections::HashMap<String, String>,
+    tool_names: &mut std::collections::HashMap<String, ToolMemo>,
     last_assistant: &mut String,
 ) {
     match block {
@@ -997,12 +1004,20 @@ fn observe_for_reporter(
         } => {
             let key = tool_call_id.0.clone();
             let first_sighting = !tool_names.contains_key(&key);
-            tool_names.entry(key).or_insert_with(|| name.clone());
+            let file = crate::tui::activity::file_of(preview);
+            tool_names.entry(key).or_insert_with(|| ToolMemo {
+                name: name.clone(),
+                file: file.map(str::to_string),
+            });
             if first_sighting && *status != ToolCallStatus::Pending {
                 if let Some(reporter) = reporter {
                     let activity = crate::tui::activity::Activity::from_preview(name, preview);
                     reporter.pre_tool_use(
-                        name,
+                        ToolCallFacts {
+                            call_id: &tool_call_id.0,
+                            name,
+                            file,
+                        },
                         activity.hook_input(summary),
                         &activity.started_card(),
                         session_id,
@@ -1024,10 +1039,17 @@ fn observe_for_reporter(
             ..
         } => {
             if let Some(reporter) = reporter {
-                let name = tool_names
-                    .get(&tool_call_id.0)
-                    .map_or("tool", String::as_str);
-                reporter.post_tool_use(name, *is_error, session_id);
+                let memo = tool_names.get(&tool_call_id.0);
+                let name = memo.map_or("tool", |memo| memo.name.as_str());
+                reporter.post_tool_use(
+                    ToolCallFacts {
+                        call_id: &tool_call_id.0,
+                        name,
+                        file: memo.and_then(|memo| memo.file.as_deref()),
+                    },
+                    *is_error,
+                    session_id,
+                );
                 if HookReporter::spawns_subagent(name) {
                     reporter.subagent_stop(
                         &tool_call_id.0,

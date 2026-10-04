@@ -43866,6 +43866,52 @@ button.jev-token:hover {
   .file-tree .tree-row { transition: none; }
 }
 
+/* The row an agent is writing right now (t-31715): the write colour, and its
+ * mark — a still line along the row's foot, which is all a row wears under
+ * reduced motion and all a row past the first few wears while many are
+ * written at once (`TREE_WRITING_MOVING_MAX`), and a sheen that sweeps across
+ * the rows that move. A folder shut over a file being written wears it too (it
+ * is pointing, as it does for a touch). The words for the state are on the row
+ * either way (`labelTreeRow`). `overflow: hidden` is the row's own;
+ * `position: relative` is what lets the mark stand inside it. */
+.tree-row[data-agent-writing],
+.tree-row[data-agent-writing-within] {
+  position: relative;
+  color: var(--tree-touch-write);
+}
+.tree-row[data-agent-writing]::after,
+.tree-row[data-agent-writing-within]::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  pointer-events: none;
+  background: var(--tree-touch-write);
+}
+/* The sheen is a pseudo-element moved by `transform` alone — the compositor's
+ * work: no layout, no paint, and no script per frame — and it exists only
+ * while a row that moves wears the state, so a tree nobody is writing in runs
+ * no animation at all. */
+@media (prefers-reduced-motion: no-preference) {
+  .tree-row[data-agent-writing="true"]::after,
+  .tree-row[data-agent-writing-within="true"]::after {
+    top: 0;
+    right: auto;
+    width: 40%;
+    height: auto;
+    background: linear-gradient(90deg, transparent 0, var(--tree-writing-sheen) 50%, transparent 100%);
+    transform: translateX(-100%);
+    will-change: transform;
+    animation: tree-writing-sweep var(--tree-writing-sweep) linear infinite;
+  }
+}
+@keyframes tree-writing-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+
 /* The keyboard's place in the tree, and the row a reveal pointed at — an
  * `@path` in a prompt, a menu's "show in the file tree". Both are rings and
  * grounds the rest of the explorer already uses. */

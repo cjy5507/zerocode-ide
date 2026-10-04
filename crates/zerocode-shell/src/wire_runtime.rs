@@ -239,7 +239,18 @@ pub(crate) struct WireState {
     /// (`wire_start`'s `from_pane`): the page opens with that pane's turns,
     /// and the pictures they name stand in that file (t-6323 A8).
     history: Option<std::path::PathBuf>,
+    /// The folder the session works in: the base of every relative path its
+    /// tool calls name, said on each activity it files (t-31715) because a wire
+    /// session has no pane to resolve one against.
+    pub(crate) cwd: Option<String>,
+    /// What the session's tool calls said since the session last told its
+    /// window (`take_activities`).
+    activity: Vec<zerocode_core::hook::Activity>,
 }
+
+/// The most activities a session holds untold. The session tells its window
+/// after every line it takes, so this only bounds a state nobody drains.
+const WIRE_ACTIVITY_CAP: usize = 256;
 
 /// Where a picture the page asks a session for stands: kept by the session
 /// (`wire:<n>`, what its tools handed back), or in the transcript of the pane
@@ -354,6 +365,7 @@ pub(crate) enum Outgoing {
 
 impl WireState {
     fn push(&mut self, turn: TranscriptTurn) {
+        self.note_activity(&turn);
         let seq = self.next_seq;
         self.next_seq += 1;
         self.turns.push(SeqTurn { seq, turn });
@@ -537,6 +549,35 @@ impl WireState {
                     .iter()
                     .map(|piece| piece.text.len())
                     .sum::<usize>(),
+        }
+    }
+
+    /// What the session's tool calls said since this was last asked
+    /// (t-31715): each call's start and each result's end, as the activity a
+    /// hook agent would have said — the road the file tree hears wire sessions
+    /// on. Drained, so that each is told once.
+    pub(crate) fn take_activities(&mut self) -> Vec<zerocode_core::hook::Activity> {
+        std::mem::take(&mut self.activity)
+    }
+
+    /// A tool turn is also something the file tree hears (t-31715). Every
+    /// protocol's calls and results become turns through `push` — the
+    /// adapters' own (`call`, `result`) and Claude Code's, which the transcript
+    /// reader makes — so this is the one place they are told from, whatever
+    /// the protocol, and it says them as the one function that says a hook
+    /// agent's (`zerocode_core::hook::activity_of_turn`).
+    fn note_activity(&mut self, turn: &TranscriptTurn) {
+        let Some(tool) = turn.tool.as_ref() else {
+            return;
+        };
+        let Some(mut activity) = zerocode_core::hook::activity_of_turn(&turn.role, tool) else {
+            return;
+        };
+        activity.cwd.clone_from(&self.cwd);
+        self.activity.push(activity);
+        if self.activity.len() > WIRE_ACTIVITY_CAP {
+            let over = self.activity.len() - WIRE_ACTIVITY_CAP;
+            self.activity.drain(..over);
         }
     }
 
@@ -1843,6 +1884,14 @@ fn take_response(protocol: Protocol, state: &mut WireState, message: &serde_json
 
 // ---------------------------------------------------------------- session
 
+/// What a session tells its window: that its state moved in a way the page
+/// draws, so the page polls at once instead of on its next tick (`changed`),
+/// and what its tool calls said, for the window's file tree (`acted`, t-31715).
+pub(crate) struct WireNews {
+    pub(crate) changed: Box<dyn Fn(WireId) + Send + Sync>,
+    pub(crate) acted: Box<dyn Fn(WireId, Vec<zerocode_core::hook::Activity>) + Send + Sync>,
+}
+
 pub(crate) struct WireSession {
     pub(crate) id: WireId,
     pub(crate) agent: String,
@@ -1852,9 +1901,7 @@ pub(crate) struct WireSession {
     next_request: AtomicI64,
     pub(crate) state: Mutex<WireState>,
     replies: Mutex<HashMap<i64, mpsc::SyncSender<serde_json::Value>>>,
-    /// Told each time the state changed in a way the page draws, so the page
-    /// polls at once instead of on its next tick.
-    changed: Box<dyn Fn(WireId) + Send + Sync>,
+    news: WireNews,
     /// When the live text was last announced (`LIVE_NOTIFY_GAP`).
     last_live_notice: Mutex<Instant>,
 }
@@ -1865,7 +1912,7 @@ impl WireSession {
         if let Ok(mut at) = self.last_live_notice.lock() {
             *at = Instant::now();
         }
-        (self.changed)(self.id);
+        (self.news.changed)(self.id);
     }
 
     /// Tell the page what a line changed: a settled change at once, a live
@@ -1893,7 +1940,20 @@ impl WireSession {
             }
         });
         if due {
-            (self.changed)(self.id);
+            (self.news.changed)(self.id);
+        }
+    }
+
+    /// The tool calls the line just taken said, to the window's file tree
+    /// (t-31715) — after the page's own news, in the order they were said.
+    fn tell_tools(&self) {
+        let told = self
+            .state
+            .lock()
+            .map(|mut state| state.take_activities())
+            .unwrap_or_default();
+        if !told.is_empty() {
+            (self.news.acted)(self.id, told);
         }
     }
 
@@ -1992,6 +2052,7 @@ impl WireSession {
             }
         }
         self.announce(before);
+        self.tell_tools();
     }
 
     pub(crate) fn send(&self, text: &str) -> Result<(), String> {
@@ -2329,8 +2390,9 @@ impl WireRuntime {
     /// session. `binary` is the agent's executable as this machine found it;
     /// `resume` continues the conversation with that session id where the
     /// road has a flag for it; `env` is the launch's own environment (which
-    /// account it runs as — an empty value removes the variable); `changed`
-    /// is told the session's id each time the page should look.
+    /// account it runs as — an empty value removes the variable); `news` is
+    /// told the session's id each time the page should look, and what its tool
+    /// calls said.
     #[allow(clippy::too_many_arguments)] // Each is one independent fact of one launch.
     pub(crate) fn start(
         &self,
@@ -2340,7 +2402,7 @@ impl WireRuntime {
         version: &str,
         resume: Option<&str>,
         env: &[(String, String)],
-        changed: impl Fn(WireId) + Send + Sync + 'static,
+        news: WireNews,
     ) -> Result<Arc<WireSession>, String> {
         let road =
             zerocode_core::agent::wire_road(agent).ok_or_else(|| format!("{agent} has no wire"))?;
@@ -2389,10 +2451,11 @@ impl WireRuntime {
                 // The one place an agent fact enters the adapter: the
                 // catalog's, read here where the agent is still named.
                 plan_tool: zerocode_core::agent::agent_voice(agent).plan_tool,
+                cwd: Some(cwd.to_string_lossy().into_owned()),
                 ..WireState::default()
             }),
             replies: Mutex::new(HashMap::new()),
-            changed: Box::new(changed),
+            news,
             last_live_notice: Mutex::new(Instant::now()),
         });
         let reader = Arc::clone(&session);
@@ -2684,6 +2747,7 @@ const SESSION_LOG_PREFIX_CHARS: usize = 8;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zerocode_core::hook::Phase;
 
     fn rows(state: &WireState) -> Vec<(String, String)> {
         state
@@ -2691,6 +2755,156 @@ mod tests {
             .iter()
             .map(|turn| (turn.turn.role.clone(), turn.turn.text.clone()))
             .collect()
+    }
+
+    /// What the tree's reader needs of one activity, in the order it was said:
+    /// the verb's word, the phase, the call's id and the files it writes.
+    fn said(state: &mut WireState) -> Vec<(String, Phase, Option<String>, Vec<String>)> {
+        state
+            .take_activities()
+            .into_iter()
+            .map(|activity| {
+                (
+                    activity.verb.as_str().to_string(),
+                    activity.phase,
+                    activity.call,
+                    activity.writes,
+                )
+            })
+            .collect()
+    }
+
+    fn rows_of(
+        said: Vec<(&str, Phase, &str, Vec<&str>)>,
+    ) -> Vec<(String, Phase, Option<String>, Vec<String>)> {
+        said.into_iter()
+            .map(|(verb, phase, call, writes)| {
+                (
+                    verb.to_string(),
+                    phase,
+                    Some(call.to_string()),
+                    writes.into_iter().map(str::to_string).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// Codex's wire says a tool item's start and its end with the item's id,
+    /// and a patch's files on both (t-31715). A command that failed is a
+    /// failure; the turn's own words are not activity.
+    #[test]
+    fn a_codex_wires_tool_items_say_their_start_and_end_with_the_items_id() {
+        let mut state = WireState {
+            cwd: Some("/w".to_string()),
+            ..WireState::default()
+        };
+        let changes = serde_json::json!([{"path":"src/a.rs","kind":{"type":"update"},"diff":"@@ -1,2 +1,2 @@\n hello\n-old\n+new\n"}]);
+        for message in [
+            serde_json::json!({"method":"item/started","params":{"item":{"type":"fileChange","id":"f1","status":"inProgress","changes":changes}}}),
+            serde_json::json!({"method":"item/started","params":{"item":{"type":"commandExecution","id":"c1","command":"cat probe.txt","status":"inProgress"}}}),
+            serde_json::json!({"method":"item/completed","params":{"item":{"type":"fileChange","id":"f1","status":"completed","changes":changes}}}),
+            serde_json::json!({"method":"item/completed","params":{"item":{"type":"commandExecution","id":"c1","command":"cat probe.txt","status":"failed","exitCode":2,"aggregatedOutput":"no such file"}}}),
+            serde_json::json!({"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"done"}}),
+        ] {
+            take(Protocol::AppServer, &mut state, &message);
+        }
+        assert_eq!(
+            said(&mut state),
+            rows_of(vec![
+                ("edit", Phase::Started, "f1", vec!["src/a.rs"]),
+                ("bash", Phase::Started, "c1", vec![]),
+                ("edit", Phase::Finished, "f1", vec!["src/a.rs"]),
+                ("bash", Phase::Failed, "c1", vec![]),
+            ])
+        );
+        assert!(said(&mut state).is_empty(), "each is told once");
+    }
+
+    /// The session's folder rides every activity it files: a wire has no pane
+    /// to resolve a relative path against.
+    #[test]
+    fn a_wire_sessions_activity_carries_the_sessions_folder() {
+        let mut state = WireState {
+            cwd: Some("/w".to_string()),
+            ..WireState::default()
+        };
+        take(
+            Protocol::AppServer,
+            &mut state,
+            &serde_json::json!({"method":"item/started","params":{"item":{"type":"commandExecution","id":"c1","command":"ls","status":"inProgress"}}}),
+        );
+        let told = state.take_activities();
+        assert_eq!(told.len(), 1);
+        assert_eq!(told[0].cwd.as_deref(), Some("/w"));
+    }
+
+    /// ACP's calls say start and end the same way — a call that arrives
+    /// already completed says both at once — and a failed update is a failure.
+    #[test]
+    fn an_acp_wires_tool_calls_say_their_start_and_end_with_the_calls_id() {
+        let mut state = WireState::default();
+        let update = |update: serde_json::Value| serde_json::json!({"method":"session/update","params":{"sessionId":"s","update":update}});
+        for message in [
+            update(
+                serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"k2","title":"Edit probe.txt","kind":"edit","status":"completed","content":[{"type":"diff","path":"probe.txt","oldText":"hello","newText":"bye"}]}),
+            ),
+            update(
+                serde_json::json!({"sessionUpdate":"tool_call","toolCallId":"k3","title":"Edit other.txt","kind":"edit","status":"pending","rawInput":{"file_path":"other.txt"}}),
+            ),
+            update(
+                serde_json::json!({"sessionUpdate":"tool_call_update","toolCallId":"k3","status":"failed","content":[]}),
+            ),
+            update(
+                serde_json::json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}),
+            ),
+        ] {
+            take(Protocol::Acp, &mut state, &message);
+        }
+        assert_eq!(
+            said(&mut state),
+            rows_of(vec![
+                ("edit", Phase::Started, "k2", vec!["probe.txt"]),
+                ("edit", Phase::Finished, "k2", vec![]),
+                ("edit", Phase::Started, "k3", vec![]),
+                ("edit", Phase::Failed, "k3", vec![]),
+            ])
+        );
+    }
+
+    /// Claude Code's stream closes a message into turns through the transcript
+    /// reader, not through the adapter's own call and result: its tool_use is a
+    /// start and the tool_result that answers it an end, both with the call's id.
+    #[test]
+    fn a_claude_wires_tool_use_and_its_result_say_a_start_and_an_end() {
+        let mut state = WireState::default();
+        for message in [
+            serde_json::json!({"type":"assistant","message":{"model":"claude-fable-5-1","id":"m1","type":"message","role":"assistant","content":[{"type":"text","text":"editing"},{"type":"tool_use","id":"toolu_7","name":"Edit","input":{"file_path":"/w/src/a.rs","old_string":"x","new_string":"y"}}]},"parent_tool_use_id":null,"session_id":"s1"}),
+            serde_json::json!({"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_7","type":"tool_result","content":"edited","is_error":false}]},"parent_tool_use_id":null,"session_id":"s1"}),
+        ] {
+            take(Protocol::ClaudeStream, &mut state, &message);
+        }
+        let told = said(&mut state);
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert_eq!(
+            told[0],
+            (
+                "edit".to_string(),
+                Phase::Started,
+                Some("toolu_7".to_string()),
+                vec!["/w/src/a.rs".to_string()]
+            )
+        );
+        assert_eq!(
+            (&told[1].1, &told[1].2),
+            (&Phase::Finished, &Some("toolu_7".to_string()))
+        );
+        // The conversation's own words are not activity.
+        take(
+            Protocol::ClaudeStream,
+            &mut state,
+            &serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"parent_tool_use_id":null,"session_id":"s1"}),
+        );
+        assert!(said(&mut state).is_empty());
     }
 
     #[test]

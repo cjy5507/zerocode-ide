@@ -20,6 +20,11 @@ function scmCleanText() {
  * lists ignored paths because it is answering "what is in this directory",
  * and this panel is answering "what might I commit". */
 let scmEntries = [];
+/* The whole-repository read now in flight, or the last one that was (t-31715).
+ * A scoped answer (`applyScmScoped`) waits behind it: a whole answer git took
+ * before a file's write ended must not land after the scoped one git took
+ * after, and turn that file's counts back. Always a promise that settles. */
+let scmStatusAsking = Promise.resolve();
 /* The checkout `scmEntries` is the status of — the one in front when the
  * answer landed, `null` before the first or after git failed. Its count is
  * said of that checkout only (the conversation's state, t-22100). */
@@ -1138,7 +1143,9 @@ async function refreshScm({ uncapped = false } = {}) {
     // `uncapped` is the banner's one-shot retry (Orca's
     // `resolveGitStatusLimit(0)` road); every ordinary refresh caps again.
     const asked = activeWorktreePath;
-    const tree = await invoke("scm_status", { uncapped });
+    const asking = invoke("scm_status", { uncapped });
+    scmStatusAsking = asking.catch(() => {});
+    const tree = await asking;
     scmEntries = tree?.changed ?? [];
     scmStatusOf = asked;
     // The operation this checkout is halfway through, whether or not anything
@@ -1198,6 +1205,24 @@ async function refreshScm({ uncapped = false } = {}) {
   // 아무도 보지 않는 패널의 것이다. 작업공간을 옮길 때마다 git 하나를 더
   // 쓰는 값은 그 낯이 치를 값이 아니다(보이면 갚는 빚은 scmPanelOwed).
   if (scmPanelShowing()) void refreshHostedReviewEligibility();
+}
+
+/* A scoped answer — "what changed in just these files" (`scm_numstat`, asked
+ * by the file tree when an agent's write ends, t-31715) — replaces what was
+ * known of exactly those files. The rest of the list stays as the last whole
+ * answer left it, and the next whole answer replaces everything again. A file
+ * asked about and not in the answer is clean now. The tree wears it in place;
+ * the source-control panel, which the periodic refresh keeps, is not repainted
+ * for it. */
+function applyScmScoped(paths, entries) {
+  const asked = new Set(paths);
+  const unasked = (path) => !asked.has(path.replace(/\/+$/, ""));
+  scmEntries = [...scmEntries.filter((entry) => unasked(entry.path)), ...entries];
+  vcsCodes = [
+    ...vcsCodes.filter(([path, code]) => code === "!!" || unasked(path)),
+    ...entries.map((entry) => [entry.path, entry.code.trim()]),
+  ];
+  paintTreeGitOf(paths);
 }
 
 /* ---- 이름으로 파일 거르기 (U03 재확인, Orca SourceControlHeaderToolbar +

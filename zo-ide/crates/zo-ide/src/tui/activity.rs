@@ -96,6 +96,20 @@ impl Activity {
     }
 }
 
+/// The file a call names, as the model wrote it — what the window's file tree
+/// resolves, which the compact target the working line shows (the last two
+/// path components) cannot be. A read, a write and an edit name one; no other
+/// call does.
+#[must_use]
+pub fn file_of(preview: &ToolPreview) -> Option<&str> {
+    match preview {
+        ToolPreview::Read { path, .. }
+        | ToolPreview::Write { path, .. }
+        | ToolPreview::Edit { path, .. } => Some(path.as_str()).filter(|path| !path.is_empty()),
+        _ => None,
+    }
+}
+
 fn display_tool(tool: &str) -> String {
     let clean = crate::util::ansi::sanitize_inline(tool.trim());
     match clean.to_ascii_lowercase().as_str() {

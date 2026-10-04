@@ -1163,6 +1163,8 @@ const stubBackend = ({ boot, pollers }) => {
       if (window.__SCM_OBSERVER_RETRY_HOLD__) return new Promise((done) => { window.__SCM_OBSERVER_RETRY_FINISH__ = done; });
       return window.__SCM_OBSERVER_HEALTH__;
     },
+    // The tree's scoped question after an agent's write ends (t-31715): nothing changed.
+    scm_numstat: () => [],
     scm_tree_rows: (args) => scmTreeRows(args.area, args.paths, args.folded ?? []),
     // 토큰 원장 둘 — 스캔 전 상태가 이 스텁의 기본값이다(게이지의 답과
     // 모양이 다르다: 원장은 report·scanning·scanned_at을 준다).

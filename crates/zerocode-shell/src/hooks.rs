@@ -2277,6 +2277,16 @@ pub fn activity_subagent(term: u32, id: &str) -> String {
     format!("sub:{term}:{id}")
 }
 
+/// A wire session's card (t-31715): the one a CLI driven without its screen
+/// files its tool calls under, on the road every pane's travel. The window
+/// names it by the same prefix (`WIRE_CARD_PREFIX`, ui/shell.js) and answers it
+/// to the file tree alone — a wire session has no sidebar row.
+pub const ACTIVITY_WIRE_PREFIX: &str = "wire:";
+
+pub fn activity_wire(id: u32) -> String {
+    format!("{ACTIVITY_WIRE_PREFIX}{id}")
+}
+
 /// And back: the helper a card name belongs to, or nothing when the name is a
 /// pane's own.
 ///
