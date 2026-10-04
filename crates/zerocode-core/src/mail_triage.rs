@@ -33,6 +33,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
 
+use crate::jev::MAIL_TRIAGE_BATCH_CAP;
+use crate::jev::batch::{Answers, Judgment};
 use crate::jev::choice::{self, ChoiceRefusal};
 use crate::jev::noul::{self, NoulRefusal};
 use crate::orchestration::{
@@ -59,6 +61,44 @@ const URGENT_YES: &str = "Its very next action should be about this letter: some
 
 /// What the Noul's no means.
 const URGENT_NO: &str = "At least one other thing can come first without harm.";
+
+/// What a request's state holds, at its top level, in the order the
+/// fingerprint reads them: the rubric once, what holds for the coordinator
+/// once, and the letters, each in an entry of its own.
+pub const REQUEST_KEYS: [&str; 3] = ["rubric", "coordinator", "letters"];
+
+/// The two parts of the state's `rubric`: what the question is, and what each
+/// option means.
+pub const RUBRIC_KEYS: [&str; 2] = ["about", "answers"];
+
+/// What the state's `coordinator` carries: what holds for every letter of the
+/// batch at once.
+pub const COORDINATOR_KEYS: [&str; 2] = ["busy", "openQuestions"];
+
+/// What each entry of the state's `letters` carries, in the order the
+/// fingerprint reads them.
+pub const LETTER_KEYS: [&str; 11] = [
+    "kind",
+    "from",
+    "worker",
+    "task",
+    "taskStatus",
+    "priority",
+    "awaitsAnswer",
+    "threadDepth",
+    "ageSeconds",
+    "delivered",
+    "repeats",
+];
+
+/// The key the letters stand under in a request's state.
+const LETTERS_KEY: &str = REQUEST_KEYS[2];
+
+/// The suffixes a letter's two questions stand under beside its place in the
+/// batch ([`crate::jev::batch::question_name`]): the choice under none, the
+/// Noul under its own.
+const TRIAGE_SUFFIX: &str = "";
+const URGENT_SUFFIX: &str = "/urgent";
 
 /// The state's keys, in the order the fingerprint reads them.
 pub const STATE_KEYS: [&str; 13] = [
@@ -124,6 +164,15 @@ impl Triage {
                 "Nothing to do beyond reading it: a repeat of a notice the coordinator has already seen about the same worker, a routine heartbeat, a notice that resolves itself, chatter that waits on nobody."
             }
         }
+    }
+
+    /// The option's meaning in a line: the lead of [`Self::means`], up to its
+    /// first colon — what each letter's own question carries, the whole
+    /// meaning standing once in the request's rubric.
+    #[must_use]
+    pub fn gist(self) -> &'static str {
+        let means = self.means();
+        means.split_once(':').map_or(means, |(lead, _)| lead)
     }
 
     /// The answer an option names, if it names one.
@@ -212,6 +261,82 @@ pub struct MailLook<'a> {
     pub repeats: usize,
     pub coordinator_busy: Option<bool>,
     pub open_questions: usize,
+}
+
+impl MailLook<'_> {
+    /// The letter's entry in a request's `letters`: its structure under the
+    /// table's keys ([`LETTER_KEYS`]) — the texts only where the door's table
+    /// declares them, numbers and flags elsewhere, never a word the letter
+    /// says.
+    #[must_use]
+    pub fn facts(&self) -> Value {
+        json!({
+            LETTER_KEYS[0]: self.kind.as_str(),
+            LETTER_KEYS[1]: self.from,
+            LETTER_KEYS[2]: self.worker,
+            LETTER_KEYS[3]: self.task,
+            LETTER_KEYS[4]: self.task_status,
+            LETTER_KEYS[5]: self.priority,
+            LETTER_KEYS[6]: self.awaits_answer,
+            LETTER_KEYS[7]: self.thread_depth,
+            LETTER_KEYS[8]: crate::notify_call::seconds(self.age_ms),
+            LETTER_KEYS[9]: self.delivered,
+            LETTER_KEYS[10]: self.repeats,
+        })
+    }
+}
+
+/// What holds for every letter of a batch at once: the coordinator's own
+/// situation, said once in a request and not once per letter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Situation {
+    /// Whether the coordinator is in the middle of a turn — `None` when the
+    /// window cannot tell.
+    pub coordinator_busy: Option<bool>,
+    /// How many questions put to the coordinator wait for an answer.
+    pub open_questions: usize,
+}
+
+/// A coordinator's batch of letters, asked on the batch road
+/// ([`crate::jev::batch`]): one closed choice and one Noul about each letter,
+/// over one state that holds the rubric and the coordinator's situation once.
+#[derive(Debug, Clone, Copy)]
+pub struct MailTriage {
+    situation: Situation,
+}
+
+impl MailTriage {
+    /// The questions of a batch handed to a coordinator in `situation`.
+    #[must_use]
+    pub const fn new(situation: Situation) -> Self {
+        Self { situation }
+    }
+}
+
+impl Judgment for MailTriage {
+    type Verdict = MailRead;
+    type Refusal = MailRefusal;
+
+    fn cap(&self) -> usize {
+        MAIL_TRIAGE_BATCH_CAP
+    }
+
+    fn items_key(&self) -> &'static str {
+        LETTERS_KEY
+    }
+
+    fn shared(&self) -> Map<String, Value> {
+        let _ = self.situation;
+        Map::new()
+    }
+
+    fn questions(&self, _at: usize) -> Vec<(&'static str, Value)> {
+        Vec::new()
+    }
+
+    fn read(&self, _answers: &Answers<'_>) -> Result<MailRead, MailRefusal> {
+        Err(MailRefusal::Triage(ChoiceRefusal::NoAnswer))
+    }
 }
 
 /// One question, ready for the wire.
@@ -952,6 +1077,18 @@ impl<'a> Mailroom<'a> {
         self.letters()
             .filter(|one| run.awaits_answer(one) && run.question_is_answerable(one).is_ok())
             .count()
+    }
+
+    /// What holds for every letter of `run`'s batch: whether the coordinator
+    /// is mid-turn (`coordinator_busy`, the window's to say) and how many
+    /// questions wait on it ([`Self::open_questions`]) — read once per look
+    /// at a run, whatever the number of letters.
+    #[must_use]
+    pub fn situation(&self, run: &Run, coordinator_busy: Option<bool>) -> Situation {
+        Situation {
+            coordinator_busy,
+            open_questions: self.open_questions(run),
+        }
     }
 }
 

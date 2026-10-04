@@ -1,0 +1,156 @@
+//! One request that judges many things at once (t-32796): the road a seat
+//! takes when it holds several INDEPENDENT items to judge — a coordinator's
+//! batch of letters (`crate::mail_triage`), later a batch of finished
+//! workers' results — and asking a model about them one by one would give back
+//! everything asking them side by side buys.
+//!
+//! One Jev request carries one state and a map of questions over it, and the
+//! state is charged once however many questions read it: input tokens only,
+//! output free (`docs.typesafe.ai/models`; the same fact a guard question
+//! beside a seat's own rides on, [`crate::jev::noul`]). So what every item
+//! shares — the rubric, the facts that hold for the whole batch — stands once
+//! in the state; what each item is stands once, as an entry of a list under
+//! the seat's [`Judgment::items_key`]; and each item is asked its own closed
+//! questions by its place in that list (`letters[3]`), the way every seat
+//! that asks about a list does ([`crate::browser_read`],
+//! [`crate::jev::claim`]).
+//!
+//! **Stage one: independent verdicts.** A request of this road asks nothing
+//! BETWEEN items. Each question is built from one item's place and the words
+//! the seat shares, never from another item's answer — no answer exists when
+//! the request is built, and [`Judgment::questions`] is handed none — and
+//! each item is read through [`Answers`], a view of the reply that holds that
+//! item's own questions and no others, so one item's verdict can be read
+//! neither from nor into its neighbour's. A reply that breaks the closed
+//! answer's rules for one item is that item's refusal and nobody else's.
+//!
+//! **Stage two** — a comparison across items: which of two results is
+//! better, which of several is a duplicate — needs the others' verdicts, so
+//! it is a SECOND request built from the first's answers over the survivors
+//! only, never one more question of the first. Nothing here asks it.
+//!
+//! The cap ([`Judgment::cap`]) is the seat's, named with its reason where the
+//! seat names its numbers; above it the items are cut EVENLY
+//! ([`super::shard`]) and the requests are meant to leave side by side, so the
+//! one that decides the wait is the longest and not the sum.
+//!
+//! **The seam for the next seat.** The review of a finished worker's result
+//! is the second user of this road: its deterministic checks settle what code
+//! can settle first (a failing check is a verdict nobody asks a model for),
+//! and the items left — their evidence as facts, the task's own words as the
+//! shared part — ride one request, each read as a verdict with a confidence
+//! against that seat's own floor. That seat implements [`Judgment`] and
+//! nothing else here changes.
+
+use std::ops::Range;
+
+use serde_json::{Map, Value};
+
+/// What every question name of a batch opens with: a letter, then the item's
+/// place in the WHOLE batch, then the question's suffix. One name per
+/// question, unique across every request of one batch, and the place an
+/// answer is read back by.
+const QUESTION_PREFIX: &str = "q";
+
+/// The name of the question `suffix` of the item at `item`, counted from the
+/// first item of the whole batch — across its requests, not within one.
+#[must_use]
+pub fn question_name(item: usize, suffix: &str) -> String {
+    format!("{QUESTION_PREFIX}{item}{suffix}")
+}
+
+/// A seat's side of the batch road: what it shares, what it asks of each
+/// item, and how it reads one item's answers.
+pub trait Judgment {
+    /// What one item's answers come to, once read in shape.
+    type Verdict;
+    /// Why one item's answers are no verdict — the closed word its row keeps.
+    type Refusal;
+
+    /// The most items one request carries: the seat's named cap.
+    fn cap(&self) -> usize;
+
+    /// The key of the state the items' facts stand under, in order.
+    fn items_key(&self) -> &'static str;
+
+    /// The state every item shares — the words and the facts that hold for
+    /// the whole batch — written once into each request, beside the items.
+    fn shared(&self) -> Map<String, Value>;
+
+    /// One item's questions, each under a suffix of its own. `at` is the
+    /// item's place in THIS request's list of items, which the questions name
+    /// it by; it is all a question is built from.
+    fn questions(&self, at: usize) -> Vec<(&'static str, Value)>;
+
+    /// What one item's own answers say.
+    ///
+    /// # Errors
+    ///
+    /// The seat's refusal for an answer that breaks a rule of its closed
+    /// answer: the item is refused and no other.
+    fn read(&self, answers: &Answers<'_>) -> Result<Self::Verdict, Self::Refusal>;
+}
+
+/// One item's answers, and no other item's: the view of a reply a seat reads
+/// an item through, so a reading cannot see a neighbour's verdict.
+#[derive(Debug, Clone, Copy)]
+pub struct Answers<'a> {
+    all: &'a Value,
+    item: usize,
+}
+
+impl<'a> Answers<'a> {
+    /// The reply's answer to this item's question `suffix`, when it gave one.
+    #[must_use]
+    pub fn get(&self, suffix: &str) -> Option<&'a Value> {
+        let _ = (self.all, self.item, suffix);
+        None
+    }
+}
+
+/// One request of a batch: the state and the questions that leave, and which
+/// items they ask about.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Request {
+    /// The request's `state`: the seat's shared part, and the items' facts
+    /// under the seat's [`Judgment::items_key`].
+    pub state: Value,
+    /// The request's `questions`: every item's own, under [`question_name`].
+    pub questions: Value,
+    /// The items this request asks about, by their place in the whole batch.
+    items: Range<usize>,
+}
+
+impl Request {
+    /// The items this request asks about, by their place in the whole batch,
+    /// in the order its state lists them.
+    #[must_use]
+    pub fn items(&self) -> Range<usize> {
+        self.items.clone()
+    }
+
+    /// What a reply's `answers` say about each item this request asked
+    /// about, in order — each read by the seat from its own answers alone.
+    #[must_use]
+    pub fn read<J: Judgment>(
+        &self,
+        judgment: &J,
+        answers: &Value,
+    ) -> Vec<Result<J::Verdict, J::Refusal>> {
+        let _ = (judgment, answers);
+        Vec::new()
+    }
+}
+
+/// The requests `facts` — one entry per item, in order — are judged in: the
+/// items cut evenly into requests of at most the seat's cap, each carrying
+/// the seat's shared part once and its own items' facts, and every item's
+/// questions.
+#[must_use]
+pub fn requests<J: Judgment>(judgment: &J, facts: Vec<Value>) -> Vec<Request> {
+    let _ = (judgment, facts);
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests;

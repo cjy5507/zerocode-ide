@@ -28,6 +28,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub mod batch;
 pub mod challenger;
 pub mod choice;
 pub mod claim;
@@ -3587,6 +3588,11 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
 /// answer later than that is the row's `timeout`, which says the service was
 /// slow as plainly.
 pub const MAIL_TRIAGE_DEADLINE_MS: u64 = 5_000;
+
+/// The most letters one mail triage request asks about ([`batch::Judgment::cap`]):
+/// a run's fresh letters above it are cut evenly into requests that leave
+/// side by side.
+pub const MAIL_TRIAGE_BATCH_CAP: usize = 16;
 
 /// The window's mail triage (t-9471, `crate::mail_triage`): for every letter
 /// a run's coordinator is handed while this window holds its seat, whether

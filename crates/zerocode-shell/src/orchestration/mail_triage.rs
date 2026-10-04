@@ -513,6 +513,9 @@ fn seat_term(run: &Run, seats: &super::TeamSeatIndex) -> Option<u32> {
 }
 
 #[cfg(test)]
+mod batch_tests;
+
+#[cfg(test)]
 mod tests {
     use std::io::Write as _;
 

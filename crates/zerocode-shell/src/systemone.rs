@@ -426,6 +426,20 @@ impl Spent {
         }
     }
 
+    /// What a row that rides a request another row paid for is charged: no
+    /// request, no withheld lines and no tokens, beside the version that
+    /// answered it and the HTTP version it came over (t-32796).
+    ///
+    /// A request that judged several letters leaves ONE account, written on
+    /// the one row that carries it ([`Spent::stamp`]); the rows of the other
+    /// letters it asked about carry this, so a ledger's sums still say how
+    /// many requests left and what they billed — a row per letter must not
+    /// make one request count as many.
+    #[must_use]
+    pub fn rider(&self) -> Self {
+        self.clone()
+    }
+
     /// What several asks of one judgment came to together — a sharded
     /// question's requests side by side: their requests and withheld lines
     /// added, and the versions the first answer among them named and came
@@ -738,6 +752,23 @@ impl Wire {
         deadline: Duration,
     ) -> Asked {
         self.ask_remembering(row, workspace, body, deadline, None)
+    }
+
+    /// Several requests of `row`'s, each with the workspace its words come
+    /// from, side by side under one `deadline` each: the answers come back in
+    /// the order the requests were handed in, and the wait is the slowest
+    /// one's — the road every seat that asks in shards takes (t-32796). Blocks
+    /// like [`Self::ask`].
+    #[must_use]
+    pub fn ask_together(
+        &self,
+        row: &JevUse,
+        asks: Vec<(Option<&Path>, Value)>,
+        deadline: Duration,
+    ) -> Vec<Asked> {
+        asks.into_iter()
+            .map(|(workspace, body)| self.ask(row, workspace, body, deadline))
+            .collect()
     }
 
     /// [`Self::ask`], with a memo between the door and the socket
