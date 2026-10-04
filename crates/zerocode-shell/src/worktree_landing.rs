@@ -66,14 +66,23 @@ pub(super) struct WorktreeLanding {
     /// 내용 기준, 이것은 커밋 기준이다). 못 읽었거나 `unlanded`가 아니면 없다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) behind: Option<u32>,
-    /// `unlanded`일 때 비교 ref에 합치면 충돌하는 파일. 충돌이 없거나 git이
-    /// 답하지 못했으면 없다 — 못 본 것을 충돌 없음이라 하지 않는다.
+    /// `unlanded`일 때 비교 ref에 합쳐 본 결과. `Some`에 `total`이 0이면 합쳐 보았고
+    /// 충돌이 없다, 0보다 크면 그만큼의 파일이 충돌한다. 없으면 **보지 못했다** — 행이
+    /// `unlanded`가 아니거나 git이 답하지 못했다. 못 본 것을 충돌 없음이라 하지 않는다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) conflict: Option<LandingConflict>,
+    /// `behind`가 [`LANDING_BEHIND_WARN`] 이상이다 — 사이드바가 칩에 「main보다 N 뒤」를
+    /// 말할 만큼 멀다. 기준을 화면이 아니라 이 파일이 쥔다: 뒤따르는 원장 알림이 같은
+    /// 기준으로 워커를 깨우므로, 화면과 알림이 서로 다른 숫자를 쓰지 않는다.
+    pub(super) far_behind: bool,
 }
 
 /// 이름을 적는 충돌 파일의 수. 더 있으면 `total`만 센다.
 pub(super) const LANDING_CONFLICT_NAMES: usize = 5;
+
+/// 비교 ref보다 이만큼 이상 뒤처지면 사이드바 칩이 그 사실을 말한다. 합칠 때 컴파일 오류가
+/// 드러나는 것은 뒤처진 수가 클수록 잦다 — 10-04에 71·74커밋 뒤처진 두 브랜치가 그랬다.
+pub(super) const LANDING_BEHIND_WARN: u32 = 20;
 
 /// 합치면 충돌하는 파일: 전체 수와, 이름을 적는 앞쪽 몇 개.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,6 +118,7 @@ impl WorktreeLanding {
             landed_in: None,
             behind: None,
             conflict: None,
+            far_behind: false,
         }
     }
 }
@@ -792,6 +802,7 @@ fn classify_landing(
         landed_in: None,
         behind: None,
         conflict: None,
+        far_behind: false,
     };
     let Some(target) = base.oid.as_deref() else {
         landing.state = "no_ref";
@@ -833,14 +844,30 @@ fn classify_landing(
         landing.state = "unlanded";
         landing.ahead = u32::try_from(ahead).unwrap_or(u32::MAX);
         landing.behind = commits_behind(host, path, head, target);
-        if let MergeProbe::Conflict(files) = probe {
-            landing.conflict = Some(LandingConflict {
-                total: u32::try_from(files.len()).unwrap_or(u32::MAX),
-                files: files.into_iter().take(LANDING_CONFLICT_NAMES).collect(),
-            });
-        }
+        landing.far_behind = landing
+            .behind
+            .is_some_and(|behind| behind >= LANDING_BEHIND_WARN);
+        landing.conflict = conflict_of(&probe);
     }
     landing
+}
+
+/// 병합 시험의 답을 칸으로 옮긴다: 깨끗함은 `total 0`, 충돌은 전체 수와 앞쪽 이름, 못 읽음은 없음.
+///
+/// 종료값이 충돌이라고 했는데 파일 이름이 하나도 없으면 충돌은 충돌이다 — 적어도 하나로 세고
+/// 이름은 비워 둔다. 0으로 옮기면 충돌을 「합쳐 보았고 깨끗함」으로 말하게 된다.
+fn conflict_of(probe: &MergeProbe) -> Option<LandingConflict> {
+    match probe {
+        MergeProbe::Clean(_) => Some(LandingConflict {
+            total: 0,
+            files: Vec::new(),
+        }),
+        MergeProbe::Conflict(files) => Some(LandingConflict {
+            total: u32::try_from(files.len()).unwrap_or(u32::MAX).max(1),
+            files: files.iter().take(LANDING_CONFLICT_NAMES).cloned().collect(),
+        }),
+        MergeProbe::Failed => None,
+    }
 }
 
 /// 비교 ref에는 있고 `head`에는 없는 커밋 수. 못 읽으면 없다 — 0이라 하지 않는다.
@@ -1439,7 +1466,14 @@ mod tests {
         let landing = bench.landing(&wt);
         assert_eq!((landing.state, landing.ahead), ("unlanded", 1));
         assert_eq!(landing.behind, Some(2));
-        assert_eq!(landing.conflict, None, "different files merge cleanly");
+        assert_eq!(
+            landing.conflict,
+            Some(LandingConflict {
+                total: 0,
+                files: Vec::new()
+            }),
+            "different files merge cleanly, and that was looked at"
+        );
     }
 
     #[test]
@@ -1470,6 +1504,58 @@ mod tests {
     }
 
     #[test]
+    fn a_probe_becomes_a_conflict_cell_only_for_what_was_looked_at() {
+        let tree = "0123456789abcdef0123456789abcdef01234567".to_string();
+        // Looked at and clean: said as zero, so the window can tell it from not looked at.
+        assert_eq!(
+            conflict_of(&MergeProbe::Clean(tree)),
+            Some(LandingConflict {
+                total: 0,
+                files: Vec::new()
+            })
+        );
+        // Looked at and clashing: the full count, and the first few names.
+        let many: Vec<String> = (1..=8).map(|index| format!("f{index}.rs")).collect();
+        let cell = conflict_of(&MergeProbe::Conflict(many.clone())).expect("a clash");
+        assert_eq!(cell.total, 8);
+        assert_eq!(cell.files, many[..LANDING_CONFLICT_NAMES].to_vec());
+        // git said it clashes and named no file: still a clash — at least one — and no names.
+        assert_eq!(
+            conflict_of(&MergeProbe::Conflict(Vec::new())),
+            Some(LandingConflict {
+                total: 1,
+                files: Vec::new()
+            })
+        );
+        // git could not say: nothing is said, never "no conflict".
+        assert_eq!(conflict_of(&MergeProbe::Failed), None);
+    }
+
+    #[test]
+    fn a_branch_is_far_behind_from_the_named_count_and_not_a_commit_before() {
+        let bench = Bench::open();
+        let wt = bench.worktree("far");
+        bench.commit(&wt, "w.txt", "work\n");
+        for index in 1..LANDING_BEHIND_WARN {
+            bench.commit(&bench.repo, &format!("m{index}.txt"), "main\n");
+        }
+        bench.publish();
+        let near = bench.landing(&wt);
+        assert_eq!(near.behind, Some(LANDING_BEHIND_WARN - 1));
+        assert!(!near.far_behind, "one commit short of the line");
+        bench.commit(&bench.repo, "last.txt", "main\n");
+        bench.publish();
+        let far = bench.landing(&wt);
+        assert_eq!(far.behind, Some(LANDING_BEHIND_WARN));
+        assert!(far.far_behind, "on the line");
+        // The flag rides the cache with the count: asked again at the same head and ref it stands.
+        assert!(bench.landing(&wt).far_behind);
+        // A row that is not on the compare ref's heels at all carries neither.
+        let idle = bench.worktree("far-idle");
+        assert!(!bench.landing(&idle).far_behind);
+    }
+
+    #[test]
     fn a_landed_or_idle_row_carries_no_drift() {
         let bench = Bench::open();
         let idle = bench.worktree("drift-idle");
@@ -1494,7 +1580,14 @@ mod tests {
         // ref가 움직이면 다시 센다: 이제 main에는 합칠 것이 없다.
         bench.publish();
         let landing = bench.landing(&wt);
-        assert_eq!((landing.state, landing.conflict), ("unlanded", None));
+        assert_eq!(landing.state, "unlanded");
+        assert_eq!(
+            landing.conflict,
+            Some(LandingConflict {
+                total: 0,
+                files: Vec::new()
+            })
+        );
         assert_eq!(landing.behind, Some(0));
     }
 
