@@ -23,6 +23,7 @@
 //! request are kept only while its pane is busy.
 
 use crate::explain::{ACTIVE_MAX, why};
+use crate::hook::HookState;
 
 /// A terminal's number, as the window numbers them.
 pub type Term = u32;
@@ -136,6 +137,31 @@ pub fn decide(pane: &PaneFacts<'_>) -> Decision {
         return Decision::Wait;
     }
     Decision::Send
+}
+
+/// What one report of a pane's state means to the requests that went to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Heard {
+    /// A turn going on, a question parked, a session starting: nothing a
+    /// request is waiting for.
+    Nothing,
+    /// The agent ended a turn: a request that waited for it is released, and one
+    /// that was asked and got no page is finished.
+    TurnEnded,
+    /// The agent is no longer in the pane: every request of it is finished.
+    AgentGone,
+}
+
+/// One report of a pane's state, read for the requests in flight. A session
+/// boundary wearing `done` is a session starting — a compaction in the middle
+/// of a turn writes one — and not a turn ending, so it is not heard.
+#[must_use]
+pub fn heard(state: HookState, _session_boundary: bool) -> Heard {
+    match state {
+        HookState::Working | HookState::NeedsAttention => Heard::Nothing,
+        HookState::Done => Heard::TurnEnded,
+        HookState::Idle => Heard::AgentGone,
+    }
 }
 
 /// The requests in flight.

@@ -214,3 +214,22 @@ fn the_wire_words_of_the_states_are_the_ones_the_window_reads() {
         ["waiting", "sent", "asked", "running", "ready", "failed"]
     );
 }
+
+#[test]
+fn a_turn_going_on_and_a_parked_question_are_not_what_a_request_waits_for() {
+    assert_eq!(heard(HookState::Working, false), Heard::Nothing);
+    assert_eq!(heard(HookState::NeedsAttention, false), Heard::Nothing);
+}
+
+#[test]
+fn done_is_a_turn_ending_and_idle_is_the_agent_gone() {
+    assert_eq!(heard(HookState::Done, false), Heard::TurnEnded);
+    assert_eq!(heard(HookState::Idle, false), Heard::AgentGone);
+}
+
+#[test]
+fn a_session_boundary_wearing_done_is_a_session_starting_not_a_turn_ending() {
+    // A compaction in the middle of a turn writes one: ending the request there
+    // would fail it while the agent is still making its page.
+    assert_eq!(heard(HookState::Done, true), Heard::Nothing);
+}
