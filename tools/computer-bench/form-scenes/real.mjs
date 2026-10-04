@@ -63,9 +63,15 @@ const doorText = resolve(options.doorText);
 if (!existsSync(options.account) || !statSync(options.account).isDirectory()) {
   console.error("REFUSED: --account is not a folder"); process.exit(2);
 }
-if (options.runsMax !== null && options.spent && existsSync(options.spent)
-  && (await readFile(options.spent, "utf8")).split("\n").filter(Boolean).length >= options.runsMax) {
+const scene = await readScene(options.scene);
+// The runs already made: a limit on all of them, and no scene and model twice.
+const spentRows = options.spent && existsSync(options.spent)
+  ? (await readFile(options.spent, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+if (options.runsMax !== null && spentRows.length >= options.runsMax) {
   console.log(`REFUSED: the run limit (${options.runsMax}) is spent`); process.exit(4);
+}
+if (spentRows.some((one) => one.scene === scene.name && one.model === options.model)) {
+  console.log(`REFUSED: ${scene.name} on ${options.model} already ran`); process.exit(4);
 }
 
 // A run's folder is its own: a used one is refused, never cleared.
@@ -76,7 +82,6 @@ for (const folder of Object.values(dirs)) await mkdir(folder, { recursive: true 
 await mkdir(join(dirs.config, "skills", "computer-use"), { recursive: true });
 await copyFile(join(ROOT, "skills", "computer-use", "SKILL.md"), join(dirs.config, "skills", "computer-use", "SKILL.md"));
 await installStandIn({ bin: dirs.bin, doorText });
-const scene = await readScene(options.scene);
 const argv = claudeArgs({ model: options.model, maxTurns: options.maxTurns });
 const env = (desk) => boxEnv({ ...dirs, bin: dirs.bin, account: resolve(options.account), desk, user: process.env.USER || "" });
 const path = env("").PATH;
@@ -162,7 +167,8 @@ const row = {
   door: { requests: desk.tally.requests, verbs: desk.tally.verbs, refusals: desk.tally.refusals, unwired: desk.tally.unwired,
     handoffs: desk.tally.handoffs, faults: desk.tally.faults, blocked: desk.tally.blocked, dialogs: desk.tally.dialogs, popups: desk.tally.popups },
   init: seen.init ? { tools: seen.init.tools, mcpServers: seen.init.mcp_servers, model: seen.init.model, apiKeySource: seen.init.apiKeySource,
-    permissionMode: seen.init.permissionMode, slashCommands: seen.init.slash_commands, plugins: seen.init.plugins ?? null, skills: seen.init.skills ?? null } : null,
+    permissionMode: seen.init.permissionMode, slashCommands: (seen.init.slash_commands || []).length, plugins: seen.init.plugins ?? null,
+    skills: seen.init.skills ?? null, agents: seen.init.agents ?? null } : null,
 };
 await writeFile(join(out, "events.ndjson"), Buffer.concat(raw));
 await writeFile(join(out, "agent.stderr"), Buffer.concat(errors));
