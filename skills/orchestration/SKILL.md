@@ -461,6 +461,22 @@ not to ask again and not to summon a replacement — that is its coordinator's
 decision. On the answering side you are just reading mail:
 `check --types question`, then `reply --to-message <id> --body '<answer>'`.
 A question from ANOTHER run's coordinator (`send --run <run> --to run:<run> --type question`) is answered the same way: one `reply --to-message <id>` closes it here and is delivered to the run that asked (`deliveredTo` in its answer) — do not answer with a `send --type status`, which leaves the question standing on the board.
+
+`delegate` is the three steps of a new piece of work in one: it writes the task,
+summons a worker on it (`worker-start`'s own gates: the quota wall, `--on-quota-wall`, the
+disk check for `--worktree`) and leaves the worker a letter that tells it its own worker,
+dispatch and task ids, which a worker cannot learn by itself. `zerocode-orc delegate --spec
+'<the work>' --agent <a> [--title <t>] [--deps a,b] [--prompt <p>] [--model <id> [--effort
+<level>]] [--on-quota-wall …] [--worktree] --retry-request <name>`. The worker's first words
+are the spec unless you give `--prompt`. A refusal anywhere leaves no task, worker or letter
+behind; the same `--retry-request` answers with the first answer and makes nothing twice.
+With `--wait --timeout-ms <ms>` (up to ten minutes) the call holds its answer until that
+worker reports (`worker_done`), asks you something, or its attempt ends silently — the answer
+then carries a `waited` object with the outcome and, for a report, the worker's own summary.
+It never reads or acknowledges your inbox, so other workers' mail waits for your `check` as
+usual. A worker that is already on a task, a replacement for an ended attempt, a bare pane
+and a federated worker still go through `worker-start`.
+
 `worker-start` also takes launch tuning where the agent's own CLI does —
 `--model <id>` (an opaque provider id, passed through unread), `--effort`
 beside it where a ride exists — plus `--retry-of <dispatchId>` to link a
