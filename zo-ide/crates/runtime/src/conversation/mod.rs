@@ -18,6 +18,7 @@ mod deep_gate;
 mod error;
 mod fallback;
 mod helpers;
+mod overflow_recovery;
 mod reminders;
 mod repetition;
 mod reviewed_edit;
@@ -811,6 +812,11 @@ pub struct ConversationRuntime<C, T> {
     /// from the transient prompt because the prompt is cleared at turn start;
     /// this flag prevents repeatedly starving precompaction in long sessions.
     state_distill_deferred_precompaction: bool,
+    /// Where the current turn stands in the answer to a refused request
+    /// (`overflow_recovery`): the picture cap a refusal for bytes asked for,
+    /// and whether the turn has compacted for it. Reset when a turn starts and
+    /// read by `assemble_request`.
+    overflow_recovery: overflow_recovery::OverflowRecovery,
     /// One-shot latch for the pre-compaction early-warning line. `true` once the
     /// heads-up ("Context nearing auto-compaction — threshold M%…") has surfaced for the
     /// current context segment, so it fires exactly once as the session climbs
@@ -1812,6 +1818,7 @@ where
             team_inbox_digest_max_updates: feature_config.team_inbox_digest_max_updates(),
             recall_hint_enabled: feature_config.recall_hint_enabled(),
             state_distill_deferred_precompaction: false,
+            overflow_recovery: overflow_recovery::OverflowRecovery::default(),
             precompaction_warned: false,
             dream_automation_enabled: feature_config.dream_automation_enabled(),
             steering: Arc::new(Mutex::new(Vec::new())),
@@ -2390,7 +2397,7 @@ where
         let mut truncation_continuations = 0;
         let mut turn_end_gate_reprompts = 0;
         let mut auto_compaction = None;
-        let mut provider_overflow_recovery_attempted = false;
+        self.overflow_recovery = overflow_recovery::OverflowRecovery::default();
         let mut microcompact = None;
         let mut budget_exhausted: Option<BudgetExhausted> = None;
 
@@ -2580,22 +2587,36 @@ where
             let events = match self.sync_stream_events(request) {
                 Ok(events) => events,
                 Err(error) => {
-                    if !provider_overflow_recovery_attempted
-                        && error.provider_error_class()
-                            == Some(crate::ProviderErrorClass::ContextOverflow)
+                    if error.provider_error_class()
+                        == Some(crate::ProviderErrorClass::ContextOverflow)
                     {
-                        provider_overflow_recovery_attempted = true;
-                        // Learn the wire's real ceiling before compacting, so this
-                        // session's thresholds stop being derived from a window the
-                        // provider does not honor.
-                        if let Some(ceiling) =
-                            ::api::context_overflow_ceiling_tokens(&error.to_string())
-                        {
-                            self.adopt_provider_context_ceiling(ceiling);
-                        }
-                        if let Some(event) = self.recover_provider_context_overflow() {
-                            auto_compaction.get_or_insert(event);
-                            continue;
+                        match self.next_overflow_step(&error) {
+                            // A body over the provider's byte ceiling is mostly
+                            // pictures, which a summary does not shrink: cut the
+                            // oldest ones first. The headless path has no render
+                            // channel, so the notice goes to stderr.
+                            overflow_recovery::OverflowStep::LeaveOutPictures { keep } => {
+                                eprintln!(
+                                    "[zo] {}",
+                                    overflow_recovery::picture_overflow_notice(keep)
+                                );
+                                continue;
+                            }
+                            overflow_recovery::OverflowStep::Compact => {
+                                // Learn the wire's real ceiling before compacting, so
+                                // this session's thresholds stop being derived from a
+                                // window the provider does not honor.
+                                if let Some(ceiling) =
+                                    ::api::context_overflow_ceiling_tokens(&error.to_string())
+                                {
+                                    self.adopt_provider_context_ceiling(ceiling);
+                                }
+                                if let Some(event) = self.recover_provider_context_overflow() {
+                                    auto_compaction.get_or_insert(event);
+                                    continue;
+                                }
+                            }
+                            overflow_recovery::OverflowStep::GiveUp => {}
                         }
                     }
                     // Main model quota exhausted: HOLD on the main model when its
@@ -2627,6 +2648,9 @@ where
                         }
                         QuotaEscape::None => {}
                     }
+                    // A refusal that ends the turn says which picture is the
+                    // newest and how big the rest of the request is.
+                    let error = self.explain_overflow(error);
                     self.clear_empty_retry_reminder(empty_retries);
                     self.record_turn_failed(iterations, &error);
                     return Err(error);

@@ -1096,9 +1096,10 @@ fn screenshot_path(answer: &Value) -> Option<String> {
 /// block, through the same guard `read_image` uses; the file is then gone.
 fn stage_screenshot(answer: &mut Value, ctx: &ToolContext) -> Option<Value> {
     let path = screenshot_path(answer)?;
-    let staged = crate::file_tools::run_read_image(
+    let staged = crate::file_tools::stage_image(
         &serde_json::from_value(json!({ "path": path })).ok()?,
         ctx,
+        crate::file_tools::ImageIntake::Screenshot,
     )
     .ok()
     .and_then(|text| serde_json::from_str::<Value>(&text).ok());

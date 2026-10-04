@@ -161,9 +161,11 @@ pub fn is_capacity_text(lower: &str) -> bool {
 /// inside the model's context window and still be refused — many images, large
 /// base64 attachments, or a few huge tool results blow the body limit long
 /// before the token ceiling. It is nevertheless classified alongside the
-/// token-overflow signals because the recovery is identical (compact, then
-/// retry) and compaction is the only lever the stack has for shrinking a
-/// request.
+/// token-overflow signals because both are answered by shrinking the request
+/// and sending it again; the runtime tells them apart by this very predicate
+/// (`conversation/overflow_recovery.rs`) and for bytes cuts the oldest pictures
+/// out of the request first — a summary does not shrink a screenshot — before
+/// it compacts.
 #[must_use]
 pub fn is_request_too_large_text(lower: &str) -> bool {
     (lower.contains("request buffer limit")
