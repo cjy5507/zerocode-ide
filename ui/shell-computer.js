@@ -182,7 +182,7 @@ function paintComputerCode(ask) {
   computerCodeInput.maxLength = limits.typedMax;
   computerCodeInput.readOnly = ask.sending === true;
   say(el("ask-code-label"), () => t("computer.handoff.codeLabel", "인증번호"));
-  say(el("ask-code-hint"), () => t("computer.handoff.codeHint", "{{min}}~{{max}}자의 숫자·영문 · 에이전트에게 한 번만 전달되고 저장되지 않습니다", limits));
+  say(el("ask-code-hint"), () => t("computer.handoff.codeHint", "{{min}}~{{max}}자의 숫자·영문 · 창이 에이전트가 정한 칸에 한 번 입력합니다. 에이전트는 번호를 받지 않습니다", limits));
   paintComputerCodeError(limits);
 }
 

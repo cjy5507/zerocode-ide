@@ -310,6 +310,24 @@ impl EnterTool {
     }
 }
 
+/// Words an input for a code may not carry: a value of its own (the code is
+/// the value, and only the window writes it), an answer's shape, a press the
+/// person is to confirm, and the guard on ZeroCode's own window.
+const ENTER_REFUSED_WORDS: [&str; 8] = [
+    "--value",
+    "--text",
+    "--value-stdin",
+    "--text-stdin",
+    "--json",
+    "--confirming",
+    "--confirm",
+    "--allow-self",
+];
+
+/// What `--into` may name, said once and carried by every refusal that needs
+/// to say it.
+const ENTER_SHAPES: &str = "set-value (--app, --element-index), type-text (--app), browser type <tab> <selector>, or emulator text (--platform, --device)";
+
 /// Where the window puts a code the person typed: the words of one input
 /// command, without the code. `["set-value","--app","Form","--element-index",
 /// "3"]` for an app's field, `["type-text","--app","Form"]` for its focused
@@ -320,7 +338,9 @@ impl EnterTool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnterInto {
     tool: EnterTool,
-    words: Vec<String>,
+    /// The words as the agent gave them, door prefix (`browser`, `emulator`)
+    /// and all.
+    given: Vec<String>,
 }
 
 impl EnterInto {
@@ -334,10 +354,30 @@ impl EnterInto {
 
     /// The command's words, checked: only an input that puts a typed value in
     /// one field, naming its field, and no word that would carry a value, a
-    /// second command or a way past the person.
+    /// second command or a way past the person. The same parsers that read a
+    /// command carrying a value read this one with a placeholder for it.
     pub fn from_words(all: &[String]) -> Result<Self, String> {
-        let _ = all;
-        Err("--into is not understood yet".to_string())
+        let Some(first) = all.first() else {
+            return Err("--into needs the words of one input command".to_string());
+        };
+        if all.iter().any(String::is_empty) {
+            return Err("--into holds an empty word".to_string());
+        }
+        let tool = match first.as_str() {
+            "browser" => EnterTool::Browser,
+            "emulator" => EnterTool::Emulator,
+            _ => EnterTool::Computer,
+        };
+        let into = Self {
+            tool,
+            given: all.to_vec(),
+        };
+        match tool {
+            EnterTool::Computer => into.check_computer()?,
+            EnterTool::Browser => into.check_browser()?,
+            EnterTool::Emulator => into.check_emulator()?,
+        }
+        Ok(into)
     }
 
     /// The door the input comes in by.
@@ -346,17 +386,30 @@ impl EnterInto {
         self.tool
     }
 
+    /// The words after the door's prefix: the input command itself.
+    fn words(&self) -> &[String] {
+        match self.tool {
+            EnterTool::Computer => &self.given,
+            EnterTool::Browser | EnterTool::Emulator => &self.given[1..],
+        }
+    }
+
     /// The input's verb: `set-value`, `type-text`, `type` or `text`.
     #[must_use]
     pub fn verb(&self) -> &str {
-        self.words.first().map_or("", String::as_str)
+        self.words().first().map_or("", String::as_str)
     }
 
     /// The words the door takes to type `value`: the command with the value
     /// where its verb takes one.
     #[must_use]
     pub fn words_with(&self, value: &str) -> Vec<String> {
-        let mut words = self.words.clone();
+        let mut words = self.words().to_vec();
+        match (self.tool, self.verb()) {
+            (EnterTool::Computer, "set-value") => words.push("--value".to_string()),
+            (EnterTool::Computer, _) | (EnterTool::Emulator, _) => words.push("--text".to_string()),
+            (EnterTool::Browser, _) => {}
+        }
         words.push(value.to_string());
         words
     }
@@ -364,7 +417,98 @@ impl EnterInto {
     /// The array as the agent gave it, door prefix and all.
     #[must_use]
     pub fn to_words(&self) -> Vec<String> {
-        self.words.clone()
+        self.given.clone()
+    }
+
+    /// No word of `words` that would carry a value of its own, or a way past
+    /// the person.
+    fn refuse_words(words: &[String]) -> Result<(), String> {
+        match words
+            .iter()
+            .find_map(|word| ENTER_REFUSED_WORDS.iter().find(|refused| **refused == word))
+        {
+            Some(refused) => Err(format!(
+                "--into may not carry {refused}: the window types the code as the value, and nothing of it comes back"
+            )),
+            None => Ok(()),
+        }
+    }
+
+    fn check_computer(&self) -> Result<(), String> {
+        let words = self.words();
+        let verb = words[0].as_str();
+        let needs: &[&str] = match verb {
+            "set-value" => &["--app", "--element-index"],
+            "type-text" => &["--app"],
+            "paste-text" | "clipboard-write" => {
+                return Err(format!(
+                    "`{verb}` goes by the clipboard, where a code stays for `clipboard-read`: use {ENTER_SHAPES}"
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "`{other}` is not an input a code can go to: use {ENTER_SHAPES}"
+                ));
+            }
+        };
+        Self::refuse_words(&words[1..])?;
+        for need in needs {
+            if !words.iter().any(|word| word == need) {
+                return Err(format!(
+                    "{verb} needs {need} to say which field the code goes in"
+                ));
+            }
+        }
+        let typed = self.words_with(ENTER_PLACEHOLDER);
+        let parsed = crate::computer_use::parse_command(&typed)?;
+        let method = match verb {
+            "set-value" => crate::computer_use::ComputerMethod::SetValue,
+            _ => crate::computer_use::ComputerMethod::TypeText,
+        };
+        if parsed.method == method {
+            Ok(())
+        } else {
+            Err(format!(
+                "`{verb}` is not an input a code can go to: use {ENTER_SHAPES}"
+            ))
+        }
+    }
+
+    fn check_browser(&self) -> Result<(), String> {
+        let words = self.words();
+        let shaped = "--into for the browser is [\"browser\",\"type\",\"<tab>\",\"<selector>\"] — no text: the window types the code (a selector may be a handle `fields` printed)";
+        let (words, setter) = match words.last().map(String::as_str) {
+            Some(crate::agent_browser::TYPE_VALUE_FLAG) if words.len() == 4 => (&words[..3], true),
+            _ => (words, false),
+        };
+        Self::refuse_words(words)?;
+        if words.len() != 3 || words[0] != "type" {
+            return Err(shaped.to_string());
+        }
+        let mut typed = words.to_vec();
+        if setter {
+            typed.push(crate::agent_browser::TYPE_VALUE_FLAG.to_string());
+        }
+        typed.push(ENTER_PLACEHOLDER.to_string());
+        crate::agent_browser::arity_ok(&typed).map_err(|why| format!("{shaped}: {why}"))
+    }
+
+    fn check_emulator(&self) -> Result<(), String> {
+        let words = self.words();
+        let shaped = "--into for a phone is [\"emulator\",\"text\",\"--platform\",\"<ios|android>\",\"--device\",\"<id>\"] — no --text: the window types the code";
+        Self::refuse_words(words)?;
+        if words.first().map(String::as_str) != Some("text") {
+            return Err(shaped.to_string());
+        }
+        let typed = self.words_with(ENTER_PLACEHOLDER);
+        let parsed = crate::computer_use::parse_emulator_command(&typed)
+            .map_err(|why| format!("{shaped}: {why}"))?;
+        if parsed.platform.is_none() || parsed.device.is_none() {
+            return Err(format!(
+                "{shaped}: it needs --platform and --device to say which phone"
+            ));
+        }
+        Ok(())
     }
 }
 

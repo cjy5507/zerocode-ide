@@ -3792,18 +3792,6 @@ fn looks_at_the_display(command: &zerocode_core::computer_use::ComputerCommand) 
     }
 }
 
-/// [`door_refusal`] with the two lists the window asks the helper for — its
-/// apps and its windows — handed in, so a test answers them. The live road
-/// asks the helper itself.
-pub(super) fn door_refusal_with(
-    command: &zerocode_core::computer_use::ComputerCommand,
-    list_apps: &mut dyn FnMut() -> Option<serde_json::Value>,
-    list_windows: &mut dyn FnMut() -> Option<serde_json::Value>,
-) -> Option<computer_use::ComputerUseError> {
-    let _ = (&list_apps, &list_windows);
-    door_refusal(command)
-}
-
 /// The one hand (§1.3): while stopped, every action is refused at the door,
 /// before anything goes near the helper; looks still answer. So is every
 /// action while the person is being asked (§1.5) — a press or a key sent
@@ -3811,31 +3799,153 @@ pub(super) fn door_refusal_with(
 /// Why a command is refused at the door, if it is. One that acts: the operator
 /// is stopped (the hotkey, `stop`, a budget), or the person is being asked
 /// about a step (or has the desk). A look is not refused here — but for a
-/// picture of the whole display while a card with a line stands.
+/// picture of the whole display, or a look that names ZeroCode itself, while a
+/// card with a line for a code stands.
 pub(super) fn door_refusal(
     command: &zerocode_core::computer_use::ComputerCommand,
 ) -> Option<computer_use::ComputerUseError> {
+    use zerocode_core::computer_use_protocol::marks::EVERY_LAYER_KEY;
+
+    door_refusal_with(
+        command,
+        &mut || computer_use::call("listApps", serde_json::json!({})).ok(),
+        &mut || {
+            computer_use::call(
+                "listAllWindows",
+                serde_json::json!({ EVERY_LAYER_KEY: true }),
+            )
+            .ok()
+        },
+    )
+}
+
+/// [`door_refusal`] with the two lists the window asks the helper for — its
+/// apps and its windows — handed in, so a test answers them. They are asked
+/// only while a card with a line stands, and only of a look that names an app
+/// or a window.
+pub(super) fn door_refusal_with(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    list_apps: &mut dyn FnMut() -> Option<serde_json::Value>,
+    list_windows: &mut dyn FnMut() -> Option<serde_json::Value>,
+) -> Option<computer_use::ComputerUseError> {
+    use zerocode_core::computer_use_protocol::error_code::PERSON_ASKED;
+
     if !command.method.acts() {
         // A card with a line shows what the person types, in clear: a picture
-        // of the display taken meanwhile would carry it into a file. Every
-        // other look still answers.
-        return (computer_use::confirm::taking_a_code() && looks_at_the_display(command)).then(
-            || {
-                computer_use::ComputerUseError::new(
-                    zerocode_core::computer_use_protocol::error_code::PERSON_ASKED,
-                    "the person is typing a code on a card; a picture of the display waits until the card is gone — look again then",
-                )
-            },
-        );
+        // of the display taken meanwhile would carry it into a file, and so
+        // would a look at the app the card is drawn in, which the helper
+        // refuses as the target of an action only. Every other look answers.
+        if !computer_use::confirm::taking_a_code() {
+            return None;
+        }
+        if looks_at_the_display(command) {
+            return Some(computer_use::ComputerUseError::new(
+                PERSON_ASKED,
+                "the person is typing a code on a card; a picture of the display waits until the card is gone — look again then",
+            ));
+        }
+        if looks_at_zerocode(command, list_apps, list_windows) {
+            return Some(computer_use::ComputerUseError::new(
+                PERSON_ASKED,
+                "the person is typing a code on a card in ZeroCode; a look at ZeroCode waits until the card is gone — look again then",
+            ));
+        }
+        return None;
     }
     match computer_use::guard::stopped_reason() {
         Some(reason) => Some(computer_use::guard::refusal(&reason)),
         None if computer_use::confirm::asking() => Some(computer_use::ComputerUseError::new(
-            zerocode_core::computer_use_protocol::error_code::PERSON_ASKED,
+            PERSON_ASKED,
             "the person is being asked about a step (or has the desk); no other action goes until they answer — wait for that command's answer",
         )),
         None => None,
     }
+}
+
+/// Whether a look names ZeroCode: the app it says (by name, bundle identifier
+/// or `pid:`) is ZeroCode's own, or the window it says is one of ZeroCode's. A
+/// list the helper does not give is no answer, and the look waits too.
+fn looks_at_zerocode(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    list_apps: &mut dyn FnMut() -> Option<serde_json::Value>,
+    list_windows: &mut dyn FnMut() -> Option<serde_json::Value>,
+) -> bool {
+    let app = command
+        .params
+        .get("app")
+        .and_then(serde_json::Value::as_str);
+    let window = command
+        .params
+        .get("windowId")
+        .and_then(serde_json::Value::as_u64);
+    if let Some(app) = app {
+        let Some(listed) = list_apps() else {
+            return true;
+        };
+        if names_zerocode(app, &listed) {
+            return true;
+        }
+    }
+    if let Some(window) = window {
+        let Some(listed) = list_windows() else {
+            return true;
+        };
+        return listed
+            .get("windows")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.get("id").and_then(serde_json::Value::as_u64) == Some(window)
+                        && row.get("own") == Some(&serde_json::Value::Bool(true))
+                })
+            });
+    }
+    false
+}
+
+/// Whether `query` — what a look says its app is — names ZeroCode among the
+/// helper's apps: a row that is this process, or a ZeroCode build the helper
+/// trusts as ZeroCode (the bundle identifier, and the dev ones under it),
+/// matched the way the helper matches an app (the name or the identifier, any
+/// case, never a fragment; the executable's name for this process), or
+/// `pid:` of such a row.
+fn names_zerocode(query: &str, listed: &serde_json::Value) -> bool {
+    use zerocode_core::computer_use_protocol::identity;
+
+    let own_pid = u64::from(std::process::id());
+    let own_stem = std::env::current_exe().ok().and_then(|path| {
+        path.file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+    });
+    let query = query.trim();
+    let pid = query
+        .strip_prefix("pid:")
+        .and_then(|digits| digits.parse::<u64>().ok());
+    let dev_builds = format!("{}.dev.", zerocode_lane::APP_IDENTIFIER);
+    listed
+        .get("apps")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                let row_pid = row.get("pid").and_then(serde_json::Value::as_u64);
+                let bundle = row.get("bundleId").and_then(serde_json::Value::as_str);
+                let this_process = row_pid == Some(own_pid);
+                let zerocode = this_process
+                    || bundle.is_some_and(|id| {
+                        id == zerocode_lane::APP_IDENTIFIER || id.starts_with(&dev_builds)
+                    });
+                zerocode
+                    && (pid.is_some() && pid == row_pid
+                        || identity::matches(
+                            query,
+                            row.get("name")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default(),
+                            bundle,
+                            own_stem.as_deref().filter(|_| this_process),
+                        ))
+            })
+        })
 }
 
 /// The door's refusal as the command's own answer.
@@ -4864,8 +4974,127 @@ pub(super) fn answer_computer_command(
         permission_window,
         asking,
         workspace,
-        &mut computer_use::enter::Unseated,
+        &mut LiveTyper {
+            window: permission_window,
+        },
     )
+}
+
+/// The window's own doors a person's code is typed through: the desktop's
+/// road, a tab's door, a phone's door. Each is the road a lone input takes
+/// below the step — the door's refusals, the helper or the pane — and none of
+/// the step above it: an acting step would record a picture of the field the
+/// code is in, and what the input answers is read for whether it worked and
+/// dropped (`computer_use::enter`).
+struct LiveTyper<'a> {
+    window: Option<&'a tauri::AppHandle>,
+}
+
+impl LiveTyper<'_> {
+    fn window(&self) -> Result<&tauri::AppHandle, computer_use::ComputerUseError> {
+        self.window.ok_or_else(|| {
+            computer_use::ComputerUseError::new(
+                zerocode_core::computer_use_protocol::error_code::INVALID_ARGUMENT,
+                "no window to type the code through",
+            )
+        })
+    }
+}
+
+/// What a tab's or a phone's answer to an input comes to: it went, or it did
+/// not and said why.
+fn input_answered(
+    answer: &zerocode_hookd::TeamAnswer,
+) -> Result<(), computer_use::ComputerUseError> {
+    if answer.exit_code == 0 {
+        return Ok(());
+    }
+    Err(computer_use::ComputerUseError::new(
+        "input_failed",
+        answer.stderr.trim().to_string(),
+    ))
+}
+
+impl computer_use::enter::Typer for LiveTyper<'_> {
+    fn computer(
+        &mut self,
+        command: &zerocode_core::computer_use::ComputerCommand,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+        if let Some(refusal) = door_refusal(command) {
+            return Err(refusal);
+        }
+        let answer = call_with_the_persons_last_step(
+            command,
+            computer_use::confirm::Asking::HandBack,
+            &mut computer_use::call,
+        )?;
+        let verb = command.method.verb_name();
+        computer_use::guard::note_action(verb, now_epoch_ms());
+        if let Some(window) = self.window {
+            let _ = window.emit(
+                "computer:activity",
+                computer_use::guard::activity_report(Some(verb)),
+            );
+        }
+        Ok(answer)
+    }
+
+    fn browser(&mut self, words: &[String]) -> Result<(), computer_use::ComputerUseError> {
+        let app = self.window()?;
+        input_answered(&tauri::async_runtime::block_on(answer_browser_command(
+            app, words, None,
+        )))
+    }
+
+    fn emulator(&mut self, words: &[String]) -> Result<(), computer_use::ComputerUseError> {
+        let app = self.window()?;
+        input_answered(&tauri::async_runtime::block_on(answer_emulator_command(
+            app, words, None, None,
+        )))
+    }
+}
+
+/// A handoff, answered: the person's turn, and — for a card that took a code —
+/// the code typed where the agent said, answered as how many characters went
+/// in. The place is read first, so a card is never shown for a code that has
+/// nowhere to go.
+fn persons_turn_answer(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    typer: &mut dyn computer_use::enter::Typer,
+) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+    use computer_use::confirm::{self, Turn};
+    use zerocode_core::computer_use_protocol::error_code;
+    use zerocode_core::handoff_code::EnterInto;
+
+    let into = command
+        .params
+        .get("into")
+        .map(|raw| {
+            serde_json::from_value::<Vec<String>>(raw.clone())
+                .map_err(|why| why.to_string())
+                .and_then(|words| EnterInto::from_words(&words))
+                .map_err(computer_use::ComputerUseError::invalid_argument)
+        })
+        .transpose()?;
+    match confirm::persons_turn(&command.params)? {
+        Turn::Plain(answer) => Ok(answer),
+        Turn::NoCode { reason } if command.json => Ok(serde_json::json!({
+            "resumed": true,
+            "reason": reason,
+            "entered": false,
+            "codeRefused": confirm::CODE_REFUSED_SECRET_REASON,
+        })),
+        Turn::NoCode { .. } => Err(computer_use::ComputerUseError::new(
+            error_code::INVALID_ARGUMENT,
+            confirm::NO_CODE_TAKEN,
+        )),
+        Turn::Code { reason, code } => match into {
+            Some(into) => computer_use::enter::enter(&reason, code, &into, typer),
+            None => Err(computer_use::ComputerUseError::invalid_argument(
+                "a code was typed with no place to put it",
+            )),
+        },
+    }
 }
 
 /// [`answer_computer_command`] with the doors a person's code is typed
@@ -4879,8 +5108,6 @@ pub(super) fn answer_computer_command_with(
     typer: &mut dyn computer_use::enter::Typer,
 ) -> zerocode_hookd::TeamAnswer {
     use zerocode_core::computer_use::{ComputerMethod, parse_command, usage};
-
-    let _ = &typer;
 
     if argv
         .first()
@@ -4950,9 +5177,9 @@ pub(super) fn answer_computer_command_with(
     } else if command.method == ComputerMethod::Observe {
         computer_use::observe::observe(&command.params.as_object().cloned().unwrap_or_default())
     } else if command.method == ComputerMethod::Handoff {
-        // The person's turn: one function answers the plain card and the card
-        // with a line for a one-time code.
-        computer_use::confirm::hand_the_desk(&command.params, command.json)
+        // The person's turn: the plain card, or the card with a line for a
+        // one-time code, whose code the window types where the agent said.
+        persons_turn_answer(&command, typer)
     } else if matches!(
         command.method,
         ComputerMethod::ReflexStart
@@ -5986,11 +6213,25 @@ pub(super) fn computer_pretty(
                 .unwrap_or_default();
             format!("{tree}{screenshot}")
         }
-        // A person's turn that took a one-time code says the code and nothing
-        // else, so what a script holds in `$(…)` is just that; an answer with
-        // no code is the pretty JSON every other verb prints.
-        ComputerMethod::Handoff if value.get("code").is_some_and(serde_json::Value::is_string) => {
-            value["code"].as_str().unwrap_or_default().to_string()
+        // A person's turn whose code the window typed says what went in, where,
+        // and how the field read back — one line a script can read and nothing
+        // that was typed. Any other answer is the pretty JSON every verb prints.
+        ComputerMethod::Handoff if value.get("entered") == Some(&serde_json::Value::Bool(true)) => {
+            format!(
+                "entered {} characters into {} ({})",
+                value
+                    .get("codeLength")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                value
+                    .pointer("/into/verb")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+                value
+                    .get("verification")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("none"),
+            )
         }
         _ => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
     }

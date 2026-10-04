@@ -176,14 +176,15 @@ impl Handed {
     }
 }
 
-/// What an agent that asked for a code is told when the reason it gave named
-/// a secret, so the card it got was the plain one and nothing was taken.
-const CODE_REFUSED_SECRET_REASON: &str = "secret_reason";
+/// What an agent that asked for a code is told, in the envelope, when the
+/// reason it gave named a secret, so the card it got was the plain one and
+/// nothing was taken.
+pub const CODE_REFUSED_SECRET_REASON: &str = "secret_reason";
 
 /// The error a script gets in text mode when none was taken. The turn went by —
 /// the person had the plain card and typed the secret themselves — and there
-/// is nothing to type: an error, so a `&&` in front of the typing stops.
-const NO_CODE_TAKEN: &str = "no code was taken: the reason names a password, a card number or a security code, which the person types themselves — they had the plain card and the turn is over; look at the screen and go on, and do not ask again";
+/// is nothing to go on from: an error, so a `&&` after it stops.
+pub const NO_CODE_TAKEN: &str = "no code was taken: the reason names a password, a card number or a security code, which the person types themselves — they had the plain card and the turn is over; look at the screen and go on, and do not ask again";
 
 type HandoffAsker = dyn Fn(&Handoff) -> Handed + Send + Sync;
 static HANDOFF_ASKER: OnceLock<Box<HandoffAsker>> = OnceLock::new();
@@ -192,7 +193,7 @@ pub fn install_handoff_asker(asker: Box<HandoffAsker>) {
     let _ = HANDOFF_ASKER.set(asker);
 }
 
-/// [`handoff`](hand_the_desk), with the reason in the page's own words: `key`
+/// [`persons_turn`], with the reason in the page's own words: `key`
 /// and `args` for the page, `reason` for a reader that has only the words.
 /// The window's own hand-overs (a covered press) never ask for a code.
 #[must_use]
@@ -214,25 +215,6 @@ fn hand_over(ask: &Handoff) -> Handed {
     HANDOFF_ASKER
         .get()
         .map_or(Handed::said(Decision::Refused), |asker| asker(ask))
-}
-
-/// What a `handoff` command is answered with: the card, the wait, and what
-/// comes back — one function for the plain turn and the card with a line for
-/// a code, so a cancel and a silence read the same either way.
-///
-/// In text mode the answer is what a script holds in `$(…)`: one that asked for
-/// a code and was given none is an error there (`NO_CODE_TAKEN`), never an
-/// answer a pipe would type into a field. With `--json` it is the envelope,
-/// `code: null` and why, for a reader that looks.
-pub fn hand_the_desk(params: &Value, json: bool) -> Result<Value, ComputerUseError> {
-    let answered = hand_the_desk_through(params, &hand_over)?;
-    if !json && answered.get("code").is_some_and(Value::is_null) {
-        return Err(ComputerUseError::new(
-            error_code::INVALID_ARGUMENT,
-            NO_CODE_TAKEN,
-        ));
-    }
-    Ok(answered)
 }
 
 /// What a person's turn that the person finished came to: the plain answer, a
@@ -294,29 +276,6 @@ fn persons_turn_through(
             format!("nobody took over within {timeout} ms ({reason})"),
         )),
     }
-}
-
-/// [`hand_the_desk`] with whoever asks the person handed in — the window's
-/// asker in the app, a script in a test.
-fn hand_the_desk_through(
-    params: &Value,
-    over: &dyn Fn(&Handoff) -> Handed,
-) -> Result<Value, ComputerUseError> {
-    Ok(match persons_turn_through(params, over)? {
-        Turn::Plain(answer) => answer,
-        Turn::Code { reason, code } => serde_json::json!({
-            "resumed": true,
-            "reason": reason,
-            "code": code.reveal(),
-            "codeLength": code.chars(),
-        }),
-        Turn::NoCode { reason } => serde_json::json!({
-            "resumed": true,
-            "reason": reason,
-            "code": null,
-            "codeRefused": CODE_REFUSED_SECRET_REASON,
-        }),
-    })
 }
 
 /// What the page is told when a person's turn is over — who, and how it
@@ -736,9 +695,9 @@ mod tests {
     fn asked_with(
         params: &Value,
         answer: impl Fn(&Handoff) -> Handed,
-    ) -> (Result<Value, ComputerUseError>, Vec<Handoff>) {
+    ) -> (Result<Turn, ComputerUseError>, Vec<Handoff>) {
         let seen = Mutex::new(Vec::new());
-        let result = hand_the_desk_through(params, &|card| {
+        let result = persons_turn_through(params, &|card| {
             seen.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(card.clone());
@@ -797,44 +756,43 @@ mod tests {
         }
     }
 
-    /// The code is the answer of the handoff that asked for it — once, with
-    /// its length — and an agent that did not ask is never given one.
+    /// The code is what the turn comes to for the handoff that asked for it —
+    /// once, held for the window to type — and never an answer: a turn that
+    /// asked for no code is never handed one, and the plain answer is the
+    /// plain one.
     #[test]
-    fn a_code_comes_back_in_the_answer_it_was_asked_for_and_in_no_other() {
+    fn a_code_comes_back_as_the_turn_of_the_handoff_that_asked_for_it_and_no_other() {
         let asked = serde_json::json!({ "reason": PERSONS_TURN_FOR_A_CODE, "askCode": true });
         let (answered, _) = asked_with(&asked, handed_a_code);
-        assert_eq!(
-            answered.ok(),
-            Some(serde_json::json!({
-                "resumed": true,
-                "reason": PERSONS_TURN_FOR_A_CODE,
-                "code": A_CODE,
-                "codeLength": 6,
-            }))
+        assert!(
+            matches!(
+                &answered,
+                Ok(Turn::Code { reason, code })
+                    if reason == PERSONS_TURN_FOR_A_CODE && code.reveal() == A_CODE && code.chars() == 6
+            ),
+            "{answered:?}"
         );
         let plain = serde_json::json!({ "reason": PERSONS_TURN_FOR_A_CODE });
         let (answered, _) = asked_with(&plain, handed_a_code);
-        assert_eq!(
-            answered.ok(),
-            Some(serde_json::json!({ "resumed": true, "reason": PERSONS_TURN_FOR_A_CODE })),
-            "a turn that asked for no code hands none over"
+        assert!(
+            matches!(
+                &answered,
+                Ok(Turn::Plain(answer))
+                    if *answer == serde_json::json!({ "resumed": true, "reason": PERSONS_TURN_FOR_A_CODE })
+            ),
+            "a turn that asked for no code hands none over: {answered:?}"
         );
     }
 
-    /// A reason that names a secret got the plain card; the agent is told no
-    /// code was taken and why, in the shape of the plain answer.
+    /// A reason that names a secret got the plain card; nothing was typed, and
+    /// the turn says so — whoever answers for the agent says what it must.
     #[test]
     fn an_agent_that_asked_for_a_secret_is_told_no_code_was_taken() {
         let asked = serde_json::json!({ "reason": "비밀번호를 입력", "askCode": true });
         let (answered, _) = asked_with(&asked, |_| Handed::said(Decision::Allowed));
-        assert_eq!(
-            answered.ok(),
-            Some(serde_json::json!({
-                "resumed": true,
-                "reason": "비밀번호를 입력",
-                "code": null,
-                "codeRefused": "secret_reason",
-            }))
+        assert!(
+            matches!(&answered, Ok(Turn::NoCode { reason }) if reason == "비밀번호를 입력"),
+            "{answered:?}"
         );
     }
 

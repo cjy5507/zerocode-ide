@@ -10,10 +10,9 @@
 //! the code is read out, and what its input answers is read for whether it
 //! worked and thrown away.
 
-use serde_json::Value;
-use zerocode_core::computer_use::ComputerCommand;
-use zerocode_core::computer_use_protocol::error_code;
-use zerocode_core::handoff_code::{EnterInto, OneTimeCode};
+use serde_json::{Value, json};
+use zerocode_core::computer_use::{ComputerCommand, parse_command};
+use zerocode_core::handoff_code::{EnterInto, EnterTool, OneTimeCode};
 
 use super::ComputerUseError;
 
@@ -30,42 +29,87 @@ pub trait Typer {
     fn emulator(&mut self, words: &[String]) -> Result<(), ComputerUseError>;
 }
 
-/// A window with no door to type through (a process without the window's
-/// roads): every input is refused, so a code is never taken for nothing.
-pub struct Unseated;
-
-impl Typer for Unseated {
-    fn computer(&mut self, _command: &ComputerCommand) -> Result<Value, ComputerUseError> {
-        Err(unseated())
-    }
-
-    fn browser(&mut self, _words: &[String]) -> Result<(), ComputerUseError> {
-        Err(unseated())
-    }
-
-    fn emulator(&mut self, _words: &[String]) -> Result<(), ComputerUseError> {
-        Err(unseated())
-    }
-}
-
-fn unseated() -> ComputerUseError {
-    ComputerUseError::new(
-        error_code::INVALID_ARGUMENT,
-        "no door to type the code through",
-    )
-}
+/// What the answer says of how the field took the code: what the helper said
+/// when the field was read back (`verified` or `unverified`), or `none` for a
+/// door whose answer is a done and nothing more.
+const VERIFIED: &str = "verified";
+const UNVERIFIED: &str = "unverified";
+const UNREAD: &str = "none";
 
 /// Put the person's code where the agent said, and answer what happened —
-/// never the code. Not yet: the code is not typed anywhere.
+/// never the code. The helper's answer to a desktop input echoes what was
+/// written (`action.verification.expected`, the read-back, the tree, a
+/// picture): it is read for the one word that says whether the field read
+/// back what was written, and dropped. A code that was not entered is dropped
+/// with the error that says why — the code taken out of the words if the
+/// helper quoted it — and the person is asked again by a new handoff, not by a
+/// second try on the same code.
 pub fn enter(
     reason: &str,
     code: OneTimeCode,
     into: &EnterInto,
     typer: &mut dyn Typer,
 ) -> Result<Value, ComputerUseError> {
-    let _ = (reason, &code, into, typer);
-    Err(ComputerUseError::new(
-        error_code::INVALID_ARGUMENT,
-        "a code is not typed yet",
-    ))
+    let length = code.chars();
+    let typed = into.words_with(code.reveal());
+    let verification = match into.tool() {
+        EnterTool::Computer => {
+            let mut command = parse_command(&typed)
+                .map_err(|why| dropped(&code, ComputerUseError::invalid_argument(why)))?;
+            // No picture of a field that shows the code, from the helper or
+            // from the look after an act.
+            if let Some(params) = command.params.as_object_mut() {
+                params.insert("noScreenshot".into(), Value::Bool(true));
+            }
+            let answer = typer
+                .computer(&command)
+                .map_err(|error| dropped(&code, error))?;
+            verification_of(&answer)
+        }
+        EnterTool::Browser => {
+            typer
+                .browser(&typed)
+                .map_err(|error| dropped(&code, error))?;
+            UNREAD
+        }
+        EnterTool::Emulator => {
+            typer
+                .emulator(&typed)
+                .map_err(|error| dropped(&code, error))?;
+            UNREAD
+        }
+    };
+    Ok(json!({
+        "resumed": true,
+        "reason": reason,
+        "codeLength": length,
+        "entered": true,
+        "into": { "tool": into.tool().name(), "verb": into.verb() },
+        "verification": verification,
+    }))
+}
+
+/// The one thing of a desktop input's answer that the agent is told: whether
+/// the helper read the field back as written. A field that is a secret is not
+/// read back at all; that is `unverified`, and the answer says no more.
+fn verification_of(answer: &Value) -> &'static str {
+    match answer
+        .pointer("/action/verification/state")
+        .and_then(Value::as_str)
+    {
+        Some("verified") => VERIFIED,
+        _ => UNVERIFIED,
+    }
+}
+
+/// An input that did not go: the code is dropped, the refusal's own code
+/// stands, and its words say so — with the code taken out of them if the
+/// helper quoted what it was given. The words of a refusal that holds no code
+/// are the helper's, whole.
+fn dropped(code: &OneTimeCode, error: ComputerUseError) -> ComputerUseError {
+    let message = error.message.replace(code.reveal(), "[code]");
+    ComputerUseError::new(
+        error.code,
+        format!("the person's code was dropped, not kept: it was not entered — {message}"),
+    )
 }

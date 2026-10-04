@@ -109,20 +109,28 @@ names: `home`, `lock`, `volume-up`, `volume-down`, `enter` on both platforms;
 accessibility tree, for when `marks` is not enough.
 
 **A verification code the site sent to the person's own phone** is theirs to
-read to you, not yours to guess. Ask for it on the person's-turn card, in the
-same command that writes it, so it is never printed or put on a command line:
+read to you, not yours to guess. Ask for it on the person's-turn card and say
+where it goes: the window types it into that field once and you are never
+handed it, so it is never printed, never on a command line and never in your
+conversation:
 
 ```text
-code=$(zerocode-computer handoff --ask-code --reason "<what the code is for>" --timeout-ms 180000) \
-  && printf '%s' "$code" | zerocode-emulator text --platform ios|android --device <id> --text-stdin --json
+zerocode-computer handoff --ask-code --reason "<what the code is for>" --timeout-ms 180000 \
+  --into '["emulator","text","--platform","ios","--device","<id>"]'
 ```
 
-Press the code's field first, as for any `text`. Through iPhone Mirroring the
-same code goes in with `zerocode-computer type --text-stdin`. If the person
-cancels or nobody answers, the `&&` stops: say so, do not ask again. A password,
-a card number or a security code (CVC, PIN) is never asked this way: the window
-shows the plain card for those and takes no value, and the person types them on
-the device themselves. The `computer-use` skill has the whole of it.
+Use `android` for an Android emulator. Press the code's field first, as for any
+`text`. The answer is one line, `entered 6 characters into text (none)`: how
+many went in and, for a phone, `none` — the field is not read back — so look at
+the screen for what the app made of it. Through iPhone Mirroring a field with a
+tree takes `--into '["type-text","--app","iPhone Mirroring","--restore-window"]'`;
+a mirrored phone with no tree may not, and then the person types the code on
+the mirrored phone themselves, on a plain `handoff`. If the person cancels or
+nobody answers, say so, do not ask again. A
+password, a card number or a security code (CVC, PIN) is never asked this way:
+the window shows the plain card for those and takes no value, and the person
+types them on the device themselves. The `computer-use` skill has the whole of
+it.
 
 ## 4. Show the screen
 

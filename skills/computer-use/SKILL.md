@@ -159,7 +159,7 @@ be undone — that press is the person's word, asked first.
 Use the handles and words exactly as `fields` printed them; never guess a
 selector. A password field is refused by `fill` (use `type … --value-stdin`),
 a file field and a code sent to the person's phone are the person's turn
-(`handoff`), and a field `fill` could not write says so — fall back to
+(`handoff`; for a code, `--ask-code --into '["browser","type","<pane-label>","<handle>"]'`), and a field `fill` could not write says so — fall back to
 `click` and a look for that one field only.
 
 When a page looks wrong, ask `diagnose` before guessing: it reads the pane's
@@ -618,39 +618,54 @@ Recording permission the screenshots use — no new prompt.
   the person a card and waits (10 minutes by default) until they press 「다
   했어요」; then look again and go on. A cancelled or unanswered handoff is a
   `confirmation_refused`/`confirmation_timeout` answer: report, do not retry.
-- **A one-time code** (`handoff --ask-code`): when the site sent a verification
-  code to the person's phone or mailbox, ask for it on the same card instead of
-  asking them to type it on their own device. The card gets one field and the
-  seconds left; they type, press Send, and the code is that command's answer —
-  once, and in no record the window writes: not its logs, its step lines or
-  the ledger (a frame of the screen shows what the site's own field shows).
-  Say what the code is for in `--reason` ("카카오톡 인증번호") and give it the
-  time the site gives its codes (`--timeout-ms 180000` for the usual three
-  minutes). Take it into the field in the same command line, so it is never
-  printed and never on a command line of its own — text mode prints the code
-  alone, and `--value-stdin` reads it from the pipe:
+- **A one-time code** (`handoff --ask-code --into`): when the site sent a
+  verification code to the person's phone or mailbox, ask for it on the same
+  card instead of asking them to type it on their own device. The card gets
+  one field and the seconds left; they type and press Send, and the **window
+  types the code into the field you named** — you are never handed it. It is
+  in no answer, no step line, no log and no ledger, and not in the echo of the
+  field either: the answer says how many characters went in and whether the
+  field read back as written. Say where it goes in `--into`, the words of one
+  input command as a JSON array; say what the code is for in `--reason`
+  ("카카오톡 인증번호"); and give it the time the site gives its codes
+  (`--timeout-ms 180000` for the usual three minutes):
 
   ```text
-  code=$(zerocode-computer handoff --ask-code --reason "카카오톡 인증번호" --timeout-ms 180000) \
-    && printf '%s' "$code" | zerocode-computer set-value --app <app> --element-index <n> --value-stdin --json
+  # an app's field, by its element index (a fresh get-app-state first)
+  zerocode-computer handoff --ask-code --reason "카카오톡 인증번호" --timeout-ms 180000 \
+    --into '["set-value","--app","<app>","--element-index","<n>"]'
+  # the focused field of an app
+  zerocode-computer handoff --ask-code --reason "…" --into '["type-text","--app","<app>","--restore-window"]'
+  # a tab of the window's browser: its label, and the field's selector or the handle `fields` printed
+  zerocode-computer handoff --ask-code --reason "…" --into '["browser","type","<pane-label>","<css>"]'
+  # a phone
+  zerocode-computer handoff --ask-code --reason "…" --into '["emulator","text","--platform","ios","--device","<id>"]'
   ```
 
-  The same pipe feeds `zerocode-browser type <pane-label> <css> --value-stdin`
-  and `zerocode-emulator text … --text-stdin`. With `--json` the answer is
-  `{"result": {"resumed": true, "code": "…", "codeLength": 6}}` for a script that
-  wants the fields. A code is four to ten letters or digits; if the person
-  cancels or nobody answers, you get `confirmation_refused` /
-  `confirmation_timeout` and the `&&` stops: report, do not ask again. A
+  The answer is one line, `entered 6 characters into set-value (verified)`, or
+  with `--json` `{"result": {"resumed": true, "codeLength": 6, "entered": true,
+  "into": {"tool": "computer", "verb": "set-value"}, "verification":
+  "verified"}}` — `verified` or `unverified` for an app (the field was read
+  back or it could not be), `none` for a tab or a phone. The place is checked
+  before the card is shown: `--ask-code` without `--into` is refused, `--into`
+  takes no `--value`, `--text` or `--json`, and not `paste-text` or the
+  clipboard (it would stay there for `clipboard-read`). If the field cannot
+  take the code, the person's code is dropped, not kept: you get the refusal's
+  code and a new handoff is the way on, the person typing again. A code is four
+  to ten letters or digits; if the person cancels or nobody answers you get
+  `confirmation_refused` / `confirmation_timeout`: report, do not ask again. A
   password, a card number or a security code (CVC, PIN) is never asked this
-  way: name one in `--reason` and the window shows the plain card and takes no
-  value — the person types it themselves, as before, and the answer says so:
-  `"code": null, "codeRefused": "secret_reason"` with `--json`, and in text mode
-  an error (`no code was taken`) that stops the `&&` before anything is typed. After the code is in, look at the
-  screen: the site says whether it took it, and the last step (a payment, a
-  submit you may not press) is still the person's. While the card stands the
-  field shows what the person types, so a picture of the whole display
-  (`screenshot`, `zoom`, `compare`, a desktop `observe` that keeps its picture)
-  answers `person_asked` too; every other look still answers.
+  way: name one in `--reason` and the window shows the plain card and types
+  nothing — the person types it themselves, as before, and the answer says so:
+  `"entered": false, "codeRefused": "secret_reason"` with `--json`, and in text
+  mode an error (`no code was taken`). After the code is in, look at the
+  screen: the site says whether it took it, and a site that shows the digits it
+  was given shows them in what you read. The last step (a payment, a submit you
+  may not press) is still the person's. While the card stands the field shows
+  what the person types, so a picture of the whole display (`screenshot`,
+  `zoom`, `compare`, a desktop `observe` that keeps its picture) and a look that
+  names ZeroCode itself (`--app ZeroCode`, one of its windows) answer
+  `person_asked`; every other look answers.
 - **Recipes** (`recipe-save --name <n> [--note …]`, `recipe-list`,
   `recipe-show --name <n>`, `recipe-run --name <n>`): when a procedure
   worked, save it — this session's steps become a document (a command line

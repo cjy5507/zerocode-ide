@@ -23947,7 +23947,7 @@ mod handoff_code_road {
         let form = RefCell::new(Form {
             refuses_with: Some(ComputerUseError::new(
                 "value_not_settable",
-                format!("the field refused '{A_CODE}' ({TYPED})"),
+                format!("the field refused '{A_CODE}'"),
             )),
             ..Form::default()
         });
