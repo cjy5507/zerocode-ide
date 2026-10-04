@@ -75,3 +75,52 @@ fn a_request_with_neither_text_nor_report_is_not_readable() {
         Ok("the chosen text")
     );
 }
+
+/// A measurement, not a check: what the door adds to every report a pane's state
+/// makes. With no request standing the road is one atomic load; with the table full
+/// and none of them this pane's, a lock and a scan of sixteen.
+/// `cargo test -p zerocode-shell --bin zerocode-shell explain_door_cost -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement, run on purpose through the build line"]
+fn explain_door_cost_probe() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    use zerocode_core::explain::ACTIVE_MAX;
+
+    const CALLS: u32 = 5_000_000;
+
+    let started = Instant::now();
+    let mut stood = 0_u32;
+    for _ in 0..CALLS {
+        stood += u32::from(black_box(anything_stands()));
+    }
+    let idle_ns = started.elapsed().as_nanos() / u128::from(CALLS);
+    assert_eq!(stood, 0, "no request stands in this test");
+
+    for n in 0..ACTIVE_MAX {
+        let held = Held {
+            id: format!("probe-{n}"),
+            term: Some(9_000 + u32::try_from(n).unwrap_or_default()),
+            agent: "claude".to_string(),
+            state: State::Asked,
+            made_ms: 0,
+            prompt: None,
+        };
+        assert_eq!(with_desk(|desk| desk.admit(held)), Ok(()));
+    }
+    assert!(anything_stands());
+
+    let started = Instant::now();
+    let mut found = 0_u32;
+    for _ in 0..CALLS {
+        found += u32::from(with_desk(|desk| desk.turn_ended(black_box(1))).is_some());
+    }
+    let standing_ns = started.elapsed().as_nanos() / u128::from(CALLS);
+    assert_eq!(found, 0, "pane 1 has no request");
+
+    for n in 0..ACTIVE_MAX {
+        assert!(with_desk(|desk| desk.finish(&format!("probe-{n}"))).is_some());
+    }
+    assert!(!anything_stands());
+    println!("explain_cost door calls={CALLS} idle_ns={idle_ns} standing_ns={standing_ns}");
+}
