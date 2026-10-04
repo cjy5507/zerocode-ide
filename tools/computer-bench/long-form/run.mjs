@@ -69,7 +69,11 @@ const AGENTS = {
     bin: (options) => options.bin || "zo",
     argv: (options, work) => ["--json", "--no-spawn", "--permission-mode", "danger-full-access", "--cwd", work,
       "--last-message", join(options.out, "last-message.txt"), ...(options.model ? ["--model", options.model] : [])],
+    // Every folder zo writes is under the run's own: a home of its own, its
+    // config, state and sessions — never the person's ~/.zo. The login is
+    // read in place from CLAUDE_SECURESTORAGE_CONFIG_DIR, never copied.
     env: (options) => ({
+      HOME: join(options.out, "home"),
       ZO_CONFIG_HOME: join(options.out, "zo-home"), ZO_STATE_DIR: join(options.out, "zo-state"),
       ZO_SESSION_ROOT: join(options.out, "zo-sessions"), ZO_DISABLE_KEYCHAIN: "1", ZEROCODE_SECOND_BRAIN: "off",
       ZO_DREAM: "0", ZO_AUTO_VERIFY: "0", ZO_PROFILE_DISABLE_HOOK_REPORTER: "1",
@@ -146,6 +150,7 @@ async function main() {
   if (!agent) throw new Error(`--agent is one of ${Object.keys(AGENTS).join(", ")} (others are not wired yet)`);
   const work = join(options.out, "work");
   await mkdir(work, { recursive: true });
+  await mkdir(join(options.out, "home"), { recursive: true });
   const { server, url } = await serve(options.out);
   const desk = await startDesk({ url, out: options.out, personAttachMs: PERSON_ATTACH_MS, scene: SCENE_OF[options.scenario] });
   const bin = await shims(options.out);
