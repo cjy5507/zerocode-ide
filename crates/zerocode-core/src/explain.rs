@@ -277,13 +277,14 @@ pub fn language_name(code: &str) -> &'static str {
 
 /// A title as it may be shown to a model or kept in the catalog: secrets
 /// masked, no quote or line break that could leave its attribute, and no longer
-/// than an artifact's title.
-///
-/// RED: a placeholder that changes nothing, so that its test fails at its
-/// assertion.
+/// than an artifact's title. The first words of an answer are a title, and an
+/// answer can say a key.
 #[must_use]
 pub fn scrub_title(title: &str) -> String {
-    title.to_string()
+    truncate_chars(
+        &mask_values(title).replace(['"', '\n', '\r'], " "),
+        ARTIFACT_TITLE_MAX,
+    )
 }
 
 /// Everything a request needs to be written down in words.
@@ -325,10 +326,7 @@ fn task_words(ask: &Ask<'_>) -> String {
 
 /// The material, in its marked block, with what was done to it said first.
 fn material_block(ask: &Ask<'_>) -> String {
-    let title = truncate_chars(
-        &ask.title.replace(['"', '\n', '\r'], " "),
-        ARTIFACT_TITLE_MAX,
-    );
+    let title = scrub_title(ask.title);
     // The block cannot be closed from inside: a closing tag in the material is
     // made not to be one.
     let closing = format!("</{MATERIAL_TAG}");

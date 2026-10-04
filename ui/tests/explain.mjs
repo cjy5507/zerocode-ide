@@ -138,6 +138,7 @@ export async function testExplain(browser, origin, ok) {
       seen.expectedWhere = t("terminal.numbered", "터미널 {{n}}", { n: term });
       seen.quotas = [...pop.querySelectorAll(".explain-once .explain-quota")].map((one) => one.textContent);
       seen.focusedRow = document.activeElement === pop.querySelector(".note-pop-row");
+      seen.dialogName = pop.getAttribute("aria-label");
       seen.preview = window.__EXPLAIN__.previews.at(-1);
       // 같은 단추를 다시 누르면 카드가 닫힌다(토글).
       open?.click();
@@ -157,7 +158,7 @@ export async function testExplain(browser, origin, ok) {
         diff.facts.includes("3") && diff.facts.includes("2") &&
         diff.names.join(",") === "Claude,Claude,Codex" && diff.where === diff.expectedWhere &&
         diff.quotas.length === 2 && diff.quotas.every((words) => words === QUOTA_WORDS.ko) &&
-        diff.focusedRow && diff.toggledClosed,
+        diff.focusedRow && diff.toggledClosed && diff.dialogName === diff.expectedLabels[0],
       JSON.stringify(diff),
     );
     ok(

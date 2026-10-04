@@ -106,6 +106,7 @@ mod durable_split;
 mod emulator;
 mod evidence_runtime;
 mod exit_runtime;
+mod explain_door;
 mod explorer_policy;
 mod explorer_runtime;
 mod fetch_refusal;
@@ -377,8 +378,8 @@ use cmd::{
     artifact_feedback_record, artifact_import_transcripts, artifact_open, artifact_page_at,
     artifact_preference_revoke, artifact_preference_save, artifact_preferences, artifact_preview,
     artifact_register, artifact_reveal, artifact_search, artifact_thumbnail, artifact_versions,
-    artifacts_list, set_artifacts_auto_open_beside, set_artifacts_retention_days,
-    set_vault_session_limit,
+    artifacts_list, explain_cancel, explain_preview, explain_roads, explain_start,
+    set_artifacts_auto_open_beside, set_artifacts_retention_days, set_vault_session_limit,
 };
 use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
@@ -3022,6 +3023,10 @@ fn main() -> ExitCode {
             artifact_delete,
             artifact_register,
             artifact_versions,
+            explain_cancel,
+            explain_preview,
+            explain_roads,
+            explain_start,
             artifact_page_at,
             artifact_feedback_record,
             artifact_preferences,

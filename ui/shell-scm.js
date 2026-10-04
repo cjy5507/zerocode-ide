@@ -6016,6 +6016,12 @@ function paintDiffView(tab) {
   }
   paintSaveNote(tab);
   paintDiffMode(view, tab);
+  // 「그림·페이지로 설명」 — 처음 필요할 때 짓는 단추(t-32787). 줄이 없는(보류된) diff는
+  // 설명할 것이 없다.
+  const explain = ensureExplainButton(view.querySelector(".file-view-head"), "diff", explainSourceOfDiff, {
+    before: view.querySelector(".diff-send"),
+  });
+  explain.disabled = !(tab.lines?.length > 0);
   const send = view.querySelector(".diff-send");
   send.disabled = notes.length === 0;
   const count = view.querySelector(".diff-send-count");
@@ -8022,6 +8028,37 @@ async function openNoteSend(button, path) {
   });
 }
 
+/* The terminals already running an agent, each with its catalog row and the tab it
+ * sits in — the send menu's first half, and the explain card's. Asked fresh at every
+ * open: a terminal may have closed and an agent may have been installed. `agent`
+ * keeps one agent's panes; `maker` stands its pane first. */
+async function runningAgentTargets({ agent = null, maker = null } = {}) {
+  if (agentRows.length === 0) await refreshAgents();
+  let running = [];
+  try {
+    running = (await invoke("agent_terms")) ?? [];
+  } catch {
+    running = [];
+  }
+  const termTabs = tabs.filter((one) => one.kind === "term");
+  const targets = running
+    .map(([term, agentId]) => ({
+      term,
+      spec: agentRows.find((row) => row.id === agentId),
+      // 터미널은 탭이거나 탭 안의 판이다 — 분할로 태어난 둘째 셸을 "제 탭이
+      // 없다"고 거르면 목록에서 사라진다 (라이브 보고 2026-08-14: 나란히 도는
+      // codex가 안 보임).
+      tab: termTabs.find(
+        (one) => one.term === term || paneLeaves(one.layout).includes(term),
+      ),
+    }))
+    .filter((one) => one.spec && one.tab && (agent === null || one.spec.id === agent));
+  // 아티팩트를 만든 판은 받을 곳의 기본이다(t-11958): 첫 줄에 서고 초점을 받아
+  // Enter 한 번이면 그 판으로 간다. 다른 판을 고를 길은 그대로 아래에 있다.
+  if (maker !== null) targets.sort((a, b) => Number(b.term === maker) - Number(a.term === maker));
+  return targets;
+}
+
 /* The send-to-agent popover, shared by the review notes and the browser grab
  * (1-g5). Two halves, Orca's `ReviewNotesSendMenuContent` /
  * `openAgentSendPopoverTargetMode`: the terminals already running an agent,
@@ -8037,16 +8074,11 @@ async function openSendToAgent(button, prompt, onDelivered, { submit = true, age
   const current = () => generation === noteSendGeneration && activeTabId === originTab && activeWorktreePath === originWorktree;
   // Both halves asked fresh: a terminal may have closed, an agent may have
   // been installed, and the menu must say what is true NOW.
-  if (agentRows.length === 0) await refreshAgents();
-  let running = [];
-  try {
-    running = (await invoke("agent_terms")) ?? [];
-  } catch {
-    running = [];
-  }
+  const targets = await runningAgentTargets({ agent, maker });
   if (!current()) return;
   const host = el("note-pop-body");
   host.replaceChildren();
+  notePop.setAttribute("aria-label", t("review.sendTip", "노트를 에이전트에게 보내기"));
   const label = (said) => {
     const line = document.createElement("div");
     line.className = "note-pop-label";
@@ -8074,22 +8106,6 @@ async function openSendToAgent(button, prompt, onDelivered, { submit = true, age
     }
   };
   label(t("review.sendTo", "보낼 곳"));
-  const termTabs = tabs.filter((one) => one.kind === "term");
-  const targets = running
-    .map(([term, agentId]) => ({
-      term,
-      spec: agentRows.find((row) => row.id === agentId),
-      // 터미널은 탭이거나 탭 안의 판이다 — 분할로 태어난 둘째 셸을 "제 탭이
-      // 없다"고 거르면 목록에서 사라진다 (라이브 보고 2026-08-14: 나란히 도는
-      // codex가 안 보임).
-      tab: termTabs.find(
-        (one) => one.term === term || paneLeaves(one.layout).includes(term),
-      ),
-    }))
-    .filter((one) => one.spec && one.tab && (agent === null || one.spec.id === agent));
-  // 아티팩트를 만든 판은 받을 곳의 기본이다(t-11958): 첫 줄에 서고 초점을 받아
-  // Enter 한 번이면 그 판으로 간다. 다른 판을 고를 길은 그대로 아래에 있다.
-  if (maker !== null) targets.sort((a, b) => Number(b.term === maker) - Number(a.term === maker));
   let makerPick = null;
   if (targets.length === 0) {
     const none = document.createElement("div");
@@ -8233,7 +8249,7 @@ document.addEventListener("click", (event) => {
   else closeNoteSend();
 });
 
-dismissable(notePop, closeNoteSend, ".diff-send");
+dismissable(notePop, closeNoteSend, ".diff-send", ".explain-open");
 
 /* ---- + 버튼은 팔레트다 (1-fs) ----
  *

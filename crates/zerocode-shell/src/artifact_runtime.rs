@@ -2921,6 +2921,33 @@ fn window_origin(
     )
 }
 
+/// Publish a page into the catalog and tell the window — the one road the hook
+/// door and a page the window made itself (an explanation's one-shot, t-32787)
+/// share. The window hears that the catalog moved and the row that was
+/// published; an explanation that asked the publishing pane for a page hears it
+/// too, and opens it.
+pub(crate) fn publish_and_tell(
+    store: &Store,
+    input: &zerocode_core::artifact_publish::PublishInput,
+    origin: Origin,
+) -> Result<(zerocode_core::artifact_publish::PageMeta, Artifact), String> {
+    let meta = store.publish_page(input, origin.clone())?;
+    let mut row = meta.artifact(origin);
+    store.fill_feedback(&mut row);
+    if let Some(app) = store
+        .window
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+    {
+        use tauri::Emitter as _;
+        let _ = app.emit(CHANGED_EVENT, ());
+        let _ = app.emit(PUBLISHED_EVENT, row.clone());
+        crate::explain_door::note_published(app, &row);
+    }
+    Ok((meta, row))
+}
+
 fn artifact_request(
     store: &Store,
     mut request: serde_json::Value,
@@ -2935,19 +2962,7 @@ fn artifact_request(
         "publish" => {
             let (input, caller) = zerocode_core::artifact_publish::publish_parts(request)?;
             let origin = origin_of(&caller);
-            let meta = store.publish_page(&input, origin.clone())?;
-            if let Some(app) = store
-                .window
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_ref()
-            {
-                use tauri::Emitter as _;
-                let _ = app.emit(CHANGED_EVENT, ());
-                let mut row = meta.artifact(origin);
-                store.fill_feedback(&mut row);
-                let _ = app.emit(PUBLISHED_EVENT, row);
-            }
+            let (meta, _) = publish_and_tell(store, &input, origin)?;
             serde_json::to_value(meta).map_err(|e| e.to_string())
         }
         // Publications only, as the headless catalog answers: a page an agent

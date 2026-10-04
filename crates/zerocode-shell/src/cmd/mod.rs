@@ -259,6 +259,7 @@ pub(crate) use artifacts::{
     artifact_import_transcripts, artifact_open, artifact_page_at, artifact_preference_revoke,
     artifact_preference_save, artifact_preferences, artifact_preview, artifact_register,
     artifact_reveal, artifact_search, artifact_thumbnail, artifact_versions, artifacts_list,
+    explain_cancel, explain_preview, explain_roads, explain_start,
 };
 pub(crate) use skills::{
     computer_use_skill_report, install_bundled_skill, list_skills, orchestration_report,
