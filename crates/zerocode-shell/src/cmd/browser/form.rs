@@ -642,13 +642,31 @@ const zcDayIn = (grid, day) => {
   const cell = grid.cells[first + at];
   return zcOff(cell) || cell.disabled ? null : cell;
 };
+// What a control says it is beyond the words it draws: its ARIA name or
+// title, an input button's value, and the names of the picture it is drawn
+// with — an image's alt, an svg's title, a part's ARIA name.
+const zcSaysItIs = (el) => {
+  const parts = [...el.querySelectorAll("img[alt], svg title, [aria-label]")]
+    .map((part) => part.getAttribute("alt") || part.getAttribute("aria-label") || part.textContent);
+  return zcFold([zcNameOf(el), zcFormTag(el) === "input" ? el.value : "", ...parts].join(" "));
+};
+// A press the window leaves to a person — a payment, a transfer, a deletion,
+// a send or a submit (`request.holds`, the one table of them) — is never made
+// on a guess. A pager is learnt by pressing it, so a control that says it is
+// one of those is no pager candidate.
+const zcHeld = (el) => {
+  const says = zcSaysItIs(el);
+  return request.holds.some((word) => says.includes(word));
+};
 // The controls that page a calendar: the drawn buttons around its heading
-// that are no day, say no words (an arrow, an icon) — and which way each
-// pages is learnt by pressing it and reading the heading again.
+// that are no day, say no words (an arrow, an icon) and name no press that
+// cannot be taken back — and which way each pages is learnt by pressing it
+// and reading the heading again.
 const zcPagers = (grid) => [...grid.root.querySelectorAll(request.actions.join(","))]
   .filter((button) => zcDrawn(button) && !zcOff(button) && !grid.cells.includes(button)
     && !grid.cells.some((cell) => button.contains(cell) || cell.contains(button))
-    && !/[\p{L}\p{N}]/u.test(String(button.innerText || button.textContent || "")));
+    && !/[\p{L}\p{N}]/u.test(String(button.innerText || button.textContent || ""))
+    && !zcHeld(button));
 const zcMonthNumber = ([year, month]) => year * 12 + month;
 // The calendars nearest a field — those sharing the deepest box with it —
 // and how deep that box is: a calendar another field left open is not this
@@ -946,8 +964,10 @@ const zerocode = Object.freeze({
 });
 "#;
 
-/// What a form script is handed: the core's tables and caps, and the marks
-/// helpers' keys and regions it reads a field's words and section by.
+/// What a form script is handed: the core's tables and caps, the words of
+/// the presses that cannot be taken back (`holds`: the window's one table of
+/// them, which a script holds a control back by), and the marks helpers' keys
+/// and regions it reads a field's words and section by.
 pub(crate) fn form_request() -> serde_json::Value {
     use zerocode_core::agent_browser::{BROWSER_FIELD_HEADINGS, BROWSER_FIELD_REGIONS};
     serde_json::json!({
@@ -963,6 +983,7 @@ pub(crate) fn form_request() -> serde_json::Value {
         "captionDepth": BROWSER_FORM_CAPTION_DEPTH,
         "lists": BROWSER_FORM_LISTS,
         "pressables": BROWSER_FORM_PRESSABLES,
+        "holds": zerocode_core::guarded::HELD_ROWS.concat(),
         "scanCap": BROWSER_FORM_SCAN_CAP,
         "listItems": BROWSER_FORM_LIST_ITEMS,
         "monthDays": BROWSER_FORM_MONTH_DAYS,
