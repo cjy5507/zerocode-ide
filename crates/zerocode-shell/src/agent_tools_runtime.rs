@@ -5023,20 +5023,14 @@ impl computer_use::enter::Typer for LiveTyper<'_> {
         if let Some(refusal) = door_refusal(command) {
             return Err(refusal);
         }
-        let answer = call_with_the_persons_last_step(
+        // No step above this call: the road that counts an action, remembers
+        // it and records the field's picture is the step's (`leave_step`), and
+        // a code typed here is none of those.
+        call_with_the_persons_last_step(
             command,
             computer_use::confirm::Asking::HandBack,
             &mut computer_use::call,
-        )?;
-        let verb = command.method.verb_name();
-        computer_use::guard::note_action(verb, now_epoch_ms());
-        if let Some(window) = self.window {
-            let _ = window.emit(
-                "computer:activity",
-                computer_use::guard::activity_report(Some(verb)),
-            );
-        }
-        Ok(answer)
+        )
     }
 
     fn browser(&mut self, words: &[String]) -> Result<(), computer_use::ComputerUseError> {

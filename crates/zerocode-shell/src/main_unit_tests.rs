@@ -24198,11 +24198,19 @@ mod handoff_code_road {
     #[test]
     fn a_picture_of_the_display_waits_while_a_card_with_a_line_stands() {
         let _hand = one_hand();
+        // The helper's lists, handed in: a look that names an app asks for
+        // them while a card stands, and a unit test has no helper to ask.
+        let apps = Some(json!({ "apps": [
+            { "name": "Notes", "bundleId": "com.apple.Notes", "pid": 1 },
+        ] }));
+        let windows = Some(json!({ "windows": [] }));
         let refusal = |argv: &[&str]| {
             let parsed = parse_command(&words(argv));
             assert!(parsed.is_ok(), "{argv:?} parses: {parsed:?}");
-            crate::agent_tools_runtime::door_refusal(
+            door_refusal_with(
                 &parsed.unwrap_or_else(|_| unreachable!("asserted above")),
+                &mut || apps.clone(),
+                &mut || windows.clone(),
             )
             .map(|why| why.code)
         };
@@ -24273,25 +24281,21 @@ mod handoff_code_road {
     fn a_look_that_names_zerocode_waits_while_a_card_with_a_line_stands() {
         let _hand = one_hand();
         let own = i64::from(std::process::id());
-        let apps = || {
-            Some(json!({ "apps": [
-                { "name": "ZeroCode", "bundleId": "dev.zerocode.app", "pid": own },
-                { "name": "Notes", "bundleId": "com.apple.Notes", "pid": own + 1 },
-            ] }))
-        };
-        let windows = || {
-            Some(json!({ "windows": [
-                { "id": 77, "own": true },
-                { "id": 78, "own": false },
-            ] }))
-        };
-        let refusal = |argv: &[&str], apps: &dyn Fn() -> Option<Value>| {
+        let apps = Some(json!({ "apps": [
+            { "name": "ZeroCode", "bundleId": "dev.zerocode.app", "pid": own },
+            { "name": "Notes", "bundleId": "com.apple.Notes", "pid": own + 1 },
+        ] }));
+        let windows = Some(json!({ "windows": [
+            { "id": 77, "own": true },
+            { "id": 78, "own": false },
+        ] }));
+        let refusal = |argv: &[&str], apps: &Option<Value>| {
             let parsed = parse_command(&words(argv));
             assert!(parsed.is_ok(), "{argv:?} parses: {parsed:?}");
             door_refusal_with(
                 &parsed.unwrap_or_else(|_| unreachable!("asserted above")),
-                &mut || apps(),
-                &mut || windows(),
+                &mut || apps.clone(),
+                &mut || windows.clone(),
             )
             .map(|why| why.code)
         };
@@ -24337,7 +24341,7 @@ mod handoff_code_road {
             );
         }
         assert_eq!(
-            refusal(&["get-app-state", "--app", "Notes"], &|| None),
+            refusal(&["get-app-state", "--app", "Notes"], &None),
             Some(error_code::PERSON_ASKED.to_string()),
             "a list that does not come refuses closed"
         );
