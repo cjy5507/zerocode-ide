@@ -3582,15 +3582,16 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
 /// so its wall is set by the answers it would lose — and a request is a batch
 /// now: one that does not come back leaves up to [`MAIL_TRIAGE_BATCH_CAP`]
 /// rows `timeout` at once. What the model takes was measured on the real wire
-/// with one synthetic day's letters asked in requests of 1, 2, 4, 8 and 16
-/// letters (2026-10-04, `measure_agreement_on_the_real_wire`; four requests
-/// side by side, the slowest of them timed, with the longest of the wordings
-/// tried): 211, 212, 233, 244 and 291 ms at the median and 504, 608, 501, 310
-/// and 292 ms at most — sixteen letters asking thirty-two questions in 48 KB
-/// no slower than the rest, as the model's time is its round trip and hardly
-/// its answers; the per-letter road, asked beside them, 218 and 606. Five
-/// seconds is eight times the slowest of those. The window's three seats that
-/// ask
+/// with one synthetic day's letters asked in requests of 1, 2, 4, 8, 16 and 32
+/// letters in the words the seat asks in (2026-10-04,
+/// `measure_agreement_on_the_real_wire`; four requests side by side, the
+/// slowest of them timed): 221, 228, 227 and 257, 254 and 240, 281 and 450 ms
+/// at the median and 322, 384, 291 and 314, 326 and 336, 354 and 450 ms at
+/// most — thirty-two letters asking sixty-four questions in 80 KB took two
+/// round trips, and the rest hardly more than one, as the model's time is its
+/// round trip and hardly its answers; the per-letter road, asked beside them,
+/// 208 and 224 at the median and 336 and 513 at most. Five seconds is nine
+/// times the slowest of those. The window's three seats that ask
 /// about orchestration facts got every one of their 967 answers on this machine
 /// inside 2,517 ms (2026-09-26: the notify seat's 558 at p99 895 ms, the
 /// summons' 247 at p99 1,464 ms, the stall seat's 162 — with a screen's 8 KB in
@@ -3617,12 +3618,13 @@ pub const MAIL_TRIAGE_DEADLINE_MS: u64 = 5_000;
 /// left unrecorded. What size does to agreement with the coordinator's later
 /// acts was measured on the real wire (`measure_agreement_on_the_real_wire`,
 /// 2026-10-04): the same 172 letters under three seeds, 406 comparisons, asked
-/// in requests of 1, 2, 4, 8 and 16 with the longest of the wordings tried —
-/// 214, 204, 205 and 214, 214 and 200 agreed, where the per-letter road, asked
-/// beside them, agreed in 216. Up to eight the sizes do not order, and the same
-/// letters asked twice at one size differ by up to nine; sixteen is the lowest,
-/// so the cap sits at eight. That the product's own words agree as the
-/// per-letter road's did at this cap is what
+/// in the words the seat asks in, in requests of 1, 2, 4, 8, 16 and 32 — 221,
+/// 216, 218 and 217, 218 and 219, 211 and 212 agreed, where the per-letter
+/// road, asked beside them, agreed in 223 and 217. Up to eight the sizes do not
+/// order, and the same letters asked twice at one size differ by up to seven;
+/// sixteen and thirty-two are about seven lower, so the cap sits at eight. That
+/// the product's own words agree as the per-letter road's did at this cap is
+/// what
 /// `the_batch_road_agrees_with_what_the_coordinator_did_next_as_the_per_letter_road_does`
 /// asks of the real model.
 pub const MAIL_TRIAGE_BATCH_CAP: usize = 8;

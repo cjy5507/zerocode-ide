@@ -2312,9 +2312,10 @@ const PIN_MAX_REQUESTS: usize = 400;
 /// How many of a day's 406 comparisons the product may agree in fewer than the
 /// per-letter road does, for each time the day is asked, before the product is
 /// said to follow the coordinator less closely. The per-letter road's own runs
-/// of the day on the real model agreed in 216, 221 and 227: a spread of 11. The
-/// batch road's first wording, which put the words of the judgment once in the
-/// state, agreed in 192 — 24 under the road asked beside it.
+/// of the day on the real model agreed in 216, 217, 221, 222, 223 and 227: a
+/// spread of 11. The batch road's first wording, which put the words of the
+/// judgment once in the state, agreed in 192 — 24 under the road asked beside
+/// it.
 const PIN_SLACK: u64 = 10;
 
 /// The agreement of the product's questions with what the coordinator did next

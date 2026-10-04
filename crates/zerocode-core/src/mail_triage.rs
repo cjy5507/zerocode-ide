@@ -59,10 +59,11 @@ use crate::orchestration::{
 /// question as the question. Said once in the state's `rubric`, with a line of
 /// each option in the questions, the day's letters agreed with what the
 /// coordinator did next in 192 of 406 comparisons — the status letters went
-/// to `no_need` — and said in the question, in 218 of 406, where the
-/// per-letter road, asked again the same hour, agreed in 216 (the real model,
-/// 2026-10-04, `measure_agreement_on_the_real_wire`). What the answers hang on
-/// in it is the list of the kinds a letter may be: without it, 163. The
+/// to `no_need` — and said in the question, in 218 and 217 (four a request)
+/// and 218 and 219 (eight), where the per-letter road, asked beside them,
+/// agreed in 223 and 217 (the real model, 2026-10-04,
+/// `measure_agreement_on_the_real_wire`). What the answers hang on in it is
+/// the list of the kinds a letter may be: without it, 163. The
 /// letters reach the model as state, never as an instruction — and never as
 /// their words, which are not in it.
 const INSTRUCTIONS: &str = "A coordinator agent runs a team of worker agents and reads its mail between the things it does. `letters` lists letters that have just reached its inbox, each described by its structure and never by its words: `kind` is what the letter is — `question` (its sender waits for an answer), `worker_done` (a worker reports its task finished and waits for review), `status` (a worker's news), or one of the notices the orchestration writes itself about a worker (`went_quiet`, `worker_died`, `quota_walled`, `classifier_declined`, `deadlocked`, `handover`, `resumed`, `model_deviated`, `account_switched`) — `from` is the kind of address that sent it (`worker`, `ledger` for the orchestration's own notices, `pane`, `run`, `home`, `remote`), `worker` and `task` the worker and the task it concerns, `taskStatus` where that task stands, `priority` the priority its sender set, `awaitsAnswer` whether it is a question nobody has answered yet, `threadDepth` how many replies deep it sits, `ageSeconds` how long it has waited, `delivered` whether the coordinator has been handed it yet, and `repeats` how many earlier letters of the same kind about the same worker and task came in the day before it. `coordinator` describes the coordinator all of those letters are for: `busy` is whether it is in the middle of a turn (null when unknown) and `openQuestions` how many questions put to it wait for an answer. Each question names one letter by its place in `letters` and asks when the coordinator should deal with that letter, by what each option of the question means.";
@@ -76,7 +77,14 @@ const AT_PLACEHOLDER: &str = "{at}";
 /// which letter, and that it is judged alone.
 const ITEM_INSTRUCTIONS: &str = "When should the coordinator deal with `letters[{at}]`? Judge that letter alone — its own facts and `coordinator`.";
 
-/// The words of the Noul asked beside each letter's choice.
+/// The words of the Noul asked beside each letter's choice. Its question does
+/// not carry the explanation of the fields, and no label grades it. With the
+/// explanation in the state it told the questions (0.71), finished tasks
+/// (0.55) and quota walls (0.62) from the status letters (0.08); with it in
+/// the choice question alone, only the questions (0.56) from the rest (0.21 to
+/// 0.28); the per-letter road's Noul answered 0.14 to 0.22 whatever the kind.
+/// A seat that comes to act on it needs the explanation in this question too,
+/// and a label to measure it by.
 const URGENT_INSTRUCTIONS: &str = "Should `letters[{at}]` be the very next thing the coordinator deals with, ahead of every other letter and every other piece of work?";
 
 /// What the Noul's yes means.
