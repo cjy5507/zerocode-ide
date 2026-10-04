@@ -165,8 +165,14 @@ function ensureExplainTurnButton(event) {
   ensureExplainButton(actions, "turn", () => explainSourceOfTurn(row.__run, row.__turn));
 }
 
-document.addEventListener("pointerover", ensureExplainTurnButton);
-document.addEventListener("focusin", ensureExplainTurnButton);
+/* 대화 목록 하나가 설 때 한 번 건다(`helperTurnsNode`). 문서에는 제스처마다 위임 리스너가
+ * 하나뿐이고(툴팁 — `pointerover`·`pointerout`·`focusin`) 그 하나를 지키는 계약이 있다. 이
+ * 단추는 대화 안에서만 쓰이므로 목록의 리스너 둘이면 되고, 대화 밖의 포인터 움직임은
+ * 이 길을 지나지도 않는다. */
+function watchExplainTurns(list) {
+  list.addEventListener("pointerover", ensureExplainTurnButton);
+  list.addEventListener("focusin", ensureExplainTurnButton);
+}
 
 /* ---- 카드 ---- */
 

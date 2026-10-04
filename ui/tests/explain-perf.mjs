@@ -16,7 +16,8 @@ import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.
  *   boot      DOM nodes, documents and event listeners right after boot (CDP counters)
  *   diff      what a diff view costs: counters after opening it, and the median
  *             time of one repaint (`paintDiffView`, which now also keeps the button)
- *   pointer   the document-level pointerover handler's cost per event, and the
+ *   pointer   the conversation list's pointerover handler's cost per event (the
+ *             document keeps its one tooltip listener per gesture), and the
  *             nodes a conversation of answers gains when the pointer touches them
  *   card      (after only) the card's open latency, its nodes and listeners, and
  *             the long tasks seen while it opened
@@ -92,7 +93,7 @@ export async function measure(browser, origin) {
     out.diff = { repaintMs: median(diffTimes), repaintRuns: diffTimes.map((one) => Number(one.toFixed(4))) };
     out.diff.buttons = await page.evaluate(() => document.querySelectorAll(".explain-open").length);
 
-    /* ---- pointer: one handler on the document, and the nodes a touched conversation gains ---- */
+    /* ---- pointer: the list's handler, and the nodes a touched conversation gains ---- */
     await page.evaluate(async (turns) => {
       const term = await openTermTab({ placement: "tab" });
       window.__AGENT_TERMS__ = [[term, "zo"]];

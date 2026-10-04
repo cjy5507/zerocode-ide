@@ -13964,6 +13964,8 @@ function helperTurnsNode(run) {
   list.setAttribute("aria-label", t("worker.transcript", "헬퍼 대화 기록"));
   list.tabIndex = 0;
   list.__run = run;
+  // 「그림·페이지로 설명」 단추는 답변 행에 포인터나 초점이 처음 닿을 때 짓는다(t-32787).
+  watchExplainTurns(list);
   // It keeps to its foot until the person leaves it (t-6323 A5).
   keepToFoot(list);
   // A person's words stuck at the top (the extension's sticky header) are a
