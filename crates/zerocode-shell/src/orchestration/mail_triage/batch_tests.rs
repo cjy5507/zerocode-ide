@@ -1880,14 +1880,140 @@ const WIDE: JevUse = JevUse {
     ..MAIL_TRIAGE
 };
 
-/// The seat's questions with a cap of the case's own on how many letters a
-/// request carries.
-struct Capped {
-    inside: MailTriage,
-    cap: usize,
+/// How a measurement words the options of each letter's choice. The batch road
+/// says an option in a line in the question and the whole of it once in the
+/// state's rubric; the per-letter road said the whole of it in the question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wording {
+    /// As the batch road asks.
+    Current,
+    /// The whole meaning in each question's options and no longer in the state.
+    WholeOnlyInTheQuestion,
+    /// A shorter meaning, with its examples, in each question's options and
+    /// not in the state.
+    ShortInTheQuestion,
+    /// The same shorter meaning in each question's options, the whole meaning
+    /// still said once in the state.
+    ShortWithTheWholeInTheState,
+    /// A terse meaning — the examples alone — in each question's options and
+    /// not in the state.
+    TerseInTheQuestion,
+    /// Everything the rubric says, in each question: as the per-letter road
+    /// asked, beside a list of letters.
+    EverythingInTheQuestion,
 }
 
-impl Judgment for Capped {
+impl Wording {
+    /// The wordings the wording experiment asks, the batch road's own first.
+    const ALL: [Self; 6] = [
+        Self::Current,
+        Self::WholeOnlyInTheQuestion,
+        Self::ShortInTheQuestion,
+        Self::ShortWithTheWholeInTheState,
+        Self::TerseInTheQuestion,
+        Self::EverythingInTheQuestion,
+    ];
+
+    /// The name a measurement line gives it.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::WholeOnlyInTheQuestion => "whole-only-in-the-question",
+            Self::ShortInTheQuestion => "short-in-the-question",
+            Self::ShortWithTheWholeInTheState => "short-in-the-question-whole-in-the-state",
+            Self::TerseInTheQuestion => "terse-in-the-question",
+            Self::EverythingInTheQuestion => "everything-in-the-question",
+        }
+    }
+}
+
+/// A shorter meaning for each option, with its examples: what the experiment
+/// asks of the model to see whether the whole of each is what it needs.
+const SHORT_MEANS: [(&str, &str); 3] = [
+    (
+        "answer_now",
+        "Deal with it before anything else: somebody is blocked until the coordinator acts — a question, a finished task waiting for review, a worker that died or hit a wall.",
+    ),
+    (
+        "can_wait",
+        "It needs the coordinator, but not before what it is doing now: news it will act on later — a status report, a notice about a worker still making progress.",
+    ),
+    (
+        "no_need",
+        "Nothing to do beyond reading it: a repeat of a notice already seen, a routine heartbeat, chatter that waits on nobody.",
+    ),
+];
+
+/// A terse meaning for each option: the examples alone.
+const TERSE_MEANS: [(&str, &str); 3] = [
+    (
+        "answer_now",
+        "Somebody is blocked until the coordinator acts: a question, a finished task, a dead worker.",
+    ),
+    (
+        "can_wait",
+        "News the coordinator acts on later: a status report, a worker still making progress.",
+    ),
+    (
+        "no_need",
+        "Nothing to do but read it: a repeat, a heartbeat, chatter.",
+    ),
+];
+
+/// What the rubric and a question say about where an option's meaning stands,
+/// and what they say when the state holds none.
+const POINTER_AFTER_A_DASH: &str = " — by what `rubric.answers` says each option means";
+const POINTER_AFTER_A_COMMA: &str = ", by what `rubric.answers` says each option means";
+const POINTER_REPLACED: &str = ", by what each option of the question means";
+
+/// The options of a choice from a table of `(word, meaning)`.
+fn meant_by(means: &[(&str, &str)]) -> Map<String, Value> {
+    means
+        .iter()
+        .map(|(word, said)| ((*word).to_string(), json!(said)))
+        .collect()
+}
+
+/// `said` for a state that does not hold the options' meanings.
+fn without_the_answers(said: &str) -> String {
+    said.replace(POINTER_AFTER_A_DASH, "")
+        .replace(POINTER_AFTER_A_COMMA, POINTER_REPLACED)
+}
+
+/// The seat's questions with a cap and a wording of the case's own: how many
+/// letters a request carries, and where the options' meanings stand.
+struct Reworded {
+    inside: MailTriage,
+    cap: usize,
+    wording: Wording,
+}
+
+impl Reworded {
+    /// The rubric as the batch road's state holds it.
+    fn rubric(&self) -> Value {
+        self.inside
+            .shared()
+            .get("rubric")
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The options of a choice, worded as the case says.
+    fn options(&self) -> Option<Map<String, Value>> {
+        match self.wording {
+            Wording::Current => None,
+            Wording::WholeOnlyInTheQuestion | Wording::EverythingInTheQuestion => {
+                self.rubric()["answers"].as_object().cloned()
+            }
+            Wording::ShortInTheQuestion | Wording::ShortWithTheWholeInTheState => {
+                Some(meant_by(&SHORT_MEANS))
+            }
+            Wording::TerseInTheQuestion => Some(meant_by(&TERSE_MEANS)),
+        }
+    }
+}
+
+impl Judgment for Reworded {
     type Verdict = MailRead;
     type Refusal = MailRefusal;
 
@@ -1900,11 +2026,50 @@ impl Judgment for Capped {
     }
 
     fn shared(&self) -> Map<String, Value> {
-        self.inside.shared()
+        let mut shared = self.inside.shared();
+        match self.wording {
+            Wording::Current | Wording::ShortWithTheWholeInTheState => {}
+            Wording::WholeOnlyInTheQuestion
+            | Wording::ShortInTheQuestion
+            | Wording::TerseInTheQuestion => {
+                if let Some(rubric) = shared.get_mut("rubric").and_then(Value::as_object_mut) {
+                    rubric.remove("answers");
+                    if let Some(about) = rubric.get_mut("about") {
+                        *about = json!(without_the_answers(about.as_str().unwrap_or_default()));
+                    }
+                }
+            }
+            Wording::EverythingInTheQuestion => {
+                shared.remove("rubric");
+            }
+        }
+        shared
     }
 
     fn questions(&self, at: usize) -> Vec<(&'static str, Value)> {
-        self.inside.questions(at)
+        let mut asked = self.inside.questions(at);
+        let Some(options) = self.options() else {
+            return asked;
+        };
+        let about = self.rubric()["about"]
+            .as_str()
+            .map(without_the_answers)
+            .unwrap_or_default();
+        for (suffix, question) in &mut asked {
+            if !suffix.is_empty() {
+                continue;
+            }
+            question["criteria"] = Value::Object(options.clone());
+            if self.wording != Wording::ShortWithTheWholeInTheState {
+                let said = without_the_answers(question["instructions"].as_str().unwrap_or(""));
+                question["instructions"] = if self.wording == Wording::EverythingInTheQuestion {
+                    json!(format!("{about} {said}"))
+                } else {
+                    json!(said)
+                };
+            }
+        }
+        asked
     }
 
     fn read(&self, answers: &Answers<'_>) -> Result<MailRead, MailRefusal> {
@@ -1912,23 +2077,18 @@ impl Judgment for Capped {
     }
 }
 
-/// How the answers of a batch road at each size agree with what a synthetic
-/// coordinator did next, on the real model: the day's letters, with the
-/// facts each entry carried when it was asked, are asked again in requests of
-/// every size in [`SIZES`] — the same letters, the same words — and each
-/// answer is marked against the labels of every seed, beside the kind rule on
-/// the same letters. What it says is where agreement starts to give way to
-/// size, and so what the cap should be.
-///
-/// **Not a check.** It crosses a real socket and spends one request a batch
-/// of each size — 258 for the day — so it is `#[ignore]`d and run under the
-/// build line with the key in this one command's environment, asking under a
-/// zo home of its own.
-#[test]
-#[ignore = "a measurement against api.typesafe.ai, printed; not a check"]
-fn measure_agreement_by_batch_size_on_the_real_wire() {
-    // The day on a stand-in: what each letter's entry said when it was asked,
-    // and what the coordinator was in at the time, in the letters' order.
+/// The day's letters as they were asked, for a measurement that asks them
+/// again: what each entry said and the coordinator it was asked beside, in the
+/// letters' order, the letters' ids, and what a synthetic coordinator did next
+/// with each under every seed.
+struct DayAsked {
+    asked_with: Vec<(Value, Value)>,
+    ids: Vec<String>,
+    truths: Vec<HashMap<String, String>>,
+}
+
+/// The day on a stand-in, read back as [`DayAsked`].
+fn the_day_as_it_was_asked() -> DayAsked {
     let model = stand_in(0);
     let stand = stand_on(&model, "shadow", None, "test-key");
     let day = the_day();
@@ -1951,8 +2111,6 @@ fn measure_agreement_by_batch_size_on_the_real_wire() {
         }
     }
     assert_eq!(asked_with.len(), letters, "an entry for every letter");
-
-    // What the coordinator did next, by letter, under every seed.
     let ids: Vec<String> = inbox.letters.iter().map(|one| one.id.clone()).collect();
     let truths: Vec<HashMap<String, String>> = labelled(&stand.book, &inbox)
         .iter()
@@ -1968,99 +2126,189 @@ fn measure_agreement_by_batch_size_on_the_real_wire() {
                 .collect()
         })
         .collect();
+    DayAsked {
+        asked_with,
+        ids,
+        truths,
+    }
+}
 
-    let real = the_real_wire();
-    let mut sizes = Vec::new();
-    for size in SIZES {
-        let groups: Vec<&[(Value, Value)]> = asked_with.chunks(size).collect();
-        let judged: Vec<(Capped, Vec<usize>)> = groups
+/// The day's letters asked of the real model in requests of `size` letters,
+/// worded as `wording` says, a wave of requests at a time: how many of the
+/// answers agree with what the coordinator did next (pooled over the seeds),
+/// beside the kind rule on the same letters, and what the requests weighed
+/// and waited.
+fn agreement_on_the_real_wire(
+    day: &DayAsked,
+    real: &Stand,
+    size: usize,
+    wording: Wording,
+) -> Value {
+    let groups: Vec<&[(Value, Value)]> = day.asked_with.chunks(size).collect();
+    let judged: Vec<(Reworded, Vec<usize>)> = groups
+        .iter()
+        .enumerate()
+        .map(|(n, group)| {
+            let coordinator = &group[0].1;
+            let situation = Situation {
+                coordinator_busy: coordinator["busy"].as_bool(),
+                open_questions: coordinator["openQuestions"]
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .unwrap_or(0),
+            };
+            let first = n * size;
+            (
+                Reworded {
+                    inside: MailTriage::new(situation),
+                    cap: size,
+                    wording,
+                },
+                (first..first + group.len()).collect(),
+            )
+        })
+        .collect();
+    let (mut compared, mut agreed, mut rule, mut refused, mut bytes) = (0, 0, 0, 0, 0);
+    let mut waves: Vec<u64> = Vec::new();
+    for (these, judging) in groups.chunks(WAVE).zip(judged.chunks(WAVE)) {
+        let built: Vec<Vec<Request>> = these
             .iter()
-            .enumerate()
-            .map(|(n, group)| {
-                let coordinator = &group[0].1;
-                let situation = Situation {
-                    coordinator_busy: coordinator["busy"].as_bool(),
-                    open_questions: coordinator["openQuestions"]
-                        .as_u64()
-                        .and_then(|n| usize::try_from(n).ok())
-                        .unwrap_or(0),
-                };
-                let first = n * size;
-                (
-                    Capped {
-                        inside: MailTriage::new(situation),
-                        cap: size,
-                    },
-                    (first..first + group.len()).collect(),
+            .zip(judging)
+            .map(|(group, (judgment, _))| {
+                zerocode_core::jev::batch::requests(
+                    judgment,
+                    group.iter().map(|(entry, _)| entry.clone()).collect(),
                 )
             })
             .collect();
-        let (mut compared, mut agreed, mut rule, mut refused, mut bytes) = (0, 0, 0, 0, 0);
-        let mut waves: Vec<u64> = Vec::new();
-        for (these, judging) in groups.chunks(WAVE).zip(judged.chunks(WAVE)) {
-            let built: Vec<Vec<Request>> = these
-                .iter()
-                .zip(judging)
-                .map(|(group, (judgment, _))| {
-                    zerocode_core::jev::batch::requests(
-                        judgment,
-                        group.iter().map(|(entry, _)| entry.clone()).collect(),
-                    )
-                })
-                .collect();
-            let asks: Vec<(Option<&Path>, Value)> = built
-                .iter()
-                .map(|made| {
-                    (
-                        Some(real.window.checkout.as_path()),
-                        request_body(&made[0].state, &made[0].questions),
-                    )
-                })
-                .collect();
-            let began = Instant::now();
-            let answered = real
-                .window
-                .wire
-                .ask_together(&WIDE, asks, MAIL_TRIAGE_DEADLINE);
-            waves.push(millis(began.elapsed()));
-            for ((made, (judgment, at)), asked) in built.iter().zip(judging).zip(&answered) {
-                bytes += asked.request_bytes;
-                for (n, reading) in at.iter().zip(read_reply(&judgment.inside, &made[0], asked)) {
-                    match reading {
-                        Ok(read) => {
-                            let kind = asked_with[*n].0["kind"]
-                                .as_str()
-                                .and_then(|kind| {
-                                    serde_json::from_value::<MessageKind>(json!(kind)).ok()
-                                })
-                                .map(|kind| kind_rule(kind).word());
-                            for truth in &truths {
-                                let Some(wanted) = truth.get(&ids[*n]) else {
-                                    continue;
-                                };
-                                compared += 1;
-                                agreed += usize::from(read.triage.word() == wanted);
-                                rule += usize::from(kind == Some(wanted.as_str()));
-                            }
+        let asks: Vec<(Option<&Path>, Value)> = built
+            .iter()
+            .map(|made| {
+                (
+                    Some(real.window.checkout.as_path()),
+                    request_body(&made[0].state, &made[0].questions),
+                )
+            })
+            .collect();
+        let began = Instant::now();
+        let answered = real
+            .window
+            .wire
+            .ask_together(&WIDE, asks, MAIL_TRIAGE_DEADLINE);
+        waves.push(millis(began.elapsed()));
+        for ((made, (judgment, at)), asked) in built.iter().zip(judging).zip(&answered) {
+            bytes += asked.request_bytes;
+            for (n, reading) in at.iter().zip(read_reply(&judgment.inside, &made[0], asked)) {
+                match reading {
+                    Ok(read) => {
+                        let kind = day.asked_with[*n].0["kind"]
+                            .as_str()
+                            .and_then(|kind| {
+                                serde_json::from_value::<MessageKind>(json!(kind)).ok()
+                            })
+                            .map(|kind| kind_rule(kind).word());
+                        for truth in &day.truths {
+                            let Some(wanted) = truth.get(&day.ids[*n]) else {
+                                continue;
+                            };
+                            compared += 1;
+                            agreed += usize::from(read.triage.word() == wanted);
+                            rule += usize::from(kind == Some(wanted.as_str()));
                         }
-                        Err(_) => refused += 1,
                     }
+                    Err(_) => refused += 1,
                 }
             }
         }
-        waves.sort_unstable();
-        sizes.push(json!({
-            "size": size,
-            "requests": groups.len(),
-            "comparedPooledOverSeeds": compared,
-            "agreed": agreed,
-            "rule": rule,
-            "refused": refused,
-            "avgRequestBytes": bytes / groups.len().max(1),
-            "waveMs": { "p50": percentile(&waves, 50), "max": waves.last() },
-        }));
     }
-    publish(&json!({ "label": "by-size", "letters": letters, "seeds": SEEDS, "sizes": sizes }));
+    waves.sort_unstable();
+    json!({
+        "size": size,
+        "wording": wording.name(),
+        "requests": groups.len(),
+        "comparedPooledOverSeeds": compared,
+        "agreed": agreed,
+        "rule": rule,
+        "refused": refused,
+        "avgRequestBytes": bytes / groups.len().max(1),
+        "waveMs": { "p50": percentile(&waves, 50), "max": waves.last() },
+    })
+}
+
+/// How the answers of a batch road at each size agree with what a synthetic
+/// coordinator did next, on the real model: the day's letters, with the
+/// facts each entry carried when it was asked, are asked again in requests of
+/// every size in [`SIZES`] — the same letters, the same words — and each
+/// answer is marked against the labels of every seed, beside the kind rule on
+/// the same letters. What it says is where agreement starts to give way to
+/// size, and so what the cap should be.
+///
+/// **Not a check.** It crosses a real socket and spends one request a batch
+/// of each size — 258 for the day — so it is `#[ignore]`d and run under the
+/// build line with the key in this one command's environment, asking under a
+/// zo home of its own.
+#[test]
+#[ignore = "a measurement against api.typesafe.ai, printed; not a check"]
+fn measure_agreement_by_batch_size_on_the_real_wire() {
+    let day = the_day_as_it_was_asked();
+    let real = the_real_wire();
+    let sizes: Vec<Value> = SIZES
+        .iter()
+        .map(|size| agreement_on_the_real_wire(&day, &real, *size, Wording::Current))
+        .collect();
+    publish(
+        &json!({ "label": "by-size", "letters": day.asked_with.len(), "seeds": SEEDS, "sizes": sizes }),
+    );
+}
+
+/// The size of request the wording experiment asks the day's letters in: a
+/// few letters, the middle of what a day's batches and a burst's cuts come to.
+const WORDING_SIZE: usize = 4;
+
+/// How many times the wording experiment asks the day under each wording: the
+/// real model answers the same request a little differently each time, and the
+/// spread between two runs is what a difference between wordings is read
+/// against.
+const WORDING_REPS: usize = 2;
+
+/// The most requests the wording experiment may spend, counted before the
+/// first leaves: a wording, a repetition, and a request a few letters.
+const WORDING_MAX_REQUESTS: usize = 520;
+
+/// How the wording of the options changes what the real model answers: the
+/// day's letters asked again in requests of [`WORDING_SIZE`], under every
+/// [`Wording`], [`WORDING_REPS`] times each — every answer marked against the
+/// labels of every seed, and what the requests weighed beside it.
+///
+/// **Not a check.** It crosses a real socket and spends at most
+/// [`WORDING_MAX_REQUESTS`], so it is `#[ignore]`d and run under the build
+/// line with the key in this one command's environment, asking under a zo
+/// home of its own.
+#[test]
+#[ignore = "a measurement against api.typesafe.ai, printed; not a check"]
+fn measure_agreement_by_wording_on_the_real_wire() {
+    let day = the_day_as_it_was_asked();
+    let requests = day.asked_with.len().div_ceil(WORDING_SIZE) * Wording::ALL.len() * WORDING_REPS;
+    assert!(
+        requests <= WORDING_MAX_REQUESTS,
+        "{requests} requests are more than the {WORDING_MAX_REQUESTS} the experiment may spend"
+    );
+    let real = the_real_wire();
+    let mut runs = Vec::new();
+    for rep in 0..WORDING_REPS {
+        for wording in Wording::ALL {
+            let mut run = agreement_on_the_real_wire(&day, &real, WORDING_SIZE, wording);
+            run["rep"] = json!(rep);
+            runs.push(run);
+        }
+    }
+    publish(&json!({
+        "label": "by-wording",
+        "letters": day.asked_with.len(),
+        "seeds": SEEDS,
+        "requestsSpent": requests,
+        "runs": runs,
+    }));
 }
 
 /// What a request's reply says about each of its letters, read through the
