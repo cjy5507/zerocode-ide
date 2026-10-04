@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use serde_json::Map;
 use zerocode_core::jev::batch::{Answers, Judgment, Request};
+use zerocode_core::jev::noul;
 use zerocode_core::jev::summary::{AGREED, BASELINE_AGREED, LABEL, NOT_COMPARED};
 use zerocode_core::jev::{Cap, JevUse, MAIL_TRIAGE_BATCH_CAP, SMART_SETTINGS_KEY, Sent};
 use zerocode_core::mail_triage::{
@@ -1832,10 +1833,6 @@ fn measure_a_burst_on_the_real_wire() {
     publish(&burst(&stand, 0, BURST_LETTERS, 1));
 }
 
-/// The sizes of request the experiment asks the day's letters in: one a
-/// request, and up to the widest a request could carry.
-const SIZES: [usize; 6] = [1, 4, 8, 16, 32, 48];
-
 /// How many requests of the experiment leave at once: a wave. Few, so the
 /// experiment's own load is not what slows the answers.
 const WAVE: usize = 4;
@@ -1846,7 +1843,7 @@ const WIDEST: usize = 48;
 
 /// The seat's row with a cap of the experiment's own on the list of letters:
 /// the door cuts a list to the table's cap, and the experiment asks wider.
-const WIDE: JevUse = JevUse {
+static WIDE: JevUse = JevUse {
     sends: &[
         Sent {
             at: "/state/letters",
@@ -1880,52 +1877,156 @@ const WIDE: JevUse = JevUse {
     ..MAIL_TRIAGE
 };
 
-/// How a measurement words the options of each letter's choice. The batch road
-/// says an option in a line in the question and the whole of it once in the
-/// state's rubric; the per-letter road said the whole of it in the question.
+/// Where a part of a request's words stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Wording {
-    /// As the batch road asks.
-    Current,
-    /// The whole meaning in each question's options and no longer in the state.
-    WholeOnlyInTheQuestion,
-    /// A shorter meaning, with its examples, in each question's options and
-    /// not in the state.
-    ShortInTheQuestion,
-    /// The same shorter meaning in each question's options, the whole meaning
-    /// still said once in the state.
-    ShortWithTheWholeInTheState,
-    /// A terse meaning — the examples alone — in each question's options and
-    /// not in the state.
-    TerseInTheQuestion,
-    /// Everything the rubric says, in each question: as the per-letter road
-    /// asked, beside a list of letters.
-    EverythingInTheQuestion,
+enum Place {
+    /// In the state's `rubric`, said once in the request.
+    State,
+    /// In each letter's own question.
+    Question,
+}
+
+/// How much of the rubric's explanation of the letters' fields a wording says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Glossary {
+    /// All of it.
+    Full,
+    /// The role and the task, and not a word on what a field is.
+    RoleAndTask,
+    /// All but the list of the kinds a letter may be.
+    WithoutTheKinds,
+}
+
+/// What an option says in a letter's question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Options {
+    /// The lead of its meaning, as the batch road asks.
+    Gist,
+    /// A shorter meaning with its examples.
+    Short,
+    /// The examples alone.
+    Terse,
+    /// All of it, as the per-letter road asked.
+    Whole,
+}
+
+/// One way of wording a request, for a measurement to ask the real model:
+/// where the explanation of the fields stands and how much of it, what each
+/// question's options say, and whether the state still holds the options'
+/// whole meanings. `per_letter` is the control: the per-letter road itself —
+/// its words, its flat state, a letter a request.
+#[derive(Debug, Clone, Copy)]
+struct Wording {
+    name: &'static str,
+    fields: Place,
+    glossary: Glossary,
+    options: Options,
+    whole_in_the_state: bool,
+    per_letter: bool,
 }
 
 impl Wording {
-    /// The wordings the wording experiment asks, the batch road's own first.
-    const ALL: [Self; 6] = [
-        Self::Current,
-        Self::WholeOnlyInTheQuestion,
-        Self::ShortInTheQuestion,
-        Self::ShortWithTheWholeInTheState,
-        Self::TerseInTheQuestion,
-        Self::EverythingInTheQuestion,
-    ];
-
-    /// The name a measurement line gives it.
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Current => "current",
-            Self::WholeOnlyInTheQuestion => "whole-only-in-the-question",
-            Self::ShortInTheQuestion => "short-in-the-question",
-            Self::ShortWithTheWholeInTheState => "short-in-the-question-whole-in-the-state",
-            Self::TerseInTheQuestion => "terse-in-the-question",
-            Self::EverythingInTheQuestion => "everything-in-the-question",
+    /// A wording of the batch road.
+    const fn batch(
+        name: &'static str,
+        fields: Place,
+        glossary: Glossary,
+        options: Options,
+        whole_in_the_state: bool,
+    ) -> Self {
+        Self {
+            name,
+            fields,
+            glossary,
+            options,
+            whole_in_the_state,
+            per_letter: false,
         }
     }
 }
+
+/// The wordings a measurement may ask, by the name a cell gives them.
+const WORDINGS: [Wording; 12] = [
+    Wording::batch("current", Place::State, Glossary::Full, Options::Gist, true),
+    Wording::batch(
+        "whole-only-in-the-question",
+        Place::State,
+        Glossary::Full,
+        Options::Whole,
+        false,
+    ),
+    Wording::batch(
+        "short-in-the-question",
+        Place::State,
+        Glossary::Full,
+        Options::Short,
+        false,
+    ),
+    Wording::batch(
+        "short-in-the-question-whole-in-the-state",
+        Place::State,
+        Glossary::Full,
+        Options::Short,
+        true,
+    ),
+    Wording::batch(
+        "terse-in-the-question",
+        Place::State,
+        Glossary::Full,
+        Options::Terse,
+        false,
+    ),
+    Wording::batch(
+        "everything-in-the-question",
+        Place::Question,
+        Glossary::Full,
+        Options::Whole,
+        false,
+    ),
+    Wording::batch(
+        "fields-in-the-question-gist",
+        Place::Question,
+        Glossary::Full,
+        Options::Gist,
+        false,
+    ),
+    Wording::batch(
+        "fields-in-the-question-short",
+        Place::Question,
+        Glossary::Full,
+        Options::Short,
+        false,
+    ),
+    Wording::batch(
+        "fields-in-the-question-whole-in-the-state",
+        Place::Question,
+        Glossary::Full,
+        Options::Gist,
+        true,
+    ),
+    Wording::batch(
+        "role-and-task-in-the-question",
+        Place::Question,
+        Glossary::RoleAndTask,
+        Options::Whole,
+        false,
+    ),
+    Wording::batch(
+        "without-the-kinds-in-the-question",
+        Place::Question,
+        Glossary::WithoutTheKinds,
+        Options::Whole,
+        false,
+    ),
+    Wording {
+        name: "per-letter-road",
+        fields: Place::Question,
+        glossary: Glossary::Full,
+        options: Options::Whole,
+        whole_in_the_state: false,
+        per_letter: true,
+    },
+];
 
 /// A shorter meaning for each option, with its examples: what the experiment
 /// asks of the model to see whether the whole of each is what it needs.
@@ -1960,11 +2061,99 @@ const TERSE_MEANS: [(&str, &str); 3] = [
     ),
 ];
 
+/// The per-letter road's question, as the base commit (v1.1.51) asked it: the
+/// words of the choice, and of the Noul beside it. Copied from its source.
+const PER_LETTER_INSTRUCTIONS: &str = "A coordinator agent runs a team of worker agents and reads its mail between the things it does. `state` describes one letter that has just reached its inbox, never the letter's words: `kind` is what the letter is — `question` (its sender waits for an answer), `worker_done` (a worker reports its task finished and waits for review), `status` (a worker's news), or one of the notices the orchestration writes itself about a worker (`went_quiet`, `worker_died`, `quota_walled`, `classifier_declined`, `deadlocked`, `handover`, `resumed`, `model_deviated`, `account_switched`) — `from` is the kind of address that sent it (`worker`, `ledger` for the orchestration's own notices, `pane`, `run`, `home`, `remote`), `worker` and `task` the worker and the task it concerns, `taskStatus` where that task stands, `priority` the priority its sender set, `awaitsAnswer` whether it is a question nobody has answered yet, `threadDepth` how many replies deep it sits, `ageSeconds` how long it has waited, `delivered` whether the coordinator has been handed it yet, `repeats` how many earlier letters of the same kind about the same worker and task came in the day before it, `coordinatorBusy` whether the coordinator is in the middle of a turn (null when unknown), and `openQuestions` how many questions put to the coordinator wait for an answer. Choose when the coordinator should deal with this letter.";
+const PER_LETTER_URGENT_INSTRUCTIONS: &str = "Should this letter be the very next thing the coordinator deals with, ahead of every other letter and every other piece of work?";
+const PER_LETTER_URGENT_YES: &str = "Its very next action should be about this letter: somebody is stopped until it acts, and every minute it waits costs.";
+const PER_LETTER_URGENT_NO: &str = "At least one other thing can come first without harm.";
+
+/// The seat's table as the per-letter road had it: the texts of a flat state.
+static PER_LETTER_SEAT: JevUse = JevUse {
+    sends: &[
+        Sent {
+            at: "/state/kind",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/from",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/worker",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/task",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/taskStatus",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/priority",
+            cap: Cap::Uncut,
+        },
+    ],
+    ..MAIL_TRIAGE
+};
+
+/// The sentences of the rubric's explanation a wording cuts at: where the list
+/// of the letters' fields begins, where the coordinator's begins, where the
+/// task begins, and the list of the kinds a letter may be.
+const FIELDS_BEGIN: &str = "`letters` lists";
+const COORDINATOR_BEGINS: &str = "`coordinator` describes";
+const TASK_BEGINS: &str = "Each question names";
+const KINDS_BEGIN: &str = "`kind` is what the letter is — ";
+const KINDS_END: &str = "`from` is";
+
 /// What the rubric and a question say about where an option's meaning stands,
 /// and what they say when the state holds none.
 const POINTER_AFTER_A_DASH: &str = " — by what `rubric.answers` says each option means";
 const POINTER_AFTER_A_COMMA: &str = ", by what `rubric.answers` says each option means";
 const POINTER_REPLACED: &str = ", by what each option of the question means";
+
+/// Where `marker` stands in the rubric's explanation. A rubric that no longer
+/// says it is a rubric this experiment was not written for.
+fn place_of(said: &str, marker: &str) -> usize {
+    said.find(marker)
+        .unwrap_or_else(|| panic!("the rubric no longer says {marker:?}"))
+}
+
+/// `about` cut to the part of it a wording keeps.
+fn glossary_of(about: &str, glossary: Glossary) -> String {
+    let (letters, coordinator, task) = (
+        place_of(about, FIELDS_BEGIN),
+        place_of(about, COORDINATOR_BEGINS),
+        place_of(about, TASK_BEGINS),
+    );
+    let (role, fields, who, what) = (
+        &about[..letters],
+        &about[letters..coordinator],
+        &about[coordinator..task],
+        &about[task..],
+    );
+    match glossary {
+        Glossary::Full => about.to_string(),
+        Glossary::RoleAndTask => format!("{role}{what}"),
+        Glossary::WithoutTheKinds => {
+            let from = place_of(fields, KINDS_BEGIN) + KINDS_BEGIN.len();
+            let to = place_of(fields, KINDS_END);
+            format!("{role}{}{}{who}{what}", &fields[..from], &fields[to..])
+        }
+    }
+}
+
+/// `said` pointing at the state's options, or saying they stand in the question.
+fn pointing(said: &str, at_the_state: bool) -> String {
+    if at_the_state {
+        said.to_string()
+    } else {
+        said.replace(POINTER_AFTER_A_DASH, "")
+            .replace(POINTER_AFTER_A_COMMA, POINTER_REPLACED)
+    }
+}
 
 /// The options of a choice from a table of `(word, meaning)`.
 fn meant_by(means: &[(&str, &str)]) -> Map<String, Value> {
@@ -1974,14 +2163,7 @@ fn meant_by(means: &[(&str, &str)]) -> Map<String, Value> {
         .collect()
 }
 
-/// `said` for a state that does not hold the options' meanings.
-fn without_the_answers(said: &str) -> String {
-    said.replace(POINTER_AFTER_A_DASH, "")
-        .replace(POINTER_AFTER_A_COMMA, POINTER_REPLACED)
-}
-
-/// The seat's questions with a cap and a wording of the case's own: how many
-/// letters a request carries, and where the options' meanings stand.
+/// The seat's questions with a cap and a wording of the case's own.
 struct Reworded {
     inside: MailTriage,
     cap: usize,
@@ -1998,17 +2180,77 @@ impl Reworded {
             .unwrap_or_default()
     }
 
-    /// The options of a choice, worded as the case says.
+    /// The options of a letter's choice, worded as the case says; `None` for
+    /// the batch road's own.
     fn options(&self) -> Option<Map<String, Value>> {
-        match self.wording {
-            Wording::Current => None,
-            Wording::WholeOnlyInTheQuestion | Wording::EverythingInTheQuestion => {
-                self.rubric()["answers"].as_object().cloned()
+        match self.wording.options {
+            Options::Gist => None,
+            Options::Whole => self.rubric()["answers"].as_object().cloned(),
+            Options::Short => Some(meant_by(&SHORT_MEANS)),
+            Options::Terse => Some(meant_by(&TERSE_MEANS)),
+        }
+    }
+
+    /// The explanation of the fields, as the wording says it.
+    fn explanation(&self) -> String {
+        let about = self.rubric()["about"].as_str().unwrap_or("").to_string();
+        pointing(
+            &glossary_of(&about, self.wording.glossary),
+            self.wording.whole_in_the_state,
+        )
+    }
+
+    /// A letter's choice, worded as the case says.
+    fn worded(&self, question: &mut Value) {
+        let wording = self.wording;
+        if wording.per_letter {
+            question["instructions"] = json!(PER_LETTER_INSTRUCTIONS);
+        } else {
+            let item = pointing(
+                question["instructions"].as_str().unwrap_or(""),
+                wording.whole_in_the_state,
+            );
+            question["instructions"] = match wording.fields {
+                Place::Question => json!(format!("{} {item}", self.explanation())),
+                Place::State => json!(item),
+            };
+        }
+        if let Some(options) = self.options() {
+            question["criteria"] = Value::Object(options);
+        }
+    }
+
+    /// The requests `entries` are asked in. The control's state is the
+    /// per-letter road's flat one: the letter's facts, and the coordinator's
+    /// beside them.
+    fn requests(&self, entries: Vec<Value>) -> Vec<Request> {
+        let mut made = zerocode_core::jev::batch::requests(self, entries);
+        if self.wording.per_letter {
+            for request in &mut made {
+                let mut flat = request.state["letters"][0]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                flat.insert(
+                    "coordinatorBusy".into(),
+                    request.state["coordinator"]["busy"].clone(),
+                );
+                flat.insert(
+                    "openQuestions".into(),
+                    request.state["coordinator"]["openQuestions"].clone(),
+                );
+                request.state = Value::Object(flat);
             }
-            Wording::ShortInTheQuestion | Wording::ShortWithTheWholeInTheState => {
-                Some(meant_by(&SHORT_MEANS))
-            }
-            Wording::TerseInTheQuestion => Some(meant_by(&TERSE_MEANS)),
+        }
+        made
+    }
+
+    /// The table the door reads this wording's request by.
+    fn seat(&self) -> &'static JevUse {
+        if self.wording.per_letter {
+            &PER_LETTER_SEAT
+        } else {
+            &WIDE
         }
     }
 }
@@ -2027,46 +2269,31 @@ impl Judgment for Reworded {
 
     fn shared(&self) -> Map<String, Value> {
         let mut shared = self.inside.shared();
-        match self.wording {
-            Wording::Current | Wording::ShortWithTheWholeInTheState => {}
-            Wording::WholeOnlyInTheQuestion
-            | Wording::ShortInTheQuestion
-            | Wording::TerseInTheQuestion => {
-                if let Some(rubric) = shared.get_mut("rubric").and_then(Value::as_object_mut) {
-                    rubric.remove("answers");
-                    if let Some(about) = rubric.get_mut("about") {
-                        *about = json!(without_the_answers(about.as_str().unwrap_or_default()));
-                    }
-                }
-            }
-            Wording::EverythingInTheQuestion => {
-                shared.remove("rubric");
-            }
+        let rubric = shared.remove("rubric").unwrap_or_default();
+        let mut kept = Map::new();
+        if self.wording.fields == Place::State && !self.wording.per_letter {
+            kept.insert("about".into(), json!(self.explanation()));
+        }
+        if self.wording.whole_in_the_state {
+            kept.insert("answers".into(), rubric["answers"].clone());
+        }
+        if !kept.is_empty() {
+            shared.insert("rubric".into(), Value::Object(kept));
         }
         shared
     }
 
     fn questions(&self, at: usize) -> Vec<(&'static str, Value)> {
         let mut asked = self.inside.questions(at);
-        let Some(options) = self.options() else {
-            return asked;
-        };
-        let about = self.rubric()["about"]
-            .as_str()
-            .map(without_the_answers)
-            .unwrap_or_default();
         for (suffix, question) in &mut asked {
-            if !suffix.is_empty() {
-                continue;
-            }
-            question["criteria"] = Value::Object(options.clone());
-            if self.wording != Wording::ShortWithTheWholeInTheState {
-                let said = without_the_answers(question["instructions"].as_str().unwrap_or(""));
-                question["instructions"] = if self.wording == Wording::EverythingInTheQuestion {
-                    json!(format!("{about} {said}"))
-                } else {
-                    json!(said)
-                };
+            if suffix.is_empty() {
+                self.worded(question);
+            } else if self.wording.per_letter {
+                *question = noul::question(
+                    PER_LETTER_URGENT_INSTRUCTIONS,
+                    PER_LETTER_URGENT_YES,
+                    PER_LETTER_URGENT_NO,
+                );
             }
         }
         asked
@@ -2133,18 +2360,85 @@ fn the_day_as_it_was_asked() -> DayAsked {
     }
 }
 
-/// The day's letters asked of the real model in requests of `size` letters,
-/// worded as `wording` says, a wave of requests at a time: how many of the
-/// answers agree with what the coordinator did next (pooled over the seeds),
-/// beside the kind rule on the same letters, and what the requests weighed
-/// and waited.
-fn agreement_on_the_real_wire(
-    day: &DayAsked,
-    real: &Stand,
-    size: usize,
+/// What the answers about the letters of one kind came to.
+#[derive(Default)]
+struct KindTally {
+    letters: usize,
+    /// How many letters of the kind were answered each word.
+    words: BTreeMap<&'static str, usize>,
+    /// The comparisons with what the coordinator did next, over every seed, and
+    /// how many of them the answer agreed with.
+    compared: usize,
+    agreed: usize,
+}
+
+impl KindTally {
+    fn json(&self) -> Value {
+        json!({
+            "letters": self.letters,
+            "words": self.words,
+            "compared": self.compared,
+            "agreed": self.agreed,
+        })
+    }
+}
+
+/// One cell of a measurement: a wording, the size of the requests it is asked
+/// in, and how many times the day is asked under it.
+struct Cell {
     wording: Wording,
-) -> Value {
-    let groups: Vec<&[(Value, Value)]> = day.asked_with.chunks(size).collect();
+    size: usize,
+    reps: usize,
+}
+
+/// The cells of a run, `wording:size:reps` comma apart.
+const CELLS_ENV: &str = "MAIL_MEASURE_CELLS";
+
+/// The most requests a run may spend, which the job names before it starts.
+const MAX_REQUESTS_ENV: &str = "MAIL_MEASURE_MAX_REQUESTS";
+
+/// The cells `spec` names.
+fn cells_named(spec: &str) -> Vec<Cell> {
+    spec.split(',')
+        .map(|cell| {
+            let mut parts = cell.trim().split(':');
+            let (name, size, reps) = (parts.next(), parts.next(), parts.next());
+            let wording = WORDINGS
+                .iter()
+                .find(|wording| Some(wording.name) == name)
+                .unwrap_or_else(|| {
+                    let names: Vec<&str> = WORDINGS.iter().map(|wording| wording.name).collect();
+                    panic!("{cell:?} names no wording of {names:?}")
+                });
+            let number = |said: Option<&str>| {
+                said.and_then(|said| said.parse::<usize>().ok())
+                    .filter(|number| *number >= 1)
+                    .unwrap_or_else(|| panic!("{cell:?} is not wording:size:reps"))
+            };
+            let (size, reps) = (number(size), number(reps));
+            assert!(
+                size <= WIDEST,
+                "{cell:?}: a request carries {WIDEST} at most"
+            );
+            assert!(
+                !wording.per_letter || size == 1,
+                "{cell:?}: the per-letter road asks a letter a request"
+            );
+            Cell {
+                wording: *wording,
+                size,
+                reps,
+            }
+        })
+        .collect()
+}
+
+/// The day's letters asked of the real model by `cell`, a wave of requests at a
+/// time: how many of the answers agree with what the coordinator did next
+/// (over every seed), beside the kind rule on the same letters, by kind, and
+/// what the requests weighed and waited.
+fn agreement_on_the_real_wire(day: &DayAsked, real: &Stand, cell: &Cell, rep: usize) -> Value {
+    let groups: Vec<&[(Value, Value)]> = day.asked_with.chunks(cell.size).collect();
     let judged: Vec<(Reworded, Vec<usize>)> = groups
         .iter()
         .enumerate()
@@ -2157,28 +2451,28 @@ fn agreement_on_the_real_wire(
                     .and_then(|n| usize::try_from(n).ok())
                     .unwrap_or(0),
             };
-            let first = n * size;
+            let first = n * cell.size;
             (
                 Reworded {
                     inside: MailTriage::new(situation),
-                    cap: size,
-                    wording,
+                    cap: cell.size,
+                    wording: cell.wording,
                 },
                 (first..first + group.len()).collect(),
             )
         })
         .collect();
+    // Every request of a cell is worded alike, and read by one table.
+    let seat = judged[0].0.seat();
     let (mut compared, mut agreed, mut rule, mut refused, mut bytes) = (0, 0, 0, 0, 0);
+    let mut by_kind: BTreeMap<String, KindTally> = BTreeMap::new();
     let mut waves: Vec<u64> = Vec::new();
     for (these, judging) in groups.chunks(WAVE).zip(judged.chunks(WAVE)) {
         let built: Vec<Vec<Request>> = these
             .iter()
             .zip(judging)
             .map(|(group, (judgment, _))| {
-                zerocode_core::jev::batch::requests(
-                    judgment,
-                    group.iter().map(|(entry, _)| entry.clone()).collect(),
-                )
+                judgment.requests(group.iter().map(|(entry, _)| entry.clone()).collect())
             })
             .collect();
         let asks: Vec<(Option<&Path>, Value)> = built
@@ -2194,37 +2488,41 @@ fn agreement_on_the_real_wire(
         let answered = real
             .window
             .wire
-            .ask_together(&WIDE, asks, MAIL_TRIAGE_DEADLINE);
+            .ask_together(seat, asks, MAIL_TRIAGE_DEADLINE);
         waves.push(millis(began.elapsed()));
         for ((made, (judgment, at)), asked) in built.iter().zip(judging).zip(&answered) {
             bytes += asked.request_bytes;
             for (n, reading) in at.iter().zip(read_reply(&judgment.inside, &made[0], asked)) {
-                match reading {
-                    Ok(read) => {
-                        let kind = day.asked_with[*n].0["kind"]
-                            .as_str()
-                            .and_then(|kind| {
-                                serde_json::from_value::<MessageKind>(json!(kind)).ok()
-                            })
-                            .map(|kind| kind_rule(kind).word());
-                        for truth in &day.truths {
-                            let Some(wanted) = truth.get(&day.ids[*n]) else {
-                                continue;
-                            };
-                            compared += 1;
-                            agreed += usize::from(read.triage.word() == wanted);
-                            rule += usize::from(kind == Some(wanted.as_str()));
-                        }
-                    }
-                    Err(_) => refused += 1,
+                let Ok(read) = reading else {
+                    refused += 1;
+                    continue;
+                };
+                let kind = day.asked_with[*n].0["kind"].as_str().unwrap_or("?");
+                let by_the_rule = serde_json::from_value::<MessageKind>(json!(kind))
+                    .ok()
+                    .map(|kind| kind_rule(kind).word());
+                let tally = by_kind.entry(kind.to_string()).or_default();
+                tally.letters += 1;
+                *tally.words.entry(read.triage.word()).or_default() += 1;
+                for truth in &day.truths {
+                    let Some(wanted) = truth.get(&day.ids[*n]) else {
+                        continue;
+                    };
+                    let agrees = read.triage.word() == wanted;
+                    compared += 1;
+                    agreed += usize::from(agrees);
+                    rule += usize::from(by_the_rule == Some(wanted.as_str()));
+                    tally.compared += 1;
+                    tally.agreed += usize::from(agrees);
                 }
             }
         }
     }
     waves.sort_unstable();
     json!({
-        "size": size,
-        "wording": wording.name(),
+        "wording": cell.wording.name,
+        "size": cell.size,
+        "rep": rep,
         "requests": groups.len(),
         "comparedPooledOverSeeds": compared,
         "agreed": agreed,
@@ -2232,78 +2530,52 @@ fn agreement_on_the_real_wire(
         "refused": refused,
         "avgRequestBytes": bytes / groups.len().max(1),
         "waveMs": { "p50": percentile(&waves, 50), "max": waves.last() },
+        "byKind": by_kind.iter().map(|(kind, tally)| (kind.clone(), tally.json())).collect::<Map<String, Value>>(),
     })
 }
 
-/// How the answers of a batch road at each size agree with what a synthetic
-/// coordinator did next, on the real model: the day's letters, with the
-/// facts each entry carried when it was asked, are asked again in requests of
-/// every size in [`SIZES`] — the same letters, the same words — and each
-/// answer is marked against the labels of every seed, beside the kind rule on
-/// the same letters. What it says is where agreement starts to give way to
+/// How the wording of a request, and the number of letters in it, change what
+/// the real model answers: the day's letters, with the facts each entry carried
+/// when it was asked, asked again by every cell the job names
+/// ([`CELLS_ENV`]) — the same letters, the words and the size of the cell —
+/// every answer marked against the labels of every seed beside the kind rule on
+/// the same letters, by kind, with what the requests weighed and waited. What it
+/// says is what to say in a question, and where agreement starts to give way to
 /// size, and so what the cap should be.
 ///
-/// **Not a check.** It crosses a real socket and spends one request a batch
-/// of each size — 258 for the day — so it is `#[ignore]`d and run under the
-/// build line with the key in this one command's environment, asking under a
-/// zo home of its own.
+/// **Not a check.** It crosses a real socket and spends the requests the cells
+/// come to, which the job caps before the first leaves ([`MAX_REQUESTS_ENV`]),
+/// so it is `#[ignore]`d and run under the build line with the key in this one
+/// command's environment, asking under a zo home of its own.
 #[test]
 #[ignore = "a measurement against api.typesafe.ai, printed; not a check"]
-fn measure_agreement_by_batch_size_on_the_real_wire() {
+fn measure_agreement_on_the_real_wire() {
+    let spec = std::env::var(CELLS_ENV).unwrap_or_else(|_| {
+        let names: Vec<&str> = WORDINGS.iter().map(|wording| wording.name).collect();
+        panic!(
+            "{CELLS_ENV} names the cells, wording:size:reps comma apart; the wordings are {names:?}"
+        )
+    });
+    let cells = cells_named(&spec);
     let day = the_day_as_it_was_asked();
-    let real = the_real_wire();
-    let sizes: Vec<Value> = SIZES
+    let requests: usize = cells
         .iter()
-        .map(|size| agreement_on_the_real_wire(&day, &real, *size, Wording::Current))
-        .collect();
-    publish(
-        &json!({ "label": "by-size", "letters": day.asked_with.len(), "seeds": SEEDS, "sizes": sizes }),
-    );
-}
-
-/// The size of request the wording experiment asks the day's letters in: a
-/// few letters, the middle of what a day's batches and a burst's cuts come to.
-const WORDING_SIZE: usize = 4;
-
-/// How many times the wording experiment asks the day under each wording: the
-/// real model answers the same request a little differently each time, and the
-/// spread between two runs is what a difference between wordings is read
-/// against.
-const WORDING_REPS: usize = 2;
-
-/// The most requests the wording experiment may spend, counted before the
-/// first leaves: a wording, a repetition, and a request a few letters.
-const WORDING_MAX_REQUESTS: usize = 520;
-
-/// How the wording of the options changes what the real model answers: the
-/// day's letters asked again in requests of [`WORDING_SIZE`], under every
-/// [`Wording`], [`WORDING_REPS`] times each — every answer marked against the
-/// labels of every seed, and what the requests weighed beside it.
-///
-/// **Not a check.** It crosses a real socket and spends at most
-/// [`WORDING_MAX_REQUESTS`], so it is `#[ignore]`d and run under the build
-/// line with the key in this one command's environment, asking under a zo
-/// home of its own.
-#[test]
-#[ignore = "a measurement against api.typesafe.ai, printed; not a check"]
-fn measure_agreement_by_wording_on_the_real_wire() {
-    let day = the_day_as_it_was_asked();
-    let requests = day.asked_with.len().div_ceil(WORDING_SIZE) * Wording::ALL.len() * WORDING_REPS;
+        .map(|cell| cell.reps * day.asked_with.len().div_ceil(cell.size))
+        .sum();
+    let ceiling: usize = env_number(MAX_REQUESTS_ENV, 0);
     assert!(
-        requests <= WORDING_MAX_REQUESTS,
-        "{requests} requests are more than the {WORDING_MAX_REQUESTS} the experiment may spend"
+        requests <= ceiling,
+        "{requests} requests are more than the {ceiling} the job allows ({MAX_REQUESTS_ENV})"
     );
     let real = the_real_wire();
     let mut runs = Vec::new();
-    for rep in 0..WORDING_REPS {
-        for wording in Wording::ALL {
-            let mut run = agreement_on_the_real_wire(&day, &real, WORDING_SIZE, wording);
-            run["rep"] = json!(rep);
-            runs.push(run);
+    for cell in &cells {
+        for rep in 0..cell.reps {
+            runs.push(agreement_on_the_real_wire(&day, &real, cell, rep));
         }
     }
     publish(&json!({
-        "label": "by-wording",
+        "label": "by-cells",
         "letters": day.asked_with.len(),
         "seeds": SEEDS,
         "requestsSpent": requests,
