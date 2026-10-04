@@ -7307,6 +7307,9 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                         term,
                         format!("{}/{}", worker.team, worker.pane),
                     )),
+                    // The plan wrote this worker and its first letter before the window opened its pane
+                    // (t-34501): not seatless, only not seated yet.
+                    None if delegate_is_seating(&worker.id) => {}
                     None => seatless.push(zerocode_core::orchestration::worker_address(&worker.id)),
                 }
             }
@@ -9104,24 +9107,66 @@ fn run_seated(
     // The consent origin is the window's own checkout observation, not an
     // argv path or the application's process cwd. Carry it across the actor
     // call under this command's identity; its guard drops even on refusal.
-    let _difficulty_origin =
-        (argv.first().map(String::as_str) == Some("worker-start")).then(|| {
-            let term = crate::agent_teams::teams()
-                .get(team_id)
-                .and_then(|team| team.term_of(pane));
-            let checkout = term.and_then(|term| host.worktree_of(term));
+    let _difficulty_origin = matches!(
+        argv.first().map(String::as_str),
+        Some("worker-start" | "delegate")
+    )
+    .then(|| {
+        let term = crate::agent_teams::teams()
+            .get(team_id)
+            .and_then(|team| team.term_of(pane));
+        let checkout = term.and_then(|term| host.worktree_of(term));
+        let request = argv
+            .windows(2)
+            .find(|pair| pair[0] == "--retry-request")
+            .map_or("", |pair| pair[1].as_str());
+        summon_difficulty::origin([team_id, pane, request], checkout, authority.is_none())
+    });
+    /* `delegate` writes the work, reserves the worker and posts the letter in ONE plan, so a second
+     * plan under the same name while the first is still opening its pane would write all three a
+     * second time: the first one's receipt is filed only after its pane is open. The same name waits
+     * its turn here and then finds the first answer; a wait that asks for no length is refused
+     * before anything is written. */
+    let delegating =
+        argv.first().map(String::as_str) == Some(zerocode_core::orchestration::delegate::VERB);
+    let waiting = match delegating {
+        true => match zerocode_core::orchestration::delegate::wait_budget(argv) {
+            Ok(budget) => budget,
+            Err(why) => return refused(why),
+        },
+        false => None,
+    };
+    let flight = match delegating {
+        true => {
             let request = argv
                 .windows(2)
                 .find(|pair| pair[0] == "--retry-request")
                 .map_or("", |pair| pair[1].as_str());
-            summon_difficulty::origin([team_id, pane, request], checkout, authority.is_none())
-        });
+            match DelegateFlight::enter(format!("{team_id}\u{1f}{pane}\u{1f}{request}")) {
+                Some(flight) => Some(flight),
+                None => {
+                    return refused(
+                        "a delegate under this --retry-request is still being carried out — ask \
+                         again in a moment and you will be given its answer",
+                    );
+                }
+            }
+        }
+        false => None,
+    };
     let decided = match actor.plan(command) {
         Ok((decided, _)) => *decided,
         Err(why) => return refused_by_runtime(why),
     };
+    if let Some(flight) = &flight
+        && let Ok(said) = serde_json::from_str::<serde_json::Value>(decided.reply.stdout.trim())
+        && let Some(worker) = said["workerId"].as_str()
+    {
+        flight.seating(worker);
+    }
     rang(decided.requires_durability);
     let mut answered = carried(host, actor, decided, team_id, pane, pane_token, now_ms);
+    drop(flight);
     // The window's own half of a worker observation, laid over the answer on
     // the way out. `seat` first — it resolves a foreign row's terminal, which
     // `agentWait` then reads — and `agentWait` is a hook fact no ledger row
@@ -9132,7 +9177,160 @@ fn run_seated(
     garnish_federation_help(argv.first().map(String::as_str), &mut answered);
     garnish_artifacts(argv.first().map(String::as_str), &mut answered);
     note_worker_report(argv, team_id, pane, &answered, now_ms);
+    match waiting {
+        Some(budget_ms) => delegate_waited(&held, answered, budget_ms),
+        None => answered,
+    }
+}
+
+/// How long a second `delegate` under a name already being carried out waits for the first before it
+/// gives up: opening a pane and handing the worker its briefing is seconds, never minutes.
+const DELEGATE_FLIGHT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// A `delegate` that is being carried out, held under its `team, pane, --retry-request`.
+///
+/// In memory only, because what it guards is the window between the plan (durable, rows written) and
+/// the receipt (filed once the pane is open); a restart ends that window by itself (the sweep takes
+/// the reservation back).
+struct DelegateFlight(String, Mutex<Vec<String>>);
+
+fn delegate_flights() -> &'static (Mutex<std::collections::HashSet<String>>, std::sync::Condvar) {
+    static FLIGHTS: OnceLock<(Mutex<std::collections::HashSet<String>>, std::sync::Condvar)> =
+        OnceLock::new();
+    FLIGHTS.get_or_init(|| {
+        (
+            Mutex::new(std::collections::HashSet::new()),
+            std::sync::Condvar::new(),
+        )
+    })
+}
+
+impl DelegateFlight {
+    /// Take the name, waiting for an earlier carrying of it. `None` when that one has not finished
+    /// within [`DELEGATE_FLIGHT_WAIT`].
+    fn enter(key: String) -> Option<Self> {
+        let (held, bell) = delegate_flights();
+        let deadline = std::time::Instant::now() + DELEGATE_FLIGHT_WAIT;
+        let mut flights = held.lock().unwrap_or_else(|held| held.into_inner());
+        while flights.contains(&key) {
+            let left = deadline.checked_duration_since(std::time::Instant::now())?;
+            flights = bell
+                .wait_timeout(flights, left)
+                .unwrap_or_else(|held| held.into_inner())
+                .0;
+        }
+        flights.insert(key.clone());
+        Some(Self(key, Mutex::new(Vec::new())))
+    }
+}
+
+/// The workers a `delegate` is still opening a pane for: the plan wrote the worker and its letter,
+/// the window has no seat for it yet. The beat leaves them out of its seatless reckoning.
+fn delegate_seating() -> &'static Mutex<std::collections::HashSet<String>> {
+    static SEATING: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    SEATING.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+impl DelegateFlight {
+    /// Say which worker this carrying is still seating. It is let go with the flight, whether the
+    /// pane opened or the carrying failed.
+    fn seating(&self, worker: &str) {
+        delegate_seating()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(worker.to_string());
+        self.1
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push(worker.to_string());
+    }
+}
+
+/// Whether a delegate is still opening this worker's pane.
+fn delegate_is_seating(worker: &str) -> bool {
+    delegate_seating()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .contains(worker)
+}
+
+impl Drop for DelegateFlight {
+    fn drop(&mut self) {
+        let mut seating = delegate_seating()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        for worker in self
+            .1
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .iter()
+        {
+            seating.remove(worker);
+        }
+        drop(seating);
+        let (held, bell) = delegate_flights();
+        held.lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .remove(&self.0);
+        bell.notify_all();
+    }
+}
+
+/// `delegate --wait`: hold the answer until the worker reports, asks or its attempt ends silently,
+/// or until the budget runs out, and say which in the answer's `waited`.
+///
+/// Reads the ledger's rows and sleeps on the same bell `check --wait` does; it takes nothing from the
+/// coordinator's inbox and acknowledges nothing, so other workers' mail is still the coordinator's.
+fn delegate_waited(
+    held: &LiveRuntime,
+    mut answered: zerocode_hookd::TeamAnswer,
+    budget_ms: u32,
+) -> zerocode_hookd::TeamAnswer {
+    if answered.exit_code != 0 {
+        return answered;
+    }
+    let Ok(said) = serde_json::from_str::<serde_json::Value>(answered.stdout.trim()) else {
+        return answered;
+    };
+    let (Some(worker), Some(dispatch)) = (said["workerId"].as_str(), said["dispatchId"].as_str())
+    else {
+        return answered;
+    };
+    let began = std::time::Instant::now();
+    let deadline = began + std::time::Duration::from_millis(u64::from(budget_ms));
+    let outcome = loop {
+        // The bell is read BEFORE the look, so a write that lands between the two is a wake-up and
+        // not a sleep through it.
+        let seen = mail_seen();
+        if let Some(found) = delegate_outcome_now(held, worker, dispatch) {
+            break Some(found);
+        }
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        wait_for_mail(seen, deadline);
+    };
+    let waited_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+    answered.stdout = zerocode_core::orchestration::delegate::with_waited(
+        &answered.stdout,
+        outcome.as_ref(),
+        waited_ms,
+        budget_ms,
+    );
     answered
+}
+
+fn delegate_outcome_now(
+    held: &LiveRuntime,
+    worker: &str,
+    dispatch: &str,
+) -> Option<zerocode_core::orchestration::delegate::Outcome> {
+    let image = held.actor.view().ok()?;
+    let rows = cached_ledger(held, &image).ok()?;
+    rows.runs()
+        .iter()
+        .find(|run| run.dispatch(dispatch).is_some())
+        .and_then(|run| zerocode_core::orchestration::delegate::outcome(run, worker, dispatch))
 }
 
 /// Lay the artifact store's rows over a worker-observation answer (t-2720

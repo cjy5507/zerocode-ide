@@ -22,7 +22,7 @@ use crate::effect_journal::{
     AuthorityLease, BeginEffect, EffectJournal, EffectJournalError, EffectPermit, EffectRequest,
     EffectSettlement, HostEffectKind, HostEffectState, OpenOperation,
 };
-use crate::workflow_store::WorkflowStore;
+use crate::workflow_store::{StoreHold, WorkflowStore};
 use zerocode_core::ProviderSession;
 use zerocode_core::agent_teams::{Effect, Team};
 use zerocode_core::orchestration::{
@@ -2919,6 +2919,12 @@ struct RuntimeState {
     /// same revision as the same ledger. Cleared wherever the memory changes
     /// without a revision — a verb's tally, a rewind from the disk.
     projection: Option<(u64, Arc<LedgerProjectionV1>)>,
+    /// This process's attachment to the store, held for the actor's life
+    /// (t-37679): the actor opens connections per request and closed them
+    /// all before the next, so every request rebuilt the WAL index and
+    /// checkpointed and deleted the WAL ([`StoreHold`]). Declared last, so
+    /// it closes after everything else.
+    _store_hold: StoreHold,
 }
 
 /// Rebuild one durable generation, repairing only named historical wounds.
@@ -2970,6 +2976,7 @@ impl RuntimeState {
         panes: Box<dyn PaneTable>,
         launcher: Box<dyn Launcher + Send>,
     ) -> Result<Self, RuntimeError> {
+        let store_hold = store.hold().map_err(|_| RuntimeError::StoreUnavailable)?;
         let journal = EffectJournal::new(&store);
         let lease = journal
             .claim_authority(&ledger_id, &random_instance_digest(), boot_now_ms(&boot))
@@ -3076,6 +3083,7 @@ impl RuntimeState {
             poison: None,
             recovery_permits,
             repairs,
+            _store_hold: store_hold,
         })
     }
 
@@ -5910,6 +5918,9 @@ fn random_instance_digest() -> String {
 mod tests {
     use super::*;
     use zerocode_core::orchestration::{Auto, NoLauncher};
+
+    #[cfg(unix)]
+    mod outside_reader;
 
     /// A store that could not be opened is answered, not the end of the actor.
     ///

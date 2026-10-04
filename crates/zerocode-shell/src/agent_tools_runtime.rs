@@ -2243,7 +2243,7 @@ pub(super) fn answer_team_command(
         let caller_identity = caller_worktree
             .as_deref()
             .and_then(zerocode_core::git_dir::identity);
-        let bound_run = matches!(verb, Some("worker-start" | "dispatch"))
+        let bound_run = matches!(verb, Some("worker-start" | "delegate" | "dispatch"))
             .then(|| orchestration::bound_run(&request.team_id, &request.pane, actor.as_deref()))
             .flatten();
         let completed = is_worker_done(&request.argv)
@@ -2359,7 +2359,7 @@ pub(super) fn observe_linked_orchestration(
     let now = now_epoch_ms();
     let parsed: serde_json::Value = serde_json::from_str(answer.stdout.trim()).unwrap_or_default();
 
-    if matches!(verb, Some("worker-start" | "dispatch"))
+    if matches!(verb, Some("worker-start" | "delegate" | "dispatch"))
         && let (Some(identity), Some(run)) = (caller_identity, bound_run)
     {
         let task = parsed.get("taskId").and_then(serde_json::Value::as_str);

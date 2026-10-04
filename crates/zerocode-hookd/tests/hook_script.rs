@@ -784,6 +784,96 @@ fn the_shim_waits_longer_than_the_window_is_allowed_to_take() {
         .deadline(),
         std::time::Duration::from_millis(120_000) + bridge_grace,
     );
+    // `delegate` is a worker summons that can also hold its answer for the worker's report
+    // (t-34501): it takes the wait seat like `worker-start`, waits for readiness by default, and
+    // with `--wait` holds exactly the budget it was given.
+    let delegating = ["delegate", "--spec", "x", "--agent", "claude"];
+    assert!(request(&delegating).reserves_wait_slot());
+    assert_eq!(
+        request(&delegating).deadline(),
+        std::time::Duration::from_millis(u64::from(
+            zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS
+        )) + bridge_grace,
+    );
+    assert_eq!(
+        request(&[
+            "delegate",
+            "--spec",
+            "x",
+            "--agent",
+            "claude",
+            "--wait",
+            "--timeout-ms",
+            "300000",
+        ])
+        .deadline(),
+        std::time::Duration::from_millis(300_000)
+            + std::time::Duration::from_millis(u64::from(
+                zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS
+            ))
+            + bridge_grace,
+    );
+    // The ladder of a `delegate --wait --timeout-ms X`, at every X the ledger accepts: the window
+    // answers after the preparation (the ready default — `--timeout-ms` is stripped from the inner
+    // worker-start) plus X; the bridge must hold longer than that, and the shim longer than the
+    // bridge. A bridge that gave up first would hand a coordinator a time-out for a worker that
+    // was already standing, and a retry under a new name would make a second one.
+    let ready = u64::from(zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS);
+    for x in [
+        u64::from(zerocode_core::orchestration::WAIT_BUDGET_MIN_MS),
+        1_000,
+        30_000,
+        300_000,
+        u64::from(zerocode_core::orchestration::WAIT_BUDGET_MAX_MS),
+    ] {
+        let said = x.to_string();
+        let bridge = request(&[
+            "delegate",
+            "--spec",
+            "x",
+            "--agent",
+            "claude",
+            "--wait",
+            "--timeout-ms",
+            said.as_str(),
+        ])
+        .deadline();
+        let window_latest = std::time::Duration::from_millis(ready + x);
+        let shim = std::time::Duration::from_secs(
+            x / 1000
+                + u64::from(zerocode_core::agent_teams::SHIM_WAIT_GRACE_SECONDS)
+                + u64::from(zerocode_core::orchestration::delegate::WAIT_HEADROOM_MS) / 1000,
+        );
+        assert!(
+            window_latest < bridge && bridge < shim,
+            "delegate --wait --timeout-ms {x}: window {window_latest:?} < bridge {bridge:?} < shim {shim:?}"
+        );
+    }
+    // The ledger reads `--timeout-ms=X` exactly as `--timeout-ms X`, so the bridge must too: a
+    // bridge that read only the two-word form held a `check --wait --timeout-ms=300000` for the
+    // short default and gave up on a wait the window was still keeping.
+    for x in ["1000", "30000", "300000", "600000"] {
+        for verb in [
+            &["check", "--wait"][..],
+            &["worker-start", "--agent", "claude"][..],
+            &["delegate", "--spec", "x", "--agent", "claude", "--wait"][..],
+        ] {
+            let spelled = |joined: bool| -> Vec<&str> {
+                let mut argv = verb.to_vec();
+                if joined {
+                    argv.push(Box::leak(format!("--timeout-ms={x}").into_boxed_str()));
+                } else {
+                    argv.extend(["--timeout-ms", x]);
+                }
+                argv
+            };
+            assert_eq!(
+                request(&spelled(true)).deadline(),
+                request(&spelled(false)).deadline(),
+                "{verb:?} --timeout-ms={x} and --timeout-ms {x} hold the bridge for different times"
+            );
+        }
+    }
     assert!(
         u64::from(zerocode_core::orchestration::ASK_BUDGET_MAX_MS)
             <= zerocode_hookd::WAIT_BUDGET_CEILING_MS,

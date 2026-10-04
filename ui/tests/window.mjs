@@ -79,6 +79,7 @@ import { testZoRestore } from "./zo-restore.mjs";
 import { testRestartSamePanes } from "./restart-same-panes.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
+import { testExplain } from "./explain.mjs";
 import { testAskPopup } from "./ask-popup.mjs";
 import { testEditorSelection } from "./editor-selection.mjs";
 import { testEditorRecovery } from "./editor-recovery.mjs";
@@ -240,6 +241,7 @@ suite("usage-refresh", async ({ browser, origin, ok }) => {
 suite("account-switch", ({ browser, origin, ok }) => testAccountSwitch(browser, origin, standBackend, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 suite("answer-door", ({ browser, origin, ok }) => testAnswerDoor(browser, origin, ok));
+suite("explain", ({ browser, origin, ok }) => testExplain(browser, origin, ok));
 // Vault state stays local to this fixture, just like the explorer fixture.
 suite("task-board", ({ browser, origin, ok }) => testTaskBoard(browser, origin, ok));
 suite("scm-health", ({ browser, origin, ok }) => testScmHealth(browser, origin, ok));

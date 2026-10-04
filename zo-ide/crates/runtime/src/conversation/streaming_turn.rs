@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::subagent_panes::AgeRule;
 
+use super::overflow_recovery::{picture_overflow_notice, OverflowRecovery, OverflowStep};
 use super::{
     ask_user_question_async, budget_exhausted_notice, build_assistant_message, deadline_notice,
     build_async_permission_request, collect_pending_tool_uses, empty_stream_exhausted_message,
@@ -990,7 +991,7 @@ where
         let mut truncation_continuations = 0;
         let mut turn_end_gate_reprompts = 0;
         let mut auto_compaction = None;
-        let mut provider_overflow_recovery_attempted = false;
+        self.overflow_recovery = OverflowRecovery::default();
         let mut microcompact = None;
         let mut budget_exhausted: Option<BudgetExhausted> = None;
         // Progress-gated deadline extensions granted so far this turn, and the
@@ -1623,29 +1624,47 @@ where
                                 self.clear_empty_retry_reminder(empty_retries);
                                 return Err(cancelled);
                             }
-                            if !provider_overflow_recovery_attempted
-                                && error.provider_error_class()
-                                    == Some(crate::ProviderErrorClass::ContextOverflow)
+                            if error.provider_error_class()
+                                == Some(crate::ProviderErrorClass::ContextOverflow)
                             {
-                                provider_overflow_recovery_attempted = true;
-                                // Learn the wire's real ceiling before compacting
-                                // (see `adopt_provider_context_ceiling`): this
-                                // session's thresholds are otherwise derived from
-                                // a window the provider does not honor, and the
-                                // next turn rebuilds to the same oversized shape.
-                                if let Some(ceiling) =
-                                    ::api::context_overflow_ceiling_tokens(&error.to_string())
-                                {
-                                    self.adopt_provider_context_ceiling(ceiling);
-                                }
-                                if let Some(event) = self
-                                    .recover_provider_context_overflow_streaming(
-                                        &render_tx, &id_gen,
-                                    )
-                                    .await
-                                {
-                                    auto_compaction.get_or_insert(event);
-                                    continue 'outer;
+                                match self.next_overflow_step(&error) {
+                                    // A body over the provider's byte ceiling is
+                                    // mostly pictures, which a summary does not
+                                    // shrink: cut the oldest ones first.
+                                    OverflowStep::LeaveOutPictures { keep } => {
+                                        let _ = render_tx
+                                            .send(RenderBlock::System {
+                                                id: id_gen.next(),
+                                                level: SystemLevel::Warn,
+                                                text: picture_overflow_notice(keep),
+                                            })
+                                            .await;
+                                        continue 'outer;
+                                    }
+                                    OverflowStep::Compact => {
+                                        // Learn the wire's real ceiling before
+                                        // compacting (see
+                                        // `adopt_provider_context_ceiling`): this
+                                        // session's thresholds are otherwise derived
+                                        // from a window the provider does not honor,
+                                        // and the next turn rebuilds to the same
+                                        // oversized shape.
+                                        if let Some(ceiling) = ::api::context_overflow_ceiling_tokens(
+                                            &error.to_string(),
+                                        ) {
+                                            self.adopt_provider_context_ceiling(ceiling);
+                                        }
+                                        if let Some(event) = self
+                                            .recover_provider_context_overflow_streaming(
+                                                &render_tx, &id_gen,
+                                            )
+                                            .await
+                                        {
+                                            auto_compaction.get_or_insert(event);
+                                            continue 'outer;
+                                        }
+                                    }
+                                    OverflowStep::GiveUp => {}
                                 }
                             }
                             // Main model's quota window is exhausted (RateLimit
@@ -1721,6 +1740,9 @@ where
                                     continue 'outer;
                                 }
                             }
+                            // A refusal that ends the turn says which picture is the
+                            // newest and how big the rest of the request is.
+                            let error = self.explain_overflow(error);
                             self.clear_empty_retry_reminder(empty_retries);
                             self.record_turn_failed(iterations, &error);
                             if iterations == 1 {
@@ -1743,29 +1765,47 @@ where
                                 self.clear_empty_retry_reminder(empty_retries);
                                 return Err(cancelled);
                             }
-                            if !provider_overflow_recovery_attempted
-                                && error.provider_error_class()
-                                    == Some(crate::ProviderErrorClass::ContextOverflow)
+                            if error.provider_error_class()
+                                == Some(crate::ProviderErrorClass::ContextOverflow)
                             {
-                                provider_overflow_recovery_attempted = true;
-                                // Learn the wire's real ceiling before compacting
-                                // (see `adopt_provider_context_ceiling`): this
-                                // session's thresholds are otherwise derived from
-                                // a window the provider does not honor, and the
-                                // next turn rebuilds to the same oversized shape.
-                                if let Some(ceiling) =
-                                    ::api::context_overflow_ceiling_tokens(&error.to_string())
-                                {
-                                    self.adopt_provider_context_ceiling(ceiling);
-                                }
-                                if let Some(event) = self
-                                    .recover_provider_context_overflow_streaming(
-                                        &render_tx, &id_gen,
-                                    )
-                                    .await
-                                {
-                                    auto_compaction.get_or_insert(event);
-                                    continue 'outer;
+                                match self.next_overflow_step(&error) {
+                                    // A body over the provider's byte ceiling is
+                                    // mostly pictures, which a summary does not
+                                    // shrink: cut the oldest ones first.
+                                    OverflowStep::LeaveOutPictures { keep } => {
+                                        let _ = render_tx
+                                            .send(RenderBlock::System {
+                                                id: id_gen.next(),
+                                                level: SystemLevel::Warn,
+                                                text: picture_overflow_notice(keep),
+                                            })
+                                            .await;
+                                        continue 'outer;
+                                    }
+                                    OverflowStep::Compact => {
+                                        // Learn the wire's real ceiling before
+                                        // compacting (see
+                                        // `adopt_provider_context_ceiling`): this
+                                        // session's thresholds are otherwise derived
+                                        // from a window the provider does not honor,
+                                        // and the next turn rebuilds to the same
+                                        // oversized shape.
+                                        if let Some(ceiling) = ::api::context_overflow_ceiling_tokens(
+                                            &error.to_string(),
+                                        ) {
+                                            self.adopt_provider_context_ceiling(ceiling);
+                                        }
+                                        if let Some(event) = self
+                                            .recover_provider_context_overflow_streaming(
+                                                &render_tx, &id_gen,
+                                            )
+                                            .await
+                                        {
+                                            auto_compaction.get_or_insert(event);
+                                            continue 'outer;
+                                        }
+                                    }
+                                    OverflowStep::GiveUp => {}
                                 }
                             }
                             // Same escape as the async branch: a native sync-only
@@ -1840,6 +1880,9 @@ where
                                     continue 'outer;
                                 }
                             }
+                            // A refusal that ends the turn says which picture is the
+                            // newest and how big the rest of the request is.
+                            let error = self.explain_overflow(error);
                             self.clear_empty_retry_reminder(empty_retries);
                             self.record_turn_failed(iterations, &error);
                             if iterations == 1 {

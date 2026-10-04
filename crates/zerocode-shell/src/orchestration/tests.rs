@@ -24005,11 +24005,18 @@ fn a_program_nobody_saw_leave_holds_every_road_even_a_door_and_a_boot_without_it
 
 /// astra R3-1: every door in `doors` — `(door, the tab it opens)` — asked
 /// for the switch's conversation while this window cannot read its ledger:
-/// first the runtime's image does not answer (a directory stands where its
-/// store's journal goes, so the store refuses the connection every request
-/// opens — a refusal the actor lives through, unlike an authority moved
-/// under it, which ends it), then a boot of this window over the same data
-/// root stands down beside the durable store and leaves no runtime at all.
+/// first the runtime's image does not answer (another connection holds the
+/// store's write lock past the actor's busy budget, so the journal read
+/// every request opens is refused — a refusal the actor lives through,
+/// unlike an authority moved under it, which ends it), then a boot of this
+/// window over the same data root stands down beside the durable store and
+/// leaves no runtime at all.
+///
+/// The refusal used to come from a directory standing where the store's
+/// journal goes. Since t-37679 the actor keeps one connection to its store
+/// for its whole life, so that path is SQLite's live journal while the
+/// window runs — not a file a test may take away (and one Windows will not
+/// let go of). The held lock leaves nothing behind once it is let go.
 /// Nothing is built, started or typed, and each door says why once per
 /// look. Then the ledger reads again with the program still there: each
 /// door is held.
@@ -24038,16 +24045,19 @@ fn held_doors_open_nothing_while_the_ledger_cannot_be_read(
         }
     };
     let root = stood._window._root.path().to_path_buf();
-    let mut journal = root
+    let store = root
         .join(super::AUTHORITY_DIR)
-        .join(super::AUTHORITY_STORE_FILE)
-        .into_os_string();
-    journal.push("-wal");
-    let journal = PathBuf::from(journal);
+        .join(super::AUTHORITY_STORE_FILE);
     let unread = "원장을 읽지 못해";
-    std::fs::create_dir(&journal).expect("a directory where the store's journal goes");
+    let writer = rusqlite::Connection::open(&store).expect("a second writer on the store");
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("the store's write lock, held");
     asked("the runtime's image does not answer", unread);
-    std::fs::remove_dir(&journal).expect("the store's journal can be made again");
+    writer
+        .execute_batch("ROLLBACK")
+        .expect("the store's write lock let go");
+    drop(writer);
     std::fs::write(root.join(super::LEDGER_FILE), b"{ not a ledger")
         .expect("a ledger file the boot cannot read");
     let standing = super::runtime_cell()
@@ -25519,4 +25529,50 @@ fn mail_left_without_a_seat_by_a_restart_is_told_to_its_sender_once() {
     );
     super::tick(&host, &[], clock());
     assert_eq!(told(), 1, "the sender was told again on a later beat");
+}
+
+/// A second `delegate` under a name already being carried out waits for the first — the first writes
+/// the work, the worker and the letter in one plan and files its receipt only once the pane is open, so
+/// a second plan in that gap would write all three again. Another name does not wait for anybody.
+#[test]
+fn a_delegate_under_a_name_already_being_carried_out_waits_for_it_and_another_name_does_not() {
+    let key = |request: &str| format!("team-flight\u{1f}%1\u{1f}{request}");
+    let first = super::DelegateFlight::enter(key("same")).expect("the name was free");
+    drop(super::DelegateFlight::enter(key("other")).expect("another name is not held up"));
+    let waiter = std::thread::spawn(move || super::DelegateFlight::enter(key("same")).is_some());
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(
+        !waiter.is_finished(),
+        "the second carrying of the same name did not wait for the first"
+    );
+    drop(first);
+    assert!(
+        waiter.join().expect("the waiter ran"),
+        "the name was free again and the waiter was still refused"
+    );
+}
+
+/// The window opens a delegate's pane AFTER the plan wrote the worker and its first letter, so for
+/// a moment the ledger holds a live worker with mail waiting and the window has no seat for it. A
+/// beat that ran then would tell the coordinator the worker "restarted and the pane has not bound".
+/// A worker the carrying is still seating is skipped, and is not skipped a moment longer.
+#[test]
+fn a_worker_a_delegate_is_still_seating_is_not_reported_as_seatless() {
+    let flight = super::DelegateFlight::enter("team\u{1f}%0\u{1f}seating".to_string())
+        .expect("the name was free");
+    assert!(
+        !super::delegate_is_seating("w-seating"),
+        "nothing is seating yet"
+    );
+    flight.seating("w-seating");
+    assert!(super::delegate_is_seating("w-seating"));
+    assert!(
+        !super::delegate_is_seating("w-other"),
+        "only the worker named"
+    );
+    drop(flight);
+    assert!(
+        !super::delegate_is_seating("w-seating"),
+        "a worker is seated, or the carrying failed, once the flight ends"
+    );
 }

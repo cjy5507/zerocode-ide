@@ -36,6 +36,20 @@ const WAL_RETRY_DELAY: Duration = Duration::from_millis(10);
 /// does not wait.
 const DELETE_PENDING_RETRIES: u32 = if cfg!(windows) { 10 } else { 0 };
 const DELETE_PENDING_DELAY: Duration = Duration::from_millis(25);
+/// Owner read and write, nobody else: the mode every store file ends at.
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
+/// Every bit `chmod` sets — the permissions and the set-id and sticky bits —
+/// so a file is owner-only exactly when these bits are [`PRIVATE_FILE_MODE`].
+#[cfg(unix)]
+const CHMOD_BITS: u32 = 0o7777;
+/// The files SQLite keeps beside a WAL database, by the suffix it adds.
+const STORE_SIDECARS: [&str; 2] = ["-wal", "-shm"];
+/// Connections [`WorkflowStore::connection`] has opened in this process:
+/// the request-road measurement's count (t-37679), compiled into tests only.
+#[cfg(test)]
+pub(crate) static CONNECTIONS_OPENED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 /* Seven is also the FIRST version a production window ever writes: the store
  * ships with the actor cutover, so every store in the wild is either empty or
  * already seven. The versions below seven only ever existed inside this
@@ -242,6 +256,25 @@ pub const MAX_WORKFLOW_REQUIRED_TESTS: usize = 256;
 #[derive(Clone)]
 pub struct WorkflowStore {
     path: PathBuf,
+}
+
+/// One idle connection kept open so this process stays attached to the
+/// store's WAL index for as long as its owner lives (t-37679).
+///
+/// SQLite treats a process with no open connection as gone. The next
+/// connection it opens is the first one again: it truncates `-shm` and
+/// rebuilds the index from the WAL. The last one to close checkpoints the
+/// WAL into the database, then deletes the WAL and `-shm`. An owner that
+/// opens connections per request and closes them all before the next pays
+/// that whole cycle on every request, and between requests leaves the store
+/// looking unattached to every other process.
+///
+/// The hold reads once — that is what maps `-shm` and takes SQLite's
+/// dead-man-switch lock — and never opens a transaction after that, so
+/// checkpoints run past it and the WAL stays bounded by SQLite's own
+/// auto-checkpoint.
+pub(crate) struct StoreHold {
+    _connection: Connection,
 }
 
 impl std::fmt::Debug for WorkflowStore {
@@ -1226,7 +1259,21 @@ impl WorkflowStore {
         self.connection()
     }
 
+    /// Keep this process attached to the store until the hold is dropped
+    /// ([`StoreHold`]).
+    pub(crate) fn hold(&self) -> Result<StoreHold, WorkflowStoreError> {
+        let connection = self.connection()?;
+        connection
+            .query_row("PRAGMA user_version", [], |_| Ok(()))
+            .map_err(|_| WorkflowStoreError::Database)?;
+        Ok(StoreHold {
+            _connection: connection,
+        })
+    }
+
     pub(crate) fn connection(&self) -> Result<Connection, WorkflowStoreError> {
+        #[cfg(test)]
+        CONNECTIONS_OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // The Unix parent gate excludes other principals. A hostile same-UID
         // process (and platforms without equivalent ACL validation) remains
         // outside this foundation's boundary until a custom VFS owns all opens.
@@ -1504,10 +1551,10 @@ pub struct TrustedReceiptRow {
 ///   answer "this window has no authority" by inventing one.
 /// - **The migration is not run.** [`WorkflowStore::open`] may write tables
 ///   and a version; a read refuses an unexpected version instead.
-/// - **The file is not chmod-ed.** The writer's preflight opens for writing
-///   and tightens the mode, which is right for a store about to be written
-///   and wrong for one only being read. The symlink and regular-file refusals
-///   are kept, on the store and on both WAL sidecars.
+/// - **The file is not chmod-ed.** The writer's preflight tightens the
+///   mode, which is right for a store about to be written and wrong for one
+///   only being read. The symlink and regular-file refusals are kept, on the
+///   store and on both WAL sidecars.
 ///
 /// The flags are `READ_WRITE` without `CREATE` rather than `READ_ONLY`, and
 /// `PRAGMA query_only` is what makes it a read: a WAL database opened
@@ -1547,23 +1594,9 @@ impl ReadOnlyWorkflows {
          * reached through one (`/var` → `/private/var`) — so an unresolved
          * path turns every store under it into "cannot open". */
         let path = fs::canonicalize(path).map_err(|_| WorkflowStoreError::UnsafeStorePath)?;
-        for suffix in ["-wal", "-shm"] {
-            let mut sidecar = path.as_os_str().to_os_string();
-            sidecar.push(suffix);
-            let sidecar = PathBuf::from(sidecar);
-            // Read as given, never opened: a reader changes nothing here.
-            sidecar_settles(
-                || match fs::symlink_metadata(&sidecar) {
-                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                        Err(not_a_regular_file())
-                    }
-                    Ok(_) => Ok(()),
-                    Err(error) => Err(error),
-                },
-                DELETE_PENDING_RETRIES,
-                DELETE_PENDING_DELAY,
-            )?;
-        }
+        // Read as given, never opened and never tightened: a reader changes
+        // nothing here.
+        check_sidecars(&path, |sidecar| regular_file(sidecar).map(drop))?;
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW;
@@ -1761,13 +1794,16 @@ fn prepare_store_path(path: &Path) -> Result<(), WorkflowStoreError> {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt as _;
-                options.mode(0o600);
+                options.mode(PRIVATE_FILE_MODE);
             }
             match options.open(path) {
+                /* Closed at once, and that close drops no lock: no SQLite
+                 * connection can have locked a file this call has only just
+                 * made (see [`private_file`] for why a close can). */
                 Ok(_) => {}
                 // Another opener may have created it after our metadata
-                // read. The descriptor-based check below still refuses a
-                // symlink or non-file; existence alone never grants trust.
+                // read. The check below still refuses a symlink or non-file;
+                // existence alone never grants trust.
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(_) => return Err(WorkflowStoreError::UnsafeStorePath),
             }
@@ -1793,28 +1829,54 @@ fn private_parent(_metadata: &fs::Metadata) -> Result<(), WorkflowStoreError> {
     Ok(())
 }
 
-#[cfg(unix)]
+/// Refuse anything but a regular file at `path`, and leave it owner-only.
+///
+/// Asked of the PATH, never of an opened descriptor (t-37679). SQLite keeps
+/// its locks as POSIX advisory locks — on the database for each live
+/// connection, and in `-shm` for the WAL index (reader marks, the writer,
+/// the dead-man switch) — and closing ANY descriptor of a file drops every
+/// such lock the process holds on it. This runs before every connection,
+/// while other connections of the same process are reading: opening the
+/// file here to look at it released their locks, the next process to open
+/// the store believed nobody was attached and truncated `-shm` to rebuild
+/// it, and the window's mapping of it pointed past the end of the file
+/// (SIGBUS, 2026-10-04).
+///
+/// `lstat` refuses a symlink, a directory, a FIFO or any other non-file
+/// without opening it. The mode changes only when it is not owner-only
+/// already — SQLite creates its sidecars with the database's own mode, so
+/// on the steady road it never does — and by path: the private parent
+/// keeps every other principal from swapping the entry between the look
+/// and the change, the boundary [`WorkflowStore::connection`] names.
 fn private_file(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(not_a_regular_file());
-    }
-    file.set_permissions(fs::Permissions::from_mode(0o600))
+    let metadata = regular_file(path)?;
+    owner_only(path, &metadata)
 }
 
-#[cfg(not(unix))]
-fn private_file(path: &Path) -> std::io::Result<()> {
+/// The `lstat` of `path`, refusing a symlink, a directory or any other
+/// non-file. Never opens it.
+fn regular_file(path: &Path) -> std::io::Result<fs::Metadata> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(not_a_regular_file());
     }
+    Ok(metadata)
+}
+
+#[cfg(unix)]
+fn owner_only(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if metadata.permissions().mode() & CHMOD_BITS == PRIVATE_FILE_MODE {
+        return Ok(());
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+}
+
+/// Windows has no POSIX mode to tighten: the check there is the kind alone,
+/// as it always was.
+#[cfg(not(unix))]
+fn owner_only(_path: &Path, _metadata: &fs::Metadata) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -1833,12 +1895,21 @@ fn tighten_store_files(path: &Path) -> Result<(), WorkflowStoreError> {
 }
 
 fn preflight_store_sidecars(path: &Path) -> Result<(), WorkflowStoreError> {
-    for suffix in ["-wal", "-shm"] {
+    check_sidecars(path, private_file)
+}
+
+/// `check` on each of the store's sidecars ([`STORE_SIDECARS`]), each
+/// waited on by [`sidecar_settles`].
+fn check_sidecars(
+    path: &Path,
+    check: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<(), WorkflowStoreError> {
+    for suffix in STORE_SIDECARS {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
         let sidecar = PathBuf::from(sidecar);
         sidecar_settles(
-            || private_file(&sidecar),
+            || check(&sidecar),
             DELETE_PENDING_RETRIES,
             DELETE_PENDING_DELAY,
         )?;
@@ -2495,6 +2566,211 @@ mod tests {
                 "the stored text of `{name}` does not normalize — an unbalanced \
                  quote reached sqlite_schema"
             );
+        }
+    }
+
+    /// t-37679: the window died of SIGBUS four seconds after another
+    /// process read its ledger with `sqlite3`.
+    ///
+    /// SQLite keeps its locks as POSIX advisory locks, and closing ANY
+    /// descriptor of a file drops every such lock the process holds on it.
+    /// A store that opened a file SQLite holds and closed it again released
+    /// the locks of every live connection of the window; another process
+    /// then saw nobody attached, truncated `-shm` to rebuild it, and the
+    /// window's mapping of it pointed past the end of the file.
+    #[cfg(unix)]
+    mod posix_locks {
+        use super::*;
+
+        /// The byte of `-shm` every connection holds SHARED while it has
+        /// the WAL index mapped (`UNIX_SHM_DMS` in SQLite's `os_unix.c`:
+        /// past 22 header words and 8 lock bytes, `(22 + 8) * 4 + 8`). A
+        /// process that can take it EXCLUSIVE believes it is the first to
+        /// attach, and truncates the file.
+        const SHM_DEAD_MAN_SWITCH: i64 = (22 + 8) * 4 + 8;
+        /// SQLite's SHARED range on the main file (`SHARED_FIRST`,
+        /// `SHARED_SIZE` in `os.h`): two bytes past the pending byte at
+        /// 1 GiB, 510 long. A WAL connection holds it for its whole life.
+        const DATABASE_SHARED_FIRST: i64 = 0x4000_0000 + 2;
+        const DATABASE_SHARED_SIZE: i64 = 510;
+
+        /// A connection standing in a read transaction, which is when it
+        /// holds the most: SHARED on the database, the dead-man switch and
+        /// a reader mark in `-shm`.
+        fn a_reader_mid_transaction(store: &WorkflowStore) -> Connection {
+            let reader = store.connection().expect("a reader");
+            reader
+                .execute_batch("BEGIN; SELECT COUNT(*) FROM workflows;")
+                .expect("a read transaction");
+            reader
+        }
+
+        /// Whether ANOTHER process could take an exclusive POSIX lock on
+        /// `len` bytes of `path` from `start` — the question SQLite's own
+        /// first opener asks. A process never conflicts with its own POSIX
+        /// locks, so the asking happens in a child.
+        fn another_process_could_lock(path: &Path, start: i64, len: i64) -> bool {
+            use std::os::unix::ffi::OsStrExt as _;
+            use std::os::unix::process::ExitStatusExt as _;
+
+            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a C path");
+            // SAFETY: every field of `flock` is an integer; zero is valid.
+            let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+            // F_WRLCK is a c_short on Apple and a c_int on Linux.
+            #[allow(clippy::unnecessary_cast)]
+            let exclusive = libc::F_WRLCK as libc::c_short;
+            lock.l_type = exclusive;
+            lock.l_whence = libc::SEEK_SET as libc::c_short;
+            lock.l_start = start;
+            lock.l_len = len;
+            // SAFETY: the child touches only memory prepared before the
+            // fork and calls only async-signal-safe functions (open, fcntl,
+            // _exit), so a lock another test thread held at the fork can
+            // never stall it.
+            let child = unsafe { libc::fork() };
+            if child == 0 {
+                // SAFETY: as above.
+                unsafe {
+                    let descriptor = libc::open(path.as_ptr(), libc::O_RDWR);
+                    let took = descriptor >= 0
+                        && libc::fcntl(descriptor, libc::F_SETLK, std::ptr::from_ref(&lock)) == 0;
+                    libc::_exit(if took { 0 } else { 1 });
+                }
+            }
+            assert!(child > 0, "fork: {}", std::io::Error::last_os_error());
+            let mut status = 0;
+            // SAFETY: waits on the child forked above; writes only `status`.
+            let waited = unsafe { libc::waitpid(child, &mut status, 0) };
+            assert_eq!(
+                waited,
+                child,
+                "waitpid: {}",
+                std::io::Error::last_os_error()
+            );
+            std::process::ExitStatus::from_raw(status).code() == Some(0)
+        }
+
+        /// The road that ran before EVERY request: the runtime actor held
+        /// one connection and opened another for the journal.
+        #[test]
+        fn another_connection_leaves_a_live_readers_wal_index_locks_standing() {
+            let root = a_private_root();
+            let path = root.path().join("workflow.sqlite");
+            let store = WorkflowStore::open(&path).expect("a store");
+            let reader = a_reader_mid_transaction(&store);
+
+            let _second = store.connection().expect("a second connection");
+
+            assert!(
+                !another_process_could_lock(
+                    &root.path().join("workflow.sqlite-shm"),
+                    SHM_DEAD_MAN_SWITCH,
+                    1
+                ),
+                "opening a second connection released the reader's hold on -shm: \
+                 another process would truncate it under the reader's mapping"
+            );
+            reader.execute_batch("COMMIT").expect("the read ends");
+        }
+
+        /// The look that replaced the open keeps both of its answers: a
+        /// loosened store file ends owner-only again, and a sidecar that is
+        /// not a regular file is refused.
+        #[test]
+        fn the_look_still_tightens_a_loosened_file_and_refuses_a_non_file() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let root = a_private_root();
+            let path = root.path().join("workflow.sqlite");
+            let store = WorkflowStore::open(&path).expect("a store");
+            let held = store.connection().expect("a connection");
+            let _: i64 = held
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("the sidecars exist");
+            let loosened = fs::Permissions::from_mode(0o644);
+            for file in [
+                "workflow.sqlite",
+                "workflow.sqlite-wal",
+                "workflow.sqlite-shm",
+            ] {
+                fs::set_permissions(root.path().join(file), loosened.clone()).expect("loosen");
+            }
+
+            drop(WorkflowStore::open(&path).expect("the store opens again"));
+            for file in [
+                "workflow.sqlite",
+                "workflow.sqlite-wal",
+                "workflow.sqlite-shm",
+            ] {
+                let mode = fs::metadata(root.path().join(file))
+                    .expect("mode")
+                    .permissions();
+                assert_eq!(mode.mode() & 0o7777, 0o600, "{file} was left loosened");
+            }
+            drop(held);
+
+            let other = root.path().join("other.sqlite");
+            drop(WorkflowStore::open(&other).expect("a second store"));
+            let sidecar = root.path().join("other.sqlite-wal");
+            let _ = fs::remove_file(&sidecar);
+            fs::create_dir(&sidecar).expect("a directory where -wal goes");
+            assert!(
+                matches!(
+                    WorkflowStore::open(&other),
+                    Err(WorkflowStoreError::UnsafeStorePath)
+                ),
+                "a sidecar that is a directory was not refused"
+            );
+        }
+
+        /// The look still runs before every connection while a hold keeps
+        /// the process attached: a sidecar that stops being a regular file
+        /// is refused on the next connection, held store or not. (Under a
+        /// hold the sidecars are SQLite's live files; the test unlinks
+        /// `-shm`, whose mapping this process keeps, to make room.)
+        #[test]
+        fn a_held_store_still_refuses_a_sidecar_that_is_not_a_file() {
+            let root = a_private_root();
+            let path = root.path().join("workflow.sqlite");
+            let store = WorkflowStore::open(&path).expect("a store");
+            let _hold = store.hold().expect("the store held");
+            let shm = root.path().join("workflow.sqlite-shm");
+            fs::remove_file(&shm).expect("-shm unlinked under its mapping");
+            fs::create_dir(&shm).expect("a directory where -shm goes");
+
+            assert!(
+                matches!(store.connection(), Err(WorkflowStoreError::UnsafeStorePath)),
+                "a held store opened a connection beside a directory at -shm"
+            );
+            fs::remove_dir(&shm).expect("the directory goes");
+            store.connection().expect("the store answers again");
+        }
+
+        /// A second opener of the same store in the same process — the
+        /// review store, a reopen after a refusal — checks and tightens the
+        /// main file as well.
+        #[test]
+        fn a_second_opener_leaves_a_live_readers_database_lock_standing() {
+            let root = a_private_root();
+            let path = root.path().join("workflow.sqlite");
+            let store = WorkflowStore::open(&path).expect("a store");
+            let reader = a_reader_mid_transaction(&store);
+
+            let _again = WorkflowStore::open(&path).expect("a second opener");
+
+            assert!(
+                !another_process_could_lock(&path, DATABASE_SHARED_FIRST, DATABASE_SHARED_SIZE),
+                "a second opener released the reader's SHARED lock on the database"
+            );
+            assert!(
+                !another_process_could_lock(
+                    &root.path().join("workflow.sqlite-shm"),
+                    SHM_DEAD_MAN_SWITCH,
+                    1
+                ),
+                "a second opener released the reader's hold on -shm"
+            );
+            reader.execute_batch("COMMIT").expect("the read ends");
         }
     }
 }
