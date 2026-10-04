@@ -45,6 +45,9 @@ const PICTURE_FILE_BYTES: usize = 900_000;
 /// The repo's own estimate of what one picture costs in tokens, whatever its bytes.
 const PICTURE_TOKENS: u64 = 1_600;
 
+/// How long the picture-free session of the common-path measurement is.
+const TEXT_ONLY_MESSAGES: usize = 2_000;
+
 fn png_head() -> Vec<u8> {
     let mut out = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgb8(image::RgbImage::new(1280, 800))
@@ -326,6 +329,35 @@ fn measure_shedding_time() {
     println!("  the decision alone (plan_picture_shed):        {plan_median:>8.3} / {plan_max:>8.3}");
     println!("  lowering without the budget (every picture):   {before_median:>8.3} / {before_max:>8.3}");
     println!("  lowering with the budget (older ones are text): {after_median:>8.3} / {after_max:>8.3}");
+
+    // The common path: a session with no picture at all, on a provider that declares a
+    // ceiling. The budget then only walks the blocks.
+    let text = text_history(TEXT_ONLY_MESSAGES);
+    let (walk_median, walk_max) = time(runs, || plan_picture_shed(&text, target));
+    let (plain_median, plain_max) =
+        time(runs, || convert_messages_for(&text, WireTarget::for_model("some-unlisted-local-model")));
+    let (with_median, with_max) = time(runs, || convert_messages_for(&text, target));
+    println!("\nthe same on a session of {TEXT_ONLY_MESSAGES} text messages and no picture, {runs} runs, ms (median / max):");
+    println!("  the decision alone (plan_picture_shed):        {walk_median:>8.3} / {walk_max:>8.3}");
+    println!("  lowering without the budget:                    {plain_median:>8.3} / {plain_max:>8.3}");
+    println!("  lowering with the budget:                       {with_median:>8.3} / {with_max:>8.3}");
+}
+
+/// A session of `messages` messages that holds no picture: the common shape.
+fn text_history(messages: usize) -> Vec<ConversationMessage> {
+    (0..messages)
+        .map(|index| {
+            if index % 2 == 0 {
+                ConversationMessage::user_text(format!(
+                    "question {index}: what does the sync option on the settings page do?"
+                ))
+            } else {
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: format!("answer {index}: it keeps the settings of every device the same."),
+                }])
+            }
+        })
+        .collect()
 }
 
 /// A frame of smooth colour with grain in the low bits.

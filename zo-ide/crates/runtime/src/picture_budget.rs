@@ -138,9 +138,7 @@ pub(crate) fn shed_count(
 ) -> usize {
     let by_budget = budget.map_or(0, |budget| shed_for_budget(sizes, other, budget));
     let by_cap = cap.map_or(0, |cap| sizes.len().saturating_sub(cap));
-    // RED STAND-IN: no picture is ever left out.
-    let _ = by_budget.max(by_cap);
-    0
+    by_budget.max(by_cap)
 }
 
 fn shed_for_budget(sizes: &[u64], other: u64, budget: PictureBudget) -> usize {
@@ -150,9 +148,11 @@ fn shed_for_budget(sizes: &[u64], other: u64, budget: PictureBudget) -> usize {
         return 0;
     }
     let sheddable = sizes.len().saturating_sub(KEEP_NEWEST_PICTURES);
+    // A step is never zero: a hand-built budget with one would divide by it.
+    let step = budget.step.max(1);
     let mut shed = 0;
     let mut left_out = 0_u64;
-    let mut reach = need.div_ceil(budget.step).saturating_mul(budget.step);
+    let mut reach = need.div_ceil(step).saturating_mul(step);
     loop {
         while shed < sheddable && left_out.saturating_add(sizes[shed]) <= reach {
             left_out += sizes[shed];
@@ -165,8 +165,8 @@ fn shed_for_budget(sizes: &[u64], other: u64, budget: PictureBudget) -> usize {
         // the least that holds it.
         reach = left_out
             .saturating_add(sizes[shed])
-            .div_ceil(budget.step)
-            .saturating_mul(budget.step);
+            .div_ceil(step)
+            .saturating_mul(step);
     }
 }
 
@@ -359,8 +359,7 @@ fn format_size(bytes: u64) -> String {
 /// rest of the request weighs — so the person can tell whether a picture or the
 /// text is the wall. `None` when the history holds no picture.
 pub(crate) fn newest_picture_note(messages: &[ConversationMessage]) -> Option<String> {
-    // RED STAND-IN: the turn ends on the provider's words alone.
-    let (message_index, media_type, data_b64, origin) = newest_picture(messages).filter(|_| false)?;
+    let (message_index, media_type, data_b64, origin) = newest_picture(messages)?;
     let Measured { sizes, other } = measure(messages);
     let pixels = crate::image_guard::peek_dimensions(data_b64)
         .map_or_else(String::new, |(width, height)| format!(" {width}x{height}"));
@@ -596,7 +595,9 @@ mod tests {
 
     #[test]
     fn the_last_word_names_the_newest_picture_and_what_the_rest_weighs() {
-        let note = newest_picture_note(&looks(3)).expect("the history holds pictures");
+        let note = newest_picture_note(&looks(3));
+        assert!(note.is_some(), "the history holds pictures");
+        let note = note.expect("checked above");
         assert!(note.starts_with("Pictures cannot be cut further"), "{note}");
         assert!(note.contains("the Computer result at message 4"), "the newest of three looks: {note}");
         assert!(note.contains("image/png 1280x800"), "{note}");

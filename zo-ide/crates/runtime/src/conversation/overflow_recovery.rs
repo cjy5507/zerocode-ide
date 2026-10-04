@@ -99,8 +99,7 @@ impl OverflowRecovery {
 
     /// The first rung that keeps fewer pictures than the refused request carried.
     fn next_picture_cap(carried: usize) -> Option<usize> {
-        // RED STAND-IN: no rung is ever taken, so a refusal compacts as it always did.
-        PICTURE_CAP_RUNGS.into_iter().find(|&keep| keep < carried).filter(|_| false)
+        PICTURE_CAP_RUNGS.into_iter().find(|&keep| keep < carried)
     }
 }
 

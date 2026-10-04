@@ -299,7 +299,7 @@ fn a_turn_whose_kept_tail_of_screenshots_passes_the_ceiling_goes_on() {
         // The endpoint takes anything: only the client's preflight can refuse.
         let (base_url, seen) = a_body_gate(usize::MAX).await;
         let before = history(30, MIB * 3 / 2);
-        let outcome = turn_on(base_url, before.clone()).await;
+        let outcome = Box::pin(turn_on(base_url, before.clone())).await;
 
         assert!(
             outcome.turn.is_ok(),
@@ -340,7 +340,7 @@ fn a_413_from_the_wire_is_answered_by_leaving_pictures_out_and_the_turn_goes_on(
         // room to spare for the system prompt and the tool definitions.
         let (base_url, seen) = a_body_gate(MIB * 5 / 2).await;
         let before = history(8, 1_000_000);
-        let outcome = turn_on(base_url, before.clone()).await;
+        let outcome = Box::pin(turn_on(base_url, before.clone())).await;
 
         assert!(
             outcome.turn.is_ok(),
@@ -380,7 +380,7 @@ fn when_even_the_newest_picture_is_refused_the_message_names_it() {
     tokio_runtime().block_on(async {
         // Below one picture.
         let (base_url, seen) = a_body_gate(100_000).await;
-        let outcome = turn_on(base_url, history(8, 1_000_000)).await;
+        let outcome = Box::pin(turn_on(base_url, history(8, 1_000_000))).await;
         assert!(outcome.turn.is_err(), "no request can fit under 100 KB: {:?}", outcome.turn);
         let error = outcome.turn.expect_err("checked above");
         assert!(error.contains("413"), "the provider's own words stay: {error}");

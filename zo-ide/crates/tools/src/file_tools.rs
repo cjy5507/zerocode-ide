@@ -713,36 +713,18 @@ pub(crate) fn stage_image(
             "read_image: unsupported image format (expected PNG, JPEG, GIF, or WEBP)".to_owned(),
         )
     })?;
-    // A heavy screenshot is lightened BEFORE the guard: the guard then sees the
-    // bytes that will be stored, and a JPEG of the same pixels has the same
-    // dimensions, so nothing the guard decides about them changes.
-    let lightened = (intake == ImageIntake::Screenshot
-        && !runtime::image_guard::screenshots_stay_lossless())
-    .then(|| runtime::image_guard::lighten_screenshot(&bytes))
-    .flatten();
-    let (bytes, media_type) = match lightened {
-        Some(jpeg) => (jpeg, "image/jpeg"),
-        None => (bytes, media_type),
-    };
-
     // Dimension-guard on ingest so an oversized image (e.g. a full-page browser
     // screenshot taller than 8000px) never enters conversation history: baked
     // into a stored tool_result it would 400 *every* subsequent turn and wedge
     // the session (Anthropic rejects any dimension > 8000px). The wire-lowering
     // guard in `convert_messages` is the backstop for images already stored and
     // for the paste / MCP staging paths that bypass this tool.
-    let (staged_media_type, encoded, staged_bytes, downscaled) = match guard_image_bytes(&bytes) {
-        ImageGuardOutcome::Keep => {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            (media_type.to_owned(), encoded, bytes.len(), false)
-        }
+    let (guarded_media_type, guarded, downscaled) = match guard_image_bytes(&bytes) {
+        ImageGuardOutcome::Keep => (media_type.to_owned(), bytes, false),
         ImageGuardOutcome::Rescaled {
             media_type,
             bytes: rescaled,
-        } => {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&rescaled);
-            (media_type, encoded, rescaled.len(), true)
-        }
+        } => (media_type, rescaled, true),
         ImageGuardOutcome::DropOversized { width, height } => {
             // Either cap can land here — dimensions or encoded size — so the
             // message names both rather than asserting the one that did not fire.
@@ -757,6 +739,21 @@ pub(crate) fn stage_image(
             )));
         }
     };
+    // A heavy screenshot is lightened AFTER the guard, so the frame it kept — or
+    // the PNG it rescaled — is the one re-encoded: lightened first, a frame the
+    // guard then had to shrink would go PNG -> JPEG -> PNG and keep none of the
+    // saving. The pixels' dimensions do not change, so nothing the guard decided
+    // about them changes either.
+    let lightened = (intake == ImageIntake::Screenshot
+        && !runtime::image_guard::screenshots_stay_lossless())
+    .then(|| runtime::image_guard::lighten_screenshot(&guarded))
+    .flatten();
+    let (staged_media_type, staged) = match lightened {
+        Some(jpeg) => ("image/jpeg".to_owned(), jpeg),
+        None => (guarded_media_type, guarded),
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&staged);
+    let staged_bytes = staged.len();
     ctx.image_sink
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

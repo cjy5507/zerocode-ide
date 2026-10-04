@@ -554,8 +554,7 @@ pub fn lighten_screenshot(png: &[u8]) -> Option<Vec<u8>> {
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, SCREENSHOT_JPEG_QUALITY);
     decoded.to_rgb8().write_with_encoder(encoder).ok()?;
     let jpeg = out.into_inner();
-    // RED STAND-IN: a screenshot is never re-encoded.
-    (jpeg.len() * 100 <= png.len() * SCREENSHOT_LOSSY_MAX_PERCENT_OF_PNG).then_some(jpeg).filter(|_| false)
+    (jpeg.len() * 100 <= png.len() * SCREENSHOT_LOSSY_MAX_PERCENT_OF_PNG).then_some(jpeg)
 }
 
 #[cfg(test)]
@@ -909,7 +908,9 @@ mod screenshot_tests {
             "the fixture must be a heavy frame: {} bytes",
             png.len()
         );
-        let jpeg = lighten_screenshot(&png).expect("a heavy opaque PNG is lightened");
+        let lightened = lighten_screenshot(&png);
+        assert!(lightened.is_some(), "a heavy opaque PNG is lightened");
+        let jpeg = lightened.expect("checked above");
         assert!(
             jpeg.len() * 2 <= png.len(),
             "at least half the bytes go: {} -> {}",
@@ -930,7 +931,9 @@ mod screenshot_tests {
         let rgba = DynamicImage::ImageRgb8(photo_like(1280, 800)).to_rgba8();
         let png = encode_png(&DynamicImage::ImageRgba8(rgba));
         assert!(png.len() >= SCREENSHOT_LOSSY_MIN_BYTES);
-        let jpeg = lighten_screenshot(&png).expect("opaque RGBA is still a screenshot");
+        let lightened = lighten_screenshot(&png);
+        assert!(lightened.is_some(), "opaque RGBA is still a screenshot");
+        let jpeg = lightened.expect("checked above");
         assert_eq!(read_dimensions(&jpeg), Some((1280, 800)));
     }
 
