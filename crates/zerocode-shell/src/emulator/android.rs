@@ -1939,9 +1939,7 @@ fn boot_android_device(
 }
 
 fn capture_path(stream: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join("zerocode-emulator")
-        .join(format!("{stream}.png"))
+    super::scratch_directory().join(format!("{stream}.png"))
 }
 
 fn pump_android_frames(

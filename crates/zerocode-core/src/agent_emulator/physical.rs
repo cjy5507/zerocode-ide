@@ -64,6 +64,34 @@ pub const ANDROID_EMULATOR_SERIAL_PREFIX: &str = "emulator-";
 /// watches, TVs and headsets, which are not the person's phone.
 const DEVICECTL_PHONE_PLATFORMS: [&str; 2] = ["iOS", "iPadOS"];
 
+/// Where a device's facts sit in `devicectl list devices --json-output` (JSON
+/// pointers). Its own table is the one place that says what each means.
+const DEVICECTL_DEVICES_AT: &str = "/result/devices";
+const DEVICECTL_PLATFORM_AT: &str = "/hardwareProperties/platform";
+const DEVICECTL_MODEL_AT: &str = "/hardwareProperties/marketingName";
+const DEVICECTL_NAME_AT: &str = "/deviceProperties/name";
+const DEVICECTL_TUNNEL_AT: &str = "/connectionProperties/tunnelState";
+
+/// `devicectl`'s words for the tunnel to a device.
+const TUNNEL_CONNECTED: &str = "connected";
+const TUNNEL_DISCONNECTED: &str = "disconnected";
+const TUNNEL_UNAVAILABLE: &str = "unavailable";
+
+/// `adb`'s words for the state of a listed device, as `adb devices -l` prints
+/// them. Only `device` is a device that can be used.
+const ADB_STATE_UP: &str = "device";
+const ADB_STATE_UNAUTHORIZED: &str = "unauthorized";
+const ADB_STATE_OFFLINE: &str = "offline";
+
+/// What a line of `adb devices -l` that is not a device starts with: the header
+/// of the list, and the notices the `adb` daemon writes about itself
+/// (`* daemon started successfully`).
+const ADB_HEADER_PREFIX: &str = "List of devices";
+const ADB_NOTICE_PREFIX: char = '*';
+
+/// The `key:value` column of an `adb devices -l` line that carries the model.
+const ADB_MODEL_PREFIX: &str = "model:";
+
 /// How the Mac stands with one real device, in plain words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -150,7 +178,7 @@ pub fn parse_devicectl(json: &str) -> Result<Vec<PhysicalDevice>, String> {
     let document: Value = serde_json::from_str(json)
         .map_err(|error| format!("devicectl wrote an answer this window cannot read: {error}"))?;
     let devices = document
-        .pointer("/result/devices")
+        .pointer(DEVICECTL_DEVICES_AT)
         .and_then(Value::as_array)
         .ok_or("devicectl's answer has no device list")?;
     Ok(devices.iter().filter_map(ios_row).collect())
@@ -163,13 +191,13 @@ fn ios_row(device: &Value) -> Option<PhysicalDevice> {
             .and_then(Value::as_str)
             .map(str::to_string)
     };
-    let platform = text("/hardwareProperties/platform")?;
+    let platform = text(DEVICECTL_PLATFORM_AT)?;
     if !DEVICECTL_PHONE_PLATFORMS.contains(&platform.as_str()) {
         return None;
     }
-    let model = text("/hardwareProperties/marketingName");
-    let name = text("/deviceProperties/name").or_else(|| model.clone())?;
-    let state = tunnel_state(text("/connectionProperties/tunnelState").as_deref());
+    let model = text(DEVICECTL_MODEL_AT);
+    let name = text(DEVICECTL_NAME_AT).or_else(|| model.clone())?;
+    let state = tunnel_state(text(DEVICECTL_TUNNEL_AT).as_deref());
     Some(PhysicalDevice::new(
         EmulatorPlatform::Ios,
         &name,
@@ -183,8 +211,8 @@ fn ios_row(device: &Value) -> Option<PhysicalDevice> {
 /// has not opened a tunnel yet. Only `unavailable` is a phone it cannot reach.
 fn tunnel_state(word: Option<&str>) -> LinkState {
     match word {
-        Some("connected" | "disconnected") => LinkState::Connected,
-        Some("unavailable") => LinkState::Unavailable,
+        Some(TUNNEL_CONNECTED | TUNNEL_DISCONNECTED) => LinkState::Connected,
+        Some(TUNNEL_UNAVAILABLE) => LinkState::Unavailable,
         _ => LinkState::Unknown,
     }
 }
@@ -209,7 +237,7 @@ impl AdbRow {
     /// Whether `adb` lists it as up: the only state a device can be used in.
     #[must_use]
     pub fn is_up(&self) -> bool {
-        self.state == "device"
+        self.state == ADB_STATE_UP
     }
 }
 
@@ -221,14 +249,16 @@ pub fn parse_adb_rows(listing: &str) -> Vec<AdbRow> {
         .lines()
         .map(str::trim)
         .filter(|line| {
-            !line.is_empty() && !line.starts_with('*') && !line.starts_with("List of devices")
+            !line.is_empty()
+                && !line.starts_with(ADB_NOTICE_PREFIX)
+                && !line.starts_with(ADB_HEADER_PREFIX)
         })
         .filter_map(|line| {
             let mut columns = line.split_whitespace();
             let serial = columns.next()?.to_string();
             let state = columns.next()?.to_string();
             let model = columns
-                .find_map(|column| column.strip_prefix("model:"))
+                .find_map(|column| column.strip_prefix(ADB_MODEL_PREFIX))
                 .map(|model| model.replace('_', " "));
             Some(AdbRow {
                 serial,
@@ -248,9 +278,9 @@ pub fn parse_adb_physical(listing: &str) -> Vec<PhysicalDevice> {
         .filter(|row| !row.is_emulator())
         .map(|row| {
             let state = match row.state.as_str() {
-                "device" => LinkState::Connected,
-                "unauthorized" => LinkState::Unauthorized,
-                "offline" => LinkState::Offline,
+                ADB_STATE_UP => LinkState::Connected,
+                ADB_STATE_UNAUTHORIZED => LinkState::Unauthorized,
+                ADB_STATE_OFFLINE => LinkState::Offline,
                 _ => LinkState::Unknown,
             };
             let name = row.model.clone().unwrap_or_else(|| UNNAMED_ANDROID.into());

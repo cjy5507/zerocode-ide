@@ -194,7 +194,7 @@ use kept::{Kept, Reading};
 #[cfg(any(target_os = "macos", test))]
 fn ios_devices_with(mut command: std::process::Command, cap: Duration) -> Reading {
     const FAILED: &str = "Xcode's devicectl did not answer";
-    let directory = std::env::temp_dir().join("zerocode-emulator");
+    let directory = super::scratch_directory();
     std::fs::create_dir_all(&directory).map_err(|error| format!("{FAILED}: {error}"))?;
     let file = directory.join(format!("devicectl-{}.json", uuid::Uuid::new_v4()));
     command

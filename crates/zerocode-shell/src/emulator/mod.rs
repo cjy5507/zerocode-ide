@@ -50,6 +50,17 @@ use session::{Loan, SessionControl, StartVerdict, loans, registry};
 pub(crate) use session::{LoanEnd, LoanSummary};
 
 const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The folder, under the system's temporary one, where the emulator roads leave
+/// the files a tool is asked to write: a frame, a screenshot, the answer of
+/// `devicectl`. Named once, because a second spelling is a second folder to
+/// clean.
+const SCRATCH_DIRECTORY: &str = "zerocode-emulator";
+
+/// The emulator roads' scratch folder (it may not exist yet).
+fn scratch_directory() -> std::path::PathBuf {
+    std::env::temp_dir().join(SCRATCH_DIRECTORY)
+}
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const BINARY_SEQUENCE_BYTES: usize = size_of::<u64>();
 

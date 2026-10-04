@@ -444,7 +444,7 @@ pub(crate) async fn mobile_emulators_direct() -> Result<Vec<SimulatorDevice>, St
 /// by the built-in pane, requested as PNG so the agent receives exact pixels.
 pub(crate) async fn ios_screenshot_direct(udid: String) -> Result<Vec<u8>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let directory = std::env::temp_dir().join("zerocode-emulator");
+        let directory = super::scratch_directory();
         std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
         let frame = directory.join(format!("agent-{}.png", uuid::Uuid::new_v4()));
         let output = simctl_command()
@@ -485,9 +485,7 @@ fn resolve_long_edge(asked: Option<u32>) -> u32 {
 }
 
 fn capture_path(stream: &str) -> PathBuf {
-    std::env::temp_dir()
-        .join("zerocode-emulator")
-        .join(format!("{stream}.jpg"))
+    super::scratch_directory().join(format!("{stream}.jpg"))
 }
 
 /// One still picture through CoreSimulator, downscaled for the pane.
