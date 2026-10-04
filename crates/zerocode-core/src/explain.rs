@@ -30,12 +30,13 @@
 //! own pane is theirs (`headline`, from the window's five catalogs).
 
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::artifact::truncate_chars;
-use crate::artifact_publish::ARTIFACT_TITLE_MAX;
+use crate::artifact::{Origin, truncate_chars};
+use crate::artifact_publish::{ARTIFACT_TITLE_MAX, PublishInput};
 use crate::capabilities::OneShotRoad;
 use crate::commit_message::{
     clip_text_on_line_boundary, fence_body, floor_char, truncate_diff_for_prompt,
@@ -347,6 +348,29 @@ fn material_block(ask: &Ask<'_>) -> String {
         ask.material.masked,
         ask.kind.as_str(),
     )
+}
+
+/// What a page the window makes itself (a one-shot's answer) is published as:
+/// the person's title and first line, and the kind of thing it explains as the
+/// label, so that the gallery can say what a page is about.
+#[must_use]
+pub fn publish_input(_kind: Kind, title: &str, headline: &str, file_path: PathBuf) -> PublishInput {
+    PublishInput {
+        file_path,
+        title: Some(title.to_string()),
+        description: Some(headline.to_string()),
+        favicon: None,
+        label: None,
+    }
+}
+
+/// The origin of a page the window makes itself, from what the ledger and the
+/// window already vouch for: `base` is what the window knows of the pane or the
+/// folder the request came from, `agent` the CLI that wrote the page, and `report`
+/// the origin of the task's report when it is a report that was explained.
+#[must_use]
+pub fn page_origin(base: Origin, _agent: &str, _report: Option<&Origin>) -> Origin {
+    base
 }
 
 /// What an agent in a pane is asked, as the person's next message there: the

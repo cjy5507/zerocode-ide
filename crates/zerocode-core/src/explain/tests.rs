@@ -7,9 +7,11 @@
 
 use super::*;
 use crate::agent::AGENT_SPECS;
+use crate::artifact::Limits;
 use crate::capabilities::{OneShotRoad, agent_capabilities};
 use crate::skill_install::bundled_skill;
 use crate::type_value::CLAUDE_HEADLESS;
+use std::path::Path;
 
 /// The two shapes of secret a diff really carries — a value under a name that
 /// says what it is, and a header — and a sentence that only talks about one.
@@ -473,6 +475,202 @@ fn a_kind_is_read_back_from_its_wire_word_and_an_unknown_word_is_refused() {
         assert_eq!(Kind::parse(kind.as_str()), Some(kind));
     }
     assert_eq!(Kind::parse("table"), None);
+}
+
+/// What the window's own helper answers for a pane it holds that sits over a
+/// ledger worker: the pane's key, the agent and model seated there, the seat's
+/// run, worker and task, and the checkout and project the folder belongs to.
+fn from_a_worker_pane() -> Origin {
+    Origin {
+        pane: Some("term-7".to_string()),
+        agent: Some("zo".to_string()),
+        model: Some("a-model-of-that-pane".to_string()),
+        run: Some("run-1".to_string()),
+        worker: Some("w-1".to_string()),
+        task: Some("t-1".to_string()),
+        worktree: Some(PathBuf::from("/work/one")),
+        project: Some(PathBuf::from("/work")),
+        ..Origin::default()
+    }
+}
+
+/// What a worker's report row says about where it came from: the task and the
+/// ledger's seat spelling, not a pane of this window.
+fn from_a_report() -> Origin {
+    Origin {
+        work_summary: Some("what the task is for".to_string()),
+        run: Some("run-9".to_string()),
+        task: Some("t-9".to_string()),
+        worker: Some("w-9".to_string()),
+        pane: Some("team/%2".to_string()),
+        agent: Some("codex".to_string()),
+        model: Some("a-model-of-the-worker".to_string()),
+        worktree: Some(PathBuf::from("/work/nine")),
+        project: Some(PathBuf::from("/work")),
+        ..Origin::default()
+    }
+}
+
+#[test]
+fn a_page_the_window_made_names_the_cli_that_wrote_it_and_leaves_the_panes_model_out() {
+    let origin = page_origin(from_a_worker_pane(), "claude", None);
+    assert_eq!(
+        origin.agent.as_deref(),
+        Some("claude"),
+        "the CLI that wrote the page, not the agent that sits in the pane"
+    );
+    assert_eq!(
+        origin.model, None,
+        "the pane's model is not this page's, and the CLI's own default is not known here"
+    );
+    // What the pane vouches for stays as it was.
+    assert_eq!(origin.pane.as_deref(), Some("term-7"));
+    assert_eq!(
+        (
+            origin.run.as_deref(),
+            origin.worker.as_deref(),
+            origin.task.as_deref()
+        ),
+        (Some("run-1"), Some("w-1"), Some("t-1"))
+    );
+    assert_eq!(origin.worktree.as_deref(), Some(Path::new("/work/one")));
+    assert_eq!(origin.project.as_deref(), Some(Path::new("/work")));
+}
+
+#[test]
+fn a_page_that_explains_a_report_belongs_to_the_reports_task_and_not_to_its_seat() {
+    let origin = page_origin(Origin::default(), "claude", Some(&from_a_report()));
+    assert_eq!(origin.task.as_deref(), Some("t-9"));
+    assert_eq!(origin.run.as_deref(), Some("run-9"));
+    assert_eq!(origin.worker.as_deref(), Some("w-9"));
+    assert_eq!(origin.work_summary.as_deref(), Some("what the task is for"));
+    assert_eq!(origin.worktree.as_deref(), Some(Path::new("/work/nine")));
+    assert_eq!(origin.project.as_deref(), Some(Path::new("/work")));
+    assert_eq!(
+        origin.pane, None,
+        "a report's seat is the ledger's spelling, not a pane of this window"
+    );
+    assert_eq!(origin.agent.as_deref(), Some("claude"));
+    assert_eq!(origin.model, None, "the worker's model is the worker's");
+}
+
+#[test]
+fn the_task_a_report_names_wins_over_the_task_of_the_pane_the_request_came_from() {
+    let origin = page_origin(from_a_worker_pane(), "claude", Some(&from_a_report()));
+    assert_eq!(origin.task.as_deref(), Some("t-9"));
+    assert_eq!(origin.run.as_deref(), Some("run-9"));
+    assert_eq!(origin.worker.as_deref(), Some("w-9"));
+    assert_eq!(origin.work_summary.as_deref(), Some("what the task is for"));
+    // The pane and the folder are where the person was, and stay.
+    assert_eq!(origin.pane.as_deref(), Some("term-7"));
+    assert_eq!(origin.worktree.as_deref(), Some(Path::new("/work/one")));
+}
+
+#[test]
+fn what_the_window_does_not_know_stays_empty() {
+    let only_the_cli = Origin {
+        agent: Some("claude".to_string()),
+        ..Origin::default()
+    };
+    assert_eq!(page_origin(Origin::default(), "claude", None), only_the_cli);
+    assert_eq!(
+        page_origin(Origin::default(), "claude", Some(&Origin::default())),
+        only_the_cli,
+        "a report that knows nothing adds nothing"
+    );
+}
+
+#[test]
+fn a_page_is_published_with_the_kind_of_what_it_explains_as_its_label() {
+    let folder = tempfile::tempdir().expect("a folder");
+    let page = folder.path().join("page.html");
+    std::fs::write(&page, "<!doctype html><html><body>hi</body></html>").expect("a page");
+    let store = folder.path().join("store");
+    for kind in Kind::ALL {
+        let input = publish_input(kind, "a title", "a line", page.clone());
+        let meta = crate::artifact_publish::publish(&store, &input, &Limits::default())
+            .expect("the page publishes");
+        assert_eq!(meta.label.as_deref(), Some(kind.as_str()), "{kind:?}");
+        assert_eq!(meta.title, "a title");
+        assert_eq!(meta.description.as_deref(), Some("a line"));
+    }
+}
+
+#[test]
+fn a_page_published_from_each_entry_point_carries_where_it_came_from_and_what_it_explains() {
+    let folder = tempfile::tempdir().expect("a folder");
+    let page = folder.path().join("page.html");
+    std::fs::write(&page, "<!doctype html><html><body>hi</body></html>").expect("a page");
+    let store = folder.path().join("store");
+    let by_claude = Origin {
+        agent: Some("claude".to_string()),
+        ..Origin::default()
+    };
+    let cases = [
+        // A diff belongs to a checkout and to no pane: the folder, and nothing else.
+        (
+            Kind::Diff,
+            Origin {
+                worktree: Some(PathBuf::from("/work/one")),
+                project: Some(PathBuf::from("/work")),
+                ..Origin::default()
+            },
+            None,
+            Origin {
+                worktree: Some(PathBuf::from("/work/one")),
+                project: Some(PathBuf::from("/work")),
+                ..by_claude.clone()
+            },
+        ),
+        // A conversation turn belongs to the pane it was read in, and to that pane's task.
+        (
+            Kind::Turn,
+            from_a_worker_pane(),
+            None,
+            Origin {
+                model: None,
+                ..Origin {
+                    agent: Some("claude".to_string()),
+                    ..from_a_worker_pane()
+                }
+            },
+        ),
+        // A task's report belongs to the task the ledger recorded it for; its seat is gone.
+        (
+            Kind::Report,
+            Origin::default(),
+            Some(from_a_report()),
+            Origin {
+                work_summary: Some("what the task is for".to_string()),
+                run: Some("run-9".to_string()),
+                task: Some("t-9".to_string()),
+                worker: Some("w-9".to_string()),
+                worktree: Some(PathBuf::from("/work/nine")),
+                project: Some(PathBuf::from("/work")),
+                ..by_claude
+            },
+        ),
+    ];
+    for (kind, base, report, expected) in cases {
+        let input = publish_input(kind, "a title", "a line", page.clone());
+        let meta = crate::artifact_publish::publish(&store, &input, &Limits::default())
+            .expect("the page publishes");
+        let row = meta.artifact(page_origin(base, "claude", report.as_ref()));
+        assert_eq!(meta.label.as_deref(), Some(kind.as_str()), "{kind:?} label");
+        assert_eq!(row.origin, expected, "{kind:?} origin");
+    }
+}
+
+#[test]
+fn the_conversation_prompt_asks_for_the_kind_as_the_pages_label() {
+    for kind in Kind::ALL {
+        let material = prepare(kind, "x");
+        let prompt = conversation_prompt(&ask(kind, &material));
+        assert!(
+            prompt.contains(&format!("--label {}", kind.as_str())),
+            "{kind:?}: {prompt}"
+        );
+    }
 }
 
 /// The process's resident memory, in KiB, as `ps` reads it.

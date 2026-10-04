@@ -112,6 +112,7 @@ export async function testExplain(browser, origin, ok) {
       const view = [...document.querySelectorAll(".file-view")].find((one) => one.querySelector(".diff-merge") && !one.hidden);
       const open = view.querySelector(".file-view-head .explain-open");
       seen.term = term;
+      seen.worktree = tabs.find((one) => one.id === view.dataset.tab)?.worktree ?? null;
       seen.buttons = view.querySelectorAll(".explain-open").length;
       seen.tag = open?.tagName ?? "";
       seen.type = open?.type ?? "";
@@ -320,6 +321,7 @@ export async function testExplain(browser, origin, ok) {
       const answer = document.querySelector(".helper-turn.is-assistant");
       const person = document.querySelector(".helper-turn.is-user");
       seen.term = term;
+      seen.cwd = answer?.__run?.cwd ?? tabOfTerm(term)?.worktree ?? null;
       seen.beforeTouch = document.querySelectorAll(".helper-actions .explain-open").length;
       seen.copy = Boolean(answer?.querySelector(":scope > .helper-actions > .helper-copy"));
       // 포인터가 처음 닿으면 한 번 짓는다.
@@ -421,6 +423,23 @@ export async function testExplain(browser, origin, ok) {
         report.request?.kind === "report" && report.request?.report === "rep-1" && report.request?.text === null &&
         report.request?.title === "w-9 · codex" && report.request?.route?.term === report.term && report.opened === 1,
       JSON.stringify(report),
+    );
+
+    /* ---- 어디서 나온 요청인지: 창이 아는 것만 싣는다 ----
+     * 한 번 실행이 만든 페이지는 창이 직접 발행하므로 출처를 창이 채운다. 원장이 보증하는 것만
+     * 쓰이도록, 요청은 사람이 보던 판과 폴더를 모르면 비워 보낸다(추정 금지): diff는 판이 아니라
+     * 체크아웃에 속하고, 보고의 판은 그 보고의 좌석이며, 대화의 한 턴은 읽던 판에 속한다. */
+    ok(
+      "each entry point says where its request came from — a diff its checkout and no pane, a turn its pane and folder, a report its seat and no folder",
+      sent.request?.from?.term === null && sent.request?.from?.cwd === diff.worktree &&
+        typeof diff.worktree === "string" && diff.worktree !== "" &&
+        turn.request?.from?.term === turn.term && turn.request?.from?.cwd === turn.cwd &&
+        typeof turn.cwd === "string" && turn.cwd !== "" &&
+        report.request?.from?.term === report.term && report.request?.from?.cwd === null,
+      JSON.stringify({
+        diff: sent.request?.from, turn: turn.request?.from, report: report.request?.from,
+        worktree: diff.worktree, cwd: turn.cwd,
+      }),
     );
 
     /* ---- 다섯 언어: 모든 낱말이 카탈로그에 있다 ---- */
