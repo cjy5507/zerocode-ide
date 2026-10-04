@@ -3774,9 +3774,12 @@ fn persons_stop_standing() -> Option<String> {
 const RECIPES_ROOT_UNKNOWN: &str = "the window has not told the operator where its data lives yet";
 
 /// Whether a command takes a picture of the whole display: a screenshot, a
-/// zoom, a compare, and a desktop observe that keeps its picture. A picture of
-/// an app's own window (`--app`) is that window's — the card is ZeroCode's,
-/// which no command may name — and an OCR read leaves ZeroCode's windows out.
+/// zoom, a compare, and a desktop observe that keeps its picture. An observe
+/// that names an app is a picture of that app's window, and an OCR read of the
+/// desktop leaves ZeroCode's windows out (the window sends their region): both
+/// still answer. The helper refuses ZeroCode as the target of an action only,
+/// so a look that names ZeroCode's own window is not stopped here — a known
+/// gap (t-40807), not a rule.
 fn looks_at_the_display(command: &zerocode_core::computer_use::ComputerCommand) -> bool {
     use zerocode_core::computer_use::ComputerMethod;
     match command.method {
