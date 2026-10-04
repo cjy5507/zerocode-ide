@@ -222,16 +222,33 @@ const zcRead = (el, request) => {
     || String(el.getAttribute("name") || "");
   return record;
 };
+// The words between two fields side by side, and after the last of them in
+// their box — where a value's parts carry their units (시 · 분, 년 · 월 · 일).
+const zcWordsBetween = (from, to) => {
+  const range = from.ownerDocument.createRange();
+  range.setStartAfter(from);
+  if (to) range.setEndBefore(to); else range.setEndAfter(from.parentElement.lastChild);
+  return zcFold(range.toString());
+};
+// Whether a field continues the run before it as one more part: no caption
+// of its own, the head's caption, or — for parts of one kind whose last is
+// followed by words too — only the unit between it and the part before.
+const zcContinues = (head, prev, next) => {
+  const caption = zcFold(next.caption);
+  if (!caption || caption === zcFold(head.caption)) return true;
+  return next.kind === head.kind && caption === zcWordsBetween(prev.el, next.el)
+    && zcWordsBetween(next.el, null) !== "";
+};
 // Fields side by side in one box with one caption — a phone number in three
-// boxes, a date in three selects — are that caption's parts, numbered.
+// boxes, a date in three selects, an hour and a minute — are that caption's
+// parts, numbered.
 const zcNumberRuns = (records) => {
   let at = 0;
   while (at < records.length) {
     const head = records[at];
     let end = at + 1;
     while (end < records.length && records[end].el.parentElement === head.el.parentElement
-      && records[end].kind !== "radio"
-      && (!zcFold(records[end].caption) || zcFold(records[end].caption) === zcFold(head.caption))
+      && records[end].kind !== "radio" && zcContinues(head, records[end - 1], records[end])
       && !zcNameOf(records[end].el)) end += 1;
     if (end - at > 1 && zcFold(head.label)) {
       // The caption read before the first part is renamed, for every part.
