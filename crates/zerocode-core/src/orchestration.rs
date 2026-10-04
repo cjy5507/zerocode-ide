@@ -3464,12 +3464,16 @@ impl Run {
     /// Whether nothing was ever handed in for a review to name: the task has
     /// had at least one attempt, every attempt has ended and none of them
     /// handed anything in ([`Dispatch::source`]), no decision stands in front
-    /// of it and no review key is written in its result.
+    /// of it and no review a coordinator wrote stands in its result.
     ///
     /// The one place this reading is written. A review binds to the newest
     /// attempt's source and `task-update` refuses one of an attempt that
     /// handed nothing in, so where this holds no coordinator can write a
-    /// review. The settle pass asks it of open and of completed tasks
+    /// review. Review keys in the result are read by who wrote them, as the
+    /// board reads them ([`ReviewFacts::written_by`]): a worker's claim, or a
+    /// row nobody is known to have written, is not a review — read as one, it
+    /// kept a task that can take no review in 검증 대기 for ever (t-34904,
+    /// 47 such on one machine). The settle pass asks it of open and of completed tasks
     /// (`quiet_unhanded`, plus its own quiet time), and [`Self::review_of`]
     /// asks it of completed ones for the board ([`ReviewFacts::unreviewable`]),
     /// which has no reason to wait a week: work done by hand a minute ago is
@@ -3484,7 +3488,7 @@ impl Run {
         attempts.peek().is_some()
             && attempts.all(|held| !held.is_open() && held.source.is_none())
             && self.pending_gate_on(&task.id).is_none()
-            && !ReviewFacts::from_result(task.result.as_str()).written
+            && !ReviewFacts::written_by(task.result.as_str(), task.result_author.as_ref()).written
     }
 
     /// The seat somebody is sitting in right now, or `None` for a run whose
