@@ -66,6 +66,40 @@ impl Judgment for Toy {
     }
 }
 
+/// A seat whose second question's suffix starts with a digit: the shape that,
+/// joined to an item's place as it stands, reads as another item's place.
+struct Digits;
+
+impl Judgment for Digits {
+    type Verdict = ();
+    type Refusal = ();
+
+    fn cap(&self) -> usize {
+        20
+    }
+
+    fn items_key(&self) -> &'static str {
+        "numbers"
+    }
+
+    fn shared(&self) -> Map<String, Value> {
+        Map::new()
+    }
+
+    fn questions(&self, at: usize) -> Vec<(&'static str, Value)> {
+        let big = json!({
+            "type": "choice",
+            "instructions": format!("Is `numbers[{at}]` big?"),
+            "criteria": { "yes": "It is.", "no": "It is not." },
+        });
+        vec![("", big.clone()), ("2", big)]
+    }
+
+    fn read(&self, _answers: &Answers<'_>) -> Result<(), ()> {
+        Ok(())
+    }
+}
+
 /// `count` items' facts, each naming its own number.
 fn numbers(count: usize) -> Vec<Value> {
     (0..count).map(|n| json!({ "n": n })).collect()
@@ -255,6 +289,31 @@ fn an_item_is_read_from_its_own_answers_and_no_neighbours() {
         request.read(&judgment, &swapped),
         vec![Err("no_answer"), big(), small()],
         "an answer is read by the name of the item it was asked about"
+    );
+}
+
+/// A name is one item's one question whatever its suffix says: item 1's
+/// question `2` is not item 12's own question, as a name made by writing the
+/// place and the suffix side by side would make it (`q1` and `2` are `q12`).
+/// Nothing is written over another question, and an item is never read from
+/// another item's answer.
+#[test]
+fn a_suffix_that_starts_with_a_digit_is_not_another_items_name() {
+    let items = 13;
+    let asked = requests(&Digits, numbers(items));
+    assert_eq!(asked.len(), 1);
+    let questions = asked[0].questions.as_object().expect("questions");
+    assert_eq!(
+        questions.len(),
+        items * 2,
+        "a question of its own for every item and suffix: one was written over another"
+    );
+    let all = json!({ (question_name(12, "")): "item twelve's own answer" });
+    let item = 1;
+    assert_eq!(
+        Answers { all: &all, item }.get("2"),
+        None,
+        "item 1 was read from an answer item 12 gave"
     );
 }
 

@@ -11,6 +11,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 use serde_json::Map;
 use zerocode_core::jev::batch::{Answers, Judgment, Request};
@@ -25,6 +27,7 @@ use zerocode_core::orchestration::{
 
 use super::*;
 use crate::systemone::Asked;
+use crate::systemone::TOGETHER_LANES;
 use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
 
 /// The coordinator's own pane, as the window numbers it: a term no other test
@@ -1339,6 +1342,167 @@ fn the_labels_of_a_batch_carry_both_marks_as_ever() {
             assert!(label[BASELINE_AGREED.canonical].is_boolean(), "{label}");
         }
     }
+}
+
+/* ---- the rows of a sweep that asks in waves ------------------------------- */
+
+/// How long the request of the last wave is held before it answers, in
+/// milliseconds: the model slow on that one request and quick on the rest.
+/// Long enough that a machine at full load, which can park a thread for a
+/// hundred milliseconds, still tells the quick requests from the slow one.
+const LAST_WAVE_HOLD_MS: u64 = 800;
+
+/// How long a case waits for the last wave's request to leave before it gives
+/// up and looks at the ledger anyway.
+const LAST_WAVE_WAIT: Duration = Duration::from_secs(10);
+
+/// How often that wait looks.
+const LAST_WAVE_POLL: Duration = Duration::from_millis(5);
+
+/// One sweep over one letter more than the lanes carry in a wave, with the
+/// request of the last wave held: the rows the ledger held while it was held,
+/// and the rows it held when the sweep was over.
+fn sweep_with_the_last_request_held() -> (Vec<Value>, Vec<Value>) {
+    let letters = TOGETHER_LANES * MAIL_TRIAGE_BATCH_CAP + 1;
+    let arrived = Arc::new(AtomicUsize::new(0));
+    let counting = Arc::clone(&arrived);
+    let endpoint = Endpoint::answering_each(
+        "HTTP/1.1 200 OK",
+        move |request: &str| {
+            if counting.fetch_add(1, Ordering::SeqCst) >= TOGETHER_LANES {
+                thread::sleep(Duration::from_millis(LAST_WAVE_HOLD_MS));
+            }
+            stand_in_answer(request, None)
+        },
+        0,
+    );
+    let stand = stand_on(&endpoint, "shadow", None, "test-key");
+    let mut inbox = Inbox::new(letters);
+    let kinds: Vec<MessageKind> = (0..letters).map(|n| KINDS[n % KINDS.len()]).collect();
+    thread::scope(|scope| {
+        let sweeping = scope.spawn(|| stand.sweep(&mut inbox, &kinds));
+        let gave_up = Instant::now() + LAST_WAVE_WAIT;
+        while arrived.load(Ordering::SeqCst) <= TOGETHER_LANES && Instant::now() < gave_up {
+            thread::sleep(LAST_WAVE_POLL);
+        }
+        let while_held = rows(&stand.ledger);
+        (while_held, sweeping.join().expect("the sweep"))
+    })
+}
+
+/// The rows of the request asked last, and the rows of the requests before
+/// it, in that order.
+fn split_by_the_last_request(written: &[Value]) -> (Vec<&Value>, Vec<&Value>) {
+    let last = written.last().map(|row| &row[BATCH]);
+    written.iter().partition(|row| Some(&row[BATCH]) == last)
+}
+
+/// A row says how long ITS request waited for its answer, not how long the
+/// whole sweep took: the letters of the quick requests are not told they
+/// waited for the slow one that left behind them.
+#[test]
+fn a_row_says_how_long_its_own_request_waited() {
+    let (_, written) = sweep_with_the_last_request_held();
+    let (slow, quick) = split_by_the_last_request(&written);
+    assert!(
+        !quick.is_empty() && !slow.is_empty(),
+        "{} rows",
+        written.len()
+    );
+    for row in quick {
+        let waited = row[ELAPSED_MS.canonical].as_u64().unwrap_or(u64::MAX);
+        assert!(
+            waited < LAST_WAVE_HOLD_MS / 2,
+            "a request answered at once waited {waited} ms: {row}"
+        );
+    }
+    for row in slow {
+        let waited = row[ELAPSED_MS.canonical].as_u64().unwrap_or(0);
+        assert!(
+            waited >= LAST_WAVE_HOLD_MS,
+            "the held request waited {waited} ms: {row}"
+        );
+    }
+}
+
+/// The rows of the requests that came back are in the ledger before the next
+/// wave is asked: a window closed while the last request waits loses that
+/// request's letters — which have no row, and are asked again — and not the
+/// whole sweep's, whose requests the day's count already holds as paid for.
+#[test]
+fn the_rows_of_a_wave_are_written_before_the_next_wave_is_asked() {
+    let (while_held, at_the_end) = sweep_with_the_last_request_held();
+    let (slow, quick) = split_by_the_last_request(&at_the_end);
+    assert!(
+        !quick.is_empty() && !slow.is_empty(),
+        "{} rows",
+        at_the_end.len()
+    );
+    assert_eq!(
+        while_held.len(),
+        quick.len(),
+        "the letters of the requests that had come back had {} rows while the last waited",
+        while_held.len()
+    );
+}
+
+/// A request's account is written on a letter that names a task when the
+/// batch has one, so that what a task cost in Jev (`task_cost`) reads the
+/// request as some task's and not as nobody's: the first letter of this batch,
+/// a notice of the ledger's, names none.
+#[test]
+fn a_request_is_booked_to_a_letter_that_names_a_task() {
+    let endpoint = stand_in(0);
+    let stand = stand_on(&endpoint, "shadow", None, "test-key");
+    let mut inbox = Inbox::new(1);
+    inbox
+        .ledger
+        .post(
+            &inbox.run,
+            Draft {
+                from: LEDGER_ITSELF.to_string(),
+                to: format!("run:{}", inbox.run),
+                kind: MessageKind::WentQuiet,
+                body: Text::from("words nobody reads"),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: Text::default(),
+                thread: None,
+                task: None,
+                dispatch: None,
+            },
+            DAY_START_MS,
+        )
+        .expect("a notice that names no task");
+    inbox.post(MessageKind::WorkerDone, DAY_START_MS + LETTER_GAP_MS);
+    let seated = [(inbox.run(), TERM)];
+    ask_about(
+        &stand.window,
+        &stand.window.wire,
+        &stand.book,
+        &stand.ledger,
+        &seated,
+        DAY_START_MS + SWEEP_AFTER_MS,
+    );
+
+    let written = rows(&stand.ledger);
+    assert_eq!(written.len(), 2);
+    assert!(
+        written[0][TASK_STAMP].is_null(),
+        "the first letter names no task: {}",
+        written[0]
+    );
+    let carrying: Vec<&Value> = written.iter().filter(|row| row["requests"] == 1).collect();
+    assert_eq!(carrying.len(), 1, "one request");
+    assert!(
+        carrying[0][TASK_STAMP].is_string(),
+        "the request is booked to no task: {}",
+        carrying[0]
+    );
+    assert_eq!(
+        carrying[0][BATCH], carrying[0][KEY],
+        "and the batch is named by the row that carries it"
+    );
 }
 
 /* ---- measurements --------------------------------------------------------- */
