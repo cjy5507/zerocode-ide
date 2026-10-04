@@ -37,6 +37,7 @@
 
 mod completion;
 pub mod coordinator_handover;
+pub mod landing_watch;
 mod session_history;
 pub mod task_cost;
 
@@ -510,6 +511,22 @@ pub enum MessageKind {
     /// their numbers, and what the window did; never a word a worker said.
     /// The road that writes it is [`Ledger::gate_judged`].
     GateJudged,
+    /// Nobody said this either: the LEDGER held a task's own record against git's and
+    /// found it late (t-34501, t-22105) — a report nobody verified, a verification
+    /// nobody merged, work git has in main that the ledger never recorded, a checkout
+    /// left standing after its work landed, or a ledger that says merged where git has
+    /// no such commit. Told to the run's coordinator once when the state begins and
+    /// again every six hours while it stands; the body names the task, worker,
+    /// checkout, head, since when, and the next thing to do. Alerts and displays
+    /// only — nothing here merges or deletes. The road that writes it is
+    /// [`Ledger::landing_watch`].
+    LandingStalled,
+    /// Nobody said this either: the LEDGER's word to a LIVE worker that its branch
+    /// runs far behind the compare ref or would conflict with it (t-34501), once per
+    /// state of (head, compare ref) and at most ten times per attempt. Addressed to
+    /// the worker, not the coordinator. The road that writes it is
+    /// [`Ledger::landing_watch`].
+    BranchDrifted,
 }
 
 impl MessageKind {
@@ -534,6 +551,8 @@ impl MessageKind {
             Self::ModelDeviated => "model_deviated",
             Self::AccountSwitched => "account_switched",
             Self::GateJudged => "gate_judged",
+            Self::LandingStalled => "landing_stalled",
+            Self::BranchDrifted => "branch_drifted",
         }
     }
 
@@ -560,6 +579,8 @@ impl MessageKind {
                 | Self::ModelDeviated
                 | Self::AccountSwitched
                 | Self::GateJudged
+                | Self::LandingStalled
+                | Self::BranchDrifted
         )
     }
 }
@@ -588,6 +609,8 @@ impl std::str::FromStr for MessageKind {
             "model_deviated" => Self::ModelDeviated,
             "account_switched" => Self::AccountSwitched,
             "gate_judged" => Self::GateJudged,
+            "landing_stalled" => Self::LandingStalled,
+            "branch_drifted" => Self::BranchDrifted,
             _ => return Err(format!("unknown message type: {word}")),
         })
     }
@@ -764,6 +787,10 @@ pub enum ResultAuthor {
         source: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         completed_ms: Option<i64>,
+        /// When this review first said `verified` for the attempt and source it names
+        /// ([`ReviewFacts::verified_ms`]), stamped by the same pass as `completed_ms`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verified_ms: Option<i64>,
     },
     /// The ledger's own note — a stop, an abandon, a death it witnessed.
     Ledger,
@@ -836,6 +863,20 @@ pub struct ReviewFacts {
     pub claimed_merged: bool,
     #[serde(default)]
     pub claimed_deployed: bool,
+    /// The coordinator marked this verified task as having no code to land — research,
+    /// a review, a design (the key `nothingToLand`, or `noCodeChange`). The board says
+    /// 완료 — 착지할 것 없음, which is not 병합, and the late-landing alerts skip it
+    /// (t-34501). Believed only where the coordinator seat wrote it, like `verified`.
+    #[serde(default)]
+    pub nothing_to_land: bool,
+    /// The same key as a worker wrote it, or as somebody nobody knows wrote it: a claim.
+    #[serde(default)]
+    pub claimed_nothing_to_land: bool,
+    /// When the coordinator's review first said `verified` for this attempt and source,
+    /// epoch milliseconds. Absent on a review written before this was stamped, and then
+    /// the alert that counts from it stays silent rather than guess (t-34501).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_ms: Option<i64>,
     /// Who wrote the result these were read from.
     #[serde(default)]
     pub author: ReviewAuthor,
@@ -22844,6 +22885,7 @@ fn correction_author(
         attempt: newest_id.map(str::to_string),
         source: observed.source.map(|named| named.trim().to_string()),
         completed_ms: None,
+        verified_ms: None,
     })
 }
 

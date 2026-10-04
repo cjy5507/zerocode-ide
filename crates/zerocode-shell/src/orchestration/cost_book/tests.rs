@@ -28,6 +28,7 @@ fn independent_completion_changes_the_cost_memo_without_a_new_usage_scan() {
         attempt: Some(dispatch.id.clone()),
         source: dispatch.source.clone(),
         completed_ms: None,
+        verified_ms: None,
     };
     ledger
         .update_task(

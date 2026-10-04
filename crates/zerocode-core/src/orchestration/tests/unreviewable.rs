@@ -152,6 +152,7 @@ fn work_a_coordinator_can_still_review_is_never_unreviewable() {
         attempt: judged_attempt,
         source: None,
         completed_ms: None,
+        verified_ms: None,
     });
     // Not completed at all: an open task whose attempt ended empty is the
     // settle pass's pile, not a completed one.

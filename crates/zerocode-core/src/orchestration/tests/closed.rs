@@ -271,6 +271,7 @@ fn the_settle_pass_lists_first_and_closes_only_when_applied() {
         attempt: judged_attempt,
         source: None,
         completed_ms: None,
+        verified_ms: None,
     });
     // Nobody has touched any of it for longer than the quiet time.
     bench.clock += SETTLE_QUIET_DAYS * 86_400_000 + 1;

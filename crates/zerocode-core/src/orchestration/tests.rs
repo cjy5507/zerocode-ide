@@ -60,6 +60,7 @@ fn a_worker_summary_is_the_prose_its_own_report_carries_and_nothing_else() {
         attempt: None,
         source: None,
         completed_ms: None,
+        verified_ms: None,
     };
     let body = r#"{"ok":true,"summary":"시험이 통과했다.","head":"abc1234"}"#;
     assert_eq!(
@@ -197,6 +198,7 @@ fn review_facts_read_only_what_a_coordinator_wrote() {
             attempt: Some("dp-1".into()),
             source: None,
             completed_ms: None,
+            verified_ms: None,
         }),
         closed: None,
     };
@@ -23196,6 +23198,7 @@ fn a_former_coordinator_or_another_runs_worker_cannot_correct_the_record() {
             attempt: None,
             source: Some("abc1234".to_string()),
             completed_ms: None,
+            verified_ms: None,
         })
     );
     assert!(run.review_of(held).verified);
@@ -23399,6 +23402,7 @@ fn a_workers_claimed_verification_is_shown_as_a_claim() {
                 attempt: Some(dispatch.clone()),
                 source: Some(source.clone()),
                 completed_ms: Some(bench.clock),
+                verified_ms: Some(bench.clock),
             })
         );
     }
@@ -24861,6 +24865,9 @@ mod assign;
 /// (`tests/closed.rs`).
 mod closed;
 mod completion;
+/// t-34501: late landings told to the coordinator, a branch that ran away told to its worker
+/// (`tests/landing_watch.rs`).
+mod landing_watch;
 /// t-7812: the window restart restore transitions (`tests/restore.rs`).
 mod restore;
 /// t-7812: the transitions those roads added (`tests/restore_seams.rs`).

@@ -20313,6 +20313,7 @@ fn a_finished_workers_row_says_whether_its_task_can_take_a_review() {
                 attempt: None,
                 source: None,
                 completed_ms: None,
+                verified_ms: None,
             },
             10,
         )
@@ -21280,6 +21281,7 @@ fn a_workers_claimed_merge_reaches_the_roster_row_as_a_claim() {
                 attempt: started.dispatch.clone(),
                 source,
                 completed_ms: None,
+                verified_ms: None,
             },
             10,
         )

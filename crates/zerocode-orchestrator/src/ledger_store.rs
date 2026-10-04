@@ -3285,6 +3285,7 @@ mod tests {
             attempt: Some("dp-9".to_string()),
             source: Some("abc1234".to_string()),
             completed_ms: Some(8),
+            verified_ms: Some(7),
         });
         let mut reported = projection.tasks[0].clone();
         reported.id = "t-11".to_string();

@@ -271,6 +271,7 @@ mod tests {
             attempt: None,
             source: None,
             completed_ms: None,
+            verified_ms: None,
         };
         let mut memo = LintMemo::default();
         // The one summary that is read: a worker's own, on a finished task.
