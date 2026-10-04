@@ -15,6 +15,14 @@ use super::*;
 /// 이 동사의 이름. 표(`VERBS`)와 창의 앞문이 같은 글자를 쓰도록 한 곳에 둔다.
 pub const VERB: &str = "delegate";
 
+/// `--wait`의 기다림 앞에 창이 더 쓸 수 있는 시간: 판을 열고 워커가 브리핑을 받는 준비.
+///
+/// 창은 준비가 끝난 *뒤에* 기다림 시계를 재므로(`strip_wait`가 안쪽 `worker-start`에서
+/// `--timeout-ms`를 빼서 준비 기한은 기본값이다), `--wait --timeout-ms X`의 답은 늦어도
+/// 준비 기본값 + X 뒤에 나온다. 다리와 두 심(POSIX·PowerShell)의 기한이 같은 수에 얹도록
+/// 한 곳에 둔다.
+pub const WAIT_HEADROOM_MS: u32 = READY_TIMEOUT_DEFAULT_MS;
+
 /// 이 동사가 스스로 읽는 낱말. 나머지는 모두 `worker-start`에 그대로 넘어간다.
 ///
 /// `--wait`는 창이 워커의 끝을 기다릴 때만 읽는다(계획은 읽지 않는다).

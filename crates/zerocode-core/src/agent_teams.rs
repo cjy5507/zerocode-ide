@@ -2629,6 +2629,10 @@ mod tests {
                 crate::orchestration::READY_TIMEOUT_DEFAULT_MS + SHIM_WAIT_GRACE_SECONDS * 1000
             ),
             "-eq 'delegate'",
+            &format!(
+                "$deadlineMs = $deadlineMs + {}",
+                crate::orchestration::delegate::WAIT_HEADROOM_MS
+            ),
             "$request.BeginGetResponse($null, $null)",
             "$request.EndGetResponse($pending)",
             "$request.Abort()",
@@ -2929,6 +2933,39 @@ mod tests {
             patient.map(str::to_string),
             Some(worker_wait),
             "a bare delegate did not carry the default readiness patience:\n{saw}"
+        );
+        // `--wait --timeout-ms X`: the window answers after the preparation AND the wait, so the
+        // shim holds both — X, the grace, and the preparation on top.
+        let waited = run_argv(
+            "200",
+            "{\"workerId\":\"w-1\"}",
+            "team-1",
+            &[
+                "delegate",
+                "--spec",
+                "x",
+                "--agent",
+                "codex",
+                "--wait",
+                "--timeout-ms",
+                "300000",
+            ],
+        );
+        assert!(
+            waited.status.success(),
+            "{}",
+            String::from_utf8_lossy(&waited.stderr)
+        );
+        let saw = std::fs::read_to_string(&sink).expect("argv sink");
+        let patient = saw.lines().skip_while(|line| *line != "--max-time").nth(1);
+        let held = (300_000 / 1000
+            + SHIM_WAIT_GRACE_SECONDS
+            + crate::orchestration::delegate::WAIT_HEADROOM_MS / 1000)
+            .to_string();
+        assert_eq!(
+            patient.map(str::to_string),
+            Some(held),
+            "a delegate --wait did not carry the preparation on top of its wait:\n{saw}"
         );
     }
 

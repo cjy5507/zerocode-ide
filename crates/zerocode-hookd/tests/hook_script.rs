@@ -807,8 +807,48 @@ fn the_shim_waits_longer_than_the_window_is_allowed_to_take() {
             "300000",
         ])
         .deadline(),
-        std::time::Duration::from_millis(300_000) + bridge_grace,
+        std::time::Duration::from_millis(300_000)
+            + std::time::Duration::from_millis(u64::from(
+                zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS
+            ))
+            + bridge_grace,
     );
+    // The ladder of a `delegate --wait --timeout-ms X`, at every X the ledger accepts: the window
+    // answers after the preparation (the ready default — `--timeout-ms` is stripped from the inner
+    // worker-start) plus X; the bridge must hold longer than that, and the shim longer than the
+    // bridge. A bridge that gave up first would hand a coordinator a time-out for a worker that
+    // was already standing, and a retry under a new name would make a second one.
+    let ready = u64::from(zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS);
+    for x in [
+        u64::from(zerocode_core::orchestration::WAIT_BUDGET_MIN_MS),
+        1_000,
+        30_000,
+        300_000,
+        u64::from(zerocode_core::orchestration::WAIT_BUDGET_MAX_MS),
+    ] {
+        let said = x.to_string();
+        let bridge = request(&[
+            "delegate",
+            "--spec",
+            "x",
+            "--agent",
+            "claude",
+            "--wait",
+            "--timeout-ms",
+            said.as_str(),
+        ])
+        .deadline();
+        let window_latest = std::time::Duration::from_millis(ready + x);
+        let shim = std::time::Duration::from_secs(
+            x / 1000
+                + u64::from(zerocode_core::agent_teams::SHIM_WAIT_GRACE_SECONDS)
+                + u64::from(zerocode_core::orchestration::delegate::WAIT_HEADROOM_MS) / 1000,
+        );
+        assert!(
+            window_latest < bridge && bridge < shim,
+            "delegate --wait --timeout-ms {x}: window {window_latest:?} < bridge {bridge:?} < shim {shim:?}"
+        );
+    }
     assert!(
         u64::from(zerocode_core::orchestration::ASK_BUDGET_MAX_MS)
             <= zerocode_hookd::WAIT_BUDGET_CEILING_MS,
