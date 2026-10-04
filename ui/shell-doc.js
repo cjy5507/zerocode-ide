@@ -6483,13 +6483,16 @@ function dressArtifactLanding(chip, say) {
   if (chip.dataset.tip !== say.tip) chip.dataset.tip = say.tip;
 }
 
-/* 작업 칩 하나의 옷 — 카드와 서랍이 같은 옷을 입는다. */
+/* 작업 칩 하나의 옷 — 카드와 서랍이 같은 옷을 입는다. 풍선의 첫 줄은 그 작업의 이름이다:
+ * 제목이 보고서의 제 머리말이 된 뒤로, 작업이 무엇이었는지는 여기와 세부 정보가 말한다. */
 function dressArtifactTaskChip(chip, row) {
   const task = row.origin?.task ?? "";
   writeTextContent(chip, task);
   chip.hidden = task === "";
   chip.dataset.task = task;
-  chip.dataset.tip = task === "" ? "" : t("artifacts.task.filterTip", "{{task}} 작업으로 거르기", { task });
+  chip.dataset.tip = task === ""
+    ? ""
+    : [row.origin?.work_summary ?? "", t("artifacts.task.filterTip", "{{task}} 작업으로 거르기", { task })].filter(Boolean).join("\n");
 }
 
 /* 워크트리 목록을 다시 읽었다. 반영 상태가 실제로 움직였을 때만(행을 움직이는 부분의 서명이
@@ -6758,6 +6761,9 @@ async function searchArtifactBodies(view) {
   try {
     const answer = await invoke("artifact_search", { query });
     artifactBodyMatches = new Set((answer?.rows ?? []).map((row) => row.id));
+    // 본문 검색의 답은 파일이 사라진 행도 싣는다 — 창이 숨긴 채로 들고 있지 않던 행이므로,
+    // 사라졌다는 것을 함께 적어야 「보기」 전에는 서지 않는다.
+    for (const id of answer?.missing ?? []) artifactMissing.add(id);
     for (const row of answer?.rows ?? []) if (!artifactRows.has(row.id)) artifactRows.set(row.id, row);
   } catch (error) {
     showError(String(error));
@@ -8374,6 +8380,8 @@ function paintArtifactDrawer(view) {
   // 반영의 낱말은 칩에, 커밋과 시각은 여기와 칩의 풍선에.
   put("landing", landed?.tip ?? "");
   for (const { field } of ARTIFACT_ORIGIN_FIELDS) put(field, row.origin?.[field] ?? "");
+  // 작업의 줄은 번호와 그 이름을 함께 말한다.
+  if (row.origin?.task && row.origin?.work_summary) put("task", `${row.origin.task} · ${row.origin.work_summary}`);
   drawer.querySelector(".artifact-no-origin").hidden = ARTIFACT_ORIGIN_FIELDS.some(({ field }) => row.origin?.[field]);
   // claude.ai 아티팩트에는 파일이 없다: Finder와 경로 복사는 설 자리가 없다.
   // 사라진 파일도 Finder에 보일 것이 없다.

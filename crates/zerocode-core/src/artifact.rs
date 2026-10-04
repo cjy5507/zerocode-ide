@@ -166,14 +166,12 @@ impl ReportSubtype {
         }
     }
 
-    /// The wire word read back; `None` for a word this build does not know, so
-    /// a kind a worker misspelled is inferred rather than invented.
+    /// The wire word read back, as [`ArtifactKind::parse`] reads its own:
+    /// exactly. `None` for a word this build does not know, so a kind a worker
+    /// misspelled is read off the file name rather than invented.
     #[must_use]
     pub fn parse(word: &str) -> Option<Self> {
-        let word = word.trim();
-        Self::ALL
-            .into_iter()
-            .find(|kind| kind.as_str().eq_ignore_ascii_case(word))
+        Self::ALL.into_iter().find(|kind| kind.as_str() == word)
     }
 
     /// The kind of one report: what its worker stated, else what its file name
@@ -999,13 +997,16 @@ mod tests {
             ReportSubtype::Handover
         );
         assert_eq!(
-            ReportSubtype::of(Some(" Review "), Path::new("notes.md")),
+            ReportSubtype::of(Some("review"), Path::new("notes.md")),
             ReportSubtype::Review
         );
-        assert_eq!(
-            ReportSubtype::of(Some("essay"), Path::new("t-12-review.md")),
-            ReportSubtype::Review
-        );
+        for unknown in ["essay", "Review", " review "] {
+            assert_eq!(
+                ReportSubtype::of(Some(unknown), Path::new("t-12-handover.md")),
+                ReportSubtype::Handover,
+                "{unknown:?} is not a word of the table"
+            );
+        }
         for kind in ReportSubtype::ALL {
             assert_eq!(ReportSubtype::parse(kind.as_str()), Some(kind));
         }

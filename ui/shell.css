@@ -45075,15 +45075,15 @@ button.jev-token:hover {
 
 .artifact-detail-title[hidden] { display: none; }
 
-/* 목차 — 긴 보고서에만. 머리 바로 아래 붙어 있고, 펼친 목록은 제 높이 안에서 넘긴다. */
+/* 목차 — 긴 보고서에만. 머리 바로 아래 붙어 있고, 펼친 목록은 본문 위에 떠서 제 높이 안에서
+ * 넘긴다: 목록이 열리고 닫혀도 본문은 움직이지 않으니, 재어 둔 머리말의 자리가 그대로 맞는다. */
 .artifact-outline {
   position: sticky;
   top: var(--artifact-bar-height);
   z-index: 1;
   display: flex;
   flex: none;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-2);
+  gap: var(--space-2);
   align-items: center;
   box-sizing: border-box;
   padding-block: var(--space-1);
@@ -45104,11 +45104,18 @@ button.jev-token:hover {
 }
 
 .artifact-outline-list {
-  flex: 0 0 100%;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0;
+  box-sizing: border-box;
   max-height: var(--artifact-outline-list-max);
   margin: 0;
-  padding: 0;
+  padding: var(--space-1) var(--space-4);
   overflow-y: auto;
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: var(--artifact-drawer-bg);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--surface-abyss) 40%, transparent);
   list-style: none;
 }
 

@@ -12,7 +12,7 @@
 import { openWindowTestPage } from "./window-boot.mjs";
 
 /* The window a person has open: 1440 wide, both side panels standing. */
-const REAL_WINDOW = Object.freeze({ width: 1440, height: 900 });
+export const REAL_WINDOW = Object.freeze({ width: 1440, height: 900 });
 /* The tab's width in that window, as measured in this harness on main (51789dbc6), and how far a
  * later change of the side panels may move it before this file is looked at again. */
 const REAL_TAB_WIDTH = 809;
@@ -42,8 +42,9 @@ const NEW_KEYS = Object.freeze([
   "artifacts.facts.yes", "artifacts.facts.no", "artifacts.facts.more",
 ]);
 
-/* The synthetic catalog, built in the page so the fake backend and the checks read one set of rows. */
-function standCatalog(page) {
+/* The synthetic catalog, built in the page so the fake backend and the checks read one set of rows.
+ * The photographs (`artifact-cards-shots.mjs`) stand the same one. */
+export function standCatalog(page) {
   return page.evaluate(async () => {
     const now = Date.now();
     const hour = 60 * 60 * 1000;
@@ -188,7 +189,7 @@ function standCatalog(page) {
 }
 
 /* Open the tab fresh, as a person does from the sidebar. */
-async function openTab(page) {
+export async function openTab(page) {
   await page.evaluate(async () => {
     dropTab("artifacts");
     artifactFilter.tab = "pages";

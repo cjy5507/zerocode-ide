@@ -6314,4 +6314,253 @@ mod tests {
         assert!(store.get(&id).is_none());
         assert!(stays.is_file(), "a file outside the store was removed");
     }
+
+    /// The numbers behind t-36910's stage 1, on a catalog shaped like the
+    /// measured one: 1,500 rows, 400 tasks, 555 rows whose files are gone, and
+    /// every report as an older build wrote it (no subtype, its task's name for
+    /// a title). It times the index read, the one scan that reads the old
+    /// titles and the scan after it, the listing a window now asks (present
+    /// rows) beside the listing it asked before (everything) with the rows and
+    /// bytes of each answer, the title and subtype of one report, and the
+    /// digest of a step log of 18,000 steps — with the resident size before and
+    /// after a run of digests, which says whether a reading leaves anything
+    /// behind.
+    ///
+    /// Run on purpose, normally and under `taskpolicy -b`:
+    /// `cargo test -p zerocode-shell --bin zerocode-shell artifact_runtime::tests::measure_ -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, run on purpose: -- --ignored --nocapture"]
+    fn measure_the_catalog_a_window_opens_and_the_digest_of_a_long_log() {
+        use std::time::Instant;
+        const ROWS: usize = 1_500;
+        const TASKS: usize = 400;
+        const ROUNDS: usize = 9;
+        const LOG_STEPS: usize = 18_000;
+        const DIGESTS_FOR_MEMORY: usize = 40;
+        // Of every 150 rows: 76 reports, 36 screenshots, 20 step logs, 18 pages.
+        const CYCLE: usize = 150;
+        const REPORTS_TO: usize = 76;
+        const SHOTS_TO: usize = 112;
+        const LOGS_TO: usize = 132;
+        // The step logs that stay on disk, of the 200: the rest and every
+        // screenshot make the 555 vanished rows.
+        const LOGS_KEPT: usize = 5;
+
+        let rss_kib = || -> u64 {
+            let out = crate::proc::quiet_command("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
+        };
+        let median = |mut times: Vec<f64>| {
+            times.sort_by(f64::total_cmp);
+            times[times.len() / 2]
+        };
+        let millis = |began: Instant| began.elapsed().as_secs_f64() * 1_000.0;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().join("data");
+        let sessions = dir.path().join("sessions");
+        let store = Store::open(&data, Limits::default());
+        let paragraph = "The queue is drained when it closes and the count is handed back. ";
+        let mut logs = 0usize;
+        for at in 0..ROWS {
+            let slot = at % CYCLE;
+            if slot < REPORTS_TO {
+                // A report of the median size on the measured catalog (9 KB).
+                let path = dir.path().join(format!("tmp/t-{at}-report.md"));
+                let body = format!(
+                    "# Synthetic report {at}: the queue drains on close\n\n{}\n",
+                    paragraph.repeat(135)
+                );
+                touch(&path, &body);
+                let origin = if at % 4 == 0 {
+                    Origin::default()
+                } else {
+                    tasked(
+                        &format!("w-{at}"),
+                        &format!("t-{}", at % TASKS),
+                        &format!("synthetic task {}", at % TASKS),
+                    )
+                };
+                let mut row = store
+                    .register_report(&path, origin, None, 1_000 + at as i64)
+                    .expect("registers");
+                // As an older build wrote it: no subtype, the task's name first.
+                row.subtype = None;
+                if let Some(work) = row.origin.work_summary.clone() {
+                    row.title = work;
+                }
+                store
+                    .append_line(&IndexLine::Row(Box::new(row)))
+                    .expect("an old row");
+            } else {
+                let (name, kept) = if slot < SHOTS_TO {
+                    (format!("s-{}/{at}.png", at % 60), false)
+                } else if slot < LOGS_TO {
+                    logs += 1;
+                    (format!("s-{}/steps-{at}.jsonl", at % 60), logs <= LOGS_KEPT)
+                } else {
+                    (format!("pages/{at}.md"), true)
+                };
+                let path = sessions.join(name);
+                touch(&path, "{\"n\":1,\"verb\":\"open\",\"ok\":true}\n");
+                store
+                    .register_in_place(
+                        &path,
+                        Source::Evidence,
+                        Origin {
+                            automation: Some("computer-use".into()),
+                            ..Origin::default()
+                        },
+                        1_000 + at as i64,
+                    )
+                    .expect("registers");
+                if !kept {
+                    std::fs::remove_file(&path).expect("the session folder is cleaned");
+                }
+            }
+        }
+        let rows = store.len();
+        drop(store);
+
+        // The index read: how long opening the catalog takes, the median of
+        // several openings.
+        let open_ms = || {
+            median(
+                (0..ROUNDS)
+                    .map(|_| {
+                        let began = Instant::now();
+                        let opened = Store::open(&data, Limits::default());
+                        let took = millis(began);
+                        drop(opened);
+                        took
+                    })
+                    .collect(),
+            )
+        };
+        // On the catalog an older build left.
+        let open_old = open_ms();
+        // The one scan that reads the old titles, and the scan after it.
+        let store = Store::open(&data, Limits::default());
+        let began = Instant::now();
+        let first = store.scan(2_000_000);
+        let scan_first = millis(began);
+        let began = Instant::now();
+        let second = store.scan(2_000_001);
+        let scan_second = millis(began);
+        drop(store);
+        // And again, now that every row says its subtype.
+        let open_new = open_ms();
+
+        let store = Store::open(&data, Limits::default());
+        store.scan(2_000_002);
+        let listing = |filter: &Filter| {
+            let mut times = Vec::new();
+            let mut answer = (0usize, 0usize, 0usize);
+            for _ in 0..ROUNDS {
+                let began = Instant::now();
+                let listed = store.list(filter);
+                times.push(millis(began));
+                answer = (
+                    listed.rows.len(),
+                    serde_json::to_vec(&listed).expect("serialises").len(),
+                    listed.missing_total,
+                );
+            }
+            (median(times), answer)
+        };
+        let (list_all_ms, all) = listing(&Filter::default());
+        let (list_present_ms, present) = listing(&Filter {
+            present: Some(true),
+            ..Filter::default()
+        });
+
+        // The title and the subtype of one report, from bytes already read.
+        let front = format!(
+            "# Synthetic report: the queue drains on close\n\n{}\n",
+            paragraph.repeat(135)
+        );
+        let limits = Limits::default();
+        let path = Path::new("/tmp/t-7-design-review.md");
+        const TITLES: u32 = 20_000;
+        let began = Instant::now();
+        let mut held = 0usize;
+        for _ in 0..TITLES {
+            held +=
+                artifact::descriptive_title(path, front.as_bytes(), Some("a task"), &limits).len();
+            held += ReportSubtype::of(None, path).as_str().len();
+        }
+        let title_us = millis(began) * 1_000.0 / f64::from(TITLES);
+        assert!(held > 0);
+
+        // The digest of a long step log, and what a run of them leaves behind.
+        let log_path = dir.path().join("long/steps.jsonl");
+        let log: String = (1..=LOG_STEPS)
+            .map(|n| {
+                format!(
+                    "{{\"n\":{n},\"at_epoch_ms\":{},\"tool\":\"browser\",\"verb\":\"{}\",\"argv\":[\"click\",\"browser-1\",\"the go button of the form on page {n}\"],\"ok\":{},\"observation\":{{\"act_ms\":4}},\"frame\":{{\"scale\":2.0,\"origin\":[0.0,0.0],\"width\":1440,\"height\":900}}}}\n",
+                    1_000 + n,
+                    if n % 7 == 0 { "wait" } else { "click" },
+                    n % 2_500 != 0,
+                )
+            })
+            .collect();
+        touch(&log_path, &log);
+        let read_once = || {
+            let file = std::fs::File::open(&log_path).expect("opens");
+            zerocode_core::evidence_digest::read(
+                zerocode_core::evidence_digest::Format::Lines,
+                std::io::BufReader::new(file),
+                &limits,
+            )
+        };
+        let rss_before = rss_kib();
+        let mut digest_times = Vec::new();
+        let mut weight = 0u64;
+        let mut counted = (0usize, 0usize, 0usize);
+        for _ in 0..DIGESTS_FOR_MEMORY {
+            let began = Instant::now();
+            let digest = read_once();
+            digest_times.push(millis(began));
+            if let Some(Digest::Steps(steps)) = &digest {
+                counted = (steps.total, steps.failed, steps.rows.len());
+            }
+            weight = digest.as_ref().map_or(0, Digest::weight);
+        }
+        let rss_after = rss_kib();
+
+        println!(
+            "MEASURE t-36910 {}",
+            serde_json::json!({
+                "rows": rows,
+                "open_old_catalog_ms": open_old,
+                "open_upgraded_catalog_ms": open_new,
+                "scan_first_ms": scan_first,
+                "scan_first_updated": first.updated,
+                "scan_second_ms": scan_second,
+                "scan_second_updated": second.updated,
+                "list_everything_ms": list_all_ms,
+                "list_everything_rows": all.0,
+                "list_everything_bytes": all.1,
+                "list_present_ms": list_present_ms,
+                "list_present_rows": present.0,
+                "list_present_bytes": present.1,
+                "vanished_rows": present.2,
+                "title_and_subtype_us": title_us,
+                "log_bytes": log.len(),
+                "log_steps": counted.0,
+                "log_failed": counted.1,
+                "digest_rows": counted.2,
+                "digest_weight_bytes": weight,
+                "digest_ms": median(digest_times),
+                "rss_before_digests_kib": rss_before,
+                "rss_after_digests_kib": rss_after,
+            })
+        );
+    }
 }
