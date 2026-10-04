@@ -27,6 +27,7 @@ const CORE = await source("crates/zerocode-core/src/agent_browser.rs");
 const FORM_CORE = await source("crates/zerocode-core/src/browser_form.rs");
 const SCREEN = await source("crates/zerocode-core/src/screen_action.rs");
 const JEV = await source("crates/zerocode-core/src/jev.rs");
+const GUARDED = await source("crates/zerocode-core/src/guarded.rs");
 const VALUE_QUESTION = JSON.parse((await source("crates/zerocode-core/fixtures/type-value/question.json")) || "{}");
 
 export const need = (name, value) => {
@@ -55,7 +56,12 @@ export const FILL_POLL_MS = rustNumber(CORE, "BROWSER_WAIT_POLL_MS");
 export const TRIES_AGAIN = ["mismatch", "not_found", "no_option", "disabled"];
 
 const CANDIDATE_CAP = rustNumber(JEV, "SCREEN_CANDIDATE_CAP");
+/* `guarded::HELD_ROWS`: the rows of the window's one table of presses that
+ * cannot be taken back, whole and in the table's order — a row the source
+ * lacks makes the whole list null, so `need` names it, not a shorter list. */
+const HELD_ROWS = ["PAYMENT_WORDS", "TRANSFER_WORDS", "DELETE_WORDS", "COMMIT_WORDS"].map((row) => rustList(GUARDED, row));
 export const FORM_REQUEST = {
+  holds: HELD_ROWS.every(Array.isArray) ? HELD_ROWS.flat() : null,
   controls: rustList(FORM_CORE, "BROWSER_FORM_CONTROLS"), notFields: rustList(FORM_CORE, "BROWSER_FORM_NOT_FIELDS"),
   actions: rustList(FORM_CORE, "BROWSER_FORM_ACTIONS"), scopes: rustList(FORM_CORE, "BROWSER_FORM_SCOPES"),
   options: rustList(FORM_CORE, "BROWSER_FORM_OPTIONS"), days: rustList(FORM_CORE, "BROWSER_FORM_DAYS"),

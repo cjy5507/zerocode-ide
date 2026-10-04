@@ -1023,6 +1023,109 @@ await test("a_calendar_the_fill_cannot_read_is_answered_with_what_it_shows", asy
   } finally { await pickers.close(); }
 });
 
+/* A calendar's own box may hold controls that page nothing (t-41387). A pager
+ * is learnt by pressing a control with no words and reading the heading
+ * again — so a control that SAYS it is something else (by its ARIA name, its
+ * title, the picture it is drawn with, its value), and that something cannot
+ * be taken back (a deletion, a send, a payment: the window's one table of
+ * them, `request.holds`), is never pressed. A control with no name is pressed
+ * as before. */
+const HELD_PICKERS = `<!doctype html><html lang="ko"><meta charset="utf-8"><title>held pickers</title>
+<form>
+  <div><label for="g">반납일</label> <input id="g" readonly></div>
+  <div><label for="h">기타일</label> <input id="h" readonly></div>
+</form>
+<script>
+  window.pressed = [];
+  const pad = (n) => String(n).padStart(2, "0");
+  const dot = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+  // Controls that page nothing, each named another way — an ARIA name, a
+  // title, an image's alt, an input button's value — and each counting its presses.
+  const STRANGERS = '<button type="button" aria-label="삭제">🗑</button>'
+    + '<button type="button" title="Submit">⏎</button>'
+    + '<button type="button"><img alt="송금" src="' + dot + '"></button>'
+    + '<input type="button" value="결제">';
+  function calendar(input, shape) {
+    input.addEventListener("click", () => {
+      if (input.parentElement.querySelector(".pop")) return;
+      let [y, m] = shape.start;
+      const pop = document.createElement("div");
+      pop.className = "pop";
+      const draw = () => {
+        pop.replaceChildren();
+        const top = document.createElement("div");
+        top.insertAdjacentHTML("beforeend", STRANGERS);
+        for (const control of top.children) {
+          control.addEventListener("click", () => window.pressed.push(
+            control.getAttribute("aria-label") || control.title || control.value || control.querySelector("img").alt));
+        }
+        const pager = (step) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = step < 0 ? "‹" : "›";
+          button.addEventListener("click", () => { m += step; if (m < 1) { m = 12; y -= 1; } if (m > 12) { m = 1; y += 1; } draw(); });
+          return button;
+        };
+        if (shape.pagers) top.append(pager(-1));
+        const heading = document.createElement("strong");
+        heading.textContent = y + "년 " + m + "월";
+        top.append(heading);
+        if (shape.pagers) top.append(pager(1));
+        pop.append(top);
+        const days = document.createElement("div");
+        days.className = "days";
+        const first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+        const count = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        const before = new Date(Date.UTC(y, m - 1, 0)).getUTCDate();
+        const cell = (d, own) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = String(d);
+          button.addEventListener("click", () => { if (!own) return; input.value = y + "-" + pad(m) + "-" + pad(d); pop.remove(); });
+          days.append(button);
+        };
+        for (let i = first - 1; i >= 0; i -= 1) cell(before - i, false);
+        for (let d = 1; d <= count; d += 1) cell(d, true);
+        for (let d = 1; (first + count + d - 1) % 7 !== 0; d += 1) cell(d, false);
+        pop.append(days);
+      };
+      draw();
+      input.parentElement.append(pop);
+    });
+  }
+  calendar(document.getElementById("g"), { start: [2026, 10], pagers: true });
+  calendar(document.getElementById("h"), { start: [2026, 10], pagers: false });
+</script>`;
+
+await test("a_control_in_a_calendar_that_names_a_press_that_cannot_be_taken_back_is_never_pressed_to_learn_a_pager", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(HELD_PICKERS);
+    const filled = await fillBundle(held, { "#g": "2026-12-09" });
+    const [only] = filled.results;
+    assert(only.status === "set", "the two controls with no name still paged the calendar to the day", only);
+    assert(await held.evaluate(() => document.getElementById("g").value) === "2026-12-09", "and the day is the asked one");
+    const pressed = await held.evaluate(() => window.pressed);
+    assert(pressed.length === 0, "no control named for a deletion, a send or a payment was pressed", pressed);
+    return "paged by the nameless pair; none of the four named controls was pressed";
+  } finally { await held.close(); }
+});
+
+await test("a_calendar_whose_only_candidates_name_such_presses_is_answered_with_what_it_shows_and_none_is_pressed", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(HELD_PICKERS);
+    const filled = await fillBundle(held, { "#h": "2026-12-09" });
+    const [only] = filled.results;
+    assert(only.status === "no_option" && only.widget && only.widget.month === "2026-10" && only.widget.pagers.length === 0,
+      "no pager to page by: no_option, with the calendar's month and days and no pager", only);
+    const pressed = await held.evaluate(() => window.pressed);
+    assert(pressed.length === 0, "none of them was pressed to find out", pressed);
+    assert(await held.evaluate(() => document.getElementById("h").value) === "", "and nothing was written");
+    return JSON.stringify(only.widget);
+  } finally { await held.close(); }
+});
+
 /* Parts of one value with the page's unit words between them — an hour
  * and a minute (시 · 분), a year, a month and a day (년 · 월 · 일) — are one
  * caption's parts, not a caption each: the words between two parts are the

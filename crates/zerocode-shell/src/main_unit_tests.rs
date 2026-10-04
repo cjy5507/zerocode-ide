@@ -23637,9 +23637,20 @@ mod browser_form_fill {
         let mut request = cmd::browser::form::form_request();
         assert_eq!(request["controls"], json!(BROWSER_FORM_CONTROLS));
         assert_eq!(request["frameSeparator"], json!(BROWSER_FORM_FRAME_SEPARATOR));
+        // The words of a press that cannot be taken back are the one table the
+        // window asks a person with (`guarded`), whole and in its rows' order: a
+        // page script never presses, on a guess, a control that says one of them.
+        let held: Vec<&str> = [
+            zerocode_core::guarded::PAYMENT_WORDS,
+            zerocode_core::guarded::TRANSFER_WORDS,
+            zerocode_core::guarded::DELETE_WORDS,
+            zerocode_core::guarded::COMMIT_WORDS,
+        ]
+        .concat();
+        assert_eq!(request["holds"], json!(held));
         for key in [
             "notFields", "actions", "scopes", "options", "days", "dayWords", "on", "off", "lists",
-            "listItems", "pressables",
+            "listItems", "pressables", "holds",
         ] {
             assert!(
                 request[key].as_array().is_some_and(|list| !list.is_empty()),
