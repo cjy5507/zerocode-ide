@@ -26,6 +26,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
+# The screenshot intake's tests build a heavy photographic frame to stage.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 session-corpus = { path = "../session-corpus" }
 tempfile.workspace = true
 

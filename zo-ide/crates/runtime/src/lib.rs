@@ -50,6 +50,7 @@ pub mod permission;
 pub mod patch_review;
 pub mod permission_enforcer;
 mod permissions;
+mod picture_budget;
 mod prompt;
 pub mod prompt_cache_breaks;
 pub mod request_timings;
@@ -186,8 +187,11 @@ pub use convert_messages::{
     declare_conversation_anchor_ttl, is_persisted_reminder_text,
     is_reasoning_passport_text, strip_reasoning_passport_label,
     mark_conversation_cache_breakpoints, mark_conversation_cache_breakpoints_short_lived,
-    model_handoff_notice, wrap_reminder, ConversationAnchorTtl, ReasoningReplay,
-    REASONING_PASSPORT_LABEL,
+    model_handoff_notice, plan_picture_shed, wrap_reminder, ConversationAnchorTtl,
+    ReasoningReplay, WireTarget, REASONING_PASSPORT_LABEL,
+};
+pub use picture_budget::{
+    PictureBudget, PictureShedPlan, KEEP_NEWEST_PICTURES, SHED_START_PERCENT, SHED_STEP_PERCENT,
 };
 pub use core_types::{format_usd, pricing_for_model};
 pub use core_types::{
