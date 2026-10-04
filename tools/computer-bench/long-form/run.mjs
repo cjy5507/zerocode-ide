@@ -6,7 +6,7 @@
  *
  *   node run.mjs --agent zo --scenario phone|chrome|url --out DIR
  *                [--cap-seconds N] [--model ID] [--bin PATH] [--note WORDS]
- *                [--window today|levers] [--words-choose PATH]
+ *                [--window today|levers] [--words-choose PATH] [--claude-cli PATH]
  *
  * `phone`: the form stands open in a phone app the Mac mirrors, pixels only,
  * as it did in the person's session; `chrome`: in a desktop browser with its
@@ -14,7 +14,9 @@
  * own road. The agent runs with an allowlisted environment: the bench's fake
  * shims first on PATH, no road to the person's window, its own state folders
  * under DIR (so nothing is written into the person's ~/.zo), and the one
- * login named by CLAUDE_SECURESTORAGE_CONFIG_DIR.
+ * login named by CLAUDE_SECURESTORAGE_CONFIG_DIR. `--claude-cli` adds that one
+ * vendor CLI to the run's PATH (as `claude`), for an agent that renews the
+ * login through it — the road a pane's agent takes.
  *
  * For the low-spec profile, run the whole command under `taskpolicy -b`:
  * the desk's Chromium, the server and the agent inherit it.
@@ -135,12 +137,13 @@ async function serve(out) {
   return { server, url };
 }
 
-async function shims(out) {
+async function shims(out, claudeCli) {
   const bin = join(out, "bin");
   await mkdir(bin, { recursive: true });
   for (const name of ["zerocode-computer", "zerocode-browser"]) {
     await symlink(join(HERE, "bin", "zerocode-door"), join(bin, name));
   }
+  if (claudeCli) await symlink(resolve(claudeCli), join(bin, "claude"));
   return bin;
 }
 
@@ -155,7 +158,7 @@ async function main() {
   const { server, url } = await serve(options.out);
   const desk = await startDesk({ url, out: options.out, personAttachMs: PERSON_ATTACH_MS, scene: SCENE_OF[options.scenario],
     window: options.window, wordsChoose: options.wordsChoose ? resolve(options.wordsChoose) : null });
-  const bin = await shims(options.out);
+  const bin = await shims(options.out, options.claudeCli);
   const env = Object.fromEntries(KEPT_ENV.filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
   Object.assign(env, agent.env(options), {
     PATH: [bin, dirname(process.execPath), ...SYSTEM_PATH].join(":"),
