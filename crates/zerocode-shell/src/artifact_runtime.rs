@@ -2891,13 +2891,25 @@ impl Writer<'_> {
     /// words — only while the seat's agent is the one whose transcript this
     /// is. A seat another agent sits in vouches for nothing here.
     fn origin(&self, session: Option<String>, project: Option<PathBuf>) -> Origin {
-        // Red (t-36910 stage 2): the pane's seat rides on no row yet.
-        Origin {
+        let mut origin = Origin {
             agent: Some(self.agent.to_string()),
             session,
             project,
             ..Origin::default()
+        };
+        let Some(pane) = self.pane else {
+            return origin;
+        };
+        origin.pane = Some(pane.key.clone());
+        let facts = &pane.facts;
+        if facts.agent.as_deref() == Some(self.agent) {
+            origin.model.clone_from(&facts.model);
+            origin.run.clone_from(&facts.run);
+            origin.worker.clone_from(&facts.worker);
+            origin.task.clone_from(&facts.task);
+            origin.work_summary.clone_from(&facts.work);
         }
+        origin
     }
 }
 
@@ -2942,8 +2954,7 @@ fn publication_origin(
         run: facts.run,
         worker: facts.worker,
         task: facts.task,
-        // Red (t-36910 stage 2): a publication does not say its task's words yet.
-        work_summary: None,
+        work_summary: facts.work,
         worktree,
         project,
         ..Origin::default()
@@ -3038,8 +3049,7 @@ fn pane_facts(heard: Option<&str>, seat: Option<Seat<'_>>) -> PaneFacts {
         model: seat.model.map(str::to_string),
         run: named(seat.run),
         worker: named(seat.worker),
-        // Red (t-36910 stage 2): a pane's facts do not carry the task's words yet.
-        work: None,
+        work: task.as_ref().and_then(|_| named(seat.work)),
         task,
     }
 }

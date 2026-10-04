@@ -66,9 +66,33 @@ pub(super) fn in_place_tags(
     len: u64,
     limits: &Limits,
 ) -> Vec<String> {
-    // Red (t-36910 stage 2): a step log's row is tagged with nothing yet.
-    let _ = (path, source, len, limits);
-    previous.map(|(_, tags)| tags).unwrap_or_default()
+    let (read_to, mut tags) = previous.unwrap_or_default();
+    if !is_step_log(path, source) {
+        return tags;
+    }
+    let from = if len >= read_to {
+        read_to
+    } else {
+        tags.retain(|tag| task_of_tag(tag).is_none());
+        0
+    };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return tags;
+    };
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return tags;
+    }
+    for task in evidence_digest::tasks_named(BufReader::new(file), limits) {
+        let tag = format!("{TASK_TAG_PREFIX}{task}");
+        let named = tags
+            .iter()
+            .filter(|held| task_of_tag(held.as_str()).is_some())
+            .count();
+        if named < limits.digest_tasks_max && !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    tags
 }
 
 /// The worker a report is counted under: the one its origin names, or — for a
@@ -336,9 +360,24 @@ const SIDE_WORDS: &[(&str, Side)] = &[
 /// The side a picture's name says, and the name without that word — what two
 /// pictures must share to be one comparison.
 fn side_of(path: &Path) -> Option<(Side, String)> {
-    // Red (t-36910 stage 2): no picture's name says a side yet.
-    let _ = path;
-    None
+    let stem = path.file_stem()?.to_string_lossy().to_lowercase();
+    let words: Vec<&str> = stem
+        .split(|glyph: char| !glyph.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let (at, side) = words.iter().enumerate().find_map(|(at, word)| {
+        SIDE_WORDS
+            .iter()
+            .find(|(held, _)| held == word)
+            .map(|(_, side)| (at, *side))
+    })?;
+    let rest: Vec<&str> = words
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != at)
+        .map(|(_, word)| *word)
+        .collect();
+    Some((side, rest.join("-")))
 }
 
 /// A before-and-after pair, or a picture that stands alone.
@@ -473,17 +512,129 @@ impl Store {
     /// asked of the line (the task's id, its words, its title), not of every
     /// row: a search on this tab is for a task.
     pub(crate) fn tasks(&self, filter: &Filter) -> TaskListing {
-        // Red (t-36910 stage 2): no task has a line yet.
-        let _ = filter;
-        TaskListing::default()
+        let limits = self.limits();
+        let needle: Vec<String> = filter
+            .query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut gathered: BTreeMap<&str, Gathering<'_>> = BTreeMap::new();
+        let mut unlinked = Unlinked::default();
+        let mut session_folders: BTreeSet<&Path> = BTreeSet::new();
+        for row in index.rows.values().filter(|row| filter.admits_origin(row)) {
+            let artifact = &row.artifact;
+            let gone = is_gone(artifact);
+            let mut linked = false;
+            for task in tasks_of(artifact) {
+                linked = true;
+                gathered.entry(task).or_default().take(artifact, gone);
+            }
+            if linked {
+                continue;
+            }
+            let part = part_of(artifact);
+            unlinked.parts.count(part, gone);
+            if gone {
+                continue;
+            }
+            if part == Part::Report && artifact.origin.is_empty() {
+                unlinked.reports_without_origin += 1;
+            }
+            let of_session = artifact.origin.automation.as_deref()
+                == Some(crate::agent_tools_runtime::EVIDENCE_AUTOMATION_ID);
+            if of_session && matches!(part, Part::Picture | Part::Log | Part::Other) {
+                unlinked.session_files += 1;
+                if let Some(folder) = artifact.path.parent() {
+                    session_folders.insert(folder);
+                }
+            }
+        }
+        unlinked.sessions = session_folders.len();
+        let mut tasks: Vec<TaskLine> = gathered
+            .into_iter()
+            .map(|(task, held)| held.line(task))
+            .filter(|line| line_matches(line, &needle))
+            .collect();
+        tasks.sort_by(|a, b| {
+            b.modified_ms
+                .cmp(&a.modified_ms)
+                .then_with(|| a.task.cmp(&b.task))
+        });
+        let total = tasks.len();
+        tasks.truncate(limits.task_lines_max);
+        TaskListing {
+            truncated: total > tasks.len(),
+            tasks,
+            total,
+            unlinked,
+        }
     }
 
     /// Everything one task holds, with what each of its logs says. `None` for
     /// a task no row names.
     pub(crate) fn bundle(&self, task: &str) -> Option<Bundle> {
-        // Red (t-36910 stage 2): no task has a bundle yet.
-        let _ = task;
-        None
+        let limits = self.limits();
+        let mut rows = self.rows_of(task);
+        if rows.is_empty() {
+            return None;
+        }
+        rows.sort_by(|a, b| {
+            b.modified_ms
+                .cmp(&a.modified_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let missing: Vec<String> = rows
+            .iter()
+            .filter(|row| is_gone(row))
+            .map(|row| row.id.clone())
+            .collect();
+        let gone = |row: &Artifact| missing.contains(&row.id);
+        let mut gathering = Gathering::default();
+        for row in &rows {
+            gathering.take(row, gone(row));
+        }
+        let present = |part: Part| {
+            rows.iter()
+                .filter(move |row| !gone(row) && part_of(row) == part)
+        };
+        let reports: Vec<&Artifact> = present(Part::Report).collect();
+        let pictures: Vec<&Artifact> = present(Part::Picture).collect();
+        let files: Vec<&Artifact> = rows
+            .iter()
+            .filter(|row| !gone(row) && matches!(part_of(row), Part::Log | Part::Other))
+            .collect();
+        let mut tally = Tally::default();
+        let mut unread = 0;
+        let evidence: Vec<EvidenceLine> = files
+            .iter()
+            .enumerate()
+            .map(|(at, row)| {
+                if at >= limits.bundle_digests_max {
+                    unread += 1;
+                    return EvidenceLine {
+                        id: row.id.clone(),
+                        ..EvidenceLine::default()
+                    };
+                }
+                let line = self.evidence_line(row, task);
+                if let Some(tests) = &line.tests {
+                    tally.add(tests);
+                }
+                line
+            })
+            .collect();
+        Some(Bundle {
+            reports: attempts_of(&reports),
+            pictures: pictures_of(&pictures),
+            evidence,
+            tally,
+            unread,
+            pages: present(Part::Page).map(|row| row.id.clone()).collect(),
+            line: gathering.line(task),
+            missing,
+            rows,
+        })
     }
 
     /// The rows of one task, as copies: the files are read with the catalog's
@@ -614,9 +765,22 @@ fn told_of<'a>(
     handed_in: impl Iterator<Item = &'a Artifact>,
     expect: Option<Expect>,
 ) -> Told {
-    // Red (t-36910 stage 2): a log is told nothing of its run yet.
-    let _ = (artifact, handed_in, expect);
-    Told::default()
+    if !is_run_log(artifact) {
+        return Told::default();
+    }
+    let exit_code = |path: &Path| {
+        let file = std::fs::File::open(path).ok()?;
+        evidence_digest::exit_code(BufReader::new(file))
+    };
+    let rc = exit_code(&artifact.path.with_extension(EXIT_CODE_EXTENSION)).or_else(|| {
+        handed_in
+            .filter(|held| is_exit_code_of(held, artifact))
+            .find_map(|held| exit_code(&held.path))
+    });
+    Told {
+        rc,
+        meant_to_fail: expect == Some(Expect::Fail),
+    }
 }
 
 /// The logs a newly catalogued exit code qualifies, by id — the other way

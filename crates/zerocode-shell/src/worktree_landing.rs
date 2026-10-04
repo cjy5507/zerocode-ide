@@ -1067,13 +1067,31 @@ pub(super) fn attach_commit_landings(
     commits: &[String],
     repos: &[KnownRepo],
 ) -> (BTreeMap<String, WorktreeLanding>, Option<CommitJob>) {
-    // Red (t-36910 stage 2): a commit is never asked about yet: every answer is `pending` and nothing is left to read.
-    let _ = repos;
-    let said = commits
-        .iter()
-        .map(|commit| (commit.clone(), WorktreeLanding::pending()))
-        .collect();
-    (said, None)
+    let cache = unpoisoned(commit_cache());
+    let mut said = BTreeMap::new();
+    let mut left = Vec::new();
+    for commit in commits.iter().take(COMMITS_ASKED_MAX) {
+        if said.contains_key(commit) {
+            continue;
+        }
+        if !is_commit_id(commit) {
+            said.insert(commit.clone(), unknown_commit());
+            continue;
+        }
+        let held = cache.get(commit);
+        if !held.is_some_and(|held| commit_stands(held, repos)) {
+            left.push(commit.clone());
+        }
+        said.insert(
+            commit.clone(),
+            held.map_or_else(WorktreeLanding::pending, |held| held.landing.clone()),
+        );
+    }
+    let job = (!left.is_empty()).then(|| CommitJob {
+        commits: left,
+        repos: repos.to_vec(),
+    });
+    (said, job)
 }
 
 /// Run what a question about commits left, on a thread of its own, and tell

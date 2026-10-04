@@ -301,8 +301,24 @@ impl Actor {
     /// absent — and so does an observation that is not a record.
     #[must_use]
     pub fn on(&self, observed: Option<serde_json::Value>) -> Option<serde_json::Value> {
-        // Red (t-36910 stage 2): the actor joins no observation yet.
-        observed
+        let known = [
+            (STEP_PANE_KEY, self.pane.as_deref()),
+            (STEP_TASK_KEY, self.task.as_deref()),
+        ];
+        if known.iter().all(|(_, held)| held.is_none()) {
+            return observed;
+        }
+        let mut value = match observed {
+            None => serde_json::json!({}),
+            Some(value) if value.is_object() => value,
+            other => return other,
+        };
+        for (key, held) in known {
+            if let Some(held) = held {
+                value[key] = serde_json::json!(held);
+            }
+        }
+        Some(value)
     }
 }
 

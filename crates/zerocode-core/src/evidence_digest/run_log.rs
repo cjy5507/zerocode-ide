@@ -79,8 +79,8 @@ impl Tests {
     /// An exit code the counts already carry stays unless a new one is told.
     #[must_use]
     pub fn judged(mut self, told: Told) -> Self {
-        // Red (t-36910 stage 2): nothing is judged yet.
-        let _ = told;
+        self.rc = told.rc.or(self.rc);
+        self.verdict = Verdict::of(&self, told.meant_to_fail);
         self
     }
 }
@@ -321,9 +321,15 @@ impl<'a> TestsFold<'a> {
 /// The exit code a `.rc` file holds: one whole number and nothing else.
 #[must_use]
 pub fn exit_code(reader: impl BufRead) -> Option<i32> {
-    // Red (t-36910 stage 2): an exit code is not read yet.
-    let _ = reader;
-    None
+    let mut held = String::new();
+    reader
+        .take(EXIT_CODE_BYTES_MAX + 1)
+        .read_to_string(&mut held)
+        .ok()?;
+    if held.len() as u64 > EXIT_CODE_BYTES_MAX {
+        return None;
+    }
+    held.trim().parse().ok()
 }
 
 /// The run a `.rc` file tells of.

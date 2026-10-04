@@ -59,8 +59,14 @@ pub enum Format {
 }
 
 /// The extensions a digest is read from, lower-cased and without the dot.
-const FORMAT_BY_EXTENSION: &[(&str, Format)] =
-    &[("jsonl", Format::Lines), ("json", Format::Document)];
+const FORMAT_BY_EXTENSION: &[(&str, Format)] = &[
+    ("jsonl", Format::Lines),
+    ("json", Format::Document),
+    ("log", Format::Text),
+    ("out", Format::Text),
+    ("txt", Format::Text),
+    ("rc", Format::ExitCode),
+];
 
 /// How many different verbs a log's count may name before the rest are summed
 /// unnamed: a log is not trusted to hold few of them.
@@ -313,8 +319,8 @@ pub fn read(format: Format, reader: impl BufRead, limits: &Limits) -> Option<Dig
     match format {
         Format::Lines => read_lines(reader, limits),
         Format::Document => read_document(reader, limits),
-        // Red (t-36910 stage 2): a text log and an exit code are not read yet.
-        Format::Text | Format::ExitCode => None,
+        Format::Text => read_text(reader, limits),
+        Format::ExitCode => run_log::read_exit_code(reader).map(Digest::Tests),
     }
 }
 
@@ -324,9 +330,11 @@ pub fn read(format: Format, reader: impl BufRead, limits: &Limits) -> Option<Dig
 /// is known for it; a digest of any other shape is as it was.
 #[must_use]
 pub fn told(digest: Option<Digest>, said: Told) -> Option<Digest> {
-    // Red (t-36910 stage 2): nothing told reaches a digest yet.
-    let _ = said;
-    digest
+    match digest {
+        Some(Digest::Tests(tests)) => Some(Digest::Tests(tests.judged(said))),
+        None if said.rc.is_some() => Some(Digest::Tests(Tests::default().judged(said))),
+        other => other,
+    }
 }
 
 /// One line of a step log, as far as a digest reads it. The window's recorder
@@ -426,9 +434,27 @@ fn read_lines(reader: impl BufRead, limits: &Limits) -> Option<Digest> {
 /// with, so a task finds the sessions that worked for it without reading them.
 #[must_use]
 pub fn tasks_named(reader: impl BufRead, limits: &Limits) -> Vec<String> {
-    // Red (t-36910 stage 2): a step log names no task yet.
-    let _ = (reader, limits);
-    Vec::new()
+    // Looked for in a line's bytes before the line is parsed: a log that names
+    // no task costs a scan and no parsing.
+    let key = format!("\"{STEP_TASK_KEY}\"");
+    let key = key.as_bytes();
+    let mut named: Vec<String> = Vec::new();
+    each_line(reader, limits, |line| {
+        if named.len() >= limits.digest_tasks_max
+            || !line.windows(key.len()).any(|bytes| bytes == key)
+        {
+            return;
+        }
+        let Ok(step) = serde_json::from_slice::<StepRead>(line.trim_ascii()) else {
+            return;
+        };
+        if let Some(task) = step.task()
+            && !named.iter().any(|held| held == task)
+        {
+            named.push(task.to_string());
+        }
+    });
+    named
 }
 
 /// A text log, read for what its test runners said.
@@ -621,6 +647,10 @@ impl<'a> StepFold<'a> {
         self.out.ended_ms = Some(read.at_epoch_ms);
         if !count_by_name(&mut self.verbs, &read.verb, VERBS_TRACKED_MAX) {
             self.out.other_verbs += 1;
+        }
+        if let Some(task) = read.task() {
+            self.out.tasked += 1;
+            count_by_name(&mut self.tasks, task, TASKS_TRACKED_MAX);
         }
         let words: &[String] = match read.argv.split_first() {
             Some((first, rest)) if *first == read.verb => rest,
