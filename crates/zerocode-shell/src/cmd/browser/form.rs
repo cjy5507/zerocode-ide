@@ -234,8 +234,10 @@ const zcNumberRuns = (records) => {
       && (!zcFold(records[end].caption) || zcFold(records[end].caption) === zcFold(head.caption))
       && !zcNameOf(records[end].el)) end += 1;
     if (end - at > 1 && zcFold(head.label)) {
+      // The caption read before the first part is renamed, for every part.
+      const caption = head.label.trim();
       for (let part = at; part < end; part += 1) {
-        records[part].label = head.label.trim() + " (" + (part - at + 1) + "/" + (end - at) + ")";
+        records[part].label = caption + " (" + (part - at + 1) + "/" + (end - at) + ")";
       }
     }
     at = end;
