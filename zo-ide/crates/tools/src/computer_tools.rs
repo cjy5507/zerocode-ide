@@ -1816,7 +1816,7 @@ mod tests {
                 &["recipe-run", "--name", "x", "--params", "{\"text-3\":\"hi\"}", "--start", "3", "--json"]),
             (json!({ "action": "handoff", "text": "Type your password", "timeout_ms": 60000 }),
                 &["handoff", "--reason", "Type your password", "--timeout-ms", "60000", "--json"]),
-            (json!({ "action": "handoff", "text": "카카오톡 인증번호", "ask_code": true, "timeout_ms": 180000 }),
+            (json!({ "action": "handoff", "text": "카카오톡 인증번호", "ask_code": true, "timeout_ms": 180_000 }),
                 &["handoff", "--reason", "카카오톡 인증번호", "--ask-code", "--timeout-ms", "180000", "--json"]),
             (json!({ "action": "walk", "goal": "도움말에서 설치 안내를 연다", "pane": "browser-13", "until": "설치 안내", "max_steps": 6 }),
                 &["walk", "--goal", "도움말에서 설치 안내를 연다", "--pane", "browser-13", "--until", "설치 안내", "--steps", "6", "--json"]),

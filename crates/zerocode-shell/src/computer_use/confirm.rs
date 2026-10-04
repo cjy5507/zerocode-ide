@@ -833,7 +833,7 @@ mod tests {
         let handed = wait_handed(&receiver, Duration::from_millis(1));
         assert_eq!(
             handed.code.is_some(),
-            round % 3 == 0,
+            round.is_multiple_of(3),
             "only a delivered code carries one"
         );
         close(&id);

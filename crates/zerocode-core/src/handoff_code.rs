@@ -35,6 +35,9 @@ pub const CODE_TYPED_MAX_CHARS: usize = CODE_MAX_CHARS * 2;
 /// What a code written in groups is joined with: the grouping is dropped and
 /// the code is the characters between.
 const CODE_GROUP_SEPARATORS: [char; 2] = [' ', '-'];
+/// The most bytes typed text may have before it is refused unread: the
+/// field's own room, at the four bytes a character takes at most in UTF-8.
+const TYPED_MAX_BYTES: usize = CODE_TYPED_MAX_CHARS * 4;
 
 /// What the card tells the page about the line it offers — the window sends
 /// this beside the reason, so the page never holds the numbers.
@@ -233,7 +236,7 @@ impl OneTimeCode {
     pub fn parse(typed: &str) -> Result<Self, CodeRefusal> {
         // Nothing past the field's own room is read: a paste of a page is
         // refused before it is walked.
-        if typed.len() > CODE_TYPED_MAX_CHARS * 4 {
+        if typed.len() > TYPED_MAX_BYTES {
             return Err(CodeRefusal::TooLong);
         }
         let joined: String = typed
