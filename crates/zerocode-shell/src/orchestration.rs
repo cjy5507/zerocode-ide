@@ -9159,6 +9159,16 @@ impl DelegateFlight {
     }
 }
 
+impl DelegateFlight {
+    /// Say which worker this carrying is still seating. (Red stub — t-34501.)
+    fn seating(&self, _worker: &str) {}
+}
+
+/// Whether a delegate is still opening this worker's pane. (Red stub — t-34501.)
+fn delegate_is_seating(_worker: &str) -> bool {
+    false
+}
+
 impl Drop for DelegateFlight {
     fn drop(&mut self) {
         let (held, bell) = delegate_flights();

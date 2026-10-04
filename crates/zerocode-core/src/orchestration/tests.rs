@@ -26714,6 +26714,33 @@ fn delegation_answer(planned: &Decided) -> serde_json::Value {
     })
 }
 
+/// The id letter is mail, and mail is read when the worker looks: a pane is pointed at its mail only
+/// once it rests. A worker that needs its ids in its first turn — to name a queue job — has to be
+/// told to look before anything else, whether the first words are the work itself or a prompt the
+/// coordinator wrote.
+#[test]
+fn delegate_tells_the_worker_in_its_first_words_to_read_its_letter_before_anything_else() {
+    for (extra, first) in [
+        (&[][..], "write-the-report"),
+        (&["--prompt", "do-this-first"][..], "do-this-first"),
+    ] {
+        let mut bench = Bench::new();
+        bench.json("run-create --name delegation");
+        let planned = delegating(&mut bench, "d-first", extra);
+        assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+        let prompt = &planned
+            .prepared_worker_start
+            .as_ref()
+            .expect("the reservation the window carries out")
+            .prompt;
+        let (work, look) = (prompt.find(first), prompt.find("zerocode-orc check"));
+        assert!(
+            matches!((work, look), (Some(work), Some(look)) if work < look),
+            "the first words name the work, then say to run `zerocode-orc check`: {prompt}"
+        );
+    }
+}
+
 /// The three things a coordinator used to do by hand are one plan: the task is written, the worker
 /// is reserved on it, and the worker's inbox already holds the letter that tells it its own ids.
 #[test]

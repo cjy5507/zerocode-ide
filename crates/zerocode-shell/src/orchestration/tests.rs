@@ -25539,3 +25539,28 @@ fn a_delegate_under_a_name_already_being_carried_out_waits_for_it_and_another_na
         "the name was free again and the waiter was still refused"
     );
 }
+
+/// The window opens a delegate's pane AFTER the plan wrote the worker and its first letter, so for
+/// a moment the ledger holds a live worker with mail waiting and the window has no seat for it. A
+/// beat that ran then would tell the coordinator the worker "restarted and the pane has not bound".
+/// A worker the carrying is still seating is skipped, and is not skipped a moment longer.
+#[test]
+fn a_worker_a_delegate_is_still_seating_is_not_reported_as_seatless() {
+    let flight = super::DelegateFlight::enter("team\u{1f}%0\u{1f}seating".to_string())
+        .expect("the name was free");
+    assert!(
+        !super::delegate_is_seating("w-seating"),
+        "nothing is seating yet"
+    );
+    flight.seating("w-seating");
+    assert!(super::delegate_is_seating("w-seating"));
+    assert!(
+        !super::delegate_is_seating("w-other"),
+        "only the worker named"
+    );
+    drop(flight);
+    assert!(
+        !super::delegate_is_seating("w-seating"),
+        "a worker is seated, or the carrying failed, once the flight ends"
+    );
+}
