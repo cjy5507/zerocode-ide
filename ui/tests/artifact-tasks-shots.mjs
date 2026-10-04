@@ -44,6 +44,20 @@ try {
       }, theme);
       await standCatalog(page);
       await standTasks(page);
+      // The task whose evidence is gone still has its report: the picture shows it under the names
+      // that are struck through. (The suites' catalog gives that report no body.)
+      await page.evaluate(() => {
+        const answer = window.__ANSWER__.artifact_preview;
+        const kept = [
+          "# 검증 보고 — 큐가 비워지는가", "",
+          "비워진다. 세 번 닫아 세 번 모두 남은 일이 0건이었다.", "",
+          "## 본 것", "",
+          "닫기 전 큐에 남은 일은 7건, 닫은 뒤에는 0건이다. 호출한 쪽의 기록에도 7이 적혔다.", "",
+        ].join("\n");
+        window.__ANSWER__.artifact_preview = (args) => (args.id === "r-review"
+          ? { kind: "markdown", text: kept, bytes: kept.length, truncated: false }
+          : answer(args));
+      });
       await page.evaluate(async (wait) => {
         dropTab("artifacts");
         Object.assign(artifactFilter, { tab: ARTIFACT_TASKS_TAB, query: "", origin: null, project: null, agent: null, period: "all", showMissing: false });

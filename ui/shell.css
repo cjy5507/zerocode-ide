@@ -45144,8 +45144,10 @@ button.jev-token:hover {
 
 .artifact-detail-facts[hidden] { display: none; }
 
+/* 제목은 위아래 여백만 지운다 — 옆 여백은 서랍이 조각마다 주는 것이라, 지우면 제목만 본문보다
+ * 왼쪽에 붙는다. */
 .artifact-detail-title {
-  margin: 0;
+  margin-block: 0;
   overflow-wrap: anywhere;
   font-size: var(--artifact-title-size);
   font-weight: 600;
@@ -45552,6 +45554,12 @@ button.jev-token:hover {
   gap: var(--space-1);
   align-items: center;
   min-width: 0;
+}
+
+/* 수는 한 덩어리다 — 목록이 띠로 좁아지면 곁의 말이 줄을 바꾸고, 「증거 4」는 꺾이지 않는다. */
+.artifacts-loose-show {
+  flex: none;
+  white-space: nowrap;
 }
 
 .artifacts-loose-note:empty { display: none; }
