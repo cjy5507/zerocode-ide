@@ -6473,6 +6473,11 @@ pub(super) async fn answer_browser_command(
             match cmd::browser::automate_fill(app, &state, &label, command.entries).await {
                 Ok(report) => {
                     let words = zerocode_core::browser_form::fill_lines(&report);
+                    // A form other than the one read: the host's own words,
+                    // nothing of the page's, and nothing written.
+                    if report.stale {
+                        return browser_refused(format!("zerocode-browser: {words}"));
+                    }
                     if report.all_took() {
                         page_said(&label, words)
                     } else {

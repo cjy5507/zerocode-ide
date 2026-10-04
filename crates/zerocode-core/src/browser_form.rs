@@ -407,7 +407,7 @@ impl FillLedger {
     /// [`BROWSER_FILL_PASSES`] passes are spent.
     #[must_use]
     pub fn next(&self) -> Vec<FillEntry> {
-        if self.passes >= BROWSER_FILL_PASSES {
+        if self.stale || self.passes >= BROWSER_FILL_PASSES {
             return Vec::new();
         }
         self.entries
@@ -423,6 +423,11 @@ impl FillLedger {
     /// wrote nothing and ends the fill.
     pub fn record(&mut self, asked: &[FillEntry], pass: FillPass) {
         self.passes += 1;
+        self.fingerprint = pass.fingerprint;
+        if pass.stale {
+            self.stale = true;
+            return;
+        }
         for entry in asked {
             let Some(at) = self.entries.iter().position(|held| held.handle == entry.handle) else {
                 continue;
@@ -488,7 +493,7 @@ impl FillReport {
 
     #[must_use]
     pub fn all_took(&self) -> bool {
-        self.took() == self.results.len()
+        !self.stale && self.took() == self.results.len()
     }
 }
 
@@ -604,6 +609,12 @@ fn left_line(field: &FormField) -> String {
 /// line — what it holds now, or why it did not take — and what is left.
 #[must_use]
 pub fn fill_lines(report: &FillReport) -> String {
+    if report.stale {
+        return format!(
+            "{}: 양식이 읽은 뒤 바뀌었습니다 (칸이 사라지거나 바뀌었거나 새 단계) — 아무 칸도 쓰지 않았습니다; fields로 다시 읽고 채우세요\n",
+            crate::computer_use_protocol::error_code::FORM_STALE
+        );
+    }
     let mut lines = vec![format!(
         "채움 {}/{}칸 ({}회)",
         report.took(),

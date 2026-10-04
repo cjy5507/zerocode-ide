@@ -125,6 +125,12 @@ A form is data, so fill it as data, not a picture per field:
 3. Press the step's button by its handle (`click <pane-label> <handle>`),
    then `fields` again only when the page moved on to another step.
 
+A `fill` is held to the form your last `fields` read (or your last fill
+left): when a field has gone, been renamed or added, or the page is on
+another step, it writes nothing and answers `form_stale` — read the form
+again, then fill. Fields your own values bring inside one fill are not
+stale.
+
 One step can also be one script: an `eval` that names `zerocode.` gets
 `zerocode.fields()` (the same read) and `zerocode.fill({handle: value})`
 (one pass of the same fill), so the script reads the step, fills it by the
@@ -136,9 +142,9 @@ zerocode-browser eval <pane-label> --value-stdin <<'JS'
 (() => {
   const read = zerocode.fields();
   const at = (words) => read.fields.find((f) => f.label.startsWith(words))?.handle;
-  const step = zerocode.fill({ [at("Name")]: "Kim", [at("Arrival date")]: "2026-11-03", [at("I agree")]: true });
+  const step = zerocode.fill({ [at("Name")]: "Kim", [at("Arrival date")]: "2026-11-03", [at("I agree")]: true }, read);
   const next = read.actions.find((a) => a.label === "Next");
-  if (step.results.every((r) => r.status === "set" || r.status === "same") && !step.left.length && next) {
+  if (!step.stale && step.results.every((r) => r.status === "set" || r.status === "same") && !step.left.length && next) {
     document.querySelector(next.handle).click();   // a step's own button — never a payment or a send
   }
   return { results: step.results, left: step.left, error: document.querySelector("[role=alert]")?.textContent };

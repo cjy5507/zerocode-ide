@@ -318,8 +318,12 @@ const zcFormFields = (request) => {
       actions.push({ handle, label, disabled: zcOff(el) });
     }
   }
+  // The form's fingerprint: every field's handle, kind and words, in order —
+  // never a value, which a fill is there to change.
+  const print = zcDigest(records.map((record) => [record.handle, record.kind, zcFold(record.label)]
+    .join("\u001f")).join("\u001e"));
   return { records, fields: records.map((record) => zcFieldOut(record, request)), actions,
-    more, sealed: docs.sealed };
+    more, sealed: docs.sealed, print };
 };
 "##;
 
@@ -328,7 +332,7 @@ const zcFormFields = (request) => {
 pub(crate) const BROWSER_FIELDS_BODY: &str = r#"
 const read = zcFormFields(request);
 return zcEncode({ ok: true, value: { fields: read.fields, actions: read.actions, more: read.more,
-  sealedFrames: read.sealed } }, request.answerCap);
+  sealedFrames: read.sealed, fingerprint: read.print } }, request.answerCap);
 "#;
 
 /// What `fill` writes with, page side — standing on the form helpers: each
@@ -546,7 +550,10 @@ const zcTarget = (handle) => {
 // the fingerprint of the form its agent read — a form that is no longer that
 // one is said (`stale`) before anything is written.
 const zcFill = (entries, expect) => {
-  void expect;
+  if (expect) {
+    const now = zcFormFields(request).print;
+    if (now !== expect) return { results: [], left: [], stale: true, fingerprint: now };
+  }
   const passes = entries.map((entry) => {
     const out = { handle: entry.handle, status: "unread", kind: "", label: "", now: "", error: "", options: [] };
     const target = zcTarget(entry.handle);
@@ -579,7 +586,7 @@ const zcFill = (entries, expect) => {
   });
   const after = zcFormFields(request);
   const left = after.fields.filter((field) => (field.required && zcEmpty(field)) || field.error);
-  return { results, left };
+  return { results, left, stale: false, fingerprint: after.print };
 };
 "#;
 
@@ -601,7 +608,8 @@ pub(crate) const BROWSER_EVAL_FORM: &str = r#"
 const zerocode = Object.freeze({
   fields: () => {
     const read = zcFormFields(request);
-    return { fields: read.fields, actions: read.actions, more: read.more, sealedFrames: read.sealed };
+    return { fields: read.fields, actions: read.actions, more: read.more, sealedFrames: read.sealed,
+      fingerprint: read.print };
   },
   fill: (bundle, read) => zcFill(Array.isArray(bundle) ? bundle
     : Object.entries(bundle || {}).map(([handle, value]) => ({ handle, value })),
@@ -659,13 +667,23 @@ fn form_prints() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
 /// Remember the form a pane's agent now knows; an empty fingerprint (a page
 /// that answered none) forgets it.
 pub(crate) fn remember_form(label: &str, fingerprint: &str) {
-    let _ = (form_prints(), label, fingerprint);
+    let mut held = form_prints()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if fingerprint.is_empty() {
+        held.remove(label);
+    } else {
+        held.insert(label.to_string(), fingerprint.to_string());
+    }
 }
 
 /// The form a pane's agent last knew, if it read one.
 pub(crate) fn known_form(label: &str) -> Option<String> {
-    let _ = label;
-    None
+    form_prints()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(label)
+        .cloned()
 }
 
 /// A fill script: the form helpers, the writer, and a body that calls it.
@@ -745,7 +763,7 @@ pub(crate) async fn automate_fill(
 /// with its refusal; a stale form ends it with nothing written.
 pub(crate) async fn fill_passes<P, F>(
     entries: Vec<FillEntry>,
-    expect: Option<String>,
+    mut expect: Option<String>,
     pending: Duration,
     poll: Duration,
     mut pass: P,
@@ -754,7 +772,6 @@ where
     P: FnMut(Vec<FillEntry>, Option<String>) -> F,
     F: std::future::Future<Output = Result<FillPass, String>>,
 {
-    let _ = expect;
     let until = tokio::time::Instant::now() + pending;
     let mut ledger = FillLedger::new(entries);
     loop {
@@ -762,7 +779,7 @@ where
         if asked.is_empty() {
             break;
         }
-        let answered = pass(asked.clone(), None).await?;
+        let answered = pass(asked.clone(), expect.take()).await?;
         ledger.record(&asked, answered);
         if ledger.next().is_empty() || tokio::time::Instant::now() >= until {
             break;
