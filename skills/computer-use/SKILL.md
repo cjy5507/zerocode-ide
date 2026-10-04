@@ -549,7 +549,10 @@ Recording permission the screenshots use — no new prompt.
   `"code": null, "codeRefused": "secret_reason"` with `--json`, and in text mode
   an error (`no code was taken`) that stops the `&&` before anything is typed. After the code is in, look at the
   screen: the site says whether it took it, and the last step (a payment, a
-  submit you may not press) is still the person's.
+  submit you may not press) is still the person's. While the card stands the
+  field shows what the person types, so a picture of the whole display
+  (`screenshot`, `zoom`, `compare`, a desktop `observe` that keeps its picture)
+  answers `person_asked` too; every other look still answers.
 - **Recipes** (`recipe-save --name <n> [--note …]`, `recipe-list`,
   `recipe-show --name <n>`, `recipe-run --name <n>`): when a procedure
   worked, save it — this session's steps become a document (a command line

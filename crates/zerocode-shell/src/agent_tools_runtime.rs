@@ -3773,18 +3773,45 @@ fn persons_stop_standing() -> Option<String> {
 /// verb has a folder to read.
 const RECIPES_ROOT_UNKNOWN: &str = "the window has not told the operator where its data lives yet";
 
+/// Whether a command takes a picture of the whole display: a screenshot, a
+/// zoom, a compare, and a desktop observe that keeps its picture. A picture of
+/// an app's own window (`--app`) is that window's — the card is ZeroCode's,
+/// which no command may name — and an OCR read leaves ZeroCode's windows out.
+fn looks_at_the_display(command: &zerocode_core::computer_use::ComputerCommand) -> bool {
+    use zerocode_core::computer_use::ComputerMethod;
+    match command.method {
+        ComputerMethod::Screenshot | ComputerMethod::Zoom | ComputerMethod::Compare => true,
+        ComputerMethod::Observe => {
+            command.params.get("app").is_none()
+                && command.params.get("noScreenshot") != Some(&serde_json::Value::Bool(true))
+        }
+        _ => false,
+    }
+}
+
 /// The one hand (§1.3): while stopped, every action is refused at the door,
 /// before anything goes near the helper; looks still answer. So is every
 /// action while the person is being asked (§1.5) — a press or a key sent
 /// meanwhile could land on the question's own Allow.
-/// Why a command that acts is refused at the door, if it is: the operator
+/// Why a command is refused at the door, if it is. One that acts: the operator
 /// is stopped (the hotkey, `stop`, a budget), or the person is being asked
-/// about a step (or has the desk). A look is never refused here.
+/// about a step (or has the desk). A look is not refused here — but for a
+/// picture of the whole display while a card with a line stands.
 pub(super) fn door_refusal(
     command: &zerocode_core::computer_use::ComputerCommand,
 ) -> Option<computer_use::ComputerUseError> {
     if !command.method.acts() {
-        return None;
+        // A card with a line shows what the person types, in clear: a picture
+        // of the display taken meanwhile would carry it into a file. Every
+        // other look still answers.
+        return (computer_use::confirm::taking_a_code() && looks_at_the_display(command)).then(
+            || {
+                computer_use::ComputerUseError::new(
+                    zerocode_core::computer_use_protocol::error_code::PERSON_ASKED,
+                    "the person is typing a code on a card; a picture of the display waits until the card is gone — look again then",
+                )
+            },
+        );
     }
     match computer_use::guard::stopped_reason() {
         Some(reason) => Some(computer_use::guard::refusal(&reason)),

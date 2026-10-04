@@ -412,6 +412,18 @@ pub fn asking() -> bool {
         .is_some_and(|pending| !pending.is_empty())
 }
 
+/// Whether a card with a line for a code stands: the person is typing
+/// something that shows in clear, and no picture of the display may be taken
+/// while it does.
+#[must_use]
+pub fn taking_a_code() -> bool {
+    PENDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|pending| pending.values().any(|waiting| waiting.takes_code))
+}
+
 /// Wait for the answer, for at most the table.
 #[must_use]
 pub fn wait(receiver: &mpsc::Receiver<Reply>, timeout: Duration) -> Decision {
