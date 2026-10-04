@@ -9669,6 +9669,8 @@ mod tests {
             "automate_scroll(app, &state",
             "automate_find(app, &state",
             "automate_diagnose(app, &state",
+            "automate_fields(app, &state",
+            "automate_fill(app, &state",
             "browser_snapshot_png(app, &state",
             "write_agent_screenshot",
         ] {

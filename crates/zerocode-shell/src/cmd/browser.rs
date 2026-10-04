@@ -2,6 +2,10 @@
 
 use crate::*;
 
+/// The form pair (`fields`, `fill`, and the same inside an `eval`).
+pub(crate) mod form;
+pub(crate) use form::{automate_fields, automate_fill, eval_script};
+
 /// The callback channel is shared by find/grab/menu and the automation
 /// surface below. A page owns every byte it returns, so both the engine wait
 /// and the amount accepted back into Rust are bounded here, once.
@@ -662,8 +666,10 @@ const zcEncode = (answer, cap = 64000) => {
 const zcFail = (code) => zcEncode({ ok: false, code });
 // A password field is the platform's own fact — the input's type, or the
 // `current-password` a form declares — never a label's word: the one rule
-// the typing holds its keys by and a look calls a field secret by.
-const zcSecretField = (element) => element instanceof HTMLInputElement
+// the typing holds its keys by, a look and a form read call a field secret
+// by. Read by the element's tag, not its realm's class, so a field inside a
+// frame is judged as one on the page.
+const zcSecretField = (element) => String((element && element.tagName) || "").toLowerCase() === "input"
   && (String(element.type).toLowerCase() === "password"
     || String(element.autocomplete || "").toLowerCase() === "current-password");
 // The element a selector names is the first one a person could SEE, not the
@@ -2064,7 +2070,7 @@ pub(crate) async fn automate_eval(
 ) -> Result<serde_json::Value, String> {
     checked_expression(expression)?;
     let pane = browser_pane_of(app, state, label)?;
-    let script = automation_script(&serde_json::json!({}), &inlined_eval_body(expression));
+    let script = eval_script(expression, &inlined_eval_body(expression));
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE)
         .await
         .map_err(inlined_eval_failure)?;
@@ -2757,7 +2763,7 @@ const zcWords = (text, cap) => zcCut(String(text || "").replace(/\s+/g, " ").tri
 // another control inside it (a select's options, a textarea's text).
 const zcLabelWords = (label) => {
   const skip = "select, textarea, button, script, style, template";
-  const walker = document.createTreeWalker(label, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+  const walker = (label.ownerDocument || document).createTreeWalker(label, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => node.nodeType === 1 && node.matches(skip)
       ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
   const words = [];
@@ -2768,11 +2774,11 @@ const zcLabelWords = (label) => {
 };
 // An element's name in the order a reader takes it: the elements it is
 // labelled by, its own label, the labels that name it, a table's caption,
-// its title.
+// its title — each looked up in the element's own document (a frame's).
 const zcNameOf = (el) => {
   const by = el.getAttribute("aria-labelledby");
   if (by) {
-    const words = by.split(/\s+/).map((id) => document.getElementById(id)).filter(Boolean)
+    const words = by.split(/\s+/).map((id) => (el.ownerDocument || document).getElementById(id)).filter(Boolean)
       .map((node) => node.textContent).join(" ");
     if (words.trim()) return words;
   }
@@ -2790,7 +2796,7 @@ const zcNameOf = (el) => {
 const zcNear = (el, field) => {
   const around = el.closest(field.regions.join(","));
   const heading = (around && around.querySelector(field.headings.join(",")))
-    || document.querySelector("h1");
+    || (el.ownerDocument || document).querySelector("h1");
   return heading ? heading.textContent : "";
 };
 // A numbered control read as a field — its kind, whether it holds a secret,
@@ -3621,6 +3627,16 @@ pub(crate) const BROWSER_OBSERVE_HELPERS: &str = r##"
 // The document a script runs in, by the moment it began: another document is
 // another epoch, a document that only changed is the same one.
 const zcEpoch = () => String(performance.timeOrigin || performance.timing.navigationStart);
+// A text's digest: its length and its FNV-1a hash — what a pin and a form's
+// fingerprint compare instead of the text itself.
+const zcDigest = (held) => {
+  let hash = 0x811c9dc5;
+  for (let at = 0; at < held.length; at += 1) {
+    hash ^= held.charCodeAt(at);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return held.length + ":" + hash.toString(16);
+};
 // What a field holds, as a pin compares it: a digest of its value — a box's
 // checked state, a select's choice — never a secret's fingerprint, and none at
 // all for a control that holds no value.
@@ -3640,12 +3656,7 @@ const zcValueDigest = (el) => {
   } else {
     return null;
   }
-  let hash = 0x811c9dc5;
-  for (let at = 0; at < held.length; at += 1) {
-    hash ^= held.charCodeAt(at);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return held.length + ":" + hash.toString(16);
+  return zcDigest(held);
 };
 // The watch a settle reads: when this document last changed, on its own
 // clock, kept on the document itself — another document starts with none, a

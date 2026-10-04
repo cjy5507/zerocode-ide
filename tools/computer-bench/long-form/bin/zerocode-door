@@ -1,0 +1,19 @@
+#!/bin/sh
+# The long-form bench's stand-in for the window's shims (t-37883): installed
+# as `zerocode-computer` and `zerocode-browser`, it sends its argv — joined
+# by 0x1f, as the window's shim joins it — to the fake desk at
+# $LONG_FORM_DESK, the door named by the name it was called by. The answer
+# goes to stdout; a refusal to stderr with exit 1, as the window's does.
+door=$(basename "$0")
+door=${door#zerocode-}
+body=$(mktemp "${TMPDIR:-/tmp}/door-body.XXXXXX") || exit 2
+reply=$(mktemp "${TMPDIR:-/tmp}/door-reply.XXXXXX") || exit 2
+trap 'rm -f "$body" "$reply"' EXIT
+printf '%s\037' "$@" > "$body"
+code=$(curl -s -o "$reply" -w '%{http_code}' --data-binary @"$body" "$LONG_FORM_DESK/$door")
+if [ "$code" = 200 ]; then
+  cat "$reply"
+  exit 0
+fi
+cat "$reply" >&2
+exit 1

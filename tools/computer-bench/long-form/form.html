@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Traveller registration</title>
+<style>
+  /* A plain government-style page: one column, labels above controls, the
+     sections stacked so most of the form sits below the fold. */
+  :root { --ink: #1d1d1f; --muted: #5a5a60; --line: #b9b9c0; --accent: #1f4fa3; --error: #b3261e; --paper: #ffffff; --band: #eef1f6; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: var(--ink); background: var(--paper); }
+  header { background: var(--accent); color: #fff; padding: 14px 24px; }
+  header h1 { margin: 0; font-size: 22px; }
+  main { max-width: 720px; margin: 0 auto; padding: 16px 24px 96px; }
+  .notice { color: var(--muted); font-size: 14px; }
+  section { border-top: 4px solid var(--band); margin-top: 28px; padding-top: 8px; }
+  section h2 { font-size: 20px; margin: 8px 0 12px; }
+  .row { margin: 14px 0; }
+  .row > label, .row > .label, fieldset > legend { display: block; font-weight: 600; margin-bottom: 4px; }
+  .hint { display: block; color: var(--muted); font-size: 14px; margin-bottom: 4px; }
+  input[type=text], input[type=email], input[type=tel], input[type=date], select, textarea { width: 100%; max-width: 420px; padding: 7px 9px; border: 2px solid var(--line); border-radius: 4px; font: inherit; background: #fff; }
+  textarea { min-height: 72px; }
+  input:focus, select:focus, textarea:focus, button:focus, [tabindex]:focus { outline: 3px solid #ffbf47; outline-offset: 1px; }
+  fieldset { border: 0; margin: 14px 0; padding: 0; }
+  fieldset label { display: inline-flex; align-items: center; gap: 6px; margin-right: 18px; font-weight: 400; }
+  .combo { position: relative; max-width: 420px; }
+  .combo ul { position: absolute; z-index: 5; left: 0; right: 0; top: 100%; margin: 0; padding: 0; list-style: none; max-height: 220px; overflow: auto; background: #fff; border: 2px solid var(--line); border-top: 0; }
+  .combo li { padding: 6px 9px; cursor: pointer; }
+  .combo li[aria-selected=true] { background: var(--accent); color: #fff; }
+  .datepick { display: flex; gap: 6px; max-width: 420px; }
+  .datepick input { flex: 1; }
+  .calendar { border: 2px solid var(--line); padding: 8px; margin-top: 4px; max-width: 300px; background: #fff; }
+  .calendar .nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .calendar table { border-collapse: collapse; width: 100%; }
+  .calendar td { text-align: center; padding: 0; }
+  .calendar td button { width: 100%; padding: 4px 0; border: 0; background: none; font: inherit; cursor: pointer; }
+  .counter { display: inline-flex; align-items: center; gap: 8px; }
+  .counter [role=spinbutton] { min-width: 2.5em; text-align: center; font-weight: 600; padding: 6px; border: 2px solid var(--line); border-radius: 4px; }
+  button { font: inherit; padding: 7px 14px; border: 2px solid var(--accent); border-radius: 4px; background: #fff; color: var(--accent); cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; font-weight: 600; padding: 10px 22px; }
+  .file-name { margin-left: 10px; color: var(--muted); }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .errors { border: 4px solid var(--error); padding: 12px 16px; margin: 16px 0; }
+  .errors h2 { color: var(--error); margin: 0 0 6px; font-size: 18px; }
+  .field-error { color: var(--error); font-weight: 600; display: block; }
+  .done { border: 4px solid #00703c; padding: 16px; margin-top: 24px; }
+  [hidden] { display: none !important; }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<header><h1>Traveller registration</h1></header>
+<main>
+  <p class="notice" id="notice"></p>
+  <div id="errors" class="errors" role="alert" tabindex="-1" hidden></div>
+  <form id="form" novalidate></form>
+  <div id="done" class="done" role="status" tabindex="-1" hidden></div>
+</main>
+<script src="form-core.js"></script>
+<script src="form.js"></script>
+</body>
+</html>

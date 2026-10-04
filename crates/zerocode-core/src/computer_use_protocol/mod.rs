@@ -31,6 +31,7 @@ pub mod reflex;
 pub mod render;
 pub mod text_field;
 pub mod validate;
+pub mod words;
 
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +106,8 @@ pub mod error_code {
     pub const WINDOW_STALE: &str = "window_stale";
     pub const WINDOW_NOT_FOCUSED: &str = "window_not_focused";
     pub const ELEMENT_NOT_FOUND: &str = "element_not_found";
+    /// Several controls read the words a press named; it pressed none.
+    pub const AMBIGUOUS_TARGET: &str = "ambiguous_target";
     pub const ELEMENT_NOT_CLICKABLE: &str = "element_not_clickable";
     pub const ACTION_NOT_SUPPORTED: &str = "action_not_supported";
     pub const VALUE_NOT_SETTABLE: &str = "value_not_settable";
@@ -165,6 +168,10 @@ pub mod error_code {
     /// recorded set, or another protocol. Nothing was pressed; the message
     /// names what is missing.
     pub const FLOW_STALE: &str = "flow_stale";
+    /// A browser `fill` found the page's form other than the one its agent
+    /// read (`fields`): a field gone, renamed or new, another step. Nothing
+    /// was written; the agent reads the form again (t-37883).
+    pub const FORM_STALE: &str = "form_stale";
     /// A Flow's act aimed at an app or a host its fingerprint does not allow
     /// (`Fingerprint::allows`): refused before the press, whatever the screen.
     pub const FLOW_ENV_MISMATCH: &str = "flow_env_mismatch";

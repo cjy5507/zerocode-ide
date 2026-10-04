@@ -1,0 +1,5 @@
+{
+  "inDate": "2026-11-03", "inTime": "07:30", "outDate": "2026-11-07", "outTime": "21:00",
+  "name": "김예시", "phone": "010-5550-0142", "email": "kim@example.com", "car": "12가3456",
+  "flight": "SH204", "people": "2", "lot": "indoor", "agree": true, "code": "482913"
+}

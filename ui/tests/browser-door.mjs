@@ -22,6 +22,8 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./playwright-chromium.mjs";
+import { rustList, rustNumber, rustText } from "./rust-source.mjs";
+import { FORM_REQUEST, evalFormScript, fieldsScript, fillPasses } from "./browser-scripts.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DOOR = await readFile(resolve(UI, "../crates/zerocode-shell/src/cmd/browser.rs"), "utf8");
@@ -294,22 +296,6 @@ await test("a press names the block it landed in by the same chain the cutter wr
 const CORE = await readFile(resolve(UI, "../crates/zerocode-core/src/agent_browser.rs"), "utf8");
 const SCREEN = await readFile(resolve(UI, "../crates/zerocode-core/src/screen_action.rs"), "utf8");
 const VALUE_QUESTION = JSON.parse(await readFile(resolve(UI, "../crates/zerocode-core/fixtures/type-value/question.json"), "utf8"));
-/* A Rust `&str` constant's text, raw or plain — null when the source has
- * none, so a missing script fails its own tests, not the whole file. */
-const rustText = (source, name) => {
-  const raw = source.match(new RegExp(`const ${name}: &str = r(#+)"([\\s\\S]*?)"\\1;`));
-  if (raw) return raw[2];
-  const plain = source.match(new RegExp(`const ${name}: &str = "((?:[^"\\\\]|\\\\.)*)";`));
-  return plain ? JSON.parse(`"${plain[1]}"`) : null;
-};
-const rustList = (source, name) => {
-  const held = source.match(new RegExp(`const ${name}: (?:&\\[&str\\]|\\[&str; \\d+\\]) = &?\\[([\\s\\S]*?)\\];`));
-  return held ? [...held[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((hit) => JSON.parse(`"${hit[1]}"`)) : null;
-};
-const rustNumber = (source, name) => {
-  const held = source.match(new RegExp(`const ${name}: \\w+ = ([\\d_.]+);`));
-  return held ? Number(held[1].replace(/_/g, "")) : null;
-};
 const snapshotKey = (name) => rustText(SCREEN, name);
 const observeKey = (head) => SCREEN.match(new RegExp(`pub const fn key\\(self\\)[\\s\\S]*?Self::${head} => "(\\w+)"`))[1];
 const MARK_HELPERS = rustText(DOOR, "BROWSER_MARK_HELPERS");
@@ -689,6 +675,252 @@ await test("background_observation_does_not_focus_another_pane", async () => {
     assert(JSON.stringify(backgroundAfter) === JSON.stringify(backgroundBefore), "the observed tab's did too", { backgroundBefore, backgroundAfter });
     return JSON.stringify(personAfter);
   } finally { await context.close(); }
+});
+
+/* ---- The form pair (t-37883): `fields` reads every field a page draws,
+ * `fill` writes a bundle and reads each field back. The scripts and their
+ * tables are read from the Rust the pane runs; the pages are the bench's
+ * regression scenes (tools/computer-bench/form-scenes), each a shape real
+ * sites build — the door is told nothing about them. */
+const SCENES = resolve(UI, "../tools/computer-bench/form-scenes");
+const scene = async (name) => readFile(resolve(SCENES, name, "scene.html"), "utf8");
+const readFields = async (target) => {
+  const read = await evalJson(target, fieldsScript());
+  assert(read.ok, "the read was refused", read);
+  return read.value;
+};
+const fillBundle = (target, bundle, expect = null) => fillPasses((source) => evalJson(target, source), bundle, expect);
+const byHandle = (read) => Object.fromEntries(read.fields.map((field) => [field.handle, field]));
+const handleOf = (read, label) => {
+  const found = read.fields.filter((field) => field.label === label);
+  assert(found.length === 1, `one field reads "${label}"`, read.fields.map((field) => field.label));
+  return found[0].handle;
+};
+
+await test("a_form_read_names_every_field_by_the_pages_own_words", async () => {
+  const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await booking.setContent(await scene("A"));
+    const read = await readFields(booking);
+    const labels = read.fields.map((field) => field.label);
+    const expected = ["입차일", "입차 시간", "출차일", "출차 시간", "이름", "휴대폰 (1/3)", "휴대폰 (2/3)", "휴대폰 (3/3)",
+      "이메일", "차량번호", "항공편", "인원", "주차 구역", "개인정보 수집·이용 동의 (필수)"];
+    assert(JSON.stringify(labels) === JSON.stringify(expected), "the page's own words, in its order, below the fold too", labels);
+    const fields = Object.fromEntries(read.fields.map((field) => [field.label, field]));
+    assert(fields["입차 시간"].disabled && fields["입차 시간"].kind === "select", "a list not loaded yet is off", fields["입차 시간"]);
+    assert(fields["출차 시간"].options.length === 38 && fields["출차 시간"].options[0] === "05:00" && fields["출차 시간"].moreOptions === 0,
+      "a select's choices by their words", fields["출차 시간"]);
+    assert(fields["휴대폰 (1/3)"].maxLength === 3 && fields["휴대폰 (2/3)"].maxLength === 4, "the parts say their length");
+    assert(fields["주차 구역"].kind === "radio" && JSON.stringify(fields["주차 구역"].options) === JSON.stringify(["실내", "실외"])
+      && fields["주차 구역"].required, "a radio group is one field", fields["주차 구역"]);
+    assert(fields["개인정보 수집·이용 동의 (필수)"].value === false, "a checkbox hidden behind its label is read", fields);
+    assert(fields["이름"].section === "예약자 정보" && fields["입차일"].section === "이용 일정", "the section is the legend");
+    assert(read.fields.every((field) => field.required === !["항공편", "인원"].includes(field.label)), "required as the page marks it");
+    const actions = read.actions.map((action) => action.label);
+    assert(actions.includes("인증요청") && actions.includes("예약하기"), "the buttons beside the fields", read.actions);
+    for (const field of read.fields) {
+      const found = await booking.evaluate((handle) => document.querySelectorAll(handle).length, field.handle);
+      assert(found >= 1, `the handle ${field.handle} finds its field`);
+    }
+    assert(!labels.includes("인증번호"), "a field the page has not drawn yet is not read");
+    return `${read.fields.length} fields, ${read.actions.length} buttons`;
+  } finally { await booking.close(); }
+});
+
+await test("a_fill_writes_a_bundle_in_one_call_and_reads_each_back", async () => {
+  const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await booking.setContent(await scene("A"));
+    const read = await readFields(booking);
+    const at = (label) => handleOf(read, label);
+    const bundle = {
+      [at("입차일")]: "2026.11.3", [at("입차 시간")]: "07:30", [at("출차일")]: "2026-11-07", [at("출차 시간")]: "21:00",
+      [at("이름")]: "김예시", [at("휴대폰 (1/3)")]: "010", [at("휴대폰 (2/3)")]: "5550", [at("휴대폰 (3/3)")]: "0142",
+      [at("이메일")]: "kim@example.com", [at("차량번호")]: "12가3456", [at("항공편")]: "SH204", [at("인원")]: 2,
+      [at("주차 구역")]: "실내", [at("개인정보 수집·이용 동의 (필수)")]: true,
+    };
+    const filled = await fillBundle(booking, bundle);
+    const statuses = filled.results.map((result) => result.status);
+    assert(statuses.every((status) => status === "set"), "every field took", filled.results);
+    assert(filled.passes >= 2, "the time list a date loads took a later pass", filled.passes);
+    assert(filled.results[0].now === "2026-11-03", "a date as written becomes the input's own form", filled.results[0]);
+    assert(filled.left.length === 0, "nothing required is left", filled.left);
+    const kept = await booking.evaluate(() => {
+      document.querySelector('input[name="flight"]').dispatchEvent(new Event("input", { bubbles: true }));
+      const form = document.getElementById("booking");
+      return { name: form.elements.name.value, email: form.elements.email.value, time: form.elements["in-time"].value,
+        lot: form.querySelector('input[name="lot"]:checked')?.value, agree: document.getElementById("agree").checked };
+    });
+    assert(JSON.stringify(kept) === JSON.stringify({ name: "김예시", email: "kim@example.com", time: "07:30", lot: "indoor", agree: true }),
+      "the framework's own state holds what was written", kept);
+    const again = await fillBundle(booking, { [at("이름")]: "김예시", [at("개인정보 수집·이용 동의 (필수)")]: true });
+    assert(again.results.every((result) => result.status === "same"), "a value already held is not written again", again.results);
+    return `${filled.passes} passes`;
+  } finally { await booking.close(); }
+});
+
+await test("a_fill_refuses_by_name_what_it_must_not_or_cannot_write", async () => {
+  const odd = await browser.newPage();
+  try {
+    await odd.setContent(`<form><label>비밀번호 <input id="pw" type="password"></label>
+      <label>사진 <input id="photo" type="file"></label><label>코드 <input id="short" maxlength="4"></label>
+      <label>도시 <select id="city"><option value="">선택</option><option>부산</option><option>대구</option></select></label></form>`);
+    const filled = await fillBundle(odd, { "#pw": "hunter2", "#photo": "/x.png", "#short": "12345", "#city": "광주",
+      "#nowhere": "x", "<<<": "x" });
+    const said = Object.fromEntries(filled.results.map((result) => [result.handle, result.status]));
+    assert(JSON.stringify(said) === JSON.stringify({ "#pw": "secret", "#photo": "file", "#short": "too_long", "#city": "no_option",
+      "#nowhere": "not_found", "<<<": "invalid_handle" }), "each refusal by its name", said);
+    const city = filled.results.find((result) => result.handle === "#city");
+    assert(JSON.stringify(city.options) === JSON.stringify(["부산", "대구"]), "a missing choice says the choices there are", city);
+    const untouched = await odd.evaluate(() => [document.getElementById("pw").value, document.getElementById("short").value]);
+    assert(JSON.stringify(untouched) === JSON.stringify(["", ""]), "nothing refused was written", untouched);
+    const read = await readFields(odd);
+    assert(read.fields.find((field) => field.handle === "#pw").masked, "a secret is read as masked");
+    return JSON.stringify(said);
+  } finally { await odd.close(); }
+});
+
+await test("drawn_widgets_steps_and_a_frame_are_read_and_filled_by_their_words", async () => {
+  const rental = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await rental.setContent(await scene("B"));
+    const step = async (bundle, next) => {
+      const read = await readFields(rental);
+      const filled = await fillBundle(rental, Object.fromEntries(Object.entries(bundle).map(([label, value]) => [handleOf(read, label), value])));
+      assert(filled.results.every((result) => result.status === "set"), "every field of the step took", filled.results);
+      if (next) {
+        const button = read.actions.find((action) => action.label === next);
+        assert(button, `the step's button ${next} is read`, read.actions);
+        await rental.evaluate((handle) => document.querySelector(handle).click(), button.handle);
+      }
+      return { read, filled };
+    };
+    const one = await step({ "차종": "준중형 · 아반떼", "운전자 생년월일": "19880214", "연료": "휘발유" }, "다음");
+    const model = one.read.fields.find((field) => field.label === "차종");
+    assert(model.kind === "combobox", "a button that opens a list is a dropdown", model);
+    const two = await step({ "반납일": "2026-11-07", "반납 장소": "기타", "보험 추가": true });
+    assert(two.read.fields.find((field) => field.label === "반납일").readOnly, "a date the page keeps from typing is read-only");
+    assert(two.filled.results[0].now === "2026.11.07", "the date was picked on the page's own calendar", two.filled.results[0]);
+    await rental.waitForTimeout(450);
+    await step({ "상세 장소": "북문 주차장" }, "다음");
+    const three = await readFields(rental);
+    const labels = three.fields.map((field) => field.label);
+    for (const label of ["카드 소유자", "카드번호 (1/4)", "카드번호 (4/4)", "유효기간 (1/2)", "유효기간 (2/2)", "이용 약관에 동의합니다"]) {
+      assert(labels.includes(label), `step 3 reads ${label}`, labels);
+    }
+    const framed = three.fields.find((field) => field.label === "카드 소유자");
+    assert(framed.handle.includes(FORM_REQUEST.frameSeparator), "a field in a frame is named through its frame", framed);
+    const at = (label) => handleOf(three, label);
+    const paid = await fillBundle(rental, { [at("카드 소유자")]: "KIM YESI", [at("카드번호 (1/4)")]: "4000", [at("카드번호 (2/4)")]: "0012",
+      [at("카드번호 (3/4)")]: "3456", [at("카드번호 (4/4)")]: "7899", [at("유효기간 (1/2)")]: "08", [at("유효기간 (2/2)")]: "28",
+      [at("이용 약관에 동의합니다")]: true });
+    assert(paid.results.every((result) => result.status === "set"), "the frame's fields and the page's took", paid.results);
+    await rental.evaluate((handle) => document.querySelector(handle).click(), three.actions.find((action) => action.label === "결제하기").handle);
+    const result = await rental.evaluate(() => window.__sceneResult);
+    const expected = JSON.parse(await readFile(resolve(SCENES, "B", "expected.json"), "utf8"));
+    assert(JSON.stringify(result) === JSON.stringify(expected), "the page took the booking", result);
+    return "3 steps";
+  } finally { await rental.close(); }
+});
+
+await test("a_tab_nobody_looks_at_reads_and_fills_and_the_persons_tab_keeps_its_focus", async () => {
+  const context = await browser.newContext({ viewport: { width: 900, height: 600 } });
+  try {
+    const person = await context.newPage();
+    await person.setContent(`<input id="typing" value="half a sentence"><div style="height:3000px"></div>`);
+    const background = await context.newPage();
+    await background.setContent(HIDDEN + await scene("A"));
+    await person.bringToFront();
+    await person.focus("#typing");
+    await person.evaluate(() => { document.getElementById("typing").setSelectionRange(2, 6); window.scrollTo(0, 120); });
+    const where = () => person.evaluate(() => ({ active: document.activeElement?.id, start: document.activeElement?.selectionStart,
+      end: document.activeElement?.selectionEnd, y: Math.round(window.scrollY) }));
+    const before = await where();
+    const read = await readFields(background);
+    const filled = await fillBundle(background, { [handleOf(read, "이름")]: "김예시", [handleOf(read, "주차 구역")]: "실외",
+      [handleOf(read, "인원")]: "3" });
+    assert(filled.results.every((result) => result.status === "set"), "the hidden tab filled", filled.results);
+    assert(await background.evaluate(() => window.__frames) === 0, "no frame was waited for");
+    const after = await where();
+    assert(JSON.stringify(after) === JSON.stringify(before), "the person's focus, selection and scroll stayed", { before, after });
+    return JSON.stringify(after);
+  } finally { await context.close(); }
+});
+
+/* One eval, one step (`eval_script`): the expression reads the page's
+ * fields, fills them by the words it read and says what is left — the
+ * script the skill teaches, run as the door runs it. */
+await test("one_eval_reads_fills_and_checks_a_step_by_the_words_it_read", async () => {
+  const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await booking.setContent(await scene("A"));
+    const card = JSON.parse(await readFile(resolve(SCENES, "A", "card.json"), "utf8"));
+    const step = `(() => {
+      const card = ${JSON.stringify(Object.fromEntries(card.facts.map((fact) => [fact.says, fact.value])))};
+      const read = zerocode.fields();
+      const bundle = {};
+      for (const field of read.fields) {
+        const words = field.label.replace(/ \\(\\d+\\/\\d+\\)$/, "");
+        if (!(words in card)) continue;
+        const part = field.label.match(/\\((\\d+)\\/(\\d+)\\)$/);
+        bundle[field.handle] = part ? String(card[words]).split(/\\D+/)[Number(part[1]) - 1] : card[words];
+      }
+      const filled = zerocode.fill(bundle);
+      return { statuses: filled.results.map((r) => r.label + ":" + r.status), left: filled.left.map((f) => f.label) };
+    })()`;
+    const first = await evalJson(booking, evalFormScript(step));
+    assert(first.ok, "the one script ran", first);
+    const notSet = first.value.statuses.filter((said) => !said.endsWith(":set"));
+    assert(JSON.stringify(notSet) === JSON.stringify(["입차 시간:disabled"]), "all but the list a date loads took in one call", first.value);
+    await booking.waitForTimeout(350);
+    const second = await evalJson(booking, evalFormScript(step));
+    assert(second.value.statuses.every((said) => said.endsWith(":set") || said.endsWith(":same")), "the next call finishes it", second.value);
+    return `${first.value.statuses.length} fields in one call`;
+  } finally { await booking.close(); }
+});
+
+/* A fill is held to the form its agent read (m-40824): a field renamed
+ * after the read, and the whole bundle is refused unwritten — on the door's
+ * road and inside one eval alike; the form as read takes it. */
+await test("a_fill_on_a_form_that_changed_since_its_read_writes_nothing", async () => {
+  const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await booking.setContent(await scene("A"));
+    const read = await readFields(booking);
+    assert(/^\d+:[0-9a-f]+$/.test(read.fingerprint || ""), "the read carries the form's fingerprint", read.fingerprint);
+    const bundle = { [handleOf(read, "이름")]: "김예시", [handleOf(read, "항공편")]: "SH204" };
+    await booking.evaluate(() => { document.querySelector('input[name="flight"]').closest("tr").querySelector("th").textContent = "편명"; });
+    const stale = await fillBundle(booking, bundle, read.fingerprint);
+    assert(stale.stale === true && stale.passes === 1, "a renamed field makes the form stale", stale);
+    const held = await booking.evaluate(() => [document.querySelector('input[name="name"]').value,
+      document.querySelector('input[name="flight"]').value]);
+    assert(JSON.stringify(held) === JSON.stringify(["", ""]), "nothing was written", held);
+    const again = await readFields(booking);
+    assert(again.fingerprint !== read.fingerprint, "the form read again is another form");
+    const fresh = await fillBundle(booking, { [handleOf(again, "이름")]: "김예시", [handleOf(again, "편명")]: "SH204" }, again.fingerprint);
+    assert(!fresh.stale && fresh.results.every((result) => result.status === "set"), "the form as read takes the bundle", fresh);
+    const script = await evalJson(booking, evalFormScript(`(() => {
+      const read = zerocode.fields();
+      document.querySelector('input[name="email"]').closest("tr").remove();
+      return zerocode.fill({ [read.fields.find((f) => f.label === "차량번호").handle]: "12가3456" }, read);
+    })()`));
+    assert(script.ok && script.value.stale === true, "one eval's fill is held to the read it made", script);
+    assert(await booking.evaluate(() => document.querySelector('input[name="car"]').value) === "", "and wrote nothing");
+    return `${read.fingerprint} → ${again.fingerprint}`;
+  } finally { await booking.close(); }
+});
+
+await test("a_frame_of_another_origin_is_named_not_read", async () => {
+  const sealed = await browser.newPage();
+  try {
+    await sealed.setContent(`<form><label>이름 <input id="who"></label>
+      <iframe id="card" src="data:text/html,<input id=inside>"></iframe></form>`);
+    await sealed.waitForTimeout(100);
+    const read = await readFields(sealed);
+    assert(read.fields.length === 1 && read.fields[0].handle === "#who", "only the page's own field", read.fields);
+    assert(read.sealedFrames.length === 1, "the other origin's frame is named", read.sealedFrames);
+    return JSON.stringify(read.sealedFrames);
+  } finally { await sealed.close(); }
 });
 
 await browser.close();

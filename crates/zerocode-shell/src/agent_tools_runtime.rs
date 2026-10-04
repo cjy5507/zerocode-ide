@@ -5050,15 +5050,44 @@ pub(super) fn answer_computer_command(
         // output as the result — the terminal a person would have opened.
         Ok(desktop_run(&command.params))
     } else if command.method == ComputerMethod::Wait {
-        // A wait is the window's to answer: a bounded pause, no helper round trip.
+        // A wait is the window's to answer: a bounded pause, no helper round
+        // trip — or, with `--settle` (a batch's wait after an act, t-37883),
+        // until what the act painted has held still on the eye's repaints,
+        // never longer than asked; without the eye, the whole pause.
         let asked = command
             .params
             .get("ms")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let (waited, capped) = zerocode_core::computer_use::desktop_wait_ms(asked);
-        std::thread::sleep(std::time::Duration::from_millis(waited));
-        Ok(serde_json::json!({ "waitedMs": waited, "capped": capped }))
+        let settles = command
+            .params
+            .get(zerocode_core::computer_use::WAIT_SETTLE_FLAG)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        match settles
+            .then(|| computer_use::eye::wait_settled_desktop(waited))
+            .flatten()
+        {
+            Some(settled) => Ok(serde_json::json!({
+                "waitedMs": settled["waitedMs"],
+                "askedMs": waited,
+                "capped": capped,
+                "settled": settled["settled"],
+            })),
+            None => {
+                std::thread::sleep(std::time::Duration::from_millis(waited));
+                Ok(serde_json::json!({ "waitedMs": waited, "capped": capped }))
+            }
+        }
+    } else if command.method == ComputerMethod::Click
+        && command
+            .params
+            .get("ocr")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        click_by_words(&command, asking, &mut computer_use::call)
     } else if command.method == ComputerMethod::Click && command.params.get("mark").is_some() {
         click_by_mark(&command, asking, workspace)
     } else if command.method == ComputerMethod::Find {
@@ -5143,6 +5172,68 @@ fn click_by_mark(
     computer_use::cover::press_mark_here(&mark, &mut press, asking, workspace)
         .map(|answer| computer_use::marks::click_answer(answer, &mark))
         .map_err(|error| computer_use::marks::click_refusal(error, &mark))
+}
+
+/// `click --app A --ocr --text T [--after-text W] [--dx N --dy N]`
+/// (t-37883): a control on a window with no tree — a mirrored phone, a
+/// remote desktop — named by the words its pixels show. The helper reads the
+/// app's window (`readText --ocr`, lines in screen points) and the core
+/// chooses the line (`computer_use_protocol::words`) at the press, so a batch
+/// step may name it after earlier steps scrolled or opened a sheet. The press
+/// is a click at the line's centre, nudged by `--dx/--dy`, down the road
+/// every press takes; words that name a payment, a transfer or a delete
+/// declare that step, so the person is asked before the helper moves — the
+/// helper cannot read a label off pixels itself.
+pub(crate) fn click_by_words(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    asking: computer_use::confirm::Asking,
+    call: &mut dyn FnMut(
+        &str,
+        serde_json::Value,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError>,
+) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+    use zerocode_core::computer_use::{ComputerCommand, ComputerMethod};
+    use zerocode_core::computer_use_protocol::words;
+    let params = &command.params;
+    let word = |key: &str| params.get(key).and_then(serde_json::Value::as_str);
+    let mut read = serde_json::Map::new();
+    for key in ["app", "windowId", "windowIndex"] {
+        if let Some(value) = params.get(key) {
+            read.insert(key.into(), value.clone());
+        }
+    }
+    read.insert("ocr".into(), serde_json::Value::Bool(true));
+    let lines = words::lines(&call("readText", serde_json::Value::Object(read))?);
+    let line = words::choose(&lines, word("text").unwrap_or_default(), word("afterText"))?;
+    let (x, y) = line.center();
+    let nudge = |key: &str| {
+        params
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0)
+    };
+    let mut press =
+        serde_json::json!({ "x": x + nudge("dx"), "y": y + nudge("dy"), "label": line.text });
+    for key in ["mouseButton", "clickCount", "modifiers", "confirming"] {
+        if let Some(value) = params.get(key) {
+            press[key] = value.clone();
+        }
+    }
+    if press.get("confirming").is_none()
+        && let Some(kind) = zerocode_core::guarded::confirm_kind_of(&line.text)
+    {
+        press["confirming"] = kind.as_str().into();
+    }
+    let resolved = ComputerCommand {
+        method: ComputerMethod::MouseClick,
+        params: press,
+        json: command.json,
+    };
+    let clicked = call_with_the_persons_last_step(&resolved, asking, call)?;
+    Ok(serde_json::json!({
+        "pressed": { "words": line.text, "x": x, "y": y },
+        "click": clicked,
+    }))
 }
 
 /// Call the helper for a command, holding a press that lands on a payment,
@@ -5906,6 +5997,18 @@ pub(super) fn page_said(source: &str, words: impl Into<String>) -> zerocode_hook
 /// once (`list`, `tabs`) rather than one page.
 const EVERY_TAB: &str = "browser tabs";
 
+/// A refusal whose words the page wrote — a fill whose fields did not all
+/// take says each field's words and what it holds — in the same fence, on
+/// the road a refusal travels (the bridge hands an agent only stderr when
+/// the exit code is not zero).
+pub(super) fn page_refused(source: &str, words: impl Into<String>) -> zerocode_hookd::TeamAnswer {
+    browser_refused(zerocode_core::untrusted::fence(
+        source,
+        &words.into(),
+        usize::MAX,
+    ))
+}
+
 pub(super) fn browser_refused(stderr: impl Into<String>) -> zerocode_hookd::TeamAnswer {
     zerocode_hookd::TeamAnswer {
         stdout: String::new(),
@@ -6122,16 +6225,32 @@ pub(super) async fn answer_browser_command(
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }
         }
-        ("eval", 3) => match cmd::browser::automate_eval(app, &state, &argv[1], &argv[2]).await {
-            Ok(value) => page_said(
-                &argv[1],
-                format!(
-                    "{}\n",
-                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string())
+        // `eval <label> <expr>`, or `eval <label> --value <expr>` — the shape
+        // the shim sends for `--value-stdin`, so a script that fills a form
+        // keeps the person's details off every argv (t-37883).
+        ("eval", 3) | ("eval", 4) => {
+            let expression = match &argv[2..] {
+                [expression] => expression,
+                [flag, expression] if flag == zerocode_core::agent_browser::TYPE_VALUE_FLAG => {
+                    expression
+                }
+                _ => {
+                    return browser_refused(
+                        "zerocode-browser: eval <label> <expr> 또는 eval <label> --value-stdin\n",
+                    );
+                }
+            };
+            match cmd::browser::automate_eval(app, &state, &argv[1], expression).await {
+                Ok(value) => page_said(
+                    &argv[1],
+                    format!(
+                        "{}\n",
+                        serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string())
+                    ),
                 ),
-            ),
-            Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
-        },
+                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+            }
+        }
         // `read <label> [css]` reads the page or a selector; `read <label>
         // --full` reads the page whole, whatever the read seat would fold.
         // The judged road and the plain road print through ONE formatter
@@ -6322,6 +6441,50 @@ pub(super) async fn answer_browser_command(
                     browser_said(format!("{}\n", cmd::browser::marks_json(&marks)))
                 }
                 Ok(marks) => page_said(&command.label, cmd::browser::marks_lines(&marks)),
+                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+            }
+        }
+        // `fields <label> [--json]` reads every field a page draws; `fill
+        // <label> <bundle>` — or `--value <bundle>`, the stdin road — writes a
+        // bundle and reads each field back (t-37883). Both answers carry the
+        // page's words: fenced, or flagged when a program reads the JSON.
+        ("fields", _) => {
+            let command = match zerocode_core::agent_browser::parse_fields(argv) {
+                Ok(command) => command,
+                Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
+            };
+            match cmd::browser::automate_fields(app, &state, &command.label).await {
+                Ok(read) if command.json => browser_said(format!(
+                    "{}\n",
+                    zerocode_core::browser_form::fields_json(&read)
+                )),
+                Ok(read) => page_said(
+                    &command.label,
+                    zerocode_core::browser_form::fields_lines(&read),
+                ),
+                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+            }
+        }
+        ("fill", _) => {
+            let command = match zerocode_core::agent_browser::parse_fill(argv) {
+                Ok(command) => command,
+                Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
+            };
+            let label = command.label.clone();
+            match cmd::browser::automate_fill(app, &state, &label, command.entries).await {
+                Ok(report) => {
+                    let words = zerocode_core::browser_form::fill_lines(&report);
+                    // A form other than the one read: the host's own words,
+                    // nothing of the page's, and nothing written.
+                    if report.stale {
+                        return browser_refused(format!("zerocode-browser: {words}"));
+                    }
+                    if report.all_took() {
+                        page_said(&label, words)
+                    } else {
+                        page_refused(&label, words)
+                    }
+                }
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }
         }
