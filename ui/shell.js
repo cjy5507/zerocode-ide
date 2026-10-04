@@ -5473,6 +5473,12 @@ function paintAgentInspectorReport(actions, entity) {
       select: report,
     });
   };
+  // 「그림·페이지로 설명」 — 보고서가 있을 때만 짓는다(t-32787). 본문은 백엔드가 파일에서 읽는다.
+  if (report !== null) {
+    ensureExplainButton(actions, "report", () => explainSourceOfReport(entity, report, Number.isInteger(seatTerm) ? seatTerm : null));
+  }
+  const explain = actions.querySelector(":scope > .explain-open");
+  if (explain) explain.hidden = report === null;
 }
 
 function agentGraphInspectorParts(view) {
@@ -11711,6 +11717,13 @@ const TERM_WITHHELD_UNWORDED = Object.freeze({
  * back still reach the clipboard, so the silence loses nobody's words. */
 const withheldNotices = new Map();
 
+/* The sentence the table has for a refusal, the way it arrived — words withheld or words
+ * left on the line — or null. The prompt notice and an explain request word the guard's
+ * refusals with the same one. */
+function withheldSentenceOf(why, pasted) {
+  return TERM_WITHHELD[why]?.[pasted ? "left" : "withheld"] ?? null;
+}
+
 /* A prompt the guard withheld, said once for the reason it gives. */
 function sayWithheldPrompt(term, why, pasted, text) {
   if (!withheldNotices.has(term)) withheldNotices.set(term, new Map());
@@ -11722,7 +11735,7 @@ function sayWithheldPrompt(term, why, pasted, text) {
   if (told) return;
   const row = TERM_WITHHELD[why];
   const way = pasted ? "left" : "withheld";
-  const sentence = row?.[way] ?? TERM_WITHHELD_UNWORDED[way];
+  const sentence = withheldSentenceOf(why, pasted) ?? TERM_WITHHELD_UNWORDED[way];
   const note = toast(t(sentence.key, sentence.word, { term }), row?.yields ? "" : "halt");
   if (note && row?.tip) note.dataset.tip = t(row.tip.key, row.tip.word);
 }
@@ -13030,6 +13043,8 @@ function helperTurnRowNode(run, turn, spoken, cold = false) {
   if (turn.role === "assistant") row.appendChild(helperActionsNode(turn));
   row.dataset.turn = String(turn.seq);
   row.__turn = turn;
+  // 「그림·페이지로 설명」이 이 답의 대화를 찾는 길(t-32787): 단추는 처음 닿을 때 짓는다.
+  row.__run = run;
   return row;
 }
 
@@ -13980,6 +13995,8 @@ function helperTurnsNode(run) {
   list.setAttribute("aria-label", t("worker.transcript", "헬퍼 대화 기록"));
   list.tabIndex = 0;
   list.__run = run;
+  // 「그림·페이지로 설명」 단추는 답변 행에 포인터나 초점이 처음 닿을 때 짓는다(t-32787).
+  watchExplainTurns(list);
   // It keeps to its foot until the person leaves it (t-6323 A5).
   keepToFoot(list);
   // A person's words stuck at the top (the extension's sticky header) are a

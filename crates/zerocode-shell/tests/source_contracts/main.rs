@@ -34083,14 +34083,35 @@ mod tests {
     fn a_door_publish_hands_the_window_its_row() {
         let backend = shipped_backend();
         let door = block_after(backend, "fn artifact_request(");
+        // The publish arm tells the window through ONE function, which the page an
+        // explanation's one-shot makes (t-32787) goes through as well — two roads that
+        // told the window apart could tell it differently.
+        assert!(
+            door.contains("publish_and_tell(store, &input, origin)"),
+            "the publish arm no longer publishes through the one function that tells the window:\n{door}"
+        );
+        let telling = block_after(backend, "pub(crate) fn publish_and_tell(");
         // The row goes out with its feedback count on it (t-11959): the same
         // row the catalog holds, filled by the store, then emitted.
         assert!(
-            door.contains("app.emit(CHANGED_EVENT, ())")
-                && door.contains("let mut row = meta.artifact(origin);")
-                && door.contains("store.fill_feedback(&mut row);")
-                && door.contains("app.emit(PUBLISHED_EVENT, row)"),
-            "the publish arm no longer hands the window the row it published:\n{door}"
+            telling.contains("app.emit(CHANGED_EVENT, ())")
+                && telling.contains("let mut row = meta.artifact(origin);")
+                && telling.contains("store.fill_feedback(&mut row);")
+                && telling.contains("app.emit(PUBLISHED_EVENT, row.clone())"),
+            "the publish door no longer hands the window the row it published:\n{telling}"
+        );
+        // The window hears the publication first and an explanation's `ready` after it:
+        // opening the page it asked for after the notice of a publication clears that
+        // notice, and the other order would raise a 「새 N」 for a page opening right now.
+        let published = telling
+            .find("app.emit(PUBLISHED_EVENT, row.clone())")
+            .expect("the publication is emitted");
+        let explained = telling
+            .find("explain_door::note_published(")
+            .expect("an explanation hears the publication");
+        assert!(
+            published < explained,
+            "an explanation's page is announced before the publication the window opens it from:\n{telling}"
         );
         assert!(
             backend.contains("pub(crate) const PUBLISHED_EVENT: &str = \"artifacts:published\";"),
