@@ -494,7 +494,7 @@ fn diff_of(bytes: usize) -> String {
         text.push_str(&format!(
             "+    let value_{line} = compute(input, {line});\n"
         ));
-        if line % 50 == 0 {
+        if line.is_multiple_of(50) {
             text.push_str("+export API_TOKEN=abc123\n");
         }
         line += 1;
