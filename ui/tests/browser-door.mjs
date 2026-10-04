@@ -1048,6 +1048,43 @@ await test("parts_with_unit_words_between_them_are_one_captions_parts", async ()
   } finally { await units.close(); }
 });
 
+/* A dropdown drawn with no ARIA at all — a focusable box with a list beside
+ * it, items filled late after another choice — is read as a field with its
+ * items for choices, and filled by opening it and pressing the item. */
+await test("a_focusable_box_with_a_list_beside_it_is_a_dropdown", async () => {
+  const plain = await browser.newPage();
+  try {
+    await plain.setContent(`<!doctype html><html lang="ko"><meta charset="utf-8"><form>
+      <div class="row"><div class="cap">터미널</div><div class="ctl"><select id="t"><option value="">선택</option><option value="A">A동</option><option value="B">B동</option></select></div></div>
+      <div class="row"><div class="cap">주차장</div><div class="ctl"><div class="dd">
+        <div class="btn" tabindex="0"><span class="val">터미널을 먼저 고르세요</span></div><ul class="list" hidden></ul></div></div></div></form>
+      <script>
+        const box = document.querySelector(".dd"), button = box.querySelector(".btn"), list = box.querySelector(".list");
+        button.addEventListener("click", () => { list.hidden = !list.hidden; });
+        list.addEventListener("click", (event) => {
+          const item = event.target.closest("li");
+          if (!item) return;
+          button.querySelector(".val").textContent = item.textContent;
+          box.dataset.value = item.dataset.value;
+          list.hidden = true;
+        });
+        document.getElementById("t").addEventListener("change", (event) => setTimeout(() => {
+          list.replaceChildren(...(event.target.value === "B" ? ["P3 단기", "P4 장기"] : ["P1 단기", "P2 장기"]).map((words, at) => {
+            const item = document.createElement("li"); item.textContent = words; item.dataset.value = "p" + at; return item; }));
+          button.querySelector(".val").textContent = "주차장을 고르세요";
+        }, 150));
+      </script>`);
+    const read = await readFields(plain);
+    const lot = read.fields.find((field) => field.label === "주차장");
+    assert(lot && lot.kind === "dropdown", "a focusable box with a list beside it is a dropdown", read.fields);
+    const filled = await fillBundle(plain, { [handleOf(read, "터미널")]: "B동", [lot.handle]: "P4 장기" });
+    assert(filled.results.every((result) => result.status === "set"), "the late items are chosen by their words", filled.results);
+    const shown = await plain.evaluate(() => [document.querySelector(".val").textContent, document.querySelector(".dd").dataset.value]);
+    assert(JSON.stringify(shown) === JSON.stringify(["P4 장기", "p1"]), "the page took the item", shown);
+    return `${filled.passes} passes`;
+  } finally { await plain.close(); }
+});
+
 await test("a_frame_of_another_origin_is_named_not_read", async () => {
   const sealed = await browser.newPage();
   try {
