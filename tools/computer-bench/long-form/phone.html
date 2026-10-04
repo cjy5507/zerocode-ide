@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=390, initial-scale=1">
+<title>Traveller registration</title>
+<style>
+  /* An iOS-style app screen (390 × 844 points) for the long-form bench: what
+     the iPhone Mirroring window shows. The mirroring window has no
+     accessibility tree, so everything an agent learns here it learns from
+     pixels. */
+  :root { --ink: #000; --muted: #6d6d72; --line: #c6c6c8; --tint: #007aff; --ground: #f2f2f7; --card: #fff;
+    --danger: #ff3b30; --keys: #d1d3d9; --key: #fff; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; }
+  body { font: 17px/1.3 -apple-system, "SF Pro Text", "Helvetica Neue", Arial, sans-serif; color: var(--ink); background: var(--ground);
+    padding-bottom: 40px; }
+  body.typing { padding-bottom: 340px; }
+  .status { position: sticky; top: 0; z-index: 20; height: 47px; display: flex; justify-content: space-between; align-items: center;
+    padding: 0 28px; font-weight: 600; font-size: 16px; background: var(--ground); }
+  h1 { font-size: 32px; margin: 4px 16px 2px; }
+  .notice { color: var(--muted); font-size: 13px; margin: 0 16px 8px; }
+  .head { color: var(--muted); font-size: 13px; text-transform: uppercase; margin: 22px 32px 6px; }
+  .card { background: var(--card); border-radius: 10px; margin: 0 16px; overflow: hidden; }
+  .row { padding: 10px 16px; border-bottom: 1px solid var(--line); min-height: 44px; display: flex; flex-direction: column; justify-content: center; }
+  .row:last-child { border-bottom: 0; }
+  .row.inline { flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; }
+  .row .label { color: var(--muted); font-size: 13px; }
+  .row.inline .label { color: var(--ink); font-size: 17px; }
+  .row input, .row textarea { border: 0; outline: 0; font: inherit; padding: 4px 0 0; background: transparent; width: 100%; }
+  .row textarea { resize: none; height: 48px; }
+  .value { color: var(--muted); display: flex; align-items: center; gap: 6px; text-align: right; }
+  .value.set { color: var(--ink); }
+  .chevron { color: var(--line); font-size: 20px; }
+  .question { font-size: 15px; margin-bottom: 8px; }
+  .segments { display: flex; background: #e3e3e8; border-radius: 9px; padding: 2px; }
+  .segments button { flex: 1; border: 0; background: transparent; font: inherit; font-size: 14px; padding: 6px 0; border-radius: 7px; }
+  .segments button.on { background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .2); font-weight: 600; }
+  .checks button { display: flex; justify-content: space-between; width: 100%; border: 0; background: none; font: inherit; padding: 8px 0;
+    border-bottom: 1px solid var(--line); text-align: left; }
+  .checks button:last-child { border-bottom: 0; }
+  .checks .mark { color: var(--tint); font-weight: 700; visibility: hidden; }
+  .checks button.on .mark { visibility: visible; }
+  .stepper { display: flex; align-items: center; gap: 10px; }
+  .stepper button { width: 46px; height: 32px; border: 0; background: #e3e3e8; border-radius: 8px; font-size: 22px; line-height: 1; }
+  .stepper .count { min-width: 1.5em; text-align: center; font-weight: 600; }
+  .switch { position: relative; flex: none; width: 51px; height: 31px; border-radius: 16px; background: #e3e3e8; border: 0; padding: 0;
+    transition: background .2s; }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%; background: #fff;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, .25); transition: left .2s; }
+  .switch.on { background: #34c759; }
+  .switch.on::after { left: 22px; }
+  .consent { font-size: 15px; }
+  .link { color: var(--tint); border: 0; background: none; font: inherit; padding: 0; text-align: left; }
+  .primary { display: block; width: calc(100% - 32px); margin: 28px 16px; padding: 15px; border: 0; border-radius: 12px; background: var(--tint);
+    color: #fff; font: inherit; font-weight: 600; }
+  .shade { position: fixed; inset: 0; background: rgba(0, 0, 0, .35); z-index: 30; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  .shade.up { opacity: 1; pointer-events: auto; }
+  .sheet { position: fixed; left: 0; right: 0; bottom: 0; height: 720px; background: var(--ground); border-radius: 12px 12px 0 0; z-index: 40;
+    transform: translateY(100%); transition: transform .3s ease-out; display: flex; flex-direction: column; }
+  .sheet.up { transform: translateY(0); }
+  .sheet .grab { width: 36px; height: 5px; border-radius: 3px; background: #c7c7cc; margin: 6px auto 0; }
+  .sheet .bar { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; font-weight: 600; }
+  .sheet .bar button { color: var(--tint); border: 0; background: none; font: inherit; padding: 0; }
+  .sheet .search { margin: 0 16px 8px; padding: 8px 10px; border: 0; border-radius: 10px; background: #e3e3e8; font: inherit; }
+  .sheet .list { overflow-y: auto; flex: 1; background: var(--card); margin: 0 16px 20px; border-radius: 10px; }
+  .sheet .list button { display: flex; justify-content: space-between; width: 100%; padding: 11px 16px; border: 0; border-bottom: 1px solid var(--line);
+    background: none; font: inherit; text-align: left; }
+  .cal { background: var(--card); margin: 0 16px; border-radius: 10px; padding: 10px; }
+  .cal .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .cal .top button { border: 0; background: none; color: var(--tint); font: inherit; font-weight: 600; padding: 4px; }
+  .cal .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; text-align: center; }
+  .cal .grid button { border: 0; background: none; font: inherit; padding: 8px 0; border-radius: 50%; }
+  .cal .grid button.on { background: var(--tint); color: #fff; }
+  .cal .years { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; height: 360px; }
+  .cal .years .col { overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; }
+  .cal .years button { display: block; width: 100%; border: 0; background: none; font: inherit; padding: 9px; }
+  .cal .years button.on { color: var(--tint); font-weight: 700; }
+  .keyboard { position: fixed; left: 0; right: 0; bottom: 0; height: 335px; background: var(--keys); z-index: 50; transform: translateY(100%);
+    transition: transform .25s ease-out; padding: 0 3px 6px; }
+  .keyboard.up { transform: translateY(0); }
+  .keyboard .accessory { height: 44px; display: flex; justify-content: flex-end; align-items: center; padding: 0 12px; background: #f6f6f6;
+    margin: 0 -3px 6px; border-top: 1px solid var(--line); }
+  .keyboard .accessory button { color: var(--tint); border: 0; background: none; font: inherit; font-weight: 600; }
+  .keyboard .keys { display: flex; justify-content: center; gap: 6px; margin: 0 0 11px; }
+  .keyboard .keys button { min-width: 32px; height: 42px; border: 0; border-radius: 5px; background: var(--key); font: inherit; font-size: 20px;
+    box-shadow: 0 1px 0 #888; }
+  .keyboard .keys button.wide { min-width: 180px; font-size: 16px; }
+  .alert { position: fixed; left: 50%; top: 50%; width: 270px; transform: translate(-50%, -50%) scale(1.1); opacity: 0; background: #f2f2f2;
+    border-radius: 14px; z-index: 60; text-align: center; transition: opacity .2s, transform .2s; pointer-events: none; }
+  .alert.up { opacity: 1; transform: translate(-50%, -50%) scale(1); pointer-events: auto; }
+  .alert h2 { font-size: 17px; margin: 18px 16px 4px; }
+  .alert p { font-size: 13px; margin: 0 16px 16px; }
+  .alert button { width: 100%; border: 0; border-top: 1px solid var(--line); background: none; color: var(--tint); font: inherit; font-weight: 600; padding: 11px; }
+  .done { margin: 120px 24px; text-align: center; }
+  .done .tick { font-size: 64px; color: #34c759; }
+  [hidden] { display: none !important; }
+  @media (prefers-reduced-motion: reduce) { .sheet, .keyboard, .shade, .alert, .switch, .switch::after { transition: none; } }
+</style>
+</head>
+<body>
+<div class="status"><span>9:41</span><span>●●● 100%</span></div>
+<div id="app"></div>
+<div id="shade" class="shade"></div>
+<div id="sheet" class="sheet"></div>
+<div id="keyboard" class="keyboard"></div>
+<div id="alert" class="alert" role="alertdialog"></div>
+<script src="form-core.js"></script>
+<script src="phone.js"></script>
+</body>
+</html>

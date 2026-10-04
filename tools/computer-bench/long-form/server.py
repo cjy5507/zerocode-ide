@@ -22,9 +22,10 @@ HERE = pathlib.Path(__file__).resolve().parent
 SPEC = HERE / "spec.json"
 SUBMISSIONS = "submissions.jsonl"
 # The files the page is made of, and the type each is served as.
-PAGE_FILES = {"": ("form.html", "text/html; charset=utf-8"),
-              "form.html": ("form.html", "text/html; charset=utf-8"),
-              "form.js": ("form.js", "text/javascript; charset=utf-8")}
+HTML = "text/html; charset=utf-8"
+SCRIPT = "text/javascript; charset=utf-8"
+PAGE_FILES = {"": ("form.html", HTML), "form.html": ("form.html", HTML), "form.js": ("form.js", SCRIPT),
+              "phone.html": ("phone.html", HTML), "phone.js": ("phone.js", SCRIPT), "form-core.js": ("form-core.js", SCRIPT)}
 # A reference is the digest's first characters: short enough to read back.
 REFERENCE_CHARS = 8
 # The largest body a post may carry; the form's whole answer is a few KB.

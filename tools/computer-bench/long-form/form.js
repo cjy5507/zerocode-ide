@@ -1,40 +1,14 @@
 'use strict';
-// The long-form bench page (t-37883). It renders the form `spec.json`
-// describes and keeps its own state, written only by the controls' events —
-// the way a framework-driven form does: a value placed into the DOM without
-// the event a person's typing makes never reaches what is submitted, so a
-// filler that skips the events is scored wrong by the oracle, not by luck.
+// The long-form bench as a web page (t-37883): the same spec drawn the way a
+// government site draws it — labels above controls, native selects, an ARIA
+// combobox, masked dates with a calendar, radios, a counter, a file picker.
+// The rules (state, what shows, checks, sending) are form-core.js's.
 
-// A typed date: day, month and year, the way the form's hint spells it.
-const DATE_SHAPE = /^(\d{2})\/(\d{2})\/(\d{4})$/;
-// The digits a typed date holds at most (DDMMYYYY).
-const DATE_DIGITS = 8;
-// The passport number the form accepts: one letter and eight digits.
-const PASSPORT_SHAPE = /^[A-Z][0-9]{8}$/i;
-const EMAIL_SHAPE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 // How long a combobox keeps its list open after its input lost focus, so a
 // press on an option lands before the list closes.
 const COMBO_CLOSE_MS = 150;
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
-  'August', 'September', 'October', 'November', 'December'];
 
-const state = {};
 const rows = {};
-let spec;
-
-function el(tag, attrs = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [name, value] of Object.entries(attrs)) {
-    if (value === false || value === undefined) continue;
-    node.setAttribute(name, value === true ? '' : String(value));
-  }
-  node.append(...children);
-  return node;
-}
-
-function optionsOf(field) {
-  return spec.options[field.options] || [];
-}
 
 // One labelled row: the label, the hint, the control and its error line.
 function row(field, control, labelTag = 'label') {
@@ -48,29 +22,23 @@ function row(field, control, labelTag = 'label') {
   return el('div', { class: 'row', 'data-field': field.id }, ...parts);
 }
 
-function describedBy(field) {
-  return field.hint ? `${field.id}-hint` : undefined;
-}
-
 function textControl(field, type) {
-  const input = el('input', { id: field.id, name: field.id, type, autocomplete: 'off', 'aria-describedby': describedBy(field) });
-  state[field.id] = '';
-  input.addEventListener('input', () => { state[field.id] = input.value; });
+  const input = el('input', { id: field.id, name: field.id, type, autocomplete: 'off',
+    'aria-describedby': field.hint ? `${field.id}-hint` : undefined });
+  input.addEventListener('input', () => LongForm.set(field.id, input.value));
   return row(field, input);
 }
 
 function textareaControl(field) {
   const area = el('textarea', { id: field.id, name: field.id, rows: 3 });
-  state[field.id] = '';
-  area.addEventListener('input', () => { state[field.id] = area.value; });
+  area.addEventListener('input', () => LongForm.set(field.id, area.value));
   return row(field, area);
 }
 
 function selectControl(field) {
   const select = el('select', { id: field.id, name: field.id }, el('option', { value: '' }, 'Select…'));
-  for (const [code, label] of optionsOf(field)) select.append(el('option', { value: code }, label));
-  state[field.id] = '';
-  select.addEventListener('change', () => { state[field.id] = select.value; changed(field.id); });
+  for (const [code, label] of LongForm.optionsOf(field)) select.append(el('option', { value: code }, label));
+  select.addEventListener('change', () => LongForm.set(field.id, select.value));
   return row(field, select);
 }
 
@@ -83,17 +51,16 @@ function comboboxControl(field) {
   const list = el('ul', { id: listId, role: 'listbox', 'aria-label': field.label, hidden: true });
   let shown = [];
   let active = -1;
-  state[field.id] = '';
   const close = () => { list.hidden = true; input.setAttribute('aria-expanded', 'false'); input.removeAttribute('aria-activedescendant'); active = -1; };
   const mark = (index) => {
     active = index;
     [...list.children].forEach((item, at) => item.setAttribute('aria-selected', String(at === index)));
     if (index >= 0) input.setAttribute('aria-activedescendant', list.children[index].id);
   };
-  const choose = ([code, label]) => { input.value = label; state[field.id] = code; close(); changed(field.id); };
+  const choose = ([code, label]) => { input.value = label; LongForm.set(field.id, code); close(); };
   const open = () => {
     const typed = input.value.trim().toLowerCase();
-    shown = optionsOf(field).filter(([, label]) => label.toLowerCase().includes(typed));
+    shown = LongForm.optionsOf(field).filter(([, label]) => label.toLowerCase().includes(typed));
     list.replaceChildren(...shown.map(([code, label], at) => {
       const item = el('li', { id: `${listId}-${code}`, role: 'option', 'aria-selected': 'false' }, label);
       item.addEventListener('mousedown', (event) => { event.preventDefault(); choose(shown[at]); });
@@ -103,7 +70,7 @@ function comboboxControl(field) {
     input.setAttribute('aria-expanded', String(!list.hidden));
     mark(shown.length ? 0 : -1);
   };
-  input.addEventListener('input', () => { state[field.id] = ''; open(); });
+  input.addEventListener('input', () => { LongForm.set(field.id, ''); open(); });
   input.addEventListener('keydown', (event) => {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
@@ -122,43 +89,19 @@ function comboboxControl(field) {
 }
 
 function radioControl(field) {
-  const legend = el('legend', { id: `${field.id}-label` }, field.label);
-  const set = el('fieldset', { id: field.id, 'data-field': field.id, class: 'row' }, legend,
+  const set = el('fieldset', { id: field.id, 'data-field': field.id, class: 'row' }, el('legend', { id: `${field.id}-label` }, field.label),
     el('span', { class: 'field-error', id: `${field.id}-error`, hidden: true }));
-  state[field.id] = '';
-  for (const [code, label] of optionsOf(field)) {
+  for (const [code, label] of LongForm.optionsOf(field)) {
     const radio = el('input', { type: 'radio', name: field.id, id: `${field.id}-${code}`, value: code });
-    radio.addEventListener('change', () => { if (radio.checked) { state[field.id] = code; changed(field.id); } });
+    radio.addEventListener('change', () => { if (radio.checked) LongForm.set(field.id, code); });
     set.append(el('label', { for: radio.id }, radio, label));
   }
   return set;
 }
 
-function isoOf(typed) {
-  const match = DATE_SHAPE.exec(typed);
-  if (!match) return '';
-  const [, day, month, year] = match.map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  const real = date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
-  return real ? `${match[3]}-${match[2]}-${match[1]}` : '';
-}
-
-function typedOf(iso) {
-  const [year, month, day] = iso.split('-');
-  return `${day}/${month}/${year}`;
-}
-
-// The typed date's mask: digits only, slashes placed as they are typed.
-function masked(value) {
-  const digits = value.replace(/\D/g, '').slice(0, DATE_DIGITS);
-  const parts = [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4)].filter(Boolean);
-  return parts.join('/');
-}
-
 function nativeDateControl(field) {
   const input = el('input', { id: field.id, name: field.id, type: 'date' });
-  state[field.id] = '';
-  const take = () => { state[field.id] = input.value; };
+  const take = () => LongForm.set(field.id, input.value);
   input.addEventListener('input', take);
   input.addEventListener('change', take);
   return row(field, input);
@@ -166,19 +109,17 @@ function nativeDateControl(field) {
 
 // A text date with a mask and a calendar beside it.
 function datePickControl(field) {
-  const hint = { ...field, hint: field.hint || 'For example, 27/03/2007' };
+  const hinted = { ...field, hint: field.hint || 'For example, 27/03/2007' };
   const input = el('input', { id: field.id, name: field.id, type: 'text', inputmode: 'numeric', placeholder: 'DD/MM/YYYY',
     autocomplete: 'off', 'aria-describedby': `${field.id}-hint` });
-  const toggle = el('button', { type: 'button', 'aria-expanded': 'false', 'aria-controls': `${field.id}-calendar` }, 'Choose date');
-  toggle.setAttribute('aria-label', `Choose ${field.label.toLowerCase()} from a calendar`);
+  const toggle = el('button', { type: 'button', 'aria-expanded': 'false', 'aria-controls': `${field.id}-calendar`,
+    'aria-label': `Choose ${field.label.toLowerCase()} from a calendar` }, 'Choose date');
   const calendar = el('div', { class: 'calendar', id: `${field.id}-calendar`, role: 'dialog', 'aria-label': `${field.label} calendar`, hidden: true });
-  state[field.id] = '';
-  const take = () => {
-    const shaped = masked(input.value);
+  input.addEventListener('input', () => {
+    const shaped = LongForm.masked(input.value);
     if (shaped !== input.value) input.value = shaped;
-    state[field.id] = isoOf(shaped);
-  };
-  input.addEventListener('input', take);
+    LongForm.set(field.id, LongForm.isoOf(shaped));
+  });
   const today = new Date();
   let shownYear = today.getUTCFullYear();
   let shownMonth = today.getUTCMonth();
@@ -196,8 +137,8 @@ function datePickControl(field) {
       const iso = `${shownYear}-${String(shownMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       const pick = el('button', { type: 'button', 'aria-label': `${day} ${MONTHS[shownMonth]} ${shownYear}` }, String(day));
       pick.addEventListener('click', () => {
-        input.value = typedOf(iso);
-        state[field.id] = iso;
+        input.value = LongForm.typedOf(iso);
+        LongForm.set(field.id, iso);
         calendar.hidden = true;
         toggle.setAttribute('aria-expanded', 'false');
         input.focus();
@@ -210,13 +151,13 @@ function datePickControl(field) {
       el('table', {}, body));
   };
   toggle.addEventListener('click', () => {
-    const iso = state[field.id];
+    const iso = LongForm.state[field.id];
     if (iso) { shownYear = Number(iso.slice(0, 4)); shownMonth = Number(iso.slice(5, 7)) - 1; }
     calendar.hidden = !calendar.hidden;
     toggle.setAttribute('aria-expanded', String(!calendar.hidden));
     if (!calendar.hidden) draw();
   });
-  return row(hint, el('div', {}, el('div', { class: 'datepick' }, input, toggle), calendar));
+  return row(hinted, el('div', {}, el('div', { class: 'datepick' }, input, toggle), calendar));
 }
 
 // A counter: a spinbutton between two buttons, keyboard-operable the APG way.
@@ -229,26 +170,24 @@ function counterControl(field) {
     const clamped = Math.max(min, Math.min(max, next));
     value.textContent = String(clamped);
     value.setAttribute('aria-valuenow', clamped);
-    state[field.id] = clamped;
+    LongForm.set(field.id, clamped);
   };
   const less = el('button', { type: 'button', 'aria-label': `Decrease: ${field.label}` }, '−');
   const more = el('button', { type: 'button', 'aria-label': `Increase: ${field.label}` }, '+');
-  less.addEventListener('click', () => set(state[field.id] - 1));
-  more.addEventListener('click', () => set(state[field.id] + 1));
+  less.addEventListener('click', () => set(LongForm.state[field.id] - 1));
+  more.addEventListener('click', () => set(LongForm.state[field.id] + 1));
+  const steps = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1 };
   value.addEventListener('keydown', (event) => {
-    const steps = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1 };
-    if (event.key in steps) { event.preventDefault(); set(state[field.id] + steps[event.key]); }
+    if (event.key in steps) { event.preventDefault(); set(LongForm.state[field.id] + steps[event.key]); }
     if (event.key === 'Home') { event.preventDefault(); set(min); }
     if (event.key === 'End') { event.preventDefault(); set(max); }
   });
-  state[field.id] = min;
   return row(field, el('div', { class: 'counter' }, less, value, more), 'div');
 }
 
 function checkboxControl(field) {
   const box = el('input', { type: 'checkbox', id: field.id, name: field.id });
-  state[field.id] = false;
-  box.addEventListener('change', () => { state[field.id] = box.checked; });
+  box.addEventListener('change', () => LongForm.set(field.id, box.checked));
   return el('div', { class: 'row', 'data-field': field.id },
     el('span', { class: 'field-error', id: `${field.id}-error`, hidden: true }),
     el('label', { for: field.id }, box, ' ', field.label));
@@ -257,10 +196,9 @@ function checkboxControl(field) {
 function fileControl(field) {
   const input = el('input', { type: 'file', id: field.id, name: field.id, class: 'visually-hidden', accept: '.jpg,.jpeg,.png,.pdf' });
   const name = el('span', { class: 'file-name', id: `${field.id}-name` }, 'No file chosen');
-  state[field.id] = null;
   input.addEventListener('change', () => {
     const file = input.files && input.files[0];
-    state[field.id] = file ? { name: file.name, size: file.size } : null;
+    LongForm.set(field.id, file ? { name: file.name, size: file.size } : null);
     name.textContent = file ? file.name : 'No file chosen';
   });
   const pick = el('label', { for: field.id, class: 'file-pick' }, el('span', { role: 'button' }, 'Choose file'));
@@ -283,55 +221,8 @@ const CONTROLS = {
   file: fileControl,
 };
 
-function fields() {
-  return spec.sections.flatMap((section) => section.fields);
-}
-
-function shown(field) {
-  return !field.shows_when || state[field.shows_when.field] === field.shows_when.is;
-}
-
-// A field another field shows on: its rows are re-judged after it changes.
-function changed(id) {
-  for (const field of fields()) {
-    if (field.shows_when && field.shows_when.field === id) rows[field.id].hidden = !shown(field);
-  }
-}
-
-function blank(field) {
-  const value = state[field.id];
-  return value === '' || value === null || value === undefined || value === false;
-}
-
-function errorsOf() {
-  const errors = [];
-  const say = (id, message) => errors.push({ id, message });
-  for (const field of fields().filter(shown)) {
-    if (field.kind === 'datepick' && document.getElementById(field.id).value && !state[field.id]) {
-      say(field.id, `${field.label} must be a real date, like 27/03/2007`);
-    } else if (field.required && blank(field)) {
-      say(field.id, `Enter or choose: ${field.label}`);
-    }
-  }
-  const has = (id) => !errors.some((error) => error.id === id);
-  if (has('email') && state.email && !EMAIL_SHAPE.test(state.email.trim())) say('email', 'Enter an email address like name@example.com');
-  if (has('email_confirm') && state.email_confirm && state.email_confirm.trim().toLowerCase() !== state.email.trim().toLowerCase()) {
-    say('email_confirm', 'The email addresses do not match');
-  }
-  if (has('passport_number') && state.passport_number && !PASSPORT_SHAPE.test(state.passport_number.trim())) {
-    say('passport_number', 'A passport number is one letter and eight digits');
-  }
-  if (state.passport_issued && state.passport_expires && state.passport_expires <= state.passport_issued) {
-    say('passport_expires', 'The expiry date must be after the date of issue');
-  }
-  if (state.arrival_date && state.departure_date && state.departure_date < state.arrival_date) {
-    say('departure_date', 'The departure date must be on or after the arrival date');
-  }
-  return errors;
-}
-
 function showErrors(errors) {
-  for (const field of fields()) {
+  for (const field of LongForm.fields()) {
     const line = document.getElementById(`${field.id}-error`);
     const error = errors.find((each) => each.id === field.id);
     line.hidden = !error;
@@ -346,21 +237,20 @@ function showErrors(errors) {
 
 async function submit(event) {
   event.preventDefault();
-  const errors = errorsOf();
+  const errors = LongForm.errors((id) => Boolean(document.getElementById(id).value) && !LongForm.state[id]);
   showErrors(errors);
   if (errors.length) return;
-  const sent = Object.fromEntries(fields().filter(shown).map((field) => [field.id, state[field.id]]));
-  const answer = await (await fetch('submit', { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ fields: sent }) })).json();
+  const reference = await LongForm.send();
   document.getElementById('form').hidden = true;
   const done = document.getElementById('done');
-  done.replaceChildren(el('h2', {}, 'Registration received'), el('p', {}, 'Your reference number is ', el('strong', { id: 'reference' }, answer.reference)));
+  done.replaceChildren(el('h2', {}, 'Registration received'), el('p', {}, 'Your reference number is ', el('strong', { id: 'reference' }, reference)));
   done.hidden = false;
   done.focus();
 }
 
 async function main() {
-  spec = await (await fetch('spec')).json();
+  const spec = await LongForm.load();
+  for (const field of LongForm.fields()) LongForm.state[field.id] = LongForm.initial(field);
   document.getElementById('notice').textContent = spec.notice;
   const form = document.getElementById('form');
   for (const section of spec.sections) {
@@ -373,7 +263,10 @@ async function main() {
   }
   form.append(el('div', { class: 'row' }, el('button', { type: 'submit', class: 'primary' }, 'Submit registration')));
   form.addEventListener('submit', submit);
-  for (const field of fields()) rows[field.id].hidden = !shown(field);
+  LongForm.onShownChange = () => {
+    for (const field of LongForm.fields()) rows[field.id].hidden = !LongForm.shown(field);
+  };
+  LongForm.onShownChange();
 }
 
 main();

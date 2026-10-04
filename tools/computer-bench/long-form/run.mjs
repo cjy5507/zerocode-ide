@@ -4,11 +4,12 @@
  * times, tokens per request, the hand's calls and waits, the pictures'
  * bytes — beside the oracle's score and the person's time for the same form.
  *
- *   node run.mjs --agent zo --scenario chrome|url --out DIR [--cap-seconds N]
- *                [--model ID] [--bin PATH] [--note WORDS]
+ *   node run.mjs --agent zo --scenario phone|chrome|url --out DIR
+ *                [--cap-seconds N] [--model ID] [--bin PATH] [--note WORDS]
  *
- * `chrome`: the form stands open in the desktop browser, as it did in the
- * person's session; `url`: the agent is handed the address and chooses its
+ * `phone`: the form stands open in a phone app the Mac mirrors, pixels only,
+ * as it did in the person's session; `chrome`: in a desktop browser with its
+ * accessibility tree; `url`: the agent is handed the address and chooses its
  * own road. The agent runs with an allowlisted environment: the bench's fake
  * shims first on PATH, no road to the person's window, its own state folders
  * under DIR (so nothing is written into the person's ~/.zo), and the one
@@ -32,18 +33,21 @@ const SPEC = JSON.parse(await readFile(join(HERE, "spec.json"), "utf8"));
 const KLM = JSON.parse(spawnSync("python3", [join(HERE, "klm.py"), "--json"], { encoding: "utf8" }).stdout);
 const PERSON_ATTACH_MS = Math.round(KLM.rows.find((row) => row.id === "passport_scan").seconds * 1000);
 const DEFAULT_CAP_SECONDS = 1500;
-// What each scenario tells the agent about where the form stands.
+// What each scenario tells the agent about where the form stands, and the
+// desk's scene it runs on.
 const WHERE = {
-  chrome: "The form is already open in Google Chrome on this Mac.",
-  url: "",
+  phone: "in the Traveller registration app on my iPhone, which this Mac shows in its iPhone Mirroring window",
+  chrome: "at {url}, already open in Google Chrome on this Mac",
+  url: "at {url}",
 };
+const SCENE_OF = { phone: "phone", chrome: "chrome", url: "chrome" };
 // The environment an agent keeps from the job's: who and where it is, and
 // the one login it runs on — never a road to the person's window.
 const KEPT_ENV = ["HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"];
 const SYSTEM_PATH = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
 function args(argv) {
-  const parsed = { agent: "zo", scenario: "chrome", capSeconds: DEFAULT_CAP_SECONDS, note: "" };
+  const parsed = { agent: "zo", scenario: "phone", capSeconds: DEFAULT_CAP_SECONDS, note: "" };
   for (let at = 0; at < argv.length; at += 2) {
     const [flag, value] = [argv[at], argv[at + 1]];
     const key = flag.replace(/^--/, "").replace(/-(\w)/g, (_, letter) => letter.toUpperCase());
@@ -55,8 +59,7 @@ function args(argv) {
 }
 
 function card(url, scenario) {
-  const lines = SPEC.card.text.map((line) => line.replace("{url}", url));
-  return [...lines, WHERE[scenario]].filter(Boolean).join(" ");
+  return SPEC.card.text.map((line) => line.replace("{where}", WHERE[scenario]).replace("{url}", url)).join(" ");
 }
 
 /* Each agent CLI behind one interface: how it is started, where it keeps
@@ -144,7 +147,7 @@ async function main() {
   const work = join(options.out, "work");
   await mkdir(work, { recursive: true });
   const { server, url } = await serve(options.out);
-  const desk = await startDesk({ url, out: options.out, personAttachMs: PERSON_ATTACH_MS });
+  const desk = await startDesk({ url, out: options.out, personAttachMs: PERSON_ATTACH_MS, scene: SCENE_OF[options.scenario] });
   const bin = await shims(options.out);
   const env = Object.fromEntries(KEPT_ENV.filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
   Object.assign(env, agent.env(options), {
@@ -182,7 +185,8 @@ async function main() {
   const wallMs = Date.now() - started;
   // What the page held when the agent stopped — the progress of a run cut
   // off before it submitted (the page's own state, as it would post it).
-  const held = await desk.page.evaluate(() => (typeof state === "object" ? state : null)).catch(() => null);
+  await desk.settled();
+  const held = await desk.content().evaluate(() => LongForm.state).catch(() => null);
   await writeFile(join(options.out, "progress.json"), JSON.stringify(held));
   await desk.close();
   server.kill();
@@ -210,7 +214,7 @@ async function main() {
     },
     tools: Object.entries(calls.reduce((tally, name) => ({ ...tally, [name]: (tally[name] || 0) + 1 }), {})),
     hand: { verbs: desk.tally.verbs, batchSteps: desk.tally.steps, waitMs: desk.tally.waitMs, handMs: desk.tally.handMs,
-      settleMs: desk.tally.settleMs, looks: desk.tally.looks, pictureBytes: spread(desk.tally.pngBytes), handoffs: desk.tally.handoffs },
+      settleMs: desk.tally.settleMs, settledFalse: desk.tally.settledFalse, looks: desk.tally.looks, pictureBytes: spread(desk.tally.pngBytes), handoffs: desk.tally.handoffs },
   };
   result.requests.modelShare = result.requests.streamMs.sum / wallMs;
   await writeFile(join(options.out, "result.json"), `${JSON.stringify(result, null, 2)}\n`);

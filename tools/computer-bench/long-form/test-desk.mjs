@@ -1,8 +1,9 @@
-/* The long-form bench end to end without a model (t-37883): the page in
+/* The long-form bench end to end without a model (t-37883): the pages in
  * Chromium, the fake desk, the fake shim and the oracle. A scripted hand that
- * fills the card through the desktop verbs an agent uses passes; a run that
- * does nothing fails; a value written without the events a person's typing
- * makes is scored wrong, because the page keeps its own state.
+ * fills the card through the desktop verbs an agent uses passes on both
+ * scenes — on the phone by pixels alone, through the mirror's lag; a run
+ * that does nothing fails; a value written without the events a person's
+ * input makes is scored wrong, because the pages keep their own state.
  *
  *   NODE_PATH=…/node_modules node tools/computer-bench/long-form/test-desk.mjs
  */
@@ -17,7 +18,15 @@ import { startDesk } from "./desk.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SPEC = JSON.parse(await readFile(join(HERE, "spec.json"), "utf8"));
 const EXPECTED = SPEC.card.expected;
+const FIELDS = SPEC.sections.flatMap((section) => section.fields);
 const PERSON_ATTACH_MS = 10;
+const PHONE = "iPhone Mirroring";
+const CHROME = "Google Chrome";
+// How long the test's own eyes give the phone after the mirror's lag: its
+// sheets and keyboard slide for 300 ms.
+const SLIDE_SETTLE_MS = 400;
+// How long a pressed submit takes to post its answer to the local server.
+const SUBMIT_SETTLE_MS = 500;
 let failures = 0;
 
 function check(name, held, detail = "") {
@@ -25,16 +34,23 @@ function check(name, held, detail = "") {
   if (!held) failures += 1;
 }
 
-async function standing(fn) {
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+const option = (field, code) => SPEC.options[field.options].find(([value]) => value === code)[1];
+const monthName = (month) => new Date(Date.UTC(2000, Number(month) - 1, 1)).toLocaleString("en", { month: "long", timeZone: "UTC" });
+
+async function standing(scene, fn) {
   const out = await mkdtemp(join(tmpdir(), "long-form-"));
   const server = spawn("python3", [join(HERE, "server.py"), "--out", out], { stdio: ["ignore", "pipe", "inherit"] });
   const url = await new Promise((done) => server.stdout.on("data", (chunk) => {
     const said = String(chunk).match(/listening (\S+)/);
     if (said) done(said[1]);
   }));
-  const desk = await startDesk({ url, out, personAttachMs: PERSON_ATTACH_MS });
+  const desk = await startDesk({ url, out, personAttachMs: PERSON_ATTACH_MS, scene });
   try {
     await fn({ desk, out });
+    await desk.settled();
+    // A submit's post leaves after the press reached the page.
+    await sleep(SUBMIT_SETTLE_MS);
   } finally {
     await desk.close();
     server.kill();
@@ -59,82 +75,181 @@ function shim(desk, argv) {
   });
 }
 
-const label = (id) => SPEC.sections.flatMap((section) => section.fields).find((field) => field.id === id).label;
+const click = (desk, [x, y]) => shim(desk, ["mouse-click", "--x", String(x), "--y", String(y), "--mouse-button", "left", "--click-count", "1", "--json"]);
+const type = (desk, text) => shim(desk, ["type", "--text", text, "--json"]);
 
-/* A hand that knows the page: each field by what it reads, then its value
- * typed or chosen as a person would. The yes/no questions all read "Yes"
- * and "No", so they are pressed by where they stand (`yesNoClicks`). */
-function fillSteps() {
+/* ---- the web page, through its accessibility tree ----------------------- */
+
+function chromeSteps() {
   const steps = [];
-  const option = (field, code) => SPEC.options[field.options].find(([value]) => value === code)[1];
-  for (const field of SPEC.sections.flatMap((section) => section.fields).filter((each) => !each.shows_when)) {
+  const byLabel = (label, ...more) => ["click", "--app", CHROME, "--label", label, ...more, "--json"];
+  for (const field of FIELDS.filter((each) => !each.shows_when && each.kind !== "yesno")) {
     const value = EXPECTED[field.id];
-    const name = field.label;
-    const click = ["click", "--app", "Google Chrome", "--label", name, "--mouse-button", "left", "--click-count", "1", "--no-screenshot", "--json"];
-    if (["text", "email", "tel", "textarea"].includes(field.kind)) {
-      if (value) steps.push(click, ["type", "--text", value, "--json"]);
-    } else if (field.kind === "date") {
-      const [year, month, day] = value.split("-");
-      steps.push(click, ["type", "--text", `${month}${day}${year}`, "--json"]);
-    } else if (field.kind === "datepick") {
-      const [year, month, day] = value.split("-");
-      steps.push(click, ["type", "--text", `${day}/${month}/${year}`, "--json"]);
-    } else if (field.kind === "select") {
-      steps.push(click, ["type", "--text", option(field, value), "--json"]);
-    } else if (field.kind === "combobox") {
-      steps.push(click, ["type", "--text", option(field, value).slice(0, 8), "--json"], ["key", "--key", "Return", "--json"]);
-    } else if (field.kind === "radio") {
-      steps.push(["click", "--app", "Google Chrome", "--label", option(field, value), "--role", "radio", "--json"]);
-    } else if (field.kind === "counter") {
-      for (let count = 0; count < value; count += 1) steps.push(["click", "--app", "Google Chrome", "--label", `Increase: ${name}`, "--json"]);
-    } else if (field.kind === "checkbox") {
-      if (value) steps.push(["click", "--app", "Google Chrome", "--label", name, "--role", "checkbox", "--json"]);
-    }
+    const focus = byLabel(field.label);
+    const typed = (text) => ["type", "--text", text, "--json"];
+    const [year, month, day] = String(value).split("-");
+    if (["text", "email", "tel", "textarea"].includes(field.kind)) { if (value) steps.push(focus, typed(value)); }
+    else if (field.kind === "date") steps.push(focus, typed(`${month}${day}${year}`));
+    else if (field.kind === "datepick") steps.push(focus, typed(`${day}/${month}/${year}`));
+    else if (field.kind === "select") steps.push(focus, typed(option(field, value)));
+    else if (field.kind === "combobox") steps.push(focus, typed(option(field, value).slice(0, 8)), ["key", "--key", "Return", "--json"]);
+    else if (field.kind === "radio") steps.push(byLabel(option(field, value), "--role", "radio"));
+    else if (field.kind === "counter") for (let count = 0; count < value; count += 1) steps.push(byLabel(`Increase: ${field.label}`));
+    else if (field.kind === "checkbox" && value) steps.push(byLabel(field.label, "--role", "checkbox"));
   }
   return steps;
 }
 
-// A run that did nothing fails.
-const idle = await standing(async () => {});
-check("a run that did nothing fails", idle.pass === false && idle.submits === 0, JSON.stringify(idle.reasons));
-
-// A value placed without the events a person's typing makes never reaches the page's state.
-const silent = await standing(async ({ desk }) => {
-  await desk.page.evaluate(() => { document.getElementById("family_name").value = "SAMPLE"; });
-  await desk.page.evaluate(() => document.getElementById("form").requestSubmit());
-});
-check("a value written without its events is not what the page holds", silent.submits === 0 || silent.fields.family_name !== "ok",
-  JSON.stringify(silent));
-
-// A scripted hand through the desktop verbs fills the card and passes.
-const filled = await standing(async ({ desk }) => {
+async function fillChrome(desk) {
   const answers = [];
-  for (const step of fillSteps()) answers.push(await shim(desk, step));
-  for (const field of SPEC.sections.flatMap((section) => section.fields).filter((each) => each.kind === "yesno")) {
+  for (const step of chromeSteps()) answers.push(await shim(desk, step));
+  // The yes/no questions all read "Yes" and "No": pressed where they stand.
+  for (const field of FIELDS.filter((each) => each.kind === "yesno")) {
     const radio = desk.page.locator(`#${field.id}-${EXPECTED[field.id]}`);
     await radio.scrollIntoViewIfNeeded();
     const box = await radio.boundingBox();
-    if (box) answers.push(await shim(desk, ["mouse-click", "--x", String(box.x + 2), "--y", String(box.y + 2), "--mouse-button", "left", "--click-count", "1", "--json"]));
+    answers.push(await click(desk, [box.x + 2, box.y + 2]));
   }
-  // The other nationality appears once the dual question is answered.
-  answers.push(await shim(desk, ["click", "--app", "Google Chrome", "--label", label("second_nationality"), "--json"]));
-  answers.push(await shim(desk, ["type", "--text", "Canada", "--json"]));
+  const other = FIELDS.find((each) => each.shows_when);
+  answers.push(await shim(desk, ["click", "--app", CHROME, "--label", other.label, "--json"]));
+  answers.push(await type(desk, option(other, EXPECTED[other.id])));
   answers.push(await shim(desk, ["handoff", "--reason", "attach the passport scan", "--json"]));
-  answers.push(await shim(desk, ["click", "--app", "Google Chrome", "--label", "Submit registration", "--json"]));
-  const refused = answers.filter((answer) => answer.code !== 0);
-  check("every scripted step was answered", refused.length === 0, refused.map((answer) => answer.err).slice(0, 3).join(" | "));
-  const look = JSON.parse((await shim(desk, ["observe", "--diff", "--settle", "--json"])).out);
-  check("a look answers a picture with its frame", Boolean(look.result.screenshot.path) && look.result.screenshot.width === 1280,
-    JSON.stringify(look.result.screenshot));
-});
-check("the card filled through the desk passes the oracle", filled.pass === true, JSON.stringify(filled.reasons));
+  answers.push(await shim(desk, ["click", "--app", CHROME, "--label", "Submit registration", "--json"]));
+  return answers;
+}
 
-// A batch stops at its first refusal and says where.
-await standing(async ({ desk }) => {
-  const commands = JSON.stringify([["wait", "--ms", "1", "--json"], ["click", "--app", "Google Chrome", "--label", "No such control", "--json"], ["wait", "--ms", "1", "--json"]]);
+/* ---- the phone, by pixels alone ------------------------------------------ */
+
+/* The display point where the phone shows what `find` locates (the test's
+ * own eyes — an agent reads the picture); the hand only ever gets points.
+ * `find` runs in the phone's page and answers an element, scrolled into
+ * view first (the test's shortcut for the scrolling an agent does). */
+async function pointOf(desk, find, arg, { scroll = true } = {}) {
+  await desk.settled();
+  await sleep(desk.scene.lagMs + SLIDE_SETTLE_MS);
+  const box = await desk.content().evaluate(({ source, arg, scroll }) => {
+    const element = new Function("arg", source)(arg);
+    if (!element) return null;
+    if (scroll) element.scrollIntoView({ block: "center" });
+    const rect = element.getBoundingClientRect();
+    return { x: rect.x + Math.min(rect.width / 2, 40), y: rect.y + rect.height / 2 };
+  }, { source: find, arg, scroll });
+  if (!box) throw new Error(`nothing on the phone answers ${find} (${JSON.stringify(arg)})`);
+  const { window: win, screen } = desk.scene;
+  const scale = win.width / screen.width;
+  return [win.x + box.x * scale, win.y + screen.top + box.y * scale];
+}
+
+// What the test's eyes look for on the phone, each a body run in the page.
+const SEES = {
+  // The control that reads `arg` — in an open sheet first, else on screen.
+  words: `const hits = [...document.querySelectorAll("button, span, div, input")].filter((element) =>
+      [...element.childNodes].some((node) => node.nodeType === 3 && node.textContent.trim() === arg) || element.placeholder === arg);
+    const live = hits.filter((element) => element.closest(".sheet.up, .keyboard.up"));
+    return (live.length ? live : hits.filter((element) => !element.closest(".sheet, .keyboard")))[0];`,
+  field: "return document.getElementById(arg);",
+  // A row's button (segment, check, stepper, switch) by the row's own words.
+  choice: `const row = [...document.querySelectorAll(".question, .label, .consent")].find((each) => each.textContent === arg.label).closest(".row");
+    return arg.words === null ? row.querySelector(".switch") :
+      [...row.querySelectorAll("button")].find((each) => each.textContent.replace("✓", "") === arg.words);`,
+};
+
+async function tap(desk, find, arg, options) {
+  return click(desk, await pointOf(desk, find, arg, options));
+}
+
+async function fillPhone(desk) {
+  const answers = [];
+  for (const field of FIELDS) {
+    const value = EXPECTED[field.id];
+    const [year, month, day] = String(value).split("-");
+    if (["text", "email", "tel", "textarea", "datepick"].includes(field.kind)) {
+      if (!value) continue;
+      answers.push(await tap(desk, SEES.field, field.id));
+      answers.push(await type(desk, field.kind === "datepick" ? `${day}${month}${year}` : value));
+      answers.push(await tap(desk, SEES.words, "Done"));
+    } else if (field.kind === "select" || field.kind === "combobox") {
+      answers.push(await tap(desk, SEES.words, field.label));
+      if (SPEC.options[field.options].length > 12) {
+        answers.push(await tap(desk, SEES.words, "Search"));
+        answers.push(await type(desk, option(field, value)));
+      }
+      answers.push(await tap(desk, SEES.words, option(field, value)));
+    } else if (field.kind === "date") {
+      const now = new Date();
+      answers.push(await tap(desk, SEES.words, field.label));
+      answers.push(await tap(desk, SEES.words, `${monthName(now.getUTCMonth() + 1)} ${now.getUTCFullYear()} ›`));
+      answers.push(await tap(desk, SEES.words, year));
+      answers.push(await tap(desk, SEES.words, monthName(month)));
+      answers.push(await tap(desk, SEES.words, `${monthName(month)} ${year} ⌃`));
+      answers.push(await tap(desk, SEES.words, String(Number(day))));
+      answers.push(await tap(desk, SEES.words, "Done"));
+    } else if (field.kind === "radio" || field.kind === "yesno") {
+      answers.push(await tap(desk, SEES.choice, { label: field.label, words: option(field, value) }));
+    } else if (field.kind === "counter") {
+      for (let count = 0; count < value; count += 1) answers.push(await tap(desk, SEES.words, "+"));
+    } else if (field.kind === "checkbox" && value) {
+      answers.push(await tap(desk, SEES.choice, { label: field.label, words: null }));
+    } else if (field.kind === "file") {
+      answers.push(await shim(desk, ["handoff", "--reason", "attach the passport photo", "--json"]));
+    }
+  }
+  answers.push(await tap(desk, SEES.words, "Submit registration"));
+  return answers;
+}
+
+/* ---- the checks ------------------------------------------------------------ */
+
+for (const scene of ["phone", "chrome"]) {
+  const idle = await standing(scene, async () => {});
+  check(`${scene}: a run that did nothing fails`, idle.pass === false && idle.submits === 0, JSON.stringify(idle.reasons));
+}
+
+const silent = await standing("chrome", async ({ desk }) => {
+  await desk.page.evaluate(() => { document.getElementById("family_name").value = "SAMPLE"; });
+  await desk.page.evaluate(() => document.getElementById("form").requestSubmit());
+});
+check("chrome: a value written without its events is not what the page holds", silent.submits === 0 || silent.fields.family_name !== "ok",
+  JSON.stringify(silent));
+
+const chrome = await standing("chrome", async ({ desk }) => {
+  const refused = (await fillChrome(desk)).filter((answer) => answer.code !== 0);
+  check("chrome: every scripted step was answered", refused.length === 0, refused.map((answer) => answer.err).slice(0, 3).join(" | "));
+});
+check("chrome: the card filled through the desk passes the oracle", chrome.pass === true, JSON.stringify(chrome.reasons));
+
+const phone = await standing("phone", async ({ desk }) => {
+  const refused = (await fillPhone(desk)).filter((answer) => answer.code !== 0);
+  check("phone: every scripted tap was answered", refused.length === 0, refused.map((answer) => answer.err).slice(0, 3).join(" | "));
+});
+check("phone: the card tapped in by pixels passes the oracle", phone.pass === true, JSON.stringify(phone.reasons));
+
+await standing("phone", async ({ desk }) => {
+  const names = ["iPhone 미러링", "com.apple.ScreenContinuity", PHONE];
+  const looks = [];
+  for (const name of names) looks.push(JSON.parse((await shim(desk, ["observe", "--diff", "--app", name, "--json"])).out));
+  check("phone: the window answers to its English name, its Korean name and its bundle id",
+    looks.every((look) => look.ok && look.result.screenshot.width === 436 && look.result.screenshot.height === 958),
+    JSON.stringify(looks.map((look) => look.result && look.result.screenshot)));
+  check("phone: the mirror has no tree beyond its window", looks[0].result.tree.elementCount === 1, JSON.stringify(looks[0].result.tree));
+  const unknown = await shim(desk, ["observe", "--app", "Notes", "--json"]);
+  check("phone: an app that is not there is refused", unknown.code === 1 && JSON.parse(unknown.err).error.code === "app_not_found", unknown.err);
+  const before = await desk.content().evaluate(() => LongForm.state.companions);
+  const plus = await pointOf(desk, SEES.words, "+");
+  const sent = Date.now();
+  await click(desk, plus);
+  const early = await desk.content().evaluate(() => LongForm.state.companions);
+  await desk.settled();
+  const late = await desk.content().evaluate(() => LongForm.state.companions);
+  check("phone: a tap reaches the phone only after the mirror's lag", early === before && late === before + 1 && Date.now() - sent >= desk.scene.lagMs,
+    `${before} → ${early} → ${late}`);
+});
+
+await standing("chrome", async ({ desk }) => {
+  const commands = JSON.stringify([["wait", "--ms", "1", "--json"], ["click", "--app", CHROME, "--label", "No such control", "--json"], ["wait", "--ms", "1", "--json"]]);
   const answer = await shim(desk, ["batch", "--commands", commands, "--json"]);
-  const said = JSON.parse(answer.err);
-  check("a batch stops at its first refusal", answer.code === 1 && said.result.refusedAt === 2 && said.result.ran === 1, answer.err);
+  const said = JSON.parse(answer.err || "{}");
+  check("a batch stops at its first refusal and says where", answer.code === 1 && said.result.refusedAt === 2 && said.result.ran === 1, answer.err);
 });
 
 console.log(failures ? `${failures} FAILED` : "all passed");

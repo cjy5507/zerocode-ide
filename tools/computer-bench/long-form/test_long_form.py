@@ -117,10 +117,11 @@ class SpecTests(unittest.TestCase):
                 codes = [code for code, _label in SPEC["options"][field["options"]]]
                 self.assertIn(EXPECTED[field["id"]], codes, field["id"])
 
-    def test_the_page_and_the_oracle_know_the_same_kinds(self):
-        page = (HERE / "form.js").read_text()
-        for kind in oracle.READ:
-            self.assertIn(f"  {kind}:", page, kind)
+    def test_both_renderings_and_the_oracle_know_the_same_kinds(self):
+        for page in ("form.js", "phone.js"):
+            drawn = (HERE / page).read_text()
+            for kind in oracle.READ:
+                self.assertRegex(drawn, rf"\b{kind}:", f"{page} draws no {kind}")
 
 
 class ServerTests(unittest.TestCase):
@@ -135,6 +136,7 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("card", spec)
         self.assertNotIn(EXPECTED["passport_number"], json.dumps(spec))
         self.assertIn("form.js", page)
+        self.assertIn("form-core.js", page)
 
     def test_a_post_is_recorded_for_the_oracle_and_answered_a_reference(self):
         with tempfile.TemporaryDirectory() as folder:

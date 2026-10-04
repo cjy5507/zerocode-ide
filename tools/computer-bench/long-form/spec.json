@@ -89,7 +89,7 @@
   ],
   "card": {
     "text": [
-      "Register my trip on the traveller registration form at {url}. My details:",
+      "Register my trip on the traveller registration form {where}. My details:",
       "Me: Mr Alex Jordan Sample — given names ALEX JORDAN, family name SAMPLE, no other names. Male, born 12 March 1990 in Sampletown. I am a South Korean national and I also hold Canadian nationality.",
       "Passport X12345678, issued by South Korea (Ministry of Foreign Affairs) on 4 May 2021, expires 4 May 2031.",
       "Email alex.sample@example.com, mobile +82 10 5550 0123. Home: 1 Example Street, Apt 2, Sampletown, postal code 12345, South Korea.",
