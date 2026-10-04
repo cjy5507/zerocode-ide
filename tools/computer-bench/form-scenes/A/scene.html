@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>장면 A — 한 쪽 주차 예약</title>
+<!--
+  Regression scene A (t-37883): one page, native controls, the way many
+  booking sites still build them. Synthetic: an invented car park, fictional
+  numbers. What it holds for the door to read without being told:
+  - labels three ways: <label for>, a wrapping <label>, and table headers (<th>)
+    with no label at all;
+  - a phone number in three boxes under one header;
+  - a time list that loads 300 ms after its date is chosen (a site fetching
+    free slots), disabled until then;
+  - three fields whose value a "framework" re-renders from its own state on
+    every input event, so a write without one is undone;
+  - a radio group under a <legend>, a consent checkbox hidden behind its
+    styled label;
+  - a code field that appears only after "send the code", the code going to
+    the person's phone (window.__personPhone).
+-->
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 0; background: #f5f6f8; }
+  main { max-width: 640px; margin: 0 auto; padding: 16px; background: #fff; }
+  fieldset { border: 1px solid #d6d9de; margin: 0 0 16px; padding: 12px; }
+  label { display: inline-block; margin: 6px 12px 6px 0; }
+  th { text-align: left; font-weight: 500; padding: 6px 12px 6px 0; white-space: nowrap; }
+  td { padding: 4px 0; }
+  input[name^="phone"] { width: 4em; }
+  .consent input { display: none; }
+  .consent label::before { content: "☐ "; }
+  .consent input:checked + label::before { content: "☑ "; }
+  #error { color: #b00020; min-height: 1.2em; }
+  .spacer { height: 900px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Harborside 주차 예약</h1>
+  <form id="booking" novalidate>
+    <fieldset>
+      <legend>이용 일정</legend>
+      <label for="in-date">입차일</label><input type="date" id="in-date" required>
+      <label for="in-time">입차 시간</label>
+      <select id="in-time" required disabled><option value="">선택</option></select>
+      <br>
+      <label>출차일 <input type="date" name="out-date" required></label>
+      <label>출차 시간 <select name="out-time" required><option value="">선택</option></select></label>
+    </fieldset>
+    <div class="spacer" aria-hidden="true"></div>
+    <fieldset>
+      <legend>예약자 정보</legend>
+      <table>
+        <tr><th>이름</th><td><input name="name" data-controlled required></td></tr>
+        <tr>
+          <th>휴대폰</th>
+          <td>
+            <input name="phone1" inputmode="numeric" maxlength="3" required> -
+            <input name="phone2" inputmode="numeric" maxlength="4" required> -
+            <input name="phone3" inputmode="numeric" maxlength="4" required>
+            <button type="button" id="send-code">인증요청</button>
+          </td>
+        </tr>
+        <tr id="code-row" hidden><th>인증번호</th><td><input name="code" inputmode="numeric" maxlength="6" required></td></tr>
+        <tr><th>이메일</th><td><input type="email" name="email" data-controlled required></td></tr>
+        <tr><th>차량번호</th><td><input name="car" data-controlled placeholder="12가3456" required></td></tr>
+        <tr><th>항공편</th><td><input name="flight" placeholder="AB123"></td></tr>
+        <tr><th>인원</th><td><select name="people"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option></select></td></tr>
+      </table>
+    </fieldset>
+    <fieldset>
+      <legend>주차 구역</legend>
+      <label><input type="radio" name="lot" value="indoor" required> 실내</label>
+      <label><input type="radio" name="lot" value="outdoor"> 실외</label>
+    </fieldset>
+    <div class="consent"><input type="checkbox" id="agree" required><label for="agree">개인정보 수집·이용 동의 (필수)</label></div>
+    <p id="error" role="alert"></p>
+    <button type="submit">예약하기</button>
+  </form>
+  <p id="done" hidden>예약이 접수되었습니다.</p>
+</main>
+<script>
+  "use strict";
+  const form = document.getElementById("booking");
+  const slots = (from, to) => {
+    const times = [];
+    for (let minutes = from * 60; minutes <= to * 60 + 30; minutes += 30) {
+      times.push(String(Math.floor(minutes / 60)).padStart(2, "0") + ":" + String(minutes % 60).padStart(2, "0"));
+    }
+    return times;
+  };
+  const fillTimes = (select, times) => {
+    select.length = 1;
+    for (const time of times) select.add(new Option(time, time));
+  };
+  fillTimes(form.elements["out-time"], slots(5, 23));
+  // A site fetching the free slots of a chosen date.
+  const entryTime = document.getElementById("in-time");
+  document.getElementById("in-date").addEventListener("change", (event) => {
+    entryTime.disabled = true;
+    fillTimes(entryTime, []);
+    if (!event.target.value) return;
+    setTimeout(() => {
+      fillTimes(entryTime, slots(5, 23));
+      entryTime.disabled = false;
+    }, 300);
+  });
+  // A framework's controlled fields: the value is the framework's state, and
+  // every render (after any input event) writes the state back.
+  const state = {};
+  const render = () => {
+    for (const field of form.querySelectorAll("[data-controlled]")) field.value = state[field.name] ?? "";
+  };
+  form.addEventListener("input", (event) => {
+    if (event.target.matches("[data-controlled]")) state[event.target.name] = event.target.value;
+    render();
+  });
+  // The code goes to the person's phone, never to the page.
+  let sentCode = "";
+  document.getElementById("send-code").addEventListener("click", () => {
+    const phone = ["phone1", "phone2", "phone3"].map((name) => form.elements[name].value).join("");
+    if (!/^\d{10,11}$/.test(phone)) {
+      document.getElementById("error").textContent = "휴대폰 번호를 확인해 주세요.";
+      return;
+    }
+    sentCode = "482913";
+    window.__personPhone = sentCode;
+    document.getElementById("code-row").hidden = false;
+    document.getElementById("error").textContent = "인증번호를 보냈습니다.";
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = (name) => form.elements[name].value;
+    const missing = [...form.querySelectorAll("[required]")].filter((field) =>
+      !field.closest("[hidden]") && (field.type === "radio"
+        ? !form.querySelector(`input[name="${field.name}"]:checked`)
+        : field.type === "checkbox" ? !field.checked : !field.value));
+    if (missing.length) {
+      document.getElementById("error").textContent = "필수 항목을 입력해 주세요.";
+      return;
+    }
+    if (!sentCode || value("code") !== sentCode) {
+      document.getElementById("error").textContent = "인증번호가 맞지 않습니다.";
+      return;
+    }
+    window.__sceneResult = {
+      inDate: value("in-date"), inTime: entryTime.value, outDate: value("out-date"), outTime: value("out-time"),
+      name: value("name"), phone: [value("phone1"), value("phone2"), value("phone3")].join("-"),
+      email: value("email"), car: value("car"), flight: value("flight"), people: value("people"),
+      lot: form.querySelector('input[name="lot"]:checked').value,
+      agree: document.getElementById("agree").checked, code: value("code"),
+    };
+    form.hidden = true;
+    document.getElementById("done").hidden = false;
+  });
+</script>
+</body>
+</html>

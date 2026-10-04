@@ -26,6 +26,7 @@ pub mod ask;
 pub mod automation;
 pub mod board;
 pub mod branching;
+pub mod browser_form;
 pub mod browser_read;
 pub mod capabilities;
 pub mod checks;

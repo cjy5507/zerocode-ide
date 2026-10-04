@@ -5253,11 +5253,12 @@ fn ring_reads_are_capped_again_and_answered_as_rows() {
 fn every_browser_verb_has_its_evidence_row() {
     for verb in zerocode_core::agent_browser::VERBS {
         let expected = match verb {
-            "list" | "read" | "console" | "network" | "tabs" | "diagnose" => None,
+            // `fields` reads a page's forms like `read` reads its text.
+            "list" | "read" | "console" | "network" | "tabs" | "diagnose" | "fields" => None,
             // `marks` numbers the controls; the frame is `screenshot --marks`.
             "open" | "close" | "marks" => Some(false),
-            "goto" | "eval" | "click" | "type" | "wait" | "screenshot" | "viewport" | "scroll"
-            | "find" => Some(true),
+            "goto" | "eval" | "click" | "type" | "fill" | "wait" | "screenshot" | "viewport"
+            | "scroll" | "find" => Some(true),
             other => panic!("`{other}` joined VERBS without an evidence row in this table"),
         };
         assert_eq!(
@@ -20308,6 +20309,64 @@ pub(crate) mod computer_desktop_wait {
         );
     }
 
+    /// t-37883: a click by the words a mirrored phone shows reads the app's
+    /// window once, presses the chosen line's centre (nudged) as a click at a
+    /// point, and declares a payment its words name — handed back unpressed
+    /// to a walk with nobody to ask.
+    #[test]
+    fn a_click_by_the_words_a_screen_shows_presses_the_lines_centre() {
+        use crate::agent_tools_runtime::click_by_words;
+        use crate::computer_use::confirm::{self, Asking};
+        use zerocode_core::computer_use_protocol::error_code;
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        confirm::set_policy(confirm::Policy::default());
+        let words = |argv: &[&str]| {
+            argv.iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        };
+        let screen = serde_json::json!({ "source": "ocr", "lines": [
+            { "text": "No", "x": 1060.0, "y": 300.0, "width": 20.0, "height": 17.0 },
+            { "text": "Have you visited a farm?", "x": 760.0, "y": 380.0, "width": 300.0, "height": 17.0 },
+            { "text": "No", "x": 1060.0, "y": 420.0, "width": 20.0, "height": 17.0 },
+            { "text": "Pay 30 USD", "x": 880.0, "y": 900.0, "width": 100.0, "height": 20.0 },
+        ] });
+        let command = zerocode_core::computer_use::parse_command(&words(&[
+            "click", "--app", "iPhone Mirroring", "--ocr", "--text", "No", "--after-text", "farm", "--dy", "2",
+        ]))
+        .expect("a click by words");
+        let mut asked = Vec::new();
+        let answer = click_by_words(&command, Asking::Person, &mut |method, params| {
+            asked.push((method.to_string(), params));
+            Ok(if method == "readText" { screen.clone() } else { serde_json::json!({ "path": "synthetic" }) })
+        })
+        .expect("pressed");
+        let methods: Vec<&str> = asked.iter().map(|(method, _)| method.as_str()).collect();
+        assert_eq!(methods, ["readText", "mouseClick"], "one reading, one press");
+        assert_eq!((&asked[0].1["app"], &asked[0].1["ocr"]), (&serde_json::json!("iPhone Mirroring"), &serde_json::json!(true)));
+        assert_eq!(
+            (asked[1].1["x"].as_f64(), asked[1].1["y"].as_f64()),
+            (Some(1070.0), Some(430.5)),
+            "the No after the farm question, two points lower"
+        );
+        assert_eq!(answer["pressed"]["words"], "No");
+        let pay = zerocode_core::computer_use::parse_command(&words(&[
+            "click", "--app", "iPhone Mirroring", "--ocr", "--text", "Pay",
+        ]))
+        .expect("a click by words");
+        let mut presses = 0;
+        let handed = click_by_words(&pay, Asking::HandBack, &mut |method, _| {
+            if method != "readText" {
+                presses += 1;
+            }
+            Ok(screen.clone())
+        });
+        assert_eq!(handed.expect_err("held for the person").code, error_code::CONFIRMATION_REQUIRED);
+        assert_eq!(presses, 0, "a payment the words name never reaches the helper unasked");
+    }
+
     /// Every request that types text as keys carries the keyboard's table —
     /// the helper keeps no numbers of its own and, without it, types no text
     /// that moves the focus; nothing else carries it.
@@ -22896,6 +22955,9 @@ mod browser_look_settle_pin {
             ("marks", BROWSER_MARKS_BODY),
             ("remeasure", BROWSER_REMEASURE_BODY),
             ("settle", BROWSER_SETTLE_BODY),
+            // A form read is a look too (t-37883): `fill` writes in its own body.
+            ("form helpers", cmd::browser::form::BROWSER_FORM_HELPERS),
+            ("fields", cmd::browser::form::BROWSER_FIELDS_BODY),
         ] {
             for act in [
                 "focus(",
@@ -23946,6 +24008,286 @@ mod handoff_code_road {
             without.stdout.contains("\"resumed\": true"),
             "an answer with no code is the pretty JSON: {}",
             without.stdout
+        );
+    }
+}
+
+/// The browser door's form pair, window half (t-37883): a fill's passes on
+/// the window's clock, and what the page scripts are handed. The page
+/// halves run for real in Chromium (`ui/tests/browser-door.mjs`).
+mod browser_form_fill {
+
+    use super::*;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use zerocode_core::browser_form::{
+        BROWSER_FILL_PASSES, BROWSER_FILL_PENDING_MS, BROWSER_FORM_CONTROLS,
+        BROWSER_FORM_FRAME_SEPARATOR, FillEntry, FillPass, FillResult, FillStatus, FormValue,
+    };
+
+    const POLL: Duration = Duration::from_millis(100);
+
+    fn entry(handle: &str) -> FillEntry {
+        FillEntry {
+            handle: handle.to_string(),
+            value: FormValue::Text("x".into()),
+        }
+    }
+
+    fn answer(asked: &[FillEntry], status: impl Fn(&str) -> FillStatus) -> FillPass {
+        FillPass {
+            results: asked
+                .iter()
+                .map(|entry| FillResult {
+                    handle: entry.handle.clone(),
+                    status: status(&entry.handle),
+                    ..FillResult::default()
+                })
+                .collect(),
+            ..FillPass::default()
+        }
+    }
+
+    /// A time list a chosen date loads 300 ms later: the date is written once,
+    /// the time is tried every poll and written the pass its choices are
+    /// there — one fill, no look in between.
+    #[tokio::test(start_paused = true)]
+    async fn a_field_an_earlier_value_brings_is_written_once_it_is_there() {
+        let began = tokio::time::Instant::now();
+        let asked_log: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
+        let log = asked_log.clone();
+        let report = cmd::browser::form::fill_passes(
+            vec![entry("#date"), entry("#time")],
+            None,
+            Duration::from_millis(BROWSER_FILL_PENDING_MS),
+            POLL,
+            move |asked, _| {
+                log.lock().unwrap().push(asked.iter().map(|e| e.handle.clone()).collect());
+                let loaded = began.elapsed() >= Duration::from_millis(300);
+                async move {
+                    Ok(answer(&asked, |handle| {
+                        if handle == "#time" && !loaded {
+                            FillStatus::NoOption
+                        } else {
+                            FillStatus::Set
+                        }
+                    }))
+                }
+            },
+        )
+        .await
+        .expect("filled");
+        assert!(report.all_took(), "{report:?}");
+        assert_eq!(report.passes, 4, "0, 100, 200 and 300 ms");
+        let asked = asked_log.lock().unwrap().clone();
+        assert_eq!(asked[0], ["#date", "#time"]);
+        assert!(asked[1..].iter().all(|pass| pass == &["#time"]), "{asked:?}");
+        assert!(began.elapsed() < Duration::from_millis(BROWSER_FILL_PENDING_MS));
+    }
+
+    /// A field that never comes is said, not waited for past the fill's
+    /// passes or its wait — whichever runs out first.
+    #[tokio::test(start_paused = true)]
+    async fn a_field_that_never_comes_is_said_once_the_wait_is_spent() {
+        let never = |asked: Vec<FillEntry>, _: Option<String>| async move {
+            Ok(answer(&asked, |_| FillStatus::NotFound))
+        };
+        let pending = Duration::from_millis(BROWSER_FILL_PENDING_MS);
+        let began = tokio::time::Instant::now();
+        let quick = cmd::browser::form::fill_passes(vec![entry("#ghost")], None, pending, POLL, never)
+            .await
+            .expect("answered");
+        assert_eq!(quick.passes, BROWSER_FILL_PASSES, "the passes ran out first");
+        assert_eq!(quick.results[0].status, FillStatus::NotFound);
+        assert!(began.elapsed() < pending);
+        let began = tokio::time::Instant::now();
+        let slow =
+            cmd::browser::form::fill_passes(vec![entry("#ghost")], None, pending, pending / 2, never)
+            .await
+            .expect("answered");
+        assert_eq!(slow.passes, 3, "the wait ran out first: 0, 1 and 2 s");
+        assert!(began.elapsed() <= pending);
+        assert!(!slow.all_took());
+    }
+
+    /// A pass the page could not answer ends the fill with the page's word.
+    #[tokio::test(start_paused = true)]
+    async fn a_pass_the_page_refuses_ends_the_fill_with_its_word() {
+        let refused = cmd::browser::form::fill_passes(
+            vec![entry("#a")],
+            None,
+            Duration::from_millis(BROWSER_FILL_PENDING_MS),
+            POLL,
+            |_, _| async { Err(cmd::browser::PAGE_TIMED_OUT.to_string()) },
+        )
+        .await;
+        assert_eq!(refused, Err(cmd::browser::PAGE_TIMED_OUT.to_string()));
+    }
+
+    /// The scripts are handed the core's tables — no list or cap of their
+    /// own — and a bundle travels as data, never as script text.
+    #[test]
+    fn the_form_scripts_are_handed_the_cores_tables_and_the_bundle_as_data() {
+        let mut request = cmd::browser::form::form_request();
+        assert_eq!(request["controls"], json!(BROWSER_FORM_CONTROLS));
+        assert_eq!(request["frameSeparator"], json!(BROWSER_FORM_FRAME_SEPARATOR));
+        for key in [
+            "notFields", "actions", "scopes", "options", "days", "dayWords", "on", "off",
+        ] {
+            assert!(
+                request[key].as_array().is_some_and(|list| !list.is_empty()),
+                "{key}"
+            );
+        }
+        for cap in [
+            "fieldCap", "actionCap", "optionCap", "wordCap", "valueCap", "answerCap",
+            "frameDepth", "captionDepth",
+        ] {
+            assert!(request[cap].as_u64().is_some_and(|n| n > 0), "{cap}");
+        }
+        let hostile = "\"); alert(1); (\"";
+        request["entries"] = json!([{ "handle": "#a", "value": hostile }]);
+        let script = cmd::browser::form::fill_script(&request, cmd::browser::form::BROWSER_FILL_BODY);
+        assert!(!script.contains(hostile), "the value is JSON data in the request");
+        for piece in ["const zcNameOf", "const zcFormFields", "const zcWrite", "request.entries"] {
+            assert!(script.contains(piece), "the fill script lacks {piece}");
+        }
+    }
+
+    /// Nothing a form script does waits for a frame or reads where a field
+    /// sits, so a tab nobody is looking at reads and fills as a shown one;
+    /// and only the fill writes.
+    #[test]
+    fn a_form_script_reads_no_place_and_waits_for_no_frame() {
+        let fill = cmd::browser::form::BROWSER_FILL_HELPERS;
+        for script in [
+            cmd::browser::form::BROWSER_FORM_HELPERS,
+            cmd::browser::form::BROWSER_FIELDS_BODY,
+            fill,
+            cmd::browser::form::BROWSER_FILL_BODY,
+            cmd::browser::form::BROWSER_EVAL_FORM,
+        ] {
+            for place in [
+                "getBoundingClientRect",
+                "elementFromPoint",
+                "requestAnimationFrame",
+                "setTimeout",
+                "scrollIntoView",
+                "innerWidth",
+            ] {
+                assert!(!script.contains(place), "a form script reads `{place}`");
+            }
+        }
+        for write in ["dispatchEvent", ".click(", "focus(", "selected = true"] {
+            assert!(fill.contains(write), "the fill lost `{write}`");
+        }
+        assert!(
+            fill.contains("\"secret\"") && fill.contains("\"file\""),
+            "a secret and a file are refused by name"
+        );
+    }
+
+    /// The form a fill is held to (m-40824): the first pass carries the
+    /// fingerprint its agent read and no later pass does — a field the
+    /// fill's own values bring is no stale form — and a page that says the
+    /// form changed ends the fill there, with nothing written.
+    #[tokio::test(start_paused = true)]
+    async fn a_fill_is_held_to_the_form_read_on_its_first_pass_only() {
+        let carried: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let seen = carried.clone();
+        let report = cmd::browser::form::fill_passes(
+            vec![entry("#date"), entry("#time")],
+            Some("9:read".into()),
+            Duration::from_millis(BROWSER_FILL_PENDING_MS),
+            POLL,
+            move |asked, expect| {
+                let first = seen.lock().unwrap().is_empty();
+                seen.lock().unwrap().push(expect);
+                async move {
+                    Ok(answer(&asked, |handle| {
+                        if handle == "#time" && first {
+                            FillStatus::NoOption
+                        } else {
+                            FillStatus::Set
+                        }
+                    }))
+                }
+            },
+        )
+        .await
+        .expect("filled");
+        assert!(report.all_took() && !report.stale, "{report:?}");
+        assert_eq!(
+            carried.lock().unwrap().clone(),
+            [Some("9:read".to_string()), None]
+        );
+        let stale = cmd::browser::form::fill_passes(
+            vec![entry("#date")],
+            Some("9:read".into()),
+            Duration::from_millis(BROWSER_FILL_PENDING_MS),
+            POLL,
+            |_, _| async {
+                Ok(FillPass {
+                    stale: true,
+                    fingerprint: "12:other".into(),
+                    ..FillPass::default()
+                })
+            },
+        )
+        .await
+        .expect("answered");
+        assert!(stale.stale && !stale.all_took() && stale.passes == 1, "{stale:?}");
+        assert!(
+            zerocode_core::browser_form::fill_lines(&stale).starts_with(
+                zerocode_core::computer_use_protocol::error_code::FORM_STALE
+            )
+        );
+    }
+
+    /// What a pane's agent last read is what its next fill is held to; a
+    /// page that answered no fingerprint holds it to nothing.
+    #[test]
+    fn a_panes_last_form_is_remembered_and_forgotten() {
+        let label = "browser-form-memory-test";
+        assert_eq!(cmd::browser::form::known_form(label), None);
+        cmd::browser::form::remember_form(label, "9:read");
+        assert_eq!(cmd::browser::form::known_form(label).as_deref(), Some("9:read"));
+        cmd::browser::form::remember_form(label, "");
+        assert_eq!(cmd::browser::form::known_form(label), None);
+    }
+
+    /// An eval that names the form pair's object gets `fields()` and
+    /// `fill()` before its expression — the expression still inlined, never
+    /// the page's own eval — and any other eval carries none of it.
+    #[test]
+    fn an_eval_that_names_the_form_pair_gets_it_and_no_other_does() {
+        use zerocode_core::agent_browser::BROWSER_EVAL_FORM_OBJECT;
+        assert!(
+            cmd::browser::form::BROWSER_EVAL_FORM
+                .trim_start()
+                .starts_with(&format!("const {BROWSER_EVAL_FORM_OBJECT} = ")),
+            "the object the page script makes is the name the core gives"
+        );
+        let expression = format!("{BROWSER_EVAL_FORM_OBJECT}.fields().fields.length");
+        let body = cmd::browser::inlined_eval_body(&expression);
+        let script = cmd::browser::form::eval_script(&expression, &body);
+        for piece in [
+            "const zcFormFields",
+            "const zcFill",
+            cmd::browser::form::BROWSER_EVAL_FORM.trim(),
+            body.as_str(),
+            "\"frameSeparator\"",
+        ] {
+            assert!(script.contains(piece), "the form eval lacks {piece:?}");
+        }
+        let plain = cmd::browser::form::eval_script(
+            "document.title",
+            &cmd::browser::inlined_eval_body("document.title"),
+        );
+        assert!(
+            !plain.contains("const zcFormFields") && !plain.contains("const zcFill"),
+            "an eval that reads no form carries none of it"
         );
     }
 }
