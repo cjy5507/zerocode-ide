@@ -16,9 +16,10 @@ use zerocode_core::browser_form::{
     BROWSER_FILL_OFF, BROWSER_FILL_ON, BROWSER_FILL_PENDING_MS, BROWSER_FORM_ACTION_CAP,
     BROWSER_FORM_ACTIONS, BROWSER_FORM_CAPTION_DEPTH, BROWSER_FORM_CONTROLS,
     BROWSER_FORM_DAY_WORDS, BROWSER_FORM_DAYS, BROWSER_FORM_FIELD_CAP, BROWSER_FORM_FRAME_DEPTH,
-    BROWSER_FORM_FRAME_SEPARATOR, BROWSER_FORM_MONTH_DAYS, BROWSER_FORM_MONTH_PAGES,
-    BROWSER_FORM_NOT_FIELDS, BROWSER_FORM_OPTION_CAP, BROWSER_FORM_OPTIONS, BROWSER_FORM_SCOPES,
-    FillEntry, FillLedger, FillPass, FillReport, FormRead,
+    BROWSER_FORM_FRAME_SEPARATOR, BROWSER_FORM_LIST_ITEMS, BROWSER_FORM_LISTS,
+    BROWSER_FORM_MONTH_DAYS, BROWSER_FORM_MONTH_PAGES, BROWSER_FORM_NOT_FIELDS,
+    BROWSER_FORM_OPTION_CAP, BROWSER_FORM_OPTIONS, BROWSER_FORM_SCOPES, FillEntry, FillLedger,
+    FillPass, FillReport, FormRead,
 };
 
 /// What a read of a page's forms is made of, page side — read only, like the
@@ -148,6 +149,11 @@ const zcDrawnOptions = (el, request) => {
   }
   return found;
 };
+// The list a focusable box keeps beside it — a dropdown drawn with no ARIA:
+// a sibling list in the box's own parent.
+const zcListBeside = (el, request) => el.parentElement
+  ? [...el.parentElement.children].find((child) => child !== el && child.matches(request.lists.join(","))) || null
+  : null;
 // The kind of field an element is, or null for one that is no field: HTML's
 // input type, a select, a textarea, an editable region, ARIA's widgets. A
 // radio input stands for its group; an input inside a combobox, for the
@@ -166,7 +172,8 @@ const zcFieldKind = (el, request) => {
   if (role === "checkbox" || role === "switch") return "checkbox";
   if (role === "radiogroup") return el.querySelector('input[type="radio"]') ? null : "radio";
   if (role === "combobox") return "combobox";
-  return el.isContentEditable ? "text" : null;
+  if (el.isContentEditable) return "text";
+  return el.hasAttribute("tabindex") && zcListBeside(el, request) ? "dropdown" : null;
 };
 // One field, read: the element it is pressed and written through, its
 // choices (each with its element), what it holds, and its words.
@@ -206,6 +213,12 @@ const zcRead = (el, request) => {
       .map((option) => ({ el: option, words: zcWords(option.label || option.text, cap),
         value: option.value, selected: option.selected }));
     record.value = record.choices.filter((choice) => choice.selected).map((choice) => choice.words).join(", ");
+  } else if (kind === "dropdown") {
+    const list = zcListBeside(el, request);
+    record.choices = [...list.children].filter((item) => item.matches(request.listItems.join(",")))
+      .map((item) => ({ el: item, words: zcChoiceWords(item, cap), value: String(item.getAttribute("data-value") || ""),
+        selected: false }));
+    record.value = zcWords(el.innerText || el.textContent || "", request.valueCap);
   } else if (kind === "combobox") {
     const typed = zcFormTag(el) === "input" ? el : el.querySelector("input");
     record.choices = zcDrawnOptions(el, request);
@@ -696,6 +709,11 @@ const zcHolds = (record, asked) => {
   if (record.kind === "checkbox") return zcFlag(asked) === record.value;
   const date = record.kind !== "select" && zcDateOf(asked);
   if (date && record.value !== "" && zcShowsDate(record.value, date)) return true;
+  if (record.kind === "dropdown") {
+    const pick = zcPick(record.choices, asked);
+    const now = zcFold(record.value);
+    return !!pick && (now === zcFold(pick.words) || now.startsWith(zcFold(pick.words)));
+  }
   if (record.kind === "combobox") {
     const open = record.el.getAttribute("aria-expanded") === "true";
     const now = zcFold(record.value);
@@ -716,6 +734,16 @@ const zcWrite = (record, asked) => {
       return "no_option";
     }
     zcPress(el);
+    return "";
+  }
+  if (record.kind === "dropdown") {
+    const pick = zcPick(record.choices, asked);
+    if (!pick) {
+      record.offered = record.choices.map((choice) => choice.words);
+      return "no_option";
+    }
+    if (!zcDrawn(pick.el)) zcPress(el);
+    zcPress(pick.el);
     return "";
   }
   if (record.kind === "combobox") {
@@ -870,6 +898,8 @@ pub(crate) fn form_request() -> serde_json::Value {
         "frameSeparator": BROWSER_FORM_FRAME_SEPARATOR,
         "frameDepth": BROWSER_FORM_FRAME_DEPTH,
         "captionDepth": BROWSER_FORM_CAPTION_DEPTH,
+        "lists": BROWSER_FORM_LISTS,
+        "listItems": BROWSER_FORM_LIST_ITEMS,
         "monthDays": BROWSER_FORM_MONTH_DAYS,
         "monthPages": BROWSER_FORM_MONTH_PAGES,
         "on": BROWSER_FILL_ON,

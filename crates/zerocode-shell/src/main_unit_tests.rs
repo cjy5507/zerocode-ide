@@ -23638,7 +23638,8 @@ mod browser_form_fill {
         assert_eq!(request["controls"], json!(BROWSER_FORM_CONTROLS));
         assert_eq!(request["frameSeparator"], json!(BROWSER_FORM_FRAME_SEPARATOR));
         for key in [
-            "notFields", "actions", "scopes", "options", "days", "dayWords", "on", "off",
+            "notFields", "actions", "scopes", "options", "days", "dayWords", "on", "off", "lists",
+            "listItems",
         ] {
             assert!(
                 request[key].as_array().is_some_and(|list| !list.is_empty()),

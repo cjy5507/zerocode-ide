@@ -34,6 +34,7 @@ pub const BROWSER_FORM_CONTROLS: &[&str] = &[
     "[role=switch]",
     "[role=radiogroup]",
     "[role=combobox]",
+    "[tabindex]",
 ];
 
 /// The input types that are no field a person fills: what a form carries
@@ -64,6 +65,14 @@ pub const BROWSER_FORM_CAPTION_DEPTH: usize = 3;
 
 /// How deep a read goes into frames inside frames.
 pub const BROWSER_FORM_FRAME_DEPTH: usize = 3;
+
+/// The lists a dropdown drawn with no ARIA keeps beside the focusable box
+/// that opens it — a field of its own kind (`dropdown`), its items the
+/// choices.
+pub const BROWSER_FORM_LISTS: &[&str] = &["ul", "ol", "[role=listbox]"];
+
+/// The items of such a list.
+pub const BROWSER_FORM_LIST_ITEMS: &[&str] = &["li", "[role=option]"];
 
 /// The choices a dropdown the page draws itself offers, once it is open
 /// (ARIA's option role).
