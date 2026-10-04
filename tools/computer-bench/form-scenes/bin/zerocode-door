@@ -1,0 +1,60 @@
+#!/bin/sh
+# The form bench's stand-in for the shims a pane carries (t-41387): installed
+# as `zerocode-browser` and `zerocode-computer`, it packs its argv the way the
+# window's shim does — joined by 0x1f, `--value-stdin` read from stdin and sent
+# as `--value <payload>` — posts it to the stand-in window at $FORM_DESK, the
+# door named by the name it was called by, and answers the way the window's
+# shim does: stdout on a 200, stderr and exit 1 otherwise, `--help` locally
+# from the manual the runner wrote beside it (`<door>.help`).
+set -eu
+door=$(basename "$0")
+door=${door#zerocode-}
+here=$(cd "$(dirname "$0")" && pwd)
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  cat "$here/$door.help" 2>/dev/null || { echo "zerocode-$door: no manual" >&2; exit 1; }
+  exit 0
+fi
+if [ -z "${FORM_DESK:-}" ]; then
+  echo "zerocode-$door: this shell is not inside a ZeroCode window" >&2
+  exit 1
+fi
+sep=$(printf '\037')
+body=""
+stdin_name=""
+for arg in "$@"; do
+  case "$arg" in
+    --text-stdin) stdin_name="text"; continue ;;
+    --value-stdin) stdin_name="value"; continue ;;
+    *"$sep"*)
+      echo "zerocode-$door: an argument may not contain the separator byte" >&2
+      exit 1
+      ;;
+  esac
+  body="$body$arg$sep"
+done
+if [ -n "$stdin_name" ]; then
+  payload=$(cat)
+  case "$payload" in
+    *"$sep"*)
+      echo "zerocode-$door: stdin may not contain the separator byte" >&2
+      exit 1
+      ;;
+  esac
+  body="$body--$stdin_name$sep$payload$sep"
+fi
+out=$(printf '%s' "$body" | curl -q -sS --noproxy '*' --proto =http \
+  --max-time 15 -w '\n%{http_code}' \
+  -H "content-type: application/octet-stream" --data-binary @- \
+  "$FORM_DESK/$door" 2>/dev/null) || {
+  echo "zerocode-$door: could not reach the window" >&2
+  exit 1
+}
+code="${out##*
+}"
+said="${out%
+*}"
+if [ "$code" != "200" ]; then
+  printf '%s' "$said" >&2
+  exit 1
+fi
+printf '%s' "$said"
