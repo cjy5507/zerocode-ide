@@ -122,6 +122,13 @@ pub fn mask_values(text: &str) -> String {
     out
 }
 
+/// The credential values something NAMES, masked and nothing else — today no road
+/// reads text that way: the text as it was.
+#[must_use]
+pub fn mask_named_values(text: &str) -> String {
+    text.to_string()
+}
+
 /// Whether `line` carries anything that is, or could introduce, a
 /// credential: a word that names or looks like one, an auth scheme, a URL's
 /// userinfo, a glued password flag, a shell `export`, or a PEM block. A road
@@ -358,5 +365,50 @@ mod tests {
             mask_values(said),
             "first  line\n\tpassword: [redacted]\nthird"
         );
+    }
+
+    /// The report keeper's reading (t-32798): what NAMES a value is masked, and
+    /// no word is masked for how it looks — one pass, two readings.
+    #[test]
+    fn the_named_reading_masks_assignments_and_headers_and_leaves_prose_alone() {
+        for (said, kept, gone) in [
+            (
+                "export DB_PASSWORD=hunter2 && make",
+                "DB_PASSWORD=[redacted] && make",
+                "hunter2",
+            ),
+            (
+                "curl -H 'Authorization: Bearer abc.def' x",
+                "'Authorization: [redacted]",
+                "abc.def",
+            ),
+            (
+                "gh --token ghx12345 pr list",
+                "--token [redacted] pr list",
+                "ghx12345",
+            ),
+            (
+                "git clone https://user:tok3n@host.test/r.git now",
+                "https://***@host.test/r.git now",
+                "tok3n",
+            ),
+        ] {
+            let masked = mask_named_values(said);
+            assert!(masked.contains(kept), "{said:?} lost {kept:?}: {masked:?}");
+            assert!(!masked.contains(gone), "{said:?} kept {gone:?}: {masked:?}");
+        }
+        for prose in [
+            "the disk-guard job DISK_FLOOR task-list ask-wait",
+            "1791083855-w-35393-t32796-red-run crates/zerocode-core/src/orchestration/tests.rs:6430",
+            "Jev tokens: 5000 and a cookie budget",
+            "key Xk9pQ2mZ7vL4nR8sT1wY6bC3dF5g",
+        ] {
+            assert_eq!(mask_named_values(prose), prose, "prose was read as a key");
+            assert_ne!(
+                mask_values(prose),
+                prose,
+                "the recap's reading masks this; the two readings must differ here"
+            );
+        }
     }
 }

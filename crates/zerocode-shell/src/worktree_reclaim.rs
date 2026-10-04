@@ -144,6 +144,7 @@ use zerocode_core::orchestration::Examined;
 use zerocode_orchestrator::{Orchestrator, Worktree, same_worktree_path};
 
 use crate::orchestration;
+use crate::orchestration::hand_in_keep::{Clearance, Mode, before_cleanup};
 use crate::{AppState, CheckoutHeld, ShellStateExt, WorkspaceCreationPrefs};
 
 /// How long a checkout that was kept waits before the question is put to git
@@ -413,6 +414,12 @@ struct Recheck<'a> {
     settled: &'a dyn Fn(&str) -> bool,
     /// How many terminals does this window hold inside it?
     terminals: &'a dyn Fn(&Path) -> usize,
+    /// Is anything a worker handed in from this checkout still to be kept
+    /// (t-32798)? Asked first of all, under the claim, because a checkout is
+    /// where the report and the evidence were written and a removal is the end of
+    /// them — and asked again by every road that takes a checkout, so the answer
+    /// is one.
+    keeping: &'a dyn Fn(&Path) -> Clearance,
 }
 
 /// What one judgment came to, for the road that asked.
@@ -436,9 +443,13 @@ fn judge_and_act(
 ) {
     let state = app.state::<AppState>();
     let terminals = |path: &Path| crate::checkout_occupancy(&state, path);
+    // The beat asks without reading a file: a hand-in not yet kept is started on
+    // a thread of its own and the checkout waits for the next beat.
+    let keeping = |path: &Path| before_cleanup(path, Mode::Wait);
     let recheck = Recheck {
         settled: &orchestration::checkout_is_settled,
         terminals: &terminals,
+        keeping: &keeping,
     };
     match settle(candidate, road, here, &recheck, now_ms) {
         Settled::Reclaimed { branch, base } => {
@@ -1034,9 +1045,13 @@ mod tests {
         fn terminals(_: &Path) -> usize {
             0
         }
+        fn kept(_: &Path) -> Clearance {
+            Clearance::Clear
+        }
         Recheck {
             settled: &settled,
             terminals: &terminals,
+            keeping: &kept,
         }
     }
 
@@ -1642,5 +1657,91 @@ mod tests {
             "the claim outlived the road that held it"
         );
         assert!(!path.exists(), "the checkout survived its reclaim");
+    }
+
+    /// What the worker handed in is kept before its checkout goes (t-32798).
+    /// A hand-in still being kept, or one whose keeping failed, leaves the
+    /// directory standing on both roads — the failed one with its reason in the
+    /// window log, once — and the directory goes the moment nothing is owed.
+    #[test]
+    fn a_checkout_whose_hand_in_is_not_kept_stays_and_says_why_and_goes_when_it_is() {
+        let bench = Bench::open();
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let (projects, prefs) = bench.window();
+        let because = "the hand-in m-7 of task t-9 was not kept (copy_failed: No space left on \
+                       device) — the checkout stays until it is";
+        for (name, road) in [
+            ("t-32798", Road::Report(bench.orchestrator())),
+            ("t-32799", Road::Sweep { projects, prefs }),
+        ] {
+            let path = bench.cut(name);
+            let candidate = finished(&path, "w-32798");
+            fn settled(_: &str) -> bool {
+                true
+            }
+            fn terminals(_: &Path) -> usize {
+                0
+            }
+            let owed = |_: &Path| Clearance::Keeping("still being kept".to_string());
+            let failed = |_: &Path| Clearance::Held(because.to_string());
+            let clear = |_: &Path| Clearance::Clear;
+            for (what, keeping) in [
+                ("being kept", &owed as &dyn Fn(&Path) -> Clearance),
+                ("failed", &failed as &dyn Fn(&Path) -> Clearance),
+            ] {
+                let recheck = Recheck {
+                    settled: &settled,
+                    terminals: &terminals,
+                    keeping,
+                };
+                assert!(
+                    matches!(
+                        settle(&candidate, &road, &here, &recheck, 1_000),
+                        Settled::Kept
+                    ),
+                    "{name}: a checkout whose hand-in is {what} was taken"
+                );
+                assert!(
+                    path.is_dir(),
+                    "{name}: the checkout went with its hand-in {what}"
+                );
+            }
+            let said = std::fs::read_to_string(data_root.path().join("window-errors.log"))
+                .unwrap_or_default();
+            let line = format!(
+                "the checkout worker w-32798 left at {} was kept: {because}",
+                path.display()
+            );
+            assert_eq!(
+                said.matches(&line).count(),
+                1,
+                "{name}: the refusal is not written down once, with its reason:\n{said}"
+            );
+            assert!(
+                !said.contains("still being kept"),
+                "{name}: a keeping that only waits its turn was written down:\n{said}"
+            );
+            let recheck = Recheck {
+                settled: &settled,
+                terminals: &terminals,
+                keeping: &clear,
+            };
+            assert!(
+                matches!(
+                    settle(&candidate, &road, &here, &recheck, 2_000),
+                    Settled::Reclaimed { .. }
+                ),
+                "{name}: the checkout stayed once nothing was owed"
+            );
+            assert!(!path.exists(), "{name}: the checkout survived its reclaim");
+            judged()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&candidate.path);
+        }
     }
 }

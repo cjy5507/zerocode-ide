@@ -40,6 +40,10 @@ use zerocode_core::artifact::{
 use zerocode_core::artifact_publish::{ExportFormat, PageRenderer};
 use zerocode_core::artifact_transcript::{PageFact, RemoteFact};
 
+mod kept;
+
+pub(crate) use kept::KeptFile;
+
 /// The store's folder under the local data root.
 pub(crate) const STORE_DIR_NAME: &str = "artifacts";
 /// The append-only catalog inside it.
@@ -444,6 +448,9 @@ pub(crate) struct Store {
     /// 이 창이 방금 내보낸 파일들, 오래된 것부터. 토스트의 「Finder에서 보기」는 이 밖의
     /// 경로를 보이지 않는다.
     exported: Mutex<VecDeque<PathBuf>>,
+    /// What a worker's hand-in named and the store kept of it, one manifest each
+    /// (t-32798, [`kept`]).
+    hand_ins: Mutex<kept::HandIns>,
 }
 
 fn store_cell() -> &'static Mutex<Option<Arc<Store>>> {
@@ -531,6 +538,7 @@ impl Store {
         }
         // Tokens are rebuilt from disk lazily by the first scan; the rows the
         // catalog named are re-stamped there too.
+        let hand_ins = kept::HandIns::load(&root);
         Self {
             root,
             local_data_root: local_data_root.to_path_buf(),
@@ -548,6 +556,7 @@ impl Store {
             feedback: Mutex::new(HashMap::new()),
             renderer: Mutex::new(None),
             exported: Mutex::new(VecDeque::new()),
+            hand_ins: Mutex::new(hand_ins),
         }
     }
 

@@ -106,6 +106,9 @@ impl ArtifactKind {
 pub enum Source {
     /// A worker's closing report, copied into the store on `worker_done`.
     WorkerReport,
+    /// A file a worker's `worker_done` names as evidence (t-32798): kept in the
+    /// store the same way, so it outlives the checkout it was written in.
+    WorkerEvidence,
     /// A file inside an automation run's evidence folder, registered in place.
     Evidence,
     /// A file from a folder the person named as an export folder.
@@ -128,7 +131,7 @@ impl Source {
     #[must_use]
     pub const fn bucket(self) -> &'static str {
         match self {
-            Self::WorkerReport => "run",
+            Self::WorkerReport | Self::WorkerEvidence => "run",
             Self::Evidence => "automation",
             Self::Export | Self::Manual | Self::AgentPage | Self::Remote => "manual",
         }
@@ -795,6 +798,17 @@ mod tests {
             ("shot.png", Source::Evidence, ArtifactKind::Screenshot),
             ("steps.jsonl", Source::Evidence, ArtifactKind::Evidence),
             ("report.md", Source::Evidence, ArtifactKind::Evidence),
+            // What a worker's hand-in names as evidence is evidence too — a log
+            // and a report written as evidence alike — and its pictures stay
+            // pictures (t-32798).
+            ("run.log", Source::WorkerEvidence, ArtifactKind::Evidence),
+            (
+                "steps.jsonl",
+                Source::WorkerEvidence,
+                ArtifactKind::Evidence,
+            ),
+            ("report.md", Source::WorkerEvidence, ArtifactKind::Evidence),
+            ("dark.png", Source::WorkerEvidence, ArtifactKind::Screenshot),
             ("turns.jsonl", Source::Manual, ArtifactKind::Transcript),
             ("rows.csv", Source::Manual, ArtifactKind::Export),
             ("bundle.bin", Source::Export, ArtifactKind::Export),

@@ -32,6 +32,7 @@ pub(crate) mod desk;
 pub(crate) mod gate_book;
 mod gate_meter;
 mod gate_snapshot;
+pub(crate) mod hand_in_keep;
 mod mail_triage;
 pub(crate) mod restart_census;
 mod stall_cause;
