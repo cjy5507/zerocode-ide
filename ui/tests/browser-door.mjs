@@ -1023,6 +1023,31 @@ await test("a_calendar_the_fill_cannot_read_is_answered_with_what_it_shows", asy
   } finally { await pickers.close(); }
 });
 
+/* Parts of one value with the page's unit words between them — an hour
+ * and a minute (시 · 분), a year, a month and a day (년 · 월 · 일) — are one
+ * caption's parts, not a caption each: the words between two parts are the
+ * first part's unit. */
+await test("parts_with_unit_words_between_them_are_one_captions_parts", async () => {
+  const units = await browser.newPage();
+  try {
+    await units.setContent(`<!doctype html><html lang="ko"><meta charset="utf-8"><form>
+      <div class="row"><div class="cap">출차 시각<em>*</em></div><div class="ctl">
+        <select id="h"><option value="">시</option><option>00</option><option>09</option><option>18</option></select><span>시</span>
+        <select id="m"><option value="">분</option><option>00</option><option>30</option></select><span>분</span></div></div>
+      <div class="row"><div class="cap">생년월일</div><div class="ctl">
+        <select id="y"><option value="">년</option><option>1988</option></select> 년
+        <select id="mo"><option value="">월</option><option>2</option></select> 월
+        <select id="d"><option value="">일</option><option>14</option></select> 일</div></div></form>`);
+    const read = await readFields(units);
+    const labels = read.fields.map((field) => field.label);
+    assert(JSON.stringify(labels) === JSON.stringify(["출차 시각 (1/2)", "출차 시각 (2/2)", "생년월일 (1/3)", "생년월일 (2/3)", "생년월일 (3/3)"]),
+      "the unit words between parts make no caption of their own", labels);
+    const filled = await fillBundle(units, { [handleOf(read, "출차 시각 (1/2)")]: "18", [handleOf(read, "출차 시각 (2/2)")]: "00" });
+    assert(filled.results.every((result) => result.status === "set"), "each part takes its number", filled.results);
+    return labels.join(" · ");
+  } finally { await units.close(); }
+});
+
 await test("a_frame_of_another_origin_is_named_not_read", async () => {
   const sealed = await browser.newPage();
   try {
