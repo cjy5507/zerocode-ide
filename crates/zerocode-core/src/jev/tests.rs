@@ -233,7 +233,14 @@ fn every_use_recommends_one_of_its_own_modes_and_off_only_where_stopped() {
 /// line the judge reads — the answer floor, the agreement floor, the apply
 /// wall, the sample it may speak on — and offers `auto`, the only mode the
 /// column speaks for. A seat that acted from the start with no judge behind it
-/// would be `on` under another name.
+/// would be `on` under another name. The reflex decision is the eighth
+/// (t-26708): it fills what the hand's plan left open — whether to go on,
+/// stop or have the plan rewritten — and its question v2 (t-22110), read on
+/// the hand's own activity and freshness, answered `continue` on every
+/// healthy reading of the bench's fixture rounds and ended none by a pause
+/// (§5.3 of the task's report names the runs); a seat that only records
+/// there would leave an autopilot run unprotected for the window it takes
+/// to rise.
 #[test]
 fn only_a_seat_that_fills_what_its_caller_left_open_starts_acting() {
     use crate::jev::promote::Stand;
@@ -245,6 +252,7 @@ fn only_a_seat_that_fills_what_its_caller_left_open_starts_acting() {
         DESKTOP.id,
         EMULATOR.id,
         COVER.id,
+        REFLEX_DECIDE.id,
     ];
     for row in &JEV_USES {
         let expected = if acting.contains(&row.id) {

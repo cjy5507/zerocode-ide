@@ -55,7 +55,7 @@ def schedule(seed, values, stress=False):
     return {'seed': seed, 'lengthMs': length, 'stress': stress, 'steps': steps, 'targets': targets}
 
 
-def plan(geometry, values, bundle, contract_version, rules=None, table_limits=None):
+def plan(geometry, values, bundle, contract_version, rules=None, table_limits=None, pointer_ms=None):
     display, window = geometry['display'], geometry['window']
     inputs, chosen = values['rts_inputs'], values['reflex_plan']
     x, y = window['x'] - int(display['x']), window['y'] - int(display['y'])
@@ -94,7 +94,8 @@ def plan(geometry, values, bundle, contract_version, rules=None, table_limits=No
              for kind in inputs]
     return {'version': contract_version, 'plan_hash': '', 'scope': {'surface': 'macos_desktop', 'target': bundle},
             'detectors': detectors, 'rules': rules, 'macros': macros,
-            'pointer': {'curve': 'cosine', 'duration_ms': values['rts_plan']['pointer_ms'], 'instant': False}}
+            'pointer': {'curve': 'cosine', 'duration_ms': reflex.glide(pointer_ms, values['rts_plan']['pointer_ms']),
+                        'instant': False}}
 
 
 def the_round(owner, seed, values, table_limits, stress=False):
@@ -209,11 +210,16 @@ class Desk(reflex.Desk):
         super().__init__(folder, values, table_limits)
         self.stress = stress
 
-    def round(self, seed):
+    def round(self, seed, scene=None):
+        # The launch hook's cover scene (t-12979): the RTS round carries none, so it is not read.
         return the_round(self.session['owner'], seed, self.values, self.limits, self.stress)
 
     def plan(self, geometry, rules):
-        return plan(geometry, self.values, self.session['bundle'], reflex.contract(), table_limits=self.limits)
+        return plan(geometry, self.values, self.session['bundle'], reflex.contract(), table_limits=self.limits,
+                    pointer_ms=self.pointer_ms)
+
+    def table_glide_ms(self):
+        return self.values['rts_plan']['pointer_ms']
 
     def result(self, record):
         return judged(record, self.values, self.limits)
@@ -231,6 +237,8 @@ def main(argv=None):
     parser.add_argument('--autopilot', action='store_true')
     parser.add_argument('--generator', choices=['window', reflex.STUB], default='window')
     parser.add_argument('--l1', choices=['auto', 'shadow', 'off'], default='shadow')
+    parser.add_argument('--pointer-ms', type=int,
+                        help="run: the glide the hand's plan asks for, in ms (default: the table's rts_plan pointer_ms)")
     args = parser.parse_args(argv)
     values, limits = tally.table(), reflex.limits()
     if args.command == 'prepare':
@@ -250,7 +258,8 @@ def main(argv=None):
                 if not args.driver or not args.helper_app:
                     parser.error('run needs --driver and --helper-app')
                 autopilot = {'generator': args.generator, 'words': goal(values), 'l1': args.l1} if args.autopilot else None
-                result = desk.run(args.seed, args.driver, args.helper_app, autopilot=autopilot)
+                result = desk.run(args.seed, args.driver, args.helper_app, autopilot=autopilot,
+                                  pointer_ms=args.pointer_ms)
         print(json.dumps(result, indent=2))
         return 0
     except (reflex.Refused, reflex.Stopped) as error:

@@ -4465,6 +4465,8 @@ pub const REFLEX_DECIDE_DEADLINE_MS: u64 =
 /// in the window after each answer, one label row naming the request by its
 /// run, its decision and the time it was asked (`reflex_decide::label_row`).
 /// A run started from a person's own plan (`reflex-start`) only records.
+/// Under `auto` it acts from the start ([`JevUse::auto_starts`], t-26708):
+/// it fills what the plan left open, as the screen seats do for a goal walk.
 ///
 /// Its lines are the stall seat's, borrowed for the stall seat's own reason
 /// ([`ORCHESTRATION_ANSWER_FLOOR_PERMILLE`]): a decision that does not come
@@ -4540,7 +4542,12 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
     label_part: &[],
     follows: None,
     regrade: Regrade::AsWritten,
-    auto_starts: promote::Stand::Recording,
+    // Acting from the start (t-26708 §5.3): the question v2 (t-22110) answered
+    // `continue` on every healthy reading of the bench's fixture rounds and
+    // ended none by a pause, so the autopilot run is guarded from its first
+    // decision; recording first left it unguarded for the window it takes to
+    // rise, and a late or failed answer still changes no input.
+    auto_starts: promote::Stand::Applying,
     abstain: Abstain::Lacks(
         "continue, pause and replan offer none — pause is the safe stop, not unknown; no reason was found in the code",
     ),
