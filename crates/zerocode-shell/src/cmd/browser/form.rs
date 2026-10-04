@@ -16,9 +16,9 @@ use zerocode_core::browser_form::{
     BROWSER_FILL_OFF, BROWSER_FILL_ON, BROWSER_FILL_PENDING_MS, BROWSER_FORM_ACTION_CAP,
     BROWSER_FORM_ACTIONS, BROWSER_FORM_CAPTION_DEPTH, BROWSER_FORM_CONTROLS,
     BROWSER_FORM_DAY_WORDS, BROWSER_FORM_DAYS, BROWSER_FORM_FIELD_CAP, BROWSER_FORM_FRAME_DEPTH,
-    BROWSER_FORM_FRAME_SEPARATOR, BROWSER_FORM_NOT_FIELDS, BROWSER_FORM_OPTION_CAP,
-    BROWSER_FORM_OPTIONS, BROWSER_FORM_SCOPES, FillEntry, FillLedger, FillPass, FillReport,
-    FormRead,
+    BROWSER_FORM_FRAME_SEPARATOR, BROWSER_FORM_MONTH_DAYS, BROWSER_FORM_MONTH_PAGES,
+    BROWSER_FORM_NOT_FIELDS, BROWSER_FORM_OPTION_CAP, BROWSER_FORM_OPTIONS, BROWSER_FORM_SCOPES,
+    FillEntry, FillLedger, FillPass, FillReport, FormRead,
 };
 
 /// What a read of a page's forms is made of, page side — read only, like the
@@ -388,7 +388,11 @@ const zcPick = (choices, asked) => {
   const exact = choices.find((c) => zcFold(c.words) === want || (c.value && zcFold(c.value) === want));
   if (exact) return exact;
   const one = (list) => (list.length === 1 ? list[0] : null);
+  // A number asked of choices that dress their numbers in words ("4" of
+  // "4일", "04" of "4 Dec") is the one choice holding just those numbers.
+  const numbers = zcDressed(want) ? zcGroups(want).join(",") : "";
   return one(choices.filter((c) => zcSame(asked, c.words) || (c.value && zcSame(asked, c.value))))
+    || (numbers && one(choices.filter((c) => zcGroups(c.words).join(",") === numbers)))
     || one(choices.filter((c) => zcFold(c.words).includes(want)))
     || one(choices.filter((c) => zcFold(c.words) && want.includes(zcFold(c.words))));
 };
@@ -437,6 +441,124 @@ const zcWriteText = (el, text, leave) => {
   zcEvent(el, "change");
   if (leave) el.blur();
 };
+// ---- a date, written the way the field takes it ----
+// The asked date as [year, month, day], when it is one (year first).
+const zcDateOf = (asked) => {
+  const groups = zcGroups(asked);
+  return groups.length === 3 && zcYear(groups[0]) ? groups : null;
+};
+// The form a field shows its dates in, from its own placeholder or title:
+// a year, a month and a day token (YYYY / YY, MM / M, DD / D, either case)
+// with whatever stands between them — "YYYY.MM.DD", "mm/dd/yyyy".
+const zcDateTokens = /y{2,4}|m{1,2}|d{1,2}/gi;
+const zcDateFormat = (el) => {
+  for (const hint of [el.getAttribute("placeholder"), el.getAttribute("aria-placeholder"), el.getAttribute("title")]) {
+    const tokens = String(hint || "").match(zcDateTokens) || [];
+    const kinds = new Set(tokens.map((token) => token[0].toLowerCase()));
+    if (tokens.length === 3 && kinds.size === 3) return String(hint);
+  }
+  return null;
+};
+const zcInFormat = (format, [year, month, day]) => format.replace(zcDateTokens, (token) => {
+  const kind = token[0].toLowerCase();
+  if (kind === "y") return token.length === 2 ? zcPad(year % 100, 2) : zcPad(year, 4);
+  const number = kind === "m" ? month : day;
+  return token.length === 2 ? zcPad(number, 2) : String(number);
+});
+// ---- a date, picked on the page's own calendar ----
+// The months' names the platform knows for the page's language and English,
+// longest first — no table of names of our own.
+const zcMonthNames = () => {
+  const names = [];
+  for (const lang of [document.documentElement.lang, navigator.language, "en"].filter(Boolean)) {
+    for (const month of ["long", "short"]) {
+      try {
+        const said = new Intl.DateTimeFormat(lang, { month, timeZone: "UTC" });
+        for (let at = 0; at < 12; at += 1) names.push([zcFold(said.format(new Date(Date.UTC(2000, at, 1)))), at + 1]);
+      } catch (_) {}
+    }
+  }
+  return names.filter(([name]) => name && !/^\d+$/.test(name)).sort((a, b) => b[0].length - a[0].length);
+};
+// The month a calendar's heading shows: a four-digit year, and beside it the
+// month's number or its name.
+const zcMonthIn = (text) => {
+  const words = zcFold(text);
+  const year = (words.match(/\d{4}/) || [])[0];
+  if (!year) return null;
+  const rest = " " + words.replace(year, " ") + " ";
+  const number = rest.match(/\D(\d{1,2})\D/);
+  if (number && Number(number[1]) >= 1 && Number(number[1]) <= 12) return [Number(year), Number(number[1])];
+  const named = zcMonthNames().find(([name]) => rest.includes(name));
+  return named ? [Number(year), named[1]] : null;
+};
+// The drawn cells whose own words are a day's number, innermost first.
+const zcDayCells = (doc) => [...doc.querySelectorAll(request.days.join(","))]
+  .filter((cell) => /^\d{1,2}$/.test(zcFold(cell.innerText || cell.textContent)) && zcDrawn(cell)
+    && !cell.querySelector(request.days.join(",")));
+// The calendars a page shows: the closest box around a month of day cells,
+// each with the month its heading shows — the box's own name, else the
+// first words above its days that read as a year and a month.
+const zcCalendars = (doc) => {
+  const cells = zcDayCells(doc);
+  const grids = [];
+  for (const cell of cells) {
+    if (grids.some((grid) => grid.box.contains(cell))) continue;
+    let box = cell.parentElement;
+    while (box && box !== doc.body && cells.filter((other) => box.contains(other)).length < request.monthDays) {
+      box = box.parentElement;
+    }
+    if (!box || box === doc.body) continue;
+    grids.push({ box, cells: cells.filter((other) => box.contains(other)) });
+  }
+  for (const grid of grids) {
+    grid.month = zcMonthIn(grid.box.getAttribute("aria-label") || "");
+    grid.root = grid.box;
+    let near = grid.box;
+    for (let level = 0; !grid.month && near && level < request.captionDepth; level += 1) {
+      const walker = doc.createTreeWalker(near, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node && !grid.month; node = walker.nextNode()) {
+        if (grid.cells.some((cell) => cell.contains(node))) continue;
+        const holder = node.parentElement;
+        const around = holder && String(holder.textContent || "").length <= request.wordCap ? holder.textContent : "";
+        const said = zcMonthIn(node.nodeValue) || zcMonthIn(around);
+        if (said) {
+          grid.month = said;
+          grid.heading = holder;
+          grid.root = near;
+        }
+      }
+      near = near.parentElement;
+    }
+    // A calendar with no heading to read keeps its controls beside its days.
+    if (!grid.month && grid.box.parentElement) grid.root = grid.box.parentElement;
+  }
+  return grids;
+};
+// The day of a calendar showing that month: its run of days runs from its
+// first "1" to the day before the next — the days of the months around it
+// it also draws are outside the run — and an off day is no choice.
+const zcDayIn = (grid, day) => {
+  const numbers = grid.cells.map((cell) => Number(zcFold(cell.innerText || cell.textContent)));
+  const first = numbers.indexOf(1);
+  if (first < 0) return null;
+  let end = numbers.indexOf(1, first + 1);
+  if (end < 0) end = numbers.length;
+  const at = numbers.slice(first, end).indexOf(day);
+  if (at < 0) return null;
+  const cell = grid.cells[first + at];
+  return zcOff(cell) || cell.disabled ? null : cell;
+};
+// The controls that page a calendar: the drawn buttons around its heading
+// that are no day, say no words (an arrow, an icon) — and which way each
+// pages is learnt by pressing it and reading the heading again.
+const zcPagers = (grid) => [...grid.root.querySelectorAll(request.actions.join(","))]
+  .filter((button) => zcDrawn(button) && !zcOff(button) && !grid.cells.includes(button)
+    && !grid.cells.some((cell) => button.contains(cell) || cell.contains(button))
+    && !/[\p{L}\p{N}]/u.test(String(button.innerText || button.textContent || "")));
+const zcMonthNumber = ([year, month]) => year * 12 + month;
+// Page a calendar to the asked month and press its day; "" when pressed,
+// else what the page shows of the calendar for the agent to finish by hand.
 // A field the page keeps from being typed in that takes a date: the day of
 // the picker it opens whose own words (its name, title, data) carry the
 // asked date's numbers in a date's order.
@@ -456,8 +578,84 @@ const zcDays = (el, want) => {
   }
   return found.filter((day) => !found.some((other) => other !== day && day.contains(other)));
 };
+// What a calendar shows the agent when the fill could not pick its day: the
+// heading's words and month, the controls that may page it, the box of its
+// days — enough to finish it in a few presses.
+const zcWidget = (grids) => {
+  const grid = grids.find((each) => each.month) || grids[0];
+  if (!grid) return null;
+  return { heading: zcWords(grid.heading ? grid.heading.textContent : "", request.wordCap),
+    month: grid.month ? grid.month[0] + "-" + zcPad(grid.month[1], 2) : "",
+    pagers: zcPagers(grid).map(zcHandleOf), days: zcHandleOf(grid.box) };
+};
+// Pick a date on the page's own calendar: a day that says its whole date
+// (its name, title, data) first; else the calendar showing a month, paged
+// with its own controls — each learnt by pressing it and reading the
+// heading again — to the asked month, and the day of that month pressed.
+// Null when a day was pressed, else what the calendar shows.
+const zcPickDate = (record, date) => {
+  const el = record.el;
+  const doc = el.ownerDocument;
+  let grids = zcCalendars(doc);
+  if (!grids.length && !zcDays(el, date).length) {
+    zcPress(el);
+    grids = zcCalendars(doc);
+  }
+  const whole = zcDays(el, date);
+  if (whole.length === 1) {
+    zcPress(whole[0]);
+    return null;
+  }
+  const target = zcMonthNumber(date);
+  // A calendar draws itself anew on each page, so a pager is known by its
+  // handle, not by the element pressed.
+  const tried = new Set();
+  let toward = null;
+  for (let press = 0; press <= request.monthPages; press += 1) {
+    const shown = grids.find((grid) => grid.month && zcMonthNumber(grid.month) === target);
+    if (shown) {
+      const cell = zcDayIn(shown, date[2]);
+      if (!cell) return zcWidget(grids);
+      zcPress(cell);
+      return null;
+    }
+    const known = grids.find((grid) => grid.month);
+    if (!known) return zcWidget(grids);
+    const now = zcMonthNumber(known.month);
+    const pagers = zcPagers(known);
+    const pager = (toward && pagers.find((each) => zcHandleOf(each) === toward))
+      || pagers.find((each) => !tried.has(zcHandleOf(each)));
+    if (!pager) return zcWidget(grids);
+    const handle = zcHandleOf(pager);
+    tried.add(handle);
+    zcPress(pager);
+    grids = zcCalendars(doc);
+    if (!grids.length) {
+      // That control closed the calendar: open it again, that one tried.
+      zcPress(el);
+      grids = zcCalendars(doc);
+      continue;
+    }
+    const after = grids.find((grid) => grid.month);
+    if (!after) return zcWidget(grids);
+    const step = zcMonthNumber(after.month) - now;
+    toward = step !== 0 && Math.sign(step) === Math.sign(target - now) ? handle : null;
+  }
+  return zcWidget(grids);
+};
+// Whether what a field shows is the asked date: its numbers in a date's
+// order, or the year, the day and the month's name.
+const zcShowsDate = (shown, date) => {
+  if (zcHasDate(String(shown), date)) return true;
+  const groups = zcGroups(shown);
+  const words = zcFold(shown);
+  return groups.includes(date[0]) && groups.includes(date[2])
+    && zcMonthNames().some(([name, month]) => month === date[1] && words.includes(name));
+};
 const zcHolds = (record, asked) => {
   if (record.kind === "checkbox") return zcFlag(asked) === record.value;
+  const date = record.kind !== "select" && zcDateOf(asked);
+  if (date && record.value !== "" && zcShowsDate(record.value, date)) return true;
   if (record.kind === "combobox") {
     const open = record.el.getAttribute("aria-expanded") === "true";
     const now = zcFold(record.value);
@@ -511,19 +709,16 @@ const zcWrite = (record, asked) => {
     }
     return "";
   }
+  const date = zcDateOf(asked);
   if (record.readOnly) {
-    const want = zcGroups(asked);
-    if (want.length !== 3) return "read_only";
-    let days = zcDays(el, want);
-    if (!days.length) {
-      zcPress(el);
-      days = zcDays(el, want);
-    }
-    if (days.length !== 1) return "no_option";
-    zcPress(days[0]);
-    return "";
+    if (!date) return "read_only";
+    const shown = zcPickDate(record, date);
+    if (!shown) return "";
+    record.widget = shown;
+    return "no_option";
   }
-  const text = zcAsKind(record.kind, asked);
+  const format = date && zcDateFormat(el);
+  const text = format ? zcInFormat(format, date) : zcAsKind(record.kind, asked);
   if (record.maxLength !== null && text.length > record.maxLength) return "too_long";
   zcWriteText(el, text, true);
   return "";
@@ -570,6 +765,7 @@ const zcFill = (entries, expect) => {
     const refused = zcWrite(record, entry.value);
     if (refused) {
       out.options = (record.offered || []).slice(0, request.optionCap);
+      if (record.widget) out.widget = record.widget;
       return { out, status: refused };
     }
     return { out, entry, record, wrote: true };
@@ -634,6 +830,8 @@ pub(crate) fn form_request() -> serde_json::Value {
         "frameSeparator": BROWSER_FORM_FRAME_SEPARATOR,
         "frameDepth": BROWSER_FORM_FRAME_DEPTH,
         "captionDepth": BROWSER_FORM_CAPTION_DEPTH,
+        "monthDays": BROWSER_FORM_MONTH_DAYS,
+        "monthPages": BROWSER_FORM_MONTH_PAGES,
         "on": BROWSER_FILL_ON,
         "off": BROWSER_FILL_OFF,
         "field": { "regions": BROWSER_FIELD_REGIONS, "headings": BROWSER_FIELD_HEADINGS },

@@ -156,6 +156,15 @@ An eval is synchronous: a field the page loads later is the next call's, and
 the script returns instead of pressing anything that pays, sends or cannot
 be undone — that press is the person's word, asked first.
 
+A date goes in as `2026-11-03` whatever the field shows: `fill` writes it
+in the field's own format (its placeholder's `YYYY.MM.DD`) or, for a field
+the page keeps from typing, pages the page's own calendar to the month and
+presses the day. A field answered `no_option` (or `read_only`) will not
+take the same `fill` again — do not resend it. When the answer carries a
+calendar (`달력 「…」 넘김 … · 날짜 칸 …`), finish that one field by hand:
+`click` the field to open it, `click` a pager until the heading shows the
+month, `click` the day; then `fields` to check it.
+
 Use the handles and words exactly as `fields` printed them; never guess a
 selector. A password field is refused by `fill` (use `type … --value-stdin`),
 a file field and a code sent to the person's phone are the person's turn

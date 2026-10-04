@@ -76,13 +76,8 @@ pub const BROWSER_FORM_DAYS: &[&str] = &["[role=gridcell]", "td", "button", "[da
 
 /// The attributes a day of a date picker says its whole date in, besides its
 /// words — ARIA's name, a title, and the data a picker keys its days by.
-pub const BROWSER_FORM_DAY_WORDS: &[&str] = &[
-    "aria-label",
-    "title",
-    "data-date",
-    "data-value",
-    "datetime",
-];
+pub const BROWSER_FORM_DAY_WORDS: &[&str] =
+    &["aria-label", "title", "data-date", "data-value", "datetime"];
 
 /// The fewest day cells a box holds to be a month's calendar (February's).
 pub const BROWSER_FORM_MONTH_DAYS: usize = 28;
@@ -629,6 +624,19 @@ pub fn fields_json(read: &FormRead) -> serde_json::Value {
     answer
 }
 
+/// A calendar the agent finishes by hand: its heading, its pagers, its days.
+fn widget_words(widget: &FormWidget) -> String {
+    let pagers = if widget.pagers.is_empty() {
+        "—".to_string()
+    } else {
+        widget.pagers.join(" · ")
+    };
+    format!(
+        " — 달력 「{}」 넘김 {pagers} · 날짜 칸 {} (열고, 넘기고, 날짜를 click)",
+        widget.heading, widget.days
+    )
+}
+
 /// What is left of a form after a fill, one field to a line.
 fn left_line(field: &FormField) -> String {
     let why = if field.error.is_empty() {
@@ -669,6 +677,9 @@ pub fn fill_lines(report: &FillReport) -> String {
                 line.push_str(&format!(" ({})", result.now.said()));
             }
             line.push_str(&choices(&result.options, 0));
+            if let Some(widget) = &result.widget {
+                line.push_str(&widget_words(widget));
+            }
         }
         if !result.error.is_empty() {
             line.push_str(&format!(" ⚠ {}", result.error));
