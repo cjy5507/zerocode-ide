@@ -12,17 +12,29 @@
 //! graded on what the hand did in the window after it ([`graded`],
 //! [`label_row`]). The autopilot that carries answers out is the window's
 //! (`computer_use::reflex::autopilot`).
+//!
+//! What a reading is asked ahead of is here as well (t-32797): beside each
+//! question the same question of the branches the next reading may take
+//! ([`branches_of`]), every answer held for that next reading under the
+//! premise it names ([`Ahead`]) — its scene and the facts the options are
+//! written in ([`Facts`]) — and used on it only when that premise is the
+//! reading's own.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use serde_json::{Map, Value, json};
 
 use super::choice;
+use super::door::WIRE_MODEL_KEY;
 use super::questions::{
-    REFLEX_DECIDE_ASKS, REFLEX_DECIDE_OPTIONS, REFLEX_DECIDE_QUESTION,
-    REFLEX_DECIDE_RUBRIC_VERSION, REFLEX_DECIDE_STATE_KEYS, reflex_decide_rubric_fingerprint,
+    REFLEX_DECIDE_ASKS, REFLEX_DECIDE_BRANCHES, REFLEX_DECIDE_OPTIONS, REFLEX_DECIDE_QUESTION,
+    REFLEX_DECIDE_RUBRIC_VERSION, REFLEX_DECIDE_STATE_KEYS, reflex_ahead_instructions,
+    reflex_decide_rubric_fingerprint,
 };
-use super::summary::{AGREED, BASELINE_AGREED, LABEL, NOT_COMPARED, REQUEST_AT};
+use super::summary::{
+    AGREED, BASELINE_AGREED, CACHED, INPUT_TOKENS, LABEL, MODEL, NOT_COMPARED, REQUEST_AT, REQUESTS,
+};
 use crate::computer_use::{
     REFLEX_APPLY_MAX_AGE_MS, REFLEX_MISSED_OUTCOMES, REFLEX_PRESSED_OUTCOME,
 };
@@ -220,19 +232,96 @@ fn reading_key(state: &Value) -> Value {
 /// sightings at all (§2.2: "every detector unknown or absent").
 #[must_use]
 pub fn finds_nothing(state: &Value) -> bool {
-    let [sightings_key, ..] = REFLEX_DECIDE_STATE_KEYS;
-    !state
+    !facts_of(state).target
+}
+
+/// What a reading is, as the options are written (t-32797): whether the
+/// capture or a detector's frame is past the hand's limit, which of the
+/// three readings some detector gives — a target, no target, or unknown —
+/// and whether the hand finished an action done, or lost one, since the
+/// reading before. An answer is about these facts of its reading and its
+/// scene ([`Ahead`]): the options' criteria name them and no other —
+/// "every reading is unknown", "targets gone", "actions ending done",
+/// "the capture over its limit". The counts, the ages under the limit, a
+/// track's number, a detector's name and why it reads unknown move an
+/// answer's confidence and not its choice: recorded answers grouped by
+/// these facts chose alike (reports/t-32797 §1.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Facts {
+    /// The capture is past `max_frame_age_ms`; `None` when nobody dated it.
+    pub capture_over: Option<bool>,
+    /// Some detector's frame is past `max_frame_age_ms`.
+    pub frame_over: bool,
+    /// Some detector reads a target: a known value other than 0.
+    pub target: bool,
+    /// Some detector reads no target: a known 0.
+    pub none: bool,
+    /// Some detector's value is unknown.
+    pub unknown: bool,
+    /// The hand finished an action done since the reading before.
+    pub done: bool,
+    /// The hand lost an action it went for since the reading before.
+    pub missed: bool,
+}
+
+impl Facts {
+    /// The facts as a row names them.
+    #[must_use]
+    pub fn json(self) -> Value {
+        json!({
+            "captureOver": self.capture_over,
+            "frameOver": self.frame_over,
+            "target": self.target,
+            "none": self.none,
+            "unknown": self.unknown,
+            "done": self.done,
+            "missed": self.missed,
+        })
+    }
+}
+
+/// The [`Facts`] of a question's state ([`snapshot_of`]).
+#[must_use]
+pub fn facts_of(state: &Value) -> Facts {
+    let [sightings_key, _, activity_key, freshness_key] = REFLEX_DECIDE_STATE_KEYS;
+    let freshness = state.get(freshness_key);
+    let limit = freshness
+        .and_then(|freshness| freshness.get("max_frame_age_ms"))
+        .and_then(Value::as_u64);
+    let counted = |key: &str| {
+        state
+            .get(activity_key)
+            .and_then(|activity| activity.get(key))
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0)
+    };
+    let mut facts = Facts {
+        capture_over: freshness
+            .and_then(|freshness| freshness.get("over_age"))
+            .and_then(Value::as_bool),
+        done: counted("done"),
+        missed: counted("missed"),
+        ..Facts::default()
+    };
+    for sighting in state
         .get(sightings_key)
         .and_then(Value::as_array)
-        .is_some_and(|sightings| {
-            sightings.iter().any(|sighting| {
-                sighting.get("unknown").is_none_or(Value::is_null)
-                    && sighting
-                        .get("value")
-                        .and_then(Value::as_i64)
-                        .is_some_and(|value| value != 0)
-            })
-        })
+        .into_iter()
+        .flatten()
+    {
+        let known = sighting
+            .get("value")
+            .and_then(Value::as_i64)
+            .filter(|_| sighting.get("unknown").is_none_or(Value::is_null));
+        match known {
+            None => facts.unknown = true,
+            Some(0) => facts.none = true,
+            Some(_) => facts.target = true,
+        }
+        let age = sighting.get("age_ms").and_then(Value::as_u64);
+        facts.frame_over |= matches!((age, limit), (Some(age), Some(limit)) if age > limit);
+    }
+    facts
 }
 
 /// The request's `questions`: the one closed choice, its options asked by
@@ -253,6 +342,321 @@ pub fn offered() -> BTreeSet<String> {
         .iter()
         .map(|(word, _)| (*word).to_string())
         .collect()
+}
+
+// ---- asked ahead (t-32797) ---------------------------------------------------
+
+/// How many branches a reading is asked ahead of, at most: the next readings
+/// its own facts make likely and the one whose pause a hand still acting
+/// would carry out ([`Branch`]). The options' other criteria — the capture
+/// past its limit, every reading unknown, every target gone — are readings
+/// of a hand already still: the helper presses on no old frame and no
+/// unknown, and a pause about a quiet hand that finds nothing is never
+/// carried out ([`Why::Idle`]); asked ahead they named 4 of 746 recorded
+/// next readings (reports/t-32797 §1.3).
+pub const AHEAD_BRANCHES: usize = REFLEX_DECIDE_BRANCHES.len();
+
+/// A branch the next reading may take, each an edit of the reading's
+/// [`Facts`] as [`REFLEX_DECIDE_BRANCHES`] words it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Branch {
+    /// The detectors that read no target read one: a target came, or moved
+    /// into a detector's place.
+    Appears,
+    /// The detectors that read a target read none: the target was pressed,
+    /// or went.
+    Taken,
+    /// The hand finished nothing done and lost what it went for.
+    Missed,
+}
+
+impl Branch {
+    /// Every branch, in the order of [`REFLEX_DECIDE_BRANCHES`].
+    pub const ALL: [Self; AHEAD_BRANCHES] = [Self::Appears, Self::Taken, Self::Missed];
+
+    /// Its word and what it supposes, from the rubric's own table.
+    const fn words(self) -> (&'static str, &'static str) {
+        REFLEX_DECIDE_BRANCHES[self as usize]
+    }
+
+    /// The word a row names it by.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        self.words().0
+    }
+
+    /// The name its question goes under in a request, beside
+    /// [`REFLEX_DECIDE_QUESTION`].
+    #[must_use]
+    pub fn question(self) -> String {
+        format!("{REFLEX_DECIDE_QUESTION}{BRANCH_JOIN}{}", self.word())
+    }
+
+    /// Its question's words, built once.
+    fn instructions(self) -> &'static str {
+        static BUILT: OnceLock<[String; AHEAD_BRANCHES]> = OnceLock::new();
+        BUILT.get_or_init(|| Self::ALL.map(|branch| reflex_ahead_instructions(branch.words().1)))
+            [self as usize]
+            .as_str()
+    }
+
+    /// The facts the next reading has on this branch, or `None` for a
+    /// branch `now` cannot take — no detector reads what it changes.
+    #[must_use]
+    pub const fn edit(self, now: Facts) -> Option<Facts> {
+        match self {
+            Self::Appears if now.none => Some(Facts {
+                none: false,
+                target: true,
+                ..now
+            }),
+            Self::Taken if now.target => Some(Facts {
+                target: false,
+                none: true,
+                ..now
+            }),
+            Self::Missed => Some(Facts {
+                done: false,
+                missed: true,
+                ..now
+            }),
+            Self::Appears | Self::Taken => None,
+        }
+    }
+}
+
+/// What joins a branch's word to the question's name.
+const BRANCH_JOIN: &str = "_if_";
+
+/// The branches a reading with `state` is asked ahead of, each with the
+/// facts it supposes: those it can take, each once, and none that is the
+/// reading as it is — its own question answers that.
+#[must_use]
+pub fn branches_of(state: &Value) -> Vec<(Branch, Facts)> {
+    let now = facts_of(state);
+    let mut branches: Vec<(Branch, Facts)> = Vec::with_capacity(AHEAD_BRANCHES);
+    for branch in Branch::ALL {
+        if let Some(facts) = branch.edit(now)
+            && facts != now
+            && branches.iter().all(|(_, other)| *other != facts)
+        {
+            branches.push((branch, facts));
+        }
+    }
+    branches
+}
+
+/// A request's `questions` for a reading with `state`: [`questions`] as it
+/// is, and the same closed choice of each of its branches ([`branches_of`])
+/// — one request, its state carried once.
+#[must_use]
+pub fn questions_for(state: &Value) -> Value {
+    let mut asked = questions();
+    if let Some(asked) = asked.as_object_mut() {
+        for (branch, _) in branches_of(state) {
+            asked.insert(
+                branch.question(),
+                choice::question(branch.instructions(), &REFLEX_DECIDE_OPTIONS),
+            );
+        }
+    }
+    asked
+}
+
+/// One answer held for the reading after the one it was asked beside.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Held {
+    /// The branch it answered; `None` for the reading's own question, held as
+    /// the answer to a next reading with the same facts.
+    pub branch: Option<Branch>,
+    /// The facts it is about.
+    pub facts: Facts,
+    /// The decision whose request carried it.
+    pub asked_with: u64,
+    pub chosen: String,
+    pub probabilities: BTreeMap<String, f64>,
+    pub confidence: f64,
+    /// The version that answered the request.
+    pub model: Option<String>,
+}
+
+impl Held {
+    /// The word a row names its branch by.
+    #[must_use]
+    pub fn branch_word(&self) -> &'static str {
+        self.branch.map_or(STEADY, Branch::word)
+    }
+}
+
+/// The word for an answer held as the reading's own question's.
+pub const STEADY: &str = "steady";
+
+/// Why no held answer decided a reading — one word, counted on a status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unheld {
+    /// Nothing was held: no answer came for the reading before, or none of
+    /// its questions read.
+    Nothing,
+    /// The reading is of another scene than the one they were asked on: its
+    /// run, stream, geometry, hold or plan — or a scene nobody can name.
+    Scene,
+    /// The reading they were asked beside is older than
+    /// [`REFLEX_APPLY_MAX_AGE_MS`], or cannot be dated.
+    Stale,
+    /// The reading's facts are none of the held answers'.
+    Facts,
+}
+
+impl Unheld {
+    pub const ALL: [Self; 4] = [Self::Nothing, Self::Scene, Self::Stale, Self::Facts];
+
+    /// The word a status names it by.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Nothing => "nothing",
+            Self::Scene => "scene",
+            Self::Stale => "stale",
+            Self::Facts => "facts",
+        }
+    }
+}
+
+/// What a reading took of the answers held for it: the one that names its
+/// premise, or why none did — and how many held answers went unused either
+/// way, every one of them now let go.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Taken {
+    pub held: Result<Held, Unheld>,
+    pub dropped: usize,
+}
+
+/// The answers held for a run's next reading (t-32797): those of the newest
+/// request, at most its own and one per branch, beside the reading it was
+/// asked on. A newer request's answers replace them; the next reading takes
+/// one or none and lets go of the rest — they were about that reading and
+/// no later one.
+#[derive(Debug, Default)]
+pub struct Ahead {
+    base: Option<Snapshot>,
+    held: Vec<Held>,
+}
+
+impl Ahead {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many answers are held.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.held.len()
+    }
+
+    /// Whether none is.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+
+    /// Hold what the request asked beside `pending` came back with, `body`:
+    /// its own question's answer and each branch's — each read whole or not
+    /// at all — in place of whatever was held. Answers how many held answers
+    /// it let go unused.
+    pub fn hold(&mut self, pending: &Pending, body: &str) -> usize {
+        let dropped = self.clear();
+        let Some(parsed) = serde_json::from_str::<Value>(body).ok() else {
+            return dropped;
+        };
+        let Some(answers) = parsed.get("answers") else {
+            return dropped;
+        };
+        let model = parsed
+            .get(WIRE_MODEL_KEY)
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let state = &pending.snapshot.state;
+        let offered = offered();
+        let asked = std::iter::once((None, REFLEX_DECIDE_QUESTION.to_string(), facts_of(state)))
+            .chain(
+                branches_of(state)
+                    .into_iter()
+                    .map(|(branch, facts)| (Some(branch), branch.question(), facts)),
+            );
+        for (branch, question, facts) in asked {
+            if let Ok(pick) = choice::read(answers, &question, &offered) {
+                self.held.push(Held {
+                    branch,
+                    facts,
+                    asked_with: pending.id,
+                    chosen: pick.chosen,
+                    probabilities: pick.probabilities,
+                    confidence: pick.confidence,
+                    model: model.clone(),
+                });
+            }
+        }
+        if !self.held.is_empty() {
+            self.base = Some(pending.snapshot.clone());
+        }
+        dropped
+    }
+
+    /// The held answer `reading` may be decided by at `now_ms` (its reader's
+    /// steady clock): only one asked on the same scene, beside a reading no
+    /// older than [`REFLEX_APPLY_MAX_AGE_MS`], whose facts are the reading's
+    /// own. Everything held is let go, used or not.
+    pub fn take(&mut self, reading: &Snapshot, now_ms: u64) -> Taken {
+        let held = std::mem::take(&mut self.held);
+        let base = self.base.take();
+        let count = held.len();
+        let unheld = |why| Taken {
+            held: Err(why),
+            dropped: count,
+        };
+        let Some(base) = base.filter(|_| count > 0) else {
+            return unheld(Unheld::Nothing);
+        };
+        if base.scene.is_none() || base.scene != reading.scene {
+            return unheld(Unheld::Scene);
+        }
+        if age_at(&base, now_ms).is_none_or(|age| age > REFLEX_APPLY_MAX_AGE_MS) {
+            return unheld(Unheld::Stale);
+        }
+        let facts = facts_of(&reading.state);
+        match held.into_iter().find(|held| held.facts == facts) {
+            Some(held) => Taken {
+                held: Ok(held),
+                dropped: count - 1,
+            },
+            None => unheld(Unheld::Facts),
+        }
+    }
+
+    /// Let go of everything held; how many there were.
+    pub fn clear(&mut self) -> usize {
+        self.base = None;
+        std::mem::take(&mut self.held).len()
+    }
+}
+
+/// The premise a held answer was used on, as a row names it: one fingerprint
+/// of the scene and the facts.
+#[must_use]
+pub fn premise_of(snapshot: &Snapshot) -> String {
+    let scene = snapshot.scene.as_ref();
+    super::fingerprint_of(
+        &json!({
+            "run": scene.map(|scene| scene.run.clone()),
+            "stream": scene.map(|scene| scene.stream),
+            "geometry": scene.map(|scene| scene.geometry),
+            "owner": scene.map(|scene| scene.owner),
+            "plan": scene.map(|scene| scene.plan),
+            "facts": facts_of(&snapshot.state).json(),
+        })
+        .to_string(),
+    )
 }
 
 /// One decision the run asked, or is waiting to ask.
@@ -285,6 +689,10 @@ pub struct Decider {
     in_flight: Option<u64>,
     waiting: Option<Pending>,
     next: u64,
+    /// The decision of the newest reading that changed: what the answers a
+    /// question brings back are held for, while it is still the newest
+    /// ([`Ahead`]).
+    newest: u64,
 }
 
 impl Decider {
@@ -311,6 +719,7 @@ impl Decider {
         }
         self.last = Some(key);
         let pending = self.number(snapshot);
+        self.newest = pending.id;
         if self.in_flight.is_some() {
             let coalesced = self.waiting.replace(pending);
             return Offer::Waiting { coalesced };
@@ -337,6 +746,19 @@ impl Decider {
         self.in_flight.is_some()
     }
 
+    /// The decision of the newest reading that changed, 0 before any.
+    #[must_use]
+    pub const fn newest(&self) -> u64 {
+        self.newest
+    }
+
+    /// A decision an answer held from the reading before decided (t-32797):
+    /// numbered among the run's decisions, never asked — the reading's own
+    /// question is asked as ever.
+    pub fn decided(&mut self, snapshot: Snapshot) -> Pending {
+        self.number(snapshot)
+    }
+
     /// The run ended: the reading still waiting is never asked — it leaves as
     /// merged.
     pub fn close(&mut self) -> Option<Pending> {
@@ -357,6 +779,9 @@ pub const ROAD_COALESCED: &str = "coalesced";
 /// nothing yet.
 pub const ROAD_MEMO: &str = "memo";
 pub const ROAD_SURROGATE: &str = "surrogate";
+/// Answered on the wire a reading before, asked ahead of the reading it
+/// decided ([`Ahead`], t-32797): no request of its own, and no wait.
+pub const ROAD_AHEAD: &str = "ahead";
 
 /// The outcome of a question sent and answered while the seat still asks.
 pub const ANSWERED: &str = "answered";
@@ -405,6 +830,11 @@ pub fn asked_row(
         "requestBytes": wired.request_bytes,
         "rttMs": wired.rtt_ms,
         "applied": false,
+        // What the request asked ahead of beside it ([`questions_for`]).
+        "branches": branches_of(&pending.snapshot.state)
+            .into_iter()
+            .map(|(branch, _)| branch.word())
+            .collect::<Vec<_>>(),
     });
     let body = match &wired.answer {
         Err(token) => {
@@ -437,6 +867,41 @@ pub fn asked_row(
         Err(refusal) => row["outcome"] = json!(refusal.token()),
     }
     row
+}
+
+/// The row a decision an answer held from the reading before decided leaves
+/// (t-32797): the state of the reading it decided, and the held answer —
+/// an answer of the seat's words that cost this decision no request
+/// ([`CACHED`], [`REQUESTS`]: the request that carried it counted its bytes
+/// and tokens), naming its branch, the decision it was asked with and the
+/// premise it was used on. It leaves `applied` false, as an asked row does.
+#[must_use]
+pub fn held_row(run: &str, pending: &Pending, held: &Held) -> Value {
+    json!({
+        "run": run,
+        "decision": pending.id,
+        "road": ROAD_AHEAD,
+        "rubricVersion": REFLEX_DECIDE_RUBRIC_VERSION,
+        "rubric": reflex_decide_rubric_fingerprint(),
+        "state": pending.snapshot.state,
+        "provenance": pending.snapshot.provenance(),
+        "attempts": 0,
+        "applied": false,
+        "outcome": ANSWERED,
+        "chosen": held.chosen,
+        "probabilities": held.probabilities,
+        "confidence": held.confidence,
+        "labelSource": "teacher",
+        "staleForCurrent": false,
+        "late": false,
+        (CACHED.canonical): true,
+        (REQUESTS.canonical): 0,
+        (INPUT_TOKENS.canonical): 0,
+        (MODEL.canonical): held.model,
+        "branch": held.branch_word(),
+        "askedWith": held.asked_with,
+        "premise": premise_of(&pending.snapshot),
+    })
 }
 
 /// The row a merged decision leaves: its number and where its reading came
@@ -542,6 +1007,16 @@ impl Why {
             Self::Idle => "idle",
         }
     }
+
+    /// Whether this refusal says the grounds the answer was asked on had gone
+    /// by the time it came back — its reading too old, another run, epoch or
+    /// plan — rather than that the seat does not apply or the hand stood
+    /// still: an answer refused so is about a premise that no longer stood,
+    /// and is held for no next reading (t-32797, [`holdable`]).
+    #[must_use]
+    pub const fn premise_gone(self) -> bool {
+        matches!(self, Self::Stale | Self::EpochMismatch | Self::PlanMismatch)
+    }
 }
 
 /// Whether an answer that came back inside its wall may be carried out
@@ -600,6 +1075,18 @@ pub fn carried(row: &mut Value, verdict: Result<(), Why>) {
     if let Err(why) = verdict {
         row["why"] = json!(why.word());
     }
+}
+
+/// Whether a decision row's answer may be held for the reading after it
+/// (t-32797): it was answered, and its carrier did not refuse it because the
+/// grounds it was asked on had gone ([`Why::premise_gone`]). A row nobody
+/// judged — a run a person's plan started — names no refusal.
+#[must_use]
+pub fn holdable(row: &Value) -> bool {
+    row["outcome"] == json!(ANSWERED)
+        && !Why::ALL
+            .into_iter()
+            .any(|why| why.premise_gone() && row["why"] == json!(why.word()))
 }
 
 // ---- what an answer is graded by ---------------------------------------------
