@@ -36,7 +36,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startDesk } from "./desk.mjs";
-import { SEES, pointOf, settledLayout, toDisplay } from "./phone-eyes.mjs";
+import { SEES, pageSays, pointOf, settledLayout, toDisplay } from "./phone-eyes.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SPEC = JSON.parse(await readFile(join(HERE, "spec.json"), "utf8"));
@@ -146,7 +146,10 @@ class Driver {
     }
     let offset = [];
     if (nudge) {
-      const [from, to] = await Promise.all([pointOf(this.desk, SEES.words, nudge, { scroll: false }), pointOf(this.desk, find, arg, { scroll: false })]);
+      // From where a press by those words lands — its OCR line's centre —
+      // to the control beside them, as a model reads both off the picture.
+      const [from, to] = await Promise.all([pointOf(this.desk, SEES.words, nudge, { scroll: false, words: true }),
+        pointOf(this.desk, find, arg, { scroll: false })]);
       offset = ["--dx", String(Math.round(to.x - from.x)), "--dy", String(Math.round(to.y - from.y))];
     }
     const said = nudge || words;
@@ -275,6 +278,7 @@ async function main() {
     failed = String(error.message || error);
   }
   await desk.settled();
+  const said = failed ? await pageSays(desk).catch(() => null) : null;
   await new Promise((done) => setTimeout(done, 500));
   const tally = desk.tally;
   await desk.close();
@@ -282,7 +286,7 @@ async function main() {
   const oracle = JSON.parse(spawnSync("python3", [join(HERE, "oracle.py"), "--out", out, "--json"], { encoding: "utf8" }).stdout);
   const handSeconds = (tally.handMs + tally.settleMs + tally.waitMs + tally.ocrMs) / 1000;
   const result = {
-    policy: options.policy, failed, oracle: { pass: oracle.pass, ok: oracle.ok_fields, of: oracle.total_fields, reasons: oracle.reasons },
+    policy: options.policy, failed, said, oracle: { pass: oracle.pass, ok: oracle.ok_fields, of: oracle.total_fields, reasons: oracle.reasons },
     count: driver.count,
     hand: { verbs: tally.verbs, waitMs: tally.waitMs, activates: tally.verbs.activate || 0, handMs: tally.handMs, settleMs: tally.settleMs,
       ocrReads: tally.ocrReads, ocrMs: tally.ocrMs, personMs: tally.personMs, pictures: tally.pngBytes.length,

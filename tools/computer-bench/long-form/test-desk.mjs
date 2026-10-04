@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startDesk } from "./desk.mjs";
-import { SEES, pointOf } from "./phone-eyes.mjs";
+import { SEES, pageSays, pointOf, settledLayout } from "./phone-eyes.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SPEC = JSON.parse(await readFile(join(HERE, "spec.json"), "utf8"));
@@ -35,16 +35,6 @@ function check(name, held, detail = "") {
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const option = (field, code) => SPEC.options[field.options].find(([value]) => value === code)[1];
 const monthName = (month) => new Date(Date.UTC(2000, Number(month) - 1, 1)).toLocaleString("en", { month: "long", timeZone: "UTC" });
-
-/* What the page says is wrong with its answer, and the alert it shows —
- * read before the desk closes, for a run the oracle failed. */
-async function pageSays(desk) {
-  return desk.content().evaluate(() => ({
-    errors: LongForm.errors(() => false).map((error) => error.message),
-    alert: document.getElementById("alert")?.textContent || null,
-    unset: LongForm.fields().filter(LongForm.shown).filter((field) => field.required && LongForm.blank(field)).map((field) => field.id),
-  }));
-}
 
 async function standing(scene, fn, deskOptions = {}) {
   const out = await mkdtemp(join(tmpdir(), "long-form-"));
@@ -130,9 +120,25 @@ async function fillChrome(desk) {
 
 /* ---- the phone, by pixels alone ------------------------------------------ */
 
+/* Every tap of the pixel road, and what stood where it landed — said when
+ * the road's run fails. */
+const taps = [];
 async function tap(desk, find, arg, options) {
-  const { x, y } = await pointOf(desk, find, arg, options);
+  const { x, y, hit } = await pointOf(desk, find, arg, options);
+  // What the form held when this tap was aimed — after the last one landed.
+  const held = await desk.content().evaluate(() => JSON.stringify(LongForm.state)).catch(() => "{}");
+  taps.push({ arg, hit, held: JSON.parse(held) });
   return click(desk, [x, y]);
+}
+
+/* The pixel road's taps, each with what the one before it changed in the
+ * form's state — said when the road's run fails. */
+function tapTrace() {
+  return taps.map((each, at) => {
+    const before = at ? taps[at - 1].held : {};
+    const changed = Object.keys(each.held).filter((key) => JSON.stringify(each.held[key]) !== JSON.stringify(before[key]));
+    return `${JSON.stringify(each.arg).slice(0, 40)} → ${each.hit}${at ? ` | before it: ${changed.map((key) => `${key}=${JSON.stringify(each.held[key])}`).join(", ")}` : ""}`;
+  });
 }
 
 async function fillPhone(desk) {
@@ -195,11 +201,16 @@ const chrome = await standing("chrome", async ({ desk }) => {
 });
 check("chrome: the card filled through the desk passes the oracle", chrome.pass === true, JSON.stringify([chrome.reasons, chrome.said]));
 
+let lastHeld = null;
 const phone = await standing("phone", async ({ desk }) => {
   const refused = (await fillPhone(desk)).filter((answer) => answer.code !== 0);
+  await desk.settled();
+  lastHeld = { ...(await desk.content().evaluate(() => ({ second: LongForm.state.second_nationality, dual: LongForm.state.decl_dual }))),
+    landed: desk.tally.landed.slice(-6) };
   check("phone: every scripted tap was answered", refused.length === 0, refused.map((answer) => answer.err).slice(0, 3).join(" | "));
 });
-check("phone: the card tapped in by pixels passes the oracle", phone.pass === true, JSON.stringify([phone.reasons, phone.said]));
+check("phone: the card tapped in by pixels passes the oracle", phone.pass === true,
+  JSON.stringify([phone.reasons, phone.said, tapTrace().slice(-8), lastHeld]));
 
 await standing("phone", async ({ desk }) => {
   const names = ["iPhone 미러링", "com.apple.ScreenContinuity", PHONE];
@@ -233,11 +244,15 @@ if (process.env.WORDS_CHOOSE) {
     const sheet = await ask(["wait-for", "--app", PHONE, "--ocr", "--text", "Cancel", "--timeout-ms", "3000", "--json"]);
     check("levers: an OCR wait sees the sheet the press opened", sheet.code === 0, sheet.err);
     await ask(["click", "--app", PHONE, "--ocr", "--text", "Mr", "--json"]);
-    await desk.settled();
+    // The sheet slides away after the press reaches the phone: what the eyes
+    // wait out before they read the screen behind it.
+    await settledLayout(desk);
     check("levers: the words chose the option", (await desk.content().evaluate(() => LongForm.state.title)) === "mr");
     // "name" is held by three labels on the first screen and read exactly by none.
     const twice = await ask(["click", "--app", PHONE, "--ocr", "--text", "name", "--json"]);
-    check("levers: words that recur are refused by name", twice.code === 1 && JSON.parse(twice.err).error.code === "ambiguous_target", twice.err);
+    const shown = twice.code === 1 && JSON.parse(twice.err).error.code === "ambiguous_target" ? ""
+      : JSON.parse((await ask(["read", "--app", PHONE, "--ocr", "--json"])).out || "{}").result?.text;
+    check("levers: words that recur are refused by name", !shown, `${twice.err} | read: ${shown}`);
     const batch = JSON.parse((await ask(["batch", "--commands", JSON.stringify([
       ["click", "--app", PHONE, "--ocr", "--text", "Male", "--json"], ["wait", "--ms", "4000", "--json"]]), "--json"])).out);
     const waited = batch.result.steps[1].result;
