@@ -112,6 +112,10 @@ struct Row {
     artifact: Artifact,
     tokens: Vec<String>,
     stamp: Option<Stamp>,
+    /// A report catalogued by a build that put the task's name before the
+    /// report's own heading (t-36910): the next scan reads its heading once and
+    /// writes the row back, which is what clears this.
+    retitle: bool,
 }
 
 /// A folder the scan walks, with the origin every file in it inherits. The
@@ -363,6 +367,7 @@ impl PreviewPayload {
     fn cost(&self) -> u64 {
         self.text.as_ref().map_or(0, |held| held.len() as u64)
             + self.data_url.as_ref().map_or(0, |held| held.len() as u64)
+            + self.digest.as_ref().map_or(0, Digest::weight)
     }
 }
 
@@ -519,6 +524,7 @@ impl Store {
                                 artifact: *artifact,
                                 tokens: Vec::new(),
                                 stamp: None,
+                                retitle: false,
                             },
                         );
                     }
@@ -550,6 +556,17 @@ impl Store {
                     zerocode_core::artifact_publish::read_meta(&root, &row.artifact.id)
                         .ok()
                         .map(|meta| meta.source_path);
+            }
+        }
+        // A report catalogued before rows said their subtype (t-36910) is given
+        // one here, by its file's name — nothing on disk is asked — and marked
+        // for the one reading that puts its own heading before its task's name
+        // (`scan`). A row this build wrote always has a subtype, so the mark is
+        // put on old rows only, and only until that scan writes them back.
+        for row in rows.values_mut() {
+            if row.artifact.kind == ArtifactKind::Report && row.artifact.subtype.is_none() {
+                row.artifact.subtype = Some(ReportSubtype::of_file_name(&row.artifact.path));
+                row.retitle = true;
             }
         }
         // Tokens are rebuilt from disk lazily by the first scan; the rows the
@@ -594,6 +611,7 @@ impl Store {
             ),
             stamp: stamp_of(&artifact.path),
             artifact,
+            retitle: false,
         };
         self.insert_row(&mut index, row, &limits)?;
         Ok(meta)
@@ -683,9 +701,12 @@ impl Store {
             stamp,
             now_ms,
             created_ms,
-            stated: _,
+            stated,
         } = seed;
         let kind = kind_of(path, source);
+        // Only a report has a kind of report: what its worker stated, else what
+        // its file's name says.
+        let subtype = (kind == ArtifactKind::Report).then(|| ReportSubtype::of(stated, path));
         let front = Self::read_front(path, limits);
         let preview = preview_of(kind, &front, limits);
         let title =
@@ -710,7 +731,7 @@ impl Store {
             artifact: Artifact {
                 id,
                 kind,
-                subtype: None,
+                subtype,
                 title,
                 path: path.to_path_buf(),
                 bytes: stamp.len,
@@ -734,6 +755,7 @@ impl Store {
             },
             tokens,
             stamp: Some(stamp),
+            retitle: false,
         }
     }
 
@@ -826,11 +848,15 @@ impl Store {
             .unwrap_or_else(|| "report.md".to_string());
         let seat = self.root.join(source.bucket()).join(&id);
         let target = seat.join(&name);
+        // A kind stated now that the row does not say yet is a change of the
+        // row, whatever the file's stamp says.
+        let restated = stated.and_then(ReportSubtype::parse);
         let mut index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(held) = index.rows.get(&id)
             && held.artifact.path == target
             && held.artifact.bytes == stamp.len
             && held.artifact.modified_ms == epoch_ms(stamp.modified).max(0)
+            && restated.is_none_or(|kind| held.artifact.subtype == Some(kind))
             && target.is_file()
         {
             return Ok(held.artifact.clone());
@@ -843,7 +869,11 @@ impl Store {
         std::fs::rename(&tmp, &target).map_err(|error| error.to_string())?;
         // The copy keeps the source's stamp in the row so "unchanged" can be
         // answered against the source next time, not against the copy.
-        let created = index.rows.get(&id).map(|held| held.artifact.created_ms);
+        let held = index
+            .rows
+            .get(&id)
+            .map(|held| (held.artifact.created_ms, held.artifact.subtype));
+        let created = held.map(|(created, _)| created);
         let mut row = Self::build_row(
             RowSeed {
                 path: &target,
@@ -858,6 +888,13 @@ impl Store {
             &limits,
         );
         row.stamp = stamp_of(&target);
+        // Handed in again with nothing stated, a report keeps the kind it was
+        // stated as: the name it would be read off has not changed either.
+        if restated.is_none()
+            && let Some((_, Some(kind))) = held
+        {
+            row.artifact.subtype = Some(kind);
+        }
         let artifact = row.artifact.clone();
         self.insert_row(&mut index, row, &limits)?;
         Ok(artifact)
@@ -1454,6 +1491,7 @@ impl Store {
             },
             tokens,
             stamp: None,
+            retitle: false,
         };
         let artifact = row.artifact.clone();
         self.insert_row(&mut index, row, &limits)?;
@@ -1641,15 +1679,21 @@ impl Store {
         };
         let mut index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
         let mut seen_paths: Vec<PathBuf> = Vec::new();
-        // Upgrade filename-only catalogs on their first bounded scan. Explicit
-        // published titles stay authoritative; no extra watcher or UI reads.
+        // Upgrade older catalogs within this pass's bounds: a row whose title is
+        // still its file's name, and a report catalogued when the task's name
+        // came before the report's own heading (`retitle`, t-36910). Each is
+        // read once: a retitled row is written back whether or not its title
+        // moved, and the row the catalog then holds is no longer an old one.
+        // Explicit published titles stay authoritative; no extra watcher or UI
+        // reads.
         let legacy: Vec<String> = index
             .rows
             .iter()
             .filter(|(_, row)| {
-                row.stamp.is_none()
-                    && row.artifact.url.is_none()
-                    && row.artifact.title == title_of(&row.artifact.path, &limits)
+                row.retitle
+                    || (row.stamp.is_none()
+                        && row.artifact.url.is_none()
+                        && row.artifact.title == title_of(&row.artifact.path, &limits))
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -1670,8 +1714,13 @@ impl Store {
                 row.artifact.origin.work_summary.as_deref(),
                 &limits,
             );
-            if title != row.artifact.title {
-                let mut row = row.clone();
+            let moved = title != row.artifact.title;
+            if !moved && !row.retitle {
+                continue;
+            }
+            let mut row = row.clone();
+            row.retitle = false;
+            if moved {
                 row.artifact.title = title;
                 row.tokens = Self::tokens_of_words(
                     &[
@@ -1680,9 +1729,9 @@ impl Store {
                     ],
                     &limits,
                 );
-                if self.insert_row(&mut index, row, &limits).is_ok() {
-                    report.updated += 1;
-                }
+            }
+            if self.insert_row(&mut index, row, &limits).is_ok() && moved {
+                report.updated += 1;
             }
         }
         for source in &sources {
@@ -2046,71 +2095,81 @@ impl Store {
                 && (kinds.is_empty() || kinds.contains(&artifact.kind))
         };
         let present = |gone: bool| filter.present.is_none_or(|wanted| wanted != gone);
-        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
-        let held: Vec<(&Row, bool)> = index
-            .rows
-            .values()
-            .filter(|row| {
-                filter
-                    .remote
-                    .is_none_or(|remote| (row.artifact.kind == ArtifactKind::Web) == remote)
-            })
-            .filter(|row| {
-                filter
+        let same = |asked: &Option<String>, held: Option<&str>| {
+            asked.as_deref().is_none_or(|wanted| held == Some(wanted))
+        };
+        // Everything the filter asks but the task, the kinds and the files'
+        // presence: the three things the counts below are taken across.
+        let admits = |row: &Row| {
+            let artifact = &row.artifact;
+            let origin = &artifact.origin;
+            filter
+                .remote
+                .is_none_or(|remote| (artifact.kind == ArtifactKind::Web) == remote)
+                && filter
                     .published
-                    .is_none_or(|published| is_publication(&row.artifact) == published)
-            })
-            .filter(|row| {
-                let origin = &row.artifact.origin;
-                let same = |asked: &Option<String>, held: Option<&str>| {
-                    asked.as_deref().is_none_or(|wanted| held == Some(wanted))
-                };
-                same(&filter.run, origin.run.as_deref())
-                    && same(&filter.task, origin.task.as_deref())
-                    && same(&filter.worker, origin.worker.as_deref())
-                    && same(&filter.automation, origin.automation.as_deref())
-                    && same(&filter.agent, origin.agent.as_deref())
-                    && filter.worktree.as_deref().is_none_or(|wanted| {
-                        origin
-                            .worktree
-                            .as_deref()
-                            .is_some_and(|held| held == Path::new(wanted))
-                    })
-            })
-            .filter(|row| {
-                let origin = &row.artifact.origin;
-                filter.roots.is_empty()
+                    .is_none_or(|published| is_publication(artifact) == published)
+                && same(&filter.run, origin.run.as_deref())
+                && same(&filter.worker, origin.worker.as_deref())
+                && same(&filter.automation, origin.automation.as_deref())
+                && same(&filter.agent, origin.agent.as_deref())
+                && filter.worktree.as_deref().is_none_or(|wanted| {
+                    origin
+                        .worktree
+                        .as_deref()
+                        .is_some_and(|held| held == Path::new(wanted))
+                })
+                && (filter.roots.is_empty()
                     || [origin.project.as_deref(), origin.worktree.as_deref()]
                         .into_iter()
                         .flatten()
-                        .any(|path| filter.roots.iter().any(|root| path.starts_with(root)))
-            })
-            .filter(|row| {
-                filter
+                        .any(|path| filter.roots.iter().any(|root| path.starts_with(root))))
+                && filter
                     .since_ms
-                    .is_none_or(|since| row.artifact.modified_ms >= since)
-            })
-            .filter(|row| {
-                filter.query.trim().is_empty() || query_matches(&filter.query, &row.tokens)
-            })
-            .map(|row| (row, is_gone(&row.artifact)))
-            .collect();
+                    .is_none_or(|since| artifact.modified_ms >= since)
+                && (filter.query.trim().is_empty() || query_matches(&filter.query, &row.tokens))
+        };
+        let of_task = |origin: &Origin| {
+            same(&filter.task, origin.task.as_deref())
+                && filter
+                    .task_linked
+                    .is_none_or(|linked| origin.task.is_some() == linked)
+        };
+        let bump = |counts: &mut BTreeMap<String, usize>, artifact: &Artifact| {
+            *counts
+                .entry(artifact.kind.as_str().to_string())
+                .or_insert(0) += 1;
+        };
+        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
         let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
+        let mut missing_by_kind: BTreeMap<String, usize> = BTreeMap::new();
+        let mut unlinked_by_kind: BTreeMap<String, usize> = BTreeMap::new();
         let mut missing_total = 0;
-        for (row, gone) in &held {
-            if present(*gone) {
-                *by_kind
-                    .entry(row.artifact.kind.as_str().to_string())
-                    .or_insert(0) += 1;
+        let mut rows: Vec<(&Row, bool)> = Vec::new();
+        for row in index.rows.values().filter(|row| admits(row)) {
+            let artifact = &row.artifact;
+            let gone = is_gone(artifact);
+            // What 「작업에 연결 안 된 것」 would list: counted across the task
+            // filter, so a tab that filter emptied can say this number.
+            if artifact.origin.task.is_none() && present(gone) {
+                bump(&mut unlinked_by_kind, artifact);
             }
-            if *gone && of_kind(&row.artifact) {
-                missing_total += 1;
+            if !of_task(&artifact.origin) {
+                continue;
+            }
+            if present(gone) {
+                bump(&mut by_kind, artifact);
+            }
+            if gone {
+                bump(&mut missing_by_kind, artifact);
+                if of_kind(artifact) {
+                    missing_total += 1;
+                }
+            }
+            if of_kind(artifact) && present(gone) {
+                rows.push((row, gone));
             }
         }
-        let mut rows: Vec<(&Row, bool)> = held
-            .into_iter()
-            .filter(|(row, gone)| of_kind(&row.artifact) && present(*gone))
-            .collect();
         rows.sort_by(|(a, _), (b, _)| {
             b.artifact
                 .modified_ms
@@ -2134,8 +2193,8 @@ impl Store {
             truncated,
             missing_total,
             by_kind,
-            missing_by_kind: BTreeMap::new(),
-            unlinked_by_kind: BTreeMap::new(),
+            missing_by_kind,
+            unlinked_by_kind,
         };
         // 기록을 세는 읽기는 카탈로그의 자물쇠 밖에서 — 행은 이미 사본이다.
         drop(index);
@@ -2341,7 +2400,7 @@ impl Store {
                     bytes,
                     truncated: bytes > limits.preview_text_bytes_max,
                     writing,
-                    digest: None,
+                    digest: evidence_digest_of(&artifact, &limits),
                 }
             }
         };
@@ -2413,6 +2472,20 @@ impl Store {
             truncated: meta.len() > cap,
         })
     }
+}
+
+/// What an evidence file says (t-36910): its steps counted and listed, its
+/// state, or its values — read from the file itself, past the text preview's
+/// cap and up to the digest's own, one line at a time. `None` for a row that
+/// is not evidence and for a file that holds no JSON record; the drawer then
+/// shows the text it was handed.
+fn evidence_digest_of(artifact: &Artifact, limits: &Limits) -> Option<Digest> {
+    if artifact.kind != ArtifactKind::Evidence {
+        return None;
+    }
+    let format = zerocode_core::evidence_digest::Format::of(&artifact.path)?;
+    let file = std::fs::File::open(&artifact.path).ok()?;
+    zerocode_core::evidence_digest::read(format, std::io::BufReader::new(file), limits)
 }
 
 /// Bytes as text, with a character the cut split in two left out rather than
@@ -2672,8 +2745,11 @@ pub(crate) fn report_path_in(payload: Option<&str>, body: &str) -> Option<PathBu
 /// `reportKind`, as the worker wrote it. `None` when the payload states none —
 /// the file's name is read instead ([`ReportSubtype::of`]).
 pub(crate) fn report_kind_in(payload: Option<&str>) -> Option<String> {
-    let _ = (payload, artifact::REPORT_KIND_KEY);
-    None
+    let value: serde_json::Value = serde_json::from_str(payload?).ok()?;
+    value
+        .get(artifact::REPORT_KIND_KEY)?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// The window's road after the file watcher's lane reported movement, or
@@ -4405,6 +4481,7 @@ mod tests {
                     artifact,
                     tokens: Vec::new(),
                     stamp: None,
+                    retitle: false,
                 };
                 store.insert_row(&mut index, row, &limits).unwrap();
             }

@@ -359,3 +359,22 @@ fn the_wire_shape_tags_the_digest_and_its_rows() {
         serde_json::json!({ "key": "goal", "value": { "is": "text", "value": "walk" } })
     );
 }
+
+/// What the preview cache counts a digest as: more for more rows, never
+/// nothing, and never the file's own size.
+#[test]
+fn a_digest_weighs_what_it_keeps_and_not_what_it_read() {
+    let short = log(&[(1, "open", true)]);
+    let long: Vec<(usize, &str, bool)> = (1..=400).map(|n| (n, "click", n % 50 != 0)).collect();
+    let long = log(&long);
+    let weigh =
+        |text: &str| read(Format::Lines, text.as_bytes(), &small()).map(|held| held.weight());
+    let (one, many) = (weigh(&short).unwrap_or(0), weigh(&long).unwrap_or(0));
+    assert!(one > 0, "a digest of one step weighs something");
+    assert!(many > one, "more rows weigh more: {one} then {many}");
+    assert!(
+        many < long.len() as u64 / 4,
+        "a digest is bounded by the table, not by the log: {many} of {} bytes",
+        long.len()
+    );
+}

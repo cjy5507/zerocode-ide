@@ -44,7 +44,7 @@ const NEW_KEYS = Object.freeze([
 
 /* The synthetic catalog, built in the page so the fake backend and the checks read one set of rows. */
 function standCatalog(page) {
-  return page.evaluate(() => {
+  return page.evaluate(async () => {
     const now = Date.now();
     const hour = 60 * 60 * 1000;
     const kept = "/tmp/zerocode-window-test/wt-kept";
@@ -167,13 +167,22 @@ function standCatalog(page) {
       seen.previews.push(args.id);
       return previews[args.id] ?? { kind: "none", bytes: 0, truncated: false };
     };
-    // The checkout the window still holds, as git last answered for it: in the compare ref.
-    if (typeof worktreeLandings !== "undefined") {
-      worktreeLandings.set(kept, {
-        state: "landed", detached: false, ahead: 0, dirty: false, ignored: false, compare_ref: "origin/main",
-        ref_updated_ms: now - hour, landed_in: { sha: "0123456789abcdef0123456789abcdef01234567", time_ms: now - 2 * hour },
+    // The checkout the window still holds, as git last answered for it: in the compare ref. It
+    // rides the project catalog, the way the runtime sends it, so a later re-read keeps it.
+    const catalog = window.__ANSWER__.project_catalog;
+    window.__ANSWER__.project_catalog = () => {
+      const projects = catalog();
+      projects[0]?.worktrees.push({
+        path: kept, branch: "wt/t-501", is_main: false, active: false, is_folder: false,
+        ownership: "zerocode-managed", external_hidden: false,
+        landing: {
+          state: "landed", detached: false, ahead: 0, dirty: false, ignored: false, compare_ref: "origin/main",
+          ref_updated_ms: now - hour, landed_in: { sha: "0123456789abcdef0123456789abcdef01234567", time_ms: now - 2 * hour },
+        },
       });
-    }
+      return projects;
+    };
+    if (typeof refreshWorktrees === "function") await refreshWorktrees();
     return { sections: sections.length, headings: 1 + sections.length * 2 };
   });
 }
@@ -279,11 +288,13 @@ export async function testArtifactCards(browser, origin, ok) {
           height: node ? Math.round(node.getBoundingClientRect().height) : null,
         };
       };
+      // The two colours a chip's outline is weighed against: the tab's neutral chip edge, and the
+      // amber the selected card wears.
       const probe = document.createElement("span");
       probe.style.color = "var(--artifact-selected-edge)";
       view?.appendChild(probe);
       const selectedEdge = getComputedStyle(probe).color;
-      probe.style.color = "var(--edge-rule)";
+      probe.style.color = "var(--artifact-chip-edge, transparent)";
       const rule = getComputedStyle(probe).color;
       probe.remove();
       return {
@@ -378,7 +389,7 @@ export async function testArtifactCards(browser, origin, ok) {
       drawer.barHeight === BAR_HEIGHT && drawer.barSticky === "sticky"
         && drawer.task === "t-501" && drawer.landing === "반영됨"
         && typeof drawer.when === "string" && drawer.when.startsWith("보고서 ")
-        && typeof drawer.maker === "string" && drawer.maker.includes("claude-sonnet-5-5"),
+        && drawer.maker === "claude sonnet-5-5",
       JSON.stringify({
         height: drawer.barHeight, sticky: drawer.barSticky, parts: drawer.barParts, task: drawer.task,
         landing: drawer.landing, when: drawer.when, maker: drawer.maker,
@@ -520,9 +531,12 @@ export async function testArtifactCards(browser, origin, ok) {
     ok(
       "the operator's state record opens as what it says — how many actions, the last one and how it went, whether it is stuck — in words",
       evidence.state.digestShown === true && evidence.state.showsJson === false
-        && typeof evidence.state.facts === "string" && evidence.state.facts.includes("3") && evidence.state.facts.includes("click")
+        && typeof evidence.state.summary === "string" && evidence.state.summary.includes("3")
+        && typeof evidence.state.facts === "string" && evidence.state.facts.includes("click")
         && evidence.state.facts.includes("실패") && evidence.state.facts.includes("막힘"),
-      JSON.stringify({ shown: evidence.state.digestShown, json: evidence.state.showsJson, facts: evidence.state.facts }),
+      JSON.stringify({
+        shown: evidence.state.digestShown, json: evidence.state.showsJson, summary: evidence.state.summary, facts: evidence.state.facts,
+      }),
     );
     ok(
       "a text log that holds no record is shown as the text it is",
@@ -629,7 +643,7 @@ export async function testArtifactCards(browser, origin, ok) {
       await new Promise((done) => setTimeout(done, 80));
       const name = (node) => String(node.className || node.tagName).split(" ").slice(0, 2).join(".");
       // An agent's mark is a picture with a letter in it, not a line of text.
-      const picture = (node) => Boolean(node.closest(".agent-ico, svg"));
+      const picture = (node) => Boolean(node.closest('[class*="agent-ico"], svg'));
       const small = new Map();
       for (const node of view?.querySelectorAll("*") ?? []) {
         if (!shown(node) || picture(node)) continue;
@@ -638,9 +652,10 @@ export async function testArtifactCards(browser, origin, ok) {
         const px = parseFloat(getComputedStyle(node).fontSize);
         if (px < 12) small.set(name(node), px);
       }
+      // A link inside a report's prose is a word of its sentence, not a control of the tab.
       const short = new Map();
       for (const node of view?.querySelectorAll('button, select, input, summary, a[href], [role="tab"], [role="button"]') ?? []) {
-        if (!shown(node)) continue;
+        if (!shown(node) || node.closest(".md-body")) continue;
         const height = Math.round(node.getBoundingClientRect().height);
         if (height < 28) short.set(name(node), height);
       }

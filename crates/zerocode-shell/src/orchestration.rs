@@ -9149,7 +9149,9 @@ fn note_worker_report(
     })
     .flatten()
     .unwrap_or_default();
-    let _ = store.register_report(&path, origin, None, now_ms);
+    // The kind of report the worker stated, when it stated one (t-36910).
+    let stated = crate::artifact_runtime::report_kind_in(value("--payload"));
+    let _ = store.register_report(&path, origin, stated.as_deref(), now_ms);
 }
 
 /// Carry out the EFFECT of one decision, and say what the shim should print.

@@ -104,7 +104,7 @@ impl ArtifactKind {
 /// and proposals alike — under one glyph; a card now says which, as a chip.
 ///
 /// The worker states it when it reports ([`REPORT_KIND_KEY`]); when it does not,
-/// the file name is read by one table ([`REPORT_SUBTYPE_BY_NAME`]). A report no
+/// the file name is read by one table (`REPORT_SUBTYPE_BY_NAME`). A report no
 /// row of the table names is a `Report`, which is what it was handed in as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -180,15 +180,26 @@ impl ReportSubtype {
     /// says.
     #[must_use]
     pub fn of(stated: Option<&str>, path: &Path) -> Self {
-        let _ = (stated, path);
-        Self::Report
+        stated
+            .and_then(Self::parse)
+            .unwrap_or_else(|| Self::of_file_name(path))
     }
 
-    /// The kind a file name says, by [`REPORT_SUBTYPE_BY_NAME`].
+    /// The kind a file name says, by the one table (`REPORT_SUBTYPE_BY_NAME`).
     #[must_use]
     pub fn of_file_name(path: &Path) -> Self {
-        let _ = (path, REPORT_SUBTYPE_BY_NAME);
-        Self::Report
+        let stem = path
+            .file_stem()
+            .map(|held| held.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let named = |markers: &[&str]| {
+            stem.split(|glyph: char| !glyph.is_alphanumeric())
+                .any(|word| markers.iter().any(|marker| word.starts_with(*marker)))
+        };
+        REPORT_SUBTYPE_BY_NAME
+            .iter()
+            .find(|(markers, _)| named(markers))
+            .map_or(Self::Report, |(_, kind)| *kind)
     }
 }
 
@@ -731,55 +742,56 @@ pub fn title_of(path: &Path, limits: &Limits) -> String {
     truncate_chars(&name, limits.title_chars)
 }
 
-/// Prefer a document's own account and its task's purpose to storage names.
-/// The caller supplies bounded bytes already read for previews/search.
+/// The headings that say nothing about one document: a title made of one of
+/// them alone gives way to the name of the task the file was written for.
+const BARE_TITLES: &[&str] = &[
+    "report",
+    "readme",
+    "summary",
+    "보고서",
+    "작업 보고서",
+    "완료 보고",
+    "요약",
+];
+
+/// The extensions whose bytes are read for a title.
+const TITLED_EXTENSIONS: &[&str] = &["md", "txt", "html", "htm", "json", "jsonl"];
+
+/// The keys of a JSON record that are its own account of itself, in the order
+/// they are tried.
+const RECORD_TITLE_KEYS: &[&str] = &["title", "summary", "goal", "description"];
+
+/// What a file calls itself, before what it was written for (t-36910).
+///
+/// The order: the file's own title — a page's `<title>`, a record's account
+/// of itself, a document's frontmatter title or its first heading of any
+/// level — then the name of the task; a heading that says nothing (「보고서」)
+/// gives way to the task's name and stands when there is none. A document
+/// with no heading and no task is named by its opening paragraph when that is
+/// prose; a list item or a table row is a fragment of the body and never a
+/// title, so such a file keeps its name. The caller supplies bounded bytes
+/// already read for previews and search.
 #[must_use]
 pub fn descriptive_title(path: &Path, bytes: &[u8], work: Option<&str>, limits: &Limits) -> String {
-    let readable = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        ["md", "txt", "html", "htm", "json", "jsonl"].contains(&e.to_ascii_lowercase().as_str())
-    });
-    let content = readable
+    let readable = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| TITLED_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()));
+    let text = readable
         .then(|| std::str::from_utf8(bytes).ok())
         .flatten()
-        .and_then(|text| {
-            let text = text.trim_start_matches('\u{feff}').trim();
-            if text.starts_with('<') {
-                return crate::artifact_publish::skeleton::title(text);
-            }
-            if text.starts_with('{') || text.starts_with('[') {
-                return text.lines().find_map(|line| {
-                    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-                    ["title", "summary", "goal", "description"]
-                        .into_iter()
-                        .find_map(|key| {
-                            value
-                                .get(key)?
-                                .as_str()
-                                .filter(|s| !s.trim().is_empty())
-                                .map(str::to_string)
-                        })
-                });
-            }
-            crate::skill::document_title(text)
-        });
+        .map(|text| text.trim_start_matches('\u{feff}').trim());
+    let (named, lead) = text.map_or((None, None), own_title);
     let meaningful = |text: &str| {
         let text = text.trim();
-        !text.is_empty()
-            && ![
-                "report",
-                "readme",
-                "summary",
-                "보고서",
-                "작업 보고서",
-                "완료 보고",
-                "요약",
-            ]
-            .contains(&text.to_lowercase().as_str())
+        !text.is_empty() && !BARE_TITLES.contains(&text.to_lowercase().as_str())
     };
-    let title = work
-        .filter(|s| meaningful(s))
-        .or_else(|| content.as_deref().filter(|s| meaningful(s)))
-        .or(content.as_deref());
+    let title = named
+        .as_deref()
+        .filter(|held| meaningful(held))
+        .or_else(|| work.filter(|held| meaningful(held)))
+        .or(named.as_deref())
+        .or_else(|| lead.as_deref().filter(|held| meaningful(held)));
     title.map_or_else(
         || title_of(path, limits),
         |text| {
@@ -788,6 +800,31 @@ pub fn descriptive_title(path: &Path, bytes: &[u8], work: Option<&str>, limits: 
                 limits.title_chars,
             )
         },
+    )
+}
+
+/// What a text names itself, and — for a document — its opening paragraph when
+/// that is prose.
+fn own_title(text: &str) -> (Option<String>, Option<String>) {
+    if text.starts_with('<') {
+        return (crate::artifact_publish::skeleton::title(text), None);
+    }
+    if text.starts_with('{') || text.starts_with('[') {
+        let named = text.lines().find_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            RECORD_TITLE_KEYS.iter().find_map(|key| {
+                value
+                    .get(*key)?
+                    .as_str()
+                    .filter(|held| !held.trim().is_empty())
+                    .map(str::to_string)
+            })
+        });
+        return (named, None);
+    }
+    (
+        crate::skill::document_heading(text),
+        crate::skill::document_lead(text),
     )
 }
 

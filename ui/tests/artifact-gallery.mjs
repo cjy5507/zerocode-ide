@@ -1588,7 +1588,7 @@ export async function testArtifactFirstScreen(page, ok) {
   });
   ok("the first screen opens on 「페이지·문서」 with each tab's count, and kinds with no rows stand no tab",
     seen.tab === "pages" && seen.tabs === "pages:3,reports:1,evidence:1" && seen.order === "pub-1,made-1,doc-1"
-      && seen.askedFilter === "{}" && seen.otherHidden === true && seen.otherAppears === true, JSON.stringify(seen));
+      && seen.askedFilter === JSON.stringify({ present: true }) && seen.otherHidden === true && seen.otherAppears === true, JSON.stringify(seen));
   ok("rows whose file is gone hide behind 「사라진 파일 N행 숨김 · 보기」, come back dimmed, and follow the runtime's `missing` rather than the disk",
     seen.hiddenLine === "사라진 파일 1행 숨김·보기" && seen.shownLine === "사라진 파일 1행 보는 중·숨기기"
       && seen.shownOrder === "pub-1,made-1,doc-1,page-dead" && seen.deadCard && seen.tabsShown === "pages:4,reports:1,evidence:3"
@@ -1769,7 +1769,7 @@ export async function testArtifactRecall(page, ok) {
       && seen.combinedReports === "0" && seen.back === "today-claude,today-codex,week-claude,old-codex,old-bare"
       && seen.asksUncapped === 0, JSON.stringify(seen));
   ok("a listing cut by the table's cap hands the tab, project roots, agent and period to the runtime, and counts tabs from its answer",
-    seen.cappedFirst === JSON.stringify([{}, { kinds: ["page", "document", "web"], present: true }])
+    seen.cappedFirst === JSON.stringify([{ present: true }, { kinds: ["page", "document", "web"], present: true }])
       && seen.cappedOrder === "today-claude,today-codex" && seen.cappedStat.startsWith("2 / 5")
       && seen.cappedTabs === "pages:5,reports:1"
       && seen.cappedAgent === JSON.stringify({ kinds: ["page", "document", "web"], present: true, agent: "codex" })
