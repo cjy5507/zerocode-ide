@@ -5847,6 +5847,9 @@ mod tests {
     use super::*;
     use zerocode_core::orchestration::{Auto, NoLauncher};
 
+    #[cfg(unix)]
+    mod outside_reader;
+
     /// A store that could not be opened is answered, not the end of the actor.
     ///
     /// The write road already says how a passing failure should be read: a

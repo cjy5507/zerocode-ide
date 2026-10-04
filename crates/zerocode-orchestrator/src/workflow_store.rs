@@ -36,6 +36,11 @@ const WAL_RETRY_DELAY: Duration = Duration::from_millis(10);
 /// does not wait.
 const DELETE_PENDING_RETRIES: u32 = if cfg!(windows) { 10 } else { 0 };
 const DELETE_PENDING_DELAY: Duration = Duration::from_millis(25);
+/// Connections [`WorkflowStore::connection`] has opened in this process:
+/// the request-road measurement's count (t-37679), compiled into tests only.
+#[cfg(test)]
+pub(crate) static CONNECTIONS_OPENED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 /* Seven is also the FIRST version a production window ever writes: the store
  * ships with the actor cutover, so every store in the wild is either empty or
  * already seven. The versions below seven only ever existed inside this
@@ -1227,6 +1232,8 @@ impl WorkflowStore {
     }
 
     pub(crate) fn connection(&self) -> Result<Connection, WorkflowStoreError> {
+        #[cfg(test)]
+        CONNECTIONS_OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // The Unix parent gate excludes other principals. A hostile same-UID
         // process (and platforms without equivalent ACL validation) remains
         // outside this foundation's boundary until a custom VFS owns all opens.
@@ -2495,6 +2502,138 @@ mod tests {
                 "the stored text of `{name}` does not normalize — an unbalanced \
                  quote reached sqlite_schema"
             );
+        }
+    }
+
+    /// t-37679: the window died of SIGBUS four seconds after another
+    /// process read its ledger with `sqlite3`.
+    ///
+    /// SQLite keeps its locks as POSIX advisory locks, and closing ANY
+    /// descriptor of a file drops every such lock the process holds on it.
+    /// A store that opened a file SQLite holds and closed it again released
+    /// the locks of every live connection of the window; another process
+    /// then saw nobody attached, truncated `-shm` to rebuild it, and the
+    /// window's mapping of it pointed past the end of the file.
+    #[cfg(unix)]
+    mod posix_locks {
+        use super::*;
+
+        /// The byte of `-shm` every connection holds SHARED while it has
+        /// the WAL index mapped (`UNIX_SHM_DMS` in SQLite's `os_unix.c`:
+        /// past 22 header words and 8 lock bytes, `(22 + 8) * 4 + 8`). A
+        /// process that can take it EXCLUSIVE believes it is the first to
+        /// attach, and truncates the file.
+        const SHM_DEAD_MAN_SWITCH: i64 = (22 + 8) * 4 + 8;
+        /// SQLite's SHARED range on the main file (`SHARED_FIRST`,
+        /// `SHARED_SIZE` in `os.h`): two bytes past the pending byte at
+        /// 1 GiB, 510 long. A WAL connection holds it for its whole life.
+        const DATABASE_SHARED_FIRST: i64 = 0x4000_0000 + 2;
+        const DATABASE_SHARED_SIZE: i64 = 510;
+
+        /// A connection standing in a read transaction, which is when it
+        /// holds the most: SHARED on the database, the dead-man switch and
+        /// a reader mark in `-shm`.
+        fn a_reader_mid_transaction(store: &WorkflowStore) -> Connection {
+            let reader = store.connection().expect("a reader");
+            reader
+                .execute_batch("BEGIN; SELECT COUNT(*) FROM workflows;")
+                .expect("a read transaction");
+            reader
+        }
+
+        /// Whether ANOTHER process could take an exclusive POSIX lock on
+        /// `len` bytes of `path` from `start` — the question SQLite's own
+        /// first opener asks. A process never conflicts with its own POSIX
+        /// locks, so the asking happens in a child.
+        fn another_process_could_lock(path: &Path, start: i64, len: i64) -> bool {
+            use std::os::unix::ffi::OsStrExt as _;
+            use std::os::unix::process::ExitStatusExt as _;
+
+            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a C path");
+            // SAFETY: every field of `flock` is an integer; zero is valid.
+            let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+            // F_WRLCK is a c_short on Apple and a c_int on Linux.
+            #[allow(clippy::unnecessary_cast)]
+            let exclusive = libc::F_WRLCK as libc::c_short;
+            lock.l_type = exclusive;
+            lock.l_whence = libc::SEEK_SET as libc::c_short;
+            lock.l_start = start;
+            lock.l_len = len;
+            // SAFETY: the child touches only memory prepared before the
+            // fork and calls only async-signal-safe functions (open, fcntl,
+            // _exit), so a lock another test thread held at the fork can
+            // never stall it.
+            let child = unsafe { libc::fork() };
+            if child == 0 {
+                // SAFETY: as above.
+                unsafe {
+                    let descriptor = libc::open(path.as_ptr(), libc::O_RDWR);
+                    let took = descriptor >= 0
+                        && libc::fcntl(descriptor, libc::F_SETLK, std::ptr::from_ref(&lock)) == 0;
+                    libc::_exit(if took { 0 } else { 1 });
+                }
+            }
+            assert!(child > 0, "fork: {}", std::io::Error::last_os_error());
+            let mut status = 0;
+            // SAFETY: waits on the child forked above; writes only `status`.
+            let waited = unsafe { libc::waitpid(child, &mut status, 0) };
+            assert_eq!(
+                waited,
+                child,
+                "waitpid: {}",
+                std::io::Error::last_os_error()
+            );
+            std::process::ExitStatus::from_raw(status).code() == Some(0)
+        }
+
+        /// The road that ran before EVERY request: the runtime actor held
+        /// one connection and opened another for the journal.
+        #[test]
+        fn another_connection_leaves_a_live_readers_wal_index_locks_standing() {
+            let root = a_private_root();
+            let path = root.path().join("workflow.sqlite");
+            let store = WorkflowStore::open(&path).expect("a store");
+            let reader = a_reader_mid_transaction(&store);
+
+            let _second = store.connection().expect("a second connection");
+
+            assert!(
+                !another_process_could_lock(
+                    &root.path().join("workflow.sqlite-shm"),
+                    SHM_DEAD_MAN_SWITCH,
+                    1
+                ),
+                "opening a second connection released the reader's hold on -shm: \
+                 another process would truncate it under the reader's mapping"
+            );
+            reader.execute_batch("COMMIT").expect("the read ends");
+        }
+
+        /// A second opener of the same store in the same process — the
+        /// review store, a reopen after a refusal — checks and tightens the
+        /// main file as well.
+        #[test]
+        fn a_second_opener_leaves_a_live_readers_database_lock_standing() {
+            let root = a_private_root();
+            let path = root.path().join("workflow.sqlite");
+            let store = WorkflowStore::open(&path).expect("a store");
+            let reader = a_reader_mid_transaction(&store);
+
+            let _again = WorkflowStore::open(&path).expect("a second opener");
+
+            assert!(
+                !another_process_could_lock(&path, DATABASE_SHARED_FIRST, DATABASE_SHARED_SIZE),
+                "a second opener released the reader's SHARED lock on the database"
+            );
+            assert!(
+                !another_process_could_lock(
+                    &root.path().join("workflow.sqlite-shm"),
+                    SHM_DEAD_MAN_SWITCH,
+                    1
+                ),
+                "a second opener released the reader's hold on -shm"
+            );
+            reader.execute_batch("COMMIT").expect("the read ends");
         }
     }
 }
