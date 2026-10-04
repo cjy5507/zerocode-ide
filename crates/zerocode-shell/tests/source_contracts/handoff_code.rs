@@ -3,8 +3,9 @@
 //! and the door's own tests (`computer_use::confirm`, `main_unit_tests`), core's
 //! rule (`handoff_code`) and the window suite (`ui/tests/ask-popup.mjs`); these
 //! contracts hold where a code may be answered from, where a value may and may
-//! not be written, what the page reads of it and keeps of it, and that no agent,
-//! no helper and no second road is named on it.
+//! not be written, where it is read out and typed, what the page reads of it
+//! and keeps of it, and that no agent, no helper and no second road is named
+//! on it.
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +26,8 @@ fn skill(name: &str) -> String {
 /// The pending table and the dispatch; a sibling module, read through its own
 /// `include_str!` like the others.
 const CONFIRM: &str = include_str!("../../src/computer_use/confirm.rs");
+/// Where a code is read out and typed.
+const ENTER: &str = include_str!("../../src/computer_use/enter.rs");
 /// The rule for a code, in core.
 const CODE_RULE: &str = include_str!("../../../zerocode-core/src/handoff_code.rs");
 const MAIN: &str = include_str!("../../src/main.rs");
@@ -101,22 +104,27 @@ fn only_the_windows_page_answers_a_card_and_its_line() {
 /// A code is a length to everything that writes: no log line, no notice to
 /// the page, no record, no panic message holds more. The type has no `Clone`,
 /// no `Display`, no `Serialize` and a `Debug` that counts; the one place it is
-/// read out is the answer built for the agent that asked.
+/// read out is where it is typed into its field, and no answer is made of it.
 #[test]
 fn a_code_is_written_in_no_log_no_notice_and_no_record() {
-    let confirm = code_only(shipped(CONFIRM));
-    for loud in [
-        "tracing::",
-        "println!",
-        "eprintln!",
-        "dbg!",
-        "log::",
-        ".emit(",
+    for (name, text) in [
+        ("computer_use/confirm.rs", CONFIRM),
+        ("computer_use/enter.rs", ENTER),
     ] {
-        assert!(
-            !confirm.contains(loud),
-            "the pending table writes somewhere (`{loud}`) where a code could land"
-        );
+        let code = code_only(shipped(text));
+        for loud in [
+            "tracing::",
+            "println!",
+            "eprintln!",
+            "dbg!",
+            "log::",
+            ".emit(",
+        ] {
+            assert!(
+                !code.contains(loud),
+                "{name} writes somewhere (`{loud}`) where a code could land"
+            );
+        }
     }
 
     let rule = shipped(CODE_RULE);
@@ -152,6 +160,13 @@ fn a_code_is_written_in_no_log_no_notice_and_no_record() {
         "the window's asker touches the code on its way to the page:\n{asker}"
     );
 
+    // The pending table hands a code over and makes no answer of it: no
+    // `"code"` field is built there, for an agent or for anyone.
+    assert!(
+        !shipped(CONFIRM).contains("\"code\""),
+        "the pending table builds an answer with a `code` in it"
+    );
+
     let mut revealing: Vec<String> = shipped_sources()
         .into_iter()
         .filter(|(_, code)| code.contains(".reveal()"))
@@ -160,8 +175,59 @@ fn a_code_is_written_in_no_log_no_notice_and_no_record() {
     revealing.sort();
     assert_eq!(
         revealing,
-        ["computer_use/confirm.rs"],
-        "a code is read out in more than the one answer built for the agent that asked"
+        ["computer_use/enter.rs"],
+        "a code is read out anywhere but where it is typed into its field"
+    );
+}
+
+/// The answer a handoff is told in — the envelope's text and the one line a
+/// script reads — is made of what went in, where and how it read back. No
+/// word of it asks for the code, and no arm of it prints one.
+#[test]
+fn the_answer_a_handoff_is_told_in_names_the_input_and_never_the_code() {
+    let backend = shipped_backend();
+    let pretty = block_after(backend, "fn computer_pretty(");
+    assert!(
+        pretty.contains("entered"),
+        "the handoff's one line does not say what was entered:\n{pretty}"
+    );
+    assert!(
+        !pretty.contains("\"code\"") && !pretty.contains("reveal"),
+        "the pretty answer reads a code:\n{pretty}"
+    );
+}
+
+/// The window types a code down one road and the road leaves no step behind:
+/// an acting step would record the picture of the field the code is in. The
+/// live doors are the window's own functions below the step; none of the step
+/// functions, and none of what they write, is called from them.
+#[test]
+fn a_code_is_typed_down_one_road_and_leaves_no_step() {
+    let backend = shipped_backend();
+    let marker = "impl computer_use::enter::Typer for LiveTyper<'_> {";
+    assert!(
+        backend.contains(marker),
+        "the window has no live door of its own to type a code through"
+    );
+    let live = block_after(backend, marker);
+    for step in [
+        "desktop_step(",
+        "browser_step(",
+        "emulator_step(",
+        "leave_step(",
+        "leave_computer_evidence(",
+        "leave_browser_evidence(",
+        "leave_emulator_evidence(",
+    ] {
+        assert!(
+            !live.contains(step),
+            "typing a code calls `{step}`, which would record the field it is in:\n{live}"
+        );
+    }
+    let enter = code_only(shipped(ENTER));
+    assert!(
+        !enter.contains("_step("),
+        "the typing is shaped by the step functions"
     );
 }
 
@@ -177,6 +243,7 @@ fn no_agent_is_named_on_the_code_road() {
     let card = ui_file("shell-computer.js");
     for (what, text) in [
         ("computer_use/confirm.rs", shipped(CONFIRM)),
+        ("computer_use/enter.rs", shipped(ENTER)),
         ("zerocode-core/src/handoff_code.rs", shipped(CODE_RULE)),
         ("ui/shell-computer.js", card.as_str()),
     ] {
@@ -359,14 +426,18 @@ fn the_field_is_labelled_wired_for_a_code_and_drawn_from_the_tokens() {
     );
 }
 
-/// The manuals teach the road: ask with `--ask-code`, take the value from the
-/// answer into a `--value-stdin`/`--text-stdin` writer, and a password or a
-/// card number is the person's, never asked this way.
+/// The manuals teach the road: ask with `--ask-code` and say where the code
+/// goes with `--into`, the answer never holds the code, and a password or a
+/// card number is the person's, never asked this way. No manual teaches the
+/// old road, where the code came back to be typed by the agent.
 #[test]
 fn the_manuals_teach_the_code_road_and_keep_a_password_the_persons() {
-    for (name, stdin) in [
-        ("computer-use", "--value-stdin"),
-        ("mobile-device", "--text-stdin"),
+    for (name, shapes) in [
+        (
+            "computer-use",
+            &["\"set-value\"", "\"browser\",\"type\""][..],
+        ),
+        ("mobile-device", &["\"emulator\",\"text\""][..]),
     ] {
         let manual = skill(name);
         assert!(
@@ -374,8 +445,18 @@ fn the_manuals_teach_the_code_road_and_keep_a_password_the_persons() {
             "{name} does not teach `handoff --ask-code`"
         );
         assert!(
-            manual.contains(stdin),
-            "{name} does not put the code into the field by `{stdin}`"
+            manual.contains("--into"),
+            "{name} does not say where the code goes with `--into`"
+        );
+        for shape in shapes {
+            assert!(
+                manual.contains(shape),
+                "{name} shows no `--into` of the shape {shape}"
+            );
+        }
+        assert!(
+            !manual.contains("code=$("),
+            "{name} still teaches holding the code in a variable: the agent is not handed it"
         );
         assert!(
             manual.contains("password") && manual.contains("card number"),

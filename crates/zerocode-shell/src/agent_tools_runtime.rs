@@ -3792,6 +3792,18 @@ fn looks_at_the_display(command: &zerocode_core::computer_use::ComputerCommand) 
     }
 }
 
+/// [`door_refusal`] with the two lists the window asks the helper for — its
+/// apps and its windows — handed in, so a test answers them. The live road
+/// asks the helper itself.
+pub(super) fn door_refusal_with(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    list_apps: &mut dyn FnMut() -> Option<serde_json::Value>,
+    list_windows: &mut dyn FnMut() -> Option<serde_json::Value>,
+) -> Option<computer_use::ComputerUseError> {
+    let _ = (&list_apps, &list_windows);
+    door_refusal(command)
+}
+
 /// The one hand (§1.3): while stopped, every action is refused at the door,
 /// before anything goes near the helper; looks still answer. So is every
 /// action while the person is being asked (§1.5) — a press or a key sent
@@ -4847,7 +4859,28 @@ pub(super) fn answer_computer_command(
     asking: computer_use::confirm::Asking,
     workspace: Option<&Path>,
 ) -> zerocode_hookd::TeamAnswer {
+    answer_computer_command_with(
+        argv,
+        permission_window,
+        asking,
+        workspace,
+        &mut computer_use::enter::Unseated,
+    )
+}
+
+/// [`answer_computer_command`] with the doors a person's code is typed
+/// through handed in: the window's own roads in the app, a form that
+/// remembers what it was given in a test.
+pub(super) fn answer_computer_command_with(
+    argv: &[String],
+    permission_window: Option<&tauri::AppHandle>,
+    asking: computer_use::confirm::Asking,
+    workspace: Option<&Path>,
+    typer: &mut dyn computer_use::enter::Typer,
+) -> zerocode_hookd::TeamAnswer {
     use zerocode_core::computer_use::{ComputerMethod, parse_command, usage};
+
+    let _ = &typer;
 
     if argv
         .first()

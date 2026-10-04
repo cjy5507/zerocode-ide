@@ -1,10 +1,13 @@
 //! The one-time code a person hands an agent on the person's-turn card
 //! (t-40807).
 //!
-//! `zerocode-computer handoff --ask-code --reason "…"` puts the usual card in
-//! front of the person with one line to type in. What they send comes back as
-//! that handoff's answer, once. This module is the whole of what such a card
-//! may take, so the window, the manual and the tests read one rule:
+//! `zerocode-computer handoff --ask-code --reason "…" --into '[…]'` puts the
+//! usual card in front of the person with one line to type in. What they send
+//! never comes back to the agent: the window types it, once, into the field
+//! the agent named in `--into` ([`EnterInto`]), and the answer says how many
+//! characters went in. This module is the whole of what such a card may take
+//! and where its code may go, so the window, the manual and the tests read one
+//! rule:
 //!
 //! - **Only a one-time code.** Four to ten letters or digits
 //!   ([`OneTimeCode::parse`]); a reason that names a password, a card number,
@@ -276,6 +279,92 @@ impl OneTimeCode {
 impl fmt::Debug for OneTimeCode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "OneTimeCode({} chars)", self.chars())
+    }
+}
+
+/// The characters a code is typed as while a command that would carry it is
+/// checked: any four-character code, so a checked command never holds the
+/// person's own.
+pub const ENTER_PLACEHOLDER: &str = "0000";
+
+/// The door an input to a field comes in by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnterTool {
+    /// The desktop: an app's element, through the accessibility tree.
+    Computer,
+    /// A tab of the window's own browser.
+    Browser,
+    /// A phone in the window's emulator pane.
+    Emulator,
+}
+
+impl EnterTool {
+    /// The word a door is told by in an answer.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Computer => "computer",
+            Self::Browser => "browser",
+            Self::Emulator => "emulator",
+        }
+    }
+}
+
+/// Where the window puts a code the person typed: the words of one input
+/// command, without the code. `["set-value","--app","Form","--element-index",
+/// "3"]` for an app's field, `["type-text","--app","Form"]` for its focused
+/// field, `["browser","type","browser-1","#otp"]` for a tab's, `["emulator",
+/// "text","--platform","ios","--device","<id>"]` for a phone's. Checked whole
+/// before the card is shown ([`EnterInto::from_words`]), so a code is never
+/// asked for that has nowhere to go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnterInto {
+    tool: EnterTool,
+    words: Vec<String>,
+}
+
+impl EnterInto {
+    /// The words of the flag, as the agent wrote them: a JSON array of strings.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let words: Vec<String> = serde_json::from_str(raw).map_err(|_| {
+            "--into is a JSON array of the words of one input command, e.g. '[\"set-value\",\"--app\",\"Form\",\"--element-index\",\"3\"]'".to_string()
+        })?;
+        Self::from_words(&words)
+    }
+
+    /// The command's words, checked: only an input that puts a typed value in
+    /// one field, naming its field, and no word that would carry a value, a
+    /// second command or a way past the person.
+    pub fn from_words(all: &[String]) -> Result<Self, String> {
+        let _ = all;
+        Err("--into is not understood yet".to_string())
+    }
+
+    /// The door the input comes in by.
+    #[must_use]
+    pub const fn tool(&self) -> EnterTool {
+        self.tool
+    }
+
+    /// The input's verb: `set-value`, `type-text`, `type` or `text`.
+    #[must_use]
+    pub fn verb(&self) -> &str {
+        self.words.first().map_or("", String::as_str)
+    }
+
+    /// The words the door takes to type `value`: the command with the value
+    /// where its verb takes one.
+    #[must_use]
+    pub fn words_with(&self, value: &str) -> Vec<String> {
+        let mut words = self.words.clone();
+        words.push(value.to_string());
+        words
+    }
+
+    /// The array as the agent gave it, door prefix and all.
+    #[must_use]
+    pub fn to_words(&self) -> Vec<String> {
+        self.words.clone()
     }
 }
 

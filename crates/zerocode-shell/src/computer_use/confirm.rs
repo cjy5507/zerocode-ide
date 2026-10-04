@@ -235,17 +235,31 @@ pub fn hand_the_desk(params: &Value, json: bool) -> Result<Value, ComputerUseErr
     Ok(answered)
 }
 
-/// [`hand_the_desk`] with whoever asks the person handed in — the window's
+/// What a person's turn that the person finished came to: the plain answer, a
+/// code the person typed, or — when a code was asked for under a reason that
+/// names a secret — nothing typed, the person having had the plain card. The
+/// code is in no place but here until it is typed into its field.
+#[derive(Debug)]
+pub enum Turn {
+    Plain(Value),
+    Code { reason: String, code: OneTimeCode },
+    NoCode { reason: String },
+}
+
+/// Give the desk to the person, as a `handoff` command asks, and wait for
+/// what they do with it. The card has a line for a code only when the agent
+/// asked for one and its reason does not name a secret; every other turn is
+/// the plain card. A cancel and a silence read the same either way.
+pub fn persons_turn(params: &Value) -> Result<Turn, ComputerUseError> {
+    persons_turn_through(params, &hand_over)
+}
+
+/// [`persons_turn`] with whoever asks the person handed in — the window's
 /// asker in the app, a script in a test.
-///
-/// The card has a line for a code only when the agent asked for one and its
-/// reason does not name a secret; every other turn is the plain card. The code
-/// is read out of what came back into the answer of the agent that asked, and
-/// into nothing else: a turn that asked for no code is never handed one.
-fn hand_the_desk_through(
+fn persons_turn_through(
     params: &Value,
     over: &dyn Fn(&Handoff) -> Handed,
-) -> Result<Value, ComputerUseError> {
+) -> Result<Turn, ComputerUseError> {
     let reason = params
         .get("reason")
         .and_then(Value::as_str)
@@ -261,7 +275,16 @@ fn hand_the_desk_through(
         code_ask: (asked_code && !reason_names_a_secret(reason)).then_some(CodeLimits::TABLE),
     });
     match handed.decision {
-        Decision::Allowed => Ok(resumed(reason, asked_code, handed.code)),
+        Decision::Allowed => Ok(match (asked_code, handed.code) {
+            (true, Some(code)) => Turn::Code {
+                reason: reason.to_string(),
+                code,
+            },
+            (true, None) => Turn::NoCode {
+                reason: reason.to_string(),
+            },
+            (false, _) => Turn::Plain(serde_json::json!({ "resumed": true, "reason": reason })),
+        }),
         Decision::Refused => Err(ComputerUseError::new(
             error_code::CONFIRMATION_REFUSED,
             format!("the person cancelled the handoff ({reason})"),
@@ -273,24 +296,27 @@ fn hand_the_desk_through(
     }
 }
 
-/// The answer of a turn the person finished: the plain one, or — for an agent
-/// that asked for a code — the code and its length, or `code: null` and why.
-fn resumed(reason: &str, asked_code: bool, code: Option<OneTimeCode>) -> Value {
-    match (asked_code, code) {
-        (true, Some(code)) => serde_json::json!({
+/// [`hand_the_desk`] with whoever asks the person handed in — the window's
+/// asker in the app, a script in a test.
+fn hand_the_desk_through(
+    params: &Value,
+    over: &dyn Fn(&Handoff) -> Handed,
+) -> Result<Value, ComputerUseError> {
+    Ok(match persons_turn_through(params, over)? {
+        Turn::Plain(answer) => answer,
+        Turn::Code { reason, code } => serde_json::json!({
             "resumed": true,
             "reason": reason,
             "code": code.reveal(),
             "codeLength": code.chars(),
         }),
-        (true, None) => serde_json::json!({
+        Turn::NoCode { reason } => serde_json::json!({
             "resumed": true,
             "reason": reason,
             "code": null,
             "codeRefused": CODE_REFUSED_SECRET_REASON,
         }),
-        (false, _) => serde_json::json!({ "resumed": true, "reason": reason }),
-    }
+    })
 }
 
 /// What the page is told when a person's turn is over — who, and how it

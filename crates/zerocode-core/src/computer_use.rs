@@ -1058,6 +1058,10 @@ pub fn sound_event_matches(event: &Value, labels: &[String], min_confidence: f64
 /// The bridge's grace past a waiting command's own budget: the answer's trip
 /// back and the window's bookkeeping.
 pub const COMPUTER_BRIDGE_GRACE_MS: u64 = 5_000;
+/// What a person's turn that puts a code in a field is given past the turn
+/// itself: the window types the code, down the road any input takes, after the
+/// person has sent it — a tab's typing may hold for its own callback's time.
+pub const COMPUTER_ENTER_GRACE_MS: u64 = 20_000;
 /// The longest any one command may take — the person's whole turn — and so
 /// the shim's own clock, which must never cut a command the bridge still
 /// waits for.

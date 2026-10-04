@@ -32,11 +32,11 @@ export const ASK_TITLES = Object.freeze({
  * nobody translated, fails here instead of agreeing with itself. `{{min}}` and
  * `{{max}}` are the window's numbers, written out the way the page shows them. */
 export const ASK_CODE_WORDS = Object.freeze({
-  ko: { title: "인증번호를 입력해 주세요", label: "인증번호", hint: "4~10자의 숫자·영문 · 에이전트에게 한 번만 전달되고 저장되지 않습니다", send: "보내기", cancel: "취소", invalid: "4~10자의 숫자·영문으로 입력해 주세요" },
-  en: { title: "Enter the code", label: "Code", hint: "4–10 letters or digits · handed to the agent once and not stored", send: "Send", cancel: "Cancel", invalid: "Enter 4–10 letters or digits" },
-  ja: { title: "コードを入力してください", label: "コード", hint: "4〜10文字の英数字 · エージェントに一度だけ渡され、保存されません", send: "送信", cancel: "キャンセル", invalid: "4〜10文字の英数字で入力してください" },
-  zh: { title: "请输入验证码", label: "验证码", hint: "4–10 位数字或字母 · 只会交给智能体一次，不会保存", send: "发送", cancel: "取消", invalid: "请输入 4–10 位数字或字母" },
-  es: { title: "Escribe el código", label: "Código", hint: "De 4 a 10 letras o dígitos · se entrega al agente una vez y no se guarda", send: "Enviar", cancel: "Cancelar", invalid: "Escribe de 4 a 10 letras o dígitos" },
+  ko: { title: "인증번호를 입력해 주세요", label: "인증번호", hint: "4~10자의 숫자·영문 · 창이 에이전트가 정한 칸에 한 번 입력합니다. 에이전트는 번호를 받지 않습니다", send: "보내기", cancel: "취소", invalid: "4~10자의 숫자·영문으로 입력해 주세요" },
+  en: { title: "Enter the code", label: "Code", hint: "4–10 letters or digits · the window types it once into the field the agent named; the agent never receives it", send: "Send", cancel: "Cancel", invalid: "Enter 4–10 letters or digits" },
+  ja: { title: "コードを入力してください", label: "コード", hint: "4〜10文字の英数字 · エージェントが指定した欄にウィンドウが一度だけ入力します。エージェントには渡りません", send: "送信", cancel: "キャンセル", invalid: "4〜10文字の英数字で入力してください" },
+  zh: { title: "请输入验证码", label: "验证码", hint: "4–10 位数字或字母 · 由窗口一次性输入到智能体指定的输入框；智能体不会收到验证码", send: "发送", cancel: "取消", invalid: "请输入 4–10 位数字或字母" },
+  es: { title: "Escribe el código", label: "Código", hint: "De 4 a 10 letras o dígitos · la ventana lo escribe una vez en el campo que indicó el agente; el agente no lo recibe", send: "Enviar", cancel: "Cancelar", invalid: "Escribe de 4 a 10 letras o dígitos" },
 });
 
 /* What the window sends for a card with a line: the plain card's fields and
