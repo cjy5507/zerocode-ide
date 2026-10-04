@@ -20,8 +20,10 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *   - the tooltip names the compare ref and when it last moved;
  *   - the git panel's head says the same words from the same function;
  *   - a landed checkout that still holds files git ignores says so on the chip
- *     in the words the evidence panel uses (t-34315), and only a landed one:
- *     nothing about ignored files is said of work main does not have. */
+ *     in the words the evidence panel uses (t-34315) — right after 반영됨, before
+ *     the offer to clean up, because the ellipsis cuts the end of a chip at the
+ *     sidebar's default width — and only a landed one: nothing about ignored
+ *     files is said of work main does not have. */
 
 const REF = "origin/main";
 const NOW = Date.now();
@@ -70,7 +72,7 @@ const WANT = {
   "/r/unk": { word: "확인 필요", tone: "check", cleanable: false },
   "/r/pend": { word: "확인 중", tone: "pending", cleanable: false },
   "/r/fail": { word: "확인 실패", tone: "check", cleanable: false },
-  "/r/ignored": { word: "반영됨 · 정리 가능 · 무시된 파일 남음", tone: "landed", cleanable: true },
+  "/r/ignored": { word: "반영됨 · 무시된 파일 남음 · 정리 가능", tone: "landed", cleanable: true },
   "/r/busyignored": { word: "반영됨 · 무시된 파일 남음", tone: "landed", cleanable: false },
   "/r/dirtyignored": { word: "반영됨 · 저장 안 한 변경 · 무시된 파일 남음", tone: "landed", cleanable: false },
   "/r/aheadignored": { word: "미반영 2", tone: "ahead", cleanable: false },
@@ -185,8 +187,8 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
     );
 
     ok(
-      "files git ignores are said on the chip of a landed checkout — after the other words, in the words the evidence panel uses — with a tooltip line that says they go with the folder, and never on work main does not have",
-      chips["/r/ignored"].word.endsWith(" · 무시된 파일 남음") && chips["/r/ignored"].tip.includes("git이 무시하는 파일이 남아 있습니다") &&
+      "files git ignores are said on the chip of a landed checkout — right after 반영됨 and before the offer to clean up, so the cut the ellipsis makes at the default width takes the offer and not the fact — in the words the evidence panel uses, with a tooltip line that says they go with the folder, and never on work main does not have",
+      chips["/r/ignored"].word === "반영됨 · 무시된 파일 남음 · 정리 가능" && chips["/r/ignored"].tip.includes("git이 무시하는 파일이 남아 있습니다") &&
         chips["/r/ignored"].tip.includes("폴더를 지우면 함께 사라집니다") &&
         chips["/r/landed"].word === "반영됨 · 정리 가능" && !chips["/r/landed"].tip.includes("무시하는") &&
         !chips["/r/aheadignored"].word.includes("무시된") && !chips["/r/aheadignored"].tip.includes("무시하는"),
