@@ -156,9 +156,10 @@ pub enum Heard {
 /// boundary wearing `done` is a session starting — a compaction in the middle
 /// of a turn writes one — and not a turn ending, so it is not heard.
 #[must_use]
-pub fn heard(state: HookState, _session_boundary: bool) -> Heard {
+pub fn heard(state: HookState, session_boundary: bool) -> Heard {
     match state {
         HookState::Working | HookState::NeedsAttention => Heard::Nothing,
+        HookState::Done if session_boundary => Heard::Nothing,
         HookState::Done => Heard::TurnEnded,
         HookState::Idle => Heard::AgentGone,
     }

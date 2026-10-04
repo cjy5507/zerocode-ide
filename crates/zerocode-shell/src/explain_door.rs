@@ -38,11 +38,14 @@ use zerocode_core::artifact::{Artifact, ArtifactKind, Origin};
 use zerocode_core::artifact_publish::PublishInput;
 use zerocode_core::capabilities::OneShotRoad;
 use zerocode_core::explain::{self, Ask, Kind, OneShotPrompt, why};
-use zerocode_core::explain_desk::{Decision, Desk, Held, PaneFacts, State, Term, decide};
+use zerocode_core::explain_desk::{
+    Decision, Desk, Heard, Held, PaneFacts, State, Term, decide, heard,
+};
 use zerocode_core::hook::HookState;
 use zerocode_core::launch_budget::Refusal as BudgetRefusal;
 use zerocode_pty::DeliveryOutcome;
 
+use crate::hooks::PaneHookReport;
 use crate::launch_budget_door::{Budgeted, Launch, run_budgeted};
 use crate::quota_wall::{StallCause, one_shot_cause};
 use crate::scm_runtime::{Once, OnceFailure};
@@ -381,20 +384,22 @@ fn settle(
 
 /// The pane reported its state. A turn that ended releases the request that
 /// waited for it, and ends one that was asked and got no page; an agent that
-/// left takes its requests with it. A pane in a turn changes nothing.
-pub(crate) fn note_pane_state(app: &AppHandle, term: Term, reported: HookState) {
+/// left takes its requests with it. A pane in a turn changes nothing — and
+/// neither does a session starting ([`heard`] says which reports those are).
+pub(crate) fn note_pane_state(app: &AppHandle, report: &PaneHookReport) {
     if !anything_stands() {
         return;
     }
-    match reported {
-        HookState::Working | HookState::NeedsAttention => {}
-        HookState::Done => {
+    let term = report.term;
+    match heard(report.state, report.session_boundary) {
+        Heard::Nothing => {}
+        Heard::TurnEnded => {
             if let Some(id) = with_desk(|desk| desk.turn_ended(term)) {
                 tell_failed(app, &id, why::NO_PAGE, Some(term));
             }
-            release(app, term, reported);
+            release(app, term, report.state);
         }
-        HookState::Idle => {
+        Heard::AgentGone => {
             for id in with_desk(|desk| desk.pane_gone(term)) {
                 tell_failed(app, &id, why::NO_AGENT, Some(term));
             }

@@ -1065,7 +1065,7 @@ pub(super) fn note_pane_state(
 ) {
     // An explanation waiting on this pane's turn, or waiting for a page from it
     // (t-32787): one atomic load when none stands.
-    crate::explain_door::note_pane_state(app, report.term, report.state);
+    crate::explain_door::note_pane_state(app, report);
     if report.state == zerocode_core::hook::HookState::Working {
         restart_nudge_runtime::received_working(app, report.term);
     }
