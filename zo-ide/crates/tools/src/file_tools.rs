@@ -675,6 +675,28 @@ pub(crate) fn run_read_image(
     input: &ReadImageInput,
     ctx: &ToolContext,
 ) -> Result<String, ToolError> {
+    stage_image(input, ctx, ImageIntake::AsIs)
+}
+
+/// How an image file is taken in by [`stage_image`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageIntake {
+    /// Staged as the file is (`read_image`): the person pointed at those
+    /// pixels, so they are never re-encoded.
+    AsIs,
+    /// A frame the Computer tool exported of the screen: a heavy PNG is
+    /// re-encoded as a JPEG of the same pixels
+    /// (`runtime::image_guard::lighten_screenshot`), because the model reads
+    /// the frame and the session re-sends it on every later request.
+    Screenshot,
+}
+
+/// [`run_read_image`] for a given intake.
+pub(crate) fn stage_image(
+    input: &ReadImageInput,
+    ctx: &ToolContext,
+    intake: ImageIntake,
+) -> Result<String, ToolError> {
     use base64::Engine as _;
     use runtime::image_guard::{guard_image_bytes, ImageGuardOutcome};
 
@@ -691,6 +713,17 @@ pub(crate) fn run_read_image(
             "read_image: unsupported image format (expected PNG, JPEG, GIF, or WEBP)".to_owned(),
         )
     })?;
+    // A heavy screenshot is lightened BEFORE the guard: the guard then sees the
+    // bytes that will be stored, and a JPEG of the same pixels has the same
+    // dimensions, so nothing the guard decides about them changes.
+    let lightened = (intake == ImageIntake::Screenshot
+        && !runtime::image_guard::screenshots_stay_lossless())
+    .then(|| runtime::image_guard::lighten_screenshot(&bytes))
+    .flatten();
+    let (bytes, media_type) = match lightened {
+        Some(jpeg) => (jpeg, "image/jpeg"),
+        None => (bytes, media_type),
+    };
 
     // Dimension-guard on ingest so an oversized image (e.g. a full-page browser
     // screenshot taller than 8000px) never enters conversation history: baked
@@ -1601,7 +1634,7 @@ mod debug_hypothesis_tests {
 
 #[cfg(test)]
 mod read_image_tests {
-    use super::{run_read_image, sniff_image_mime, ReadImageInput};
+    use super::{run_read_image, sniff_image_mime, stage_image, ImageIntake, ReadImageInput};
     use crate::context::ToolContext;
     use runtime::session::{ContentBlock, ConversationMessage};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1799,6 +1832,86 @@ mod read_image_tests {
             "exactly one image staged",
         );
         let _ = std::fs::remove_file(&image);
+    }
+
+    /// A frame a photograph of a screen would be: smooth colour with a little
+    /// grain in the low bits — heavy as a PNG, light as a JPEG.
+    fn heavy_photographic_png() -> Vec<u8> {
+        let mut state: u32 = 0x2468_ACE1;
+        let frame = image::RgbImage::from_fn(1280, 800, |x, y| {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let grain = u8::try_from((state >> 16) % 5).unwrap_or(0);
+            image::Rgb([
+                u8::try_from(x * 255 / 1280).unwrap_or(u8::MAX).saturating_add(grain),
+                u8::try_from(y * 255 / 800).unwrap_or(u8::MAX).saturating_add(grain),
+                u8::try_from((x + y) * 255 / 2080).unwrap_or(u8::MAX).saturating_add(grain),
+            ])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(frame)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode the fixture");
+        out.into_inner()
+    }
+
+    fn staged_summary(path: &std::path::Path, intake: ImageIntake) -> (serde_json::Value, Vec<(String, String)>) {
+        let ctx = ToolContext::new();
+        let out = stage_image(
+            &ReadImageInput {
+                path: path.to_string_lossy().into_owned(),
+            },
+            &ctx,
+            intake,
+        )
+        .expect("the frame stages");
+        let staged = std::mem::take(
+            &mut *ctx
+                .image_sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        (serde_json::from_str(&out).expect("json summary"), staged)
+    }
+
+    /// A frame the Computer tool exports is a photograph of a screen for the
+    /// model, and the session re-sends it on every later request: a heavy one is
+    /// staged as a JPEG of the same pixels. `read_image` is the person pointing at
+    /// pixels — those are never re-encoded — and the person can ask for lossless.
+    #[test]
+    fn a_heavy_screenshot_is_lightened_unless_the_person_asked_for_lossless() {
+        let png = heavy_photographic_png();
+        assert!(png.len() >= runtime::image_guard::SCREENSHOT_LOSSY_MIN_BYTES, "{} bytes", png.len());
+        let path = temp_file("heavy-shot", &png);
+
+        let (summary, staged) = staged_summary(&path, ImageIntake::Screenshot);
+        assert_eq!(summary["media_type"], "image/jpeg", "summary: {summary}");
+        assert_eq!(staged[0].0, "image/jpeg");
+        let bytes = summary["bytes"].as_u64().expect("staged bytes");
+        assert!(bytes * 2 <= png.len() as u64, "half the bytes go: {} -> {bytes}", png.len());
+        assert_eq!(
+            runtime::image_guard::peek_dimensions(&staged[0].1),
+            Some((1280, 800)),
+            "the same pixels, so every coordinate the model reads still holds"
+        );
+
+        let (summary, staged) = staged_summary(&path, ImageIntake::AsIs);
+        assert_eq!(summary["media_type"], "image/png", "read_image keeps the person's pixels");
+        assert_eq!(staged[0].0, "image/png");
+
+        std::env::set_var(runtime::image_guard::SCREENSHOT_LOSSLESS_ENV, "1");
+        let (summary, _) = staged_summary(&path, ImageIntake::Screenshot);
+        std::env::remove_var(runtime::image_guard::SCREENSHOT_LOSSLESS_ENV);
+        assert_eq!(summary["media_type"], "image/png", "the person asked for lossless: {summary}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_small_screenshot_is_staged_as_it_is() {
+        let path = temp_file("small-shot", PNG_1X1);
+        let (summary, staged) = staged_summary(&path, ImageIntake::Screenshot);
+        assert_eq!(summary["media_type"], "image/png", "summary: {summary}");
+        assert_eq!(staged[0].0, "image/png");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

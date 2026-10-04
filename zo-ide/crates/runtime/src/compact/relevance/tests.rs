@@ -394,6 +394,37 @@ fn shadow_answers_and_unpersisted_originals_do_not_take_the_retention_road() {
     }
 }
 
+/// Pictures belong to the byte budget (`picture_budget`: the oldest are left out of
+/// a REQUEST, the stored session untouched), not to this road. A judgment reads
+/// text and cannot establish that the pixels in a result are dispensable, so a
+/// drop that clears a result's pictures stays on the summary road — retention
+/// keeps its place beside the budget instead of overlapping it.
+#[test]
+fn a_dropped_result_that_carried_pictures_never_takes_the_retention_road() {
+    let _env = crate::test_env_lock();
+    let dir = tempfile::tempdir().expect("a session dir");
+    let mut session = Session::new().with_persistence_path(dir.path().join("pictures.jsonl"));
+    for mut message in session_with_four_results().messages.iter().cloned() {
+        if let Some(ContentBlock::ToolResult { images, tool_use_id, .. }) = message.blocks.first_mut() {
+            if tool_use_id.as_str() == "t1" {
+                images.push(("image/png".to_string(), "AAAA".to_string()));
+            }
+        }
+        session.push_message(message).expect("push");
+    }
+    let (plan, judged) = api::sync_bridge::run_blocking(judge_plan(
+        &Says(CompactionJudgment { dropped: vec![0], applies: true }),
+        &session,
+        plan_of(&session),
+        MIN_BYTES,
+        "attempt",
+    ));
+    assert_eq!(judged.dropped, 1, "the judgment applied");
+    let assessment = crate::compact::retention_assessment(&plan, usize::MAX, 5);
+    assert!(!assessment.eligible, "a result that carried pictures is not retained");
+    assert_eq!(assessment.reason, "images");
+}
+
 #[test]
 fn a_summary_refused_by_a_peer_write_preserves_the_original_plan_and_reports_no_change() {
     let _env = crate::test_env_lock();
