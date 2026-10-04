@@ -87,15 +87,10 @@ impl HandIns {
         self.by_message.get(message).map(|held| &held.facts)
     }
 
-    /// Every hand-in record of one task, newest first — the read-only door a
-    /// per-task view reads (t-36910). A task whose workers handed in nothing by
-    /// name answers with none. The view lands on its own task; until it does,
-    /// only this file's test reads the door, and the expectation says so — it
-    /// fails the build the day a reader appears, so it is removed with it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the per-task view (t-36910) is its reader")
-    )]
+    /// Every hand-in record of one task, newest first — the read-only door the
+    /// per-task view reads for what a worker said to expect of a file
+    /// (t-36910). A task whose workers handed in nothing by name answers with
+    /// none.
     pub(crate) fn of_task(&self, run: &str, task: &str) -> Vec<&Manifest> {
         let mut found: Vec<&Manifest> = self
             .by_message
@@ -291,6 +286,20 @@ impl Store {
     /// the error says the next boot will not.
     pub(crate) fn note_hand_in(&self, manifest: Manifest) -> Result<(), String> {
         let line = serde_json::to_string(&manifest).map_err(|error| error.to_string())?;
+        // What the worker said to expect of a file qualifies that file's
+        // verdict: a preview drawn before the record came is read again.
+        {
+            let mut previews = self.previews.lock().unwrap_or_else(PoisonError::into_inner);
+            for entry in manifest
+                .entries
+                .iter()
+                .filter(|entry| entry.expect.is_some())
+            {
+                if let Some(id) = &entry.artifact {
+                    previews.evict(id);
+                }
+            }
+        }
         let mut book = self.hand_ins();
         book.insert(manifest);
         book.lines += 1;

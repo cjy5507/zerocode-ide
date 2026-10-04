@@ -121,6 +121,24 @@ pub(crate) fn artifact_counts() -> Result<artifact_runtime::Counts, String> {
     Ok(store_or_refuse()?.counts())
 }
 
+/// The catalog read by task (t-36910): one line for each task the filter
+/// admits, newest first and bounded by the table, and the rows no task is
+/// linked to, counted.
+#[tauri::command(async)]
+pub(crate) fn artifact_tasks(
+    filter: artifact_runtime::Filter,
+) -> Result<artifact_runtime::TaskListing, String> {
+    Ok(store_or_refuse()?.tasks(&filter))
+}
+
+/// Everything one task holds — its reports, pictures, logs and pages, with
+/// what each log says. `None` for a task no row names. The logs are read off
+/// the window's thread, like every other read here.
+#[tauri::command(async)]
+pub(crate) fn artifact_bundle(task: String) -> Result<Option<artifact_runtime::Bundle>, String> {
+    Ok(store_or_refuse()?.bundle(&task))
+}
+
 fn path_of(id: &str) -> Result<PathBuf, String> {
     let artifact = store_or_refuse()?
         .get(id)

@@ -16,7 +16,10 @@
 //!   `PostToolUse` of `Write` or `Artifact`) names `transcript_path`, and the
 //!   tail past the remembered stamp is read then — bounded by
 //!   `transcript_tail_bytes` when the file was never met. This IS the
-//!   existing event; the transcript is not watched.
+//!   existing event; the transcript is not watched. Only this road knows the
+//!   pane the transcript is written in, so only its rows carry what the
+//!   ledger vouches for of that pane: the run, the worker and the task
+//!   (t-36910). A row the boot road registers names none of them.
 //!
 //! What it registers: `Artifact` results as `Web` rows (one per url), and a
 //! table extension under the project root as a page only when the writer's
@@ -41,7 +44,7 @@ use zerocode_core::artifact_transcript::{ExtractionState, Fact, Speaker, extract
 use zerocode_core::civil::epoch_ms_of_iso;
 use zerocode_core::hook::{HookEnvelope, Phase, Tool};
 
-use crate::artifact_runtime::Store;
+use crate::artifact_runtime::{HeldPane, Store, Writer};
 
 /// The stamp file's name under the store root.
 pub(crate) const STAMPS_FILE: &str = "transcripts.json";
@@ -293,18 +296,36 @@ fn session_of(path: &Path) -> Option<String> {
         .map(|stem| stem.to_string_lossy().into_owned())
 }
 
+/// Whose transcript is read and — on the hook road — the pane that handed it
+/// over. A speaker alone is a transcript no pane handed over: the boot road.
+#[derive(Clone, Copy)]
+pub(crate) struct Voice<'a> {
+    speaker: Speaker,
+    pane: Option<&'a HeldPane>,
+}
+
+impl From<Speaker> for Voice<'_> {
+    fn from(speaker: Speaker) -> Self {
+        Self {
+            speaker,
+            pane: None,
+        }
+    }
+}
+
 /// Register the facts of one transcript's unread stretch. `project` is the
 /// root zo's rootless lines are judged against; Claude's lines carry their
 /// own. Counts actual bytes read separately from the committed cursor.
-pub(crate) fn note_transcript(
+pub(crate) fn note_transcript<'a>(
     store: &Store,
     stamps: &mut Stamps,
     path: &Path,
-    speaker: Speaker,
+    voice: impl Into<Voice<'a>>,
     project: Option<&Path>,
     most: u64,
     now_ms: i64,
 ) -> BackfillReport {
+    let Voice { speaker, pane } = voice.into();
     let limits = store.limits();
     let mut report = BackfillReport {
         files: 1,
@@ -343,9 +364,12 @@ pub(crate) fn note_transcript(
     mark.at_ms = now_ms;
     mark.project = project;
     stamps.mark(path, mark, limits.transcript_files_max * 2);
-    let agent = match speaker {
-        Speaker::Claude => AgentKind::Claude.slug(),
-        Speaker::Zo => AgentKind::Zo.slug(),
+    let writer = Writer {
+        agent: match speaker {
+            Speaker::Claude => AgentKind::Claude.slug(),
+            Speaker::Zo => AgentKind::Zo.slug(),
+        },
+        pane,
     };
     let session = session_of(path);
     for fact in facts {
@@ -354,7 +378,7 @@ pub(crate) fn note_transcript(
                 if held.session.is_none() {
                     held.session = session.clone();
                 }
-                if store.register_remote(&held, agent, now_ms).is_ok() {
+                if store.register_remote(&held, writer, now_ms).is_ok() {
                     report.remote += 1;
                 }
             }
@@ -362,7 +386,7 @@ pub(crate) fn note_transcript(
                 if held.session.is_none() {
                     held.session = session.clone();
                 }
-                if let Ok(Some(row)) = store.register_page(&held, agent, now_ms) {
+                if let Ok(Some(row)) = store.register_page(&held, writer, now_ms) {
                     stamps.created_pages.insert(row.path);
                     report.pages += 1;
                 }
@@ -954,11 +978,20 @@ pub(crate) fn reading_of(envelope: &HookEnvelope, now_ms: i64) -> Option<Reading
 }
 
 /// The hook road: read what the envelope points at and register it. Answers
-/// whether anything landed, so the caller can tell the window once.
-pub(crate) fn note_hook(store: &Store, envelope: &HookEnvelope, now_ms: i64) -> bool {
+/// whether anything landed, so the caller can tell the window once. `pane`
+/// answers for the pane the hook came from — asked only once the envelope
+/// turned out to be worth a read, and `None` for a pane the window does not
+/// hold.
+pub(crate) fn note_hook(
+    store: &Store,
+    envelope: &HookEnvelope,
+    pane: impl FnOnce() -> Option<HeldPane>,
+    now_ms: i64,
+) -> bool {
     let Some(reading) = reading_of(envelope, now_ms) else {
         return false;
     };
+    let pane = pane();
     let limits = store.limits();
     let _reading = store
         .transcript_reads
@@ -969,7 +1002,10 @@ pub(crate) fn note_hook(store: &Store, envelope: &HookEnvelope, now_ms: i64) -> 
         store,
         &mut stamps,
         &reading.path,
-        reading.speaker,
+        Voice {
+            speaker: reading.speaker,
+            pane: pane.as_ref(),
+        },
         reading.project.as_deref(),
         limits.transcript_tail_bytes,
         now_ms,
@@ -1314,14 +1350,126 @@ mod tests {
         assert!(note_hook(
             &store,
             &envelope(AgentKind::Claude, &payload),
+            || None,
             1_000
         ));
         assert_eq!(store.len(), 2);
         assert!(
-            !note_hook(&store, &envelope(AgentKind::Claude, &payload), 2_000),
+            !note_hook(
+                &store,
+                &envelope(AgentKind::Claude, &payload),
+                || None,
+                2_000
+            ),
             "nothing new was appended, nothing new landed"
         );
         assert_eq!(Stamps::load(store.root()).len(), 1);
+    }
+
+    /// What the ledger vouches for of a pane rides on the rows its transcript
+    /// names (t-36910): a page a worker wrote, and the artifact it published,
+    /// carry the worker's run, task and the task's words — on the hook road,
+    /// the only road that knows the pane. A seat another agent sits in vouches
+    /// for nothing, a pane the window does not hold names nothing, and the boot
+    /// road, which no pane handed the transcript to, names the agent and the
+    /// session and no more.
+    #[test]
+    fn a_page_written_in_a_workers_pane_carries_the_task_the_ledger_seats_there() {
+        use crate::artifact_runtime::PaneFacts;
+        let stop = |agent: AgentKind, transcript: &Path| HookEnvelope {
+            agent,
+            pane_key: "term-3".into(),
+            tab_id: String::new(),
+            launch_token: String::new(),
+            worktree_id: String::new(),
+            env: String::new(),
+            version: String::new(),
+            hook_event_name: String::new(),
+            payload: serde_json::json!({
+                "hook_event_name": "Stop",
+                "session_id": "s-1",
+                "transcript_path": transcript.display().to_string(),
+            })
+            .to_string(),
+        };
+        let seated = |agent: &str| {
+            Some(HeldPane {
+                key: "term-3".into(),
+                facts: PaneFacts {
+                    agent: Some(agent.into()),
+                    model: Some("claude-sonnet-5-5".into()),
+                    run: Some("run-1".into()),
+                    worker: Some("w-7".into()),
+                    task: Some("t-7".into()),
+                    work: Some("the gallery reads by task".into()),
+                },
+            })
+        };
+        // Each case reads the same transcript into its own store.
+        let rows_of = |pane: Option<HeldPane>, hook: bool| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (transcript, page) = claude_fixture(dir.path());
+            let store = Store::open(&dir.path().join("data"), Limits::default());
+            if hook {
+                assert!(note_hook(
+                    &store,
+                    &stop(AgentKind::Claude, &transcript),
+                    || pane,
+                    1_000
+                ));
+            } else {
+                let roots = roots(&dir.path().join("home"), &dir.path().join("window-home"));
+                assert!(backfill(&store, &roots, 1_000).changed());
+            }
+            let rows = store.list(&Filter::default()).rows;
+            assert_eq!(rows.len(), 2, "the web row and the page: {rows:?}");
+            let page = page.canonicalize().expect("the page is there");
+            let (pages, webs): (Vec<_>, Vec<_>) =
+                rows.into_iter().partition(|row| row.path == page);
+            (pages[0].origin.clone(), webs[0].origin.clone())
+        };
+        let vouched = |origin: &zerocode_core::artifact::Origin| {
+            (
+                origin.pane.clone(),
+                origin.run.clone(),
+                origin.worker.clone(),
+                origin.task.clone(),
+                origin.work_summary.clone(),
+                origin.model.clone(),
+            )
+        };
+        let nothing = (None, None, None, None, None, None);
+
+        let (page, web) = rows_of(seated("claude"), true);
+        let whole = (
+            Some("term-3".to_string()),
+            Some("run-1".to_string()),
+            Some("w-7".to_string()),
+            Some("t-7".to_string()),
+            Some("the gallery reads by task".to_string()),
+            Some("claude-sonnet-5-5".to_string()),
+        );
+        assert_eq!(vouched(&page), whole, "the page a worker wrote");
+        assert_eq!(vouched(&web), whole, "the artifact it published");
+        assert_eq!(page.agent.as_deref(), Some("claude"));
+        assert!(page.session.is_some() && page.project.is_some());
+
+        // The ledger seats a codex worker in the pane a claude transcript came
+        // from: the pane is named, and nothing of the seat.
+        let (page, _) = rows_of(seated("codex"), true);
+        assert_eq!(
+            vouched(&page),
+            (Some("term-3".to_string()), None, None, None, None, None)
+        );
+        assert_eq!(page.agent.as_deref(), Some("claude"));
+
+        let (page, _) = rows_of(None, true);
+        assert_eq!(vouched(&page), nothing, "a pane the window does not hold");
+
+        let (page, web) = rows_of(None, false);
+        assert_eq!(vouched(&page), nothing, "the boot road knows no pane");
+        assert_eq!(vouched(&web), nothing);
+        assert_eq!(page.agent.as_deref(), Some("claude"));
     }
 
     /// A file the stamps say was read further than it is long was rewritten:
