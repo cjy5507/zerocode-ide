@@ -248,12 +248,12 @@ fn a_cap_leaves_only_the_newest_n_whatever_the_body() {
     let mut expected = vec![false; 6];
     expected.extend([true, true]);
     assert_eq!(wire_pictures(&two), expected);
-    let one = convert_messages_for(&history, target.with_picture_cap(Some(1)));
+    let just_newest = convert_messages_for(&history, target.with_picture_cap(Some(1)));
     let mut expected = vec![false; 7];
     expected.push(true);
-    assert_eq!(wire_pictures(&one), expected);
-    let none = convert_messages_for(&history, target.with_picture_cap(None));
-    assert_eq!(wire_pictures(&none), vec![true; 8], "no cap, no ceiling: everything");
+    assert_eq!(wire_pictures(&just_newest), expected);
+    let uncapped = convert_messages_for(&history, target.with_picture_cap(None));
+    assert_eq!(wire_pictures(&uncapped), vec![true; 8], "no cap, no ceiling: everything");
 }
 
 #[test]

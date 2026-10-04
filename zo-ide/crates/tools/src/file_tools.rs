@@ -1833,15 +1833,15 @@ mod read_image_tests {
 
     /// A frame a photograph of a screen would be: smooth colour with a little
     /// grain in the low bits — heavy as a PNG, light as a JPEG.
-    fn heavy_photographic_png() -> Vec<u8> {
+    fn heavy_photographic_png(width: u32, height: u32) -> Vec<u8> {
         let mut state: u32 = 0x2468_ACE1;
-        let frame = image::RgbImage::from_fn(1280, 800, |x, y| {
+        let frame = image::RgbImage::from_fn(width, height, |x, y| {
             state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
             let grain = u8::try_from((state >> 16) % 5).unwrap_or(0);
             image::Rgb([
-                u8::try_from(x * 255 / 1280).unwrap_or(u8::MAX).saturating_add(grain),
-                u8::try_from(y * 255 / 800).unwrap_or(u8::MAX).saturating_add(grain),
-                u8::try_from((x + y) * 255 / 2080).unwrap_or(u8::MAX).saturating_add(grain),
+                u8::try_from(x * 255 / width).unwrap_or(u8::MAX).saturating_add(grain),
+                u8::try_from(y * 255 / height).unwrap_or(u8::MAX).saturating_add(grain),
+                u8::try_from((x + y) * 255 / (width + height)).unwrap_or(u8::MAX).saturating_add(grain),
             ])
         });
         let mut out = std::io::Cursor::new(Vec::new());
@@ -1876,7 +1876,9 @@ mod read_image_tests {
     /// pixels — those are never re-encoded — and the person can ask for lossless.
     #[test]
     fn a_heavy_screenshot_is_lightened_unless_the_person_asked_for_lossless() {
-        let png = heavy_photographic_png();
+        // The lock and the restore: the variable is the process's, not this test's.
+        let _env = crate::tests::EnvGuard::clear(runtime::image_guard::SCREENSHOT_LOSSLESS_ENV);
+        let png = heavy_photographic_png(1280, 800);
         assert!(png.len() >= runtime::image_guard::SCREENSHOT_LOSSY_MIN_BYTES, "{} bytes", png.len());
         let path = temp_file("heavy-shot", &png);
 
@@ -1908,6 +1910,29 @@ mod read_image_tests {
         let (summary, staged) = staged_summary(&path, ImageIntake::Screenshot);
         assert_eq!(summary["media_type"], "image/png", "summary: {summary}");
         assert_eq!(staged[0].0, "image/png");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A frame wider than the guard's box (a capture from a Retina display): the
+    /// guard shrinks it to a PNG first, and that PNG is the one lightened. Lightened
+    /// first, the JPEG would meet the guard and come back out as a PNG again — the
+    /// heavy file this exists to avoid.
+    #[test]
+    fn a_frame_the_guard_has_to_shrink_is_lightened_from_the_png_it_kept() {
+        let _env = crate::tests::EnvGuard::clear(runtime::image_guard::SCREENSHOT_LOSSLESS_ENV);
+        let box_edge = runtime::image_guard::IMAGE_CLAMP_DIMENSION;
+        let png = heavy_photographic_png(box_edge + 200, 800);
+        let path = temp_file("wide-shot", &png);
+
+        let (summary, staged) = staged_summary(&path, ImageIntake::Screenshot);
+        assert_eq!(summary["downscaled"], true, "the guard shrank it: {summary}");
+        assert_eq!(summary["media_type"], "image/jpeg", "and the PNG it kept was lightened: {summary}");
+        let (width, height) = runtime::image_guard::peek_dimensions(&staged[0].1)
+            .expect("the staged JPEG's header is readable");
+        assert!(
+            width.max(height) <= box_edge,
+            "the staged frame fits the guard's box: {width}x{height}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

@@ -438,10 +438,39 @@ mod tests {
     #[test]
     fn a_picture_bigger_than_a_step_still_leaves_when_it_has_to() {
         // 90 bytes each: one picture is more than a step. Four of them over a
-        // 100-byte trigger need 260 freed; the budget reaches for two whole
-        // steps beyond the first picture, never loops, never keeps what must go.
+        // 100-byte trigger need 260 freed, but the newest two stay: only two can go.
         let shed = shed_count(&[90; 4], 0, Some(BUDGET), None);
         assert_eq!(shed, 2, "the newest two stay, so only two can go");
+    }
+
+    #[test]
+    fn a_step_that_frees_too_little_reaches_for_the_next_one() {
+        // 90 + 90 + 10 + 10 is 100 over the trigger. That rounds up to a reach of 100
+        // bytes, which holds the oldest picture (90) and not the second (180), so only
+        // 90 of the 100 needed would go: the reach grows to the step that holds the
+        // second one, and both leave.
+        assert_eq!(shed_count(&[90, 90, 10, 10], 0, Some(BUDGET), None), 2);
+        // The same with room to spare at the end: 495 over a trigger of 1,000 is one
+        // reach of 500, which holds eight pictures of 60 (480, short of 495); the
+        // next reach (1,000) holds sixteen (960), so sixteen leave — not the eight
+        // that would leave the body over the trigger, and not all twenty-two.
+        let wide = PictureBudget {
+            trigger: 1_000,
+            step: 500,
+        };
+        assert_eq!(shed_count(&[60; 24], 55, Some(wide), None), 16);
+    }
+
+    #[test]
+    fn a_hand_built_budget_with_no_step_still_counts() {
+        // `PictureBudget`'s fields are public: a step of zero is read as one byte
+        // instead of dividing by it. A body of 200 against a trigger of 100 needs 100
+        // freed: five pictures of 20.
+        let stepless = PictureBudget {
+            trigger: 100,
+            step: 0,
+        };
+        assert_eq!(shed_count(&[20; 10], 0, Some(stepless), None), 5);
     }
 
     #[test]
