@@ -23,6 +23,11 @@ const DRAWER_SLACK = 16;
 const BAR_HEIGHT = 40;
 const TEXT_MIN_PX = 12;
 const PRESS_MIN_PX = 28;
+/* A window short enough that a card leaves the list when the drawer narrows it to one column, and
+ * how many times the drawer is opened and closed over it — enough rounds to tell a pool that makes
+ * nodes each round from one that made what it needs once. */
+const SHORT_WINDOW = Object.freeze({ width: REAL_WINDOW.width, height: 480 });
+const POOL_ROUNDS = 6;
 
 /* The words a card or the drawer says, by catalog key — every one of them must stand in the four
  * translated catalogs (Korean is the word the code carries). */
@@ -756,6 +761,203 @@ export async function testArtifactCards(browser, origin, ok) {
       JSON.stringify(still),
     );
     await page.emulateMedia({ reducedMotion: "no-preference" });
+
+    /* ---- what a gesture costs (t-40649) -------------------------------------------------------
+     * Counted, not timed: a count is the same on a fast machine and on a slow one. Each of these was
+     * work the tab paid on every paint or every opening where once is enough — on a machine four
+     * times slower, the part of a press a person waits for. */
+    const weight = await page.evaluate(async () => {
+      const view = artifactsView();
+      const pane = view?.querySelector(".artifacts-drawer") ?? null;
+      const md = pane?.querySelector(".artifact-preview-md") ?? null;
+      const strip = pane?.querySelector(".artifact-outline") ?? null;
+      const cards = view?.querySelector(".artifacts-cards") ?? null;
+      const shown = (node) => Boolean(node) && !node.hidden && node.getClientRects().length > 0;
+      const settle = () => new Promise((done) => setTimeout(done, 150));
+      const frames = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const seen = {};
+      view?.querySelector('[data-artifact-tab="reports"]')?.click();
+      await settle();
+      selectArtifact(view, "r-final");
+      await settle();
+
+      // 1. Cards that did not change: no formatter is built for them and nothing is written into them.
+      const kinds = ["DateTimeFormat", "RelativeTimeFormat", "NumberFormat"];
+      const real = kinds.map((kind) => Intl[kind]);
+      const built = [];
+      kinds.forEach((kind, at) => {
+        Intl[kind] = new Proxy(real[at], {
+          construct(target, args) {
+            built.push(kind);
+            return new target(...args);
+          },
+        });
+      });
+      const written = [];
+      const watch = new MutationObserver((records) => written.push(...records.map((one) => one.attributeName ?? one.type)));
+      if (cards) watch.observe(cards, { subtree: true, childList: true, characterData: true, attributes: true });
+      try {
+        for (let at = 0; at < 3; at += 1) paintArtifactCards(view);
+        await frames();
+      } finally {
+        written.push(...watch.takeRecords().map((one) => one.attributeName ?? one.type));
+        watch.disconnect();
+        kinds.forEach((kind, at) => {
+          Intl[kind] = real[at];
+        });
+      }
+      seen.cardsStanding = cards?.querySelectorAll(".artifact-card").length ?? 0;
+      seen.builtByRepaint = built.slice();
+      seen.writtenByRepaint = written.slice(0, 12);
+      seen.writes = written.length;
+
+      // 2. The task picker's list is built when the catalog's tasks are counted, not when the tab or
+      //    the filter moves.
+      const countWord = typeof artifactCountWord === "function" ? artifactCountWord : null;
+      let counted = 0;
+      if (countWord) {
+        artifactCountWord = (n) => {
+          counted += 1;
+          return countWord(n);
+        };
+      }
+      try {
+        view?.querySelector('[data-artifact-tab="pages"]')?.click();
+        await settle();
+        view?.querySelector('[data-artifact-tab="reports"]')?.click();
+        await settle();
+        filterArtifactsByTask(view, "t-501");
+        await settle();
+        filterArtifactsByTask(view, "");
+        await settle();
+        seen.countedByTabAndFilter = countWord ? counted : null;
+        const pick = view?.querySelector('[data-artifact-pick="task"]') ?? null;
+        seen.pickOptions = pick ? [...pick.options].map((one) => one.textContent.trim()) : [];
+        // …and it is built again once the tasks were counted again.
+        counted = 0;
+        indexArtifactTasks();
+        paintArtifactHead(view);
+        seen.countedAfterIndex = countWord ? counted : null;
+      } finally {
+        if (countWord) artifactCountWord = countWord;
+      }
+
+      // 3. One report's body never stands under another report's head: while the next report's
+      //    preview is on its way, the reader shows its head and no body.
+      selectArtifact(view, "r-final");
+      await settle();
+      const answer = window.__ANSWER__.artifact_preview;
+      let release = null;
+      window.__ANSWER__.artifact_preview = () => new Promise((done) => {
+        release = () => done({ kind: "markdown", text: "# 검증 보고 — 큐가 비워지는가\n\n비워진다.", bytes: 40, truncated: false });
+      });
+      try {
+        selectArtifact(view, "r-review");
+        await frames();
+        seen.asked = release !== null;
+        seen.headWhileWaiting = pane?.querySelector(".artifact-detail-task")?.textContent.trim() ?? null;
+        seen.bodyWhileWaiting = shown(md) ? md.textContent.trim().slice(0, 24) : null;
+        seen.outlineWhileWaiting = shown(strip);
+        release?.();
+        await settle();
+        seen.bodyAfter = shown(md) ? md.textContent.trim().slice(0, 24) : null;
+      } finally {
+        window.__ANSWER__.artifact_preview = answer;
+      }
+
+      // 4. Opening a long report measures no heading: the outline says the first one, and the places
+      //    of the headings are read once, when the reader first scrolls.
+      const rect = Element.prototype.getBoundingClientRect;
+      let measured = 0;
+      Element.prototype.getBoundingClientRect = function countedRect() {
+        if (this.classList?.contains("md-head")) measured += 1;
+        return rect.call(this);
+      };
+      try {
+        selectArtifact(view, "r-final");
+        await settle();
+        seen.measuredOnOpen = measured;
+        seen.nowOnOpen = shown(strip) ? strip.querySelector(".artifact-outline-now")?.textContent.trim() ?? null : null;
+        if (pane) pane.scrollTop = Math.round(pane.scrollHeight / 2);
+        await settle();
+        seen.measuredOnScroll = measured;
+        seen.nowAfterScroll = strip?.querySelector(".artifact-outline-now")?.textContent.trim() ?? null;
+        if (pane) pane.scrollTop += 40;
+        await settle();
+        seen.measuredOnSecondScroll = measured;
+      } finally {
+        Element.prototype.getBoundingClientRect = rect;
+      }
+      return seen;
+    });
+    ok(
+      "repainting cards that did not change builds no date or number formatter and writes nothing into them",
+      weight.cardsStanding > 0 && weight.builtByRepaint.length === 0 && weight.writes === 0,
+      JSON.stringify({ cards: weight.cardsStanding, built: weight.builtByRepaint.slice(0, 8), builtCount: weight.builtByRepaint.length, writes: weight.writes, written: weight.writtenByRepaint }),
+    );
+    ok(
+      "the task picker's list is built when the catalog's tasks are counted, not when the tab or the filter moves: two tab switches and a task filter count no row for it, and it still lists every task",
+      weight.countedByTabAndFilter === 0 && weight.countedAfterIndex > 0
+        && weight.pickOptions.some((one) => one.includes("t-501") && one.includes("3")),
+      JSON.stringify({ counted: weight.countedByTabAndFilter, afterIndex: weight.countedAfterIndex, options: weight.pickOptions }),
+    );
+    ok(
+      "one report's body never stands under another report's head: while the next preview is on its way the reader shows the new head and no body, then the new body",
+      weight.asked === true && weight.headWhileWaiting === "t-502" && weight.bodyWhileWaiting === null && weight.outlineWhileWaiting === false
+        && typeof weight.bodyAfter === "string" && weight.bodyAfter.startsWith("검증 보고"),
+      JSON.stringify({ asked: weight.asked, head: weight.headWhileWaiting, body: weight.bodyWhileWaiting, outline: weight.outlineWhileWaiting, after: weight.bodyAfter }),
+    );
+    ok(
+      "opening a long report measures no heading — the outline says the first one — and the headings' places are read once, when the reader first scrolls",
+      weight.measuredOnOpen === 0 && weight.nowOnOpen === "큐 닫기 재시도 — 닫을 때 남은 일을 비운다"
+        && weight.measuredOnScroll === fixture.headings && weight.measuredOnSecondScroll === fixture.headings
+        && typeof weight.nowAfterScroll === "string" && weight.nowAfterScroll !== weight.nowOnOpen,
+      JSON.stringify({
+        onOpen: weight.measuredOnOpen, nowOnOpen: weight.nowOnOpen, onScroll: weight.measuredOnScroll,
+        onSecondScroll: weight.measuredOnSecondScroll, nowAfterScroll: weight.nowAfterScroll, headings: fixture.headings,
+      }),
+    );
+
+    /* The card pool over the drawer's opening and closing (t-40649): at the real width the drawer
+     * takes the list from three columns to one, cards leave it and come back, and the pool must give
+     * each returning card a node it already has. A pool that makes nodes here grows by a card's
+     * worth of DOM every round, and every later paint walks all of it. */
+    await page.setViewportSize(SHORT_WINDOW);
+    const pool = await page.evaluate(async (rounds) => {
+      const view = artifactsView();
+      const cards = view?.querySelector(".artifacts-cards") ?? null;
+      const frames = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const standing = () => [...(cards?.querySelectorAll(".artifact-card") ?? [])].map((one) => one.dataset.id);
+      const made = () => (typeof artifactCardCreations === "number" ? artifactCardCreations : null);
+      const close = async () => {
+        artifactSelectedId = null;
+        paintArtifactCards(view);
+        paintArtifactDrawer(view);
+        await frames();
+      };
+      view?.querySelector('[data-artifact-tab="reports"]')?.click();
+      await new Promise((done) => setTimeout(done, 150));
+      await close();
+      const seen = { closed: standing().length, open: null, madeBefore: made() };
+      for (let round = 0; round < rounds; round += 1) {
+        selectArtifact(view, "r-final");
+        await frames();
+        if (seen.open === null) seen.open = standing().length;
+        await close();
+      }
+      seen.madeAfter = made();
+      const ids = standing();
+      seen.closedAfter = ids.length;
+      seen.twice = ids.filter((id, at) => ids.indexOf(id) !== at);
+      return seen;
+    }, POOL_ROUNDS);
+    await page.setViewportSize(REAL_WINDOW);
+    ok(
+      `opening and closing the drawer ${POOL_ROUNDS} times makes no card node: the cards that leave the narrowed list get their nodes back, and no card stands twice`,
+      pool.open !== null && pool.open < pool.closed && pool.closedAfter === pool.closed
+        && pool.madeBefore !== null && pool.madeAfter === pool.madeBefore && pool.twice.length === 0,
+      JSON.stringify({ closed: pool.closed, open: pool.open, closedAfter: pool.closedAfter, made: [pool.madeBefore, pool.madeAfter], twice: pool.twice }),
+    );
 
     const catalogs = await page.evaluate((keys) => {
       const missing = [];
