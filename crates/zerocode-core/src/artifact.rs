@@ -970,13 +970,19 @@ mod tests {
             ReportSubtype::of(Some("review"), Path::new("notes.md")),
             ReportSubtype::Review
         );
-        for unknown in ["essay", "Review", " review "] {
+        for unknown in ["essay", "Review"] {
             assert_eq!(
                 ReportSubtype::of(Some(unknown), Path::new("t-12-handover.md")),
                 ReportSubtype::Handover,
                 "{unknown:?} is not a word of the table"
             );
         }
+        // The word with space around it is the word: `hand_in` trims what the
+        // payload said, and the catalog reads the same type.
+        assert_eq!(
+            ReportSubtype::of(Some(" review "), Path::new("t-12-handover.md")),
+            ReportSubtype::Review
+        );
         for kind in ReportSubtype::ALL {
             assert_eq!(ReportSubtype::parse(kind.as_str()), Some(kind));
         }
