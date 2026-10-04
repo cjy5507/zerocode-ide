@@ -4887,29 +4887,9 @@ pub(super) fn answer_computer_command(
     } else if command.method == ComputerMethod::Observe {
         computer_use::observe::observe(&command.params.as_object().cloned().unwrap_or_default())
     } else if command.method == ComputerMethod::Handoff {
-        use computer_use::confirm::Decision;
-        use zerocode_core::computer_use_protocol::error_code;
-        let reason = command
-            .params
-            .get("reason")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let timeout = command
-            .params
-            .get("timeoutMs")
-            .and_then(serde_json::Value::as_u64);
-        let timeout = zerocode_core::computer_use::handoff_ms(timeout);
-        match computer_use::confirm::handoff(reason, timeout) {
-            Decision::Allowed => Ok(serde_json::json!({ "resumed": true, "reason": reason })),
-            Decision::Refused => Err(computer_use::ComputerUseError::new(
-                error_code::CONFIRMATION_REFUSED,
-                format!("the person cancelled the handoff ({reason})"),
-            )),
-            Decision::TimedOut => Err(computer_use::ComputerUseError::new(
-                error_code::CONFIRMATION_TIMEOUT,
-                format!("nobody took over within {timeout} ms ({reason})"),
-            )),
-        }
+        // The person's turn: one function answers the plain card and the card
+        // with a line for a one-time code.
+        computer_use::confirm::hand_the_desk(&command.params)
     } else if matches!(
         command.method,
         ComputerMethod::ReflexStart
@@ -5312,18 +5292,18 @@ pub(super) fn install_confirm_asker(app: AppHandle) {
     use computer_use::confirm;
     let handoff_app = app.clone();
     confirm::install_handoff_asker(Box::new(move |handoff| {
-        let receiver = confirm::open(&handoff.id);
+        let receiver = confirm::open_handoff(handoff);
         let _ = handoff_app.emit("computer:handoff", handoff);
-        let decision = confirm::wait(
+        let handed = confirm::wait_handed(
             &receiver,
             std::time::Duration::from_millis(handoff.timeout_ms),
         );
         confirm::close(&handoff.id);
         let _ = handoff_app.emit(
             "computer:handoff-closed",
-            serde_json::json!({ "id": handoff.id, "decision": decision }),
+            confirm::closed_said(&handoff.id, handed.decision),
         );
-        decision
+        handed
     }));
     confirm::install_asker(Box::new(move |ask| {
         let receiver = confirm::open(&ask.id);

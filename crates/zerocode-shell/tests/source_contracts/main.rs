@@ -13,6 +13,7 @@ mod crash_report;
 mod fixture_cases;
 mod git_doors;
 mod hand_in_keep;
+mod handoff_code;
 mod jev_pane_seats;
 mod quiet_children;
 mod quota_wall;

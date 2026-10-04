@@ -23454,3 +23454,427 @@ fn a_helpers_sidecar_is_read_from_beside_its_transcript_only() {
         assert_eq!(helper_about(&transcript), None, "a pipe was read");
     }
 }
+
+/// The person's turn with a line for a one-time code (t-40807), through the
+/// door every agent's `zerocode-computer` comes in by: what the agent is
+/// handed and how, what it is not handed, and that nothing else of the window
+/// can answer for the person while the card stands. The windowless parts —
+/// the pending table, the rule for a code — are pinned where they live
+/// (`computer_use::confirm`, core's `handoff_code`); this is the road between.
+mod handoff_code_road {
+    use std::cell::RefCell;
+    use std::sync::{Mutex, Once};
+
+    use serde_json::{Value, json};
+    use zerocode_core::computer_use::parse_command;
+    use zerocode_core::computer_use_protocol::error_code;
+    use zerocode_core::handoff_code::{CodeLimits, OneTimeCode};
+
+    use crate::agent_tools_runtime::{
+        answer_computer_command, call_with_the_persons_last_step, said_envelope,
+    };
+    use crate::computer_use::ComputerUseError;
+    use crate::computer_use::confirm::{self, Asking, Decision, Handed, Handoff};
+    use crate::tests::computer_desktop_wait::ONE_HAND;
+
+    const A_CODE_REASON: &str = "카카오톡 인증번호";
+    const A_CODE: &str = "493021";
+
+    fn words(argv: &[&str]) -> Vec<String> {
+        argv.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    fn one_hand() -> std::sync::MutexGuard<'static, ()> {
+        ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A card that closes when its test ends, passed or failed, so one that
+    /// fails never leaves the person "being asked" for the tests after it.
+    struct Standing(String);
+
+    impl Drop for Standing {
+        fn drop(&mut self) {
+            confirm::close(&self.0);
+        }
+    }
+
+    /// What the person at the window is going to say to the next card, and the
+    /// cards they were shown: whether each had a line, and its reason.
+    #[derive(Default)]
+    struct Person {
+        will_say: Option<Handed>,
+        shown: Vec<(bool, String)>,
+    }
+
+    static PERSON: Mutex<Person> = Mutex::new(Person {
+        will_say: None,
+        shown: Vec::new(),
+    });
+
+    /// Seats the person once for the whole binary: the window's asker is set
+    /// once and answers from what the test last had the person say.
+    fn seat_a_person() {
+        static SEATED: Once = Once::new();
+        SEATED.call_once(|| {
+            confirm::install_handoff_asker(Box::new(|card| {
+                let mut person = PERSON
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                person
+                    .shown
+                    .push((card.code_ask.is_some(), card.reason.clone()));
+                person
+                    .will_say
+                    .take()
+                    .unwrap_or_else(|| Handed::said(Decision::TimedOut))
+            }));
+        });
+        let mut person = PERSON
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        person.will_say = None;
+        person.shown.clear();
+    }
+
+    fn person_types(typed: &str) {
+        let code = OneTimeCode::parse(typed);
+        assert!(code.is_ok(), "the person typed a code: {typed:?}");
+        PERSON
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .will_say = Some(Handed {
+            decision: Decision::Allowed,
+            code: code.ok(),
+        });
+    }
+
+    fn person_says(decision: Decision) {
+        PERSON
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .will_say = Some(Handed::said(decision));
+    }
+
+    fn shown_cards() -> Vec<(bool, String)> {
+        PERSON
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shown
+            .clone()
+    }
+
+    fn at_the_door(argv: &[&str]) -> zerocode_hookd::TeamAnswer {
+        answer_computer_command(&words(argv), None, Asking::Person, None)
+    }
+
+    fn envelope_of(answer: &zerocode_hookd::TeamAnswer) -> Value {
+        let line = [answer.stdout.as_str(), answer.stderr.as_str()]
+            .into_iter()
+            .flat_map(str::lines)
+            .find(|line| line.trim_start().starts_with('{'))
+            .unwrap_or("{}");
+        serde_json::from_str(line.trim()).unwrap_or(Value::Null)
+    }
+
+    /// The code is what the agent's `$(…)` holds in text, and one field of the
+    /// envelope in JSON: said once, and by nothing but the answer.
+    #[test]
+    fn a_code_is_said_alone_in_text_and_inside_the_envelope_in_json() {
+        let _hand = one_hand();
+        seat_a_person();
+        person_types("493 021");
+        let said = at_the_door(&[
+            "handoff",
+            "--ask-code",
+            "--reason",
+            A_CODE_REASON,
+            "--timeout-ms",
+            "180000",
+        ]);
+        assert_eq!(said.exit_code, 0, "{}", said.stderr);
+        assert_eq!(
+            said.stdout,
+            format!("{A_CODE}\n"),
+            "text mode says the code and nothing else, so what a script holds is just it"
+        );
+        assert_eq!(shown_cards(), [(true, A_CODE_REASON.to_string())]);
+
+        person_types("493021");
+        let said = at_the_door(&["handoff", "--ask-code", "--reason", A_CODE_REASON, "--json"]);
+        let envelope = envelope_of(&said);
+        assert_eq!(envelope["ok"], true, "{}", said.stdout);
+        assert_eq!(envelope["result"]["code"], A_CODE);
+        assert_eq!(envelope["result"]["codeLength"], 6);
+        assert_eq!(
+            said.stdout.matches(A_CODE).count(),
+            1,
+            "the code stands once in its answer"
+        );
+    }
+
+    /// A plain turn answers as it always did, and an agent that asked a card
+    /// with a line for a secret hears that no code was taken.
+    #[test]
+    fn a_plain_turn_is_the_plain_answer_and_a_secret_reason_says_no_code_was_taken() {
+        let _hand = one_hand();
+        seat_a_person();
+        person_says(Decision::Allowed);
+        let plain = at_the_door(&["handoff", "--reason", A_CODE_REASON, "--json"]);
+        assert_eq!(
+            envelope_of(&plain)["result"],
+            json!({ "resumed": true, "reason": A_CODE_REASON })
+        );
+        assert_eq!(shown_cards(), [(false, A_CODE_REASON.to_string())]);
+
+        person_says(Decision::Allowed);
+        let secret = at_the_door(&[
+            "handoff",
+            "--ask-code",
+            "--reason",
+            "카드 비밀번호",
+            "--json",
+        ]);
+        assert_eq!(
+            envelope_of(&secret)["result"],
+            json!({
+                "resumed": true,
+                "reason": "카드 비밀번호",
+                "code": null,
+                "codeRefused": "secret_reason",
+            })
+        );
+        assert_eq!(
+            shown_cards().last(),
+            Some(&(false, "카드 비밀번호".to_string())),
+            "the card for a secret has no line"
+        );
+    }
+
+    /// A script that holds the answer in `$(…)` must never go on with no code
+    /// in it: asked for a code the card had no line for, text mode is an error
+    /// that says why — the turn, which the person took, is over — so a `&&` in
+    /// front of the typing stops; the envelope says `code: null` to a reader.
+    #[test]
+    fn text_mode_with_no_code_taken_is_an_error_that_stops_a_script() {
+        let _hand = one_hand();
+        seat_a_person();
+        person_says(Decision::Allowed);
+        let said = at_the_door(&["handoff", "--ask-code", "--reason", "카드 비밀번호"]);
+        assert_ne!(
+            said.exit_code, 0,
+            "an answer with no code in it must not read as one to type"
+        );
+        assert!(
+            said.stdout.is_empty(),
+            "nothing on stdout for a pipe to type: {:?}",
+            said.stdout
+        );
+        assert!(
+            said.stderr.contains("no code was taken"),
+            "the error says why: {}",
+            said.stderr
+        );
+        assert_eq!(
+            shown_cards().last(),
+            Some(&(false, "카드 비밀번호".to_string())),
+            "the person still had the plain card"
+        );
+    }
+
+    /// A cancel and a silence are the answers of the plain turn, byte for
+    /// byte, whether or not the card had a line.
+    #[test]
+    fn a_cancel_and_a_silence_read_the_same_with_or_without_a_line() {
+        let _hand = one_hand();
+        seat_a_person();
+        for decision in [Decision::Refused, Decision::TimedOut] {
+            let say = |ask_code: bool| {
+                person_says(decision);
+                let mut argv = vec!["handoff", "--reason", A_CODE_REASON, "--timeout-ms", "180000"];
+                if ask_code {
+                    argv.push("--ask-code");
+                }
+                at_the_door(&argv)
+            };
+            let plain = say(false);
+            let coded = say(true);
+            assert_ne!(plain.exit_code, 0, "{decision:?} is a refusal");
+            assert_eq!(
+                (coded.exit_code, coded.stdout, coded.stderr),
+                (plain.exit_code, plain.stdout, plain.stderr),
+                "{decision:?}"
+            );
+        }
+    }
+
+    /// Nothing of the window answers for the person while a card with a line
+    /// stands: every action is refused `person_asked`, as for any question.
+    #[test]
+    fn nothing_acts_while_a_card_with_a_line_stands() {
+        let _hand = one_hand();
+        let id = confirm::next_id();
+        let card = Handoff {
+            id: id.clone(),
+            reason: A_CODE_REASON.to_string(),
+            reason_key: None,
+            reason_args: Value::Null,
+            timeout_ms: 1_000,
+            code_ask: Some(CodeLimits::TABLE),
+        };
+        let _receiver = confirm::open_handoff(&card);
+        let standing = Standing(id.clone());
+        for argv in [
+            &["key", "--key", "return", "--json"][..],
+            &["type-text", "--app", "Form", "--text", A_CODE, "--json"][..],
+            &["set-value", "--app", "Form", "--element-index", "3", "--value", A_CODE, "--json"][..],
+            &["click", "--app", "Form", "--text", "보내기", "--json"][..],
+        ] {
+            let refused = at_the_door(argv);
+            assert_eq!(
+                envelope_of(&refused)["error"]["code"],
+                error_code::PERSON_ASKED,
+                "{argv:?}"
+            );
+        }
+        drop(standing);
+        assert!(!confirm::asking(), "the card goes when its guard does");
+    }
+
+    /// 합성 양식 (a page that is no real site): a button that sends a code,
+    /// one field, a button that pays. The agent asks for the code, the person
+    /// types it on the card, the agent writes it into the field the way the
+    /// shim's `--value-stdin` sends it, and the press that would pay is the
+    /// person's — held, and never pressed.
+    #[derive(Default)]
+    struct Form {
+        code_requested: bool,
+        field: Option<String>,
+        paid: u32,
+    }
+
+    fn the_form<'a>(
+        form: &'a RefCell<Form>,
+        set_value: &'a str,
+    ) -> impl FnMut(&str, Value) -> Result<Value, ComputerUseError> + 'a {
+        move |method, params| {
+            let mut form = form.borrow_mut();
+            match (method, params.get("text").and_then(Value::as_str)) {
+                ("click", Some("인증요청")) => {
+                    form.code_requested = true;
+                    Ok(json!({ "clicked": true }))
+                }
+                ("click", Some("결제하기")) => {
+                    form.paid += 1;
+                    Ok(json!({ "clicked": true }))
+                }
+                (method, _) if method == set_value => {
+                    form.field = params
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    Ok(json!({ "set": true }))
+                }
+                _ => Err(ComputerUseError::new(
+                    error_code::INVALID_ARGUMENT,
+                    "the form has no such control",
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn a_form_takes_the_code_the_person_typed_and_is_never_submitted() {
+        let _hand = one_hand();
+        seat_a_person();
+        confirm::set_policy(confirm::Policy::default());
+        let set_value = zerocode_core::computer_use::ComputerMethod::SetValue
+            .provider_name()
+            .unwrap_or("setValue");
+        let form = RefCell::new(Form::default());
+        let mut helper = the_form(&form, set_value);
+        let mut step = |argv: &[&str]| {
+            let command = parse_command(&words(argv));
+            assert!(command.is_ok(), "{argv:?} parses: {command:?}");
+            let command = command.unwrap_or_else(|_| unreachable!("asserted above"));
+            call_with_the_persons_last_step(&command, Asking::Person, &mut helper)
+        };
+
+        // 1. 인증요청: the form sends its code to the person's phone.
+        assert!(step(&["click", "--app", "Form", "--text", "인증요청"]).is_ok());
+
+        // 2. The card: the person types what arrived; the agent's `$(…)` holds it.
+        person_types("493 021");
+        let said = at_the_door(&[
+            "handoff",
+            "--ask-code",
+            "--reason",
+            A_CODE_REASON,
+            "--timeout-ms",
+            "180000",
+        ]);
+        assert_eq!(said.stdout, format!("{A_CODE}\n"));
+        let code = said.stdout.trim_end().to_string();
+
+        // 3. The agent writes it into the field — the words the shim sends for
+        // `--value-stdin` — and the log keeps the length, never the value.
+        let typing = [
+            "set-value",
+            "--app",
+            "Form",
+            "--element-index",
+            "3",
+            "--value",
+            code.as_str(),
+        ];
+        assert!(step(&typing).is_ok());
+        let logged = crate::run_evidence::redacted("computer", &words(&typing));
+        assert_eq!(
+            logged.last().and_then(|word| crate::run_evidence::redacted_chars(word)),
+            Some(6),
+            "the evidence line keeps how long the code was: {logged:?}"
+        );
+        assert!(!logged.join(" ").contains(A_CODE), "{logged:?}");
+
+        // 4. The last step is the person's: the press that pays is held for
+        // them, and nobody says yes.
+        let paid = step(&[
+            "click",
+            "--app",
+            "Form",
+            "--text",
+            "결제하기",
+            "--confirming",
+            "payment",
+        ]);
+        assert_eq!(
+            paid.err().map(|error| error.code),
+            Some(error_code::CONFIRMATION_REFUSED.to_string())
+        );
+        let form = form.borrow();
+        assert!(form.code_requested);
+        assert_eq!(form.field.as_deref(), Some(A_CODE), "the code is in the field");
+        assert_eq!(form.paid, 0, "the form was stopped before it was submitted");
+    }
+
+    /// The text mode's one line is what the pretty printer says; a handoff
+    /// without a code keeps the pretty JSON every other verb prints.
+    #[test]
+    fn text_mode_prints_a_code_alone_and_a_plain_answer_as_json() {
+        let ask = parse_command(&words(&["handoff", "--ask-code", "--reason", "x"]));
+        assert!(ask.is_ok(), "handoff --ask-code parses: {ask:?}");
+        let ask = ask.unwrap_or_else(|_| unreachable!("asserted above"));
+        let with_code = said_envelope(
+            &ask,
+            json!({ "resumed": true, "reason": "x", "code": A_CODE, "codeLength": 6 }),
+        );
+        assert_eq!(with_code.stdout, format!("{A_CODE}\n"));
+        let without = said_envelope(&ask, json!({ "resumed": true, "reason": "x", "code": null }));
+        assert!(
+            without.stdout.contains("\"resumed\": true"),
+            "an answer with no code is the pretty JSON: {}",
+            without.stdout
+        );
+    }
+}
