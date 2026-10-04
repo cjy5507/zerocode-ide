@@ -179,8 +179,9 @@ mod kept {
                 .map(drop)
         }
 
-        /// Forget the reading, for a measurement that wants a cold start.
-        #[cfg(test)]
+        /// Forget the reading, for a measurement that wants a cold start (only
+        /// the Mac has a reading to forget).
+        #[cfg(all(test, target_os = "macos"))]
         pub(super) fn forget(&self) {
             held(&self.slot).taken = None;
         }
@@ -189,8 +190,10 @@ mod kept {
 
 #[cfg(any(target_os = "macos", test))]
 use super::session::held;
+#[cfg(target_os = "macos")]
+use kept::Kept;
 #[cfg(any(target_os = "macos", test))]
-use kept::{Kept, Reading};
+use kept::Reading;
 
 /// The iPhones and iPads Xcode's `devicectl` lists, run now.
 #[cfg(any(target_os = "macos", test))]

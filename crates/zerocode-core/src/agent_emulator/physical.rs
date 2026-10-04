@@ -39,8 +39,8 @@ pub const PHYSICAL_ROWS_MAX: usize = 8;
 
 /// The longest device name an answer carries. The name is the owner's own
 /// word, or a device's own property, and it reaches the agent's context: this
-/// is long enough for "<person>'s iPhone Air" and too short to carry a
-/// paragraph.
+/// is long enough for a name such as "Synthetic Phone Max" and too short to
+/// carry a paragraph.
 pub const DEVICE_NAME_CHARS_MAX: usize = 48;
 
 /// The name a row carries when the tool gave none: an Android device that

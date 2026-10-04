@@ -44,7 +44,7 @@ here are made up):
 
 ```json
 {"surface": "zerocode-built-in", "ios": [], "android": [],
- "physical": [{"platform": "ios", "name": "Synthetic Phone A", "model": "iPhone 15",
+ "physical": [{"platform": "ios", "name": "Synthetic Phone A", "model": "Synthetic iPhone",
    "state": "connected", "drivable": false,
    "reason": "A real iPhone or iPad. This window drives only the iOS Simulator."}]}
 ```
