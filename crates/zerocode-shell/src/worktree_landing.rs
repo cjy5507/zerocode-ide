@@ -1089,6 +1089,8 @@ mod tests {
         // 128 같은 값은 충돌이 아니라 git이 못 답한 것이다.
         assert_eq!(parse_merge_probe(128, "fatal"), MergeProbe::Failed);
         assert_eq!(parse_merge_probe(0, ""), MergeProbe::Failed);
+        // git은 합칠 수 없는 대상에도 1로 끝나지만 표준 출력이 비어 있다 — 충돌이 아니다.
+        assert_eq!(parse_merge_probe(1, ""), MergeProbe::Failed);
     }
 
     #[test]
@@ -1115,13 +1117,7 @@ mod tests {
             .vcs()
             .text_and_code(
                 &bench.repo,
-                &[
-                    "merge-tree",
-                    "--write-tree",
-                    "--name-only",
-                    &main,
-                    "0123456789abcdef0123456789abcdef01234567",
-                ],
+                &["cat-file", "-p", "0123456789abcdef0123456789abcdef01234567"],
             )
             .expect("git ran");
         assert_eq!(code, 128, "a commit git does not have is a failure");
