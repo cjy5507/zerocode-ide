@@ -258,6 +258,25 @@ pub struct WorkflowStore {
     path: PathBuf,
 }
 
+/// One idle connection kept open so this process stays attached to the
+/// store's WAL index for as long as its owner lives (t-37679).
+///
+/// SQLite treats a process with no open connection as gone. The next
+/// connection it opens is the first one again: it truncates `-shm` and
+/// rebuilds the index from the WAL. The last one to close checkpoints the
+/// WAL into the database, then deletes the WAL and `-shm`. An owner that
+/// opens connections per request and closes them all before the next pays
+/// that whole cycle on every request, and between requests leaves the store
+/// looking unattached to every other process.
+///
+/// The hold reads once — that is what maps `-shm` and takes SQLite's
+/// dead-man-switch lock — and never opens a transaction after that, so
+/// checkpoints run past it and the WAL stays bounded by SQLite's own
+/// auto-checkpoint.
+pub(crate) struct StoreHold {
+    _connection: Connection,
+}
+
 impl std::fmt::Debug for WorkflowStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -1238,6 +1257,18 @@ impl WorkflowStore {
     #[doc(hidden)]
     pub fn fault_connection_for_tests(&self) -> Result<Connection, WorkflowStoreError> {
         self.connection()
+    }
+
+    /// Keep this process attached to the store until the hold is dropped
+    /// ([`StoreHold`]).
+    pub(crate) fn hold(&self) -> Result<StoreHold, WorkflowStoreError> {
+        let connection = self.connection()?;
+        connection
+            .query_row("PRAGMA user_version", [], |_| Ok(()))
+            .map_err(|_| WorkflowStoreError::Database)?;
+        Ok(StoreHold {
+            _connection: connection,
+        })
     }
 
     pub(crate) fn connection(&self) -> Result<Connection, WorkflowStoreError> {
