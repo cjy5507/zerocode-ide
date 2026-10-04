@@ -542,8 +542,11 @@ const zcTarget = (handle) => {
   return record ? { record } : { code: "not_a_field" };
 };
 // One pass over a bundle: each entry written in its order, then each
-// written field read back, then what the form still wants.
-const zcFill = (entries) => {
+// written field read back, then what the form still wants. With `expect` —
+// the fingerprint of the form its agent read — a form that is no longer that
+// one is said (`stale`) before anything is written.
+const zcFill = (entries, expect) => {
+  void expect;
   const passes = entries.map((entry) => {
     const out = { handle: entry.handle, status: "unread", kind: "", label: "", now: "", error: "", options: [] };
     const target = zcTarget(entry.handle);
@@ -574,32 +577,35 @@ const zcFill = (entries) => {
     pass.out.status = zcHolds(now, pass.entry.value) ? (pass.wrote ? "set" : "same") : "mismatch";
     return pass.out;
   });
-  const left = zcFormFields(request).fields
-    .filter((field) => (field.required && zcEmpty(field)) || field.error);
+  const after = zcFormFields(request);
+  const left = after.fields.filter((field) => (field.required && zcEmpty(field)) || field.error);
   return { results, left };
 };
 "#;
 
 /// One pass of a `fill`: the bundle the window hands it, through `zcFill`.
 pub(crate) const BROWSER_FILL_BODY: &str = r#"
-return zcEncode({ ok: true, value: zcFill(request.entries) }, request.answerCap);
+return zcEncode({ ok: true, value: zcFill(request.entries, request.expect || null) }, request.answerCap);
 "#;
 
 /// The form pair inside an `eval` (t-37883): an expression that names
-/// [`BROWSER_EVAL_FORM_OBJECT`] (the `const` below is that name) gets `fields()` — the read `fields` answers —
-/// and `fill(bundle)` — one pass of `fill` over `{handle: value}` or a list
-/// of `{handle, value}` — so one script can read a step, fill it by the
-/// words it read, check what is left and press a step's button, in one
-/// round trip. Synchronous like every eval: a field that loads later is the
-/// next call's.
+/// [`BROWSER_EVAL_FORM_OBJECT`] (the `const` below is that name) gets
+/// `fields()` — the read `fields` answers — and `fill(bundle, read)` — one
+/// pass of `fill` over `{handle: value}` or a list of `{handle, value}`,
+/// held to the form `read` (a `fields()` answer or its fingerprint) as the
+/// door's fill is held to its last read — so one script can read a step,
+/// fill it by the words it read, check what is left and press a step's
+/// button, in one round trip. Synchronous like every eval: a field that
+/// loads later is the next call's.
 pub(crate) const BROWSER_EVAL_FORM: &str = r#"
 const zerocode = Object.freeze({
   fields: () => {
     const read = zcFormFields(request);
     return { fields: read.fields, actions: read.actions, more: read.more, sealedFrames: read.sealed };
   },
-  fill: (bundle) => zcFill(Array.isArray(bundle) ? bundle
-    : Object.entries(bundle || {}).map(([handle, value]) => ({ handle, value }))),
+  fill: (bundle, read) => zcFill(Array.isArray(bundle) ? bundle
+    : Object.entries(bundle || {}).map(([handle, value]) => ({ handle, value })),
+    typeof read === "string" ? read : (read && read.fingerprint) || null),
 });
 "#;
 
@@ -630,12 +636,36 @@ pub(crate) fn form_request() -> serde_json::Value {
     })
 }
 
-/// A form script: the marks helpers it stands on, the form helpers, a body.
+/// A form script: the observe and marks helpers it stands on (a digest, a
+/// field's name, its region's heading), the form helpers, a body.
 pub(crate) fn form_script(request: &serde_json::Value, body: &str) -> String {
     automation_script(
         request,
-        &format!("{BROWSER_MARK_HELPERS}\n{BROWSER_FORM_HELPERS}\n{body}"),
+        &format!(
+            "{BROWSER_OBSERVE_HELPERS}\n{BROWSER_MARK_HELPERS}\n{BROWSER_FORM_HELPERS}\n{body}"
+        ),
     )
+}
+
+/// The form a pane's agent last read (`fields`) or was told of by its last
+/// fill, by fingerprint — what the next `fill` holds the page to before it
+/// writes. Kept per pane label, as the marks table is.
+fn form_prints() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static PRINTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    PRINTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Remember the form a pane's agent now knows; an empty fingerprint (a page
+/// that answered none) forgets it.
+pub(crate) fn remember_form(label: &str, fingerprint: &str) {
+    let _ = (form_prints(), label, fingerprint);
+}
+
+/// The form a pane's agent last knew, if it read one.
+pub(crate) fn known_form(label: &str) -> Option<String> {
+    let _ = label;
+    None
 }
 
 /// A fill script: the form helpers, the writer, and a body that calls it.
@@ -664,11 +694,15 @@ pub(crate) async fn automate_fields(
     let pane = browser_pane_of(app, state, label)?;
     let script = form_script(&form_request(), BROWSER_FIELDS_BODY);
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
-    serde_json::from_value(page_value(reply)?)
-        .map_err(|_| "브라우저 판의 양식 읽기를 읽을 수 없습니다".to_string())
+    let read: FormRead = serde_json::from_value(page_value(reply)?)
+        .map_err(|_| "브라우저 판의 양식 읽기를 읽을 수 없습니다".to_string())?;
+    remember_form(label, &read.fingerprint);
+    Ok(read)
 }
 
-/// Fill a bundle into a pane's page, in passes ([`fill_passes`]).
+/// Fill a bundle into a pane's page, in passes ([`fill_passes`]), held to
+/// the form the pane's agent last knew; what the fill leaves is the form it
+/// knows next.
 pub(crate) async fn automate_fill(
     app: &AppHandle,
     state: &AppState,
@@ -676,15 +710,17 @@ pub(crate) async fn automate_fill(
     entries: Vec<FillEntry>,
 ) -> Result<FillReport, String> {
     let pane = browser_pane_of(app, state, label)?;
-    fill_passes(
+    let report = fill_passes(
         entries,
+        known_form(label),
         Duration::from_millis(BROWSER_FILL_PENDING_MS),
         BROWSER_WAIT_POLL,
-        |asked| {
+        |asked, expect| {
             let pane = pane.clone();
             async move {
                 let mut request = form_request();
                 request["entries"] = serde_json::to_value(&asked).unwrap_or_default();
+                request["expect"] = expect.into();
                 let script = fill_script(&request, BROWSER_FILL_BODY);
                 let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
                 serde_json::from_value::<FillPass>(page_value(reply)?)
@@ -692,25 +728,33 @@ pub(crate) async fn automate_fill(
             }
         },
     )
-    .await
+    .await?;
+    if !report.stale {
+        remember_form(label, &report.fingerprint);
+    }
+    Ok(report)
 }
 
-/// A fill's passes on the window's clock: the whole bundle first, then —
-/// every `poll`, until `pending` has passed since the start — only the
-/// fields another pass may still find (the ledger's word), so a field an
-/// earlier value brings (a time list a date loads, a box a choice turns
-/// on, a dropdown that opens on a press) is written once it is there. A
-/// pass that fails ends the fill with its refusal.
+/// A fill's passes on the window's clock: the whole bundle first, held to
+/// the form its agent read (`expect`, the first pass only — later passes
+/// meet fields the fill's own values brought), then — every `poll`, until
+/// `pending` has passed since the start — only the fields another pass may
+/// still find (the ledger's word), so a field an earlier value brings (a
+/// time list a date loads, a box a choice turns on, a dropdown that opens on
+/// a press) is written once it is there. A pass that fails ends the fill
+/// with its refusal; a stale form ends it with nothing written.
 pub(crate) async fn fill_passes<P, F>(
     entries: Vec<FillEntry>,
+    expect: Option<String>,
     pending: Duration,
     poll: Duration,
     mut pass: P,
 ) -> Result<FillReport, String>
 where
-    P: FnMut(Vec<FillEntry>) -> F,
+    P: FnMut(Vec<FillEntry>, Option<String>) -> F,
     F: std::future::Future<Output = Result<FillPass, String>>,
 {
+    let _ = expect;
     let until = tokio::time::Instant::now() + pending;
     let mut ledger = FillLedger::new(entries);
     loop {
@@ -718,7 +762,7 @@ where
         if asked.is_empty() {
             break;
         }
-        let answered = pass(asked.clone()).await?;
+        let answered = pass(asked.clone(), None).await?;
         ledger.record(&asked, answered);
         if ledger.next().is_empty() || tokio::time::Instant::now() >= until {
             break;

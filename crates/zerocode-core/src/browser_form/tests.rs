@@ -91,6 +91,7 @@ fn a_fill_tries_again_only_what_the_page_may_still_bring() {
                 required: true,
                 ..FormField::default()
             }],
+            ..FillPass::default()
         },
     );
     let second = ledger.next();
@@ -107,6 +108,7 @@ fn a_fill_tries_again_only_what_the_page_may_still_bring() {
                 said("#plan", FillStatus::Mismatch),
             ],
             left: Vec::new(),
+            ..FillPass::default()
         },
     );
     let third = ledger.next();
@@ -116,6 +118,7 @@ fn a_fill_tries_again_only_what_the_page_may_still_bring() {
         FillPass {
             results: vec![said("#plan", FillStatus::Same)],
             left: Vec::new(),
+            ..FillPass::default()
         },
     );
     assert!(ledger.next().is_empty());
@@ -156,6 +159,7 @@ fn a_fill_stops_chasing_a_value_the_page_keeps_rewriting() {
             FillPass {
                 results: vec![said("#phone", FillStatus::Mismatch)],
                 left: Vec::new(),
+                ..FillPass::default()
             },
         );
     }
@@ -275,6 +279,7 @@ fn a_fill_report_names_what_took_and_why_the_rest_did_not() {
             ..FormField::default()
         }],
         passes: 2,
+        ..FillReport::default()
     };
     let lines = fill_lines(&report);
     for expected in [
@@ -288,4 +293,38 @@ fn a_fill_report_names_what_took_and_why_the_rest_did_not() {
     ] {
         assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
     }
+}
+
+/// A fill on a form that changed since its agent read it (t-37883, m-40824):
+/// the page said so before writing anything — the fill ends there, every
+/// field unwritten, and the agent is told to read the form again.
+#[test]
+fn a_fill_on_a_form_changed_since_its_read_ends_at_once_and_writes_nothing() {
+    let bundle = vec![entry("#name", text("Kim")), entry("#time", text("09:00"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(
+        &bundle,
+        FillPass {
+            stale: true,
+            fingerprint: "11:abc".into(),
+            ..FillPass::default()
+        },
+    );
+    assert!(ledger.next().is_empty(), "a stale form is not tried again");
+    let report = ledger.report();
+    assert!(report.stale && !report.all_took(), "{report:?}");
+    assert_eq!(report.fingerprint, "11:abc");
+    assert!(
+        report
+            .results
+            .iter()
+            .all(|result| result.status == FillStatus::Unread),
+        "nothing was written"
+    );
+    let said = fill_lines(&report);
+    assert!(
+        said.starts_with(crate::computer_use_protocol::error_code::FORM_STALE)
+            && said.contains("fields"),
+        "{said}"
+    );
 }

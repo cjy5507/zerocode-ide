@@ -128,7 +128,8 @@ class Road {
     this.facts = card.facts.map((fact) => ({ ...fact }));
     this.codeTurn = (card.personTurns || []).includes("code");
     this.codeSent = false;
-    this.count = { roundTrips: 0, fields: 0, fill: 0, click: 0, eval: 0, handoff: 0, read: 0, fillPasses: 0 };
+    this.count = { roundTrips: 0, fields: 0, fill: 0, click: 0, eval: 0, handoff: 0, read: 0, fillPasses: 0, stale: 0 };
+    this.form = null;
     this.scriptMs = [];
     this.trail = [];
   }
@@ -148,14 +149,23 @@ class Road {
     return this.page.evaluate(source).then((raw) => JSON.parse(raw));
   }
 
+  /* The window keeps the form a pane's agent last read, and holds the
+   * next fill to it (`known_form`): so does the driver. */
   async fields() {
     const read = await this.call("fields", () => this.run(fieldsScript()));
     if (!read.ok) throw new Error(`fields refused: ${JSON.stringify(read)}`);
+    this.form = read.value.fingerprint;
     return read.value;
   }
 
   async fill(bundle) {
-    const filled = await this.call("fill", () => fillPasses((source) => this.run(source), bundle));
+    const filled = await this.call("fill", () => fillPasses((source) => this.run(source), bundle, this.form));
+    if (filled.stale) {
+      this.count.stale += 1;
+      this.trail.push({ fill: "form_stale" });
+      return { ...filled, left: [] };
+    }
+    this.form = filled.fingerprint;
     this.count.fillPasses += filled.passes;
     this.trail.push({ fill: filled.results.map((result) => `${result.label}:${result.status}`) });
     return filled;
@@ -193,10 +203,14 @@ class Road {
       const { bundle } = plan(read.fields, this.facts);
       if (this.price) this.priced += await this.today(read, bundle);
       let left = read.fields.filter((field) => field.required && (field.value === "" || field.value === false));
-      if (Object.keys(bundle).length) left = (await this.fill(bundle)).left;
+      if (Object.keys(bundle).length) {
+        const filled = await this.fill(bundle);
+        if (filled.stale) continue;
+        left = filled.left;
+      }
       const owed = await this.code(left);
       if (owed && this.price) this.priced += 1;
-      if (owed) await this.fill(owed);
+      if (owed && (await this.fill(owed)).stale) continue;
       if (await this.step(read.actions)) return this.done();
     }
   }
@@ -250,7 +264,7 @@ class Road {
       const facts = __FACTS__;
       const read = zerocode.fields();
       const { bundle } = plan(read.fields, facts);
-      const filled = Object.keys(bundle).length ? zerocode.fill(bundle) : { results: [], left: read.fields
+      const filled = Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: read.fields
         .filter((field) => field.required && (field.value === "" || field.value === false)) };
       const clean = filled.results.every((result) => took(result.status)) && !filled.left.length;
       const next = read.actions.find((action) => !action.disabled && intentOf(action.label, "next"));

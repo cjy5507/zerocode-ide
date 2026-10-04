@@ -3627,6 +3627,16 @@ pub(crate) const BROWSER_OBSERVE_HELPERS: &str = r##"
 // The document a script runs in, by the moment it began: another document is
 // another epoch, a document that only changed is the same one.
 const zcEpoch = () => String(performance.timeOrigin || performance.timing.navigationStart);
+// A text's digest: its length and its FNV-1a hash — what a pin and a form's
+// fingerprint compare instead of the text itself.
+const zcDigest = (held) => {
+  let hash = 0x811c9dc5;
+  for (let at = 0; at < held.length; at += 1) {
+    hash ^= held.charCodeAt(at);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return held.length + ":" + hash.toString(16);
+};
 // What a field holds, as a pin compares it: a digest of its value — a box's
 // checked state, a select's choice — never a secret's fingerprint, and none at
 // all for a control that holds no value.
@@ -3646,12 +3656,7 @@ const zcValueDigest = (el) => {
   } else {
     return null;
   }
-  let hash = 0x811c9dc5;
-  for (let at = 0; at < held.length; at += 1) {
-    hash ^= held.charCodeAt(at);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return held.length + ":" + hash.toString(16);
+  return zcDigest(held);
 };
 // The watch a settle reads: when this document last changed, on its own
 // clock, kept on the document itself — another document starts with none, a

@@ -156,6 +156,10 @@ pub struct FormRead {
     /// Frames whose page this one may not read (another origin) — said, so
     /// the agent knows a part of the form is not in the read.
     pub sealed_frames: Vec<String>,
+    /// The form's fingerprint: a digest of every field's handle, kind and
+    /// words — never a value — that `fill` holds the page to before it
+    /// writes (a field gone, renamed or new, another step: `form_stale`).
+    pub fingerprint: String,
 }
 
 /// What a field holds, or is asked to: words, or a checkbox's state.
@@ -366,6 +370,10 @@ pub struct FillResult {
 pub struct FillPass {
     pub results: Vec<FillResult>,
     pub left: Vec<FormField>,
+    /// The form was not the one the agent read: nothing was written.
+    pub stale: bool,
+    /// The form's fingerprint once the pass was done (before it, when stale).
+    pub fingerprint: String,
 }
 
 /// A fill's passes, kept: each entry's latest outcome, and the page's word
@@ -376,6 +384,8 @@ pub struct FillLedger {
     results: Vec<Option<FillResult>>,
     left: Vec<FormField>,
     passes: usize,
+    stale: bool,
+    fingerprint: String,
 }
 
 impl FillLedger {
@@ -387,6 +397,8 @@ impl FillLedger {
             results,
             left: Vec::new(),
             passes: 0,
+            stale: false,
+            fingerprint: String::new(),
         }
     }
 
@@ -407,7 +419,8 @@ impl FillLedger {
     }
 
     /// One pass's answer, matched to the entries by handle; an entry the
-    /// pass was asked for and did not answer reads `unread`.
+    /// pass was asked for and did not answer reads `unread`. A stale pass
+    /// wrote nothing and ends the fill.
     pub fn record(&mut self, asked: &[FillEntry], pass: FillPass) {
         self.passes += 1;
         for entry in asked {
@@ -445,6 +458,8 @@ impl FillLedger {
             results,
             left: self.left,
             passes: self.passes,
+            stale: self.stale,
+            fingerprint: self.fingerprint,
         }
     }
 }
@@ -456,6 +471,10 @@ pub struct FillReport {
     pub results: Vec<FillResult>,
     pub left: Vec<FormField>,
     pub passes: usize,
+    /// The form was not the one the agent read: nothing was written.
+    pub stale: bool,
+    /// The form's fingerprint after the last pass.
+    pub fingerprint: String,
 }
 
 impl FillReport {

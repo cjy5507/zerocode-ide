@@ -689,7 +689,7 @@ const readFields = async (target) => {
   assert(read.ok, "the read was refused", read);
   return read.value;
 };
-const fillBundle = (target, bundle) => fillPasses((source) => evalJson(target, source), bundle);
+const fillBundle = (target, bundle, expect = null) => fillPasses((source) => evalJson(target, source), bundle, expect);
 const byHandle = (read) => Object.fromEntries(read.fields.map((field) => [field.handle, field]));
 const handleOf = (read, label) => {
   const found = read.fields.filter((field) => field.label === label);
@@ -876,6 +876,37 @@ await test("one_eval_reads_fills_and_checks_a_step_by_the_words_it_read", async 
     const second = await evalJson(booking, evalFormScript(step));
     assert(second.value.statuses.every((said) => said.endsWith(":set") || said.endsWith(":same")), "the next call finishes it", second.value);
     return `${first.value.statuses.length} fields in one call`;
+  } finally { await booking.close(); }
+});
+
+/* A fill is held to the form its agent read (m-40824): a field renamed
+ * after the read, and the whole bundle is refused unwritten — on the door's
+ * road and inside one eval alike; the form as read takes it. */
+await test("a_fill_on_a_form_that_changed_since_its_read_writes_nothing", async () => {
+  const booking = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await booking.setContent(await scene("A"));
+    const read = await readFields(booking);
+    assert(/^\d+:[0-9a-f]+$/.test(read.fingerprint || ""), "the read carries the form's fingerprint", read.fingerprint);
+    const bundle = { [handleOf(read, "이름")]: "김예시", [handleOf(read, "항공편")]: "SH204" };
+    await booking.evaluate(() => { document.querySelector('input[name="flight"]').closest("tr").querySelector("th").textContent = "편명"; });
+    const stale = await fillBundle(booking, bundle, read.fingerprint);
+    assert(stale.stale === true && stale.passes === 1, "a renamed field makes the form stale", stale);
+    const held = await booking.evaluate(() => [document.querySelector('input[name="name"]').value,
+      document.querySelector('input[name="flight"]').value]);
+    assert(JSON.stringify(held) === JSON.stringify(["", ""]), "nothing was written", held);
+    const again = await readFields(booking);
+    assert(again.fingerprint !== read.fingerprint, "the form read again is another form");
+    const fresh = await fillBundle(booking, { [handleOf(again, "이름")]: "김예시", [handleOf(again, "편명")]: "SH204" }, again.fingerprint);
+    assert(!fresh.stale && fresh.results.every((result) => result.status === "set"), "the form as read takes the bundle", fresh);
+    const script = await evalJson(booking, evalFormScript(`(() => {
+      const read = zerocode.fields();
+      document.querySelector('input[name="email"]').closest("tr").remove();
+      return zerocode.fill({ [read.fields.find((f) => f.label === "차량번호").handle]: "12가3456" }, read);
+    })()`));
+    assert(script.ok && script.value.stale === true, "one eval's fill is held to the read it made", script);
+    assert(await booking.evaluate(() => document.querySelector('input[name="car"]').value) === "", "and wrote nothing");
+    return `${read.fingerprint} → ${again.fingerprint}`;
   } finally { await booking.close(); }
 });
 

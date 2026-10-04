@@ -7,9 +7,10 @@
  * - `FORM_REQUEST` is `form_request()`; `fieldsScript()`, `fillScript(entries)`
  *   and `evalFormScript(expression)` are `fields`, one pass of `fill` and an
  *   eval that names the form pair (`eval_script` + `inlined_eval_body`);
- * - `fillPasses(run, bundle)` is the window's `fill_passes`: the whole
- *   bundle, then every poll, inside the pending wait and the passes, what a
- *   later pass may still find.
+ * - `fillPasses(run, bundle, expect)` is the window's `fill_passes`: the
+ *   whole bundle, held on its first pass to the form read (`expect`, a
+ *   fingerprint), then every poll, inside the pending wait and the passes,
+ *   what a later pass may still find.
  *
  * A constant the Rust does not hold reads null, and `need` names it. */
 
@@ -36,6 +37,7 @@ export const need = (name, value) => {
 };
 
 export const HELPERS = rustText(DOOR, "BROWSER_AUTOMATION_HELPERS");
+export const OBSERVE_HELPERS = rustText(DOOR, "BROWSER_OBSERVE_HELPERS");
 export const MARK_HELPERS = rustText(DOOR, "BROWSER_MARK_HELPERS");
 export const CLICK_BODY = rustText(DOOR, "CLICK_BODY");
 export const FORM_HELPERS = rustText(FORM, "BROWSER_FORM_HELPERS");
@@ -71,10 +73,11 @@ export const doorScript = (request, body) =>
   `(() => {\n${need("BROWSER_AUTOMATION_HELPERS", HELPERS)}\nconst request = ${JSON.stringify(request)};\ntry {\n${body}\n} catch (_) { return zcFail("evaluation_failed"); }\n})()`;
 const formScript = (request, body) => {
   need("BROWSER_FORM_CONTROLS", FORM_REQUEST.controls);
-  return doorScript(request, `${need("BROWSER_MARK_HELPERS", MARK_HELPERS)}\n${need("BROWSER_FORM_HELPERS", FORM_HELPERS)}\n${body}`);
+  return doorScript(request, `${need("BROWSER_OBSERVE_HELPERS", OBSERVE_HELPERS)}\n${need("BROWSER_MARK_HELPERS", MARK_HELPERS)}\n`
+    + `${need("BROWSER_FORM_HELPERS", FORM_HELPERS)}\n${body}`);
 };
 export const fieldsScript = () => formScript(FORM_REQUEST, need("BROWSER_FIELDS_BODY", FIELDS_BODY));
-export const fillScript = (entries) => formScript({ ...FORM_REQUEST, entries },
+export const fillScript = (entries, expect = null) => formScript({ ...FORM_REQUEST, entries, expect },
   `${need("BROWSER_FILL_HELPERS", FILL_HELPERS)}\n${need("BROWSER_FILL_BODY", FILL_BODY)}`);
 /* `inlined_eval_body`: the expression written into the script, a thenable
  * refused, `undefined` said as such. */
@@ -84,23 +87,27 @@ export const evalFormScript = (expression) => formScript(FORM_REQUEST,
   + `const held = value === undefined ? { type: "undefined" } : value;\nreturn zcEncode({ ok: true, value: held });`);
 export const clickScript = (selector) => doorScript({ selector, blockRoots: "", expect: null }, need("CLICK_BODY", CLICK_BODY));
 
-/* `fill_passes` over `run(script) → page answer`: the whole bundle, then
- * what another pass may still find, every poll, until the wait or the
- * passes run out. Answers each entry's last word, what is left, the passes. */
-export async function fillPasses(run, bundle) {
+/* `fill_passes` over `run(script) → page answer`: the whole bundle, held on
+ * its first pass to `expect`, then what another pass may still find, every
+ * poll, until the wait or the passes run out. Answers each entry's last
+ * word, what is left, the passes, whether the form was stale and its
+ * fingerprint after the last pass. */
+export async function fillPasses(run, bundle, expect = null) {
   const entries = Array.isArray(bundle) ? bundle : Object.entries(bundle).map(([handle, value]) => ({ handle, value }));
   const last = new Map();
   const began = Date.now();
-  let asked = entries, left = [], passes = 0;
+  let asked = entries, left = [], passes = 0, fingerprint = "";
   while (asked.length) {
-    const pass = await run(fillScript(asked));
+    const pass = await run(fillScript(asked, passes === 0 ? expect : null));
     if (!pass.ok) throw new Error(`a fill pass was refused: ${JSON.stringify(pass)}`);
     passes += 1;
+    fingerprint = pass.value.fingerprint;
+    if (pass.value.stale) return { results: entries.map(() => undefined), left: [], passes, stale: true, fingerprint };
     for (const result of pass.value.results) last.set(result.handle, result);
     left = pass.value.left;
     asked = entries.filter((entry) => TRIES_AGAIN.includes(last.get(entry.handle)?.status));
     if (!asked.length || passes >= FILL_PASSES || Date.now() - began >= FILL_PENDING_MS) break;
     await new Promise((done) => setTimeout(done, FILL_POLL_MS));
   }
-  return { results: entries.map((entry) => last.get(entry.handle)), left, passes };
+  return { results: entries.map((entry) => last.get(entry.handle)), left, passes, stale: false, fingerprint };
 }

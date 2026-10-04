@@ -23550,7 +23550,7 @@ mod browser_form_fill {
                     ..FillResult::default()
                 })
                 .collect(),
-            left: Vec::new(),
+            ..FillPass::default()
         }
     }
 
@@ -23564,9 +23564,10 @@ mod browser_form_fill {
         let log = asked_log.clone();
         let report = cmd::browser::form::fill_passes(
             vec![entry("#date"), entry("#time")],
+            None,
             Duration::from_millis(BROWSER_FILL_PENDING_MS),
             POLL,
-            move |asked| {
+            move |asked, _| {
                 log.lock().unwrap().push(asked.iter().map(|e| e.handle.clone()).collect());
                 let loaded = began.elapsed() >= Duration::from_millis(300);
                 async move {
@@ -23594,19 +23595,20 @@ mod browser_form_fill {
     /// passes or its wait — whichever runs out first.
     #[tokio::test(start_paused = true)]
     async fn a_field_that_never_comes_is_said_once_the_wait_is_spent() {
-        let never = |asked: Vec<FillEntry>| async move {
+        let never = |asked: Vec<FillEntry>, _: Option<String>| async move {
             Ok(answer(&asked, |_| FillStatus::NotFound))
         };
         let pending = Duration::from_millis(BROWSER_FILL_PENDING_MS);
         let began = tokio::time::Instant::now();
-        let quick = cmd::browser::form::fill_passes(vec![entry("#ghost")], pending, POLL, never)
+        let quick = cmd::browser::form::fill_passes(vec![entry("#ghost")], None, pending, POLL, never)
             .await
             .expect("answered");
         assert_eq!(quick.passes, BROWSER_FILL_PASSES, "the passes ran out first");
         assert_eq!(quick.results[0].status, FillStatus::NotFound);
         assert!(began.elapsed() < pending);
         let began = tokio::time::Instant::now();
-        let slow = cmd::browser::form::fill_passes(vec![entry("#ghost")], pending, pending / 2, never)
+        let slow =
+            cmd::browser::form::fill_passes(vec![entry("#ghost")], None, pending, pending / 2, never)
             .await
             .expect("answered");
         assert_eq!(slow.passes, 3, "the wait ran out first: 0, 1 and 2 s");
@@ -23619,9 +23621,10 @@ mod browser_form_fill {
     async fn a_pass_the_page_refuses_ends_the_fill_with_its_word() {
         let refused = cmd::browser::form::fill_passes(
             vec![entry("#a")],
+            None,
             Duration::from_millis(BROWSER_FILL_PENDING_MS),
             POLL,
-            |_| async { Err(cmd::browser::PAGE_TIMED_OUT.to_string()) },
+            |_, _| async { Err(cmd::browser::PAGE_TIMED_OUT.to_string()) },
         )
         .await;
         assert_eq!(refused, Err(cmd::browser::PAGE_TIMED_OUT.to_string()));
@@ -23688,6 +23691,75 @@ mod browser_form_fill {
             fill.contains("\"secret\"") && fill.contains("\"file\""),
             "a secret and a file are refused by name"
         );
+    }
+
+    /// The form a fill is held to (m-40824): the first pass carries the
+    /// fingerprint its agent read and no later pass does — a field the
+    /// fill's own values bring is no stale form — and a page that says the
+    /// form changed ends the fill there, with nothing written.
+    #[tokio::test(start_paused = true)]
+    async fn a_fill_is_held_to_the_form_read_on_its_first_pass_only() {
+        let carried: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let seen = carried.clone();
+        let report = cmd::browser::form::fill_passes(
+            vec![entry("#date"), entry("#time")],
+            Some("9:read".into()),
+            Duration::from_millis(BROWSER_FILL_PENDING_MS),
+            POLL,
+            move |asked, expect| {
+                let first = seen.lock().unwrap().is_empty();
+                seen.lock().unwrap().push(expect);
+                async move {
+                    Ok(answer(&asked, |handle| {
+                        if handle == "#time" && first {
+                            FillStatus::NoOption
+                        } else {
+                            FillStatus::Set
+                        }
+                    }))
+                }
+            },
+        )
+        .await
+        .expect("filled");
+        assert!(report.all_took() && !report.stale, "{report:?}");
+        assert_eq!(
+            carried.lock().unwrap().clone(),
+            [Some("9:read".to_string()), None]
+        );
+        let stale = cmd::browser::form::fill_passes(
+            vec![entry("#date")],
+            Some("9:read".into()),
+            Duration::from_millis(BROWSER_FILL_PENDING_MS),
+            POLL,
+            |_, _| async {
+                Ok(FillPass {
+                    stale: true,
+                    fingerprint: "12:other".into(),
+                    ..FillPass::default()
+                })
+            },
+        )
+        .await
+        .expect("answered");
+        assert!(stale.stale && !stale.all_took() && stale.passes == 1, "{stale:?}");
+        assert!(
+            zerocode_core::browser_form::fill_lines(&stale).starts_with(
+                zerocode_core::computer_use_protocol::error_code::FORM_STALE
+            )
+        );
+    }
+
+    /// What a pane's agent last read is what its next fill is held to; a
+    /// page that answered no fingerprint holds it to nothing.
+    #[test]
+    fn a_panes_last_form_is_remembered_and_forgotten() {
+        let label = "browser-form-memory-test";
+        assert_eq!(cmd::browser::form::known_form(label), None);
+        cmd::browser::form::remember_form(label, "9:read");
+        assert_eq!(cmd::browser::form::known_form(label).as_deref(), Some("9:read"));
+        cmd::browser::form::remember_form(label, "");
+        assert_eq!(cmd::browser::form::known_form(label), None);
     }
 
     /// An eval that names the form pair's object gets `fields()` and
