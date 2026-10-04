@@ -20,7 +20,7 @@
 
 import { spawn } from "node:child_process";
 import { appendFile, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENT_CONTEXT } from "../../../ui/tests/browser-scripts.mjs";
@@ -68,6 +68,8 @@ if (options.runsMax !== null && options.spent && existsSync(options.spent)
   console.log(`REFUSED: the run limit (${options.runsMax}) is spent`); process.exit(4);
 }
 
+// A run's folder is its own: a used one is refused, never cleared.
+if (existsSync(out) && readdirSync(out).length) { console.log("REFUSED: --out is not empty"); process.exit(2); }
 // The box: the run's own folders, the stand-in's names and manuals, the skill.
 const dirs = { bin: join(out, "bin"), work: join(out, "work"), home: join(out, "home"), tmp: join(out, "tmp"), config: join(out, "config") };
 for (const folder of Object.values(dirs)) await mkdir(folder, { recursive: true });
