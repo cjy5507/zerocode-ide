@@ -1368,6 +1368,7 @@ want_ms=""
 case "${{1:-}}" in
   ask) waiting=1; budget={ask_wait_s} ;;
   worker-start) waiting=1; budget={worker_wait_s} ;;
+  delegate) waiting=1; budget={worker_wait_s} ;;
 esac
 for arg in "$@"; do
   case "$arg" in
@@ -1504,6 +1505,10 @@ if ($args.Count -gt 0 -and ([string]$args[0]) -eq 'ask') {{
   $deadlineMs = {ask_wait_ms}
 }}
 if ($args.Count -gt 0 -and ([string]$args[0]) -eq 'worker-start') {{
+  $waiting = $true
+  $deadlineMs = {worker_wait_ms}
+}}
+if ($args.Count -gt 0 -and ([string]$args[0]) -eq 'delegate') {{
   $waiting = $true
   $deadlineMs = {worker_wait_ms}
 }}

@@ -287,15 +287,17 @@ impl TeamRequest {
     ///
     /// Kept beside the request and its limits so the bridge, the window, and
     /// tests do not grow separate ideas of which command consumes the reserved
-    /// wait quota. Three verbs qualify: a `check` that said `--wait`, every
-    /// `ask`, and `worker-start`, whose answer now waits for the spawned TUI to
-    /// accept its briefing. All are orchestration words; tmux has no bare
-    /// command with any of these names.
+    /// wait quota. Four verbs qualify: a `check` that said `--wait`, every
+    /// `ask`, `worker-start`, whose answer now waits for the spawned TUI to
+    /// accept its briefing, and `delegate`, which is a `worker-start` that also
+    /// writes the work and the worker's first letter (t-34501). All are
+    /// orchestration words; tmux has no bare command with any of these names.
     #[must_use]
     pub fn reserves_wait_slot(&self) -> bool {
         let verb = self.argv.first();
         verb.is_some_and(|verb| verb == "ask")
             || verb.is_some_and(|verb| verb == "worker-start")
+            || verb.is_some_and(|verb| verb == "delegate")
             || (verb.is_some_and(|verb| verb == "check")
                 && self.argv.iter().skip(1).any(|word| word == "--wait"))
     }
@@ -331,7 +333,11 @@ impl TeamRequest {
                     zerocode_core::orchestration::ASK_BUDGET_DEFAULT_MS,
                 )) + BRIDGE_GRACE
             }
-            None if self.argv.first().is_some_and(|verb| verb == "worker-start") => {
+            None if self
+                .argv
+                .first()
+                .is_some_and(|verb| verb == "worker-start" || verb == "delegate") =>
+            {
                 std::time::Duration::from_millis(u64::from(
                     zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS,
                 )) + BRIDGE_GRACE
