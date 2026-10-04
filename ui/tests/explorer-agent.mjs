@@ -318,7 +318,11 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
     const pairs = await page.evaluate(async ({ hold, watchMs }) => {
       const { root, fire, act, settle } = window.__XT__;
       const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-      // The first burst's marks fade before this one is measured.
+      // The first burst's turn ends and its marks fade before this one is
+      // measured. Its edits said they started and never that they ended, and a
+      // write nobody ended stays open until its turn ends or its bound passes —
+      // left open, it would still be moving when the tree below is weighed idle.
+      fire("term:1", [act("stop", null, "stopped")]);
       await sleep(hold + 800);
       await settle(3);
       window.__ANSWER__.scm_numstat = ({ paths }) => paths.map((path) => ({ path, code: " M", staged: false, changed: true, added: 2, removed: 1, conflict: null, origin: null }));
