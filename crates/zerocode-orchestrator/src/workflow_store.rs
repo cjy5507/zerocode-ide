@@ -36,6 +36,15 @@ const WAL_RETRY_DELAY: Duration = Duration::from_millis(10);
 /// does not wait.
 const DELETE_PENDING_RETRIES: u32 = if cfg!(windows) { 10 } else { 0 };
 const DELETE_PENDING_DELAY: Duration = Duration::from_millis(25);
+/// Owner read and write, nobody else: the mode every store file ends at.
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
+/// Every bit `chmod` sets — the permissions and the set-id and sticky bits —
+/// so a file is owner-only exactly when these bits are [`PRIVATE_FILE_MODE`].
+#[cfg(unix)]
+const CHMOD_BITS: u32 = 0o7777;
+/// The files SQLite keeps beside a WAL database, by the suffix it adds.
+const STORE_SIDECARS: [&str; 2] = ["-wal", "-shm"];
 /// Connections [`WorkflowStore::connection`] has opened in this process:
 /// the request-road measurement's count (t-37679), compiled into tests only.
 #[cfg(test)]
@@ -1511,10 +1520,10 @@ pub struct TrustedReceiptRow {
 ///   answer "this window has no authority" by inventing one.
 /// - **The migration is not run.** [`WorkflowStore::open`] may write tables
 ///   and a version; a read refuses an unexpected version instead.
-/// - **The file is not chmod-ed.** The writer's preflight opens for writing
-///   and tightens the mode, which is right for a store about to be written
-///   and wrong for one only being read. The symlink and regular-file refusals
-///   are kept, on the store and on both WAL sidecars.
+/// - **The file is not chmod-ed.** The writer's preflight tightens the
+///   mode, which is right for a store about to be written and wrong for one
+///   only being read. The symlink and regular-file refusals are kept, on the
+///   store and on both WAL sidecars.
 ///
 /// The flags are `READ_WRITE` without `CREATE` rather than `READ_ONLY`, and
 /// `PRAGMA query_only` is what makes it a read: a WAL database opened
@@ -1554,23 +1563,9 @@ impl ReadOnlyWorkflows {
          * reached through one (`/var` → `/private/var`) — so an unresolved
          * path turns every store under it into "cannot open". */
         let path = fs::canonicalize(path).map_err(|_| WorkflowStoreError::UnsafeStorePath)?;
-        for suffix in ["-wal", "-shm"] {
-            let mut sidecar = path.as_os_str().to_os_string();
-            sidecar.push(suffix);
-            let sidecar = PathBuf::from(sidecar);
-            // Read as given, never opened: a reader changes nothing here.
-            sidecar_settles(
-                || match fs::symlink_metadata(&sidecar) {
-                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                        Err(not_a_regular_file())
-                    }
-                    Ok(_) => Ok(()),
-                    Err(error) => Err(error),
-                },
-                DELETE_PENDING_RETRIES,
-                DELETE_PENDING_DELAY,
-            )?;
-        }
+        // Read as given, never opened and never tightened: a reader changes
+        // nothing here.
+        check_sidecars(&path, |sidecar| regular_file(sidecar).map(drop))?;
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW;
@@ -1768,13 +1763,16 @@ fn prepare_store_path(path: &Path) -> Result<(), WorkflowStoreError> {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt as _;
-                options.mode(0o600);
+                options.mode(PRIVATE_FILE_MODE);
             }
             match options.open(path) {
+                /* Closed at once, and that close drops no lock: no SQLite
+                 * connection can have locked a file this call has only just
+                 * made (see [`private_file`] for why a close can). */
                 Ok(_) => {}
                 // Another opener may have created it after our metadata
-                // read. The descriptor-based check below still refuses a
-                // symlink or non-file; existence alone never grants trust.
+                // read. The check below still refuses a symlink or non-file;
+                // existence alone never grants trust.
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(_) => return Err(WorkflowStoreError::UnsafeStorePath),
             }
@@ -1800,28 +1798,54 @@ fn private_parent(_metadata: &fs::Metadata) -> Result<(), WorkflowStoreError> {
     Ok(())
 }
 
-#[cfg(unix)]
+/// Refuse anything but a regular file at `path`, and leave it owner-only.
+///
+/// Asked of the PATH, never of an opened descriptor (t-37679). SQLite keeps
+/// its locks as POSIX advisory locks — on the database for each live
+/// connection, and in `-shm` for the WAL index (reader marks, the writer,
+/// the dead-man switch) — and closing ANY descriptor of a file drops every
+/// such lock the process holds on it. This runs before every connection,
+/// while other connections of the same process are reading: opening the
+/// file here to look at it released their locks, the next process to open
+/// the store believed nobody was attached and truncated `-shm` to rebuild
+/// it, and the window's mapping of it pointed past the end of the file
+/// (SIGBUS, 2026-10-04).
+///
+/// `lstat` refuses a symlink, a directory, a FIFO or any other non-file
+/// without opening it. The mode changes only when it is not owner-only
+/// already — SQLite creates its sidecars with the database's own mode, so
+/// on the steady road it never does — and by path: the private parent
+/// keeps every other principal from swapping the entry between the look
+/// and the change, the boundary [`WorkflowStore::connection`] names.
 fn private_file(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(not_a_regular_file());
-    }
-    file.set_permissions(fs::Permissions::from_mode(0o600))
+    let metadata = regular_file(path)?;
+    owner_only(path, &metadata)
 }
 
-#[cfg(not(unix))]
-fn private_file(path: &Path) -> std::io::Result<()> {
+/// The `lstat` of `path`, refusing a symlink, a directory or any other
+/// non-file. Never opens it.
+fn regular_file(path: &Path) -> std::io::Result<fs::Metadata> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(not_a_regular_file());
     }
+    Ok(metadata)
+}
+
+#[cfg(unix)]
+fn owner_only(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if metadata.permissions().mode() & CHMOD_BITS == PRIVATE_FILE_MODE {
+        return Ok(());
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+}
+
+/// Windows has no POSIX mode to tighten: the check there is the kind alone,
+/// as it always was.
+#[cfg(not(unix))]
+fn owner_only(_path: &Path, _metadata: &fs::Metadata) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -1840,12 +1864,21 @@ fn tighten_store_files(path: &Path) -> Result<(), WorkflowStoreError> {
 }
 
 fn preflight_store_sidecars(path: &Path) -> Result<(), WorkflowStoreError> {
-    for suffix in ["-wal", "-shm"] {
+    check_sidecars(path, private_file)
+}
+
+/// `check` on each of the store's sidecars ([`STORE_SIDECARS`]), each
+/// waited on by [`sidecar_settles`].
+fn check_sidecars(
+    path: &Path,
+    check: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<(), WorkflowStoreError> {
+    for suffix in STORE_SIDECARS {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
         let sidecar = PathBuf::from(sidecar);
         sidecar_settles(
-            || private_file(&sidecar),
+            || check(&sidecar),
             DELETE_PENDING_RETRIES,
             DELETE_PENDING_DELAY,
         )?;
@@ -2607,6 +2640,56 @@ mod tests {
                  another process would truncate it under the reader's mapping"
             );
             reader.execute_batch("COMMIT").expect("the read ends");
+        }
+
+        /// The look that replaced the open keeps both of its answers: a
+        /// loosened store file ends owner-only again, and a sidecar that is
+        /// not a regular file is refused.
+        #[test]
+        fn the_look_still_tightens_a_loosened_file_and_refuses_a_non_file() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let root = a_private_root();
+            let path = root.path().join("workflow.sqlite");
+            let store = WorkflowStore::open(&path).expect("a store");
+            let held = store.connection().expect("a connection");
+            let _: i64 = held
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("the sidecars exist");
+            let loosened = fs::Permissions::from_mode(0o644);
+            for file in [
+                "workflow.sqlite",
+                "workflow.sqlite-wal",
+                "workflow.sqlite-shm",
+            ] {
+                fs::set_permissions(root.path().join(file), loosened.clone()).expect("loosen");
+            }
+
+            drop(WorkflowStore::open(&path).expect("the store opens again"));
+            for file in [
+                "workflow.sqlite",
+                "workflow.sqlite-wal",
+                "workflow.sqlite-shm",
+            ] {
+                let mode = fs::metadata(root.path().join(file))
+                    .expect("mode")
+                    .permissions();
+                assert_eq!(mode.mode() & 0o7777, 0o600, "{file} was left loosened");
+            }
+            drop(held);
+
+            let other = root.path().join("other.sqlite");
+            drop(WorkflowStore::open(&other).expect("a second store"));
+            let sidecar = root.path().join("other.sqlite-wal");
+            let _ = fs::remove_file(&sidecar);
+            fs::create_dir(&sidecar).expect("a directory where -wal goes");
+            assert!(
+                matches!(
+                    WorkflowStore::open(&other),
+                    Err(WorkflowStoreError::UnsafeStorePath)
+                ),
+                "a sidecar that is a directory was not refused"
+            );
         }
 
         /// A second opener of the same store in the same process — the
