@@ -78,6 +78,7 @@ fn the_record_round_trips_through_the_settings_document() {
             per_hour: Some(10),
             per_day: Some(100),
         },
+        alerts: Alerts { landing: false },
     };
     let text = serde_json::to_string(&harness).expect("serializes");
     let back: HarnessSettings = serde_json::from_str(&text).expect("reads back");
