@@ -183,7 +183,6 @@ class Road {
   async byHand(result, asked) {
     const [year, month, day] = String(asked).match(/\d+/g).map(Number);
     const target = year * 12 + month;
-    await this.press({ handle: result.handle, label: result.label });
     const look = () => this.call("eval", () => this.page.evaluate(([box]) => {
       const days = document.querySelector(box);
       let root = days;
@@ -196,6 +195,9 @@ class Road {
       const number = rest.match(/(?:^|\D)(\d{1,2})(?:\D|$)/);
       return year4 && number ? Number(year4) * 12 + Number(number[1]) : null;
     };
+    // Open it only when the look shows no calendar: a press on a field
+    // under its own open calendar is refused as covered.
+    if (monthOf(await look()) === null) await this.press({ handle: result.handle, label: result.label });
     for (let presses = 0, pager = 0; presses < HAND_PRESSES; presses += 1) {
       const now = monthOf(await look());
       if (now === target) break;

@@ -352,7 +352,10 @@ fn a_calendar_the_fill_could_not_pick_on_is_said_with_its_heading_pagers_and_day
     ledger.record(&bundle, pass);
     let report = ledger.report();
     assert_eq!(
-        report.results[0].widget.as_ref().map(|widget| widget.days.as_str()),
+        report.results[0]
+            .widget
+            .as_ref()
+            .map(|widget| widget.days.as_str()),
         Some("div.days")
     );
     let lines = fill_lines(&report);

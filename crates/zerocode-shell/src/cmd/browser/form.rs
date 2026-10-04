@@ -557,6 +557,25 @@ const zcPagers = (grid) => [...grid.root.querySelectorAll(request.actions.join("
     && !grid.cells.some((cell) => button.contains(cell) || cell.contains(button))
     && !/[\p{L}\p{N}]/u.test(String(button.innerText || button.textContent || "")));
 const zcMonthNumber = ([year, month]) => year * 12 + month;
+// The calendars nearest a field — those sharing the deepest box with it —
+// and how deep that box is: a calendar another field left open is not this
+// field's.
+const zcDepth = (node) => {
+  let depth = 0;
+  for (; node; node = node.parentElement) depth += 1;
+  return depth;
+};
+const zcNearest = (grids, el) => {
+  const around = new Set();
+  for (let node = el; node; node = node.parentElement) around.add(node);
+  const depths = grids.map((grid) => {
+    let shared = grid.box;
+    while (shared && !around.has(shared)) shared = shared.parentElement;
+    return zcDepth(shared);
+  });
+  const best = Math.max(0, ...depths);
+  return { grids: grids.filter((_, at) => depths[at] === best), depth: best };
+};
 // Page a calendar to the asked month and press its day; "" when pressed,
 // else what the page shows of the calendar for the agent to finish by hand.
 // A field the page keeps from being typed in that takes a date: the day of
@@ -596,11 +615,15 @@ const zcWidget = (grids) => {
 const zcPickDate = (record, date) => {
   const el = record.el;
   const doc = el.ownerDocument;
-  let grids = zcCalendars(doc);
-  if (!grids.length && !zcDays(el, date).length) {
+  const near = () => zcNearest(zcCalendars(doc), el);
+  // The field's own calendar shares at least the field's own box with it;
+  // anything further is opened by pressing the field.
+  let found = near();
+  if ((!found.grids.length || found.depth < zcDepth(el.parentElement)) && !zcDays(el, date).length) {
     zcPress(el);
-    grids = zcCalendars(doc);
+    found = near();
   }
+  let grids = found.grids;
   const whole = zcDays(el, date);
   if (whole.length === 1) {
     zcPress(whole[0]);
@@ -629,11 +652,11 @@ const zcPickDate = (record, date) => {
     const handle = zcHandleOf(pager);
     tried.add(handle);
     zcPress(pager);
-    grids = zcCalendars(doc);
+    grids = near().grids;
     if (!grids.length) {
       // That control closed the calendar: open it again, that one tried.
       zcPress(el);
-      grids = zcCalendars(doc);
+      grids = near().grids;
       continue;
     }
     const after = grids.find((grid) => grid.month);
