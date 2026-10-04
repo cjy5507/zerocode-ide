@@ -125,9 +125,10 @@ Android phone, and `list` never offers one as drivable. When the person's phone
 is one of these:
 
 1. Tell them what you found, in their own language and in two sentences or
-   fewer: the device `name`, its `state` (`connected`, or `unavailable` when the
-   Mac knows the phone but cannot reach it now), and that this window can drive
-   only simulators and emulators.
+   fewer: the device `name`, its `state` (`connected`; `unavailable` when the
+   Mac knows the phone but cannot reach it now; on Android also `unauthorized`
+   when the phone has not allowed this computer, or `offline`), and that this
+   window can drive only simulators and emulators.
 2. Offer what you can do instead: open a simulator or emulator with `open`, or
    work on the app's code, build and logs.
 3. Ask before you touch the real phone any other way (`adb`, `devicectl`,
