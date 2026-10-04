@@ -2723,6 +2723,29 @@ mod tests {
             );
         }
 
+        /// The look still runs before every connection while a hold keeps
+        /// the process attached: a sidecar that stops being a regular file
+        /// is refused on the next connection, held store or not. (Under a
+        /// hold the sidecars are SQLite's live files; the test unlinks
+        /// `-shm`, whose mapping this process keeps, to make room.)
+        #[test]
+        fn a_held_store_still_refuses_a_sidecar_that_is_not_a_file() {
+            let root = a_private_root();
+            let path = root.path().join("workflow.sqlite");
+            let store = WorkflowStore::open(&path).expect("a store");
+            let _hold = store.hold().expect("the store held");
+            let shm = root.path().join("workflow.sqlite-shm");
+            fs::remove_file(&shm).expect("-shm unlinked under its mapping");
+            fs::create_dir(&shm).expect("a directory where -shm goes");
+
+            assert!(
+                matches!(store.connection(), Err(WorkflowStoreError::UnsafeStorePath)),
+                "a held store opened a connection beside a directory at -shm"
+            );
+            fs::remove_dir(&shm).expect("the directory goes");
+            store.connection().expect("the store answers again");
+        }
+
         /// A second opener of the same store in the same process — the
         /// review store, a reopen after a refusal — checks and tightens the
         /// main file as well.
