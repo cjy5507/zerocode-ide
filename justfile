@@ -153,6 +153,16 @@ knowledge-browser-test:
 long-form-test:
     node tools/computer-bench/long-form/test-desk.mjs
 
+# The form bench's stand-in browser door, its shim and the runner of a real
+# agent, held to what the window answers (t-41387): no model and no login — a
+# shell script stands where `claude -p` stands. Builds the core's `door_text`
+# example first, which says what the window says. A bench's own check, run by
+# the build line, not by `verify`.
+form-bench-test:
+    cargo build -p zerocode-core --example door_text
+    node tools/computer-bench/form-scenes/test-desk.mjs --door-text "${CARGO_TARGET_DIR:-target}/debug/examples/door_text"
+    node tools/computer-bench/form-scenes/test-real.mjs --door-text "${CARGO_TARGET_DIR:-target}/debug/examples/door_text"
+
 # Release builds use a deliberately small frontend tree. Keeping this separate
 # from ui/ means browser fixtures and prototypes remain available to developers
 # without being embedded in the desktop binary.
