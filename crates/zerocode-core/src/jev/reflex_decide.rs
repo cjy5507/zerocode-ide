@@ -1007,6 +1007,16 @@ impl Why {
             Self::Idle => "idle",
         }
     }
+
+    /// Whether this refusal says the grounds the answer was asked on had gone
+    /// by the time it came back — its reading too old, another run, epoch or
+    /// plan — rather than that the seat does not apply or the hand stood
+    /// still: an answer refused so is about a premise that no longer stood,
+    /// and is held for no next reading (t-32797, [`holdable`]).
+    #[must_use]
+    pub const fn premise_gone(self) -> bool {
+        matches!(self, Self::Stale | Self::EpochMismatch | Self::PlanMismatch)
+    }
 }
 
 /// Whether an answer that came back inside its wall may be carried out
@@ -1065,6 +1075,18 @@ pub fn carried(row: &mut Value, verdict: Result<(), Why>) {
     if let Err(why) = verdict {
         row["why"] = json!(why.word());
     }
+}
+
+/// Whether a decision row's answer may be held for the reading after it
+/// (t-32797): it was answered, and its carrier did not refuse it because the
+/// grounds it was asked on had gone ([`Why::premise_gone`]). A row nobody
+/// judged — a run a person's plan started — names no refusal.
+#[must_use]
+pub fn holdable(row: &Value) -> bool {
+    row["outcome"] == json!(ANSWERED)
+        && !Why::ALL
+            .into_iter()
+            .any(|why| why.premise_gone() && row["why"] == json!(why.word()))
 }
 
 // ---- what an answer is graded by ---------------------------------------------

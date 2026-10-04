@@ -34,7 +34,7 @@ use zerocode_core::computer_use_protocol::reflex::{
     self, RUN_POLICY_VERSION, ReflexCapability, RunPolicy, Surface, VERSION, ValidatedPlan,
 };
 use zerocode_core::jev::reflex_decide::{
-    self, ANSWERED, Ahead, Decider, Offer, Pending, Snapshot, Stamp, Wired,
+    self, Ahead, Decider, Offer, Pending, Snapshot, Stamp, Wired,
 };
 use zerocode_core::jev::{JevMode, REFLEX_DECIDE, REFLEX_DECIDE_DEADLINE_MS};
 
@@ -980,17 +980,18 @@ impl Watch {
         spent.stamp(&mut row);
         self.stamp(&mut row, mode);
         self.agree_with_ahead(&pending, &mut row);
-        // Held for the next reading while this one is still the newest: its
-        // branches are about the reading after it and no later one.
-        if row["outcome"] == json!(ANSWERED)
-            && !ended
+        carrier.settled(&pending, &mut row);
+        // Held for the next reading while this one is still the newest — its
+        // branches are about the reading after it and no later one — and only
+        // while the grounds it was asked on stood when it came back.
+        if !ended
             && self.decider.newest() == pending.id
+            && reflex_decide::holdable(&row)
             && let Ok(body) = &wired.answer
         {
             self.report.ahead.dropped += self.ahead.hold(&pending, body) as u64;
             self.report.ahead.held += self.ahead.len() as u64;
         }
-        carrier.settled(&pending, &mut row);
         let road = row["road"].as_str().unwrap_or_default().to_string();
         self.count(&road, u64::from(wired.attempts));
         if let Some(next) = self.decider.settled(pending.id) {

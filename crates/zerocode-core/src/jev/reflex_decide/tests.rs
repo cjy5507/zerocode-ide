@@ -1144,3 +1144,52 @@ fn a_held_answers_row_is_an_answer_of_no_request() {
     assert_ne!(premise_of(&next), premise_of(&healthy(1, 10)));
     assert_eq!(premise_of(&healthy(1, 10)), premise_of(&healthy(1, 99)));
 }
+
+/// An answer is held for the next reading only while the grounds it was
+/// asked on stood when it came back (t-32797): one its carrier refused as
+/// stale, another run's or epoch's, or another plan's is about a premise
+/// that had gone; one refused because the seat does not apply, or about a
+/// hand already still, was fit and is held; one nobody judged is held; one
+/// that did not answer is not.
+#[test]
+fn only_an_answer_whose_grounds_stood_is_held_for_the_next_reading() {
+    let answered = asked_row(
+        "rx-1",
+        &Pending {
+            id: 1,
+            snapshot: healthy(1, 10),
+        },
+        &sent(answering("pause")),
+        None,
+        true,
+        false,
+    );
+    assert!(holdable(&answered), "nobody judged it");
+    for why in Why::ALL {
+        let mut row = answered.clone();
+        carried(&mut row, Err(why));
+        assert_eq!(holdable(&row), !why.premise_gone(), "{}", why.word());
+    }
+    assert_eq!(
+        Why::ALL
+            .into_iter()
+            .filter(|why| why.premise_gone())
+            .collect::<Vec<_>>(),
+        [Why::Stale, Why::EpochMismatch, Why::PlanMismatch]
+    );
+    let mut fit = answered.clone();
+    carried(&mut fit, Ok(()));
+    assert!(holdable(&fit));
+    let failed = asked_row(
+        "rx-1",
+        &Pending {
+            id: 1,
+            snapshot: healthy(1, 10),
+        },
+        &sent(Err("timeout".into())),
+        None,
+        true,
+        false,
+    );
+    assert!(!holdable(&failed));
+}
