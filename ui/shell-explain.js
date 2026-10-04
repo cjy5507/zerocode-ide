@@ -130,6 +130,8 @@ function explainSourceOfDiff(button) {
     title: tab.path,
     text: [`diff --git a/${tab.path} b/${tab.path}`, ...lines].join("\n"),
     term: artifactDraftSeats()[0]?.term ?? null,
+    // 변경은 판이 아니라 체크아웃에 속한다 — 보던 판을 지어내지 않는다.
+    from: { term: null, cwd: tab.worktree ?? null },
   };
 }
 
@@ -144,16 +146,20 @@ function explainSourceOfTurn(run, turn) {
   const said = (role, text) => `${EXPLAIN_TURN_SPEAKERS[role]}:\n${text}`;
   const parts = asked === "" ? [said("assistant", answered)] : [said("user", asked), said("assistant", answered)];
   const head = answered.split("\n", 1)[0].slice(0, EXPLAIN_TITLE_CHARS);
+  const term = Number.isInteger(run.term) ? run.term : null;
   return {
     title: head || t(EXPLAIN_KINDS.turn.what.key, EXPLAIN_KINDS.turn.what.word),
     text: parts.join("\n\n"),
-    term: run.term ?? null,
+    term,
+    // 읽던 판과 그 폴더 — wire 대화는 판이 없고 제 폴더만 안다.
+    from: { term, cwd: run.cwd ?? (term === null ? null : tabOfTerm(term)?.worktree) ?? null },
   };
 }
 
 /* 과업 보고: 보고서 아티팩트의 id만 보낸다 — 본문은 백엔드가 파일에서 읽는다. */
 function explainSourceOfReport(entity, report, term) {
-  return { title: entity.facts?.identity ?? report, report, term };
+  // 폴더는 보고서 행이 제 출처로 갖고 있다 — 창은 좌석의 판만 안다.
+  return { title: entity.facts?.identity ?? report, report, term, from: { term, cwd: null } };
 }
 
 /* 답변 행의 단추: 행에 포인터나 초점이 처음 닿을 때 한 번 짓는다 — 긴 대화의 모든
@@ -309,6 +315,7 @@ async function startExplain(kind, source, route, agent) {
     language: explainLanguage(),
     headline: t("explain.headline", "그림·페이지로 설명해 주세요"),
     route,
+    from: source.from ?? null,
   };
   try {
     await invoke("explain_start", { request });

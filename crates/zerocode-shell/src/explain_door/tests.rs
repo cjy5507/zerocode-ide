@@ -76,6 +76,41 @@ fn a_request_with_neither_text_nor_report_is_not_readable() {
     );
 }
 
+#[test]
+fn a_request_names_where_it_came_from_only_when_the_window_held_it() {
+    let request = |from: serde_json::Value| -> Start {
+        let mut said = serde_json::json!({
+            "id": "explain-1",
+            "kind": "turn",
+            "title": "t",
+            "text": "x",
+            "language": "ko",
+            "headline": "h",
+            "route": { "via": "one_shot", "agent": "claude" },
+        });
+        if !from.is_null() {
+            said["from"] = from;
+        }
+        serde_json::from_value(said).expect("a request the window can send")
+    };
+    // A turn: the pane it was read in, and that pane's folder.
+    let turn = request(serde_json::json!({ "term": 7, "cwd": "/work/one" }));
+    let from = turn.from.expect("a source");
+    assert_eq!(from.term, Some(7));
+    assert_eq!(from.cwd.as_deref(), Some("/work/one"));
+    // A diff: a folder and no pane — the null the window sends is no pane at all.
+    let diff = request(serde_json::json!({ "term": null, "cwd": "/work/one" }));
+    let from = diff.from.expect("a source");
+    assert_eq!(from.term, None);
+    assert_eq!(from.cwd.as_deref(), Some("/work/one"));
+    // A report: its seat's pane, and no folder (the report's own row has it).
+    let report = request(serde_json::json!({ "term": 3, "cwd": null }));
+    let from = report.from.expect("a source");
+    assert_eq!((from.term, from.cwd), (Some(3), None));
+    // A window older than this field sends none, and nothing is invented.
+    assert!(request(serde_json::Value::Null).from.is_none());
+}
+
 /// A measurement, not a check: what the door adds to every report a pane's state
 /// makes. With no request standing the road is one atomic load; with the table full
 /// and none of them this pane's, a lock and a scan of sixteen.

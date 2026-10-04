@@ -34,8 +34,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, Manager as _};
-use zerocode_core::artifact::{Artifact, ArtifactKind, Origin};
-use zerocode_core::artifact_publish::PublishInput;
+use zerocode_core::artifact::{Artifact, ArtifactKind};
 use zerocode_core::capabilities::OneShotRoad;
 use zerocode_core::explain::{self, Ask, Kind, OneShotPrompt, why};
 use zerocode_core::explain_desk::{
@@ -79,6 +78,32 @@ pub(crate) struct Start {
     pub(crate) language: String,
     pub(crate) headline: String,
     pub(crate) route: Route,
+    /// Where the person was when they pressed. An older window sends none.
+    #[serde(default)]
+    pub(crate) from: Option<Source>,
+}
+
+/// What the window knows of where a request came from: the pane the person was
+/// reading in and the folder of the checkout it belongs to. Each is absent when
+/// the window does not hold it — a diff belongs to a checkout and to no pane, and
+/// a report's folder is the report's own — so that a page's origin never says
+/// what nobody vouched for.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct Source {
+    #[serde(default)]
+    pub(crate) term: Option<Term>,
+    #[serde(default)]
+    pub(crate) cwd: Option<String>,
+}
+
+/// What a one-shot's page is published as, and where its request came from.
+struct Page {
+    kind: Kind,
+    title: String,
+    headline: String,
+    from: Source,
+    /// The artifact id of the report, when a task's report is what was explained.
+    report: Option<String>,
 }
 
 /// What the card says about the material before it is sent.
@@ -276,8 +301,13 @@ pub(crate) fn start(app: &AppHandle, request: Start) -> Result<(), String> {
             &request.id,
             agent,
             explain::one_shot_prompt(&ask),
-            &title,
-            &request.headline,
+            Page {
+                kind,
+                title: title.clone(),
+                headline: request.headline.clone(),
+                from: request.from.clone().unwrap_or_default(),
+                report: request.report.clone(),
+            },
         ),
     }
     Ok(())
@@ -466,14 +496,7 @@ pub(crate) fn note_pane_gone(term: Term) {
 
 // ---- a one-shot ----
 
-fn start_one_shot(
-    app: &AppHandle,
-    id: &str,
-    agent: &str,
-    prompt: OneShotPrompt,
-    title: &str,
-    headline: &str,
-) {
+fn start_one_shot(app: &AppHandle, id: &str, agent: &str, prompt: OneShotPrompt, page: Page) {
     let Some(road) = zerocode_core::agent_capabilities(agent).and_then(|caps| caps.one_shot) else {
         return tell_failed(app, id, why::NO_AGENT, None);
     };
@@ -500,10 +523,9 @@ fn start_one_shot(
     );
     let app = app.clone();
     let (id, agent) = (id.to_string(), agent.to_string());
-    let (title, headline) = (title.to_string(), headline.to_string());
     std::thread::spawn(move || {
         let made = run_once_for(&app, &agent, road, &program, &prompt);
-        match made.and_then(|page| publish_made(&agent, &title, &headline, &id, &page)) {
+        match made.and_then(|html| publish_made(&app, &id, &agent, &page, &html)) {
             Ok(row) => finish_ready(&app, &id, &agent, row),
             Err(reason) => fail(&app, &id, reason, None),
         }
@@ -595,15 +617,33 @@ fn file_stem(id: &str) -> String {
         .collect()
 }
 
+/// The origin of the page a one-shot made: what the window and the ledger vouch
+/// for about where the request came from ([`explain::page_origin`] says how they
+/// are put together), asked as late as possible — the pane may have changed what it
+/// sits over while the CLI ran, and the report's row is read as it stands.
+fn origin_of_page(app: &AppHandle, agent: &str, page: &Page) -> zerocode_core::artifact::Origin {
+    let base = crate::artifact_runtime::origin_of_source(
+        app,
+        page.from.term,
+        page.from.cwd.as_deref().map(Path::new),
+    );
+    let report = page
+        .report
+        .as_deref()
+        .and_then(|id| crate::artifact_runtime::store()?.get(id))
+        .map(|row| row.origin);
+    explain::page_origin(base, agent, report.as_ref())
+}
+
 /// Publish the page a one-shot made, through the road the hook door uses. The
 /// file the store reads it from is the store's own folder and is removed
 /// as soon as the store has its copy.
 fn publish_made(
-    agent: &str,
-    title: &str,
-    headline: &str,
+    app: &AppHandle,
     id: &str,
-    page: &str,
+    agent: &str,
+    page: &Page,
+    html: &str,
 ) -> Result<Artifact, &'static str> {
     if with_desk(|desk| desk.get(id).is_none()) {
         // Cancelled while it ran: nothing opens.
@@ -613,18 +653,9 @@ fn publish_made(
     let dir: PathBuf = store.root().join("explain");
     let file = dir.join(format!("{}.html", file_stem(id)));
     std::fs::create_dir_all(&dir).map_err(|_| why::NOT_PUBLISHED)?;
-    std::fs::write(&file, page).map_err(|_| why::NOT_PUBLISHED)?;
-    let input = PublishInput {
-        file_path: file.clone(),
-        title: Some(title.to_string()),
-        description: Some(headline.to_string()),
-        favicon: None,
-        label: None,
-    };
-    let origin = Origin {
-        agent: Some(agent.to_string()),
-        ..Origin::default()
-    };
+    std::fs::write(&file, html).map_err(|_| why::NOT_PUBLISHED)?;
+    let input = explain::publish_input(page.kind, &page.title, &page.headline, file.clone());
+    let origin = origin_of_page(app, agent, page);
     let published = crate::artifact_runtime::publish_and_tell(&store, &input, origin);
     let _ = std::fs::remove_file(&file);
     published

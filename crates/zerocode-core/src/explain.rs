@@ -354,23 +354,44 @@ fn material_block(ask: &Ask<'_>) -> String {
 /// the person's title and first line, and the kind of thing it explains as the
 /// label, so that the gallery can say what a page is about.
 #[must_use]
-pub fn publish_input(_kind: Kind, title: &str, headline: &str, file_path: PathBuf) -> PublishInput {
+pub fn publish_input(kind: Kind, title: &str, headline: &str, file_path: PathBuf) -> PublishInput {
     PublishInput {
         file_path,
         title: Some(title.to_string()),
         description: Some(headline.to_string()),
         favicon: None,
-        label: None,
+        label: Some(kind.as_str().to_string()),
     }
 }
 
 /// The origin of a page the window makes itself, from what the ledger and the
-/// window already vouch for: `base` is what the window knows of the pane or the
-/// folder the request came from, `agent` the CLI that wrote the page, and `report`
-/// the origin of the task's report when it is a report that was explained.
+/// window already vouch for and nothing more: `base` is what the window knows of
+/// the pane or the folder the request came from (the same answer a page an agent
+/// publishes from that pane gets), `agent` the CLI that wrote the page, and
+/// `report` the origin of the task's report when it is a report that was explained.
+///
+/// The page names the CLI that wrote it and no model: the model seated in the
+/// pane is not the one that answered, and the CLI's own default is not known
+/// here. A report's task wins over the pane's — the page is about that task —
+/// while the pane and the folder stay where the person was. The report's seat is
+/// the ledger's spelling of a place, not a pane of this window, so it is not
+/// copied. What nobody knows stays empty.
 #[must_use]
-pub fn page_origin(base: Origin, _agent: &str, _report: Option<&Origin>) -> Origin {
-    base
+pub fn page_origin(base: Origin, agent: &str, report: Option<&Origin>) -> Origin {
+    let mut origin = Origin {
+        agent: Some(agent.to_string()),
+        model: None,
+        ..base
+    };
+    if let Some(report) = report {
+        origin.work_summary = report.work_summary.clone().or(origin.work_summary);
+        origin.run = report.run.clone().or(origin.run);
+        origin.task = report.task.clone().or(origin.task);
+        origin.worker = report.worker.clone().or(origin.worker);
+        origin.worktree = origin.worktree.or_else(|| report.worktree.clone());
+        origin.project = origin.project.or_else(|| report.project.clone());
+    }
+    origin
 }
 
 /// What an agent in a pane is asked, as the person's next message there: the
@@ -397,11 +418,12 @@ pub fn conversation_prompt(ask: &Ask<'_>) -> String {
          1. {skills}.\n\
          2. HTML, CSS, SVG and script all inline in that one file.\n\
          3. Do not edit any file of this project. Write the page outside the repository (for example in the system temp folder).\n\
-         4. Publish it: `zerocode-artifact publish --file-path <absolute path of the html file> --title \"<a title that names the content>\" --description \"<one sentence>\"`. \
+         4. Publish it: `zerocode-artifact publish --file-path <absolute path of the html file> --title \"<a title that names the content>\" --description \"<one sentence>\" --label {kind}`. \
          The window opens the page by itself once it is published; then tell me the id it printed.\n\n\
          {material}",
         headline = ask.headline.trim(),
         task = task_words(ask),
+        kind = ask.kind.as_str(),
         material = material_block(ask),
     )
 }

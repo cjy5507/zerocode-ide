@@ -2921,6 +2921,34 @@ fn window_origin(
     )
 }
 
+/// The origin a page the window makes itself (an explanation's one-shot, t-32787)
+/// takes from what the window knows of where its request came from: the pane the
+/// person was reading in, through the same answer a page published from that pane
+/// gets, and the folder of the checkout. A request from no pane this window holds
+/// (a diff belongs to a checkout) names no pane and no ledger seat; its folder
+/// still names the project and workspace that hold it.
+pub(crate) fn origin_of_source(
+    app: &tauri::AppHandle,
+    term: Option<crate::TermId>,
+    cwd: Option<&Path>,
+) -> Origin {
+    use tauri::Manager as _;
+    let caller = zerocode_core::artifact_publish::Caller {
+        pane: term.map(crate::hooks::pane_key_of),
+        cwd: cwd.map(Path::to_path_buf),
+    };
+    let mut origin = window_origin(app, &caller);
+    if origin.is_empty()
+        && let Some(cwd) = cwd.filter(|cwd| cwd.is_absolute())
+    {
+        let state = app.state::<AppState>();
+        let (project, worktree) = place_of(cwd, &known_projects(state.config_root(), cwd));
+        origin.project = project;
+        origin.worktree = worktree;
+    }
+    origin
+}
+
 /// Publish a page into the catalog and tell the window — the one road the hook
 /// door and a page the window made itself (an explanation's one-shot, t-32787)
 /// share. The window hears that the catalog moved and the row that was
