@@ -287,15 +287,17 @@ impl TeamRequest {
     ///
     /// Kept beside the request and its limits so the bridge, the window, and
     /// tests do not grow separate ideas of which command consumes the reserved
-    /// wait quota. Three verbs qualify: a `check` that said `--wait`, every
-    /// `ask`, and `worker-start`, whose answer now waits for the spawned TUI to
-    /// accept its briefing. All are orchestration words; tmux has no bare
-    /// command with any of these names.
+    /// wait quota. Four verbs qualify: a `check` that said `--wait`, every
+    /// `ask`, `worker-start`, whose answer now waits for the spawned TUI to
+    /// accept its briefing, and `delegate`, which is a `worker-start` that also
+    /// writes the work and the worker's first letter (t-34501). All are
+    /// orchestration words; tmux has no bare command with any of these names.
     #[must_use]
     pub fn reserves_wait_slot(&self) -> bool {
         let verb = self.argv.first();
         verb.is_some_and(|verb| verb == "ask")
             || verb.is_some_and(|verb| verb == "worker-start")
+            || verb.is_some_and(|verb| verb == "delegate")
             || (verb.is_some_and(|verb| verb == "check")
                 && self.argv.iter().skip(1).any(|word| word == "--wait"))
     }
@@ -317,21 +319,44 @@ impl TeamRequest {
         if !self.reserves_wait_slot() {
             return TEAM_DEADLINE;
         }
-        let budget = self
-            .argv
-            .iter()
-            .zip(self.argv.iter().skip(1))
-            .find(|(flag, _)| *flag == "--timeout-ms")
-            .and_then(|(_, value)| value.parse::<u64>().ok())
-            .map(|ms| ms.min(WAIT_BUDGET_CEILING_MS));
+        // `--timeout-ms X` and `--timeout-ms=X` are one thing to the ledger (the later one wins), so
+        // they are one thing here; reading only the two-word form held a `=` spelling for the short
+        // default while the window kept its wait.
+        let mut budget: Option<u64> = None;
+        for (at, word) in self.argv.iter().enumerate() {
+            let value = if word == "--timeout-ms" {
+                self.argv.get(at + 1).map(String::as_str)
+            } else {
+                word.strip_prefix("--timeout-ms=")
+            };
+            if let Some(ms) = value.and_then(|value| value.parse::<u64>().ok()) {
+                budget = Some(ms.min(WAIT_BUDGET_CEILING_MS));
+            }
+        }
+        // A `delegate --wait` answers after the pane is opened and the worker has its briefing
+        // (up to the ready default) AND THEN the wait the caller asked for — so the bridge holds
+        // the preparation on top of the wait, or it gives up before a window that is still right.
+        let preparation = if self.argv.first().is_some_and(|verb| verb == "delegate")
+            && self.argv.iter().skip(1).any(|word| word == "--wait")
+        {
+            std::time::Duration::from_millis(u64::from(
+                zerocode_core::orchestration::delegate::WAIT_HEADROOM_MS,
+            ))
+        } else {
+            std::time::Duration::ZERO
+        };
         match budget {
-            Some(ms) => std::time::Duration::from_millis(ms) + BRIDGE_GRACE,
+            Some(ms) => std::time::Duration::from_millis(ms) + preparation + BRIDGE_GRACE,
             None if self.argv.first().is_some_and(|verb| verb == "ask") => {
                 std::time::Duration::from_millis(u64::from(
                     zerocode_core::orchestration::ASK_BUDGET_DEFAULT_MS,
                 )) + BRIDGE_GRACE
             }
-            None if self.argv.first().is_some_and(|verb| verb == "worker-start") => {
+            None if self
+                .argv
+                .first()
+                .is_some_and(|verb| verb == "worker-start" || verb == "delegate") =>
+            {
                 std::time::Duration::from_millis(u64::from(
                     zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS,
                 )) + BRIDGE_GRACE

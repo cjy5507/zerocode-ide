@@ -37,6 +37,7 @@
 
 mod completion;
 pub mod coordinator_handover;
+pub mod delegate;
 mod session_history;
 pub mod task_cost;
 
@@ -1020,7 +1021,7 @@ pub const NO_ATTEMPT: &str = "none";
 
 /// A commit, as a person or an agent writes one: seven hex digits or more.
 /// Anything else is not a commit — a report id, a branch name, a sentence.
-fn commit_named(text: &str) -> Option<String> {
+pub(crate) fn commit_named(text: &str) -> Option<String> {
     let text = text.trim();
     (text.len() >= 7 && text.chars().all(|c| c.is_ascii_hexdigit())).then(|| text.to_string())
 }
@@ -17640,6 +17641,16 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::Mutation,
     ),
     (
+        delegate::VERB,
+        "--spec <text> --agent <a> [--title <t>] [--deps a,b] [--parent <id>] [--prompt <p>] \
+         [--model <id> [--effort <level>]] [--on-quota-wall wait|<agent[:model[:effort]]>] \
+         [--worktree] [--horizontal] [--timeout-ms <ms>] [--wait] · write the work down, summon a \
+         worker on it and leave the worker a letter with its own ids, in one step; --wait holds \
+         the answer until the worker reports or asks (--timeout-ms is then how long, up to ten \
+         minutes); without --wait, --timeout-ms is the readiness window, as for worker-start",
+        Doing::Mutation,
+    ),
+    (
         "worker-list",
         "[--all] [--terminal-state <s>] · every worker in this run, with terminal counts",
         Doing::FreshRead,
@@ -18348,9 +18359,24 @@ is left — and when the real answer is longer than that, write it to a file \
 and carry the path instead: `--payload '{{\"reportPath\":\"/abs/path\",\"lifetime\":\"ephemeral\"}}'`, \
 with the same path named once in the summary. Say in the summary if that \
 file dies with your worktree, because the coordinator reads it before \
-anything is cleaned up. Every command that CHANGES anything needs --retry-request: repeat \
+anything is cleaned up. Screenshots, logs or a folder of them go in the same \
+payload as `\"{evidence}\":[\"/abs/file\",\"/abs/folder\"]`: the window keeps a copy of \
+what you name before your checkout is cleaned (text and pictures only, private \
+values masked, {cap_mb} MB at most). An intended failure is evidence too — name it \
+`{{\"path\":\"/abs/red.log\",\"{expect}\":\"fail\"}}` so nobody guesses it from the file \
+name — and a report that is not a plain report says what it is: `\"{report_kind}\":\"review\"` \
+(one of {kinds}). Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
 a new request. `zerocode-orc help` lists the rest. {find} {plain} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+        evidence = crate::hand_in::EVIDENCE_KEY,
+        expect = crate::hand_in::EXPECT_KEY,
+        report_kind = crate::hand_in::REPORT_KIND_KEY,
+        kinds = crate::hand_in::ReportKind::ALL
+            .iter()
+            .map(|kind| kind.word())
+            .collect::<Vec<_>>()
+            .join(", "),
+        cap_mb = crate::hand_in::HAND_IN_BYTES_MAX / (1024 * 1024),
         find = worker_find_context(),
         plain = WORKER_PLAIN_REPORT_CONTEXT,
         purpose = WORKER_PURPOSE_CONTEXT,
@@ -19464,7 +19490,13 @@ fn plan_inner(
     let (verb, rest) = argv
         .split_first()
         .ok_or_else(|| "a verb is required — try `help`".to_string())?;
-    let words = split_words(rest, BOOL_FLAGS);
+    let words = {
+        let mut words = split_words(rest, BOOL_FLAGS);
+        if verb == delegate::VERB {
+            delegate::strip_wait(&mut words);
+        }
+        words
+    };
     within_bounds(&words)?;
 
     // A retry is answered with the first answer, not by doing the thing again.
@@ -20557,6 +20589,10 @@ fn plan_inner(
                 "detected": measured.is_some(),
             }))
         }
+
+        delegate::VERB => delegate::plan(
+            ledger, team, launcher, &words, pane, now_ms, actor, &caller, &seat,
+        )?,
 
         "worker-start" => {
             let run_id = bound(ledger, &words, &caller, &seat)?;

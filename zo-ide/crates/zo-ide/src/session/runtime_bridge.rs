@@ -168,9 +168,14 @@ pub fn build_message_request(
     // carried as text rather than dropped, so a mid-session model switch hands
     // the next model the reasoning behind the conversation and not just its
     // conclusions (`runtime::convert_messages::ReasoningReplay`).
+    //
+    // And for THIS request's byte ceiling: the oldest pictures a body over the
+    // catalog's `max_request_bytes` budget cannot carry are left out of the wire
+    // form (stored history is not touched), and a refused request tightens the
+    // cap (`ApiRequest::picture_cap`) so the same turn goes on.
     let mut messages = runtime::convert_messages_for(
         &reconciled,
-        runtime::ReasoningReplay::for_model(&wire_model),
+        runtime::WireTarget::for_model(&wire_model).with_picture_cap(request.picture_cap),
     );
     // Reminders ride the newest user message so the system blocks — and the
     // cached history behind them — stay byte-identical across turns. Before
@@ -756,7 +761,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::session) mod tests {
     use super::*;
 
     use runtime::CLAUDE_CODE_IDENTITY;
@@ -792,6 +797,7 @@ mod tests {
             effort_override: None,
             effort_step: None,
             model_override: None,
+            picture_cap: None,
         };
         build_message_request(&request, model, true, None, registry, None, None, None)
             .tools
@@ -829,6 +835,7 @@ mod tests {
             effort_override: None,
             effort_step: None,
             model_override: None,
+            picture_cap: None,
         };
         // No step: byte-identical to the turn's own reading.
         let turn = request_effort(&request, Some(L::Xhigh), Some(L::Max), Some(28_000));
@@ -881,6 +888,7 @@ mod tests {
             effort_override: None,
             effort_step: None,
             model_override: None,
+            picture_cap: None,
         }
     }
 
@@ -1202,6 +1210,7 @@ mod tests {
             effort_override: None,
             effort_step: None,
             model_override: None,
+            picture_cap: None,
         };
         let wire = build_message_request(
             &request,
@@ -1239,6 +1248,7 @@ mod tests {
             effort_override: None,
             effort_step: None,
             model_override: None,
+            picture_cap: None,
         };
         let wire = build_message_request(
             &request,
@@ -1268,6 +1278,7 @@ mod tests {
             effort_override: None,
             effort_step: None,
             model_override: None,
+            picture_cap: None,
         };
         let wire = build_message_request(
             &request,
@@ -1563,14 +1574,14 @@ mod tests {
     /// A world with no Claude login in it: an empty zo home, an empty Claude
     /// folder the store rule reads — where a person's new login lands — and
     /// no keychain, key or model list. The caller holds the test env lock.
-    struct NoLoginAnywhere {
+    pub(in crate::session) struct NoLoginAnywhere {
         store: tempfile::TempDir,
         _home: tempfile::TempDir,
         _env: Vec<crate::support::EnvVarGuard>,
     }
 
     impl NoLoginAnywhere {
-        fn new() -> Self {
+        pub(in crate::session) fn new() -> Self {
             let home = tempfile::tempdir().expect("an empty zo home");
             let store = tempfile::tempdir().expect("the Claude folder");
             let home_path = home.path().to_str().expect("utf8 home");
@@ -1638,6 +1649,7 @@ mod tests {
             effort_override: None,
             effort_step: None,
             model_override: None,
+            picture_cap: None,
         };
         (live, request, seen)
     }
