@@ -23742,6 +23742,77 @@ mod handoff_code_road {
         assert!(!confirm::asking(), "the card goes when its guard does");
     }
 
+    /// The card with a line shows what the person types, in clear. While it
+    /// stands, a picture of the whole display waits (`person_asked`) — it would
+    /// carry the code into a file — and every look that is not one still
+    /// answers. A card without a line, and no card at all, refuse no picture.
+    #[test]
+    fn a_picture_of_the_display_waits_while_a_card_with_a_line_stands() {
+        let _hand = one_hand();
+        let refusal = |argv: &[&str]| {
+            let parsed = parse_command(&words(argv));
+            assert!(parsed.is_ok(), "{argv:?} parses: {parsed:?}");
+            crate::agent_tools_runtime::door_refusal(
+                &parsed.unwrap_or_else(|_| unreachable!("asserted above")),
+            )
+            .map(|why| why.code)
+        };
+        let card = |id: &str, line: bool| Handoff {
+            id: id.to_string(),
+            reason: A_CODE_REASON.to_string(),
+            reason_key: None,
+            reason_args: Value::Null,
+            timeout_ms: 1_000,
+            code_ask: line.then_some(CodeLimits::TABLE),
+        };
+        let pictures: [&[&str]; 4] = [
+            &["screenshot"],
+            &["zoom", "--region", "0,0,40,40"],
+            &["observe"],
+            &["compare", "--baseline", "/baseline.png"],
+        ];
+        let other_looks: [&[&str]; 5] = [
+            &["wait", "--ms", "1"],
+            &["status"],
+            &["watch"],
+            &["observe", "--app", "Notes"],
+            &["observe", "--no-screenshot"],
+        ];
+
+        let id = confirm::next_id();
+        let standing = Standing(id.clone());
+        let _receiver = confirm::open_handoff(&card(&id, true));
+        for argv in pictures {
+            assert_eq!(
+                refusal(argv),
+                Some(error_code::PERSON_ASKED.to_string()),
+                "{argv:?} while the card stands"
+            );
+        }
+        for argv in other_looks {
+            assert_eq!(
+                refusal(argv),
+                None,
+                "{argv:?} carries no picture of the display"
+            );
+        }
+        drop(standing);
+        for argv in pictures {
+            assert_eq!(refusal(argv), None, "{argv:?} once the card has gone");
+        }
+
+        let plain = confirm::next_id();
+        let _plain_standing = Standing(plain.clone());
+        let _plain_receiver = confirm::open_handoff(&card(&plain, false));
+        for argv in pictures {
+            assert_eq!(
+                refusal(argv),
+                None,
+                "{argv:?} while a card with no line stands: nothing typed to photograph"
+            );
+        }
+    }
+
     /// 합성 양식 (a page that is no real site): a button that sends a code,
     /// one field, a button that pays. The agent asks for the code, the person
     /// types it on the card, the agent writes it into the field the way the

@@ -3780,7 +3780,7 @@ const RECIPES_ROOT_UNKNOWN: &str = "the window has not told the operator where i
 /// Why a command that acts is refused at the door, if it is: the operator
 /// is stopped (the hotkey, `stop`, a budget), or the person is being asked
 /// about a step (or has the desk). A look is never refused here.
-fn door_refusal(
+pub(super) fn door_refusal(
     command: &zerocode_core::computer_use::ComputerCommand,
 ) -> Option<computer_use::ComputerUseError> {
     if !command.method.acts() {
