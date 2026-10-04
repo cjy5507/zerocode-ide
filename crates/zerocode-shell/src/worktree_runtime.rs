@@ -2332,3 +2332,64 @@ pub(crate) fn worktree_stamp_of(roots: Vec<String>) -> String {
     }
     said
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = crate::proc::quiet_command("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .env_remove("GIT_OPTIONAL_LOCKS")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The cleanup screen's evidence is read in the background for every
+    /// checkout; it must not refresh `.git/index` under `index.lock` (t-24545).
+    #[test]
+    fn cleanup_git_evidence_does_not_rewrite_the_index() {
+        assert!(
+            std::env::var_os("GIT_OPTIONAL_LOCKS").is_none(),
+            "GIT_OPTIONAL_LOCKS is already set in this environment, so a plain `git status` \
+             would not rewrite the index either and this test would prove nothing — unset it"
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).expect("create project");
+        git(&root, &["init", "-b", "main"]);
+        git(&root, &["config", "user.email", "t@example.invalid"]);
+        git(&root, &["config", "user.name", "t"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("tracked.txt"), "one\n").expect("write");
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-q", "-m", "first"]);
+        git(&root, &["status", "--porcelain"]);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join("tracked.txt"))
+            .expect("open");
+        file.set_modified(SystemTime::now() - Duration::from_secs(3600))
+            .expect("move the mtime");
+        drop(file);
+        let index = root.join(".git").join("index");
+        let before = std::fs::read(&index).expect("index");
+
+        let evidence = cleanup_git_evidence(&Host::for_workspace(&root), &root);
+
+        assert!(!evidence.errored, "the evidence was not read");
+        assert_eq!(
+            before,
+            std::fs::read(&index).expect("index"),
+            "cleanup_git_evidence wrote the index"
+        );
+    }
+}

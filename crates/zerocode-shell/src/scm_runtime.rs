@@ -1199,7 +1199,7 @@ pub(super) fn read_git_history(root: &Path, limit: Option<usize>) -> Result<GitH
         .unwrap_or(GIT_HISTORY_DEFAULT_LIMIT)
         .clamp(1, GIT_HISTORY_MAX_LIMIT);
     let git = |args: &[&str]| -> Result<String, String> {
-        let out = crate::proc::quiet_command("git")
+        let out = zerocode_core::host::lock_free_git(crate::proc::quiet_command("git"))
             .args(args)
             .current_dir(root)
             .output()

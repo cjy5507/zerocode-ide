@@ -171,7 +171,7 @@ fn is_ref_part(worker: &str) -> bool {
 /// every git of this module goes in by, so that none is the one that takes an
 /// optional lock a worker's own `add` or `commit` would wait for.
 fn git(checkout: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
-    let mut command = crate::proc::quiet_command("git");
+    let mut command = zerocode_core::host::lock_free_git(crate::proc::quiet_command("git"));
     command
         .arg("--no-optional-locks")
         .arg("-C")

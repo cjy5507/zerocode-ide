@@ -155,7 +155,7 @@ fn live_roots(state: &AppState) -> Vec<PathBuf> {
 /// The commit, then the ref the checkout stands on — `HEAD` again when it is
 /// detached.
 fn checkout_token(root: &Path) -> Result<String, String> {
-    let output = crate::proc::quiet_command("git")
+    let output = zerocode_core::host::lock_free_git(crate::proc::quiet_command("git"))
         .args(["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"])
         .current_dir(root)
         .output()
