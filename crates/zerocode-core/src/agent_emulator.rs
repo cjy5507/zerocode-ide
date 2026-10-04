@@ -14,6 +14,21 @@ use crate::agent_browser::{
     verb_in,
 };
 
+pub mod physical;
+
+/// The skill that teaches the mobile road (`skills/mobile-device`): the one
+/// place that holds the command table. The `computer-use` skill points to it,
+/// and a test holds both files to this name.
+pub const MOBILE_SKILL_NAME: &str = "mobile-device";
+
+/// The longest the mobile skill's one-line description may be. It rides every
+/// session of every CLI that lists its skills, and it is the line a person's
+/// sentence must find; the ninetieth percentile of the fifty skills measured on
+/// one machine (`jev::SKILL_DESCRIPTION_CHAR_CAP`: p50 232, p75 405, p90 548)
+/// is long enough for both languages and short enough to be a cost nobody
+/// notices.
+pub const MOBILE_DESCRIPTION_CHARS_MAX: usize = 550;
+
 /// The shim's name on every pane's PATH — the word a recipe line starts with
 /// when its step goes through the emulator door (`computer_use::
 /// emulator_shim_script` writes the shim under it).

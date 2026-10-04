@@ -1800,6 +1800,69 @@ fn artifact_skills_frontmatter_routes_korean_and_english_deliverables() {
     }
 }
 
+/// What a person says when a phone is on the other end — five sentences in
+/// Korean and five in English, all made up — put to the two matchers zo has
+/// that need no model: the skill search's word match (`lexical_rank`, which the
+/// turn-start suggestion and the explicit search both fall back to) and the
+/// turn matcher (`recommend_skills`). Over the skills this product ships, the
+/// mobile skill is first for every one (t-36920). A Korean sentence carries the
+/// bare noun a person says ("아이폰 연결해놨어"): neither matcher sees through a
+/// particle glued to a word, and that is the model-led path's job (see
+/// `skills.rs`).
+#[test]
+fn the_mobile_skill_ranks_first_for_what_a_person_says_about_a_phone() {
+    const SENTENCES: [&str; 10] = [
+        "아이폰 연결해놨어, 앱 켜서 로그인 화면 확인해줘",
+        "안드로이드 폰에 앱 설치해뒀어. 첫 화면 스크린샷 찍어줘",
+        "시뮬레이터 열어서 설정 탭 눌러보고 뭐가 보이는지 알려줘",
+        "에뮬레이터 띄우고 이메일 칸에 테스트 계정 입력해서 로그인 버튼 눌러줘",
+        "IDE에 아이패드 연결돼 있는지 보고 앱 화면을 스와이프 해봐",
+        "The iPhone is connected to the IDE, open the app and check the login screen.",
+        "I installed the app on my Android phone, take a screenshot of the first screen.",
+        "Use the iOS simulator to tap the Settings tab and type my email into the form.",
+        "Is an iPad connected? Swipe through the onboarding screens in the app and tell me what you see.",
+        "Boot an Android emulator, launch the app, press the back button and screenshot the result.",
+    ];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../skills");
+    let mut files: Vec<PathBuf> = fs::read_dir(&root)
+        .expect("bundled skills")
+        .flatten()
+        .map(|entry| entry.path().join("SKILL.md"))
+        .filter(|path| path.is_file())
+        .collect();
+    files.sort();
+    let entries: Vec<SkillIndexEntry> = files
+        .into_iter()
+        .filter_map(|path| {
+            let body = fs::read_to_string(&path).ok()?;
+            super::parse_skill_index_entry(path, &body)
+        })
+        .collect();
+    let mobile = zerocode_core::agent_emulator::MOBILE_SKILL_NAME;
+    assert!(
+        entries.iter().any(|entry| entry.name == mobile),
+        "the shipped skills have no `{mobile}`"
+    );
+    let candidates = crate::skill_rank::skill_candidates(&entries);
+    for sentence in SENTENCES {
+        let ranked = crate::skill_rank::lexical_rank(sentence, &candidates);
+        assert_eq!(
+            ranked.first().map(|reading| reading.name.as_str()),
+            Some(mobile),
+            "the word match for `{sentence}`: {ranked:?}"
+        );
+        let found = crate::skills::recommend_skills(
+            &crate::skills::SkillMatchInput { user_text: sentence, touched_paths: &[] },
+            &entries,
+        );
+        assert_eq!(
+            found.first().map(|rec| rec.name.as_str()),
+            Some(mobile),
+            "the turn matcher for `{sentence}`: {found:?}"
+        );
+    }
+}
+
 /// The index is paid on every request, so it stays inside the skill budget
 /// whatever the machine has installed: the highest-precedence skills keep
 /// their lines, the tail folds into one line that says how many were left out

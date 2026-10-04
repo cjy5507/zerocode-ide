@@ -200,31 +200,45 @@ const HELPER_ATTACH_RETRY: Duration = Duration::from_millis(500);
 /// device is up and the helper still has not answered.
 const HELPER_ATTACH_CEILING: Duration = Duration::from_secs(60);
 
-/// One `simctl` invocation, however this machine reaches it.
+/// One invocation of an Xcode tool, however this machine reaches it.
 ///
 /// `xcrun` resolves its tool with a real process walk on every call, and the
 /// frame pump used to pay that walk thirty times a second — half of the
-/// "Orca는 바로 떠" gap once the nap was gone. Resolved once; a machine where
-/// `--find` answers nothing keeps the plain `xcrun simctl` spelling and fails
-/// exactly where it always failed.
-pub(crate) fn simctl_command() -> Command {
-    static FOUND: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    let words = FOUND.get_or_init(|| {
-        let found = crate::proc::quiet_command("xcrun")
-            .args(["--find", "simctl"])
+/// "Orca는 바로 떠" gap once the nap was gone. Resolved once per tool (`found`
+/// is that tool's own cell); a machine where `--find` answers nothing keeps the
+/// plain `xcrun <tool>` spelling and fails exactly where it always failed.
+fn xcrun_command(tool: &str, found: &'static std::sync::OnceLock<Vec<String>>) -> Command {
+    let words = found.get_or_init(|| {
+        let path = crate::proc::quiet_command("xcrun")
+            .args(["--find", tool])
             .output()
             .ok()
             .filter(|out| out.status.success())
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .filter(|path| !path.is_empty() && std::path::Path::new(path).is_file());
-        match found {
+        match path {
             Some(path) => vec![path],
-            None => vec!["xcrun".to_string(), "simctl".to_string()],
+            None => vec!["xcrun".to_string(), tool.to_string()],
         }
     });
     let mut command = crate::proc::quiet_command(&words[0]);
     command.args(&words[1..]);
     command
+}
+
+/// One `simctl` invocation.
+pub(crate) fn simctl_command() -> Command {
+    static FOUND: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    xcrun_command("simctl", &FOUND)
+}
+
+/// One `devicectl` invocation: the Xcode tool that lists the iPhones and iPads
+/// on a cable or a network, which `zerocode-emulator list` names and cannot
+/// drive (t-36920).
+#[cfg(target_os = "macos")]
+pub(crate) fn devicectl_command() -> Command {
+    static FOUND: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    xcrun_command("devicectl", &FOUND)
 }
 
 #[derive(Debug, Clone, Serialize)]

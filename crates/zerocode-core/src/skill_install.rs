@@ -3,7 +3,7 @@
 //! `skill.rs` reads and never writes — those are directories the person and
 //! their agents own. This module is the one deliberate exception, and it is
 //! narrow on purpose: it writes only the skills carried inside this binary
-//! (`skills/computer-use`, `skills/orchestration`, `skills/second-brain`), only into the global root
+//! (every directory under `skills/`, as `build.rs` lists them), only into the global root
 //! each detected agent actually reads, and only over a file that is already
 //! ours. Anything else that lives at the destination is left as it is and
 //! reported.
@@ -402,6 +402,11 @@ mod tests {
         assert!(bundled_skill("computer-use").is_some());
         assert!(bundled_skill("orchestration").is_some());
         assert!(bundled_skill("second-brain").is_some());
+        assert!(
+            bundled_skill(crate::agent_emulator::MOBILE_SKILL_NAME).is_some(),
+            "this build carries no {} skill",
+            crate::agent_emulator::MOBILE_SKILL_NAME
+        );
         assert!(bundled_skill("playwright").is_none());
     }
 
@@ -527,16 +532,20 @@ mod tests {
     }
 
     /// The six agents the person named — Claude Code, Codex, zo, agy (the
-    /// catalog's `antigravity`), Kimi and Grok — each get the `plain-report`
-    /// skill in the root they read, and each reads it from there (t-32786).
+    /// catalog's `antigravity`), Kimi and Grok — each get EVERY bundled skill in
+    /// the root they read, and each reads it from there (t-32786, t-36920).
     /// Every one has a root: none is left unwired. Kimi has no root of its own
-    /// and reads the shared `.agents` home.
+    /// and reads the shared `.agents` home. Two skills are named outright, so a
+    /// skill this build lost is a failure here and not a loop that ran over
+    /// fewer skills.
     #[test]
-    fn the_plain_report_skill_installs_for_each_of_the_six_agents_in_the_root_it_reads() {
-        assert!(
-            bundled_skill("plain-report").is_some(),
-            "this build carries no plain-report skill"
-        );
+    fn every_bundled_skill_installs_for_each_of_the_six_agents_in_the_root_it_reads() {
+        for named in ["plain-report", crate::agent_emulator::MOBILE_SKILL_NAME] {
+            assert!(
+                bundled_skill(named).is_some(),
+                "this build carries no {named} skill"
+            );
+        }
         let six = [
             ("claude", ".claude/skills"),
             ("codex", ".codex/skills"),
@@ -553,39 +562,47 @@ mod tests {
                 (spec.id.to_string(), spec.name.to_string())
             })
             .collect();
-        let home = tempfile::tempdir().unwrap();
-        let outcomes = install_bundled_skill("plain-report", home.path(), &rows).unwrap();
-        assert_eq!(outcomes.len(), six.len());
-        let sources = discovery_sources(home.path(), &[]);
-        for ((agent, root), outcome) in six.into_iter().zip(&outcomes) {
-            assert_eq!(outcome.agent, agent);
-            assert_eq!(
-                outcome.state,
-                InstallState::Written,
-                "{agent}: {}",
-                outcome.detail
-            );
-            assert_eq!(
-                outcome.path,
-                home.path().join(root).join("plain-report").join(SKILL_FILE),
-                "{agent}"
-            );
-            assert_eq!(
-                std::fs::read_to_string(&outcome.path).unwrap(),
-                bundled_skill("plain-report").unwrap().content,
-                "{agent}"
-            );
-            let own = install_root(agent, &sources)
-                .unwrap_or_else(|| panic!("{agent} has no skills root"));
-            let found = crate::skill::scan(own);
-            let skill = found
-                .iter()
-                .find(|skill| skill.name == "plain-report")
-                .unwrap_or_else(|| panic!("{agent}: the skill is not found in its own root"));
-            assert!(
-                crate::skill::agent_reads_skill(agent, skill),
-                "{agent} does not read the root it was installed into"
-            );
+        for skill in BUNDLED_SKILLS {
+            let home = tempfile::tempdir().unwrap();
+            let outcomes = install_bundled_skill(skill.name, home.path(), &rows).unwrap();
+            assert_eq!(outcomes.len(), six.len(), "{}", skill.name);
+            let sources = discovery_sources(home.path(), &[]);
+            for ((agent, root), outcome) in six.into_iter().zip(&outcomes) {
+                assert_eq!(outcome.agent, agent);
+                assert_eq!(
+                    outcome.state,
+                    InstallState::Written,
+                    "{} for {agent}: {}",
+                    skill.name,
+                    outcome.detail
+                );
+                assert_eq!(
+                    outcome.path,
+                    home.path().join(root).join(skill.name).join(SKILL_FILE),
+                    "{} for {agent}",
+                    skill.name
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&outcome.path).unwrap(),
+                    skill.content,
+                    "{} for {agent}",
+                    skill.name
+                );
+                let own = install_root(agent, &sources)
+                    .unwrap_or_else(|| panic!("{agent} has no skills root"));
+                let found = crate::skill::scan(own);
+                let read = found
+                    .iter()
+                    .find(|candidate| candidate.name == skill.name)
+                    .unwrap_or_else(|| {
+                        panic!("{agent}: {} is not found in its own root", skill.name)
+                    });
+                assert!(
+                    crate::skill::agent_reads_skill(agent, read),
+                    "{agent} does not read the root {} was installed into",
+                    skill.name
+                );
+            }
         }
     }
 

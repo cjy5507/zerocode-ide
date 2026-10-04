@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+use zerocode_core::agent_emulator::physical::PhysicalDevice;
 
 use super::session::{FinishSession, SessionControl, SessionKey, StartClaim, registry};
 use super::{
@@ -1331,6 +1332,18 @@ fn android_avd_name(adb: &Path, serial: &str) -> Result<String, String> {
         return Err("Android AVD identity is ambiguous".into());
     }
     Ok(name.to_string())
+}
+
+/// The real Android phones on the bridge, named for `zerocode-emulator list`.
+pub(super) fn physical_android_devices(_cap: Duration) -> Result<Vec<PhysicalDevice>, String> {
+    Ok(Vec::new())
+}
+
+pub(super) fn physical_android_with(
+    _adb: &Path,
+    _cap: Duration,
+) -> Result<Vec<PhysicalDevice>, String> {
+    Ok(Vec::new())
 }
 
 fn recovered_managed_record(

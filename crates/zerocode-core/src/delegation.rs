@@ -57,4 +57,44 @@ mod tests {
         assert_eq!(with_agent_selection_contract(&added), added);
         assert_eq!(with_agent_selection_contract("  \n"), "  \n");
     }
+
+    /// What the surfaces paragraph weighed before the mobile clause (t-36920),
+    /// in characters: 720, about 181 tokens at the harness's `chars / 4 + 1`.
+    /// It rides every session of every agent that gets the contract and every
+    /// worker briefing, so a growth is a decision and not a drift.
+    const SURFACES_CHARS_BEFORE_THE_MOBILE_CLAUSE: usize = 720;
+
+    /// What the mobile clause may add to it, in characters: the words that send
+    /// an agent that is told a phone is connected to `zerocode-emulator list`
+    /// and away from the three roads one transcript took first.
+    const MOBILE_CLAUSE_CHARS_MAX: usize = 198;
+
+    /// An agent told "the iPhone is connected to our IDE" looked in the Mac's
+    /// window list for iPhone Mirroring, asked Xcode's `devicectl`, and then
+    /// searched the notes for how ZeroCode drives a phone (2026-10-04). The
+    /// paragraph every session carries says the person's own words and the one
+    /// first step, and says which roads not to start from.
+    #[test]
+    fn the_surfaces_paragraph_sends_a_phone_sentence_to_zerocode_emulator_list_first() {
+        let surfaces = AGENT_SELECTION_CONTEXT
+            .split_once("ZeroCode surfaces:")
+            .map_or("", |(_, rest)| rest);
+        for words in [
+            "when the person says a phone, iPhone, iPad or Android device is connected or open in the IDE",
+            "start with `zerocode-emulator list`",
+            "not the Mac window list, iPhone Mirroring or Xcode's devicectl",
+        ] {
+            assert!(
+                surfaces.contains(words),
+                "the surfaces paragraph never says `{words}`: {surfaces}"
+            );
+        }
+        let chars = "ZeroCode surfaces:".chars().count() + surfaces.chars().count();
+        assert!(
+            chars <= SURFACES_CHARS_BEFORE_THE_MOBILE_CLAUSE + MOBILE_CLAUSE_CHARS_MAX,
+            "the surfaces paragraph is {chars} characters; it was \
+             {SURFACES_CHARS_BEFORE_THE_MOBILE_CLAUSE} and the mobile clause may add \
+             {MOBILE_CLAUSE_CHARS_MAX}"
+        );
+    }
 }

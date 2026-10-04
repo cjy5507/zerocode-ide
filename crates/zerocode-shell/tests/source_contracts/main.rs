@@ -9375,8 +9375,9 @@ mod tests {
         );
         let mobile = block_after(shell, "async fn answer_emulator_command(");
         for owned in [
-            "mobile_emulators_direct()",
-            "android_emulators_direct()",
+            // The list is one function of the emulator module (t-36920); the
+            // door only calls it.
+            "crate::emulator::list_answer_now()",
             r#"emit_to("main", "emulator:agent-open""#,
             // Seated in the asking pane's checkout (t-6379): the payload
             // names the terminal the door's pane key reads as.
@@ -9396,6 +9397,25 @@ mod tests {
             !mobile.contains("Command::new") && !mobile.contains("open_mobile_emulator_direct"),
             "the agent route opens or drives an external emulator instead of ZeroCode's pane"
         );
+        // `list` reads the simulators, the emulators and the real devices the
+        // window sees and cannot drive side by side, and puts them in the one
+        // answer the core writes — never a reader of its own.
+        let list = block_after(
+            include_str!("../../src/emulator/physical.rs"),
+            "pub(crate) async fn list_answer_now(",
+        );
+        for owned in [
+            "mobile_emulators_direct()",
+            "android_emulators_direct()",
+            "physical_ios()",
+            "physical_android()",
+            "list_answer(",
+        ] {
+            assert!(
+                list.contains(owned),
+                "the emulator list lost {owned}:\n{list}"
+            );
+        }
         // The frame comes from the backend that paints the pane, through the
         // one helper both the agent's `screenshot` and a run's evidence use.
         let frame = block_after(shell, "async fn emulator_screenshot_bytes(");
@@ -9465,13 +9485,23 @@ mod tests {
             4,
             "`emulator.agentOpenUnseated` is missing from one of the en/ja/zh/es catalogs"
         );
+        // The mobile road has a skill of its own (t-36920): computer-use
+        // routes to it by name, and it holds the commands.
+        let mobile_skill = zerocode_core::skill_install::bundled_skill(
+            zerocode_core::agent_emulator::MOBILE_SKILL_NAME,
+        )
+        .map_or("", |skill| skill.content);
         assert!(
             skill.contains("Website or web app: use `zerocode-browser")
-                && skill.contains("Never assume a specific phone")
-                && skill.contains("zerocode-emulator list --json")
                 && skill.contains("zerocode-browser screenshot <pane-label>")
-                && skill.contains("zerocode-emulator screenshot --platform ios|android"),
-            "the installed skill no longer teaches dynamic built-in routing"
+                && skill.contains(&format!(
+                    "`{}` skill",
+                    zerocode_core::agent_emulator::MOBILE_SKILL_NAME
+                ))
+                && mobile_skill.contains("Never assume a specific phone")
+                && mobile_skill.contains("zerocode-emulator list --json")
+                && mobile_skill.contains("zerocode-emulator screenshot --platform ios|android"),
+            "the installed skills no longer teach dynamic built-in routing"
         );
         // The remote route, whole: the router owns the word, the verbs reach
         // this window's own machinery, the pane is mounted by the window, and

@@ -13,6 +13,7 @@ mod ios;
 #[cfg(target_os = "macos")]
 mod ios_hid;
 pub(crate) mod marks;
+mod physical;
 mod prefs;
 mod process;
 mod pump;
@@ -44,6 +45,7 @@ pub(crate) use ios::{
     ios_tap_direct, ios_text, ios_text_direct, ios_touch, mobile_emulators,
     mobile_emulators_direct, open_mobile_emulator, shutdown_mobile_emulator, start_emulator_stream,
 };
+pub(crate) use physical::list_answer_now;
 use session::{Loan, SessionControl, StartVerdict, loans, registry};
 pub(crate) use session::{LoanEnd, LoanSummary};
 
