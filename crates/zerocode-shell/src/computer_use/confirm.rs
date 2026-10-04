@@ -819,4 +819,112 @@ mod tests {
             assert_eq!(coded, plain, "{decision:?}");
         }
     }
+
+    /// One round of a card with a line, as the window plays it: opened, a code
+    /// judged and handed over (or a cancel, or silence), and the entry gone.
+    fn one_card(round: u32) {
+        let id = next_id();
+        let receiver = open_handoff(&card(&id, true));
+        match round % 3 {
+            0 => assert_eq!(answer_code(&id, "493 021"), CodeVerdict::Delivered),
+            1 => assert!(answer(&id, false)),
+            _ => close(&id),
+        }
+        let handed = wait_handed(&receiver, Duration::from_millis(1));
+        assert_eq!(
+            handed.code.is_some(),
+            round % 3 == 0,
+            "only a delivered code carries one"
+        );
+        close(&id);
+    }
+
+    /// Cards come and go by the thousand over a long session; each leaves
+    /// nothing in the table.
+    #[test]
+    fn ten_thousand_cards_leave_the_table_empty() {
+        let _hand = one_hand();
+        for round in 0..10_000 {
+            one_card(round);
+        }
+        assert_eq!(open_questions(), 0, "a card left its entry behind");
+        assert!(!asking());
+    }
+
+    /// A measurement, not a gate (t-40807): what one card with a line costs the
+    /// window — its entry opened, a code judged and handed over, the entry
+    /// gone — and what the rule costs once per handoff, in microseconds; and
+    /// what ten thousand cards leave in the table and in memory. Run as it is
+    /// and under `taskpolicy -b` (the efficiency cores):
+    ///
+    ///   cargo test -p zerocode-shell --bin zerocode-shell -- --ignored --nocapture a_card_with_a_line_costs
+    #[test]
+    #[ignore = "a measurement, not a gate"]
+    fn a_card_with_a_line_costs_microseconds_and_leaves_nothing_behind() {
+        let _hand = one_hand();
+        const ROUNDS: u32 = 10_000;
+        const RULE_CALLS: u32 = 100_000;
+        let rss_kib = || -> u64 {
+            let out = crate::proc::quiet_command("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
+        };
+        let micros = |began: std::time::Instant, calls: u32| {
+            began.elapsed().as_secs_f64() * 1_000_000.0 / f64::from(calls)
+        };
+        for round in 0..300 {
+            one_card(round);
+        }
+        let before = rss_kib();
+        let began = std::time::Instant::now();
+        for round in 0..ROUNDS {
+            one_card(round);
+        }
+        let per_card = micros(began, ROUNDS);
+        let after = rss_kib();
+
+        // The plain card, as it was before the line: the same table, a yes.
+        let began = std::time::Instant::now();
+        for _ in 0..ROUNDS {
+            let id = next_id();
+            let receiver = open(&id);
+            assert!(answer(&id, true));
+            assert_eq!(wait(&receiver, Duration::from_millis(1)), Decision::Allowed);
+        }
+        let per_plain = micros(began, ROUNDS);
+
+        let began = std::time::Instant::now();
+        let mut named = 0_u32;
+        for _ in 0..RULE_CALLS {
+            named += u32::from(reason_names_a_secret(std::hint::black_box(
+                PERSONS_TURN_FOR_A_CODE,
+            )));
+        }
+        let per_reason = micros(began, RULE_CALLS);
+        let began = std::time::Instant::now();
+        let mut judged = 0_u32;
+        for _ in 0..RULE_CALLS {
+            judged += u32::from(OneTimeCode::parse(std::hint::black_box("493 021")).is_ok());
+        }
+        let per_code = micros(began, RULE_CALLS);
+        assert_eq!((named, judged), (0, RULE_CALLS));
+        println!(
+            "HANDOFF_CARD_NUMBERS {}",
+            serde_json::json!({
+                "rounds": ROUNDS,
+                "microsPerPlainCard": (per_plain * 100.0).round() / 100.0,
+                "microsPerCardWithLine": (per_card * 100.0).round() / 100.0,
+                "microsPerReasonJudged": (per_reason * 1000.0).round() / 1000.0,
+                "microsPerCodeJudged": (per_code * 1000.0).round() / 1000.0,
+                "openAfter": open_questions(),
+                "rssKibBefore": before,
+                "rssKibAfter": after,
+            })
+        );
+    }
 }
