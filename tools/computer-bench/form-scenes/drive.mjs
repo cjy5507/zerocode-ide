@@ -31,6 +31,12 @@
  * nothing about any scene — no handle, label, order or step is written here.
  * Between two round trips the driver waits THINK_MS: a model's turn is never
  * shorter, and a page's own late fields land inside it.
+ *
+ * What the door cannot do, the driver does by hand as a model would — open,
+ * look, press, a round trip each: a date a fill answered `no_option` with
+ * the calendar it saw, a choice it answered `no_option` for, and a fact no
+ * field takes whose words are beside a thing the read could not name
+ * (`unknowns`).
  */
 
 import { createServer } from "node:http";
@@ -94,6 +100,7 @@ async function serve(folder) {
  * them; a value split across `(i/n)` parts by its number groups. */
 function plan(fields, facts) {
   const bundle = {};
+  const unplaced = [];
   const byWords = new Map();
   for (const field of fields) {
     const key = words(field.label);
@@ -107,7 +114,10 @@ function plan(fields, facts) {
       const near = [...byWords.entries()].filter(([key]) => key && (key.includes(said) || said.includes(key)));
       if (near.length === 1) group = near[0][1];
     }
-    if (!group) continue;
+    if (!group) {
+      unplaced.push(fact);
+      continue;
+    }
     if (group.length === 1) {
       const [field] = group;
       if (field.value !== fact.value) bundle[field.handle] = fact.value;
@@ -120,7 +130,18 @@ function plan(fields, facts) {
       if (piece && field.value !== piece) bundle[field.handle] = piece;
     });
   }
-  return { bundle };
+  return { bundle, unplaced };
+}
+
+/* The one thing whose words are these words, else the one that holds them
+ * or is held by them — the reading `plan` gives a fact, given to a press. */
+function thingOf(things, said) {
+  const wanted = fold(said);
+  const same = things.filter((thing) => [thing.label, thing.caption].some((text) => text && fold(text) === wanted));
+  if (same.length) return same[0];
+  const near = things.filter((thing) => [thing.label, thing.caption]
+    .some((text) => text && (fold(text).includes(wanted) || wanted.includes(fold(text)))));
+  return near.length === 1 ? near[0] : null;
 }
 
 class Road {
@@ -132,6 +153,7 @@ class Road {
     this.codeSent = false;
     this.count = { roundTrips: 0, fields: 0, fill: 0, click: 0, eval: 0, handoff: 0, read: 0, fillPasses: 0, stale: 0 };
     this.form = null;
+    this.byHandTried = new Set();
     this.scriptMs = [];
     this.trail = [];
   }
@@ -171,9 +193,49 @@ class Road {
     this.count.fillPasses += filled.passes;
     this.trail.push({ fill: filled.results.map((result) => `${result.label}:${result.status}`) });
     for (const result of filled.results) {
-      if (result?.status === "no_option" && result.widget) await this.byHand(result, bundle[result.handle]);
+      if (result?.status !== "no_option") continue;
+      if (result.widget) await this.byHand(result, bundle[result.handle]);
+      else await this.openAndPress(result, bundle[result.handle]);
     }
     return filled;
+  }
+
+  /* A thing the door could not fill — a field answered `no_option`, a thing
+   * of no kind beside a fact's words — opened, looked at and pressed by the
+   * value's words, each a round trip: a press, a read, a press by handle when
+   * the read names it, else a look by words (`marks`) and a press. Tried
+   * once a thing. */
+  async openAndPress(thing, value) {
+    if (typeof value !== "string" || this.byHandTried.has(thing.handle)) return false;
+    this.byHandTried.add(thing.handle);
+    await this.press({ handle: thing.handle, label: thing.label });
+    const read = await this.fields();
+    const named = thingOf([...(read.unknowns || []), ...read.actions].filter((one) => one.handle !== thing.handle), value);
+    if (named) {
+      await this.press(named);
+      return true;
+    }
+    const spot = await this.call("read", () => this.page.evaluate(([wanted]) => {
+      const fold = (text) => String(text ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+      const all = [...document.querySelectorAll("body *")];
+      return all.findIndex((el) => el.getClientRects().length && fold(el.innerText) === fold(wanted)
+        && ![...el.children].some((child) => fold(child.innerText) === fold(wanted)));
+    }, [value]));
+    this.trail.push({ look: thing.label, found: spot >= 0 });
+    if (spot < 0) return false;
+    await this.call("click", () => this.page.evaluate(([at]) => document.querySelectorAll("body *")[at].click(), [spot]));
+    return true;
+  }
+
+  /* The facts no field took, each to the thing of no kind its words sit
+   * beside: answers true when one was pressed, so the step is read again. */
+  async unknownRoad(unknowns, unplaced) {
+    let pressed = false;
+    for (const fact of unplaced) {
+      const thing = thingOf(unknowns || [], fact.says);
+      if (thing && (await this.openAndPress(thing, fact.value))) pressed = true;
+    }
+    return pressed;
   }
 
   /* A date the fill could not pick, finished by hand from the calendar its
@@ -248,8 +310,9 @@ class Road {
   async verbs() {
     for (;;) {
       const read = await this.fields();
-      const { bundle } = plan(read.fields, this.facts);
+      const { bundle, unplaced } = plan(read.fields, this.facts);
       if (this.price) this.priced += await this.today(read, bundle);
+      if (await this.unknownRoad(read.unknowns, unplaced)) continue;
       let left = read.fields.filter((field) => field.required && (field.value === "" || field.value === false));
       if (Object.keys(bundle).length) {
         const filled = await this.fill(bundle);
@@ -311,17 +374,17 @@ class Road {
       const intentOf = ${intentOf.toString()};
       const facts = __FACTS__;
       const read = zerocode.fields();
-      const { bundle } = plan(read.fields, facts);
+      const { bundle, unplaced } = plan(read.fields, facts);
       const filled = Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: read.fields
         .filter((field) => field.required && (field.value === "" || field.value === false)) };
       const clean = filled.results.every((result) => took(result.status)) && !filled.left.length;
       const next = read.actions.find((action) => !action.disabled && intentOf(action.label, "next"));
       const pressNext = clean && !!next && !next.handle.includes(${JSON.stringify(FORM_REQUEST.frameSeparator)});
       if (pressNext) document.querySelector(next.handle).click();
-      const hand = filled.results.filter((result) => result.status === "no_option" && result.widget)
+      const hand = filled.results.filter((result) => result.status === "no_option")
         .map((result) => ({ ...result, asked: bundle[result.handle] }));
       return { results: filled.results.map((result) => result.label + ":" + result.status), left: filled.left,
-        actions: read.actions, pressedNext: pressNext, hand };
+        actions: read.actions, pressedNext: pressNext, hand, unknowns: read.unknowns, unplaced };
     })()`;
     for (;;) {
       const source = evalFormScript(STEP.replace("__FACTS__", () => JSON.stringify(this.facts)));
@@ -329,8 +392,12 @@ class Road {
       if (!answer.ok) throw new Error(`eval refused: ${JSON.stringify(answer)}`);
       const said = answer.value;
       this.trail.push({ script: said.results, pressedNext: said.pressedNext });
-      for (const result of said.hand || []) await this.byHand(result, result.asked);
+      for (const result of said.hand || []) {
+        if (result.widget) await this.byHand(result, result.asked);
+        else await this.openAndPress(result, result.asked);
+      }
       if (said.pressedNext) continue;
+      if (await this.unknownRoad(said.unknowns, said.unplaced)) continue;
       if (await this.code(said.left)) continue;
       if (said.left.length || said.results.some((result) => !/:(set|same)$/.test(result))) continue;
       if (await this.step(said.actions)) return this.done();

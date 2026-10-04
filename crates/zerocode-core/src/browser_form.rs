@@ -74,6 +74,25 @@ pub const BROWSER_FORM_LISTS: &[&str] = &["ul", "ol", "[role=listbox]"];
 /// The items of such a list.
 pub const BROWSER_FORM_LIST_ITEMS: &[&str] = &["li", "[role=option]"];
 
+/// What a person can press or focus that no other row names: an element
+/// that takes focus or a click of its own, or one of ARIA's pressable roles
+/// no field or button stands for. These, and a box that shows a pointer its
+/// parent does not, are what a read says as `unknown` rather than drops.
+pub const BROWSER_FORM_PRESSABLES: &[&str] = &[
+    "[tabindex]:not([tabindex^='-'])",
+    "[onclick]",
+    "[role=tab]",
+    "[role=menuitem]",
+    "[role=treeitem]",
+    "[role=slider]",
+    "[role=spinbutton]",
+    "[role=option]",
+];
+
+/// The most elements a read looks through for pressable things of no kind
+/// — a long form has a few thousand.
+pub const BROWSER_FORM_SCAN_CAP: usize = 5_000;
+
 /// The choices a dropdown the page draws itself offers, once it is open
 /// (ARIA's option role).
 pub const BROWSER_FORM_OPTIONS: &[&str] = &["[role=option]"];
@@ -628,6 +647,24 @@ pub fn fields_lines(read: &FormRead) -> String {
             })
             .collect();
         lines.push(format!("버튼: {}", buttons.join(" · ")));
+    }
+    if !read.unknowns.is_empty() {
+        let things: Vec<String> = read
+            .unknowns
+            .iter()
+            .map(|thing| {
+                let caption = if thing.caption.is_empty() || thing.caption == thing.label {
+                    String::new()
+                } else {
+                    format!(" ({})", thing.caption)
+                };
+                format!("{} 「{}」{caption}", thing.handle, thing.label)
+            })
+            .collect();
+        lines.push(format!(
+            "종류를 모르는 조작: {} — click 뒤 fields로 다시 읽기",
+            things.join(" · ")
+        ));
     }
     if !read.sealed_frames.is_empty() {
         lines.push(format!(

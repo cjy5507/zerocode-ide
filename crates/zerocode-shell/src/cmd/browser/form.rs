@@ -18,8 +18,8 @@ use zerocode_core::browser_form::{
     BROWSER_FORM_DAY_WORDS, BROWSER_FORM_DAYS, BROWSER_FORM_FIELD_CAP, BROWSER_FORM_FRAME_DEPTH,
     BROWSER_FORM_FRAME_SEPARATOR, BROWSER_FORM_LIST_ITEMS, BROWSER_FORM_LISTS,
     BROWSER_FORM_MONTH_DAYS, BROWSER_FORM_MONTH_PAGES, BROWSER_FORM_NOT_FIELDS,
-    BROWSER_FORM_OPTION_CAP, BROWSER_FORM_OPTIONS, BROWSER_FORM_SCOPES, FillEntry, FillLedger,
-    FillPass, FillReport, FormRead,
+    BROWSER_FORM_OPTION_CAP, BROWSER_FORM_OPTIONS, BROWSER_FORM_PRESSABLES, BROWSER_FORM_SCAN_CAP,
+    BROWSER_FORM_SCOPES, FillEntry, FillLedger, FillPass, FillReport, FormRead,
 };
 
 /// What a read of a page's forms is made of, page side — read only, like the
@@ -311,6 +311,49 @@ const zcFieldOut = (record, request) => {
   return out;
 };
 const zcEmpty = (out) => out.value === "" || out.value === false;
+// A net under every rule: what a person can press or focus inside the boxes
+// the fields stand in that no field, choice or button stands for — an
+// element that takes focus or a click of its own, one of ARIA's pressable
+// roles, a box that shows a pointer its parent does not — said once,
+// outermost, with its words and the caption beside it. A link, a label and
+// HTML's own controls are named elsewhere or are no step of a form.
+const zcUnknowns = (records, pressed, scopes, docs, request) => {
+  const known = [...pressed];
+  for (const record of records) {
+    known.push(record.el, ...record.choices.map((choice) => choice.el).filter(Boolean));
+  }
+  const said = [];
+  const unknowns = [];
+  const pointer = (el) => {
+    const view = el.ownerDocument.defaultView || window;
+    return view.getComputedStyle(el).cursor === "pointer";
+  };
+  // A page whose every control is drawn by hand has no field to find a box
+  // by: its whole body is looked through.
+  const roots = scopes.size ? [...scopes] : docs.open.map(({ doc }) => doc.body).filter(Boolean);
+  for (const { doc, prefix } of docs.open) {
+    for (const scope of roots) {
+      if (scope.ownerDocument !== doc) continue;
+      let scanned = 0;
+      for (const el of scope.querySelectorAll("*")) {
+        if (unknowns.length >= request.actionCap || (scanned += 1) > request.scanCap) break;
+        if (said.some((one) => one.contains(el))) continue;
+        const own = el.matches(request.pressables.join(","))
+          || (pointer(el) && !(el.parentElement && pointer(el.parentElement)));
+        if (!own || el.matches("input, select, textarea, button, option, label, a[href]")) continue;
+        if (el.closest("label, a[href]") || !zcDrawn(el)) continue;
+        if (known.some((one) => one === el || one.contains(el) || el.contains(one))) continue;
+        const label = zcWords(el.getAttribute("aria-label") || el.innerText || el.textContent || "",
+          request.wordCap);
+        const caption = zcWords(zcCaption(el, request), request.wordCap);
+        if (!label && !caption) continue;
+        said.push(el);
+        unknowns.push({ handle: prefix + zcHandleOf(el), label, caption });
+      }
+    }
+  }
+  return unknowns;
+};
 // Every field the page draws, in its order, frames after the page, and the
 // buttons that stand with them.
 const zcFormFields = (request) => {
@@ -338,6 +381,7 @@ const zcFormFields = (request) => {
     || record.el.ownerDocument.body));
   const actions = [];
   const named = new Set();
+  const pressed = [];
   for (const { doc, prefix } of docs.open) {
     for (const el of doc.querySelectorAll(request.actions.join(","))) {
       if (actions.length >= request.actionCap) break;
@@ -347,15 +391,17 @@ const zcFormFields = (request) => {
       const handle = prefix + zcHandleOf(el);
       if (!label || named.has(handle)) continue;
       named.add(handle);
+      pressed.push(el);
       actions.push({ handle, label, disabled: zcOff(el) });
     }
   }
+  const unknowns = zcUnknowns(records, pressed, scopes, docs, request);
   // The form's fingerprint: every field's handle, kind and words, in order —
   // never a value, which a fill is there to change.
   const print = zcDigest(records.map((record) => [record.handle, record.kind, zcFold(record.label)]
     .join("\u001f")).join("\u001e"));
   return { records, fields: records.map((record) => zcFieldOut(record, request)), actions,
-    more, sealed: docs.sealed, print };
+    more, sealed: docs.sealed, print, unknowns };
 };
 "##;
 
@@ -364,7 +410,7 @@ const zcFormFields = (request) => {
 pub(crate) const BROWSER_FIELDS_BODY: &str = r#"
 const read = zcFormFields(request);
 return zcEncode({ ok: true, value: { fields: read.fields, actions: read.actions, more: read.more,
-  sealedFrames: read.sealed, fingerprint: read.print } }, request.answerCap);
+  sealedFrames: read.sealed, fingerprint: read.print, unknowns: read.unknowns } }, request.answerCap);
 "#;
 
 /// What `fill` writes with, page side — standing on the form helpers: each
@@ -875,7 +921,7 @@ const zerocode = Object.freeze({
   fields: () => {
     const read = zcFormFields(request);
     return { fields: read.fields, actions: read.actions, more: read.more, sealedFrames: read.sealed,
-      fingerprint: read.print };
+      fingerprint: read.print, unknowns: read.unknowns };
   },
   fill: (bundle, read) => zcFill(Array.isArray(bundle) ? bundle
     : Object.entries(bundle || {}).map(([handle, value]) => ({ handle, value })),
@@ -899,6 +945,8 @@ pub(crate) fn form_request() -> serde_json::Value {
         "frameDepth": BROWSER_FORM_FRAME_DEPTH,
         "captionDepth": BROWSER_FORM_CAPTION_DEPTH,
         "lists": BROWSER_FORM_LISTS,
+        "pressables": BROWSER_FORM_PRESSABLES,
+        "scanCap": BROWSER_FORM_SCAN_CAP,
         "listItems": BROWSER_FORM_LIST_ITEMS,
         "monthDays": BROWSER_FORM_MONTH_DAYS,
         "monthPages": BROWSER_FORM_MONTH_PAGES,

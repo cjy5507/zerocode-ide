@@ -23639,7 +23639,7 @@ mod browser_form_fill {
         assert_eq!(request["frameSeparator"], json!(BROWSER_FORM_FRAME_SEPARATOR));
         for key in [
             "notFields", "actions", "scopes", "options", "days", "dayWords", "on", "off", "lists",
-            "listItems",
+            "listItems", "pressables",
         ] {
             assert!(
                 request[key].as_array().is_some_and(|list| !list.is_empty()),
@@ -23648,7 +23648,7 @@ mod browser_form_fill {
         }
         for cap in [
             "fieldCap", "actionCap", "optionCap", "wordCap", "valueCap", "answerCap",
-            "frameDepth", "captionDepth", "monthDays", "monthPages",
+            "frameDepth", "captionDepth", "monthDays", "monthPages", "scanCap",
         ] {
             assert!(request[cap].as_u64().is_some_and(|n| n > 0), "{cap}");
         }

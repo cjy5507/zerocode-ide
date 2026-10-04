@@ -63,6 +63,7 @@ export const FORM_REQUEST = {
   frameDepth: rustNumber(FORM_CORE, "BROWSER_FORM_FRAME_DEPTH"), captionDepth: rustNumber(FORM_CORE, "BROWSER_FORM_CAPTION_DEPTH"),
   monthDays: rustNumber(FORM_CORE, "BROWSER_FORM_MONTH_DAYS"), monthPages: rustNumber(FORM_CORE, "BROWSER_FORM_MONTH_PAGES"),
   lists: rustList(FORM_CORE, "BROWSER_FORM_LISTS"), listItems: rustList(FORM_CORE, "BROWSER_FORM_LIST_ITEMS"),
+  pressables: rustList(FORM_CORE, "BROWSER_FORM_PRESSABLES"), scanCap: rustNumber(FORM_CORE, "BROWSER_FORM_SCAN_CAP"),
   on: rustList(FORM_CORE, "BROWSER_FILL_ON"), off: rustList(FORM_CORE, "BROWSER_FILL_OFF"),
   field: { regions: rustList(CORE, "BROWSER_FIELD_REGIONS"), headings: rustList(CORE, "BROWSER_FIELD_HEADINGS") },
   fieldCap: rustNumber(FORM_CORE, "BROWSER_FORM_FIELD_CAP"), actionCap: rustNumber(FORM_CORE, "BROWSER_FORM_ACTION_CAP"),

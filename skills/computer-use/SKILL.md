@@ -165,6 +165,11 @@ calendar (`달력 「…」 넘김 … · 날짜 칸 …`), finish that one fiel
 `click` the field to open it, `click` a pager until the heading shows the
 month, `click` the day; then `fields` to check it.
 
+A line `종류를 모르는 조작: …` names what a person can press there that the
+read has no kind for — a box with its own list, a chip, a pointer-only
+control: `click` it by its handle, then `fields` again; what opens is read
+like the rest.
+
 Use the handles and words exactly as `fields` printed them; never guess a
 selector. A password field is refused by `fill` (use `type … --value-stdin`),
 a file field and a code sent to the person's phone are the person's turn
