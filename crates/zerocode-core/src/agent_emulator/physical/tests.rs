@@ -30,7 +30,7 @@ fn devicectl_fixture() -> String {
         "info": { "jsonVersion": 3, "outcome": "success" },
         "result": { "devices": [
             device("Synthetic Phone A", "00000000-0000-0000-0000-00000000000a", "iOS", "iPhone", "connected"),
-            device("Synthetic Tablet B", "00000000-0000-0000-0000-00000000000b", "iOS", "iPad", "disconnected"),
+            device("Synthetic Tablet B", "00000000-0000-0000-0000-00000000000b", "iPadOS", "iPad", "disconnected"),
             device("Synthetic Phone C", "00000000-0000-0000-0000-00000000000c", "iOS", "iPhone", "unavailable"),
             device("Synthetic Watch D", "00000000-0000-0000-0000-00000000000d", "watchOS", "AppleWatch", "connected"),
         ] },
@@ -52,8 +52,8 @@ SYN0000000003          offline transport_id:4
 192.0.2.7:5555         device product:synthetic2 model:Synthetic_Tab transport_id:5
 ";
 
-fn row(platform: EmulatorPlatform, name: &str, state: LinkState) -> PhysicalDevice {
-    PhysicalDevice::new(platform, name, None, state)
+fn row(hardware: Hardware, name: &str, state: LinkState) -> PhysicalDevice {
+    PhysicalDevice::new(hardware, name, None, state)
 }
 
 /// An answer that must have come: a refusal fails at this assertion and not at
@@ -102,8 +102,13 @@ fn a_devicectl_answer_becomes_one_undrivable_row_per_phone() {
             "{}: a real device is never drivable here",
             row.name
         );
-        assert_eq!(row.reason, IOS_REASON);
     }
+    let reasons: Vec<&str> = rows.iter().map(|row| row.reason).collect();
+    assert_eq!(
+        reasons,
+        [IPHONE_REASON, IPAD_REASON, IPHONE_REASON],
+        "an iPad is told apart from an iPhone, and each says its own road"
+    );
     assert_eq!(rows[1].model.as_deref(), Some("Synthetic iPad"));
 }
 
@@ -179,14 +184,14 @@ fn the_rows_an_answer_carries_put_the_reachable_first_and_count_the_rest() {
     let mut rows = Vec::new();
     for at in 0..6 {
         rows.push(row(
-            EmulatorPlatform::Ios,
+            Hardware::IPhone,
             &format!("Gone {at}"),
             LinkState::Unavailable,
         ));
     }
     for at in 0..6 {
         rows.push(row(
-            EmulatorPlatform::Android,
+            Hardware::AndroidDevice,
             &format!("Here {at}"),
             LinkState::Connected,
         ));
@@ -205,7 +210,7 @@ fn the_rows_an_answer_carries_put_the_reachable_first_and_count_the_rest() {
 #[test]
 fn a_row_says_drivable_false_and_its_reason_in_the_words_the_skill_names() {
     let phone = row(
-        EmulatorPlatform::Ios,
+        Hardware::IPhone,
         "Synthetic Phone A",
         LinkState::Unavailable,
     );
@@ -232,6 +237,60 @@ fn a_row_says_drivable_false_and_its_reason_in_the_words_the_skill_names() {
     }
 }
 
+/// The most characters a real device's reason may take. A row rides every
+/// `list` answer, up to [`PHYSICAL_ROWS_MAX`] of them: the road fits in about
+/// this much, and a longer one is a paragraph repeated for every phone ever
+/// paired.
+const REASON_CHARS_MAX: usize = 300;
+
+/// "The iPhone is connected" means a real iPhone on a cable, and the Mac's iPhone
+/// Mirroring window is the road it takes (the coordinator's note of 2026-10-04:
+/// another session drove that window more than ninety times and called the app
+/// by three names, two of which it did not find). The row says the road in the
+/// words an agent acts on, in the row itself, so `list` is the one step that
+/// tells which road a device takes.
+#[test]
+fn an_iphone_row_names_the_mac_window_that_drives_it() {
+    let rows = parse_devicectl(&devicectl_fixture()).unwrap_or_default();
+    let phone = rows.iter().find(|row| row.name == "Synthetic Phone A");
+    assert!(phone.is_some(), "the fixture's iPhone is not in the answer");
+    let reason = phone.map_or("", |row| row.reason);
+    for words in [
+        "zerocode-computer",
+        "iPhone Mirroring",
+        IPHONE_MIRRORING_APP,
+        "ask the person",
+        "do not open the app",
+    ] {
+        assert!(
+            reason.contains(words),
+            "an iPhone's reason never says `{words}`: {reason}"
+        );
+    }
+    assert!(
+        reason.chars().count() <= REASON_CHARS_MAX,
+        "the reason is {} characters, over {REASON_CHARS_MAX}: {reason}",
+        reason.chars().count()
+    );
+}
+
+/// iPhone Mirroring shows iPhones only: an iPad is not sent to a window that
+/// cannot show it.
+#[test]
+fn an_ipad_row_is_not_sent_to_iphone_mirroring() {
+    let rows = parse_devicectl(&devicectl_fixture()).unwrap_or_default();
+    let tablet = rows.iter().find(|row| row.name == "Synthetic Tablet B");
+    assert!(tablet.is_some(), "the fixture's iPad is not in the answer");
+    let reason = tablet.map_or("", |row| row.reason);
+    assert_ne!(reason, IPHONE_REASON, "an iPad was given an iPhone's road");
+    assert!(!reason.contains(IPHONE_MIRRORING_APP), "{reason}");
+    assert!(
+        reason.chars().count() <= REASON_CHARS_MAX,
+        "the reason is {} characters, over {REASON_CHARS_MAX}: {reason}",
+        reason.chars().count()
+    );
+}
+
 #[test]
 fn list_names_a_phone_it_cannot_drive_beside_the_simulators_it_can() {
     let simulators = json!([{ "udid": "SIM-1", "name": "Synthetic Simulator", "booted": true }]);
@@ -240,7 +299,7 @@ fn list_names_a_phone_it_cannot_drive_beside_the_simulators_it_can() {
             EmulatorPlatform::Ios,
             Ok(simulators.clone()),
             Ok(vec![row(
-                EmulatorPlatform::Ios,
+                Hardware::IPhone,
                 "Synthetic Phone A",
                 LinkState::Connected,
             )]),
@@ -252,7 +311,7 @@ fn list_names_a_phone_it_cannot_drive_beside_the_simulators_it_can() {
     assert_eq!(answer["android"], json!([]));
     assert_eq!(answer[PHYSICAL_KEY].as_array().map(Vec::len), Some(1));
     assert_eq!(answer[PHYSICAL_KEY][0]["drivable"], false);
-    assert_eq!(answer[PHYSICAL_KEY][0]["reason"], IOS_REASON);
+    assert_eq!(answer[PHYSICAL_KEY][0]["reason"], IPHONE_REASON);
     assert!(answer.get(UNCHECKED_KEY).is_none() && answer.get(OMITTED_KEY).is_none());
 }
 
@@ -265,7 +324,7 @@ fn a_tool_that_did_not_answer_is_a_named_gap_and_the_rest_still_answers() {
             EmulatorPlatform::Ios,
             Ok(json!([{ "udid": "SIM-1" }])),
             Ok(vec![row(
-                EmulatorPlatform::Ios,
+                Hardware::IPhone,
                 "Synthetic Phone A",
                 LinkState::Connected,
             )]),
@@ -336,7 +395,7 @@ fn an_answer_with_more_phones_than_the_cap_says_how_many_it_left_out() {
     let many: Vec<PhysicalDevice> = (0..PHYSICAL_ROWS_MAX + 3)
         .map(|at| {
             row(
-                EmulatorPlatform::Ios,
+                Hardware::IPhone,
                 &format!("Synthetic Phone {at:02}"),
                 LinkState::Connected,
             )
@@ -389,6 +448,45 @@ fn the_mobile_skill_speaks_in_the_answers_words_and_teaches_every_verb() {
             verb.word
         );
     }
+}
+
+/// A real iPhone is driven through the Mac's iPhone Mirroring window, and the
+/// skill says how: the app by its id, a look for the window first, one request
+/// to the person when it is not open, and no opening of the app or unlocking on
+/// their behalf. Its sample row is the row `list` answers.
+#[test]
+fn the_mobile_skill_sends_a_real_iphone_through_the_mirroring_window() {
+    let content = bundled_skill(MOBILE_SKILL_NAME).map_or("", |skill| skill.content);
+    for words in [
+        IPHONE_MIRRORING_APP,
+        "iPhone Mirroring",
+        "iPhone 미러링",
+        "ask the person",
+        "do not open the app",
+        "the `computer-use` skill",
+    ] {
+        assert!(
+            content.contains(words),
+            "the skill never says `{words}` about a real iPhone"
+        );
+    }
+    let look = format!("zerocode-computer list-windows --app {IPHONE_MIRRORING_APP}");
+    assert!(
+        content.contains(&look),
+        "the skill does not write out the look for the window: {look}"
+    );
+    assert!(
+        content.contains(IPHONE_REASON),
+        "the skill's sample row is not the row `list` answers for an iPhone"
+    );
+    let description = content
+        .lines()
+        .find_map(|line| line.strip_prefix("description: "))
+        .unwrap_or("");
+    assert!(
+        !description.contains("never the Mac window list, iPhone Mirroring"),
+        "the description turns an agent away from the road a real iPhone takes: {description}"
+    );
 }
 
 /// The `computer-use` skill points to the mobile skill and keeps no copy of the

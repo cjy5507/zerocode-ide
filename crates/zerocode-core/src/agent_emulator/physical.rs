@@ -47,9 +47,17 @@ pub const DEVICE_NAME_CHARS_MAX: usize = 48;
 /// reports no model.
 pub const UNNAMED_ANDROID: &str = "Android device";
 
-/// Why a real iPhone or iPad is not drivable, in the words an agent hands the
-/// person.
-pub const IOS_REASON: &str = "A real iPhone or iPad. This window drives only the iOS Simulator.";
+/// The id of the Mac's iPhone Mirroring app, the window a real iPhone is driven
+/// through. An id is the same in every language; its name is not ("iPhone
+/// Mirroring", "iPhone 미러링"), and an agent that called the app by three names
+/// in one day found it by none of them.
+pub const IPHONE_MIRRORING_APP: &str = "com.apple.ScreenContinuity";
+
+/// Why a real iPhone is not drivable by `zerocode-emulator`, and the road it
+/// takes instead, in the words an agent hands the person.
+pub const IPHONE_REASON: &str = "A real iPhone or iPad. This window drives only the iOS Simulator.";
+/// Why a real iPad is not drivable, and that no road reaches it from here.
+pub const IPAD_REASON: &str = "A real iPhone or iPad. This window drives only the iOS Simulator.";
 /// Why a real Android phone or tablet is not drivable.
 pub const ANDROID_REASON: &str =
     "A real Android phone or tablet. This window drives only Android emulators.";
@@ -60,9 +68,11 @@ pub const ANDROID_REASON: &str =
 /// same way.
 pub const ANDROID_EMULATOR_SERIAL_PREFIX: &str = "emulator-";
 
-/// The platforms `devicectl` reports as an iPhone or iPad. It also lists
+/// The platforms `devicectl` reports as an iPhone and as an iPad. It also lists
 /// watches, TVs and headsets, which are not the person's phone.
-const DEVICECTL_PHONE_PLATFORMS: [&str; 2] = ["iOS", "iPadOS"];
+const DEVICECTL_IPHONE_PLATFORM: &str = "iOS";
+const DEVICECTL_IPAD_PLATFORM: &str = "iPadOS";
+const DEVICECTL_PHONE_PLATFORMS: [&str; 2] = [DEVICECTL_IPHONE_PLATFORM, DEVICECTL_IPAD_PLATFORM];
 
 /// Where a device's facts sit in `devicectl list devices --json-output` (JSON
 /// pointers). Its own table is the one place that says what each means.
@@ -108,6 +118,35 @@ pub enum LinkState {
     Unknown,
 }
 
+/// The kinds of real device a row can be. What a device is decides the road it
+/// takes, so it decides the words of the row's `reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hardware {
+    /// An iPhone: the Mac's iPhone Mirroring window drives it.
+    IPhone,
+    /// An iPad: iPhone Mirroring shows iPhones only.
+    IPad,
+    /// An Android phone or tablet on a cable or a network.
+    AndroidDevice,
+}
+
+impl Hardware {
+    fn platform(self) -> EmulatorPlatform {
+        match self {
+            Self::IPhone | Self::IPad => EmulatorPlatform::Ios,
+            Self::AndroidDevice => EmulatorPlatform::Android,
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::IPhone => IPHONE_REASON,
+            Self::IPad => IPAD_REASON,
+            Self::AndroidDevice => ANDROID_REASON,
+        }
+    }
+}
+
 /// One real device this window cannot drive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PhysicalDevice {
@@ -125,22 +164,14 @@ pub struct PhysicalDevice {
 }
 
 impl PhysicalDevice {
-    fn new(
-        platform: EmulatorPlatform,
-        name: &str,
-        model: Option<String>,
-        state: LinkState,
-    ) -> Self {
+    fn new(hardware: Hardware, name: &str, model: Option<String>, state: LinkState) -> Self {
         Self {
-            platform,
+            platform: hardware.platform(),
             name: plain_name(name),
             model: model.map(|model| plain_name(&model)),
             state,
             drivable: false,
-            reason: match platform {
-                EmulatorPlatform::Ios => IOS_REASON,
-                EmulatorPlatform::Android => ANDROID_REASON,
-            },
+            reason: hardware.reason(),
         }
     }
 }
@@ -198,12 +229,7 @@ fn ios_row(device: &Value) -> Option<PhysicalDevice> {
     let model = text(DEVICECTL_MODEL_AT);
     let name = text(DEVICECTL_NAME_AT).or_else(|| model.clone())?;
     let state = tunnel_state(text(DEVICECTL_TUNNEL_AT).as_deref());
-    Some(PhysicalDevice::new(
-        EmulatorPlatform::Ios,
-        &name,
-        model,
-        state,
-    ))
+    Some(PhysicalDevice::new(Hardware::IPhone, &name, model, state))
 }
 
 /// What `devicectl`'s tunnel word means for the person. Its own table calls a
@@ -284,7 +310,7 @@ pub fn parse_adb_physical(listing: &str) -> Vec<PhysicalDevice> {
                 _ => LinkState::Unknown,
             };
             let name = row.model.clone().unwrap_or_else(|| UNNAMED_ANDROID.into());
-            PhysicalDevice::new(EmulatorPlatform::Android, &name, row.model, state)
+            PhysicalDevice::new(Hardware::AndroidDevice, &name, row.model, state)
         })
         .collect()
 }

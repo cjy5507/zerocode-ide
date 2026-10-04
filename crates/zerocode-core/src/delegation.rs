@@ -66,14 +66,16 @@ mod tests {
 
     /// What the mobile clause may add to it, in characters: the words that send
     /// an agent that is told a phone is connected to `zerocode-emulator list`
-    /// and away from the three roads one transcript took first.
-    const MOBILE_CLAUSE_CHARS_MAX: usize = 198;
+    /// before the three roads one transcript took first. (198 until the real
+    /// iPhone's road was known to be the Mac's iPhone Mirroring window: "not"
+    /// became "before", because `list` is what names that road.)
+    const MOBILE_CLAUSE_CHARS_MAX: usize = 200;
 
     /// An agent told "the iPhone is connected to our IDE" looked in the Mac's
     /// window list for iPhone Mirroring, asked Xcode's `devicectl`, and then
     /// searched the notes for how ZeroCode drives a phone (2026-10-04). The
     /// paragraph every session carries says the person's own words and the one
-    /// first step, and says which roads not to start from.
+    /// first step, and says which roads come after it.
     #[test]
     fn the_surfaces_paragraph_sends_a_phone_sentence_to_zerocode_emulator_list_first() {
         let surfaces = AGENT_SELECTION_CONTEXT
@@ -82,7 +84,7 @@ mod tests {
         for words in [
             "when the person says a phone, iPhone, iPad or Android device is connected or open in the IDE",
             "start with `zerocode-emulator list`",
-            "not the Mac window list, iPhone Mirroring or Xcode's devicectl",
+            "before the Mac window list, iPhone Mirroring or Xcode's devicectl",
         ] {
             assert!(
                 surfaces.contains(words),
