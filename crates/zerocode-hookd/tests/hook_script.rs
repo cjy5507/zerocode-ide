@@ -849,6 +849,31 @@ fn the_shim_waits_longer_than_the_window_is_allowed_to_take() {
             "delegate --wait --timeout-ms {x}: window {window_latest:?} < bridge {bridge:?} < shim {shim:?}"
         );
     }
+    // The ledger reads `--timeout-ms=X` exactly as `--timeout-ms X`, so the bridge must too: a
+    // bridge that read only the two-word form held a `check --wait --timeout-ms=300000` for the
+    // short default and gave up on a wait the window was still keeping.
+    for x in ["1000", "30000", "300000", "600000"] {
+        for verb in [
+            &["check", "--wait"][..],
+            &["worker-start", "--agent", "claude"][..],
+            &["delegate", "--spec", "x", "--agent", "claude", "--wait"][..],
+        ] {
+            let spelled = |joined: bool| -> Vec<&str> {
+                let mut argv = verb.to_vec();
+                if joined {
+                    argv.push(Box::leak(format!("--timeout-ms={x}").into_boxed_str()));
+                } else {
+                    argv.extend(["--timeout-ms", x]);
+                }
+                argv
+            };
+            assert_eq!(
+                request(&spelled(true)).deadline(),
+                request(&spelled(false)).deadline(),
+                "{verb:?} --timeout-ms={x} and --timeout-ms {x} hold the bridge for different times"
+            );
+        }
+    }
     assert!(
         u64::from(zerocode_core::orchestration::ASK_BUDGET_MAX_MS)
             <= zerocode_hookd::WAIT_BUDGET_CEILING_MS,

@@ -2642,6 +2642,7 @@ mod tests {
                 crate::orchestration::READY_TIMEOUT_DEFAULT_MS + SHIM_WAIT_GRACE_SECONDS * 1000
             ),
             "-eq 'delegate'",
+            "StartsWith('--timeout-ms=')",
             &format!(
                 "$deadlineMs = $deadlineMs + {}",
                 crate::orchestration::delegate::WAIT_HEADROOM_MS
@@ -2980,6 +2981,40 @@ mod tests {
             Some(held),
             "a delegate --wait did not carry the preparation on top of its wait:\n{saw}"
         );
+        // The same wait spelled `--timeout-ms=X`, which the ledger reads as the same thing.
+        for (argv, secs) in [
+            (
+                vec!["check", "--wait", "--timeout-ms=300000"],
+                300 + SHIM_WAIT_GRACE_SECONDS,
+            ),
+            (
+                vec![
+                    "delegate",
+                    "--spec",
+                    "x",
+                    "--agent",
+                    "codex",
+                    "--wait",
+                    "--timeout-ms=300000",
+                ],
+                300 + SHIM_WAIT_GRACE_SECONDS
+                    + crate::orchestration::delegate::WAIT_HEADROOM_MS / 1000,
+            ),
+        ] {
+            let joined = run_argv("200", "{\"workerId\":\"w-1\"}", "team-1", &argv);
+            assert!(
+                joined.status.success(),
+                "{}",
+                String::from_utf8_lossy(&joined.stderr)
+            );
+            let saw = std::fs::read_to_string(&sink).expect("argv sink");
+            let patient = saw.lines().skip_while(|line| *line != "--max-time").nth(1);
+            assert_eq!(
+                patient.map(str::to_string),
+                Some(secs.to_string()),
+                "{argv:?} did not carry the patience of its --timeout-ms=X:\n{saw}"
+            );
+        }
     }
 
     /// The PowerShell shim, run as what it is — on the one platform that has
