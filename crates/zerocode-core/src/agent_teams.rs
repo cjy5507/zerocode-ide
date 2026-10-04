@@ -2548,6 +2548,13 @@ mod tests {
                 "worker-start) waiting=1; budget={}",
                 crate::orchestration::READY_TIMEOUT_DEFAULT_MS / 1000 + SHIM_WAIT_GRACE_SECONDS
             ),
+            // `delegate` summons a worker too, so it waits for the same readiness
+            // before it answers (t-34501): losing this line makes a bare delegate hit
+            // the shim's fifteen seconds while the window is still opening the pane.
+            &format!(
+                "delegate) waiting=1; budget={}",
+                crate::orchestration::READY_TIMEOUT_DEFAULT_MS / 1000 + SHIM_WAIT_GRACE_SECONDS
+            ),
             r#"printf '{"_keepalive":true,"elapsedMs":%d}\n' "$elapsed" >&2"#,
         ] {
             assert!(
@@ -2616,6 +2623,7 @@ mod tests {
                 "$deadlineMs = {}",
                 crate::orchestration::READY_TIMEOUT_DEFAULT_MS + SHIM_WAIT_GRACE_SECONDS * 1000
             ),
+            "-eq 'delegate'",
             "$request.BeginGetResponse($null, $null)",
             "$request.EndGetResponse($pending)",
             "$request.Abort()",
@@ -2895,6 +2903,27 @@ mod tests {
             patient.map(str::to_string),
             Some(worker_wait),
             "a bare worker-start did not carry the default readiness patience:\n{saw}"
+        );
+        let delegated = run_argv(
+            "200",
+            "{\"workerId\":\"w-1\"}",
+            "team-1",
+            &["delegate", "--spec", "x", "--agent", "codex"],
+        );
+        assert!(
+            delegated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&delegated.stderr)
+        );
+        let saw = std::fs::read_to_string(&sink).expect("argv sink");
+        let patient = saw.lines().skip_while(|line| *line != "--max-time").nth(1);
+        let worker_wait = (crate::orchestration::READY_TIMEOUT_DEFAULT_MS / 1000
+            + SHIM_WAIT_GRACE_SECONDS)
+            .to_string();
+        assert_eq!(
+            patient.map(str::to_string),
+            Some(worker_wait),
+            "a bare delegate did not carry the default readiness patience:\n{saw}"
         );
     }
 

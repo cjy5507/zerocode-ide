@@ -25518,3 +25518,24 @@ fn mail_left_without_a_seat_by_a_restart_is_told_to_its_sender_once() {
     super::tick(&host, &[], clock());
     assert_eq!(told(), 1, "the sender was told again on a later beat");
 }
+
+/// A second `delegate` under a name already being carried out waits for the first — the first writes
+/// the work, the worker and the letter in one plan and files its receipt only once the pane is open, so
+/// a second plan in that gap would write all three again. Another name does not wait for anybody.
+#[test]
+fn a_delegate_under_a_name_already_being_carried_out_waits_for_it_and_another_name_does_not() {
+    let key = |request: &str| format!("team-flight\u{1f}%1\u{1f}{request}");
+    let first = super::DelegateFlight::enter(key("same")).expect("the name was free");
+    drop(super::DelegateFlight::enter(key("other")).expect("another name is not held up"));
+    let waiter = std::thread::spawn(move || super::DelegateFlight::enter(key("same")).is_some());
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(
+        !waiter.is_finished(),
+        "the second carrying of the same name did not wait for the first"
+    );
+    drop(first);
+    assert!(
+        waiter.join().expect("the waiter ran"),
+        "the name was free again and the waiter was still refused"
+    );
+}

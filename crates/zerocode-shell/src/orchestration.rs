@@ -9079,6 +9079,19 @@ fn run_seated(
     answered
 }
 
+/// A `delegate` that is being carried out, held under its `team, pane, --retry-request`.
+///
+/// The red stage's empty shape: it never waits for an earlier carrying of the same name.
+#[allow(dead_code)]
+struct DelegateFlight(String);
+
+#[allow(dead_code)]
+impl DelegateFlight {
+    fn enter(key: String) -> Option<Self> {
+        Some(Self(key))
+    }
+}
+
 /// Lay the artifact store's rows over a worker-observation answer (t-2720
 /// §4): `artifacts`, the ids this worker left, newest first, and `report`,
 /// the newest report among them — the id 「보고서 보기」 opens. The ledger's

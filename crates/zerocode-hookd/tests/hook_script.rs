@@ -784,6 +784,31 @@ fn the_shim_waits_longer_than_the_window_is_allowed_to_take() {
         .deadline(),
         std::time::Duration::from_millis(120_000) + bridge_grace,
     );
+    // `delegate` is a worker summons that can also hold its answer for the worker's report
+    // (t-34501): it takes the wait seat like `worker-start`, waits for readiness by default, and
+    // with `--wait` holds exactly the budget it was given.
+    let delegating = ["delegate", "--spec", "x", "--agent", "claude"];
+    assert!(request(&delegating).reserves_wait_slot());
+    assert_eq!(
+        request(&delegating).deadline(),
+        std::time::Duration::from_millis(u64::from(
+            zerocode_core::orchestration::READY_TIMEOUT_DEFAULT_MS
+        )) + bridge_grace,
+    );
+    assert_eq!(
+        request(&[
+            "delegate",
+            "--spec",
+            "x",
+            "--agent",
+            "claude",
+            "--wait",
+            "--timeout-ms",
+            "300000",
+        ])
+        .deadline(),
+        std::time::Duration::from_millis(300_000) + bridge_grace,
+    );
     assert!(
         u64::from(zerocode_core::orchestration::ASK_BUDGET_MAX_MS)
             <= zerocode_hookd::WAIT_BUDGET_CEILING_MS,
