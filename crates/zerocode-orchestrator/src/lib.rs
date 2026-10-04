@@ -25,6 +25,7 @@
 pub mod effect_journal;
 pub mod git_publisher;
 pub mod handoff;
+pub mod ignored_usage;
 pub mod ledger_store;
 pub mod naming;
 pub mod publish;
@@ -1947,6 +1948,16 @@ fn parse_status(stdout: &str) -> PendingLoss {
         });
     }
     loss
+}
+
+/// Whether `git status --porcelain=v2 -z --ignored=matching` output lists any
+/// ignored path — the one question the sidebar's landing chip asks of it, so
+/// that the chip, the cleanup review and the evidence read all take the output
+/// apart with the one parser and cannot disagree about whether such files
+/// exist (t-34315).
+#[must_use]
+pub fn lists_ignored_paths(status_v2_z: &str) -> bool {
+    !parse_status(status_v2_z).ignored.is_empty()
 }
 
 /// What one expanded submodule holds.
