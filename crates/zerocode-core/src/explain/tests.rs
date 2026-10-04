@@ -2,7 +2,8 @@
 //!
 //! Every behaviour here is asserted on its own words: what a request may carry,
 //! what leaves out of it, what the model is told, and what a one-shot's answer
-//! becomes. Nothing runs a process and nothing reads a window.
+//! becomes. No check runs a process or reads a window; the two `#[ignore]`d
+//! probes at the end do, on purpose, and only when asked for by name.
 
 use super::*;
 use crate::agent::AGENT_SPECS;
@@ -566,8 +567,11 @@ fn explain_cost_probe() {
 /// The real CLI behind a one-shot road, asked once with a small synthetic diff
 /// through exactly the argv, stdin and readers this module builds (t-32787).
 /// Not a check: a wall or a login answer is a real answer, and what it prints is
-/// the evidence. `EXPLAIN_PROBE_AGENT=claude|codex cargo test -p zerocode-core
-/// --lib real_cli_probe -- --ignored --nocapture`
+/// the evidence. `EXPLAIN_PROBE_AGENT=claude|codex` names the road, and
+/// `EXPLAIN_PROBE_PROGRAM` the binary to run — the window runs the program it
+/// found on the machine, not a pane's shim of it — which is the agent's own name
+/// when unset: `cargo test -p zerocode-core --lib real_cli_probe -- --ignored
+/// --nocapture`
 #[test]
 #[ignore = "spends a little of the person's subscription quota; run on purpose"]
 fn real_cli_probe() {
@@ -599,7 +603,8 @@ fn real_cli_probe() {
     let dir = std::env::temp_dir().join("zerocode-explain-probe");
     std::fs::create_dir_all(&dir).expect("a folder to run in");
     let started = Instant::now();
-    let mut child = Command::new(&agent)
+    let program = std::env::var("EXPLAIN_PROBE_PROGRAM").unwrap_or_else(|_| agent.clone());
+    let mut child = Command::new(&program)
         .args(&argv)
         .current_dir(&dir)
         .stdin(Stdio::piped())
@@ -624,7 +629,7 @@ fn real_cli_probe() {
         .rev()
         .collect();
     println!(
-        "explain_probe agent={agent} success={} secs={} stdout_bytes={} stderr_tail={stderr_tail:?}",
+        "explain_probe agent={agent} program={program} success={} secs={} stdout_bytes={} stderr_tail={stderr_tail:?}",
         out.status.success(),
         started.elapsed().as_secs(),
         stdout.len()
