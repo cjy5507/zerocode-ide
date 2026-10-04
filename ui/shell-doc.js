@@ -9850,11 +9850,25 @@ function artifactTabShown(tab) {
   return stageGroups().includes(tab.pane) && activeTabIn(tab.pane)?.id === tab.id && !stagePagesCover();
 }
 
+/* 열고 있는 중인 발행 — 같은 아티팩트를 두 길(발행 소식의 자동 열기, 「그림·페이지로 설명」이
+ * 만든 페이지를 여는 길)이 한꺼번에 열려 해도 탭은 하나다. */
+const artifactBesideOpening = new Set();
+
 /* 발행한 판 옆에 연다. 그 판이 이 체크아웃에 서 있을 때만 옆이고, 아니면 여는
  * 길은 갤러리의 「열기」와 같다. 오른쪽에 이미 이웃 그룹이 있으면 그 자리가
  * 옆이다 — 아무것도 새로 나누지 않는다. 이웃이 없을 때만 나누고, 그 판이 좁으면
  * (그 셸이 지금 입은 폭) 나누는 대신 같은 그룹의 탭이다. */
-async function openArtifactBeside(row, maker, { hint = null } = {}) {
+async function openArtifactBeside(row, maker, options = {}) {
+  if (artifactBesideOpening.has(row.id)) return true;
+  artifactBesideOpening.add(row.id);
+  try {
+    return await openArtifactBesideOnce(row, maker, options);
+  } finally {
+    artifactBesideOpening.delete(row.id);
+  }
+}
+
+async function openArtifactBesideOnce(row, maker, { hint = null } = {}) {
   const tab = maker === null ? null : tabOfTerm(maker);
   let seat = null;
   if (tab && (tab.worktree ?? activeWorktreePath) === activeWorktreePath && stageGroups().includes(tab.pane)) {

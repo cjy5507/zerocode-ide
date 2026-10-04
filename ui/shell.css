@@ -46456,3 +46456,108 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 }
 
 #flow-console-mirror { min-width: 0; max-width: 42%; color: inherit; background-color: var(--surface-deck); border: var(--rule-width) solid var(--edge-rule); border-radius: 6px; padding: 6px; padding-inline-end: var(--select-room); }
+
+/* 「그림·페이지로 설명」 (t-32787): diff 머리·답변 행·보고서 문에 서는 같은 조용한 아이콘 단추,
+ * 카드의 사실 한 줄과 구독 한도 문구, 상태 표시줄의 한 칸. 색과 간격은 토큰만 쓴다. */
+.explain-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px var(--space-2);
+  border: 0;
+  border-radius: var(--radius-edge);
+  background: none;
+  color: var(--ink-mist);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+/* 이 단추의 전환은 클래스 규칙이라 `body :is(button…) { transition: none }`보다 구체적이다 —
+ * 움직임을 줄이는 사람에게는 여기서 직접 끈다. */
+@media (prefers-reduced-motion: reduce) {
+  .explain-open {
+    transition: none;
+  }
+}
+
+.explain-open:hover:not(:disabled) {
+  color: var(--ink-chalk);
+  background: var(--row-hover);
+}
+
+.explain-open:focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: 2px;
+}
+
+.explain-open:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.explain-open .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* diff 머리: 노트 보내기 단추 앞에 서서, 둘이 함께 오른쪽 끝에 선다. */
+.file-view-head .explain-open {
+  margin-left: auto;
+}
+
+.file-view-head .explain-open + .diff-send {
+  margin-left: 0;
+}
+
+/* 답변 행: 복사 단추와 같은 크기와 모양. */
+.helper-actions .explain-open {
+  width: var(--chat-copy-size);
+  height: var(--chat-copy-size);
+  padding: var(--chat-copy-pad);
+  border-radius: var(--chat-radius-small);
+}
+
+.helper-actions .explain-open:hover {
+  background: var(--chat-pill-bg);
+}
+
+.helper-actions .explain-open .icon {
+  width: var(--icon-size);
+  height: var(--icon-size);
+}
+
+.explain-facts {
+  padding: var(--space-1) var(--space-2);
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+.explain-quota {
+  color: var(--artifact-new-ink);
+}
+
+/* 상태 표시줄: 진행 중인 가장 최근 요청 하나. */
+.sb-explain {
+  min-width: 0;
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+}
+
+.sb-explain > .icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+.sb-explain-words {
+  overflow: hidden;
+  max-width: 48ch;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-explain-act {
+  white-space: nowrap;
+}

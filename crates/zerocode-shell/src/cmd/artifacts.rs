@@ -444,3 +444,38 @@ pub(crate) fn artifact_register(path: String) -> Result<Artifact, String> {
         now_epoch_ms(),
     )
 }
+
+/// The agents this window can run once on this machine, for the explain
+/// card's "make it separately" rows (t-32787): a catalog row with a one-shot
+/// road whose program is installed.
+#[tauri::command(async)]
+pub(crate) fn explain_roads() -> Vec<explain_door::Road> {
+    explain_door::roads()
+}
+
+/// What the explain card says about the chosen material before it is sent:
+/// how many lines, in how many places a secret value was taken out, and
+/// whether it was cut for length. A worker's report is read here, by its
+/// artifact id, and never travels through the window.
+#[tauri::command(async)]
+pub(crate) fn explain_preview(
+    kind: String,
+    text: Option<String>,
+    report: Option<String>,
+) -> Result<explain_door::Facts, String> {
+    explain_door::preview(&kind, text, report)
+}
+
+/// Ask for an explanation page. Everything that happens to the request after
+/// this answers as `explain:state`; only a request the door cannot read at all
+/// is an error here.
+#[tauri::command(async)]
+pub(crate) fn explain_start(app: AppHandle, request: explain_door::Start) -> Result<(), String> {
+    explain_door::start(&app, request)
+}
+
+/// Let a request go: what it would have opened is not opened.
+#[tauri::command(async)]
+pub(crate) fn explain_cancel(id: String) -> bool {
+    explain_door::cancel(&id)
+}

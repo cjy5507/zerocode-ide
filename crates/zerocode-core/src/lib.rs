@@ -46,6 +46,8 @@ pub mod continue_gate;
 pub mod credential;
 pub mod delegation;
 pub mod evidence_digest;
+pub mod explain;
+pub mod explain_desk;
 pub mod file_find;
 pub mod git_config;
 pub mod git_dir;
