@@ -364,3 +364,24 @@ fn a_calendar_the_fill_could_not_pick_on_is_said_with_its_heading_pagers_and_day
         "{lines}"
     );
 }
+
+/// What a person can press that the read named no kind for is said with its
+/// words and caption, and how to go on: press it, read again.
+#[test]
+fn a_pressable_thing_without_a_kind_is_said_in_the_read() {
+    let read: FormRead = serde_json::from_value(json!({
+        "fields": [{ "handle": "#name", "kind": "text", "label": "Name", "value": "" }],
+        "unknowns": [
+            { "handle": "#region", "label": "Pick a region ▾", "caption": "Region" },
+            { "handle": "div.chip", "label": "Breakfast", "caption": "" },
+        ],
+    }))
+    .expect("a read with things of no kind");
+    let lines = fields_lines(&read);
+    assert!(
+        lines.contains(
+            "종류를 모르는 조작: #region 「Pick a region ▾」 (Region) · div.chip 「Breakfast」 — click 뒤 fields로 다시 읽기"
+        ),
+        "{lines}"
+    );
+}

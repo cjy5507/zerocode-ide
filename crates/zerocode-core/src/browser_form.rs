@@ -178,6 +178,19 @@ pub struct FormRead {
     /// words — never a value — that `fill` holds the page to before it
     /// writes (a field gone, renamed or new, another step: `form_stale`).
     pub fingerprint: String,
+    /// What a person can press or focus beside the fields that the read
+    /// named no kind for — said, so nothing pressable drops out of the read.
+    pub unknowns: Vec<FormUnknown>,
+}
+
+/// A pressable thing the read could not name a kind for: its handle, its own
+/// words and the caption beside it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FormUnknown {
+    pub handle: String,
+    pub label: String,
+    pub caption: String,
 }
 
 /// What a field holds, or is asked to: words, or a checkbox's state.

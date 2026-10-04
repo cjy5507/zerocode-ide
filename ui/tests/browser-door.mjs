@@ -1085,6 +1085,35 @@ await test("a_focusable_box_with_a_list_beside_it_is_a_dropdown", async () => {
   } finally { await plain.close(); }
 });
 
+/* A net under every rule: what a person can press or focus beside the
+ * fields that the read names no kind for — a box that shows a pointer, a
+ * focusable chip with no list, a text with a click handler — is said as
+ * \`unknown\` with its words and caption; what nobody can press (a notice), a
+ * label of a field, a link, stays out. */
+await test("a_pressable_thing_the_read_cannot_name_is_said_as_unknown", async () => {
+  const odd = await browser.newPage();
+  try {
+    await odd.setContent(`<!doctype html><html lang="ko"><meta charset="utf-8"><form>
+      <div class="row"><div class="cap">지역</div><div class="ctl"><div id="region" style="cursor:pointer">지역을 고르세요 <b>▾</b></div></div></div>
+      <div class="row"><div class="cap">옵션</div><div class="ctl"><div class="chip" tabindex="0">아침 식사</div></div></div>
+      <div class="row"><div class="cap">이름</div><div class="ctl"><input id="name"></div></div>
+      <p class="notice">안내: 입력한 내용은 저장됩니다</p>
+      <label style="cursor:pointer"><input type="checkbox" id="agree"> 동의</label>
+      <a href="#help">도움말</a> <span id="more" onclick="void 0">더보기</span>
+    </form>`);
+    const read = await readFields(odd);
+    const unknown = (read.unknowns || []).map((thing) => thing.label);
+    assert(JSON.stringify(unknown) === JSON.stringify(["지역을 고르세요 ▾", "아침 식사", "더보기"]),
+      "each pressable thing of no kind is said once, outermost, in the page's order — the notice, the label and the link are not", read.unknowns);
+    assert(read.unknowns[0].caption === "지역" && read.unknowns[1].caption === "옵션", "with the caption beside it", read.unknowns);
+    for (const thing of read.unknowns) {
+      assert(await odd.evaluate((handle) => document.querySelectorAll(handle).length === 1, thing.handle), `the handle ${thing.handle} finds it`);
+    }
+    assert(read.fields.map((field) => field.label).join(",") === "이름,동의", "the fields are still the fields", read.fields);
+    return unknown.join(" · ");
+  } finally { await odd.close(); }
+});
+
 await test("a_frame_of_another_origin_is_named_not_read", async () => {
   const sealed = await browser.newPage();
   try {
