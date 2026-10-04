@@ -201,8 +201,10 @@ pub fn kind_of(path: &Path, source: Source) -> ArtifactKind {
             .find(|(names, _)| names.contains(&extension.as_str()))
             .map_or(ArtifactKind::Other, |(_, kind)| *kind),
         (Source::Remote, _) => ArtifactKind::Web,
-        (Source::Evidence, ArtifactKind::Screenshot) => ArtifactKind::Screenshot,
-        (Source::Evidence, _) => ArtifactKind::Evidence,
+        (Source::Evidence | Source::WorkerEvidence, ArtifactKind::Screenshot) => {
+            ArtifactKind::Screenshot
+        }
+        (Source::Evidence | Source::WorkerEvidence, _) => ArtifactKind::Evidence,
         (Source::WorkerReport, ArtifactKind::Report | ArtifactKind::Other) => ArtifactKind::Report,
         (Source::Export, ArtifactKind::Other) => ArtifactKind::Export,
         (_, kind) => kind,

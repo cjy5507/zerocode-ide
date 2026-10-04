@@ -2,10 +2,15 @@
 //! worker's `worker_done` names, and the manifest that says what became of every
 //! file.
 //!
-//! Today the store keeps no hand-in: a report is copied verbatim by
-//! `register_report` and nothing records what was named. This is the shape the
-//! keeping asks of the store, with a book that holds nothing and a store that
-//! keeps no file. The tests below fail on that.
+//! The kept files are ordinary rows of the catalog — a report is a report, a
+//! picture is a screenshot — so the Artifacts view opens them as it opens
+//! anything else, filtered by the worker or the task, and the retention sweep
+//! that follows the ledger's own days ([`Store::prune`]) takes them with the run
+//! they belong to. What a row cannot say is which hand-in a file belongs to, what
+//! was left out and why, and whether the keeping finished: that is the manifest,
+//! one line per hand-in in `hand-ins.jsonl` beside the catalog, the newest line
+//! for a hand-in the one that counts. The facts a board shows are counted once,
+//! when the manifest is written, and held in memory beside it.
 
 use zerocode_core::hand_in::{Facts, Manifest, Role};
 
@@ -45,9 +50,26 @@ pub(crate) struct HandIns {
 }
 
 impl HandIns {
-    /// Nothing is read.
-    pub(super) fn load(_root: &Path) -> Self {
-        Self::default()
+    /// Read the file. A line that does not read is skipped, as a bad line of the
+    /// catalog is; a file whose last line was torn by a crash is rewritten at
+    /// once, so the next append does not glue itself to it.
+    pub(super) fn load(root: &Path) -> Self {
+        let mut book = Self::default();
+        let mut torn = false;
+        if let Ok(text) = std::fs::read_to_string(root.join(HAND_INS_FILE)) {
+            torn = !text.is_empty() && !text.ends_with('\n');
+            for line in text.lines() {
+                book.lines += 1;
+                if let Ok(manifest) = serde_json::from_str::<Manifest>(line) {
+                    book.insert(manifest);
+                }
+            }
+        }
+        let evicted = book.cap();
+        if torn || evicted {
+            let _ = book.rewrite(root);
+        }
+        book
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -59,32 +81,177 @@ impl HandIns {
         self.by_message.len()
     }
 
-    /// No task has a keeping.
-    pub(crate) fn facts_of_task(&self, _run: &str, _task: &str) -> Option<&Facts> {
-        None
+    /// What a task's row shows: its newest hand-in's facts.
+    pub(crate) fn facts_of_task(&self, run: &str, task: &str) -> Option<&Facts> {
+        let message = self.by_task.get(run)?.get(task)?;
+        self.by_message.get(message).map(|held| &held.facts)
     }
 
-    /// No task has a record.
+    /// Every hand-in record of one task, newest first — the read-only door a
+    /// per-task view reads (t-36910). A task whose workers handed in nothing by
+    /// name answers with none. The view lands on its own task; until it does,
+    /// only this file's test reads the door, and the expectation says so — it
+    /// fails the build the day a reader appears, so it is removed with it.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the per-task view (t-36910) is its reader")
     )]
-    pub(crate) fn of_task(&self, _run: &str, _task: &str) -> Vec<&Manifest> {
-        Vec::new()
+    pub(crate) fn of_task(&self, run: &str, task: &str) -> Vec<&Manifest> {
+        let mut found: Vec<&Manifest> = self
+            .by_message
+            .values()
+            .map(|held| &held.manifest)
+            .filter(|manifest| manifest.run == run && manifest.task.as_deref() == Some(task))
+            .collect();
+        found.sort_by_key(|manifest| std::cmp::Reverse(manifest.at_ms));
+        found
     }
 
-    /// No worker has a keeping.
-    pub(crate) fn facts_of_worker(&self, _run: &str, _worker: &str) -> Option<&Facts> {
-        None
+    /// What a worker's row shows: its newest hand-in's facts.
+    pub(crate) fn facts_of_worker(&self, run: &str, worker: &str) -> Option<&Facts> {
+        let message = self.by_worker.get(run)?.get(worker)?;
+        self.by_message.get(message).map(|held| &held.facts)
     }
 
-    /// A manifest is not held.
-    fn insert(&mut self, _manifest: Manifest) {}
-
-    /// The book never gives a seat away.
-    fn cap_to(&mut self, _max: usize) -> bool {
-        false
+    /// Put a manifest in, replacing the one a message already had, and point the
+    /// task and the worker at it when it is their newest.
+    fn insert(&mut self, manifest: Manifest) {
+        let facts = manifest.facts();
+        let message = manifest.message.clone();
+        let at_ms = manifest.at_ms;
+        let run = manifest.run.clone();
+        let worker = manifest.worker.clone();
+        let task = manifest.task.clone();
+        self.by_message
+            .insert(message.clone(), Held { manifest, facts });
+        if let Some(task) = task {
+            Self::point(
+                &mut self.by_task,
+                &self.by_message,
+                &run,
+                task,
+                &message,
+                at_ms,
+            );
+        }
+        Self::point(
+            &mut self.by_worker,
+            &self.by_message,
+            &run,
+            worker,
+            &message,
+            at_ms,
+        );
     }
+
+    /// Point `key` of `run` at `message` unless it already points at a newer one.
+    fn point(
+        pointers: &mut HashMap<String, HashMap<String, String>>,
+        manifests: &HashMap<String, Held>,
+        run: &str,
+        key: String,
+        message: &str,
+        at_ms: i64,
+    ) {
+        let newer = pointers
+            .get(run)
+            .and_then(|keys| keys.get(&key))
+            .is_none_or(|held| {
+                manifests
+                    .get(held)
+                    .is_none_or(|current| current.manifest.at_ms <= at_ms)
+            });
+        if newer {
+            pointers
+                .entry(run.to_string())
+                .or_default()
+                .insert(key, message.to_string());
+        }
+    }
+
+    /// Rebuild both pointers from the manifests, oldest first so the newest wins.
+    fn reindex(&mut self) {
+        self.by_task.clear();
+        self.by_worker.clear();
+        let mut all: Vec<&Held> = self.by_message.values().collect();
+        all.sort_by_key(|held| held.manifest.at_ms);
+        for held in all {
+            let manifest = &held.manifest;
+            if let Some(task) = &manifest.task {
+                self.by_task
+                    .entry(manifest.run.clone())
+                    .or_default()
+                    .insert(task.clone(), manifest.message.clone());
+            }
+            self.by_worker
+                .entry(manifest.run.clone())
+                .or_default()
+                .insert(manifest.worker.clone(), manifest.message.clone());
+        }
+    }
+
+    /// Hold to [`HAND_INS_MAX`], the oldest giving way. Whether any did.
+    fn cap(&mut self) -> bool {
+        self.cap_to(HAND_INS_MAX)
+    }
+
+    fn cap_to(&mut self, max: usize) -> bool {
+        let mut evicted = false;
+        while self.by_message.len() > max {
+            let Some(oldest) = self
+                .by_message
+                .values()
+                .min_by_key(|held| held.manifest.at_ms)
+                .map(|held| held.manifest.message.clone())
+            else {
+                break;
+            };
+            self.by_message.remove(&oldest);
+            evicted = true;
+        }
+        if evicted {
+            self.reindex();
+        }
+        evicted
+    }
+
+    /// Write the file whole from the manifests in memory, beside and renamed
+    /// over, like every durable file this window keeps.
+    fn rewrite(&mut self, root: &Path) -> Result<(), String> {
+        let mut all: Vec<&Held> = self.by_message.values().collect();
+        all.sort_by_key(|held| held.manifest.at_ms);
+        let mut text = String::new();
+        for held in all {
+            text.push_str(
+                &serde_json::to_string(&held.manifest).map_err(|error| error.to_string())?,
+            );
+            text.push('\n');
+        }
+        crate::durable_file::replace_bytes(&root.join(HAND_INS_FILE), text.as_bytes())
+            .map_err(|error| error.to_string())?;
+        self.lines = self.by_message.len();
+        Ok(())
+    }
+}
+
+/// One line added to the file, and on disk before it returns.
+fn append_line(path: &Path, line: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    // One write, so a crash tears at most the tail of one line.
+    let mut text = String::with_capacity(line.len() + 1);
+    text.push_str(line);
+    text.push('\n');
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.sync_data())
+        .map_err(|error| error.to_string())
 }
 
 /// What a keeping hands the store for one file: its name, whose it is, and its
@@ -108,28 +275,87 @@ impl Store {
         self.hand_ins.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// No manifest is kept.
-    pub(crate) fn hand_in(&self, _message: &str) -> Option<Manifest> {
-        None
+    /// The manifest a hand-in message has, if a keeping wrote one.
+    pub(crate) fn hand_in(&self, message: &str) -> Option<Manifest> {
+        self.hand_ins()
+            .by_message
+            .get(message)
+            .map(|held| held.manifest.clone())
     }
 
-    /// A manifest is not written.
-    pub(crate) fn note_hand_in(&self, _manifest: Manifest) -> Result<(), String> {
-        Ok(())
+    /// Put a hand-in's manifest in the book, and on disk. The book takes it
+    /// first, so a disk that refuses leaves this process knowing what it kept;
+    /// the error says the next boot will not.
+    pub(crate) fn note_hand_in(&self, manifest: Manifest) -> Result<(), String> {
+        let line = serde_json::to_string(&manifest).map_err(|error| error.to_string())?;
+        let mut book = self.hand_ins();
+        book.insert(manifest);
+        book.lines += 1;
+        let evicted = book.cap();
+        if evicted || book.lines > book.len() + HAND_INS_SLACK {
+            return book.rewrite(&self.root);
+        }
+        append_line(&self.root.join(HAND_INS_FILE), &line)
     }
 
-    /// No manifest goes on its own age.
-    pub(super) fn prune_hand_ins(&self, _horizon_ms: i64) -> usize {
-        0
+    /// The retention sweep's half for manifests: the ones older than `horizon_ms`
+    /// go, with the rows the same sweep takes. How many went.
+    pub(super) fn prune_hand_ins(&self, horizon_ms: i64) -> usize {
+        let mut book = self.hand_ins();
+        let before = book.by_message.len();
+        book.by_message
+            .retain(|_, held| held.manifest.at_ms >= horizon_ms);
+        let removed = before - book.by_message.len();
+        if removed > 0 {
+            book.reindex();
+            let _ = book.rewrite(&self.root);
+        }
+        removed
     }
 
-    /// No file is kept.
+    /// Keep one file of a hand-in as a row of the catalog: written beside and
+    /// renamed over under the store's own bucket, so a copy that fails halfway
+    /// leaves no half-file under the row's name, and the same file kept again is
+    /// the same row.
     pub(crate) fn register_kept(
         &self,
         file: &KeptFile<'_>,
-        _now_ms: i64,
+        now_ms: i64,
     ) -> Result<Artifact, String> {
-        Err(format!("a hand-in is not kept: {}", file.name))
+        let source = match file.role {
+            Role::Report => Source::WorkerReport,
+            Role::Evidence => Source::WorkerEvidence,
+        };
+        let id = artifact_id(file.origin, file.identity);
+        let target = self.root.join(source.bucket()).join(&id).join(file.name);
+        crate::durable_file::replace_bytes(&target, file.bytes)
+            .map_err(|error| error.to_string())?;
+        let stamp = stamp_of(&target)
+            .ok_or_else(|| format!("the kept file is not there: {}", file.name))?;
+        let limits = self.limits();
+        let mut index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
+        let created = index.rows.get(&id).map(|held| held.artifact.created_ms);
+        let mut row = Self::build_row(
+            RowSeed {
+                path: &target,
+                id,
+                source,
+                origin: file.origin.clone(),
+                stamp,
+                now_ms,
+                created_ms: created,
+            },
+            &limits,
+        );
+        // A log is named by its file, as it was written, whatever its first
+        // line says; a report keeps the title its own words give it.
+        if file.role == Role::Evidence {
+            row.artifact.title = title_of(&target, &limits);
+        }
+        row.artifact.description = file.note.map(str::to_string);
+        let artifact = row.artifact.clone();
+        self.insert_row(&mut index, row, &limits)?;
+        Ok(artifact)
     }
 }
 

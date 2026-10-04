@@ -1,15 +1,26 @@
 //! A worker's hand-in, and what the ledger keeps of it (t-32798).
 //!
-//! Today a `worker_done` that names files keeps nothing of them: the ledger
-//! copies one report verbatim and a cleanup never asks. This is the shape the
-//! keeping asks of the pure half — what a payload names, how much fits, what a
-//! keeping says about itself, where a cleanup stands against it — with nothing
-//! named, nothing planned, nothing counted and a cleanup that never waits. The
-//! tests below fail on that.
+//! A `worker_done` may name files:
+//! `{"reportPath":"/abs/report.md","evidencePaths":["/abs/shot.png","/abs/dir"],
+//! "lifetime":"ephemeral"}`. They usually live in the worker's checkout or in its
+//! agent's scratch folder, and both go when the checkout is cleaned — which is
+//! why a coordinator copied them out by hand, again and again. This module is
+//! the pure half of keeping them for every agent CLI alike: what a payload names
+//! ([`named`]), which hand-ins the ledger holds for a checkout ([`hand_ins_at`]),
+//! how much of the files fits ([`plan`]) and what the keeping says about
+//! itself ([`Manifest`], [`Facts`], [`Standing`]). The window does the reading,
+//! masking and writing ([`crate::private_data`] is the mask) and puts a manifest
+//! to each hand-in; a cleanup asks [`Standing`] before it takes a checkout.
+//!
+//! The payload is the CLI-neutral hand-in: Claude Code, Codex, zo, Antigravity,
+//! Kimi and Grok all report through `zerocode-orc send`, so nothing here knows
+//! which agent wrote it.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::orchestration::{Message, MessageKind, Run, WORKER_ADDRESS_PREFIX};
 use crate::private_data::Found;
@@ -99,8 +110,10 @@ impl ReportKind {
 
     /// The kind a word names, if the list has it.
     #[must_use]
-    pub fn parse(_word: &str) -> Option<Self> {
-        None
+    pub fn parse(word: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.word() == word.trim())
     }
 }
 
@@ -125,8 +138,10 @@ impl Expect {
     }
 
     #[must_use]
-    pub fn parse(_word: &str) -> Option<Self> {
-        None
+    pub fn parse(word: &str) -> Option<Self> {
+        [Self::Fail, Self::Pass]
+            .into_iter()
+            .find(|expect| expect.word() == word.trim())
     }
 }
 
@@ -173,10 +188,81 @@ impl Named {
     }
 }
 
-/// Nothing a payload names is read.
+/// The files a message names: the payload's `reportPath` and `evidencePaths`
+/// (absolute paths only — a relative one names nothing a window could find), and
+/// for the report alone, the first absolute Markdown path the body mentions when
+/// the payload names none.
 #[must_use]
-pub fn named(_payload: &str, _body: &str) -> Named {
-    Named::default()
+pub fn named(payload: &str, body: &str) -> Named {
+    let mut named = Named::default();
+    if !payload.trim().is_empty()
+        && let Ok(serde_json::Value::Object(map)) =
+            serde_json::from_str::<serde_json::Value>(payload)
+    {
+        named.report = map
+            .get(REPORT_KEY)
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute());
+        named.report_kind = map
+            .get(REPORT_KIND_KEY)
+            .and_then(serde_json::Value::as_str)
+            .and_then(ReportKind::parse);
+        if let Some(list) = map.get(EVIDENCE_KEY).and_then(serde_json::Value::as_array) {
+            let mut seen = BTreeSet::new();
+            for item in list.iter().filter_map(evidence_of) {
+                if !seen.insert(item.path.clone()) {
+                    continue;
+                }
+                if named.evidence.len() < NAMED_MAX {
+                    named.evidence.push(item);
+                } else {
+                    named.beyond += 1;
+                }
+            }
+        }
+    }
+    if named.report.is_none() {
+        named.report = report_in_body(body);
+    }
+    named
+}
+
+/// One entry of `evidencePaths`: an absolute path as a string, or an object
+/// `{"path": "/abs", "expected": "what the file should show", "expect": "fail"}`.
+/// Anything else, and a path that is not absolute, names nothing; an `expect`
+/// outside `fail` and `pass` is dropped.
+fn evidence_of(item: &serde_json::Value) -> Option<Evidence> {
+    let (path, expected, expect) = match item {
+        serde_json::Value::String(path) => (path.as_str(), None, None),
+        serde_json::Value::Object(map) => (
+            map.get("path").and_then(serde_json::Value::as_str)?,
+            map.get("expected").and_then(serde_json::Value::as_str),
+            map.get(EXPECT_KEY)
+                .and_then(serde_json::Value::as_str)
+                .and_then(Expect::parse),
+        ),
+        _ => return None,
+    };
+    let path = PathBuf::from(path);
+    path.is_absolute().then(|| Evidence {
+        path,
+        expected: expected
+            .map(str::trim)
+            .filter(|note| !note.is_empty())
+            .map(|note| note.chars().take(EXPECTED_CHARS_MAX).collect()),
+        expect,
+    })
+}
+
+/// The first absolute Markdown path a body mentions — a worker that wrote
+/// "report at `/abs/r.md`" in prose rather than in the payload.
+fn report_in_body(body: &str) -> Option<PathBuf> {
+    body.split(|ch: char| ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | '(' | ')' | ','))
+        .find(|word| {
+            word.ends_with(".md") && (word.starts_with('/') || Path::new(word).is_absolute())
+        })
+        .map(PathBuf::from)
 }
 
 /// One message that names files, with the worker and the work it belongs to.
@@ -195,22 +281,106 @@ pub struct HandIn {
     pub named: Named,
 }
 
-/// No message is a hand-in.
-#[must_use]
-pub fn hand_in_of(_runs: &[Run], _message: &str) -> Option<HandIn> {
-    None
+/// A message as a hand-in: `None` when it names nothing, when its dispatch lives
+/// in another window (its paths are on another machine), or when no worker can
+/// be told from it.
+fn hand_in_of_message(run: &Run, message: &Message) -> Option<HandIn> {
+    let named = named(message.payload.as_str(), message.body.as_str());
+    if named.is_empty() {
+        return None;
+    }
+    let dispatch = message
+        .dispatch
+        .as_deref()
+        .and_then(|dispatch| run.dispatch(dispatch));
+    if dispatch.is_some_and(|dispatch| dispatch.remote.is_some()) {
+        return None;
+    }
+    let worker = match dispatch {
+        Some(dispatch) => dispatch.worker.clone(),
+        None => message
+            .from
+            .strip_prefix(WORKER_ADDRESS_PREFIX)?
+            .to_string(),
+    };
+    Some(HandIn {
+        run: run.id.clone(),
+        message: message.id.clone(),
+        task: message.task.clone(),
+        dispatch: message.dispatch.clone(),
+        worker,
+        at_ms: message.created_ms,
+        commit: dispatch
+            .and_then(|dispatch| dispatch.source.as_deref())
+            .and_then(crate::orchestration::commit_named),
+        named,
+    })
 }
 
-/// No checkout holds one.
+/// The hand-in a message id is, whatever kind of mail it is — a status report
+/// may name a file as well as a `worker_done`.
 #[must_use]
-pub fn hand_ins_at(_runs: &[Run], _checkout: &str) -> Vec<HandIn> {
-    Vec::new()
+pub fn hand_in_of(runs: &[Run], message: &str) -> Option<HandIn> {
+    runs.iter().find_map(|run| {
+        run.message(message)
+            .and_then(|held| hand_in_of_message(run, held))
+    })
 }
 
-/// No worker owes one.
+/// The `worker_done`s in `run` that name files and were sent by one of `workers`.
+fn worker_dones(run: &Run, workers: &[&str], found: &mut Vec<HandIn>) {
+    for message in run.messages() {
+        if message.kind != MessageKind::WorkerDone {
+            continue;
+        }
+        if let Some(hand_in) = hand_in_of_message(run, message)
+            && workers.contains(&hand_in.worker.as_str())
+        {
+            found.push(hand_in);
+        }
+    }
+}
+
+/// Every `worker_done` that names files, sent by a worker whose checkout `sat_in`
+/// says is the one asked about — what a cleanup of that checkout would take with
+/// it. The caller says what "the same checkout" means: a path is spelled the way
+/// the pane reported it in one place and the way git resolves it in another, and
+/// a window that knows its filesystem compares them as the filesystem does. A
+/// checkout handed from one worker to the next answers for both.
 #[must_use]
-pub fn hand_ins_of_worker(_runs: &[Run], _worker: &str) -> Vec<HandIn> {
-    Vec::new()
+pub fn hand_ins_where(runs: &[Run], sat_in: impl Fn(&str) -> bool) -> Vec<HandIn> {
+    let mut found = Vec::new();
+    for run in runs {
+        let workers: Vec<&str> = run
+            .workers
+            .iter()
+            .filter(|worker| worker.checkout.as_deref().is_some_and(&sat_in))
+            .map(|worker| worker.id.as_str())
+            .collect();
+        if !workers.is_empty() {
+            worker_dones(run, &workers, &mut found);
+        }
+    }
+    found
+}
+
+/// [`hand_ins_where`] for a checkout named by the same spelling the ledger holds
+/// it under (a trailing separator aside).
+#[must_use]
+pub fn hand_ins_at(runs: &[Run], checkout: &str) -> Vec<HandIn> {
+    let here = checkout.trim_end_matches('/');
+    hand_ins_where(runs, |at| at.trim_end_matches('/') == here)
+}
+
+/// Every `worker_done` that names files and one worker sent — what is owed when
+/// its seat is released.
+#[must_use]
+pub fn hand_ins_of_worker(runs: &[Run], worker: &str) -> Vec<HandIn> {
+    let mut found = Vec::new();
+    for run in runs.iter().filter(|run| run.worker(worker).is_some()) {
+        worker_dones(run, &[worker], &mut found);
+    }
+    found
 }
 
 /// What a file turned out to be, read from its first bytes — never from its name.
@@ -243,28 +413,139 @@ pub enum Verdict {
     Leave(Why),
 }
 
-/// Nothing is planned.
+/// How much of the files fits, in the order they are named (the report first):
+/// each is kept whole, kept as its head (text only), or left out with a reason.
+/// A file that does not fit does not stop the ones after it.
 #[must_use]
-pub fn plan(_candidates: &[Candidate<'_>]) -> Vec<Verdict> {
-    Vec::new()
+pub fn plan(candidates: &[Candidate<'_>]) -> Vec<Verdict> {
+    let mut used = 0u64;
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(at, candidate)| {
+            if at >= FILES_MAX {
+                return Verdict::Leave(Why::TooManyFiles);
+            }
+            if secret_name(candidate.name) {
+                return Verdict::Leave(Why::SecretName);
+            }
+            if candidate.kind == Kind::Other {
+                return Verdict::Leave(Why::NotKept);
+            }
+            let room = HAND_IN_BYTES_MAX.saturating_sub(used);
+            let limit = FILE_BYTES_MAX.min(room);
+            if candidate.bytes <= limit {
+                used = used.saturating_add(candidate.bytes);
+                Verdict::Keep {
+                    read: candidate.bytes,
+                    trimmed: false,
+                }
+            } else if candidate.kind == Kind::Text && limit >= TRIM_MIN_BYTES {
+                used = used.saturating_add(limit);
+                Verdict::Keep {
+                    read: limit,
+                    trimmed: true,
+                }
+            } else if candidate.bytes > FILE_BYTES_MAX {
+                Verdict::Leave(Why::OverFileCap)
+            } else {
+                Verdict::Leave(Why::OverTotalCap)
+            }
+        })
+        .collect()
 }
 
-/// No file name is refused.
+/// File names a credential store wears. A file named like one is not evidence of
+/// anything a board shows, so it is refused by name — before it is read, whatever
+/// it holds.
+const SECRET_FILE_NAMES: &[&str] = &[
+    ".env",
+    ".netrc",
+    ".npmrc",
+    ".pgpass",
+    ".git-credentials",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "credentials",
+    "credentials.json",
+    "secrets.json",
+];
+const SECRET_FILE_PREFIXES: &[&str] = &[".env."];
+const SECRET_FILE_SUFFIXES: &[&str] =
+    &[".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".kdbx"];
+
+/// Whether a file is named like a credential store (case ignored; only the last
+/// path component counts).
 #[must_use]
-pub fn secret_name(_name: &str) -> bool {
-    false
+pub fn secret_name(name: &str) -> bool {
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    SECRET_FILE_NAMES.contains(&base.as_str())
+        || SECRET_FILE_PREFIXES
+            .iter()
+            .any(|prefix| base.starts_with(prefix))
+        || SECRET_FILE_SUFFIXES
+            .iter()
+            .any(|suffix| base.ends_with(suffix))
 }
 
-/// A name as it was given.
+/// The one-component name a kept file is stored under: separators flattened, no
+/// control characters, no leading dot, at most [`KEPT_NAME_MAX`] characters with
+/// the extension kept.
 #[must_use]
 pub fn kept_name(relative: &str) -> String {
-    relative.to_string()
+    let flat: String = relative
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .map(|ch| {
+            if matches!(ch, '/' | '\\' | ':') {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect();
+    let flat = flat.trim_start_matches('.');
+    if flat.is_empty() {
+        return "file".to_string();
+    }
+    if flat.chars().count() <= KEPT_NAME_MAX {
+        return flat.to_string();
+    }
+    let (stem, extension) = match flat.rfind('.') {
+        Some(at) if flat.len() - at <= 16 => (&flat[..at], &flat[at..]),
+        _ => (flat, ""),
+    };
+    let room = KEPT_NAME_MAX.saturating_sub(extension.chars().count());
+    format!("{}{extension}", stem.chars().take(room).collect::<String>())
 }
 
-/// No fingerprint is made.
+/// What the files named looked like when they were read — a name, a size and a
+/// modification time each — as one short word. A keeping whose files still look
+/// the same needs no second read.
 #[must_use]
-pub fn fingerprint(_files: &[(String, u64, i64)]) -> String {
-    String::new()
+pub fn fingerprint(files: &[(String, u64, i64)]) -> String {
+    let mut lines: Vec<String> = files
+        .iter()
+        .map(|(name, bytes, modified)| format!("{name}\0{bytes}\0{modified}"))
+        .collect();
+    lines.sort();
+    let mut hasher = Sha256::new();
+    for line in &lines {
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Why a named file is not (all) in the keeping. The word is what the board
@@ -318,7 +599,10 @@ impl Why {
     /// Kept nothing of it on purpose — a refusal, not a cap and not an absence.
     #[must_use]
     pub const fn is_refusal(self) -> bool {
-        false
+        matches!(
+            self,
+            Self::NotKept | Self::SecretName | Self::OutsideRoots | Self::Link | Self::Unsafe
+        )
     }
 }
 
@@ -468,30 +752,113 @@ impl Manifest {
         }
     }
 
-    /// Nothing is counted.
-    pub fn push(&mut self, _entry: Entry) {}
+    /// Add one file's line, and its share of every total.
+    pub fn push(&mut self, entry: Entry) {
+        match entry.outcome {
+            Outcome::Kept => {
+                self.kept += 1;
+                self.kept_bytes = self.kept_bytes.saturating_add(entry.kept_bytes);
+            }
+            Outcome::Trimmed => {
+                self.kept += 1;
+                self.trimmed += 1;
+                self.kept_bytes = self.kept_bytes.saturating_add(entry.kept_bytes);
+                self.left_out_bytes = self
+                    .left_out_bytes
+                    .saturating_add(entry.source_bytes.saturating_sub(entry.kept_bytes));
+            }
+            Outcome::Left => {
+                self.left_out += 1;
+                self.left_out_bytes = self.left_out_bytes.saturating_add(entry.source_bytes);
+                if entry.why.is_some_and(Why::is_refusal) {
+                    self.refused += 1;
+                }
+            }
+        }
+        self.masked.add(entry.masked);
+        if self.entries.len() < ENTRIES_LISTED {
+            self.entries.push(entry);
+        } else {
+            self.more += 1;
+        }
+    }
 
-    /// Nothing is counted.
-    pub fn leave_unlisted(&mut self, _paths: u32) {}
+    /// Count `paths` that were named and cannot be listed: past [`NAMED_MAX`].
+    pub fn leave_unlisted(&mut self, paths: u32) {
+        self.left_out += paths;
+        self.more += paths;
+    }
 
-    /// A failure is not recorded.
-    pub fn fail(&mut self, _fault: Fault, _detail: &str) {}
+    /// Record that the window could not write the keeping.
+    pub fn fail(&mut self, fault: Fault, detail: &str) {
+        self.failed = Some(Failure {
+            fault,
+            detail: detail.to_string(),
+        });
+    }
 
     #[must_use]
     pub fn state(&self) -> State {
-        State::Withheld
+        if self.failed.is_some() {
+            State::Failed
+        } else if self.kept == 0 {
+            State::Withheld
+        } else if self.left_out > 0 || self.trimmed > 0 {
+            State::Partial
+        } else {
+            State::Kept
+        }
     }
 
-    /// A cleanup never waits for a hand-in.
+    /// Where a cleanup stands against this keeping.
     #[must_use]
     pub fn standing(&self) -> Standing {
-        Standing::Settled
+        match &self.failed {
+            Some(failure) => Standing::Failed {
+                at_ms: self.at_ms,
+                fault: failure.fault,
+                detail: failure.detail.clone(),
+            },
+            None => Standing::Settled,
+        }
     }
 
-    /// What the board shows of this keeping: nothing but that it is not done.
+    /// What the board shows of this keeping.
     #[must_use]
     pub fn facts(&self) -> Facts {
-        Facts::keeping(self.at_ms)
+        let mut reasons: Vec<&'static str> = Vec::new();
+        if let Some(failure) = &self.failed {
+            reasons.push(failure.fault.word());
+        }
+        for word in self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.why)
+            .map(Why::word)
+        {
+            if reasons.len() < REASONS_SHOWN && !reasons.contains(&word) {
+                reasons.push(word);
+            }
+        }
+        Facts {
+            state: self.state().word(),
+            kept: self.kept,
+            bytes: self.kept_bytes,
+            left_out: self.left_out,
+            left_out_bytes: self.left_out_bytes,
+            refused: self.refused,
+            masked: self.masked.total(),
+            report: self
+                .entries
+                .iter()
+                .find(|entry| entry.role == Role::Report)
+                .and_then(|entry| entry.artifact.clone()),
+            reasons,
+            cap_bytes: HAND_IN_BYTES_MAX,
+            file_cap_bytes: FILE_BYTES_MAX,
+            detail: self.failed.as_ref().map(|failure| failure.detail.clone()),
+            at_ms: self.at_ms,
+        }
     }
 }
 
@@ -561,23 +928,34 @@ pub enum Standing {
 }
 
 impl Standing {
-    /// Where a hand-in stands: nothing is owed.
+    /// Where a hand-in stands, given the manifest its message has, if any.
     #[must_use]
-    pub fn of(_manifest: Option<&Manifest>) -> Self {
-        Self::Settled
+    pub fn of(manifest: Option<&Manifest>) -> Self {
+        manifest.map_or(Self::Owed, Manifest::standing)
     }
 
-    /// A cleanup goes on past anything.
+    /// Whether a cleanup may go on past it.
     #[must_use]
     pub const fn lets_a_cleanup_go_on(&self) -> bool {
-        true
+        matches!(self, Self::Settled)
     }
 }
 
-/// No sentence is made.
+/// The sentence a refused cleanup carries, for the window log and a refusal: the
+/// hand-in, the work, and why the checkout stays.
 #[must_use]
-pub fn hold_sentence(_message: &str, _task: Option<&str>, _standing: &Standing) -> String {
-    String::new()
+pub fn hold_sentence(message: &str, task: Option<&str>, standing: &Standing) -> String {
+    let of = task.map_or_else(String::new, |task| format!(" of task {task}"));
+    match standing {
+        Standing::Settled => format!("the hand-in {message}{of} is kept"),
+        Standing::Owed => format!(
+            "the hand-in {message}{of} is still being kept — the checkout stays until it is"
+        ),
+        Standing::Failed { fault, detail, .. } => format!(
+            "the hand-in {message}{of} was not kept ({}: {detail}) — the checkout stays until it is",
+            fault.word()
+        ),
+    }
 }
 
 #[cfg(test)]

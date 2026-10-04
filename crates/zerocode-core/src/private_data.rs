@@ -1,19 +1,39 @@
 //! What a kept copy must not carry — a home directory, a private address, a
 //! mailbox, a credential — and the mask that takes each out of text (t-32798).
 //!
-//! Today nothing keeps a copy of what a worker hands in, so nothing masks one:
-//! this is the shape the keeping asks of the mask, and a mask that takes nothing
-//! out. The tests below fail on it.
+//! The shapes are `tools/release/pii-rules.json`, the table the release gate
+//! (`pii-scan.py`) reads as well: what the gate refuses in the published tree is
+//! what this masks in the copy the ledger keeps of a worker's hand-in, and the
+//! two cannot disagree because there is one list. A value the table forgives
+//! (`/Users/dev`, `someone@example.com`, a fixture token that says so in its own
+//! body) is left as it was written.
+//!
+//! What stands in a value's place is the placeholder vocabulary `AGENTS.md`
+//! already writes for these things, so a masked copy re-scans clean by
+//! construction ([`is_clean`]) and a reader still sees where a value stood.
+//! Credentials are masked twice over: by the table's provider shapes, then by
+//! what NAMES one (`KEY=value`, `Authorization:`, `Bearer`) through the core's
+//! one credential table ([`crate::credential`]) — and never by how a word
+//! looks, which reads `disk-guard`, `task-list` and every long path as a key.
 
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-/// There is no shared table yet: the release gate carries its own, in the script.
-const TABLE: &str = r#"{"rules":[]}"#;
+/// The table, embedded: the gate's file is the build's input, so a row cannot
+/// be added to one reader and forgotten by the other.
+const TABLE: &str = include_str!("../../../tools/release/pii-rules.json");
 
+/// The account name a masked home directory keeps: the first name the gate's
+/// own `allow` row forgives, and the one `AGENTS.md` says to write.
 pub const HOME_NAME: &str = "dev";
+/// A masked private address: RFC 5737 TEST-NET-1, which no network routes and
+/// the gate's `private-ip` row never reaches.
 pub const PRIVATE_IP: &str = "192.0.2.1";
+/// A masked mailbox: an RFC 2606 example domain, which the gate's `email` row
+/// forgives.
 pub const MAILBOX: &str = "someone@example.com";
 
 /// A kind of value a kept copy must not carry — one row of the table.
@@ -73,6 +93,16 @@ impl Found {
         self.private_ip = self.private_ip.saturating_add(other.private_ip);
         self.email = self.email.saturating_add(other.email);
     }
+
+    fn bump(&mut self, category: Category, by: u32) {
+        let slot = match category {
+            Category::Credential => &mut self.credential,
+            Category::HomePath => &mut self.home_path,
+            Category::PrivateIp => &mut self.private_ip,
+            Category::Email => &mut self.email,
+        };
+        *slot = slot.saturating_add(by);
+    }
 }
 
 /// The text with its private values taken out, and what was taken.
@@ -82,22 +112,145 @@ pub struct Masked {
     pub found: Found,
 }
 
-/// No row is compiled: nothing reads the table.
-static RULES: LazyLock<Vec<Category>> = LazyLock::new(Vec::new);
+/// One row, compiled: `find` is what the category looks like, `allow` (anchored
+/// to the whole found value, as the gate's `fullmatch` is) forgives it.
+struct Rule {
+    category: Category,
+    find: Regex,
+    allow: Regex,
+}
 
-/// `text` as it is: no value is taken out.
-#[must_use]
-pub fn mask(text: &str) -> Masked {
-    Masked {
-        text: text.to_string(),
-        found: Found::default(),
+/// The table's rows, compiled once. The table is a build input pinned by this
+/// module's tests, so a row that does not compile is a bug found there, never
+/// in a window.
+static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
+    #[derive(Deserialize)]
+    struct Row {
+        name: String,
+        find: String,
+        allow: String,
+    }
+    #[derive(Deserialize)]
+    struct Table {
+        rules: Vec<Row>,
+    }
+    let table: Table =
+        serde_json::from_str(TABLE).expect("the shared private-value table is valid JSON");
+    Category::ALL
+        .iter()
+        .map(|&category| {
+            let row = table
+                .rules
+                .iter()
+                .find(|row| row.name == category.row())
+                .expect("the shared table has a row for every category");
+            Rule {
+                category,
+                find: Regex::new(&row.find).expect("a row's `find` is a valid regex"),
+                allow: Regex::new(&format!("^(?:{})$", row.allow))
+                    .expect("a row's `allow` is a valid regex"),
+            }
+        })
+        .collect()
+});
+
+/// What replaces one found value.
+fn replacement(category: Category, value: &str) -> String {
+    match category {
+        Category::Credential => crate::credential::MASK.to_string(),
+        // Everything but the account name stays: the path below the home
+        // directory is the evidence, the person's name is the secret.
+        Category::HomePath => {
+            let name_from = value
+                .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '_'))
+                .map_or(0, |at| at + 1);
+            format!("{}{HOME_NAME}", &value[..name_from])
+        }
+        Category::PrivateIp => PRIVATE_IP.to_string(),
+        Category::Email => MAILBOX.to_string(),
     }
 }
 
-/// Whether `text` holds nothing private: not asked of any text today.
+/// One row over `text`: the replaced text when a value was found and not
+/// forgiven, `None` when the text stands as it is.
+fn sweep(text: &str, rule: &Rule, found: &mut Found) -> Option<String> {
+    let mut hits = 0u32;
+    let swept = rule.find.replace_all(text, |caps: &regex::Captures<'_>| {
+        let value = &caps[0];
+        if rule.allow.is_match(value) {
+            value.to_string()
+        } else {
+            hits += 1;
+            replacement(rule.category, value)
+        }
+    });
+    match swept {
+        Cow::Owned(owned) if hits > 0 => {
+            found.bump(rule.category, hits);
+            Some(owned)
+        }
+        _ => None,
+    }
+}
+
+/// The credential values something NAMES — `KEY=value`, `Authorization:`,
+/// `Bearer`, `--password x`, a URL's userinfo — by the core's credential table.
+fn sweep_named(text: &str, found: &mut Found) -> Option<String> {
+    let masked = crate::credential::mask_named_values(text);
+    if masked == text {
+        return None;
+    }
+    // Counted by the marks the pass left, and at least one: a URL's userinfo is
+    // scrubbed to a mark of its own (`clone::scrub_credentials`), and a masked
+    // quoted value can swallow a mark that was already there.
+    let mark = crate::credential::MASK;
+    let taken = masked
+        .matches(mark)
+        .count()
+        .saturating_sub(text.matches(mark).count())
+        .max(1);
+    found.bump(
+        Category::Credential,
+        u32::try_from(taken).unwrap_or(u32::MAX),
+    );
+    Some(masked)
+}
+
+/// `text` with every private value taken out and counted. The text comes back
+/// whole — lines, spacing and every word the table does not name — so a report
+/// stays a report.
 #[must_use]
-pub fn is_clean(_text: &str) -> bool {
-    true
+pub fn mask(text: &str) -> Masked {
+    let mut found = Found::default();
+    let mut owned: Option<String> = None;
+    for rule in RULES.iter() {
+        let current = owned.as_deref().unwrap_or(text);
+        if let Some(next) = sweep(current, rule, &mut found) {
+            owned = Some(next);
+        }
+        if rule.category == Category::Credential {
+            let current = owned.as_deref().unwrap_or(text);
+            if let Some(next) = sweep_named(current, &mut found) {
+                owned = Some(next);
+            }
+        }
+    }
+    Masked {
+        text: owned.unwrap_or_else(|| text.to_string()),
+        found,
+    }
+}
+
+/// Whether the table finds nothing in `text` that it does not forgive — the
+/// check a masked copy passes before anything is written, so a mask that missed
+/// a value fails closed instead of keeping it.
+#[must_use]
+pub fn is_clean(text: &str) -> bool {
+    RULES.iter().all(|rule| {
+        rule.find
+            .find_iter(text)
+            .all(|hit| rule.allow.is_match(hit.as_str()))
+    })
 }
 
 #[cfg(test)]

@@ -509,6 +509,18 @@ fn settle(
     if !path.is_dir() {
         return Settled::Elsewhere;
     }
+    // What the worker handed in is kept before anything else is asked of this
+    // directory (t-32798). A keeping that is only waiting for its turn is not
+    // written down and not remembered — the next beat asks again; one that
+    // failed is written down once, with its reason, like every other refusal.
+    match (recheck.keeping)(&path) {
+        Clearance::Clear => {}
+        Clearance::Keeping(_) => return Settled::Kept,
+        Clearance::Held(because) => {
+            remember(candidate, Standing::Kept, &because, data_root, now_ms);
+            return Settled::Kept;
+        }
+    }
     let owner = match road {
         Road::Sweep { projects, prefs } => owning_repository(projects, prefs, &path),
         Road::Report(cutter) => listed_by(cutter, &path),

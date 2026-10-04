@@ -33081,6 +33081,74 @@ details.task-board-section > summary {
   overflow-wrap: anywhere;
 }
 
+/* 남긴 것 (t-32798): 과업 행·워커 행 밑의 한 줄. 줄 전체가 제 신호의 잉크를 입는다 — 일부만
+ * 보관·보관한 것 없음은 기다림, 실패는 멈춤 — 그 밖에는 조용한 글씨다. 글은 줄바꿈을 따라
+ * 흐르고, 문은 줄 끝에 붙는다. 줄에 움직임이 없으니 줄일 움직임도 없다. */
+.board-desk-task-kept,
+.board-desk-worker-kept {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  min-width: 0;
+  color: var(--ink-label);
+}
+
+.board-desk-task-kept {
+  grid-column: 2;
+}
+
+.board-desk-worker-kept {
+  font-size: var(--text-2xs);
+}
+
+.board-desk-kept-text {
+  overflow-wrap: anywhere;
+}
+
+.board-desk-task-kept[data-state="partial"],
+.board-desk-task-kept[data-state="withheld"],
+.board-desk-worker-kept[data-state="partial"],
+.board-desk-worker-kept[data-state="withheld"] {
+  color: var(--signal-wait-ink);
+}
+
+.board-desk-task-kept[data-state="failed"],
+.board-desk-worker-kept[data-state="failed"] {
+  color: var(--signal-halt-ink);
+}
+
+.board-desk-kept-door {
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-2xs);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard);
+}
+
+.board-desk-kept-door:hover {
+  border-color: var(--edge-mark);
+  background: var(--row-hover);
+}
+
+.board-desk-kept-door:focus-visible {
+  outline: var(--rule-width) solid var(--ink-chalk);
+  outline-offset: var(--space-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-desk-kept-door {
+    transition: none;
+  }
+}
+
 .board-desk-more {
   margin: var(--space-1) 0 0;
   color: var(--ink-label);
@@ -33091,6 +33159,9 @@ details.task-board-section > summary {
 .board-desk-task-note[hidden],
 .board-desk-task-cost[hidden],
 .board-desk-task-writing[hidden],
+.board-desk-task-kept[hidden],
+.board-desk-worker-kept[hidden],
+.board-desk-kept-door[hidden],
 .board-desk-more[hidden] {
   display: none;
 }
