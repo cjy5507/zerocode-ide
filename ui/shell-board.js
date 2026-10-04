@@ -389,6 +389,16 @@ const DESK_MAIL = Object.freeze({
   deadlocked: { state: "needs-attention", key: "board.desk.mailDeadlocked", word: "서로 기다림" },
   classifier_declined: { state: "needs-attention", key: "board.desk.mailDeclined", word: "분류기 거절" },
   model_deviated: { state: "needs-attention", key: "board.desk.mailDeviated", word: "모델 바뀜" },
+  landing_stalled: { state: "needs-attention", key: "board.desk.mailLanding", word: "착지 점검" },
+});
+
+/* 늦은 착지의 다섯 까닭(t-22105) — 원장의 낱말마다. 표에 없는 낱말은 원장의 말 그대로 선다. */
+const DESK_LANDING_REASONS = Object.freeze({
+  no_review: { key: "board.desk.landingNoReview", word: "보고했는데 검증이 늦어요" },
+  no_merge: { key: "board.desk.landingNoMerge", word: "검증했는데 병합 기록이 없어요" },
+  merged_unrecorded: { key: "board.desk.landingUnrecorded", word: "git엔 main에 있는데 원장에 병합 기록이 없어요" },
+  cleanable: { key: "board.desk.landingCleanable", word: "병합된 작업 폴더가 남아 있어요 (정리 가능)" },
+  ledger_merged_git_not: { key: "board.desk.landingGitNot", word: "원장은 병합됐다는데 git엔 그 커밋이 main에 없어요" },
 });
 
 /* 분류기 거절 뒤에 무엇이 서 있는가(t-6747): 선언된 워커에게 넘기는 중, 넘길 곳을
@@ -448,6 +458,14 @@ function deskLetterDetail(letter, now) {
     return letter.notices > 1
       ? t("board.desk.quietNotices", "{{reason}} · 알림 {{count}}통", { reason, count: letter.notices })
       : reason;
+  }
+  if (letter.kind === "landing_stalled") {
+    const held = DESK_LANDING_REASONS[letter.reason];
+    const reason = held ? t(held.key, held.word) : String(letter.reason ?? "");
+    // No time when the ledger named none or it is under a minute — never a zero.
+    const since = Number.isFinite(letter.since_ms) && now - letter.since_ms >= 60_000
+      ? t("board.desk.landingSince", "{{time}}째", { time: agoWord(letter.since_ms, now) }) : "";
+    return [reason, since].filter(Boolean).join(" · ");
   }
   if (letter.kind === "worker_died") return t("board.desk.mailDiedCopy", "보고 전에 판이 끝났어요");
   if (letter.kind === "deadlocked") return t("board.desk.mailDeadlockedCopy", "서로의 답을 기다리는 고리에 들었어요");
@@ -1054,12 +1072,13 @@ const DESK_STAGES = Object.freeze([
   { id: "blocked", flow: false, tone: "wait", key: "board.desk.stageBlocked", word: "막힘" },
   { id: "failed", flow: false, tone: "halt", key: "board.desk.stageFailed", word: "실패" },
   { id: "unreviewable", flow: false, tone: "", key: "board.noReviewRecord", word: "완료 — 검토 기록 없음" },
+  { id: "nothing_to_land", flow: false, tone: "", key: "board.nothingToLand", word: "완료 — 착지할 것 없음" },
   { id: "closed", flow: false, tone: "", key: "board.closed", word: "닫힘" },
 ]);
 
 /* 흐름을 떠난 단계: 닫힘, 그리고 검토 기록을 영영 받을 수 없어 완료로만 남은 것(t-19328).
  * 「과업 흐름 · N」의 N은 아직 흐름에 있는 과업만 센다. */
-const DESK_OVER_STAGES = Object.freeze(["unreviewable", "closed"]);
+const DESK_OVER_STAGES = Object.freeze(["unreviewable", "nothing_to_land", "closed"]);
 
 /* 처음 펼쳐 둘 단계: 멈춰 선 단계 가운데 과업이 있는 첫째. 없으면 아무것도. */
 function deskDefaultStage(counts) {

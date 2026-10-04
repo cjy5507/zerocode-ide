@@ -665,3 +665,123 @@ fn the_time_of_a_verification_is_stamped_once_and_kept_by_a_rewrite_of_the_same_
         Some(first)
     );
 }
+
+/// A new branch fast-forwarded to main has its head in main without a single commit of its own, and a
+/// task that lands stage by stage has the ledger's `merged` only at the end: neither is a late
+/// landing, because the commit git has is not the one the attempt handed in.
+#[test]
+fn only_the_commit_the_attempt_handed_in_counts_as_what_git_has() {
+    // No report yet: the worker's checkout is a branch main fast-forwarded past, and git calls it landed.
+    let mut fresh = Bench::new();
+    fresh.json("run-create --name watch");
+    let task = fresh.json("task-create --spec fresh-task")["taskId"]
+        .as_str()
+        .expect("a task id")
+        .to_string();
+    let (_, pane) = fresh.seat(&format!("worker-start --agent claude --task {task}"));
+    assert!(fresh.ledger.worker_seated(("team-1", &pane), CHECKOUT));
+    let landed = vec![witness(
+        CHECKOUT,
+        HEAD,
+        GitSays::Landed { at_ms: Some(1) },
+        false,
+    )];
+    assert_eq!(
+        fresh
+            .ledger
+            .landing_watch(&landed, fresh.clock + 10 * MERGED_UNRECORDED_GRACE_MS),
+        0,
+        "an attempt that handed nothing in has no commit git could have"
+    );
+
+    // A stage of the work landed earlier: git has an older commit of the same branch.
+    let mut staged = Bench::new();
+    let handed = handed_in(&mut staged, CHECKOUT, HEAD);
+    let earlier = vec![witness(
+        CHECKOUT,
+        "1111111111111111111111111111111111111111",
+        GitSays::Landed {
+            at_ms: Some(handed.done_at),
+        },
+        false,
+    )];
+    assert_eq!(
+        staged
+            .ledger
+            .landing_watch(&earlier, handed.done_at + 3 * MERGED_UNRECORDED_GRACE_MS),
+        0,
+        "the stage that landed is not the commit that was handed in"
+    );
+    let ledger_says_merged = {
+        let mut bench = Bench::new();
+        let handed = handed_in(&mut bench, CHECKOUT, HEAD);
+        let merged_at = review(
+            &mut bench,
+            &handed,
+            &format!("\"verified\":true,\"mergeHead\":\"{HEAD}\""),
+        );
+        let unlanded_stage = vec![witness(
+            CHECKOUT,
+            "1111111111111111111111111111111111111111",
+            GitSays::Unlanded {
+                behind: Some(1),
+                far_behind: false,
+                conflict: None,
+            },
+            false,
+        )];
+        bench.ledger.landing_watch(&unlanded_stage, merged_at + 1)
+    };
+    assert_eq!(
+        ledger_says_merged, 0,
+        "git's word about another commit is not a disagreement"
+    );
+}
+
+/// The alert's ledger is the rows themselves: the same moment twice, and a ledger read in again, tell
+/// nothing a second time.
+#[test]
+fn a_notice_already_told_is_not_told_again_at_the_same_moment_or_after_a_rebuild() {
+    let mut bench = Bench::new();
+    let handed = handed_in(&mut bench, CHECKOUT, HEAD);
+    let seen = silent();
+    let at = handed.done_at + VERIFY_OVERDUE_MS;
+    assert_eq!(bench.ledger.landing_watch(&seen, at), 1);
+    assert_eq!(
+        bench.ledger.landing_watch(&seen, at),
+        0,
+        "the same moment twice"
+    );
+    let mut carried = Ledger::rebuild(bench.ledger.export()).expect("a readable ledger");
+    assert_eq!(
+        carried.landing_watch(&seen, at + 1),
+        0,
+        "a ledger read in again"
+    );
+    assert_eq!(
+        carried.landing_watch(&seen, at + RENOTIFY_MS),
+        1,
+        "and six hours later"
+    );
+}
+
+/// A review an older window wrote has no time on it, and the row it left reads and writes back.
+#[test]
+fn a_coordinators_row_from_before_the_verification_time_reads_and_writes_back_without_it() {
+    let old = r#"{"kind":"coordinator","seat":"team-1/%1","generation":1,"attempt":"dp-1","source":"abc1234","completed_ms":5}"#;
+    let read: ResultAuthor = serde_json::from_str(old).expect("an old row");
+    match &read {
+        ResultAuthor::Coordinator {
+            completed_ms,
+            verified_ms,
+            ..
+        } => assert_eq!((*completed_ms, *verified_ms), (Some(5), None)),
+        other => panic!("not a coordinator's row: {other:?}"),
+    }
+    let written = serde_json::to_value(&read).expect("written");
+    assert!(written.get("verified_ms").is_none(), "{written}");
+    assert_eq!(
+        serde_json::from_value::<ResultAuthor>(written).expect("read back"),
+        read
+    );
+}

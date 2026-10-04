@@ -279,6 +279,47 @@ fn millis(ttl: Duration) -> i64 {
     i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX)
 }
 
+/// What the cache holds of one checkout, as the ledger's witness (t-34501 stage 2): the head and the
+/// compare ref's oid the classification stood on, what git said of the work, and whether a pane is in
+/// the folder now. Reads the cache only — no git, no process, no new loop — so a checkout the sidebar
+/// never classified has no witness and the ledger hears nothing of git for it.
+pub(crate) fn witness_for(
+    path: &Path,
+    occupied: bool,
+) -> Option<zerocode_core::orchestration::landing_watch::LandingWitness> {
+    use zerocode_core::orchestration::landing_watch::{ConflictCell, GitSays, LandingWitness};
+    let held = held_landing(path)?;
+    // The key is `head|compare oid|branch`; a failure is held under an empty key and is no witness.
+    let mut parts = held.key.splitn(3, '|');
+    let head = parts.next().filter(|head| !head.is_empty())?;
+    let compare_oid = parts.next().unwrap_or("");
+    let branch = parts.next().filter(|branch| !branch.is_empty());
+    let landing = &held.landing;
+    let git = match landing.state {
+        "landed" => GitSays::Landed {
+            at_ms: landing.landed_in.as_ref().map(|taken| taken.time_ms),
+        },
+        "unlanded" => GitSays::Unlanded {
+            behind: landing.behind,
+            far_behind: landing.far_behind,
+            conflict: landing.conflict.as_ref().map(|cell| ConflictCell {
+                total: cell.total,
+                files: cell.files.clone(),
+            }),
+        },
+        _ => GitSays::Silent,
+    };
+    Some(LandingWitness {
+        checkout: path.to_string_lossy().into_owned(),
+        branch: branch.map(str::to_string),
+        head: head.to_string(),
+        compare_ref: landing.compare_ref.clone().unwrap_or_default(),
+        compare_oid: compare_oid.to_string(),
+        git,
+        occupied,
+    })
+}
+
 /// Whether a held answer still answers for these facts: the same key, and an
 /// unsaved-changes reading younger than `dirty_ttl`.
 fn stands(held: &HeldLanding, key: &str, dirty_ttl: Duration) -> bool {

@@ -860,6 +860,7 @@ const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
   { stage: "closed", flag: "closed", key: "board.closed", word: "닫힘" },
   { stage: "deployed", flag: "deployed", key: "board.deployed", word: "배포됨" },
   { stage: "merged", flag: "merged", key: "board.merged", word: "병합됨" },
+  { stage: "nothing-to-land", flag: "nothing_to_land", key: "board.nothingToLand", word: "완료 — 착지할 것 없음" },
   { stage: "verified", flag: "verified", key: "board.verified", word: "검증됨" },
   { stage: "claimed-deployed", flag: "claimed_deployed", key: "board.claimedDeployed", word: "배포됐다 함" },
   { stage: "claimed-merged", flag: "claimed_merged", key: "board.claimedMerged", word: "병합됐다 함" },

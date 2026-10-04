@@ -12,12 +12,28 @@ use serde::{Deserialize, Serialize};
 use zerocode_core::continue_gate::Settings;
 use zerocode_core::launch_budget::Limits;
 
-/// The gate's half and the ledger's half, as stored.
+/// What the ledger may tell on its own (t-34501): the notices about work that landed late, sent to the
+/// run's coordinator, and the word to a live worker whose branch ran far behind the main branch or would
+/// conflict with it. On by default; the notices only inform — nothing is merged, deleted or pushed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Alerts {
+    pub(crate) landing: bool,
+}
+
+impl Default for Alerts {
+    fn default() -> Self {
+        Self { landing: true }
+    }
+}
+
+/// The gate's half, the ledger's half and its alerts, as stored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct HarnessSettings {
     pub(crate) gate: Settings,
     pub(crate) launches: Limits,
+    pub(crate) alerts: Alerts,
 }
 
 impl HarnessSettings {
@@ -37,9 +53,18 @@ impl HarnessSettings {
             })?,
             None => Limits::default(),
         };
+        // A bad word turns nothing off: only a plain `false` does.
+        let alerts = Alerts {
+            landing: value
+                .get("alerts")
+                .and_then(|held| held.get("landing"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+        };
         Ok(Self {
             gate: Settings::parse(&value.get("gate").cloned().unwrap_or_default()),
             launches,
+            alerts,
         })
     }
 }

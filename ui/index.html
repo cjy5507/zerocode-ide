@@ -4009,6 +4009,16 @@
             <input class="settings-input" id="harness-day-usd" type="number" inputmode="decimal"
                    min="0" step="any" aria-describedby="harness-day-usd-hint" />
           </label>
+          <label class="settings-field" data-field="md" for="harness-alerts-landing">
+            <span class="settings-label" data-i18n="settings.harness.alerts">원장 알림: 늦은 착지와 뒤처진 브랜치</span>
+            <span class="settings-hint" id="harness-alerts-landing-hint" data-i18n="settings.harness.alertsHint">
+              켜면 원장이 1분에 한 번 작업의 기록을 git과 맞대어 봅니다. 보고했는데 검증이 2시간 넘게 없거나, 검증했는데 병합 기록이 없거나, 병합됐는데 폴더가 남아 있으면 그 런의 코디네이터에게 알리고, main보다 많이 뒤처졌거나 합치면 충돌하는 브랜치는 그 일을 하는 워커에게 알립니다. 알리기만 합니다 — 병합도 삭제도 push도 하지 않습니다.
+            </span>
+            <select class="settings-input" id="harness-alerts-landing" aria-describedby="harness-alerts-landing-hint">
+              <option value="on" data-i18n="settings.harness.alertsOn">켬</option>
+              <option value="off" data-i18n="settings.harness.alertsOff">끔</option>
+            </select>
+          </label>
           <div class="settings-subhead">
             <h3 class="settings-subhead-title" data-i18n="settings.harness.launchesTitle">에이전트 호출 한도</h3>
             <p class="settings-subhead-desc" data-i18n="settings.harness.launchesAbout">

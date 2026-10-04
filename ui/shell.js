@@ -233,6 +233,8 @@ async function refreshPaneLedger() {
         failed: row?.failed === true,
         review: row?.review ?? null,
         closed: row?.closed ?? null,
+        // When the wait began (t-22105); null where the ledger kept none.
+        review_since_ms: Number.isFinite(row?.review_since_ms) ? row.review_since_ms : null,
       };
       if (typeof row?.term === "number") next.set(row.term, facts);
       else if (row?.settled === true && row.checkout) {
@@ -266,7 +268,7 @@ function paneLedgerSaid(map) {
     .sort(([a], [b]) => a - b)
     .map(([term, f]) =>
       `${term}:${f.taskId}:${f.task}:${f.ledger}:${f.reported ? 1 : 0}:${f.failed ? 1 : 0}` +
-      `:${JSON.stringify(f.review)}:${JSON.stringify(f.closed)}`)
+      `:${JSON.stringify(f.review)}:${JSON.stringify(f.closed)}:${f.review_since_ms ?? ""}`)
     .join(",");
 }
 
@@ -303,6 +305,10 @@ function ledgerReviewWord(facts) {
   if (facts.closed) return t("board.closed", "닫힘");
   if (review.deployed) return t("board.deployed", "배포됨");
   if (review.merged) return t("board.merged", "병합됨");
+  // The coordinator wrote that there is no code to land — research, a review, a design (t-34501).
+  // Done, and NOT merged: nothing went into main, so the word is its own. A merge beside it wins,
+  // above; a worker's word for it is a claim and stays out of here (`claimed_nothing_to_land`).
+  if (review.nothing_to_land) return t("board.nothingToLand", "완료 — 착지할 것 없음");
   if (review.verified) return t("board.verified", "검증됨");
   // The worker's own keys, kept apart by the ledger as its claim (t-6815):
   // the row says the worker SAYS so, in words that are never the fact's.
@@ -338,7 +344,7 @@ function ledgerClosedReason(closed) {
 /* Whether a coordinator has stood behind the work — verified, merged or
  * deployed in the ledger (`ReviewFacts`); a worker's claim never is. */
 function ledgerVouched(review) {
-  return Boolean(review && (review.verified || review.merged || review.deployed));
+  return Boolean(review && (review.verified || review.merged || review.deployed || review.nothing_to_land));
 }
 
 /* The phases of the ledger's reading (`ledgerReviewPhaseOf`) that wait on nobody:
@@ -381,6 +387,7 @@ const LEDGER_REVIEW_PHASE = Object.freeze({
   "claimed-deployed": "review",
   verified: "vouched",
   merged: "vouched",
+  "nothing-to-land": "vouched",
   deployed: "vouched",
 });
 
@@ -10146,6 +10153,32 @@ function worktreeReviewPhase(path) {
   }
   read(checkoutLedger.get(checkoutKey(path)));
   return phase;
+}
+
+/* How long the work standing in one checkout has waited where the ledger says it waits (t-22105,
+ * t-34501). `review` is a report nobody has verified, counted from the report; `unmerged` is a
+ * verification nobody has merged, counted from the verification. The ledger keeps the time
+ * (`review_since_ms`); a row whose ledger kept none — a verification an older window wrote — answers
+ * nothing, and the sidebar then says no time at all instead of a zero. With several seats the longest
+ * wait is the one told. */
+function worktreeWaitingSince(path) {
+  let found = null;
+  const read = (facts) => {
+    if (!facts || !Number.isFinite(facts.review_since_ms)) return;
+    const phase = ledgerReviewPhaseOf(facts);
+    const review = facts.review ?? {};
+    const kind = phase === "review"
+      ? "review"
+      : phase === "vouched" && !review.merged && !review.deployed && !review.nothing_to_land ? "unmerged" : null;
+    if (kind === null) return;
+    if (found === null || facts.review_since_ms < found.since) found = { kind, since: facts.review_since_ms };
+  };
+  for (const tab of tabs) {
+    if (tab.kind !== "term" || tab.worktree !== path) continue;
+    for (const term of paneLeaves(tab.layout)) read(paneLedger.get(term));
+  }
+  read(checkoutLedger.get(checkoutKey(path)));
+  return found;
 }
 
 /* Whether this row IS the pane on stage — Orca's `isFocusedPane`, which fills

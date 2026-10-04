@@ -2056,6 +2056,9 @@ pub(super) fn beat_standing_orders(app: &AppHandle) {
         // See [`worktree_reclaim`] for what the pass costs when it finds
         // nothing, which is the reason it can ride a one-second beat at all.
         worktree_reclaim::sweep(&beating, now_ms);
+        // And the ledger's record held against git's, once a minute, from the landing cache the
+        // sidebar already keeps (t-34501): what is late is told, nothing is merged or deleted.
+        crate::landing_watch_sweep::sweep(&beating, now_ms);
     });
 }
 

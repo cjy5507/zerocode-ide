@@ -90,6 +90,8 @@ pub(crate) struct DeskMail {
     pub(crate) reason: Option<String>,
     /// When the provider said a quota wall resets.
     pub(crate) resets_at_ms: Option<i64>,
+    /// Since when a late landing has stood (`landing_stalled`, t-34501).
+    pub(crate) since_ms: Option<i64>,
     /// A classifier decline's category (`cyber`, `reasoning_extraction`,
     /// …), on a decline and on a switch of model it caused (t-6747).
     pub(crate) category: Option<String>,
@@ -361,6 +363,7 @@ fn mail_row(run: &Run, message: &Message, inbox: &InboxState) -> DeskMail {
         },
         reason: said["reason"].as_str().map(str::to_string),
         resets_at_ms: said["resetsAtMs"].as_i64(),
+        since_ms: said["sinceMs"].as_i64(),
         category: said["category"].as_str().map(str::to_string),
         routed: said["routed"].as_bool(),
         rung: said["rung"].as_str().map(str::to_string),
@@ -482,6 +485,12 @@ fn stage_of(run: &Run, task: &Task) -> &'static str {
                 "merged"
             } else if review.unreviewable {
                 "unreviewable"
+            } else if review.nothing_to_land {
+                // The coordinator wrote that there is no code to land (t-34501): a review of research, a
+                // design, a check.
+                // Never 병합: nothing went into main. A worker's claim is not here — only the
+                // coordinator's fact is `nothing_to_land`.
+                "nothing_to_land"
             } else {
                 "reported"
             }
