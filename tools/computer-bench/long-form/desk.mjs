@@ -193,7 +193,7 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
   await content().waitForFunction(() => typeof LongForm === "object" && LongForm.spec !== null);
   const cdp = await page.context().newCDPSession(page);
   const tally = { verbs: {}, steps: {}, waitMs: 0, handMs: 0, settleMs: 0, settledFalse: 0, pngBytes: [], handoffs: 0, looks: 0,
-    ocrReads: 0, ocrMs: 0, personMs: 0 };
+    ocrReads: 0, ocrMs: 0, personMs: 0, landed: [] };
   const lastLook = new Map();
   let shots = 0;
   let pointer = { x: 0, y: 0 };
@@ -209,6 +209,21 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
   };
 
   const count = (table, verb) => { table[verb] = (table[verb] || 0) + 1; };
+
+  /* What a pointer press meets when it reaches the app: the element at the
+   * point, the sheet up and the keyboard — a trace for a bench whose press
+   * did nothing (the phone only; a page is read by its tree). */
+  async function landsOn(at) {
+    if (scene.accessible) return null;
+    const { window: box, screen } = scene;
+    const scale = box.width / screen.width;
+    const point = { x: (at.x - box.x) / scale, y: (at.y - box.y - screen.top) / scale };
+    return content().evaluate(({ x, y }) => {
+      const hit = document.elementFromPoint(x, y);
+      const said = hit ? `${hit.tagName.toLowerCase()}.${String(hit.className || "").split(" ")[0]} "${String(hit.textContent || "").trim().slice(0, 24)}"` : "nothing";
+      return `${said} @${Math.round(x)},${Math.round(y)} sheet=${document.querySelector(".sheet.up .bar span")?.textContent || "-"} keyboard=${Boolean(document.querySelector(".keyboard.up"))} active=${document.activeElement?.className || document.activeElement?.tagName}`;
+    }, point).catch(() => "unread");
+  }
 
   /* The hand's time for one acting verb, as the session measured it. */
   async function handStep(verb, started) {
@@ -445,7 +460,10 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
         const at = { x: Number(flags.x), y: Number(flags.y) };
         pointer = at;
         const clicks = Number(flags["click-count"] || 1);
-        deliver(() => page.mouse.click(at.x, at.y, { button: flags["mouse-button"] || "left", clickCount: clicks }));
+        deliver(async () => {
+          tally.landed.push(await landsOn(at));
+          await page.mouse.click(at.x, at.y, { button: flags["mouse-button"] || "left", clickCount: clicks });
+        });
         await handStep(verb, started);
         return { path: "synthetic", clickCount: clicks };
       }

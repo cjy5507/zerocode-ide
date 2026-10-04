@@ -205,7 +205,8 @@ let lastHeld = null;
 const phone = await standing("phone", async ({ desk }) => {
   const refused = (await fillPhone(desk)).filter((answer) => answer.code !== 0);
   await desk.settled();
-  lastHeld = await desk.content().evaluate(() => ({ second: LongForm.state.second_nationality, dual: LongForm.state.decl_dual }));
+  lastHeld = { ...(await desk.content().evaluate(() => ({ second: LongForm.state.second_nationality, dual: LongForm.state.decl_dual }))),
+    landed: desk.tally.landed.slice(-6) };
   check("phone: every scripted tap was answered", refused.length === 0, refused.map((answer) => answer.err).slice(0, 3).join(" | "));
 });
 check("phone: the card tapped in by pixels passes the oracle", phone.pass === true,
