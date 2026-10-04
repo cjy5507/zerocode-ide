@@ -180,11 +180,16 @@ async function main() {
   const exit = await new Promise((done) => child.on("exit", (code, signal) => done({ code, signal })));
   clearTimeout(capped);
   const wallMs = Date.now() - started;
+  // What the page held when the agent stopped — the progress of a run cut
+  // off before it submitted (the page's own state, as it would post it).
+  const held = await desk.page.evaluate(() => (typeof state === "object" ? state : null)).catch(() => null);
+  await writeFile(join(options.out, "progress.json"), JSON.stringify(held));
   await desk.close();
   server.kill();
   await writeFile(join(options.out, "agent.ndjson"), Buffer.concat(raw));
   await writeFile(join(options.out, "agent.stderr"), Buffer.concat(errors));
-  const oracle = JSON.parse(spawnSync("python3", [join(HERE, "oracle.py"), "--out", options.out, "--json"], { encoding: "utf8" }).stdout);
+  const oracle = JSON.parse(spawnSync("python3", [join(HERE, "oracle.py"), "--out", options.out, "--json",
+    "--progress", join(options.out, "progress.json")], { encoding: "utf8" }).stdout);
   const timings = await agent.timings(options);
   const tokens = await agent.tokens(options);
   const calls = agent.toolCalls(lines);
@@ -194,7 +199,7 @@ async function main() {
     wallSeconds: wallMs / 1000, exit, capSeconds: options.capSeconds,
     personSeconds: KLM.total_seconds, overPerson: wallMs / 1000 / KLM.total_seconds,
     oracle: { pass: oracle.pass, ok: oracle.ok_fields, of: oracle.total_fields, wrong: oracle.wrong, missing: oracle.missing,
-      submits: oracle.submits, handoffs: oracle.handoffs, reasons: oracle.reasons },
+      submits: oracle.submits, handoffs: oracle.handoffs, reasons: oracle.reasons, progress: oracle.progress || null },
     requests: {
       roundTrips: timings.length, requestsSent: requestSentAt.length,
       firstByteMs: spread(timings.map((row) => row.ttfb_ms).filter(Number.isFinite)),

@@ -65,26 +65,32 @@ def fields(spec):
     return [field for section in spec["sections"] for field in section["fields"]]
 
 
+def verdicts(sent, spec):
+    """Each field of `sent` (a submission, or the page's state at a moment)
+    against the card: ok, wrong or missing."""
+    expected = spec["card"]["expected"]
+    out = {}
+    for field in fields(spec):
+        name = field["id"]
+        read = READ[field["kind"]]
+        if name not in sent:
+            out[name] = "missing"
+        else:
+            out[name] = "ok" if read(sent[name]) == read(expected[name]) else "wrong"
+    return out
+
+
 def score(out, spec=None):
     spec = spec or json.loads(SPEC.read_text())
     out = pathlib.Path(out)
     submissions = lines(out / SUBMISSIONS)
     handoffs = lines(out / HANDOFFS)
-    expected = spec["card"]["expected"]
     result = {"submits": len(submissions), "handoffs": len(handoffs), "fields": {},
               "wrong": [], "missing": [], "reasons": []}
     if not submissions:
         result["reasons"].append("no submission: the form was never sent")
-    sent = submissions[-1]["fields"] if submissions else {}
-    for field in fields(spec):
-        name = field["id"]
-        read = READ[field["kind"]]
-        want = read(expected[name])
-        if name not in sent:
-            verdict = "missing"
-        else:
-            verdict = "ok" if read(sent[name]) == want else "wrong"
-        result["fields"][name] = verdict
+    result["fields"] = verdicts(submissions[-1]["fields"] if submissions else {}, spec)
+    for name, verdict in result["fields"].items():
         if verdict != "ok":
             result[verdict].append(name)
     if result["wrong"]:
@@ -103,8 +109,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", required=True)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--progress", help="also score the page's state at the run's end (a JSON file), "
+                        "for a run cut off before it submitted")
     args = parser.parse_args()
     result = score(args.out)
+    if args.progress and pathlib.Path(args.progress).exists():
+        held = verdicts(json.loads(pathlib.Path(args.progress).read_text()) or {}, json.loads(SPEC.read_text()))
+        result["progress"] = {"ok": sum(1 for verdict in held.values() if verdict == "ok"), "of": len(held)}
     if args.json:
         print(json.dumps(result))
     else:
