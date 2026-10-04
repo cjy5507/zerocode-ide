@@ -939,7 +939,7 @@ function deskWorkerRow(view) {
   gate.hidden = true;
   gate.append(deskElement("strong", "board-desk-worker-gate-verdict"),
     deskElement("span", "board-desk-worker-gate-why"), deskElement("span", "board-desk-worker-gate-basis"));
-  button.append(line, what, gate);
+  button.append(line, what, gate, deskKeptLine("board-desk-worker-kept", false));
   button.onclick = () => {
     const term = row.__term;
     if (term != null) selectTaskBoardMember(view, `agent:term:${term}`);
@@ -985,6 +985,7 @@ function paintDeskWorkers(block, now, view) {
       [row.task || row.task_id, review, ledgerClosedReason(row.closed)].filter(Boolean).join(" · "));
     writeTextContent(node.querySelector(".board-desk-worker-facts"), deskWorkerFacts(row, now));
     paintDeskGate(node.querySelector(".board-desk-worker-gate"), row.gate);
+    paintDeskKept(node.querySelector(".board-desk-worker-kept"), row.kept, null);
     const main = node.querySelector(".board-desk-worker-main");
     writeDisabled(main, node.__term == null);
     return node;
@@ -1049,6 +1050,107 @@ function taskCostWords(cost) {
   return { text, tip };
 }
 
+/* ---- 남긴 것 (t-32798) ------------------------------------------------------
+ *
+ * 워커가 worker_done으로 밝힌 보고서와 증거는 체크아웃과 함께 사라지기 전에 원장이 창의
+ * 아티팩트 저장소에 가려서 남긴다(`hand_in_keep`). 과업 행과 워커 행은 그 기록에서 한 번
+ * 센 사실 하나(`kept`)를 달고 온다 — 여기는 그 말을 풀어 쓸 뿐이다. 무엇을 남겼고 무엇을
+ * 못 담았는지, 정리를 막는지도 백엔드가 정한다. 못 담은 것에는 이유가 낱말로 붙어 오고, 낱말마다
+ * 한 문장이다. 남긴 파일은 아티팩트 탭의 같은 행이라, 문은 그 탭을 이 과업으로 걸러 연다. */
+
+/* 상태 낱말(백엔드 `Facts::state`), 낱말마다 한 문장. 모르는 낱말은 그대로 쓴다. */
+const KEPT_STATES = Object.freeze({
+  keeping: { key: "board.desk.kept.keeping", word: "보관하는 중…" },
+  kept: { key: "board.desk.kept.kept", word: "보관됨 · {{count}}개 · {{size}}" },
+  partial: { key: "board.desk.kept.partial", word: "일부만 보관 · {{count}}개 보관 · {{left}}개 못 담음" },
+  withheld: { key: "board.desk.kept.withheld", word: "보관한 것 없음 · {{left}}개 못 담음" },
+  failed: { key: "board.desk.kept.failed", word: "보관 실패 · 정리가 막혀 있음" },
+});
+
+/* 못 담은 이유(백엔드 `Why::word`와 `Fault::word`), 낱말마다 한 문장. 한도는 백엔드가 실어 보낸
+ * 숫자(`file_cap_bytes`·`cap_bytes`)다. */
+const KEPT_REASONS = Object.freeze({
+  over_file_cap: { key: "board.desk.kept.reasonOverFileCap", word: "파일 하나가 {{fileCap}} 초과" },
+  over_total_cap: { key: "board.desk.kept.reasonOverTotalCap", word: "한 번에 {{totalCap}}까지만 보관" },
+  too_many_files: { key: "board.desk.kept.reasonTooManyFiles", word: "파일이 너무 많음" },
+  not_kept: { key: "board.desk.kept.reasonNotKept", word: "글도 그림도 아닌 파일은 못 읽어 보관 안 함" },
+  secret_name: { key: "board.desk.kept.reasonSecretName", word: "비밀 파일 이름이라 보관 안 함" },
+  outside_roots: { key: "board.desk.kept.reasonOutsideRoots", word: "작업 폴더 밖의 파일이라 보관 안 함" },
+  link: { key: "board.desk.kept.reasonLink", word: "바로가기는 따라가지 않음" },
+  unsafe: { key: "board.desk.kept.reasonUnsafe", word: "가려도 비공개 값이 남아 보관 안 함" },
+  gone: { key: "board.desk.kept.reasonGone", word: "원본이 이미 없음" },
+  unreadable: { key: "board.desk.kept.reasonUnreadable", word: "원본을 읽을 수 없음" },
+  remote: { key: "board.desk.kept.reasonRemote", word: "다른 기계의 파일" },
+  copy_failed: { key: "board.desk.kept.reasonCopyFailed", word: "보관소에 쓰지 못함" },
+  store_unavailable: { key: "board.desk.kept.reasonStoreUnavailable", word: "보관소가 아직 열리지 않음" },
+});
+
+/* 한 줄과 그 팁 — 백엔드가 과업·워커 행에 실어 보낸 사실 하나에서. 사실이 없으면 `null`이고
+ * 부르는 쪽이 줄을 숨긴다. 이유는 줄에 그대로 서서, 막힌 정리의 까닭이 팁 뒤에 숨지 않는다. */
+function keptWords(kept) {
+  if (!kept || typeof kept !== "object") return null;
+  const state = KEPT_STATES[kept.state];
+  const head = state
+    ? t(state.key, state.word, {
+      count: Number(kept.kept) || 0, left: Number(kept.left_out) || 0, size: artifactBytesWord(Number(kept.bytes) || 0),
+    })
+    : String(kept.state);
+  const caps = { fileCap: artifactBytesWord(Number(kept.file_cap_bytes) || 0), totalCap: artifactBytesWord(Number(kept.cap_bytes) || 0) };
+  const reasons = (Array.isArray(kept.reasons) ? kept.reasons : []).map((word) => {
+    const said = KEPT_REASONS[word];
+    return said ? t(said.key, said.word, caps) : String(word);
+  });
+  const masked = Number(kept.masked) > 0
+    ? t("board.desk.kept.masked", "가린 값 {{count}}개", { count: Number(kept.masked) }) : "";
+  return {
+    state: String(kept.state),
+    text: [head, masked, ...reasons].filter(Boolean).join(" · "),
+    tip: [
+      t("board.desk.kept.tip", "체크아웃이 지워져도 남도록 아티팩트 저장소에 복사한 보고서와 증거입니다. 글은 홈 경로·메일·사설 주소·자격 증명을 가린 사본이고, 그림은 글자를 읽지 못해 그대로입니다."),
+      kept.detail ? String(kept.detail) : "",
+    ].filter(Boolean).join(" "),
+  };
+}
+
+/* 줄 하나를 사실에 맞게 쓴다 — 바뀐 것만 쓰는 손(`write*`)으로, 조용한 박자가 아무것도 다시 쓰지
+ * 않게. `task`가 있으면 줄의 문이 선다: 아티팩트 탭을 이 과업으로 걸러 열어, 남긴 보고서를 고른다. */
+function paintDeskKept(line, kept, task) {
+  /* 워커 행은 깨끗이 남긴 것(`kept`)을 말하지 않는다 — 그 말은 과업 행에 서 있고, 행마다 한 줄을 더하면 데스크가
+   * 길어져 「첫 과업 행은 첫 화면」(t-6588)이 깨진다. 보관하는 중·일부만·없음·실패만 말한다. */
+  const words = keptWords(task === null && kept?.state === "kept" ? null : kept);
+  writeHidden(line, words === null);
+  if (words === null) return;
+  writeAttribute(line, "data-state", words.state);
+  writeAttribute(line, "data-tip", words.tip);
+  writeTextContent(line.firstElementChild, words.text);
+  const door = line.querySelector(".board-desk-kept-door");
+  if (!door) return;
+  writeHidden(door, !(Number(kept.kept) > 0));
+  writeTextContent(door, t("board.desk.kept.open", "열기"));
+  writeAttribute(door, "aria-label", t("board.desk.kept.openAria", "보관한 보고서와 증거를 아티팩트에서 열기"));
+  door.__task = task;
+  door.__report = kept.report ?? null;
+}
+
+/* 한 줄의 뼈대: 글 칸 하나, 그리고 문이 있는 줄이면 눌리는 단추 하나. 한 번 짓고 박자마다 옷만 갈아입는다. */
+function deskKeptLine(className, withDoor) {
+  const line = deskElement("span", className);
+  line.hidden = true;
+  line.append(deskElement("span", "board-desk-kept-text"));
+  if (withDoor) {
+    const door = deskElement("button", "board-desk-kept-door");
+    door.type = "button";
+    door.onclick = () => {
+      const task = door.__task;
+      if (!task) return;
+      leavePagesForStage();
+      openArtifacts({ origin: { field: "task", value: task.id, label: task.title }, select: door.__report });
+    };
+    line.append(door);
+  }
+  return line;
+}
+
 /* ---- 과업 흐름 --------------------------------------------------------------
  *
  * `task-list`의 자리: 판 위의 런이 적어 둔 과업을 단계 하나씩으로 센다 —
@@ -1110,8 +1212,8 @@ function deskTaskRow(held, task, runs) {
   const row = held ?? deskElement("li", "board-desk-task");
   if (!held) row.append(deskElement("code", "board-desk-task-id"), deskElement("span", "board-desk-task-title"),
     deskElement("span", "board-desk-task-note"), deskElement("span", "board-desk-task-cost"),
-    deskElement("span", "board-desk-task-writing"));
-  const [, title, noteLine, costLine, writingLine] = row.children;
+    deskElement("span", "board-desk-task-writing"), deskKeptLine("board-desk-task-kept", true));
+  const [, title, noteLine, costLine, writingLine, keptLine] = row.children;
   writeAttribute(row, "data-task", `${task.run}/${task.id}`);
   writeTextContent(row.firstElementChild, task.id);
   writeTextContent(title, runs > 1 ? `${task.title} · ${task.run}` : task.title);
@@ -1134,6 +1236,8 @@ function deskTaskRow(held, task, runs) {
   writeTextContent(writingLine, writing?.text ?? "");
   writeAttribute(writingLine, "data-tip", writing?.tip ?? "");
   writeHidden(writingLine, writing === null);
+  // 워커가 밝힌 보고서와 증거를 원장이 남겼으면 한 줄과 그것을 여는 문(t-32798).
+  paintDeskKept(keptLine, task.kept, task);
   return row;
 }
 

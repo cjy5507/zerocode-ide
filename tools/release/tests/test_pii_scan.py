@@ -112,6 +112,31 @@ class PiiScan(unittest.TestCase):
                     f"{category}: the placeholder must be forgiven, not merely outranked: {hits}",
                 )
 
+    def test_the_table_is_the_shared_json_and_the_script_names_no_value_itself(self):
+        """One table, two readers (t-32798): the gate reads `pii-rules.json`,
+        and so does `private_data.rs`, the mask every kept worker hand-in passes
+        through — so what this gate refuses and what the keeper masks cannot
+        drift apart. The script carries the loader and none of the patterns."""
+        source = SCAN.read_text(encoding="utf-8")
+        shared = REPO / "tools" / "release" / "pii-rules.json"
+        self.assertIn("pii-rules.json", source, "the gate does not read the shared table")
+        rows = json.loads(shared.read_text(encoding="utf-8"))["rules"]
+        for row in rows:
+            self.assertNotIn(row["find"], source, f"{row['name']}: the pattern is copied into the script")
+        self.assertEqual(
+            [row["name"] for row in pii_scan.load_rules()],
+            [row["name"] for row in rows],
+            "the gate's rows are not the shared table's, in its order",
+        )
+        self.assertEqual(pii_scan.RULES, pii_scan.load_rules())
+        # Every row carries what the Rust reader needs, and nothing the two
+        # regex dialects read differently.
+        for row in rows:
+            for key in ("name", "says", "find", "allow", "skip", "why"):
+                self.assertIn(key, row, f"{row.get('name')}: missing `{key}`")
+            for dialect_trap in ("(?<", "(?P<", "\\1", "(?="):
+                self.assertNotIn(dialect_trap, row["find"] + row["allow"], f"{row['name']}: {dialect_trap}")
+
     def test_a_home_directory_is_caught_on_either_separator(self):
         """Windows writes `C:\\Users\\dev`, and a Rust string doubles the
         backslash; a short placeholder is forgiven on every spelling.

@@ -32,6 +32,7 @@ import { testAccountSwitch } from "./account-switch.mjs";
 import { testTaskBoard } from "./task-board.mjs";
 import { testScmHealth } from "./scm-health.mjs";
 import { testArtifactPreferences } from "./artifact-preferences.mjs";
+import { testArtifactCards } from "./artifact-cards.mjs";
 import { testAgentSupport } from "./agent-support.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
@@ -246,6 +247,7 @@ suite("explain", ({ browser, origin, ok }) => testExplain(browser, origin, ok));
 suite("task-board", ({ browser, origin, ok }) => testTaskBoard(browser, origin, ok));
 suite("scm-health", ({ browser, origin, ok }) => testScmHealth(browser, origin, ok));
 suite("artifact-preferences", ({ browser, origin, ok }) => testArtifactPreferences(browser, origin, ok));
+suite("artifact-cards", ({ browser, origin, ok }) => testArtifactCards(browser, origin, ok));
 suite("agent-support", ({ browser, origin, ok }) => testAgentSupport(browser, origin, ok));
 // The coordinator's desk above the task list (t-6588, docs/design/agent-board-round4.md).
 suite("coordinator-desk", ({ browser, origin, ok }) => testCoordinatorDesk(browser, origin, ok));

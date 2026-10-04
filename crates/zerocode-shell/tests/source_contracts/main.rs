@@ -12,6 +12,7 @@ mod coordinator_desk;
 mod crash_report;
 mod fixture_cases;
 mod git_doors;
+mod hand_in_keep;
 mod jev_pane_seats;
 mod quiet_children;
 mod quota_wall;
@@ -36919,12 +36920,20 @@ mod tests {
             road.contains("ids_for_worker(") && road.contains("\"artifacts\""),
             "the garnish does not read the store by worker:\n{road}"
         );
+        // The road moved (t-32798): a send that names files is handed to the
+        // keeping, which reads them once through the one parser, masks them and
+        // copies them into the store under the origin the worker's row vouches for.
         assert!(
-            shipped.contains("report_path_in(") && shipped.contains("register_report("),
-            "a worker_done's report is not copied into the store"
+            shipped.contains("hand_in_keep::after_send("),
+            "a worker_done's report is not handed to the keeping"
+        );
+        let keeping = include_str!("../../src/orchestration/hand_in_keep.rs");
+        assert!(
+            keeping.contains("hand_in::named(") && keeping.contains("register_kept("),
+            "what a hand-in names is not copied into the store"
         );
         assert!(
-            shipped.contains("origin_of_worker("),
+            keeping.contains("origin_of_worker("),
             "the report's origin is not read from the ledger row"
         );
     }

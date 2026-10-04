@@ -1,0 +1,47 @@
+{
+  "note": "The one table of private-value shapes. tools/release/pii-scan.py (the release gate over tracked files) and crates/zerocode-core/src/private_data.rs (the mask every kept worker hand-in passes through) both read this file, so what the gate refuses and what the keeper masks cannot drift apart. `find` is what a category looks like; `allow` fully matches a found value to forgive it; `skip` lists paths only the gate leaves unread; `why` is documentation. A regex here must stay inside the syntax Python's `re` and Rust's `regex` crate share (no look-around, no back-references).",
+  "rules": [
+    {
+      "name": "home-path",
+      "says": "a real account's home directory, written out or slugged into a session id",
+      "find": "(?:[/\\\\]{1,2}Users[/\\\\]{1,2}|\\bUsers-)[A-Za-z0-9._]+",
+      "allow": "(?:[/\\\\]{1,2}Users[/\\\\]{1,2}|Users-)(?:dev|you|user|someone|somebody|me|person|people|fixture|tester|test|example|other|another|private|Public|Shared|[A-Za-z]{1,2})(?:\\.[A-Za-z0-9]+)?",
+      "skip": [],
+      "why": "Both separators, and a Rust string's doubled backslash. There is no `/home/` row: every `/home/` path in this tree is a container root (`codex-runtime-home/home/…`) or a role (`builder`, `codex`), so the row would be noise — a remote account's name is what the banished row and the diff catch."
+    },
+    {
+      "name": "private-ip",
+      "says": "an address on a real private network (RFC 1918), which names an office",
+      "find": "\\b(?:10\\.[0-9]{1,3}|172\\.(?:1[6-9]|2[0-9]|3[01])|192\\.168)\\.[0-9]{1,3}\\.[0-9]{1,3}\\b",
+      "allow": "(?:10\\.0\\.0\\.[0-9]{1,3}|10\\.1\\.2\\.3|172\\.16\\.0\\.1|192\\.168\\.[01]\\.[0-9]{1,3})",
+      "skip": [],
+      "why": "The private subnets this repository's fixtures stand on: the two every manual uses for an example, and the single address that pins the RFC 1918 boundary itself. Loopback and link-local are not in `find` because they name the machine, never an office. The RFC 5737 documentation addresses (192.0.2/198.51.100/203.0.113) are not private, so `find` never reaches them."
+    },
+    {
+      "name": "email",
+      "says": "a mailbox outside the reserved example domains — a real person or service",
+      "find": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b",
+      "allow": "(?i)[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\\.)*(?:example\\.(?:com|org|net)|acme\\.com|github\\.com|gitlab\\.com|azure\\.com|gserviceaccount\\.com|zerocode\\.[a-z]+|test|example|invalid|local|localhost)|[A-Za-z0-9._%+-]+@[0-9]+x\\.(?:png|jpe?g|gif|svg|webp|ico)",
+      "skip": [
+        [
+          "ui/vendor/",
+          "third-party bundles and their authors' own copyright notices"
+        ]
+      ],
+      "why": "Reserved and fictional domains, the public code hosts a `git@` URL names, Google's own service-account example — and a retina asset (`icon@2x.png`, `128x128@2x.png`), whose `@2x` is a scale, not a mailbox."
+    },
+    {
+      "name": "credential",
+      "says": "a token or key of a shape a provider actually issues, carrying a body",
+      "find": "sk-ant-[a-z0-9]{3,}-[A-Za-z0-9_-]{24,}|sk-proj-[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{50,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|AIza[0-9A-Za-z_-]{35}|ya29\\.[A-Za-z0-9_-]{30,}|-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----(?:[^A-Za-z0-9+/]{0,6}[A-Za-z0-9+/]{16,}){3,}",
+      "allow": "(?i).*(?:example|secret|sample|fake|dummy|test|canary|never|should|placeholder|redacted|abcdef|0123456789|xxxx).*",
+      "skip": [
+        [
+          "ui/vendor/",
+          "third-party bundles carry minified strings of every shape"
+        ]
+      ],
+      "why": "A PEM header is a shape a test writes freely; only one carrying real base64 after it is a key: three wrapped runs, at any width a writer chose. `allow` is a fixture saying so in its own body; a leaked token never would."
+    }
+  ]
+}

@@ -99,6 +99,73 @@ impl ArtifactKind {
     }
 }
 
+/// What a worker's report is, beyond "a report" (t-36910): the kind the worker
+/// states when it hands in — [`crate::hand_in::ReportKind`], under
+/// [`crate::hand_in::REPORT_KIND_KEY`] — and the catalog row's `subtype`. One
+/// type, defined once, so the hand-in and the catalog say the same word for the
+/// same thing. When the worker states none, the file name is read by one table
+/// (`REPORT_SUBTYPE_BY_NAME`); a report no row of the table names is a `Report`,
+/// which is what it was handed in as.
+pub use crate::hand_in::ReportKind as ReportSubtype;
+
+/// The table the inference reads, and the only place a file name is judged: a
+/// row names the beginnings of a word, and the first row any word of the file
+/// name begins with wins. The words of a name are its runs of letters and
+/// digits (`t-12-design-review.md` is `t`, `12`, `design`, `review`), so a
+/// marker never matches the middle of another word — `explanation` is not a
+/// `plan`. Rows stand in the order they are tried: a review of a design is a
+/// review. Korean file names carry the same five kinds in their own words.
+const REPORT_SUBTYPE_BY_NAME: &[(&[&str], ReportSubtype)] = &[
+    (
+        &["review", "verif", "리뷰", "검토", "검증"],
+        ReportSubtype::Review,
+    ),
+    (
+        &["brief", "precheck", "브리프", "브리핑"],
+        ReportSubtype::Brief,
+    ),
+    (&["handover", "handoff", "인계"], ReportSubtype::Handover),
+    (
+        &["proposal", "plan", "design", "제안", "설계", "계획"],
+        ReportSubtype::Proposal,
+    ),
+];
+
+impl ReportSubtype {
+    /// The wire word under the name the catalog's readers use — [`Self::word`],
+    /// spelled once in `hand_in`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.word()
+    }
+
+    /// The kind of one report: what its worker stated, else what its file name
+    /// says.
+    #[must_use]
+    pub fn of(stated: Option<&str>, path: &Path) -> Self {
+        stated
+            .and_then(Self::parse)
+            .unwrap_or_else(|| Self::of_file_name(path))
+    }
+
+    /// The kind a file name says, by the one table (`REPORT_SUBTYPE_BY_NAME`).
+    #[must_use]
+    pub fn of_file_name(path: &Path) -> Self {
+        let stem = path
+            .file_stem()
+            .map(|held| held.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let named = |markers: &[&str]| {
+            stem.split(|glyph: char| !glyph.is_alphanumeric())
+                .any(|word| markers.iter().any(|marker| word.starts_with(*marker)))
+        };
+        REPORT_SUBTYPE_BY_NAME
+            .iter()
+            .find(|(markers, _)| named(markers))
+            .map_or(Self::Report, |(_, kind)| *kind)
+    }
+}
+
 /// Where a file was found — the half of the kind judgement an extension
 /// cannot make on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -106,6 +173,9 @@ impl ArtifactKind {
 pub enum Source {
     /// A worker's closing report, copied into the store on `worker_done`.
     WorkerReport,
+    /// A file a worker's `worker_done` names as evidence (t-32798): kept in the
+    /// store the same way, so it outlives the checkout it was written in.
+    WorkerEvidence,
     /// A file inside an automation run's evidence folder, registered in place.
     Evidence,
     /// A file from a folder the person named as an export folder.
@@ -128,7 +198,7 @@ impl Source {
     #[must_use]
     pub const fn bucket(self) -> &'static str {
         match self {
-            Self::WorkerReport => "run",
+            Self::WorkerReport | Self::WorkerEvidence => "run",
             Self::Evidence => "automation",
             Self::Export | Self::Manual | Self::AgentPage | Self::Remote => "manual",
         }
@@ -198,8 +268,10 @@ pub fn kind_of(path: &Path, source: Source) -> ArtifactKind {
             .find(|(names, _)| names.contains(&extension.as_str()))
             .map_or(ArtifactKind::Other, |(_, kind)| *kind),
         (Source::Remote, _) => ArtifactKind::Web,
-        (Source::Evidence, ArtifactKind::Screenshot) => ArtifactKind::Screenshot,
-        (Source::Evidence, _) => ArtifactKind::Evidence,
+        (Source::Evidence | Source::WorkerEvidence, ArtifactKind::Screenshot) => {
+            ArtifactKind::Screenshot
+        }
+        (Source::Evidence | Source::WorkerEvidence, _) => ArtifactKind::Evidence,
         (Source::WorkerReport, ArtifactKind::Report | ArtifactKind::Other) => ArtifactKind::Report,
         (Source::Export, ArtifactKind::Other) => ArtifactKind::Export,
         (_, kind) => kind,
@@ -286,6 +358,12 @@ pub enum Preview {
 pub struct Artifact {
     pub id: String,
     pub kind: ArtifactKind,
+    /// What kind of report this is (t-36910): stated by the worker that handed
+    /// it in, else read off its file name ([`ReportSubtype::of`]). `None` for
+    /// every row that is not a report; a report row written before this field
+    /// existed is given one when the catalog is read, by the same function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtype: Option<ReportSubtype>,
     pub title: String,
     /// The file — empty for a [`ArtifactKind::Web`] row, which has none.
     pub path: PathBuf,
@@ -394,6 +472,23 @@ pub struct Limits {
     pub transcript_pending_max: usize,
     /// Snapshots kept per page or document (t-3233 §5); the oldest go first.
     pub versions_per_artifact_max: usize,
+    /// The most of an evidence file a digest reads (t-36910): a step log is
+    /// read line by line to this many bytes, and says so when it was longer.
+    pub digest_bytes_max: u64,
+    /// Step rows one digest carries; the steps past it are folded and counted.
+    pub digest_rows_max: usize,
+    /// Steps shown from the start of a log before anything is folded.
+    pub digest_head_steps: usize,
+    /// Steps shown from the end of a log.
+    pub digest_tail_steps: usize,
+    /// Steps shown on each side of a failed one.
+    pub digest_context_steps: usize,
+    /// Characters kept of one step's target, of its error and of one fact.
+    pub digest_text_chars: usize,
+    /// Verbs a digest counts by name; the rest are one sum.
+    pub digest_verbs_max: usize,
+    /// Facts listed from a JSON record that is not a step log.
+    pub digest_facts_max: usize,
 }
 
 impl Default for Limits {
@@ -427,6 +522,14 @@ impl Default for Limits {
             transcript_tail_bytes: 256 * 1024,
             transcript_pending_max: 128,
             versions_per_artifact_max: 10,
+            digest_bytes_max: 16 * 1024 * 1024,
+            digest_rows_max: 200,
+            digest_head_steps: 10,
+            digest_tail_steps: 3,
+            digest_context_steps: 1,
+            digest_text_chars: 160,
+            digest_verbs_max: 6,
+            digest_facts_max: 24,
         }
     }
 }
@@ -477,6 +580,14 @@ impl Limits {
                 "transcript_tail_bytes" => self.transcript_tail_bytes = value,
                 "transcript_pending_max" => self.transcript_pending_max = as_usize,
                 "versions_per_artifact_max" => self.versions_per_artifact_max = as_usize,
+                "digest_bytes_max" => self.digest_bytes_max = value,
+                "digest_rows_max" => self.digest_rows_max = as_usize,
+                "digest_head_steps" => self.digest_head_steps = as_usize,
+                "digest_tail_steps" => self.digest_tail_steps = as_usize,
+                "digest_context_steps" => self.digest_context_steps = as_usize,
+                "digest_text_chars" => self.digest_text_chars = as_usize,
+                "digest_verbs_max" => self.digest_verbs_max = as_usize,
+                "digest_facts_max" => self.digest_facts_max = as_usize,
                 _ => {}
             }
         }
@@ -599,55 +710,56 @@ pub fn title_of(path: &Path, limits: &Limits) -> String {
     truncate_chars(&name, limits.title_chars)
 }
 
-/// Prefer a document's own account and its task's purpose to storage names.
-/// The caller supplies bounded bytes already read for previews/search.
+/// The headings that say nothing about one document: a title made of one of
+/// them alone gives way to the name of the task the file was written for.
+const BARE_TITLES: &[&str] = &[
+    "report",
+    "readme",
+    "summary",
+    "보고서",
+    "작업 보고서",
+    "완료 보고",
+    "요약",
+];
+
+/// The extensions whose bytes are read for a title.
+const TITLED_EXTENSIONS: &[&str] = &["md", "txt", "html", "htm", "json", "jsonl"];
+
+/// The keys of a JSON record that are its own account of itself, in the order
+/// they are tried.
+const RECORD_TITLE_KEYS: &[&str] = &["title", "summary", "goal", "description"];
+
+/// What a file calls itself, before what it was written for (t-36910).
+///
+/// The order: the file's own title — a page's `<title>`, a record's account
+/// of itself, a document's frontmatter title or its first heading of any
+/// level — then the name of the task; a heading that says nothing (「보고서」)
+/// gives way to the task's name and stands when there is none. A document
+/// with no heading and no task is named by its opening paragraph when that is
+/// prose; a list item or a table row is a fragment of the body and never a
+/// title, so such a file keeps its name. The caller supplies bounded bytes
+/// already read for previews and search.
 #[must_use]
 pub fn descriptive_title(path: &Path, bytes: &[u8], work: Option<&str>, limits: &Limits) -> String {
-    let readable = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        ["md", "txt", "html", "htm", "json", "jsonl"].contains(&e.to_ascii_lowercase().as_str())
-    });
-    let content = readable
+    let readable = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| TITLED_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()));
+    let text = readable
         .then(|| std::str::from_utf8(bytes).ok())
         .flatten()
-        .and_then(|text| {
-            let text = text.trim_start_matches('\u{feff}').trim();
-            if text.starts_with('<') {
-                return crate::artifact_publish::skeleton::title(text);
-            }
-            if text.starts_with('{') || text.starts_with('[') {
-                return text.lines().find_map(|line| {
-                    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-                    ["title", "summary", "goal", "description"]
-                        .into_iter()
-                        .find_map(|key| {
-                            value
-                                .get(key)?
-                                .as_str()
-                                .filter(|s| !s.trim().is_empty())
-                                .map(str::to_string)
-                        })
-                });
-            }
-            crate::skill::document_title(text)
-        });
+        .map(|text| text.trim_start_matches('\u{feff}').trim());
+    let (named, lead) = text.map_or((None, None), own_title);
     let meaningful = |text: &str| {
         let text = text.trim();
-        !text.is_empty()
-            && ![
-                "report",
-                "readme",
-                "summary",
-                "보고서",
-                "작업 보고서",
-                "완료 보고",
-                "요약",
-            ]
-            .contains(&text.to_lowercase().as_str())
+        !text.is_empty() && !BARE_TITLES.contains(&text.to_lowercase().as_str())
     };
-    let title = work
-        .filter(|s| meaningful(s))
-        .or_else(|| content.as_deref().filter(|s| meaningful(s)))
-        .or(content.as_deref());
+    let title = named
+        .as_deref()
+        .filter(|held| meaningful(held))
+        .or_else(|| work.filter(|held| meaningful(held)))
+        .or(named.as_deref())
+        .or_else(|| lead.as_deref().filter(|held| meaningful(held)));
     title.map_or_else(
         || title_of(path, limits),
         |text| {
@@ -656,6 +768,31 @@ pub fn descriptive_title(path: &Path, bytes: &[u8], work: Option<&str>, limits: 
                 limits.title_chars,
             )
         },
+    )
+}
+
+/// What a text names itself, and — for a document — its opening paragraph when
+/// that is prose.
+fn own_title(text: &str) -> (Option<String>, Option<String>) {
+    if text.starts_with('<') {
+        return (crate::artifact_publish::skeleton::title(text), None);
+    }
+    if text.starts_with('{') || text.starts_with('[') {
+        let named = text.lines().find_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            RECORD_TITLE_KEYS.iter().find_map(|key| {
+                value
+                    .get(*key)?
+                    .as_str()
+                    .filter(|held| !held.trim().is_empty())
+                    .map(str::to_string)
+            })
+        });
+        return (named, None);
+    }
+    (
+        crate::skill::document_heading(text),
+        crate::skill::document_lead(text),
     )
 }
 
@@ -786,6 +923,171 @@ mod tests {
         );
     }
 
+    /// A report's kind is what its worker stated, else what its file name says
+    /// (t-36910): one table, tried in its own order, matched on the beginnings
+    /// of whole words.
+    #[test]
+    fn a_report_subtype_is_stated_or_read_off_the_file_name_by_one_table() {
+        let cases: &[(&str, ReportSubtype)] = &[
+            ("t-12-report.md", ReportSubtype::Report),
+            ("REPORT.md", ReportSubtype::Report),
+            ("notes.md", ReportSubtype::Report),
+            ("t-12-review.md", ReportSubtype::Review),
+            ("verification-t-12.md", ReportSubtype::Review),
+            ("t-12-검토.md", ReportSubtype::Review),
+            ("coordinator-brief.md", ReportSubtype::Brief),
+            ("t-12-precheck.md", ReportSubtype::Brief),
+            ("handoff-w-3.md", ReportSubtype::Handover),
+            ("t-12-handover.md", ReportSubtype::Handover),
+            ("t-12-proposal.md", ReportSubtype::Proposal),
+            ("migration-plan.md", ReportSubtype::Proposal),
+            ("t-12-design.md", ReportSubtype::Proposal),
+            // The table's order decides a name two rows could claim.
+            ("t-12-design-review.md", ReportSubtype::Review),
+            // A marker in the middle of another word names nothing.
+            ("explanation.md", ReportSubtype::Report),
+            ("preview-notes.md", ReportSubtype::Report),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                ReportSubtype::of_file_name(Path::new(name)),
+                *expected,
+                "{name}"
+            );
+            assert_eq!(
+                ReportSubtype::of(None, Path::new(name)),
+                *expected,
+                "{name}, with nothing stated"
+            );
+        }
+        // What the worker stated wins over the name; a word this build does not
+        // know states nothing, and the name is read instead.
+        assert_eq!(
+            ReportSubtype::of(Some("handover"), Path::new("t-12-review.md")),
+            ReportSubtype::Handover
+        );
+        assert_eq!(
+            ReportSubtype::of(Some("review"), Path::new("notes.md")),
+            ReportSubtype::Review
+        );
+        for unknown in ["essay", "Review"] {
+            assert_eq!(
+                ReportSubtype::of(Some(unknown), Path::new("t-12-handover.md")),
+                ReportSubtype::Handover,
+                "{unknown:?} is not a word of the table"
+            );
+        }
+        // The word with space around it is the word: `hand_in` trims what the
+        // payload said, and the catalog reads the same type.
+        assert_eq!(
+            ReportSubtype::of(Some(" review "), Path::new("t-12-handover.md")),
+            ReportSubtype::Review
+        );
+        for kind in ReportSubtype::ALL {
+            assert_eq!(ReportSubtype::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(ReportSubtype::parse("essay"), None);
+        // On the wire it is the same word, and a row written before the field
+        // existed reads as none and writes none.
+        let row: Artifact = serde_json::from_str(
+            r#"{"id":"a","kind":"report","subtype":"review","title":"t","path":"/x","bytes":1,"created_ms":2,"modified_ms":3}"#,
+        )
+        .expect("a row with a subtype reads");
+        assert_eq!(row.subtype, Some(ReportSubtype::Review));
+        let text = serde_json::to_string(&row).expect("serialises");
+        assert!(text.contains("\"subtype\":\"review\""), "{text}");
+        let old: Artifact = serde_json::from_str(
+            r#"{"id":"a","kind":"report","title":"t","path":"/x","bytes":1,"created_ms":2,"modified_ms":3}"#,
+        )
+        .expect("a row without a subtype reads");
+        assert_eq!(old.subtype, None);
+        assert!(
+            !serde_json::to_string(&old)
+                .expect("serialises")
+                .contains("subtype")
+        );
+    }
+
+    /// A title is what the file calls itself — its first heading, of any level —
+    /// before the task it was written for (t-36910); a list line is a fragment
+    /// of a body and never a title.
+    #[test]
+    fn a_title_is_the_first_heading_then_the_task_name_and_never_a_list_line() {
+        let limits = Limits::default();
+        let path = Path::new("/tmp/t-123-review.md");
+        let work = Some("workflow phase `verify` item 0");
+        assert_eq!(
+            descriptive_title(
+                path,
+                b"# Verification report: the queue drains\n\nbody",
+                work,
+                &limits
+            ),
+            "Verification report: the queue drains",
+            "the heading comes before the task's name"
+        );
+        assert_eq!(
+            descriptive_title(
+                path,
+                b"intro line\n\n## What changed\n\nbody",
+                work,
+                &limits
+            ),
+            "What changed",
+            "a heading of any level is the heading"
+        );
+        assert_eq!(
+            descriptive_title(
+                path,
+                b"```\n# not a heading\n```\n\n### The real one\n",
+                None,
+                &limits
+            ),
+            "The real one",
+            "a line inside a code fence is not a heading"
+        );
+        let list = b"- feat(queue): drain on close\n- fix: the last line\n";
+        assert_eq!(
+            descriptive_title(path, list, work, &limits),
+            "workflow phase `verify` item 0",
+            "without a heading the task's name is the title"
+        );
+        assert_eq!(
+            descriptive_title(path, list, None, &limits),
+            "t-123-review.md",
+            "a list line is never a title"
+        );
+        assert_eq!(
+            descriptive_title(path, b"| a | b |\n|---|---|\n", None, &limits),
+            "t-123-review.md",
+            "nor is a table row"
+        );
+        assert_eq!(
+            descriptive_title(path, b"1. first\n2. second\n", None, &limits),
+            "t-123-review.md",
+            "nor a numbered item"
+        );
+        let prose = b"The queue drained in 40 ms.\n\nMore.";
+        assert_eq!(
+            descriptive_title(path, prose, None, &limits),
+            "The queue drained in 40 ms.",
+            "a prose opening still names a file that has nothing else"
+        );
+        assert_eq!(
+            descriptive_title(path, prose, work, &limits),
+            "workflow phase `verify` item 0",
+            "the task's name comes before a paragraph"
+        );
+        // A heading that says nothing still gives way to the task's name, and
+        // stands when there is none.
+        let bare = "# 보고서\n\n본문".as_bytes();
+        assert_eq!(
+            descriptive_title(path, bare, work, &limits),
+            "workflow phase `verify` item 0"
+        );
+        assert_eq!(descriptive_title(path, bare, None, &limits), "보고서");
+    }
+
     #[test]
     fn the_kind_table_judges_by_extension_then_by_source() {
         let cases: &[(&str, Source, ArtifactKind)] = &[
@@ -795,6 +1097,17 @@ mod tests {
             ("shot.png", Source::Evidence, ArtifactKind::Screenshot),
             ("steps.jsonl", Source::Evidence, ArtifactKind::Evidence),
             ("report.md", Source::Evidence, ArtifactKind::Evidence),
+            // What a worker's hand-in names as evidence is evidence too — a log
+            // and a report written as evidence alike — and its pictures stay
+            // pictures (t-32798).
+            ("run.log", Source::WorkerEvidence, ArtifactKind::Evidence),
+            (
+                "steps.jsonl",
+                Source::WorkerEvidence,
+                ArtifactKind::Evidence,
+            ),
+            ("report.md", Source::WorkerEvidence, ArtifactKind::Evidence),
+            ("dark.png", Source::WorkerEvidence, ArtifactKind::Screenshot),
             ("turns.jsonl", Source::Manual, ArtifactKind::Transcript),
             ("rows.csv", Source::Manual, ArtifactKind::Export),
             ("bundle.bin", Source::Export, ArtifactKind::Export),
@@ -1070,6 +1383,7 @@ mod tests {
         let web = Artifact {
             id: artifact_id_for_url("https://claude.ai/code/artifact/abc"),
             kind: ArtifactKind::Web,
+            subtype: None,
             title: "a page".into(),
             path: PathBuf::new(),
             bytes: 0,

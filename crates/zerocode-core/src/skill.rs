@@ -454,6 +454,75 @@ pub fn document_title(markdown: &str) -> Option<String> {
         .or_else(|| first_paragraph(body))
 }
 
+/// What a document calls itself: its frontmatter title, else its first heading
+/// of any level outside a code fence (t-36910). Never a paragraph — a caller
+/// that takes prose for want of a heading asks [`document_lead`]. A report whose
+/// only headings are `##` is as much a headed document as one that opens with `#`.
+#[must_use]
+pub fn document_heading(markdown: &str) -> Option<String> {
+    let (front, body) = document_sections(markdown);
+    frontmatter_value(front, "title").or_else(|| heading_of_any_level(body))
+}
+
+/// The document's opening paragraph, when it is prose. A document that opens
+/// with a list item, a table row or a quotation opens with a fragment of its
+/// body, which says nothing of the whole: `None`.
+#[must_use]
+pub fn document_lead(markdown: &str) -> Option<String> {
+    let (_, body) = document_sections(markdown);
+    first_paragraph(body).filter(|lead| !opens_as_a_fragment(lead))
+}
+
+/// The deepest heading Markdown has: `######`.
+const HEADING_LEVELS: usize = 6;
+
+/// How a line that is a fragment of a body begins: a list item, a table row, a
+/// quotation. A numbered item is told apart by [`opens_as_a_fragment`].
+const FRAGMENT_OPENINGS: &[&str] = &["- ", "* ", "+ ", "|", ">"];
+
+/// The marks that end a numbered item's number: `1.` and `1)`.
+const ITEM_NUMBER_ENDS: &[&str] = &[". ", ") "];
+
+fn opens_as_a_fragment(line: &str) -> bool {
+    let line = line.trim_start();
+    if FRAGMENT_OPENINGS
+        .iter()
+        .any(|opening| line.starts_with(opening))
+    {
+        return true;
+    }
+    let after_digits = line.trim_start_matches(|glyph: char| glyph.is_ascii_digit());
+    after_digits.len() < line.len()
+        && ITEM_NUMBER_ENDS
+            .iter()
+            .any(|end| after_digits.starts_with(end))
+}
+
+/// The first ATX heading of any level, skipping what stands inside a code
+/// fence — a `# comment` in an example is not the document's heading.
+fn heading_of_any_level(body: &str) -> Option<String> {
+    let mut fenced = false;
+    for line in body.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let level = line.bytes().take_while(|byte| *byte == b'#').count();
+        if (1..=HEADING_LEVELS).contains(&level)
+            && let Some(rest) = line[level..].strip_prefix(' ')
+        {
+            let text = rest.trim().trim_end_matches('#').trim_end();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn document_sections(markdown: &str) -> (&str, &str) {
     let text = markdown.strip_prefix('\u{feff}').unwrap_or(markdown);
     // Frontmatter is a `---` fence at the very top and nowhere else. A `---` in
