@@ -7419,6 +7419,7 @@ function setLocale(code) {
   paintUpdatePane();
   paintEditingPrefs();
   paintTermPrefs();
+  paintExplainStatus();
   paintOpenInApplications();
   paintBrowserPrefs();
   // Agent pills, permission badges and row notes are built dynamically, so
