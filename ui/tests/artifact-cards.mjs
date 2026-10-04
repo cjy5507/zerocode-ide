@@ -170,10 +170,12 @@ export function standCatalog(page) {
     };
     // The checkout the window still holds, as git last answered for it: in the compare ref. It
     // rides the project catalog, the way the runtime sends it, so a later re-read keeps it.
-    const catalog = window.__ANSWER__.project_catalog;
+    // The harness answers `project_catalog` from its own table (`window.__ANSWER__` holds only
+    // what a case put there), so the base is what the window read at boot: its `projects`.
+    const base = JSON.parse(JSON.stringify(projects));
     window.__ANSWER__.project_catalog = () => {
-      const projects = catalog();
-      projects[0]?.worktrees.push({
+      const answer = JSON.parse(JSON.stringify(base));
+      answer[0]?.worktrees.push({
         path: kept, branch: "wt/t-501", is_main: false, active: false, is_folder: false,
         ownership: "zerocode-managed", external_hidden: false,
         landing: {
@@ -181,7 +183,7 @@ export function standCatalog(page) {
           ref_updated_ms: now - hour, landed_in: { sha: "0123456789abcdef0123456789abcdef01234567", time_ms: now - 2 * hour },
         },
       });
-      return projects;
+      return answer;
     };
     if (typeof refreshWorktrees === "function") await refreshWorktrees();
     return { sections: sections.length, headings: 1 + sections.length * 2 };
@@ -706,32 +708,34 @@ export async function testArtifactCards(browser, origin, ok) {
     );
 
     /* Keyboard reach and a visible focus for every new control: Tab from the list walks into them. */
-    const reach = await page.evaluate(() => {
+    // Every stop is written down, the ones outside the tab marked with `!` — a walk that left the
+    // tab says where it went instead of showing an empty list.
+    const start = await page.evaluate(() => {
       const view = artifactsView();
       view?.querySelector(".artifacts-grid")?.focus();
-      return Boolean(view);
+      return String(document.activeElement?.className ?? "").split(" ")[0] || null;
     });
     const walked = [];
-    if (reach) {
+    if (start) {
       for (let at = 0; at < 14; at += 1) {
         await page.keyboard.press("Tab");
         walked.push(await page.evaluate(() => {
           const node = document.activeElement;
-          if (!node || !node.closest(".artifacts-view")) return null;
-          const style = getComputedStyle(node);
+          const style = node ? getComputedStyle(node) : null;
           return {
-            name: String(node.className || node.tagName).split(" ")[0],
-            ring: (style.outlineStyle !== "none" && parseFloat(style.outlineWidth) > 0) || style.boxShadow !== "none",
+            name: String(node?.className || node?.tagName || "").split(" ")[0] || null,
+            inside: Boolean(node?.closest(".artifacts-view")),
+            ring: style !== null && ((style.outlineStyle !== "none" && parseFloat(style.outlineWidth) > 0) || style.boxShadow !== "none"),
           };
         }));
       }
     }
-    const reached = walked.filter(Boolean);
+    const reached = walked.filter((held) => held.inside);
     const wanted = ["artifact-detail-task", "artifact-detail-attempts", "artifact-detail-more", "artifact-outline-toggle"];
     ok(
       "Tab from the list reaches the drawer's new controls — the task chip, the reports select, 세부 정보, the outline — and each shows its focus",
       wanted.every((one) => reached.some((held) => held.name === one && held.ring)),
-      JSON.stringify(reached.map((held) => `${held.name}${held.ring ? "" : " (no ring)"}`)),
+      JSON.stringify({ start, path: walked.map((held) => `${held.inside ? "" : "!"}${held.name}${held.ring ? "" : " (no ring)"}`) }),
     );
     await page.emulateMedia({ reducedMotion: "reduce" });
     const still = await page.evaluate(() => {

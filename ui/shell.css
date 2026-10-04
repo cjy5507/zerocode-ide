@@ -44594,6 +44594,8 @@ button.jev-token:hover {
 .artifact-detail-task {
   font-family: var(--font-mono);
   cursor: pointer;
+  /* hover가 바꾸는 유일한 속성만 눕힌다 — 줄어든 움직임 규칙이 끈다. */
+  transition: border-color var(--motion-fast) var(--ease-standard);
 }
 
 .artifact-card-task:hover,
@@ -45137,6 +45139,7 @@ button.jev-token:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
 }
 
 .artifact-outline-list button:hover {

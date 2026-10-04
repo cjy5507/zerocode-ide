@@ -7083,6 +7083,9 @@ function buildArtifactsView() {
   root.className = "file-view artifacts-view";
   root.id = "artifacts-view";
   root.hidden = true;
+  // 목록이나 서랍에 초점이 있는 동안 키는 여기 머문다 — 이 표시가 없으면 첫 키 입력에 터미널의
+  // 키 받침이 초점을 가져가, Tab이 서랍의 단추에 닿지 못한다(t-36910).
+  root.dataset.keyboardOwner = "true";
   root.dataset.i18nAria = "artifacts.title";
   root.setAttribute("aria-label", t("artifacts.title", "아티팩트"));
 
@@ -8097,6 +8100,17 @@ function artifactGridLayout(view) {
   return { tuning, grid, columns, cardWidth, cardHeight, rowHeight, places, height: top + tuning.gap };
 }
 
+/* 풀이 한 번에 갖출 노드 수 — 가장 낮은 카드(얼굴 없는 보고서 카드)가 한 화면(+overscan)에
+ * 세울 수 있는 자리. 탭을 바꿔 카드가 낮아지고 더 많이 보여도 그때 노드를 만들지 않는다 — 전환·
+ * 검색의 생성은 0으로 남는다(t-36910). 무리마다 행이 끊기므로 무리 수만큼 행을 더 잡고, 카탈로그
+ * 전체 행보다 많이 만들지는 않는다. */
+function artifactPoolCapacity(layout) {
+  const { tuning, grid, columns, places } = layout;
+  const rowHeight = Math.min(tuning.cardPlainHeight, tuning.cardHeight) + tuning.gap;
+  const rows = Math.ceil((grid.clientHeight + 2 * tuning.overscan * rowHeight) / rowHeight) + places.length;
+  return Math.min(artifactRows.size, rows * columns);
+}
+
 /* 카드 한 장의 윗변 — 제 무리의 첫 행에서 몇 행 아래인가. */
 function artifactCardTop(layout, index) {
   const place = layout.places.find((one) => index >= one.start && index < one.start + one.count);
@@ -8152,6 +8166,10 @@ function paintArtifactCards(view) {
     for (let index = place.start + rowStart * columns; index < end; index += 1) wanted.push(index);
   }
   const wantedSet = new Set(wanted.map((index) => artifactOrder[index]));
+  // 풀은 가장 촘촘한 판의 자리 수만큼 한 번에 갖춘다 — 그 뒤의 탭 전환·검색은 노드를 만들지 않는다.
+  for (let short = artifactPoolCapacity(layout) - pool.nodes.length; short > 0; short -= 1) {
+    pool.nodes.push(makeArtifactCardNode());
+  }
   // Nodes that still show a wanted id keep it; the rest are free.
   const free = [];
   for (const node of pool.nodes) {
