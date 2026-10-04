@@ -3233,7 +3233,20 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
             )
             .questions,
         ],
-        id if id == REFLEX_DECIDE.id => vec![reflex_decide::questions()],
+        // Alone, and with every branch a reading is asked ahead of (t-32797).
+        id if id == REFLEX_DECIDE.id => vec![
+            reflex_decide::questions(),
+            reflex_decide::questions_for(
+                &reflex_decide::snapshot_of(&json!({
+                    "sightings": [
+                        { "detector": "red", "value": 1, "unknown": null, "track": 4, "ageNs": 3_000_000 },
+                        { "detector": "blue", "value": 0, "unknown": null, "track": null, "ageNs": 3_000_000 },
+                    ],
+                    "receipts": [{ "seq": 1, "outcome": "done" }],
+                }))
+                .state,
+            ),
+        ],
         id if id == COVER.id => {
             use crate::computer_use_protocol::cover::{Cover, Coverer, Owner};
             use crate::computer_use_protocol::render::Rect;

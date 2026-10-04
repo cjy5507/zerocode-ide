@@ -114,6 +114,17 @@ pub const fn base64_len(raw_len: usize) -> usize {
 /// decodes cleanly (interior groups carry no padding).
 const DIMENSION_PROBE_B64_CHARS: usize = 176 * 1024;
 
+/// Header-probe budget for a *note*, in base64 characters (~6 KiB decoded).
+///
+/// A note about a picture left out of a request ([`peek_dimensions`]) only
+/// wants its width and height, and it asks for them once per left-out picture
+/// on every request of the session — so it reads far less than the
+/// correctness-grade probe above: PNG, GIF and WEBP put the dimensions in the
+/// first ~40 bytes, and a JPEG whose SOF marker sits behind a large EXIF/ICC
+/// segment simply goes without them (the note then names no pixel size, which
+/// costs it nothing it needs).
+const NOTE_PROBE_B64_CHARS: usize = 8 * 1024;
+
 /// Most images the provider accepts in one request — and therefore the most
 /// distinct images one lowering pass can present. Used to bound the rescale
 /// memo below.
@@ -324,9 +335,23 @@ pub fn guard_wire_image_base64(data_b64: &str) -> WireImageOutcome {
 /// that partial byte buffer. Returns `None` when the header is not readable from
 /// the probe window; callers fall back to full decode in that case.
 fn read_dimensions_from_base64_probe(data_b64: &str) -> Option<(u32, u32)> {
+    probe_dimensions(data_b64, DIMENSION_PROBE_B64_CHARS)
+}
+
+/// The width and height of a stored base64 picture, read from the first few
+/// KiB of it (`NOTE_PROBE_B64_CHARS`) — never a full decode, never a hash.
+/// `None` when the format is unknown or its header does not fit that window.
+#[must_use]
+pub fn peek_dimensions(data_b64: &str) -> Option<(u32, u32)> {
+    probe_dimensions(data_b64, NOTE_PROBE_B64_CHARS)
+}
+
+/// [`read_dimensions_from_base64_probe`] and [`peek_dimensions`] differ only in
+/// how much of the payload they are willing to decode.
+fn probe_dimensions(data_b64: &str, probe_chars: usize) -> Option<(u32, u32)> {
     let bytes = data_b64.as_bytes();
-    let mut len = bytes.len().min(DIMENSION_PROBE_B64_CHARS);
-    if bytes.len() > DIMENSION_PROBE_B64_CHARS {
+    let mut len = bytes.len().min(probe_chars);
+    if bytes.len() > probe_chars {
         // Interior base64 has no padding, so decode a complete number of
         // 4-character groups. (When the whole payload is shorter than the probe,
         // keep its real length so normal tail padding is preserved.)
@@ -476,6 +501,60 @@ fn shrink_to_byte_budget(bytes: &[u8]) -> Option<Vec<u8>> {
         scale = 0.7;
     }
     None
+}
+
+/// A screenshot whose PNG is at least this many bytes is a busy frame — a
+/// photograph, a video, a gradient, a map — which is what PNG is worst at: the
+/// noise in its low bits defeats the filters and a 1280 px frame costs ~1 MB.
+/// Flat interface frames (windows, text, lists) stay a few hundred KB as PNG and
+/// are left exactly as they were, so the pixels the model reads small text off
+/// are never touched. Measured on synthetic frames: `measure_screenshot_bytes`.
+pub const SCREENSHOT_LOSSY_MIN_BYTES: usize = 400_000;
+
+/// JPEG quality for a lightened screenshot. 90 is the point where text edges and
+/// icon outlines stop showing ringing at the sizes a screenshot is read at;
+/// lower buys little (the saving comes from leaving PNG, not from the quality).
+pub const SCREENSHOT_JPEG_QUALITY: u8 = 90;
+
+/// The JPEG must be at most this share of the PNG to be worth the loss.
+const SCREENSHOT_LOSSY_MAX_PERCENT_OF_PNG: usize = 50;
+
+/// The environment variable that keeps every screenshot a lossless PNG.
+pub const SCREENSHOT_LOSSLESS_ENV: &str = "ZO_SCREENSHOT_LOSSLESS";
+
+/// Whether the person asked for lossless screenshots.
+#[must_use]
+pub fn screenshots_stay_lossless() -> bool {
+    std::env::var_os(SCREENSHOT_LOSSLESS_ENV).is_some()
+}
+
+/// Re-encode a heavy, opaque PNG screenshot as a JPEG, or `None` when the frame
+/// should stay as it is: not a PNG, under [`SCREENSHOT_LOSSY_MIN_BYTES`], not
+/// opaque (JPEG cannot hold transparency), not decodable, or not at least half
+/// the size once re-encoded.
+///
+/// A screenshot is a photograph of a screen for the model's eyes and its bytes
+/// are paid on every request of a session that re-sends its history; the
+/// pixels' dimensions — and so every coordinate the model reads off the frame —
+/// do not change. Screenshots from the window's helper are RGBA with every alpha
+/// at 255, so opacity is checked per pixel and not by the channel's existence.
+#[must_use]
+pub fn lighten_screenshot(png: &[u8]) -> Option<Vec<u8>> {
+    if png.len() < SCREENSHOT_LOSSY_MIN_BYTES || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return None;
+    }
+    let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+    if decoded.color().has_alpha()
+        && decoded.to_rgba8().pixels().any(|pixel| pixel.0[3] != u8::MAX)
+    {
+        return None;
+    }
+    let mut out = Cursor::new(Vec::new());
+    let encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, SCREENSHOT_JPEG_QUALITY);
+    decoded.to_rgb8().write_with_encoder(encoder).ok()?;
+    let jpeg = out.into_inner();
+    (jpeg.len() * 100 <= png.len() * SCREENSHOT_LOSSY_MAX_PERCENT_OF_PNG).then_some(jpeg)
 }
 
 #[cfg(test)]
@@ -784,5 +863,109 @@ mod size_cap_tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(noisy_png(64, 64));
         assert!(encoded.len() <= MAX_IMAGE_BASE64_BYTES);
         assert_eq!(guard_wire_image_base64(&encoded), WireImageOutcome::Keep);
+    }
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::*;
+    use image::{DynamicImage, ImageFormat, RgbImage};
+
+    /// Smooth colour with a little grain in the low bits: what a photograph of a
+    /// screen — a video frame, a map, a gradient — is to PNG. The grain defeats
+    /// the filters, so a 1280x800 frame costs ~1 MB; a JPEG hardly notices it.
+    fn photo_like(width: u32, height: u32) -> RgbImage {
+        let mut image = RgbImage::new(width, height);
+        let mut state: u32 = 0x2468_ACE1;
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let grain = u8::try_from((state >> 16) % 5).unwrap_or(0);
+            let red = u8::try_from(x * 255 / width).unwrap_or(u8::MAX);
+            let green = u8::try_from(y * 255 / height).unwrap_or(u8::MAX);
+            let blue = u8::try_from((x + y) * 255 / (width + height)).unwrap_or(u8::MAX);
+            *pixel = image::Rgb([
+                red.saturating_add(grain),
+                green.saturating_add(grain),
+                blue.saturating_add(grain),
+            ]);
+        }
+        image
+    }
+
+    fn encode_png(image: &DynamicImage) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        image
+            .write_to(&mut out, ImageFormat::Png)
+            .expect("encode test PNG");
+        out.into_inner()
+    }
+
+    #[test]
+    fn a_heavy_photographic_screenshot_becomes_a_much_smaller_jpeg_of_the_same_size() {
+        let png = encode_png(&DynamicImage::ImageRgb8(photo_like(1280, 800)));
+        assert!(
+            png.len() >= SCREENSHOT_LOSSY_MIN_BYTES,
+            "the fixture must be a heavy frame: {} bytes",
+            png.len()
+        );
+        let lightened = lighten_screenshot(&png);
+        assert!(lightened.is_some(), "a heavy opaque PNG is lightened");
+        let jpeg = lightened.expect("checked above");
+        assert!(
+            jpeg.len() * 2 <= png.len(),
+            "at least half the bytes go: {} -> {}",
+            png.len(),
+            jpeg.len()
+        );
+        assert!(jpeg.starts_with(&[0xFF, 0xD8, 0xFF]), "it is a JPEG");
+        assert_eq!(
+            read_dimensions(&jpeg),
+            Some((1280, 800)),
+            "the same pixels, so every coordinate read off the frame still holds"
+        );
+    }
+
+    #[test]
+    fn the_window_helpers_shape_an_rgba_frame_with_every_pixel_opaque_is_lightened() {
+        // The helper's PNGs carry an alpha channel with every alpha at 255.
+        let rgba = DynamicImage::ImageRgb8(photo_like(1280, 800)).to_rgba8();
+        let png = encode_png(&DynamicImage::ImageRgba8(rgba));
+        assert!(png.len() >= SCREENSHOT_LOSSY_MIN_BYTES);
+        let lightened = lighten_screenshot(&png);
+        assert!(lightened.is_some(), "opaque RGBA is still a screenshot");
+        let jpeg = lightened.expect("checked above");
+        assert_eq!(read_dimensions(&jpeg), Some((1280, 800)));
+    }
+
+    #[test]
+    fn a_frame_with_a_transparent_pixel_is_left_alone() {
+        let mut rgba = DynamicImage::ImageRgb8(photo_like(1280, 800)).to_rgba8();
+        rgba.get_pixel_mut(3, 3).0[3] = 0;
+        let png = encode_png(&DynamicImage::ImageRgba8(rgba));
+        assert!(png.len() >= SCREENSHOT_LOSSY_MIN_BYTES);
+        assert_eq!(lighten_screenshot(&png), None, "JPEG cannot hold transparency");
+    }
+
+    #[test]
+    fn a_flat_interface_frame_stays_a_lossless_png() {
+        // Windows, text and lists: PNG holds them in a few KB and the small text
+        // the model reads off them must never be touched.
+        let mut flat = RgbImage::from_pixel(1280, 800, image::Rgb([245, 245, 245]));
+        for x in 100..900 {
+            for y in 200..260 {
+                flat.put_pixel(x, y, image::Rgb([30, 30, 30]));
+            }
+        }
+        let png = encode_png(&DynamicImage::ImageRgb8(flat));
+        assert!(png.len() < SCREENSHOT_LOSSY_MIN_BYTES, "{} bytes", png.len());
+        assert_eq!(lighten_screenshot(&png), None);
+    }
+
+    #[test]
+    fn only_a_png_is_a_candidate() {
+        let mut not_a_png = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        not_a_png.resize(SCREENSHOT_LOSSY_MIN_BYTES + 1, 0x11);
+        assert_eq!(lighten_screenshot(&not_a_png), None);
+        assert_eq!(lighten_screenshot(b"not an image at all"), None);
     }
 }

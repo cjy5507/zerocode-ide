@@ -966,7 +966,7 @@ impl ApiClient for ProviderRuntimeClient {
         // system blocks and cached history stay byte-identical across turns.
         let mut messages = runtime::convert_messages_for(
             &reconciled,
-            runtime::ReasoningReplay::for_model(&self.model),
+            runtime::WireTarget::for_model(&self.model).with_picture_cap(request.picture_cap),
         );
         runtime::append_wire_reminders(&mut messages, &request.wire_reminders);
         // Anchor-plus-rolling conversation-prefix breakpoints. Without them

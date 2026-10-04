@@ -957,6 +957,62 @@ impl ReviewFacts {
 /// briefing that asks for it ([`worker_briefing`]), from this one place.
 pub const HANDED_IN_HEAD: &str = "head";
 
+/// The key a worker's report carries the words a person reads under — spelled
+/// in the briefing ([`worker_briefing`]) and read back by [`worker_summary`]
+/// from this one place.
+pub const HANDED_IN_SUMMARY: &str = "summary";
+
+/// Whether a result is the carrying worker's own writing — the only words the
+/// board reads a worker's summary from in the task's result. A result a
+/// coordinator wrote, or one nobody is known to have written, is not the
+/// worker's report and is not read as one: the provenance
+/// [`ReviewFacts::written_by`] asks the same way.
+#[must_use]
+pub fn is_workers_own(author: Option<&ResultAuthor>) -> bool {
+    matches!(author, Some(ResultAuthor::Worker { .. }))
+}
+
+/// The [`HANDED_IN_SUMMARY`] string of a `worker_done` body, when it carries one.
+fn summary_of_body(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get(HANDED_IN_SUMMARY)?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The words a worker handed in for a person to read: the
+/// [`HANDED_IN_SUMMARY`] string of its own `worker_done` body, or `None` where
+/// the result is not the worker's own ([`is_workers_own`]) or carries no text
+/// under that key.
+#[must_use]
+pub fn worker_summary(result: &str, author: Option<&ResultAuthor>) -> Option<String> {
+    if !is_workers_own(author) {
+        return None;
+    }
+    summary_of_body(result)
+}
+
+/// The words the carrying worker handed in for a person to read, found where
+/// the ledger holds them: the task's own result while the worker wrote it
+/// ([`worker_summary`]), and otherwise the worker's `worker_done` in the run's
+/// mail. A coordinator's `task-update --result` replaces the result whole and
+/// the worker's report goes with it, but the report itself stays in the mail,
+/// so a task keeps its words after its review is written.
+#[must_use]
+pub fn worker_summary_in(run: &Run, task: &Task) -> Option<String> {
+    worker_summary(task.result.as_str(), task.result_author.as_ref()).or_else(|| {
+        run.messages()
+            .iter()
+            .rev()
+            .find(|message| {
+                message.kind == MessageKind::WorkerDone
+                    && message.task.as_deref() == Some(task.id.as_str())
+            })
+            .and_then(|message| summary_of_body(message.body.as_str()))
+    })
+}
+
 /// The `--attempt` word for "this task has no attempt": a correction of work
 /// nobody was dispatched on still names what it looked at, and the word is
 /// refused the moment an attempt exists.
@@ -18228,6 +18284,15 @@ bypass a safeguard or reach anything the person does not own.";
 
 const WORKER_GATE_CONTEXT: &str = "For code changes in a Rust workspace, the worker gate must include `cargo clippy --all-targets -- -D warnings` from the repository root, including test targets across the workspace. Report each gate exit code without hiding it behind a pipe.";
 
+/// What a worker is told, once and at launch, about the words it writes for a
+/// person (t-32786): the summary, a report, a notice. One sentence that names
+/// the rule and the skill that carries it — the skill is read when such a text
+/// is written, so no turn after this carries the rule again. The briefing is
+/// the same for every agent that takes a task, so every agent is told the same.
+/// The sentence says the rule's gist itself, so a CLI that has not installed the
+/// skill yet is still told what to do.
+const WORKER_PLAIN_REPORT_CONTEXT: &str = "What you write for a person to read — the summary, a report, a notice — follows the `plain-report` skill. Put the result first, write one fact in a sentence, give every number a unit, and use no codebase metaphors.";
+
 /// The sentence that sends a worker to `zerocode-find` before it reads code
 /// it does not know (t-14869): the file pick seat, called by the agent
 /// itself, in place of the reads a worker spends finding its files — a
@@ -18270,7 +18335,7 @@ pub fn worker_briefing(task: &str, title: &str) -> String {
         "You are a worker in this window's orchestration, carrying task {carrying}. \
 When your work is done, run: zerocode-orc send --type worker_done \
 --retry-request done-{task} --body \
-'{{\"ok\":true,\"summary\":\"<what changed and how you verified it>\",\"{head}\":\"<the commit you hand in, when the work is code>\"}}' \
+'{{\"ok\":true,\"{summary}\":\"<what changed and how you verified it>\",\"{head}\":\"<the commit you hand in, when the work is code>\"}}' \
 — with \"ok\":false instead if you could not finish; the coordinator reviews \
 the commit you name. If you are blocked, run: \
 zerocode-orc ask --retry-request <a name of your own> --body '<your question>' \
@@ -18285,12 +18350,14 @@ with the same path named once in the summary. Say in the summary if that \
 file dies with your worktree, because the coordinator reads it before \
 anything is cleaned up. Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
-a new request. `zerocode-orc help` lists the rest. {find} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+a new request. `zerocode-orc help` lists the rest. {find} {plain} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
         find = worker_find_context(),
+        plain = WORKER_PLAIN_REPORT_CONTEXT,
         purpose = WORKER_PURPOSE_CONTEXT,
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,
         trust = trust,
+        summary = HANDED_IN_SUMMARY,
         head = HANDED_IN_HEAD,
         hands_over = BRIEFING_HANDS_OVER,
     )
@@ -18320,7 +18387,7 @@ pub fn federated_briefing(home_dispatch: &str) -> String {
         "You are a worker borrowed by another window's orchestration \
 (remote dispatch {home_dispatch}). When your work is done, run: zerocode-orc \
 send --type worker_done --retry-request done-{home_dispatch} --body \
-\'{{\"ok\":true,\"summary\":\"<what changed and how you verified it>\",\"{head}\":\"<the commit you hand in, when the work is code>\"}}\' \
+\'{{\"ok\":true,\"{summary}\":\"<what changed and how you verified it>\",\"{head}\":\"<the commit you hand in, when the work is code>\"}}\' \
 — with \"ok\":false instead if you could not finish; the coordinator reviews \
 the commit you name. If you are blocked, run: \
 zerocode-orc ask --retry-request <a name of your own> --body '<your question>' \
@@ -18330,11 +18397,13 @@ nobody on either side can answer one. Keep the summary short and carry a \
 longer answer as a path — `--payload '{{\"reportPath\":\"/abs/path\",\"lifetime\":\"ephemeral\"}}'` — \
 naming it once in the summary too, and say whether that file outlives your \
 worktree, because the home window is not on this machine. Every command that CHANGES anything needs --retry-request. \
-`zerocode-orc help` lists the rest. {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+`zerocode-orc help` lists the rest. {plain} {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\n{hands_over}\n\n",
+        plain = WORKER_PLAIN_REPORT_CONTEXT,
         purpose = WORKER_PURPOSE_CONTEXT,
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,
         trust = trust,
+        summary = HANDED_IN_SUMMARY,
         head = HANDED_IN_HEAD,
         hands_over = BRIEFING_HANDS_OVER,
     )

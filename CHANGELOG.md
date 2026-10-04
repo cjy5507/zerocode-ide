@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.52] — 2026-10-04
+
+### feat
+
+- feat(orchestration): every agent writes to you in controlled plain language, and a light lint counts what it wrote — a plain-report skill and two briefing sentences for every CLI, a rules table of 36 rows, and one line on the board, the coordinator desk and the artifact drawer that says how many flagged words a report holds (on a synthetic report: Korean 61 → 24 characters a sentence and 23 → 0 flagged words; the lint reads 20 KB in 1.65 ms on a low-spec profile).
+- feat(computer-use): the reflex decision is asked ahead — each request also asks about the next reading's likely branches (a target appears, the target is taken, the hand missed), and the held answer is used at once when the next reading matches the premise it was asked on, so the wait for a decision drops from about 230 ms to 0 at the median on the synthetic scenes (p95 329–411 → 233–341 ms), with one request per reading as before and no wrongly used answer; on the real Jev wire the answers used ahead equalled the reading's own answer 127 times out of 127. On a low-spec profile the loop stretches and there is no gain yet.
+- feat(explain): "explain this as a picture or a page" — a button on a diff, on an answer in a conversation and on a task's report opens a small card that says what will be sent; the pane's agent then writes an explanation page (plain language, with a diagram where it helps) and the window opens it as a Page artifact beside what it explains. A pane with no agent can use the official one-shot mode of Claude Code or Codex (the card says that it spends that login's plan); secrets are masked before anything is sent, nothing is typed into your composer, and there is no background loop. The page records the pane, task and kind of thing it explains.
+
+### fix
+
+- fix(worktree): a folder whose work is already in main is no longer called "uncommitted" because of files git ignores — the evidence panel's headline counts only real changes, ignored files are one plain row with their size (for example 270 MB of node_modules/ and target/), every reason a reading was incomplete is said in words in all five languages instead of a raw name like ignored_content, and the sidebar badge says the same thing as the panel ("landed · ignored files left"). The safety rules for clean-up and handoff are unchanged.
+- fix(orchestration): an outside reader of the ledger's database (for example a diagnostic `sqlite3` opened on it while the window runs) can no longer bring the window down — the runtime keeps one connection to its store for its whole life and looks at the store's files by path instead of opening and closing them on every request, so its locks stand; the same change makes a request through the ledger cheaper (2,737 → 2,048 µs on the normal profile, 13,556 → 11,221 µs on an efficiency-cores profile; bytes written per 1,000 requests 73.4 → 7.9 MB).
+
 ## [1.1.51] — 2026-10-04
 
 ### feat

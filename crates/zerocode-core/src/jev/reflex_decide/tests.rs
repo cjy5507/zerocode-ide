@@ -1,5 +1,5 @@
 use super::*;
-use crate::computer_use::{REFLEX_MISSED_OUTCOMES, REFLEX_PRESSED_OUTCOME};
+use crate::computer_use::{REFLEX_COLLECT_MS, REFLEX_MISSED_OUTCOMES, REFLEX_PRESSED_OUTCOME};
 
 /// A helper status on `plan` and `owner`, capture `capture`, with the ball's
 /// newest sighting `value` and `done` actions so far.
@@ -764,4 +764,432 @@ fn a_reading_that_differs_only_by_the_captures_exact_age_is_the_same_reading() {
         ),
         "over the hand's limit the reading is new"
     );
+}
+
+// ---- asked ahead (t-32797) ---------------------------------------------------
+
+/// A reading of two detectors on `plan` — `first` and `second` each a known
+/// value or, for `None`, unknown — whose capture is `age_ms` old, with
+/// `done` actions finished and `missed` lost since the reading before, and
+/// `total` done so far.
+fn reading(
+    plan: u64,
+    first: Option<i64>,
+    second: Option<i64>,
+    age_ms: u64,
+    (done, missed, total): (u64, u64, u64),
+) -> Snapshot {
+    let sighting = |detector: &str, value: Option<i64>, track: u64| {
+        json!({
+            "detector": detector,
+            "value": value,
+            "unknown": if value.is_none() { json!("scene") } else { Value::Null },
+            "track": value.filter(|value| *value != 0).map(|_| track),
+            "ageNs": age_ms * 1_000_000,
+        })
+    };
+    let receipts: Vec<Value> = (0..done)
+        .map(|_| REFLEX_PRESSED_OUTCOME)
+        .chain((0..missed).map(|_| REFLEX_MISSED_OUTCOMES[0]))
+        .enumerate()
+        .map(|(at, outcome)| json!({ "seq": at + 1, "outcome": outcome }))
+        .collect();
+    let mut snapshot = snapshot_of(&json!({
+        "runId": "rx-1",
+        "sightings": [sighting("red", first, total + 1), sighting("blue", second, total + 2)],
+        "outcomes": { "done": total },
+        "receipts": receipts,
+        "scene": { "stream": 1, "geometry": 1, "owner": 7, "plan": plan },
+        "lastCapture": total + 1,
+        "lastCaptureAgeNs": age_ms * 1_000_000,
+    }));
+    snapshot.read_ms = Some(1_000);
+    snapshot
+}
+
+/// The endpoint's body answering `next` with `own` and each branch named in
+/// `branches` with its word.
+fn answering_ahead(own: &str, branches: &[(Branch, &str)]) -> String {
+    let choice = |word: &str| {
+        let probabilities: Map<String, Value> = REFLEX_DECIDE_OPTIONS
+            .iter()
+            .map(|(option, _)| {
+                (
+                    (*option).to_string(),
+                    json!(if *option == word { 0.8 } else { 0.1 }),
+                )
+            })
+            .collect();
+        json!({ "type": "choice", "choice": word, "probabilities": probabilities, "confidence": 0.7 })
+    };
+    let mut answers = Map::new();
+    answers.insert(REFLEX_DECIDE_QUESTION.to_string(), choice(own));
+    for (branch, word) in branches {
+        answers.insert(branch.question(), choice(word));
+    }
+    json!({ "answers": answers, "model": "jev-1.13.0" }).to_string()
+}
+
+/// A healthy reading: the red detector reads a target, the blue none, the
+/// hand finished three since the reading before.
+fn healthy(plan: u64, total: u64) -> Snapshot {
+    reading(plan, Some(1), Some(0), 4, (3, 0, total))
+}
+
+/// What a reading is, as the options are written: some detector reads a
+/// target, some none, some unknown; the capture or a frame past the limit;
+/// the hand finished or lost something since the reading before. A count, an
+/// age under the limit, a track's number and why a reading is unknown are no
+/// fact of it.
+#[test]
+fn a_readings_facts_are_what_the_options_are_written_in() {
+    assert_eq!(
+        facts_of(&healthy(1, 10).state),
+        Facts {
+            capture_over: Some(false),
+            frame_over: false,
+            target: true,
+            none: true,
+            unknown: false,
+            done: true,
+            missed: false,
+        }
+    );
+    let blind = facts_of(&reading(1, None, None, 60, (0, 2, 10)).state);
+    assert_eq!(
+        blind,
+        Facts {
+            capture_over: Some(true),
+            frame_over: true,
+            target: false,
+            none: false,
+            unknown: true,
+            done: false,
+            missed: true,
+        }
+    );
+    // Other counts, ages under the limit, other tracks: the same facts.
+    assert_eq!(
+        facts_of(&reading(1, Some(3), Some(0), 21, (8, 0, 77)).state),
+        facts_of(&healthy(1, 10).state)
+    );
+    // Why a reading is unknown is not a fact of it.
+    let mut occluded = reading(1, Some(1), None, 4, (3, 0, 10));
+    occluded.state["sightings"][1]["unknown"] = json!("occluded");
+    assert_eq!(
+        facts_of(&occluded.state),
+        facts_of(&reading(1, Some(1), None, 4, (3, 0, 10)).state)
+    );
+    // No sightings, no capture dated: nothing read, nothing past a limit.
+    assert_eq!(facts_of(&snapshot_of(&json!({})).state).capture_over, None);
+    assert!(finds_nothing(
+        &reading(1, Some(0), None, 4, (0, 0, 1)).state
+    ));
+    assert!(!finds_nothing(&healthy(1, 1).state));
+}
+
+/// A reading is asked ahead of the branches it can take, each once, never of
+/// itself and at most [`AHEAD_BRANCHES`]: a target can be taken only where
+/// one is read, appear only where a detector reads none.
+#[test]
+fn a_reading_is_asked_ahead_of_the_branches_it_can_take() {
+    let words = |snapshot: &Snapshot| -> Vec<&'static str> {
+        branches_of(&snapshot.state)
+            .into_iter()
+            .map(|(branch, _)| branch.word())
+            .collect()
+    };
+    assert_eq!(words(&healthy(1, 10)), ["appears", "taken", "missed"]);
+    // Only unknowns: nothing to take, nowhere to appear.
+    assert_eq!(words(&reading(1, None, None, 4, (2, 0, 9))), ["missed"]);
+    // A hand already missing: that branch is the reading itself.
+    assert_eq!(words(&reading(1, Some(1), None, 4, (0, 1, 9))), ["taken"]);
+    let healthy_facts = facts_of(&healthy(1, 10).state);
+    for (branch, facts) in branches_of(&healthy(1, 10).state) {
+        assert_ne!(facts, healthy_facts, "{}", branch.word());
+        assert_eq!(Some(facts), branch.edit(healthy_facts));
+    }
+    assert!(branches_of(&healthy(1, 10).state).len() <= AHEAD_BRANCHES);
+}
+
+/// The request carries the reading's own question as it always was, byte for
+/// byte, and one question of the same choice per branch under its own name —
+/// the state once, unchanged.
+#[test]
+fn the_request_asks_the_reading_as_it_is_and_each_branch_beside_it() {
+    let state = healthy(1, 10).state;
+    let asked = questions_for(&state);
+    assert_eq!(
+        asked[REFLEX_DECIDE_QUESTION],
+        questions()[REFLEX_DECIDE_QUESTION]
+    );
+    let names: BTreeSet<String> = asked
+        .as_object()
+        .expect("questions")
+        .keys()
+        .cloned()
+        .collect();
+    let wanted: BTreeSet<String> = std::iter::once(REFLEX_DECIDE_QUESTION.to_string())
+        .chain(Branch::ALL.map(Branch::question))
+        .collect();
+    assert_eq!(names, wanted);
+    for (branch, supposes) in Branch::ALL
+        .into_iter()
+        .zip(REFLEX_DECIDE_BRANCHES.map(|(_, s)| s))
+    {
+        let question = &asked[branch.question()];
+        assert_eq!(question["type"], json!("choice"));
+        let words = question["instructions"].as_str().expect("instructions");
+        assert!(words.contains(supposes), "{}", branch.word());
+        assert_eq!(
+            question["criteria"], asked[REFLEX_DECIDE_QUESTION]["criteria"],
+            "the same three options"
+        );
+    }
+    // A reading with no branch asks its own question alone.
+    let lone = reading(1, None, None, 4, (0, 1, 9));
+    assert_eq!(questions_for(&lone.state), questions());
+}
+
+/// One request's answers are held for the reading after it: its own, under
+/// the reading's facts, and each branch's under the facts it supposes — and
+/// the reading that comes takes the one whose premise is its own, at once,
+/// letting go of the rest.
+#[test]
+fn the_next_reading_takes_the_answer_held_for_its_premise() {
+    let pending = Pending {
+        id: 4,
+        snapshot: healthy(1, 10),
+    };
+    let mut ahead = Ahead::new();
+    let body = answering_ahead(
+        CONTINUE,
+        &[
+            (Branch::Appears, CONTINUE),
+            (Branch::Taken, CONTINUE),
+            (Branch::Missed, PAUSE),
+        ],
+    );
+    assert_eq!(ahead.hold(&pending, &body), 0);
+    assert_eq!(ahead.len(), 1 + AHEAD_BRANCHES);
+    // The hand lost what it went for: the missed branch's pause.
+    let next = reading(1, Some(1), Some(0), 9, (0, 1, 10));
+    let taken = ahead.take(&next, 1_000 + REFLEX_COLLECT_MS);
+    let held = taken.held.expect("held for this premise");
+    assert_eq!(held.branch, Some(Branch::Missed));
+    assert_eq!(held.chosen, PAUSE);
+    assert_eq!(held.asked_with, 4);
+    assert_eq!(held.model.as_deref(), Some("jev-1.13.0"));
+    assert_eq!(taken.dropped, AHEAD_BRANCHES, "the rest let go");
+    assert!(ahead.is_empty());
+    // Its own answer is held for a next reading with the same facts.
+    ahead.hold(&pending, &body);
+    let same = ahead.take(&reading(1, Some(5), Some(0), 30, (7, 0, 13)), 1_500);
+    assert_eq!(same.held.expect("the reading's own").branch, None);
+    // A branch whose answer does not read is not held; the others are.
+    let broken = answering_ahead(
+        CONTINUE,
+        &[(Branch::Appears, "retreat"), (Branch::Taken, CONTINUE)],
+    );
+    ahead.hold(&pending, &broken);
+    assert_eq!(ahead.len(), 2, "its own and the one taken branch");
+    assert_eq!(
+        ahead.hold(&pending, "{"),
+        2,
+        "a body that does not read holds nothing"
+    );
+    assert!(ahead.is_empty());
+}
+
+/// No held answer is ever used on a reading whose premise is not the one it
+/// was asked for (t-32797's proof): every part of the scene, the age of the
+/// reading it was asked beside, every fact, an empty table — each leaves the
+/// reading undecided, names why, and lets go of everything held.
+#[test]
+fn a_held_answer_is_never_used_on_another_premise() {
+    let pending = Pending {
+        id: 4,
+        snapshot: healthy(1, 10),
+    };
+    let body = answering_ahead(
+        CONTINUE,
+        &[
+            (Branch::Appears, PAUSE),
+            (Branch::Taken, PAUSE),
+            (Branch::Missed, PAUSE),
+        ],
+    );
+    let soon = 1_000 + REFLEX_COLLECT_MS;
+    let refused = |next: &Snapshot, now_ms: u64| {
+        let mut ahead = Ahead::new();
+        ahead.hold(&pending, &body);
+        let taken = ahead.take(next, now_ms);
+        assert!(ahead.is_empty(), "everything let go");
+        assert_eq!(taken.dropped, 1 + AHEAD_BRANCHES);
+        taken.held.expect_err("never used")
+    };
+    // Every part of the scene.
+    for part in ["stream", "geometry", "owner", "plan"] {
+        let mut next = healthy(1, 13);
+        next.scene = next.scene.map(|mut scene| {
+            match part {
+                "stream" => scene.stream += 1,
+                "geometry" => scene.geometry += 1,
+                "owner" => scene.owner += 1,
+                _ => scene.plan += 1,
+            }
+            scene
+        });
+        assert_eq!(refused(&next, soon), Unheld::Scene, "{part}");
+    }
+    let mut another_run = healthy(1, 13);
+    if let Some(scene) = another_run.scene.as_mut() {
+        scene.run = "rx-2".into();
+    }
+    assert_eq!(refused(&another_run, soon), Unheld::Scene, "run");
+    let mut unnamed = healthy(1, 13);
+    unnamed.scene = None;
+    assert_eq!(
+        refused(&unnamed, soon),
+        Unheld::Scene,
+        "a scene nobody names"
+    );
+    // The reading it was asked beside, too old — or undatable.
+    assert_eq!(
+        refused(&healthy(1, 13), 1_000 + REFLEX_APPLY_MAX_AGE_MS),
+        Unheld::Stale
+    );
+    let mut undated = Ahead::new();
+    let mut unread = pending.clone();
+    unread.snapshot.read_ms = None;
+    undated.hold(&unread, &body);
+    assert_eq!(undated.take(&healthy(1, 13), soon).held, Err(Unheld::Stale));
+    // Every fact: a reading whose facts no held answer names.
+    for (fact, next) in [
+        ("capture_over", reading(1, Some(1), Some(0), 60, (3, 0, 13))),
+        ("unknown", reading(1, Some(1), None, 4, (3, 0, 13))),
+        ("target and none", reading(1, None, None, 4, (3, 0, 13))),
+        ("done", reading(1, Some(1), Some(0), 4, (0, 0, 13))),
+        (
+            "missed beside done",
+            reading(1, Some(1), Some(0), 4, (3, 1, 13)),
+        ),
+    ] {
+        assert_eq!(refused(&next, soon), Unheld::Facts, "{fact}");
+    }
+    let mut late_frame = healthy(1, 13);
+    late_frame.state["sightings"][0]["age_ms"] = json!(LIMITS.max_frame_age_ns / 1_000_000 + 1);
+    assert_eq!(refused(&late_frame, soon), Unheld::Facts, "frame_over");
+    // Nothing held.
+    let taken = Ahead::new().take(&healthy(1, 13), soon);
+    assert_eq!((taken.held, taken.dropped), (Err(Unheld::Nothing), 0));
+}
+
+/// A decision a held answer decided is a row of the seat's words that cost
+/// no request, on the reading it decided — its branch, the decision whose
+/// request carried it and the premise it was used on named — and it is
+/// numbered among the run's decisions without being asked.
+#[test]
+fn a_held_answers_row_is_an_answer_of_no_request() {
+    let mut decider = Decider::new();
+    let Offer::Ask(asked) = decider.offer(healthy(1, 10)) else {
+        panic!("asked");
+    };
+    assert_eq!(decider.newest(), asked.id);
+    let mut ahead = Ahead::new();
+    ahead.hold(
+        &asked,
+        &answering_ahead(CONTINUE, &[(Branch::Missed, PAUSE)]),
+    );
+    assert_eq!(decider.settled(asked.id), None, "its answer came back");
+    let next = reading(1, Some(1), Some(0), 9, (0, 1, 10));
+    let Offer::Ask(own) = decider.offer(next.clone()) else {
+        panic!("the reading's own question is asked as ever");
+    };
+    let held = ahead
+        .take(&next, 1_000 + REFLEX_COLLECT_MS)
+        .held
+        .expect("held");
+    let decided = decider.decided(next.clone());
+    assert_eq!((asked.id, own.id, decided.id), (1, 2, 3));
+    assert_eq!(decider.newest(), own.id, "a held decision is no reading");
+    assert!(decider.asking(), "and changes nothing in flight");
+    let row = held_row("rx-1", &decided, &held);
+    assert_eq!(row["road"], json!(ROAD_AHEAD));
+    assert_eq!(row["outcome"], json!(ANSWERED));
+    assert_eq!(row["chosen"], json!(PAUSE));
+    assert_eq!(row["decision"], json!(3));
+    assert_eq!(row["state"], next.state, "the reading it decided");
+    assert_eq!(row["provenance"], next.provenance());
+    assert_eq!(row["branch"], json!("missed"));
+    assert_eq!(row["askedWith"], json!(1));
+    assert_eq!(row["premise"], json!(premise_of(&next)));
+    assert_eq!(row["cached"], json!(true));
+    assert_eq!(row["requests"], json!(0));
+    assert_eq!(row["attempts"], json!(0));
+    assert_eq!(row["model"], json!("jev-1.13.0"));
+    assert_eq!(row["rubricVersion"], json!(REFLEX_DECIDE_RUBRIC_VERSION));
+    assert_eq!(row["applied"], json!(false));
+    // The question asked about it names the branches that rode with it.
+    let own_row = asked_row(
+        "rx-1",
+        &asked,
+        &sent(answering("continue")),
+        None,
+        true,
+        false,
+    );
+    assert_eq!(own_row["branches"], json!(["appears", "taken", "missed"]));
+    // Two readings of other facts are other premises.
+    assert_ne!(premise_of(&next), premise_of(&healthy(1, 10)));
+    assert_eq!(premise_of(&healthy(1, 10)), premise_of(&healthy(1, 99)));
+}
+
+/// An answer is held for the next reading only while the grounds it was
+/// asked on stood when it came back (t-32797): one its carrier refused as
+/// stale, another run's or epoch's, or another plan's is about a premise
+/// that had gone; one refused because the seat does not apply, or about a
+/// hand already still, was fit and is held; one nobody judged is held; one
+/// that did not answer is not.
+#[test]
+fn only_an_answer_whose_grounds_stood_is_held_for_the_next_reading() {
+    let answered = asked_row(
+        "rx-1",
+        &Pending {
+            id: 1,
+            snapshot: healthy(1, 10),
+        },
+        &sent(answering("pause")),
+        None,
+        true,
+        false,
+    );
+    assert!(holdable(&answered), "nobody judged it");
+    for why in Why::ALL {
+        let mut row = answered.clone();
+        carried(&mut row, Err(why));
+        assert_eq!(holdable(&row), !why.premise_gone(), "{}", why.word());
+    }
+    assert_eq!(
+        Why::ALL
+            .into_iter()
+            .filter(|why| why.premise_gone())
+            .collect::<Vec<_>>(),
+        [Why::Stale, Why::EpochMismatch, Why::PlanMismatch]
+    );
+    let mut fit = answered.clone();
+    carried(&mut fit, Ok(()));
+    assert!(holdable(&fit));
+    let failed = asked_row(
+        "rx-1",
+        &Pending {
+            id: 1,
+            snapshot: healthy(1, 10),
+        },
+        &sent(Err("timeout".into())),
+        None,
+        true,
+        false,
+    );
+    assert!(!holdable(&failed));
 }

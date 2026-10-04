@@ -328,6 +328,12 @@ pub(crate) struct PreviewPayload {
     /// The file was larger than the table allows, and what came back is cut
     /// (text) or absent (image).
     pub(crate) truncated: bool,
+    /// What the writing lint counted in a report's or a document's text
+    /// (t-32786): worked out once, when the preview is, and kept with it in the
+    /// byte-capped cache. Counts only; absent for any other kind and for a
+    /// text with nothing to count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) writing: Option<zerocode_core::plain_text::TextLint>,
 }
 
 impl PreviewPayload {
@@ -2189,6 +2195,7 @@ impl Store {
                 data_url: None,
                 bytes: 0,
                 truncated: false,
+                writing: None,
             });
             return Ok(payload);
         }
@@ -2208,6 +2215,7 @@ impl Store {
                 data_url: png.as_deref().map(data_url_of),
                 bytes,
                 truncated: false,
+                writing: None,
             }));
         }
         let payload = match artifact.kind {
@@ -2219,6 +2227,7 @@ impl Store {
                         data_url: None,
                         bytes,
                         truncated: true,
+                        writing: None,
                     }
                 } else {
                     use base64::Engine as _;
@@ -2233,6 +2242,7 @@ impl Store {
                         )),
                         bytes,
                         truncated: false,
+                        writing: None,
                     }
                 }
             }
@@ -2242,6 +2252,7 @@ impl Store {
                 data_url: None,
                 bytes,
                 truncated: false,
+                writing: None,
             },
             // A PDF document is not text; its bytes fall to `none` below.
             ArtifactKind::Document if !is_utf8_document(&artifact.path) => PreviewPayload {
@@ -2250,6 +2261,7 @@ impl Store {
                 data_url: None,
                 bytes,
                 truncated: false,
+                writing: None,
             },
             ArtifactKind::Report
             | ArtifactKind::Document
@@ -2264,17 +2276,20 @@ impl Store {
                     .read_to_end(&mut held)
                     .map_err(|error| error.to_string())?;
                 let text = String::from_utf8_lossy(&held).into_owned();
+                let prose = matches!(artifact.kind, ArtifactKind::Report | ArtifactKind::Document);
+                // A report's words are linted here, once, and the counts ride the
+                // cached preview (t-32786). What is not prose, and a text with
+                // nothing to count, carry none.
+                let writing = prose
+                    .then(|| zerocode_core::plain_text::lint(&text))
+                    .filter(|found| found.sentences > 0);
                 PreviewPayload {
-                    kind: if matches!(artifact.kind, ArtifactKind::Report | ArtifactKind::Document)
-                    {
-                        "markdown"
-                    } else {
-                        "text"
-                    },
+                    kind: if prose { "markdown" } else { "text" },
                     text: Some(text),
                     data_url: None,
                     bytes,
                     truncated: bytes > limits.preview_text_bytes_max,
+                    writing,
                 }
             }
         };
@@ -2921,6 +2936,61 @@ fn window_origin(
     )
 }
 
+/// The origin a page the window makes itself (an explanation's one-shot, t-32787)
+/// takes from what the window knows of where its request came from: the pane the
+/// person was reading in, through the same answer a page published from that pane
+/// gets, and the folder of the checkout. A request from no pane this window holds
+/// (a diff belongs to a checkout) names no pane and no ledger seat; its folder
+/// still names the project and workspace that hold it.
+pub(crate) fn origin_of_source(
+    app: &tauri::AppHandle,
+    term: Option<crate::TermId>,
+    cwd: Option<&Path>,
+) -> Origin {
+    use tauri::Manager as _;
+    let caller = zerocode_core::artifact_publish::Caller {
+        pane: term.map(crate::hooks::pane_key_of),
+        cwd: cwd.map(Path::to_path_buf),
+    };
+    let mut origin = window_origin(app, &caller);
+    if origin.is_empty()
+        && let Some(cwd) = cwd.filter(|cwd| cwd.is_absolute())
+    {
+        let state = app.state::<AppState>();
+        let (project, worktree) = place_of(cwd, &known_projects(state.config_root(), cwd));
+        origin.project = project;
+        origin.worktree = worktree;
+    }
+    origin
+}
+
+/// Publish a page into the catalog and tell the window — the one road the hook
+/// door and a page the window made itself (an explanation's one-shot, t-32787)
+/// share. The window hears that the catalog moved and the row that was
+/// published; an explanation that asked the publishing pane for a page hears it
+/// too, and opens it.
+pub(crate) fn publish_and_tell(
+    store: &Store,
+    input: &zerocode_core::artifact_publish::PublishInput,
+    origin: Origin,
+) -> Result<(zerocode_core::artifact_publish::PageMeta, Artifact), String> {
+    let meta = store.publish_page(input, origin.clone())?;
+    let mut row = meta.artifact(origin);
+    store.fill_feedback(&mut row);
+    if let Some(app) = store
+        .window
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+    {
+        use tauri::Emitter as _;
+        let _ = app.emit(CHANGED_EVENT, ());
+        let _ = app.emit(PUBLISHED_EVENT, row.clone());
+        crate::explain_door::note_published(app, &row);
+    }
+    Ok((meta, row))
+}
+
 fn artifact_request(
     store: &Store,
     mut request: serde_json::Value,
@@ -2935,19 +3005,7 @@ fn artifact_request(
         "publish" => {
             let (input, caller) = zerocode_core::artifact_publish::publish_parts(request)?;
             let origin = origin_of(&caller);
-            let meta = store.publish_page(&input, origin.clone())?;
-            if let Some(app) = store
-                .window
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_ref()
-            {
-                use tauri::Emitter as _;
-                let _ = app.emit(CHANGED_EVENT, ());
-                let mut row = meta.artifact(origin);
-                store.fill_feedback(&mut row);
-                let _ = app.emit(PUBLISHED_EVENT, row);
-            }
+            let (meta, _) = publish_and_tell(store, &input, origin)?;
             serde_json::to_value(meta).map_err(|e| e.to_string())
         }
         // Publications only, as the headless catalog answers: a page an agent
@@ -4101,6 +4159,50 @@ mod tests {
         drop(held);
         store.delete(&ids[0], true).expect("deletes");
         assert_eq!(store.preview_cache_bytes(), 16);
+    }
+
+    /// A report's preview carries the writing lint of its text (t-32786), worked
+    /// out once with the preview and kept with it in the cache. A text with
+    /// nothing to count, and a kind that is not prose, carry none.
+    #[test]
+    fn a_reports_preview_carries_the_lint_of_its_text_and_the_cache_keeps_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let report = dir.path().join("tmp/t-1-report.md");
+        touch(
+            &report,
+            "Jev 자리의 판정이 느려서 스윕 박자를 조정함으로써 재시도가 줄어들게 되는 것이다.\n",
+        );
+        let id = store
+            .register_report(&report, origin("w-1"), 1_000)
+            .expect("registers")
+            .id;
+        let first = store.preview(&id).expect("preview");
+        assert_eq!(first.kind, "markdown");
+        assert_eq!(
+            first
+                .writing
+                .as_ref()
+                .map(|found| (found.sentences, found.words, found.patterns)),
+            Some((1, 2, 1)),
+            "the report's preview carried no lint: {first:?}"
+        );
+        let again = store.preview(&id).expect("preview");
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the cached preview was built again"
+        );
+
+        let numbers = dir.path().join("tmp/t-2-report.md");
+        touch(&numbers, "0123456789012345");
+        let id = store
+            .register_report(&numbers, origin("w-2"), 1_000)
+            .expect("registers")
+            .id;
+        assert!(
+            store.preview(&id).expect("preview").writing.is_none(),
+            "a text with no words carried a lint"
+        );
     }
 
     /// Listing filters by kind and by each origin field, newest first, and

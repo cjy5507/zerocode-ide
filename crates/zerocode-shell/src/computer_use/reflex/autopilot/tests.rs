@@ -8,11 +8,12 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use super::super::plan::tests::{Named, Scripted, answer_for, capture, scope};
-use super::super::tests::{answer_naming, open, reading_handshake};
+use super::super::tests::{answer_naming, answer_naming_ahead, open, reading_handshake};
 use super::*;
 use crate::systemone::Spent;
 use crate::systemone::tests::ANSWERING_VERSION;
 use zerocode_core::computer_use::REFLEX_SETTLE_MS;
+use zerocode_core::jev::reflex_decide::{Branch, Unheld};
 
 /// The epoch milliseconds the test's steady clock starts at.
 const WALL: i64 = 1_790_000_000_000;
@@ -237,14 +238,30 @@ impl Teacher {
         self.line(Ok(answer_naming(word)), 1, None);
     }
 
+    /// `own` for the reading, and for each branch in `branches` its word
+    /// (t-32797).
+    fn says_ahead(&self, own: &str, branches: &[(Branch, &str)]) {
+        self.line(Ok(answer_naming_ahead(own, branches)), 1, None);
+    }
+
     fn fails(&self, token: &str, attempts: u32) {
         self.line(Err(token.to_string()), attempts, None);
     }
 
     /// `word`, held until the gate handed back is opened.
     fn holds(&self, word: &str) -> mpsc::Sender<()> {
+        self.gated(answer_naming(word))
+    }
+
+    /// [`Self::says_ahead`]'s answer, held until the gate handed back is
+    /// opened.
+    fn holds_ahead(&self, own: &str, branches: &[(Branch, &str)]) -> mpsc::Sender<()> {
+        self.gated(answer_naming_ahead(own, branches))
+    }
+
+    fn gated(&self, body: String) -> mpsc::Sender<()> {
         let (open, gate) = mpsc::channel();
-        self.line(Ok(answer_naming(word)), 1, Some(gate));
+        self.line(Ok(body), 1, Some(gate));
         open
     }
 
@@ -445,6 +462,29 @@ impl Fake {
             .collect()
     }
 
+    /// Settle between collects, the clock standing, until `wanted` questions
+    /// settled: an answer comes back before the next reading, as it does
+    /// when the wire answers inside a collect (t-32797).
+    fn settle_until_rows(&mut self, autopilot: &mut Autopilot, wanted: usize) {
+        for _ in 0..400 {
+            if self.asked_rows().len() >= wanted {
+                return;
+            }
+            self.with(None, |world| autopilot.settle(world));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("question {wanted} did not settle between collects");
+    }
+
+    /// The rows of decisions an answer held for their reading decided.
+    fn held_rows(&self) -> Vec<Value> {
+        self.decisions
+            .iter()
+            .filter(|row| row["road"] == json!(ROAD_AHEAD))
+            .cloned()
+            .collect()
+    }
+
     /// Collect, the clock standing, until one more question settled.
     fn until_settled(&mut self, autopilot: &mut Autopilot) {
         self.until_rows(autopilot, self.asked_rows().len() + 1);
@@ -538,7 +578,7 @@ fn a_pause_carried_out_stops_the_run_and_says_why() {
     assert_eq!(status["applied"][PAUSE], json!(1));
     assert_eq!(
         status["roads"],
-        json!({ "memo": 0, "surrogate": 0, "jev": 1 })
+        json!({ "memo": 0, "surrogate": 0, "jev": 1, "ahead": 0 })
     );
     assert_eq!(status["ended"]["reason"], json!(PAUSED));
     assert_eq!(status["plans"][0]["source"], json!(plan::SOURCE_MODEL));
@@ -1359,4 +1399,197 @@ fn an_answer_landing_in_the_pass_that_reads_a_new_plan_is_refused_as_mismatched(
     let status = report(&run).expect("the account");
     assert_eq!(status["invalid"]["plan_mismatch"], json!(1));
     assert_eq!(status["applied"][PAUSE], json!(0));
+}
+
+// ---- asked ahead (t-32797) ---------------------------------------------------
+
+/// An autopilot whose first reading — the hand pressed three — was asked
+/// with its branches and answered `own`, the hand losing what it went for
+/// answered `missed`, between collects: what the test reads next is the
+/// reading after it. Its run.
+fn asked_ahead(fake: &mut Fake, own: &str, missed: &str) -> (Autopilot, String) {
+    fake.teacher
+        .says_ahead(own, &[(Branch::Taken, CONTINUE), (Branch::Missed, missed)]);
+    let (mut autopilot, answer) = fake.start(asked(None)).expect("started");
+    let run = answer["runId"].as_str().expect("a run").to_string();
+    fake.helper.press(&run, 3, 0);
+    fake.now += REFLEX_COLLECT_MS;
+    fake.tick(&mut autopilot);
+    fake.settle_until_rows(&mut autopilot, 1);
+    let first = &fake.asked_rows()[0];
+    assert_eq!(first["branches"], json!(["taken", "missed"]));
+    assert!(first["decisionWaitMs"].as_u64().is_some());
+    (autopilot, run)
+}
+
+/// What the run's watch says it asked ahead.
+fn ahead_of(run: &str) -> Value {
+    super::super::watch_report(run).expect("the watch's account")["ahead"].clone()
+}
+
+/// The pause the teacher gave a reading before, for a hand that would lose
+/// what it went for, is carried out in the very collect that reads such a
+/// hand — before that reading's own question has gone and come back — and
+/// says it waited for nothing. The reading's own question still goes; its
+/// row says whether it agreed with the answer that decided it.
+#[test]
+fn a_pause_held_for_the_next_reading_is_carried_out_in_the_collect_that_reads_it() {
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good()]);
+    let (mut autopilot, run) = asked_ahead(&mut fake, CONTINUE, PAUSE);
+    let first = fake.asked_rows()[0].clone();
+    let own = fake.teacher.holds(CONTINUE);
+    // The next reading: the hand lost what it went for and pressed nothing.
+    fake.helper.press(&run, 0, 1);
+    fake.now += REFLEX_COLLECT_MS;
+    fake.tick(&mut autopilot);
+    let held = fake.held_rows();
+    assert_eq!(held.len(), 1, "decided by the answer held for it");
+    assert_eq!(held[0]["chosen"], json!(PAUSE));
+    assert_eq!(held[0]["branch"], json!("missed"));
+    assert_eq!(held[0]["askedWith"], first["decision"]);
+    assert_eq!(held[0]["applied"], json!(true));
+    assert_eq!(held[0]["decisionWaitMs"], json!(0));
+    assert_eq!(held[0]["requests"], json!(0));
+    assert_eq!(
+        fake.helper.stops(),
+        std::slice::from_ref(&run),
+        "the hand stopped in the collect that read it"
+    );
+    assert_eq!(
+        fake.asked_rows().len(),
+        1,
+        "before the reading's own question came back"
+    );
+    assert_eq!(
+        autopilot.ended().map(|ended| ended["reason"].clone()),
+        Some(json!(PAUSED))
+    );
+    own.send(()).expect("its answer comes");
+    fake.until_rows(&mut autopilot, 2);
+    assert_eq!(fake.teacher.heard.load(Ordering::SeqCst), 2, "it was asked");
+    let asked_own = fake.asked_rows()[1].clone();
+    assert_eq!(asked_own["held"]["decision"], held[0]["decision"]);
+    assert_eq!(asked_own["held"]["agreed"], json!(false));
+    assert_eq!(
+        asked_own["applied"],
+        json!(false),
+        "the run it was about stopped"
+    );
+    let status = report(&run).expect("the account");
+    assert_eq!(status["roads"][ROAD_AHEAD], json!(1));
+    assert_eq!(status["applied"][PAUSE], json!(1));
+    let ahead = ahead_of(&run);
+    assert_eq!(ahead["held"], json!(3), "its own and two branches");
+    assert_eq!(ahead["used"], json!(1));
+    assert_eq!(ahead["disagreed"], json!(1));
+    assert_eq!(
+        ahead["unheld"][Unheld::Nothing.word()],
+        json!(1),
+        "the first reading"
+    );
+}
+
+/// The reading's own answer is held for a next reading with the same facts:
+/// a hand that keeps pressing what it finds is decided at once, its own
+/// question asked as ever.
+#[test]
+fn a_reading_with_the_facts_of_the_one_before_is_decided_by_its_answer_at_once() {
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good()]);
+    let (mut autopilot, run) = asked_ahead(&mut fake, CONTINUE, PAUSE);
+    fake.helper.press(&run, 2, 0);
+    fake.now += REFLEX_COLLECT_MS;
+    fake.tick(&mut autopilot);
+    let held = fake.held_rows();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0]["branch"], json!("steady"));
+    assert_eq!(held[0]["chosen"], json!(CONTINUE));
+    assert_eq!(held[0]["applied"], json!(true));
+    assert!(fake.helper.stops().is_empty());
+    assert!(autopilot.ended().is_none());
+    assert_eq!(
+        report(&run).expect("the account")["roads"][ROAD_AHEAD],
+        json!(1)
+    );
+}
+
+/// An answer held for one premise is never carried out on a reading of
+/// another (t-32797's proof, through the window): other facts, another
+/// scene, a reading it was asked beside grown too old — the hand goes on,
+/// the reading's own question is asked, and the status says why nothing
+/// held decided it.
+#[test]
+fn a_held_answer_is_never_carried_out_on_another_premise() {
+    for kind in [Unheld::Facts, Unheld::Scene, Unheld::Stale] {
+        let mut fake = Fake::new((JevMode::Auto, true), vec![good()]);
+        let (mut autopilot, run) = asked_ahead(&mut fake, CONTINUE, PAUSE);
+        match kind {
+            // The hand lost one beside two it pressed: not the missed branch.
+            Unheld::Facts => fake.helper.press(&run, 2, 1),
+            Unheld::Scene => {
+                fake.helper.press(&run, 0, 1);
+                fake.helper.scene["owner"] = json!(4);
+            }
+            _ => {
+                fake.helper.press(&run, 0, 1);
+                fake.now += REFLEX_APPLY_MAX_AGE_MS;
+            }
+        }
+        fake.now += REFLEX_COLLECT_MS;
+        fake.tick(&mut autopilot);
+        let word = kind.word();
+        assert!(
+            fake.held_rows().is_empty(),
+            "{word}: nothing held decided it"
+        );
+        assert!(fake.helper.stops().is_empty(), "{word}: the hand goes on");
+        assert!(autopilot.ended().is_none(), "{word}");
+        let ahead = ahead_of(&run);
+        assert_eq!(ahead["unheld"][word], json!(1), "{word}");
+        assert_eq!(ahead["used"], json!(0), "{word}");
+        assert_eq!(ahead["dropped"], json!(3), "{word}: all three let go");
+    }
+}
+
+/// The answers to a question that comes back after a newer reading was read
+/// are held for nobody (t-32797): its branches were about the reading after
+/// it, and that reading has come. A third reading with the first one's facts,
+/// read while the second's question is in flight and well inside the first
+/// reading's age, finds nothing held.
+#[test]
+fn answers_that_come_back_after_a_newer_reading_are_held_for_nobody() {
+    let mut fake = Fake::new((JevMode::Auto, true), vec![good()]);
+    let first = fake.teacher.holds_ahead(
+        CONTINUE,
+        &[(Branch::Taken, CONTINUE), (Branch::Missed, PAUSE)],
+    );
+    let second = fake.teacher.holds(CONTINUE);
+    let (mut autopilot, answer) = fake.start(asked(None)).expect("started");
+    let run = answer["runId"].as_str().expect("a run").to_string();
+    // The first reading's question waits on its gate…
+    fake.helper.press(&run, 3, 0);
+    fake.now += REFLEX_COLLECT_MS;
+    fake.tick(&mut autopilot);
+    // …while a newer reading — nothing pressed since — is read and waits.
+    fake.now += REFLEX_COLLECT_MS;
+    fake.tick(&mut autopilot);
+    first.send(()).expect("the late answer");
+    fake.settle_until_rows(&mut autopilot, 1);
+    // The first reading's facts again, half a collect on: young enough for
+    // its answers, had they been held.
+    fake.helper.press(&run, 3, 0);
+    fake.now += REFLEX_COLLECT_MS / 2;
+    fake.tick(&mut autopilot);
+    assert!(fake.held_rows().is_empty());
+    let ahead = ahead_of(&run);
+    assert_eq!(ahead["held"], json!(0), "nothing was held for anyone");
+    assert_eq!(ahead["used"], json!(0));
+    // The second reading's answer comes back after the third was read: held
+    // for nobody either. The third's, back before any newer reading, is.
+    second.send(()).expect("the second answer");
+    fake.settle_until_rows(&mut autopilot, 3);
+    assert_eq!(
+        ahead_of(&run)["held"],
+        json!(1),
+        "only the answer that came back before a newer reading"
+    );
 }

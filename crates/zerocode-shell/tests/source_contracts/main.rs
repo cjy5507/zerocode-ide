@@ -11202,6 +11202,92 @@ mod tests {
         );
     }
 
+    /// The evidence panel never shows a raw tag (t-34315).
+    ///
+    /// The backend says why an observation did not cover everything with a
+    /// snake_case tag — `ignored_content`, `untracked_content` — and the panel
+    /// printed it as it came, in every language, after a sentence that had no
+    /// words for it either. A tag is not a sentence. The window turns each one
+    /// into words through ONE table, and this reads the tags out of the function
+    /// that writes them, so a gap kind the backend learns tomorrow is a red here
+    /// and not a raw tag on somebody's screen. The table's rows are then held to
+    /// words in all five languages: Korean at the call site, the other four in
+    /// their catalogs.
+    #[test]
+    fn every_gap_the_evidence_can_name_has_words_in_all_five_languages() {
+        let backend = include_str!("../../../zerocode-orchestrator/src/worktree_evidence.rs");
+        let writer = backend
+            .find("fn gap_tag(")
+            .map(|at| &backend[at..])
+            .and_then(|rest| rest.split_once("\n}\n").map(|(body, _)| body))
+            .expect("the backend's gap_tag function is gone");
+        let tags: Vec<&str> = writer
+            .lines()
+            .filter_map(|line| {
+                let (_, after) = line.split_once("=> \"")?;
+                after.split_once('"').map(|(tag, _)| tag)
+            })
+            .collect();
+        assert!(
+            tags.len() >= 6,
+            "only {} gap tags were read out of gap_tag — the scan broke: {writer}",
+            tags.len()
+        );
+
+        let window = window_source();
+        let table = window
+            .find("const WORKTREE_EVIDENCE_GAPS = {")
+            .map(|at| &window[at..])
+            .and_then(|rest| rest.split_once("\n};\n").map(|(body, _)| body));
+        assert!(
+            table.is_some(),
+            "the window has no table that turns a gap tag into words"
+        );
+        let table = table.unwrap_or_default();
+
+        fn catalog<'a>(window: &'a str, language: &str) -> &'a str {
+            let opened = format!("\n  {language}: {{\n");
+            let at = window
+                .find(&opened)
+                .unwrap_or_else(|| panic!("no `{language}` catalog"));
+            let rest = &window[at..];
+            rest.split_once("\n  },").map_or(rest, |(block, _)| block)
+        }
+        let mut wordless: Vec<String> = Vec::new();
+        for tag in tags {
+            let Some(row) = table
+                .lines()
+                .find(|line| line.trim_start().starts_with(&format!("{tag}: () => t(")))
+            else {
+                wordless.push(format!("{tag}: no row in WORKTREE_EVIDENCE_GAPS"));
+                continue;
+            };
+            let Some((_, rest)) = row.split_once("t(\"") else {
+                wordless.push(format!("{tag}: the row does not ask a catalog key"));
+                continue;
+            };
+            let Some((key, fallback)) = rest.split_once("\", \"") else {
+                wordless.push(format!(
+                    "{tag}: the row has no Korean sentence at its call site"
+                ));
+                continue;
+            };
+            if fallback.trim_start_matches(['"', ')', ',', ' ']).is_empty() {
+                wordless.push(format!("{tag}: the Korean sentence is empty"));
+            }
+            for language in ["en", "ja", "zh", "es"] {
+                if !catalog(window, language).contains(&format!("\"{key}\":")) {
+                    wordless.push(format!("{tag}: `{key}` is not in the `{language}` catalog"));
+                }
+            }
+        }
+        assert!(
+            wordless.is_empty(),
+            "a gap tag would reach the screen as a raw tag:\n  {}",
+            wordless.join("\n  ")
+        );
+    }
+
     /// A keyed element is not overwritten behind its key.
     ///
     /// `applyLocale` redraws every element the markup keyed FROM that key, so
@@ -33997,14 +34083,35 @@ mod tests {
     fn a_door_publish_hands_the_window_its_row() {
         let backend = shipped_backend();
         let door = block_after(backend, "fn artifact_request(");
+        // The publish arm tells the window through ONE function, which the page an
+        // explanation's one-shot makes (t-32787) goes through as well — two roads that
+        // told the window apart could tell it differently.
+        assert!(
+            door.contains("publish_and_tell(store, &input, origin)"),
+            "the publish arm no longer publishes through the one function that tells the window:\n{door}"
+        );
+        let telling = block_after(backend, "pub(crate) fn publish_and_tell(");
         // The row goes out with its feedback count on it (t-11959): the same
         // row the catalog holds, filled by the store, then emitted.
         assert!(
-            door.contains("app.emit(CHANGED_EVENT, ())")
-                && door.contains("let mut row = meta.artifact(origin);")
-                && door.contains("store.fill_feedback(&mut row);")
-                && door.contains("app.emit(PUBLISHED_EVENT, row)"),
-            "the publish arm no longer hands the window the row it published:\n{door}"
+            telling.contains("app.emit(CHANGED_EVENT, ())")
+                && telling.contains("let mut row = meta.artifact(origin);")
+                && telling.contains("store.fill_feedback(&mut row);")
+                && telling.contains("app.emit(PUBLISHED_EVENT, row.clone())"),
+            "the publish door no longer hands the window the row it published:\n{telling}"
+        );
+        // The window hears the publication first and an explanation's `ready` after it:
+        // opening the page it asked for after the notice of a publication clears that
+        // notice, and the other order would raise a 「새 N」 for a page opening right now.
+        let published = telling
+            .find("app.emit(PUBLISHED_EVENT, row.clone())")
+            .expect("the publication is emitted");
+        let explained = telling
+            .find("explain_door::note_published(")
+            .expect("an explanation hears the publication");
+        assert!(
+            published < explained,
+            "an explanation's page is announced before the publication the window opens it from:\n{telling}"
         );
         assert!(
             backend.contains("pub(crate) const PUBLISHED_EVENT: &str = \"artifacts:published\";"),

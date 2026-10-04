@@ -7043,6 +7043,45 @@ function artifactMetaRow(list, row) {
   list.append(term, value);
 }
 
+/* ---- 글 점검 배지 (t-32786) -------------------------------------------------
+ *
+ * 에이전트가 사람에게 쓴 글 — 원장이 받은 `worker_done` 요약(보드의 끝난 행)과 아티팩트
+ * 서랍의 보고서 — 을 백엔드가 센 숫자(`plain_text::lint`) 그대로 한 줄로 말한다. 규칙과
+ * 한도는 백엔드의 것이고 여기는 그 수를 그릴 뿐이다: 거절도 경고색도 없고, 센 것이 없으면
+ * 「걸린 것 없음」이다. 센 수가 없는 답(쓴 요약이 없음·센 문장이 없음)이면 `null` — 부르는
+ * 쪽이 줄을 숨긴다. 서랍과 데스크 행이 이 한 함수를 쓴다. */
+function writingBadgeWords(lint) {
+  if (!lint || typeof lint !== "object" || !(Number(lint.sentences) > 0)) return null;
+  const unit = lint.lang === "en" ? t("writing.unitWords", "단어") : t("writing.unitChars", "자");
+  const counts = {
+    avg: Number(lint.avg_len) || 0,
+    unit,
+    long: Number(lint.long_sentences) || 0,
+    words: Number(lint.words) || 0,
+    patterns: Number(lint.patterns) || 0,
+  };
+  const noted = counts.long + counts.words + counts.patterns > 0;
+  const hits = (Array.isArray(lint.hits) ? lint.hits : [])
+    .map((hit) => t("writing.hit", "‘{{find}}’ → {{plain}} ×{{count}}", {
+      find: String(hit.find), plain: String(hit.plain), count: Number(hit.count) || 0,
+    }))
+    .join(" · ");
+  const tip = [
+    t("writing.tip", "{{sentences}}문장을 센 결과입니다. 한 문장이 {{limit}}{{unit}}를 넘으면 긴 문장입니다. 세기만 하고 글을 거절하지 않습니다.",
+      { sentences: Number(lint.sentences), limit: Number(lint.limit) || 0, unit }),
+    lint.cut ? t("writing.tipCut", "글이 길어 앞부분만 읽었습니다.") : "",
+    hits,
+  ].filter(Boolean).join(" ");
+  return {
+    noted,
+    hits,
+    tip,
+    text: noted
+      ? t("writing.badge", "글 점검 · 문장 평균 {{avg}}{{unit}} · 긴 문장 {{long}} · 바꿀 말 {{words}} · 직역투 {{patterns}}", counts)
+      : t("writing.badgeClean", "글 점검 · 문장 평균 {{avg}}{{unit}} · 걸린 것 없음", counts),
+  };
+}
+
 function buildArtifactDrawer() {
   const drawer = document.createElement("aside");
   drawer.className = "artifacts-drawer";
@@ -7084,6 +7123,16 @@ function buildArtifactDrawer() {
   truncated.dataset.i18n = "artifacts.previewTruncated";
   truncated.textContent = t("artifacts.previewTruncated", "표 상한까지만 보입니다 — 전체는 「열기」로.");
   truncated.hidden = true;
+  // 글 점검 한 줄(t-32786): 센 수와, 걸린 말과 바꿔 쓸 말. 미리보기 상자 밖에 서서 글을 넘겨 보지
+  // 않아도 보이고, 센 수가 없으면 숨는다.
+  const writing = document.createElement("p");
+  writing.className = "artifact-preview-writing";
+  writing.hidden = true;
+  const writingLine = document.createElement("span");
+  writingLine.className = "artifact-preview-writing-line";
+  const writingHits = document.createElement("span");
+  writingHits.className = "artifact-preview-writing-hits";
+  writing.append(writingLine, writingHits);
   preview.append(md, img, text, none, truncated);
 
   const meta = document.createElement("dl");
@@ -7127,7 +7176,7 @@ function buildArtifactDrawer() {
     one.appendChild(label);
     actions.appendChild(one);
   }
-  detail.append(head, preview, meta, noOrigin, links, actions);
+  detail.append(head, preview, writing, meta, noOrigin, links, actions);
   drawer.append(empty, detail);
   return drawer;
 }
@@ -7939,6 +7988,13 @@ async function paintArtifactPreview(view, row) {
   text.hidden = payload.kind !== "text";
   none.hidden = !(payload.kind === "none" || (payload.kind === "image" && !payload.data_url));
   truncated.hidden = payload.truncated !== true;
+  const badge = payload.kind === "markdown" ? writingBadgeWords(payload.writing) : null;
+  const writing = drawer.querySelector(".artifact-preview-writing");
+  const writingHits = writing.querySelector(".artifact-preview-writing-hits");
+  writing.hidden = badge === null;
+  writing.querySelector(".artifact-preview-writing-line").textContent = badge?.text ?? "";
+  writingHits.textContent = badge?.hits ?? "";
+  writingHits.hidden = !badge?.hits;
   if (payload.kind === "markdown") {
     if (md._painted !== payload.text) {
       md._painted = payload.text;
@@ -9111,11 +9167,25 @@ function artifactTabShown(tab) {
   return stageGroups().includes(tab.pane) && activeTabIn(tab.pane)?.id === tab.id && !stagePagesCover();
 }
 
+/* 열고 있는 중인 발행 — 같은 아티팩트를 두 길(발행 소식의 자동 열기, 「그림·페이지로 설명」이
+ * 만든 페이지를 여는 길)이 한꺼번에 열려 해도 탭은 하나다. */
+const artifactBesideOpening = new Set();
+
 /* 발행한 판 옆에 연다. 그 판이 이 체크아웃에 서 있을 때만 옆이고, 아니면 여는
  * 길은 갤러리의 「열기」와 같다. 오른쪽에 이미 이웃 그룹이 있으면 그 자리가
  * 옆이다 — 아무것도 새로 나누지 않는다. 이웃이 없을 때만 나누고, 그 판이 좁으면
  * (그 셸이 지금 입은 폭) 나누는 대신 같은 그룹의 탭이다. */
-async function openArtifactBeside(row, maker, { hint = null } = {}) {
+async function openArtifactBeside(row, maker, options = {}) {
+  if (artifactBesideOpening.has(row.id)) return true;
+  artifactBesideOpening.add(row.id);
+  try {
+    return await openArtifactBesideOnce(row, maker, options);
+  } finally {
+    artifactBesideOpening.delete(row.id);
+  }
+}
+
+async function openArtifactBesideOnce(row, maker, { hint = null } = {}) {
   const tab = maker === null ? null : tabOfTerm(maker);
   let seat = null;
   if (tab && (tab.worktree ?? activeWorktreePath) === activeWorktreePath && stageGroups().includes(tab.pane)) {
