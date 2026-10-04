@@ -465,6 +465,10 @@ zerocode-computer batch --commands '[["click","--app","iPhone Mirroring","--ocr"
 - Name the app once, by the name `observe` answered (`app`); every name of
   the same window reaches it. A click brings its window forward: `activate`
   is only for keys into an app that is not in front.
+- After the batch, look at that window once it has settled —
+  `observe --app <app> --diff --settle` — or, when its words are enough to
+  plan the next screen, `read --app <app> --ocr`: every line with its
+  position, and no picture to open.
 - In zo: `left_click` with `app`, `label` (the words), `ocr: true`,
   `after_text` and `offset` (pixels); `wait_for` with `app`, `ocr: true`,
   `text`. The batch's look after shows that app's window once it has settled
