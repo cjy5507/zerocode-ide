@@ -488,11 +488,17 @@ export async function testArtifactCards(browser, origin, ok) {
         await new Promise((done) => setTimeout(done, 300));
         const digest = pane?.querySelector(".artifact-digest") ?? null;
         const raw = pane?.querySelector(".artifact-digest-raw") ?? null;
+        // The title and what is read under it: the summary, or the text where there is none.
+        const title = pane?.querySelector(".artifact-detail-title") ?? null;
+        const under = shown(digest) ? digest : pane?.querySelector(".artifact-preview") ?? null;
+        const left = (node) => (shown(node) ? Math.round(node.getBoundingClientRect().left) : null);
         const visible = [...(pane?.querySelectorAll("*") ?? [])]
           .filter((one) => shown(one) && !one.closest("details:not([open])") && one.children.length === 0)
           .map((one) => one.textContent).join("\n");
         return {
           digestShown: shown(digest),
+          titleLeft: left(title),
+          underLeft: left(under),
           summary: text(digest?.querySelector(".artifact-digest-summary")),
           steps: [...(digest?.querySelectorAll(".artifact-step") ?? [])].filter(shown).map((one) => ({
             ok: one.dataset.ok ?? null,
@@ -525,6 +531,12 @@ export async function testArtifactCards(browser, origin, ok) {
         shown: evidence.steps.digestShown, json: evidence.steps.showsJson, pre: evidence.steps.preShown, summary: evidence.steps.summary,
         steps: evidence.steps.steps.length, failed: failed?.words ?? null, passed: passed?.words ?? null, folds: evidence.steps.folds,
       }),
+    );
+    const titled = [evidence.steps, evidence.state, evidence.log];
+    ok(
+      "a row whose body is no Markdown says its title on the left edge of what is read under it — the summary, or the text",
+      titled.every((one) => one.titleLeft !== null && one.titleLeft === one.underLeft),
+      JSON.stringify(titled.map((one) => ({ title: one.titleLeft, under: one.underLeft }))),
     );
     ok(
       "the raw text stands behind 「원문 보기」, closed, for whoever wants it",

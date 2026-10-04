@@ -345,6 +345,12 @@ export async function testArtifactTasks(browser, origin, ok) {
       seen.banner = shown(bundle?.querySelector(".artifact-bundle-banner"));
       seen.bundleAsks = window.__TASKS__.bundles.join(",");
       seen.overflowX = (view?.querySelector(".artifacts-tasks")?.scrollWidth ?? 0) - (view?.querySelector(".artifacts-tasks")?.clientWidth ?? 0);
+      // The foot of the strip: how many lines each count stands on.
+      seen.footCounts = [...(view?.querySelectorAll(".artifacts-loose-show") ?? [])].filter(shown).map((one) => {
+        const words = document.createRange();
+        words.selectNodeContents(one);
+        return { word: one.textContent, lines: new Set([...words.getClientRects()].map((rect) => Math.round(rect.top))).size };
+      });
       return seen;
     });
     ok(
@@ -353,6 +359,11 @@ export async function testArtifactTasks(browser, origin, ok) {
         && reader.readerWidth >= reader.viewWidth - STRIP_WIDTH - 6 && reader.readerWidth >= 560 && reader.overflowX <= 0
         && reader.bundleAsks === "t-501",
       JSON.stringify({ detail: reader.detail, line: reader.selectedLine, strip: reader.stripWidth, reader: reader.readerWidth, view: reader.viewWidth, asks: reader.bundleAsks }),
+    );
+    ok(
+      "in the strip a count at the foot of the list stays one unbroken piece: 「증거 4」 does not break between its word and its number",
+      reader.footCounts.length === 3 && reader.footCounts.every((one) => one.lines === 1),
+      JSON.stringify(reader.footCounts),
     );
     ok(
       "the reader's head is the one row of stage 1, and the task's other attempts are one select: 「최종 보고 · 2편 중」 and 「1번째 시도」",
