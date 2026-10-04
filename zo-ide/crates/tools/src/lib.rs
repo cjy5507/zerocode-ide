@@ -17,6 +17,11 @@
 //! unchanged — only the cross-cutting glue that used to live inline was
 //! extracted as part of Phase 3.1 of the refactor.
 
+// The Computer tool's schema is one `json!` literal of every action's fields,
+// and the macro recurses once per pair: the person's-turn `into` (t-40807) is
+// the pair that passes the default limit of 128.
+#![recursion_limit = "256"]
+
 mod aliases;
 mod artifacts;
 mod bash_redirect;

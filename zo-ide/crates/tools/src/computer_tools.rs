@@ -238,8 +238,13 @@ pub(crate) struct ComputerInput {
     /// or delete — the window asks the person before the helper moves.
     pub confirming: Option<String>,
     /// `handoff`: ask for a one-time code on the person's card (the core's
-    /// `--ask-code`); the answer is the code.
+    /// `--ask-code`); the window types it into the field `into` names, and
+    /// the answer carries no code.
     pub ask_code: Option<bool>,
+    /// `handoff` with `ask_code`: the words of the input command that puts
+    /// the code into its field (`["set-value", "--app", …]`, a browser `type`,
+    /// an emulator `text`) — the window runs it, so the code never comes back.
+    pub into: Option<Vec<String>>,
     pub force: Option<bool>,
     pub reset_budget: Option<bool>,
     pub last: Option<u64>,
@@ -326,6 +331,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "absent": { "type": "boolean" },
         "confirming": { "type": "string", "enum": ["payment", "transfer", "delete"] },
         "ask_code": { "type": "boolean" },
+        "into": { "type": "array", "items": { "type": "string" } },
         "force": { "type": "boolean" },
         "reset_budget": { "type": "boolean" },
         "last": { "type": "integer", "minimum": 1 },
@@ -1720,6 +1726,8 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use runtime::{CompactionSummarizer, ContentBlock, ConversationMessage, MessageRole, Session};
 
     fn input(fields: Value) -> ComputerInput {
         serde_json::from_value(fields).expect("input")
@@ -1875,8 +1883,10 @@ mod tests {
                 &["recipe-run", "--name", "x", "--params", "{\"text-3\":\"hi\"}", "--start", "3", "--json"]),
             (json!({ "action": "handoff", "text": "Type your password", "timeout_ms": 60000 }),
                 &["handoff", "--reason", "Type your password", "--timeout-ms", "60000", "--json"]),
-            (json!({ "action": "handoff", "text": "카카오톡 인증번호", "ask_code": true, "timeout_ms": 180_000 }),
-                &["handoff", "--reason", "카카오톡 인증번호", "--ask-code", "--timeout-ms", "180000", "--json"]),
+            (json!({ "action": "handoff", "text": "카카오톡 인증번호", "ask_code": true,
+                "into": ["set-value", "--app", "Form", "--element-index", "3"], "timeout_ms": 180_000 }),
+                &["handoff", "--reason", "카카오톡 인증번호", "--ask-code", "--into",
+                    r#"["set-value","--app","Form","--element-index","3"]"#, "--timeout-ms", "180000", "--json"]),
             (json!({ "action": "walk", "goal": "도움말에서 설치 안내를 연다", "pane": "browser-13", "until": "설치 안내", "max_steps": 6 }),
                 &["walk", "--goal", "도움말에서 설치 안내를 연다", "--pane", "browser-13", "--until", "설치 안내", "--steps", "6", "--json"]),
         ];
@@ -1907,25 +1917,105 @@ mod tests {
         assert_eq!(spec.input_schema["properties"]["action"]["enum"].as_array().map(Vec::len), Some(ACTIONS.len()));
     }
 
-    /// A one-time code is asked for with one boolean on the person's turn
-    /// (t-40807): the core's `--ask-code`, passed through and never judged
-    /// here — whether the reason names a secret is the window's to say — and
-    /// named once in the tool's sentence, so the model knows the road.
+    /// The words of the input command that puts a typed code into a field of
+    /// a desktop app (t-40807).
+    const INTO_A_FIELD: [&str; 5] = ["set-value", "--app", "Form", "--element-index", "3"];
+
+    /// A one-time code asked for on the person's turn, with the field it goes
+    /// into.
+    fn a_code_into_a_field() -> Value {
+        json!({ "action": "handoff", "text": "The site's one-time code", "ask_code": true,
+            "into": INTO_A_FIELD, "timeout_ms": 180_000 })
+    }
+
+    /// A one-time code is asked for with `ask_code` and the words of the input
+    /// command that puts it into its field, `into` (t-40807): the window types
+    /// what the person types, and the answer carries no code. The tool passes
+    /// both through, never judged here — whether the reason names a secret is
+    /// the window's to say — in the order the core's line takes them, with no
+    /// word that would hand a code to the field from this side, and says in its
+    /// one sentence that the code does not come back, so the model knows the road.
     #[test]
-    fn the_persons_turn_asks_for_a_one_time_code_by_one_boolean() {
+    fn the_persons_turn_asks_for_a_one_time_code_by_into() {
         let spec = tool_specs().pop().expect("one spec");
-        assert_eq!(
-            spec.input_schema["properties"]["ask_code"]["type"],
-            json!("boolean"),
-            "the person's turn has no switch for a code"
-        );
-        assert!(spec.description.contains("ask_code"), "the tool's sentence does not say what ask_code is for");
+        let properties = &spec.input_schema["properties"];
+        assert_eq!(properties["ask_code"]["type"], json!("boolean"), "the person's turn has no switch for a code");
+        assert_eq!(properties["into"]["type"], json!("array"), "the person's turn has no place to put a code");
+        assert_eq!(properties["into"]["items"]["type"], json!("string"), "the words of an input command are strings");
         assert!(
-            spec.input_schema["properties"]["steps"]["items"]["properties"].get("ask_code").is_none(),
-            "the person's turn is never a batch step"
+            spec.description.contains("ask_code") && spec.description.contains("into"),
+            "the tool's sentence does not say what ask_code and into are for"
+        );
+        assert!(spec.description.contains("never receive"), "the tool's sentence does not say the code does not come back");
+        for field in ["ask_code", "into"] {
+            assert!(
+                properties["steps"]["items"]["properties"].get(field).is_none(),
+                "the person's turn is never a batch step: {field}"
+            );
+        }
+        let asked = argv_for(&input(a_code_into_a_field())).expect("a code asked for with the field it goes into");
+        let spelled = serde_json::to_string(&INTO_A_FIELD).expect("the words spell as JSON");
+        assert_eq!(
+            asked,
+            ["handoff", "--reason", "The site's one-time code", "--ask-code", "--into", spelled.as_str(), "--timeout-ms", "180000", "--json"]
+        );
+        assert!(
+            !asked.iter().any(|word| word == "--value" || word == "--text" || word.ends_with("-stdin")),
+            "a word hands a code to the field from this side: {asked:?}"
         );
         let plain = argv_for(&input(json!({ "action": "handoff", "text": "x", "ask_code": false }))).expect("a handoff");
         assert_eq!(plain, ["handoff", "--reason", "x", "--json"], "ask_code false is the plain turn");
+    }
+
+    /// A code asked for with no field to put it in is refused before the
+    /// shell is called (t-40807): the code never comes back to the model, so a
+    /// handoff that asks for one and names no field has nowhere to send it, and
+    /// a field named with no code to put in it is a mistake.
+    #[cfg(unix)]
+    #[test]
+    fn a_code_asked_for_without_into_is_refused_before_the_shell_is_called() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (road, _) = fake_shim(dir.path());
+        let ctx = ToolContext::new();
+        let cases = [
+            ("ask_code alone", json!({ "action": "handoff", "text": "x", "ask_code": true })),
+            ("an empty into", json!({ "action": "handoff", "text": "x", "ask_code": true, "into": [] })),
+            ("into alone", json!({ "action": "handoff", "text": "x", "into": INTO_A_FIELD })),
+            ("into beside ask_code false", json!({ "action": "handoff", "text": "x", "ask_code": false, "into": INTO_A_FIELD })),
+        ];
+        for (what, fields) in &cases {
+            let answer = run_computer(fields, &ctx, &road);
+            assert!(matches!(answer, Err(ToolError::InvalidInput(_))), "{what}: {answer:?}");
+        }
+        let verbs = calls(dir.path());
+        assert!(verbs.is_empty(), "the shell was called for a code with no field to put it in: {verbs:?}");
+        let refused = run_computer(&cases[0].1, &ctx, &road);
+        let told = refused.err().map(|error| error.to_string()).unwrap_or_default();
+        assert!(
+            told.contains("into") && told.contains("never reaches this conversation"),
+            "the refusal does not tell the model where the code goes: {told}"
+        );
+    }
+
+    /// The person's turn changes nothing on the screen by itself, and the
+    /// window's typing of the code into its field is no press of the model's:
+    /// no look follows a handoff (t-40807), so no picture of the field the
+    /// code is in comes back with the answer.
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_never_takes_a_look_after_picture() {
+        assert!(!acts("handoff") && !presses("handoff"), "a handoff is a turn the person takes, no act of the model's");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (road, _) = fake_shim(dir.path());
+        let ctx = ToolContext::new();
+        let answer = run_computer(&a_code_into_a_field(), &ctx, &road);
+        assert!(answer.is_ok(), "the handoff answers: {answer:?}");
+        let verbs = calls(dir.path());
+        assert_eq!(verbs, ["handoff"], "a look followed the handoff: {verbs:?}");
+        let words = handoff_words(dir.path());
+        assert!(words.iter().any(|word| word == "--into"), "the window was not told where to type the code: {words:?}");
+        assert_eq!(ctx.computer_frame(), None, "a handoff leaves the model's picture as it was");
+        assert_eq!(staged(&ctx), 0, "a picture came back with the code typed");
     }
 
     /// Looks are not followed by a look; a type is not a press; the presses
@@ -2000,9 +2090,17 @@ mod tests {
         assert!(!needs_a_frame(&input(json!({ "action": "key", "text": "Tab" }))));
     }
 
+    /// The one-time code the synthetic window of the code tests answers with
+    /// when it is the old window (t-40807).
+    #[cfg(unix)]
+    const A_CODE: &str = "ZC7TEST9";
+
     /// A fake shim on disk, answering like the window: a look carries a frame
     /// at half scale and what changed (read from a file the test flips), and
-    /// every answer carries a position in points.
+    /// every answer carries a position in points. A handoff answers as its
+    /// window does: with an `--into` in its line the answer carries no code,
+    /// without one it carries the old window's (`A_CODE`); the line's words
+    /// are kept, one to a line.
     #[cfg(unix)]
     fn fake_shim(dir: &Path) -> (ComputerRoad, PathBuf) {
         use std::os::unix::fs::PermissionsExt as _;
@@ -2017,6 +2115,14 @@ verb="$1"
 echo "$verb" >> '@DIR@/calls'
 [ "$verb" = batch ] && { printf '%s' "$3" > '@DIR@/batch-commands'; cat '@DIR@/batch'; echo; exit 0; }
 [ "$verb" = walk ] && [ -f '@DIR@/walk' ] && { printf '%s\n' "$*" > '@DIR@/walk-argv'; cat '@DIR@/walk'; echo; exit 0; }
+if [ "$verb" = handoff ]; then
+  for word in "$@"; do printf '%s\n' "$word"; done > '@DIR@/handoff-argv'
+  case "$*" in
+    *--into*) printf '%s\n' '{"ok":true,"result":{"resumed":true,"reason":"a code","codeLength":8,"entered":true,"into":{"tool":"computer","verb":"set-value"},"verification":"verified"}}' ;;
+    *) printf '%s\n' '{"ok":true,"result":{"resumed":true,"reason":"a code","code":"@CODE@","codeLength":8}}' ;;
+  esac
+  exit 0
+fi
 case "$verb" in
   screenshot|observe)
     cp '@PNG@' '@PNG@'.$$
@@ -2028,6 +2134,7 @@ printf '%s
 "#
         .replace("@PNG@", &png.display().to_string())
         .replace("@CHANGED@", &changed.display().to_string())
+        .replace("@CODE@", A_CODE)
         .replace("@DIR@", &dir.display().to_string());
         std::fs::write(&program, script).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2309,6 +2416,12 @@ printf '%s
     #[cfg(unix)]
     fn calls(dir: &Path) -> Vec<String> {
         std::fs::read_to_string(dir.join("calls")).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    /// The words of the last handoff the fake shim was called with.
+    #[cfg(unix)]
+    fn handoff_words(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("handoff-argv")).unwrap_or_default().lines().map(str::to_string).collect()
     }
 
     /// Each step of a batch is spelled exactly as the same action alone, in
@@ -2769,6 +2882,169 @@ printf '%s
         assert!(said.contains("--app iPhone Mirroring"), "the app the model last looked at: {said}");
     }
 
+    /// A summarizer that keeps what it was asked to summarize.
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct Recording(std::cell::RefCell<String>);
+
+    #[cfg(unix)]
+    impl CompactionSummarizer for Recording {
+        fn summarize(&self, messages: &[ConversationMessage]) -> String {
+            *self.0.borrow_mut() =
+                messages.iter().map(|message| message.to_json().render()).collect::<Vec<_>>().join("\n");
+            String::from("<summary>Conversation summary: a turn passed.</summary>")
+        }
+    }
+
+    /// Where a value is found after a conversation has been written down,
+    /// compacted and read again by the roads of a zo session.
+    #[cfg(unix)]
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Found {
+        /// The files a persisted session leaves: its transcript, a rotated
+        /// copy, its vault.
+        files: Vec<String>,
+        /// The roads that carry the conversation on: the next request, what a
+        /// summary is asked about, the deterministic summary, the turn trace.
+        roads: Vec<&'static str>,
+    }
+
+    /// A conversation around `middle`: the person's first words, `middle`, and
+    /// four turns that follow, so a compaction seals `middle` into the vault.
+    #[cfg(unix)]
+    fn a_conversation(middle: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+        let says = |words: &str| vec![ContentBlock::Text { text: words.to_string() }];
+        let mut messages = vec![ConversationMessage::user_text("Sign in with the code the site sends")];
+        messages.extend(middle);
+        messages.extend([
+            ConversationMessage::assistant(says("Signed in.")),
+            ConversationMessage::user_text("Thanks."),
+            ConversationMessage::assistant(says("Anything else?")),
+            ConversationMessage::user_text("No."),
+        ]);
+        messages
+    }
+
+    /// The session files in `dir` that hold `needle`, by name.
+    #[cfg(unix)]
+    fn files_holding(dir: &Path, needle: &str) -> Vec<String> {
+        let mut holding: Vec<String> = std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("session"))
+            .filter(|entry| String::from_utf8_lossy(&std::fs::read(entry.path()).unwrap_or_default()).contains(needle))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        holding.sort();
+        holding
+    }
+
+    /// `messages` as a zo session lives them: pushed to a persisted session,
+    /// compacted once (the summary asked about the evicted turns, their raw
+    /// originals sealed to the vault), converted for the next request,
+    /// summarized by the deterministic summarizer and traced as a turn — and
+    /// where `needle` is found on each road.
+    #[cfg(unix)]
+    fn scan_everywhere(messages: &[ConversationMessage], needle: &str) -> Found {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = Session::new().with_persistence_path(dir.path().join("session.jsonl"));
+        for message in messages {
+            let pushed = session.push_message(message.clone());
+            assert!(pushed.is_ok(), "the session takes a message: {pushed:?}");
+        }
+        let recording = Recording::default();
+        let config = runtime::CompactionConfig { preserve_recent_messages: 2, max_estimated_tokens: 1 };
+        let compacted = runtime::compact_session_with(&session, config, &recording);
+        assert!(compacted.removed_message_count > 0, "the conversation was compacted, its turns sealed to the vault");
+        let turn = runtime::TurnSummary {
+            assistant_messages: Vec::new(),
+            tool_results: messages.iter().filter(|message| message.role == MessageRole::Tool).cloned().collect(),
+            prompt_cache_events: Vec::new(),
+            iterations: 1,
+            usage: runtime::usage::TokenUsage::default(),
+            turn_output_tokens: 0,
+            auto_compaction: None,
+            microcompact: None,
+            deep_verification: None,
+            verification_issues: Vec::new(),
+            deep_verifier_parse: None,
+            deep_verifier_model: None,
+            budget_exhausted: None,
+        };
+        let roads = [
+            ("wire", serde_json::to_string(&runtime::convert_messages(messages)).unwrap_or_default()),
+            ("summary asked", recording.0.borrow().clone()),
+            ("local summary", runtime::LocalSummarizer.summarize(messages)),
+            ("turn trace", serde_json::to_string(&runtime::TurnRecord::from_summary("session", 1, &turn, None)).unwrap_or_default()),
+        ];
+        Found {
+            files: files_holding(dir.path(), needle),
+            roads: roads.into_iter().filter(|(_, text)| text.contains(needle)).map(|(road, _)| road).collect(),
+        }
+    }
+
+    /// The code a window answers is in no store of a zo conversation (t-40807):
+    /// the answer of a window that types the code into its field carries none,
+    /// and a handoff that asks for a code with no field to put it in is refused
+    /// before the window is asked — so neither result reaches the transcript,
+    /// its rotated copies, the vault, the next request, what a summary is asked
+    /// about, the summary, or the turn trace; nor does the model hold a code
+    /// to type into a call of its own. The same scan finds a code planted in a
+    /// tool result on every road that carries one, and on the turn trace — which
+    /// keeps no output — it finds none.
+    #[cfg(unix)]
+    #[test]
+    fn a_code_the_window_answers_is_in_no_store_of_a_zo_conversation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (road, _) = fake_shim(dir.path());
+        let ctx = ToolContext::new();
+        let calls_made = [
+            ("call-1", a_code_into_a_field()),
+            ("call-2", json!({ "action": "handoff", "text": "The site's one-time code", "ask_code": true })),
+        ];
+        let mut middle = Vec::new();
+        for (id, fields) in &calls_made {
+            let answer = run_computer(fields, &ctx, &road);
+            let is_error = answer.is_err();
+            let output = answer.unwrap_or_else(|error| error.to_string());
+            let call = ContentBlock::ToolUse { id: (*id).to_string(), name: "Computer".to_string(), input: fields.to_string() };
+            middle.push(ConversationMessage::assistant(vec![call]));
+            middle.push(ConversationMessage::tool_result(*id, "Computer", output, is_error));
+        }
+        let conversation = a_conversation(middle);
+
+        let planted_answer = format!("{{\"ok\":true,\"result\":{{\"code\":\"{A_CODE}\"}}}}");
+        let planted = scan_everywhere(
+            &a_conversation(vec![
+                ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                    id: "plant".to_string(),
+                    name: "Computer".to_string(),
+                    input: "{}".to_string(),
+                }]),
+                ConversationMessage::tool_result("plant", "Computer", planted_answer, false),
+            ]),
+            A_CODE,
+        );
+        assert!(planted.files.iter().any(|name| name.ends_with(".vault.jsonl")), "the vault keeps the evicted turns raw: {planted:?}");
+        for stored in ["wire", "summary asked", "local summary"] {
+            assert!(planted.roads.contains(&stored), "the scan does not see a planted code on the {stored} road: {planted:?}");
+        }
+        assert!(!planted.roads.contains(&"turn trace"), "the turn trace keeps no tool output: {planted:?}");
+        let alive = scan_everywhere(&conversation, "call-1");
+        assert!(alive.roads.contains(&"wire") && !alive.files.is_empty(), "the roads do not carry this conversation: {alive:?}");
+
+        let found = scan_everywhere(&conversation, A_CODE);
+        assert_eq!(found, Found::default(), "a code the window answered reached a store of the conversation");
+        for message in &conversation {
+            for block in &message.blocks {
+                if let ContentBlock::ToolUse { input, .. } = block {
+                    assert!(!input.contains(A_CODE), "the model was handed a code to type: {input}");
+                }
+            }
+        }
+    }
+
     /// The tool's seat in a conversation once it is looked up, measured the
     /// way the harness measures every schema (the serialized definition,
     /// `chars/4 + 1`), and pinned from above so a batch's step items cannot
@@ -2783,10 +3059,11 @@ printf '%s
     /// step, one sentence; t-37883) ~135, a walk (one
     /// name, eight fields, `until` read by two actions, one sentence) ~134,
     /// the person's turn asking for a one-time code (one boolean, one clause)
-    /// ~19.
+    /// ~19, and where the window types it (`into`: one array property, one
+    /// sentence) ~55.
     #[test]
     fn the_computer_schema_is_measured() {
-        const CEILING_TOKENS: usize = 1_980;
+        const CEILING_TOKENS: usize = 2_050;
         let spec = tool_specs().pop().expect("one spec");
         let definition = json!({ "name": spec.name, "description": spec.description, "input_schema": spec.input_schema });
         let compact = serde_json::to_string(&definition).unwrap().chars().count();
