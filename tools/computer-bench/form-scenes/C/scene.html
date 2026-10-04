@@ -1,0 +1,1098 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>하버 파크앤플라이 - 공항 주차 예약</title>
+<style>
+:root{--pri:#0b5cff;--pri-d:#0848c4;--ink:#1d2433;--sub:#5c6678;--line:#d5dbe6;--bg:#f3f5f9;--err:#d12f49;--ok:#16803f}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{font:15px/1.5 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif;color:var(--ink);background:var(--bg)}
+.site-h{background:#fff;border-bottom:1px solid var(--line)}
+.site-h .in{max-width:860px;margin:0 auto;padding:12px 16px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+.logo{display:flex;align-items:center;gap:8px;font-weight:700;font-size:17px;color:#0a2a66}
+.logo i{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,#0b5cff,#19b5a5);display:inline-block}
+.nav-i{color:var(--sub);font-size:14px}
+.today{margin-left:auto;color:var(--sub);font-size:13px}
+.wrap{max-width:860px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:22px;margin:4px 0 14px}
+.steps{list-style:none;margin:0 0 16px;padding:0;display:flex;gap:8px}
+.steps li{flex:1;display:flex;align-items:center;gap:8px;padding:10px 12px;background:#fff;border:1px solid var(--line);border-radius:10px;color:var(--sub);font-size:14px}
+.steps li b{width:24px;height:24px;border-radius:50%;background:#e4e8f0;color:var(--sub);display:inline-flex;align-items:center;justify-content:center;font-size:13px;flex:none}
+.steps li.on{border-color:var(--pri);color:var(--ink);font-weight:600}
+.steps li.on b{background:var(--pri);color:#fff}
+.steps li.done b{background:var(--ok);color:#fff}
+.banner{margin:0 0 14px;padding:11px 14px;border-radius:10px;background:#fdecef;border:1px solid #f3b8c2;color:#9b1c33;font-size:14px}
+.panel{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px 22px}
+.panel h2{font-size:18px;margin:0 0 6px}
+.grp{margin-top:18px}
+.grp h3{font-size:14px;margin:0 0 4px;color:var(--pri-d)}
+.row{display:grid;grid-template-columns:150px minmax(0,1fr);gap:6px 16px;padding:12px 0;border-top:1px solid #edf0f5;align-items:start}
+.row .cap,.row>dt{padding-top:8px;font-weight:600;font-size:14px;margin:0}
+.row>dd{margin:0}
+.dl{margin:0}
+.cap label{font-weight:600}
+.req{color:var(--err);font-style:normal;margin-left:3px}
+.ctl{min-width:0}
+input[type=text],select,textarea{height:38px;padding:0 10px;border:1px solid #b9c2d3;border-radius:8px;font:inherit;background:#fff;color:var(--ink)}
+textarea{height:76px;padding:8px 10px;width:100%;max-width:440px;resize:vertical}
+input[readonly]{background:#f6f8fb}
+input:focus,select:focus,textarea:focus,.dd-btn:focus,.chk:focus,.day:focus,.cal-nav:focus,.btn:focus{outline:2px solid #7aa7ff;outline-offset:1px}
+.in-m{width:100%;max-width:320px}
+.in-s{width:78px;text-align:center}
+.sel-s{width:84px}
+.sel-m{width:130px}
+.u,.sep{color:var(--sub);margin:0 6px 0 3px}
+.sep{margin:0 4px}
+.err{color:var(--err);font-size:13px;margin-top:4px;min-height:0}
+.err:empty{display:none}
+.row.bad input[type=text],.row.bad select,.row.bad .dd-btn,.row.bad textarea{border-color:var(--err)}
+.sub{color:var(--sub);font-size:12.5px;margin-top:4px}
+.dd{position:relative;width:100%;max-width:360px}
+.dd-btn{display:flex;align-items:center;justify-content:space-between;width:100%;height:38px;padding:0 12px;border:1px solid #b9c2d3;border-radius:8px;background:#fff;cursor:pointer;font:inherit;color:var(--ink);text-align:left}
+.dd-btn::after{content:"";border:5px solid transparent;border-top-color:#6b7487;margin-top:5px}
+.dd.open .dd-btn{border-color:var(--pri)}
+.dd-val.placeholder{color:#8a93a6}
+.dd.disabled .dd-btn{background:#f1f3f7;color:#8a93a6;cursor:not-allowed}
+.dd-list{position:absolute;left:0;right:0;top:calc(100% + 4px);margin:0;padding:4px;list-style:none;background:#fff;border:1px solid #b9c2d3;border-radius:8px;box-shadow:0 8px 24px rgba(20,30,60,.14);z-index:20}
+.dd-list li{padding:9px 10px;border-radius:6px;cursor:pointer}
+.dd-list li.act{background:#eaf1ff}
+.dd-list li.sel{font-weight:700;color:var(--pri-d)}
+.datebox{position:relative;display:inline-flex;gap:6px;align-items:center}
+.datebox input{width:210px;cursor:pointer}
+.cal-ico{height:38px;padding:0 12px;border:1px solid #b9c2d3;border-radius:8px;background:#f3f6fb;font:inherit;font-size:13px;cursor:pointer;color:var(--ink)}
+.cal{position:absolute;left:0;top:calc(100% + 6px);width:292px;background:#fff;border:1px solid #b9c2d3;border-radius:10px;box-shadow:0 10px 28px rgba(20,30,60,.18);padding:10px;z-index:30}
+.cal-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.cal-h strong{font-size:15px}
+.cal-nav{width:32px;height:32px;border:0;border-radius:8px;background:#eef2f9;font-size:18px;line-height:1;cursor:pointer;color:var(--ink)}
+.cal-nav:disabled{opacity:.35;cursor:not-allowed}
+.cal-t{width:100%;border-collapse:collapse}
+.cal-t th{font-size:12px;color:var(--sub);padding:4px 0;font-weight:600}
+.cal-t td{padding:1px;text-align:center}
+.day{width:36px;height:34px;border:0;background:none;border-radius:8px;cursor:pointer;font:inherit;color:var(--ink)}
+.day:hover:not(:disabled){background:#e8f0ff}
+.day.today{box-shadow:inset 0 0 0 1px var(--pri)}
+.day.sel{background:var(--pri);color:#fff}
+.day:disabled{color:#b7bfcd;cursor:not-allowed}
+.radio{display:inline-flex;align-items:center;gap:6px;margin:6px 18px 0 0;cursor:pointer}
+.vt{width:100%;border-collapse:collapse;margin-top:6px}
+.vt th{background:#f3f6fb;font-size:13px;padding:8px 10px;border:1px solid var(--line);text-align:left}
+.vt td{padding:8px;border:1px solid var(--line);vertical-align:top}
+.vt td input,.vt td select{width:100%}
+.vt tr.errs td{border:0;padding:0 8px 4px}
+.btn{height:44px;min-width:112px;padding:0 20px;border:0;border-radius:10px;font:inherit;font-weight:600;cursor:pointer}
+.btn.pri{background:var(--pri);color:#fff}
+.btn.sec{background:#e6ebf4;color:var(--ink)}
+.btn:disabled{opacity:.6;cursor:default}
+.btn-s{height:38px;padding:0 14px;border:1px solid var(--pri);border-radius:8px;background:#fff;color:var(--pri-d);font:inherit;font-size:14px;font-weight:600;cursor:pointer;margin-left:8px}
+.btn-s:disabled{opacity:.55;cursor:default}
+#nav{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
+.otp{margin-top:10px;padding:10px 12px;background:#f6f9ff;border:1px solid #dbe6fb;border-radius:8px}
+.otp-msg{font-size:13px;color:var(--pri-d);margin-bottom:6px}
+.otp-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.otp-cap{font-size:14px;font-weight:600}
+.otp-row input{width:130px;letter-spacing:2px;text-align:center}
+.timer{color:var(--err);font-variant-numeric:tabular-nums;font-size:14px}
+.otp-ok{color:var(--ok);font-weight:600;margin-top:8px;font-size:14px}
+.summary{border:1px solid var(--line);border-radius:10px;background:#fafbfd;padding:6px 14px}
+.srow{display:flex;gap:12px;padding:6px 0;border-bottom:1px dashed #e3e7ef;font-size:14px}
+.srow:last-child{border-bottom:0}
+.srow span{width:92px;color:var(--sub);flex:none}
+iframe#pay-frame{display:block;width:100%;height:440px;border:1px solid var(--line);border-radius:10px;background:#fff}
+.agree-item{padding:8px 0;border-bottom:1px solid #edf0f5}
+.agree-line{display:flex;align-items:center;gap:10px;justify-content:space-between}
+.chk,.chk2{display:inline-flex;align-items:center;gap:10px;cursor:pointer;user-select:none;position:relative}
+.box{width:22px;height:22px;border:2px solid #aab4c8;border-radius:6px;background:#fff;display:inline-block;position:relative;flex:none}
+.chk.on .box,.chk2 input:checked+.box{background:var(--pri);border-color:var(--pri)}
+.chk.on .box::after,.chk2 input:checked+.box::after{content:"";position:absolute;left:6px;top:2px;width:5px;height:11px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+.chk2 input{position:absolute;opacity:0;width:1px;height:1px;margin:0;pointer-events:none}
+.chk2 input:focus+.box{outline:2px solid #7aa7ff;outline-offset:1px}
+.link{border:0;background:none;color:var(--sub);text-decoration:underline;font:inherit;font-size:13px;cursor:pointer}
+.terms-body{margin:8px 0 0;padding:10px 12px;background:#f6f8fb;border-radius:8px;font-size:13px;color:var(--sub);max-height:110px;overflow:auto}
+.done{text-align:center;padding:36px 22px}
+.done-ic{width:56px;height:56px;border-radius:50%;background:var(--ok);color:#fff;font-size:30px;line-height:56px;margin:0 auto 12px}
+.done .summary{text-align:left;max-width:520px;margin:16px auto}
+.small{font-size:13px;color:var(--sub)}
+footer{max-width:860px;margin:0 auto;padding:0 16px 32px;color:var(--sub);font-size:12.5px}
+@media (max-width:640px){
+  .row{grid-template-columns:1fr;gap:2px}
+  .row .cap,.row>dt{padding-top:0}
+  .steps li span.t{display:none}
+  .datebox input{width:170px}
+  .panel{padding:16px 14px}
+}
+</style>
+</head>
+<body>
+<header class="site-h">
+  <div class="in">
+    <div class="logo"><i></i><span>하버 파크앤플라이</span></div>
+    <span class="nav-i">주차 예약</span>
+    <span class="nav-i">요금 안내</span>
+    <span class="nav-i">예약 확인</span>
+    <span class="nav-i">고객센터 02-555-0100</span>
+    <span class="today" id="today"></span>
+  </div>
+</header>
+
+<main class="wrap">
+  <h1>공항 주차 예약</h1>
+  <ol class="steps" id="steps">
+    <li class="on" data-step="1"><b>1</b><span class="t">예약 정보</span></li>
+    <li data-step="2"><b>2</b><span class="t">차량 · 운전자</span></li>
+    <li data-step="3"><b>3</b><span class="t">결제 · 동의</span></li>
+  </ol>
+  <div id="banner" class="banner" role="alert" hidden></div>
+
+  <form id="rsv" novalidate autocomplete="off" onsubmit="return false">
+
+    <section id="step1" class="panel">
+      <h2>1. 예약 정보</h2>
+
+      <div class="grp">
+        <h3>이용 장소</h3>
+        <div class="row">
+          <div class="cap" id="cap-terminal">이용 터미널<em class="req">*</em></div>
+          <div class="ctl">
+            <div class="dd" id="dd-terminal">
+              <button type="button" class="dd-btn" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-controls="dd-terminal-list" aria-labelledby="cap-terminal dd-terminal-val">
+                <span class="dd-val placeholder" id="dd-terminal-val">터미널을 선택하세요</span>
+              </button>
+              <ul class="dd-list" id="dd-terminal-list" role="listbox" hidden>
+                <li role="option" aria-selected="false" data-value="A">A동 (국내선)</li>
+                <li role="option" aria-selected="false" data-value="B">B동 (국제선)</li>
+              </ul>
+            </div>
+            <div class="err" data-err="terminal"></div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="cap">주차장<em class="req">*</em></div>
+          <div class="ctl">
+            <div class="dd disabled" id="dd-lot">
+              <div class="dd-btn" tabindex="0"><span class="dd-val placeholder">이용 터미널을 먼저 선택하세요</span></div>
+              <ul class="dd-list" hidden></ul>
+            </div>
+            <div class="err" data-err="lot"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3>이용 기간</h3>
+        <div class="row">
+          <div class="cap"><label for="in-date">입차 날짜</label><em class="req">*</em></div>
+          <div class="ctl">
+            <div class="datebox" id="db-in">
+              <input type="text" id="in-date" readonly placeholder="날짜를 선택하세요" autocomplete="off">
+              <button type="button" class="cal-ico">달력</button>
+              <div class="cal" hidden></div>
+            </div>
+            <div class="err" data-err="inDate"></div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="cap">입차 시각<em class="req">*</em></div>
+          <div class="ctl">
+            <select id="in-h" class="sel-s"></select><span class="u">시</span><select id="in-m" class="sel-s"></select><span class="u">분</span>
+            <div class="err" data-err="inTime"></div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="cap"><label for="out-date">출차 날짜</label><em class="req">*</em></div>
+          <div class="ctl">
+            <div class="datebox" id="db-out">
+              <input type="text" id="out-date" readonly placeholder="날짜를 선택하세요" autocomplete="off">
+              <button type="button" class="cal-ico">달력</button>
+              <div class="cal" hidden></div>
+            </div>
+            <div class="err" data-err="outDate"></div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="cap">출차 시각<em class="req">*</em></div>
+          <div class="ctl">
+            <select id="out-h" class="sel-s"></select><span class="u">시</span><select id="out-m" class="sel-s"></select><span class="u">분</span>
+            <div class="err" data-err="outTime"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grp">
+        <h3>부가 서비스</h3>
+        <div class="row" id="row-shuttle">
+          <div class="cap" id="cap-shuttle">공항 셔틀 이용<em class="req">*</em></div>
+          <div class="ctl" role="radiogroup" aria-labelledby="cap-shuttle">
+            <label class="radio"><input type="radio" name="shuttle" value="Y"> 이용함</label>
+            <label class="radio"><input type="radio" name="shuttle" value="N"> 이용 안 함</label>
+            <div class="err" data-err="shuttle"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="step2" class="panel" hidden></section>
+    <section id="step3" class="panel" hidden></section>
+
+    <section id="done" class="panel done" hidden>
+      <div class="done-ic">&#10003;</div>
+      <h2>예약이 완료되었습니다</h2>
+      <p>예약번호 <strong id="rsv-no"></strong></p>
+      <div id="done-sum" class="summary"></div>
+      <p class="small">입력하신 휴대전화로 예약 확인 문자가 발송됩니다. (시험용 가상 서비스)</p>
+    </section>
+
+    <div id="nav">
+      <button type="button" class="btn sec" id="btn-prev" hidden>이전</button>
+      <button type="button" class="btn pri" id="btn-next">다음</button>
+    </div>
+  </form>
+</main>
+
+<footer>하버 파크앤플라이 · 고객센터 02-555-0100 · help@example.com · 이 화면은 시험용 가상 서비스이며 실제 예약·결제가 이루어지지 않습니다.</footer>
+
+<template id="tpl-step2">
+  <h2>2. 차량 · 운전자 정보</h2>
+
+  <div class="grp">
+    <h3>차량 정보</h3>
+    <table class="vt">
+      <thead>
+        <tr><th>차량번호</th><th>차종</th><th>차량 색상</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><input type="text" id="v-plate" name="f1" maxlength="10" placeholder="예) 12가3456" autocomplete="off"></td>
+          <td>
+            <select id="v-type" name="f2">
+              <option value="">선택</option>
+              <option value="light">경차</option>
+              <option value="small">소형</option>
+              <option value="mid">중형</option>
+              <option value="large">대형</option>
+              <option value="suv">SUV</option>
+              <option value="ev">전기차</option>
+            </select>
+          </td>
+          <td><input type="text" id="v-color" name="f3" maxlength="10" autocomplete="off"></td>
+        </tr>
+        <tr class="errs">
+          <td><div class="err" data-err="plate"></div></td>
+          <td><div class="err" data-err="carType"></div></td>
+          <td><div class="err" data-err="carColor"></div></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="grp">
+    <h3>운전자 정보</h3>
+    <dl class="dl">
+      <div class="row">
+        <dt><label for="d-name">운전자 성명</label><em class="req">*</em></dt>
+        <dd>
+          <input type="text" id="d-name" class="in-m" maxlength="20" autocomplete="off">
+          <div class="err" data-err="driver"></div>
+        </dd>
+      </div>
+      <div class="row">
+        <dt>생년월일<em class="req">*</em></dt>
+        <dd>
+          <select id="b-y" class="sel-s"></select><span class="u">년</span><select id="b-m" class="sel-s"></select><span class="u">월</span><select id="b-d" class="sel-s"></select><span class="u">일</span>
+          <div class="err" data-err="birth"></div>
+        </dd>
+      </div>
+      <div class="row">
+        <dt>휴대전화<em class="req">*</em></dt>
+        <dd>
+          <select id="p-1" class="sel-s">
+            <option value="010" selected>010</option>
+            <option value="011">011</option>
+            <option value="016">016</option>
+            <option value="017">017</option>
+            <option value="019">019</option>
+          </select><span class="sep">-</span><input type="text" id="p-2" class="in-s" maxlength="4" inputmode="numeric" autocomplete="off"><span class="sep">-</span><input type="text" id="p-3" class="in-s" maxlength="4" inputmode="numeric" autocomplete="off"><button type="button" class="btn-s" id="btn-otp">인증번호 받기</button>
+          <div class="err" data-err="phone"></div>
+          <div id="otp-area"></div>
+        </dd>
+      </div>
+      <div class="row">
+        <dt>이메일<em class="req">*</em></dt>
+        <dd>
+          <input type="text" id="e-id" style="width:150px" maxlength="40" autocomplete="off"><span class="sep">@</span><input type="text" id="e-dom" style="width:170px" maxlength="40" placeholder="직접 입력" autocomplete="off">
+          <select id="e-sel" style="width:150px;margin-left:6px">
+            <option value="">직접 입력</option>
+            <option value="example.com">example.com</option>
+            <option value="example.net">example.net</option>
+            <option value="mail.example.org">mail.example.org</option>
+          </select>
+          <div class="err" data-err="email"></div>
+        </dd>
+      </div>
+      <div class="row">
+        <dt>요청 사항 (선택)</dt>
+        <dd>
+          <textarea id="memo" maxlength="100"></textarea>
+          <div class="sub"><span id="memo-n">0/100</span></div>
+          <div class="err" data-err="memo"></div>
+        </dd>
+      </div>
+    </dl>
+  </div>
+</template>
+
+<template id="tpl-step3">
+  <h2>3. 결제 · 동의</h2>
+
+  <div class="grp">
+    <h3>예약 내용 확인</h3>
+    <div id="summary" class="summary"></div>
+  </div>
+
+  <div class="grp">
+    <h3>카드 결제 정보</h3>
+    <iframe id="pay-frame" src="frame.html" title="카드 결제 정보 입력"></iframe>
+  </div>
+
+  <div class="grp">
+    <h3>약관 동의</h3>
+    <div class="agree-item">
+      <div class="agree-line">
+        <div class="chk" id="ag-terms" role="checkbox" aria-checked="false" tabindex="0"><span class="box" aria-hidden="true"></span><span class="txt">이용약관 동의 (필수)</span></div>
+        <button type="button" class="link" data-tog="tb-terms">내용 보기</button>
+      </div>
+      <div class="terms-body" id="tb-terms" hidden>제1조 (목적) 이 약관은 하버 파크앤플라이(시험용 가상 서비스)가 제공하는 공항 주차 예약 서비스의 이용 조건과 절차를 정합니다. 제2조 (예약의 변경) 입차 24시간 전까지는 예약을 변경하거나 취소할 수 있습니다. 제3조 (요금) 이용 요금은 24시간을 1일로 계산하며 1일 미만의 시간은 1일로 봅니다.</div>
+      <div class="err" data-err="terms"></div>
+    </div>
+    <div class="agree-item">
+      <div class="agree-line">
+        <label class="chk2"><input type="checkbox" id="ag-priv"><span class="box"></span><span class="txt">개인정보 수집·이용 동의 (필수)</span></label>
+        <button type="button" class="link" data-tog="tb-priv">내용 보기</button>
+      </div>
+      <div class="terms-body" id="tb-priv" hidden>수집 항목: 성명, 생년월일, 휴대전화, 이메일, 차량번호. 이용 목적: 주차 예약 확인 및 안내. 보유 기간: 출차일로부터 30일. 동의를 거부할 수 있으나 거부 시 예약이 제한됩니다.</div>
+      <div class="err" data-err="priv"></div>
+    </div>
+    <div class="agree-item">
+      <div class="agree-line">
+        <div class="chk" id="ag-mkt" tabindex="0"><span class="box"></span><span class="txt">마케팅 정보 수신 동의 (선택)</span></div>
+        <button type="button" class="link" data-tog="tb-mkt">내용 보기</button>
+      </div>
+      <div class="terms-body" id="tb-mkt" hidden>할인 쿠폰과 이벤트 소식을 문자와 이메일로 받아 보실 수 있습니다. 동의하지 않아도 예약에는 영향이 없습니다.</div>
+    </div>
+  </div>
+</template>
+
+<script>
+(function () {
+  'use strict';
+
+  /* The scene's own "today" is fixed so the calendar does not depend on the real date. */
+  var TODAY = { y: 2026, m: 9, d: 15 }; /* m is 0-based: October */
+  var WD = ['일', '월', '화', '수', '목', '금', '토'];
+
+  var LOTS = {
+    A: [
+      { v: 'A-P1', t: '실내 주차장 (P1)', rate: 12000 },
+      { v: 'A-P3', t: '야외 장기주차장 (P3)', rate: 7000 }
+    ],
+    B: [
+      { v: 'B-P2', t: '실내 주차장 (P2)', rate: 15000 },
+      { v: 'B-P4', t: '야외 장기주차장 (P4)', rate: 8000 },
+      { v: 'B-VL', t: '발렛 주차 서비스', rate: 30000 }
+    ]
+  };
+
+  var KEYS = { 'v-plate': 'plate', 'v-type': 'carType', 'v-color': 'carColor', 'ag-priv': 'priv' };
+
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+  var pad = function (n) { return String(n).padStart(2, '0'); };
+  var isoOf = function (y, m, d) { return y + '-' + pad(m + 1) + '-' + pad(d); };
+  var parseIso = function (s) { var a = s.split('-').map(Number); return { y: a[0], m: a[1] - 1, d: a[2] }; };
+  var numOf = function (y, m, d) { return y * 10000 + (m + 1) * 100 + d; };
+  var money = function (n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); };
+  var wdOf = function (y, m, d) { return WD[new Date(y, m, d).getDay()]; };
+
+  var S = { step: 1 };
+  var built = {};
+  var otp = { code: '', exp: 0, tries: 0, verified: false, timer: null };
+  var lastTerm = '';
+  var lotToken = 0;
+
+  $('#today').textContent = '오늘 ' + isoOf(TODAY.y, TODAY.m, TODAY.d) + ' (' + wdOf(TODAY.y, TODAY.m, TODAY.d) + ')';
+
+  /* ---------- popups (dropdowns and calendars close on outside mouse down / focus) ---------- */
+  var popups = [];
+  function closeAllPopups(except) {
+    popups.forEach(function (p) { if (p.el !== except) p.close(); });
+  }
+  document.addEventListener('mousedown', function (e) {
+    popups.forEach(function (p) { if (!p.el.contains(e.target)) p.close(); });
+  });
+  document.addEventListener('focusin', function (e) {
+    popups.forEach(function (p) { if (!p.el.contains(e.target)) p.close(); });
+  });
+
+  /* ---------- errors and banner ---------- */
+  function setErr(key, msg) {
+    $$('[data-err="' + key + '"]').forEach(function (el) {
+      el.textContent = msg || '';
+      var row = el.closest('.row');
+      if (row) row.classList.toggle('bad', !!msg);
+    });
+  }
+  function showBanner(msg) { var b = $('#banner'); b.textContent = msg; b.hidden = false; }
+  function hideBanner() { $('#banner').hidden = true; }
+  function clearPanelErrs() {
+    $$('#step' + S.step + ' .err').forEach(function (el) { el.textContent = ''; });
+    $$('#step' + S.step + ' .bad').forEach(function (el) { el.classList.remove('bad'); });
+  }
+  function report(errs) {
+    clearPanelErrs();
+    if (!errs.length) { hideBanner(); return true; }
+    errs.forEach(function (e) { setErr(e[0], e[1]); });
+    showBanner('입력하지 않았거나 올바르지 않은 항목이 ' + errs.length + '개 있습니다. 안내 문구를 확인해 주세요.');
+    var first = $('[data-err="' + errs[0][0] + '"]');
+    if (first && first.scrollIntoView) first.scrollIntoView({ block: 'center' });
+    return false;
+  }
+
+  /* ---------- custom dropdown (aria combobox variant and plain-div variant share this code) ---------- */
+  function Dropdown(root, onChange, onBlocked) {
+    var btn = $('.dd-btn', root), list = $('.dd-list', root), valEl = $('.dd-val', root);
+    var isBtn = btn.tagName === 'BUTTON';
+    var aria = btn.getAttribute('role') === 'combobox';
+    var api = { value: '', text: '' };
+    var active = -1;
+    var disabled = root.classList.contains('disabled');
+    function items() { return $$('li', list); }
+    function setActive(i) {
+      var its = items();
+      its.forEach(function (li) { li.classList.remove('act'); });
+      if (i < 0 || i >= its.length) { active = -1; return; }
+      active = i;
+      its[i].classList.add('act');
+    }
+    function open() {
+      if (disabled) { if (onBlocked) onBlocked(); return; }
+      if (!list.hidden) return;
+      closeAllPopups(root);
+      list.hidden = false;
+      root.classList.add('open');
+      if (aria) btn.setAttribute('aria-expanded', 'true');
+      var its = items();
+      var cur = -1;
+      its.forEach(function (li, i) { if (li.dataset.value === api.value) cur = i; });
+      setActive(cur >= 0 ? cur : 0);
+    }
+    function close() {
+      if (list.hidden) return;
+      list.hidden = true;
+      root.classList.remove('open');
+      if (aria) btn.setAttribute('aria-expanded', 'false');
+    }
+    function choose(li) {
+      api.value = li.dataset.value;
+      api.text = li.textContent.trim();
+      valEl.textContent = api.text;
+      valEl.classList.remove('placeholder');
+      items().forEach(function (x) {
+        x.classList.toggle('sel', x === li);
+        if (aria) x.setAttribute('aria-selected', x === li ? 'true' : 'false');
+      });
+      close();
+      btn.focus();
+      if (onChange) onChange(api);
+    }
+    btn.addEventListener('click', function () { if (list.hidden) open(); else close(); });
+    list.addEventListener('click', function (e) {
+      var li = e.target.closest('li');
+      if (li) choose(li);
+    });
+    btn.addEventListener('keydown', function (e) {
+      var k = e.key;
+      if (k === 'ArrowDown' || k === 'ArrowUp') {
+        e.preventDefault();
+        if (list.hidden) { open(); return; }
+        var n = items().length;
+        if (!n) return;
+        setActive(k === 'ArrowDown' ? Math.min(n - 1, active + 1) : Math.max(0, active - 1));
+      } else if (k === 'Escape') {
+        close();
+      } else if (k === 'Enter' || (k === ' ' && !isBtn)) {
+        if (!list.hidden) {
+          e.preventDefault();
+          var its = items();
+          if (its[active]) choose(its[active]);
+        } else if (!isBtn) {
+          e.preventDefault();
+          open();
+        }
+      }
+    });
+    api.setItems = function (arr) {
+      list.innerHTML = arr.map(function (o) {
+        return '<li' + (aria ? ' role="option" aria-selected="false"' : '') + ' data-value="' + o.v + '">' + o.t + '</li>';
+      }).join('');
+    };
+    api.reset = function (txt) {
+      api.value = '';
+      api.text = '';
+      valEl.textContent = txt;
+      valEl.classList.add('placeholder');
+      list.innerHTML = '';
+      close();
+    };
+    api.say = function (txt) { if (!api.value) valEl.textContent = txt; };
+    api.setDisabled = function (b) { disabled = b; root.classList.toggle('disabled', b); };
+    popups.push({ el: root, close: close });
+    return api;
+  }
+
+  /* ---------- calendar widget ---------- */
+  function DatePicker(box, opts) {
+    var input = $('input', box), ico = $('.cal-ico', box), pop = $('.cal', box);
+    var api = {
+      value: '',
+      label: '',
+      clear: function () { api.value = ''; api.label = ''; input.value = ''; }
+    };
+    var view = { y: TODAY.y, m: TODAY.m };
+
+    function render(focusNav) {
+      var mn = opts.getMin();
+      var lowN = mn.y * 12 + mn.m;
+      var highN = TODAY.y * 12 + TODAY.m + 18;
+      var cur = view.y * 12 + view.m;
+      var minNum = numOf(mn.y, mn.m, mn.d);
+      var selNum = -1;
+      if (api.value) { var p = parseIso(api.value); selNum = numOf(p.y, p.m, p.d); }
+      var todayNum = numOf(TODAY.y, TODAY.m, TODAY.d);
+      var first = new Date(view.y, view.m, 1).getDay();
+      var dim = new Date(view.y, view.m + 1, 0).getDate();
+      var h = '<div class="cal-h">' +
+        '<button type="button" class="cal-nav" data-nav="-1"' + (cur <= lowN ? ' disabled' : '') + '>&lsaquo;</button>' +
+        '<strong>' + view.y + '년 ' + (view.m + 1) + '월</strong>' +
+        '<button type="button" class="cal-nav" data-nav="1"' + (cur >= highN ? ' disabled' : '') + '>&rsaquo;</button></div>';
+      h += '<table class="cal-t"><thead><tr>' + WD.map(function (w) { return '<th>' + w + '</th>'; }).join('') + '</tr></thead><tbody>';
+      var day = 1 - first;
+      while (day <= dim) {
+        h += '<tr>';
+        for (var c = 0; c < 7; c++, day++) {
+          if (day < 1 || day > dim) { h += '<td></td>'; continue; }
+          var n = numOf(view.y, view.m, day);
+          h += '<td><button type="button" class="day' + (n === selNum ? ' sel' : '') + (n === todayNum ? ' today' : '') +
+            '" data-d="' + day + '"' + (n < minNum ? ' disabled' : '') + '>' + day + '</button></td>';
+        }
+        h += '</tr>';
+      }
+      h += '</tbody></table>';
+      pop.innerHTML = h;
+      if (focusNav) {
+        var b = $('[data-nav="' + focusNav + '"]', pop);
+        if (b && !b.disabled) b.focus();
+      }
+    }
+    function open() {
+      if (opts.guard && !opts.guard()) return;
+      closeAllPopups(box);
+      var base = api.value ? parseIso(api.value) : opts.getMin();
+      view = { y: base.y, m: base.m };
+      render();
+      pop.hidden = false;
+      box.classList.add('open');
+    }
+    function close() {
+      if (pop.hidden) return;
+      pop.hidden = true;
+      box.classList.remove('open');
+    }
+    function toggle() { if (pop.hidden) open(); else close(); }
+    input.addEventListener('click', toggle);
+    ico.addEventListener('click', toggle);
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') { e.preventDefault(); open(); }
+      else if (e.key === 'Escape') close();
+    });
+    pop.addEventListener('click', function (e) {
+      var nav = e.target.closest('.cal-nav');
+      if (nav) {
+        if (nav.disabled) return;
+        var step = Number(nav.dataset.nav);
+        var m = view.m + step, y = view.y;
+        if (m < 0) { m = 11; y--; }
+        if (m > 11) { m = 0; y++; }
+        view = { y: y, m: m };
+        render(nav.dataset.nav);
+        return;
+      }
+      var dayBtn = e.target.closest('.day');
+      if (dayBtn && !dayBtn.disabled) {
+        var d = Number(dayBtn.dataset.d);
+        api.value = isoOf(view.y, view.m, d);
+        api.label = api.value + ' (' + wdOf(view.y, view.m, d) + ')';
+        input.value = api.label;
+        close();
+        input.focus();
+        if (opts.onPick) opts.onPick(api.value);
+      }
+    });
+    popups.push({ el: box, close: close });
+    return api;
+  }
+
+  /* ---------- step 1 ---------- */
+  function fillTime(hId, mId) {
+    var h = '<option value="">선택</option>';
+    for (var i = 0; i < 24; i++) h += '<option value="' + pad(i) + '">' + pad(i) + '</option>';
+    $('#' + hId).innerHTML = h;
+    var m = '<option value="">선택</option>';
+    [0, 10, 20, 30, 40, 50].forEach(function (i) { m += '<option value="' + pad(i) + '">' + pad(i) + '</option>'; });
+    $('#' + mId).innerHTML = m;
+  }
+  fillTime('in-h', 'in-m');
+  fillTime('out-h', 'out-m');
+
+  var ddTerminal = Dropdown($('#dd-terminal'), function (a) {
+    setErr('terminal', '');
+    if (a.value !== lastTerm) { lastTerm = a.value; loadLots(a.value); }
+  });
+  var ddLot = Dropdown($('#dd-lot'), function () { setErr('lot', ''); }, function () {
+    setErr('lot', '이용 터미널을 먼저 선택해 주세요.');
+  });
+
+  function loadLots(term) {
+    var tok = ++lotToken;
+    setErr('lot', '');
+    ddLot.reset('주차장 정보를 불러오는 중…');
+    ddLot.setDisabled(true);
+    setTimeout(function () {
+      if (tok !== lotToken) return;
+      ddLot.setItems(LOTS[term] || []);
+      ddLot.setDisabled(false);
+      ddLot.say('주차장을 선택하세요');
+    }, 500);
+  }
+
+  var dpIn = DatePicker($('#db-in'), {
+    getMin: function () { return TODAY; },
+    onPick: function (v) {
+      setErr('inDate', '');
+      if (dpOut.value && dpOut.value < v) {
+        dpOut.clear();
+        setErr('outDate', '입차 날짜가 바뀌어 출차 날짜를 다시 선택해 주세요.');
+      }
+    }
+  });
+  var dpOut = DatePicker($('#db-out'), {
+    getMin: function () { return dpIn.value ? parseIso(dpIn.value) : TODAY; },
+    guard: function () {
+      if (!dpIn.value) { setErr('outDate', '입차 날짜를 먼저 선택해 주세요.'); return false; }
+      return true;
+    },
+    onPick: function () { setErr('outDate', ''); }
+  });
+
+  function shuttleVal() {
+    var c = $('input[name="shuttle"]:checked');
+    return c ? c.value : '';
+  }
+  function setPax(on) {
+    var ex = $('#row-pax');
+    if (!on) { if (ex) ex.remove(); return; }
+    if (ex) return;
+    var row = document.createElement('div');
+    row.className = 'row';
+    row.id = 'row-pax';
+    row.innerHTML = '<div class="cap"><label for="pax">탑승 인원</label><em class="req">*</em></div>' +
+      '<div class="ctl"><select id="pax" class="sel-m"><option value="">선택</option>' +
+      '<option value="1">1명</option><option value="2">2명</option><option value="3">3명</option><option value="4">4명</option>' +
+      '</select><div class="err" data-err="pax"></div></div>';
+    $('#row-shuttle').after(row);
+  }
+  $$('input[name="shuttle"]').forEach(function (r) {
+    r.addEventListener('change', function () {
+      setErr('shuttle', '');
+      if (r.value === 'Y' && r.checked) {
+        setTimeout(function () { if (shuttleVal() === 'Y') setPax(true); }, 250);
+      } else {
+        setPax(false);
+      }
+    });
+  });
+
+  ['input', 'change'].forEach(function (t) {
+    $('#rsv').addEventListener(t, function (e) {
+      var row = e.target.closest ? e.target.closest('.row') : null;
+      if (row) {
+        $$('.err', row).forEach(function (x) { x.textContent = ''; });
+        row.classList.remove('bad');
+        return;
+      }
+      var k = KEYS[e.target.id];
+      if (k) setErr(k, '');
+    });
+  });
+
+  function validate1() {
+    var errs = [];
+    if (!ddTerminal.value) errs.push(['terminal', '이용 터미널을 선택해 주세요.']);
+    if (!ddLot.value) errs.push(['lot', ddTerminal.value ? '주차장을 선택해 주세요.' : '이용 터미널을 먼저 선택해 주세요.']);
+    if (!dpIn.value) errs.push(['inDate', '입차 날짜를 선택해 주세요.']);
+    var inOk = $('#in-h').value && $('#in-m').value;
+    if (!inOk) errs.push(['inTime', '입차 시각의 시와 분을 모두 선택해 주세요.']);
+    if (!dpOut.value) errs.push(['outDate', '출차 날짜를 선택해 주세요.']);
+    var outOk = $('#out-h').value && $('#out-m').value;
+    if (!outOk) errs.push(['outTime', '출차 시각의 시와 분을 모두 선택해 주세요.']);
+    if (dpIn.value && dpOut.value && inOk && outOk) {
+      var a = dpIn.value + 'T' + $('#in-h').value + ':' + $('#in-m').value;
+      var b = dpOut.value + 'T' + $('#out-h').value + ':' + $('#out-m').value;
+      if (b <= a) errs.push(['outTime', '출차 일시는 입차 일시보다 늦어야 합니다.']);
+    }
+    if (!shuttleVal()) errs.push(['shuttle', '셔틀 이용 여부를 선택해 주세요.']);
+    else if (shuttleVal() === 'Y') {
+      setPax(true);
+      if (!$('#pax').value) errs.push(['pax', '탑승 인원을 선택해 주세요.']);
+    }
+    return errs;
+  }
+
+  /* ---------- step 2 ---------- */
+  function init2() {
+    var y = '<option value="">선택</option>';
+    for (var i = 2007; i >= 1940; i--) y += '<option value="' + i + '">' + i + '</option>';
+    $('#b-y').innerHTML = y;
+    var m = '<option value="">선택</option>';
+    for (var j = 1; j <= 12; j++) m += '<option value="' + pad(j) + '">' + j + '</option>';
+    $('#b-m').innerHTML = m;
+    var d = '<option value="">선택</option>';
+    for (var k = 1; k <= 31; k++) d += '<option value="' + pad(k) + '">' + k + '</option>';
+    $('#b-d').innerHTML = d;
+
+    $('#memo').addEventListener('input', function () { $('#memo-n').textContent = $('#memo').value.length + '/100'; });
+
+    $('#p-2').addEventListener('input', function (e) {
+      e.target.value = e.target.value.replace(/\D/g, '');
+      if (e.target.value.length >= 4 && document.activeElement === e.target) $('#p-3').focus();
+    });
+    $('#p-3').addEventListener('input', function (e) { e.target.value = e.target.value.replace(/\D/g, ''); });
+
+    $('#e-sel').addEventListener('change', function () {
+      var dom = $('#e-dom');
+      if ($('#e-sel').value) { dom.value = $('#e-sel').value; dom.readOnly = true; }
+      else { dom.readOnly = false; dom.value = ''; dom.focus(); }
+    });
+
+    $('#btn-otp').addEventListener('click', onOtpButton);
+  }
+
+  function phoneParts() {
+    return { a: $('#p-1').value, b: $('#p-2').value.trim(), c: $('#p-3').value.trim() };
+  }
+  function phoneStr() { var p = phoneParts(); return p.a + '-' + p.b + '-' + p.c; }
+  function phoneErr() {
+    var p = phoneParts();
+    if (!/^01[016789]$/.test(p.a) || !/^\d{3,4}$/.test(p.b) || !/^\d{4}$/.test(p.c)) return '휴대전화 번호를 올바르게 입력해 주세요.';
+    return '';
+  }
+  function setPhoneLock(on) {
+    $('#p-1').disabled = on;
+    $('#p-2').readOnly = on;
+    $('#p-3').readOnly = on;
+  }
+
+  function onOtpButton() {
+    var btn = $('#btn-otp');
+    if (otp.verified) {
+      otp.verified = false;
+      otp.code = '';
+      clearInterval(otp.timer);
+      setPhoneLock(false);
+      $('#otp-area').innerHTML = '';
+      btn.textContent = '인증번호 받기';
+      return;
+    }
+    var pe = phoneErr();
+    if (pe) { setErr('phone', pe); return; }
+    setErr('phone', '');
+    btn.disabled = true;
+    btn.textContent = '발송 중…';
+    otp.code = String(Math.floor(100000 + Math.random() * 900000));
+    otp.tries = 0;
+    otp.exp = Date.now() + 180000;
+    window.__personPhone = otp.code;
+    try { window.top.__personPhone = otp.code; } catch (e) { /* cross-origin top */ }
+    setTimeout(function () {
+      btn.disabled = false;
+      btn.textContent = '인증번호 재발송';
+      showOtpArea();
+    }, 400);
+  }
+
+  function showOtpArea() {
+    var area = $('#otp-area');
+    area.innerHTML = '<div class="otp"><div class="otp-msg">인증번호를 문자로 보냈습니다. 3분 안에 입력해 주세요.</div>' +
+      '<div class="otp-row"><span class="otp-cap">인증번호</span>' +
+      '<input type="text" id="otp-in" inputmode="numeric" maxlength="6" autocomplete="off">' +
+      '<span class="timer" id="otp-timer">03:00</span>' +
+      '<button type="button" id="otp-ok" class="btn-s">확인</button></div>' +
+      '<div class="err" data-err="otp"></div></div>';
+    $('#otp-ok').addEventListener('click', confirmOtp);
+    $('#otp-in').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); confirmOtp(); } });
+    $('#otp-in').addEventListener('input', function (e) { e.target.value = e.target.value.replace(/\D/g, ''); });
+    startTimer();
+  }
+
+  function startTimer() {
+    clearInterval(otp.timer);
+    function tick() {
+      var left = Math.max(0, Math.ceil((otp.exp - Date.now()) / 1000));
+      var el = $('#otp-timer');
+      if (el) el.textContent = pad(Math.floor(left / 60)) + ':' + pad(left % 60);
+      if (left <= 0) {
+        clearInterval(otp.timer);
+        if (!otp.verified && otp.code) setErr('otp', '인증 시간이 지났습니다. 인증번호를 다시 받아 주세요.');
+      }
+    }
+    tick();
+    otp.timer = setInterval(tick, 1000);
+  }
+
+  function confirmOtp() {
+    var v = $('#otp-in').value.trim();
+    if (!otp.code) { setErr('otp', '인증번호를 다시 받아 주세요.'); return; }
+    if (Date.now() > otp.exp) { setErr('otp', '인증 시간이 지났습니다. 인증번호를 다시 받아 주세요.'); return; }
+    if (!/^\d{6}$/.test(v)) { setErr('otp', '인증번호 6자리를 입력해 주세요.'); return; }
+    if (v !== otp.code) {
+      otp.tries++;
+      if (otp.tries >= 5) { otp.code = ''; setErr('otp', '5회 틀렸습니다. 인증번호를 다시 받아 주세요.'); }
+      else setErr('otp', '인증번호가 일치하지 않습니다. (' + otp.tries + '/5)');
+      return;
+    }
+    otp.verified = true;
+    clearInterval(otp.timer);
+    setErr('phone', '');
+    $('#otp-area').innerHTML = '<div class="otp-ok">휴대전화 인증이 완료되었습니다.</div>';
+    setPhoneLock(true);
+    $('#btn-otp').textContent = '번호 변경';
+  }
+
+  function validate2() {
+    var errs = [];
+    var plate = $('#v-plate').value.replace(/\s+/g, '');
+    if (!/^\d{2,3}[가-힣]\d{4}$/.test(plate)) errs.push(['plate', '차량번호 형식이 올바르지 않습니다. 예) 12가3456']);
+    if (!$('#v-type').value) errs.push(['carType', '차종을 선택해 주세요.']);
+    if (!/^[가-힣A-Za-z ]{1,10}$/.test($('#v-color').value.trim())) errs.push(['carColor', '차량 색상을 입력해 주세요.']);
+    if (!/^[가-힣A-Za-z ]{2,20}$/.test($('#d-name').value.trim())) errs.push(['driver', '운전자 성명을 2자 이상 입력해 주세요.']);
+
+    var by = $('#b-y').value, bm = $('#b-m').value, bd = $('#b-d').value;
+    if (!by || !bm || !bd) errs.push(['birth', '생년월일을 모두 선택해 주세요.']);
+    else {
+      var dt = new Date(Number(by), Number(bm) - 1, Number(bd));
+      if (dt.getMonth() !== Number(bm) - 1 || dt.getDate() !== Number(bd)) errs.push(['birth', '존재하지 않는 날짜입니다.']);
+    }
+
+    var pe = phoneErr();
+    if (pe) errs.push(['phone', pe]);
+    else if (!otp.verified) {
+      if (otp.code && $('#otp-in')) errs.push(['otp', '인증번호를 입력하고 [확인]을 눌러 주세요.']);
+      else errs.push(['phone', '휴대전화 인증이 필요합니다. [인증번호 받기]를 눌러 주세요.']);
+    }
+
+    var local = $('#e-id').value.trim(), dom = $('#e-dom').value.trim();
+    if (!/^[A-Za-z0-9._%+-]{1,40}$/.test(local) || !/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(dom)) {
+      errs.push(['email', '이메일 주소를 올바르게 입력해 주세요.']);
+    }
+    if ($('#memo').value.length > 100) errs.push(['memo', '요청 사항은 100자까지 입력할 수 있습니다.']);
+    return errs;
+  }
+
+  /* ---------- step 3 ---------- */
+  function isOn(el) { return el.classList.contains('on'); }
+  function toggleChk(el) {
+    var on = !el.classList.contains('on');
+    el.classList.toggle('on', on);
+    if (el.getAttribute('role') === 'checkbox') el.setAttribute('aria-checked', on ? 'true' : 'false');
+    var item = el.closest('.agree-item');
+    if (item) { var er = $('.err', item); if (er) er.textContent = ''; }
+  }
+  function init3() {
+    $$('.chk').forEach(function (el) {
+      el.addEventListener('click', function () { toggleChk(el); });
+      el.addEventListener('keydown', function (e) {
+        if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggleChk(el); }
+      });
+    });
+    $$('[data-tog]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var t = $('#' + b.dataset.tog);
+        t.hidden = !t.hidden;
+        b.textContent = t.hidden ? '내용 보기' : '내용 닫기';
+      });
+    });
+  }
+
+  function buildSummary(box) {
+    box.innerHTML = '';
+    var lot = null;
+    (LOTS[ddTerminal.value] || []).forEach(function (l) { if (l.v === ddLot.value) lot = l; });
+    var rate = lot ? lot.rate : 0;
+    var a = parseIso(dpIn.value), b = parseIso(dpOut.value);
+    var t0 = Date.UTC(a.y, a.m, a.d, Number($('#in-h').value), Number($('#in-m').value));
+    var t1 = Date.UTC(b.y, b.m, b.d, Number($('#out-h').value), Number($('#out-m').value));
+    var days = Math.max(1, Math.ceil((t1 - t0) / 86400000));
+    var typeText = $('#v-type').options[$('#v-type').selectedIndex].textContent;
+    var rows = [
+      ['이용 장소', ddTerminal.text + ' · ' + ddLot.text],
+      ['입차 일시', dpIn.label + ' ' + $('#in-h').value + ':' + $('#in-m').value],
+      ['출차 일시', dpOut.label + ' ' + $('#out-h').value + ':' + $('#out-m').value],
+      ['셔틀', shuttleVal() === 'Y' ? '이용 (' + $('#pax').value + '명)' : '이용 안 함'],
+      ['차량', $('#v-plate').value.replace(/\s+/g, '') + ' · ' + typeText + ' · ' + $('#v-color').value.trim()],
+      ['운전자', $('#d-name').value.trim()],
+      ['예상 요금', money(days * rate) + '원 (' + days + '일 × ' + money(rate) + '원)']
+    ];
+    rows.forEach(function (r) {
+      var d = document.createElement('div');
+      d.className = 'srow';
+      var k = document.createElement('span');
+      k.textContent = r[0];
+      var v = document.createElement('strong');
+      v.textContent = r[1];
+      d.appendChild(k);
+      d.appendChild(v);
+      box.appendChild(d);
+    });
+  }
+
+  /* messages with the card frame */
+  var reqId = 0;
+  var pending = {};
+  window.addEventListener('message', function (ev) {
+    var f = $('#pay-frame');
+    if (!f || ev.source !== f.contentWindow) return;
+    var d = ev.data;
+    if (!d || d.t !== 'hpf-card') return;
+    if (pending[d.id]) { pending[d.id](d); delete pending[d.id]; }
+  });
+  function askFrame() {
+    return new Promise(function (resolve) {
+      var f = $('#pay-frame');
+      if (!f || !f.contentWindow) { resolve({ ok: false, timeout: true }); return; }
+      var id = ++reqId;
+      var to = setTimeout(function () { delete pending[id]; resolve({ ok: false, timeout: true }); }, 3000);
+      pending[id] = function (d) { clearTimeout(to); resolve(d); };
+      f.contentWindow.postMessage({ t: 'hpf-validate', id: id }, '*');
+    });
+  }
+
+  function validate3() {
+    var errs = [];
+    if (!isOn($('#ag-terms'))) errs.push(['terms', '이용약관에 동의해 주세요.']);
+    if (!$('#ag-priv').checked) errs.push(['priv', '개인정보 수집·이용에 동의해 주세요.']);
+    return errs;
+  }
+
+  async function submit() {
+    var btn = $('#btn-next');
+    clearPanelErrs();
+    var errs = validate3();
+    btn.disabled = true;
+    btn.textContent = '처리 중…';
+    var r = await askFrame();
+    if (errs.length || !r.ok) {
+      btn.disabled = false;
+      btn.textContent = '예약 완료';
+      errs.forEach(function (e) { setErr(e[0], e[1]); });
+      if (!r.ok) {
+        showBanner(r.timeout ? '카드 입력 화면이 응답하지 않습니다. 잠시 후 다시 시도해 주세요.' : '카드 결제 정보를 확인해 주세요.');
+        var f = $('#pay-frame');
+        if (f && f.scrollIntoView) f.scrollIntoView({ block: 'center' });
+      } else {
+        showBanner('필수 약관에 동의해 주세요.');
+        var first = $('[data-err="' + errs[0][0] + '"]');
+        if (first && first.scrollIntoView) first.scrollIntoView({ block: 'center' });
+      }
+      return;
+    }
+    hideBanner();
+    setTimeout(function () { finalize(r.values); }, 600);
+  }
+
+  function finalize(cv) {
+    var res = {
+      terminal: ddTerminal.value,
+      lot: ddLot.value,
+      inDate: dpIn.value,
+      inTime: $('#in-h').value + ':' + $('#in-m').value,
+      outDate: dpOut.value,
+      outTime: $('#out-h').value + ':' + $('#out-m').value,
+      shuttle: shuttleVal(),
+      pax: shuttleVal() === 'Y' ? $('#pax').value : '0',
+      plate: $('#v-plate').value.replace(/\s+/g, ''),
+      carType: $('#v-type').value,
+      carColor: $('#v-color').value.trim(),
+      driver: $('#d-name').value.trim(),
+      birth: $('#b-y').value + '-' + $('#b-m').value + '-' + $('#b-d').value,
+      phone: phoneStr(),
+      verified: otp.verified,
+      email: ($('#e-id').value.trim() + '@' + $('#e-dom').value.trim()).toLowerCase(),
+      memo: $('#memo').value.trim(),
+      card: cv.card,
+      exp: cv.exp,
+      cardName: cv.cardName,
+      cvc: cv.cvc,
+      inst: cv.inst,
+      agreeTerms: isOn($('#ag-terms')),
+      agreePrivacy: $('#ag-priv').checked,
+      agreeMkt: isOn($('#ag-mkt'))
+    };
+    window.__sceneResult = res;
+    try { if (window.top !== window) window.top.__sceneResult = res; } catch (e) { /* ignore */ }
+
+    buildSummary($('#done-sum'));
+    $('#rsv-no').textContent = 'HPF-' + String(Math.floor(100000 + Math.random() * 900000));
+    [1, 2, 3].forEach(function (i) { var p = $('#step' + i); if (p) p.hidden = true; });
+    $('#steps').hidden = true;
+    $('#nav').hidden = true;
+    hideBanner();
+    $('#done').hidden = false;
+    window.scrollTo(0, 0);
+  }
+
+  /* ---------- step flow ---------- */
+  function build(n) {
+    var tpl = $('#tpl-step' + n);
+    $('#step' + n).appendChild(tpl.content.cloneNode(true));
+    built[n] = true;
+    if (n === 2) init2(); else init3();
+  }
+  function go(n) {
+    S.step = n;
+    hideBanner();
+    if (n > 1 && !built[n]) build(n);
+    if (n === 3) buildSummary($('#summary'));
+    [1, 2, 3].forEach(function (i) { var p = $('#step' + i); if (p) p.hidden = (i !== n); });
+    $$('#steps li').forEach(function (li) {
+      var k = Number(li.dataset.step);
+      li.classList.toggle('on', k === n);
+      li.classList.toggle('done', k < n);
+    });
+    $('#btn-prev').hidden = (n === 1);
+    var nx = $('#btn-next');
+    nx.textContent = (n === 3) ? '예약 완료' : '다음';
+    nx.disabled = false;
+    window.scrollTo(0, 0);
+  }
+
+  $('#btn-prev').addEventListener('click', function () { if (S.step > 1) go(S.step - 1); });
+  $('#btn-next').addEventListener('click', function () {
+    if (S.step === 1) { if (report(validate1())) go(2); }
+    else if (S.step === 2) { if (report(validate2())) go(3); }
+    else submit();
+  });
+})();
+</script>
+</body>
+</html>
