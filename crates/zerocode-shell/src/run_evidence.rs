@@ -1069,6 +1069,17 @@ mod tests {
             redacted("browser", &words(&["type", "b1", "#pw", "hunter2"])),
             words(&["type", "b1", "#pw", "[7 chars]"])
         );
+        // A fill's bundle holds a person's details: one word, or after
+        // `--value` (the stdin road's shape).
+        let bundle = r##"{"#name":"Kim"}"##;
+        assert_eq!(
+            redacted("browser", &words(&["fill", "b1", bundle])),
+            words(&["fill", "b1", "[15 chars]"])
+        );
+        assert_eq!(
+            redacted("browser", &words(&["fill", "b1", "--value", bundle])),
+            words(&["fill", "b1", "--value", "[15 chars]"])
+        );
         assert_eq!(
             redacted(
                 "computer",

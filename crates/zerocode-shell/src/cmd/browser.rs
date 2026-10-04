@@ -2,6 +2,10 @@
 
 use crate::*;
 
+/// The form pair (`fields`, `fill`, and the same inside an `eval`).
+pub(crate) mod form;
+pub(crate) use form::{automate_fields, automate_fill, eval_script};
+
 /// The callback channel is shared by find/grab/menu and the automation
 /// surface below. A page owns every byte it returns, so both the engine wait
 /// and the amount accepted back into Rust are bounded here, once.
@@ -2064,7 +2068,7 @@ pub(crate) async fn automate_eval(
 ) -> Result<serde_json::Value, String> {
     checked_expression(expression)?;
     let pane = browser_pane_of(app, state, label)?;
-    let script = automation_script(&serde_json::json!({}), &inlined_eval_body(expression));
+    let script = eval_script(expression, &inlined_eval_body(expression));
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE)
         .await
         .map_err(inlined_eval_failure)?;

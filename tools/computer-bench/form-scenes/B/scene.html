@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>장면 B — 단계 나뉜 렌터카 예약</title>
+<!--
+  Regression scene B (t-37883): a three-step flow drawn with the page's own
+  widgets, the way newer sites build them. Synthetic: an invented rental
+  desk, fictional numbers. What it holds for the door to read without being
+  told:
+  - step 1: a dropdown drawn as a button with an ARIA list (combobox +
+    listbox + options, rendered only while open), a field with no label
+    whose only caption is the words just before it, an ARIA radio group;
+  - step 2: a date field the page keeps read-only, filled by pressing a day
+    of its own calendar (an ARIA grid whose days say their whole date), a
+    select whose "other" choice brings a field 400 ms later, an ARIA switch;
+  - step 3: a payment box inside a same-origin frame — a card number in four
+    boxes under one term (<dt>), an expiry in two selects after a caption —
+    and an ARIA checkbox for the terms on the page around it.
+  Later steps are not drawn until reached.
+-->
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 0; background: #eef1f4; }
+  main { max-width: 680px; margin: 0 auto; padding: 16px; background: #fff; }
+  .step[hidden] { display: none; }
+  .row { margin: 10px 0; }
+  .caption { display: inline-block; width: 7em; color: #444; }
+  .combo { position: relative; display: inline-block; }
+  .combo button { min-width: 12em; text-align: left; }
+  [role=listbox] { position: absolute; top: 100%; left: 0; background: #fff; border: 1px solid #ccc; margin: 0; padding: 0; list-style: none; z-index: 2; }
+  [role=option] { padding: 4px 10px; cursor: pointer; }
+  [role=radio], [role=switch], [role=checkbox] { display: inline-block; padding: 4px 10px; border: 1px solid #bbb; border-radius: 4px; cursor: pointer; margin-right: 6px; }
+  [role=radio][aria-checked=true], [role=switch][aria-checked=true], [role=checkbox][aria-checked=true] { background: #1d4ed8; color: #fff; }
+  .calendar { position: absolute; background: #fff; border: 1px solid #ccc; padding: 6px; z-index: 3; }
+  .calendar button { width: 2.2em; }
+  iframe { width: 100%; height: 220px; border: 1px solid #d6d9de; }
+  #error { color: #b00020; min-height: 1.2em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Seoha 렌터카</h1>
+  <form id="rental" novalidate>
+    <section class="step" id="step-1">
+      <h2>1. 차량</h2>
+      <div class="row">
+        <span class="caption" id="model-caption">차종</span>
+        <span class="combo">
+          <button type="button" id="model" role="combobox" aria-labelledby="model-caption" aria-haspopup="listbox"
+            aria-expanded="false" aria-controls="model-list" aria-required="true">선택하세요</button>
+        </span>
+      </div>
+      <div class="row"><div class="caption">운전자 생년월일</div><div><input id="birth" placeholder="YYYYMMDD" maxlength="8" required></div></div>
+      <div class="row">
+        <span class="caption" id="fuel-caption">연료</span>
+        <span role="radiogroup" aria-labelledby="fuel-caption" aria-required="true">
+          <span role="radio" aria-checked="false" tabindex="0" data-value="gas">휘발유</span>
+          <span role="radio" aria-checked="false" tabindex="-1" data-value="diesel">경유</span>
+          <span role="radio" aria-checked="false" tabindex="-1" data-value="ev">전기</span>
+        </span>
+      </div>
+      <button type="button" id="next-1">다음</button>
+    </section>
+    <section class="step" id="step-2" hidden>
+      <h2>2. 일정</h2>
+      <div class="row" style="position: relative">
+        <label for="return-date">반납일</label>
+        <input id="return-date" readonly required placeholder="날짜 선택">
+      </div>
+      <div class="row">
+        <label for="return-place">반납 장소</label>
+        <select id="return-place" required>
+          <option value="">선택</option><option value="desk">본점</option><option value="terminal">터미널 지점</option><option value="other">기타</option>
+        </select>
+      </div>
+      <div class="row" id="place-detail-row" hidden><label for="place-detail">상세 장소</label><input id="place-detail" required></div>
+      <div class="row"><span class="caption" id="cover-caption">보험 추가</span><span role="switch" id="cover" aria-labelledby="cover-caption" aria-checked="false" tabindex="0">추가</span></div>
+      <button type="button" id="next-2">다음</button>
+    </section>
+    <section class="step" id="step-3" hidden>
+      <h2>3. 결제</h2>
+      <iframe id="pay" title="결제 정보" srcdoc='<!doctype html><meta charset="utf-8"><style>body{font:14px system-ui,sans-serif;margin:8px} dd{margin:0 0 8px} input{width:4em}</style>
+        <form id="card">
+          <label for="holder">카드 소유자</label> <input id="holder" style="width:12em" required>
+          <dl><dt>카드번호</dt><dd><input name="c1" maxlength="4" required> <input name="c2" maxlength="4" required> <input name="c3" maxlength="4" required> <input name="c4" maxlength="4" required></dd></dl>
+          <div>유효기간 <select name="mm" required><option value="">월</option><option>01</option><option>02</option><option>03</option><option>04</option><option>05</option><option>06</option><option>07</option><option>08</option><option>09</option><option>10</option><option>11</option><option>12</option></select>
+          / <select name="yy" required><option value="">년</option><option>26</option><option>27</option><option>28</option><option>29</option><option>30</option></select></div>
+        </form>'></iframe>
+      <div class="row"><span role="checkbox" id="terms" aria-checked="false" aria-required="true" tabindex="0">이용 약관에 동의합니다</span></div>
+      <button type="submit">결제하기</button>
+    </section>
+    <p id="error" role="alert"></p>
+  </form>
+  <p id="done" hidden>예약이 완료되었습니다.</p>
+</main>
+<script>
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const error = (words) => { $("error").textContent = words; };
+  // The dropdown: a list drawn only while open, chosen by a press.
+  const models = ["소형 · 레이", "준중형 · 아반떼", "중형 · K5", "SUV · 투싼", "승합 · 카니발"];
+  const model = $("model");
+  let chosenModel = "";
+  const closeModels = () => { const list = $("model-list"); if (list) list.remove(); model.setAttribute("aria-expanded", "false"); };
+  model.addEventListener("click", () => {
+    if (model.getAttribute("aria-expanded") === "true") return closeModels();
+    const list = document.createElement("ul");
+    list.id = "model-list";
+    list.setAttribute("role", "listbox");
+    for (const name of models) {
+      const option = document.createElement("li");
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(name === chosenModel));
+      option.textContent = name;
+      option.addEventListener("click", () => { chosenModel = name; model.textContent = name; closeModels(); });
+      list.append(option);
+    }
+    model.parentElement.append(list);
+    model.setAttribute("aria-expanded", "true");
+  });
+  // The ARIA radio group and switch and checkbox: pressed, never typed.
+  for (const radio of document.querySelectorAll("[role=radio]")) {
+    radio.addEventListener("click", () => {
+      for (const other of radio.parentElement.children) other.setAttribute("aria-checked", String(other === radio));
+    });
+  }
+  for (const toggle of [$("cover"), $("terms")]) {
+    toggle.addEventListener("click", () => toggle.setAttribute("aria-checked", String(toggle.getAttribute("aria-checked") !== "true")));
+  }
+  const fuel = () => { const on = document.querySelector('[role=radio][aria-checked="true"]'); return on ? on.dataset.value : ""; };
+  // The calendar: November 2026 only, each day saying its whole date.
+  const returnDate = $("return-date");
+  returnDate.addEventListener("click", () => {
+    if (document.querySelector(".calendar")) return;
+    const grid = document.createElement("div");
+    grid.className = "calendar";
+    grid.setAttribute("role", "grid");
+    grid.setAttribute("aria-label", "2026년 11월");
+    for (let day = 1; day <= 30; day += 1) {
+      const cell = document.createElement("button");
+      cell.type = "button";
+      cell.setAttribute("role", "gridcell");
+      cell.setAttribute("aria-label", `2026년 11월 ${day}일`);
+      cell.textContent = String(day);
+      cell.addEventListener("click", () => {
+        returnDate.value = `2026.11.${String(day).padStart(2, "0")}`;
+        grid.remove();
+      });
+      grid.append(cell);
+    }
+    returnDate.parentElement.append(grid);
+  });
+  // "Other" brings a field, a little later.
+  $("return-place").addEventListener("change", (event) => {
+    $("place-detail-row").hidden = true;
+    if (event.target.value === "other") setTimeout(() => { $("place-detail-row").hidden = false; }, 400);
+  });
+  const show = (step) => { for (const each of document.querySelectorAll(".step")) each.hidden = each.id !== step; };
+  $("next-1").addEventListener("click", () => {
+    if (!chosenModel || !/^\d{8}$/.test($("birth").value) || !fuel()) return error("차량 정보를 모두 입력해 주세요.");
+    error("");
+    show("step-2");
+  });
+  $("next-2").addEventListener("click", () => {
+    const place = $("return-place").value;
+    if (!returnDate.value || !place || (place === "other" && !$("place-detail").value)) return error("일정을 모두 입력해 주세요.");
+    error("");
+    show("step-3");
+  });
+  $("rental").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const card = $("pay").contentDocument.getElementById("card");
+    const value = (name) => card.elements[name].value;
+    const number = ["c1", "c2", "c3", "c4"].map(value).join("");
+    if (!value("holder") || !/^\d{16}$/.test(number) || !value("mm") || !value("yy")) return error("결제 정보를 확인해 주세요.");
+    if ($("terms").getAttribute("aria-checked") !== "true") return error("약관에 동의해 주세요.");
+    window.__sceneResult = {
+      model: chosenModel, birth: $("birth").value, fuel: fuel(), returnDate: returnDate.value,
+      place: $("return-place").value, placeDetail: $("place-detail").value,
+      cover: $("cover").getAttribute("aria-checked") === "true",
+      holder: value("holder"), card: number, expiry: value("mm") + "/" + value("yy"), terms: true,
+    };
+    $("rental").hidden = true;
+    $("done").hidden = false;
+  });
+  show("step-1");
+</script>
+</body>
+</html>

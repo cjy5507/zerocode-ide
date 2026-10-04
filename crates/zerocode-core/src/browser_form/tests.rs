@@ -1,0 +1,291 @@
+use serde_json::json;
+
+use super::*;
+
+fn entry(handle: &str, value: FormValue) -> FillEntry {
+    FillEntry {
+        handle: handle.to_string(),
+        value,
+    }
+}
+
+fn text(words: &str) -> FormValue {
+    FormValue::Text(words.to_string())
+}
+
+fn said(handle: &str, status: FillStatus) -> FillResult {
+    FillResult {
+        handle: handle.to_string(),
+        status,
+        ..FillResult::default()
+    }
+}
+
+#[test]
+fn a_bundle_keeps_the_order_it_was_written_in() {
+    // A date before the time it loads: the page's order is the writer's.
+    let written = fill_entries(r##"{"#zeta": "2026-10-05", "#alpha": true, "#mid": 3}"##)
+        .expect("an object bundle");
+    assert_eq!(
+        written,
+        [
+            entry("#zeta", text("2026-10-05")),
+            entry("#alpha", FormValue::Flag(true)),
+            entry("#mid", text("3")),
+        ]
+    );
+    let listed = fill_entries(
+        r##"[{"handle": "#zeta", "value": "2026-10-05"}, {"handle": "#alpha", "value": true}, {"handle": "#mid", "value": 3}]"##,
+    )
+    .expect("a list bundle");
+    assert_eq!(listed, written, "the two shapes say the same bundle");
+    let framed = fill_entries(r##"{"iframe#pay >> #card": "4000"}"##).expect("a framed handle");
+    assert_eq!(framed[0].handle, "iframe#pay >> #card");
+}
+
+#[test]
+fn a_bundle_that_cannot_be_filled_is_refused_by_name() {
+    for (bundle, why) in [
+        ("", "not JSON"),
+        ("\"#a\"", "a bare string"),
+        ("{}", "empty"),
+        ("[]", "empty list"),
+        (r##"{"#a": null}"##, "a null value"),
+        (r##"{"#a": ["x"]}"##, "a list value"),
+        (r##"{"#a": "x", "#a": "y"}"##, "a handle twice"),
+        (r##"{"  ": "x"}"##, "an empty handle"),
+        (r##"[{"handle": "#a", "value": "x", "extra": 1}]"##, "an unknown key"),
+    ] {
+        assert!(fill_entries(bundle).is_err(), "{why}: {bundle}");
+    }
+    let long = format!(r##"{{"#a": "{}"}}"##, "x".repeat(BROWSER_FILL_VALUE_CAP + 1));
+    let refused = fill_entries(&long).expect_err("a value past the cap");
+    assert!(refused.contains("#a"), "{refused}");
+    let many: serde_json::Map<String, serde_json::Value> = (0..=BROWSER_FORM_FIELD_CAP)
+        .map(|at| (format!("#f{at}"), json!("x")))
+        .collect();
+    assert!(fill_entries(&serde_json::Value::Object(many).to_string()).is_err());
+}
+
+#[test]
+fn a_fill_tries_again_only_what_the_page_may_still_bring() {
+    let bundle = vec![
+        entry("#name", text("Kim")),
+        entry("#time", text("09:00")),
+        entry("#plan", text("Indoor")),
+        entry("#pw", text("hidden")),
+    ];
+    let mut ledger = FillLedger::new(bundle.clone());
+    assert_eq!(ledger.next(), bundle, "the first pass writes everything");
+    ledger.record(
+        &bundle,
+        FillPass {
+            results: vec![
+                said("#name", FillStatus::Set),
+                said("#time", FillStatus::NoOption),
+                said("#plan", FillStatus::NotFound),
+                said("#pw", FillStatus::Secret),
+            ],
+            left: vec![FormField {
+                handle: "#time".into(),
+                required: true,
+                ..FormField::default()
+            }],
+        },
+    );
+    let second = ledger.next();
+    assert_eq!(
+        second.iter().map(|e| e.handle.as_str()).collect::<Vec<_>>(),
+        ["#time", "#plan"],
+        "what took and what never will are not written again"
+    );
+    ledger.record(
+        &second,
+        FillPass {
+            results: vec![
+                said("#time", FillStatus::Set),
+                said("#plan", FillStatus::Mismatch),
+            ],
+            left: Vec::new(),
+        },
+    );
+    let third = ledger.next();
+    assert_eq!(third, [entry("#plan", text("Indoor"))]);
+    ledger.record(
+        &third,
+        FillPass {
+            results: vec![said("#plan", FillStatus::Same)],
+            left: Vec::new(),
+        },
+    );
+    assert!(ledger.next().is_empty());
+    let report = ledger.report();
+    assert_eq!(
+        report
+            .results
+            .iter()
+            .map(|r| (r.handle.as_str(), r.status))
+            .collect::<Vec<_>>(),
+        [
+            ("#name", FillStatus::Set),
+            ("#time", FillStatus::Set),
+            ("#plan", FillStatus::Same),
+            ("#pw", FillStatus::Secret),
+        ],
+        "the bundle's order, each field's last word"
+    );
+    assert_eq!(report.passes, 3);
+    assert_eq!((report.took(), report.all_took()), (3, false));
+    assert!(report.left.is_empty(), "what is left is the last pass's word");
+}
+
+#[test]
+fn a_fill_stops_chasing_a_value_the_page_keeps_rewriting() {
+    let bundle = vec![entry("#phone", text("01055500123"))];
+    let mut ledger = FillLedger::new(bundle);
+    let mut passes = 0;
+    loop {
+        let asked = ledger.next();
+        if asked.is_empty() {
+            break;
+        }
+        passes += 1;
+        assert!(passes <= BROWSER_FILL_PASSES, "the passes are bounded");
+        ledger.record(
+            &asked,
+            FillPass {
+                results: vec![said("#phone", FillStatus::Mismatch)],
+                left: Vec::new(),
+            },
+        );
+    }
+    assert_eq!(passes, BROWSER_FILL_PASSES);
+    assert_eq!(ledger.report().results[0].status, FillStatus::Mismatch);
+}
+
+#[test]
+fn a_field_the_page_did_not_answer_reads_unread() {
+    let bundle = vec![entry("#a", text("x")), entry("#b", text("y"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [{ "handle": "#a", "status": "exploded", "now": "x" }],
+    }))
+    .expect("a pass with a word this door does not know");
+    ledger.record(&bundle, pass);
+    let report = ledger.report();
+    assert_eq!(
+        report
+            .results
+            .iter()
+            .map(|r| (r.handle.as_str(), r.status))
+            .collect::<Vec<_>>(),
+        [("#a", FillStatus::Unread), ("#b", FillStatus::Unread)]
+    );
+}
+
+/// A read as the page script answers it: two sections, a choice past the
+/// cap, a secret, a button and a frame of another origin.
+fn booking() -> FormRead {
+    serde_json::from_value(json!({
+        "fields": [
+            { "handle": "#in-date", "kind": "date", "label": "Entry date", "section": "Schedule",
+              "value": "", "required": true },
+            { "handle": "select[name=\"in-time\"]", "kind": "select", "label": "Entry time",
+              "section": "Schedule", "value": "", "required": true,
+              "options": ["06:00", "06:30"], "moreOptions": 8 },
+            { "handle": "#phone-1", "kind": "tel", "label": "Mobile (1/3)", "section": "Driver",
+              "value": "010", "maxLength": 3 },
+            { "handle": "#pw", "kind": "password", "label": "Password", "section": "Driver",
+              "value": "", "masked": true, "required": true },
+            { "handle": "#agree", "kind": "checkbox", "label": "I agree", "section": "Driver",
+              "value": true, "required": true, "error": "" },
+        ],
+        "actions": [
+            { "handle": "#send-code", "label": "Send code" },
+            { "handle": "form > button", "label": "Book", "disabled": true },
+        ],
+        "more": 2,
+        "sealedFrames": ["pay.example.com"],
+    }))
+    .expect("the page's read")
+}
+
+#[test]
+fn a_fields_read_says_each_field_under_its_section_with_its_choices() {
+    let lines = fields_lines(&booking());
+    for expected in [
+        "양식 칸 5개 (필수 4, 비어 있는 필수 3)",
+        "[Schedule]\n  #in-date · date · Entry date * = \"\"\n",
+        "  select[name=\"in-time\"] · select · Entry time * = \"\" ▸ 06:00 | 06:30 (+8)",
+        "[Driver]\n  #phone-1 · tel · Mobile (1/3) = \"010\" 최대 3자",
+        "  #pw · password · Password * = (가림)",
+        "  #agree · checkbox · I agree * = true",
+        "(+2칸 더",
+        "버튼: #send-code 「Send code」 · form > button 「Book」 (꺼짐)",
+        "읽지 못한 다른 출처의 틀: pay.example.com",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+    assert_eq!(lines.matches("[Driver]").count(), 1, "one header a section");
+}
+
+#[test]
+fn a_json_read_is_the_read_flagged_as_the_pages_words() {
+    let answer = fields_json(&booking());
+    assert_eq!(answer[crate::untrusted::JSON_FLAG], json!(true));
+    assert_eq!(answer["fields"][1]["moreOptions"], json!(8));
+    assert_eq!(answer["fields"][3]["value"], json!(""));
+    assert_eq!(answer["actions"][0]["handle"], json!("#send-code"));
+}
+
+#[test]
+fn a_fill_report_names_what_took_and_why_the_rest_did_not() {
+    let report = FillReport {
+        results: vec![
+            FillResult {
+                now: text("Kim"),
+                label: "Name".into(),
+                ..said("#name", FillStatus::Set)
+            },
+            FillResult {
+                now: FormValue::Flag(true),
+                label: "I agree".into(),
+                ..said("#agree", FillStatus::Same)
+            },
+            FillResult {
+                label: "Entry time".into(),
+                options: vec!["06:00".into(), "06:30".into()],
+                ..said("#time", FillStatus::NoOption)
+            },
+            FillResult {
+                label: "Mobile".into(),
+                now: text("010-555"),
+                ..said("#phone", FillStatus::Mismatch)
+            },
+            FillResult {
+                label: "Password".into(),
+                ..said("#pw", FillStatus::Secret)
+            },
+        ],
+        left: vec![FormField {
+            handle: "#code".into(),
+            kind: "text".into(),
+            label: "Code".into(),
+            required: true,
+            ..FormField::default()
+        }],
+        passes: 2,
+    };
+    let lines = fill_lines(&report);
+    for expected in [
+        "채움 2/5칸 (2회)",
+        "  ✓ #name Name = \"Kim\"",
+        "  ✓ #agree I agree = true",
+        "  ✗ #time Entry time: 그 값의 선택지가 없음 ▸ 06:00 | 06:30",
+        "  ✗ #phone Mobile: 다시 읽으니 다른 값 (\"010-555\")",
+        "  ✗ #pw Password: 비밀 칸은 fill이 쓰지 않음",
+        "남은 칸:\n  #code · text · Code — 필수, 비어 있음",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+}
