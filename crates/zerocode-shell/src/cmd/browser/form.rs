@@ -104,9 +104,26 @@ const zcWordsBefore = (el, request) => {
   }
   return "";
 };
-// A field's caption when nothing names it: its table row's header, the term
-// its definition follows, the words just before it.
+// The words a field has to itself under a header's cell or a term's
+// definition: those before it in the outermost box inside the cell that
+// holds no other field. A field straight in the cell has none.
+const zcOwnWords = (el, holder, request) => {
+  const controls = request.controls.join(",");
+  let depth = 0;
+  for (let up = el.parentElement, level = 1; up && up !== holder; up = up.parentElement, level += 1) {
+    if ([...up.querySelectorAll(controls)].some((other) => other !== el && zcFieldKind(other, request))) break;
+    depth = level;
+  }
+  return depth ? zcWordsBefore(el, { ...request, captionDepth: depth }) : "";
+};
+// A field's caption when nothing names it: the words it has to itself in a
+// box of its own, else its table row's header, the term its definition
+// follows (shared by the fields with no words of their own), the words just
+// before it.
 const zcCaption = (el, request) => {
+  const holder = el.closest("td, [role=cell], [role=gridcell], dd");
+  const own = holder ? zcOwnWords(el, holder, request) : "";
+  if (own.trim()) return own;
   const cell = el.closest("td, [role=cell], [role=gridcell]");
   const head = cell && cell.parentElement && cell.parentElement.querySelector("th, [role=rowheader]");
   if (head && zcLabelWords(head).trim()) return zcLabelWords(head);
