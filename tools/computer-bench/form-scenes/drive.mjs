@@ -41,11 +41,11 @@
  * (`unknowns`).
  */
 
-import { createServer } from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
-import { extname, join, resolve, sep } from "node:path";
+import { join, sep } from "node:path";
 import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
 import { FORM_REQUEST, clickScript, evalFormScript, fieldsScript, fillPasses } from "../../../ui/tests/browser-scripts.mjs";
+import { serveScene as serve, wrongKeys } from "./scene-kit.mjs";
 
 // The floor of one model round trip, and what one costs in the person's
 // session (m-38845: about 17 s — 55 min, 122 requests, 80 % model time).
@@ -66,7 +66,6 @@ const INTENT = {
   confirm: ["확인", "인증", "인증하기", "verify", "confirm"],
   oneTime: ["인증번호", "인증 번호", "인증코드", "일회용", "otp", "verification code", "one-time", "passcode"],
 };
-const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".json": "application/json" };
 
 const fold = (text) => String(text ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 const PART = / \((\d+)\/(\d+)\)$/;
@@ -82,23 +81,6 @@ function args(argv) {
   }
   if (!parsed.scene.length || !parsed.out) throw new Error("--scene DIR [--scene DIR …] --out FILE.json");
   return parsed;
-}
-
-/* Serve one folder over loopback, nothing outside it. */
-async function serve(folder) {
-  const root = resolve(folder);
-  const server = createServer(async (request, response) => {
-    const path = resolve(root, "." + decodeURIComponent(new URL(request.url, "http://x").pathname));
-    if (path !== root && !path.startsWith(root + sep)) return response.writeHead(403).end();
-    try {
-      const body = await readFile(path.endsWith(sep) || path === root ? join(path, "scene.html") : path);
-      response.writeHead(200, { "content-type": TYPES[extname(path)] || "application/octet-stream" }).end(body);
-    } catch {
-      response.writeHead(404).end();
-    }
-  });
-  await new Promise((done) => server.listen(0, "127.0.0.1", done));
-  return { url: `http://127.0.0.1:${server.address().port}/scene.html`, close: () => server.close() };
 }
 
 /* The model's reading, played by one rule: each fact to the field whose words
@@ -479,11 +461,11 @@ async function drive(browser, folder, roadName) {
     await page.close();
     site.close();
   }
-  const ok = JSON.stringify(result) === JSON.stringify(expected);
+  const wrong = result ? wrongKeys(result, expected) : null;
+  const ok = wrong !== null && wrong.length === 0;
   const scriptMs = road.scriptMs.slice().sort((a, b) => a - b);
   return {
-    scene: folder.split(sep).filter(Boolean).pop(), road: roadName, ok, stuck,
-    wrong: result ? Object.keys(expected).filter((key) => JSON.stringify(result[key]) !== JSON.stringify(expected[key])) : null,
+    scene: folder.split(sep).filter(Boolean).pop(), road: roadName, ok, stuck, wrong,
     ...road.count, projectedSeconds: road.count.roundTrips * SECONDS_PER_ROUND_TRIP,
     callMsP50: Math.round(scriptMs[Math.floor(scriptMs.length / 2)] ?? 0), callMsMax: Math.round(scriptMs.at(-1) ?? 0),
     wallMs: Math.round(performance.now() - began), trail: road.trail,
