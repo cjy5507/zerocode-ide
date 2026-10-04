@@ -968,7 +968,7 @@ class Autopilot(unittest.TestCase):
         # A person's plan asks the decision nothing: every road but the hand's is none.
         hand = reflex.measure(clean(), VALUES, LIMITS)
         self.assertEqual({road: row["n"] for road, row in hand["roads"].items() if road != "l0"},
-                         {"memo": 0, "surrogate": 0, "jev": 0, "escalated": 0})
+                         {"memo": 0, "surrogate": 0, "jev": 0, "ahead": 0, "escalated": 0})
         self.assertIsNone(hand["autopilot"])
 
     def test_the_new_columns_come_from_the_fixture_the_helper_and_the_ledgers(self):
@@ -1046,6 +1046,45 @@ class Autopilot(unittest.TestCase):
         env, why = reflex.keys_for(VALUES, reflex.STUB, lambda service, value=False: None)
         self.assertEqual(env, {})
         self.assertIsNone(why)
+
+
+class AskedAhead(unittest.TestCase):
+    """t-32797: a decision an answer held for its reading decided rides a
+    road of its own and adds up with the rest, and the bench reads from the
+    decision ledger how long every reading waited for its decision and what
+    asking ahead held, used and let go."""
+
+    def test_a_held_answers_road_adds_up_with_the_others(self):
+        record = piloted()
+        pilot = record["ended"]["autopilot"]
+        pilot["roads"]["ahead"] = 2
+        pilot["applied"]["continue"] += 2
+        measured = reflex.measure(record, VALUES, LIMITS)
+        self.assertTrue(measured["autopilot"]["roads_add_up"])
+        self.assertEqual(measured["roads"].get("ahead", {}).get("n"), 2)
+        self.assertEqual(measured["autopilot"]["road_counts"].get("ahead"), 2)
+
+    def test_how_long_a_reading_waited_and_what_was_asked_ahead_come_from_the_ledger(self):
+        record = piloted()
+        rows = [row for row in record["decisions"] if "decision" in row]
+        for row, wait in zip(rows, (240, 260, 280, 300)):
+            row.update(decisionWaitMs=wait, branches=["taken", "missed"])
+        # The third reading was decided by the answer held for it, a reading
+        # before; its own answer came 280 ms after it was read, and agreed.
+        rows[2]["held"] = {"decision": 9, "chosen": "continue", "agreed": True}
+        record["decisions"].append({
+            "run": "rx-1", "decision": 9, "road": "ahead", "attempts": 0, "outcome": "answered",
+            "provenance": {"epoch": 1, "planHash": "h1", "forced": True}, "applied": True,
+            "chosen": "continue", "branch": "missed", "decisionWaitMs": 0, "cached": True})
+        l1 = reflex.measure(record, VALUES, LIMITS)["l1"]
+        self.assertEqual(l1["asked"], 5, "a held answer is no question asked")
+        self.assertEqual(l1["requests"], 5)
+        # Every reading's decision: the held one's nothing, the others their own answer's wait.
+        self.assertEqual(l1.get("decision_wait_ms"), reflex.spread([240, 260, 300, 0]))
+        # What each reading's own answer took, as it would have without asking ahead.
+        self.assertEqual(l1.get("own_wait_ms"), reflex.spread([240, 260, 280, 300]))
+        self.assertEqual(l1.get("ahead"), {"used": 1, "branches": {"missed": 1}, "agreed": 1, "disagreed": 0,
+                                           "branches_asked": 8, "branches_unused": 7})
 
 
 class Retries(unittest.TestCase):

@@ -66,7 +66,12 @@ COVER_SETTING = "jevCover"
 # The reflex decision's rows that were questions, and the one road that asks.
 ASKED_OUTCOME = "answered"
 JEV_ROAD = "jev"
-DECISION_ROADS = ("memo", "surrogate", JEV_ROAD)
+# An answer the wire gave the reading before, held for the reading it decided
+# (t-32797): no request of its own, and no wait.
+AHEAD_ROAD = "ahead"
+DECISION_ROADS = ("memo", "surrogate", JEV_ROAD, AHEAD_ROAD)
+# The key every decision row says how long its reading waited for it under.
+DECISION_WAIT = "decisionWaitMs"
 
 
 def limits():
@@ -800,15 +805,48 @@ def question_rows(record):
 def l1_numbers(record):
     """The reflex decision's questions from its ledger in the bench's home:
     asked, answered, forced by the bench, the requests that went and their
-    round trips."""
+    round trips — and (t-32797) how long each reading waited for its
+    decision, and what the answers held for a next reading came to."""
     rows = question_rows(record)
+    asked = [row for row in rows if row.get("road") != AHEAD_ROAD]
+    held = [row for row in rows if row.get("road") == AHEAD_ROAD]
     return {
-        "asked": len(rows),
-        "answered": sum(1 for row in rows if row.get("outcome") == ASKED_OUTCOME),
-        "forced": sum(1 for row in rows if (row.get("provenance") or {}).get("forced") is True),
+        "asked": len(asked),
+        "answered": sum(1 for row in asked if row.get("outcome") == ASKED_OUTCOME),
+        "forced": sum(1 for row in asked if (row.get("provenance") or {}).get("forced") is True),
         "requests": sum(int(row.get("attempts") or 0) for row in rows),
         "rtt_ms": spread([row["rttMs"] for row in rows if row.get("road") == JEV_ROAD
                           and isinstance(row.get("rttMs"), (int, float))]),
+        "decision_wait_ms": spread(decision_waits(rows)),
+        "own_wait_ms": spread([row[DECISION_WAIT] for row in asked if row.get("outcome") == ASKED_OUTCOME
+                               and isinstance(row.get(DECISION_WAIT), (int, float))]),
+        "ahead": ahead_numbers(asked, held),
+    }
+
+
+def decision_waits(rows):
+    """How long each reading waited for the decision it was decided by: a
+    held answer's nothing, and — for a reading no held answer decided — its
+    own answer's wait (t-32797)."""
+    return [row[DECISION_WAIT] for row in rows
+            if row.get("outcome") == ASKED_OUTCOME and "held" not in row
+            and isinstance(row.get(DECISION_WAIT), (int, float))]
+
+
+def ahead_numbers(asked, held):
+    """What asking ahead came to: the readings a held answer decided, by
+    branch; whether the reading's own answer, when it came, agreed; and the
+    branch questions that rode along and were never used (t-32797)."""
+    agreements = [(row.get("held") or {}).get("agreed") for row in asked if "held" in row]
+    branches_asked = sum(len(row.get("branches") or []) for row in asked)
+    used_branches = sum(1 for row in held if row.get("branch") != "steady")
+    return {
+        "used": len(held),
+        "branches": dict(collections.Counter(row.get("branch") for row in held)),
+        "agreed": sum(1 for agreed in agreements if agreed is True),
+        "disagreed": sum(1 for agreed in agreements if agreed is False),
+        "branches_asked": branches_asked,
+        "branches_unused": branches_asked - used_branches,
     }
 
 
