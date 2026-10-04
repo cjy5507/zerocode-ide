@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::capabilities::{
     AuthProbeKind, BlockedSignal, CLAUDE_EFFORT_LADDER, CLAUDE_EFFORT_PICKER,
-    CLAUDE_RESUME_SELECTORS, CODEX_EFFORT_LADDER, Harness, IdShape, MoveRoad, PointerRoute,
-    SpawnRoad, StoreResume, Submit, SubmitAck, TrustMenu, TurnMoves, WakeMark,
+    CLAUDE_RESUME_SELECTORS, CODEX_EFFORT_LADDER, Harness, IdShape, MoveRoad, OneShotRoad,
+    PointerRoute, SpawnRoad, StoreResume, Submit, SubmitAck, TrustMenu, TurnMoves, WakeMark,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -734,6 +734,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
             // half again, counted from the moment the first delivery
             // answered its Enter was not taken.
             enter_retry_ms: Some(90_000),
+            one_shot: Some(OneShotRoad::ClaudePrint),
             ..Harness::PLAIN
         },
     },
@@ -805,6 +806,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 model: Some(MoveRoad::Shown("/model")),
                 ladder: CODEX_EFFORT_LADDER,
             },
+            one_shot: Some(OneShotRoad::CodexExec),
             ..Harness::PLAIN
         },
     },
