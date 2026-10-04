@@ -13,14 +13,18 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 use serde_json::Map;
-use zerocode_core::jev::summary::{AGREED, BASELINE_AGREED, NOT_COMPARED};
-use zerocode_core::jev::{MAIL_TRIAGE_BATCH_CAP, SMART_SETTINGS_KEY};
-use zerocode_core::mail_triage::NO_NEED_AFTER_ACTS;
+use zerocode_core::jev::batch::{Answers, Judgment, Request};
+use zerocode_core::jev::summary::{AGREED, BASELINE_AGREED, LABEL, NOT_COMPARED};
+use zerocode_core::jev::{Cap, JevUse, MAIL_TRIAGE_BATCH_CAP, SMART_SETTINGS_KEY, Sent};
+use zerocode_core::mail_triage::{
+    MailRead, MailRefusal, MailTriage, NO_NEED_AFTER_ACTS, Situation,
+};
 use zerocode_core::orchestration::{
     Draft, LEDGER_ITSELF, MessageKind, Priority, ServedAnswer, ServedRow, Text, worker_address,
 };
 
 use super::*;
+use crate::systemone::Asked;
 use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
 
 /// The coordinator's own pane, as the window numbers it: a term no other test
@@ -86,6 +90,9 @@ const COORDINATOR_AFTER_MS: i64 = 5_000;
 /// The gap between two of the coordinator's acts.
 const ACT_GAP_MS: i64 = 100;
 
+/// The workers the ledger's notices are about in a day: a few.
+const QUIET_HANDS: usize = 6;
+
 /// A text this long is the product's words and not a letter's fact: the
 /// longest value a letter's entry carries is 19 bytes (a kind), the shortest
 /// of the words a question says is 31.
@@ -95,6 +102,12 @@ const SHARED_WORDS_MIN_BYTES: usize = 24;
 /// built it, says them: counting them counts the requests that carried the
 /// rubric.
 const RUBRIC_OPENING: &str = "A coordinator agent runs a team of worker agents";
+
+/// The most bytes of the product's words one request may repeat for each
+/// letter beyond its first: the option and yes/no lines every question must
+/// carry — about 300 B — and not the rubric, ten times that, which is said
+/// once.
+const OPTION_LINES_BYTES_MAX: usize = 512;
 
 /* ---- the stand-in model --------------------------------------------------- */
 
@@ -189,6 +202,9 @@ fn stand_in(hold_ms: u64) -> Endpoint {
 
 /* ---- the window ----------------------------------------------------------- */
 
+/// A job the beat hands off, as the host is handed it.
+type Job = Box<dyn FnOnce() + Send>;
+
 /// A window with one coordinator pane: it hands out the wire and the
 /// coordinator's checkout and nothing else, and runs a job where it is handed
 /// it — the trait's own default — so a test sees what a sweep did the moment
@@ -196,6 +212,37 @@ fn stand_in(hold_ms: u64) -> Endpoint {
 struct Window {
     wire: Wire,
     checkout: PathBuf,
+    /// Jobs handed off the beat, kept while a case times the beat's own work
+    /// apart from theirs; `None` runs them where they are handed over.
+    held: Mutex<Option<Vec<Job>>>,
+}
+
+impl Window {
+    fn new(wire: Wire, checkout: PathBuf) -> Self {
+        Self {
+            wire,
+            checkout,
+            held: Mutex::new(None),
+        }
+    }
+
+    /// From now on a job is kept until [`Self::run_held`]: the beat returns
+    /// as soon as it has gathered what it found.
+    fn hold_jobs(&self) {
+        *self.held.lock().unwrap_or_else(|held| held.into_inner()) = Some(Vec::new());
+    }
+
+    /// Run every job kept so far, and keep holding the next ones.
+    fn run_held(&self) {
+        let jobs = self
+            .held
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .replace(Vec::new());
+        for job in jobs.unwrap_or_default() {
+            job();
+        }
+    }
 }
 
 impl Host for Window {
@@ -226,6 +273,16 @@ impl Host for Window {
     }
     fn worktree_of(&self, _term: u32) -> Option<PathBuf> {
         Some(self.checkout.clone())
+    }
+    fn off_the_beat(&self, job: Job) {
+        let mut held = self.held.lock().unwrap_or_else(|held| held.into_inner());
+        match held.as_mut() {
+            Some(jobs) => jobs.push(job),
+            None => {
+                drop(held);
+                job();
+            }
+        }
     }
 }
 
@@ -314,6 +371,12 @@ impl Inbox {
     /// An inbox that will be handed `letters` letters in the mix [`KINDS`]
     /// names.
     fn new(letters: usize) -> Self {
+        Self::with_quiet_hands(letters, QUIET_HANDS)
+    }
+
+    /// The same, with `quiet` workers for the ledger's notices to be about:
+    /// each on an attempt of its own, so a long ledger holds that many.
+    fn with_quiet_hands(letters: usize, quiet: usize) -> Self {
         let mut ledger = Ledger::new();
         let run = ledger.create_run("synthetic day", 1);
         ledger
@@ -325,8 +388,8 @@ impl Inbox {
             .count();
         let finishing = letters.div_ceil(KINDS.len()) * done_in_a_round;
         let talkers = Self::hands(&mut ledger, &run, 2, 6);
-        let quiet = Self::hands(&mut ledger, &run, 8, 6);
-        let finishing = Self::hands(&mut ledger, &run, 14, finishing);
+        let quiet = Self::hands(&mut ledger, &run, 8, quiet);
+        let finishing = Self::hands(&mut ledger, &run, 8 + quiet.len(), finishing);
         Self {
             ledger,
             run,
@@ -456,21 +519,32 @@ fn the_day() -> Vec<Vec<MessageKind>> {
         .collect()
 }
 
+/// One sweep of a day: how many letters it was handed, how long it took to
+/// triage them — the time to a triaged batch — and which of the model's
+/// requests were its.
+struct Sweep {
+    letters: usize,
+    took: Duration,
+    requests: Range<usize>,
+}
+
 /// A day's sweeps: each batch arrives, and one sweep of the beat sees it.
-/// Returns the letters in each sweep and how long the sweep took — the time
-/// to a triaged batch.
+/// `heard` says how many requests the model has heard so far, so a sweep can
+/// name its own.
 fn run_the_day(
     window: &Window,
     book: &Arc<Mutex<MailBook>>,
     ledger: &Path,
     inbox: &mut Inbox,
     batches: &[Vec<MessageKind>],
-) -> Vec<(usize, Duration)> {
-    let mut took = Vec::new();
+    heard: &dyn Fn() -> usize,
+) -> Vec<Sweep> {
+    let mut sweeps = Vec::new();
     for (n, kinds) in batches.iter().enumerate() {
         let at = DAY_START_MS + MINUTE_MS * i64::try_from(n).unwrap_or(0);
         inbox.arrive(kinds, at);
         let seated = [(inbox.run(), TERM)];
+        let first = heard();
         let began = Instant::now();
         ask_about(
             window,
@@ -480,9 +554,13 @@ fn run_the_day(
             &seated,
             at + SWEEP_AFTER_MS,
         );
-        took.push((kinds.len(), began.elapsed()));
+        sweeps.push(Sweep {
+            letters: kinds.len(),
+            took: began.elapsed(),
+            requests: first..heard(),
+        });
     }
-    took
+    sweeps
 }
 
 /// Every string of `value` that is long enough to be the product's words.
@@ -510,23 +588,33 @@ fn repeated_shared_bytes(bodies: &[Value]) -> usize {
         .sum()
 }
 
-/// What a day came to: read off the rows the seat wrote and the requests the
-/// endpoint heard.
+/// What a day came to: read off the rows the seat wrote and, where something
+/// listened, the requests the model heard.
 struct Account {
     letters: usize,
-    sweeps: usize,
+    batches: usize,
     requests: u64,
     request_bytes: u64,
     input_tokens: u64,
-    repeated_shared_bytes: usize,
-    rubrics: usize,
+    /// The bytes of the product's words that left more than once among the
+    /// requests of ONE delivered batch, summed over the day — what asking a
+    /// batch letter by letter pays and asking it together does not. `None`
+    /// where nothing listened (the real model).
+    repeated_in_a_batch: Option<usize>,
+    /// The same, among every request of the day: what no road avoids, a
+    /// request carrying its own context.
+    repeated_in_a_day: Option<usize>,
+    /// How many requests carried the rubric.
+    rubrics: Option<usize>,
     outcomes: BTreeMap<String, usize>,
 }
 
-fn account(rows: &[Value], endpoint: &Endpoint, sweeps: usize) -> Account {
+fn account(rows: &[Value], listened: Option<&Endpoint>, sweeps: &[Sweep]) -> Account {
     let sum = |key: &str| -> u64 { rows.iter().map(|row| row[key].as_u64().unwrap_or(0)).sum() };
-    let heard = endpoint.asked();
-    let bodies: Vec<Value> = heard.iter().map(|request| body_of(request)).collect();
+    let heard = listened.map(Endpoint::asked);
+    let bodies: Option<Vec<Value>> = heard
+        .as_ref()
+        .map(|heard| heard.iter().map(|request| body_of(request)).collect());
     let mut outcomes: BTreeMap<String, usize> = BTreeMap::new();
     for row in rows {
         *outcomes
@@ -535,15 +623,23 @@ fn account(rows: &[Value], endpoint: &Endpoint, sweeps: usize) -> Account {
     }
     Account {
         letters: rows.len(),
-        sweeps,
+        batches: sweeps.len(),
         requests: sum("requests"),
         request_bytes: sum("requestBytes"),
         input_tokens: sum("inputTokens"),
-        repeated_shared_bytes: repeated_shared_bytes(&bodies),
-        rubrics: heard
-            .iter()
-            .map(|request| request.matches(RUBRIC_OPENING).count())
-            .sum(),
+        repeated_in_a_batch: bodies.as_ref().map(|bodies| {
+            sweeps
+                .iter()
+                .map(|sweep| repeated_shared_bytes(&bodies[sweep.requests.clone()]))
+                .sum()
+        }),
+        repeated_in_a_day: bodies.as_ref().map(|bodies| repeated_shared_bytes(bodies)),
+        rubrics: heard.as_ref().map(|heard| {
+            heard
+                .iter()
+                .map(|request| request.matches(RUBRIC_OPENING).count())
+                .sum()
+        }),
         outcomes,
     }
 }
@@ -599,6 +695,14 @@ fn rank(kind: MessageKind) -> u8 {
 /// one or two.
 const FILLER_ACTS: u64 = 3;
 
+/// The seeds the synthetic coordinator is run under: the same letters, three
+/// different days of behaviour, so a difference between two roads has to hold
+/// under each of them.
+const SEEDS: [u64; 3] = [7, 11, 13];
+
+/// When the labels are read: long after the day and its closing acts.
+const LABEL_NOW_MS: i64 = DAY_START_MS + MINUTE_MS * 200;
+
 impl Inbox {
     /// One receipt of the coordinator's, filed at `at`.
     fn receipt(verb: &str, answer: &Value, at: i64, n: usize) -> ServedRow {
@@ -613,34 +717,26 @@ impl Inbox {
         }
     }
 
-    /// The act by which the coordinator handles letter `n`, filed at `at`: a
-    /// question is answered in its thread, a finished task is reviewed, and
-    /// any other letter is dealt with by a word to the worker it is about.
-    fn handling(&mut self, n: usize, at: i64, filed: usize) -> ServedRow {
-        let (id, kind, worker, task) = {
-            let letter = &self.letters[n];
-            (
-                letter.id.clone(),
-                letter.kind,
-                letter.worker.clone(),
-                letter.task.clone(),
-            )
-        };
-        match kind {
+    /// The act by which the coordinator handles letter `n`, filed at `at` in
+    /// `ledger`: a question is answered in its thread, a finished task is
+    /// reviewed, and any other letter is dealt with by a word to the worker it
+    /// is about.
+    fn handling(&self, ledger: &mut Ledger, n: usize, at: i64, filed: usize) -> ServedRow {
+        let letter = &self.letters[n];
+        match letter.kind {
             MessageKind::Question => {
-                let reply = self
-                    .ledger
+                let reply = ledger
                     .post(
                         &self.run,
                         Draft {
                             from: format!("run:{}", self.run),
-                            to: worker_address(&worker),
+                            to: worker_address(&letter.worker),
                             kind: MessageKind::Question,
                             body: Text::from("yes"),
                             subject: Text::default(),
                             priority: Priority::Normal,
                             payload: Text::default(),
-                            thread: Some(id),
+                            thread: Some(letter.id.clone()),
                             task: None,
                             dispatch: None,
                         },
@@ -650,20 +746,23 @@ impl Inbox {
                 Self::receipt("reply", &json!({ "messageId": reply }), at, filed)
             }
             MessageKind::WorkerDone => {
-                Self::receipt("task-update", &json!({ "taskId": task }), at, filed)
+                Self::receipt("task-update", &json!({ "taskId": letter.task }), at, filed)
             }
-            _ => Self::receipt("send", &json!({ "workerId": worker }), at, filed),
+            _ => Self::receipt("send", &json!({ "workerId": letter.worker }), at, filed),
         }
     }
 
-    /// The ledger once the synthetic coordinator has dealt with the day: each
-    /// batch taken in the order [`rank`] gives, each letter handled as often
-    /// as [`handled_percent`] says, and enough acts at the end that a letter
-    /// nothing named is given up. Every letter has been handed over.
-    fn coordinated(mut self, dice: &mut Dice) -> Ledger {
+    /// The ledger once a synthetic coordinator, rolling under `seed`, has dealt
+    /// with the day: each batch taken in the order [`rank`] gives, each letter
+    /// handled as often as [`handled_percent`] says, and enough acts at the
+    /// end that a letter nothing named is given up. Every letter has been
+    /// handed over. The inbox itself is left as it was, to be run under
+    /// another seed.
+    fn coordinated(&self, seed: u64) -> Ledger {
+        let mut dice = Dice(seed);
+        let mut ledger = Ledger::rebuild(self.ledger.export()).expect("a copy");
         let mut receipts = Vec::new();
-        let batches = self.batches.clone();
-        for (b, batch) in batches.iter().enumerate() {
+        for (b, batch) in self.batches.iter().enumerate() {
             let mut at =
                 DAY_START_MS + MINUTE_MS * i64::try_from(b).unwrap_or(0) + COORDINATOR_AFTER_MS;
             let mut order: Vec<usize> = batch.clone().collect();
@@ -683,11 +782,11 @@ impl Inbox {
                     at += ACT_GAP_MS;
                 }
                 let filed = receipts.len();
-                receipts.push(self.handling(n, at, filed));
+                receipts.push(self.handling(&mut ledger, n, at, filed));
                 at += ACT_GAP_MS;
             }
         }
-        let mut at = DAY_START_MS + MINUTE_MS * i64::try_from(batches.len()).unwrap_or(0);
+        let mut at = DAY_START_MS + MINUTE_MS * i64::try_from(self.batches.len()).unwrap_or(0);
         for _ in 0..=NO_NEED_AFTER_ACTS {
             let filed = receipts.len();
             receipts.push(Self::receipt(
@@ -698,7 +797,7 @@ impl Inbox {
             ));
             at += ACT_GAP_MS;
         }
-        let mut projected = self.ledger.export();
+        let mut projected = ledger.export();
         projected.served.extend(receipts);
         for inbox in projected
             .inboxes
@@ -711,6 +810,31 @@ impl Inbox {
     }
 }
 
+/// The labels every seed's coordinator wrote for the answers `book` holds
+/// waiting, one list a seed.
+fn labelled(book: &Arc<Mutex<MailBook>>, inbox: &Inbox) -> Vec<(u64, Vec<Value>)> {
+    let (path, waiting) = kept(book).waiting.clone().unwrap_or_default();
+    SEEDS
+        .into_iter()
+        .map(|seed| {
+            let mut copy = MailBook {
+                waiting: Some((path.clone(), waiting.clone())),
+                ..MailBook::default()
+            };
+            let ledger = inbox.coordinated(seed);
+            (seed, label_waiting(&mut copy, &ledger, LABEL_NOW_MS))
+        })
+        .collect()
+}
+
+/// What each seed's labels say of the answers, with the kind rule beside them.
+fn agreements(by_seed: &[(u64, Vec<Value>)]) -> Vec<(u64, Agreement)> {
+    by_seed
+        .iter()
+        .map(|(seed, labels)| (*seed, agreement(labels)))
+        .collect()
+}
+
 /// What the labels said of the answers: how many letters were compared, how
 /// many the seat's answer agreed with what the coordinator did, and how many
 /// the kind rule agreed with, on the same letters.
@@ -720,6 +844,25 @@ struct Agreement {
     answered: usize,
     rule: usize,
     not_compared: usize,
+}
+
+impl Agreement {
+    /// Another seed's tally, pooled in.
+    fn pool(&mut self, other: &Self) {
+        self.compared += other.compared;
+        self.answered += other.answered;
+        self.rule += other.rule;
+        self.not_compared += other.not_compared;
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "compared": self.compared,
+            "answered": self.answered,
+            "rule": self.rule,
+            "notCompared": self.not_compared,
+        })
+    }
 }
 
 fn agreement(labels: &[Value]) -> Agreement {
@@ -760,10 +903,7 @@ fn stand_at(base: &str, mode: &str, budget: Option<u64>, key: &str) -> Stand {
     let wire = Wire::at(base, key, Some(settings));
     let book = open_book(&ledger);
     Stand {
-        window: Window {
-            wire,
-            checkout: work.path().to_path_buf(),
-        },
+        window: Window::new(wire, work.path().to_path_buf()),
         _home: home,
         _work: work,
         ledger,
@@ -933,7 +1073,10 @@ fn one_letters_broken_answer_leaves_the_letters_beside_it_answered() {
 /// the slowest request's, not the sum of them.
 #[test]
 fn a_burst_above_the_cap_is_cut_evenly_and_asked_side_by_side() {
-    const HOLD_MS: u64 = 150;
+    // Held long enough that a machine at full load, which can park a thread
+    // for a hundred milliseconds, is still far from the three holds in a row
+    // (1,200 ms) a one-after-another road would take.
+    const HOLD_MS: u64 = 400;
     let endpoint = stand_in(HOLD_MS);
     let stand = stand_on(&endpoint, "shadow", None, "test-key");
     let letters = MAIL_TRIAGE_BATCH_CAP * 2 + 1;
@@ -987,14 +1130,21 @@ fn a_day_costs_a_request_a_batch_and_every_letter_is_asked_once() {
     assert_eq!(letters, 172, "the shape of the day");
     assert_eq!(day.len(), 107);
     let mut inbox = Inbox::new(letters);
-    run_the_day(&stand.window, &stand.book, &stand.ledger, &mut inbox, &day);
+    let sweeps = run_the_day(
+        &stand.window,
+        &stand.book,
+        &stand.ledger,
+        &mut inbox,
+        &day,
+        &|| endpoint.count(),
+    );
 
     let written = rows(&stand.ledger);
     let held = inbox.letters_held();
-    let account = account(&written, &endpoint, day.len());
-    let heard = endpoint.asked().len();
+    let account = account(&written, Some(&endpoint), &sweeps);
+    let heard = endpoint.count();
     assert_eq!(
-        heard, account.sweeps,
+        heard, account.batches,
         "a request for every batch, not for every letter ({} letters)",
         account.letters
     );
@@ -1009,8 +1159,23 @@ fn a_day_costs_a_request_a_batch_and_every_letter_is_asked_once() {
         "the rows add up to the requests that left"
     );
     assert_eq!(
-        account.rubrics, heard,
+        account.rubrics,
+        Some(heard),
         "the rubric travelled once in each of them"
+    );
+    assert!(
+        sweeps
+            .iter()
+            .all(|sweep| sweep.requests.len() == 1 && sweep.letters > 0),
+        "every sweep asked its batch in one request"
+    );
+    let extra_letters = account.letters - account.batches;
+    assert!(
+        account
+            .repeated_in_a_batch
+            .is_some_and(|repeated| repeated <= extra_letters * OPTION_LINES_BYTES_MAX),
+        "the product's words left more than once inside a batch: {:?} bytes for {extra_letters} letters beyond each batch's first",
+        account.repeated_in_a_batch
     );
     assert!(
         account.outcomes.keys().all(|outcome| outcome == ANSWERED),
@@ -1141,7 +1306,8 @@ fn a_letter_is_asked_about_once_and_a_restart_asks_none_again() {
 }
 
 /// What the coordinator did next labels a batch's letters as it labels any:
-/// the seat's answer and the kind rule, each marked against the same truth.
+/// the seat's answer and the kind rule, each marked against the same truth —
+/// under every seed the synthetic coordinator is run under.
 #[test]
 fn the_labels_of_a_batch_carry_both_marks_as_ever() {
     let endpoint = stand_in(0);
@@ -1149,23 +1315,29 @@ fn the_labels_of_a_batch_carry_both_marks_as_ever() {
     let day = the_day();
     let letters: usize = day.iter().map(Vec::len).sum();
     let mut inbox = Inbox::new(letters);
-    run_the_day(&stand.window, &stand.book, &stand.ledger, &mut inbox, &day);
-    let answered = rows(&stand.ledger).len();
-    let ledger = inbox.coordinated(&mut Dice(7));
-    let labels = label_waiting(
-        &mut kept(&stand.book),
-        &ledger,
-        DAY_START_MS + MINUTE_MS * 200,
+    run_the_day(
+        &stand.window,
+        &stand.book,
+        &stand.ledger,
+        &mut inbox,
+        &day,
+        &|| endpoint.count(),
     );
-    assert!(!labels.is_empty(), "{answered} answers, no label");
-    let tally = agreement(&labels);
-    assert!(tally.compared > 0, "{tally:?}");
-    for label in labels
-        .iter()
-        .filter(|label| label.get(NOT_COMPARED.canonical).is_none())
-    {
-        assert!(label[AGREED.canonical].is_boolean(), "{label}");
-        assert!(label[BASELINE_AGREED.canonical].is_boolean(), "{label}");
+    let answered = rows(&stand.ledger).len();
+    for (seed, labels) in labelled(&stand.book, &inbox) {
+        assert!(
+            !labels.is_empty(),
+            "seed {seed}: {answered} answers, no label"
+        );
+        let tally = agreement(&labels);
+        assert!(tally.compared > 0, "seed {seed}: {tally:?}");
+        for label in labels
+            .iter()
+            .filter(|label| label.get(NOT_COMPARED.canonical).is_none())
+        {
+            assert!(label[AGREED.canonical].is_boolean(), "{label}");
+            assert!(label[BASELINE_AGREED.canonical].is_boolean(), "{label}");
+        }
     }
 }
 
@@ -1175,17 +1347,62 @@ fn the_labels_of_a_batch_carry_both_marks_as_ever() {
 const PROFILE_ENV: &str = "MAIL_MEASURE_PROFILE";
 
 /// Which road the measured build carries — `per-letter` before the batch road
-/// and `batch` after it: a name the job gives, since both builds run this very
-/// test.
+/// and `batch` after it: a name the job gives, since both builds run these
+/// very tests.
 const ROAD_ENV: &str = "MAIL_MEASURE_ROAD";
 
 /// How long the stand-in holds each request before it answers, in
-/// milliseconds: the model's measured round trip at p50 (280 ms, rounds 2 to
-/// 10 of 2026-09-21, `docs/design/jev-seats-accuracy-wave-20260921.md` §2).
+/// milliseconds, when the job does not say: the model's measured round trip at
+/// p50 (280 ms, rounds 2 to 10 of 2026-09-21,
+/// `docs/design/jev-seats-accuracy-wave-20260921.md` §2).
 const ROUND_TRIP_MS: u64 = 280;
+
+/// The key a job names the stand-in's round trip by, in milliseconds.
+const ROUND_TRIP_ENV: &str = "MAIL_MEASURE_ROUND_TRIP_MS";
 
 /// The most requests a real-wire measurement may spend.
 const MAX_REAL_REQUESTS: usize = 400;
+
+/// The key of how many days the stand-in measurement asks, one after another
+/// in one process: what a long run holds is read off the process's peak
+/// resident set at one day and at many.
+const DAYS_ENV: &str = "MAIL_MEASURE_DAYS";
+
+/// The key of how many times a burst is asked.
+const BURST_REPS_ENV: &str = "MAIL_MEASURE_BURST_REPS";
+
+/// How many letters the long ledger of the burst measurement already holds,
+/// asked about and put away.
+const HISTORY_LETTERS: usize = 2_000;
+
+/// How many attempts the notices of the long ledger are spread over: what a
+/// run that has summoned workers for weeks holds.
+const HISTORY_ATTEMPTS: usize = 300;
+
+/// How many fresh letters arrive at once in a burst.
+const BURST_LETTERS: usize = 100;
+
+/// How many times the burst is asked, for a median, when the job does not say.
+const BURST_REPEATS: usize = 7;
+
+/// What every measurement line opens with. libtest prints `test <name> ... `
+/// without a newline before a test's own output, so a measurement printed
+/// plainly lands at the end of that line: it opens a line of its own, behind
+/// this mark, and a job finds it by the mark.
+const MEASURE_MARK: &str = "MAIL-MEASURE ";
+
+/// Print one measurement as the job collects it: on a line of its own.
+fn publish(measurement: &Value) {
+    println!("\n{MEASURE_MARK}{measurement}");
+}
+
+/// A number a job names in its environment, or `default`.
+fn env_number<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name)
+        .ok()
+        .and_then(|said| said.parse().ok())
+        .unwrap_or(default)
+}
 
 /// The value at `percent` of a sorted list, by the nearest rank.
 fn percentile(sorted: &[u64], percent: usize) -> u64 {
@@ -1195,26 +1412,33 @@ fn percentile(sorted: &[u64], percent: usize) -> u64 {
     sorted[((last * percent + 50) / 100).min(last)]
 }
 
+/// Microseconds since `began`.
+fn micros(began: Instant) -> u64 {
+    u64::try_from(began.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+/// Milliseconds a duration took.
+fn millis(took: Duration) -> u64 {
+    u64::try_from(took.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// One measured day, as a line the job collects: requests, bytes, the words
 /// that left more than once, the time each batch took to be triaged, and what
-/// the labels said.
+/// the labels said under each seed.
 fn report(
     label: &str,
     account: &Account,
-    took: &[(usize, Duration)],
-    labels: Option<&Agreement>,
+    sweeps: &[Sweep],
+    labels: Option<&[(u64, Agreement)]>,
 ) -> Value {
-    let mut millis: Vec<u64> = took
-        .iter()
-        .map(|(_, took)| u64::try_from(took.as_millis()).unwrap_or(u64::MAX))
-        .collect();
-    millis.sort_unstable();
+    let mut all: Vec<u64> = sweeps.iter().map(|sweep| millis(sweep.took)).collect();
+    all.sort_unstable();
     let mut by_size: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
-    for (size, took) in took {
+    for sweep in sweeps {
         by_size
-            .entry(*size)
+            .entry(sweep.letters)
             .or_default()
-            .push(u64::try_from(took.as_millis()).unwrap_or(u64::MAX));
+            .push(millis(sweep.took));
     }
     let by_size: Map<String, Value> = by_size
         .into_iter()
@@ -1226,41 +1450,65 @@ fn report(
             )
         })
         .collect();
-    let agreement = labels.map(|tally| {
-        json!({
-            "compared": tally.compared,
-            "answered": tally.answered,
-            "rule": tally.rule,
-            "notCompared": tally.not_compared,
-        })
+    let agreement = labels.map(|by_seed| {
+        let mut seeds = Map::new();
+        let mut pooled = Agreement::default();
+        for (seed, tally) in by_seed {
+            seeds.insert(seed.to_string(), tally.json());
+            pooled.pool(tally);
+        }
+        seeds.insert("pooled".to_string(), pooled.json());
+        Value::Object(seeds)
     });
     json!({
         "label": label,
         "road": std::env::var(ROAD_ENV).unwrap_or_default(),
         "profile": std::env::var(PROFILE_ENV).unwrap_or_default(),
         "letters": account.letters,
-        "batches": account.sweeps,
+        "batches": account.batches,
         "requests": account.requests,
         "requestBytes": account.request_bytes,
         "inputTokens": account.input_tokens,
-        "repeatedSharedBytes": account.repeated_shared_bytes,
-        "rubricsSent": account.rubrics,
+        "repeatedInABatchBytes": account.repeated_in_a_batch,
+        "repeatedInADayBytes": account.repeated_in_a_day,
+        "requestsCarryingTheRubric": account.rubrics,
         "outcomes": account.outcomes,
         "timeToTriagedBatchMs": {
-            "p50": percentile(&millis, 50),
-            "p95": percentile(&millis, 95),
-            "max": millis.last(),
-            "total": millis.iter().sum::<u64>(),
+            "p50": percentile(&all, 50),
+            "p95": percentile(&all, 95),
+            "max": all.last(),
+            "total": all.iter().sum::<u64>(),
         },
         "bySize": by_size,
         "agreement": agreement,
     })
 }
 
-/// The key of how many days the stand-in measurement asks, one after another
-/// in one process: what a long run holds is read off the process's peak
-/// resident set at one day and at many.
-const DAYS_ENV: &str = "MAIL_MEASURE_DAYS";
+/// What each letter's row says: its id, its kind, the word the seat gave (or
+/// the word it was refused with), the confidence and the probability that it
+/// is urgent — a line a letter, for comparing two roads' answers offline.
+fn verdicts(written: &[Value]) -> Vec<Value> {
+    written
+        .iter()
+        .map(|row| {
+            let round = |key: &str| {
+                row[key]
+                    .as_f64()
+                    .map(|share| (share * 100.0).round() / 100.0)
+            };
+            let word = row[TRIAGE]
+                .as_str()
+                .or_else(|| row[OUTCOME.canonical].as_str());
+            json!([
+                row[KEY],
+                row["kind"],
+                word,
+                round("confidence"),
+                round("urgent")
+            ])
+        })
+        .collect()
+}
 
 /// The synthetic day asked of a stand-in model that holds each request for a
 /// round trip: the numbers a batch road and a per-letter road differ by,
@@ -1274,39 +1522,403 @@ const DAYS_ENV: &str = "MAIL_MEASURE_DAYS";
 #[test]
 #[ignore = "a measurement, printed; not a check"]
 fn measure_the_synthetic_day_on_a_stand_in_model() {
-    let hold_ms = std::env::var("MAIL_MEASURE_ROUND_TRIP_MS")
-        .ok()
-        .and_then(|said| said.parse().ok())
-        .unwrap_or(ROUND_TRIP_MS);
-    let days: usize = std::env::var(DAYS_ENV)
-        .ok()
-        .and_then(|said| said.parse().ok())
-        .unwrap_or(1)
-        .max(1);
+    let hold_ms = env_number(ROUND_TRIP_ENV, ROUND_TRIP_MS);
+    let days = env_number::<usize>(DAYS_ENV, 1).max(1);
     let day = the_day();
     let letters: usize = day.iter().map(Vec::len).sum();
     for _ in 0..days {
         let endpoint = stand_in(hold_ms);
         let stand = stand_on(&endpoint, "shadow", None, "test-key");
         let mut inbox = Inbox::new(letters);
-        let took = run_the_day(&stand.window, &stand.book, &stand.ledger, &mut inbox, &day);
+        let sweeps = run_the_day(
+            &stand.window,
+            &stand.book,
+            &stand.ledger,
+            &mut inbox,
+            &day,
+            &|| endpoint.count(),
+        );
         let written = rows(&stand.ledger);
-        let account = account(&written, &endpoint, day.len());
+        let account = account(&written, Some(&endpoint), &sweeps);
         if days == 1 {
-            println!("{}", report("stand-in", &account, &took, None));
+            publish(&report("stand-in", &account, &sweeps, None));
         }
     }
     if days > 1 {
-        println!(
-            "{}",
-            json!({ "label": "stand-in", "days": days, "letters": letters })
-        );
+        publish(&json!({ "label": "stand-in", "days": days, "letters": letters }));
     }
 }
 
+/// A burst of `fresh` letters arriving at once on a ledger that already holds
+/// `history` letters asked about and put away, asked `reps` times: what the
+/// beat itself pays to gather them, and what the job off the beat pays to turn
+/// them into requests, ask and write the rows — each apart, as a median over
+/// the repeats, with the whole burst's wait to be triaged beside them. The beat
+/// is the part a person's screen waits on; the wait is what a coordinator
+/// handed a burst of parallel results waits on.
+fn burst(stand: &Stand, history: usize, fresh: usize, reps: usize) -> Value {
+    let letters = history + fresh;
+    let attempts = if history == 0 {
+        QUIET_HANDS
+    } else {
+        HISTORY_ATTEMPTS
+    };
+    let mut inbox = Inbox::with_quiet_hands(letters, attempts);
+    let kinds: Vec<MessageKind> = (0..letters).map(|n| KINDS[n % KINDS.len()]).collect();
+    inbox.arrive(&kinds, DAY_START_MS);
+    let asked_already: Vec<String> = inbox.letters[..history]
+        .iter()
+        .map(|letter| letter.id.clone())
+        .collect();
+    let messages = inbox.run().messages().len();
+    let attempts = inbox.run().dispatches.len();
+    stand.window.hold_jobs();
+    let (mut beat, mut job, mut triaged): (Vec<u64>, Vec<u64>, Vec<u64>) =
+        (Vec::new(), Vec::new(), Vec::new());
+    let mut requests = 0;
+    for rep in 0..reps {
+        // A book of this repeat's own: the history is asked about already, the
+        // burst is not.
+        let ledger = stand._home.path().join(format!("burst-{rep}.jsonl"));
+        let book = open_book(&ledger);
+        kept(&book).asked.extend(asked_already.iter().cloned());
+        let seated = [(inbox.run(), TERM)];
+        let began = Instant::now();
+        ask_about(
+            &stand.window,
+            &stand.window.wire,
+            &book,
+            &ledger,
+            &seated,
+            DAY_START_MS + SWEEP_AFTER_MS,
+        );
+        let on_the_beat = micros(began);
+        let began = Instant::now();
+        stand.window.run_held();
+        let off_the_beat = micros(began);
+        beat.push(on_the_beat);
+        job.push(off_the_beat);
+        triaged.push(on_the_beat + off_the_beat);
+        let written = rows(&ledger);
+        assert_eq!(written.len(), fresh, "every fresh letter has a row");
+        requests = written
+            .iter()
+            .map(|row| row["requests"].as_u64().unwrap_or(0))
+            .sum::<u64>();
+    }
+    beat.sort_unstable();
+    job.sort_unstable();
+    triaged.sort_unstable();
+    json!({
+        "label": "burst",
+        "road": std::env::var(ROAD_ENV).unwrap_or_default(),
+        "profile": std::env::var(PROFILE_ENV).unwrap_or_default(),
+        "messages": messages,
+        "attempts": attempts,
+        "fresh": fresh,
+        "reps": reps,
+        "requests": requests,
+        "beatMicros": { "p50": percentile(&beat, 50), "max": beat.last() },
+        "jobMicros": { "p50": percentile(&job, 50), "max": job.last() },
+        "timeToTriagedMicros": { "p50": percentile(&triaged, 50), "max": triaged.last() },
+    })
+}
+
+/// A burst of fresh letters on a long ledger, asked of a stand-in model
+/// (`MAIL_MEASURE_ROUND_TRIP_MS`: none by default, the CPU the road itself
+/// costs; a round trip, the wait it adds).
+///
+/// **Not a check.** It prints one JSON line. Run it under the build line on
+/// both roads and both profiles (`taskpolicy -b` is the low-spec one).
+#[test]
+#[ignore = "a measurement, printed; not a check"]
+fn measure_a_burst_on_a_long_ledger() {
+    let endpoint = stand_in(env_number(ROUND_TRIP_ENV, 0));
+    let stand = stand_on(&endpoint, "shadow", None, "test-key");
+    let reps = env_number(BURST_REPS_ENV, BURST_REPEATS).max(1);
+    publish(&burst(&stand, HISTORY_LETTERS, BURST_LETTERS, reps));
+}
+
+/// A stand on the real endpoint, under a zo home of its own: the person's day
+/// count and ledgers are untouched. The key comes from the environment and not
+/// from the keychain: inside a test build `accounts::security_command` is a
+/// fixture holding a map. The job lifts it out of the real keychain into this
+/// one command's environment, where no file and no log ever sees it.
+fn the_real_wire() -> Stand {
+    let key = std::env::var(zerocode_harness::TYPESAFE_API_KEY_ENV).unwrap_or_else(|_| {
+        panic!(
+            "{} carries this machine's TypeSafe key",
+            zerocode_harness::TYPESAFE_API_KEY_ENV
+        )
+    });
+    stand_at(crate::systemone::SYSTEMONE_BASE_URL, "shadow", None, &key)
+}
+
+/// A burst of fresh letters asked of the real model: the wait a coordinator
+/// handed a burst of parallel results actually has before they are triaged.
+///
+/// **Not a check.** It crosses a real socket and spends a request per letter
+/// on the per-letter road and a few on the batch road; it prints one JSON
+/// line.
+#[test]
+#[ignore = "a measurement against api.typesafe.ai, printed; not a check"]
+fn measure_a_burst_on_the_real_wire() {
+    let stand = the_real_wire();
+    publish(&burst(&stand, 0, BURST_LETTERS, 1));
+}
+
+/// The sizes of request the experiment asks the day's letters in: one a
+/// request, and up to the widest a request could carry.
+const SIZES: [usize; 6] = [1, 4, 8, 16, 32, 48];
+
+/// How many requests of the experiment leave at once: a wave. Few, so the
+/// experiment's own load is not what slows the answers.
+const WAVE: usize = 4;
+
+/// The widest request the experiment asks: the table's cap read wide enough
+/// for it, so the door does not cut a request the experiment means to ask whole.
+const WIDEST: usize = 48;
+
+/// The seat's row with a cap of the experiment's own on the list of letters:
+/// the door cuts a list to the table's cap, and the experiment asks wider.
+const WIDE: JevUse = JevUse {
+    sends: &[
+        Sent {
+            at: "/state/letters",
+            cap: Cap::Items(WIDEST),
+        },
+        Sent {
+            at: "/state/letters/*/kind",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/letters/*/from",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/letters/*/worker",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/letters/*/task",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/letters/*/taskStatus",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/letters/*/priority",
+            cap: Cap::Uncut,
+        },
+    ],
+    ..MAIL_TRIAGE
+};
+
+/// The seat's questions with a cap of the case's own on how many letters a
+/// request carries.
+struct Capped {
+    inside: MailTriage,
+    cap: usize,
+}
+
+impl Judgment for Capped {
+    type Verdict = MailRead;
+    type Refusal = MailRefusal;
+
+    fn cap(&self) -> usize {
+        self.cap
+    }
+
+    fn items_key(&self) -> &'static str {
+        self.inside.items_key()
+    }
+
+    fn shared(&self) -> Map<String, Value> {
+        self.inside.shared()
+    }
+
+    fn questions(&self, at: usize) -> Vec<(&'static str, Value)> {
+        self.inside.questions(at)
+    }
+
+    fn read(&self, answers: &Answers<'_>) -> Result<MailRead, MailRefusal> {
+        self.inside.read(answers)
+    }
+}
+
+/// How the answers of a batch road at each size agree with what a synthetic
+/// coordinator did next, on the real model: the day's letters, with the
+/// facts each entry carried when it was asked, are asked again in requests of
+/// every size in [`SIZES`] — the same letters, the same words — and each
+/// answer is marked against the labels of every seed, beside the kind rule on
+/// the same letters. What it says is where agreement starts to give way to
+/// size, and so what the cap should be.
+///
+/// **Not a check.** It crosses a real socket and spends one request a batch
+/// of each size — 258 for the day — so it is `#[ignore]`d and run under the
+/// build line with the key in this one command's environment, asking under a
+/// zo home of its own.
+#[test]
+#[ignore = "a measurement against api.typesafe.ai, printed; not a check"]
+fn measure_agreement_by_batch_size_on_the_real_wire() {
+    // The day on a stand-in: what each letter's entry said when it was asked,
+    // and what the coordinator was in at the time, in the letters' order.
+    let model = stand_in(0);
+    let stand = stand_on(&model, "shadow", None, "test-key");
+    let day = the_day();
+    let letters: usize = day.iter().map(Vec::len).sum();
+    let mut inbox = Inbox::new(letters);
+    run_the_day(
+        &stand.window,
+        &stand.book,
+        &stand.ledger,
+        &mut inbox,
+        &day,
+        &|| model.count(),
+    );
+    let mut asked_with: Vec<(Value, Value)> = Vec::new();
+    for request in model.asked() {
+        let body = body_of(&request);
+        let coordinator = body["state"]["coordinator"].clone();
+        for entry in body["state"]["letters"].as_array().into_iter().flatten() {
+            asked_with.push((entry.clone(), coordinator.clone()));
+        }
+    }
+    assert_eq!(asked_with.len(), letters, "an entry for every letter");
+
+    // What the coordinator did next, by letter, under every seed.
+    let ids: Vec<String> = inbox.letters.iter().map(|one| one.id.clone()).collect();
+    let truths: Vec<HashMap<String, String>> = labelled(&stand.book, &inbox)
+        .iter()
+        .map(|(_, labels)| {
+            labels
+                .iter()
+                .filter_map(|label| {
+                    Some((
+                        label[LABEL.canonical].as_str()?.to_string(),
+                        label["truth"].as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .collect();
+
+    let real = the_real_wire();
+    let mut sizes = Vec::new();
+    for size in SIZES {
+        let groups: Vec<&[(Value, Value)]> = asked_with.chunks(size).collect();
+        let judged: Vec<(Capped, Vec<usize>)> = groups
+            .iter()
+            .enumerate()
+            .map(|(n, group)| {
+                let coordinator = &group[0].1;
+                let situation = Situation {
+                    coordinator_busy: coordinator["busy"].as_bool(),
+                    open_questions: coordinator["openQuestions"]
+                        .as_u64()
+                        .and_then(|n| usize::try_from(n).ok())
+                        .unwrap_or(0),
+                };
+                let first = n * size;
+                (
+                    Capped {
+                        inside: MailTriage::new(situation),
+                        cap: size,
+                    },
+                    (first..first + group.len()).collect(),
+                )
+            })
+            .collect();
+        let (mut compared, mut agreed, mut rule, mut refused, mut bytes) = (0, 0, 0, 0, 0);
+        let mut waves: Vec<u64> = Vec::new();
+        for (these, judging) in groups.chunks(WAVE).zip(judged.chunks(WAVE)) {
+            let built: Vec<Vec<Request>> = these
+                .iter()
+                .zip(judging)
+                .map(|(group, (judgment, _))| {
+                    zerocode_core::jev::batch::requests(
+                        judgment,
+                        group.iter().map(|(entry, _)| entry.clone()).collect(),
+                    )
+                })
+                .collect();
+            let asks: Vec<(Option<&Path>, Value)> = built
+                .iter()
+                .map(|made| {
+                    (
+                        Some(real.window.checkout.as_path()),
+                        request_body(&made[0].state, &made[0].questions),
+                    )
+                })
+                .collect();
+            let began = Instant::now();
+            let answered = real
+                .window
+                .wire
+                .ask_together(&WIDE, asks, MAIL_TRIAGE_DEADLINE);
+            waves.push(millis(began.elapsed()));
+            for ((made, (judgment, at)), asked) in built.iter().zip(judging).zip(&answered) {
+                bytes += asked.request_bytes;
+                for (n, reading) in at.iter().zip(read_reply(&judgment.inside, &made[0], asked)) {
+                    match reading {
+                        Ok(read) => {
+                            let kind = asked_with[*n].0["kind"]
+                                .as_str()
+                                .and_then(|kind| {
+                                    serde_json::from_value::<MessageKind>(json!(kind)).ok()
+                                })
+                                .map(|kind| kind_rule(kind).word());
+                            for truth in &truths {
+                                let Some(wanted) = truth.get(&ids[*n]) else {
+                                    continue;
+                                };
+                                compared += 1;
+                                agreed += usize::from(read.triage.word() == wanted);
+                                rule += usize::from(kind == Some(wanted.as_str()));
+                            }
+                        }
+                        Err(_) => refused += 1,
+                    }
+                }
+            }
+        }
+        waves.sort_unstable();
+        sizes.push(json!({
+            "size": size,
+            "requests": groups.len(),
+            "comparedPooledOverSeeds": compared,
+            "agreed": agreed,
+            "rule": rule,
+            "refused": refused,
+            "avgRequestBytes": bytes / groups.len().max(1),
+            "waveMs": { "p50": percentile(&waves, 50), "max": waves.last() },
+        }));
+    }
+    publish(&json!({ "label": "by-size", "letters": letters, "seeds": SEEDS, "sizes": sizes }));
+}
+
+/// What a request's reply says about each of its letters, read through the
+/// seat's own reader: a reply with no answers in it is every letter's refusal.
+fn read_reply(
+    judgment: &MailTriage,
+    request: &Request,
+    asked: &Asked,
+) -> Vec<Result<MailRead, MailRefusal>> {
+    let answers = asked
+        .answer
+        .as_ref()
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(body).ok())
+        .and_then(|mut parsed| parsed.get_mut("answers").map(Value::take))
+        .unwrap_or(Value::Null);
+    request.read(judgment, &answers)
+}
+
 /// The synthetic day asked of the real model, and graded by what a synthetic
-/// coordinator did next: the answers' agreement with the labels, beside the
-/// kind rule's on the same letters.
+/// coordinator did next under each seed: the answers' agreement with the
+/// labels, beside the kind rule's on the same letters, and the verdict of every
+/// letter on a line of its own for comparing two roads' answers.
 ///
 /// **Not a check.** It crosses a real socket and spends a request per batch
 /// (a request per letter on the per-letter road), so it is `#[ignore]`d and
@@ -1316,25 +1928,7 @@ fn measure_the_synthetic_day_on_a_stand_in_model() {
 #[test]
 #[ignore = "a measurement against api.typesafe.ai, printed; not a check"]
 fn measure_the_synthetic_day_on_the_real_wire() {
-    let key = std::env::var(zerocode_harness::TYPESAFE_API_KEY_ENV).unwrap_or_else(|_| {
-        panic!(
-            "{} carries this machine's TypeSafe key",
-            zerocode_harness::TYPESAFE_API_KEY_ENV
-        )
-    });
-    let home = tempfile::tempdir().expect("a zo home of this measurement's own");
-    let work = tempfile::tempdir().expect("a checkout");
-    let wire = Wire::at(
-        crate::systemone::SYSTEMONE_BASE_URL,
-        &key,
-        Some(settings(&home, "shadow", work.path(), None)),
-    );
-    let ledger = home.path().join(MAIL_TRIAGE.ledger);
-    let book = open_book(&ledger);
-    let window = Window {
-        wire,
-        checkout: work.path().to_path_buf(),
-    };
+    let stand = the_real_wire();
     let day = the_day();
     let letters: usize = day.iter().map(Vec::len).sum();
     assert!(
@@ -1342,41 +1936,22 @@ fn measure_the_synthetic_day_on_the_real_wire() {
         "a request per letter must stay under {MAX_REAL_REQUESTS}"
     );
     let mut inbox = Inbox::new(letters);
-    let took = run_the_day(&window, &book, &ledger, &mut inbox, &day);
-    let written = rows(&ledger);
-    let sweeps = day.len();
-    let account = Account {
-        letters: written.len(),
-        sweeps,
-        requests: written
-            .iter()
-            .map(|row| row["requests"].as_u64().unwrap_or(0))
-            .sum(),
-        request_bytes: written
-            .iter()
-            .map(|row| row["requestBytes"].as_u64().unwrap_or(0))
-            .sum(),
-        input_tokens: written
-            .iter()
-            .map(|row| row["inputTokens"].as_u64().unwrap_or(0))
-            .sum(),
-        repeated_shared_bytes: 0,
-        rubrics: 0,
-        outcomes: written.iter().fold(BTreeMap::new(), |mut found, row| {
-            *found
-                .entry(row["outcome"].as_str().unwrap_or("none").to_string())
-                .or_default() += 1;
-            found
-        }),
-    };
-    let ledger_after = inbox.coordinated(&mut Dice(7));
-    let labels = label_waiting(
-        &mut kept(&book),
-        &ledger_after,
-        DAY_START_MS + MINUTE_MS * 200,
+    let sweeps = run_the_day(
+        &stand.window,
+        &stand.book,
+        &stand.ledger,
+        &mut inbox,
+        &day,
+        &|| 0,
     );
-    println!(
-        "{}",
-        report("real-wire", &account, &took, Some(&agreement(&labels)))
-    );
+    let written = rows(&stand.ledger);
+    let account = account(&written, None, &sweeps);
+    let by_seed = agreements(&labelled(&stand.book, &inbox));
+    publish(&report("real-wire", &account, &sweeps, Some(&by_seed)));
+    publish(&json!({
+        "label": "verdicts",
+        "road": std::env::var(ROAD_ENV).unwrap_or_default(),
+        "profile": std::env::var(PROFILE_ENV).unwrap_or_default(),
+        "verdicts": verdicts(&written),
+    }));
 }

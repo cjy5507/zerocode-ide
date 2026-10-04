@@ -130,6 +130,12 @@ impl Endpoint {
     pub(crate) fn asked(&self) -> Vec<String> {
         self.seen.lock().expect("the record").clone()
     }
+
+    /// How many requests have been heard so far: the count alone, for a caller
+    /// that asks it between every two requests and has no use for the copy.
+    pub(crate) fn count(&self) -> usize {
+        self.seen.lock().expect("the record").len()
+    }
 }
 
 /// One whole request off `socket`: the head, then as many body bytes as its
@@ -735,23 +741,9 @@ fn a_row_riding_another_rows_request_is_charged_nothing_and_a_batch_is_counted_o
     assert_eq!(sum("inputTokens"), 1_200);
 }
 
-/// Several requests leave side by side — the wait is the slowest one's, not
-/// their sum — and the answers come back in the order they were handed in,
-/// each to the request it answered.
-#[test]
-fn requests_asked_together_leave_side_by_side_and_come_back_in_order() {
-    use zerocode_core::jev::MAIL_TRIAGE;
-
-    const HOLD_MS: u64 = 300;
-    let endpoint = Endpoint::answering_each(
-        "HTTP/1.1 200 OK",
-        |request: &str| {
-            let body = request.split_once("\r\n\r\n").map_or("", |(_, body)| body);
-            let asked: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-            json!({ "answers": {}, "echo": asked["state"] }).to_string()
-        },
-        HOLD_MS,
-    );
+/// A wire on `endpoint` whose person consented to the checkout that goes
+/// with it: both stay alive as long as the case holds them.
+fn a_wire_that_consents(endpoint: &Endpoint) -> (tempfile::TempDir, tempfile::TempDir, Wire) {
     let home = tempfile::tempdir().expect("a zo home");
     let work = tempfile::tempdir().expect("a checkout");
     let settings = home.path().join("settings.json");
@@ -762,23 +754,26 @@ fn requests_asked_together_leave_side_by_side_and_come_back_in_order() {
     )
     .expect("zo's settings");
     let wire = Wire::at(&endpoint.base(), "test-key", Some(settings));
+    (home, work, wire)
+}
 
-    let asks: Vec<(Option<&Path>, Value)> = (0..3)
-        .map(|n| {
-            (
-                Some(work.path()),
-                json!({ "state": { "n": n }, "questions": {} }),
-            )
-        })
-        .collect();
-    let began = Instant::now();
-    let asked = wire.ask_together(&MAIL_TRIAGE, asks, Duration::from_secs(5));
-    let took = began.elapsed();
-    assert!(
-        took < Duration::from_millis(HOLD_MS * 2),
-        "three requests held {HOLD_MS} ms each came back after {took:?}: they were asked one after another"
-    );
-    assert_eq!(asked.len(), 3);
+/// `count` requests for the checkout `work`, each carrying its own number in
+/// its state for the endpoint to echo.
+fn numbered_asks(work: &Path, count: usize) -> Vec<(Option<&Path>, Value)> {
+    (0..count)
+        .map(|n| (Some(work), json!({ "state": { "n": n }, "questions": {} })))
+        .collect()
+}
+
+/// What an endpoint answers: the state it was asked, echoed back.
+fn echo_of(request: &str) -> String {
+    let body = request.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+    let asked: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    json!({ "answers": {}, "echo": asked["state"] }).to_string()
+}
+
+/// Every answer in `asked` is the echo of the request of the same place.
+fn assert_echoes_in_order(asked: &[Asked]) {
     for (n, one) in asked.iter().enumerate() {
         let body = one.answer.as_ref().expect("an answer");
         assert!(
@@ -787,7 +782,79 @@ fn requests_asked_together_leave_side_by_side_and_come_back_in_order() {
         );
         assert_eq!(one.spent.requests, 1);
     }
-    assert_eq!(endpoint.asked().len(), 3);
+}
+
+/// Several requests leave side by side — the wait is the slowest one's, not
+/// their sum — and the answers come back in the order they were handed in,
+/// each to the request it answered.
+#[test]
+fn requests_asked_together_leave_side_by_side_and_come_back_in_order() {
+    use zerocode_core::jev::MAIL_TRIAGE;
+
+    const HOLD_MS: u64 = 300;
+    let endpoint = Endpoint::answering_each("HTTP/1.1 200 OK", echo_of, HOLD_MS);
+    let (_home, work, wire) = a_wire_that_consents(&endpoint);
+
+    let began = Instant::now();
+    let asked = wire.ask_together(
+        &MAIL_TRIAGE,
+        numbered_asks(work.path(), 3),
+        Duration::from_secs(5),
+    );
+    let took = began.elapsed();
+    assert!(
+        took < Duration::from_millis(HOLD_MS * 2),
+        "three requests held {HOLD_MS} ms each came back after {took:?}: they were asked one after another"
+    );
+    assert_eq!(asked.len(), 3);
+    assert_echoes_in_order(&asked);
+    assert_eq!(endpoint.count(), 3);
+}
+
+/// However many requests are asked together, no more than the lanes are in
+/// flight at once — a burst of a thousand letters must not put sixty-three
+/// requests on the vendor in one breath — and the answers still come back in
+/// the order the requests were handed in.
+#[test]
+fn requests_asked_together_never_have_more_than_the_lanes_in_flight() {
+    use std::sync::atomic::AtomicUsize;
+    use zerocode_core::jev::MAIL_TRIAGE;
+
+    /// Held inside the answer, so the requests that overlap are the ones counted.
+    const HOLD_MS: u64 = 100;
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let highest = Arc::new(AtomicUsize::new(0));
+    let (flying, peak) = (Arc::clone(&in_flight), Arc::clone(&highest));
+    let endpoint = Endpoint::answering_each(
+        "HTTP/1.1 200 OK",
+        move |request: &str| {
+            let now = flying.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(HOLD_MS));
+            flying.fetch_sub(1, Ordering::SeqCst);
+            echo_of(request)
+        },
+        0,
+    );
+    let (_home, work, wire) = a_wire_that_consents(&endpoint);
+
+    let count = TOGETHER_LANES * 3 + 1;
+    let asked = wire.ask_together(
+        &MAIL_TRIAGE,
+        numbered_asks(work.path(), count),
+        Duration::from_secs(10),
+    );
+    assert_eq!(asked.len(), count);
+    assert_echoes_in_order(&asked);
+    let most = highest.load(Ordering::SeqCst);
+    assert!(
+        most <= TOGETHER_LANES,
+        "{most} requests were in flight at once; the lanes are {TOGETHER_LANES}"
+    );
+    assert!(
+        most >= 2,
+        "the requests were asked one after another: {most} in flight at most"
+    );
 }
 
 /// Which connection a question rides (t-13199).

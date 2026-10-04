@@ -523,6 +523,18 @@ fn trimmed(key: Option<String>) -> Option<String> {
         .filter(|key| !key.is_empty())
 }
 
+/// The most requests of one [`Wire::ask_together`] in flight at once; the rest
+/// leave behind them, in waves.
+///
+/// Four. The most any seat asks side by side today is the browser read's four
+/// shards, which this leaves as they were. The vendor takes 250,000 input
+/// tokens a second (docs.typesafe.ai/models, read 2026-09-25): four of the
+/// heaviest request any seat makes — a full skills shard, some 13,000 tokens
+/// (38,600 for three, the reference build's own search) — in a 300 ms round
+/// trip are some 170,000 a second, under it; the sixty-three mail requests of
+/// a thousand letters at once, some 280,000 tokens, are over it.
+pub const TOGETHER_LANES: usize = 4;
+
 impl Wire {
     /// Carry a local session/task name to opted-in review evidence only.
     #[must_use]
