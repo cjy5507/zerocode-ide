@@ -275,6 +275,17 @@ pub fn language_name(code: &str) -> &'static str {
         .map_or("English", |(_, name)| *name)
 }
 
+/// A title as it may be shown to a model or kept in the catalog: secrets
+/// masked, no quote or line break that could leave its attribute, and no longer
+/// than an artifact's title.
+///
+/// RED: a placeholder that changes nothing, so that its test fails at its
+/// assertion.
+#[must_use]
+pub fn scrub_title(title: &str) -> String {
+    title.to_string()
+}
+
 /// Everything a request needs to be written down in words.
 #[derive(Debug, Clone, Copy)]
 pub struct Ask<'a> {

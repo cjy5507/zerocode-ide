@@ -245,6 +245,23 @@ fn a_title_cannot_break_out_of_its_attribute() {
 }
 
 #[test]
+fn a_title_that_carries_a_secret_is_masked_before_a_model_sees_it() {
+    // The first words of an answer are a title, and an answer can say a key.
+    let material = prepare(Kind::Turn, "x");
+    let mut titled = ask(Kind::Turn, &material);
+    titled.title = "the key is sk-proj-fakefakefakefakefakefake1234 for now";
+    let prompt = conversation_prompt(&titled);
+    assert!(!prompt.contains("fakefakefakefake"), "{prompt}");
+    assert!(
+        prompt.contains("title=\"the key is [redacted] for now\""),
+        "{prompt}"
+    );
+    let kept = scrub_title("a \"quoted\" sk-proj-fakefakefakefakefakefake1234");
+    assert_eq!(kept, "a  quoted  [redacted]");
+    assert_eq!(scrub_title(&"t".repeat(500)).chars().count(), 120);
+}
+
+#[test]
 fn the_prompt_says_what_was_taken_out_and_what_was_cut() {
     let material = Prepared {
         text: "x".to_string(),
