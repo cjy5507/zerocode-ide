@@ -218,7 +218,7 @@ fn run_policy(label: &str, full: &[ConversationMessage], steps: usize, target: W
     let mut totals = Totals::default();
     let mut first_over = None;
     for looks in 1..=steps {
-        let request = wire(&full[..1 + 2 * looks], target);
+        let request = wire(&full[..=(2 * looks)], target);
         let total_tokens = *request.prefix_tokens.last().unwrap_or(&0);
         let read = cache_read_tokens(&request, &earlier);
         let refused = request.bytes as u64 > ceiling;
@@ -334,12 +334,12 @@ fn measure_shedding_time() {
     // ceiling. The budget then only walks the blocks.
     let text = text_history(TEXT_ONLY_MESSAGES);
     let (walk_median, walk_max) = time(runs, || plan_picture_shed(&text, target));
-    let (plain_median, plain_max) =
+    let (bare_median, bare_max) =
         time(runs, || convert_messages_for(&text, WireTarget::for_model("some-unlisted-local-model")));
     let (with_median, with_max) = time(runs, || convert_messages_for(&text, target));
     println!("\nthe same on a session of {TEXT_ONLY_MESSAGES} text messages and no picture, {runs} runs, ms (median / max):");
     println!("  the decision alone (plan_picture_shed):        {walk_median:>8.3} / {walk_max:>8.3}");
-    println!("  lowering without the budget:                    {plain_median:>8.3} / {plain_max:>8.3}");
+    println!("  lowering without the budget:                    {bare_median:>8.3} / {bare_max:>8.3}");
     println!("  lowering with the budget:                       {with_median:>8.3} / {with_max:>8.3}");
 }
 
@@ -473,7 +473,7 @@ fn measure_memory_over_a_long_session() {
     println!("\nmemory over a {steps}-step session ({stored_mib:.0} MiB of pictures stored, kept whole):");
     println!("{:>6} {:>22} {:>22}", "step", "no budget: body / rss", "budget: body / rss");
     for looks in [25, 50, 100, 150, 200] {
-        let history = &full[..1 + 2 * looks];
+        let history = &full[..=(2 * looks)];
         let idle = rss_kib();
         let unlimited = convert_messages_for(history, WireTarget::for_model("some-unlisted-local-model"));
         let unlimited_body = serde_json::to_vec(&unlimited).expect("serialize").len();

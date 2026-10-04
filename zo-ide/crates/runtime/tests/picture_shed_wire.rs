@@ -307,7 +307,7 @@ fn rewriting_requests(steps: usize, budget: PictureBudget) -> usize {
     let mut previous: Option<Vec<InputMessage>> = None;
     let mut rewrites = 0;
     for looks in 1..=steps {
-        let lowered = convert_messages_for(&full[..1 + 2 * looks], target);
+        let lowered = convert_messages_for(&full[..=(2 * looks)], target);
         if let Some(before) = previous.as_ref() {
             // The previous request's own tail may reshape once it is no longer
             // the newest (lowering treats the newest tool result differently);
