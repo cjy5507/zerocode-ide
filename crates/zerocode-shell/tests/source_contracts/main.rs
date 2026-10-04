@@ -9397,23 +9397,31 @@ mod tests {
             !mobile.contains("Command::new") && !mobile.contains("open_mobile_emulator_direct"),
             "the agent route opens or drives an external emulator instead of ZeroCode's pane"
         );
-        // `list` reads the simulators, the emulators and the real devices the
-        // window sees and cannot drive side by side, and puts them in the one
-        // answer the core writes — never a reader of its own.
+        // `list` reads the simulators, Android (the emulators and the phones
+        // from ONE `adb devices -l`) and the real iPhones and iPads the window
+        // sees and cannot drive side by side, and puts them in the one answer
+        // the core writes — never a reader of its own.
         let list = block_after(
             include_str!("../../src/emulator/physical.rs"),
             "pub(crate) async fn list_answer_now(",
         );
         for owned in [
             "mobile_emulators_direct()",
-            "android_emulators_direct()",
+            "android_listing_now()",
             "physical_ios()",
-            "physical_android()",
             "list_answer(",
         ] {
             assert!(
                 list.contains(owned),
                 "the emulator list lost {owned}:\n{list}"
+            );
+        }
+        // A second reader of the same `adb devices -l` is a second process on
+        // the efficiency cores: +122 ms on 194 (t-36920, `taskpolicy -b`).
+        for second in ["android_emulators_direct()", "physical_android()"] {
+            assert!(
+                !list.contains(second),
+                "the emulator list asks adb again through {second}:\n{list}"
             );
         }
         // The frame comes from the backend that paints the pane, through the

@@ -1337,6 +1337,35 @@ pub(super) fn physical_android_with(
         })
 }
 
+/// What `zerocode-emulator list` reads of Android (t-36920): the emulators this
+/// window drives and the phones it only names, each with the reason it has none.
+pub(super) struct AndroidListing {
+    pub(super) emulators: Result<Vec<AndroidDevice>, String>,
+    pub(super) phones: Result<Vec<PhysicalDevice>, String>,
+}
+
+/// [`android_listing_with`] for this machine's SDK; a machine without one has
+/// no answer for either half, and says why in one sentence.
+pub(super) fn android_listing() -> AndroidListing {
+    match android_sdk() {
+        Ok(sdk) => android_listing_with(&sdk),
+        Err(search) => {
+            let why = search.to_string();
+            AndroidListing {
+                emulators: Err(why.clone()),
+                phones: Err(why),
+            }
+        }
+    }
+}
+
+fn android_listing_with(sdk: &AndroidSdk) -> AndroidListing {
+    AndroidListing {
+        emulators: emulators_listed(sdk, &android_running(&sdk.adb)),
+        phones: physical_android_with(&sdk.adb, Duration::from_secs(5)),
+    }
+}
+
 /// What a read of the AVD behind a serial answers when it names none.
 const AVD_UNAVAILABLE: &str = "Android AVD identity is unavailable";
 
@@ -1532,6 +1561,15 @@ pub(super) fn booted_emulators() -> Option<usize> {
 fn list_android_devices() -> Result<Vec<AndroidDevice>, String> {
     let sdk = android_sdk().map_err(|search| search.to_string())?;
     let running = android_running(&sdk.adb);
+    emulators_listed(&sdk, &running)
+}
+
+/// The emulators `running` says are up, then the AVDs the emulator package
+/// lists that are not.
+fn emulators_listed(
+    sdk: &AndroidSdk,
+    running: &[(String, String)],
+) -> Result<Vec<AndroidDevice>, String> {
     let mut devices = running
         .iter()
         .filter(|(_, avd)| !avd.is_empty())
@@ -3685,6 +3723,125 @@ mod tests {
             std::fs::read_to_string(&asked).unwrap_or_default(),
             "devices -l\n-s emulator-5554 emu avd name\n",
             "only the emulator is asked who it is"
+        );
+    }
+
+    /// A script standing in for a tool of the SDK: it runs `body` and nothing else.
+    #[cfg(unix)]
+    fn sdk_tool(scratch: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = scratch.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("a fake tool");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    /// One `list` asks `adb` for its device list once, whatever it wants the
+    /// list for (t-36920). The emulators the window drives and the phones it
+    /// only names are two readings of one answer: a second `adb devices -l`
+    /// beside the first cost +122 ms on the efficiency cores (194 → 316 ms,
+    /// `taskpolicy -b`, 20 runs) and nothing on the fast ones.
+    #[cfg(unix)]
+    #[test]
+    fn one_list_asks_adb_for_its_devices_once_and_both_halves_come_from_that_answer() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let asked = scratch.path().join("asked");
+        let adb = sdk_tool(
+            scratch.path(),
+            "adb",
+            &format!(
+                "printf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  devices) printf 'List of devices attached\\nemulator-5554\\tdevice model:sdk_synthetic\\nSYN0000000001\\tdevice model:Synthetic_Pixel\\nSYN0000000002\\tunauthorized\\n' ;;\n  -s) printf 'Synthetic_AVD\\nOK\\n' ;;\nesac",
+                asked.display()
+            ),
+        );
+        let emulator = sdk_tool(
+            scratch.path(),
+            "emulator",
+            "printf 'Synthetic_AVD\\nSynthetic_Other\\n'",
+        );
+        let sdk = AndroidSdk {
+            root: scratch.path().to_path_buf(),
+            adb,
+            emulator: Ok(emulator),
+        };
+        let listing = android_listing_with(&sdk);
+        let log = std::fs::read_to_string(&asked).unwrap_or_default();
+        let listings = log.lines().filter(|line| *line == "devices -l").count();
+        assert_eq!(
+            listings, 1,
+            "adb was asked for its device list {listings} times; it was asked:\n{log}"
+        );
+        assert!(
+            listing.emulators.is_ok() && listing.phones.is_ok(),
+            "{:?} / {:?}",
+            listing.emulators,
+            listing.phones
+        );
+        let drives: Vec<(String, bool)> = listing
+            .emulators
+            .unwrap_or_default()
+            .into_iter()
+            .map(|device| (device.avd, device.booted))
+            .collect();
+        assert_eq!(
+            drives,
+            [
+                ("Synthetic_AVD".to_string(), true),
+                ("Synthetic_Other".to_string(), false)
+            ]
+        );
+        let names: Vec<String> = listing
+            .phones
+            .unwrap_or_default()
+            .into_iter()
+            .map(|phone| phone.name)
+            .collect();
+        assert_eq!(names, ["Synthetic Pixel", "Android device"]);
+    }
+
+    /// An `adb` that fails is a named gap for the phones, and the AVDs the
+    /// emulator package lists are still listed: one tool's failure does not
+    /// take the other half of the answer with it.
+    #[cfg(unix)]
+    #[test]
+    fn an_adb_that_fails_is_a_named_gap_for_the_phones_and_the_avds_still_list() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let adb = sdk_tool(
+            scratch.path(),
+            "adb",
+            "echo 'synthetic failure' >&2\nexit 1",
+        );
+        let emulator = sdk_tool(
+            scratch.path(),
+            "emulator",
+            "printf 'Synthetic_AVD\\nSynthetic_Other\\n'",
+        );
+        let sdk = AndroidSdk {
+            root: scratch.path().to_path_buf(),
+            adb,
+            emulator: Ok(emulator),
+        };
+        let listing = android_listing_with(&sdk);
+        assert!(
+            listing
+                .phones
+                .as_ref()
+                .is_err_and(|why| why.contains("adb")),
+            "{:?}",
+            listing.phones
+        );
+        let drives: Vec<(String, bool)> = listing
+            .emulators
+            .unwrap_or_default()
+            .into_iter()
+            .map(|device| (device.avd, device.booted))
+            .collect();
+        assert_eq!(
+            drives,
+            [
+                ("Synthetic_AVD".to_string(), false),
+                ("Synthetic_Other".to_string(), false)
+            ]
         );
     }
 }
