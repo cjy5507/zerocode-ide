@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startDesk } from "./desk.mjs";
+import { SEES, pointOf } from "./phone-eyes.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SPEC = JSON.parse(await readFile(join(HERE, "spec.json"), "utf8"));
@@ -22,9 +23,6 @@ const FIELDS = SPEC.sections.flatMap((section) => section.fields);
 const PERSON_ATTACH_MS = 10;
 const PHONE = "iPhone Mirroring";
 const CHROME = "Google Chrome";
-// How long the test's own eyes give the phone after the mirror's lag: its
-// sheets and keyboard slide for 300 ms.
-const SLIDE_SETTLE_MS = 400;
 // How long a pressed submit takes to post its answer to the local server.
 const SUBMIT_SETTLE_MS = 500;
 let failures = 0;
@@ -132,42 +130,9 @@ async function fillChrome(desk) {
 
 /* ---- the phone, by pixels alone ------------------------------------------ */
 
-/* The display point where the phone shows what `find` locates (the test's
- * own eyes — an agent reads the picture); the hand only ever gets points.
- * `find` runs in the phone's page and answers an element, scrolled into
- * view first (the test's shortcut for the scrolling an agent does). */
-async function pointOf(desk, find, arg, { scroll = true } = {}) {
-  await desk.settled();
-  await sleep(desk.scene.lagMs + SLIDE_SETTLE_MS);
-  const box = await desk.content().evaluate(({ source, arg, scroll }) => {
-    const element = new Function("arg", source)(arg);
-    if (!element) return null;
-    if (scroll) element.scrollIntoView({ block: "center" });
-    const rect = element.getBoundingClientRect();
-    return { x: rect.x + Math.min(rect.width / 2, 40), y: rect.y + rect.height / 2 };
-  }, { source: find, arg, scroll });
-  if (!box) throw new Error(`nothing on the phone answers ${find} (${JSON.stringify(arg)})`);
-  const { window: win, screen } = desk.scene;
-  const scale = win.width / screen.width;
-  return [win.x + box.x * scale, win.y + screen.top + box.y * scale];
-}
-
-// What the test's eyes look for on the phone, each a body run in the page.
-const SEES = {
-  // The control that reads `arg` — in an open sheet first, else on screen.
-  words: `const hits = [...document.querySelectorAll("button, span, div, input")].filter((element) =>
-      [...element.childNodes].some((node) => node.nodeType === 3 && node.textContent.trim() === arg) || element.placeholder === arg);
-    const live = hits.filter((element) => element.closest(".sheet.up, .keyboard.up"));
-    return (live.length ? live : hits.filter((element) => !element.closest(".sheet, .keyboard")))[0];`,
-  field: "return document.getElementById(arg);",
-  // A row's button (segment, check, stepper, switch) by the row's own words.
-  choice: `const row = [...document.querySelectorAll(".question, .label, .consent")].find((each) => each.textContent === arg.label).closest(".row");
-    return arg.words === null ? row.querySelector(".switch") :
-      [...row.querySelectorAll("button")].find((each) => each.textContent.replace("✓", "") === arg.words);`,
-};
-
 async function tap(desk, find, arg, options) {
-  return click(desk, await pointOf(desk, find, arg, options));
+  const { x, y } = await pointOf(desk, find, arg, options);
+  return click(desk, [x, y]);
 }
 
 async function fillPhone(desk) {
@@ -249,7 +214,7 @@ await standing("phone", async ({ desk }) => {
   const before = await desk.content().evaluate(() => LongForm.state.companions);
   const plus = await pointOf(desk, SEES.words, "+");
   const sent = Date.now();
-  await click(desk, plus);
+  await click(desk, [plus.x, plus.y]);
   const early = await desk.content().evaluate(() => LongForm.state.companions);
   await desk.settled();
   const late = await desk.content().evaluate(() => LongForm.state.companions);

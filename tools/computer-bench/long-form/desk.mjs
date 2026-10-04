@@ -32,16 +32,22 @@ import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
 import { rustNumber } from "../../../ui/tests/rust-source.mjs";
 
 // The window's own numbers, read from the source the measured build is made
-// of — never restated here: a look's settle, a wait's quiet, a wait-for's poll.
-const CORE = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../../crates/zerocode-core/src/computer_use.rs"), "utf8");
-const WINDOW = {
-  settleNothingMs: rustNumber(CORE, "COMPUTER_SETTLE_MS"),
-  quietMs: rustNumber(CORE, "EYE_QUIET_MS"),
-  settleMaxMs: rustNumber(CORE, "EYE_SETTLE_MAX_MS"),
-  waitQuietMs: rustNumber(CORE, "EYE_WAIT_QUIET_MS"),
-  waitForPollMs: rustNumber(CORE, "COMPUTER_WAIT_FOR_POLL_MS"),
-  batchDeadlineMs: rustNumber(CORE, "COMPUTER_USE_DEADLINE_SECONDS") * 1000,
-};
+// of (or another commit's, for the window as it was) — never restated here:
+// a look's settle, a wait's quiet, a wait-for's poll.
+const CORE_SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), "../../../crates/zerocode-core/src/computer_use.rs");
+const CORE = await readFile(CORE_SOURCE, "utf8");
+
+async function windowNumbers(source) {
+  const core = source ? await readFile(source, "utf8") : CORE;
+  return {
+    settleNothingMs: rustNumber(core, "COMPUTER_SETTLE_MS"),
+    quietMs: rustNumber(core, "EYE_QUIET_MS"),
+    settleMaxMs: rustNumber(core, "EYE_SETTLE_MAX_MS"),
+    waitQuietMs: rustNumber(core, "EYE_WAIT_QUIET_MS"),
+    waitForPollMs: rustNumber(core, "COMPUTER_WAIT_FOR_POLL_MS"),
+    batchDeadlineMs: rustNumber(core, "COMPUTER_USE_DEADLINE_SECONDS") * 1000,
+  };
+}
 
 // The scenes. A window rect is in display points; `screen` is the phone's
 // own CSS size, drawn into the window below its `screenTop` bar.
@@ -173,9 +179,10 @@ transform:scale(${scale});transform-origin:0 0"></iframe></div></body></html>`;
  * `words_choose` example), and an app's looks kept and answered under the
  * app the helper resolved. The look's settle cap is the source's either way. */
 export async function startDesk({ url, out, personAttachMs, scene: sceneName = "phone", headless = true, overrides = {},
-  window = "today", wordsChoose = null }) {
+  window = "today", wordsChoose = null, windowSource = undefined }) {
   const scene = { ...SCENES[sceneName], ...overrides };
   const levers = window === "levers";
+  const WINDOW = await windowNumbers(windowSource);
   await mkdir(join(out, "shots"), { recursive: true });
   const browser = await chromium.launch({ headless });
   const page = await browser.newPage({ viewport: scene.display });
@@ -185,7 +192,8 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
   const content = () => (scene.accessible ? page.mainFrame() : page.frames().find((frame) => frame.url().endsWith(scene.page)));
   await content().waitForFunction(() => typeof LongForm === "object" && LongForm.spec !== null);
   const cdp = await page.context().newCDPSession(page);
-  const tally = { verbs: {}, steps: {}, waitMs: 0, handMs: 0, settleMs: 0, settledFalse: 0, pngBytes: [], handoffs: 0, looks: 0 };
+  const tally = { verbs: {}, steps: {}, waitMs: 0, handMs: 0, settleMs: 0, settledFalse: 0, pngBytes: [], handoffs: 0, looks: 0,
+    ocrReads: 0, ocrMs: 0, personMs: 0 };
   const lastLook = new Map();
   let shots = 0;
   let pointer = { x: 0, y: 0 };
@@ -280,6 +288,8 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
       return lines;
     });
     await sleep(OCR_WINDOW_MS);
+    tally.ocrReads += 1;
+    tally.ocrMs += OCR_WINDOW_MS;
     const { window: box, screen } = scene;
     const scale = scene.accessible ? 1 : box.width / screen.width;
     const top = scene.accessible ? 0 : screen.top;
@@ -554,6 +564,7 @@ export async function startDesk({ url, out, personAttachMs, scene: sceneName = "
       }
       case "handoff": {
         await sleep(personAttachMs);
+        tally.personMs += personAttachMs;
         if (scene.accessible) {
           const upload = page.locator("input[type=file]");
           if (await upload.count()) await upload.first().setInputFiles(SCAN);
