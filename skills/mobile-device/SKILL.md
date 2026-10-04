@@ -32,8 +32,8 @@ this order:
   or `serial` on Android) and `booted`. Never assume a specific phone family
   or model, AVD name, UDID, or Android serial; use what `list` gave.
 - `physical`: real iPhones, iPads and Android phones the Mac sees. Every row
-  has `drivable: false` and a plain `reason`. Go to "A device this window cannot
-  drive".
+  has `drivable: false` and a plain `reason`; at most eight rows come, and
+  `omitted` counts the rest. Go to "A device this window cannot drive".
 - `unchecked`: a tool did not answer, and `why` says which. A gap is not
   "nothing is connected". When `why` says it is still looking, run `list` again
   in a few seconds.

@@ -31,8 +31,9 @@ use super::{android_emulators_direct, mobile_emulators_direct};
 /// How long one `list` waits for the tools that name real devices: half of what
 /// a walk lets a `list` hold (`EMULATOR_HOLD_MS`), so the simulators, the
 /// emulators and these tools together stay inside it. `devicectl` answered in
-/// 0.04–0.06 s on a warm service (2026-10-04, `time` over three runs); the wait
-/// is for the cold start of that service, and for `adb` starting its server.
+/// 0.04–0.06 s on a warm service and in 0.33 s after a rest (2026-10-04, `time`);
+/// the wait is for the cold start of that service, and for `adb` starting its
+/// server.
 const PROBE_WAIT: Duration = Duration::from_millis(EMULATOR_HOLD_MS / 2);
 
 /// How long a tool may run before it is killed. A probe that outlives its
@@ -54,8 +55,9 @@ const DEVICECTL_TIMEOUT_SECS: u64 = 8;
 #[cfg(any(target_os = "macos", test))]
 const PROBE_TTL: Duration = Duration::from_secs(5);
 
-/// The most a tool's answer is read: a `devicectl` list of a drawer of paired
-/// phones is a few kilobytes, so this is a bound on a tool gone wrong.
+/// The most a tool's answer is read. A device is about 3.2 KB of `devicectl`'s
+/// JSON (6.4 KB for two paired phones, measured 2026-10-04), so this reads about
+/// eighty paired devices; past it the tool has gone wrong.
 #[cfg(any(target_os = "macos", test))]
 const PROBE_OUTPUT_MAX_BYTES: usize = 256 * 1024;
 
