@@ -124,7 +124,7 @@ fn a_devicectl_answer_it_cannot_read_is_an_error_and_not_an_empty_list() {
 
 #[test]
 fn an_adb_listing_keeps_the_phones_and_drops_the_emulators_and_the_noise() {
-    let rows = parse_adb_physical(ADB_FIXTURE);
+    let rows = physical_android_rows(&parse_adb_rows(ADB_FIXTURE));
     let seen: Vec<(&str, LinkState)> = rows
         .iter()
         .map(|row| (row.name.as_str(), row.state))
@@ -160,7 +160,7 @@ fn a_row_of_one_adb_listing_is_a_driven_emulator_or_a_named_phone_and_never_both
         .filter(|row| row.is_emulator() && row.is_up())
         .map(|row| row.serial.as_str())
         .collect();
-    let named = parse_adb_physical(ADB_FIXTURE);
+    let named = physical_android_rows(&rows);
     assert_eq!(driven, ["emulator-5554"]);
     assert_eq!(named.len(), 4);
     assert_eq!(

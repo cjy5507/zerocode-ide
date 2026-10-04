@@ -308,12 +308,12 @@ pub fn parse_adb_rows(listing: &str) -> Vec<AdbRow> {
         .collect()
 }
 
-/// The real Android devices in an `adb devices -l` listing: every row that is
-/// not an emulator.
+/// The real Android devices among the rows of one `adb devices -l`: every row
+/// that is not an emulator. The window reads the listing once and hands the same
+/// rows to this and to its emulator reader.
 #[must_use]
-pub fn parse_adb_physical(listing: &str) -> Vec<PhysicalDevice> {
-    parse_adb_rows(listing)
-        .into_iter()
+pub fn physical_android_rows(rows: &[AdbRow]) -> Vec<PhysicalDevice> {
+    rows.iter()
         .filter(|row| !row.is_emulator())
         .map(|row| {
             let state = match row.state.as_str() {
@@ -323,7 +323,7 @@ pub fn parse_adb_physical(listing: &str) -> Vec<PhysicalDevice> {
                 _ => LinkState::Unknown,
             };
             let name = row.model.clone().unwrap_or_else(|| UNNAMED_ANDROID.into());
-            PhysicalDevice::new(Hardware::AndroidDevice, &name, row.model, state)
+            PhysicalDevice::new(Hardware::AndroidDevice, &name, row.model.clone(), state)
         })
         .collect()
 }

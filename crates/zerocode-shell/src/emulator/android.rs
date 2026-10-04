@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use zerocode_core::agent_emulator::physical::{
-    ANDROID_EMULATOR_SERIAL_PREFIX, PhysicalDevice, parse_adb_physical, parse_adb_rows,
+    ANDROID_EMULATOR_SERIAL_PREFIX, AdbRow, PhysicalDevice, parse_adb_rows, physical_android_rows,
 };
 
 use super::session::{FinishSession, SessionControl, SessionKey, StartClaim, registry};
@@ -1290,51 +1290,36 @@ pub(crate) struct AndroidDevice {
     booted: bool,
 }
 
-fn android_running(adb: &Path) -> Vec<(String, String)> {
-    let Ok(out) = crate::proc::quiet_command(adb)
+/// What one `adb devices -l` listed, or what it said when it did not answer.
+fn adb_rows(adb: &Path) -> Result<Vec<AdbRow>, String> {
+    let out = crate::proc::quiet_command(adb)
         .args(["devices", "-l"])
         .output()
-    else {
-        return Vec::new();
-    };
+        .map_err(|error| error.to_string())?;
     if !out.status.success() {
-        return Vec::new();
+        let said = String::from_utf8_lossy(&out.stderr);
+        return Err(match said.trim() {
+            "" => out.status.to_string(),
+            said => said.to_string(),
+        });
     }
-    parse_adb_rows(&String::from_utf8_lossy(&out.stdout))
-        .into_iter()
+    Ok(parse_adb_rows(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// The emulators `rows` list as up, each with the AVD it runs: the one road the
+/// window drives. A phone on a cable is never asked who it is.
+fn running_emulators(adb: &Path, rows: &[AdbRow]) -> Vec<(String, String)> {
+    rows.iter()
         .filter(|row| row.is_up() && row.is_emulator())
         .map(|row| {
             let avd = android_avd_name(adb, &row.serial).unwrap_or_default();
-            (row.serial, avd)
+            (row.serial.clone(), avd)
         })
         .collect()
 }
 
-/// The most `adb devices -l` is read: a line is a hundred bytes and a person
-/// has a handful of devices, so this is a bound on a tool gone wrong.
-const ADB_LISTING_MAX_BYTES: usize = 64 * 1024;
-
-/// The real Android phones on the bridge, named for `zerocode-emulator list`
-/// and never driven (t-36920): the window's input roads are the emulator's, and
-/// `EMULATOR_SERIAL_PREFIX` is where [`android_running`] and `device_presence`
-/// stop a phone on a cable from reaching them. `cap` bounds the whole call.
-pub(super) fn physical_android_devices(cap: Duration) -> Result<Vec<PhysicalDevice>, String> {
-    let sdk = android_sdk().map_err(|search| search.to_string())?;
-    physical_android_with(&sdk.adb, cap)
-}
-
-pub(super) fn physical_android_with(
-    adb: &Path,
-    cap: Duration,
-) -> Result<Vec<PhysicalDevice>, String> {
-    let mut command = crate::proc::quiet_command(adb);
-    command.args(["devices", "-l"]);
-    super::process::run_bounded(command, cap, ADB_LISTING_MAX_BYTES)
-        .and_then(|out| out.ensure_success("adb devices"))
-        .map(|out| parse_adb_physical(&out.stdout_text()))
-        .map_err(|why| {
-            format!("adb did not list the devices ({why}); ask list again in a few seconds")
-        })
+fn android_running(adb: &Path) -> Vec<(String, String)> {
+    adb_rows(adb).map_or_else(|_| Vec::new(), |rows| running_emulators(adb, &rows))
 }
 
 /// What `zerocode-emulator list` reads of Android (t-36920): the emulators this
@@ -1359,10 +1344,25 @@ pub(super) fn android_listing() -> AndroidListing {
     }
 }
 
+/// Both halves from ONE `adb devices -l`: the emulators the window drives, and
+/// the real phones the window's input roads never reach (`EMULATOR_SERIAL_PREFIX`
+/// is where [`android_running`] and `device_presence` stop a phone on a cable).
+/// A second ask of adb for the phones cost +122 ms on the efficiency cores
+/// (194 → 316 ms, `taskpolicy -b`) and nothing on the fast ones, and answers the
+/// same words. No deadline of its own: the emulators' half always waited for
+/// this one call, so the phones add no wait to it.
 fn android_listing_with(sdk: &AndroidSdk) -> AndroidListing {
+    let rows = adb_rows(&sdk.adb);
+    let running = rows
+        .as_ref()
+        .map_or_else(|_| Vec::new(), |rows| running_emulators(&sdk.adb, rows));
     AndroidListing {
-        emulators: emulators_listed(sdk, &android_running(&sdk.adb)),
-        phones: physical_android_with(&sdk.adb, Duration::from_secs(5)),
+        emulators: emulators_listed(sdk, &running),
+        phones: rows
+            .map(|rows| physical_android_rows(&rows))
+            .map_err(|why| {
+                format!("adb did not list the devices ({why}); ask list again in a few seconds")
+            }),
     }
 }
 

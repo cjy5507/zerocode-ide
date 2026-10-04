@@ -301,42 +301,6 @@ fn a_failed_probe_is_kept_for_its_time_too_and_a_panicking_one_leaves_a_reason()
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn the_android_probe_names_phones_from_adb_and_leaves_the_emulators_out() {
-    let scratch = tempfile::tempdir().expect("scratch");
-    let asked = scratch.path().join("asked");
-    let adb = fake_tool(
-        scratch.path(),
-        "adb",
-        &format!(
-            "printf '%s\\n' \"$*\" > '{}'\nprintf 'List of devices attached\\nemulator-5554\\tdevice model:sdk_synthetic\\nSYN0000000001\\tdevice model:Synthetic_Pixel\\nSYN0000000002\\tunauthorized\\n'",
-            asked.display()
-        ),
-    );
-    let reading = super::super::android::physical_android_with(&adb, Duration::from_secs(5));
-    assert!(reading.is_ok(), "{reading:?}");
-    let names: Vec<String> = reading
-        .unwrap_or_default()
-        .into_iter()
-        .map(|row| row.name)
-        .collect();
-    assert_eq!(names, ["Synthetic Pixel", "Android device"]);
-    assert_eq!(
-        std::fs::read_to_string(&asked).unwrap_or_default(),
-        "devices -l\n"
-    );
-
-    let hanging = fake_tool(scratch.path(), "adb-hanging", "exec sleep 30");
-    let began = Instant::now();
-    let stuck = super::super::android::physical_android_with(&hanging, Duration::from_millis(200));
-    assert!(
-        stuck.as_ref().is_err_and(|why| why.contains("adb")),
-        "{stuck:?}"
-    );
-    assert!(began.elapsed() < Duration::from_secs(5));
-}
-
 /// How long each of `runs` took, as the middle, the 90th percentile and the
 /// worst, in milliseconds.
 fn spread(runs: usize, mut each: impl FnMut()) -> [f64; 3] {
@@ -393,7 +357,10 @@ fn the_cost_of_one_list() {
     };
     let was = spread(RUNS, || {
         tauri::async_runtime::block_on(async {
-            let _ = tokio::join!(mobile_emulators_direct(), android_emulators_direct());
+            let _ = tokio::join!(
+                mobile_emulators_direct(),
+                super::super::android_emulators_direct()
+            );
         });
     });
     let cold = spread(RUNS, || {
@@ -414,8 +381,8 @@ fn the_cost_of_one_list() {
             PROBE_TOOL_CAP,
         );
     });
-    let adb = spread(RUNS, || {
-        let _ = super::super::android::physical_android_devices(PROBE_WAIT);
+    let android = spread(RUNS, || {
+        let _ = super::super::android::android_listing();
     });
     let slow = {
         let kept = kept();
@@ -458,7 +425,7 @@ fn the_cost_of_one_list() {
             "list_after_warm": warm,
             "devicectl_alone": devicectl,
             "devicectl_missing": missing,
-            "adb_physical_alone": adb,
+            "android_half_alone (one adb, both readings)": android,
             "slow_tool_3s_ms [caller_waited, second_call, as_expected]": slow,
             "answer_keys": keys,
             "rows_ios_android_physical": counts,

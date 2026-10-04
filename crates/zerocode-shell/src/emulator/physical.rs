@@ -7,33 +7,41 @@
 //!
 //! - the tools run beside the simulator and emulator readers, not after them, so
 //!   a `list` costs the slowest of them and not the sum;
-//! - a caller waits for the real-device tools at most [`PROBE_WAIT`]; a tool that
-//!   needs longer is left to finish and the next `list` has its answer, and the
-//!   answer for now says it is still looking instead of saying "none";
+//! - the phones `adb` lists are read from the one `adb devices -l` the emulators'
+//!   reader makes anyway (`android::android_listing`): a process of its own cost
+//!   +122 ms on the efficiency cores and nothing on the fast ones;
+//! - a caller waits for `devicectl` at most [`PROBE_WAIT`]; a tool that needs
+//!   longer is left to finish and the next `list` has its answer, and the answer
+//!   for now says it is still looking instead of saying "none";
 //! - `devicectl` is the slow one (it asks a system service), so its reading is
 //!   kept for [`PROBE_TTL`] and taken by one probe at a time, however many
-//!   `list` calls arrive; `adb` answers in milliseconds and is asked every time;
+//!   `list` calls arrive;
 //! - a machine without the tool pays one failed spawn per [`PROBE_TTL`] and the
 //!   answer names the gap.
 //!
 //! There is no loop here: a probe runs because a `list` asked for it, on a
 //! thread that ends with it.
 
+#[cfg(any(target_os = "macos", test))]
 use std::time::Duration;
 
 use serde_json::Value;
+#[cfg(any(target_os = "macos", test))]
 use zerocode_core::agent_emulator::EMULATOR_HOLD_MS;
-use zerocode_core::agent_emulator::physical::{PhysicalDevice, PlatformReading, list_answer};
+#[cfg(not(target_os = "macos"))]
+use zerocode_core::agent_emulator::physical::PhysicalDevice;
+use zerocode_core::agent_emulator::physical::{PlatformReading, list_answer};
 use zerocode_core::computer_use::EmulatorPlatform;
 
-use super::{android_emulators_direct, mobile_emulators_direct};
+use super::android::AndroidListing;
+use super::mobile_emulators_direct;
 
-/// How long one `list` waits for the tools that name real devices: half of what
-/// a walk lets a `list` hold (`EMULATOR_HOLD_MS`), so the simulators, the
-/// emulators and these tools together stay inside it. `devicectl` answered in
-/// 0.04–0.06 s on a warm service and in 0.33 s after a rest (2026-10-04, `time`);
-/// the wait is for the cold start of that service, and for `adb` starting its
-/// server.
+/// How long one `list` waits for `devicectl`: half of what a walk lets a `list`
+/// hold (`EMULATOR_HOLD_MS`), so the simulators, the emulators and this tool
+/// together stay inside it. `devicectl` answered in 0.04–0.06 s on a warm
+/// service and in 0.33 s after a rest (2026-10-04, `time`); the wait is for the
+/// cold start of that service.
+#[cfg(any(target_os = "macos", test))]
 const PROBE_WAIT: Duration = Duration::from_millis(EMULATOR_HOLD_MS / 2);
 
 /// How long a tool may run before it is killed. A probe that outlives its
@@ -252,21 +260,27 @@ async fn physical_ios() -> Result<Vec<PhysicalDevice>, String> {
     Ok(Vec::new())
 }
 
-/// The real Android phones `adb` lists, asked every time: it answers in
-/// milliseconds, and a stale "none" is what a freshly plugged phone makes wrong.
-async fn physical_android() -> Result<Vec<PhysicalDevice>, String> {
-    tauri::async_runtime::spawn_blocking(|| super::android::physical_android_devices(PROBE_WAIT))
+/// Android as `list` reads it: the emulators and the real phones from one
+/// `adb devices -l`, asked every time — a stale "none" is what a freshly plugged
+/// phone makes wrong, and the call answers in milliseconds.
+async fn android_listing_now() -> AndroidListing {
+    tauri::async_runtime::spawn_blocking(super::android::android_listing)
         .await
-        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|error| {
+            let why = error.to_string();
+            AndroidListing {
+                emulators: Err(why.clone()),
+                phones: Err(why),
+            }
+        })
 }
 
 /// What `zerocode-emulator list` answers, read now.
 pub(crate) async fn list_answer_now() -> Result<Value, String> {
-    let (simulators, emulators, ios_physical, android_physical) = tokio::join!(
+    let (simulators, android, ios_physical) = tokio::join!(
         mobile_emulators_direct(),
-        android_emulators_direct(),
+        android_listing_now(),
         physical_ios(),
-        physical_android(),
     );
     let to_rows = |rows: Result<Value, serde_json::Error>| rows.map_err(|error| error.to_string());
     list_answer(
@@ -277,8 +291,10 @@ pub(crate) async fn list_answer_now() -> Result<Value, String> {
         },
         PlatformReading {
             platform: EmulatorPlatform::Android,
-            simulated: emulators.and_then(|found| to_rows(serde_json::to_value(found))),
-            physical: android_physical,
+            simulated: android
+                .emulators
+                .and_then(|found| to_rows(serde_json::to_value(found))),
+            physical: android.phones,
         },
     )
 }
