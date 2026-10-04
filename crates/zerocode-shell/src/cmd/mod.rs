@@ -205,10 +205,10 @@ pub(crate) use update::{
 };
 
 pub(crate) use worktree::{
-    create_worktree, github_assignable_users, github_comment_work_item, github_merge_pr,
-    github_preset_query, github_set_work_item_open, github_web_urls, github_work_item_detail,
-    github_work_items, gitlab_comment_item, gitlab_inline_comment, gitlab_item_detail,
-    gitlab_job_trace, gitlab_merge_mr, gitlab_mr_review, gitlab_pipeline_jobs,
+    commit_landings, create_worktree, github_assignable_users, github_comment_work_item,
+    github_merge_pr, github_preset_query, github_set_work_item_open, github_web_urls,
+    github_work_item_detail, github_work_items, gitlab_comment_item, gitlab_inline_comment,
+    gitlab_item_detail, gitlab_job_trace, gitlab_merge_mr, gitlab_mr_review, gitlab_pipeline_jobs,
     gitlab_project_members, gitlab_retry_job, gitlab_set_item_open, gitlab_set_mr_reviewers,
     gitlab_todos, gitlab_update_mr, gitlab_work_items, list_branches, list_worktrees,
     merge_and_remove_worktree, remove_worktree, resolve_mr_base, resolve_pr_base,
@@ -254,12 +254,12 @@ pub(crate) use second_brain::{
 pub(crate) use supply_chain::{supply_chain_graph, supply_chain_report};
 
 pub(crate) use artifacts::{
-    artifact_copy_path, artifact_counts, artifact_delete, artifact_document, artifact_export,
-    artifact_export_formats, artifact_export_reveal, artifact_feedback_record,
+    artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
+    artifact_export, artifact_export_formats, artifact_export_reveal, artifact_feedback_record,
     artifact_import_transcripts, artifact_open, artifact_page_at, artifact_preference_revoke,
     artifact_preference_save, artifact_preferences, artifact_preview, artifact_register,
-    artifact_reveal, artifact_search, artifact_thumbnail, artifact_versions, artifacts_list,
-    explain_cancel, explain_preview, explain_roads, explain_start,
+    artifact_reveal, artifact_search, artifact_tasks, artifact_thumbnail, artifact_versions,
+    artifacts_list, explain_cancel, explain_preview, explain_roads, explain_start,
 };
 pub(crate) use skills::{
     computer_use_skill_report, install_bundled_skill, list_skills, orchestration_report,

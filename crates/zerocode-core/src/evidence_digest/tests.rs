@@ -293,7 +293,9 @@ fn a_file_that_holds_no_record_has_no_digest() {
     );
 }
 
-/// The extension says how the bytes are read, and nothing about what they hold.
+/// The extension says how the bytes are read, and nothing about what they hold:
+/// JSON by line or whole, the lines of a text log, the one number of an exit
+/// code. A file of any other name is read by no digest.
 #[test]
 fn the_extension_names_the_format() {
     let cases: &[(&str, Option<Format>)] = &[
@@ -301,7 +303,10 @@ fn the_extension_names_the_format() {
         ("/a/b/browser-action.JSONL", Some(Format::Lines)),
         ("state.json", Some(Format::Document)),
         ("walk-002.Json", Some(Format::Document)),
-        ("run.log", None),
+        ("run.log", Some(Format::Text)),
+        ("/a/b/clippy.OUT", Some(Format::Text)),
+        ("notes.txt", Some(Format::Text)),
+        ("run.rc", Some(Format::ExitCode)),
         ("report.md", None),
         ("notes", None),
     ];
@@ -377,4 +382,87 @@ fn a_digest_weighs_what_it_keeps_and_not_what_it_read() {
         "a digest is bounded by the table, not by the log: {many} of {} bytes",
         long.len()
     );
+}
+
+/// A step line of a pane that works on a task: the recorder lays the task and
+/// the pane on the observation of the line it would write anyway.
+fn step_for(n: usize, task: &str) -> String {
+    let measured = format!(r#""observation":{{"act_ms":{}"#, n * 2);
+    let line = step(n, "click", true);
+    assert!(line.contains(&measured), "the helper's line is measured");
+    line.replace(
+        &measured,
+        &format!(r#"{measured},"{STEP_TASK_KEY}":"{task}","{STEP_PANE_KEY}":"term-3""#),
+    )
+}
+
+/// A session's log runs across tasks: the digest counts the steps that name
+/// one, by task, and a step taken for none names none.
+#[test]
+fn a_step_log_counts_the_steps_that_name_a_task() {
+    let text = [
+        step_for(1, "t-10"),
+        step(2, "open", true),
+        step_for(3, "t-20"),
+        step_for(4, "t-20"),
+        step_for(5, "t-10"),
+        step_for(6, "t-20"),
+    ]
+    .join("\n");
+    let steps = read_steps(&text, &Limits::default());
+    assert_eq!((steps.total, steps.tasked), (6, 5));
+    let by_task: Vec<(&str, usize)> = steps
+        .tasks
+        .iter()
+        .map(|held| (held.task.as_str(), held.steps))
+        .collect();
+    assert_eq!(
+        by_task,
+        [("t-20", 3), ("t-10", 2)],
+        "the task with most steps first"
+    );
+
+    let listed = Limits {
+        digest_tasks_max: 1,
+        ..Limits::default()
+    };
+    let steps = read_steps(&text, &listed);
+    assert_eq!(steps.tasked, 5, "every step that names a task is counted");
+    assert_eq!(steps.tasks.len(), 1, "and the table's count of them listed");
+
+    let old = log(&[(1, "open", true), (2, "click", true)]);
+    let steps = read_steps(&old, &Limits::default());
+    assert_eq!((steps.tasked, steps.tasks.len()), (0, 0));
+    let wire = serde_json::to_value(Digest::Steps(steps)).expect("serialises");
+    assert_eq!(wire["tasked"], 0);
+    assert!(
+        wire.get("tasks").is_none(),
+        "a log that names no task writes no list: {wire}"
+    );
+}
+
+/// What the catalog tags a step log's row with: the tasks its steps name, each
+/// once and in the order first named, as many as the table lists.
+#[test]
+fn the_tasks_a_step_log_names_are_listed_once_in_the_order_first_named() {
+    let text = [
+        step(1, "open", true),
+        step_for(2, "t-20"),
+        step_for(3, "t-10"),
+        step_for(4, "t-20"),
+        // Not a step: a record that happens to carry the key names nothing —
+        // and neither does a step that carries it outside its observation.
+        r#"{"task":"t-99","goal":"walk"}"#.to_string(),
+        r#"{"verb":"click","ok":true,"task":"t-98"}"#.to_string(),
+    ]
+    .join("\n");
+    let limits = Limits::default();
+    assert_eq!(tasks_named(text.as_bytes(), &limits), ["t-20", "t-10"]);
+    let old = log(&[(1, "open", true), (2, "click", true)]);
+    assert_eq!(tasks_named(old.as_bytes(), &limits), Vec::<String>::new());
+    let one = Limits {
+        digest_tasks_max: 1,
+        ..Limits::default()
+    };
+    assert_eq!(tasks_named(text.as_bytes(), &one), ["t-20"]);
 }

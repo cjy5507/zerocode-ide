@@ -23,11 +23,16 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *     in the words the evidence panel uses (t-34315) — right after 반영됨, before
  *     the offer to clean up, because the ellipsis cuts the end of a chip at the
  *     sidebar's default width — and only a landed one: nothing about ignored
- *     files is said of work main does not have. */
+ *     files is said of work main does not have;
+ *   - an unlanded row also says how far behind the compare ref it runs and what a merge would
+ *     conflict on (t-34501): a clash is the second word of the chip in its own colour, a branch
+ *     `far_behind` says 「main보다 N 뒤」 after it, the tooltip always has the commit count, the files
+ *     and the next thing to do, and a conflict nobody looked at is said as not read — never as none. */
 
 const REF = "origin/main";
 const NOW = Date.now();
 const LANDED_IN = { sha: "0123456789abcdef0123456789abcdef01234567", time_ms: NOW - 3 * 3600_000 };
+const CLEAN = { total: 0, files: [] };
 const base = (state, over = {}) => ({
   state, detached: false, ahead: 0, dirty: false, dirty_checked_ms: NOW - 1000, compare_ref: REF, ref_updated_ms: NOW - 2 * 86_400_000, ...over,
 });
@@ -55,6 +60,16 @@ const SCENE = [
   { path: "/r/busyignored", term: 9103, hook: "working", landing: base("landed", { ignored: true }) },
   { path: "/r/dirtyignored", landing: base("landed", { dirty: true, ignored: true }) },
   { path: "/r/aheadignored", landing: base("unlanded", { ahead: 2, ignored: true }) },
+  // How far behind the compare ref a branch runs and what a merge would clash on (t-34501).
+  { path: "/r/near", landing: base("unlanded", { ahead: 1, behind: 3, far_behind: false, conflict: CLEAN }) },
+  { path: "/r/clash", landing: base("unlanded", { ahead: 3, behind: 5, far_behind: false,
+    conflict: { total: 2, files: ["src/a.rs", "ui/b.js"] } }) },
+  { path: "/r/far", landing: base("unlanded", { ahead: 4, behind: 70, far_behind: true, conflict: CLEAN }) },
+  { path: "/r/farclash", landing: base("unlanded", { ahead: 17, behind: 71, far_behind: true,
+    conflict: { total: 7, files: ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"] } }) },
+  { path: "/r/clashdirty", landing: base("unlanded", { ahead: 2, behind: 4, far_behind: false, dirty: true,
+    conflict: { total: 1, files: ["x.js"] } }) },
+  { path: "/r/unseen", landing: base("unlanded", { ahead: 2, far_behind: false }) },
   { path: "/r/plain" },
 ];
 
@@ -76,6 +91,12 @@ const WANT = {
   "/r/busyignored": { word: "반영됨 · 무시된 파일 남음", tone: "landed", cleanable: false },
   "/r/dirtyignored": { word: "반영됨 · 저장 안 한 변경 · 무시된 파일 남음", tone: "landed", cleanable: false },
   "/r/aheadignored": { word: "미반영 2", tone: "ahead", cleanable: false },
+  "/r/near": { word: "미반영 1", tone: "ahead", cleanable: false },
+  "/r/clash": { word: "미반영 3 · 충돌 2", tone: "conflict", cleanable: false },
+  "/r/far": { word: "미반영 4 · main보다 70 뒤", tone: "ahead", cleanable: false },
+  "/r/farclash": { word: "미반영 17 · 충돌 7 · main보다 71 뒤", tone: "conflict", cleanable: false },
+  "/r/clashdirty": { word: "미반영 2 · 충돌 1 · 저장 안 한 변경", tone: "conflict", cleanable: false },
+  "/r/unseen": { word: "미반영 2", tone: "ahead", cleanable: false },
 };
 
 export async function testSidebarLandingState({ browser, origin, ok, faults }) {
@@ -136,6 +157,7 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
           row: Boolean(row),
           word: shown ? chip.textContent : null,
           tone: chip?.dataset.landing ?? null,
+          color: chip ? getComputedStyle(chip).color : null,
           tip: shown ? chip.dataset.tip ?? "" : null,
           cleanable: chip?.dataset.cleanable === "1",
           // The ellipsis cuts what does not fit (`textContent` is the whole word either way), so the
@@ -196,6 +218,28 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
     );
 
     ok(
+      "an unlanded row's tooltip always says how many commits it runs behind the compare ref, which files a merge would conflict on (with the count of the ones left out) and the next thing to do; a conflict nobody looked at is said as not read, and work that is in main says none of it",
+      chips["/r/near"].tip.includes(`${REF}보다 3커밋 뒤처져 있습니다`) &&
+        chips["/r/near"].tip.includes(`${REF}에 합쳐 보아도 충돌하는 파일이 없습니다`) &&
+        chips["/r/near"].tip.includes("다음 할 일: git fetch 뒤") && chips["/r/near"].tip.includes("게이트를 다시 돌리세요") &&
+        chips["/r/clash"].tip.includes(`${REF}에 합치면 2개 파일이 충돌합니다: src/a.rs, ui/b.js`) &&
+        !chips["/r/clash"].tip.includes(" 외 ") &&
+        chips["/r/farclash"].tip.includes(`${REF}에 합치면 7개 파일이 충돌합니다: a.rs, b.rs, c.rs, d.rs, e.rs 외 2개`) &&
+        chips["/r/farclash"].tip.includes(`${REF}보다 71커밋 뒤처져 있습니다`) &&
+        chips["/r/unseen"].tip.includes("충돌하는지는 읽지 못했습니다") && !chips["/r/unseen"].tip.includes("충돌하는 파일이 없습니다") &&
+        !chips["/r/unseen"].tip.includes("뒤처져") &&
+        !chips["/r/landed"].tip.includes("뒤처져") && !chips["/r/landed"].tip.includes("충돌") && !chips["/r/landed"].tip.includes("다음 할 일"),
+      JSON.stringify(Object.fromEntries(["/r/near", "/r/clash", "/r/farclash", "/r/unseen", "/r/landed"].map((path) => [path, chips[path].tip]))),
+    );
+
+    ok(
+      "a clash wears its own colour — the halt ink the 확인 필요 chip uses, and not the wait ink 미반영 wears — and a branch that is far behind but merges cleanly keeps the wait ink, so the colour is for the conflict alone",
+      chips["/r/clash"].color === chips["/r/lm"].color && chips["/r/clash"].color !== chips["/r/ahead"].color &&
+        chips["/r/farclash"].color === chips["/r/lm"].color && chips["/r/far"].color === chips["/r/ahead"].color,
+      JSON.stringify({ clash: chips["/r/clash"].color, check: chips["/r/lm"].color, ahead: chips["/r/ahead"].color, far: chips["/r/far"].color }),
+    );
+
+    ok(
       "the tooltip names the ref compared with and how long ago it last moved, the main commit that took the work (nine characters) and its time, and says so for a detached HEAD, a missing ref and an unknown",
       chips["/r/landed"].tip.includes(`비교: ${REF}`) && chips["/r/landed"].tip.includes("마지막 갱신 2일 전") &&
         chips["/r/landed"].tip.includes("012345678 ·") && !chips["/r/landed"].tip.includes("0123456789") &&
@@ -240,14 +284,16 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
         const chip = document.getElementById("scm-compare-landing");
         return { hidden: chip.hidden, word: chip.textContent, tip: chip.dataset.tip ?? "" };
       };
-      const out = { ahead: read("/r/ahead"), plain: read("/r/plain"), landed: read("/r/landed") };
+      const out = { ahead: read("/r/ahead"), plain: read("/r/plain"), landed: read("/r/landed"), clash: read("/r/farclash") };
       out.rowTip = window.__CHIP__("/r/ahead").tip;
+      out.clashRow = window.__CHIP__("/r/farclash");
       return out;
     });
     ok(
       "the git panel's head says the same words from the same function — 미반영 13 with the row's tooltip — and nothing at all where git said nothing; the current checkout is never offered for clean-up",
       !panel.ahead.hidden && panel.ahead.word === "미반영 13" && panel.ahead.tip === panel.rowTip &&
-        panel.plain.hidden === true && !panel.landed.hidden && panel.landed.word === "반영됨",
+        panel.plain.hidden === true && !panel.landed.hidden && panel.landed.word === "반영됨" &&
+        panel.clash.word === "미반영 17 · 충돌 7 · main보다 71 뒤" && panel.clash.tip === panel.clashRow.tip,
       JSON.stringify(panel),
     );
 
@@ -309,6 +355,55 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       JSON.stringify(live),
     );
 
+    const moved = await page.evaluate(async () => {
+      // Only `behind` and the conflict change — ahead, state and the ref stand — and the chip says so.
+      const was = window.__ANSWER__.project_catalog;
+      window.__ANSWER__.project_catalog = () => {
+        const [project] = was();
+        return [{ ...project, worktrees: project.worktrees.map((one) => one.path !== "/r/clash" ? one : {
+          ...one, landing: { ...one.landing, behind: 9, conflict: { total: 3, files: ["src/a.rs", "ui/b.js", "c.md"] } },
+        }) }];
+      };
+      await refreshWorktrees();
+      await window.__PAINTED__();
+      return window.__CHIP__("/r/clash");
+    });
+    ok(
+      "a change of only the commits behind or of the conflicting files repaints the chip and its tooltip — the row's shape carries both",
+      moved.word === "미반영 3 · 충돌 3" && moved.tip.includes("9커밋 뒤처져") && moved.tip.includes("3개 파일이 충돌합니다: src/a.rs, ui/b.js, c.md"),
+      JSON.stringify(moved),
+    );
+
+    // The artifact card and drawer wear the state's own word only (t-36910 `head`): the clash and the
+    // distance are said in the sidebar chip and in the tooltip, and a clash is told by colour there.
+    const card = await page.evaluate(() => {
+      const wear = (path) => {
+        const chip = document.createElement("span");
+        chip.className = "artifact-card-landing";
+        document.body.append(chip);
+        dressArtifactLanding(chip, worktreeLandingSayFor(path));
+        const seen = {
+          text: chip.textContent,
+          tone: chip.dataset.landing ?? null,
+          tip: chip.dataset.tip ?? "",
+          color: getComputedStyle(chip).color,
+          border: getComputedStyle(chip).borderTopColor,
+        };
+        chip.remove();
+        return seen;
+      };
+      return { clash: wear("/r/farclash"), check: wear("/r/unk"), quiet: wear("/r/ahead"), sidebar: window.__CHIP__("/r/farclash") };
+    });
+    ok(
+      "an unlanded row with a clash and a long way behind reads 미반영 N alone on an artifact card, tells the clash by data-landing and by the 확인 필요 colour, keeps the clash and the distance in its tooltip, and wears the whole sentence in the sidebar",
+      card.clash.text === "미반영 17" && card.clash.tone === "conflict" &&
+        card.clash.color === card.check.color && card.clash.border === card.check.border &&
+        card.clash.color !== card.quiet.color &&
+        card.clash.tip.includes("7개 파일이 충돌합니다") && card.clash.tip.includes("71커밋 뒤처져") &&
+        card.sidebar.word === "미반영 17 · 충돌 7 · main보다 71 뒤",
+      JSON.stringify(card),
+    );
+
     const heights = await page.evaluate(() => {
       const rows = [...document.querySelectorAll(".wt-row")].map((row) => row.getBoundingClientRect().height);
       return { min: Math.min(...rows), max: Math.max(...rows), plain: window.__CHIP__("/r/plain").height };
@@ -323,6 +418,15 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       for (const theme of ["dark", "light"]) {
         await page.evaluate(async (which) => { document.documentElement.dataset.theme = which; await window.__PAINTED__(); }, theme);
         await page.locator(".threads").screenshot({ path: resolve(capture, `landing-${theme}.png`), animations: "disabled" });
+      }
+      // The narrowest the sidebar allows (panel limits: 180 px), where the ellipsis cuts the chip.
+      for (const theme of ["dark", "light"]) {
+        await page.evaluate(async (which) => {
+          document.documentElement.dataset.theme = which;
+          document.documentElement.style.setProperty("--sidebar-width", "180px");
+          await window.__PAINTED__();
+        }, theme);
+        await page.locator(".threads").screenshot({ path: resolve(capture, `landing-${theme}-narrow.png`), animations: "disabled" });
       }
     }
   } finally {

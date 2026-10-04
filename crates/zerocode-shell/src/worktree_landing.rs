@@ -66,14 +66,23 @@ pub(super) struct WorktreeLanding {
     /// 내용 기준, 이것은 커밋 기준이다). 못 읽었거나 `unlanded`가 아니면 없다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) behind: Option<u32>,
-    /// `unlanded`일 때 비교 ref에 합치면 충돌하는 파일. 충돌이 없거나 git이
-    /// 답하지 못했으면 없다 — 못 본 것을 충돌 없음이라 하지 않는다.
+    /// `unlanded`일 때 비교 ref에 합쳐 본 결과. `Some`에 `total`이 0이면 합쳐 보았고
+    /// 충돌이 없다, 0보다 크면 그만큼의 파일이 충돌한다. 없으면 **보지 못했다** — 행이
+    /// `unlanded`가 아니거나 git이 답하지 못했다. 못 본 것을 충돌 없음이라 하지 않는다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) conflict: Option<LandingConflict>,
+    /// `behind`가 [`LANDING_BEHIND_WARN`] 이상이다 — 사이드바가 칩에 「main보다 N 뒤」를
+    /// 말할 만큼 멀다. 기준을 화면이 아니라 이 파일이 쥔다: 뒤따르는 원장 알림이 같은
+    /// 기준으로 워커를 깨우므로, 화면과 알림이 서로 다른 숫자를 쓰지 않는다.
+    pub(super) far_behind: bool,
 }
 
 /// 이름을 적는 충돌 파일의 수. 더 있으면 `total`만 센다.
 pub(super) const LANDING_CONFLICT_NAMES: usize = 5;
+
+/// 비교 ref보다 이만큼 이상 뒤처지면 사이드바 칩이 그 사실을 말한다. 합칠 때 컴파일 오류가
+/// 드러나는 것은 뒤처진 수가 클수록 잦다 — 10-04에 71·74커밋 뒤처진 두 브랜치가 그랬다.
+pub(super) const LANDING_BEHIND_WARN: u32 = 20;
 
 /// 합치면 충돌하는 파일: 전체 수와, 이름을 적는 앞쪽 몇 개.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,6 +118,7 @@ impl WorktreeLanding {
             landed_in: None,
             behind: None,
             conflict: None,
+            far_behind: false,
         }
     }
 }
@@ -751,6 +761,7 @@ fn classify_landing(
         landed_in: None,
         behind: None,
         conflict: None,
+        far_behind: false,
     };
     let Some(target) = base.oid.as_deref() else {
         landing.state = "no_ref";
@@ -792,14 +803,30 @@ fn classify_landing(
         landing.state = "unlanded";
         landing.ahead = u32::try_from(ahead).unwrap_or(u32::MAX);
         landing.behind = commits_behind(host, path, head, target);
-        if let MergeProbe::Conflict(files) = probe {
-            landing.conflict = Some(LandingConflict {
-                total: u32::try_from(files.len()).unwrap_or(u32::MAX),
-                files: files.into_iter().take(LANDING_CONFLICT_NAMES).collect(),
-            });
-        }
+        landing.far_behind = landing
+            .behind
+            .is_some_and(|behind| behind >= LANDING_BEHIND_WARN);
+        landing.conflict = conflict_of(&probe);
     }
     landing
+}
+
+/// 병합 시험의 답을 칸으로 옮긴다: 깨끗함은 `total 0`, 충돌은 전체 수와 앞쪽 이름, 못 읽음은 없음.
+///
+/// 종료값이 충돌이라고 했는데 파일 이름이 하나도 없으면 충돌은 충돌이다 — 적어도 하나로 세고
+/// 이름은 비워 둔다. 0으로 옮기면 충돌을 「합쳐 보았고 깨끗함」으로 말하게 된다.
+fn conflict_of(probe: &MergeProbe) -> Option<LandingConflict> {
+    match probe {
+        MergeProbe::Clean(_) => Some(LandingConflict {
+            total: 0,
+            files: Vec::new(),
+        }),
+        MergeProbe::Conflict(files) => Some(LandingConflict {
+            total: u32::try_from(files.len()).unwrap_or(u32::MAX).max(1),
+            files: files.iter().take(LANDING_CONFLICT_NAMES).cloned().collect(),
+        }),
+        MergeProbe::Failed => None,
+    }
 }
 
 /// 비교 ref에는 있고 `head`에는 없는 커밋 수. 못 읽으면 없다 — 0이라 하지 않는다.
@@ -943,6 +970,267 @@ fn commit_time(host: &Host, path: &Path, commit: &str) -> Option<i64> {
     landing_git_text(host, path, &["log", "-1", "--format=%ct", commit])
         .and_then(|said| said.parse::<i64>().ok())
         .map(|seconds| seconds.saturating_mul(1000))
+}
+
+// ---- A commit whose checkout is gone (t-36910) -----------------------------
+//
+// A task's row in the artifact gallery outlives the checkout the task was
+// worked in: once the worktree is removed there is no row above to wear a
+// landed state. What is left is the commit the task handed in, and the
+// question "is that commit in the compare ref" is the classifier's own —
+// `classify_landing` with no branch — asked of the repository that holds the
+// commit. The answers are kept by commit, read behind the listing like the
+// rows above, and the window is told when one moved.
+
+/// The window event that says the answer about a commit moved.
+pub(crate) const COMMIT_LANDINGS_EVENT: &str = "worktree:commit-landing";
+
+/// A repository this window keeps, and the compare ref its project pins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct KnownRepo {
+    pub(super) root: PathBuf,
+    pub(super) pinned: Option<String>,
+}
+
+/// The repositories this window keeps, each with the compare ref its project
+/// pins: what a question about a commit is asked of. A project that is not a
+/// repository answers for no commit and is passed over when one is looked for.
+pub(super) fn known_repos(
+    config_root: &Path,
+    repository: &settings::SettingsRepository,
+) -> Vec<KnownRepo> {
+    stored_projects(config_root)
+        .into_iter()
+        .map(PathBuf::from)
+        .map(|root| KnownRepo {
+            pinned: stored_project_settings_at(repository, &project_settings_key(&root))
+                .ok()
+                .and_then(|stored| stored.worktree_base_ref),
+            root,
+        })
+        .collect()
+}
+
+/// How long "no repository this window keeps knows that commit" stands. Every
+/// other answer is keyed by something git writes; this one is not — the commit
+/// may come with the next fetch, or never — so it is asked again this often
+/// and no oftener.
+const COMMIT_UNKNOWN_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// The most commits one question names: a listing asks for the tasks it shows,
+/// and a longer list is cut rather than turned into that many git processes.
+const COMMITS_ASKED_MAX: usize = 128;
+
+/// The most answers kept. Past it the answers that are not `landed` go first,
+/// then everything: a landed answer costs nothing to keep right, the rest are
+/// re-read when the compare ref moves anyway.
+const COMMITS_HELD_MAX: usize = 4096;
+
+/// How many characters a word must and may have to be taken as a commit id:
+/// the shortest abbreviation git prints, up to a SHA-256 id.
+const COMMIT_ID_CHARS: std::ops::RangeInclusive<usize> = 7..=64;
+
+/// Whether a word is a commit id and nothing else — it is handed to git as an
+/// argument, so nothing that is not hexadecimal goes through.
+fn is_commit_id(word: &str) -> bool {
+    COMMIT_ID_CHARS.contains(&word.len()) && word.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+struct HeldCommit {
+    /// The repository that holds the commit, once one answered for it.
+    repo: Option<PathBuf>,
+    /// The compare ref's commit the answer was read against.
+    base_oid: Option<String>,
+    asked_ms: i64,
+    landing: WorktreeLanding,
+}
+
+fn commit_cache() -> &'static Mutex<HashMap<String, HeldCommit>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, HeldCommit>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The answer for a commit nothing can be said of: not a commit id, or no
+/// repository this window keeps knows it.
+fn unknown_commit() -> WorktreeLanding {
+    WorktreeLanding {
+        state: "unknown",
+        detached: true,
+        ..WorktreeLanding::pending()
+    }
+}
+
+/// Whether a held answer about a commit still stands. Work that landed stays
+/// landed whatever the compare ref does next. Any other answer read in a
+/// repository stands while that repository's compare ref has not moved — by
+/// `stat` alone. "No repository knows it" stands for [`COMMIT_UNKNOWN_TTL`].
+fn commit_stands(held: &HeldCommit, repos: &[KnownRepo]) -> bool {
+    if held.landing.state == "landed" {
+        return true;
+    }
+    let Some(root) = held.repo.as_deref() else {
+        return now_ms().saturating_sub(held.asked_ms) < millis(COMMIT_UNKNOWN_TTL);
+    };
+    repos
+        .iter()
+        .find(|repo| repo.root == root)
+        .and_then(|repo| known_landing_base(&repo.root, repo.pinned.as_deref()))
+        .is_some_and(|base| base.oid == held.base_oid)
+}
+
+/// What a question about commits left to ask of git.
+pub(super) struct CommitJob {
+    commits: Vec<String>,
+    repos: Vec<KnownRepo>,
+}
+
+/// Answer each commit with what is already known, and say what is left to ask.
+///
+/// Nothing here starts a git process. A commit never asked about is `pending`;
+/// one whose answer no longer stands keeps that answer until the new one is
+/// ready, so a moved compare ref does not make a chip flash. A word that is not
+/// a commit id is `unknown` and is never asked.
+pub(super) fn attach_commit_landings(
+    commits: &[String],
+    repos: &[KnownRepo],
+) -> (BTreeMap<String, WorktreeLanding>, Option<CommitJob>) {
+    let cache = unpoisoned(commit_cache());
+    let mut said = BTreeMap::new();
+    let mut left = Vec::new();
+    for commit in commits.iter().take(COMMITS_ASKED_MAX) {
+        if said.contains_key(commit) {
+            continue;
+        }
+        if !is_commit_id(commit) {
+            said.insert(commit.clone(), unknown_commit());
+            continue;
+        }
+        let held = cache.get(commit);
+        if !held.is_some_and(|held| commit_stands(held, repos)) {
+            left.push(commit.clone());
+        }
+        said.insert(
+            commit.clone(),
+            held.map_or_else(WorktreeLanding::pending, |held| held.landing.clone()),
+        );
+    }
+    let job = (!left.is_empty()).then(|| CommitJob {
+        commits: left,
+        repos: repos.to_vec(),
+    });
+    (said, job)
+}
+
+/// Run what a question about commits left, on a thread of its own, and tell
+/// the window once if an answer moved. A job that changed nothing says nothing,
+/// so a window that asks again on the notice cannot start a loop.
+pub(super) fn spawn_commit_landing_job(app: &AppHandle, job: CommitJob) {
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("landing-commits".to_string())
+        .spawn(move || {
+            if run_commit_job(&job) {
+                let _ = app.emit(COMMIT_LANDINGS_EVENT, ());
+            }
+        });
+}
+
+/// Answer a job's commits, [`LANDING_PARALLEL`] at a time; whether any answer
+/// now differs from the one the window was last given. One job runs at a time:
+/// a second question about the same commits queues behind the first and finds
+/// them standing.
+fn run_commit_job(job: &CommitJob) -> bool {
+    static TURN: Mutex<()> = Mutex::new(());
+    let _turn = unpoisoned(&TURN);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..job.commits.len().min(LANDING_PARALLEL))
+            .map(|_| {
+                let next = &next;
+                scope.spawn(move || {
+                    let mut moved = false;
+                    while let Some(commit) = job
+                        .commits
+                        .get(next.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+                    {
+                        moved |= answer_commit(commit, &job.repos);
+                    }
+                    moved
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .fold(false, |any, handle| handle.join().unwrap_or(false) || any)
+    })
+}
+
+/// Whether `repo` holds `commit` as a commit.
+fn holds_commit(host: &Host, repo: &Path, commit: &str) -> bool {
+    landing_git(
+        host,
+        repo,
+        &["cat-file", "-e", &format!("{commit}^{{commit}}")],
+    )
+    .is_ok()
+}
+
+/// Read one commit's answer and keep it; whether it differs from the one held.
+/// The repository that answered before is asked first, then each repository
+/// the window keeps until one holds the commit.
+fn answer_commit(commit: &str, repos: &[KnownRepo]) -> bool {
+    let (before, last_repo) = {
+        let cache = unpoisoned(commit_cache());
+        let held = cache.get(commit);
+        if held.is_some_and(|held| commit_stands(held, repos)) {
+            return false;
+        }
+        (
+            held.map(|held| held.landing.clone()),
+            held.and_then(|held| held.repo.clone()),
+        )
+    };
+    let holder = repos
+        .iter()
+        .filter(|repo| Some(&repo.root) == last_repo.as_ref())
+        .chain(
+            repos
+                .iter()
+                .filter(|repo| Some(&repo.root) != last_repo.as_ref()),
+        )
+        .find_map(|repo| {
+            let host = Host::for_workspace(&repo.root);
+            holds_commit(&host, &repo.root, commit).then_some((host, repo))
+        });
+    let (landing, base_oid, repo) = match holder {
+        Some((host, repo)) => {
+            let base = landing_base(&host, &repo.root, repo.pinned.as_deref());
+            (
+                classify_landing(&host, &repo.root, None, Some(commit), &base),
+                base.oid,
+                Some(repo.root.clone()),
+            )
+        }
+        None => (unknown_commit(), None, None),
+    };
+    let moved = before.is_none_or(|before| !same_facts(&before, &landing));
+    let mut cache = unpoisoned(commit_cache());
+    if cache.len() >= COMMITS_HELD_MAX {
+        cache.retain(|_, held| held.landing.state == "landed");
+        if cache.len() >= COMMITS_HELD_MAX {
+            cache.clear();
+        }
+    }
+    cache.insert(
+        commit.to_string(),
+        HeldCommit {
+            repo,
+            base_oid,
+            asked_ms: now_ms(),
+            landing,
+        },
+    );
+    moved
 }
 
 #[cfg(test)]
@@ -1398,7 +1686,14 @@ mod tests {
         let landing = bench.landing(&wt);
         assert_eq!((landing.state, landing.ahead), ("unlanded", 1));
         assert_eq!(landing.behind, Some(2));
-        assert_eq!(landing.conflict, None, "different files merge cleanly");
+        assert_eq!(
+            landing.conflict,
+            Some(LandingConflict {
+                total: 0,
+                files: Vec::new()
+            }),
+            "different files merge cleanly, and that was looked at"
+        );
     }
 
     #[test]
@@ -1429,6 +1724,58 @@ mod tests {
     }
 
     #[test]
+    fn a_probe_becomes_a_conflict_cell_only_for_what_was_looked_at() {
+        let tree = "0123456789abcdef0123456789abcdef01234567".to_string();
+        // Looked at and clean: said as zero, so the window can tell it from not looked at.
+        assert_eq!(
+            conflict_of(&MergeProbe::Clean(tree)),
+            Some(LandingConflict {
+                total: 0,
+                files: Vec::new()
+            })
+        );
+        // Looked at and clashing: the full count, and the first few names.
+        let many: Vec<String> = (1..=8).map(|index| format!("f{index}.rs")).collect();
+        let cell = conflict_of(&MergeProbe::Conflict(many.clone())).expect("a clash");
+        assert_eq!(cell.total, 8);
+        assert_eq!(cell.files, many[..LANDING_CONFLICT_NAMES].to_vec());
+        // git said it clashes and named no file: still a clash — at least one — and no names.
+        assert_eq!(
+            conflict_of(&MergeProbe::Conflict(Vec::new())),
+            Some(LandingConflict {
+                total: 1,
+                files: Vec::new()
+            })
+        );
+        // git could not say: nothing is said, never "no conflict".
+        assert_eq!(conflict_of(&MergeProbe::Failed), None);
+    }
+
+    #[test]
+    fn a_branch_is_far_behind_from_the_named_count_and_not_a_commit_before() {
+        let bench = Bench::open();
+        let wt = bench.worktree("far");
+        bench.commit(&wt, "w.txt", "work\n");
+        for index in 1..LANDING_BEHIND_WARN {
+            bench.commit(&bench.repo, &format!("m{index}.txt"), "main\n");
+        }
+        bench.publish();
+        let near = bench.landing(&wt);
+        assert_eq!(near.behind, Some(LANDING_BEHIND_WARN - 1));
+        assert!(!near.far_behind, "one commit short of the line");
+        bench.commit(&bench.repo, "last.txt", "main\n");
+        bench.publish();
+        let far = bench.landing(&wt);
+        assert_eq!(far.behind, Some(LANDING_BEHIND_WARN));
+        assert!(far.far_behind, "on the line");
+        // The flag rides the cache with the count: asked again at the same head and ref it stands.
+        assert!(bench.landing(&wt).far_behind);
+        // A row that is not on the compare ref's heels at all carries neither.
+        let idle = bench.worktree("far-idle");
+        assert!(!bench.landing(&idle).far_behind);
+    }
+
+    #[test]
     fn a_landed_or_idle_row_carries_no_drift() {
         let bench = Bench::open();
         let idle = bench.worktree("drift-idle");
@@ -1453,7 +1800,14 @@ mod tests {
         // ref가 움직이면 다시 센다: 이제 main에는 합칠 것이 없다.
         bench.publish();
         let landing = bench.landing(&wt);
-        assert_eq!((landing.state, landing.conflict), ("unlanded", None));
+        assert_eq!(landing.state, "unlanded");
+        assert_eq!(
+            landing.conflict,
+            Some(LandingConflict {
+                total: 0,
+                files: Vec::new()
+            })
+        );
         assert_eq!(landing.behind, Some(0));
     }
 
@@ -1859,5 +2213,108 @@ mod tests {
                 .iter()
                 .all(|one| one.landing.as_ref().map(|landing| landing.state) == Some("no_commits"))
         );
+    }
+
+    fn the_repo(bench: &Bench) -> Vec<KnownRepo> {
+        vec![KnownRepo {
+            root: bench.repo.clone(),
+            pinned: None,
+        }]
+    }
+
+    /// Ask about commits and read what the question left, the way the command
+    /// and its thread do; then what the same question is answered with.
+    fn asked(commits: &[String], repos: &[KnownRepo]) -> BTreeMap<String, WorktreeLanding> {
+        if let (_, Some(job)) = attach_commit_landings(commits, repos) {
+            run_commit_job(&job);
+        }
+        attach_commit_landings(commits, repos).0
+    }
+
+    /// A task whose checkout was removed is still judged — by the commit it
+    /// handed in (t-36910): not in the compare ref, then in it once main took
+    /// it. The listing never waits: the first answer is `pending`, a moved
+    /// compare ref serves the old answer until the new one is read, the same
+    /// question asks git nothing, and work that landed is not asked about again.
+    #[test]
+    fn a_commit_whose_checkout_is_gone_is_judged_by_the_commit() {
+        let bench = Bench::open();
+        let wt = bench.worktree("gone");
+        bench.commit(&wt, "w.txt", "work\n");
+        let handed_in = vec![git(&wt, &["rev-parse", "HEAD"])];
+        git(
+            &bench.repo,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        assert!(!wt.exists(), "the checkout is gone");
+        let repos = the_repo(&bench);
+        let state = |said: &BTreeMap<String, WorktreeLanding>| said[&handed_in[0]].state;
+
+        let (first, job) = attach_commit_landings(&handed_in, &repos);
+        assert_eq!(
+            state(&first),
+            "pending",
+            "the listing does not wait for git"
+        );
+        assert!(job.is_some());
+        let said = asked(&handed_in, &repos);
+        assert_eq!(state(&said), "unlanded");
+        assert_eq!(said[&handed_in[0]].ahead, 1);
+        assert!(
+            attach_commit_landings(&handed_in, &repos).1.is_none(),
+            "the same question asks git nothing"
+        );
+
+        git(
+            &bench.repo,
+            &["merge", "--no-ff", "-q", "-m", "merge it", &handed_in[0]],
+        );
+        bench.publish();
+        let (served, job) = attach_commit_landings(&handed_in, &repos);
+        assert_eq!(
+            state(&served),
+            "unlanded",
+            "the old answer stands in until the new one is read"
+        );
+        assert!(job.is_some(), "the compare ref moved");
+        let said = asked(&handed_in, &repos);
+        assert_eq!(state(&said), "landed");
+        let merge = git(&bench.repo, &["rev-parse", "main"]);
+        assert_eq!(
+            said[&handed_in[0]].landed_in.clone().map(|one| one.sha),
+            Some(merge)
+        );
+
+        bench.commit(&bench.repo, "later.txt", "later\n");
+        bench.publish();
+        assert!(
+            attach_commit_landings(&handed_in, &repos).1.is_none(),
+            "what landed stays landed, whatever the compare ref does next"
+        );
+    }
+
+    /// A commit no repository of the window knows is `unknown` — said, not
+    /// guessed — and is not asked about again at once; a word that is not a
+    /// commit id never reaches git at all.
+    #[test]
+    fn a_commit_no_repository_knows_is_unknown_and_a_word_that_is_no_commit_is_never_asked() {
+        let bench = Bench::open();
+        let repos = the_repo(&bench);
+        let stranger = vec!["0123456789abcdef0123456789abcdef01234567".to_string()];
+        let said = asked(&stranger, &repos);
+        assert_eq!(said[&stranger[0]].state, "unknown");
+        assert!(
+            attach_commit_landings(&stranger, &repos).1.is_none(),
+            "not asked again while the answer is fresh"
+        );
+        let words = vec![
+            "--upload-pack=touch".to_string(),
+            "main".to_string(),
+            "abc".to_string(),
+        ];
+        let (said, job) = attach_commit_landings(&words, &repos);
+        assert!(job.is_none(), "none of them is a commit id");
+        assert!(said.values().all(|landing| landing.state == "unknown"));
+        assert_eq!(said.len(), words.len());
     }
 }
