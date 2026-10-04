@@ -574,6 +574,25 @@ pub const CLAUDE_HEADLESS: &[&str] = &[
     "--strict-mcp-config",
 ];
 
+/// Codex once, headless, with every door a pane's session would open shut: no
+/// session recorded (`--ephemeral`), the person's `config.toml` and rules not
+/// read (so no hook, MCP server or pinned provider of theirs rides along — the
+/// login still comes from the Codex home), a read-only sandbox, and the answer
+/// as the CLI's JSON events. The words every headless Codex run of this window
+/// starts with, as [`CLAUDE_HEADLESS`] is for Claude Code — the login road's
+/// question ([`codex_cli_argv`]) and the page an explanation asks for
+/// ([`crate::explain`]).
+pub const CODEX_HEADLESS: &[&str] = &[
+    "exec",
+    "--json",
+    "--ephemeral",
+    "--skip-git-repo-check",
+    "--sandbox",
+    "read-only",
+    "--ignore-user-config",
+    "--ignore-rules",
+];
+
 /// What the [`Road::CodexCli`] road runs after the program's name (t-10372):
 /// Codex once, headless, on the row's model at the row's reasoning rung
 /// ([`ValueRow::thinking_level`]), reading its instructions and question from
@@ -585,21 +604,12 @@ pub const CLAUDE_HEADLESS: &[&str] = &[
 /// starting inside this window (`crate::launch::compat_launch_args`).
 #[must_use]
 pub fn codex_cli_argv(row: &ValueRow, compat: &[String]) -> Vec<String> {
-    let mut argv: Vec<String> = [
-        "exec",
-        "--json",
-        "--ephemeral",
-        "--skip-git-repo-check",
-        "--sandbox",
-        "read-only",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--model",
-        row.model.as_str(),
-    ]
-    .iter()
-    .map(|word| (*word).to_string())
-    .collect();
+    let mut argv: Vec<String> = CODEX_HEADLESS
+        .iter()
+        .copied()
+        .chain(["--model", row.model.as_str()])
+        .map(str::to_string)
+        .collect();
     if let Some(rung) = &row.thinking_level {
         argv.push("-c".to_string());
         argv.push(format!("model_reasoning_effort={rung}"));

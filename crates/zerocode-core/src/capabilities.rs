@@ -391,6 +391,21 @@ pub enum BlockedSignal {
     Silence,
 }
 
+/// How the window can ask an agent's own CLI for ONE answer without a pane
+/// (t-32787): the vendor's official one-shot mode, run once under the login the
+/// person's panes already use. It spends that login's plan and the product
+/// reads no token of it — the road the person opted into for generators
+/// (`claude -p`, `codex exec`), and no other. A row without one has no such
+/// road yet: the window offers its pane's conversation and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OneShotRoad {
+    /// `claude -p`: the question on stdin, the answer in one JSON result.
+    ClaudePrint,
+    /// `codex exec -`: the question on stdin, the answer in JSON events.
+    CodexExec,
+}
+
 /// The harness facts of one agent that used to be agent-name branches at the
 /// write doors, now one field each on its row of [`AGENT_SPECS`].
 ///
@@ -444,6 +459,9 @@ pub struct Harness {
     /// next one written after. `None` for a row nobody measured so: its
     /// one Enter alone stays one. See [`Startup::enter_retry_ms`].
     pub enter_retry_ms: Option<u32>,
+    /// The agent's official one-shot mode, where the window has measured one
+    /// (t-32787) — see [`OneShotRoad`]. `None`: not yet.
+    pub one_shot: Option<OneShotRoad>,
 }
 
 impl Harness {
@@ -461,6 +479,7 @@ impl Harness {
         moves: TurnMoves::NONE,
         start_settle_ms: None,
         enter_retry_ms: None,
+        one_shot: None,
     };
 }
 
@@ -596,6 +615,10 @@ pub struct AgentCapabilities {
     pub pointer_route: Option<PointerRoute>,
     /// The between-turn moves and the effort ladder, off the row.
     pub moves: TurnMoves,
+    /// The official one-shot mode the window has measured for this agent, if
+    /// any (t-32787) — what "make it separately" may run, and for an agent
+    /// with none, not.
+    pub one_shot: Option<OneShotRoad>,
 }
 
 impl AgentCapabilities {
@@ -687,6 +710,7 @@ impl AgentSpec {
             spawn: self.harness.spawn,
             pointer_route: self.harness.pointer_route,
             moves: self.harness.moves,
+            one_shot: self.harness.one_shot,
         }
     }
 }
