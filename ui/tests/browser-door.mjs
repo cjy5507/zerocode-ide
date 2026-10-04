@@ -1114,6 +1114,30 @@ await test("a_pressable_thing_the_read_cannot_name_is_said_as_unknown", async ()
   } finally { await odd.close(); }
 });
 
+/* A field under a term (or a header) in a box of its own — no other field
+ * in it — with its own words before it there, as a code box drawn under the
+ * phone it was sent to, is named by those words; the parts in the term's own
+ * cell, and a box with no words of its own, share the term. */
+await test("a_field_in_its_own_box_under_a_term_is_named_by_its_own_words", async () => {
+  const nested = await browser.newPage();
+  try {
+    await nested.setContent(`<!doctype html><html lang="ko"><meta charset="utf-8"><form><dl>
+      <dt>휴대전화<em>*</em></dt><dd><select id="p1"><option>010</option><option>011</option></select><span>-</span>
+        <input id="p2" maxlength="4"><span>-</span><input id="p3" maxlength="4">
+        <div class="code"><div class="row"><span>인증번호</span><span class="w"><input id="code" maxlength="6"></span><button type="button">확인</button></div></div></dd>
+      <dt>요금</dt><dd><div class="price"><input id="fee"></div></dd></dl>
+      <table><tr><th>차량번호</th><td><div class="box"><span>앞자리</span><input id="car"></div></td></tr></table></form>`);
+    const read = await readFields(nested);
+    const labels = Object.fromEntries(read.fields.map((field) => [field.handle, field.label]));
+    assert(labels["#code"] === "인증번호", "the code box is named by its own words, not the phone's term", labels);
+    assert(labels["#car"] === "앞자리", "so is a box of its own under a header", labels);
+    assert(String(labels["#fee"]).startsWith("요금"), "a box with no words of its own keeps the term", labels);
+    assert(["#p1", "#p2", "#p3"].every((handle) => String(labels[handle]).startsWith("휴대전화")),
+      "the parts in the term's own cell keep it", labels);
+    return JSON.stringify(labels);
+  } finally { await nested.close(); }
+});
+
 await test("a_frame_of_another_origin_is_named_not_read", async () => {
   const sealed = await browser.newPage();
   try {
