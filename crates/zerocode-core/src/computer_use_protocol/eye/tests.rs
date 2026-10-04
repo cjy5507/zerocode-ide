@@ -184,8 +184,10 @@ fn the_look_after_an_act_waits_for_its_paint_to_finish_and_no_longer() {
         Settle::Look { settled: true },
         "the last frame at 120 ms, still since"
     );
-    // A video that never stops: the cap, and the look says so.
-    let video: Vec<Change> = (0..40)
+    // A video that never stops — a frame every 33 ms past the cap: the cap,
+    // and the look says so.
+    let cap = i64::try_from(EYE_SETTLE_MAX_MS).unwrap();
+    let video: Vec<Change> = (0..u64::try_from(cap / 33 + 2).unwrap())
         .map(|frame| {
             change(
                 11 + frame,
@@ -194,7 +196,6 @@ fn the_look_after_an_act_waits_for_its_paint_to_finish_and_no_longer() {
             )
         })
         .collect();
-    let cap = i64::try_from(EYE_SETTLE_MAX_MS).unwrap();
     assert_eq!(settle(&video, ACT, &desk, at(cap - 1)), Settle::Wait);
     assert_eq!(
         settle(&video, ACT, &desk, at(cap)),
