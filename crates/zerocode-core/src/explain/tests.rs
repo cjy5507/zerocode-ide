@@ -473,3 +473,179 @@ fn a_kind_is_read_back_from_its_wire_word_and_an_unknown_word_is_refused() {
     }
     assert_eq!(Kind::parse("table"), None);
 }
+
+/// The process's resident memory, in KiB, as `ps` reads it.
+fn rss_kib() -> u64 {
+    std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// A diff of about `bytes` bytes with a name-bound secret every fifty lines.
+fn diff_of(bytes: usize) -> String {
+    let mut text = String::from("diff --git a/src/lib.rs b/src/lib.rs\n");
+    let mut line = 0_usize;
+    while text.len() < bytes {
+        text.push_str(&format!(
+            "+    let value_{line} = compute(input, {line});\n"
+        ));
+        if line % 50 == 0 {
+            text.push_str("+export API_TOKEN=abc123\n");
+        }
+        line += 1;
+    }
+    text
+}
+
+/// A measurement, not a check: what preparing the material costs by size, and
+/// that a long run of requests leaves the process no larger.
+/// `cargo test -p zerocode-core --lib explain_cost -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement, run on purpose through the build line"]
+fn explain_cost_probe() {
+    use crate::explain_desk::{Desk, Held, State};
+    use std::time::Instant;
+
+    for size in [4 * 1024, 24 * 1024, 64 * 1024, RECEIVE_BYTES_MAX] {
+        let text = diff_of(size);
+        let mut micros: Vec<u128> = (0..30)
+            .map(|_| {
+                let started = Instant::now();
+                let prepared = prepare(Kind::Diff, &text);
+                assert!(prepared.masked > 0);
+                started.elapsed().as_micros()
+            })
+            .collect();
+        micros.sort_unstable();
+        println!(
+            "explain_cost prepare bytes={} median_us={} p95_us={}",
+            text.len(),
+            micros[micros.len() / 2],
+            micros[micros.len() * 95 / 100]
+        );
+    }
+
+    let text = diff_of(CONTENT_BYTES_MAX);
+    let ask_material = prepare(Kind::Diff, &text);
+    let before = rss_kib();
+    let mut desk = Desk::default();
+    for round in 0..2_000_u32 {
+        let prepared = prepare(Kind::Diff, &text);
+        let ask = Ask {
+            kind: Kind::Diff,
+            title: "src/lib.rs",
+            language: "ko",
+            headline: "h",
+            material: &ask_material,
+        };
+        assert!(!conversation_prompt(&ask).is_empty() && prepared.lines > 0);
+        let id = format!("explain-{round}");
+        let admitted = desk.admit(Held {
+            id: id.clone(),
+            term: Some(round),
+            agent: "claude".to_string(),
+            state: State::Waiting,
+            made_ms: 0,
+            prompt: Some(prepared.text),
+        });
+        assert_eq!(admitted, Ok(()));
+        assert!(desk.finish(&id).is_some());
+    }
+    assert!(desk.is_empty());
+    println!(
+        "explain_cost growth rounds=2000 rss_before_kib={before} rss_after_kib={} desk_len={}",
+        rss_kib(),
+        desk.len()
+    );
+}
+
+/// The real CLI behind a one-shot road, asked once with a small synthetic diff
+/// through exactly the argv, stdin and readers this module builds (t-32787).
+/// Not a check: a wall or a login answer is a real answer, and what it prints is
+/// the evidence. `EXPLAIN_PROBE_AGENT=claude|codex cargo test -p zerocode-core
+/// --lib real_cli_probe -- --ignored --nocapture`
+#[test]
+#[ignore = "spends a little of the person's subscription quota; run on purpose"]
+fn real_cli_probe() {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let Ok(agent) = std::env::var("EXPLAIN_PROBE_AGENT") else {
+        return;
+    };
+    let road = match agent.as_str() {
+        "claude" => OneShotRoad::ClaudePrint,
+        "codex" => OneShotRoad::CodexExec,
+        other => panic!("no one-shot road for {other}"),
+    };
+    let diff = "diff --git a/src/greet.rs b/src/greet.rs\n--- a/src/greet.rs\n+++ b/src/greet.rs\n\
+                @@ -1,3 +1,5 @@\n fn greet(name: &str) -> String {\n-    format!(\"hi {name}\")\n\
+                +    let shout = name.to_uppercase();\n+    format!(\"HELLO {shout}\")\n }\n";
+    let material = prepare(Kind::Diff, diff);
+    let ask = Ask {
+        kind: Kind::Diff,
+        title: "src/greet.rs",
+        language: "en",
+        headline: "Please explain this with a picture or page",
+        material: &material,
+    };
+    let prompt = one_shot_prompt(&ask);
+    let argv = one_shot_argv(road, &prompt.system);
+    let dir = std::env::temp_dir().join("zerocode-explain-probe");
+    std::fs::create_dir_all(&dir).expect("a folder to run in");
+    let started = Instant::now();
+    let mut child = Command::new(&agent)
+        .args(&argv)
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the CLI starts");
+    child
+        .stdin
+        .take()
+        .expect("a stdin")
+        .write_all(one_shot_stdin(road, &prompt).as_bytes())
+        .expect("the question is written");
+    let out = child.wait_with_output().expect("the CLI ends");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr_tail: String = String::from_utf8_lossy(&out.stderr)
+        .chars()
+        .rev()
+        .take(300)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    println!(
+        "explain_probe agent={agent} success={} secs={} stdout_bytes={} stderr_tail={stderr_tail:?}",
+        out.status.success(),
+        started.elapsed().as_secs(),
+        stdout.len()
+    );
+    match read_one_shot(road, &stdout, &stderr_tail, out.status.success()) {
+        Ok(said) => match page_from_output(&said) {
+            Ok(page) => println!(
+                "explain_probe page_bytes={} doctype={} svg={} title={}",
+                page.len(),
+                page.to_ascii_lowercase().starts_with("<!doctype html"),
+                page.contains("<svg"),
+                page.contains("<title>")
+            ),
+            Err(why) => println!(
+                "explain_probe not_a_page={why:?} said_head={:?}",
+                said.chars().take(200).collect::<String>()
+            ),
+        },
+        Err(words) => println!(
+            "explain_probe cli_words={:?}",
+            words.chars().take(300).collect::<String>()
+        ),
+    }
+}
