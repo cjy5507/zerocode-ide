@@ -3816,9 +3816,9 @@ function landingShape(landing) {
 
 /* The words for "files git ignores are still here" — a build's output, a
  * `node_modules`, a `.env` (t-34315). One reader for two places: the sidebar
- * chip ends with it (`반영됨 · 무시된 파일 남음`) and the evidence panel's row
- * for the same fact is named by it, so the chip and the panel say one thing in
- * one set of words. */
+ * chip carries it right after 반영됨 (`반영됨 · 무시된 파일 남음`) and the
+ * evidence panel's row for the same fact is named by it, so the chip and the
+ * panel say one thing in one set of words. */
 function worktreeIgnoredWord() {
   return t("worktree.landIgnored", "무시된 파일 남음");
 }
@@ -3880,9 +3880,6 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   if (check) {
     word = t("worktree.landCheck", "확인 필요");
     tone = "check";
-  } else if (cleanable) {
-    word = t("worktree.landCleanable", "반영됨 · 정리 가능");
-    tone = "landed";
   } else if (gitIn) {
     word = t("worktree.landLanded", "반영됨");
     tone = "landed";
@@ -3901,6 +3898,14 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   // asks only landed rows, and a row that is in doubt says nothing more.
   const holdsIgnored = gitIn && !check && landing.ignored === true;
   if (holdsIgnored) word += ` · ${worktreeIgnoredWord()}`;
+  // The offer to clean up stands last. The ellipsis cuts the end of a chip — at
+  // the sidebar's default width an idle landed checkout's chip is cut after
+  // "반영됨 · 무시된 파일" — so what would go with the folder is said before the
+  // offer to remove it, and it is the offer's words that give way.
+  if (cleanable) {
+    const offer = t("worktree.landCleanableTail", "정리 가능");
+    word += ` · ${offer}`;
+  }
   const lines = [];
   if (ledgerLine) lines.push(ledgerLine);
   if (state === "landed") {
