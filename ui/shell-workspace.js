@@ -3919,6 +3919,9 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   const cleanable = gitIn && !landing.dirty && !check && idle && !current;
   let word;
   let tone;
+  // The state's own word, before anything is added to it: what a place with room for one word says
+  // (an artifact card's chip, t-36910) — the rest is in the tooltip either way.
+  let head = null;
   if (check) {
     word = t("worktree.landCheck", "확인 필요");
     tone = "check";
@@ -3928,6 +3931,7 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   } else if (state === "unlanded") {
     word = t("worktree.landAhead", "미반영 {{count}}", { count: landing.ahead });
     tone = "ahead";
+    head = word;
     // The clash comes first — it is what stops a landing — and the distance after it, because the
     // ellipsis cuts the end of a chip (t-34501). Only a clash changes the colour.
     if (landing.conflict && landing.conflict.total > 0) {
@@ -3944,10 +3948,7 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
     word = t("worktree.landNoRef", "비교 기준 없음");
     tone = "none";
   }
-  // The state's own word, before anything is added to it: what a place with
-  // room for one word says (an artifact card's chip, t-36910) — the rest is in
-  // the tooltip either way.
-  const head = word;
+  head ??= word;
   if (landing.dirty && !check) word += t("worktree.landDirty", " · 저장 안 한 변경");
   // Said of work that is in the compare ref and of nothing else: the backend
   // asks only landed rows, and a row that is in doubt says nothing more.

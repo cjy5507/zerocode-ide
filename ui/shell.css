@@ -44692,7 +44692,8 @@ button.jev-token:hover {
   color: var(--signal-ready-ink);
 }
 
-:is(.artifact-card-landing, .artifact-detail-landing)[data-landing="check"] {
+:is(.artifact-card-landing, .artifact-detail-landing)[data-landing="check"],
+:is(.artifact-card-landing, .artifact-detail-landing)[data-landing="conflict"] {
   border-color: color-mix(in srgb, var(--signal-halt-ink) 45%, transparent);
   color: var(--signal-halt-ink);
 }
