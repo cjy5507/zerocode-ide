@@ -151,6 +151,15 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
     },
     jev: { requests: n % 6, stampedSeats: 4, unstampedSeats: 23, inputTokens: null },
   });
+  /* What the writing lint counted in a finished task's summary, as `plain_text::lint` hands it over
+   * (t-32786): a Korean one with notes, an English one with none, and one in three has none because its worker
+   * wrote no summary. Moving tasks carry none. */
+  const writing = (n) => (n % 3 === 0 ? null : n % 2 === 0
+    ? { lang: "en", sentences: 7, avg_len: 9, longest: 11, limit: 25, long_sentences: 0, words: 0, patterns: 0,
+      hits: [], cut: false }
+    : { lang: "ko", sentences: 6, avg_len: 61, longest: 77, limit: 60, long_sentences: 4, words: 10, patterns: 13,
+      hits: [{ kind: "word", find: "박자", plain: "주기", count: 2 },
+        { kind: "pattern", find: "~하는 것이다", plain: "서술어로 바로 끝낸다 (~한다)", count: 2 }], cut: false });
   const deskTasks = [];
   let at = 0;
   for (const [stage, count] of stages) {
@@ -163,6 +172,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
         blocked_by: stage === "blocked" ? [`t-${100 + at - 1}`] : [],
         created_ms: now - (tasks - at) * 3 * minute,
         cost: stage === "reported" || stage === "merged" ? cost(at) : null,
+        writing: stage === "reported" ? writing(at) : null,
       });
     }
   }
@@ -794,6 +804,48 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("what is not known is said as — with its reason, never as a guess",
       costs.some((row) => row.cost.includes("$— 사용량 원장 없는 에이전트")) && costs.some((row) => row.cost.includes("벽시계 —")) &&
       !costs.some((row) => row.cost.includes("NaN") || row.cost.includes("undefined")), JSON.stringify(costs));
+    /* ---- 글 점검 (t-32786): 끝난 행마다, 일꾼이 쓴 요약을 센 수 한 줄 — 거절 없이 ---- */
+    const readWriting = () => page.evaluate(() =>
+      [...document.querySelectorAll('#board-view [data-desk-block="pipeline"] .board-desk-task')].map((row) => {
+        const line = row.querySelector(".board-desk-task-writing");
+        return { id: row.querySelector(".board-desk-task-id").textContent,
+          text: line && !line.hidden ? line.textContent : "", tip: line?.dataset.tip ?? "" };
+      }));
+    const writings = await readWriting();
+    const noted = writings.find((row) => row.text.includes("직역투 13"));
+    ok("a finished task whose worker wrote a summary says what the writing lint counted in it: the mean sentence, the long ones, the words to replace and the translationese — and a clean one says so",
+      writings.length === 6 &&
+      writings.filter((row) => row.text === "글 점검 · 문장 평균 61자 · 긴 문장 4 · 바꿀 말 10 · 직역투 13").length === 2 &&
+      writings.filter((row) => row.text === "글 점검 · 문장 평균 9단어 · 걸린 것 없음").length === 2 &&
+      writings.filter((row) => row.text === "").length === 2, JSON.stringify(writings));
+    ok("the line's tip says how many sentences were read, what makes one long, that it only counts, and which rules were hit with what to write instead",
+      Boolean(noted) && noted.tip.includes("6문장") && noted.tip.includes("60자를 넘으면") &&
+      noted.tip.includes("거절하지 않") && noted.tip.includes("‘박자’ → 주기 ×2") &&
+      noted.tip.includes("‘~하는 것이다’ → 서술어로 바로 끝낸다 (~한다) ×2"), JSON.stringify(noted));
+    const writingMoved = await page.evaluate(async () => {
+      const surface = document.querySelector("#board-view .task-board-surface");
+      const records = [];
+      const watch = new MutationObserver((batch) => records.push(...batch));
+      watch.observe(surface, { subtree: true, childList: true, attributes: true, characterData: true });
+      const target = window.__DESK__.tasks.find((one) => one.stage === "reported" && one.writing?.lang === "ko");
+      window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
+        tasks: window.__DESK__.tasks.map((one) => one === target
+          ? { ...one, writing: { ...one.writing, words: one.writing.words + 5 } } : one) };
+      refreshDeskLedger();
+      for (let beat = 0; beat < 20 && (deskLedgerAsking || deskPaintFrame !== null); beat += 1) {
+        await new Promise((done) => requestAnimationFrame(done));
+      }
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      records.push(...watch.takeRecords());
+      watch.disconnect();
+      const where = (record) => (record.target.nodeType === 1 ? record.target : record.target.parentElement);
+      return { id: target.id, records: records.map((record) =>
+        `${record.type}:${where(record)?.className}:${where(record)?.closest(".board-desk-task")?.dataset.task ?? ""}`) };
+    });
+    ok("a count that moved rewrites that one line and nothing else",
+      writingMoved.records.length > 0 &&
+        writingMoved.records.every((one) => one.includes("board-desk-task-writing") && one.endsWith(`run-desk/${writingMoved.id}`)),
+      JSON.stringify(writingMoved));
     const costMoved = await page.evaluate(async () => {
       const surface = document.querySelector("#board-view .task-board-surface");
       const records = [];
@@ -823,6 +875,10 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     const movingCosts = await readCosts();
     ok("a task still moving carries no cost line",
       movingCosts.length > 0 && movingCosts.every((row) => row.cost === ""), JSON.stringify(movingCosts));
+    const movingWritings = await readWriting();
+    ok("a task still moving carries no writing line either",
+      movingWritings.length > 0 && movingWritings.every((row) => row.text === "" && row.tip === ""),
+      JSON.stringify(movingWritings));
     await page.click('#board-view [data-desk-block="pipeline"] [data-stage="ready"]');
     await settleDesk();
 

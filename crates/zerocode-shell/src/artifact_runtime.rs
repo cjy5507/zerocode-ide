@@ -328,6 +328,12 @@ pub(crate) struct PreviewPayload {
     /// The file was larger than the table allows, and what came back is cut
     /// (text) or absent (image).
     pub(crate) truncated: bool,
+    /// What the writing lint counted in a report's or a document's text
+    /// (t-32786): worked out once, when the preview is, and kept with it in the
+    /// byte-capped cache. Counts only; absent for any other kind and for a
+    /// text with nothing to count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) writing: Option<zerocode_core::plain_text::TextLint>,
 }
 
 impl PreviewPayload {
@@ -2189,6 +2195,7 @@ impl Store {
                 data_url: None,
                 bytes: 0,
                 truncated: false,
+                writing: None,
             });
             return Ok(payload);
         }
@@ -2208,6 +2215,7 @@ impl Store {
                 data_url: png.as_deref().map(data_url_of),
                 bytes,
                 truncated: false,
+                writing: None,
             }));
         }
         let payload = match artifact.kind {
@@ -2219,6 +2227,7 @@ impl Store {
                         data_url: None,
                         bytes,
                         truncated: true,
+                        writing: None,
                     }
                 } else {
                     use base64::Engine as _;
@@ -2233,6 +2242,7 @@ impl Store {
                         )),
                         bytes,
                         truncated: false,
+                        writing: None,
                     }
                 }
             }
@@ -2242,6 +2252,7 @@ impl Store {
                 data_url: None,
                 bytes,
                 truncated: false,
+                writing: None,
             },
             // A PDF document is not text; its bytes fall to `none` below.
             ArtifactKind::Document if !is_utf8_document(&artifact.path) => PreviewPayload {
@@ -2250,6 +2261,7 @@ impl Store {
                 data_url: None,
                 bytes,
                 truncated: false,
+                writing: None,
             },
             ArtifactKind::Report
             | ArtifactKind::Document
@@ -2264,17 +2276,20 @@ impl Store {
                     .read_to_end(&mut held)
                     .map_err(|error| error.to_string())?;
                 let text = String::from_utf8_lossy(&held).into_owned();
+                let prose = matches!(artifact.kind, ArtifactKind::Report | ArtifactKind::Document);
+                // A report's words are linted here, once, and the counts ride the
+                // cached preview (t-32786). What is not prose, and a text with
+                // nothing to count, carry none.
+                let writing = prose
+                    .then(|| zerocode_core::plain_text::lint(&text))
+                    .filter(|found| found.sentences > 0);
                 PreviewPayload {
-                    kind: if matches!(artifact.kind, ArtifactKind::Report | ArtifactKind::Document)
-                    {
-                        "markdown"
-                    } else {
-                        "text"
-                    },
+                    kind: if prose { "markdown" } else { "text" },
                     text: Some(text),
                     data_url: None,
                     bytes,
                     truncated: bytes > limits.preview_text_bytes_max,
+                    writing,
                 }
             }
         };
@@ -4101,6 +4116,50 @@ mod tests {
         drop(held);
         store.delete(&ids[0], true).expect("deletes");
         assert_eq!(store.preview_cache_bytes(), 16);
+    }
+
+    /// A report's preview carries the writing lint of its text (t-32786), worked
+    /// out once with the preview and kept with it in the cache. A text with
+    /// nothing to count, and a kind that is not prose, carry none.
+    #[test]
+    fn a_reports_preview_carries_the_lint_of_its_text_and_the_cache_keeps_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let report = dir.path().join("tmp/t-1-report.md");
+        touch(
+            &report,
+            "Jev 자리의 판정이 느려서 스윕 박자를 조정함으로써 재시도가 줄어들게 되는 것이다.\n",
+        );
+        let id = store
+            .register_report(&report, origin("w-1"), 1_000)
+            .expect("registers")
+            .id;
+        let first = store.preview(&id).expect("preview");
+        assert_eq!(first.kind, "markdown");
+        assert_eq!(
+            first
+                .writing
+                .as_ref()
+                .map(|found| (found.sentences, found.words, found.patterns)),
+            Some((1, 2, 1)),
+            "the report's preview carried no lint: {first:?}"
+        );
+        let again = store.preview(&id).expect("preview");
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the cached preview was built again"
+        );
+
+        let numbers = dir.path().join("tmp/t-2-report.md");
+        touch(&numbers, "0123456789012345");
+        let id = store
+            .register_report(&numbers, origin("w-2"), 1_000)
+            .expect("registers")
+            .id;
+        assert!(
+            store.preview(&id).expect("preview").writing.is_none(),
+            "a text with no words carried a lint"
+        );
     }
 
     /// Listing filters by kind and by each origin field, newest first, and

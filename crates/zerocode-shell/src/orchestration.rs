@@ -40,6 +40,7 @@ mod summon_assign;
 mod summon_choice;
 mod summon_difficulty;
 mod summon_model;
+mod writing_book;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1885,7 +1886,7 @@ fn with_ledger_seats<T>(read: impl FnOnce(&Ledger, &TeamSeatIndex) -> T) -> Opti
 /// and its rows already carry the [`checkout`](Self::checkout) the board hangs
 /// a card's workspace and project off — so this is a third source in the
 /// SAME ontology, not a fourth layer.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub(crate) struct LedgerAgent {
     /// The run that summoned it, so a person can go and ask about it.
     pub(crate) run: String,
@@ -1978,6 +1979,12 @@ pub(crate) struct LedgerAgent {
     /// ([`gate_book::dress`]); `None` for a worker nobody watches and for a gate
     /// that is off.
     pub(crate) gate: Option<gate_book::GateReading>,
+    /// What the writing lint counted in the summary its task's own worker
+    /// handed in, once the task is finished (t-32786) — laid on by the board's
+    /// beat from the window's writing book ([`writing_book::WritingBook`]),
+    /// beside the cost. `None` for a task still moving, for a worker who wrote
+    /// no summary, and on every row read another way.
+    pub(crate) writing: Option<zerocode_core::plain_text::TextLint>,
 }
 
 /// Volatile relations layered over the board's two permanent graph edges.
@@ -2283,23 +2290,32 @@ pub(crate) fn refresh_board_ledger() {
         // beat only asks (t-9470, [`cost_book`]).
         let mut costs = cost_book::book();
         costs.begin(ledger);
+        // What the writing lint counted in a finished task's summary is worked
+        // out once and remembered the same way (t-32786, [`writing_book`]).
+        let mut writing = writing_book::book();
+        writing.begin();
         let next = BoardLedgerSnapshot {
-            agents: Arc::new(gate_book::dress(
+            agents: Arc::new(gate_book::dress(writing.dress_agents(
+                ledger,
                 costs.dress(ledger, ledger_agents_for_seats(ledger, seats)),
-            )),
+            ))),
             states: Arc::new(ledger_states_for_seats(ledger, seats)),
             overlays: Arc::new(graph_overlay_snapshot_for_seats(ledger, seats)),
             held_checkouts: zerocode_core::orchestration::held_checkouts(ledger).len(),
-            desk: Arc::new(desk::desk_snapshot(
+            desk: Arc::new(writing.dress_desk(
                 ledger,
-                |seat| seat_is_held(seats, seat),
-                |run, task| costs.cost(run, task),
+                desk::desk_snapshot(
+                    ledger,
+                    |seat| seat_is_held(seats, seat),
+                    |run, task| costs.cost(run, task),
+                ),
             )),
         };
         let outcomes = summon_difficulty::observations(ledger, &mut costs);
         let model_outcomes = summon_model::observations(ledger, &mut costs);
         let agent_outcomes = summon_choice::observations(ledger, &mut costs);
         costs.end();
+        writing.end();
         (next, (outcomes, model_outcomes, agent_outcomes))
     }) else {
         return;
@@ -2473,6 +2489,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 pane_missing_since_ms: worker.pane_missing_since_ms,
                 cost: None,
                 gate: None,
+                writing: None,
             });
         }
     }
