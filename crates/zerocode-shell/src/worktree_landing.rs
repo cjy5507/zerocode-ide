@@ -945,6 +945,249 @@ fn commit_time(host: &Host, path: &Path, commit: &str) -> Option<i64> {
         .map(|seconds| seconds.saturating_mul(1000))
 }
 
+// ---- A commit whose checkout is gone (t-36910) -----------------------------
+//
+// A task's row in the artifact gallery outlives the checkout the task was
+// worked in: once the worktree is removed there is no row above to wear a
+// landed state. What is left is the commit the task handed in, and the
+// question "is that commit in the compare ref" is the classifier's own —
+// `classify_landing` with no branch — asked of the repository that holds the
+// commit. The answers are kept by commit, read behind the listing like the
+// rows above, and the window is told when one moved.
+
+/// The window event that says the answer about a commit moved.
+pub(crate) const COMMIT_LANDINGS_EVENT: &str = "worktree:commit-landing";
+
+/// A repository this window keeps, and the compare ref its project pins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct KnownRepo {
+    pub(super) root: PathBuf,
+    pub(super) pinned: Option<String>,
+}
+
+/// The repositories this window keeps, each with the compare ref its project
+/// pins: what a question about a commit is asked of. A project that is not a
+/// repository answers for no commit and is passed over when one is looked for.
+pub(super) fn known_repos(
+    config_root: &Path,
+    repository: &settings::SettingsRepository,
+) -> Vec<KnownRepo> {
+    stored_projects(config_root)
+        .into_iter()
+        .map(PathBuf::from)
+        .map(|root| KnownRepo {
+            pinned: stored_project_settings_at(repository, &project_settings_key(&root))
+                .ok()
+                .and_then(|stored| stored.worktree_base_ref),
+            root,
+        })
+        .collect()
+}
+
+/// How long "no repository this window keeps knows that commit" stands. Every
+/// other answer is keyed by something git writes; this one is not — the commit
+/// may come with the next fetch, or never — so it is asked again this often
+/// and no oftener.
+const COMMIT_UNKNOWN_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// The most commits one question names: a listing asks for the tasks it shows,
+/// and a longer list is cut rather than turned into that many git processes.
+const COMMITS_ASKED_MAX: usize = 128;
+
+/// The most answers kept. Past it the answers that are not `landed` go first,
+/// then everything: a landed answer costs nothing to keep right, the rest are
+/// re-read when the compare ref moves anyway.
+const COMMITS_HELD_MAX: usize = 4096;
+
+/// How many characters a word must and may have to be taken as a commit id:
+/// the shortest abbreviation git prints, up to a SHA-256 id.
+const COMMIT_ID_CHARS: std::ops::RangeInclusive<usize> = 7..=64;
+
+/// Whether a word is a commit id and nothing else — it is handed to git as an
+/// argument, so nothing that is not hexadecimal goes through.
+fn is_commit_id(word: &str) -> bool {
+    COMMIT_ID_CHARS.contains(&word.len()) && word.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+struct HeldCommit {
+    /// The repository that holds the commit, once one answered for it.
+    repo: Option<PathBuf>,
+    /// The compare ref's commit the answer was read against.
+    base_oid: Option<String>,
+    asked_ms: i64,
+    landing: WorktreeLanding,
+}
+
+fn commit_cache() -> &'static Mutex<HashMap<String, HeldCommit>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, HeldCommit>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The answer for a commit nothing can be said of: not a commit id, or no
+/// repository this window keeps knows it.
+fn unknown_commit() -> WorktreeLanding {
+    WorktreeLanding {
+        state: "unknown",
+        detached: true,
+        ..WorktreeLanding::pending()
+    }
+}
+
+/// Whether a held answer about a commit still stands. Work that landed stays
+/// landed whatever the compare ref does next. Any other answer read in a
+/// repository stands while that repository's compare ref has not moved — by
+/// `stat` alone. "No repository knows it" stands for [`COMMIT_UNKNOWN_TTL`].
+fn commit_stands(held: &HeldCommit, repos: &[KnownRepo]) -> bool {
+    if held.landing.state == "landed" {
+        return true;
+    }
+    let Some(root) = held.repo.as_deref() else {
+        return now_ms().saturating_sub(held.asked_ms) < millis(COMMIT_UNKNOWN_TTL);
+    };
+    repos
+        .iter()
+        .find(|repo| repo.root == root)
+        .and_then(|repo| known_landing_base(&repo.root, repo.pinned.as_deref()))
+        .is_some_and(|base| base.oid == held.base_oid)
+}
+
+/// What a question about commits left to ask of git.
+pub(super) struct CommitJob {
+    commits: Vec<String>,
+    repos: Vec<KnownRepo>,
+}
+
+/// Answer each commit with what is already known, and say what is left to ask.
+///
+/// Nothing here starts a git process. A commit never asked about is `pending`;
+/// one whose answer no longer stands keeps that answer until the new one is
+/// ready, so a moved compare ref does not make a chip flash. A word that is not
+/// a commit id is `unknown` and is never asked.
+pub(super) fn attach_commit_landings(
+    commits: &[String],
+    repos: &[KnownRepo],
+) -> (BTreeMap<String, WorktreeLanding>, Option<CommitJob>) {
+    // Red (t-36910 stage 2): a commit is never asked about yet: every answer is `pending` and nothing is left to read.
+    let _ = repos;
+    let said = commits
+        .iter()
+        .map(|commit| (commit.clone(), WorktreeLanding::pending()))
+        .collect();
+    (said, None)
+}
+
+/// Run what a question about commits left, on a thread of its own, and tell
+/// the window once if an answer moved. A job that changed nothing says nothing,
+/// so a window that asks again on the notice cannot start a loop.
+pub(super) fn spawn_commit_landing_job(app: &AppHandle, job: CommitJob) {
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("landing-commits".to_string())
+        .spawn(move || {
+            if run_commit_job(&job) {
+                let _ = app.emit(COMMIT_LANDINGS_EVENT, ());
+            }
+        });
+}
+
+/// Answer a job's commits, [`LANDING_PARALLEL`] at a time; whether any answer
+/// now differs from the one the window was last given. One job runs at a time:
+/// a second question about the same commits queues behind the first and finds
+/// them standing.
+fn run_commit_job(job: &CommitJob) -> bool {
+    static TURN: Mutex<()> = Mutex::new(());
+    let _turn = unpoisoned(&TURN);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..job.commits.len().min(LANDING_PARALLEL))
+            .map(|_| {
+                let next = &next;
+                scope.spawn(move || {
+                    let mut moved = false;
+                    while let Some(commit) = job
+                        .commits
+                        .get(next.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+                    {
+                        moved |= answer_commit(commit, &job.repos);
+                    }
+                    moved
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .fold(false, |any, handle| handle.join().unwrap_or(false) || any)
+    })
+}
+
+/// Whether `repo` holds `commit` as a commit.
+fn holds_commit(host: &Host, repo: &Path, commit: &str) -> bool {
+    landing_git(
+        host,
+        repo,
+        &["cat-file", "-e", &format!("{commit}^{{commit}}")],
+    )
+    .is_ok()
+}
+
+/// Read one commit's answer and keep it; whether it differs from the one held.
+/// The repository that answered before is asked first, then each repository
+/// the window keeps until one holds the commit.
+fn answer_commit(commit: &str, repos: &[KnownRepo]) -> bool {
+    let (before, last_repo) = {
+        let cache = unpoisoned(commit_cache());
+        let held = cache.get(commit);
+        if held.is_some_and(|held| commit_stands(held, repos)) {
+            return false;
+        }
+        (
+            held.map(|held| held.landing.clone()),
+            held.and_then(|held| held.repo.clone()),
+        )
+    };
+    let holder = repos
+        .iter()
+        .filter(|repo| Some(&repo.root) == last_repo.as_ref())
+        .chain(
+            repos
+                .iter()
+                .filter(|repo| Some(&repo.root) != last_repo.as_ref()),
+        )
+        .find_map(|repo| {
+            let host = Host::for_workspace(&repo.root);
+            holds_commit(&host, &repo.root, commit).then_some((host, repo))
+        });
+    let (landing, base_oid, repo) = match holder {
+        Some((host, repo)) => {
+            let base = landing_base(&host, &repo.root, repo.pinned.as_deref());
+            (
+                classify_landing(&host, &repo.root, None, Some(commit), &base),
+                base.oid,
+                Some(repo.root.clone()),
+            )
+        }
+        None => (unknown_commit(), None, None),
+    };
+    let moved = before.is_none_or(|before| !same_facts(&before, &landing));
+    let mut cache = unpoisoned(commit_cache());
+    if cache.len() >= COMMITS_HELD_MAX {
+        cache.retain(|_, held| held.landing.state == "landed");
+        if cache.len() >= COMMITS_HELD_MAX {
+            cache.clear();
+        }
+    }
+    cache.insert(
+        commit.to_string(),
+        HeldCommit {
+            repo,
+            base_oid,
+            asked_ms: now_ms(),
+            landing,
+        },
+    );
+    moved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1859,5 +2102,108 @@ mod tests {
                 .iter()
                 .all(|one| one.landing.as_ref().map(|landing| landing.state) == Some("no_commits"))
         );
+    }
+
+    fn the_repo(bench: &Bench) -> Vec<KnownRepo> {
+        vec![KnownRepo {
+            root: bench.repo.clone(),
+            pinned: None,
+        }]
+    }
+
+    /// Ask about commits and read what the question left, the way the command
+    /// and its thread do; then what the same question is answered with.
+    fn asked(commits: &[String], repos: &[KnownRepo]) -> BTreeMap<String, WorktreeLanding> {
+        if let (_, Some(job)) = attach_commit_landings(commits, repos) {
+            run_commit_job(&job);
+        }
+        attach_commit_landings(commits, repos).0
+    }
+
+    /// A task whose checkout was removed is still judged — by the commit it
+    /// handed in (t-36910): not in the compare ref, then in it once main took
+    /// it. The listing never waits: the first answer is `pending`, a moved
+    /// compare ref serves the old answer until the new one is read, the same
+    /// question asks git nothing, and work that landed is not asked about again.
+    #[test]
+    fn a_commit_whose_checkout_is_gone_is_judged_by_the_commit() {
+        let bench = Bench::open();
+        let wt = bench.worktree("gone");
+        bench.commit(&wt, "w.txt", "work\n");
+        let handed_in = vec![git(&wt, &["rev-parse", "HEAD"])];
+        git(
+            &bench.repo,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        assert!(!wt.exists(), "the checkout is gone");
+        let repos = the_repo(&bench);
+        let state = |said: &BTreeMap<String, WorktreeLanding>| said[&handed_in[0]].state;
+
+        let (first, job) = attach_commit_landings(&handed_in, &repos);
+        assert_eq!(
+            state(&first),
+            "pending",
+            "the listing does not wait for git"
+        );
+        assert!(job.is_some());
+        let said = asked(&handed_in, &repos);
+        assert_eq!(state(&said), "unlanded");
+        assert_eq!(said[&handed_in[0]].ahead, 1);
+        assert!(
+            attach_commit_landings(&handed_in, &repos).1.is_none(),
+            "the same question asks git nothing"
+        );
+
+        git(
+            &bench.repo,
+            &["merge", "--no-ff", "-q", "-m", "merge it", &handed_in[0]],
+        );
+        bench.publish();
+        let (served, job) = attach_commit_landings(&handed_in, &repos);
+        assert_eq!(
+            state(&served),
+            "unlanded",
+            "the old answer stands in until the new one is read"
+        );
+        assert!(job.is_some(), "the compare ref moved");
+        let said = asked(&handed_in, &repos);
+        assert_eq!(state(&said), "landed");
+        let merge = git(&bench.repo, &["rev-parse", "main"]);
+        assert_eq!(
+            said[&handed_in[0]].landed_in.clone().map(|one| one.sha),
+            Some(merge)
+        );
+
+        bench.commit(&bench.repo, "later.txt", "later\n");
+        bench.publish();
+        assert!(
+            attach_commit_landings(&handed_in, &repos).1.is_none(),
+            "what landed stays landed, whatever the compare ref does next"
+        );
+    }
+
+    /// A commit no repository of the window knows is `unknown` — said, not
+    /// guessed — and is not asked about again at once; a word that is not a
+    /// commit id never reaches git at all.
+    #[test]
+    fn a_commit_no_repository_knows_is_unknown_and_a_word_that_is_no_commit_is_never_asked() {
+        let bench = Bench::open();
+        let repos = the_repo(&bench);
+        let stranger = vec!["0123456789abcdef0123456789abcdef01234567".to_string()];
+        let said = asked(&stranger, &repos);
+        assert_eq!(said[&stranger[0]].state, "unknown");
+        assert!(
+            attach_commit_landings(&stranger, &repos).1.is_none(),
+            "not asked again while the answer is fresh"
+        );
+        let words = vec![
+            "--upload-pack=touch".to_string(),
+            "main".to_string(),
+            "abc".to_string(),
+        ];
+        let (said, job) = attach_commit_landings(&words, &repos);
+        assert!(job.is_none(), "none of them is a commit id");
+        assert!(said.values().all(|landing| landing.state == "unknown"));
+        assert_eq!(said.len(), words.len());
     }
 }

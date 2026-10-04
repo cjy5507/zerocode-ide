@@ -2542,6 +2542,10 @@ pub(super) async fn computer_loop(
             let cwd = request.cwd;
             let pane = request.pane;
             let reply = request.answer;
+            // Who this request's steps are taken for (t-36910): asked once,
+            // here, where the pane is known; every step the request walks —
+            // down whichever road — is recorded under it.
+            let actor = step_actor(&steering, pane.as_deref());
             // A walk — a batch, a recipe — is the loop's to run: each step
             // goes down the lone command's road, and the loop knows when its
             // caller has gone.
@@ -2561,6 +2565,7 @@ pub(super) async fn computer_loop(
                 let deadline_ms = zerocode_core::computer_use::computer_deadline_ms(&argv);
                 let _ = tauri::async_runtime::spawn_blocking(move || {
                     let _sequence = _sequence;
+                    let _acting = run_evidence::acting_for(actor);
                     let answer = if command.method
                         == zerocode_core::computer_use::ComputerMethod::Batch
                     {
@@ -2763,6 +2768,7 @@ pub(super) async fn computer_loop(
                     (steering.clone(), local_data_root.clone(), argv.clone());
                 tauri::async_runtime::spawn_blocking(move || {
                     let _sequence = _sequence;
+                    let _acting = run_evidence::acting_for(actor);
                     desktop_step(
                         &app,
                         &root,
@@ -2904,8 +2910,23 @@ fn session_folder_adopted() -> Option<PathBuf> {
     })
 }
 
+/// Who a step asked from `pane` is taken for (t-36910): that pane, and the
+/// task of the worker the ledger seats in it — what the artifact catalog's
+/// own door says of the pane ([`crate::artifact_runtime::held_pane`]), so a
+/// step, a published page and a transcript's page name the same task. A door
+/// that names no pane, or a pane this window does not hold, is nobody: the
+/// step then carries what the thread's own actor says, or nothing.
+fn step_actor(app: &AppHandle, pane: Option<&str>) -> run_evidence::Actor {
+    pane.and_then(|key| crate::artifact_runtime::held_pane(app, key))
+        .map(|held| run_evidence::Actor {
+            pane: Some(held.key),
+            task: held.facts.task,
+        })
+        .unwrap_or_default()
+}
+
 /// The automation the operator's own evidence folders are catalogued under.
-const EVIDENCE_AUTOMATION_ID: &str = "computer-use";
+pub(crate) const EVIDENCE_AUTOMATION_ID: &str = "computer-use";
 
 /// An arena walk's folder (`recipe-run --arena`): born beside the session
 /// folders for this walk, and catalogued as evidence the way a session's is
@@ -2930,7 +2951,9 @@ pub(super) async fn browser_step(
     argv: &[String],
     logged: &[String],
 ) -> zerocode_hookd::TeamAnswer {
-    let observation = run_evidence::observation();
+    // Read before the await, and with the pane's own actor laid on it: a lone
+    // command names its pane, a walk's step stands under the walk's actor.
+    let observation = step_actor(app, pane).on(run_evidence::observation());
     let began = std::time::Instant::now();
     let answer = answer_browser_command(app, argv, pane).await;
     if let Some(dir) = dir {
@@ -2962,7 +2985,7 @@ pub(super) async fn emulator_step(
     argv: &[String],
     logged: &[String],
 ) -> zerocode_hookd::TeamAnswer {
-    let observation = run_evidence::observation();
+    let observation = step_actor(app, pane).on(run_evidence::observation());
     let began = std::time::Instant::now();
     let answer = answer_emulator_command(app, argv, cwd, pane).await;
     if let Some(dir) = dir {

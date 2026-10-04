@@ -105,7 +105,7 @@ ok(
   "the gallery opens on 「페이지·문서」 with each tab's count, the tabs split kinds without asking, cards group by day and wear 🌐/🔒 with relative or month-day words, a document's face is its first block, a claude.ai card wears its favicon, and thumbnails are asked for visible page·web cards only, one at a time, failing to a glyph once",
   gallery.rows === 9 && gallery.cards > 0 && gallery.cards <= 9 &&
     gallery.defaultTab === "pages" &&
-    gallery.tabs === "pages:9,reports:1,evidence:2,other:3" &&
+    gallery.tabs === "reports:1,evidence:2,pages:9,other:3" &&
     gallery.pagesKinds === "document,page,web" &&
     gallery.reportsKinds === "report" && gallery.reportsSelected === "true" &&
     gallery.evidenceKinds === "evidence,screenshot" &&
@@ -967,7 +967,7 @@ ok(
     artifactsOpen.askedFilter !== null &&
     artifactsOpen.held === 12 &&
     artifactsOpen.landed === "reports" &&
-    artifactsOpen.tabs === "pages:0,reports:2,evidence:4,other:6" &&
+    artifactsOpen.tabs === "reports:2,evidence:4,pages:0,other:6" &&
     artifactsOpen.rows === 2 && artifactsOpen.cards === 2 &&
     artifactsOpen.firstTitle !== "" &&
     artifactsOpen.firstMaker.includes(artifactsOpen.claude) && artifactsOpen.firstMaker.includes("fable") &&
@@ -1587,11 +1587,11 @@ export async function testArtifactFirstScreen(page, ok) {
     return out;
   });
   ok("the first screen opens on 「페이지·문서」 with each tab's count, and kinds with no rows stand no tab",
-    seen.tab === "pages" && seen.tabs === "pages:3,reports:1,evidence:1" && seen.order === "pub-1,made-1,doc-1"
+    seen.tab === "pages" && seen.tabs === "reports:1,evidence:1,pages:3" && seen.order === "pub-1,made-1,doc-1"
       && seen.askedFilter === JSON.stringify({ present: true }) && seen.otherHidden === true && seen.otherAppears === true, JSON.stringify(seen));
   ok("rows whose file is gone hide behind 「사라진 파일 N행 숨김 · 보기」, come back dimmed, and follow the runtime's `missing` rather than the disk",
     seen.hiddenLine === "사라진 파일 1행 숨김·보기" && seen.shownLine === "사라진 파일 1행 보는 중·숨기기"
-      && seen.shownOrder === "pub-1,made-1,doc-1,page-dead" && seen.deadCard && seen.tabsShown === "pages:4,reports:1,evidence:3"
+      && seen.shownOrder === "pub-1,made-1,doc-1,page-dead" && seen.deadCard && seen.tabsShown === "reports:1,evidence:3,pages:4"
       && seen.deadDrawer.includes("파일이 사라졌습니다") && seen.deadReveal && !seen.deadAsked && seen.hiddenAgain
       && seen.evidenceLine === "사라진 파일 2행 숨김·보기" && seen.evidenceOrder === "shot-live" && seen.revived,
     JSON.stringify(seen));
@@ -1771,7 +1771,7 @@ export async function testArtifactRecall(page, ok) {
   ok("a listing cut by the table's cap hands the tab, project roots, agent and period to the runtime, and counts tabs from its answer",
     seen.cappedFirst === JSON.stringify([{ present: true }, { kinds: ["page", "document", "web"], present: true }])
       && seen.cappedOrder === "today-claude,today-codex" && seen.cappedStat.startsWith("2 / 5")
-      && seen.cappedTabs === "pages:5,reports:1"
+      && seen.cappedTabs === "reports:1,pages:5"
       && seen.cappedAgent === JSON.stringify({ kinds: ["page", "document", "web"], present: true, agent: "codex" })
       && seen.cappedAgentOrder === "today-codex,old-codex" && seen.cappedSince
       && seen.cappedRoots === JSON.stringify(["/tmp/zerocode-window-test"]),

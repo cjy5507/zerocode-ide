@@ -42,8 +42,10 @@ use zerocode_core::artifact_transcript::{PageFact, RemoteFact};
 use zerocode_core::evidence_digest::Digest;
 
 mod kept;
+mod tasks;
 
 pub(crate) use kept::KeptFile;
+pub(crate) use tasks::{Bundle, TaskListing};
 
 /// The store's folder under the local data root.
 pub(crate) const STORE_DIR_NAME: &str = "artifacts";
@@ -797,10 +799,16 @@ impl Store {
         }
         self.append_line(&IndexLine::Row(Box::new(row.artifact.clone())))?;
         index.appended += 1;
-        self.previews
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .evict(&row.artifact.id);
+        {
+            let mut previews = self.previews.lock().unwrap_or_else(PoisonError::into_inner);
+            previews.evict(&row.artifact.id);
+            // A run's exit code qualifies the logs of that run: their
+            // previews are read again with it.
+            let rows = index.rows.values().map(|held| &held.artifact);
+            for id in tasks::told_by(&row.artifact, rows) {
+                previews.evict(&id);
+            }
+        }
         index.rows.insert(row.artifact.id.clone(), row);
         Ok(())
     }
@@ -942,7 +950,11 @@ impl Store {
         }
         let existed = index.rows.contains_key(&id);
         let created = index.rows.get(&id).map(|held| held.artifact.created_ms);
-        let row = Self::build_row(
+        let tagged = index
+            .rows
+            .get(&id)
+            .map(|held| (held.artifact.bytes, held.artifact.tags.clone()));
+        let mut row = Self::build_row(
             RowSeed {
                 path,
                 id,
@@ -955,6 +967,7 @@ impl Store {
             },
             limits,
         );
+        row.artifact.tags = tasks::in_place_tags(path, source, tagged, stamp.len, limits);
         let artifact = row.artifact.clone();
         // A page or document's every version is kept (t-3233 §5): the first
         // registration is V1, and each stamp the scan sees move is the next.
@@ -1415,12 +1428,13 @@ impl Store {
     /// A claude.ai artifact a transcript saw published (t-3233 §2a): one row
     /// per url, refreshed with the newer title and time when the fact is
     /// newer than the row, left alone when it is older. Idempotent.
-    pub(crate) fn register_remote(
+    pub(crate) fn register_remote<'a>(
         &self,
         fact: &RemoteFact,
-        agent: &str,
+        writer: impl Into<Writer<'a>>,
         now_ms: i64,
     ) -> Result<Artifact, String> {
+        let writer: Writer<'_> = writer.into();
         let url = fact.url.trim();
         if !url.starts_with("https://") {
             return Err(format!("not an artifact url: {url}"));
@@ -1469,12 +1483,7 @@ impl Store {
                 source_path: None,
                 feedback_count: None,
                 feedback_version: None,
-                origin: Origin {
-                    agent: Some(agent.to_string()),
-                    session: fact.session.clone(),
-                    project: fact.project.clone(),
-                    ..Origin::default()
-                },
+                origin: writer.origin(fact.session.clone(), fact.project.clone()),
                 tags: Vec::new(),
                 preview: if description.is_empty() {
                     Preview::None
@@ -1499,12 +1508,13 @@ impl Store {
     /// than the table allows, or is not a page at all — none of which is an
     /// error, a transcript names files that have since moved on. Bounded per
     /// session: past `pages_per_session` the session's oldest row gives way.
-    pub(crate) fn register_page(
+    pub(crate) fn register_page<'a>(
         &self,
         fact: &PageFact,
-        agent: &str,
+        writer: impl Into<Writer<'a>>,
         now_ms: i64,
     ) -> Result<Option<Artifact>, String> {
+        let writer: Writer<'_> = writer.into();
         if !artifact::is_page_extension(&fact.path) || !fact.path.is_absolute() {
             return Ok(None);
         }
@@ -1527,12 +1537,7 @@ impl Store {
         if stamp.len > limits.page_bytes_max {
             return Ok(None);
         }
-        let origin = Origin {
-            agent: Some(agent.to_string()),
-            session: fact.session.clone(),
-            project: Some(project),
-            ..Origin::default()
-        };
+        let origin = writer.origin(fact.session.clone(), Some(project));
         let id = artifact_id(&Origin::default(), &path);
         let mut index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
         if !index.rows.contains_key(&id)
@@ -2100,32 +2105,7 @@ impl Store {
         // Everything the filter asks but the task, the kinds and the files'
         // presence: the three things the counts below are taken across.
         let admits = |row: &Row| {
-            let artifact = &row.artifact;
-            let origin = &artifact.origin;
-            filter
-                .remote
-                .is_none_or(|remote| (artifact.kind == ArtifactKind::Web) == remote)
-                && filter
-                    .published
-                    .is_none_or(|published| is_publication(artifact) == published)
-                && same(&filter.run, origin.run.as_deref())
-                && same(&filter.worker, origin.worker.as_deref())
-                && same(&filter.automation, origin.automation.as_deref())
-                && same(&filter.agent, origin.agent.as_deref())
-                && filter.worktree.as_deref().is_none_or(|wanted| {
-                    origin
-                        .worktree
-                        .as_deref()
-                        .is_some_and(|held| held == Path::new(wanted))
-                })
-                && (filter.roots.is_empty()
-                    || [origin.project.as_deref(), origin.worktree.as_deref()]
-                        .into_iter()
-                        .flatten()
-                        .any(|path| filter.roots.iter().any(|root| path.starts_with(root))))
-                && filter
-                    .since_ms
-                    .is_none_or(|since| artifact.modified_ms >= since)
+            filter.admits_origin(row)
                 && (filter.query.trim().is_empty() || query_matches(&filter.query, &row.tokens))
         };
         let of_task = |origin: &Origin| {
@@ -2399,7 +2379,7 @@ impl Store {
                     bytes,
                     truncated: bytes > limits.preview_text_bytes_max,
                     writing,
-                    digest: evidence_digest_of(&artifact, &limits),
+                    digest: self.digest_of(&artifact, &limits),
                 }
             }
         };
@@ -2751,7 +2731,10 @@ pub(crate) fn note_hook(app: &tauri::AppHandle, envelope: &zerocode_core::HookEn
     let Some(store) = store() else {
         return;
     };
-    if crate::artifact_transcripts::note_hook(&store, envelope, crate::now_epoch_ms()) {
+    // The pane is looked up only once the envelope turned out to be worth a
+    // read: every other hook pays the string look above and nothing more.
+    let pane = || held_pane(app, &envelope.pane_key);
+    if crate::artifact_transcripts::note_hook(&store, envelope, pane, crate::now_epoch_ms()) {
         let _ = app.emit(CHANGED_EVENT, ());
     }
 }
@@ -2862,15 +2845,60 @@ impl zerocode_hookd::ArtifactCommands for ArtifactDoor {
     }
 }
 
-/// What the window knows about the pane a publication came from. The run,
-/// worker and task are the ledger's seat in that pane, when it holds one.
+/// What the window knows about one of its panes — the pane a publication, a
+/// transcript's hook or a Computer Use step came from. The run, worker and
+/// task are the ledger's seat in that pane, when it holds one; `work` is that
+/// task in the coordinator's words.
 #[derive(Default)]
-struct PaneFacts {
-    agent: Option<String>,
-    model: Option<String>,
-    run: Option<String>,
-    worker: Option<String>,
-    task: Option<String>,
+pub(crate) struct PaneFacts {
+    pub(crate) agent: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) run: Option<String>,
+    pub(crate) worker: Option<String>,
+    pub(crate) task: Option<String>,
+    pub(crate) work: Option<String>,
+}
+
+/// A pane this window holds, by the key its hooks and doors name it with
+/// (`term-<n>`), and what the window knows of it.
+pub(crate) struct HeldPane {
+    pub(crate) key: String,
+    pub(crate) facts: PaneFacts,
+}
+
+/// Who a transcript's rows are registered for (t-36910): the agent whose
+/// transcript it is and — on the hook road — the pane the hook came from. The
+/// boot road reads transcripts no pane handed over, and has none: its rows
+/// name the agent and the session and nothing the ledger would have to vouch
+/// for.
+#[derive(Clone, Copy)]
+pub(crate) struct Writer<'a> {
+    pub(crate) agent: &'a str,
+    pub(crate) pane: Option<&'a HeldPane>,
+}
+
+/// An agent's transcript with no pane behind it.
+impl<'a> From<&'a str> for Writer<'a> {
+    fn from(agent: &'a str) -> Self {
+        Self { agent, pane: None }
+    }
+}
+
+impl Writer<'_> {
+    /// The origin of a row this writer's transcript names: the agent, the
+    /// session and the project the transcript knows; the pane the hook came
+    /// from; and that pane's seat — model, run, worker, task and the task's
+    /// words — only while the seat's agent is the one whose transcript this
+    /// is. A seat another agent sits in vouches for nothing here.
+    fn origin(&self, session: Option<String>, project: Option<PathBuf>) -> Origin {
+        // Red (t-36910 stage 2): the pane's seat rides on no row yet.
+        Origin {
+            agent: Some(self.agent.to_string()),
+            session,
+            project,
+            ..Origin::default()
+        }
+    }
 }
 
 /// A project this window keeps, and the workspaces it knows for it.
@@ -2914,6 +2942,8 @@ fn publication_origin(
         run: facts.run,
         worker: facts.worker,
         task: facts.task,
+        // Red (t-36910 stage 2): a publication does not say its task's words yet.
+        work_summary: None,
         worktree,
         project,
         ..Origin::default()
@@ -2984,12 +3014,15 @@ struct Seat<'a> {
     run: &'a str,
     worker: &'a str,
     task: &'a str,
+    /// The task in the coordinator's words (`LedgerAgent::task`).
+    work: &'a str,
 }
 
 /// A pane's facts: the agent the window seated or heard there, else the
 /// seat's; the seat's model, run, worker and task only while the seat's agent
 /// is the one the pane runs — a seat another agent now sits over vouches for
-/// nothing. The ledger's empty word is absence (`LedgerAgent::task_id`).
+/// nothing. The ledger's empty word is absence (`LedgerAgent::task_id`), and
+/// the task's words are said only of a task that is named.
 fn pane_facts(heard: Option<&str>, seat: Option<Seat<'_>>) -> PaneFacts {
     let agent = heard.or(seat.as_ref().map(|seat| seat.agent));
     let Some(seat) = seat.filter(|seat| agent == Some(seat.agent)) else {
@@ -2999,13 +3032,53 @@ fn pane_facts(heard: Option<&str>, seat: Option<Seat<'_>>) -> PaneFacts {
         };
     };
     let named = |value: &str| (!value.is_empty()).then(|| value.to_string());
+    let task = named(seat.task);
     PaneFacts {
         agent: Some(seat.agent.to_string()),
         model: seat.model.map(str::to_string),
         run: named(seat.run),
         worker: named(seat.worker),
-        task: named(seat.task),
+        // Red (t-36910 stage 2): a pane's facts do not carry the task's words yet.
+        work: None,
+        task,
     }
+}
+
+/// What this window knows of one of its panes: the agent it seated or heard
+/// there and the ledger's seat in it ([`pane_facts`]). `None` for a terminal
+/// this window does not hold — a pane since closed, a key of another window.
+/// The one door the publication road, the transcript hook's road and the
+/// Computer Use step's road ask, so a pane's task is the same on all three.
+pub(crate) fn facts_of_pane(app: &tauri::AppHandle, term: crate::TermId) -> Option<PaneFacts> {
+    use tauri::Manager as _;
+    let state = app.state::<AppState>();
+    if !state.terminals().contains_key(&term) {
+        return None;
+    }
+    let heard = state.agent_terms().get(&term).copied();
+    let ledger = crate::orchestration::board_ledger_snapshot();
+    let seat = ledger
+        .agents
+        .iter()
+        .find(|row| row.term == Some(term))
+        .map(|row| Seat {
+            agent: &row.agent,
+            model: row.model.as_deref(),
+            run: &row.run,
+            worker: &row.worker,
+            task: &row.task_id,
+            work: &row.task,
+        });
+    Some(pane_facts(heard, seat))
+}
+
+/// The pane a key names (`term-<n>`), when this window holds it.
+pub(crate) fn held_pane(app: &tauri::AppHandle, key: &str) -> Option<HeldPane> {
+    let term = crate::hooks::term_of_pane_key(key)?;
+    Some(HeldPane {
+        key: crate::hooks::pane_key_of(term),
+        facts: facts_of_pane(app, term)?,
+    })
 }
 
 /// This window's answer for [`publication_origin`]: a pane it holds, what
@@ -3019,25 +3092,7 @@ fn window_origin(
     let state = app.state::<AppState>();
     publication_origin(
         caller,
-        |term| {
-            if !state.terminals().contains_key(&term) {
-                return None;
-            }
-            let heard = state.agent_terms().get(&term).copied();
-            let ledger = crate::orchestration::board_ledger_snapshot();
-            let seat = ledger
-                .agents
-                .iter()
-                .find(|row| row.term == Some(term))
-                .map(|row| Seat {
-                    agent: &row.agent,
-                    model: row.model.as_deref(),
-                    run: &row.run,
-                    worker: &row.worker,
-                    task: &row.task_id,
-                });
-            Some(pane_facts(heard, seat))
-        },
+        |term| facts_of_pane(app, term),
         |cwd| known_projects(state.config_root(), cwd),
     )
 }
@@ -3157,6 +3212,19 @@ fn artifact_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This process's resident memory in KiB, as `ps` says it: what a
+    /// measurement reads before and after the work it weighs.
+    pub(super) fn rss_kib() -> u64 {
+        let out = crate::proc::quiet_command("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
 
     /// Test-only doors onto the store, beside the tests so the shipped half
     /// of this file ends where they begin.
@@ -3652,6 +3720,7 @@ mod tests {
                 run: Some("run-1".into()),
                 worker: Some("w-1".into()),
                 task: Some("t-1".into()),
+                work: Some("the gallery reads by task".into()),
             })
         };
         let from = |pane: &str, cwd: &Path| {
@@ -3673,6 +3742,7 @@ mod tests {
                 run: Some("run-1".into()),
                 worker: Some("w-1".into()),
                 task: Some("t-1".into()),
+                work_summary: Some("the gallery reads by task".into()),
                 worktree: Some(linked.clone()),
                 project: Some(project.clone()),
                 ..Origin::default()
@@ -3719,13 +3789,15 @@ mod tests {
     /// nothing heard, the seat's own agent is the pane's.
     #[test]
     fn a_pane_takes_its_ledger_seat_only_while_the_seat_is_its_agent() {
-        let seat = |agent| Seat {
+        let seat_on = |agent, task| Seat {
             agent,
             model: Some("claude-opus-5"),
             run: "run-1",
             worker: "w-1",
-            task: "",
+            task,
+            work: "the gallery reads by task",
         };
+        let seat = |agent| seat_on(agent, "");
         let facts = pane_facts(Some("claude"), Some(seat("claude")));
         assert_eq!(
             (
@@ -3733,15 +3805,23 @@ mod tests {
                 facts.model.as_deref(),
                 facts.run.as_deref(),
                 facts.worker.as_deref(),
-                facts.task.as_deref()
+                facts.task.as_deref(),
+                facts.work.as_deref()
             ),
             (
                 Some("claude"),
                 Some("claude-opus-5"),
                 Some("run-1"),
                 Some("w-1"),
+                None,
+                // The words of a task nobody named are nobody's words.
                 None
             )
+        );
+        let tasked = pane_facts(Some("claude"), Some(seat_on("claude", "t-1")));
+        assert_eq!(
+            (tasked.task.as_deref(), tasked.work.as_deref()),
+            (Some("t-1"), Some("the gallery reads by task"))
         );
         let seated = pane_facts(None, Some(seat("codex")));
         assert_eq!(
@@ -6179,8 +6259,9 @@ mod tests {
     }
 
     /// An evidence file's preview carries what the file says — its steps counted
-    /// and listed — and the byte-capped cache keeps it. A file that holds no
-    /// JSON record carries none and is shown as the text it is.
+    /// and listed, its test run counted and judged — and the byte-capped cache
+    /// keeps it. A file with nothing to count carries none and is shown as the
+    /// text it is.
     #[test]
     fn an_evidence_rows_preview_carries_its_digest_and_the_cache_keeps_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6244,15 +6325,29 @@ mod tests {
             held.digest
         );
 
-        let plain = session.join("run.log");
-        touch(&plain, "test result: ok. 3 passed; 0 failed\n");
+        // A test run's log opens as what its runner said.
+        let run = session.join("run.log");
+        touch(&run, "test result: ok. 3 passed; 0 failed\n");
+        let said = store.preview(&place(&run)).expect("preview");
+        assert!(
+            matches!(
+                &said.digest,
+                Some(Digest::Tests(tests))
+                    if (tests.passed, tests.failed, tests.verdict)
+                        == (3, 0, zerocode_core::evidence_digest::Verdict::Pass)
+            ),
+            "the test log's preview carried no digest of it: {:?}",
+            said.digest
+        );
+        let plain = session.join("notes.txt");
+        touch(&plain, "nothing in this file is counted\n");
         assert!(
             store
                 .preview(&place(&plain))
                 .expect("preview")
                 .digest
                 .is_none(),
-            "a text log is shown as the text it is"
+            "a text file with nothing to count is shown as the text it is"
         );
         let report = dir.path().join("tmp/t-1-report.md");
         touch(&report, "# Report");
@@ -6329,16 +6424,6 @@ mod tests {
         // screenshot make the 555 vanished rows.
         const LOGS_KEPT: usize = 5;
 
-        let rss_kib = || -> u64 {
-            let out = crate::proc::quiet_command("ps")
-                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-                .output()
-                .expect("ps");
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .parse()
-                .unwrap_or(0)
-        };
         let median = |mut times: Vec<f64>| {
             times.sort_by(f64::total_cmp);
             times[times.len() / 2]

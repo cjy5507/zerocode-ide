@@ -19,12 +19,15 @@
  *   3. opening the drawer on a report — from the selection to the painted body, ms;
  *   4. memory — the JS heap after a collection and the document's element count, before and after
  *      N rounds of opening and closing the drawer over five reports; and the ms of each opening;
- *   5. where the time goes, when a number above moved: the N rounds are read in ten parts, each with
+ *   5. the tab by task (stage 2 — measured only on a tree that has it): from the sidebar's press to
+ *      the first lines of 400 tasks, opening one task to its painted report with its evidence, a
+ *      search over the lines, and the same memory question over N rounds of opening and closing a task;
+ *   6. where the time goes, when a number above moved: the N rounds are read in ten parts, each with
  *      the median of its openings and the renderer's own clocks for one round (script, style, layout,
  *      and how many times each ran), and with the listeners and nodes the page held before and after
  *      — so a cost that grows with the rounds shows as a slope and says in which clock it grew.
  *      `--attribute N` reads the same clocks over N rounds of each single operation (the drawer, the
- *      tab, the filter), `--profile` adds the heaviest functions of the first and the last part,
+ *      tab, the filter), `--profile` adds the heaviest functions of the first and the last part, and
  *      `--count` counts the observers, listeners, timers and frames the page asked for, and
  *      `--without a,b` measures with the window's functions of those names doing nothing — what a
  *      number owes to one step of a painting is the difference.
@@ -147,7 +150,50 @@ function standCatalog(page) {
       return { kind: "markdown", text, bytes: text.length, truncated: false };
     };
     const reports = rows.filter((one) => one.kind === "report" && one.origin.task);
-    return { reports: reports.slice(0, 8).map((one) => one.id), task: reports[0].origin.task, vanished: gone.size };
+    // The catalog by task, as the runtime answers it: one line for each task, counted from the same
+    // rows, and one task whole. A tree without the tab never asks.
+    const byTask = new Map();
+    for (const one of rows) {
+      const task = one.origin.task;
+      if (!task || gone.has(one.id)) continue;
+      const held = byTask.get(task) ?? [];
+      held.push(one);
+      byTask.set(task, held);
+    }
+    const lineOf = (task, held) => {
+      const lead = held.find((one) => one.kind === "report") ?? held[0];
+      const parts = { reports: 0, pages: 0, files: 0, pictures: 0, logs: 0, other: 0, missing: 0 };
+      for (const one of held) parts[one.kind === "report" ? "reports" : "pages"] += 1;
+      return {
+        task, work: lead.origin.work_summary ?? task, modified_ms: Math.max(...held.map((one) => one.modified_ms)),
+        lead: lead.id, title: lead.title, parts, attempts: new Set(held.map((one) => one.origin.worker)).size, sessions: 0,
+        worktree: lead.origin.worktree ?? null,
+      };
+    };
+    const lines = [...byTask].map(([task, held]) => lineOf(task, held)).sort((a, b) => b.modified_ms - a.modified_ms);
+    const taskAsks = (window.__PERF_TASK_ASKS__ = []);
+    window.__ANSWER__.artifact_tasks = (args) => {
+      const needle = String(args?.filter?.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+      const held = lines.filter((line) => needle.every((word) => `${line.task} ${line.work} ${line.title}`.toLowerCase().includes(word)));
+      const answer = { tasks: held, total: held.length, truncated: false, unlinked: { parts: { reports: 190, pages: 159, files: 5, pictures: 0, logs: 0, other: 5, missing: gone.size }, reports_without_origin: 190, session_files: 5, sessions: 5 } };
+      taskAsks.push({ lines: held.length, bytes: JSON.stringify(answer).length });
+      return answer;
+    };
+    window.__ANSWER__.artifact_bundle = (args) => {
+      const held = byTask.get(args.task) ?? [];
+      if (held.length === 0) return null;
+      const line = lineOf(args.task, held);
+      const reportsOf = held.filter((one) => one.kind === "report");
+      return {
+        line, reports: reportsOf.map((one, at) => ({ id: one.id, attempt: reportsOf.length - at })),
+        pictures: [], evidence: [], tally: { runs: 0, passed: 0, failed: 0, ignored: 0, pass: 0, fail: 0, intended: 0, unknown: 0 },
+        unread: 0, pages: held.filter((one) => one.kind !== "report").map((one) => one.id), rows: held, missing: [],
+      };
+    };
+    return {
+      reports: reports.slice(0, 8).map((one) => one.id), task: reports[0].origin.task, vanished: gone.size,
+      tasks: lines.slice(0, 8).map((line) => line.task), taskLines: lines.length,
+    };
   }, CATALOG);
 }
 
@@ -359,6 +405,11 @@ async function soakOf(page, cdp, { rounds, warm, once, profile }) {
   };
 }
 
+/* The same numbers under another thing's name: `soakRounds` of the tab by task is `taskSoakRounds`. */
+const namedFor = (word, held) => Object.fromEntries(
+  Object.entries(held).map(([key, value]) => [`${word}${key[0].toUpperCase()}${key.slice(1)}`, value]),
+);
+
 export async function measureArtifacts(page, { soak = 0, attribute = 0, profile = false, without = [] } = {}) {
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("Performance.enable");
@@ -507,7 +558,113 @@ export async function measureArtifacts(page, { soak = 0, attribute = 0, profile 
       profile,
     }));
   }
+  Object.assign(result, await measureTasks(page, cdp, fixture, { soak, attribute, profile }));
   await cdp.detach();
+  return result;
+}
+
+/* The tab by task (stage 2). A tree that has not built it answers nothing here: its numbers are the
+ * ones above. */
+async function measureTasks(page, cdp, fixture, { soak, attribute, profile }) {
+  const built = await page.evaluate(() => typeof openArtifactTask === "function" && typeof ARTIFACT_TASKS_TAB === "string");
+  if (!built) return {};
+  const first = await page.evaluate(async () => {
+    dropTab("artifacts");
+    Object.assign(artifactFilter, { tab: ARTIFACT_TASKS_TAB, query: "", origin: null, project: null, agent: null, period: "all", showMissing: false });
+    artifactTabPicked = false;
+    artifactAskedAt = 0;
+    closeArtifactTask();
+    const from = performance.now();
+    el("nav-artifacts").click();
+    for (let beat = 0; beat < 600 && (artifactAsking || artifactsView()?.querySelector(".artifact-task") === null); beat += 1) {
+      await new Promise((done) => requestAnimationFrame(done));
+    }
+    await window.__PERF_SETTLE__();
+    const ms = performance.now() - from;
+    const view = artifactsView();
+    return {
+      ms, lines: artifactTaskLines.length, nodes: view.querySelectorAll(".artifact-task").length,
+      elements: view.getElementsByTagName("*").length, asks: window.__PERF_TASK_ASKS__.slice(-1)[0] ?? null,
+    };
+  });
+  /* One opening of a task: from the press on its line to the frame after its report and its bundle stand. */
+  const open = (task) => page.evaluate(async ({ task, frames }) => {
+    const view = artifactsView();
+    const md = view.querySelector(".artifact-preview-md");
+    const from = performance.now();
+    openArtifactTask(view, task, { reveal: true });
+    for (let beat = 0; beat < frames; beat += 1) {
+      const lead = artifactTaskLine(task)?.lead;
+      const detail = view.querySelector(".artifacts-detail");
+      if (detail.dataset.artifactId === lead && !md.hidden && md.childElementCount > 0 && !view.querySelector(".artifact-bundle").hidden) break;
+      await new Promise((done) => requestAnimationFrame(done));
+    }
+    await window.__PERF_SETTLE__();
+    return performance.now() - from;
+  }, { task, frames: PAINT_FRAMES_MAX });
+  const close = () => page.evaluate(async () => {
+    const view = artifactsView();
+    closeArtifactTask();
+    paintArtifactTasks(view);
+    paintArtifactDrawer(view);
+    await new Promise((done) => requestAnimationFrame(done));
+  });
+  /* One round of a task: open task `at` of the five, read, close. */
+  const taskRound = async (at) => {
+    const ms = await open(fixture.tasks[at % SOAK_REPORTS]);
+    await close();
+    return ms;
+  };
+  const openMs = [];
+  for (let at = 0; at < SOAK_REPORTS; at += 1) openMs.push(await taskRound(at));
+  const searched = await page.evaluate(async () => {
+    const view = artifactsView();
+    const query = view.querySelector(".artifacts-query");
+    const asksBefore = window.__PERF_TASK_ASKS__.length;
+    const from = performance.now();
+    query.value = "t-39";
+    query.dispatchEvent(new Event("input", { bubbles: true }));
+    for (let beat = 0; beat < 600 && window.__PERF_TASK_ASKS__.length === asksBefore; beat += 1) {
+      await new Promise((done) => requestAnimationFrame(done));
+    }
+    await window.__PERF_SETTLE__();
+    const ms = performance.now() - from;
+    const shown = artifactTaskLines.length;
+    query.value = "";
+    query.dispatchEvent(new Event("input", { bubbles: true }));
+    for (let beat = 0; beat < 600 && window.__PERF_TASK_ASKS__.length < asksBefore + 2; beat += 1) {
+      await new Promise((done) => requestAnimationFrame(done));
+    }
+    await window.__PERF_SETTLE__();
+    return { ms, shown };
+  });
+  const result = {
+    tasksFirstPaintMs: first.ms,
+    taskLines: first.lines,
+    taskNodes: first.nodes,
+    tasksElements: first.elements,
+    tasksListingBytes: first.asks?.bytes ?? null,
+    taskOpenMs: median(openMs),
+    taskOpenMaxMs: Math.max(...openMs),
+    taskSearchMs: searched.ms,
+    taskSearchShown: searched.shown,
+  };
+  if (attribute > 0) {
+    result.taskAttributed = {
+      rounds: attribute,
+      taskOpen: (await readRounds(page, cdp, { rounds: attribute, once: taskRound, profile })).reading,
+    };
+  }
+  if (soak > 0) {
+    Object.assign(result, namedFor("task", await soakOf(page, cdp, {
+      rounds: soak,
+      warm: async () => {
+        for (let at = 0; at < SOAK_REPORTS; at += 1) await taskRound(at);
+      },
+      once: taskRound,
+      profile,
+    })));
+  }
   return result;
 }
 
@@ -536,8 +693,7 @@ export async function measureArtifactRounds({ rounds = 5, soak = 0, attribute = 
   const numeric = Object.keys(taken[0]).filter((key) => typeof taken[0][key] === "number");
   const summary = Object.fromEntries(numeric.map((key) => [key, median(taken.map((one) => one[key]).filter((held) => typeof held === "number"))]));
   const last = taken.at(-1);
-  // What the soak read is the last round's, as it stands — never a median with rounds that ran no soak.
-  const ofTheSoak = (key) => /^(soak|heap|elements|listeners|nodes|cardsMade)/.test(key);
+  const ofTheSoak = (key) => /^(task)?(soak|heap|elements|listeners|nodes|cardsMade)/i.test(key);
   for (const key of Object.keys(last)) if (!(key in summary) || ofTheSoak(key)) summary[key] = last[key];
   return { catalog: CATALOG, throttle: Number(process.env.WINDOW_CPU_THROTTLE ?? 1), rounds, load: loadNote(), summary, taken };
 }

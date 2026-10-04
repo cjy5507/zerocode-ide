@@ -844,20 +844,32 @@ export async function testArtifactCards(browser, origin, ok) {
 
       // 3. One report's body never stands under another report's head: while the next report's
       //    preview is on its way, the reader shows its head and no body.
-      selectArtifact(view, "r-final");
-      await settle();
+      //    The report read first wears the plain-language badge: what the lint counted in it is its
+      //    own, and leaves with its body.
       const answer = window.__ANSWER__.artifact_preview;
+      const badge = pane?.querySelector(".artifact-preview-writing") ?? null;
       let release = null;
-      window.__ANSWER__.artifact_preview = () => new Promise((done) => {
-        release = () => done({ kind: "markdown", text: "# 검증 보고 — 큐가 비워지는가\n\n비워진다.", bytes: 40, truncated: false });
-      });
       try {
+        selectArtifact(view, "r-first");
+        await settle();
+        artifactPreviews.delete("r-final");
+        window.__ANSWER__.artifact_preview = (args) => ({
+          ...answer(args),
+          writing: { lang: "ko", sentences: 12, avg_len: 31, limit: 60, long_sentences: 1, words: 0, patterns: 0, hits: [] },
+        });
+        selectArtifact(view, "r-final");
+        await settle();
+        seen.badgeBefore = shown(badge);
+        window.__ANSWER__.artifact_preview = () => new Promise((done) => {
+          release = () => done({ kind: "markdown", text: "# 검증 보고 — 큐가 비워지는가\n\n비워진다.", bytes: 40, truncated: false });
+        });
         selectArtifact(view, "r-review");
         await frames();
         seen.asked = release !== null;
         seen.headWhileWaiting = pane?.querySelector(".artifact-detail-task")?.textContent.trim() ?? null;
         seen.bodyWhileWaiting = shown(md) ? md.textContent.trim().slice(0, 24) : null;
         seen.outlineWhileWaiting = shown(strip);
+        seen.badgeWhileWaiting = shown(badge);
         release?.();
         await settle();
         seen.bodyAfter = shown(md) ? md.textContent.trim().slice(0, 24) : null;
@@ -902,10 +914,14 @@ export async function testArtifactCards(browser, origin, ok) {
       JSON.stringify({ counted: weight.countedByTabAndFilter, afterIndex: weight.countedAfterIndex, options: weight.pickOptions }),
     );
     ok(
-      "one report's body never stands under another report's head: while the next preview is on its way the reader shows the new head and no body, then the new body",
+      "one report's body never stands under another report's head: while the next preview is on its way the reader shows the new head and no body, no outline and no badge of the old one — then the new body",
       weight.asked === true && weight.headWhileWaiting === "t-502" && weight.bodyWhileWaiting === null && weight.outlineWhileWaiting === false
+        && weight.badgeBefore === true && weight.badgeWhileWaiting === false
         && typeof weight.bodyAfter === "string" && weight.bodyAfter.startsWith("검증 보고"),
-      JSON.stringify({ asked: weight.asked, head: weight.headWhileWaiting, body: weight.bodyWhileWaiting, outline: weight.outlineWhileWaiting, after: weight.bodyAfter }),
+      JSON.stringify({
+        asked: weight.asked, head: weight.headWhileWaiting, body: weight.bodyWhileWaiting, outline: weight.outlineWhileWaiting,
+        badge: [weight.badgeBefore, weight.badgeWhileWaiting], after: weight.bodyAfter,
+      }),
     );
     ok(
       "opening a long report measures no heading — the outline says the first one — and the headings' places are read once, when the reader first scrolls",
