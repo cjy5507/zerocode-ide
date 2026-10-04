@@ -7662,7 +7662,16 @@ function wireArtifactsView(view) {
     const observer = new ResizeObserver((entries) => {
       if (entries.some((entry) => entry.target === drawer)) drawer.querySelector(".artifact-outline")._tops = null;
       if (!entries.some((entry) => entry.target === grid)) return;
-      if (!view.hidden) paintArtifactCards(view);
+      if (!view.hidden) {
+        // 폭이 바뀐 격자에 드러내 달라던 카드가 있으면 그 카드가 보이게 다시 옮긴다 — 한 번만.
+        if (artifactRevealPending !== null && artifactRevealPending === artifactSelectedId) {
+          const id = artifactRevealPending;
+          artifactRevealPending = null;
+          revealArtifactCard(view, id);
+        } else {
+          paintArtifactCards(view);
+        }
+      }
       paintArtifactTier(view);
     });
     observer.observe(grid);
@@ -8337,28 +8346,44 @@ function rememberArtifactThumb(id, dataUrl) {
   artifactThumbs.set(id, dataUrl);
 }
 
-function selectArtifact(view, id, { reveal = false } = {}) {
-  artifactSelectedId = id;
-  if (reveal) {
-    // Virtual cards do not exist until their row is in view. Use the renderer's
-    // geometry before asking the DOM to reveal the selected card.
-    const index = artifactOrder.indexOf(id);
-    if (index >= 0) {
-      const layout = artifactGridLayout(view);
-      const { grid, columns, cardHeight, places } = layout;
-      const top = artifactCardTop(layout, index);
-      if (top < grid.scrollTop || top + cardHeight > grid.scrollTop + grid.clientHeight) {
-        // 무리의 첫 행이면 그 무리의 머리까지 함께 든다.
-        const place = places.find((one) => index >= one.start && index < one.start + one.count);
-        grid.scrollTop = place && index - place.start < columns ? place.head : top;
-      }
+/* 고른 카드가 보이게 격자를 옮긴다 — 서랍이 선 뒤의 격자로 잰다: 서랍이 서면 격자가 좁아져 열이
+ * 줄고 뒤의 무리가 아래로 내려가므로, 그 전의 자리로 옮기면 방금 드러낸 카드가 다음 다시 그리기에
+ * 풀로 돌아간다. 가상 카드는 제 행이 보일 때까지 없으므로 DOM이 아니라 렌더러의 자리로 먼저 옮기고,
+ * 선 노드를 마저 맞춘다. */
+function revealArtifactCard(view, id) {
+  const index = artifactOrder.indexOf(id);
+  if (index >= 0) {
+    const layout = artifactGridLayout(view);
+    const { grid, columns, cardHeight, places } = layout;
+    const top = artifactCardTop(layout, index);
+    if (top < grid.scrollTop || top + cardHeight > grid.scrollTop + grid.clientHeight) {
+      // 무리의 첫 행이면 그 무리의 머리까지 함께 든다.
+      const place = places.find((one) => index >= one.start && index < one.start + one.count);
+      grid.scrollTop = place && index - place.start < columns ? place.head : top;
     }
   }
   paintArtifactCards(view);
+  view.querySelector(`.artifact-card[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
+}
+
+/* 드러내 달라고 한 카드 — 격자의 폭이 바뀌어 다시 그릴 때 한 번 더 드러낸다(서랍이 서는 폭 변화는
+ * 관찰자가 다음 프레임에 본다). */
+let artifactRevealPending = null;
+
+function selectArtifact(view, id, { reveal = false } = {}) {
+  artifactSelectedId = id;
+  // 서랍이 먼저 선다: 격자의 폭은 서랍이 정하고, 드러내기는 그 폭으로 잰다.
   paintArtifactDrawer(view);
   if (reveal) {
-    const node = view.querySelector(`.artifact-card[data-id="${CSS.escape(id)}"]`);
-    node?.scrollIntoView({ block: "nearest" });
+    artifactRevealPending = id;
+    revealArtifactCard(view, id);
+    // 관찰자는 다음 프레임의 레이아웃 뒤에 본다; 그 프레임이 지나도록 폭이 안 바뀌었으면 드러낼 일은
+    // 끝난 것이다 — 나중의 창 크기 변화가 이 카드로 뛰어가지 않게 둘째 프레임에 지운다.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (artifactRevealPending === id) artifactRevealPending = null;
+    }));
+  } else {
+    paintArtifactCards(view);
   }
 }
 

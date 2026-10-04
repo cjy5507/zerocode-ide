@@ -2934,6 +2934,12 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
       await page.evaluate(() => openArtifacts());
       await settle(150);
     };
+    // 카드는 가상화되어 제 행이 보일 때만 선다 — 문서를 고른 뒤의 목록은 서랍 곁의 한 열이라, 뒤의
+    // 카드는 드러낸 뒤에 누른다(t-36910).
+    const card = async (id) => {
+      await page.evaluate((wanted) => revealArtifactCard(artifactsView(), wanted), id);
+      return page.locator(`.artifact-card[data-id="${id}"]`);
+    };
     const look = (id) => page.evaluate((artifactId) => {
       const seen = window.__OTHER__;
       const tab = tabs.find((one) => one.kind === "file" && one.artifact?.id === artifactId);
@@ -2979,7 +2985,7 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
     }, { artifactId: id, next: value });
 
     /* ---- 1. 더블클릭: 밖의 문서가 읽기 전용으로 한 번 열리고 알림이 없다 --------- */
-    await page.locator('.artifact-card[data-id="doc-out"]').dblclick();
+    await (await card("doc-out")).dblclick();
     await settle();
     const dbl = await look("doc-out");
     ok(
@@ -3082,7 +3088,7 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
     /* ---- 5. Enter (눌러 둔 채 반복해도 한 번) --------------------------------- */
     await clear();
     await gallery();
-    await page.locator('.artifact-card[data-id="doc-key"]').click();
+    await (await card("doc-key")).click();
     await page.keyboard.down("Enter");
     await page.keyboard.down("Enter");
     await page.keyboard.up("Enter");
@@ -3098,7 +3104,7 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
     /* ---- 6. 창이 모르는 폴더: 머리띠는 폴더 자체를 말한다 ------------------------ */
     await clear();
     await gallery();
-    await page.locator('.artifact-card[data-id="doc-far"]').dblclick();
+    await (await card("doc-far")).dblclick();
     await settle();
     const far = await look("doc-far");
     ok(
@@ -3110,7 +3116,7 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
     /* ---- 7. 버전 선택기: 보관 스냅샷도 저장소의 문으로 읽는다 --------------------- */
     await clear();
     await gallery();
-    await page.locator('.artifact-card[data-id="doc-hist"]').dblclick();
+    await (await card("doc-hist")).dblclick();
     await settle();
     const snapshot = await pick("doc-hist", "1");
     const back = await pick("doc-hist", "current");
@@ -3126,7 +3132,7 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
     await clear();
     await gallery();
     const readsBefore = await page.evaluate(() => window.__OTHER__.reads.length);
-    await page.locator('.artifact-card[data-id="doc-in"]').dblclick();
+    await (await card("doc-in")).dblclick();
     await settle();
     const inside = await look("doc-in");
     const insideReads = await page.evaluate((from) => window.__OTHER__.reads.slice(from), readsBefore);
@@ -3159,7 +3165,7 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
     /* ---- 9. 표의 상한에서 잘린 문서는 앞부분만 보인다고 말한다 ------------------------ */
     await clear();
     await gallery();
-    await page.locator('.artifact-card[data-id="doc-cut"]').dblclick();
+    await (await card("doc-cut")).dblclick();
     await settle();
     const cutView = await look("doc-cut");
     ok(
@@ -3172,7 +3178,7 @@ export async function testArtifactOtherProject(browser, origin, ok, outputDir) {
     /* ---- 10. 실패해도 알림은 하나 ----------------------------------------------- */
     await clear();
     await gallery();
-    await page.locator('.artifact-card[data-id="doc-gone"]').dblclick();
+    await (await card("doc-gone")).dblclick();
     await settle();
     const gone = await look("doc-gone");
     ok(
