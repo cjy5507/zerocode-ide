@@ -1275,6 +1275,52 @@ mod tests {
         assert!(ask(Duration::ZERO).dirty);
     }
 
+    /// The ignored-files reading costs as much as the `status` that reads `dirty`
+    /// (20 ms and 23 ms on a checkout with 61,000 ignored files; 77 and 88 ms on
+    /// efficiency cores), and ignored files appear when a build runs, not when a
+    /// commit lands. Asked every time `dirty` is, it would double what a landed
+    /// row's refresh costs for a fact that moves this slowly — so it stands for
+    /// longer than the unsaved reading does.
+    #[test]
+    fn a_landed_rows_ignored_reading_stands_longer_than_its_unsaved_reading() {
+        let bench = Bench::open();
+        std::fs::write(bench.repo.join(".gitignore"), "scratch/\n").expect("the project's rule");
+        git(&bench.repo, &["add", ".gitignore"]);
+        git(&bench.repo, &["commit", "-q", "-m", "ignore build output"]);
+        bench.publish();
+        let wt = landed_checkout(&bench, "aged");
+        let host = Host::for_workspace(&bench.repo);
+        let base = resolve_landing_base(&host, &bench.repo, None);
+        let head = git(&wt, &["rev-parse", "HEAD"]);
+        let ask =
+            |ttl| worktree_landing_within(&host, &wt, Some("wt/aged"), Some(&head), &base, ttl);
+
+        // A zero TTL asks for everything: nothing is left over yet.
+        assert_eq!(
+            told(&ask(Duration::ZERO))["ignored"],
+            serde_json::json!(false)
+        );
+        leave_build_output(&wt);
+
+        // The unsaved reading is old enough to be taken again (50 ms against the
+        // 60 that passed); the ignored one is not, and the build output goes
+        // unseen until that one is old enough too.
+        std::thread::sleep(Duration::from_millis(60));
+        let again = ask(Duration::from_millis(50));
+        assert_eq!(
+            told(&again)["ignored"],
+            serde_json::json!(false),
+            "the ignored reading was asked again as often as the unsaved one"
+        );
+        assert!(again.dirty_checked_ms.is_some());
+
+        // Past its own TTL it is asked, and the output is seen.
+        assert_eq!(
+            told(&ask(Duration::ZERO))["ignored"],
+            serde_json::json!(true)
+        );
+    }
+
     #[test]
     fn a_classification_does_not_rewrite_the_index_other_git_commands_need_the_lock_of() {
         let bench = Bench::open();
