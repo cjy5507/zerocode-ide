@@ -1675,43 +1675,55 @@ fn measure_asking_ahead_on_the_real_wire() {
         .and_then(|n| n.parse().ok())
         .unwrap_or(0);
     let (mut requests, mut input_tokens, mut output_tokens) = (0_u64, 0_u64, 0_u64);
+    // `REFLEX_AHEAD_WIRE_ARMS=beside` asks each reading with its branches
+    // only: the held answers against their readings' own, one request each.
+    let arms: u64 = if std::env::var("REFLEX_AHEAD_WIRE_ARMS").as_deref() == Ok("beside") {
+        1
+    } else {
+        2
+    };
     'runs: for run in traces(&path)
         .iter()
         .filter(|run| wanted.contains(&run.name))
     {
         let mut ahead = reflex_decide::Ahead::new();
-        for (at, snapshot) in snapshots_of(run).into_iter().enumerate() {
-            // Two requests a reading: never past the cap the line gave.
-            if requests + 2 > cap {
+        for (at, mut snapshot) in snapshots_of(run).into_iter().enumerate() {
+            // A request or two a reading: never past the cap the line gave.
+            if requests + arms > cap {
                 break 'runs;
             }
+            // Read now: the answers held for it were asked a reading ago.
+            snapshot.read_ms = Some(steady_ms());
             let state = snapshot.state.clone();
-            let mut ask_both = |first: &Asker, second: &Asker| {
-                let mut wired = Vec::new();
-                for ask in [first, second] {
-                    let (one, spent) = ask(state.clone());
-                    requests += u64::from(spent.requests);
-                    input_tokens += spent.input_tokens.unwrap_or(0);
-                    output_tokens += spent.output_tokens.unwrap_or(0);
-                    wired.push(one);
+            let mut ask = |asker: &Asker| {
+                let (wired, spent) = asker(state.clone());
+                requests += u64::from(spent.requests);
+                input_tokens += spent.input_tokens.unwrap_or(0);
+                output_tokens += spent.output_tokens.unwrap_or(0);
+                wired
+            };
+            // The two arms in turn, the order swapped every reading.
+            let (wired_alone, wired_beside) = match (arms, at % 2) {
+                (1, _) => (None, ask(&beside)),
+                (_, 0) => {
+                    let first = ask(&alone);
+                    (Some(first), ask(&beside))
                 }
-                let second = wired.pop().expect("two answers");
-                (wired.pop().expect("two answers"), second)
+                _ => {
+                    let second = ask(&beside);
+                    (Some(ask(&alone)), second)
+                }
             };
-            let (wired_alone, wired_beside) = if at % 2 == 0 {
-                ask_both(&alone, &beside)
-            } else {
-                let (two, one) = ask_both(&beside, &alone);
-                (one, two)
-            };
-            rtt_alone.push(wired_alone.rtt_ms);
             rtt_beside.push(wired_beside.rtt_ms);
-            bytes_alone.push(wired_alone.request_bytes as u64);
             bytes_beside.push(wired_beside.request_bytes as u64);
             let own = chosen_of(&wired_beside);
-            if let (Some(alone), Some(beside)) = (chosen_of(&wired_alone), own.as_ref()) {
-                own_compared += 1;
-                own_moved += u64::from(&alone != beside);
+            if let Some(wired_alone) = &wired_alone {
+                rtt_alone.push(wired_alone.rtt_ms);
+                bytes_alone.push(wired_alone.request_bytes as u64);
+                if let (Some(alone), Some(beside)) = (chosen_of(wired_alone), own.as_ref()) {
+                    own_compared += 1;
+                    own_moved += u64::from(&alone != beside);
+                }
             }
             // The answer held for this reading, against its own.
             let taken = ahead.take(&snapshot, steady_ms());
