@@ -7753,14 +7753,28 @@ fn what_an_agent_is_doing_reaches_the_window_bounded_and_coalesced() {
          pane is working:\n{activity_road}"
     );
 
-    // The floor. The emit is gated on `due`, which is the only place the
-    // throttle lives — an `emit` reached without it is one emit per hook
-    // event, which is what this window already paid for once on the
+    // The floor. The emit is gated on the ring's `release`, which asks `due` —
+    // the only place the throttle lives — and the batch leaves through
+    // `send_activities` alone: an `emit` reached without it is one emit per
+    // hook event, which is what this window already paid for once on the
     // painting side.
     assert!(
-        activity_road.contains("ring.due(Instant::now())")
-            && activity_road.contains(r#"app.emit("hook:activity", PaneActivities { pane"#),
+        activity_road.contains("ring.release(Instant::now())")
+            && activity_road.contains("send_activities(&app, pane, batch, owed);"),
         "the activity emit no longer goes through the throttle:\n{activity_road}"
+    );
+    let sending = block_after(shipped, "fn send_activities(");
+    assert!(
+        sending.contains(r#"app.emit("hook:activity", PaneActivities { pane, activities })"#),
+        "a batch leaves for the window some other way than the one door:\n{sending}"
+    );
+    // Markers without their indent, so the block ends at the method's own
+    // closing brace instead of running on to the end of the impl.
+    let releasing = block_after(shipped, "fn release(\n        &mut self,");
+    assert!(
+        releasing.contains("self.due(now)") && releasing.contains("self.owed(now)"),
+        "a release no longer asks the floor first, or forgets what it holds \
+         back:\n{releasing}"
     );
     let throttle = block_after(shipped, "    fn due(&mut self, now: Instant)");
     assert!(
@@ -7773,12 +7787,40 @@ fn what_an_agent_is_doing_reaches_the_window_bounded_and_coalesced() {
         Duration::from_millis(100),
         "the emit floor moved"
     );
-    // And no timer anywhere on this road: the batch rides the next
-    // envelope, which is the documented trade and the reason there is no
+    // The decision has no timer: it is a question of the clock. What a held
+    // batch is owed (t-31715 — a write's END must not wait for the agent's
+    // next event, which is seconds of model thinking away) is promised by
+    // exactly one sleeping task for each held batch, made only when the ring
+    // says the batch is owed (`owed` says each held batch once), and never a
     // thread per card.
     assert!(
         !throttle.contains("spawn") && !throttle.contains("sleep"),
         "the throttle grew a timer of its own:\n{throttle}"
+    );
+    let owing = block_after(shipped, "fn owed(&mut self, now: Instant)");
+    assert!(
+        owing.contains("self.pending == 0 || self.armed")
+            && owing.contains("self.armed = true;")
+            && !owing.contains("spawn")
+            && !owing.contains("sleep"),
+        "a held batch is promised more than once, or the ledger of promises \
+         grew a timer:\n{owing}"
+    );
+    let promising = block_after(shipped, "fn promise_activities(");
+    assert_eq!(
+        (
+            promising.matches("tauri::async_runtime::spawn(").count(),
+            promising.matches("tokio::time::sleep(wait)").count(),
+            promising.matches("std::thread").count(),
+        ),
+        (1, 1, 0),
+        "the deadline of a held batch is more than one sleeping task, or a \
+         thread:\n{promising}"
+    );
+    assert!(
+        sending.contains("promise_activities(app, pane.clone(), wait)")
+            && sending.contains("if let Some(wait) = owed {"),
+        "a promise is made without the ring saying one is owed:\n{sending}"
     );
 
     // The cap, which is what makes a per-agent history a bounded one.
@@ -7980,7 +8022,9 @@ fn a_helpers_line_counts_its_tool_uses_whoever_counted_them() {
     );
     let filing = block_after(shipped, "fn note_helper_activity(");
     assert!(
-        filing.contains("ring.note_fresh(activity)") && filing.contains("ring.due(Instant::now())"),
+        filing.contains("ring.note_fresh(activity)")
+            && filing.contains("ring.release(Instant::now())")
+            && filing.contains("send_activities(app, card, batch, owed);"),
         "the snapshot road files without the dedupe or without the \
          floor:\n{filing}"
     );
@@ -7996,6 +8040,7 @@ fn a_helpers_line_counts_its_tool_uses_whoever_counted_them() {
         writes: Vec::new(),
         vcs: Vec::new(),
         cwd: None,
+        call: None,
     };
     assert!(ring.note_fresh(doing("src/x.rs")));
     assert!(
@@ -8438,6 +8483,245 @@ fn an_agent_that_left_its_shell_behind_stops_being_drawn_as_running() {
     );
 }
 
+/// A wire session's tool calls reach the window on the road every pane's
+/// travel, and are answered to the file tree alone (t-31715): the card's prefix
+/// is one word on both sides, the wire branch stands ahead of everything that
+/// files a card (the window's ring, the sidebar, the graph), the scoped
+/// question the tree asks after a write is registered under the name the
+/// window calls it by, and what the tree names in one question stays below
+/// what the backend refuses.
+#[test]
+fn a_wire_sessions_tool_calls_reach_the_file_tree_alone_and_its_question_is_bounded() {
+    let window = window_source();
+    assert!(
+        window.contains(&format!(
+            "const WIRE_CARD_PREFIX = \"{}\";",
+            hooks::ACTIVITY_WIRE_PREFIX
+        )),
+        "the window and the backend name a wire session's card differently"
+    );
+    let listening = block_after(window, r#"listen("hook:activity", (event) => {"#);
+    let wire_at = listening
+        .find("if (pane.startsWith(WIRE_CARD_PREFIX)) {")
+        .expect("the activity listener stopped telling a wire card apart");
+    let filing_at = listening
+        .find("paneActivities.set(pane, held.slice(-ACTIVITY_RING))")
+        .expect("the activity listener stopped keeping its ring");
+    assert!(
+        wire_at < filing_at
+            && listening[wire_at..filing_at].contains("noteTreeActivities(pane, activities);")
+            && listening[wire_at..filing_at].contains("return;"),
+        "a wire card reaches the sidebar's ring, or never reaches the \
+         tree:\n{listening}"
+    );
+    let seeding = block_after(window, "function seedActivities() {");
+    assert!(
+        seeding.contains("!card.pane.startsWith(WIRE_CARD_PREFIX)"),
+        "a window opened mid-run files a wire card in the sidebar's \
+         ring:\n{seeding}"
+    );
+
+    assert!(
+        window.contains(r#"invoke("scm_numstat", { paths })"#)
+            && shipped_backend().contains("            scm_numstat,\n"),
+        "the tree asks a question the backend does not answer under that name"
+    );
+    let named_by_tree: usize = window
+        .split("const TREE_NUMSTAT_PATHS_MAX = ")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .and_then(|number| number.replace('_', "").trim().parse().ok())
+        .expect("the tree's cap on one question is gone");
+    assert!(
+        (1..=scm_runtime::SCM_NUMSTAT_PATHS_MAX / 2).contains(&named_by_tree),
+        "the tree names {named_by_tree} paths in one question; the backend \
+         refuses more than {}",
+        scm_runtime::SCM_NUMSTAT_PATHS_MAX
+    );
+}
+
+/// One edit's activity of the call `call-1`, as the ring's deadline tests file it.
+fn edit_activity(target: &str, phase: zerocode_core::hook::Phase) -> zerocode_core::hook::Activity {
+    zerocode_core::hook::Activity {
+        verb: zerocode_core::hook::Tool::Edit,
+        target: Some(target.to_string()),
+        phase,
+        reads: Vec::new(),
+        writes: Vec::new(),
+        vcs: Vec::new(),
+        cwd: None,
+        call: Some("call-1".to_string()),
+    }
+}
+
+/// A batch the floor held back is owed a deadline, once (t-31715): the last
+/// event of a burst — an edit's end — must reach the window when the floor
+/// opens, not whenever the agent next does something. One promise for each
+/// held batch, however many events join it; none when nothing is held.
+#[test]
+fn a_batch_the_floor_held_back_is_owed_a_deadline_once() {
+    use zerocode_core::hook::Phase;
+
+    let mut ring = ActivityRing::default();
+    let start = Instant::now();
+    let after = |millis: u64| start + Duration::from_millis(millis);
+
+    ring.note(edit_activity("src/a.rs", Phase::Started));
+    assert!(ring.due(start).is_some(), "the first leaves at once");
+    assert_eq!(ring.owed(start), None, "nothing is held, so nothing is owed");
+
+    // The end comes inside the floor: held, and owed the time the floor has left.
+    ring.note(edit_activity("src/a.rs", Phase::Finished));
+    assert!(ring.due(after(10)).is_none());
+    assert_eq!(ring.owed(after(10)), Some(Duration::from_millis(90)));
+    assert_eq!(
+        ring.owed(after(20)),
+        None,
+        "one promise for a held batch, not one for each time somebody asks"
+    );
+    ring.note(edit_activity("src/b.rs", Phase::Started));
+    assert_eq!(ring.owed(after(30)), None, "another event joins the batch the promise covers");
+
+    // The promise keeps: when the floor opens the batch leaves, all of it.
+    let batch = ring.due(after(100)).expect("the floor opened");
+    assert_eq!(batch.len(), 2);
+    assert_eq!(ring.owed(after(100)), None);
+
+    // And the next held batch is owed again.
+    ring.note(edit_activity("src/c.rs", Phase::Finished));
+    assert!(ring.due(after(110)).is_none());
+    assert_eq!(ring.owed(after(110)), Some(Duration::from_millis(90)));
+}
+
+/// The promise comes due a hair before the floor opens — a clock that woke its
+/// task early (t-31715): the batch stays, and is promised again for what is
+/// left; when it comes due for good the batch leaves and nothing is owed. A
+/// promise that finds nothing held (the batch left with a later event) makes
+/// none.
+#[test]
+fn a_promise_that_wakes_early_is_made_again_and_one_that_wakes_on_time_takes_the_batch() {
+    use zerocode_core::hook::Phase;
+
+    let mut ring = ActivityRing::default();
+    let start = Instant::now();
+    let after = |millis: u64| start + Duration::from_millis(millis);
+    ring.note(edit_activity("src/a.rs", Phase::Started));
+    assert!(ring.due(start).is_some(), "the first leaves at once");
+
+    ring.note(edit_activity("src/a.rs", Phase::Finished));
+    let (batch, owed) = ring.release(after(10));
+    assert!(batch.is_none(), "the floor is shut");
+    assert_eq!(owed, Some(Duration::from_millis(90)));
+
+    let (batch, owed) = ring.flush(after(95));
+    assert!(batch.is_none(), "the clock woke the task before the floor opened");
+    assert_eq!(owed, Some(Duration::from_millis(5)), "promised again for what is left");
+
+    let (batch, owed) = ring.flush(after(100));
+    assert_eq!(batch.map(|held| held.len()), Some(1), "the floor opened: the end leaves");
+    assert_eq!(owed, None, "nothing is held, so nothing is owed");
+
+    let (batch, owed) = ring.flush(after(200));
+    assert!(batch.is_none() && owed.is_none(), "a promise that finds nothing held makes none");
+}
+
+/// A measurement, not a gate (t-31715): what the ring's deadline costs a busy
+/// card — a hundred thousand events at one a millisecond — against the decision
+/// the ring made before it (`note` and `due`), and how many promises the
+/// deadline makes: one for each held batch, which is one for each floor. Run it
+/// by name, on the low-spec profile too:
+/// `taskpolicy -b cargo test -p zerocode-shell --bin zerocode-shell -- --ignored --nocapture the_rings_deadline_costs`.
+#[test]
+#[ignore = "a measurement, not a gate: run it by name"]
+fn the_rings_deadline_costs_nanoseconds_an_event_and_one_promise_a_floor() {
+    use zerocode_core::hook::Phase;
+
+    const EVENTS: u64 = 100_000;
+    let one = || edit_activity("src/a.rs", Phase::Started);
+    let start = Instant::now();
+    let at = |event: u64| start + Duration::from_millis(event);
+
+    let mut before = ActivityRing::default();
+    let began = Instant::now();
+    let mut batches_before = 0_u64;
+    for event in 0..EVENTS {
+        before.note(one());
+        if before.due(at(event)).is_some() {
+            batches_before += 1;
+        }
+    }
+    let before_ns = began.elapsed().as_nanos() / u128::from(EVENTS);
+
+    let mut after = ActivityRing::default();
+    let began = Instant::now();
+    let (mut batches_after, mut promises) = (0_u64, 0_u64);
+    for event in 0..EVENTS {
+        after.note(one());
+        let (batch, owed) = after.release(at(event));
+        batches_after += u64::from(batch.is_some());
+        promises += u64::from(owed.is_some());
+    }
+    let after_ns = began.elapsed().as_nanos() / u128::from(EVENTS);
+
+    println!(
+        "ACTIVITY_RING_NUMBERS {}",
+        serde_json::json!({
+            "events": EVENTS,
+            "decide_ns_before": before_ns,
+            "decide_ns_after": after_ns,
+            "emits_before": batches_before,
+            "emits_after": batches_after,
+            "promises": promises,
+        })
+    );
+    assert_eq!(batches_before, batches_after, "the deadline moved the floor");
+    assert!(promises <= batches_after + 1, "more promises than held batches");
+}
+
+/// What the file tree asks when an agent's write ends (t-31715), answered
+/// through the panel's own entries: just the files asked about, with their
+/// counts — a change nobody asked about stays out however large it is, and a
+/// clean (or unknown) file has no entry.
+#[test]
+fn a_scoped_scm_answer_covers_only_the_files_asked_about() {
+    let temp = tempfile::tempdir().expect("a repository");
+    let repo = temp.path();
+    test_git(repo, &["init", "-q", "-b", "main"]);
+    test_git(repo, &["config", "user.name", "ZeroCode Test"]);
+    test_git(repo, &["config", "user.email", "zerocode@example.invalid"]);
+    std::fs::write(repo.join("kept.txt"), "one\ntwo\nthree\n").expect("kept");
+    std::fs::write(repo.join("other.txt"), "alpha\n").expect("other");
+    test_git(repo, &["add", "."]);
+    test_git(repo, &["commit", "-q", "-m", "base"]);
+    std::fs::write(repo.join("kept.txt"), "one\nTWO\nthree\nfour\n").expect("a change");
+    std::fs::write(repo.join("other.txt"), "alpha\nbeta\ngamma\n").expect("a change nobody asked about");
+    std::fs::write(repo.join("fresh.txt"), "new\n").expect("a new file");
+    let orchestrator = Orchestrator::open(repo).expect("open repository");
+
+    let asked = vec![
+        "kept.txt".to_string(),
+        "fresh.txt".to_string(),
+        "never-existed.txt".to_string(),
+    ];
+    let answer =
+        scm_runtime::scoped_scm_entries(&orchestrator, repo, &asked).expect("a scoped answer");
+    assert_eq!(
+        answer
+            .iter()
+            .map(|entry| (
+                entry.path.as_str(),
+                entry.code.as_str(),
+                entry.added,
+                entry.removed
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("kept.txt", " M", Some(2), Some(1)),
+            ("fresh.txt", "??", None, None),
+        ]
+    );
+}
+
 /// The ring counts, throttles and forgets — the mechanism itself, not the
 /// source that spells it.
 #[test]
@@ -8452,6 +8736,7 @@ fn a_ring_keeps_the_last_twenty_and_speaks_at_most_ten_times_a_second() {
         writes: Vec::new(),
         vcs: Vec::new(),
         cwd: None,
+        call: None,
     };
     let mut ring = ActivityRing::default();
     let start = Instant::now();

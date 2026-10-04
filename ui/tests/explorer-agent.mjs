@@ -13,7 +13,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { openWindowTestPage, PRIMARY_EVENT } from "./window-boot.mjs";
+import { openWindowTestPage, PRIMARY_EVENT, WINDOW_MOTION_REST } from "./window-boot.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -24,6 +24,37 @@ const treeConstant = async (name) => {
   const source = await readFile(resolve(UI, "shell-explorer-tree.js"), "utf8");
   return Number(source.match(new RegExp(`const ${name} = ([\\d_]+);`))?.[1]?.replace(/_/g, ""));
 };
+
+/* How long the burst measurements watch the window after a burst, in ms. A
+ * number of this test's own — never derived from the feature's constants — so
+ * that a before (a window without the feature) and an after watch the same time
+ * and their frame, paint and long-frame counts are counts of the same thing. */
+const BURST_WATCH_MS = 800;
+
+/* The most times a burst may arm the tree's one sweep timer: once for the first
+ * thing held, again if a later one expires sooner (a write that has ended is
+ * shown for a second, a lit row for six) — never once for each event. A number
+ * of this test's own, so that a before and an after judge the same bound. */
+const BURST_SWEEPS_ARMED_MAX = 3;
+
+/* The most rows the tree may light at once, and the most writes it may hold
+ * open. Every lit row transitions its colour and its bar on the page's main
+ * thread, and every writing row wears a mark: on a low-spec machine (Chromium
+ * at a quarter of its CPU) a burst that lit sixty-four of them cost a third of
+ * the page's frames and made it miss nine more, and sixteen still cost it a few
+ * (87 frames against main's 92); eight bore it (94). A number of this test's
+ * own: a tree that wants more has to show a low-spec burst that bears it. */
+const BURST_TOUCH_CAP_MAX = 8;
+
+/* The most files one scoped question may name. One answer is drawn in one task —
+ * every file it names and every folder above them — and on a quarter-speed
+ * Chromium sixty-four files were frames made late (two to four of them in a
+ * burst of two hundred); sixteen and eight are not. A number of this test's
+ * own, like the cap above. */
+const BURST_NUMSTAT_PATHS_MAX = 8;
+
+/* How long the memory run breathes between its rounds, in ms: the same reason. */
+const MEMORY_BREATH_MS = 190;
 
 /* The synthetic checkout every suite here stands in. Three levels, so a file
  * can sit under a folder that is itself under a folder. */
@@ -60,7 +91,9 @@ async function standTree(page, listings = LISTINGS) {
       fire: (pane, activities) => {
         for (const handler of window.__LISTENERS__["hook:activity"] ?? []) handler({ payload: { pane, activities } });
       },
-      act: (verb, target, phase = "started") => ({ seq: ++seq, activity: { verb, ...(target === null ? {} : { target }), phase } }),
+      // `extra` is what a road adds beside the three fields every agent says —
+      // the call's id (`call`), the folder it ran in (`cwd`).
+      act: (verb, target, phase = "started", extra = {}) => ({ seq: ++seq, activity: { verb, ...(target === null ? {} : { target }), phase, ...extra } }),
       // Two frames and the tasks between them: a batch is painted on the
       // frame after it lands, and an unfold waits on its listing.
       settle: async (rounds = 4) => {
@@ -222,6 +255,11 @@ export async function testExplorerAgentActivity(browser, origin, ok) {
  * handlers and its paint took. Printed as `EXPLORER_AGENT_NUMBERS` beside the
  * checks, so a before/after is two log lines. */
 export async function testExplorerAgentBurst(browser, origin, ok) {
+  const hold = await treeConstant("TREE_TOUCH_HOLD_MS");
+  const windowMs = await treeConstant("TREE_NUMSTAT_WINDOW_MS");
+  const movingMax = await treeConstant("TREE_WRITING_MOVING_MAX");
+  const touchCap = await treeConstant("TREE_TOUCH_CAP");
+  const numstatMax = await treeConstant("TREE_NUMSTAT_PATHS_MAX");
   const listings = { "": [] };
   for (let dir = 0; dir < 20; dir += 1) {
     const name = `d${String(dir).padStart(2, "0")}`;
@@ -269,6 +307,123 @@ export async function testExplorerAgentBurst(browser, origin, ok) {
     });
     console.log(`EXPLORER_AGENT_NUMBERS ${JSON.stringify(numbers)}`);
     ok("a burst of 200 activity events on a 400-file tree paints at most once a frame, lists nothing already listed and runs no git", numbers.files >= 400 && numbers.lit > 0 && numbers.paints >= 1 && numbers.paints <= numbers.frames && numbers.listDir === 0 && numbers.git === 0, JSON.stringify(numbers));
+
+    /* The same tree, 200 start/end pairs (t-31715): what live progress costs a
+     * busy agent. Counted the way a low-spec machine feels it — paints per
+     * frame, the frames the page's own work made late (an animation-frame gap
+     * past one 60 Hz budget), the handlers' milliseconds — and what it asks of
+     * git: one scoped question per window, never a whole-repo status. Printed as
+     * `EXPLORER_AGENT_PAIR_NUMBERS`, so a before and an after are two log lines
+     * (and `WINDOW_CPU_THROTTLE=4` is the low-spec profile). */
+    const pairs = await page.evaluate(async ({ hold, watchMs }) => {
+      const { root, fire, act, settle } = window.__XT__;
+      const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+      // The first burst's turn ends and its marks fade before this one is
+      // measured. Its edits said they started and never that they ended, and a
+      // write nobody ended stays open until its turn ends or its bound passes —
+      // left open, it would still be moving when the tree below is weighed idle.
+      fire("term:1", [act("stop", null, "stopped")]);
+      await sleep(hold + 800);
+      await settle(3);
+      window.__ANSWER__.scm_numstat = ({ paths }) => paths.map((path) => ({ path, code: " M", staged: false, changed: true, added: 2, removed: 1, conflict: null, origin: null }));
+      const counts = () => ({ ...window.__COUNTS__ });
+      const before = counts();
+      const paintsBefore = typeof treeTouchPaints === "number" ? treeTouchPaints : NaN;
+      // A 60 Hz frame that fit its budget lands ~16.7 ms after the last; a gap
+      // past this is a frame the page's own work made late.
+      const LONG_FRAME_GAP_MS = 20;
+      let frames = 0;
+      let longFrames = 0;
+      let worstGapMs = 0;
+      let last = performance.now();
+      let counting = true;
+      const tick = (stamp) => {
+        if (!counting) return;
+        frames += 1;
+        const gap = stamp - last;
+        last = stamp;
+        if (gap > LONG_FRAME_GAP_MS) longFrames += 1;
+        worstGapMs = Math.max(worstGapMs, gap);
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+      let longTasks = 0;
+      const observer = new PerformanceObserver((list) => { longTasks += list.getEntries().length; });
+      try { observer.observe({ type: "longtask" }); } catch { /* an engine with no long-task entries counts none */ }
+      // The timers the tree's sweep is armed with while the burst is handled.
+      const realSetTimeout = window.setTimeout;
+      let sweepsArmed = 0;
+      window.setTimeout = (callback, ...rest) => {
+        if (typeof sweepTreeTouches === "function" && callback === sweepTreeTouches) sweepsArmed += 1;
+        return realSetTimeout.call(window, callback, ...rest);
+      };
+      const started = performance.now();
+      for (let at = 0; at < 200; at += 1) {
+        const dir = `d${String(at % 20).padStart(2, "0")}`;
+        const file = `f${String(Math.floor(at / 20) * 2 % 20).padStart(2, "0")}.rs`;
+        const target = `${root}/${dir}/${file}`;
+        fire("term:1", [act("edit", target, "started", { call: `burst${at}` })]);
+        fire("term:1", [act("edit", target, "finished", { call: `burst${at}` })]);
+      }
+      const handled = performance.now() - started;
+      window.setTimeout = realSetTimeout;
+      await settle(3);
+      const settled = performance.now() - started;
+      const shown = fileTree.querySelectorAll("[data-agent-writing]").length;
+      // The rows whose sheen runs, and what a row held still wears and says.
+      const sweeping = document.getAnimations().filter((one) => one.animationName === "tree-writing-sweep" && one.playState === "running" && fileTree.contains(one.effect?.target)).length;
+      // What the sheen's keyframes animate: only what the compositor moves without the page's main thread.
+      const sheenProperties = [...new Set(document.getAnimations()
+        .filter((one) => one.animationName === "tree-writing-sweep")
+        .flatMap((one) => one.effect.getKeyframes().flatMap((frame) => Object.keys(frame))))]
+        .filter((key) => !["offset", "easing", "composite", "computedOffset"].includes(key));
+      const held = fileTree.querySelector('[data-agent-writing="still"]');
+      const word = t("tree.writing.file", "");
+      const still = held ? { animation: getComputedStyle(held, "::after").animationName, height: getComputedStyle(held, "::after").height, said: word.length > 0 && (held.getAttribute("aria-label") ?? "").includes(word) } : null;
+      await sleep(watchMs);
+      counting = false;
+      observer.disconnect();
+      const after = counts();
+      const delta = (command) => (after[command] ?? 0) - (before[command] ?? 0);
+      const tallied = [...fileTree.querySelectorAll(".tree-row.is-file .tree-tally")].filter((tally) => tally.textContent.includes("+2")).length;
+      // The paints of the burst's own window, before the idle wait below adds the
+      // dwell's end and the marks' fade.
+      const paintsDuring = (typeof treeTouchPaints === "number" ? treeTouchPaints : NaN) - paintsBefore;
+      // Nothing writing and nothing held: no animation runs and no timer of the
+      // tree's is armed — the cost of an idle tree is zero.
+      await sleep(hold + 1500);
+      const idle = {
+        animations: document.getAnimations().filter((one) => fileTree.contains(one.effect?.target)).length,
+        timers: [typeof treeTouchSweep === "undefined" ? "missing" : treeTouchSweep, typeof treeNumstatTimer === "undefined" ? "missing" : treeNumstatTimer, typeof treeVcsSweep === "undefined" ? "missing" : treeVcsSweep].filter((timer) => timer !== null).length,
+      };
+      return {
+        handledMs: Math.round(handled * 10) / 10,
+        sweepsArmed,
+        settledMs: Math.round(settled * 10) / 10,
+        frames,
+        longFrames,
+        longTasks,
+        worstGapMs: Math.round(worstGapMs),
+        paints: paintsDuring,
+        shown,
+        sweeping,
+        sheenProperties,
+        still,
+        tallied,
+        numstat: delta("scm_numstat"),
+        wholeRepo: delta("scm_status") + delta("upstream_status") + delta("git_history"),
+        listDir: delta("list_dir"),
+        idle,
+      };
+    }, { hold, watchMs: BURST_WATCH_MS });
+    console.log(`EXPLORER_AGENT_PAIR_NUMBERS ${JSON.stringify(pairs)}`);
+    ok("a burst of 200 start/end pairs shows the writing state, paints at most once a frame, asks git one scoped question per window and never a whole-repo status", pairs.shown > 0 && pairs.paints >= 1 && pairs.paints <= pairs.frames && pairs.numstat >= 1 && pairs.numstat <= Math.ceil((pairs.settledMs + BURST_WATCH_MS) / windowMs) && pairs.wholeRepo === 0 && pairs.listDir === 0 && pairs.tallied > 0, JSON.stringify(pairs));
+    ok("the most rows the tree lights at once, which is also the most writes it holds open, is one named cap that a low-spec machine bears: a burst of two hundred lights and marks no more", Number.isFinite(touchCap) && touchCap > 0 && touchCap <= BURST_TOUCH_CAP_MAX && numbers.lit <= touchCap && pairs.shown <= touchCap, JSON.stringify({ touchCap, most: BURST_TOUCH_CAP_MAX, lit: numbers.lit, shown: pairs.shown }));
+    ok("the most files one scoped question names is one named cap that a low-spec machine bears: one answer is drawn in one task", Number.isFinite(numstatMax) && numstatMax > 0 && numstatMax <= BURST_NUMSTAT_PATHS_MAX, JSON.stringify({ numstatMax, most: BURST_NUMSTAT_PATHS_MAX }));
+    ok("a burst of 200 start/end pairs arms the tree's one sweep timer a handful of times at most, never once for each event", Number.isFinite(pairs.sweepsArmed) && pairs.sweepsArmed >= 1 && pairs.sweepsArmed <= BURST_SWEEPS_ARMED_MAX, JSON.stringify({ sweepsArmed: pairs.sweepsArmed, most: BURST_SWEEPS_ARMED_MAX }));
+    ok("the sheen moves on at most the few rows the tree names however many are being written; the rest wear the still marker and say the same words", Number.isFinite(movingMax) && movingMax > 0 && pairs.sweeping > 0 && pairs.sweeping <= movingMax && pairs.shown > movingMax && pairs.still?.animation === "none" && parseFloat(pairs.still?.height) === 2 && pairs.still?.said === true, JSON.stringify({ movingMax, sweeping: pairs.sweeping, shown: pairs.shown, still: pairs.still }));
+    ok("the sheen is moved by transform alone — a property the compositor animates without the page's main thread", pairs.sweeping > 0 && JSON.stringify(pairs.sheenProperties) === JSON.stringify(["transform"]), JSON.stringify(pairs.sheenProperties));
+    ok("an idle tree runs no animation and holds no timer once the writing has ended and the marks have faded", pairs.idle.animations === 0 && pairs.idle.timers === 0, JSON.stringify(pairs.idle));
     ok("the burst suite raised no renderer faults", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();
@@ -672,6 +827,458 @@ export async function testExplorerSelection(browser, origin, ok) {
     }, PRIMARY_EVENT);
     ok("the tree's selection is said to the backend as it moves, relative to its workspace, once a frame", seen.one?.root === seen.root && JSON.stringify(seen.one?.paths) === JSON.stringify(["README.md"]) && JSON.stringify([...(seen.two?.paths ?? [])].sort()) === JSON.stringify(["README.md", "src"]) && seen.burst === 1 && JSON.stringify(seen.none?.paths) === JSON.stringify([]), JSON.stringify(seen));
     ok("the selection suite raised no renderer faults", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
+
+/* ---- slice 8: what an agent is writing right now (t-31715) --------------------
+ *
+ * The person tried the tree of 1.1.50 and said its marks were there but nothing
+ * in it was *happening*. Live progress, and only that: while a write or edit
+ * tool call is open — it has started and not finished — its file's row, and
+ * every collapsed folder above it, shimmers; the moment the call ends the
+ * file's +N -N lands on the row, from the scoped git questions for the files
+ * written in a short window, a few files each (never one per event, never a
+ * whole-repo status);
+ * and all of it is the same for every agent, because the tree reads one shape —
+ * `hook:activity`'s — in which a start and its end are paired by the call's id,
+ * or, where an agent gives none, by its verb and target. Hook agents, wire
+ * sessions (`wire:<n>`) and zo's main pane all arrive on that shape; this suite
+ * drives it the way each arrives.
+ *
+ * Nothing here calls a function the feature added: on a window without it,
+ * every check fails at its assertion. */
+export async function testExplorerWriting(browser, origin, ok) {
+  const [max, min, windowMs, most] = await Promise.all(["TREE_WRITING_MAX_MS", "TREE_WRITING_MIN_MS", "TREE_NUMSTAT_WINDOW_MS", "TREE_NUMSTAT_PATHS_MAX"].map(treeConstant));
+  ok("the writing mark's lost-end bound, its shortest showing, the numstat window and the most paths one question names are named constants of the tree's module", [max, min, windowMs, most].every((one) => Number.isFinite(one) && one > 0) && min < max, JSON.stringify({ max, min, windowMs, most }));
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await standTree(page);
+    // What the backend's scoped question answers: the asked files, each
+    // modified, with the counts below.
+    await page.evaluate(() => {
+      window.__XT__.asked = [];
+      window.__ANSWER__.scm_numstat = (args) => {
+        window.__XT__.asked.push([...args.paths]);
+        return args.paths.map((path) => ({ path, code: " M", staged: false, changed: true, added: 3, removed: 1, conflict: null, origin: null }));
+      };
+      window.__XT__.sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+      window.__XT__.writing = (relative) => window.__XT__.row(relative)?.dataset.agentWriting ?? null;
+      // The document's list names every animation however it is targeted — a
+      // pseudo-element's included — where an element's own `getAnimations` leaves
+      // pseudo-elements out unless asked, and engines differ in how they ask.
+      window.__XT__.animationsOn = (root) => document.getAnimations().filter((one) => {
+        const target = one.effect?.target;
+        return Boolean(target) && root.contains(target);
+      });
+      window.__XT__.sweeping = (relative) => {
+        const row = window.__XT__.row(relative);
+        return row ? window.__XT__.animationsOn(row).filter((one) => one.animationName === "tree-writing-sweep" && one.playState === "running").length : 0;
+      };
+    });
+
+    /* a hook agent in Claude's shape: the call's id on both ends */
+    const claude = await page.evaluate(async ({ windowMs, min }) => {
+      const { root, fire, act, settle, row, open, sleep, writing, sweeping } = window.__XT__;
+      const file = "src/deep/x.rs";
+      const asking = () => window.__COUNTS__.scm_numstat ?? 0;
+      const out = {};
+      fire("term:1", [act("edit", `${root}/${file}`, "started", { call: "toolu_a" })]);
+      await settle(6);
+      out.writing = writing(file);
+      out.followed = open("src") && open("src/deep");
+      out.sweeping = sweeping(file);
+      const word = t("tree.writing.file", "");
+      out.said = word.length > 0 && (row(file)?.getAttribute("aria-label") ?? "").includes(word);
+      out.askedBeforeEnd = asking();
+      // The end arrives in the same batch the start did: the mark stays for its
+      // shortest showing, so an edit that took 20 ms is still seen to happen.
+      fire("term:1", [act("edit", `${root}/${file}`, "finished", { call: "toolu_a" })]);
+      await settle(2);
+      out.heldByMin = writing(file);
+      await sleep(windowMs + 500);
+      out.asked = window.__XT__.asked.map((paths) => paths.join(","));
+      out.tally = row(file)?.querySelector(".tree-tally")?.textContent ?? null;
+      out.letter = row(file)?.querySelector(".badge")?.textContent ?? null;
+      out.chips = ["src/deep", "src"].map((folder) => [...(row(folder)?.querySelectorAll(".badge .tree-count") ?? [])].map((chip) => chip.textContent).join(""));
+      await sleep(min + 500);
+      out.cleared = writing(file) === null && sweeping(file) === 0;
+      return out;
+    }, { windowMs, min });
+    ok("a write that has started and not ended shimmers its file's row, in words for a screen reader, and costs git nothing until it ends", claude.writing === "true" && claude.sweeping === 1 && claude.said === true && claude.askedBeforeEnd === 0 && claude.followed === true, JSON.stringify(claude));
+    ok("a call's end lands its +N -N on the row, its letter and its folders' roll-ups from one scoped question, and the mark leaves after its shortest showing", claude.heldByMin === "true" && JSON.stringify(claude.asked) === JSON.stringify(["src/deep/x.rs"]) && claude.tally?.includes("+3") && claude.tally?.includes("-1") && claude.letter === "M" && JSON.stringify(claude.chips) === JSON.stringify(["M1", "M1"]) && claude.cleared === true, JSON.stringify(claude));
+
+    /* with follow off the folders stay shut and wear the state themselves */
+    const folders = await page.evaluate(async ({ min }) => {
+      const { root, fire, act, settle, row, open, sleep, sweeping } = window.__XT__;
+      const toggle = document.getElementById("tree-follow");
+      toggle.click();
+      fire("term:1", [act("write", `${root}/docs/guide.md`, "started", { call: "toolu_b" })]);
+      await settle();
+      const folder = row("docs");
+      const out = {
+        within: folder?.dataset.agentWritingWithin ?? null,
+        stayedClosed: !open("docs"),
+        sweeping: sweeping("docs"),
+        said: (() => { const word = t("tree.writing.within", ""); return word.length > 0 && (folder?.getAttribute("aria-label") ?? "").includes(word); })(),
+      };
+      fire("term:1", [act("write", `${root}/docs/guide.md`, "finished", { call: "toolu_b" })]);
+      await sleep(min + 600);
+      out.cleared = (row("docs")?.dataset.agentWritingWithin ?? null) === null;
+      toggle.click();
+      return out;
+    }, { min });
+    ok("with follow off the collapsed folder above a file being written shimmers for it, says so in words and stays shut; it clears with the call", folders.within === "true" && folders.stayedClosed === true && folders.sweeping === 1 && folders.said === true && folders.cleared === true, JSON.stringify(folders));
+
+    /* an agent that gives no call id: start and end meet by verb and target */
+    const plain = await page.evaluate(async ({ min }) => {
+      const { root, fire, act, settle, sleep, writing } = window.__XT__;
+      const out = {};
+      fire("term:2", [act("edit", `${root}/README.md`, "started"), act("write", `${root}/src/lib.rs`, "started")]);
+      await settle(6);
+      out.both = [writing("README.md"), writing("src/lib.rs")];
+      fire("term:2", [act("edit", `${root}/README.md`, "finished")]);
+      await sleep(min + 500);
+      out.afterOne = [writing("README.md"), writing("src/lib.rs")];
+      // An end that names no file closes the pane's oldest open call of that verb.
+      fire("term:2", [act("write", null, "finished")]);
+      await sleep(min + 500);
+      out.afterTwo = writing("src/lib.rs");
+      return out;
+    }, { min });
+    ok("without a call id an end closes the call with its verb and target, and an end naming nothing closes the pane's oldest open call of that verb", JSON.stringify(plain.both) === JSON.stringify(["true", "true"]) && JSON.stringify(plain.afterOne) === JSON.stringify([null, "true"]) && plain.afterTwo === null, JSON.stringify(plain));
+
+    /* a helper's card with no id is a snapshot of what it does now: nothing closes it;
+     * the same card with a call id is an event stream like any pane's */
+    const helper = await page.evaluate(async ({ min }) => {
+      const { root, fire, act, settle, row, sleep, writing } = window.__XT__;
+      fire("sub:1:h9", [act("edit", `${root}/src/main.rs`, "started")]);
+      await settle(6);
+      const out = { touched: row("src/main.rs")?.dataset.agentTouch ?? null, snapshot: writing("src/main.rs") };
+      fire("sub:1:h9", [act("edit", `${root}/src/main.rs`, "started", { call: "h9-1" })]);
+      await settle(6);
+      out.withId = writing("src/main.rs");
+      fire("sub:1:h9", [act("edit", `${root}/src/main.rs`, "finished", { call: "h9-1" })]);
+      await sleep(min + 500);
+      out.closed = writing("src/main.rs") === null;
+      return out;
+    }, { min });
+    ok("a helper's activity with no call id lights its file but never opens a write nothing would close; with a call id its writes are paired like any pane's", helper.touched === "write" && helper.snapshot === null && helper.withId === "true" && helper.closed === true, JSON.stringify(helper));
+
+    /* the turn ending, a failed call, an end that never came, an end whose start was missed */
+    const ends = await page.evaluate(async ({ windowMs, min, max }) => {
+      const { root, fire, act, settle, sleep, writing } = window.__XT__;
+      const asking = () => window.__COUNTS__.scm_numstat ?? 0;
+      const out = {};
+      await sleep(windowMs + 300);
+      let before = asking();
+      fire("term:3", [act("edit", `${root}/src/main.rs`, "started", { call: "c3" })]);
+      await settle(6);
+      out.openedForStop = writing("src/main.rs");
+      fire("term:3", [{ seq: 900, activity: { verb: "stop", phase: "stopped" } }]);
+      await sleep(min + windowMs + 500);
+      out.stopCleared = writing("src/main.rs") === null;
+      out.stopAsked = asking() - before;
+      before = asking();
+      fire("term:3", [act("edit", `${root}/README.md`, "started", { call: "f1" })]);
+      await settle(6);
+      fire("term:3", [act("edit", `${root}/README.md`, "failed", { call: "f1" })]);
+      await sleep(min + windowMs + 500);
+      out.failedCleared = writing("README.md") === null;
+      out.failedAsked = asking() - before;
+      before = asking();
+      fire("term:3", [act("edit", `${root}/docs/guide.md`, "finished", { call: "orphan" })]);
+      await sleep(windowMs + 500);
+      out.orphanAsked = asking() - before;
+      out.orphanNamed = window.__XT__.asked.at(-1)?.join(",") ?? null;
+      // An end that never comes: the bound closes the call and asks git once.
+      before = asking();
+      fire("term:3", [act("edit", `${root}/src/lib.rs`, "started", { call: "lost1" })]);
+      await settle(6);
+      out.openedForBound = writing("src/lib.rs");
+      const real = performance.now.bind(performance);
+      performance.now = () => real() + max + 1000;
+      try { sweepTreeTouches(); } finally { performance.now = real; }
+      await settle(3);
+      out.boundCleared = writing("src/lib.rs") === null;
+      await sleep(windowMs + 500);
+      out.boundAsked = asking() - before;
+      return out;
+    }, { windowMs, min, max });
+    ok("the turn's end closes what it left open and asks git once; a failed call clears the mark and asks nothing; an end whose start was missed still asks for its file", ends.openedForStop === "true" && ends.stopCleared === true && ends.stopAsked === 1 && ends.failedCleared === true && ends.failedAsked === 0 && ends.orphanAsked === 1 && ends.orphanNamed === "docs/guide.md", JSON.stringify(ends));
+    ok("a call whose end never comes is let go at its bound — the mark clears and git is asked once for what it may have written", ends.openedForBound === "true" && ends.boundCleared === true && ends.boundAsked === 1, JSON.stringify(ends));
+
+    /* a patch: the call names no file of its own but the files it writes — each one shimmers
+     * and each is asked about when the patch ends; and a folded column is nobody looking */
+    const patch = await page.evaluate(async ({ windowMs, min }) => {
+      const { root, fire, act, settle, sleep, writing } = window.__XT__;
+      const asking = () => window.__COUNTS__.scm_numstat ?? 0;
+      const out = {};
+      const said = { writes: ["src/lib.rs", "src/main.rs"], cwd: root, call: "patch-1" };
+      fire("term:8", [act("edit", "*** Begin Patch …", "started", said)]);
+      await settle(6);
+      out.both = [writing("src/lib.rs"), writing("src/main.rs")];
+      const before = asking();
+      fire("term:8", [act("edit", "*** Begin Patch …", "finished", said)]);
+      await sleep(min + windowMs + 500);
+      out.cleared = [writing("src/lib.rs"), writing("src/main.rs")].every((one) => one === null);
+      out.asked = asking() - before;
+      out.named = window.__XT__.asked.at(-1)?.slice().sort().join(",") ?? null;
+      // Nobody is looking at a tree whose column is folded: its writes end, and git is not asked.
+      setPanelFolded("aside", true);
+      const folded = asking();
+      fire("term:8", [act("edit", `${root}/README.md`, "finished", { call: "folded-1" })]);
+      await sleep(windowMs + 400);
+      out.foldedAsks = asking() - folded;
+      setPanelFolded("aside", false);
+      return out;
+    }, { windowMs, min });
+    ok("a patch's files each shimmer while it runs and are asked about together when it ends", JSON.stringify(patch.both) === JSON.stringify(["true", "true"]) && patch.cleared === true && patch.asked === 1 && patch.named === "src/lib.rs,src/main.rs", JSON.stringify(patch));
+    ok("a tree whose column is folded asks git nothing when a write ends", patch.foldedAsks === 0, JSON.stringify(patch));
+
+    /* a wire session: its own pane key, its folder in `cwd`, its end naming no file */
+    const wire = await page.evaluate(async ({ windowMs, min }) => {
+      const { root, fire, act, settle, sleep, writing } = window.__XT__;
+      const out = {};
+      const before = window.__COUNTS__.scm_numstat ?? 0;
+      fire("wire:7", [act("edit", "src/lib.rs", "started", { call: "item_1", cwd: root })]);
+      await settle(6);
+      out.writing = writing("src/lib.rs");
+      out.notFiled = typeof paneActivities === "object" && !paneActivities.has("wire:7");
+      fire("wire:7", [act("edit", null, "finished", { call: "item_1" })]);
+      await sleep(min + windowMs + 500);
+      out.ended = writing("src/lib.rs") === null;
+      out.asked = (window.__COUNTS__.scm_numstat ?? 0) - before;
+      out.named = window.__XT__.asked.at(-1)?.join(",") ?? null;
+      return out;
+    }, { windowMs, min });
+    ok("a wire session's writes follow start to end the same way: its folder is its `cwd`, its end needs no file of its own, and it fills no sidebar card", wire.writing === "true" && wire.notFiled === true && wire.ended === true && wire.asked === 1 && wire.named === "src/lib.rs", JSON.stringify(wire));
+
+    /* a burst: 200 pairs in one tick, 40 files — as few questions as the cap allows, each file in one */
+    const burst = await page.evaluate(async ({ windowMs, most }) => {
+      const { root, fire, act, settle, sleep } = window.__XT__;
+      const out = {};
+      await sleep(windowMs + 300);
+      const before = { ...window.__COUNTS__ };
+      const askedBefore = window.__XT__.asked.length;
+      for (let at = 0; at < 200; at += 1) {
+        const target = `${root}/src/burst${at % 40}.rs`;
+        fire("term:5", [act("edit", target, "started", { call: `b${at}` })]);
+        fire("term:5", [act("edit", target, "finished", { call: `b${at}` })]);
+      }
+      await settle(3);
+      // Wait for the questions the cap makes necessary, one window over (a question
+      // beyond them would show) — and never into the page's own settled re-read of git
+      // (`SCM_SETTLE_MS`, after the last activity), so that what is counted below is
+      // the write-end road's alone.
+      const expected = Math.ceil(40 / most);
+      const waited = performance.now();
+      while (window.__XT__.asked.length - askedBefore < expected && performance.now() - waited < windowMs * (expected + 2)) await sleep(25);
+      await sleep(windowMs + 50);
+      out.window = Math.round(performance.now() - waited);
+      out.settle = typeof SCM_SETTLE_MS === "number" ? SCM_SETTLE_MS : NaN;
+      out.waitingMax = typeof TREE_NUMSTAT_WAITING_MAX === "number" ? TREE_NUMSTAT_WAITING_MAX : NaN;
+      const delta = (command) => (window.__COUNTS__[command] ?? 0) - (before[command] ?? 0);
+      const questions = window.__XT__.asked.slice(askedBefore);
+      out.questions = questions.length;
+      out.files = new Set(questions.flat()).size;
+      out.biggest = Math.max(0, ...questions.map((paths) => paths.length));
+      out.repeats = questions.flat().length - out.files;
+      out.wholeRepo = delta("scm_status") + delta("upstream_status");
+      out.listed = delta("list_dir");
+      // More files than one question may name wait for the next window, in order.
+      const spill = 2 * most + 6;
+      const spillBefore = window.__XT__.asked.length;
+      for (let at = 0; at < spill; at += 1) fire("term:5", [act("edit", `${root}/src/spill${at}.rs`, "finished", { call: `s${at}` })]);
+      await sleep(windowMs * 5 + 600);
+      const spilled = window.__XT__.asked.slice(spillBefore);
+      out.spillQuestions = spilled.length;
+      out.spillFiles = new Set(spilled.flat()).size;
+      out.spillBiggest = Math.max(0, ...spilled.map((paths) => paths.length));
+      out.spill = spill;
+      return out;
+    }, { windowMs, most });
+    ok("a burst of 200 start/end pairs asks git about each file once, in as few questions as the cap allows — never per event, never a whole-repo status, no listing", burst.questions === Math.ceil(40 / most) && burst.biggest <= most && burst.files === 40 && burst.repeats === 0 && burst.wholeRepo === 0 && burst.listed === 0 && burst.window < burst.settle, JSON.stringify(burst));
+    ok("more files than one question may name are asked in the following windows, none dropped and none named twice", burst.spillBiggest <= most && burst.spillFiles === burst.spill && burst.spillQuestions >= 3 && burst.spill <= burst.waitingMax, JSON.stringify(burst));
+
+    /* held writes are bounded however many calls start and never end */
+    const held = await page.evaluate(() => {
+      const { root, fire, act } = window.__XT__;
+      for (let at = 0; at < 300; at += 1) fire("term:6", [act("edit", `${root}/src/many${at}.rs`, "started", { call: `many${at}` })]);
+      return { writes: typeof treeWrites === "object" ? treeWrites.size : NaN, cap: typeof TREE_TOUCH_CAP === "number" ? TREE_TOUCH_CAP : NaN };
+    });
+    ok("the writes held open are bounded by the touch cap however many calls start and never end", Number.isFinite(held.writes) && held.writes <= held.cap, JSON.stringify(held));
+
+    /* a run of short writes does not push out the long ones still open: with the cap full, a write
+     * that has ended — only waiting out its showing — goes first, for an open write's end may name
+     * no file (a wire session's does not) and then only its start knows it */
+    const crowd = await page.evaluate(async ({ max }) => {
+      const { root, fire, act } = window.__XT__;
+      const real = performance.now.bind(performance);
+      const letGo = () => {
+        performance.now = () => real() + max + 1000;
+        try { sweepTreeTouches(); } finally { performance.now = real; }
+      };
+      letGo();
+      const cap = typeof TREE_TOUCH_CAP === "number" ? TREE_TOUCH_CAP : NaN;
+      const longs = cap - 2;
+      for (let at = 0; at < longs; at += 1) fire("term:7", [act("edit", `${root}/src/long${at}.rs`, "started", { call: `long${at}` })]);
+      for (let at = 0; at < 4; at += 1) {
+        fire("term:8", [act("edit", `${root}/src/short${at}.rs`, "started", { call: `short${at}` })]);
+        fire("term:8", [act("edit", `${root}/src/short${at}.rs`, "finished", { call: `short${at}` })]);
+      }
+      const holding = [...treeWrites.values()];
+      const out = { cap, longs, open: holding.filter((one) => !one.closed && one.pane === "term:7").length, held: holding.length };
+      letGo();
+      return out;
+    }, { max });
+    ok("with the cap full, a write that has ended goes before one still open: a run of short writes leaves the long ones in place", Number.isFinite(crowd.cap) && crowd.longs > 0 && crowd.open === crowd.longs && crowd.held <= crowd.cap, JSON.stringify(crowd));
+
+    /* the sheen is a theme token and the name stays readable under its peak */
+    const sheen = await page.evaluate(async () => {
+      const prior = document.documentElement.dataset.theme;
+      const channels = (value) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+      const luminance = (values) => values.map((v) => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+      const ratio = (a, b) => { const pair = [luminance(a), luminance(b)].sort((x, y) => y - x); return (pair[0] + .05) / (pair[1] + .05); };
+      const resolved = (property, value) => {
+        const probe = document.createElement("span");
+        probe.style[property] = value;
+        document.body.append(probe);
+        const read = getComputedStyle(probe)[property];
+        probe.remove();
+        return channels(read);
+      };
+      const out = [];
+      for (const theme of ["dark", "light"]) {
+        document.documentElement.dataset.theme = theme;
+        await new Promise((done) => setTimeout(done, 250));
+        const tokens = getComputedStyle(document.documentElement);
+        const raw = tokens.getPropertyValue("--tree-writing-sheen").trim();
+        const share = Number(raw.match(/(\d+(?:\.\d+)?)%/)?.[1]) / 100;
+        const ink = resolved("color", tokens.getPropertyValue("--tree-touch-write"));
+        const ratios = ["--surface-deck", "--surface-well"].map((name) => {
+          const ground = resolved("backgroundColor", tokens.getPropertyValue(name));
+          return ratio(ink, ground.map((value, at) => value * (1 - share) + ink[at] * share));
+        });
+        out.push({ theme, raw, share, ratios: ratios.map((one) => Math.round(one * 100) / 100), sweepMs: parseFloat(tokens.getPropertyValue("--tree-writing-sweep")) });
+      }
+      document.documentElement.dataset.theme = prior;
+      return out;
+    });
+    ok("the sheen is a theme token — its own in each theme — and the written name stays 4.5:1 readable under its peak on both grounds; one sweep lasts at least the shortest showing", sheen.length === 2 && sheen.every((one) => one.share > 0 && one.share < .5 && one.ratios.every((ratio) => ratio >= 4.5) && one.sweepMs >= min) && sheen[0].raw !== sheen[1].raw, JSON.stringify(sheen));
+
+    /* reduced motion: nothing moves, a static marker stands, the words are the same */
+    // Nothing writing from here on, whatever the cases above left open.
+    await page.evaluate(() => { if (typeof treeWrites === "object") treeWrites.clear(); });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const still = await page.evaluate(async () => {
+      const { root, fire, act, settle, row, writing, sweeping } = window.__XT__;
+      fire("term:7", [act("edit", `${root}/README.md`, "started", { call: "rm1" })]);
+      await settle(6);
+      const row0 = row("README.md");
+      const mark = row0 ? getComputedStyle(row0, "::after") : null;
+      const word = t("tree.writing.file", "");
+      return {
+        writing: writing("README.md"),
+        sweeping: sweeping("README.md"),
+        animationName: mark?.animationName ?? null,
+        marker: mark ? { content: mark.content, display: mark.display, height: parseFloat(mark.height) } : null,
+        said: word.length > 0 && (row0?.getAttribute("aria-label") ?? "").includes(word),
+      };
+    });
+    await page.emulateMedia({ reducedMotion: WINDOW_MOTION_REST });
+    ok("under reduced motion the writing state does not move, a static marker stands in its place, and the words are the same", still.writing === "true" && still.sweeping === 0 && still.animationName === "none" && still.marker?.content !== "none" && still.marker?.display !== "none" && still.marker?.height > 0 && still.said === true, JSON.stringify(still));
+
+    /* the keyboard: the row that holds focus names what is happening to it */
+    await page.evaluate(() => window.__XT__.row("README.md").focus());
+    // README.md is the tree's last row: up to its neighbour and back, by keyboard.
+    await page.keyboard.press("ArrowUp");
+    await page.keyboard.press("ArrowDown");
+    const focus = await page.evaluate(() => {
+      const row = document.activeElement;
+      const word = t("tree.writing.file", "");
+      return { path: row?.dataset?.treePath ?? null, visible: row?.matches?.(":focus-visible") ?? false, said: word.length > 0 && (row?.getAttribute?.("aria-label") ?? "").includes(word) };
+    });
+    ok("a focused row that is being written shows its focus ring and says what is happening to it in words", focus.path === "README.md" && focus.visible === true && focus.said === true, JSON.stringify(focus));
+    ok("the writing suite raised no renderer faults", faults.length === 0, faults.join(" | "));
+  } finally {
+    await page.close();
+  }
+}
+
+/* ---- slice 8, memory: a long run grows nothing (t-31715) -----------------------
+ *
+ * An agent works for hours: thousands of calls, many of whose ends never reach
+ * the window. Everything the tree holds for them — the open writes, the files
+ * waiting for git, the rows it dressed — is bounded by a cap, so the heap after
+ * a long run, with garbage collected, is the heap before it. Measured over CDP
+ * (`HeapProfiler.collectGarbage`, `Runtime.getHeapUsage`: exact, where the
+ * page's own `performance.memory` is bucketed) and printed as
+ * `EXPLORER_AGENT_MEMORY`, so a before and an after are two log lines. */
+export async function testExplorerAgentMemory(browser, origin, ok) {
+  const listings = { "": [] };
+  for (let dir = 0; dir < 20; dir += 1) {
+    const name = `d${String(dir).padStart(2, "0")}`;
+    listings[""].push({ name, is_dir: true });
+    listings[name] = [];
+    for (let file = 0; file < 20; file += 1) listings[name].push({ name: `f${String(file).padStart(2, "0")}.rs`, is_dir: false });
+  }
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  const cdp = await page.context().newCDPSession(page);
+  const heap = async () => {
+    await cdp.send("HeapProfiler.collectGarbage");
+    await cdp.send("HeapProfiler.collectGarbage");
+    return (await cdp.send("Runtime.getHeapUsage")).usedSize;
+  };
+  try {
+    await standTree(page, listings);
+    await page.evaluate(async () => {
+      const { settle } = window.__XT__;
+      window.__ANSWER__.scm_numstat = ({ paths }) => paths.map((path) => ({ path, code: " M", staged: false, changed: true, added: 2, removed: 1, conflict: null, origin: null }));
+      for (const row of [...fileTree.querySelectorAll(":scope > .tree-row.is-dir")]) await row._treeUnfold(true);
+      await settle();
+    });
+    // One round: 200 calls — half end, half never do — each with an id nobody
+    // has used, over the 400 files, then a breath.
+    const round = (rounds, breathMs) => page.evaluate(async ({ rounds, breathMs }) => {
+      const { root, fire, act } = window.__XT__;
+      const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+      let calls = window.__MEMORY_CALLS__ ?? 0;
+      for (let at = 0; at < rounds; at += 1) {
+        for (let one = 0; one < 200; one += 1) {
+          const dir = `d${String(calls % 20).padStart(2, "0")}`;
+          const file = `f${String(Math.floor(calls / 20) % 20).padStart(2, "0")}.rs`;
+          const target = `${root}/${dir}/${file}`;
+          fire("term:1", [act("edit", target, "started", { call: `mem${calls}` })]);
+          if (one % 2 === 0) fire("term:1", [act("edit", target, "finished", { call: `mem${calls}` })]);
+          calls += 1;
+        }
+        await sleep(breathMs);
+      }
+      window.__MEMORY_CALLS__ = calls;
+      return calls;
+    }, { rounds, breathMs });
+    // Warm: the first rounds build what any long run keeps (rows dressed, maps filled).
+    await round(5, MEMORY_BREATH_MS);
+    const before = await heap();
+    const calls = await round(100, MEMORY_BREATH_MS);
+    const after = await heap();
+    const held = await page.evaluate(() => ({
+      writes: typeof treeWrites === "object" ? treeWrites.size : NaN,
+      wanted: typeof treeNumstatWanted === "object" ? treeNumstatWanted.size : NaN,
+      dressed: typeof treeDressedRows === "object" ? treeDressedRows.size : NaN,
+      touches: treeTouches.size,
+      cap: typeof TREE_TOUCH_CAP === "number" ? TREE_TOUCH_CAP : NaN,
+      waitingMax: typeof TREE_NUMSTAT_WAITING_MAX === "number" ? TREE_NUMSTAT_WAITING_MAX : NaN,
+      activityRing: [...paneActivities.values()].reduce((sum, list) => sum + list.length, 0),
+    }));
+    const growthKiB = Math.round((after - before) / 1024);
+    const numbers = { calls, beforeKiB: Math.round(before / 1024), afterKiB: Math.round(after / 1024), growthKiB, ...held };
+    console.log(`EXPLORER_AGENT_MEMORY ${JSON.stringify(numbers)}`);
+    ok("what the tree holds for a long run is bounded by its caps: the open writes, the files waiting for git, the rows dressed and the window's ring", held.writes <= held.cap && held.wanted <= held.waitingMax && held.dressed <= held.cap * 8 && held.touches <= held.cap && held.activityRing <= 20 * 4, JSON.stringify(numbers));
+    ok("a hundred rounds of two hundred calls — half of them never ended — leave the heap, garbage collected, where it was (growth under 3 MiB: a leak of one small object per call would be larger)", Number.isFinite(growthKiB) && growthKiB < 3072 && held.writes <= held.cap, JSON.stringify(numbers));
+    ok("the memory suite raised no renderer faults", faults.length === 0, faults.join(" | "));
   } finally {
     await page.close();
   }

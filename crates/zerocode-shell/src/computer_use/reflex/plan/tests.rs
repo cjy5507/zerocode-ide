@@ -660,10 +660,10 @@ fn a_plan_is_asked_from_words_and_numbers_with_no_picture() {
 /// version is red here, because a plan's label is read per version.
 #[test]
 fn the_version_is_pinned_to_the_words() {
-    assert_eq!(PROMPT_VERSION, 3);
+    assert_eq!(PROMPT_VERSION, 4);
     assert_eq!(
         zerocode_core::jev::fingerprint_of(INSTRUCTIONS),
-        "278ea90b68f98c91"
+        "6a6a0d7e654286a2"
     );
 }
 
@@ -832,4 +832,24 @@ fn a_plan_says_which_generator_wrote_it() {
         "answered",
     );
     assert_eq!(row["source"], json!("stub"));
+}
+
+/// The model writes `pointer.duration_ms` for every plan and the one example
+/// it is shown glides 80 ms — a pace a person follows with their eyes on a
+/// still screen. The instructions say what the glide costs and what a target
+/// that shows for under a second wants, in the table's own terms (t-26708);
+/// else every model-written plan reacts at the example's pace, and the bench
+/// measured that pace at 110 ms to the press where 16 ms gave 56.
+#[test]
+fn the_instructions_say_what_the_glide_costs_and_what_a_short_lived_target_wants() {
+    for words in [
+        "pointer.duration_ms",
+        "shortest glide",
+        "limits.reflex.pointer_tick_ns",
+    ] {
+        assert!(
+            INSTRUCTIONS.contains(words),
+            "the instructions say nothing of {words:?}"
+        );
+    }
 }

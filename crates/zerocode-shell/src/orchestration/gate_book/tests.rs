@@ -17,6 +17,7 @@ fn activity(phase: Phase) -> Activity {
         writes: Vec::new(),
         vcs: Vec::new(),
         cwd: None,
+        call: None,
     }
 }
 

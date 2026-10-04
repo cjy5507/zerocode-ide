@@ -253,14 +253,25 @@ fn the_settle_pass_lists_first_and_closes_only_when_applied() {
     bench.json(&format!(
         "task-update --task {done_unhanded} --status completed"
     ));
-    // One a coordinator already judged: old news it is not.
+    // One a coordinator already judged: old news it is not. Written in the
+    // coordinator seat's voice — a claim in any other is no judgment (t-34904).
     let judged = task_with_an_empty_attempt(&mut bench, "judged");
-    bench.ledger.runs[0]
+    let judged_attempt = bench.ledger.runs[0]
+        .newest_attempt(&judged)
+        .map(|attempt| attempt.id.clone());
+    let task = bench.ledger.runs[0]
         .tasks
         .iter_mut()
         .find(|task| task.id == judged)
-        .expect("the task")
-        .result = r#"{"merged":true}"#.into();
+        .expect("the task");
+    task.result = r#"{"merged":true}"#.into();
+    task.result_author = Some(ResultAuthor::Coordinator {
+        seat: "coordinator".into(),
+        generation: None,
+        attempt: judged_attempt,
+        source: None,
+        completed_ms: None,
+    });
     // Nobody has touched any of it for longer than the quiet time.
     bench.clock += SETTLE_QUIET_DAYS * 86_400_000 + 1;
     // One handed something in, however long ago: it can take a review.

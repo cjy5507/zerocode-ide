@@ -1096,9 +1096,20 @@ pub struct Activity {
     pub vcs: Vec<VcsStep>,
     /// The folder the call ran in, as the payload said it (Claude's and
     /// Cursor's `cwd`) — carried only beside [`Activity::reads`] or
-    /// [`Activity::writes`], the relative paths it is the base of.
+    /// [`Activity::writes`], the relative paths it is the base of. A wire
+    /// session (no pane to resolve a relative path against) says its own
+    /// folder on every call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// The vendor's id for the tool call this event is one end of (t-31715),
+    /// said on the start AND on the end — Claude's family and Codex write
+    /// `tool_use_id`, Amp `toolUseId`, a wire session's turns `call_id`; zo
+    /// writes the same spelling Claude does. It is what lets the file tree pair
+    /// a write that has begun with the one that has ended. `None` where the
+    /// vendor gives none (then the two meet by verb and target) and for a
+    /// snapshot of what a helper is doing now, which no end will ever close.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
 }
 
 /// One git or gh operation a shell command runs (t-24298): the program and
@@ -1477,9 +1488,9 @@ struct Touched {
     cwd: Option<String>,
 }
 
-fn touched_in(verb: &Tool, parsed: &serde_json::Value) -> Touched {
+fn touched_in(verb: &Tool, parsed: &serde_json::Value, shown: Option<&str>) -> Touched {
     let input = INPUT_KEYS.iter().find_map(|key| parsed.get(*key));
-    let writes: Vec<String> = match input {
+    let mut writes: Vec<String> = match input {
         Some(input) if matches!(verb, Tool::Edit | Tool::Bash) && names_a_patch(input) => {
             crate::transcript::edits_in(tool_named_in(parsed).unwrap_or_default(), Some(input))
                 .into_iter()
@@ -1488,12 +1499,13 @@ fn touched_in(verb: &Tool, parsed: &serde_json::Value) -> Touched {
         }
         _ => Vec::new(),
     };
-    let (reads, vcs) = match verb {
+    let (mut reads, vcs) = match verb {
         Tool::Bash => shell_script_in(parsed)
             .map(|script| (read_paths(&script), vcs_steps(&script)))
             .unwrap_or_default(),
         _ => (Vec::new(), Vec::new()),
     };
+    file_cut_path(verb, shown, || target_in(parsed), &mut reads, &mut writes);
     // Raw, not through the row's clamp: a base cut at 120 characters would
     // put every path under it somewhere else.
     let cwd = (!reads.is_empty() || !writes.is_empty())
@@ -1610,8 +1622,39 @@ fn activity_text(text: &str) -> Option<String> {
         return Some(collapsed);
     }
     let mut cut: String = collapsed.chars().take(ACTIVITY_TARGET_CHARS).collect();
-    cut.push('…');
+    cut.push(CUT_MARK);
     Some(cut)
+}
+
+/// What the row's clamp leaves at the end of a target it cut ([`activity_text`]).
+const CUT_MARK: char = '…';
+
+/// A file whose path the row's clamp cut, filed whole with the files the call
+/// reads or writes (t-31715) — where the file tree looks, which cannot walk to a
+/// path that ends in [`CUT_MARK`] — while the row keeps its cut words. Without
+/// it a deep path never lights its row, shimmers, or gets its counts, for any
+/// agent. Only a call that names a file of its own has one (`Read`, `Edit`,
+/// `Write`: a search's pattern or a command is no file), and only when it names
+/// no other: a patch lists its files already. `whole_path` is asked only then.
+fn file_cut_path(
+    verb: &Tool,
+    shown: Option<&str>,
+    whole_path: impl FnOnce() -> Option<String>,
+    reads: &mut Vec<String>,
+    writes: &mut Vec<String>,
+) {
+    let cut = shown.is_some_and(|words| words.ends_with(CUT_MARK));
+    if !cut || !reads.is_empty() || !writes.is_empty() {
+        return;
+    }
+    let Some(whole) = whole_path() else {
+        return;
+    };
+    match verb {
+        Tool::Read => reads.push(whole),
+        Tool::Edit | Tool::Write => writes.push(whole),
+        _ => {}
+    }
 }
 
 /// What separates a verb from its target in a composed activity line.
@@ -1648,6 +1691,7 @@ pub fn activity_said(line: &str) -> Option<Activity> {
         writes: Vec::new(),
         vcs: Vec::new(),
         cwd: None,
+        call: None,
     })
 }
 
@@ -1785,7 +1829,7 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
         } else {
             phase
         };
-        let touched = touched_in(&verb, parsed);
+        let touched = touched_in(&verb, parsed, target.as_deref());
         return Some(Activity {
             verb,
             target,
@@ -1794,6 +1838,7 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             writes: touched.writes,
             vcs: touched.vcs,
             cwd: touched.cwd,
+            call: worker_call_id_in(parsed),
         });
     }
     if word == "userpromptsubmit" || word == "beforesubmitprompt" {
@@ -1805,6 +1850,7 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             writes: Vec::new(),
             vcs: Vec::new(),
             cwd: None,
+            call: None,
         });
     }
     // Every way a turn ends, borrowed from the one table that already knows
@@ -1818,10 +1864,65 @@ pub fn activity_of_parsed(event_name: &str, payload: &HookPayload<'_>) -> Option
             writes: Vec::new(),
             vcs: Vec::new(),
             cwd: None,
+            call: None,
         });
     }
     None
 }
+
+/// What a tool turn of a driver that has no hooks says an agent is doing
+/// (t-31715): the one road a wire session (Codex `app-server`, ACP, Claude
+/// Code's stream) reports its tool calls on, so that it says what a hook agent
+/// says. `role` is the turn's (`tool` — a call, `tool_result` — its end);
+/// every other turn is the conversation's and says nothing here.
+///
+/// The files are the call's own (`file`, what its input names) and the ones its
+/// edits describe, each as the agent wrote the path — a patch names several and
+/// no file of its own. A result carries the call's id and, where its agent
+/// repeats it, the edits; its name may be empty (Claude Code's result lines name
+/// no tool), and it then says `NAMELESS_TOOL_VERB`.
+#[must_use]
+pub fn activity_of_turn(role: &str, tool: &crate::transcript::TranscriptTool) -> Option<Activity> {
+    let phase = match role {
+        TOOL_CALL_ROLE => Phase::Started,
+        TOOL_RESULT_ROLE if tool.is_error => Phase::Failed,
+        TOOL_RESULT_ROLE => Phase::Finished,
+        _ => return None,
+    };
+    let verb =
+        Tool::named(&tool.name).unwrap_or_else(|| Tool::Other(NAMELESS_TOOL_VERB.to_string()));
+    let target = tool
+        .file
+        .as_ref()
+        .and_then(|file| activity_text(&file.path));
+    let mut reads = Vec::new();
+    let mut writes: Vec<String> = tool.edits.iter().map(|edit| edit.path.clone()).collect();
+    file_cut_path(
+        &verb,
+        target.as_deref(),
+        || tool.file.as_ref().map(|file| file.path.clone()),
+        &mut reads,
+        &mut writes,
+    );
+    Some(Activity {
+        verb,
+        target,
+        phase,
+        reads,
+        writes,
+        vcs: Vec::new(),
+        cwd: None,
+        call: Some(tool.call_id.clone()).filter(|id| !id.trim().is_empty()),
+    })
+}
+
+/// The transcript roles a tool call and its result take (`TranscriptTurn::role`).
+const TOOL_CALL_ROLE: &str = "tool";
+const TOOL_RESULT_ROLE: &str = "tool_result";
+
+/// What a result whose agent named no tool says it is: the neutral word zo's
+/// own reporter files an unnamed call under.
+const NAMELESS_TOOL_VERB: &str = "tool";
 
 /// The agent CLI a shell command launches, or `None` for an ordinary command.
 ///
@@ -3284,6 +3385,296 @@ mod tests {
         // And says nothing about its target rather than dumping the whole input
         // object onto a row.
         assert_eq!(mcp.target, None);
+    }
+
+    /// A call's start and its end say the same id (t-31715) — what lets the
+    /// file tree tell a write that has begun from one that has ended, whichever
+    /// agent writes. One payload per spelling of the id, the start and the end
+    /// of each; and an agent that gives none says none (the tree then pairs by
+    /// verb and target), never an invented one.
+    #[test]
+    fn a_tool_calls_start_and_end_say_the_same_call_id_in_every_spelling() {
+        let call_of = |event: &str, payload: &str| {
+            activity_of(event, payload)
+                .expect("a tool event said nothing")
+                .call
+        };
+        let said = |id: &str| Some(id.to_string());
+        // Claude's family, and Codex: `tool_use_id`, on both ends.
+        let edit = |event: &str, id: &str| {
+            format!(
+                r#"{{"hook_event_name":"{event}","tool_name":"Edit","tool_use_id":"{id}",
+                    "tool_input":{{"file_path":"/repo/src/a.rs"}}}}"#
+            )
+        };
+        assert_eq!(
+            call_of("PreToolUse", &edit("PreToolUse", "toolu_01")),
+            said("toolu_01")
+        );
+        assert_eq!(
+            call_of("PostToolUse", &edit("PostToolUse", "toolu_01")),
+            said("toolu_01")
+        );
+        assert_eq!(
+            call_of(
+                "PostToolUseFailure",
+                &edit("PostToolUseFailure", "toolu_01")
+            ),
+            said("toolu_01")
+        );
+        // Amp's plugin: `toolUseId`.
+        assert_eq!(
+            call_of(
+                "tool.call",
+                r#"{"hook_event_name":"tool.call","toolUseId":"u-1","tool":"edit_file","input":{"path":"/repo/src/a.rs"}}"#
+            ),
+            said("u-1")
+        );
+        assert_eq!(
+            call_of(
+                "tool.result",
+                r#"{"hook_event_name":"tool.result","toolUseId":"u-1","tool":"edit_file","input":{"path":"/repo/src/a.rs"},"status":"done"}"#
+            ),
+            said("u-1")
+        );
+        // The other spellings the one reader knows.
+        assert_eq!(
+            call_of(
+                "PreToolUse",
+                r#"{"tool_name":"Write","tool_call_id":"call-9","tool_input":{"file_path":"/repo/b.rs"}}"#
+            ),
+            said("call-9")
+        );
+        // zo's own hooks, in Claude's spelling: the id its runtime minted, and the
+        // full path rather than the clipped tail its working line shows.
+        let zo = activity_of(
+            "PreToolUse",
+            r#"{"tool_name":"Edit","tool_use_id":"call_7","session_id":"s-1",
+                "tool_input":{"file_path":"/repo/zo-ide/crates/zo-ide/src/tui/view.rs"},
+                "activity":{"verb":"edit","target":"tui/view.rs","phase":"started","elapsed_secs":0}}"#,
+        )
+        .expect("a zo tool start said nothing");
+        assert_eq!(zo.call, said("call_7"));
+        assert_eq!(
+            zo.target.as_deref(),
+            Some("/repo/zo-ide/crates/zo-ide/src/tui/view.rs")
+        );
+        // An agent that gives none says none; so do a prompt and a turn's end.
+        assert_eq!(
+            call_of(
+                "PreToolUse",
+                r#"{"tool_name":"Edit","tool_input":{"file_path":"/repo/src/a.rs"}}"#
+            ),
+            None
+        );
+        assert_eq!(
+            activity_of("UserPromptSubmit", r#"{"prompt":"go"}"#)
+                .expect("a prompt said nothing")
+                .call,
+            None
+        );
+        // And the id rides the wire only when there is one.
+        let wire = serde_json::to_value(
+            activity_of(
+                "PreToolUse",
+                r#"{"tool_name":"Edit","tool_input":{"file_path":"/repo/src/a.rs"}}"#,
+            )
+            .expect("a tool start said nothing"),
+        )
+        .expect("an activity serializes");
+        assert!(wire.get("call").is_none(), "{wire}");
+    }
+
+    /// A tool turn as a wire session's transcript makes it: the call's id and
+    /// name, the file it names (if any), the files its edits describe, and
+    /// whether its result was an error.
+    fn wire_tool(
+        name: &str,
+        call: &str,
+        file: Option<&str>,
+        paths: &[&str],
+        is_error: bool,
+    ) -> crate::transcript::TranscriptTool {
+        use crate::transcript::{TranscriptEdit, TranscriptFile, TranscriptTool};
+        TranscriptTool {
+            call_id: call.to_string(),
+            name: name.to_string(),
+            kind: Tool::named(name)
+                .map(|known| known.as_str().to_string())
+                .unwrap_or_default(),
+            input: String::new(),
+            is_error,
+            edits: paths
+                .iter()
+                .map(|path| TranscriptEdit::at(path, Vec::new()))
+                .collect(),
+            file: file.map(|path| TranscriptFile {
+                path: path.to_string(),
+                offset: None,
+                limit: None,
+                search: None,
+            }),
+            facts: None,
+        }
+    }
+
+    /// A wire session's tool turns say what a hook agent says (t-31715): a call
+    /// is a start, its result an end that is a failure when the result is one,
+    /// the id is the call's own, the files are the call's file or the files its
+    /// edits name — and the conversation's other turns say nothing.
+    #[test]
+    fn a_wire_sessions_tool_turns_say_what_a_hook_agent_says() {
+        // Claude Code's Edit over its stream: one file, named by the call.
+        let started = activity_of_turn(
+            "tool",
+            &wire_tool(
+                "Edit",
+                "toolu_1",
+                Some("/repo/src/a.rs"),
+                &["/repo/src/a.rs"],
+                false,
+            ),
+        )
+        .expect("a call said nothing");
+        assert_eq!(started.verb, Tool::Edit);
+        assert_eq!(started.phase, Phase::Started);
+        assert_eq!(started.call.as_deref(), Some("toolu_1"));
+        assert_eq!(started.target.as_deref(), Some("/repo/src/a.rs"));
+        assert_eq!(started.writes, vec!["/repo/src/a.rs".to_string()]);
+        // Codex's `apply_patch`: no file of its own, the files its edits name.
+        let patch = activity_of_turn(
+            "tool",
+            &wire_tool(
+                "apply_patch",
+                "item_3",
+                None,
+                &["src/a.rs", "src/b.rs"],
+                false,
+            ),
+        )
+        .expect("a patch said nothing");
+        assert_eq!(patch.verb, Tool::Edit);
+        assert_eq!(patch.target, None);
+        assert_eq!(
+            patch.writes,
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+        // A result is the end, and says the id of the call it ends — its name
+        // may be empty (Claude's result lines name none).
+        let finished = activity_of_turn("tool_result", &wire_tool("", "toolu_1", None, &[], false))
+            .expect("a result said nothing");
+        assert_eq!(finished.phase, Phase::Finished);
+        assert_eq!(finished.call.as_deref(), Some("toolu_1"));
+        let failed = activity_of_turn(
+            "tool_result",
+            &wire_tool("Edit", "toolu_2", None, &[], true),
+        )
+        .expect("a failed result said nothing");
+        assert_eq!(failed.phase, Phase::Failed);
+        assert_eq!(failed.verb, Tool::Edit);
+        // A tool this table has not heard of keeps its own name.
+        let other = activity_of_turn("tool", &wire_tool("calendar.add", "c-1", None, &[], false))
+            .expect("an unknown tool said nothing");
+        assert_eq!(other.verb, Tool::Other("calendar.add".to_string()));
+        // The conversation's own turns are not tool calls.
+        for role in ["assistant", "user", "thinking", "system"] {
+            assert_eq!(
+                activity_of_turn(role, &wire_tool("Edit", "toolu_3", None, &[], false)),
+                None,
+                "{role}"
+            );
+        }
+    }
+
+    /// A path longer than the row's clamp is cut there, and a file tree cannot
+    /// walk to a path that ends in the cut's mark (t-31715) — so a call that
+    /// names a file of its own says the whole path where the tree reads files
+    /// (`reads`, `writes`) and keeps the cut words for the row. A path that
+    /// fits says nothing beside its target, as before; a pattern or a command
+    /// is not a file.
+    #[test]
+    fn a_path_the_rows_clamp_cut_is_said_whole_where_the_file_tree_reads_files() {
+        let deep = format!("/repo/{}a.rs", "deep/".repeat(40));
+        assert!(deep.chars().count() > ACTIVITY_TARGET_CHARS);
+        let said = |event: &str, tool: &str, key: &str, value: &str| {
+            activity_of(
+                event,
+                &format!(
+                    r#"{{"tool_name":"{tool}","cwd":"/repo","tool_input":{{"{key}":"{value}"}}}}"#
+                ),
+            )
+            .expect("a tool event said nothing")
+        };
+        let edit = said("PreToolUse", "Edit", "file_path", &deep);
+        assert!(
+            edit.target
+                .as_deref()
+                .is_some_and(|words| words.ends_with('…')),
+            "the row's words are still the cut ones: {:?}",
+            edit.target
+        );
+        assert_eq!(edit.writes, vec![deep.clone()]);
+        assert!(edit.reads.is_empty());
+        assert_eq!(edit.cwd.as_deref(), Some("/repo"));
+        assert_eq!(
+            said("PreToolUse", "Write", "file_path", &deep).writes,
+            vec![deep.clone()]
+        );
+        let read = said("PreToolUse", "Read", "file_path", &deep);
+        assert_eq!(read.reads, vec![deep.clone()]);
+        assert!(read.writes.is_empty());
+        // The end says it as the start does: it can ask git for the file alone.
+        assert_eq!(
+            said("PostToolUse", "Edit", "file_path", &deep).writes,
+            vec![deep.clone()]
+        );
+        // A path that fits is its own target, with nothing beside it.
+        let short = said("PreToolUse", "Edit", "file_path", "/repo/src/a.rs");
+        assert_eq!(short.target.as_deref(), Some("/repo/src/a.rs"));
+        assert!(short.writes.is_empty() && short.reads.is_empty());
+        // A cut pattern or command is not a file.
+        let long = "x".repeat(ACTIVITY_TARGET_CHARS * 2);
+        let pattern = said("PreToolUse", "Grep", "pattern", &long);
+        assert!(pattern.reads.is_empty() && pattern.writes.is_empty());
+        let command = said("PreToolUse", "Bash", "command", &long);
+        assert!(command.reads.is_empty() && command.writes.is_empty());
+    }
+
+    /// A wire session's file call is cut by the same clamp and says its path
+    /// whole the same way (t-31715): a call that carries its edits has said the
+    /// files already, and says each once.
+    #[test]
+    fn a_wire_calls_cut_path_is_said_whole_where_the_file_tree_reads_files() {
+        let deep = format!("/repo/{}a.rs", "deep/".repeat(40));
+        let started = |name: &str, paths: &[&str]| {
+            activity_of_turn(
+                "tool",
+                &wire_tool(name, "c1", Some(deep.as_str()), paths, false),
+            )
+            .expect("a call said nothing")
+        };
+        let read = started("Read", &[]);
+        assert!(
+            read.target
+                .as_deref()
+                .is_some_and(|words| words.ends_with('…')),
+            "the row's words are still the cut ones: {:?}",
+            read.target
+        );
+        assert_eq!(read.reads, vec![deep.clone()]);
+        assert!(read.writes.is_empty());
+        assert_eq!(started("Edit", &[]).writes, vec![deep.clone()]);
+        assert_eq!(started("Edit", &[deep.as_str()]).writes, vec![deep.clone()]);
+        // A path that fits says nothing beside its target, and a result names no file.
+        let short = activity_of_turn(
+            "tool",
+            &wire_tool("Read", "c2", Some("/repo/a.rs"), &[], false),
+        )
+        .expect("a call said nothing");
+        assert!(short.reads.is_empty());
+        let result = activity_of_turn("tool_result", &wire_tool("Read", "c1", None, &[], false))
+            .expect("a result said nothing");
+        assert!(result.reads.is_empty() && result.target.is_none());
     }
 
     /// The prompt and the turn's end ride the same stream as the tools between

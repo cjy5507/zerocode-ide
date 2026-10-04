@@ -4233,7 +4233,11 @@ impl Ui {
                     // channel's fact (`publish_working_activity`), not a hook.
                     let activity = super::activity::Activity::from_preview(name, preview);
                     reporter.pre_tool_use(
-                        name,
+                        crate::ide::reporter::ToolCallFacts {
+                            call_id: &tool_call_id.0,
+                            name,
+                            file: super::activity::file_of(preview),
+                        },
                         activity.hook_input(summary),
                         &activity.started_card(),
                         session_id,
@@ -4253,11 +4257,20 @@ impl Ui {
                 is_error,
                 ..
             } => {
-                let name = self
-                    .tools
-                    .get(&tool_call_id.0)
-                    .map_or("tool", |call| call.name.as_str());
-                reporter.post_tool_use(name, *is_error, session_id);
+                let pending = self.tools.get(&tool_call_id.0);
+                let name = pending.map_or("tool", |call| call.name.as_str());
+                let file = pending
+                    .map(|call| call.path.as_str())
+                    .filter(|path| !path.is_empty());
+                reporter.post_tool_use(
+                    crate::ide::reporter::ToolCallFacts {
+                        call_id: &tool_call_id.0,
+                        name,
+                        file,
+                    },
+                    *is_error,
+                    session_id,
+                );
                 if crate::ide::reporter::HookReporter::spawns_subagent(name) {
                     reporter.subagent_stop(
                         &tool_call_id.0,
@@ -6683,9 +6696,18 @@ mod tests {
             [ev("PreToolUse", "Read"), ev("PreToolUse", "Read")]
         );
         let posted = captured.lock().expect("hook capture");
-        // The real tool name, the compact target the row shows, and the same
-        // started fact the channel says — at second zero, where a start is.
-        assert_eq!(posted[0].payload["tool_input"], "tui/view.rs");
+        // The real tool name; the id the runtime minted for each call, which is
+        // what tells two reads of one file apart and what the call's end will
+        // say again (t-31715); the call's whole file in Claude's spelling, which
+        // the window's file tree resolves (the compact tail the working line
+        // shows stays in the activity fact beside it); and the same started
+        // fact the channel says — at second zero, where a start is.
+        assert_eq!(posted[0].payload["tool_use_id"], "toolu_1");
+        assert_eq!(posted[1].payload["tool_use_id"], "toolu_2");
+        assert_eq!(
+            posted[0].payload["tool_input"],
+            json!({ "file_path": "workspace/crates/zo-ide/src/tui/view.rs" })
+        );
         assert_eq!(
             posted[0].payload["activity"],
             json!({

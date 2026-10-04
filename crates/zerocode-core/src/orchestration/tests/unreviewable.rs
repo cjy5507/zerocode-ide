@@ -134,13 +134,25 @@ fn work_a_coordinator_can_still_review_is_never_unreviewable() {
     let (_worker, pane) = bench.seat(&format!("worker-start --agent codex --task {retried}"));
     bench.json_at(&pane, "send --type worker_done --body {\"ok\":true}");
     // A coordinator already wrote its review: that is a record, not its absence.
+    // Written by the coordinator's seat against the attempt it judged — the
+    // one voice whose keys are facts (`ReviewFacts::written_by`).
     let judged = done_by_hand_after(&mut bench, "judged", 1);
-    bench.ledger.runs[0]
+    let judged_attempt = bench.ledger.runs[0]
+        .newest_attempt(&judged)
+        .map(|attempt| attempt.id.clone());
+    let task = bench.ledger.runs[0]
         .tasks
         .iter_mut()
         .find(|task| task.id == judged)
-        .expect("the task")
-        .result = r#"{"merged":true}"#.into();
+        .expect("the task");
+    task.result = r#"{"merged":true}"#.into();
+    task.result_author = Some(ResultAuthor::Coordinator {
+        seat: "coordinator".into(),
+        generation: None,
+        attempt: judged_attempt,
+        source: None,
+        completed_ms: None,
+    });
     // Not completed at all: an open task whose attempt ended empty is the
     // settle pass's pile, not a completed one.
     let open = task_of(&mut bench, "open");
@@ -155,6 +167,50 @@ fn work_a_coordinator_can_still_review_is_never_unreviewable() {
         (&open, "the task is not completed"),
     ] {
         assert!(!unreviewable(&mut bench, id), "{id}: {why}");
+    }
+}
+
+/// t-34904: a claim in the result is not a review. The old pile's shape — the
+/// attempts ended handing nothing in, written before hand-ins were recorded —
+/// with a result that says verified and merged in a voice the ledger cannot
+/// vouch for: the worker's own, or a row nobody is known to have written. The
+/// board shows the claim as a claim, no review can be written of the task, and
+/// so it is not 검증 대기 — it was, for ever, 47 times on one machine.
+#[test]
+fn a_claim_in_the_result_keeps_no_task_that_can_take_no_review_in_review() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name claims");
+    let worker_said = done_by_hand_after(&mut bench, "the worker said merged", 1);
+    let nobody_said = done_by_hand_after(&mut bench, "nobody known said merged", 1);
+    for (id, author) in [
+        (
+            &worker_said,
+            Some(ResultAuthor::Worker {
+                worker: "w-1".into(),
+                dispatch: None,
+            }),
+        ),
+        (&nobody_said, None),
+    ] {
+        let task = bench.ledger.runs[0]
+            .tasks
+            .iter_mut()
+            .find(|task| &task.id == id)
+            .expect("the task");
+        task.result = r#"{"ok":true,"verified":true,"merged":"abc1234"}"#.into();
+        task.result_author = author;
+    }
+    for id in [&worker_said, &nobody_said] {
+        let review = row_of(&mut bench, id)["review"].clone();
+        assert_eq!(
+            review["claimed_merged"], true,
+            "{id}: the claim is shown as a claim"
+        );
+        assert_eq!(review["merged"], false, "{id}: and never as a fact");
+        assert!(
+            unreviewable(&mut bench, id),
+            "{id}: no review can be written of it"
+        );
     }
 }
 

@@ -138,6 +138,7 @@ fn stand_wire(
         .ok_or_else(|| format!("{name} is not on the shell's PATH"))?;
     // Which account it runs as — the door every launch of this agent takes.
     let launch_env = account_env_for(state.config_root(), agent)?;
+    let page = app.clone();
     let app = app.clone();
     state.shell_runtime().wires.start(
         agent,
@@ -146,8 +147,15 @@ fn stand_wire(
         env!("CARGO_PKG_VERSION"),
         resume,
         &launch_env,
-        move |id| {
-            let _ = app.emit("wire:update", WireUpdate { id });
+        wire_runtime::WireNews {
+            changed: Box::new(move |id| {
+                let _ = page.emit("wire:update", WireUpdate { id });
+            }),
+            // The tool calls the session said, on the road every pane's
+            // travel — the file tree hears a wire session's writes (t-31715).
+            acted: Box::new(move |id, activities| {
+                pane_runtime::note_wire_activities(&app, id, activities);
+            }),
         },
     )
 }
@@ -381,5 +389,9 @@ pub(crate) fn wire_stop(
     state: State<'_, AppState>,
     id: wire_runtime::WireId,
 ) -> Result<(), String> {
-    state.shell_runtime().wires.stop(id)
+    state.shell_runtime().wires.stop(id)?;
+    // The session's card has nothing more to say, and its ring goes with it
+    // (t-31715): a card nothing forgets is a leak wearing a feature's clothes.
+    state.activities().remove(&hooks::activity_wire(id));
+    Ok(())
 }

@@ -9315,6 +9315,12 @@ function seedSubagents() {
 const ACTIVITY_RING = 20;
 const paneActivities = new Map();
 
+/* A wire session's card (`wire:<n>`, the backend's `hooks::activity_wire`):
+ * its tool calls reach the window on this road too (t-31715), for the file
+ * tree alone. A wire session has no sidebar card and no board node — what it
+ * does is its conversation page's to say — so nothing here files it. */
+const WIRE_CARD_PREFIX = "wire:";
+
 /* Seed it, once, for the same reason the helpers are seeded: this window may
  * have opened an hour into the work, and waiting for the next event means
  * waiting for an agent to do something new. One round trip for every card —
@@ -9327,7 +9333,7 @@ function seedActivities() {
   return invoke("pane_activities", { pane: null })
     .then((cards) => {
       for (const card of cards ?? []) {
-        if (card?.pane && card.activities?.length) paneActivities.set(card.pane, card.activities);
+        if (card?.pane && !card.pane.startsWith(WIRE_CARD_PREFIX) && card.activities?.length) paneActivities.set(card.pane, card.activities);
       }
     })
     .catch(() => {});
@@ -9399,6 +9405,10 @@ function toolUsesWords(count) {
 listen("hook:activity", (event) => {
   const { pane, activities } = event.payload ?? {};
   if (!pane || !activities?.length) return;
+  if (pane.startsWith(WIRE_CARD_PREFIX)) {
+    noteTreeActivities(pane, activities);
+    return;
+  }
   agentGraphHotKey = agentGraphAgentKey(pane);
   // 배치로 온다 — 백엔드가 카드마다 100ms에 한 번만 보내고, 그 사이의 것을
   // 모아서 함께 싣는다. 이어 붙이고 스무 개에서 끊는다.

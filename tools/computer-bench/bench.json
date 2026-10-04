@@ -764,5 +764,29 @@
   "rts_goal": {
     "value": "Press A for a yellow A card and 1 for a cyan 1 card. Box-select the green unit group from just outside its top-left to just outside its bottom-right, then press Ctrl+1. Right-click red targets, Shift-click blue targets, and Cmd-click magenta targets. The top {hud} points of the window are a fixed legend; ignore that strip and act only on targets in the field below it. Act only on this fixture window.",
     "why": "The same visible tasks as the hand-written plan, for the real automatic plan generator."
+  },
+  "reflex_kind": {
+    "value": {
+      "timing": {"preview_ms": [150, 300]},
+      "avoid": {"every_ms": [1500, 3000], "flight_ms": [450, 700], "width_pt": 60, "height_pt": 40, "pad_radius_pt": 20},
+      "panel": {"cards": 3, "life_ms": [600, 900]}
+    },
+    "why": "The round's kinds beyond today's plain one (t-26708), each the seed's alone: `timing` shows every target as a preview first and arms it after this long, so a press is measured against the moment it became right and an earlier press is a wrong input; `avoid` now and then sends a sweeper from outside the field toward where the pointer rests, over this flight, with a pad shown on the far side to move to — the pointer still under the sweeper when it arrives is struck; `panel` shows each target among cards-1 decoys for this life, so the right card is picked in time or not. A target's size, drift and gap are the plain round's."
+  },
+  "reflex_kind_palette": {
+    "value": {
+      "preview": {"r": 120, "g": 120, "b": 120, "tolerance": 40},
+      "sweeper": {"r": 255, "g": 160, "b": 0, "tolerance": 40},
+      "pad": {"r": 0, "g": 255, "b": 0, "tolerance": 40}
+    },
+    "why": "The colours a kind adds to the round's palette and to every detector's classes, each apart from the plain palette's and from one another by more than their tolerances reach together (the perception table's rule), so a count of zero stays known while they show: the preview a target wears before it is armed, the sweeper, and the pad. The plain round's bytes carry none of them."
+  },
+  "reflex_kind_floor": {
+    "value": {
+      "timing": {"p50_ms": 120, "p95_ms": 200},
+      "avoid": {"clear_share": 0.98},
+      "panel": {"in_time_share": 0.95}
+    },
+    "why": "The lines a kind's run is held to (t-26708, the person's targets): arm → press p50 and p95 for timing (a pro's visuomotor reaction measures 175 ± 26 ms, the press itself after it); the share of sweepers the pointer was clear of at arrival (one struck of a minute's launches fails it); the share of panels whose right card was pressed inside its life — a random pick gets 1/cards."
   }
 }
