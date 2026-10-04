@@ -59,3 +59,10 @@ harness = false
 [[bench]]
 name = "continue_gate_memory"
 harness = false
+
+# What masking and planning a worker's hand-in cost on a report of 20 KB and of
+# 5 MB, in prose and in a dense shape: the one place a kept report spends a slow
+# machine's time (t-32798).
+[[bench]]
+name = "hand_in"
+harness = false

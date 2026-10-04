@@ -56,6 +56,21 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
       at_ms: now,
     };
   };
+  /* What the ledger kept of what a task's workers handed in, as `hand_in_keep` lays it on a row (t-32798):
+   * one in four finished rows kept all of it, one kept part and left out a file over the cap and a file
+   * named like a credential store, one could not write its keeping (the cleanup of its checkout is held),
+   * and one handed in nothing by name. */
+  const keptOf = (n) => {
+    const base = { cap_bytes: 25_165_824, file_cap_bytes: 8_388_608, detail: null, at_ms: now, report: `a-${n}`, refused: 0 };
+    switch (n % 4) {
+      case 1: return { ...base, state: "kept", kept: 3, bytes: 23_552, left_out: 0, left_out_bytes: 0, masked: 4, reasons: [] };
+      case 2: return { ...base, state: "partial", kept: 2, bytes: 2_048, left_out: 3, left_out_bytes: 9_000_000, masked: 0,
+        refused: 2, reasons: ["over_file_cap", "secret_name"] };
+      case 3: return { ...base, state: "failed", kept: 1, bytes: 10, left_out: 0, left_out_bytes: 0, masked: 0, report: null,
+        reasons: ["copy_failed"], detail: "No space left on device (os error 28)" };
+      default: return null;
+    }
+  };
   const columns = { attention: [], working: [], done: [], idle: [] };
   const ledger = [];
   for (let n = 1; n <= workers; n += 1) {
@@ -87,6 +102,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
       quiet_at: word === "idle" ? now - 6 * minute : null,
       pane_missing_since_ms: word === "dead" ? now - 12 * minute : null,
       ...(gates ? { gate: gateOf(n) } : {}),
+      ...(n === 2 ? { kept: keptOf(3) } : n === 3 ? { kept: keptOf(1) } : {}),
     });
     if (!seated) continue;
     const state = word === "turn" ? "working" : word === "asking" ? "needs-attention"
@@ -173,6 +189,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
         created_ms: now - (tasks - at) * 3 * minute,
         cost: stage === "reported" || stage === "merged" ? cost(at) : null,
         writing: stage === "reported" ? writing(at) : null,
+        ...(stage === "reported" && keptOf(at) ? { kept: keptOf(at) } : {}),
       });
     }
   }
@@ -870,6 +887,123 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       costMoved.records.length > 0 &&
         costMoved.records.every((one) => one.includes("board-desk-task-cost") && one.endsWith(`run-desk/${costMoved.id}`)),
       JSON.stringify(costMoved));
+    /* ---- 남긴 것 (t-32798): 끝난 행마다 한 줄 — 무엇을 남겼고, 무엇을 왜 못 담았는지, 정리가 막혔는지 ---- */
+    const readKept = () => page.evaluate(() =>
+      [...document.querySelectorAll('#board-view [data-desk-block="pipeline"] .board-desk-task')].map((row) => {
+        const line = row.querySelector(".board-desk-task-kept");
+        const door = line?.querySelector(".board-desk-kept-door");
+        return { id: row.querySelector(".board-desk-task-id").textContent, shown: Boolean(line) && !line.hidden,
+          text: line && !line.hidden ? line.firstElementChild.textContent : "", state: line?.dataset.state ?? "",
+          tip: line?.dataset.tip ?? "", door: line && !line.hidden && door && !door.hidden ? door.textContent : null,
+          aria: door?.getAttribute("aria-label") ?? "" };
+      }));
+    const kepts = await readKept();
+    const shownKepts = kepts.filter((row) => row.shown);
+    ok("a finished task whose workers handed files in says what was kept: how many, how big, how many private values were masked",
+      kepts.length === 6 && shownKepts.length === 4 &&
+      shownKepts.filter((row) => row.text === "보관됨 · 3개 · 23.0 KB · 가린 값 4개" && row.state === "kept").length === 2,
+      JSON.stringify(kepts));
+    ok("a keeping that left files out says so on the row, and why — the cap with its number, the refusal by name — and still opens what it kept",
+      shownKepts.some((row) => row.state === "partial" &&
+        row.text === "일부만 보관 · 2개 보관 · 3개 못 담음 · 파일 하나가 8.0 MB 초과 · 비밀 파일 이름이라 보관 안 함" &&
+        row.door === "열기"), JSON.stringify(shownKepts));
+    ok("a keeping that failed says the cleanup is held, with its reason on the row and the system's own words in its tip",
+      shownKepts.some((row) => row.state === "failed" && row.text === "보관 실패 · 정리가 막혀 있음 · 보관소에 쓰지 못함" &&
+        row.tip.includes("No space left on device (os error 28)")), JSON.stringify(shownKepts));
+    ok("a row with nothing handed in carries no kept line, and every line that opens something is a button with a name",
+      kepts.filter((row) => !row.shown).every((row) => row.text === "" && row.door === null) &&
+      shownKepts.every((row) => row.door === "열기" && row.aria === "보관한 보고서와 증거를 아티팩트에서 열기"),
+      JSON.stringify(kepts));
+    const opened = await page.evaluate(() => {
+      window.__OPENED__ = [];
+      const keep = window.openArtifacts;
+      window.openArtifacts = (arg) => window.__OPENED__.push(arg);
+      const row = [...document.querySelectorAll('#board-view [data-desk-block="pipeline"] .board-desk-task')]
+        .find((one) => one.querySelector(".board-desk-task-kept")?.dataset.state === "kept");
+      const door = row?.querySelector(".board-desk-kept-door") ?? null;
+      const focusable = Boolean(door) && door.tabIndex >= 0 && door.tagName === "BUTTON";
+      door?.click();
+      window.openArtifacts = keep;
+      return { id: row?.querySelector(".board-desk-task-id")?.textContent ?? null,
+        title: row?.querySelector(".board-desk-task-title")?.textContent ?? null, calls: window.__OPENED__, focusable };
+    });
+    ok("the door opens the Artifacts tab filtered to that task and selects the kept report, and is a button the keyboard reaches",
+      opened.focusable && opened.calls.length === 1 && opened.calls[0]?.origin?.field === "task" &&
+      opened.calls[0].origin.value === opened.id && opened.calls[0].origin.label === opened.title &&
+      /^a-\d+$/.test(opened.calls[0].select ?? ""), JSON.stringify(opened));
+    const keptMoved = await page.evaluate(async () => {
+      const surface = document.querySelector("#board-view .task-board-surface");
+      const records = [];
+      const watch = new MutationObserver((batch) => records.push(...batch));
+      watch.observe(surface, { subtree: true, childList: true, attributes: true, characterData: true });
+      const target = window.__DESK__.tasks.find((one) => one.kept?.state === "kept");
+      window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
+        tasks: window.__DESK__.tasks.map((one) => one === target
+          ? { ...one, kept: { ...one.kept, kept: one.kept.kept + 1 } } : one) };
+      refreshDeskLedger();
+      for (let beat = 0; beat < 20 && (deskLedgerAsking || deskPaintFrame !== null); beat += 1) {
+        await new Promise((done) => requestAnimationFrame(done));
+      }
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      records.push(...watch.takeRecords());
+      watch.disconnect();
+      const where = (record) => (record.target.nodeType === 1 ? record.target : record.target.parentElement);
+      return { id: target.id, records: records.map((record) =>
+        `${record.type}:${where(record)?.className}:${where(record)?.closest(".board-desk-task")?.dataset.task ?? ""}`) };
+    });
+    ok("a keeping that moved rewrites that one line and nothing else",
+      keptMoved.records.length > 0 && keptMoved.records.every((one) => one.includes("board-desk-kept-text") && one.endsWith(`run-desk/${keptMoved.id}`)),
+      JSON.stringify(keptMoved));
+    const workerKepts = await page.evaluate(() =>
+      Object.fromEntries([...document.querySelectorAll('#board-view [data-desk-block="workers"] .board-desk-worker')].map((row) => {
+        const line = row.querySelector(".board-desk-worker-kept");
+        return [row.dataset.worker, { shown: Boolean(line) && !line.hidden, state: line?.dataset.state ?? "",
+          text: line && !line.hidden ? line.firstElementChild.textContent : "",
+          inButton: Boolean(line?.closest("button.board-desk-worker-main")), door: Boolean(line?.querySelector("button")) }];
+      })));
+    ok("a worker row says a keeping that failed — its checkout's cleanup is held — and is quiet about one that was kept cleanly, which the task row says",
+      workerKepts["run-desk/w-2"]?.state === "failed" &&
+      workerKepts["run-desk/w-2"].text === "보관 실패 · 정리가 막혀 있음 · 보관소에 쓰지 못함" &&
+      workerKepts["run-desk/w-3"]?.shown === false &&
+      Object.entries(workerKepts).filter(([, row]) => row.shown).length === 1 &&
+      Object.values(workerKepts).every((row) => !row.door), JSON.stringify(workerKepts));
+    /* The rule on its own: every state a keeping can be in, painted on a worker's line — only the clean one is not said. */
+    const workerStates = await page.evaluate(() => {
+      if (typeof deskKeptLine !== "function" || typeof paintDeskKept !== "function") return [];
+      const line = deskKeptLine("board-desk-worker-kept", false);
+      const base = { cap_bytes: 25_165_824, file_cap_bytes: 8_388_608, detail: null, at_ms: 1, report: null, refused: 0,
+        kept: 1, bytes: 10, left_out: 1, left_out_bytes: 10, masked: 0, reasons: [] };
+      return ["keeping", "kept", "partial", "withheld", "failed"].map((state) => {
+        paintDeskKept(line, { ...base, state }, null);
+        return `${state}:${line.hidden ? "quiet" : "said"}`;
+      });
+    });
+    ok("a worker's line stays quiet for a keeping that is whole and says every other state",
+      workerStates.join() === "keeping:said,kept:quiet,partial:said,withheld:said,failed:said", JSON.stringify(workerStates));
+    const keptWords = await page.evaluate(() => {
+      const catalogs = ["en", "ja", "zh", "es"];
+      /* The tables are page globals the new code declares; a page without them has no sentences, not an exception. */
+      const states = typeof KEPT_STATES === "undefined" ? {} : KEPT_STATES;
+      const reasonTable = typeof KEPT_REASONS === "undefined" ? {} : KEPT_REASONS;
+      const entries = [...Object.values(states), ...Object.values(reasonTable),
+        { key: "board.desk.kept.masked", word: "가린 값 {{count}}개" }, { key: "board.desk.kept.open", word: "열기" },
+        { key: "board.desk.kept.openAria", word: "보관한 보고서와 증거를 아티팩트에서 열기" },
+        { key: "board.desk.kept.tip", word: "체크아웃이 지워져도 남도록 아티팩트 저장소에 복사한 보고서와 증거입니다." }];
+      const holes = [];
+      for (const { key, word } of entries) {
+        const marks = (text) => [...String(text).matchAll(/\{\{(\w+)\}\}/g)].map((hit) => hit[1]).sort().join();
+        for (const code of catalogs) {
+          const said = CATALOG[code][key];
+          if (typeof said !== "string" || said === "") holes.push(`${code}:${key}`);
+          else if (key !== "board.desk.kept.tip" && marks(said) !== marks(word)) holes.push(`${code}:${key}:{{}}`);
+        }
+      }
+      return { count: entries.length, holes, reasons: Object.keys(reasonTable).sort().join() };
+    });
+    ok("every state and reason the backend can send has its sentence in the four catalogs beside the Korean one, with the same blanks",
+      keptWords.holes.length === 0 && keptWords.count === 22 &&
+      keptWords.reasons === "copy_failed,gone,link,not_kept,outside_roots,over_file_cap,over_total_cap,remote,secret_name,store_unavailable,too_many_files,unreadable,unsafe",
+      JSON.stringify(keptWords));
     await page.click('#board-view [data-desk-block="pipeline"] [data-stage="ready"]');
     await settleDesk();
     const movingCosts = await readCosts();
@@ -879,6 +1013,10 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("a task still moving carries no writing line either",
       movingWritings.length > 0 && movingWritings.every((row) => row.text === "" && row.tip === ""),
       JSON.stringify(movingWritings));
+    const movingKepts = await readKept();
+    ok("a task still moving carries no kept line either",
+      movingKepts.length > 0 && movingKepts.every((row) => !row.shown && row.text === "" && row.door === null),
+      JSON.stringify(movingKepts));
     await page.click('#board-view [data-desk-block="pipeline"] [data-stage="ready"]');
     await settleDesk();
 

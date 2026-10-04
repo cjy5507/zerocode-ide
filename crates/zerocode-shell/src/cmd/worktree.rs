@@ -1438,6 +1438,28 @@ pub(crate) async fn remove_worktree(
             note_window_event(&history_root, &reason);
             return Err(reason);
         };
+        // What the workers that sat in this checkout handed in is kept before the
+        // directory it was written in goes (t-32798). The person is waiting for
+        // this answer, so whatever is owed is kept on the spot; a keeping that
+        // cannot be written refuses the removal with its reason, on every road to
+        // this door — the discard confirmation answers for unsaved work, not for a
+        // report nobody has copied out yet. Before the archive script, which works
+        // inside the directory as well.
+        match crate::orchestration::hand_in_keep::before_cleanup(
+            &chosen.path,
+            crate::orchestration::hand_in_keep::Mode::Now,
+        ) {
+            crate::orchestration::hand_in_keep::Clearance::Clear => {}
+            crate::orchestration::hand_in_keep::Clearance::Keeping(because)
+            | crate::orchestration::hand_in_keep::Clearance::Held(because) => {
+                let reason = format!(
+                    "worktree removal refused for {}: {because}",
+                    chosen.path.display()
+                );
+                note_window_event(&history_root, &reason);
+                return Err(reason);
+            }
+        }
         // BEFORE the removal, not after: the archive script exists to take
         // down what this checkout brought up — a compose stack, a tunnel, a
         // database — and it needs the directory it is talking about to still

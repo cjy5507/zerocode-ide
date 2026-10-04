@@ -2584,7 +2584,7 @@ mod tests {
             // before it answers (t-34501): losing this line makes a bare delegate hit
             // the shim's fifteen seconds while the window is still opening the pane.
             &format!(
-                "delegate) waiting=1; budget={}",
+                "delegate) waiting=1; delegating=1; budget={}",
                 crate::orchestration::READY_TIMEOUT_DEFAULT_MS / 1000 + SHIM_WAIT_GRACE_SECONDS
             ),
             r#"printf '{"_keepalive":true,"elapsedMs":%d}\n' "$elapsed" >&2"#,

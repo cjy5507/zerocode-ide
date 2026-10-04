@@ -409,6 +409,20 @@ The shape of a session is always the same:
    outlives the worker, BEFORE you retire the seat. A worker that packs a
    whole analysis into one summary line has lost most of it; that happened
    here on 2026-08-28 and the only recovery was scraping the pane.
+   The window now keeps a copy itself (t-32798): when a `worker_done` names a
+   `reportPath` (with `"reportKind"` — report, review, brief, handover or proposal —
+   when it is one of the last four), or files and folders under
+   `"evidencePaths":["/abs/file","/abs/dir"]` (an entry may be
+   `{"path":"/abs/red.log","expected":"fails at the assertion","expect":"fail"}`, so an
+   intended failure is said and not guessed from the file name),
+   the ledger copies them into the artifact store — masked of home paths,
+   mailboxes, private addresses and credentials, text and pictures only, at most
+   24 MB a hand-in — and the task's row on the board says what was kept, what was
+   left out and why, with a door to open it. It keeps them again before any
+   cleanup or release takes the checkout, and a cleanup refuses while a keeping
+   has not finished or failed. The same road serves every agent CLI. Read the
+   kept copy from the Artifacts view (or the row's door) rather than the
+   worker's path, which is gone once the checkout is.
 5. `worker-read --worker <id>` — look at a worker's actual screen when you
    need to see what it is doing rather than what it said. A released worker
    answers from the screen its release archived, same tail rules. The window

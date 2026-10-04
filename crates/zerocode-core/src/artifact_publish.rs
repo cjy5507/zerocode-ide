@@ -352,6 +352,7 @@ impl PageMeta {
         Artifact {
             id: self.id.clone(),
             kind: ArtifactKind::Page,
+            subtype: None,
             title: self.title.clone(),
             path: self.path.clone(),
             bytes: self.bytes,

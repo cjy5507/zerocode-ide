@@ -10,6 +10,9 @@
 use api::{ImageSource, InputContentBlock, InputMessage, ToolResultContentBlock};
 
 use crate::image_guard::{guard_wire_image_base64, oversized_placeholder, WireImageOutcome};
+use crate::picture_budget::{
+    plan, PictureBudget, PictureCursor, PictureLimits, PictureOrigin, PictureShedPlan,
+};
 use crate::{ContentBlock, ConversationMessage, MessageRole};
 
 /// Lower stored conversation messages into provider wire messages.
@@ -101,6 +104,70 @@ impl ReasoningReplay {
             Self::AsText
         }
     }
+}
+
+/// What the provider a request is going to can take: the one value the lowering
+/// is asked for, so a new constraint of a target is a field here and not
+/// another argument at every call site (three clients lower a history).
+///
+/// * how reasoning travels ([`ReasoningReplay`]); and
+/// * how much body it takes in pictures: the budget of the byte ceiling its
+///   catalog row declares (`max_request_bytes`, the number the client's
+///   preflight refuses against — see `picture_budget`), and a hard cap a
+///   refusal asked for ([`Self::with_picture_cap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireTarget {
+    reasoning: ReasoningReplay,
+    pictures: PictureLimits,
+}
+
+impl WireTarget {
+    /// The target serving `model`: its reasoning replay and — when the catalog
+    /// declares one — its request-body byte ceiling.
+    #[must_use]
+    pub fn for_model(model: &str) -> Self {
+        Self {
+            reasoning: ReasoningReplay::for_model(model),
+            pictures: PictureLimits::for_model(model),
+        }
+    }
+
+    /// Carry at most the newest `cap` pictures, however small the body. `None`
+    /// leaves the byte budget alone. A refusal of the body asks for this: the
+    /// budget is an estimate, and a cap is what a refused request tightens to.
+    #[must_use]
+    pub fn with_picture_cap(mut self, cap: Option<usize>) -> Self {
+        self.pictures.cap = cap;
+        self
+    }
+
+    /// Replace the byte budget — for a ceiling the catalog does not declare, and
+    /// for tests and measurements that need a different one.
+    #[must_use]
+    pub fn with_picture_budget(mut self, budget: Option<PictureBudget>) -> Self {
+        self.pictures.budget = budget;
+        self
+    }
+}
+
+impl From<ReasoningReplay> for WireTarget {
+    /// A target with no body limit: callers with no model in hand (tests,
+    /// measurement harnesses) and every provider that declares no ceiling.
+    fn from(reasoning: ReasoningReplay) -> Self {
+        Self {
+            reasoning,
+            pictures: PictureLimits::default(),
+        }
+    }
+}
+
+/// What the picture budget decides for `messages` going to `target`: how many
+/// pictures there are, how many of the oldest the wire form leaves out, and the
+/// estimated body before and after. The numbers behind a lowering, for a
+/// measurement or a log line — the lowering itself asks the same function.
+#[must_use]
+pub fn plan_picture_shed(messages: &[ConversationMessage], target: WireTarget) -> PictureShedPlan {
+    plan(messages, target.pictures)
 }
 
 /// Per-block budget for carried reasoning, in characters (~250 tokens).
@@ -226,8 +293,14 @@ pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
 #[must_use]
 pub fn convert_messages_for(
     messages: &[ConversationMessage],
-    reasoning: ReasoningReplay,
+    target: impl Into<WireTarget>,
 ) -> Vec<InputMessage> {
+    let target = target.into();
+    let reasoning = target.reasoning;
+    // How many of the OLDEST pictures this request leaves out, decided once from
+    // the stored history (a pure function of it — see `picture_budget`), so the
+    // walk below only asks per picture and never clones one it leaves out.
+    let mut pictures = PictureCursor::new(&plan(messages, target.pictures));
     let mut out: Vec<InputMessage> = Vec::with_capacity(messages.len());
     // Whether the newest message in `out` lowered from `MessageRole::Tool` —
     // messages that lower to no content are invisible on the wire and keep
@@ -247,7 +320,7 @@ pub fn convert_messages_for(
         } else {
             crate::context_compression::WireRewrite::Full
         };
-        let content = convert_blocks(message, rewrite, reasoning);
+        let content = convert_blocks(message, index, rewrite, reasoning, &mut pictures);
         if content.is_empty() {
             continue;
         }
@@ -318,8 +391,10 @@ fn enforce_tool_results_lead(message: &mut InputMessage) {
 /// replayed thinking still leads the assistant turn.
 fn convert_blocks(
     message: &ConversationMessage,
+    message_index: usize,
     rewrite: crate::context_compression::WireRewrite,
     reasoning: ReasoningReplay,
+    pictures: &mut PictureCursor,
 ) -> Vec<InputContentBlock> {
     message
         .blocks
@@ -398,9 +473,16 @@ fn convert_blocks(
                         // wire (see `image_guard`): an oversized screenshot
                         // baked into history otherwise 400s every turn. A drop
                         // degrades to a text placeholder so the model still
-                        // learns an image was present.
+                        // learns an image was present — and so does a picture
+                        // the request's byte budget leaves out.
                         content.extend(images.iter().map(|(media_type, data)| {
-                            match guard_image_source(media_type, data) {
+                            match lower_picture(
+                                pictures,
+                                media_type,
+                                data,
+                                PictureOrigin::Tool(tool_name),
+                                message_index + 1,
+                            ) {
                                 Ok(source) => ToolResultContentBlock::Image { source },
                                 Err(placeholder) => {
                                     ToolResultContentBlock::Text { text: placeholder }
@@ -415,7 +497,13 @@ fn convert_blocks(
                         })
                     }
                     ContentBlock::Image { media_type, data } => {
-                        Some(match guard_image_source(media_type, data) {
+                        Some(match lower_picture(
+                            pictures,
+                            media_type,
+                            data,
+                            PictureOrigin::Attached,
+                            message_index + 1,
+                        ) {
                             Ok(source) => InputContentBlock::Image {
                                 source,
                                 cache_control: None,
@@ -428,6 +516,23 @@ fn convert_blocks(
                     }
                 })
         .collect::<Vec<_>>()
+}
+
+/// One stored picture on its way to the wire: the budget's verdict first (a
+/// picture it leaves out is never cloned or probed — the note stands in for it),
+/// then the dimension guard. `Err` carries the text that replaces the picture,
+/// whichever of the two said no.
+fn lower_picture(
+    pictures: &mut PictureCursor,
+    media_type: &str,
+    data: &str,
+    origin: PictureOrigin<'_>,
+    message_number: usize,
+) -> Result<ImageSource, String> {
+    match pictures.take(media_type, data, origin, message_number) {
+        Some(note) => Err(note),
+        None => guard_image_source(media_type, data),
+    }
 }
 
 /// Dimension-guard one stored `(media_type, base64)` image on the way to the

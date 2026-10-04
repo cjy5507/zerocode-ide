@@ -3885,6 +3885,7 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   if (state === "pending") {
     return {
       word: t("worktree.landPending", "확인 중"),
+      head: t("worktree.landPending", "확인 중"),
       tone: "pending",
       tip: t("worktree.landTipPending", "main에 들어갔는지 git으로 확인하는 중입니다"),
       cleanable: false,
@@ -3895,6 +3896,7 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   if (state === "failed") {
     return {
       word: t("worktree.landFailed", "확인 실패"),
+      head: t("worktree.landFailed", "확인 실패"),
       tone: "check",
       tip: t("worktree.landTipFailed", "git으로 main 반영 여부를 읽지 못했습니다 — 다음 새로고침에 다시 시도합니다"),
       cleanable: false,
@@ -3942,6 +3944,10 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
     word = t("worktree.landNoRef", "비교 기준 없음");
     tone = "none";
   }
+  // The state's own word, before anything is added to it: what a place with
+  // room for one word says (an artifact card's chip, t-36910) — the rest is in
+  // the tooltip either way.
+  const head = word;
   if (landing.dirty && !check) word += t("worktree.landDirty", " · 저장 안 한 변경");
   // Said of work that is in the compare ref and of nothing else: the backend
   // asks only landed rows, and a row that is in doubt says nothing more.
@@ -3997,7 +4003,7 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
     }));
   }
   if (cleanable) lines.push(t("worktree.landTipCleanable", "활성 세션이 없습니다 — 눌러서 비활성 워크스페이스 검토에서 정리하세요"));
-  return { word, tone, tip: lines.join("\n"), cleanable };
+  return { word, head, tone, tip: lines.join("\n"), cleanable };
 }
 
 /* The same words for a checkout looked up by path — what the git panel's head
@@ -5065,6 +5071,8 @@ async function refreshWorktrees() {
       }
     }
     paintScmLanding();
+    // The Artifacts tab's landed chips read the same answers (t-36910).
+    noteArtifactLandings();
     if (!projectsRead) seedStartupProjectFolds(projects);
     projectsRead = true;
     worktreePoll.sync();

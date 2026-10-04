@@ -619,6 +619,10 @@ where
                 // cannot drift apart.
                 self.bound_client_model_override()
             },
+            // The pictures this turn's refusals let a request carry: `None`
+            // until a provider refused a body as too large, then the newest
+            // two, then the newest one (`overflow_recovery`).
+            picture_cap: self.overflow_recovery.picture_cap(),
         }
     }
 
