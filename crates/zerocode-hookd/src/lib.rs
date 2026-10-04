@@ -326,8 +326,20 @@ impl TeamRequest {
             .find(|(flag, _)| *flag == "--timeout-ms")
             .and_then(|(_, value)| value.parse::<u64>().ok())
             .map(|ms| ms.min(WAIT_BUDGET_CEILING_MS));
+        // A `delegate --wait` answers after the pane is opened and the worker has its briefing
+        // (up to the ready default) AND THEN the wait the caller asked for — so the bridge holds
+        // the preparation on top of the wait, or it gives up before a window that is still right.
+        let preparation = if self.argv.first().is_some_and(|verb| verb == "delegate")
+            && self.argv.iter().skip(1).any(|word| word == "--wait")
+        {
+            std::time::Duration::from_millis(u64::from(
+                zerocode_core::orchestration::delegate::WAIT_HEADROOM_MS,
+            ))
+        } else {
+            std::time::Duration::ZERO
+        };
         match budget {
-            Some(ms) => std::time::Duration::from_millis(ms) + BRIDGE_GRACE,
+            Some(ms) => std::time::Duration::from_millis(ms) + preparation + BRIDGE_GRACE,
             None if self.argv.first().is_some_and(|verb| verb == "ask") => {
                 std::time::Duration::from_millis(u64::from(
                     zerocode_core::orchestration::ASK_BUDGET_DEFAULT_MS,

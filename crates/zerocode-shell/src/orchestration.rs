@@ -7251,6 +7251,9 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                         term,
                         format!("{}/{}", worker.team, worker.pane),
                     )),
+                    // The plan wrote this worker and its first letter before the window opened its pane
+                    // (t-34501): not seatless, only not seated yet.
+                    None if delegate_is_seating(&worker.id) => {}
                     None => seatless.push(zerocode_core::orchestration::worker_address(&worker.id)),
                 }
             }
@@ -9099,6 +9102,12 @@ fn run_seated(
         Ok((decided, _)) => *decided,
         Err(why) => return refused_by_runtime(why),
     };
+    if let Some(flight) = &flight
+        && let Ok(said) = serde_json::from_str::<serde_json::Value>(decided.reply.stdout.trim())
+        && let Some(worker) = said["workerId"].as_str()
+    {
+        flight.seating(worker);
+    }
     rang(decided.requires_durability);
     let mut answered = carried(host, actor, decided, team_id, pane, pane_token, now_ms);
     drop(flight);
@@ -9127,7 +9136,7 @@ const DELEGATE_FLIGHT_WAIT: std::time::Duration = std::time::Duration::from_secs
 /// In memory only, because what it guards is the window between the plan (durable, rows written) and
 /// the receipt (filed once the pane is open); a restart ends that window by itself (the sweep takes
 /// the reservation back).
-struct DelegateFlight(String);
+struct DelegateFlight(String, Mutex<Vec<String>>);
 
 fn delegate_flights() -> &'static (Mutex<std::collections::HashSet<String>>, std::sync::Condvar) {
     static FLIGHTS: OnceLock<(Mutex<std::collections::HashSet<String>>, std::sync::Condvar)> =
@@ -9155,22 +9164,54 @@ impl DelegateFlight {
                 .0;
         }
         flights.insert(key.clone());
-        Some(Self(key))
+        Some(Self(key, Mutex::new(Vec::new())))
     }
 }
 
-impl DelegateFlight {
-    /// Say which worker this carrying is still seating. (Red stub — t-34501.)
-    fn seating(&self, _worker: &str) {}
+/// The workers a `delegate` is still opening a pane for: the plan wrote the worker and its letter,
+/// the window has no seat for it yet. The beat leaves them out of its seatless reckoning.
+fn delegate_seating() -> &'static Mutex<std::collections::HashSet<String>> {
+    static SEATING: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    SEATING.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-/// Whether a delegate is still opening this worker's pane. (Red stub — t-34501.)
-fn delegate_is_seating(_worker: &str) -> bool {
-    false
+impl DelegateFlight {
+    /// Say which worker this carrying is still seating. It is let go with the flight, whether the
+    /// pane opened or the carrying failed.
+    fn seating(&self, worker: &str) {
+        delegate_seating()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(worker.to_string());
+        self.1
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push(worker.to_string());
+    }
+}
+
+/// Whether a delegate is still opening this worker's pane.
+fn delegate_is_seating(worker: &str) -> bool {
+    delegate_seating()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .contains(worker)
 }
 
 impl Drop for DelegateFlight {
     fn drop(&mut self) {
+        let mut seating = delegate_seating()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        for worker in self
+            .1
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .iter()
+        {
+            seating.remove(worker);
+        }
+        drop(seating);
         let (held, bell) = delegate_flights();
         held.lock()
             .unwrap_or_else(|held| held.into_inner())

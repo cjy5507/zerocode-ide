@@ -23,6 +23,11 @@ pub const VERB: &str = "delegate";
 /// 한 곳에 둔다.
 pub const WAIT_HEADROOM_MS: u32 = READY_TIMEOUT_DEFAULT_MS;
 
+/// 워커의 첫 말 끝에 붙는 한 줄. 첫 편지는 우편이고, 입력칸 안내는 쉬는 판에만 가므로 첫 턴에
+/// 제 id가 필요한 일(큐 일감 이름)은 스스로 먼저 `check`를 해야 읽는다.
+const FIRST_STEP: &str = "First, run `zerocode-orc check`: the letter there holds your worker, \
+     dispatch and task ids, which you need to name your own files, jobs and questions.";
+
 /// 이 동사가 스스로 읽는 낱말. 나머지는 모두 `worker-start`에 그대로 넘어간다.
 ///
 /// `--wait`는 창이 워커의 끝을 기다릴 때만 읽는다(계획은 읽지 않는다).
@@ -124,12 +129,11 @@ pub(super) fn plan(
         "--task".to_string(),
         task.clone(),
     ];
-    if words.value("--prompt").is_none() {
-        inner.push("--prompt".to_string());
-        inner.push(spec.to_string());
-    }
+    let first_words = words.value("--prompt").unwrap_or(spec);
+    inner.push("--prompt".to_string());
+    inner.push(format!("{first_words}\n\n{FIRST_STEP}"));
     for (name, value) in &words.values {
-        if !OWN_FLAGS.contains(&name.as_str()) {
+        if !OWN_FLAGS.contains(&name.as_str()) && name != "--prompt" {
             inner.push(name.clone());
             inner.push(value.clone());
         }
