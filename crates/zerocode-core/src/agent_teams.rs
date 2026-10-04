@@ -1368,6 +1368,7 @@ waiting=""
 want_ms=""
 delegating=""
 waited=""
+joined=""
 case "${{1:-}}" in
   ask) waiting=1; budget={ask_wait_s} ;;
   worker-start) waiting=1; budget={worker_wait_s} ;;
@@ -1390,6 +1391,13 @@ for arg in "$@"; do
   case "$arg" in
     --wait) waiting=1; waited=1 ;;
     --timeout-ms) want_ms=1 ;;
+    --timeout-ms=*)
+      joined=${{arg#--timeout-ms=}}
+      case "$joined" in
+        ''|*[!0-9]*) : ;;
+        *) budget=$((joined / 1000 + {SHIM_WAIT_GRACE_SECONDS})) ;;
+      esac
+      ;;
   esac
   body="$body$arg$sep"
 done
@@ -1534,6 +1542,12 @@ foreach ($arg in $args) {{
       $deadlineMs = $parsed + {grace_ms}
     }}
     $wantMs = $false
+  }}
+  if ($word.StartsWith('--timeout-ms=')) {{
+    $parsed = 0
+    if ([int64]::TryParse($word.Substring(13), [ref]$parsed) -and $parsed -gt 0) {{
+      $deadlineMs = $parsed + {grace_ms}
+    }}
   }}
   if ($word -eq '--wait') {{ $waiting = $true; $waitedFlag = $true }}
   if ($word -eq '--timeout-ms') {{ $wantMs = $true }}

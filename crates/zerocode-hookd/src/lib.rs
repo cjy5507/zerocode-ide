@@ -319,13 +319,20 @@ impl TeamRequest {
         if !self.reserves_wait_slot() {
             return TEAM_DEADLINE;
         }
-        let budget = self
-            .argv
-            .iter()
-            .zip(self.argv.iter().skip(1))
-            .find(|(flag, _)| *flag == "--timeout-ms")
-            .and_then(|(_, value)| value.parse::<u64>().ok())
-            .map(|ms| ms.min(WAIT_BUDGET_CEILING_MS));
+        // `--timeout-ms X` and `--timeout-ms=X` are one thing to the ledger (the later one wins), so
+        // they are one thing here; reading only the two-word form held a `=` spelling for the short
+        // default while the window kept its wait.
+        let mut budget: Option<u64> = None;
+        for (at, word) in self.argv.iter().enumerate() {
+            let value = if word == "--timeout-ms" {
+                self.argv.get(at + 1).map(String::as_str)
+            } else {
+                word.strip_prefix("--timeout-ms=")
+            };
+            if let Some(ms) = value.and_then(|value| value.parse::<u64>().ok()) {
+                budget = Some(ms.min(WAIT_BUDGET_CEILING_MS));
+            }
+        }
         // A `delegate --wait` answers after the pane is opened and the worker has its briefing
         // (up to the ready default) AND THEN the wait the caller asked for — so the bridge holds
         // the preparation on top of the wait, or it gives up before a window that is still right.
