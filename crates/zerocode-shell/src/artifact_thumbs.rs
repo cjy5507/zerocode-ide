@@ -431,6 +431,7 @@ mod tests {
         Artifact {
             id: "art".into(),
             kind,
+            subtype: None,
             title: "t".into(),
             path: path.to_path_buf(),
             bytes: 0,

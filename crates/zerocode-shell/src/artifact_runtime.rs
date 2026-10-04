@@ -34,11 +34,12 @@ use std::time::SystemTime;
 use crate::{AppState, ShellStateExt as _};
 use serde::{Deserialize, Serialize};
 use zerocode_core::artifact::{
-    self, Artifact, ArtifactKind, Limits, Origin, Preview, Source, artifact_id,
+    self, Artifact, ArtifactKind, Limits, Origin, Preview, ReportSubtype, Source, artifact_id,
     artifact_id_for_url, body_tokens, kind_of, preview_of, query_matches, title_of,
 };
 use zerocode_core::artifact_publish::{ExportFormat, PageRenderer};
 use zerocode_core::artifact_transcript::{PageFact, RemoteFact};
+use zerocode_core::evidence_digest::Digest;
 
 /// The store's folder under the local data root.
 pub(crate) const STORE_DIR_NAME: &str = "artifacts";
@@ -99,6 +100,9 @@ struct RowSeed<'a> {
     stamp: Stamp,
     now_ms: i64,
     created_ms: Option<i64>,
+    /// The kind of report the worker stated when it handed this file in
+    /// (t-36910) — the word as it was said; `None` on every other road.
+    stated: Option<&'a str>,
 }
 
 /// A row as held in memory: the artifact, its search tokens (sorted, bounded
@@ -153,6 +157,10 @@ pub(crate) struct Filter {
     pub(crate) kind: Option<String>,
     pub(crate) run: Option<String>,
     pub(crate) task: Option<String>,
+    /// `Some(false)` lists the rows no task is linked to, `Some(true)` the rows
+    /// one is (t-36910) — what 「작업에 연결 안 된 것」 asks for when the table
+    /// cut the catalog and the window cannot filter it itself.
+    pub(crate) task_linked: Option<bool>,
     pub(crate) worker: Option<String>,
     pub(crate) worktree: Option<String>,
     pub(crate) automation: Option<String>,
@@ -297,6 +305,15 @@ pub(crate) struct Listing {
     pub(crate) missing_total: usize,
     /// 종류만 빼고 거르개에 맞는 전체 행을 종류별로 센다.
     pub(crate) by_kind: BTreeMap<String, usize>,
+    /// The rows whose file is gone, by kind (t-36910) — everything the filter
+    /// admits but `present` and the kinds. The window asks for present rows
+    /// only, so the vanished ones do not travel; this is how each tab can still
+    /// say how many it hides.
+    pub(crate) missing_by_kind: BTreeMap<String, usize>,
+    /// The rows no task is linked to, by kind (t-36910) — everything the filter
+    /// admits but the task and the kinds. A tab a task filter emptied says this
+    /// number instead of showing an empty list.
+    pub(crate) unlinked_by_kind: BTreeMap<String, usize>,
 }
 
 /// Counts by origin, for the chips other surfaces wear — the board card, the
@@ -334,6 +351,12 @@ pub(crate) struct PreviewPayload {
     /// text with nothing to count.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) writing: Option<zerocode_core::plain_text::TextLint>,
+    /// What an evidence file says, read into counts and steps (t-36910): the
+    /// drawer draws this instead of the file's JSON. Worked out with the
+    /// preview and kept with it; absent for a file that holds no JSON record
+    /// and for every kind that is not evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) digest: Option<Digest>,
 }
 
 impl PreviewPayload {
@@ -660,6 +683,7 @@ impl Store {
             stamp,
             now_ms,
             created_ms,
+            stated: _,
         } = seed;
         let kind = kind_of(path, source);
         let front = Self::read_front(path, limits);
@@ -686,6 +710,7 @@ impl Store {
             artifact: Artifact {
                 id,
                 kind,
+                subtype: None,
                 title,
                 path: path.to_path_buf(),
                 bytes: stamp.len,
@@ -751,23 +776,38 @@ impl Store {
 
     /// Copy a worker's report into the store and catalog it. Idempotent: the
     /// same file under the same origin is the same artifact, and a source that
-    /// has not changed since the copy is not copied again.
+    /// has not changed since the copy is not copied again. `stated` is the kind
+    /// of report the worker said it is ([`report_kind_in`]); `None` leaves the
+    /// kind to the file's name.
     pub(crate) fn register_report(
         &self,
         source_path: &Path,
         origin: Origin,
+        stated: Option<&str>,
         now_ms: i64,
     ) -> Result<Artifact, String> {
-        self.register_copy(source_path, Source::WorkerReport, origin, now_ms)
+        self.register_copy_as(source_path, Source::WorkerReport, origin, stated, now_ms)
     }
 
-    /// Copy any file into the store under its source's bucket — the report
-    /// road above, and the hand-registration road (`manual`).
+    /// Copy any file into the store under its source's bucket — the
+    /// hand-registration road (`manual`); nobody states a kind on it.
     pub(crate) fn register_copy(
         &self,
         source_path: &Path,
         source: Source,
         origin: Origin,
+        now_ms: i64,
+    ) -> Result<Artifact, String> {
+        self.register_copy_as(source_path, source, origin, None, now_ms)
+    }
+
+    /// The copy both roads above share.
+    fn register_copy_as(
+        &self,
+        source_path: &Path,
+        source: Source,
+        origin: Origin,
+        stated: Option<&str>,
         now_ms: i64,
     ) -> Result<Artifact, String> {
         let stamp = stamp_of(source_path)
@@ -813,6 +853,7 @@ impl Store {
                 stamp,
                 now_ms,
                 created_ms: created,
+                stated,
             },
             &limits,
         );
@@ -877,6 +918,7 @@ impl Store {
                 stamp,
                 now_ms,
                 created_ms: created,
+                stated: None,
             },
             limits,
         );
@@ -1381,6 +1423,7 @@ impl Store {
             artifact: Artifact {
                 id: id.clone(),
                 kind: ArtifactKind::Web,
+                subtype: None,
                 title,
                 path: PathBuf::new(),
                 bytes: 0,
@@ -2091,6 +2134,8 @@ impl Store {
             truncated,
             missing_total,
             by_kind,
+            missing_by_kind: BTreeMap::new(),
+            unlinked_by_kind: BTreeMap::new(),
         };
         // 기록을 세는 읽기는 카탈로그의 자물쇠 밖에서 — 행은 이미 사본이다.
         drop(index);
@@ -2196,6 +2241,7 @@ impl Store {
                 bytes: 0,
                 truncated: false,
                 writing: None,
+                digest: None,
             });
             return Ok(payload);
         }
@@ -2216,6 +2262,7 @@ impl Store {
                 bytes,
                 truncated: false,
                 writing: None,
+                digest: None,
             }));
         }
         let payload = match artifact.kind {
@@ -2228,6 +2275,7 @@ impl Store {
                         bytes,
                         truncated: true,
                         writing: None,
+                        digest: None,
                     }
                 } else {
                     use base64::Engine as _;
@@ -2243,6 +2291,7 @@ impl Store {
                         bytes,
                         truncated: false,
                         writing: None,
+                        digest: None,
                     }
                 }
             }
@@ -2253,6 +2302,7 @@ impl Store {
                 bytes,
                 truncated: false,
                 writing: None,
+                digest: None,
             },
             // A PDF document is not text; its bytes fall to `none` below.
             ArtifactKind::Document if !is_utf8_document(&artifact.path) => PreviewPayload {
@@ -2262,6 +2312,7 @@ impl Store {
                 bytes,
                 truncated: false,
                 writing: None,
+                digest: None,
             },
             ArtifactKind::Report
             | ArtifactKind::Document
@@ -2290,6 +2341,7 @@ impl Store {
                     bytes,
                     truncated: bytes > limits.preview_text_bytes_max,
                     writing,
+                    digest: None,
                 }
             }
         };
@@ -2614,6 +2666,14 @@ pub(crate) fn report_path_in(payload: Option<&str>, body: &str) -> Option<PathBu
             word.ends_with(".md") && (word.starts_with('/') || Path::new(word).is_absolute())
         })
         .map(PathBuf::from)
+}
+
+/// The kind of report a `worker_done` states (t-36910): the payload's
+/// `reportKind`, as the worker wrote it. `None` when the payload states none —
+/// the file's name is read instead ([`ReportSubtype::of`]).
+pub(crate) fn report_kind_in(payload: Option<&str>) -> Option<String> {
+    let _ = (payload, artifact::REPORT_KIND_KEY);
+    None
 }
 
 /// The window's road after the file watcher's lane reported movement, or
@@ -3104,7 +3164,7 @@ mod tests {
         let data = dir.path().join("data");
         let store = Store::open(&data, Limits::default());
         let mut artifact = store
-            .register_report(&report, origin("worker"), 1000)
+            .register_report(&report, origin("worker"), None, 1000)
             .expect("report");
         artifact.title = artifact
             .path
@@ -3943,10 +4003,10 @@ mod tests {
         touch(&report, "# report\n\nlanded 아티팩트 view\n");
         let store = Store::open(&data, Limits::default());
         let first = store
-            .register_report(&report, origin("w-1"), 1_000)
+            .register_report(&report, origin("w-1"), None, 1_000)
             .expect("registers");
         let again = store
-            .register_report(&report, origin("w-1"), 2_000)
+            .register_report(&report, origin("w-1"), None, 2_000)
             .expect("registers again");
         assert_eq!(first, again, "the same report became two artifacts");
         assert!(
@@ -3967,7 +4027,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         touch(&report, "# report v2\n");
         let changed = store
-            .register_report(&report, origin("w-1"), 3_000)
+            .register_report(&report, origin("w-1"), None, 3_000)
             .expect("re-registers");
         assert_eq!(changed.id, first.id);
         assert_eq!(
@@ -3975,7 +4035,7 @@ mod tests {
             "# report v2\n"
         );
         let other = store
-            .register_report(&report, origin("w-2"), 3_000)
+            .register_report(&report, origin("w-2"), None, 3_000)
             .expect("another worker");
         assert_ne!(other.id, first.id);
         assert_eq!(store.counts().by_worker.get("w-1"), Some(&1));
@@ -4015,7 +4075,7 @@ mod tests {
         touch(&export, "a,b\n");
         let store = Store::open(&data, Limits::default());
         let copied = store
-            .register_report(&report, origin("w-1"), 1_000)
+            .register_report(&report, origin("w-1"), None, 1_000)
             .expect("registers");
         let outside = store
             .register_in_place(&export, Source::Export, Origin::default(), 1_000)
@@ -4038,7 +4098,7 @@ mod tests {
         // The ledger's clock: no sweep until the ledger swept, one per sweep.
         touch(&report, "# new\n");
         store
-            .register_report(&report, origin("w-1"), 1_000)
+            .register_report(&report, origin("w-1"), None, 1_000)
             .expect("registers");
         assert_eq!(store.sweep_beside_ledger(None, 30, now), None);
         assert!(store.sweep_beside_ledger(Some(5), 30, now).is_some());
@@ -4055,7 +4115,7 @@ mod tests {
         touch(&report, "# report\n");
         let store = Store::open(&data, Limits::default());
         let copied = store
-            .register_report(&report, origin("w-1"), 1_000)
+            .register_report(&report, origin("w-1"), None, 1_000)
             .expect("registers");
         assert_eq!(store.delete(&copied.id, false), Ok(false));
         assert!(copied.path.exists());
@@ -4087,7 +4147,7 @@ mod tests {
             touch(&report, "0123456789012345");
             ids.push(
                 store
-                    .register_report(&report, origin(&format!("w-{n}")), 1_000)
+                    .register_report(&report, origin(&format!("w-{n}")), None, 1_000)
                     .expect("registers")
                     .id,
             );
@@ -4131,7 +4191,7 @@ mod tests {
             "Jev 자리의 판정이 느려서 스윕 박자를 조정함으로써 재시도가 줄어들게 되는 것이다.\n",
         );
         let id = store
-            .register_report(&report, origin("w-1"), 1_000)
+            .register_report(&report, origin("w-1"), None, 1_000)
             .expect("registers")
             .id;
         let first = store.preview(&id).expect("preview");
@@ -4153,7 +4213,7 @@ mod tests {
         let numbers = dir.path().join("tmp/t-2-report.md");
         touch(&numbers, "0123456789012345");
         let id = store
-            .register_report(&numbers, origin("w-2"), 1_000)
+            .register_report(&numbers, origin("w-2"), None, 1_000)
             .expect("registers")
             .id;
         assert!(
@@ -4177,7 +4237,7 @@ mod tests {
             let report = dir.path().join(format!("tmp/t-{n}-report.md"));
             touch(&report, "# r\n");
             store
-                .register_report(&report, origin(&format!("w-{n}")), 1_000 + n)
+                .register_report(&report, origin(&format!("w-{n}")), None, 1_000 + n)
                 .expect("registers");
         }
         let shot = dir.path().join("evidence/shot.png");
@@ -4323,6 +4383,7 @@ mod tests {
                 let artifact = Artifact {
                     id: id.into(),
                     kind,
+                    subtype: None,
                     title: id.into(),
                     path,
                     bytes: 1,
@@ -4757,7 +4818,7 @@ mod tests {
         let report_file = dir.path().join("t-9-report.md");
         touch(&report_file, "# report");
         let report = store
-            .register_report(&report_file, origin("w-1"), 1_300)
+            .register_report(&report_file, origin("w-1"), None, 1_300)
             .expect("report");
         let refused = store
             .document_text(&report.id, None)
@@ -5693,5 +5754,487 @@ mod tests {
         );
         assert!(reopened.delete(&id, true).unwrap());
         assert!(!file.exists());
+    }
+
+    // ---- t-36910: the cards and the drawer, on the rows the catalog holds ----
+
+    /// A worker's report, with the task it was written for.
+    fn tasked(worker: &str, task: &str, work: &str) -> Origin {
+        Origin {
+            work_summary: Some(work.into()),
+            task: Some(task.into()),
+            ..origin(worker)
+        }
+    }
+
+    /// A report row says what kind of report it is: what the worker stated, else
+    /// what the file's name says. Nothing else has a subtype.
+    #[test]
+    fn a_report_row_says_what_kind_of_report_it_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().join("data");
+        let store = Store::open(&data, Limits::default());
+        let file = |name: &str, text: &str| {
+            let path = dir.path().join("tmp").join(name);
+            touch(&path, text);
+            path
+        };
+        let review = store
+            .register_report(
+                &file("t-9-review.md", "# Review"),
+                origin("w-1"),
+                None,
+                1_000,
+            )
+            .expect("registers");
+        assert_eq!(
+            review.subtype,
+            Some(ReportSubtype::Review),
+            "read off the file's name"
+        );
+        let plain = store
+            .register_report(&file("REPORT.md", "# Report"), origin("w-2"), None, 1_000)
+            .expect("registers");
+        assert_eq!(plain.subtype, Some(ReportSubtype::Report));
+        let notes = file("notes.md", "# Notes");
+        let stated = store
+            .register_report(&notes, origin("w-3"), Some("handover"), 1_000)
+            .expect("registers");
+        assert_eq!(
+            stated.subtype,
+            Some(ReportSubtype::Handover),
+            "what the worker stated wins over the name"
+        );
+        // The same file handed in again, unchanged, with another kind stated:
+        // the row says the new one.
+        let restated = store
+            .register_report(&notes, origin("w-3"), Some("brief"), 1_500)
+            .expect("registers again");
+        assert_eq!(
+            (restated.id.as_str(), restated.subtype),
+            (stated.id.as_str(), Some(ReportSubtype::Brief))
+        );
+        // Handed in once more, changed, with nothing stated: what was stated
+        // stands.
+        std::thread::sleep(Duration::from_millis(20));
+        touch(&notes, "# Notes\n\nmore");
+        let again = store
+            .register_report(&notes, origin("w-3"), None, 2_000)
+            .expect("registers a third time");
+        assert_eq!(
+            (again.id.as_str(), again.subtype),
+            (stated.id.as_str(), Some(ReportSubtype::Brief))
+        );
+        // Evidence is not a report and has no subtype, whatever it is called.
+        let steps = store
+            .register_in_place(
+                &file("review-steps.jsonl", "{\"n\":1}\n"),
+                Source::Evidence,
+                Origin::default(),
+                1_000,
+            )
+            .expect("registers");
+        assert_eq!(steps.subtype, None);
+        // The catalog keeps it across a reopening.
+        drop(store);
+        let reopened = Store::open(&data, Limits::default());
+        assert_eq!(
+            reopened.get(&stated.id).and_then(|row| row.subtype),
+            Some(ReportSubtype::Brief)
+        );
+        assert_eq!(
+            reopened.get(&review.id).and_then(|row| row.subtype),
+            Some(ReportSubtype::Review)
+        );
+    }
+
+    /// A catalog written before rows said their subtype: every report in it is
+    /// given one when the catalog is read, by its file's name alone. Nothing on
+    /// disk is asked, so a report whose file is gone has one too.
+    #[test]
+    fn a_catalog_written_before_subtypes_gives_its_reports_one_at_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().join("data");
+        let store = Store::open(&data, Limits::default());
+        let report = dir.path().join("tmp/t-9-review.md");
+        touch(&report, "# Review");
+        let mut row = store
+            .register_report(&report, origin("w-1"), None, 1_000)
+            .expect("registers");
+        // As an older build wrote it.
+        row.subtype = None;
+        store
+            .append_line(&IndexLine::Row(Box::new(row.clone())))
+            .expect("an old row");
+        let evidence = dir.path().join("evidence/steps.jsonl");
+        touch(&evidence, "{\"n\":1}\n");
+        let other = store
+            .register_in_place(&evidence, Source::Evidence, Origin::default(), 1_000)
+            .expect("registers");
+        drop(store);
+        std::fs::remove_file(&row.path).expect("the stored copy goes");
+
+        let reopened = Store::open(&data, Limits::default());
+        assert_eq!(
+            reopened.get(&row.id).and_then(|held| held.subtype),
+            Some(ReportSubtype::Review)
+        );
+        assert_eq!(
+            reopened.get(&other.id).and_then(|held| held.subtype),
+            None,
+            "only a report has a subtype"
+        );
+    }
+
+    /// The kind a `worker_done` states is read out of its payload, as the worker
+    /// wrote it; a payload that states none, or is not one, says nothing.
+    #[test]
+    fn a_worker_done_states_its_report_kind_in_the_payload() {
+        let payload =
+            serde_json::json!({ "reportPath": "/tmp/r.md", "reportKind": "review" }).to_string();
+        assert_eq!(report_kind_in(Some(&payload)).as_deref(), Some("review"));
+        assert_eq!(report_kind_in(Some(r#"{"reportPath":"/tmp/r.md"}"#)), None);
+        assert_eq!(
+            report_kind_in(Some(r#"{"reportKind":3}"#)),
+            None,
+            "a kind is a word"
+        );
+        assert_eq!(report_kind_in(Some("not json")), None);
+        assert_eq!(report_kind_in(None), None);
+    }
+
+    /// A catalog whose report titles are the names of their tasks — what every
+    /// build before this one wrote — is read for its titles once: a title becomes
+    /// the report's own heading, and the next opening of the catalog does not
+    /// read the reports for their titles again.
+    #[test]
+    fn reopening_a_catalog_whose_titles_are_task_names_reads_the_headings_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().join("data");
+        let work = "workflow phase `verify` item 0";
+        let store = Store::open(&data, Limits::default());
+        let old_row = |name: &str, text: &str, worker: &str| {
+            let path = dir.path().join("tmp").join(name);
+            touch(&path, text);
+            let mut row = store
+                .register_report(&path, tasked(worker, "t-7", work), None, 1_000)
+                .expect("registers");
+            row.title = work.to_string();
+            row.subtype = None;
+            store
+                .append_line(&IndexLine::Row(Box::new(row.clone())))
+                .expect("an old row");
+            row
+        };
+        let headed = old_row(
+            "t-7-review.md",
+            "# Verification report: the queue drains\n\nbody",
+            "w-1",
+        );
+        let bare = old_row("t-7-report.md", "# 보고서\n\nbody", "w-2");
+        drop(store);
+
+        let reopened = Store::open(&data, Limits::default());
+        let title_in = |store: &Store, id: &str| store.get(id).map(|row| row.title);
+        assert_eq!(
+            title_in(&reopened, &headed.id).as_deref(),
+            Some(work),
+            "the catalog still holds the old title"
+        );
+        let first = reopened.scan(2_000);
+        assert_eq!(
+            title_in(&reopened, &headed.id).as_deref(),
+            Some("Verification report: the queue drains")
+        );
+        assert_eq!(
+            title_in(&reopened, &bare.id).as_deref(),
+            Some(work),
+            "a heading that says nothing leaves the task's name"
+        );
+        assert_eq!(first.updated, 1, "one title moved: {first:?}");
+        drop(reopened);
+
+        // The stored copy now says something else under the same length and the
+        // same modified time: only a second reading of it could notice.
+        let modified = std::fs::metadata(&bare.path)
+            .and_then(|meta| meta.modified())
+            .expect("the copy's time");
+        std::fs::write(&bare.path, "# 새제목\n\nbody").expect("rewrites");
+        std::fs::File::options()
+            .write(true)
+            .open(&bare.path)
+            .and_then(|file| file.set_modified(modified))
+            .expect("keeps the time");
+        let again = Store::open(&data, Limits::default());
+        let second = again.scan(3_000);
+        assert_eq!(second.updated, 0, "the upgrade ran again: {second:?}");
+        assert_eq!(
+            title_in(&again, &bare.id).as_deref(),
+            Some(work),
+            "a report the upgrade had already read was read again"
+        );
+        assert_eq!(
+            title_in(&again, &headed.id).as_deref(),
+            Some("Verification report: the queue drains")
+        );
+    }
+
+    /// The window asks for the rows whose files are there, so the vanished ones
+    /// do not travel; the answer still counts them, kind by kind, for the line
+    /// that says how many each tab hides.
+    #[test]
+    fn a_listing_of_present_rows_counts_the_vanished_ones_by_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let session = dir.path().join("sessions/one");
+        let place = |name: &str| {
+            let path = session.join(name);
+            touch(&path, "{\"n\":1}\n");
+            store
+                .register_in_place(
+                    &path,
+                    Source::Evidence,
+                    Origin {
+                        automation: Some("computer-use".into()),
+                        ..Origin::default()
+                    },
+                    1_000,
+                )
+                .expect("registers")
+                .id
+        };
+        let steps = place("steps.jsonl");
+        for name in ["state.json", "001.png", "002.png"] {
+            place(name);
+        }
+        let report = dir.path().join("tmp/t-1-report.md");
+        touch(&report, "# Report");
+        let kept = store
+            .register_report(&report, origin("w-1"), None, 1_000)
+            .expect("registers")
+            .id;
+        // The session folder is cleaned away, all but its step log.
+        for name in ["state.json", "001.png", "002.png"] {
+            std::fs::remove_file(session.join(name)).expect("removes");
+        }
+
+        let present = store.list(&Filter {
+            present: Some(true),
+            ..Filter::default()
+        });
+        let mut ids: Vec<&str> = present.rows.iter().map(|row| row.id.as_str()).collect();
+        ids.sort_unstable();
+        let mut expected = vec![steps.as_str(), kept.as_str()];
+        expected.sort_unstable();
+        assert_eq!(ids, expected, "only the rows whose files are there travel");
+        assert!(present.missing.is_empty());
+        assert_eq!(present.missing_total, 3);
+        assert_eq!(
+            present.missing_by_kind,
+            BTreeMap::from([("evidence".to_string(), 1), ("screenshot".to_string(), 2)])
+        );
+        // Asked for one tab, the count is still every kind's: the other tabs'
+        // lines read it too.
+        let one_tab = store.list(&Filter {
+            present: Some(true),
+            kinds: vec!["report".into()],
+            ..Filter::default()
+        });
+        assert_eq!(one_tab.missing_by_kind.get("screenshot"), Some(&2));
+        // 「사라진 파일 보기」 asks without `present`, and they come back, named.
+        let all = store.list(&Filter::default());
+        assert_eq!((all.rows.len(), all.missing.len()), (5, 3));
+    }
+
+    /// 「작업에 연결 안 된 것」: the rows no task is linked to can be asked for,
+    /// and every answer counts them by kind — so a tab a task filter emptied
+    /// says how many rows of its kind are linked to no task.
+    #[test]
+    fn a_listing_counts_and_lists_the_rows_no_task_is_linked_to() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let report = |name: &str, origin: Origin| {
+            let path = dir.path().join("tmp").join(name);
+            touch(&path, "# Report");
+            store
+                .register_report(&path, origin, None, 1_000)
+                .expect("registers")
+                .id
+        };
+        let linked = report("t-1-report.md", origin("w-1"));
+        let loose = report("loose-report.md", Origin::default());
+        let evidence = dir.path().join("sessions/one/steps.jsonl");
+        touch(&evidence, "{\"n\":1}\n");
+        let steps = store
+            .register_in_place(&evidence, Source::Evidence, Origin::default(), 1_000)
+            .expect("registers")
+            .id;
+
+        let everything = store.list(&Filter::default());
+        assert_eq!(
+            everything.unlinked_by_kind,
+            BTreeMap::from([("evidence".to_string(), 1), ("report".to_string(), 1)])
+        );
+        // Filtered to one task and to the evidence tab nothing is listed, and
+        // the evidence linked to no task is still counted.
+        let emptied = store.list(&Filter {
+            task: Some("t-1".into()),
+            kinds: vec!["evidence".into()],
+            ..Filter::default()
+        });
+        assert!(emptied.rows.is_empty());
+        assert_eq!(emptied.unlinked_by_kind.get("evidence"), Some(&1));
+        assert_eq!(
+            emptied.by_kind.get("report"),
+            Some(&1),
+            "the task's own rows are counted by kind as before"
+        );
+        // The rows no task is linked to, and the rows one is.
+        let ids = |filter: Filter| {
+            let mut ids: Vec<String> = store
+                .list(&filter)
+                .rows
+                .into_iter()
+                .map(|row| row.id)
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        let mut unlinked = vec![loose, steps];
+        unlinked.sort_unstable();
+        assert_eq!(
+            ids(Filter {
+                task_linked: Some(false),
+                ..Filter::default()
+            }),
+            unlinked
+        );
+        assert_eq!(
+            ids(Filter {
+                task_linked: Some(true),
+                ..Filter::default()
+            }),
+            vec![linked]
+        );
+    }
+
+    /// An evidence file's preview carries what the file says — its steps counted
+    /// and listed — and the byte-capped cache keeps it. A file that holds no
+    /// JSON record carries none and is shown as the text it is.
+    #[test]
+    fn an_evidence_rows_preview_carries_its_digest_and_the_cache_keeps_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let session = dir.path().join("sessions/one");
+        // The lines the window's own recorder writes, from its own record.
+        let step = |n: usize, ok: bool| crate::run_evidence::Step {
+            n,
+            at_epoch_ms: 1_000 + n as i64,
+            tool: "browser".into(),
+            verb: "click".into(),
+            argv: vec!["click".into(), "browser-1".into()],
+            ok,
+            observation: Some(serde_json::json!({ "act_ms": 4 })),
+            error: (!ok).then(|| "the selector never showed".to_string()),
+            code: None,
+            acts: true,
+            shot: None,
+            frame: None,
+            frame_skipped: None,
+        };
+        let log: String = [step(1, true), step(2, false), step(3, true)]
+            .iter()
+            .map(|step| serde_json::to_string(step).expect("serialises") + "\n")
+            .collect();
+        let steps = session.join("steps.jsonl");
+        touch(&steps, &log);
+        let place = |path: &Path| {
+            store
+                .register_in_place(path, Source::Evidence, Origin::default(), 1_000)
+                .expect("registers")
+                .id
+        };
+        let id = place(&steps);
+        let first = store.preview(&id).expect("preview");
+        assert!(
+            matches!(&first.digest, Some(Digest::Steps(read)) if (read.total, read.failed) == (3, 1)),
+            "the step log's preview carried no digest of it: {:?}",
+            first.digest
+        );
+        assert!(
+            Arc::ptr_eq(&first, &store.preview(&id).expect("preview")),
+            "the cached preview was built again"
+        );
+
+        // The operator's state record, as its own writer serialises it.
+        let state = session.join("state.json");
+        let written = crate::computer_use::state::OperatorState {
+            actions: 3,
+            consecutive_failures: 1,
+            ..Default::default()
+        };
+        touch(
+            &state,
+            &serde_json::to_string(&written).expect("serialises"),
+        );
+        let held = store.preview(&place(&state)).expect("preview");
+        assert!(
+            matches!(&held.digest, Some(Digest::State(read)) if (read.actions, read.consecutive_failures) == (3, 1)),
+            "the state record's preview carried no digest of it: {:?}",
+            held.digest
+        );
+
+        let plain = session.join("run.log");
+        touch(&plain, "test result: ok. 3 passed; 0 failed\n");
+        assert!(
+            store
+                .preview(&place(&plain))
+                .expect("preview")
+                .digest
+                .is_none(),
+            "a text log is shown as the text it is"
+        );
+        let report = dir.path().join("tmp/t-1-report.md");
+        touch(&report, "# Report");
+        let report = store
+            .register_report(&report, origin("w-1"), None, 1_000)
+            .expect("registers")
+            .id;
+        assert!(store.preview(&report).expect("preview").digest.is_none());
+    }
+
+    /// A row whose file went with its folder stays in the catalog — 「사라진 파일
+    /// 보기」 still shows it — until the retention sweep the catalog already has
+    /// takes it. Nothing outside the store is touched on the way.
+    #[test]
+    fn a_vanished_row_stays_until_the_retention_sweep_and_nothing_outside_the_store_is_touched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(&dir.path().join("data"), Limits::default());
+        let session = dir.path().join("sessions/one");
+        let gone = session.join("steps.jsonl");
+        let stays = session.join("notes.txt");
+        touch(&gone, "{\"n\":1}\n");
+        touch(&stays, "kept by its owner");
+        let id = store
+            .register_in_place(&gone, Source::Evidence, Origin::default(), 1_000)
+            .expect("registers")
+            .id;
+        std::fs::remove_file(&gone).expect("removes");
+        store.scan(2_000);
+        assert!(
+            store.get(&id).is_some(),
+            "a scan dropped a row no folder vouches for"
+        );
+        let day = 24 * 60 * 60 * 1000;
+        let modified = store.get(&id).map_or(0, |row| row.modified_ms);
+        store.prune(modified + 10 * day, 30);
+        assert!(
+            store.get(&id).is_some(),
+            "the row went before its days were over"
+        );
+        let pruned = store.prune(modified + 31 * day, 30);
+        assert_eq!((pruned.rows, pruned.files), (1, 0));
+        assert!(store.get(&id).is_none());
+        assert!(stays.is_file(), "a file outside the store was removed");
     }
 }

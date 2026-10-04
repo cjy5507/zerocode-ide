@@ -22,6 +22,8 @@ pub(crate) struct ArtifactListing {
     pub(crate) missing: Vec<String>,
     pub(crate) missing_total: usize,
     pub(crate) by_kind: std::collections::BTreeMap<String, usize>,
+    pub(crate) missing_by_kind: std::collections::BTreeMap<String, usize>,
+    pub(crate) unlinked_by_kind: std::collections::BTreeMap<String, usize>,
     pub(crate) retention_days: u32,
     pub(crate) thumb: ThumbTable,
 }
@@ -44,6 +46,8 @@ pub(crate) fn artifacts_list(filter: artifact_runtime::Filter) -> Result<Artifac
         missing: listing.missing,
         missing_total: listing.missing_total,
         by_kind: listing.by_kind,
+        missing_by_kind: listing.missing_by_kind,
+        unlinked_by_kind: listing.unlinked_by_kind,
         retention_days: limits.retention_days,
         thumb: ThumbTable {
             width: limits.thumb_width,

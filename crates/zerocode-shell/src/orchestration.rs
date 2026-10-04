@@ -9149,7 +9149,7 @@ fn note_worker_report(
     })
     .flatten()
     .unwrap_or_default();
-    let _ = store.register_report(&path, origin, now_ms);
+    let _ = store.register_report(&path, origin, None, now_ms);
 }
 
 /// Carry out the EFFECT of one decision, and say what the shim should print.
