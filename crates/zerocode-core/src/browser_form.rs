@@ -53,7 +53,8 @@ pub const BROWSER_FORM_ACTIONS: &[&str] = &[
 /// The boxes a form's buttons stand in with its fields — the form, a dialog,
 /// the page's main region — so a read names the buttons that send or move
 /// the form on, not the site's navigation.
-pub const BROWSER_FORM_SCOPES: &[&str] = &["form", "[role=form]", "dialog", "[role=dialog]", "main"];
+pub const BROWSER_FORM_SCOPES: &[&str] =
+    &["form", "[role=form]", "dialog", "[role=dialog]", "main"];
 
 /// How many boxes out from a field its caption is looked for, when nothing
 /// names the field (no label, no ARIA name, no table header): the words
@@ -239,7 +240,8 @@ impl<'de> Deserialize<'de> for Bundle {
 /// as its words) or a checkbox's `true`/`false`.
 pub fn fill_entries(said: &str) -> Result<Vec<FillEntry>, String> {
     let Bundle(pairs) = serde_json::from_str(said).map_err(|_| {
-        "fill 값은 JSON입니다 — {\"손잡이\": 값, …} 또는 [{\"handle\": …, \"value\": …}]".to_string()
+        "fill 값은 JSON입니다 — {\"손잡이\": 값, …} 또는 [{\"handle\": …, \"value\": …}]"
+            .to_string()
     })?;
     if pairs.is_empty() {
         return Err("fill 묶음이 비어 있습니다".to_string());
@@ -429,7 +431,11 @@ impl FillLedger {
             return;
         }
         for entry in asked {
-            let Some(at) = self.entries.iter().position(|held| held.handle == entry.handle) else {
+            let Some(at) = self
+                .entries
+                .iter()
+                .position(|held| held.handle == entry.handle)
+            else {
                 continue;
             };
             let said = pass
@@ -602,7 +608,10 @@ fn left_line(field: &FormField) -> String {
     } else {
         field.error.clone()
     };
-    format!("  {} · {} · {} — {why}", field.handle, field.kind, field.label)
+    format!(
+        "  {} · {} · {} — {why}",
+        field.handle, field.kind, field.label
+    )
 }
 
 /// A fill for the agent: how many took in how many passes, every field's

@@ -54,11 +54,17 @@ fn a_bundle_that_cannot_be_filled_is_refused_by_name() {
         (r##"{"#a": ["x"]}"##, "a list value"),
         (r##"{"#a": "x", "#a": "y"}"##, "a handle twice"),
         (r##"{"  ": "x"}"##, "an empty handle"),
-        (r##"[{"handle": "#a", "value": "x", "extra": 1}]"##, "an unknown key"),
+        (
+            r##"[{"handle": "#a", "value": "x", "extra": 1}]"##,
+            "an unknown key",
+        ),
     ] {
         assert!(fill_entries(bundle).is_err(), "{why}: {bundle}");
     }
-    let long = format!(r##"{{"#a": "{}"}}"##, "x".repeat(BROWSER_FILL_VALUE_CAP + 1));
+    let long = format!(
+        r##"{{"#a": "{}"}}"##,
+        "x".repeat(BROWSER_FILL_VALUE_CAP + 1)
+    );
     let refused = fill_entries(&long).expect_err("a value past the cap");
     assert!(refused.contains("#a"), "{refused}");
     let many: serde_json::Map<String, serde_json::Value> = (0..=BROWSER_FORM_FIELD_CAP)
@@ -139,7 +145,10 @@ fn a_fill_tries_again_only_what_the_page_may_still_bring() {
     );
     assert_eq!(report.passes, 3);
     assert_eq!((report.took(), report.all_took()), (3, false));
-    assert!(report.left.is_empty(), "what is left is the last pass's word");
+    assert!(
+        report.left.is_empty(),
+        "what is left is the last pass's word"
+    );
 }
 
 #[test]

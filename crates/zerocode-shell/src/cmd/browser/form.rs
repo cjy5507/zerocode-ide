@@ -11,15 +11,15 @@
 //! fills as a shown one does.
 
 use super::*;
+use zerocode_core::agent_browser::BROWSER_EVAL_FORM_OBJECT;
 use zerocode_core::browser_form::{
     BROWSER_FILL_OFF, BROWSER_FILL_ON, BROWSER_FILL_PENDING_MS, BROWSER_FORM_ACTION_CAP,
-    BROWSER_FORM_ACTIONS, BROWSER_FORM_CAPTION_DEPTH, BROWSER_FORM_CONTROLS, BROWSER_FORM_DAY_WORDS,
-    BROWSER_FORM_DAYS, BROWSER_FORM_FIELD_CAP, BROWSER_FORM_FRAME_DEPTH,
+    BROWSER_FORM_ACTIONS, BROWSER_FORM_CAPTION_DEPTH, BROWSER_FORM_CONTROLS,
+    BROWSER_FORM_DAY_WORDS, BROWSER_FORM_DAYS, BROWSER_FORM_FIELD_CAP, BROWSER_FORM_FRAME_DEPTH,
     BROWSER_FORM_FRAME_SEPARATOR, BROWSER_FORM_NOT_FIELDS, BROWSER_FORM_OPTION_CAP,
     BROWSER_FORM_OPTIONS, BROWSER_FORM_SCOPES, FillEntry, FillLedger, FillPass, FillReport,
     FormRead,
 };
-use zerocode_core::agent_browser::BROWSER_EVAL_FORM_OBJECT;
 
 /// What a read of a page's forms is made of, page side — read only, like the
 /// marks helpers it stands on (`BROWSER_MARK_HELPERS`: a field's name, the
@@ -659,8 +659,9 @@ pub(crate) fn form_script(request: &serde_json::Value, body: &str) -> String {
 /// fill, by fingerprint — what the next `fill` holds the page to before it
 /// writes. Kept per pane label, as the marks table is.
 fn form_prints() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
-    static PRINTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
-        std::sync::OnceLock::new();
+    static PRINTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
     PRINTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 

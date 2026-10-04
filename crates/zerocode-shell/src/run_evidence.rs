@@ -189,8 +189,10 @@ pub fn captures(tool: &str, verb: &str) -> Option<bool> {
 pub fn redacted(tool: &str, argv: &[String]) -> Vec<String> {
     // A browser `type` and a `fill` carry what was typed last, as one word
     // or after `--value`.
-    let typing =
-        tool == "browser" && argv.first().is_some_and(|verb| verb == "type" || verb == "fill");
+    let typing = tool == "browser"
+        && argv
+            .first()
+            .is_some_and(|verb| verb == "type" || verb == "fill");
     let needle = tool == "computer"
         && argv
             .first()
