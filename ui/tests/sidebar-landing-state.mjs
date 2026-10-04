@@ -374,6 +374,36 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       JSON.stringify(moved),
     );
 
+    // The artifact card and drawer wear the state's own word only (t-36910 `head`): the clash and the
+    // distance are said in the sidebar chip and in the tooltip, and a clash is told by colour there.
+    const card = await page.evaluate(() => {
+      const wear = (path) => {
+        const chip = document.createElement("span");
+        chip.className = "artifact-card-landing";
+        document.body.append(chip);
+        dressArtifactLanding(chip, worktreeLandingSayFor(path));
+        const seen = {
+          text: chip.textContent,
+          tone: chip.dataset.landing ?? null,
+          tip: chip.dataset.tip ?? "",
+          color: getComputedStyle(chip).color,
+          border: getComputedStyle(chip).borderTopColor,
+        };
+        chip.remove();
+        return seen;
+      };
+      return { clash: wear("/r/farclash"), check: wear("/r/unk"), quiet: wear("/r/ahead"), sidebar: window.__CHIP__("/r/farclash") };
+    });
+    ok(
+      "an unlanded row with a clash and a long way behind reads 미반영 N alone on an artifact card, tells the clash by data-landing and by the 확인 필요 colour, keeps the clash and the distance in its tooltip, and wears the whole sentence in the sidebar",
+      card.clash.text === "미반영 17" && card.clash.tone === "conflict" &&
+        card.clash.color === card.check.color && card.clash.border === card.check.border &&
+        card.clash.color !== card.quiet.color &&
+        card.clash.tip.includes("7개 파일이 충돌합니다") && card.clash.tip.includes("71커밋 뒤처져") &&
+        card.sidebar.word === "미반영 17 · 충돌 7 · main보다 71 뒤",
+      JSON.stringify(card),
+    );
+
     const heights = await page.evaluate(() => {
       const rows = [...document.querySelectorAll(".wt-row")].map((row) => row.getBoundingClientRect().height);
       return { min: Math.min(...rows), max: Math.max(...rows), plain: window.__CHIP__("/r/plain").height };
