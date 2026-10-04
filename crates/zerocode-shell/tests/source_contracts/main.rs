@@ -8793,12 +8793,29 @@ mod tests {
         }
         // And `adb` alone carries a device that is already running: the
         // emulator package is asked for the AVD list, never for the frames,
-        // taps or tree of a device adb can already see.
-        let listing = block_after(android_emulator, "fn list_android_devices(");
+        // taps or tree of a device adb can already see. The rule is one
+        // function's (`emulators_listed`, t-36920), and both roads to the list
+        // — the panes' device list and the one `zerocode-emulator list`
+        // answers with the phones beside it — read adb first and hand what is
+        // running to it, so neither can hide a running device behind a missing
+        // package.
+        let listing = block_after(android_emulator, "fn emulators_listed(");
         assert!(
-            listing.contains("android_running(&sdk.adb)")
-                && listing.contains("if devices.is_empty()"),
+            listing.contains("if devices.is_empty()"),
             "a missing emulator package hides devices adb can already reach:\n{listing}"
+        );
+        let panes_list = block_after(android_emulator, "fn list_android_devices(");
+        assert!(
+            panes_list.contains("android_running(&sdk.adb)")
+                && panes_list.contains("emulators_listed(&sdk, &running)"),
+            "the panes' device list has its own rule for a missing emulator package:\n{panes_list}"
+        );
+        let answer_list = block_after(android_emulator, "fn android_listing_with(");
+        assert!(
+            answer_list.contains("adb_rows(&sdk.adb)")
+                && answer_list.contains("running_emulators(&sdk.adb, rows)")
+                && answer_list.contains("emulators_listed(sdk, &running)"),
+            "`zerocode-emulator list` has its own rule for a missing emulator package, or asks adb again:\n{answer_list}"
         );
         let videoing = block_after(android_emulator, "fn pump_android_video(");
         assert!(
