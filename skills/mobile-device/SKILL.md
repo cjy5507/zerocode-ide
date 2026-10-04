@@ -24,8 +24,8 @@ points here and keeps no copy.
 zerocode-emulator list --json
 ```
 
-One call answers "nothing", "these" or "that one, not supported". Read it in
-this order:
+One call answers "nothing", "these" or "that one, not supported". With `--json`
+the answer is `{"ok": true, "result": {…}}`; read `result` in this order:
 
 - `ios`, `android`: the iOS Simulators and Android emulators this window can
   drive. A row carries the id every other command takes (`udid` on iOS, `avd`
@@ -43,10 +43,10 @@ An answer with a phone this window cannot drive and nothing it can (the names
 here are made up):
 
 ```json
-{"surface": "zerocode-built-in", "ios": [], "android": [],
+{"ok": true, "result": {"surface": "zerocode-built-in", "ios": [], "android": [],
  "physical": [{"platform": "ios", "name": "Synthetic Phone A", "model": "Synthetic iPhone",
    "state": "connected", "drivable": false,
-   "reason": "A real iPhone or iPad. This window drives only the iOS Simulator."}]}
+   "reason": "A real iPhone or iPad. This window drives only the iOS Simulator."}]}}
 ```
 
 ## 2. Nothing booted: open one
