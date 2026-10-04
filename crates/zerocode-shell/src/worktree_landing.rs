@@ -803,19 +803,30 @@ fn classify_landing(
         landing.state = "unlanded";
         landing.ahead = u32::try_from(ahead).unwrap_or(u32::MAX);
         landing.behind = commits_behind(host, path, head, target);
-        if let MergeProbe::Conflict(files) = probe {
-            landing.conflict = Some(LandingConflict {
-                total: u32::try_from(files.len()).unwrap_or(u32::MAX),
-                files: files.into_iter().take(LANDING_CONFLICT_NAMES).collect(),
-            });
-        }
+        landing.far_behind = landing
+            .behind
+            .is_some_and(|behind| behind >= LANDING_BEHIND_WARN);
+        landing.conflict = conflict_of(&probe);
     }
     landing
 }
 
 /// 병합 시험의 답을 칸으로 옮긴다: 깨끗함은 `total 0`, 충돌은 전체 수와 앞쪽 이름, 못 읽음은 없음.
-fn conflict_of(_probe: &MergeProbe) -> Option<LandingConflict> {
-    None
+///
+/// 종료값이 충돌이라고 했는데 파일 이름이 하나도 없으면 충돌은 충돌이다 — 적어도 하나로 세고
+/// 이름은 비워 둔다. 0으로 옮기면 충돌을 「합쳐 보았고 깨끗함」으로 말하게 된다.
+fn conflict_of(probe: &MergeProbe) -> Option<LandingConflict> {
+    match probe {
+        MergeProbe::Clean(_) => Some(LandingConflict {
+            total: 0,
+            files: Vec::new(),
+        }),
+        MergeProbe::Conflict(files) => Some(LandingConflict {
+            total: u32::try_from(files.len()).unwrap_or(u32::MAX).max(1),
+            files: files.iter().take(LANDING_CONFLICT_NAMES).cloned().collect(),
+        }),
+        MergeProbe::Failed => None,
+    }
 }
 
 /// 비교 ref에는 있고 `head`에는 없는 커밋 수. 못 읽으면 없다 — 0이라 하지 않는다.
