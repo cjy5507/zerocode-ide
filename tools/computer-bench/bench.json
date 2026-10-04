@@ -66,7 +66,7 @@
   },
   "question_wait_ms": {
     "value": 605000,
-    "why": "COMPUTER_HANDOFF_TIMEOUT_MS + COMPUTER_BRIDGE_GRACE_MS (the core's COMPUTER_LONGEST_DEADLINE_MS): the longest a question the model left open — a press's confirmation (120 s) or a handoff (600 s) — stays on the person's screen, and status.confirming counts both. After zo ends, the runner waits for it to reach 0 (bounded by this) before the oracle looks and teardown moves anything; a question still open past it ends the bench with the desk left as it is."
+    "why": "COMPUTER_HANDOFF_TIMEOUT_MS + COMPUTER_BRIDGE_GRACE_MS (the core's COMPUTER_LONGEST_DEADLINE_MS less the grace a typed code's entering gets, which starts after the question has closed): the longest a question the model left open — a press's confirmation (120 s) or a handoff (600 s) — stays on the person's screen, and status.confirming counts both. After zo ends, the runner waits for it to reach 0 (bounded by this) before the oracle looks and teardown moves anything; a question still open past it ends the bench with the desk left as it is."
   },
   "budget_fraction_max": {
     "value": 0.8,
