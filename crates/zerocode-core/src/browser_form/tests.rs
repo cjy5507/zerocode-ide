@@ -1427,3 +1427,30 @@ fn a_fill_that_the_page_keeps_from_writing_names_the_button_that_opens_the_field
         "and says no more where the read named none:\n{lines}"
     );
 }
+
+/// A button the page says opens a dialog (`aria-haspopup="dialog"`) says the name of the dialog in the read; a dialog with no name says only that it opens one, and any other button says nothing more.
+#[test]
+fn a_button_that_opens_a_dialog_says_the_name_of_the_dialog() {
+    let read: FormRead = serde_json::from_value(json!({
+        "fields": [],
+        "actions": [
+            { "handle": "#from", "label": "Start date", "dialog": "Stay dates" },
+            { "handle": "#help", "label": "Help", "dialog": "" },
+            { "handle": "#next", "label": "Next" },
+        ],
+    }))
+    .expect("a read with buttons that open dialogs");
+    let lines = fields_lines(&read);
+    assert!(
+        lines.contains("#from 「Start date」 (대화상자 「Stay dates」을 엶)"),
+        "a named dialog is said by its name:\n{lines}"
+    );
+    assert!(
+        lines.contains("#help 「Help」 (대화상자를 엶)"),
+        "one with no name is said to open one:\n{lines}"
+    );
+    assert!(
+        lines.contains("#next 「Next」") && !lines.contains("#next 「Next」 (대화상자"),
+        "and any other button says nothing of one:\n{lines}"
+    );
+}
