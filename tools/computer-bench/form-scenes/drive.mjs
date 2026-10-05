@@ -40,7 +40,14 @@
  * `trace`: what the door said to each `fields` and `fill` in the core's own words, and what
  * the driver pressed and typed — the chain a failed run is read from.
  *
- * What a model takes from the door's words and the skill, the driver does the same way: a fill
+ * What a model takes from the door's words and the skill, the driver does the same way: a value the page
+ * splits across fields is cut at the symbols the door says stand between the parts (`joint`) — the last part,
+ * when it is a list that has the rest among its options, takes it; a date or a time goes to parts the page
+ * names by units (년 · 월 · 일, 시 · 분, 오전 · 오후; year, month, day, hour, minute, am, pm); a fact that
+ * names two fields is told by the kind of the field the value fits, and a card that does not tell is stopped on;
+ * a field the door says has new text after a press, with one button of its own beside it (`beside`), has that button
+ * pressed once and the form read again; a field whose read-back the door cannot tell (`unseen`) is not written
+ * again. A fill
  * whose answer says the form changed is followed by a read of the form before anything is
  * pressed; a button that moves the form on and is off while the door has said new text (a check
  * the page is still running) is waited for, a fixed number of times, and the form read again; a field the read says the page keeps off, with a box the read names as not yet read to
@@ -88,6 +95,17 @@ const INTENT = {
   oneTime: ["인증번호", "인증 번호", "인증코드", "일회용", "otp", "verification code", "one-time", "passcode"],
 };
 
+// The words a part of one value names what it holds by, read as units — the model's reading, a short list in each of the
+// two languages the bench's pages are written in. A part is told by the words after its caption (`<caption> — <words>`).
+const UNITS = {
+  year: ["년", "year", "yyyy"],
+  month: ["월", "month", "mm"],
+  day: ["일", "day", "dd"],
+  hour: ["시", "hour", "hh"],
+  minute: ["분", "minute", "min"],
+  meridiem: ["오전", "오후", "am", "pm"],
+};
+
 const fold = (text) => String(text ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 const PART = / \((\d+)\/(\d+)\)$/;
 const words = (label) => fold(label).replace(PART, "").replace(/\s*\*$/, "");
@@ -105,6 +123,89 @@ function advancing(actions, before = []) {
     && before.some((one) => one.handle === action.handle && one.disabled));
   if (turned.length) return turned[turned.length - 1];
   return actions.length ? actions[actions.length - 1] : null;
+}
+
+/* The unit a part's own words name, when they name exactly one. */
+function unitOf(own) {
+  const tokens = fold(own).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const hit = Object.entries(UNITS).filter(([, names]) => tokens.some((token) => names.includes(token))).map(([unit]) => unit);
+  return hit.length === 1 ? hit[0] : null;
+}
+
+/* The fields the door names by a caption and a unit — `<caption> — <unit>` — grouped by caption: the parts of a date or a
+ * time, two or more units of one. */
+function unitGroups(fields) {
+  const groups = new Map();
+  for (const field of fields) {
+    const label = String(field.label || "").replace(/\s*\*$/, "");
+    const at = label.lastIndexOf(" — ");
+    if (at < 0) continue;
+    const unit = unitOf(label.slice(at + 3));
+    if (!unit) continue;
+    const key = fold(label.slice(0, at)).replace(/\s*\*$/, "");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ field, unit });
+  }
+  for (const [key, parts] of groups) if (new Set(parts.map((part) => part.unit)).size < 2) groups.delete(key);
+  return groups;
+}
+
+/* A date or a time the card gives, in its numbers: a year first makes a date (an hour and a minute after it make a time too), else
+ * an hour and a minute; `pm` is which half of the day the words say, or null. */
+function momentOf(value) {
+  const text = String(value);
+  const numbers = (text.match(/\d+/g) || []).map(Number);
+  const words = fold(text);
+  const pm = /오후|\bpm\b|p\.m\./.test(words) ? true : /오전|\bam\b|a\.m\./.test(words) ? false : null;
+  const moment = { pm };
+  let rest = numbers;
+  if (numbers.length >= 3 && /^\d{4}$/.test((text.match(/\d+/) || [""])[0])) {
+    [moment.year, moment.month, moment.day] = numbers;
+    rest = numbers.slice(3);
+  }
+  if (rest.length) {
+    moment.hour = rest[0];
+    moment.minute = rest[1] ?? 0;
+  }
+  return moment;
+}
+
+/* The parts of one value cut at the symbols the door says stand between them (each part's `joint` is the symbol after it): the text
+ * between two symbols goes to the part before the second; parts with no symbol between them share the text up to the next symbol — the
+ * last of them, when it is a list that has the text among its options, takes it (the page writes the parts before it), else the first.
+ * A Map from part to its text; null when the door said no symbol, or the text lacks one it said. */
+function splitAtJoints(parts, text) {
+  if (!parts.slice(0, -1).some((part) => part.joint)) return null;
+  const chunks = [];
+  let rest = text;
+  let run = [];
+  for (let at = 0; at < parts.length; at += 1) {
+    run.push(parts[at]);
+    const joint = at + 1 < parts.length ? parts[at].joint : "";
+    if (at + 1 < parts.length && !joint) continue;
+    let chunk = rest;
+    if (joint) {
+      const found = rest.indexOf(joint);
+      if (found < 0) return null;
+      chunk = rest.slice(0, found);
+      rest = rest.slice(found + joint.length);
+    }
+    chunks.push({ run, chunk });
+    run = [];
+  }
+  const cut = new Map();
+  for (const { run: held, chunk } of chunks) {
+    const last = held[held.length - 1];
+    const option = (last.options || []).find((one) => fold(one) === fold(chunk));
+    if (held.length > 1 && option) cut.set(last, option);
+    else cut.set(held[0], chunk);
+  }
+  return cut;
+}
+
+/* Whether a value fits the kind of a field: a true or false is a checkbox's, any other value is not. */
+function kindFits(field, value) {
+  return typeof value === "boolean" ? field.kind === "checkbox" : field.kind !== "checkbox";
 }
 
 function args(argv) {
@@ -127,6 +228,12 @@ function args(argv) {
 function plan(fields, facts) {
   const bundle = {};
   const unplaced = [];
+  const ambiguous = [];
+  const dated = unitGroups(fields);
+  const sameNumbers = (a, b) => {
+    const left = String(a ?? "").match(/\d+/g), right = String(b ?? "").match(/\d+/g);
+    return Boolean(left && right) && left.map(Number).join() === right.map(Number).join();
+  };
   const byWords = new Map();
   for (const field of fields) {
     const key = words(field.label);
@@ -149,10 +256,44 @@ function plan(fields, facts) {
   };
   for (const fact of facts) {
     const said = fold(fact.says);
+    const parts = dated.get(said);
+    if (parts && typeof fact.value !== "boolean") {
+      // A date or a time, written into the parts the page names by units.
+      const moment = momentOf(fact.value);
+      const halves = parts.some((part) => part.unit === "meridiem");
+      for (const { field, unit } of parts) {
+        let piece = null;
+        if (unit === "year" && moment.year !== undefined) piece = String(moment.year);
+        if (unit === "month" && moment.month !== undefined) piece = String(moment.month);
+        if (unit === "day" && moment.day !== undefined) piece = String(moment.day);
+        if (unit === "hour" && moment.hour !== undefined) piece = String(halves ? moment.hour % 12 || 12 : moment.hour);
+        if (unit === "minute" && moment.hour !== undefined) piece = String(moment.minute);
+        if (unit === "meridiem" && moment.hour !== undefined) {
+          const names = (moment.pm ?? moment.hour >= 12) ? ["오후", "pm"] : ["오전", "am"];
+          piece = (field.options || []).find((option) => names.some((name) => fold(option).includes(name))) ?? null;
+        }
+        if (piece !== null && !sameNumbers(field.value, piece) && fold(field.value) !== fold(piece)) bundle[field.handle] = piece;
+      }
+      continue;
+    }
     let group = byWords.get(said);
     if (!group) {
       const near = [...byWords.entries()].filter(([key]) => key && (key.includes(said) || said.includes(key)));
       if (near.length === 1) group = near[0][1];
+      else if (near.length > 1) {
+        // One item that two fields answer to: a number goes to the field that takes numbers, a true or false to a
+        // checkbox; what still fits two fields is not told by the card.
+        let fits = near.flatMap(([, list]) => list).filter((field) => kindFits(field, fact.value));
+        if (fits.length > 1 && /^\d+$/.test(String(fact.value))) {
+          const numeric = fits.filter((field) => field.kind === "number" || field.kind === "range" || /^\d+$/.test(String(field.value ?? "")));
+          if (numeric.length) fits = numeric;
+        }
+        if (fits.length === 1) group = fits;
+        else if (fits.length > 1) {
+          ambiguous.push({ says: fact.says, handles: fits.map((field) => field.handle) });
+          continue;
+        }
+      }
     }
     if (!group) {
       const hit = typeof fact.value === "boolean" ? optionOf(said) : null;
@@ -182,6 +323,12 @@ function plan(fields, facts) {
       }
       continue;
     }
+    // A value the page splits across parts, cut at the symbols the door says stand between them.
+    const cut = splitAtJoints(group, String(fact.value));
+    if (cut) {
+      for (const [field, piece] of cut) if (piece && field.value !== piece) bundle[field.handle] = piece;
+      continue;
+    }
     const groups = String(fact.value).match(/\d+/g) || [];
     const pieces = groups.length === group.length ? groups : [];
     group.forEach((field, at) => {
@@ -193,7 +340,12 @@ function plan(fields, facts) {
     const list = (field.options || []).filter((option) => on.has(option));
     if (JSON.stringify(list) !== JSON.stringify(field.value || [])) bundle[field.handle] = list;
   }
-  return { bundle, unplaced };
+  return { bundle, unplaced, ambiguous };
+}
+
+/* What a stop on a card that does not tell says. */
+function ambiguousWords(ambiguous) {
+  return `stuck: ${ambiguous.map((one) => `"${one.says}" answers to ${one.handles.length} fields (${one.handles.join(", ")})`).join("; ")} and the card does not say which`;
 }
 
 /* The one thing whose words are these words, else the one that holds them
@@ -228,6 +380,10 @@ class Road {
     this.pressed = new Map();
     this.justPressed = null;
     this.lastSig = null;
+    // Every button the driver pressed, and what the door said after the last press: whether the form stayed, the fields that
+    // have something to say and the buttons — what a field's own button is found by.
+    this.everPressed = new Set();
+    this.after = null;
     // The secret fields typed on the setter road: a fill never reads one back,
     // so a field already typed is no longer asked of it nor owed by it.
     this.typed = new Set();
@@ -412,6 +568,8 @@ class Road {
 
   async press(action) {
     this.trail.push({ press: action.label });
+    this.everPressed.add(action.handle);
+    this.after = null;
     if (action.handle.includes(FORM_REQUEST.frameSeparator)) {
       this.note({ verb: "click", handle: action.handle, label: action.label });
       const [frame, inner] = action.handle.split(FORM_REQUEST.frameSeparator);
@@ -432,11 +590,34 @@ class Road {
     if (this.ask) entry.words = this.ask({ op: "press", label: "browser-1", read: done.read, known, buttons, moving: done.moving }).words;
     this.note(entry);
     this.fresh = [...(done.read.outside || []), ...(done.read.alerts || []), ...(done.read.noted || []).flatMap((one) => one.fresh || [])];
+    this.after = { stayed: done.read.fingerprint === known, noted: done.read.noted || [], actions: done.read.actions || [] };
     if (done.read.fingerprint === known) {
       this.form = done.read.fingerprint;
       this.buttons = done.read.actions || this.buttons;
     }
     return done.pressed;
+  }
+
+  /* A field's own button (the door says which button stands beside which field, `beside`): after a press that left the form as it was, when
+   * the door says a field that holds a value has new text — the page's answer about it — and one button on beside that field has not been
+   * pressed, it is pressed once and the form is read again, as a model does with the "apply" of a code the page asked to be applied. True
+   * when pressed. */
+  async ownButton() {
+    const after = this.after;
+    if (!after || !after.stayed) return false;
+    for (const field of after.noted) {
+      const holds = field.value !== "" && field.value !== false && !(Array.isArray(field.value) && !field.value.length);
+      if (!holds || !(field.fresh || []).length) continue;
+      const own = after.actions.filter((action) => action.beside === field.handle && !action.disabled && !this.everPressed.has(action.handle));
+      if (own.length !== 1) continue;
+      this.trail.push({ own: own[0].label, beside: field.handle });
+      await this.press(own[0]);
+      // The page answers the buttons pressed so far differently now: the count of the same press in the same form starts again.
+      this.pressed.clear();
+      this.waits = 0;
+      return true;
+    }
+    return false;
   }
 
   /* A field the page keeps off until a box is read to its end: the read says why in the page's
@@ -493,7 +674,8 @@ class Road {
       const read = await this.fields();
       if (await this.finished()) return this.done();
       if (await this.scrollRoad(read)) continue;
-      const { bundle, unplaced } = plan(this.untyped(read.fields), this.facts);
+      const { bundle, unplaced, ambiguous } = plan(this.untyped(read.fields), this.facts);
+      if (ambiguous.length) throw new Error(ambiguousWords(ambiguous));
       if (this.price) this.priced += await this.today(read, bundle);
       if (await this.unknownRoad(read.unknowns, unplaced)) continue;
       let actions = read.actions;
@@ -575,7 +757,9 @@ class Road {
     this.fresh = [];
     this.justPressed = advance.handle;
     await this.press(advance);
-    return this.finished();
+    if (await this.finished()) return true;
+    await this.ownButton();
+    return false;
   }
 
   /* The script road: one eval a step reads, fills by the words it read and
@@ -587,6 +771,12 @@ class Road {
       const fold = ${fold.toString()};
       const PART = ${PART.toString()};
       const words = ${words.toString()};
+      const UNITS = ${JSON.stringify(UNITS)};
+      const unitOf = ${unitOf.toString()};
+      const unitGroups = ${unitGroups.toString()};
+      const momentOf = ${momentOf.toString()};
+      const splitAtJoints = ${splitAtJoints.toString()};
+      const kindFits = ${kindFits.toString()};
       const plan = ${plan.toString()};
       const took = ${took.toString()};
       const INTENT = ${JSON.stringify(INTENT)};
@@ -597,7 +787,7 @@ class Road {
       const typed = __TYPED__;
       const read = zerocode.fields();
       const fields = read.fields.filter((field) => !typed.includes(field.handle));
-      const { bundle, unplaced } = plan(fields, facts);
+      const { bundle, unplaced, ambiguous } = plan(fields, facts);
       const filled = Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: fields
         .filter((field) => field.required && (field.value === "" || field.value === false)) };
       const left = filled.left.filter((field) => !typed.includes(field.handle));
@@ -622,7 +812,7 @@ class Road {
       const fresh = [].concat(filled.outside || [], filled.alerts || [], ...filled.results.map((result) => result.fresh || []));
       return { results: filled.results.map((result) => result.label + ":" + result.status), left,
         actions, before: read.actions.map((action) => ({ handle: action.handle, disabled: action.disabled })), fresh, pressedNext: pressNext, pressedHandle: pressNext ? next.handle : null,
-        print: read.fingerprint, hand, viaType, unknowns: read.unknowns, unplaced, clean, moved,
+        print: read.fingerprint, hand, viaType, unknowns: read.unknowns, unplaced, ambiguous, clean, moved,
         scrollBoxes: read.scrollBoxes || [],
         confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, label: field.label,
           value: field.value, required: field.required, disabled: field.disabled, hint: field.hint })) };
@@ -637,6 +827,7 @@ class Road {
       const said = answer.value;
       this.seen = said.fields;
       if (await this.finished()) return this.done();
+      if (said.ambiguous.length) throw new Error(ambiguousWords(said.ambiguous));
       if (turn.confirm && said.clean) this.codeConfirmed = true;
       this.trail.push({ script: said.results, pressedNext: said.pressedNext, confirmed: said.confirmed });
       this.note({ verb: "eval", results: said.results, left: said.left.map((field) => `${field.handle} ${field.label}`),
@@ -666,7 +857,7 @@ class Road {
       const sig = JSON.stringify([said.results, said.left.map((field) => field.handle)]);
       const again = sig === this.lastSig;
       this.lastSig = sig;
-      if (!again && (said.left.length || said.results.some((result) => !/:(set|same)$/.test(result)))) continue;
+      if (!again && (said.left.length || said.results.some((result) => !/:(set|same|unseen)$/.test(result)))) continue;
       this.fresh = said.fresh;
       this.form = said.print;
       if (await this.step(said.actions, said.before)) return this.done();
