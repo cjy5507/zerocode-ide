@@ -453,7 +453,11 @@ const zcGroupTitle = (first, group, request) => {
   if (explicit.trim()) {
     return { name: explicit, note: between.trim() && zcFold(between) !== zcFold(explicit) ? between : "" };
   }
-  const asked = zcCaption(first, request);
+  // A radio the page wraps in its own label stands one box deeper than a field written straight into its row: that label is
+  // the radio's, not a box around the group, so it does not use up a box of the words' reach.
+  const reach = first.parentElement && first.parentElement.matches("label")
+    ? { ...request, captionDepth: request.captionDepth + 1 } : request;
+  const asked = zcCaption(first, reach);
   const near = heading ? zcWordsBeforeAt(first, request) : { text: "", node: null };
   const box = near.node && zcFold(near.text) === zcFold(asked) ? zcCommonBox(near.node, first) : null;
   if (box && box.contains(heading) && zcLabelWords(heading).trim()) {
