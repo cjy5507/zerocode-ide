@@ -550,11 +550,17 @@ async function drive(browser, folder, roadName) {
   const extra = extraKeys(result, expected);
   const scriptMs = road.scriptMs.slice().sort((a, b) => a - b);
   const fillMs = (road.kindMs.fill || []).slice().sort((a, b) => a - b);
+  // How long each kind of round trip took, by kind, as count / median / longest in ms: what the
+  // door spends reading a page (`fields`), writing it (`fill`) and pressing in it (`click`).
+  const ms = Object.fromEntries(Object.entries(road.kindMs).map(([kind, list]) => {
+    const sorted = list.slice().sort((a, b) => a - b);
+    return [kind, { n: sorted.length, p50: Math.round(sorted[Math.floor(sorted.length / 2)]), max: Math.round(sorted.at(-1)) }];
+  }));
   return {
     scene: folder.split(sep).filter(Boolean).pop(), road: roadName, ok, whole, sameSet, extra, stuck, wrong,
     ...road.count, projectedSeconds: road.count.roundTrips * SECONDS_PER_ROUND_TRIP,
     callMsP50: Math.round(scriptMs[Math.floor(scriptMs.length / 2)] ?? 0), callMsMax: Math.round(scriptMs.at(-1) ?? 0),
-    fillMsP50: Math.round(fillMs[Math.floor(fillMs.length / 2)] ?? 0), fillMsMax: Math.round(fillMs.at(-1) ?? 0),
+    fillMsP50: Math.round(fillMs[Math.floor(fillMs.length / 2)] ?? 0), fillMsMax: Math.round(fillMs.at(-1) ?? 0), ms,
     wallMs: Math.round(performance.now() - began), trail: road.trail,
     ...(doorWords ? { trace: road.said } : {}),
   };
@@ -596,7 +602,7 @@ try {
     for (const road of ["verbs", "script"]) {
       const row = await drive(browser, folder, road);
       rows.push(row);
-      console.log(`DRIVE ${row.scene} ${row.road} ok=${row.ok} whole=${row.whole} sameSet=${row.sameSet} extra=${row.extra.join("|") || "-"} roundTrips=${row.roundTrips} fields=${row.fields} fill=${row.fill} click=${row.click} eval=${row.eval} type=${row.type} handoff=${row.handoff} passes=${row.fillPasses} callMs p50=${row.callMsP50} max=${row.callMsMax} fillMs p50=${row.fillMsP50} max=${row.fillMsMax}${row.stuck ? " stuck=" + row.stuck : ""}${row.wrong?.length ? " wrong=" + row.wrong.join(",") : ""}`);
+      console.log(`DRIVE ${row.scene} ${row.road} ok=${row.ok} whole=${row.whole} sameSet=${row.sameSet} extra=${row.extra.join("|") || "-"} roundTrips=${row.roundTrips} fields=${row.fields} fill=${row.fill} click=${row.click} eval=${row.eval} type=${row.type} handoff=${row.handoff} passes=${row.fillPasses} callMs p50=${row.callMsP50} max=${row.callMsMax} fillMs p50=${row.fillMsP50} max=${row.fillMsMax} ms ${Object.entries(row.ms).map(([kind, one]) => `${kind}=${one.n}/${one.p50}/${one.max}`).join(" ")}${row.stuck ? " stuck=" + row.stuck : ""}${row.wrong?.length ? " wrong=" + row.wrong.join(",") : ""}`);
     }
     const today = await countToday(browser, folder);
     rows.push(today);
