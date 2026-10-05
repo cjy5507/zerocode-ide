@@ -1390,6 +1390,58 @@ await test("a_fill_of_a_field_that_is_off_says_the_words_the_page_gives_about_it
   } finally { await why.close(); }
 });
 
+/* The buttons a fill leaves (t-41387): a step's button that turns on once its
+ * field is right, and one the page takes away, are said in the fill's own
+ * answer — the agent presses the step's button with no read between — by the
+ * page's own states: `disabled`, and not drawn. */
+const STEP_BUTTONS = `<!doctype html><html lang="en"><meta charset="utf-8">
+<form onsubmit="return false">
+  <label for="mail">Contact email</label> <input id="mail" type="email">
+  <button type="button" id="go" disabled>Continue</button>
+  <button type="button" id="back">Go back</button>
+  <button type="button" id="later">Skip this step</button>
+</form>
+<script>
+  const mail = document.getElementById("mail");
+  mail.addEventListener("input", () => {
+    const ok = mail.validity.valid && mail.value !== "";
+    document.getElementById("go").disabled = !ok;
+    document.getElementById("later").hidden = ok;
+  });
+</script>`;
+const buttonStates = (actions) => JSON.stringify(Object.fromEntries((Array.isArray(actions) ? actions : [])
+  .map((action) => [action.label, action.disabled ? "off" : "on"])));
+
+await test("a_fill_answers_the_state_of_the_buttons_the_form_has_after_it", async () => {
+  const step = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await step.setContent(STEP_BUTTONS);
+    const before = await readFields(step);
+    assert(buttonStates(before.actions) === JSON.stringify({ "Continue": "off", "Go back": "on", "Skip this step": "on" }),
+      "before the fill the step's button is off", before.actions);
+    const filled = await fillBundle(step, { "#mail": "kim@example.com" }, before.fingerprint);
+    assert(buttonStates(filled.actions) === JSON.stringify({ "Continue": "on", "Go back": "on" }),
+      "after it the step's button is on and the one the page took away is not there", filled.actions);
+    assert(filled.fingerprint === before.fingerprint, "the form's own fields did not change", filled);
+    return buttonStates(filled.actions);
+  } finally { await step.close(); }
+});
+
+await test("a_fill_inside_an_eval_answers_the_buttons_after_it_too", async () => {
+  const step = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await step.setContent(STEP_BUTTONS);
+    const script = `(() => { const read = zerocode.fields();
+      const filled = zerocode.fill({ "#mail": "kim@example.com" }, read);
+      return filled.actions; })()`;
+    const answer = await evalJson(step, evalFormScript(script));
+    assert(answer.ok, "the one script ran", answer);
+    assert(buttonStates(answer.value) === JSON.stringify({ "Continue": "on", "Go back": "on" }),
+      "the eval's fill says the buttons after it", answer.value);
+    return buttonStates(answer.value);
+  } finally { await step.close(); }
+});
+
 await browser.close();
 
 let failed = 0;

@@ -177,27 +177,29 @@ return zcEncode({ ok: true, value: { x: Math.round(window.scrollX), y: Math.roun
 /* `fill_passes` over `run(script) → page answer`: the whole bundle, held on
  * its first pass to `expect`, then what another pass may still find, every
  * poll, until the wait or the passes run out. Answers each entry's last
- * word, what is left, the passes, whether the form was stale and its
- * fingerprint after the last pass — and each `round`: the handles a pass was
- * asked and what the page answered, for the ledger that says the answer. */
+ * word, what is left, the passes, whether the form was stale, its
+ * fingerprint and its buttons after the last pass — and each `round`: the
+ * handles a pass was asked and what the page answered, for the ledger that
+ * says the answer. */
 export async function fillPasses(run, bundle, expect = null) {
   const entries = Array.isArray(bundle) ? bundle : Object.entries(bundle).map(([handle, value]) => ({ handle, value }));
   const last = new Map();
   const rounds = [];
   const began = Date.now();
-  let asked = entries, left = [], passes = 0, fingerprint = "";
+  let asked = entries, left = [], passes = 0, fingerprint = "", actions = [];
   while (asked.length) {
     const pass = await run(fillScript(asked, passes === 0 ? expect : null));
     if (!pass.ok) throw new Error(`a fill pass was refused: ${JSON.stringify(pass)}`);
     passes += 1;
     fingerprint = pass.value.fingerprint;
     rounds.push({ asked: asked.map((entry) => entry.handle), pass: pass.value });
-    if (pass.value.stale) return { results: entries.map(() => undefined), left: [], passes, stale: true, fingerprint, rounds };
+    if (pass.value.stale) return { results: entries.map(() => undefined), left: [], passes, stale: true, fingerprint, actions: [], rounds };
     for (const result of pass.value.results) last.set(result.handle, result);
     left = pass.value.left;
+    actions = pass.value.actions || [];
     asked = entries.filter((entry) => TRIES_AGAIN.includes(last.get(entry.handle)?.status));
     if (!asked.length || passes >= FILL_PASSES || Date.now() - began >= FILL_PENDING_MS) break;
     await new Promise((done) => setTimeout(done, FILL_POLL_MS));
   }
-  return { results: entries.map((entry) => last.get(entry.handle)), left, passes, stale: false, fingerprint, rounds };
+  return { results: entries.map((entry) => last.get(entry.handle)), left, passes, stale: false, fingerprint, actions, rounds };
 }

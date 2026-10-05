@@ -457,3 +457,81 @@ fn a_fill_that_meets_a_field_that_is_off_says_the_words_the_page_gives_about_it(
         "{lines}"
     );
 }
+
+/// A fill that read its buttons after the last pass, as the page answers it.
+fn filled_with_buttons(fingerprint: &str) -> FillReport {
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [{ "handle": "#mail", "status": "set", "label": "Contact email",
+            "now": "kim@example.com" }],
+        "fingerprint": fingerprint,
+        "actions": [
+            { "handle": "#go", "label": "Continue", "disabled": false },
+            { "handle": "#back", "label": "Go back", "disabled": true },
+        ],
+    }))
+    .expect("a pass with the buttons after it");
+    let bundle = vec![entry("#mail", text("kim@example.com"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    ledger.report()
+}
+
+fn button(handle: &str, label: &str, disabled: bool) -> FormAction {
+    FormAction {
+        handle: handle.into(),
+        label: label.into(),
+        disabled,
+    }
+}
+
+/// A fill says, at its end, the state of the buttons the form has after it
+/// (t-41387): the agent presses the step's button with no read between.
+#[test]
+fn a_fill_says_the_state_of_each_button_after_it() {
+    let lines = fill_lines(&filled_with_buttons("5:aaa"));
+    assert!(
+        lines.ends_with("버튼: #go 「Continue」 켜짐, #back 「Go back」 꺼짐\n"),
+        "{lines}"
+    );
+}
+
+/// Against the form the agent read before the fill: the same fields are
+/// "그대로" and a button the page took away is said as hidden; other fields
+/// are "바뀜" and the agent reads again — the old form's buttons are not said.
+#[test]
+fn a_fill_says_whether_the_form_it_read_changed_and_which_button_went_away() {
+    let before = vec![
+        button("#go", "Continue", true),
+        button("#back", "Go back", false),
+        button("#later", "Skip this step", false),
+    ];
+    let stayed = fill_lines(&filled_with_buttons("5:aaa").against(Some("5:aaa"), &before));
+    assert!(
+        stayed.ends_with(
+            "양식 그대로 — 버튼: #go 「Continue」 켜짐, #back 「Go back」 꺼짐; 숨김: #later 「Skip this step」\n"
+        ),
+        "{stayed}"
+    );
+    let changed = fill_lines(&filled_with_buttons("5:bbb").against(Some("5:aaa"), &before));
+    assert!(
+        changed.ends_with(
+            "양식 바뀜(fields로 다시 읽기) — 버튼: #go 「Continue」 켜짐, #back 「Go back」 꺼짐\n"
+        ),
+        "{changed}"
+    );
+}
+
+/// A form the agent never read has no "before" to be the same as: nothing is
+/// said of a change, and the buttons are said all the same.
+#[test]
+fn a_fill_of_a_form_the_agent_never_read_says_nothing_of_a_change() {
+    let lines = fill_lines(&filled_with_buttons("5:aaa").against(None, &[]));
+    assert!(
+        !lines.contains("양식 그대로") && !lines.contains("양식 바뀜"),
+        "{lines}"
+    );
+    assert!(
+        lines.contains("버튼: #go 「Continue」 켜짐"),
+        "the buttons are said all the same:\n{lines}"
+    );
+}

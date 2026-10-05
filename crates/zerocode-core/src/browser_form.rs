@@ -572,6 +572,13 @@ pub struct FillReport {
 }
 
 impl FillReport {
+    /// The report set against the form the agent read before the fill, and
+    /// the buttons that read had — what the answer's last line says.
+    #[must_use]
+    pub fn against(self, _known: Option<&str>, _buttons: &[FormAction]) -> Self {
+        self
+    }
+
     #[must_use]
     pub fn took(&self) -> usize {
         self.results
