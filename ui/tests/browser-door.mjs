@@ -2958,6 +2958,16 @@ await test("a_type_into_a_frame_held_to_the_form_its_agent_read_is_refused_when_
   } finally { await framed.close(); }
 });
 
+/* The value a `type` writes is in the page script's request and in nothing that script answers (t-41720): every answer the typing's page script encodes — in the page and in a frame — is read for
+ * the words of the value, and none holds them; the driver's step for a type says the value is not in its trace. The answer of the Rust side is the page's report and nothing else. */
+await test("the_typing_body_answers_without_the_value_it_typed_in_the_page_and_in_a_frame", () => {
+  const answers = [...TYPE_BODY.matchAll(/zcEncode\(([\s\S]*?)\);/g)].map((one) => one[1]);
+  assert(answers.length >= 3, "the typing answers in a few places", answers.length);
+  for (const answer of answers) assert(!/request\.text/.test(answer), "an answer of the typing never carries the value it typed", answer);
+  assert(TYPE_BODY.includes("frame_sealed") && TYPE_BODY.includes("form_stale"), "and the two refusals of a field in a frame are in the typing's body");
+  return `${answers.length} answers`;
+});
+
 await browser.close();
 
 let failed = 0;
