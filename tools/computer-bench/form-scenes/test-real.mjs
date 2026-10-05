@@ -188,6 +188,20 @@ await test("a run that names an account folder as its login is refused before th
   return said[0];
 });
 
+await test("an account named in any form is refused before the agent starts, with a value or without", async () => {
+  const marker = join(root, "started-again.txt");
+  const watcher = await standIn("watcher-again", `echo started > "${marker}"\ncat > /dev/null`);
+  for (const naming of [["--account"], ["--account", ""], [`--account=${account}`], ["--account", account]]) {
+    const out = fresh();
+    const done = spawnSync(process.execPath, [REAL, "--scene", scene, "--model", "fake-model", "--out", out, "--door-text", doorText,
+      "--claude", watcher, ...naming], { encoding: "utf8", timeout: 120_000 });
+    const said = `${done.stdout}${done.stderr}`.split("\n").filter((line) => line.startsWith("REFUSED"));
+    assert(done.status === 2 && said.length === 1 && said[0].includes("closed"), "refused in one line that says the road is closed", [naming, done.status, said]);
+    assert(!existsSync(marker) && !existsSync(out), "and nothing was started or made", naming);
+  }
+  return "ok";
+});
+
 let failed = 0;
 for (const result of results) {
   if (!result.pass) failed += 1;

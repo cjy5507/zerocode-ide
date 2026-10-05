@@ -607,3 +607,35 @@ fn a_field_the_page_replaced_after_the_write_says_so() {
         "{lines}"
     );
 }
+
+/// A button with no id or name is found by its place in the page: when the fill
+/// shows a banner above it the place moves and the button is the same — one
+/// that has the same words now is not one the page took away.
+#[test]
+fn a_button_whose_place_moved_is_not_said_to_be_hidden() {
+    let before = vec![
+        button("div:nth-of-type(2) > button", "다음", false),
+        button("div:nth-of-type(3) > button", "이전", false),
+    ];
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [{ "handle": "#mail", "status": "set", "label": "Contact email",
+            "now": "kim@example.com" }],
+        "fingerprint": "5:aaa",
+        "actions": [
+            { "handle": "div:nth-of-type(3) > button", "label": "다음", "disabled": false },
+        ],
+    }))
+    .expect("a pass with the buttons moved");
+    let bundle = vec![entry("#mail", text("kim@example.com"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    let lines = fill_lines(&ledger.report().against(Some("5:aaa"), &before));
+    assert!(
+        lines.contains("숨김: div:nth-of-type(3) > button 「이전」"),
+        "{lines}"
+    );
+    assert!(
+        !lines.contains("숨김: div:nth-of-type(2) > button"),
+        "the button that stands somewhere else now is not hidden:\n{lines}"
+    );
+}

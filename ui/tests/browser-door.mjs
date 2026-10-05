@@ -1538,6 +1538,89 @@ await test("a_fill_read_in_another_document_than_the_write_says_the_page_was_rep
   } finally { await late.close(); }
 });
 
+/* What a review of the nets found wrong on pages shaped like our own scenes (t-41387):
+ * a hint is the words nearest the field that are no one else's — not the text of
+ * the box around it, a symbol, a hidden calendar or a field's own caption; a
+ * column head follows the table's spans; a list a field offers is no box to read
+ * to its end. */
+const HINT_SHAPES = `<!doctype html><html lang="en"><meta charset="utf-8">
+<style>.box{height:60px;overflow:auto;border:1px solid #999}</style>
+<form>
+  <div class="field">
+    <label id="tl">Service terms <span class="req">*</span></label>
+    <div id="tbox" class="box" tabindex="0"><p>Article 1. These terms apply to every booking.</p><p>Article 2. The deposit is kept.</p><p>Article 3. Cancel before noon.</p><p>Article 4. Pets are not allowed.</p><p>Article 5. Quiet after ten.</p><p>Article 6. Keys stay with the guest.</p><p>Article 7. Damage is charged.</p><p>Article 8. These terms end on checkout.</p></div>
+    <div class="hint">Read the terms to the end to accept them.</div>
+    <label class="chk"><input type="checkbox" id="accept" disabled><span>I accept the terms</span></label>
+    <div id="err" role="alert" hidden>You must accept the terms.</div>
+  </div>
+  <div class="field">
+    <label for="arrive">Arrival</label>
+    <input id="arrive" readonly placeholder="YYYY-MM-DD">
+    <span class="req">*</span>
+    <div class="cal" hidden>Nov 2026 Mo Tu We Th Fr Sa Su</div>
+  </div>
+  <div class="field">
+    <div id="news" role="checkbox" aria-checked="false" aria-disabled="true" tabindex="-1">Send me news</div>
+  </div>
+  <div class="field">
+    <label for="pickup">Pickup</label> <input id="pickup" disabled> <span class="note">Choose a branch first.</span>
+    <span class="note">Opening hours vary.</span>
+  </div>
+</form>`;
+const SPAN_TABLES = `<!doctype html><html lang="en"><meta charset="utf-8">
+<table id="two"><thead><tr><th rowspan="2">Name</th><th colspan="2">Contact</th></tr><tr><th>Phone</th><th>Email</th></tr></thead>
+  <tbody><tr><td><input id="n1"></td><td><input id="p1"></td><td><input id="e1"></td></tr></tbody></table>
+<table id="down"><thead><tr><th>Group</th><th>Item</th></tr></thead>
+  <tbody><tr><td rowspan="2"><input id="g1"></td><td><input id="h1"></td></tr><tr><td><input id="h2"></td></tr></tbody></table>
+<table id="title"><tr><th colspan="2">Booking</th></tr><tr><td>Guest</td><td><input id="t1"></td></tr></table>`;
+const OFFERED_LIST = `<!doctype html><html lang="en"><meta charset="utf-8">
+<style>#lst{height:40px;overflow:auto;margin:0;padding:0}</style>
+<form>
+  <input id="nick" disabled>
+  <div id="city" role="combobox" aria-expanded="true" aria-controls="lst" tabindex="0">Choose a city</div>
+  <ul id="lst" role="listbox"><li role="option">Seoul</li><li role="option">Busan</li><li role="option">Daegu</li><li role="option">Jeju</li><li role="option">Ulsan</li></ul>
+</form>`;
+
+await test("a_hint_is_the_words_nearest_the_field_not_the_box_around_it_a_symbol_a_hidden_calendar_or_its_own_words", async () => {
+  const shapes = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await shapes.setContent(HINT_SHAPES);
+    const fields = byHandle(await readFields(shapes));
+    assert(fields["#accept"].hint === "Read the terms to the end to accept them.",
+      "the sentence beside the checkbox, not the terms box, its heading or a hidden error", fields["#accept"]);
+    assert(!fields["#arrive"].hint, "a required mark and a hidden calendar are no hint", fields["#arrive"]);
+    assert(!fields["#news"].hint, "a custom checkbox's own words are its name, not a hint", fields["#news"]);
+    assert(fields["#pickup"].hint === "Choose a branch first.", "the nearest words after the field, not the second note", fields["#pickup"]);
+    return fields["#accept"].hint;
+  } finally { await shapes.close(); }
+});
+
+await test("a_column_head_follows_the_tables_spans_and_a_title_over_every_column_is_no_column_head", async () => {
+  const spans = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await spans.setContent(SPAN_TABLES);
+    const labels = Object.fromEntries((await readFields(spans)).fields.map((field) => [field.handle, field.label]));
+    assert(JSON.stringify([labels["#n1"], labels["#p1"], labels["#e1"]]) === JSON.stringify(["Name", "Phone", "Email"]),
+      "a head cell spanning two rows names its own column, the head row under it the next two", labels);
+    assert(JSON.stringify([labels["#g1"], labels["#h1"], labels["#h2"]]) === JSON.stringify(["Group", "Item", "Item"]),
+      "a body cell spanning two rows leaves its column to the row below", labels);
+    assert(labels["#t1"] === "Guest", "a head cell over every column is the table's title: the words before the field stand", labels);
+    return JSON.stringify(labels);
+  } finally { await spans.close(); }
+});
+
+await test("a_list_a_field_offers_is_no_box_to_read_to_its_end", async () => {
+  const offered = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await offered.setContent(OFFERED_LIST);
+    const read = await readFields(offered);
+    const city = read.fields.find((field) => field.handle === "#city");
+    assert(city && city.options.length === 5, "the dropdown's choices are read as the field's options", read.fields);
+    assert((read.scrollBoxes || []).length === 0, "and the list that holds them is not named a box with more to read", read.scrollBoxes);
+    return "no box";
+  } finally { await offered.close(); }
+});
+
 await browser.close();
 
 let failed = 0;
