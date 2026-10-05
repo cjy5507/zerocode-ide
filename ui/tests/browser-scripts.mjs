@@ -276,7 +276,7 @@ export async function pressInForm(run, selector) {
   const stood = await run(pressBeforeScript());
   if (!stood.ok) throw new Error(`a press was refused before it was made: ${JSON.stringify(stood)}`);
   const pressed = await run(clickScript(selector));
-  if (!pressed.ok) throw new Error(`a press was refused: ${JSON.stringify(pressed)}`);
+  if (!pressed.ok) throw new Error(`click refused: ${JSON.stringify(pressed)}`);
   const heard = await settled(run, stood.value.epoch, pressed.value.pressedAt);
   const read = await run(pressAfterScript(stood.value.before));
   if (!read.ok) throw new Error(`the form was not read after a press: ${JSON.stringify(read)}`);

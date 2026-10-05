@@ -37,6 +37,13 @@
  * `trace`: what the door said to each `fields` and `fill` in the core's own words, and what
  * the driver pressed and typed — the chain a failed run is read from.
  *
+ * What a model takes from the door's words and the skill, the driver does the same way: a fill
+ * whose answer says the form changed is followed by a read of the form before anything is
+ * pressed; a field the read says the page keeps off, with a box the read names as not yet read to
+ * its end, is switched on by scrolling that box with an `eval` the way the skill teaches
+ * (door-recipes.mjs), then the form is read again; a press in a form that was read is made as the
+ * door makes it (`pressInForm`) — the page waited for and read after it.
+ *
  * Between two round trips the driver waits THINK_MS: a model's turn is never
  * shorter, and a page's own late fields land inside it.
  *
@@ -51,7 +58,8 @@ import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
-import { FORM_REQUEST, clickScript, evalFormScript, fieldsScript, fillPasses, typeScript } from "../../../ui/tests/browser-scripts.mjs";
+import { FORM_REQUEST, clickScript, evalFormScript, evalScript, fieldsScript, fillPasses, pressInForm, typeScript } from "../../../ui/tests/browser-scripts.mjs";
+import { scrollToEnd } from "./door-recipes.mjs";
 import { extraKeys, madeKeys, readScene, sameAsSet, sameWhole, serveScene as serve, wrongKeys } from "./scene-kit.mjs";
 
 // The floor of one model round trip, and what one costs in the person's
@@ -160,6 +168,7 @@ class Road {
     this.said = [];
     this.buttons = [];
     this.byHandTried = new Set();
+    this.scrolled = new Set();
     this.scriptMs = [];
     // How long each kind of round trip took on the wall, by kind — a fill's is
     // what the door spends reading the page after it writes.
@@ -225,7 +234,9 @@ class Road {
       if (result.widget) await this.byHand(result, bundle[result.handle]);
       else await this.openAndPress(result, bundle[result.handle]);
     }
-    return { ...filled, byHand: this.count.roundTrips > before };
+    // The form the fill's answer ended with is not the one read before it: the answer says so
+    // (`양식 바뀜`), and a model reads the form again before it presses.
+    return { ...filled, byHand: this.count.roundTrips > before, changed: known !== null && filled.fingerprint !== known };
   }
 
   /* A secret field: `fill` never writes one and says so (`secret`), naming
@@ -330,15 +341,48 @@ class Road {
 
   async press(action) {
     this.trail.push({ press: action.label });
-    this.note({ verb: "click", handle: action.handle, label: action.label });
     if (action.handle.includes(FORM_REQUEST.frameSeparator)) {
+      this.note({ verb: "click", handle: action.handle, label: action.label });
       const [frame, inner] = action.handle.split(FORM_REQUEST.frameSeparator);
       return this.call("eval", () => this.page.evaluate(([outer, button]) =>
         document.querySelector(outer).contentDocument.querySelector(button).click(), [frame, inner]));
     }
-    const pressed = await this.call("click", () => this.run(clickScript(action.handle)));
-    if (!pressed.ok) throw new Error(`click refused: ${JSON.stringify(pressed)}`);
-    return pressed;
+    // A pane whose form was never read is pressed as it always was.
+    if (this.form === null) {
+      this.note({ verb: "click", handle: action.handle, label: action.label });
+      const pressed = await this.call("click", () => this.run(clickScript(action.handle)));
+      if (!pressed.ok) throw new Error(`click refused: ${JSON.stringify(pressed)}`);
+      return pressed;
+    }
+    // One in a form that was read is pressed in it: the page waited for and read, set against that form.
+    const known = this.form, buttons = this.buttons;
+    const done = await this.call("click", () => pressInForm((source) => this.run(source), action.handle));
+    const entry = { verb: "click", handle: action.handle, label: action.label };
+    if (this.ask) entry.words = this.ask({ op: "press", label: "browser-1", read: done.read, known, buttons, moving: done.moving }).words;
+    this.note(entry);
+    if (done.read.fingerprint === known) {
+      this.form = done.read.fingerprint;
+      this.buttons = done.read.actions || this.buttons;
+    }
+    return done.pressed;
+  }
+
+  /* A field the page keeps off until a box is read to its end: the read says why in the page's
+   * words (`hint`) and names the box (`scrollBoxes`), and the skill teaches scrolling it with an
+   * `eval`. Each box once; true when one was scrolled, so the form is read again. */
+  async scrollRoad(read) {
+    if (!(read.fields || []).some((field) => field.disabled && field.hint)) return false;
+    let scrolled = false;
+    for (const box of read.scrollBoxes || []) {
+      if (this.scrolled.has(box.handle)) continue;
+      this.scrolled.add(box.handle);
+      this.note({ verb: "eval", scroll: box.handle });
+      this.trail.push({ scroll: box.handle });
+      const answer = await this.call("eval", () => this.run(evalScript(scrollToEnd(box.handle))));
+      if (!answer.ok) throw new Error(`scroll refused: ${JSON.stringify(answer)}`);
+      scrolled = true;
+    }
+    return scrolled;
   }
 
   async handoff() {
@@ -360,20 +404,21 @@ class Road {
   async verbs() {
     for (;;) {
       const read = await this.fields();
+      if (await this.scrollRoad(read)) continue;
       const { bundle, unplaced } = plan(this.untyped(read.fields), this.facts);
       if (this.price) this.priced += await this.today(read, bundle);
       if (await this.unknownRoad(read.unknowns, unplaced)) continue;
       let actions = read.actions;
       if (Object.keys(bundle).length) {
         const filled = await this.fill(bundle);
-        if (filled.stale || filled.byHand) continue;
+        if (filled.stale || filled.byHand || filled.changed) continue;
         if (filled.actions.length) actions = filled.actions;
       }
       const owed = await this.code(read.fields, bundle);
       if (owed && this.price) this.priced += 1;
       if (owed) {
         const filled = await this.fill(owed);
-        if (filled.stale || filled.byHand) continue;
+        if (filled.stale || filled.byHand || filled.changed) continue;
         if (filled.actions.length) actions = filled.actions;
       }
       if (await this.step(actions)) return this.done();
@@ -459,22 +504,25 @@ class Road {
       // redacts any key that looks like a secret, and no value goes back through it.
       const viaType = filled.results.filter((result) => result.status === "secret").map((result) => result.handle);
       const clean = filled.results.every((result) => took(result.status)) && !left.length;
+      // The fill's own values brought a field: the form is not the one read, and it is read again before a press.
+      const moved = Object.keys(bundle).length > 0 && Boolean(filled.fingerprint) && filled.fingerprint !== read.fingerprint;
       const actions = filled.actions && filled.actions.length ? filled.actions : read.actions;
       const live = actions.filter((action) => !action.disabled);
       const inFrame = (action) => action.handle.includes(${JSON.stringify(FORM_REQUEST.frameSeparator)});
-      const confirm = turn.confirm && clean
+      const confirm = turn.confirm && clean && !moved
         ? live.find((action) => !inFrame(action) && INTENT.confirm.includes(fold(action.label))) : null;
       if (confirm) document.querySelector(confirm.handle).click();
       const hold = turn.owed && live.some((action) => intentOf(action.label, "code"));
       const next = live.find((action) => intentOf(action.label, "next"));
-      const pressNext = clean && !confirm && !hold && !!next && !inFrame(next);
+      const pressNext = clean && !moved && !confirm && !hold && !!next && !inFrame(next);
       if (pressNext) document.querySelector(next.handle).click();
       const hand = filled.results.filter((result) => result.status === "no_option")
         .map((result) => ({ ...result, asked: bundle[result.handle] }));
       return { results: filled.results.map((result) => result.label + ":" + result.status), left,
-        actions, pressedNext: pressNext, hand, viaType, unknowns: read.unknowns, unplaced, clean,
+        actions, pressedNext: pressNext, hand, viaType, unknowns: read.unknowns, unplaced, clean, moved,
+        scrollBoxes: read.scrollBoxes || [],
         confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, label: field.label,
-          value: field.value, required: field.required })) };
+          value: field.value, required: field.required, disabled: field.disabled, hint: field.hint })) };
     })()`;
     for (;;) {
       const turn = { owed: this.codeTurn, confirm: Boolean(this.codeField) && !this.codeConfirmed };
@@ -496,6 +544,8 @@ class Road {
       // The value is the card's: the driver reads it where it stands, not from the page's answer.
       const owedTyping = plan(this.untyped(said.fields), this.facts).bundle;
       for (const handle of said.viaType || []) await this.typeSecret(handle, owedTyping[handle]);
+      if (await this.scrollRoad({ fields: said.fields, scrollBoxes: said.scrollBoxes })) continue;
+      if (said.moved) continue;
       if (said.pressedNext || said.confirmed) continue;
       if (await this.unknownRoad(said.unknowns, said.unplaced)) continue;
       if (await this.code(said.fields, said.bundle)) continue;
