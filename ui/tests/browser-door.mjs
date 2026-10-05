@@ -1324,6 +1324,72 @@ await test("a_field_in_a_table_cell_with_no_row_header_is_named_by_the_header_ov
   } finally { await grid.close(); }
 });
 
+/* The reason a field is off, and what there is to read (t-41387): a field
+ * that is disabled or cannot be written says the words the page gives about
+ * it — what its aria-describedby names, else its title, else the words of the
+ * nearest box around it that holds no other field, minus its own labels —
+ * and a field that is on says nothing more. A box the page lets scroll that
+ * has more below what is shown is said; one read to its end, one with
+ * nothing more to read, one holding a field and one not drawn are not. */
+const REASONS = `<!doctype html><html lang="en"><meta charset="utf-8">
+<style>.box{height:60px;overflow:auto;border:1px solid #999}</style>
+<form>
+  <div class="row"><label for="state">State</label> <select id="state" disabled aria-describedby="why-state"><option>-</option></select>
+    <p id="why-state">Choose a country first.</p></div>
+  <div class="row"><label for="promo">Promo code</label> <input id="promo" disabled title="Available after you create an account"></div>
+  <div class="row"><label><input type="checkbox" id="accept" disabled> I have read the licence</label>
+    <span class="note">Scroll the licence to its end to switch this on.</span></div>
+  <div class="row"><label for="ref">Reference</label> <input id="ref" readonly value="X1">
+    <small>Filled in by the shop; you cannot change it.</small></div>
+  <div class="row"><label for="nick">Nickname</label> <input id="nick"><small>Shown to other guests.</small></div>
+  <div id="licence" class="box"><p>Licence terms 1</p><p>2</p><p>3</p><p>4</p><p>5</p><p>6</p><p>7</p><p>8</p></div>
+  <div id="read" class="box"><p>Privacy 1</p><p>2</p><p>3</p><p>4</p><p>5</p><p>6</p><p>7</p><p>8</p></div>
+  <div id="short" class="box" style="height:200px"><p>One line.</p></div>
+  <div id="editor" class="box"><textarea id="bio" rows="8"></textarea></div>
+  <div id="gone" class="box" style="display:none"><p>1</p><p>2</p><p>3</p><p>4</p><p>5</p><p>6</p><p>7</p><p>8</p></div>
+</form>
+<script>document.getElementById("read").scrollTop = document.getElementById("read").scrollHeight;</script>`;
+
+await test("a_field_that_is_off_or_cannot_be_written_says_the_words_the_page_gives_about_it", async () => {
+  const why = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await why.setContent(REASONS);
+    const fields = byHandle(await readFields(why));
+    assert(fields["#state"].hint === "Choose a country first.", "the words its aria-describedby names", fields["#state"]);
+    assert(fields["#promo"].hint === "Available after you create an account", "else its title, a label having named it", fields["#promo"]);
+    assert(fields["#accept"].hint === "Scroll the licence to its end to switch this on.", "else the words in its box beside its own label", fields["#accept"]);
+    assert(fields["#ref"].hint === "Filled in by the shop; you cannot change it.", "a field that cannot be written, too", fields["#ref"]);
+    assert(!fields["#nick"].hint, "a field that is on says nothing more", fields["#nick"]);
+    return fields["#accept"].hint;
+  } finally { await why.close(); }
+});
+
+await test("a_box_with_more_to_read_below_it_is_said_and_one_read_to_its_end_or_holding_a_field_is_not", async () => {
+  const why = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await why.setContent(REASONS);
+    const read = await readFields(why);
+    const boxes = (read.scrollBoxes || []).map((box) => `${box.handle} ${box.label.slice(0, 15)}`);
+    assert(JSON.stringify(boxes) === JSON.stringify(["#licence Licence terms 1"]),
+      "only the box with more below it: not the one read to its end, the short one, the one holding a field, the one not drawn", read.scrollBoxes);
+    await why.evaluate(() => { const box = document.getElementById("licence"); box.scrollTop = box.scrollHeight; });
+    assert(((await readFields(why)).scrollBoxes || []).length === 0, "and once it is read to its end it is not said again");
+    return boxes.join(" · ");
+  } finally { await why.close(); }
+});
+
+await test("a_fill_of_a_field_that_is_off_says_the_words_the_page_gives_about_it", async () => {
+  const why = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await why.setContent(REASONS);
+    const filled = await fillBundle(why, { "#accept": true });
+    const [only] = filled.results;
+    assert(only.status === "disabled" && only.hint === "Scroll the licence to its end to switch this on.",
+      "disabled, and why", only);
+    return only.hint;
+  } finally { await why.close(); }
+});
+
 await browser.close();
 
 let failed = 0;

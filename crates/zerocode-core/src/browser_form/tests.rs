@@ -385,3 +385,75 @@ fn a_pressable_thing_without_a_kind_is_said_in_the_read() {
         "{lines}"
     );
 }
+
+/// A field that is off or cannot be written says the words the page gives
+/// about it, in the read (t-41387): the agent learns what switches it on.
+/// A field that is on says nothing more.
+#[test]
+fn a_field_that_is_off_says_the_words_the_page_gives_about_it() {
+    let read: FormRead = serde_json::from_value(json!({
+        "fields": [
+            { "handle": "#state", "kind": "select", "label": "State", "value": "", "disabled": true,
+              "hint": "Choose a country first." },
+            { "handle": "#ref", "kind": "text", "label": "Reference", "value": "X1", "readOnly": true,
+              "hint": "Filled in by the shop; you cannot change it." },
+            { "handle": "#nick", "kind": "text", "label": "Nickname", "value": "" },
+        ],
+    }))
+    .expect("a read with a hint");
+    let lines = fields_lines(&read);
+    for expected in [
+        "  #state · select · State = \"\" (꺼짐) — 안내: Choose a country first.",
+        "  #ref · text · Reference = \"X1\" (직접 못 씀) — 안내: Filled in by the shop; you cannot change it.",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+    assert_eq!(
+        lines.matches("안내").count(),
+        2,
+        "a field that is on says no more:\n{lines}"
+    );
+}
+
+/// A box the page lets scroll that has more to read below what is shown is
+/// said, so the agent knows what to read to its end when a field stays off.
+#[test]
+fn a_box_with_more_to_read_below_it_is_said_in_the_read() {
+    let read: FormRead = serde_json::from_value(json!({
+        "fields": [{ "handle": "#name", "kind": "text", "label": "Name", "value": "" }],
+        "scrollBoxes": [
+            { "handle": "#licence", "label": "Licence terms 1 Licence terms 2" },
+            { "handle": "div.policy", "label": "Privacy" },
+        ],
+    }))
+    .expect("a read with boxes to scroll");
+    let lines = fields_lines(&read);
+    assert!(
+        lines.contains(
+            "끝까지 안 내린 스크롤 상자: #licence 「Licence terms 1 Licence terms 2」 · div.policy 「Privacy」 — 꺼진 칸이 있으면 끝까지 내려 보고 fields로 다시 읽기"
+        ),
+        "{lines}"
+    );
+    assert!(
+        !fields_lines(&booking()).contains("스크롤 상자"),
+        "a read with no such box says nothing"
+    );
+}
+
+/// A fill that meets a field that is off says why, in the page's words.
+#[test]
+fn a_fill_that_meets_a_field_that_is_off_says_the_words_the_page_gives_about_it() {
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [{ "handle": "#accept", "status": "disabled", "label": "I have read the licence",
+            "hint": "Scroll the licence to its end to switch this on." }],
+    }))
+    .expect("a pass with a field that is off");
+    let bundle = vec![entry("#accept", FormValue::Flag(true))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    let lines = fill_lines(&ledger.report());
+    assert!(
+        lines.contains("  ✗ #accept I have read the licence: 꺼져 있음 — 안내: Scroll the licence to its end to switch this on."),
+        "{lines}"
+    );
+}
