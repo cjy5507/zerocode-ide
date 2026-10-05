@@ -249,6 +249,17 @@ const JOINTS = await scene("joints", `<!doctype html><html lang="en"><meta chars
 </script>`, [{ says: "Contact", value: "ann@mail.test" }, { says: "Serial", value: "AB-12-CD" }],
 { contact: "ann@mail.test", serial: "AB-12-CD" });
 
+/* The parts a caption names — each told by its own short words, `Window — From` — are a split value too: the driver cuts the value at the symbol the door says stands
+ * between them. */
+const JOINTS_NAMED = await scene("joints-named", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <fieldset><legend>Window</legend><input id="w1" aria-label="From" size="4"> ~ <input id="w2" aria-label="To" size="4"></fieldset>
+  <button type="button" id="go">Send</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  $("go").addEventListener("click", () => { window.__sceneResult = { window: $("w1").value + "~" + $("w2").value }; });
+</script>`, [{ says: "Window", value: "08~17" }], { window: "08~17" });
+
 /* A date and a time written into parts the page names by units — in English and in Korean, with a half of the day to press. */
 const numbers = (from, to, word = "") => Array.from({ length: to - from + 1 }, (_, at) => `<option>${from + at}${word}</option>`).join("");
 const UNITS = await scene("units", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
@@ -332,7 +343,7 @@ const DRAWN = await scene("drawn", `<!doctype html><html lang="en"><meta charset
 const out = join(root, "rows.json");
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -441,6 +452,14 @@ await test("a driver cuts a value the page splits across fields at the symbols t
     assert(one && one.ok && one.pass, `the ${road} road gives each part its piece of the address and of the serial`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
   }
   return JSON.stringify(row("joints", "verbs").result);
+});
+
+await test("a driver cuts a value across the parts a caption names at the symbol the door says stands between them", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("joints-named", road);
+    assert(one && one.ok && one.pass, `the ${road} road gives each part named by the caption its piece`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return JSON.stringify(row("joints-named", "verbs").result);
 });
 
 await test("a driver writes a date and a time into the parts the page names by units, in English and in Korean, and presses the half of the day", () => {
