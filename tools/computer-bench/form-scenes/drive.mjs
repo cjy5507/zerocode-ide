@@ -541,7 +541,12 @@ class Road {
     this.note({ verb: "type", handle });
     this.trail.push({ type: handle });
     const held = handle.includes(FORM_REQUEST.frameSeparator) ? expect : null;
-    const typed = await this.call("type", () => this.run(typeScript(handle, value, "setter", held)));
+    let typed = await this.call("type", () => this.run(typeScript(handle, value, "setter", held)));
+    // The form is no longer the one that was read (the field typed before this one brought a field of its own): the window refuses, and the form is read again — as a model does — before the type is made once more.
+    if (!typed.ok && typed.code === "form_stale") {
+      const read = await this.fields();
+      typed = await this.call("type", () => this.run(typeScript(handle, value, "setter", read.fingerprint)));
+    }
     if (!typed.ok) throw new Error(`type refused: ${JSON.stringify(typed)}`);
     return true;
   }
