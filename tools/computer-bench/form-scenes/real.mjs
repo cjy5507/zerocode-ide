@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url";
 import { AGENT_CONTEXT } from "../../../ui/tests/browser-scripts.mjs";
 import { CAP_SECONDS, MAX_TURNS, argsProblems, boxEnv, checkPath, claudeArgs, installStandIn } from "./agent-box.mjs";
 import { startFormDesk } from "./door-desk.mjs";
-import { readScene, wrongKeys } from "./scene-kit.mjs";
+import { extraKeys, readScene, sameWhole, wrongKeys } from "./scene-kit.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "../../..");
@@ -190,7 +190,9 @@ const tokens = {
 };
 const denials = seen.final?.permission_denials ?? [];
 const row = {
-  schema: 1, scene: scene.name, model: options.model, oracle: { pass: wrong.length === 0, wrong, tookResult: result !== null },
+  schema: 1, scene: scene.name, model: options.model,
+  // The two rules of success side by side (the keys the card expects; the page's whole result as the expected one) and what only the page recorded.
+  oracle: { pass: wrong.length === 0, wrong, tookResult: result !== null, whole: result !== null && sameWhole(result, scene.expected), extra: extraKeys(result, scene.expected) },
   wallMs, personMs: desk.tally.personMs, stopped, exit, leftover,
   modelCalls: seen.calls.size, turns: seen.final?.num_turns ?? null, apiMs: seen.final?.duration_api_ms ?? null,
   tokens, costUsd: seen.final?.total_cost_usd ?? null, finalSubtype: seen.final?.subtype ?? null,

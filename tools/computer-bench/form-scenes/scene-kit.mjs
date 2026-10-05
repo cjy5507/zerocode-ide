@@ -54,3 +54,13 @@ export async function serveScene(folder) {
  * in the result are the page's own. */
 export const wrongKeys = (result, expected) =>
   Object.keys(expected).filter((key) => !result || JSON.stringify(result[key]) !== JSON.stringify(expected[key]));
+
+/* The first oracle (before e29f7f84a): the page's whole result is the expected
+ * one, key by key and in the same order. Kept beside `wrongKeys` so a pass is
+ * said under both, and `extraKeys` says what only the page recorded. */
+export const sameWhole = (result, expected) => JSON.stringify(result) === JSON.stringify(expected);
+const sortedByKey = (value) => JSON.stringify(Object.fromEntries(Object.entries(value || {}).sort(([a], [b]) => (a < b ? -1 : 1))));
+/* The same, without the order of the keys. */
+export const sameAsSet = (result, expected) => Boolean(result) && sortedByKey(result) === sortedByKey(expected);
+/* The keys the page recorded that the expected result does not hold. */
+export const extraKeys = (result, expected) => Object.keys(result || {}).filter((key) => !(key in expected));

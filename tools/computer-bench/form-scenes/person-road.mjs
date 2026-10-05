@@ -13,7 +13,7 @@
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
-import { readScene, serveScene, wrongKeys } from "./scene-kit.mjs";
+import { extraKeys, readScene, sameAsSet, sameWhole, serveScene, wrongKeys } from "./scene-kit.mjs";
 
 /* The time a person gets over one scene's whole road. */
 const ROAD_MS = 120_000;
@@ -36,8 +36,11 @@ try {
       await page.goto(site.url);
       await solveAsPerson(page, scene.card);
       await page.waitForTimeout(500);
-      const wrong = wrongKeys(await page.evaluate(() => window.__sceneResult || null), scene.expected);
-      verdict = wrong.length ? `FAIL  ${scene.name}  a person's road: ${wrong.length} keys differ (${wrong.join(", ")})` : `PASS  ${scene.name}  a person's road finishes it`;
+      const result = await page.evaluate(() => window.__sceneResult || null);
+      const wrong = wrongKeys(result, scene.expected);
+      // Both rules of success: the expected keys, and the page's whole result equal to the expected one.
+      const rules = `whole=${Boolean(result) && sameWhole(result, scene.expected)} sameSet=${sameAsSet(result, scene.expected)} extra=${extraKeys(result, scene.expected).join("|") || "-"}`;
+      verdict = wrong.length ? `FAIL  ${scene.name}  a person's road: ${wrong.length} keys differ (${wrong.join(", ")}) ${rules}` : `PASS  ${scene.name}  a person's road finishes it  ${rules}`;
       await page.close();
     } catch (error) {
       verdict = `FAIL  ${scene.name}  a person's road threw: ${String(error?.message || error).slice(0, 160)}`;
