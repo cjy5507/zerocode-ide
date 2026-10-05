@@ -693,9 +693,11 @@ class Road {
         last = await this.fill({ [given.get(fact).handle]: fact.value.trim() });
       }
       pressed = true;
+      // The buttons the second pick turned on: the one that applies the range, and the one that goes back a month when the second day stood in a later month than the first. The one
+      // that applies stands after the one that goes back in the dialog — the page's last of them, as the button that moves a form on is taken.
       const turned = before && last ? (last.actions || []).filter((action) => !action.disabled
         && (before.actions || []).some((one) => one.handle === action.handle && one.disabled)) : [];
-      if (turned.length === 1) await this.press(turned[0]);
+      if (turned.length) await this.press(turned[turned.length - 1]);
       await this.fields();
     }
     return pressed;
