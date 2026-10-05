@@ -1369,3 +1369,61 @@ fn a_secret_field_inside_a_frame_is_said_to_be_out_of_reach_of_both_fill_and_typ
         "a secret in the page itself still names type:\n{lines}"
     );
 }
+
+/// A field the page keeps from being typed in and fills from a window a button opens (a pick from a list the page searches) says which button opens
+/// it, so the agent presses that one and does not guess; a read-only field with no such button says no more than that it cannot be written.
+#[test]
+fn a_read_only_field_says_the_button_that_opens_it() {
+    let read: FormRead = serde_json::from_value(json!({
+        "fields": [
+            { "handle": "#locker", "kind": "text", "label": "Locker", "value": "", "readOnly": true,
+              "opens": { "handle": "#pick", "label": "Pick a locker" } },
+            { "handle": "#spot", "kind": "text", "label": "Parcel point", "value": "", "readOnly": true,
+              "opens": { "handle": "#pick", "label": "Pick a locker" } },
+            { "handle": "#ref", "kind": "text", "label": "Reference", "value": "X1", "readOnly": true },
+        ],
+    }))
+    .expect("a read with an opener");
+    let lines = fields_lines(&read);
+    for expected in [
+        "  #locker · text · Locker = \"\" (직접 못 씀 — 열 단추: #pick 「Pick a locker」)",
+        "  #spot · text · Parcel point = \"\" (직접 못 씀 — 열 단추: #pick 「Pick a locker」)",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+    assert!(
+        lines
+            .lines()
+            .any(|line| line == "  #ref · text · Reference = \"X1\" (직접 못 씀)"),
+        "a read-only field with no opener says no more:\n{lines}"
+    );
+}
+
+/// The answer of a fill that the page keeps from writing names the same button, in the words that say to open the field.
+#[test]
+fn a_fill_that_the_page_keeps_from_writing_names_the_button_that_opens_the_field() {
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [
+            { "handle": "#spot", "status": "read_only", "kind": "text", "label": "Parcel point",
+              "opens": { "handle": "#pick", "label": "Pick a locker" } },
+            { "handle": "#ref", "status": "read_only", "kind": "text", "label": "Reference" },
+        ],
+    }))
+    .expect("a pass with two read-only fields");
+    let bundle = vec![
+        entry("#spot", text("North Gate 9")),
+        entry("#ref", text("X2")),
+    ];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    let lines = fill_lines(&ledger.report());
+    assert!(
+        lines.contains("  ✗ #spot Parcel point: 페이지가 직접 쓰지 못하게 막음 — click으로 열어 고를 것 (열 단추: #pick 「Pick a locker」)"),
+        "a fill that cannot write names the button that opens the field:\n{lines}"
+    );
+    assert!(
+        lines.lines().any(|line| line
+            == "  ✗ #ref Reference: 페이지가 직접 쓰지 못하게 막음 — click으로 열어 고를 것"),
+        "and says no more where the read named none:\n{lines}"
+    );
+}

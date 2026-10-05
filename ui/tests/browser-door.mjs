@@ -2644,6 +2644,63 @@ await test("a_radio_group_that_already_had_a_name_keeps_it_when_the_reach_of_the
   } finally { await kept.close(); }
 });
 
+/* A field the page keeps from being typed in and fills from a window a button opens (a pick from a list the page searches) says which button opens it (t-41720): the
+ * button beside it, else the one beside the read-only field next to it; and the answer of a fill that cannot write it says the same. A window of the same origin that holds a
+ * frame is read once it is open — the frame's field and button are in the read. */
+const OPENER = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="line"><input id="lk" readonly aria-label="Locker"><button type="button" id="pick">Pick a locker</button></div>
+  <input id="pt" readonly aria-label="Parcel point">
+  <input id="note" aria-label="Note">
+  <div id="layer" hidden><iframe id="fr" title="Locker search"></iframe></div>
+</form>
+<script>
+  document.getElementById("pick").addEventListener("click", () => {
+    const frame = document.getElementById("fr");
+    if (!frame.getAttribute("srcdoc")) frame.setAttribute("srcdoc", '<!doctype html><form><input id="q" aria-label="Search words"><button type="submit">Go</button></form>');
+    document.getElementById("layer").hidden = false;
+  });
+</script>`;
+await test("a_read_only_field_says_the_button_that_opens_it_beside_it_or_beside_the_read_only_field_next_to_it", async () => {
+  const opener = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await opener.setContent(OPENER);
+    const read = await readFields(opener);
+    const opens = (handle) => read.fields.find((one) => one.handle === handle)?.opens;
+    assert(opens("#lk")?.handle === "#pick" && opens("#lk")?.label === "Pick a locker", "the button that stands beside a read-only field opens it", read.fields);
+    assert(opens("#pt")?.handle === "#pick", "a read-only field with no button of its own is opened by the one beside the read-only field next to it", read.fields);
+    assert(opens("#note") === undefined, "a field that can be written has none", read.fields);
+    return JSON.stringify([opens("#lk"), opens("#pt")]);
+  } finally { await opener.close(); }
+});
+await test("a_fill_that_the_page_keeps_from_writing_answers_the_button_that_opens_the_field", async () => {
+  const opener = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await opener.setContent(OPENER);
+    const read = await readFields(opener);
+    const filled = await fillBundle(opener, { "#pt": "North Gate 9" }, read.fingerprint);
+    const one = filled.results[0];
+    assert(one?.status === "read_only", "the page keeps the field from being written", filled.results);
+    assert(one.opens?.handle === "#pick" && one.opens?.label === "Pick a locker", "the answer names the button that opens it", one);
+    return `${one.status} ${one.opens?.handle}`;
+  } finally { await opener.close(); }
+});
+await test("a_layer_that_holds_a_frame_of_the_same_origin_is_read_once_it_is_open", async () => {
+  const opener = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await opener.setContent(OPENER);
+    const shut = await readFields(opener);
+    assert(!shut.fields.some((one) => one.handle.includes(" >> ")), "a layer that is shut shows no field of its frame", shut.fields);
+    await opener.click("#pick");
+    await opener.waitForTimeout(200);
+    const open = await readFields(opener);
+    const inside = open.fields.find((one) => one.handle === "#fr >> #q");
+    assert(inside && inside.label === "Search words", "the frame's search field is in the read once the layer is open", open.fields);
+    const go = open.actions.find((one) => one.handle.startsWith("#fr >> ") && one.label === "Go");
+    assert(go && go.submit === true, "and its button, which says it submits", open.actions);
+    return `${inside.handle} · ${go.handle}`;
+  } finally { await opener.close(); }
+});
+
 await browser.close();
 
 let failed = 0;
