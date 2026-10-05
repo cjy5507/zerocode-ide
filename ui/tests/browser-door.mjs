@@ -2019,6 +2019,89 @@ await test("a_note_is_the_sentence_just_under_the_title_not_every_word_between_t
   } finally { await under.close(); }
 });
 
+/* What stands new beside a field is words: a counter that counts, a countdown that runs, and the
+ * value the page shows of the field itself — in the control or beside it — are the field's own
+ * number or value changing, not text the page brought; a sentence the page brought is still said. */
+await test("a_counter_a_countdown_or_the_value_shown_beside_a_field_is_no_new_text", async () => {
+  const live = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await live.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div class="row"><label for="note">Note</label> <textarea id="note"></textarea><span id="count">0/100</span></div>
+      <div class="row"><label for="code">Code</label> <input id="code"><span id="left">Valid for 03:00</span></div>
+      <div class="row"><label for="nick">Nickname</label> <input id="nick"><span id="echo"></span></div>
+      <div class="row"><label for="mail">Email</label> <input id="mail"></div>
+    </form>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      $("note").addEventListener("change", (event) => { $("count").textContent = event.target.value.length + "/100"; });
+      $("code").addEventListener("change", () => { $("left").textContent = "Valid for 02:59"; });
+      $("nick").addEventListener("change", (event) => { $("echo").textContent = event.target.value; });
+      $("mail").addEventListener("change", () => {
+        const saved = document.createElement("span"); saved.textContent = "Saved to your profile"; $("mail").parentElement.append(saved);
+      });
+    </script>`);
+    const before = await readFields(live);
+    const filled = await fillBundle(live, { "#note": "hello there", "#code": "123456", "#nick": "Kim", "#mail": "kim@example.com" }, before.fingerprint);
+    const result = (handle) => filled.results.find((one) => one.handle === handle);
+    assert(!result("#note").fresh, "a counter that counts is no new text", result("#note"));
+    assert(!result("#code").fresh, "a countdown that runs is no new text — its words are the same, its number is not", result("#code"));
+    assert(!result("#nick").fresh, "the value shown beside the field is the field's own", result("#nick"));
+    assert(JSON.stringify(result("#mail").fresh) === JSON.stringify(["Saved to your profile"]), "a sentence the page brought is still said", result("#mail"));
+    return JSON.stringify(result("#mail").fresh);
+  } finally { await live.close(); }
+});
+
+await test("the_item_a_dropdown_shows_in_its_own_box_is_no_new_text_beside_it", async () => {
+  const shown = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await shown.setContent(`<!doctype html><html lang="ko"><meta charset="utf-8"><form>
+      <div class="row"><div class="cap">주차장</div><div class="ctl"><div class="dd">
+        <div class="btn" tabindex="0"><span class="val">주차장을 고르세요</span></div>
+        <ul class="list" hidden><li data-value="p0">P3 단기</li><li data-value="p1">P4 장기</li></ul></div></div></div></form>
+      <script>
+        const box = document.querySelector(".dd"), button = box.querySelector(".btn"), list = box.querySelector(".list");
+        button.addEventListener("click", () => { list.hidden = !list.hidden; });
+        list.addEventListener("click", (event) => {
+          const item = event.target.closest("li");
+          if (!item) return;
+          button.querySelector(".val").textContent = item.textContent;
+          list.hidden = true;
+        });
+      </script>`);
+    const read = await readFields(shown);
+    const lot = read.fields.find((field) => field.label === "주차장");
+    assert(lot && lot.kind === "dropdown", "a focusable box with a list beside it is a dropdown", read.fields);
+    const filled = await fillBundle(shown, { [lot.handle]: "P4 장기" }, read.fingerprint);
+    assert(filled.results[0].status === "set", "the item is chosen by its words", filled.results);
+    assert(!filled.results[0].fresh, "the item the box shows now is the field's own value, not text the page brought", filled.results[0]);
+    return "own value";
+  } finally { await shown.close(); }
+});
+
+/* A field marked invalid is told "the page does not say why" only when nothing but its own words
+ * stands in its box: a sentence that stood beside it all along may be the reason. */
+await test("a_field_marked_invalid_is_told_silent_only_when_nothing_but_its_own_words_stands_beside_it", async () => {
+  const marks = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await marks.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div class="row"><label for="a">Alpha</label> <input id="a"></div>
+      <div class="row"><label for="b">Beta</label> <input id="b"><span class="msg">Use letters only</span></div>
+    </form>
+    <script>
+      for (const id of ["a", "b"]) document.getElementById(id).addEventListener("change", (event) => event.target.setAttribute("aria-invalid", "true"));
+    </script>`);
+    const before = await readFields(marks);
+    const filled = await fillBundle(marks, { "#a": "1", "#b": "2" }, before.fingerprint);
+    const result = (handle) => filled.results.find((one) => one.handle === handle);
+    assert(result("#a").silent === true && result("#a").error === "aria-invalid", "nothing but its own words beside it: the page says nothing of why", result("#a"));
+    assert(result("#b").error === "aria-invalid" && !result("#b").silent && !result("#b").fresh,
+      "a sentence stood beside it all along: it is not told that the page says nothing", result("#b"));
+    assert(filled.left.some((one) => one.handle === "#a" && one.silent === true) && !filled.left.some((one) => one.handle === "#b" && one.silent),
+      "and the fields that are left carry the same", filled.left);
+    return "own words only";
+  } finally { await marks.close(); }
+});
+
 await browser.close();
 
 let failed = 0;
