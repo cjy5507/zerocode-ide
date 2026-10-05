@@ -168,7 +168,8 @@ A form is data, so fill it as data, not a picture per field:
    a date drawn without its year): `같은지는 볼 수 없음` and the text it shows — neither a difference
    nor a sameness is said, so look at what is shown (or read `fields`) before you judge, and do
    not write it again. A secret field — a password, a one-time code (the page's own mark, or a numeric box the page calls a
-   code), and all the parts of a value when one of them is secret (the boxes of a number, one of which hides what is typed) — is read
+   code), a payment card's number or security code (the page's own mark `cc-number`, `cc-csc`, `cc-exp…`, or the words it gives the
+   field: card number, CVC, CVV, security code), and all the parts of a value when one of them is secret (the boxes of a number, one of which hides what is typed) — is read
    as `(가림)`, is never written by `fill` and its value never goes into a fill or an eval: you type it from stdin
    (`type <label> <handle> --value-stdin`), or hand a code sent to the person to the person:
    a field inside a frame of the page's own origin is typed by its handle too, `#frame >> #field`; a frame of

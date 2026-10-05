@@ -1104,8 +1104,12 @@ const zcPartCaptions = (records, request) => {
 // ---- what the read says is secret, whole ----
 // A password field is secret by the platform's own facts (the one helper `zcSecretField`). The read adds what stands beside it: a one-time code — by the platform's mark
 // (autocomplete one-time-code) or, on a page that marks nothing, by its shape (a numeric box of four to eight characters) together with the words the page itself gives it; a row of
-// four or more single-character numeric boxes is one code; and the parts of one value are all secret when one of them is. A secret field's value is never read.
+// four or more single-character numeric boxes is one code; a payment card's number and security code — by the platform's marks (autocomplete cc-number, cc-csc, cc-exp, cc-exp-month, cc-exp-year)
+// or, on a page that marks nothing, by the short words the page gives the field itself (card number, CVC, CVV, security code — in two languages); and the parts of one value are all secret when
+// one of them is. A secret field's value is never read.
 const zcOneTimeWords = /one[\s-]?time|\botp\b|verification|security\s*code|\bsms\b|인증/i;
+const zcCardMarks = ["cc-number", "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year"];
+const zcCardWords = /\bcard[\s_-]*(?:number|no\b)|\bcv[cv]2?\b|security[\s_-]*code|카드[\s_-]*번호|보안[\s_-]*코드/i;
 const zcTextual = (record) => ["text", "tel", "number", "password", "email", "search", "url", "textarea"].includes(record.kind);
 const zcSecretParts = (records) => {
   const hide = (record) => {
@@ -1113,12 +1117,16 @@ const zcSecretParts = (records) => {
     record.value = "";
   };
   const wordsOf = (record) => [record.label, record.placeholder, record.caption, record.el.getAttribute("aria-label"), record.el.getAttribute("name"), record.el.id].join(" ");
+  // The words of a card's field are the field's own: its label, placeholder, aria-label, name and id — a caption above a whole section is no word of one field.
+  const ownWords = (record) => [record.label, record.placeholder, record.el.getAttribute("aria-label"), record.el.getAttribute("name"), record.el.id].join(" ");
   const numeric = (record) => record.el.inputMode === "numeric" || record.kind === "tel";
   for (const record of records) {
     if (record.masked || !zcTextual(record) || zcFormTag(record.el) !== "input") continue;
-    const marked = String(record.el.getAttribute("autocomplete") || "").toLowerCase().split(/\s+/).includes("one-time-code");
+    const marks = String(record.el.getAttribute("autocomplete") || "").toLowerCase().split(/\s+/);
+    const marked = marks.includes("one-time-code") || marks.some((mark) => zcCardMarks.includes(mark));
     const shaped = numeric(record) && record.maxLength !== null && record.maxLength >= 4 && record.maxLength <= 8 && zcOneTimeWords.test(wordsOf(record));
-    if (marked || shaped) hide(record);
+    const carded = zcCardWords.test(ownWords(record));
+    if (marked || shaped || carded) hide(record);
   }
   const groups = [...new Set(records.flatMap((record) => record.groups || []))];
   for (const group of groups) {
