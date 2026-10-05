@@ -98,6 +98,7 @@ const intentOf = (label, intent) => INTENT[intent].some((word) => fold(label).in
  * page declares a submit (`(제출 단추)`), else the one that was off before the fields were written and is on
  * now, else the page's last — a step's own button stands after the ones that go back, apply or search. */
 function advancing(actions, before = []) {
+  if (!Array.isArray(before)) before = [];
   const submits = actions.filter((action) => action.submit);
   if (submits.length) return submits[submits.length - 1];
   const turned = actions.filter((action) => !action.disabled
@@ -620,7 +621,7 @@ class Road {
         .map((result) => ({ ...result, asked: bundle[result.handle] }));
       const fresh = [].concat(filled.outside || [], filled.alerts || [], ...filled.results.map((result) => result.fresh || []));
       return { results: filled.results.map((result) => result.label + ":" + result.status), left,
-        actions, before: read.actions, fresh, pressedNext: pressNext, pressedHandle: pressNext ? next.handle : null,
+        actions, before: read.actions.map((action) => ({ handle: action.handle, disabled: action.disabled })), fresh, pressedNext: pressNext, pressedHandle: pressNext ? next.handle : null,
         print: read.fingerprint, hand, viaType, unknowns: read.unknowns, unplaced, clean, moved,
         scrollBoxes: read.scrollBoxes || [],
         confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, label: field.label,
