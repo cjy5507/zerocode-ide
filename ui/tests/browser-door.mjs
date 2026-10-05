@@ -1809,9 +1809,9 @@ await test("a_secret_field_is_not_counted_as_required_and_empty_after_a_fill", a
 
 /* Fields of one read that go by the same words are told apart by the title of the
  * row, list item or card each stands in — `<title>: <words>` — else numbered, and
- * a number says it is only an order. Two fields of one name under different
- * headings are told apart already, and keep their names. A fill says the name the
- * read gave. */
+ * a number says it is only an order. Two fields of one name under
+ * different headings are told by those headings too — a name is what a script reads a
+ * field by. A fill says the name the read gave. */
 await test("fields_of_one_name_are_told_apart_by_the_title_of_the_item_each_stands_in_else_numbered", async () => {
   const same = await browser.newPage({ viewport: { width: 900, height: 1200 } });
   try {
@@ -1831,7 +1831,8 @@ await test("fields_of_one_name_are_told_apart_by_the_title_of_the_item_each_stan
     assert(label("#n1") === "Note #1" && label("#n2") === "Note #2", "with nothing to tell them by, by number", read.fields.map((one) => one.label));
     assert(read.fields.find((one) => one.handle === "#n2").ordinal === true && !read.fields.find((one) => one.handle === "#q1").ordinal,
       "and the number says it is only an order", read.fields);
-    assert(label("#s1") === "Surname" && label("#s2") === "Surname", "fields under different headings keep their names", read.fields.map((one) => one.label));
+    assert(label("#s1") === "Guest: Surname" && label("#s2") === "Host: Surname",
+      "fields of one name under different headings are told by them too — what is read by name is the name", read.fields.map((one) => one.label));
     const filled = await fillBundle(same, { "#q1": "2", "#n2": "later" });
     assert(filled.results[0].label === "Tomato 500g: Qty" && filled.results[1].label === "Note #2", "a fill says the name the read gave", filled.results);
     return `${read.fields.length} fields`;
@@ -1939,6 +1940,83 @@ await test("a_press_in_a_known_form_says_what_appeared_beside_its_field_and_a_pr
     assert(moved.read.fingerprint !== read.fingerprint, "a press that moves the form on brings a form that is not the one read", moved.read);
     return `${stayed.read.noted.length} noted`;
   } finally { await form.close(); }
+});
+
+/* An item is titled by its name — the words a person would call it by — not by a short label that
+ * stands before it (a thumbnail's), nor by a price, a count or a total, which have letters in them
+ * only as units: fields of one name in rows of a cart are told apart by the name of the product. */
+await test("an_item_is_titled_by_its_name_not_by_a_short_label_before_it_or_a_price_or_total_around_it", async () => {
+  const cart = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    const row = (name, desc, list, price) => `<li><input type="checkbox" aria-label="${name} select">
+      <div class="thumb">${name.split(" ")[0]}</div>
+      <div class="info"><p class="n">${name}</p><p class="d">${desc}</p><p class="price"><s>${list} won</s> ${price} won</p></div>
+      <div class="step"><button type="button" aria-label="Less">-</button><input aria-label="Qty" value="1"><button type="button" aria-label="More">+</button></div>
+      <strong class="total">${price} won</strong></li>`;
+    await cart.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form><ul>
+      ${row("Green tea tin 100g", "Loose leaf · chilled", "7,900", "6,900")}
+      ${row("Black tea tin 100g", "Smoked · room", "5,000", "4,200")}
+      ${row("Mint 1 bunch", "Fresh · chilled", "0", "2,800")}</ul></form>`);
+    const read = await readFields(cart);
+    const quantities = read.fields.filter((field) => field.kind === "text").map((field) => field.label);
+    assert(JSON.stringify(quantities) === JSON.stringify(["Green tea tin 100g: Qty", "Black tea tin 100g: Qty", "Mint 1 bunch: Qty"]),
+      "each row's quantity is told by the product's name — not by its thumbnail's word, its price or its total", quantities);
+    return quantities.join(" · ");
+  } finally { await cart.close(); }
+});
+
+/* A button that opens a list is named by what labels it from outside: a label that names it by
+ * `aria-labelledby` together with the element inside it that holds the value it shows is the
+ * label's words alone — the value element is part of the button, not of its name. */
+await test("a_list_button_is_named_by_the_words_beside_it_not_by_the_value_element_inside_it", async () => {
+  const inner = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await inner.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <span class="glabel" id="t-l">Session track <b>*</b></span>
+      <div class="dd"><button type="button" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="t-l t-v" id="track">
+        <span id="t-v">Choose a session…</span><span class="caret"></span></button>
+        <ul role="listbox" hidden><li role="option">Lab</li><li role="option">Experiments</li></ul></div></form>`);
+    const field = (await readFields(inner)).fields.find((one) => one.handle === "#track");
+    assert(field && field.label === "Session track *", "the label's words, not the words of the value inside the button", field);
+    assert(field.value === "Choose a session…", "and the value is what the button shows", field);
+    return field.label;
+  } finally { await inner.close(); }
+});
+
+/* Fields of one name in groups the page titles — a fieldset with its legend, as a party of two
+ * is entered — are told by the title: `<legend>: <name>`, as a person says them. */
+await test("fields_of_one_name_in_fieldsets_under_different_legends_are_told_by_the_legend", async () => {
+  const party = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await party.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <fieldset><legend>Attendee 1 <span class="badge">Booking contact</span></legend>
+        <label>First name <b>*</b> <input id="f1"></label><label>Last name <b>*</b> <input id="l1"></label></fieldset>
+      <fieldset><legend>Attendee 2</legend>
+        <label>First name <b>*</b> <input id="f2"></label><label>Last name <b>*</b> <input id="l2"></label></fieldset></form>`);
+    const labels = Object.fromEntries((await readFields(party)).fields.map((one) => [one.handle, one.label]));
+    assert(labels["#f1"] === "Attendee 1: First name *" && labels["#f2"] === "Attendee 2: First name *"
+      && labels["#l1"] === "Attendee 1: Last name *" && labels["#l2"] === "Attendee 2: Last name *",
+      "each is told by the legend of the fieldset it stands in", labels);
+    return JSON.stringify(labels);
+  } finally { await party.close(); }
+});
+
+/* A note is the sentence just under the title — the text blocks that follow the heading until the first
+ * thing that is no mere text (a control, a button, a label, another heading, the group itself) — not every
+ * word the page has between the title and the group. */
+await test("a_note_is_the_sentence_just_under_the_title_not_every_word_between_title_and_group", async () => {
+  const under = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await under.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form><section><h2>Schedule</h2>
+      <p>Two nights at least.</p>
+      <div class="row"><span class="cap">Pick-up</span> <button type="button">Choose a time</button></div>
+      <div role="radiogroup" aria-label="Morning or evening"><label><input type="radio" name="ampm" value="a"> Morning</label>
+        <label><input type="radio" name="ampm" value="p"> Evening</label></div></section></form>`);
+    const group = (await readFields(under)).fields.find((one) => one.kind === "radio");
+    assert(group.label === "Morning or evening" && group.hint === "Two nights at least.",
+      "the sentence under the title is the note — not the caption of a button that stands between", group);
+    return group.hint;
+  } finally { await under.close(); }
 });
 
 await browser.close();
