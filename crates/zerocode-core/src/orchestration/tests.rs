@@ -23198,7 +23198,7 @@ fn a_former_coordinator_or_another_runs_worker_cannot_correct_the_record() {
             attempt: None,
             source: Some("abc1234".to_string()),
             completed_ms: None,
-            verified_ms: None,
+            verified_ms: Some(bench.clock),
         })
     );
     assert!(run.review_of(held).verified);
