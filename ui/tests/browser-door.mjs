@@ -1029,14 +1029,22 @@ await test("a_calendar_the_fill_cannot_read_is_answered_with_what_it_shows", asy
  * title, the picture it is drawn with, its value), and that something cannot
  * be taken back (a deletion, a send, a payment: the window's one table of
  * them, `request.holds`), is never pressed. A control with no name is pressed
- * as before. */
+ * as before — except one that says in its own markup that it submits its form
+ * (`<button type="submit">`, `<input type="submit">`), whatever it is named:
+ * pressed on a guess it would send the form. A `<button>` with no type at all
+ * is still a candidate (calendar libraries draw their pagers so). */
 const HELD_PICKERS = `<!doctype html><html lang="ko"><meta charset="utf-8"><title>held pickers</title>
 <form>
   <div><label for="g">반납일</label> <input id="g" readonly></div>
   <div><label for="h">기타일</label> <input id="h" readonly></div>
+  <div><label for="s">취소일</label> <input id="s" readonly></div>
+  <div><label for="t">변경일</label> <input id="t" readonly></div>
 </form>
 <script>
   window.pressed = [];
+  // The form is never really sent: a submit is counted and stopped.
+  window.submitted = 0;
+  document.querySelector("form").addEventListener("submit", (event) => { event.preventDefault(); window.submitted += 1; });
   const pad = (n) => String(n).padStart(2, "0");
   const dot = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
   // Controls that page nothing, each named another way — an ARIA name, a
@@ -1045,6 +1053,8 @@ const HELD_PICKERS = `<!doctype html><html lang="ko"><meta charset="utf-8"><titl
     + '<button type="button" title="Submit">⏎</button>'
     + '<button type="button"><img alt="송금" src="' + dot + '"></button>'
     + '<input type="button" value="결제">';
+  // Controls that say in their own markup they submit the form, with no name at all.
+  const SUBMITTERS = '<button type="submit">▶</button>' + '<input type="submit" value="">';
   function calendar(input, shape) {
     input.addEventListener("click", () => {
       if (input.parentElement.querySelector(".pop")) return;
@@ -1054,14 +1064,16 @@ const HELD_PICKERS = `<!doctype html><html lang="ko"><meta charset="utf-8"><titl
       const draw = () => {
         pop.replaceChildren();
         const top = document.createElement("div");
-        top.insertAdjacentHTML("beforeend", STRANGERS);
+        top.insertAdjacentHTML("beforeend", shape.controls || STRANGERS);
         for (const control of top.children) {
           control.addEventListener("click", () => window.pressed.push(
-            control.getAttribute("aria-label") || control.title || control.value || control.querySelector("img").alt));
+            control.getAttribute("aria-label") || control.title || control.value || (control.querySelector("img") || {}).alt || control.tagName));
         }
         const pager = (step) => {
           const button = document.createElement("button");
-          button.type = "button";
+          // A pager drawn with no type at all, as calendar libraries do, stops the form's own submit.
+          if (shape.typeless) button.addEventListener("click", (event) => event.preventDefault());
+          else button.type = "button";
           button.textContent = step < 0 ? "‹" : "›";
           button.addEventListener("click", () => { m += step; if (m < 1) { m = 12; y -= 1; } if (m > 12) { m = 1; y += 1; } draw(); });
           return button;
@@ -1095,6 +1107,8 @@ const HELD_PICKERS = `<!doctype html><html lang="ko"><meta charset="utf-8"><titl
   }
   calendar(document.getElementById("g"), { start: [2026, 10], pagers: true });
   calendar(document.getElementById("h"), { start: [2026, 10], pagers: false });
+  calendar(document.getElementById("s"), { start: [2026, 10], pagers: true, controls: SUBMITTERS, typeless: true });
+  calendar(document.getElementById("t"), { start: [2026, 10], pagers: false, controls: SUBMITTERS });
 </script>`;
 
 await test("a_control_in_a_calendar_that_names_a_press_that_cannot_be_taken_back_is_never_pressed_to_learn_a_pager", async () => {
@@ -1122,6 +1136,35 @@ await test("a_calendar_whose_only_candidates_name_such_presses_is_answered_with_
     const pressed = await held.evaluate(() => window.pressed);
     assert(pressed.length === 0, "none of them was pressed to find out", pressed);
     assert(await held.evaluate(() => document.getElementById("h").value) === "", "and nothing was written");
+    return JSON.stringify(only.widget);
+  } finally { await held.close(); }
+});
+
+await test("a_control_that_says_it_submits_its_form_is_never_pressed_to_learn_a_pager_but_a_pager_with_no_type_still_is", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(HELD_PICKERS);
+    const filled = await fillBundle(held, { "#s": "2026-12-09" });
+    const [only] = filled.results;
+    assert(only.status === "set", "the pagers with no type attribute still paged the calendar to the day", only);
+    assert(await held.evaluate(() => document.getElementById("s").value) === "2026-12-09", "and the day is the asked one");
+    const sent = await held.evaluate(() => ({ submitted: window.submitted, pressed: window.pressed }));
+    assert(sent.submitted === 0 && sent.pressed.length === 0, "no control that says it submits was pressed, and the form was never sent", sent);
+    return "paged by the typeless pair; the form was not sent";
+  } finally { await held.close(); }
+});
+
+await test("a_calendar_whose_only_candidates_say_they_submit_is_answered_with_what_it_shows_and_the_form_is_not_sent", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(HELD_PICKERS);
+    const filled = await fillBundle(held, { "#t": "2026-12-09" });
+    const [only] = filled.results;
+    assert(only.status === "no_option" && only.widget && only.widget.month === "2026-10" && only.widget.pagers.length === 0,
+      "no pager to page by: no_option, with the calendar's month and days and no pager", only);
+    const sent = await held.evaluate(() => ({ submitted: window.submitted, pressed: window.pressed }));
+    assert(sent.submitted === 0 && sent.pressed.length === 0, "none of them was pressed to find out, and the form was never sent", sent);
+    assert(await held.evaluate(() => document.getElementById("t").value) === "", "and nothing was written");
     return JSON.stringify(only.widget);
   } finally { await held.close(); }
 });
