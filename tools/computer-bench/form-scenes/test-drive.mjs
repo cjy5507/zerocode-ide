@@ -330,9 +330,9 @@ const STEPPER = await scene("stepper", `<!doctype html><html lang="en"><meta cha
  * kind `tel` — and the button that confirms it is the one beside the field the code was written into; neither is found by a list of words. A page whose buttons say
  * no place is held to the few short words that are left. */
 const CODE_CARD = (facts) => ({ "card.json": JSON.stringify({ task: "Fill it in.", facts, personTurns: ["code"] }) });
-const SEND_BESIDE_FACTS = [{ says: "Mobile", value: "031-7788-2290" }];
+const SEND_BESIDE_FACTS = [{ says: "Cell line", value: "031-7788-2290" }];
 const SEND_BESIDE = await scene("send-beside", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
-  <div class="row"><label for="ph">Mobile</label><div class="line"><input id="ph" type="tel"><button type="button" id="text">Text me</button></div></div>
+  <div class="row"><label for="ph">Cell line</label><div class="line"><input id="ph" type="tel"><button type="button" id="text">Text me</button></div></div>
   <div class="row" id="cr" hidden><label for="cd">Number we texted</label><div class="line"><input id="cd"></div></div>
   <button type="button" id="finish">Finish</button>
 </form>
@@ -346,7 +346,7 @@ const SEND_BESIDE = await scene("send-beside", `<!doctype html><html lang="en"><
   });
 </script>`, SEND_BESIDE_FACTS, { mobile: "031-7788-2290", code: "483920" }, CODE_CARD(SEND_BESIDE_FACTS));
 const CONFIRM_BESIDE = await scene("confirm-beside", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
-  <div class="row"><label for="ph">Mobile</label> <input id="ph" type="tel"> <button type="button" id="send">Send code</button></div>
+  <div class="row"><label for="ph">Cell line</label> <input id="ph" type="tel"> <button type="button" id="send">Get my code</button></div>
   <div class="row" id="cr" hidden><label for="cd">Number we texted</label><div class="line"><input id="cd"><button type="button" id="check">Check</button></div></div>
   <p id="top"></p>
   <button type="button" id="finish">Finish</button>
@@ -362,8 +362,8 @@ const CONFIRM_BESIDE = await scene("confirm-beside", `<!doctype html><html lang=
   });
 </script>`, SEND_BESIDE_FACTS, { mobile: "031-7788-2290", code: "483920", verified: true }, CODE_CARD(SEND_BESIDE_FACTS));
 const CODE_WORDS = await scene("code-words", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
-  <div class="row"><label for="ph">Mobile</label> <input id="ph"> <button type="button" id="send">Send code</button></div>
-  <div class="row" id="cr" hidden><label for="cd">Code</label><input id="cd"><p>Enter the number</p><button type="button" id="v">Verify</button></div>
+  <div class="row"><label for="ph">Cell line</label> <input id="ph"> <button type="button" id="send">Get my code</button></div>
+  <div class="row" id="cr" hidden><label for="cd">Digits sent</label><input id="cd"><p>Enter the number</p><button type="button" id="v">Confirm</button></div>
   <p id="top"></p>
   <button type="button" id="finish">Finish</button>
 </form>
@@ -373,7 +373,7 @@ const CODE_WORDS = await scene("code-words", `<!doctype html><html lang="en"><me
   $("send").addEventListener("click", () => { sent = "483920"; window.__personPhone = sent; $("cr").hidden = false; });
   $("v").addEventListener("click", () => { ok = $("cd").value === sent; });
   $("finish").addEventListener("click", () => {
-    if (!ok) { $("top").textContent = "Verify the number first"; return; }
+    if (!ok) { $("top").textContent = "Confirm the number first"; return; }
     window.__sceneResult = { mobile: $("ph").value, code: $("cd").value, verified: ok };
   });
 </script>`, SEND_BESIDE_FACTS, { mobile: "031-7788-2290", code: "483920", verified: true }, CODE_CARD(SEND_BESIDE_FACTS));

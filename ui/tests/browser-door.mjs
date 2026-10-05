@@ -2597,13 +2597,13 @@ await test("a_list_drawn_only_while_it_is_open_leaves_no_item_to_compare_so_the_
 /* A group of radios the page names only by plain words that stand in its row (t-41720): each radio is wrapped in its own label, so the label is the radio's, not a box around
  * the group, and does not use up a box of the words' reach — a title in the row, one box beyond the old reach of three, names the group. A group that had a name keeps it,
  * and a group with no words in its own row still has none (the words of another row are never borrowed). */
-const WRAPPED = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false"><div class="card"><h3>Order details</h3>
-  <div class="row"><span class="lbl">Receipt type</span><div class="fld"><div class="radios">
-    <label><input type="radio" name="rc" value="a" checked> None</label><label><input type="radio" name="rc" value="b"> Personal</label></div></div></div>
+const WRAPPED = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false"><div class="card"><h3>Page notes</h3>
+  <div class="row"><span class="lbl">Shirt colour</span><div class="fld"><div class="radios">
+    <label><input type="radio" name="rc" value="a" checked> Red</label><label><input type="radio" name="rc" value="b"> Blue</label></div></div></div>
   <div class="row"><div class="fld"><div class="radios">
     <label><input type="radio" name="zz" value="a"> Alpha</label><label><input type="radio" name="zz" value="b"> Beta</label></div></div></div>
-  <div class="far"><span class="lbl">Delivery speed</span><div class="row"><div class="box"><div class="fld"><div class="radios">
-    <label><input type="radio" name="sp" value="a"> Slow</label><label><input type="radio" name="sp" value="b"> Fast</label></div></div></div></div></div>
+  <div class="far"><span class="lbl">Print finish</span><div class="row"><div class="box"><div class="fld"><div class="radios">
+    <label><input type="radio" name="sp" value="a"> Matte</label><label><input type="radio" name="sp" value="b"> Gloss</label></div></div></div></div></div>
 </div></form>`;
 await test("a_radio_group_whose_radios_are_each_wrapped_in_a_label_takes_the_plain_text_title_that_stands_one_box_beyond_the_old_reach", async () => {
   const wrapped = await browser.newPage({ viewport: { width: 900, height: 700 } });
@@ -2612,7 +2612,7 @@ await test("a_radio_group_whose_radios_are_each_wrapped_in_a_label_takes_the_pla
     const read = await readFields(wrapped);
     const label = (name) => read.fields.find((one) => one.handle.includes(`name="${name}"`))?.label;
     const labels = read.fields.map((one) => [one.handle, one.label]);
-    assert(label("rc") === "Receipt type", "the title in the group's row names a group of radios each wrapped in its own label", labels);
+    assert(label("rc") === "Shirt colour", "the title in the group's row names a group of radios each wrapped in its own label", labels);
     assert(label("zz") === "", "a group with no words in its own row is still nameless — the words of the row above are not borrowed", labels);
     assert(label("sp") === "", "words two boxes further out stay out of reach", labels);
     return labels.map(([, one]) => JSON.stringify(one)).join(" · ");
