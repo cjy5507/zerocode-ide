@@ -252,7 +252,7 @@ const JOINTS = await scene("joints", `<!doctype html><html lang="en"><meta chars
 /* A date and a time written into parts the page names by units — in English and in Korean, with a half of the day to press. */
 const numbers = (from, to, word = "") => Array.from({ length: to - from + 1 }, (_, at) => `<option>${from + at}${word}</option>`).join("");
 const UNITS = await scene("units", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
-  <div class="row"><span>Born</span> <select id="by" aria-label="Year"><option value="">-</option><option>1988</option><option>1990</option><option>1992</option></select>
+  <div class="row"><span>Born</span> <select id="by" aria-label="Year"><option value="">-</option><option>1985</option><option>1987</option><option>1989</option></select>
     <select id="bm" aria-label="Month"><option value="">-</option>${numbers(1, 12)}</select><select id="bd" aria-label="Day"><option value="">-</option>${numbers(1, 31)}</select></div>
   <div class="row"><span>Alarm</span> <div id="ap" role="radiogroup" aria-label="AM or PM"><button type="button" role="radio" aria-checked="false">AM</button><button type="button" role="radio" aria-checked="false">PM</button></div>
     <select id="ah" aria-label="Hour"><option value="">-</option>${numbers(1, 12)}</select><select id="am" aria-label="Minute"><option value="">-</option><option>00</option><option>05</option><option>30</option></select></div>
@@ -269,8 +269,8 @@ const UNITS = await scene("units", `<!doctype html><html lang="en"><meta charset
     window.__sceneResult = { born: [$("by").value, $("bm").value, $("bd").value].join("-"), alarm: (on ? on.textContent : "") + " " + $("ah").value + ":" + $("am").value,
       wake: $("kh").value + " " + $("km").value };
   });
-</script>`, [{ says: "Born", value: "1990-06-30" }, { says: "Alarm", value: "7:05 PM" }, { says: "기상", value: "06:30" }],
-{ born: "1990-6-30", alarm: "PM 7:05", wake: "6시 30분" });
+</script>`, [{ says: "Born", value: "1987-03-09" }, { says: "Alarm", value: "7:05 PM" }, { says: "기상", value: "06:30" }],
+{ born: "1987-3-9", alarm: "PM 7:05", wake: "6시 30분" });
 
 /* A fact that names two fields — an item's name is in the words of its checkbox and of its count: the value is a number, so it goes to the field that takes
  * one — and one that names two fields of one kind, which the card does not tell apart: the driver stops and says which fields. */
@@ -326,7 +326,7 @@ const DRAWN = await scene("drawn", `<!doctype html><html lang="en"><meta charset
     if (parts) { kept = $("day").value; $("day").value = parts[2] + "/" + parts[3]; }
   });
   $("go").addEventListener("click", () => { window.__sceneResult = { arrival: kept }; });
-</script>`, [{ says: "Arrival", value: "2026-12-02" }], { arrival: "2026-12-02" });
+</script>`, [{ says: "Arrival", value: "2027-02-17" }], { arrival: "2027-02-17" });
 
 /* One run of the drivers on every scene, once. */
 const out = join(root, "rows.json");

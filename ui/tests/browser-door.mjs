@@ -2427,7 +2427,7 @@ await test("a_text_read_back_is_no_different_value_when_the_pages_own_state_show
     const read = await readFields(shown);
     const filled = await fillBundle(shown, {
       "#rate": "Five stars", "#tier": "Gold plan (monthly)", "#seat": "Five stars",
-      "#when": "2026-12-02", "#back": "2026-12-02", "#plain": "abc",
+      "#when": "2027-02-17", "#back": "2027-02-17", "#plain": "abc",
     }, read.fingerprint);
     const status = Object.fromEntries(filled.results.map((result) => [result.handle, result.status]));
     const shownNow = Object.fromEntries(filled.results.map((result) => [result.handle, result.now]));
@@ -2435,9 +2435,9 @@ await test("a_text_read_back_is_no_different_value_when_the_pages_own_state_show
     assert(status["#tier"] === "unseen" && shownNow["#tier"] === "Gold",
       "a list that says nothing of which item is chosen: the door passes on what is shown and says it cannot see", { status, shownNow });
     assert(status["#seat"] === "mismatch", "a list that marks another item chosen is a different value", { status, shownNow });
-    assert(status["#when"] === "unseen" && shownNow["#when"] === "12/02",
+    assert(status["#when"] === "unseen" && shownNow["#when"] === "02/17",
       "a date drawn without its year, with the asked month and day, is neither the same nor another", { status, shownNow });
-    assert(status["#back"] === "mismatch" && shownNow["#back"] === "12/03", "a date whose day is another is a different value", { status, shownNow });
+    assert(status["#back"] === "mismatch" && shownNow["#back"] === "02/18", "a date whose day is another is a different value", { status, shownNow });
     assert(status["#plain"] === "set", "a text that reads back as given is as it was", { status, shownNow });
     return JSON.stringify(status);
   } finally { await shown.close(); }

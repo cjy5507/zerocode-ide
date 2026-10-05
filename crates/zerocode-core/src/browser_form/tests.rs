@@ -1202,7 +1202,7 @@ fn a_fill_that_cannot_see_whether_the_text_read_back_is_the_same_value_says_so_a
  {
     let pass: FillPass = serde_json::from_value(json!({
         "results": [
-            { "handle": "#when", "status": "unseen", "kind": "text", "label": "Date", "now": "12/02" },
+            { "handle": "#when", "status": "unseen", "kind": "text", "label": "Date", "now": "02/17" },
             { "handle": "#rate", "status": "unseen", "kind": "combobox", "label": "Rating", "now": "5★",
               "options": ["Five stars", "Four stars"] },
             { "handle": "#size", "status": "mismatch", "kind": "text", "label": "Size", "now": "M" },
@@ -1211,7 +1211,7 @@ fn a_fill_that_cannot_see_whether_the_text_read_back_is_the_same_value_says_so_a
     }))
     .expect("a pass with a text it cannot tell");
     let bundle = vec![
-        entry("#when", text("2026-12-02")),
+        entry("#when", text("2027-02-17")),
         entry("#rate", text("Five stars")),
         entry("#size", text("S")),
         entry("#name", text("Kim")),
@@ -1236,7 +1236,7 @@ fn a_fill_that_cannot_see_whether_the_text_read_back_is_the_same_value_says_so_a
     let lines = fill_lines(&report);
     for expected in [
         "채움 1/4칸 (1회)",
-        "  ? #when Date: 다시 읽은 글과 글자는 다르나 같은지는 볼 수 없음 (\"12/02\")",
+        "  ? #when Date: 다시 읽은 글과 글자는 다르나 같은지는 볼 수 없음 (\"02/17\")",
         "  ? #rate Rating: 다시 읽은 글과 글자는 다르나 같은지는 볼 수 없음 (\"5★\")",
         "  ✗ #size Size: 다시 읽으니 다른 값 (\"M\")",
         "  ✓ #name Name = \"Kim\"",
