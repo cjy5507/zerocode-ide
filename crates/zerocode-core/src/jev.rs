@@ -28,6 +28,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub mod batch;
 pub mod challenger;
 pub mod choice;
 pub mod claim;
@@ -3574,31 +3575,74 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     abstain: Abstain::NotAChoice,
 };
 
-/// The wall one mail triage question waits for its answer, in milliseconds —
+/// The wall one mail triage request waits for its answer, in milliseconds —
 /// the wire's own, since the seat never rises and names no apply wall.
 ///
-/// A record-only question asked off the beat holds nothing but its own
-/// thread, so its wall is set by the answers it would lose. The window's
-/// three seats that ask about orchestration facts got every one of their 967
-/// answers on this machine inside 2,517 ms (2026-09-26: the notify seat's
-/// 558 at p99 895 ms, the summons' 247 at p99 1,464 ms, the stall seat's 162
-/// — with a screen's 8 KB in each — at p99 2,003 ms), and a letter's facts
-/// are fewer bytes than any of them. Five seconds is twice the slowest; an
-/// answer later than that is the row's `timeout`, which says the service was
-/// slow as plainly.
+/// A record-only request asked off the beat holds nothing but its own thread,
+/// so its wall is set by the answers it would lose — and a request is a batch
+/// now: one that does not come back leaves up to [`MAIL_TRIAGE_BATCH_CAP`]
+/// rows `timeout` at once. What the model takes was measured on the real wire
+/// with one synthetic day's letters asked in requests of 1, 2, 4, 8, 16 and 32
+/// letters in the words the seat asks in (2026-10-04,
+/// `measure_agreement_on_the_real_wire`; four requests side by side, the
+/// slowest of them timed): 221, 228, 227 and 257, 254 and 240, 281 and 450 ms
+/// at the median and 322, 384, 291 and 314, 326 and 336, 354 and 450 ms at
+/// most — thirty-two letters asking sixty-four questions in 80 KB took two
+/// round trips, and the rest hardly more than one, as the model's time is its
+/// round trip and hardly its answers; the per-letter road, asked beside them,
+/// 208 and 224 at the median and 336 and 513 at most. Five seconds is nine
+/// times the slowest of those. The window's three seats that ask
+/// about orchestration facts got every one of their 967 answers on this machine
+/// inside 2,517 ms (2026-09-26: the notify seat's 558 at p99 895 ms, the
+/// summons' 247 at p99 1,464 ms, the stall seat's 162 — with a screen's 8 KB in
+/// each — at p99 2,003 ms), and five seconds is twice the slowest of those
+/// too. An answer later than that is the row's `timeout`, which says the
+/// service was slow as plainly.
 pub const MAIL_TRIAGE_DEADLINE_MS: u64 = 5_000;
+
+/// The most letters one mail triage request asks about ([`batch::Judgment::cap`]):
+/// a run's fresh letters above it are cut evenly ([`shard::even_shards`]) into
+/// requests that leave side by side — four at a time — so a burst waits for a
+/// request or a few and not for its letters one after another.
+///
+/// Eight, for what a request weighs and for what was measured. Every
+/// letter's question carries the words of the judgment (`crate::mail_triage`:
+/// a question is judged on its own words), so a letter adds about 2.8 KB to a
+/// request (2,810 B: its entry and its two questions, at rubric version 2)
+/// beside the few dozen bytes of the coordinator's situation: a full request is
+/// some 22 KB — about 7,600 tokens of the 64,000 one request may carry
+/// (docs.typesafe.ai/models, read 2026-09-25) — and asks sixteen questions,
+/// under the fifty the skill and compaction seats put in one
+/// ([`SKILL_SHARD_TARGET`]). It bounds what one request that does not come back
+/// costs: the seat only records, and the letters of that request are the ones
+/// left unrecorded. What size does to agreement with the coordinator's later
+/// acts was measured on the real wire (`measure_agreement_on_the_real_wire`,
+/// 2026-10-04): the same 172 letters under three seeds, 406 comparisons, asked
+/// in the words the seat asks in, in requests of 1, 2, 4, 8, 16 and 32 — 221,
+/// 216, 218 and 217, 218 and 219, 211 and 212 agreed, where the per-letter
+/// road, asked beside them, agreed in 223 and 217. Up to eight the sizes do not
+/// order, and the same letters asked twice at one size differ by up to seven;
+/// sixteen and thirty-two are about seven lower, so the cap sits at eight. That
+/// the product's own words agree as the per-letter road's did at this cap is
+/// what
+/// `the_batch_road_agrees_with_what_the_coordinator_did_next_as_the_per_letter_road_does`
+/// asks of the real model.
+pub const MAIL_TRIAGE_BATCH_CAP: usize = 8;
 
 /// The window's mail triage (t-9471, `crate::mail_triage`): for every letter
 /// a run's coordinator is handed while this window holds its seat, whether
 /// the coordinator should deal with it now, later, or not at all — and
-/// whether it should be the very next thing it does.
+/// whether it should be the very next thing it does. A run's fresh letters
+/// are asked in one request ([`batch`], t-32796), not one request each.
 ///
 /// Record-only: `shadow` is the most it offers and it never rises. Its rows
 /// are the evidence the desk's order will be judged on before it may move a
 /// letter (the harness design's §H6, a later round). What it sends is a
 /// letter's structure — kinds, the ledger's own ids, counts, a priority word
-/// — and never a word of the letter; the table declares every text the
-/// state carries, each a word or an id the product wrote.
+/// — and never a word of the letter; the table declares every text of a
+/// letter's entry, each a word or an id the product wrote, and the state holds
+/// no other text: the words of the judgment stand in the questions, which the
+/// product wrote.
 ///
 /// The label is what the coordinator did next, read off the ledger alone
 /// (`crate::mail_triage::Mailroom::label`): its acts after the hand-over, the
@@ -3613,32 +3657,38 @@ pub const MAIL_TRIAGE: JevUse = JevUse {
     modes: &[JevMode::Off, JevMode::Shadow],
     recommended: JevMode::Shadow,
     repeat: None,
-    // Every text the state carries: the letter's kind, its sender's address
+    // The list of letters, cut to the batch cap — the road never builds a
+    // request over it, so the door's cut is a belt beside its braces — and
+    // every text a letter's entry carries: its kind, its sender's address
     // head, the ledger's ids of the worker and the task, the task's stage
     // word and the priority word. The rest are numbers and flags.
     sends: &[
         Sent {
-            at: "/state/kind",
+            at: "/state/letters",
+            cap: Cap::Items(MAIL_TRIAGE_BATCH_CAP),
+        },
+        Sent {
+            at: "/state/letters/*/kind",
             cap: Cap::Uncut,
         },
         Sent {
-            at: "/state/from",
+            at: "/state/letters/*/from",
             cap: Cap::Uncut,
         },
         Sent {
-            at: "/state/worker",
+            at: "/state/letters/*/worker",
             cap: Cap::Uncut,
         },
         Sent {
-            at: "/state/task",
+            at: "/state/letters/*/task",
             cap: Cap::Uncut,
         },
         Sent {
-            at: "/state/taskStatus",
+            at: "/state/letters/*/taskStatus",
             cap: Cap::Uncut,
         },
         Sent {
-            at: "/state/priority",
+            at: "/state/letters/*/priority",
             cap: Cap::Uncut,
         },
     ],

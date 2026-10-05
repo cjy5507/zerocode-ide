@@ -2431,16 +2431,18 @@ fn reflex_decide_sends_no_pixels_text_or_app_names() {
 }
 
 /// The mail triage (t-9471): every letter a coordinator is handed, put to one
-/// closed choice and one Noul beside it, recorded and never acted on —
-/// `shadow` is the most it offers, it never rises, names no floor, wall or
-/// band, and its wire waits its own five seconds. It stands right before the
-/// challenger, so every seat the table pins by its distance from the end
-/// stands where it stood; it stamps the task a letter concerns, so a task's
-/// cost counts its requests; and every text its state carries is declared,
-/// each a word or an id the product wrote — never a letter's words.
+/// closed choice and one Noul beside it — a run's fresh letters together, in
+/// one request (t-32796) — recorded and never acted on: `shadow` is the most
+/// it offers, it never rises, names no floor, wall or band, and its wire waits
+/// its own five seconds. It stands right before the challenger, so every seat
+/// the table pins by its distance from the end stands where it stood; it
+/// stamps the task a letter concerns, so a task's cost counts its requests;
+/// its letters stand in a list the table cuts to the batch cap; and every
+/// text a letter's entry carries is declared, each a word or an id the product
+/// wrote — never a letter's words.
 #[test]
 fn the_mail_triage_records_every_letter_and_never_rises() {
-    use crate::mail_triage::{MAIL_TRIAGE_RUBRIC_VERSION, STATE_KEYS};
+    use crate::mail_triage::{LETTER_KEYS, MAIL_TRIAGE_RUBRIC_VERSION};
     use crate::orchestration::task_cost::TASK_STAMPED;
 
     assert_eq!(jev_use("mail_triage"), Some(&MAIL_TRIAGE));
@@ -2476,20 +2478,26 @@ fn the_mail_triage_records_every_letter_and_never_rises() {
     assert_eq!(
         pointers,
         [
-            "/state/kind",
-            "/state/from",
-            "/state/worker",
-            "/state/task",
-            "/state/taskStatus",
-            "/state/priority",
+            "/state/letters",
+            "/state/letters/*/kind",
+            "/state/letters/*/from",
+            "/state/letters/*/worker",
+            "/state/letters/*/task",
+            "/state/letters/*/taskStatus",
+            "/state/letters/*/priority",
         ]
     );
-    for sent in MAIL_TRIAGE.sends {
+    assert_eq!(
+        MAIL_TRIAGE.sends[0].cap,
+        Cap::Items(MAIL_TRIAGE_BATCH_CAP),
+        "the table cuts the list of letters to the batch cap"
+    );
+    for sent in &MAIL_TRIAGE.sends[1..] {
         assert_eq!(sent.cap, Cap::Uncut, "{}", sent.at);
-        let key = sent.at.trim_start_matches("/state/");
+        let key = sent.at.trim_start_matches("/state/letters/*/");
         assert!(
-            STATE_KEYS.contains(&key),
-            "{key} is not a key the state carries"
+            LETTER_KEYS.contains(&key),
+            "{key} is not a key a letter's entry carries"
         );
         for word in [
             "body", "subject", "payload", "words", "text", "title", "summary",
@@ -3189,26 +3197,30 @@ fn asked_here(row: &JevUse) -> Option<Vec<Value>> {
             ]
         }
         id if id == MAIL_TRIAGE.id => {
-            use crate::mail_triage::{MailLook, ask};
+            use crate::jev::batch::requests;
+            use crate::mail_triage::{MailLook, MailTriage, Situation};
             use crate::orchestration::MessageKind;
-            vec![
-                ask(&MailLook {
-                    kind: MessageKind::Question,
-                    from: "worker",
-                    worker: Some("w-7"),
-                    task: Some("t-3"),
-                    task_status: Some("dispatched"),
-                    priority: "normal",
-                    awaits_answer: true,
-                    thread_depth: 0,
-                    age_ms: 42_500,
-                    delivered: false,
-                    repeats: 0,
-                    coordinator_busy: None,
-                    open_questions: 1,
-                })
-                .questions,
-            ]
+            let look = MailLook {
+                kind: MessageKind::Question,
+                from: "worker",
+                worker: Some("w-7"),
+                task: Some("t-3"),
+                task_status: Some("dispatched"),
+                priority: "normal",
+                awaits_answer: true,
+                thread_depth: 0,
+                age_ms: 42_500,
+                delivered: false,
+                repeats: 0,
+            };
+            let situation = Situation {
+                coordinator_busy: None,
+                open_questions: 1,
+            };
+            requests(&MailTriage::new(situation), vec![look.facts()])
+                .into_iter()
+                .map(|request| request.questions)
+                .collect()
         }
         id if id == CHALLENGER.id => vec![
             challenger::ask(

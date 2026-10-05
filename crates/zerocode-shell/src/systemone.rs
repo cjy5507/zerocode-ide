@@ -426,6 +426,27 @@ impl Spent {
         }
     }
 
+    /// What a row that rides a request another row paid for is charged: no
+    /// request, no withheld lines and no tokens, beside the version that
+    /// answered it and the HTTP version it came over (t-32796).
+    ///
+    /// A request that judged several letters leaves ONE account, written on
+    /// the one row that carries it ([`Spent::stamp`]); the rows of the other
+    /// letters it asked about carry this, so a ledger's sums still say how
+    /// many requests left and what they billed — a row per letter must not
+    /// make one request count as many.
+    #[must_use]
+    pub fn rider(&self) -> Self {
+        Self {
+            requests: 0,
+            redacted_lines: 0,
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            model: self.model.clone(),
+            version: self.version.clone(),
+        }
+    }
+
     /// What several asks of one judgment came to together — a sharded
     /// question's requests side by side: their requests and withheld lines
     /// added, and the versions the first answer among them named and came
@@ -475,6 +496,10 @@ pub struct Asked {
     /// before the memo was reached. When `memo.answered`, `answer` is the
     /// memo's and `spent.requests` is `0`: nothing left the machine.
     pub memo: Option<Memoed>,
+    /// How long this call took, from the door to the answer: its own wait,
+    /// whatever the requests asked beside it took — which a clock around
+    /// [`Wire::ask_together`] cannot say.
+    pub waited: Duration,
 }
 
 /// Where the key is read from.
@@ -508,6 +533,18 @@ fn trimmed(key: Option<String>) -> Option<String> {
     key.map(|key| key.trim().to_string())
         .filter(|key| !key.is_empty())
 }
+
+/// The most requests of one [`Wire::ask_together`] in flight at once; the rest
+/// leave behind them, in waves.
+///
+/// Four. The most any seat asks side by side today is the browser read's four
+/// shards, which this leaves as they were. The vendor takes 250,000 input
+/// tokens a second (docs.typesafe.ai/models, read 2026-09-25): four of the
+/// heaviest request any seat makes — a full skills shard, some 13,000 tokens
+/// (38,600 for three, the reference build's own search) — in a 300 ms round
+/// trip are some 170,000 a second, under it; the sixty-three mail requests of
+/// a thousand letters at once, some 280,000 tokens, are over it.
+pub const TOGETHER_LANES: usize = 4;
 
 impl Wire {
     /// Carry a local session/task name to opted-in review evidence only.
@@ -740,6 +777,80 @@ impl Wire {
         self.ask_remembering(row, workspace, body, deadline, None)
     }
 
+    /// Several requests of `row`'s, each with the workspace its words come
+    /// from, under one `deadline` each: at most [`TOGETHER_LANES`] in flight at
+    /// once, side by side, and the rest in waves behind them. The answers come
+    /// back in the order the requests were handed in, and a wave's wait is its
+    /// slowest request's — the road every seat that asks in shards takes
+    /// (t-32796). Blocks like [`Self::ask`].
+    #[must_use]
+    pub fn ask_together(
+        &self,
+        row: &JevUse,
+        asks: Vec<(Option<&Path>, Value)>,
+        deadline: Duration,
+    ) -> Vec<Asked> {
+        self.ask_in_waves(row, asks, deadline).flatten().collect()
+    }
+
+    /// [`Self::ask_together`], one wave at a time: each item is the next wave's
+    /// answers, in the order its requests were handed in, and the wave leaves
+    /// when its item is asked for. A caller with something to do with a wave's
+    /// answers — write them down — does it before the next wave leaves, so a
+    /// window closed in between has lost the work of one wave and not of the
+    /// whole.
+    pub fn ask_in_waves<'a>(
+        &'a self,
+        row: &'a JevUse,
+        mut asks: Vec<(Option<&'a Path>, Value)>,
+        deadline: Duration,
+    ) -> impl Iterator<Item = Vec<Asked>> + 'a {
+        std::iter::from_fn(move || {
+            if asks.is_empty() {
+                return None;
+            }
+            let wave: Vec<_> = asks.drain(..asks.len().min(TOGETHER_LANES)).collect();
+            Some(self.ask_in_one_wave(row, wave, deadline))
+        })
+    }
+
+    /// One wave of [`Self::ask_in_waves`]: its requests all in flight at once.
+    fn ask_in_one_wave(
+        &self,
+        row: &JevUse,
+        mut wave: Vec<(Option<&Path>, Value)>,
+        deadline: Duration,
+    ) -> Vec<Asked> {
+        // One request has nothing to leave beside: no thread for it.
+        if wave.len() == 1 {
+            return wave
+                .pop()
+                .map(|(workspace, body)| self.ask(row, workspace, body, deadline))
+                .into_iter()
+                .collect();
+        }
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = wave
+                .into_iter()
+                .map(|(workspace, body)| {
+                    scope.spawn(move || self.ask(row, workspace, body, deadline))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| Asked {
+                        answer: Err(TRANSPORT.to_string()),
+                        spent: Spent::default(),
+                        request_bytes: 0,
+                        memo: None,
+                        waited: Duration::ZERO,
+                    })
+                })
+                .collect()
+        })
+    }
+
     /// [`Self::ask`], with a memo between the door and the socket
     /// ([`door::pass_remembering`], t-6132): the door's four questions, then
     /// the lookup of the cleared bytes, then — for a hit under a seat that
@@ -756,12 +867,14 @@ impl Wire {
         deadline: Duration,
         memo: Option<Memo<'_>>,
     ) -> Asked {
-        let deadline = Instant::now() + deadline;
+        let began = Instant::now();
+        let deadline = began + deadline;
         let refused = |refusal: Refused| Asked {
             answer: Err(refusal.token().to_string()),
             spent: Spent::default(),
             request_bytes: 0,
             memo: None,
+            waited: began.elapsed(),
         };
         let key = self.key();
         let passed = match self.pass(row, key.is_some(), workspace, body, memo) {
@@ -798,6 +911,7 @@ impl Wire {
                 },
                 request_bytes,
                 memo,
+                waited: began.elapsed(),
             };
         }
         // Every caller is sync — a walk drives sync roads, a question asked
@@ -847,6 +961,7 @@ impl Wire {
             spent,
             request_bytes,
             memo,
+            waited: began.elapsed(),
         }
     }
 
