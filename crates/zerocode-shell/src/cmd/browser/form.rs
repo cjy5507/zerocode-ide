@@ -935,26 +935,21 @@ const zcFresh = (records, before, request, scopes) => {
   return { byHandle, quiet, alerts: alerts.slice(0, request.freshCap), outside: outside.slice(0, request.freshCap) };
 };
 // A value split across several fields — an hour beside a minute, the boxes of a code — is told by what
-// the group the parts stand in is called. A part the page names only by its own short words (an ARIA
-// label with no label of the page beside it, or a placeholder) takes the caption in front of it
-// (`<caption> — <words>`) when its box holds two or more such parts and no other field, and the words
-// do not already say it. The caption is the name of the group around the parts — a fieldset's legend,
-// ARIA's name for a group — when the group holds nothing but these parts, else the words before the
-// first of them. A star the page put on the caption stays with the parts.
+// the group the parts stand in is called. The parts stand side by side: two or more fields that are direct
+// children of one box, which holds no other field, each named only by its own short words (an ARIA label
+// with no label of the page beside it, or a placeholder). Each takes the caption in front of its words
+// (`<caption> — <words>`) unless they already hold it. The caption is the name of the group around the
+// parts — a fieldset's legend, ARIA's name for a group — when the group holds nothing but these parts, else
+// the words before the first of them. A star the page put on the caption stays with the parts.
 const zcPartCaptions = (records, request) => {
   const edge = /^[\s*＊]+|[\s*＊]+$/g;
   const done = new Set();
   for (const record of records) {
     if (!record.short || record.kind === "chips" || done.has(record)) continue;
-    let box = record.el.parentElement;
-    let held = [];
-    for (let level = 0; box && level < request.captionDepth; level += 1, box = box.parentElement) {
-      if (box.matches("body, form, [role=form], dialog, [role=dialog], main")) { box = null; break; }
-      const inside = records.filter((other) => box.contains(other.el));
-      if (inside.some((other) => !other.short || other.kind === "chips")) { box = null; break; }
-      if (inside.length > 1) { held = inside; break; }
-    }
-    if (!box || held.length < 2) continue;
+    const box = record.el.parentElement;
+    if (!box || box.matches("body, form, [role=form], dialog, [role=dialog], main")) continue;
+    const held = records.filter((other) => box.contains(other.el));
+    if (held.length < 2 || held.some((other) => !other.short || other.kind === "chips" || other.el.parentElement !== box)) continue;
     for (const part of held) done.add(part);
     let name = "";
     for (let up = box, level = 0; up && level <= request.captionDepth; up = up.parentElement, level += 1) {
@@ -972,7 +967,7 @@ const zcPartCaptions = (records, request) => {
     const star = /[*＊]/.test(said.replace(lead, ""));
     for (const part of held) {
       const own = String(part.label).trim();
-      if (!own || zcFold(own).includes(zcFold(lead)) || zcFold(lead).includes(zcFold(own))) continue;
+      if (!own || zcFold(own).includes(zcFold(lead))) continue;
       part.label = lead + " — " + own + (star && !/[*＊]\s*$/.test(own) ? " *" : "");
     }
   }

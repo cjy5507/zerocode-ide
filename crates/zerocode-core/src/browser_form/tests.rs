@@ -1023,7 +1023,7 @@ fn a_fill_of_a_group_of_chips_says_the_list_it_holds_now_and_the_one_it_holds_in
         "results": [
             { "handle": "#colours", "status": "set", "label": "Colours", "now": ["Red", "Blue"] },
             { "handle": "#size", "status": "mismatch", "label": "Size", "now": ["Medium"] },
-            { "handle": "#size", "status": "no_option", "label": "Size", "options": ["S", "M"] },
+            { "handle": "#fit", "status": "no_option", "label": "Fit", "options": ["S", "M"] },
         ],
     }));
     assert!(
@@ -1034,7 +1034,7 @@ fn a_fill_of_a_group_of_chips_says_the_list_it_holds_now_and_the_one_it_holds_in
     let bundle = vec![
         entry("#colours", text("Red, Blue")),
         entry("#size", text("Small")),
-        entry("#size", text("XL")),
+        entry("#fit", text("XL")),
     ];
     let mut ledger = FillLedger::new(bundle.clone());
     ledger.record(&bundle, pass.unwrap_or_default());
@@ -1042,7 +1042,7 @@ fn a_fill_of_a_group_of_chips_says_the_list_it_holds_now_and_the_one_it_holds_in
     for expected in [
         "  ✓ #colours Colours = [\"Red\", \"Blue\"]",
         "  ✗ #size Size: 다시 읽으니 다른 값 ([\"Medium\"])",
-        "  ✗ #size Size: 그 값의 선택지가 없음 ▸ S | M",
+        "  ✗ #fit Fit: 그 값의 선택지가 없음 ▸ S | M",
     ] {
         assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
     }

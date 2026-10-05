@@ -2285,6 +2285,14 @@ const PARTS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
   <fieldset><legend>Billing</legend><label>Street <input id="street"></label><label>City <input id="city"></label></fieldset>
   <div class="row"><span>Search</span> <input id="q" aria-label="Query"></div>
   <dl><div class="row"><dt>Email</dt><dd><input id="e-id" aria-label="Email name"><span>@</span><input id="e-dom" aria-label="Email domain"></dd></div></dl>
+  <div id="bdCap">Birth day *</div>
+  <div role="group" aria-labelledby="bdCap">
+    <select id="bY" aria-label="Year"><option value="">-</option><option>2000</option></select>
+    <select id="bM" aria-label="Month"><option value="">-</option><option>1</option></select>
+    <select id="bD" aria-label="Day"><option value="">-</option><option>1</option></select>
+  </div>
+  <ul><li><span>Mint 1 bunch</span> <input type="checkbox" id="pick" aria-label="Mint select">
+    <div class="step"><button type="button" aria-label="Less">-</button><input id="qty" aria-label="Count" value="1"><button type="button" aria-label="More">+</button></div></li></ul>
 </form>`;
 await test("a_part_the_page_names_only_by_its_own_short_words_is_told_by_the_caption_of_its_group_or_row", async () => {
   const parts = await browser.newPage({ viewport: { width: 900, height: 900 } });
@@ -2302,6 +2310,10 @@ await test("a_part_the_page_names_only_by_its_own_short_words_is_told_by_the_cap
       "a field a label names, and a part alone in its box, are as they were", read.fields.map((one) => one.label));
     assert(label("#e-id") === "Email name" && label("#e-dom") === "Email domain",
       "a name that already holds the caption is not given it twice", read.fields.map((one) => one.label));
+    assert(label("#bD") === "Birth day — Day *" && label("#bY") === "Birth day — Year *",
+      "a name that is a word of the caption (a unit) is still told by it", read.fields.map((one) => one.label));
+    assert(label("#pick") === "Mint select" && label("#qty") === "Count",
+      "fields of one item that are not side by side — a checkbox and a stepper's box — are no parts of one value", read.fields.map((one) => one.label));
     assert(!read.fields.some((one) => one.ordinal), "no field is told by a number", read.fields.filter((one) => one.ordinal));
     return ["#rtHour", "#ptHour", "#p1"].map(label).join(" · ");
   } finally { await parts.close(); }
