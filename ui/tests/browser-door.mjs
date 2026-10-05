@@ -2346,6 +2346,186 @@ await test("a_button_that_declares_it_submits_the_form_is_marked_and_one_that_do
   } finally { await submits.close(); }
 });
 
+/* A field's name is taken only from words the page draws (t-41720): text a page keeps from the eye — display, the
+ * hidden attribute, visibility, no opacity, a font of no size, a box collapsed to nothing — is no one's name. The
+ * words before a field that names nothing else are then the field's own placeholder, or nothing, which the read says. */
+const HIDDEN_WORDS = `<!doctype html><html lang="en"><meta charset="utf-8"><style>
+  .off { display: none } .ghost { visibility: hidden } .clear { opacity: 0 } .tiny { font-size: 0 }
+  .fold { max-height: 0; overflow: hidden } .readers { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0) }
+</style><form>
+  <div><label for="l1">Lane</label> <input id="l1"><p class="off">Check the lane</p></div><div><input id="n1" placeholder="Hint one"></div>
+  <div><label for="l2">Lane two</label> <input id="l2"><p hidden>Check the second lane</p></div><div><input id="n2" placeholder="Hint two"></div>
+  <div><label for="l3">Lane three</label> <input id="l3"><p class="ghost">Check the third lane</p></div><div><input id="n3" placeholder="Hint three"></div>
+  <div><label for="l4">Lane four</label> <input id="l4"><p class="clear">Check the fourth lane</p></div><div><input id="n4" placeholder="Hint four"></div>
+  <div><label for="l5">Lane five</label> <input id="l5"><p class="tiny">Check the fifth lane</p></div><div><input id="n5" placeholder="Hint five"></div>
+  <div><label for="l6">Lane six</label> <input id="l6"><p class="fold">Check the sixth lane</p></div><div><input id="n6" placeholder="Hint six"></div>
+  <div><label for="l7">Lane seven</label> <input id="l7"><p class="off">Check the seventh lane</p></div><div><input id="none"></div>
+  <div><label for="l8">Lane eight</label> <input id="l8"><p>Say it plainly</p></div><div><input id="n8" placeholder="Hint eight"></div>
+  <div><input id="l9"><span class="readers">Reader's note</span><input id="n9"></div>
+</form>`;
+await test("a_name_is_taken_only_from_words_the_page_draws_so_hidden_text_names_no_field", async () => {
+  const hidden = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await hidden.setContent(HIDDEN_WORDS);
+    const read = await readFields(hidden);
+    const label = (handle) => read.fields.find((one) => one.handle === handle)?.label;
+    const labels = read.fields.map((one) => [one.handle, one.label]);
+    for (const [handle, hint] of [["#n1", "Hint one"], ["#n2", "Hint two"], ["#n3", "Hint three"], ["#n4", "Hint four"], ["#n5", "Hint five"], ["#n6", "Hint six"]]) {
+      assert(label(handle) === hint, `a field whose words before it are kept from the eye is named by its own placeholder (${handle})`, labels);
+    }
+    assert(label("#none") === "", "a field with nothing to name it by says it has no name, and borrows no other field's words", labels);
+    assert(label("#n8") === "Say it plainly", "words the page draws before a field still name it", labels);
+    assert(label("#n9") === "Reader's note", "words drawn for readers only, in a box a pixel wide, are still the page's words", labels);
+    return labels.filter(([handle]) => handle.startsWith("#n")).map(([, one]) => one).join(" · ");
+  } finally { await hidden.close(); }
+});
+
+/* A text read back that differs by its letters from the value given is no different value when the page's own
+ * state shows the same one (t-41720): the option a list button's list marks chosen, a date drawn without its
+ * year that says the asked month and day. Where the page's state does not say, the door says it cannot see — never
+ * a difference it does not know of, never a sameness it cannot show — and where it does say another, it is one. */
+const UNSEEN = `<!doctype html><html lang="en"><meta charset="utf-8"><body><form>
+  <div><span id="rl">Rating</span> <button type="button" id="rate" class="pick" aria-haspopup="listbox" aria-controls="rate-list" aria-expanded="false" aria-labelledby="rl" data-short="5★">Pick one</button>
+    <ul id="rate-list" role="listbox" hidden><li role="option" aria-selected="false" data-short="5★">★★★★★ Five stars</li><li role="option" aria-selected="false" data-short="4★">★★★★ Four stars</li></ul></div>
+  <div><span id="tl">Plan</span> <button type="button" id="tier" class="pick" aria-haspopup="listbox" aria-controls="tier-list" aria-expanded="false" aria-labelledby="tl">Pick one</button>
+    <ul id="tier-list" role="listbox" hidden><li role="option" data-short="Gold">Gold plan (monthly)</li><li role="option" data-short="Silver">Silver plan (monthly)</li></ul></div>
+  <div><span id="sl">Seat</span> <button type="button" id="seat" class="pick keeps" aria-haspopup="listbox" aria-controls="seat-list" aria-expanded="false" aria-labelledby="sl">★★★★ Four stars</button>
+    <ul id="seat-list" role="listbox" hidden><li role="option" aria-selected="true">★★★★ Four stars</li><li role="option" aria-selected="false">★★★★★ Five stars</li></ul></div>
+  <div><label for="when">Arrival</label> <input id="when" data-draws="short"></div>
+  <div><label for="back">Return</label> <input id="back" data-draws="next"></div>
+  <div><label for="plain">Memo</label> <input id="plain"></div>
+</form><script>
+  for (const button of document.querySelectorAll("button.pick")) {
+    const list = document.getElementById(button.getAttribute("aria-controls"));
+    button.addEventListener("click", () => {
+      const open = button.getAttribute("aria-expanded") === "true";
+      button.setAttribute("aria-expanded", String(!open));
+      list.hidden = open;
+    });
+    for (const item of list.children) {
+      item.addEventListener("click", () => {
+        list.hidden = true;
+        button.setAttribute("aria-expanded", "false");
+        if (button.classList.contains("keeps")) return;
+        for (const other of list.children) if (other.hasAttribute("aria-selected")) other.setAttribute("aria-selected", String(other === item));
+        button.textContent = item.dataset.short;
+      });
+    }
+  }
+  for (const input of document.querySelectorAll("input[data-draws]")) {
+    input.addEventListener("change", () => {
+      const [, year, month, day] = input.value.match(/^(\\d{4})-(\\d\\d)-(\\d\\d)$/) || [];
+      if (!year) return;
+      input.value = input.dataset.draws === "short" ? month + "/" + day : month + "/" + String(Number(day) + 1).padStart(2, "0");
+    });
+  }
+</script>`;
+await test("a_text_read_back_is_no_different_value_when_the_pages_own_state_shows_the_same_one_and_else_the_door_says_it_cannot_see", async () => {
+  const shown = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await shown.setContent(UNSEEN);
+    const read = await readFields(shown);
+    const filled = await fillBundle(shown, {
+      "#rate": "Five stars", "#tier": "Gold plan (monthly)", "#seat": "Five stars",
+      "#when": "2026-12-02", "#back": "2026-12-02", "#plain": "abc",
+    }, read.fingerprint);
+    const status = Object.fromEntries(filled.results.map((result) => [result.handle, result.status]));
+    const shownNow = Object.fromEntries(filled.results.map((result) => [result.handle, result.now]));
+    assert(status["#rate"] === "set", "a list button that shows its choice shortened is no different value when the chosen option is the one asked", { status, shownNow });
+    assert(status["#tier"] === "unseen" && shownNow["#tier"] === "Gold",
+      "a list that says nothing of which item is chosen: the door passes on what is shown and says it cannot see", { status, shownNow });
+    assert(status["#seat"] === "mismatch", "a list that marks another item chosen is a different value", { status, shownNow });
+    assert(status["#when"] === "unseen" && shownNow["#when"] === "12/02",
+      "a date drawn without its year, with the asked month and day, is neither the same nor another", { status, shownNow });
+    assert(status["#back"] === "mismatch" && shownNow["#back"] === "12/03", "a date whose day is another is a different value", { status, shownNow });
+    assert(status["#plain"] === "set", "a text that reads back as given is as it was", { status, shownNow });
+    return JSON.stringify(status);
+  } finally { await shown.close(); }
+});
+
+/* A value split across fields says, beside each part with another after it, the short symbol the page draws
+ * between them (t-41720) — an @, a dash, a colon, a slash — whether the parts are numbered (no words of their own)
+ * or told by their group's caption. Words between them (a unit), a symbol the page does not draw, and fields that are
+ * not parts of one value say none. */
+const JOINTS = `<!doctype html><html lang="en"><meta charset="utf-8"><style>.off { display: none }</style><form>
+  <div class="row"><span>Score</span> <input id="sa"> <span class="sep">/</span> <input id="sb"></div>
+  <fieldset><legend>Window</legend><input id="w1" aria-label="From"> ~ <input id="w2" aria-label="To"> <input id="w3" aria-label="Zone"></fieldset>
+  <div class="row"><span>Span</span> <input id="u1" aria-label="Hours"> <span class="off">:</span> <input id="u2" aria-label="Minutes"></div>
+  <div class="row"><span>Size</span> <input id="d1" aria-label="Width"> by <input id="d2" aria-label="Height"></div>
+  <div class="row"><label for="x1">Left</label> <input id="x1"> <span>|</span> <label for="x2">Right</label> <input id="x2"></div>
+  <div class="row"><span>Code</span> <input id="c1" size="2">-<input id="c2" size="2">-<input id="c3" size="2"></div>
+</form>`;
+await test("a_part_of_a_split_value_says_the_short_symbol_the_page_draws_after_it_and_words_or_hidden_marks_are_none", async () => {
+  const joints = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await joints.setContent(JOINTS);
+    const read = await readFields(joints);
+    const joint = (handle) => read.fields.find((one) => one.handle === handle)?.joint;
+    const labels = read.fields.map((one) => [one.handle, one.label, one.joint]);
+    assert(joint("#sa") === "/" && joint("#sb") === undefined, "parts numbered by their caption say the symbol after the first and none after the last", labels);
+    assert(joint("#w1") === "~" && joint("#w2") === undefined && joint("#w3") === undefined,
+      "parts told by their group's caption say it too, and only where a symbol stands", labels);
+    assert(joint("#u1") === undefined && joint("#d1") === undefined, "a symbol the page does not draw, and a word between parts, are no symbol", labels);
+    assert(joint("#x1") === undefined && joint("#x2") === undefined, "fields a label of their own names are no parts, whatever stands between them", labels);
+    assert(joint("#c1") === "-" && joint("#c2") === "-" && joint("#c3") === undefined, "a symbol between parts with no space around it is as well said", labels);
+    return labels.filter(([, , one]) => one).map(([handle, , one]) => `${handle}:${one}`).join(" ");
+  } finally { await joints.close(); }
+});
+
+/* A field's own choices are no buttons (t-41720): the options of a group of radios the page draws with buttons
+ * are said once, as the field's options, and not again in the buttons line. A button that is not a choice stays. */
+await test("a_fields_own_choices_are_not_listed_again_as_buttons", async () => {
+  const own = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await own.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div id="slot" role="radiogroup" aria-label="Slot"><button type="button" role="radio" aria-checked="false">Morning</button><button type="button" role="radio" aria-checked="true">Evening</button></div>
+      <fieldset><legend>Seat</legend><label><input type="radio" name="seat" value="a"> Aisle</label><label><input type="radio" name="seat" value="w"> Window</label></fieldset>
+      <button type="button" id="next">Next</button></form><script>
+        for (const radio of document.querySelectorAll("[role=radio]")) radio.addEventListener("click", () => {
+          for (const other of radio.parentElement.children) other.setAttribute("aria-checked", String(other === radio));
+        });
+      </script>`);
+    const read = await readFields(own);
+    const slot = read.fields.find((one) => one.handle === "#slot");
+    assert(slot?.kind === "radio" && JSON.stringify(slot.options) === JSON.stringify(["Morning", "Evening"]),
+      "the group is one field that offers its options", read.fields);
+    assert(JSON.stringify(read.actions.map((one) => one.label)) === JSON.stringify(["Next"]),
+      "its options are not listed again as buttons, and the button that is none stays", read.actions);
+    const filled = await fillBundle(own, { "#slot": "Morning" }, read.fingerprint);
+    assert(JSON.stringify(filled.actions.map((one) => one.label)) === JSON.stringify(["Next"]), "a fill's buttons are the same", filled.actions);
+    return JSON.stringify(read.actions.map((one) => one.label));
+  } finally { await own.close(); }
+});
+
+/* A button that stands beside one field is said to be that field's, by its place (t-41720): in the nearest box that
+ * holds a field, with no other element between them. A button in a box with two fields, one set apart from its
+ * field by other words, and one the form holds directly are no field's. */
+const BESIDE = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div class="row"><label for="v">Voucher</label><div class="line"><input id="v"><button type="button" id="apply">Apply</button></div><p>One per order</p></div>
+  <div class="row"><input id="a1" aria-label="First"> <input id="a2" aria-label="Second"> <button type="button" id="swap">Swap</button></div>
+  <div class="row"><label for="far">Far</label><input id="far"><p>A note about it</p><button type="button" id="apart">Check</button></div>
+  <div class="step"><button type="button" id="less" aria-label="Less">-</button><input id="qty" aria-label="Count"><button type="button" id="more" aria-label="More">+</button></div>
+  <ul><li><label><input type="checkbox" id="agree"> Terms</label> <button type="button" id="view">View</button></li></ul>
+  <button type="button" id="next">Next</button></form>`;
+await test("a_button_beside_one_field_is_said_to_be_that_fields_by_its_place_and_no_other_is", async () => {
+  const beside = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await beside.setContent(BESIDE);
+    const read = await readFields(beside);
+    const of = (id) => read.actions.find((one) => one.handle === "#" + id)?.beside;
+    const sides = read.actions.map((one) => [one.handle, one.beside]);
+    assert(of("apply") === "#v", "the button in the box of one field and next to it is that field's", sides);
+    assert(of("less") === "#qty" && of("more") === "#qty", "both buttons around one field are its", sides);
+    assert(of("view") === "#agree", "a button next to a checkbox is the checkbox's", sides);
+    assert(of("swap") === undefined, "a button in a box with two fields is no one's", sides);
+    assert(of("apart") === undefined, "a button set apart from its field by other words is no one's", sides);
+    assert(of("next") === undefined, "a button the form holds directly is no field's", sides);
+    const filled = await fillBundle(beside, { "#v": "X1" }, read.fingerprint);
+    assert(filled.actions.find((one) => one.handle === "#apply")?.beside === "#v", "a fill's buttons say it too", filled.actions);
+    return sides.filter(([, one]) => one).map(([handle, one]) => `${handle}→${one}`).join(" ");
+  } finally { await beside.close(); }
+});
+
 await browser.close();
 
 let failed = 0;

@@ -1147,3 +1147,197 @@ fn an_explicit_submit_button_is_marked_in_the_buttons_of_a_read_a_fill_and_a_pre
         "{pressed}"
     );
 }
+
+/// A field the page gave no words says it has none: a name left empty would read as a field that has a
+/// name, and the words the page gave only as a placeholder stay an example beside it. A group of chips
+/// with no title keeps its own words for the same thing.
+#[test]
+fn a_field_the_page_gave_no_name_says_it_has_none_and_keeps_its_placeholder_as_an_example() {
+    let read: FormRead = serde_json::from_value(json!({
+        "fields": [
+            { "handle": "#unit", "kind": "text", "label": "", "value": "", "placeholder": "Floor or flat" },
+            { "handle": "#bare", "kind": "text", "label": "", "value": "" },
+            { "handle": "#row", "kind": "chips", "label": "", "value": [], "options": ["Yes", "No"] },
+            { "handle": "#street", "kind": "text", "label": "Street", "value": "", "placeholder": "Lane" },
+        ],
+    }))
+    .expect("a read of fields with no name");
+    let lines = fields_lines(&read);
+    for expected in [
+        "  #unit · text · (이름 없음) = \"\" 예: Floor or flat",
+        "  #bare · text · (이름 없음) = \"\"\n",
+        "  #row · chips · (제목 없음) = [] ▸ Yes | No",
+        "  #street · text · Street = \"\" 예: Lane",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [
+            { "handle": "#bare", "status": "set", "kind": "text", "label": "", "now": "x" },
+            { "handle": "#row", "status": "set", "kind": "chips", "label": "", "now": ["Yes"] },
+        ],
+    }))
+    .expect("a pass over fields with no name");
+    let bundle = vec![entry("#bare", text("x")), entry("#row", text("Yes"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    let filled = fill_lines(&ledger.report());
+    for expected in [
+        "  ✓ #bare (이름 없음) = \"x\"",
+        "  ✓ #row (제목 없음) = [\"Yes\"]",
+    ] {
+        assert!(
+            filled.contains(expected),
+            "missing {expected:?} in\n{filled}"
+        );
+    }
+}
+
+/// A fill that reads back a text unlike the one it was given, where the page's own state does not say
+/// whether it is the same value (a list button that shows its choice shortened, a date drawn in another
+/// shape), says it cannot see: neither "다른 값" nor "들어감". It is not tried again — the page will draw
+/// it the same way — and it is not counted as taken.
+#[test]
+fn a_fill_that_cannot_see_whether_the_text_read_back_is_the_same_value_says_so_and_does_not_try_again()
+ {
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [
+            { "handle": "#when", "status": "unseen", "kind": "text", "label": "Date", "now": "12/02" },
+            { "handle": "#rate", "status": "unseen", "kind": "combobox", "label": "Rating", "now": "5★",
+              "options": ["Five stars", "Four stars"] },
+            { "handle": "#size", "status": "mismatch", "kind": "text", "label": "Size", "now": "M" },
+            { "handle": "#name", "status": "set", "kind": "text", "label": "Name", "now": "Kim" },
+        ],
+    }))
+    .expect("a pass with a text it cannot tell");
+    let bundle = vec![
+        entry("#when", text("2026-12-02")),
+        entry("#rate", text("Five stars")),
+        entry("#size", text("S")),
+        entry("#name", text("Kim")),
+    ];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    assert_eq!(
+        ledger
+            .next()
+            .iter()
+            .map(|one| one.handle.as_str())
+            .collect::<Vec<_>>(),
+        ["#size"],
+        "only the text that reads back as another value is tried again"
+    );
+    let report = ledger.report();
+    assert_eq!(
+        (report.took(), report.all_took()),
+        (1, false),
+        "a text the door cannot tell is not counted as taken"
+    );
+    let lines = fill_lines(&report);
+    for expected in [
+        "채움 1/4칸 (1회)",
+        "  ? #when Date: 다시 읽은 글과 글자는 다르나 같은지는 볼 수 없음 (\"12/02\")",
+        "  ? #rate Rating: 다시 읽은 글과 글자는 다르나 같은지는 볼 수 없음 (\"5★\")",
+        "  ✗ #size Size: 다시 읽으니 다른 값 (\"M\")",
+        "  ✓ #name Name = \"Kim\"",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+    assert!(
+        !lines.contains("? #when Date: 다시 읽으니 다른 값") && !lines.contains("들어감"),
+        "neither a difference nor a sameness is claimed:\n{lines}"
+    );
+}
+
+/// A value split across fields says, beside each part that has one after it, the short symbol the page
+/// draws between the parts (an @, a dash, a colon, a slash), so whoever writes the value does not guess
+/// where to cut it. A part with nothing after it says nothing, and the JSON carries the symbol as `joint`.
+#[test]
+fn a_part_of_a_split_value_says_the_symbol_the_page_draws_after_it() {
+    let read: FormRead = serde_json::from_value(json!({
+        "fields": [
+            { "handle": "#sa", "kind": "text", "label": "Score (1/3)", "value": "", "joint": "/" },
+            { "handle": "#sb", "kind": "text", "label": "Score (2/3)", "value": "", "joint": "~" },
+            { "handle": "#sc", "kind": "text", "label": "Score (3/3)", "value": "" },
+        ],
+    }))
+    .expect("a read of split parts");
+    let lines = fields_lines(&read);
+    for expected in [
+        "  #sa · text · Score (1/3) = \"\" (다음 칸 앞에 「/」)",
+        "  #sb · text · Score (2/3) = \"\" (다음 칸 앞에 「~」)",
+        "  #sc · text · Score (3/3) = \"\"\n",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+    let json = fields_json(&read);
+    assert_eq!(json["fields"][0]["joint"], json!("/"));
+    assert_eq!(json["fields"][1]["joint"], json!("~"));
+    assert!(
+        json["fields"][2].get("joint").is_none(),
+        "a part with nothing after it says none in the JSON: {json}"
+    );
+}
+
+/// A button that stands beside one field says whose it is — in the buttons of a read, of a fill's end and
+/// of a press's — so a reader ties "Apply" to the code it applies without a list of words; a button that
+/// stands beside no one field says nothing, in the words and in the JSON.
+#[test]
+fn a_button_beside_a_field_is_said_to_be_that_fields_in_the_buttons_of_a_read_a_fill_and_a_press() {
+    let actions = json!([
+        { "handle": "#apply", "label": "Apply", "beside": "#code" },
+        { "handle": "#less", "label": "Less", "disabled": true, "beside": "#qty" },
+        { "handle": "#go", "label": "Go", "submit": true },
+    ]);
+    let read: FormRead = serde_json::from_value(json!({
+        "fields": [{ "handle": "#code", "kind": "text", "label": "Code", "value": "" }],
+        "actions": actions,
+    }))
+    .expect("a read with buttons beside fields");
+    let lines = fields_lines(&read);
+    assert!(
+        lines.contains(
+            "버튼: #apply 「Apply」 (#code 칸 곁) · #less 「Less」 (꺼짐) (#qty 칸 곁) · #go 「Go」 (제출 단추)"
+        ),
+        "{lines}"
+    );
+    let json = fields_json(&read);
+    assert_eq!(json["actions"][0]["beside"], json!("#code"));
+    assert!(
+        json["actions"][2].get("beside").is_none(),
+        "a button beside no one field says none in the JSON: {json}"
+    );
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [{ "handle": "#code", "status": "set", "label": "Code", "now": "x" }],
+        "fingerprint": "5:aaa",
+        "actions": actions,
+    }))
+    .expect("a pass with buttons");
+    let bundle = vec![entry("#code", text("x"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    let filled = fill_lines(&ledger.report());
+    assert!(
+        filled.contains(
+            "버튼: #apply 「Apply」 켜짐 (#code 칸 곁), #less 「Less」 꺼짐 (#qty 칸 곁), #go 「Go」 켜짐 (제출 단추)"
+        ),
+        "{filled}"
+    );
+    let after = PressAfter::against(
+        PressRead {
+            fingerprint: "5:aaa".into(),
+            actions: read.actions.clone(),
+            ..PressRead::default()
+        },
+        Some("5:aaa"),
+        &[],
+        false,
+    );
+    let pressed = press_lines(&after);
+    assert!(
+        pressed.contains(
+            "버튼: #apply 「Apply」 켜짐 (#code 칸 곁), #less 「Less」 꺼짐 (#qty 칸 곁), #go 「Go」 켜짐 (제출 단추)"
+        ),
+        "{pressed}"
+    );
+}
