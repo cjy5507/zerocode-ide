@@ -284,6 +284,24 @@ const zcPopupName = (el) => {
   }
   return "";
 };
+// ---- a text field with a list the page makes after the text ----
+// A text field the page keeps a list of suggestions beside — a box with the role of a list, in the box the field stands in, with no button of its own that opens a list there — takes the
+// item chosen from that list, not the text typed. What the fill picked from it is remembered on the field, out of the page's sight.
+const zcPickedKey = Symbol.for("zerocode.picked");
+const zcSuggestions = (el) => {
+  if (zcFormTag(el) !== "input" || zcFormRole(el) === "combobox" || !["text", "search"].includes(String(el.type || "text").toLowerCase())) return null;
+  const box = el.parentElement;
+  if (!box) return null;
+  const kids = [...box.children].filter((child) => child !== el);
+  const list = kids.find((child) => child.matches("[role=listbox]"));
+  return list && !kids.some((child) => zcListButton(child)) ? list : null;
+};
+// The items such a list shows now, each with its words and the lines of its own: the words of each element it is made of.
+const zcSuggestionItems = (list, request) => [...list.querySelectorAll(request.options.join(","))]
+  .filter((option) => zcDrawn(option) && option.getAttribute("aria-disabled") !== "true")
+  .map((option) => ({ el: option, words: zcChoiceWords(option, request.wordCap), value: String(option.getAttribute("data-value") || ""),
+    selected: option.getAttribute("aria-selected") === "true",
+    parts: [...option.children].map((child) => zcWords(child.innerText || child.textContent || "", request.wordCap)).filter(Boolean) }));
 // The kind of field an element is, or null for one that is no field: HTML's
 // input type, a select, a textarea, an editable region, ARIA's widgets. A
 // radio input stands for its group; an input inside a combobox, for the
@@ -537,6 +555,7 @@ const zcRead = (el, request) => {
   } else if (!record.masked) {
     record.value = ["input", "textarea"].includes(zcFormTag(el)) ? String(el.value) : String(el.innerText || "");
   }
+  record.suggests = zcSuggestions(el);
   record.caption = zcCaption(el, request);
   // A checkbox the page draws itself is named by its own words (ARIA's
   // name from content), before any caption around it.
@@ -1247,6 +1266,9 @@ const zcPick = (choices, asked) => {
   const exact = choices.find((c) => zcFold(c.words) === want || (c.value && zcFold(c.value) === want));
   if (exact) return exact;
   const one = (list) => (list.length === 1 ? list[0] : null);
+  // An item made of lines (a main line and a note) whose one line is the asked words: the items that only hold them are not it.
+  const line = one(choices.filter((c) => (c.parts || []).some((part) => zcFold(part) === want)));
+  if (line) return line;
   // A number asked of choices that dress their numbers in words ("4" of
   // "4일", "04" of "4 Dec") is the one choice holding just those numbers.
   const numbers = zcDressed(want) ? zcGroups(want).join(",") : "";
@@ -1596,6 +1618,7 @@ const zcHolds = (record, asked) => {
     return wanted.missing === undefined && wanted.picks.length === record.choices.filter((choice) => choice.selected).length
       && wanted.picks.every((choice) => choice.selected);
   }
+  if (record.suggests) return record.el[zcPickedKey] === zcFold(asked) && zcFold(record.value) !== "";
   const date = record.kind !== "select" && zcDateOf(asked);
   if (date && record.value !== "") {
     if (zcShowsDate(record.value, date)) return true;
@@ -1715,6 +1738,22 @@ const zcWrite = (record, asked) => {
     }
     return "";
   }
+  if (record.suggests) {
+    if (record.maxLength !== null && String(asked).length > record.maxLength) return "too_long";
+    if (zcFold(el.value) !== zcFold(asked)) {
+      el[zcPickedKey] = "";
+      zcWriteText(el, String(asked), false);
+    }
+    const items = zcSuggestionItems(record.suggests, request);
+    const pick = zcPick(items, asked);
+    if (!pick) {
+      record.offered = items.map((choice) => choice.words);
+      return "no_option";
+    }
+    zcPress(pick.el);
+    el[zcPickedKey] = zcFold(asked);
+    return "";
+  }
   const date = zcDateOf(asked);
   if (record.readOnly) {
     if (!date) return "read_only";
@@ -1765,7 +1804,9 @@ const zcFillWrite = (entries, expect, watch) => {
   if (expect && read.print !== expect) return { stale: true, fingerprint: read.print, wrote: false, held: [] };
   const before = zcTextBefore(read, request);
   if (watch) zcSettleWatch(watch);
-  const held = entries.map((entry) => {
+  // A field whose list the page makes after the text is written after the others of the bundle: a field written after it would take the focus, and a page shuts the list when it goes.
+  const lateSet = new Set(entries.filter((entry) => { const target = zcTarget(entry.handle); return Boolean(target.record && target.record.suggests); }));
+  const writeOne = (entry) => {
     const out = { handle: entry.handle, status: "unread", kind: "", label: "", now: "", error: "", options: [] };
     // The value goes back to the window only with an entry the read-back will
     // check it against — never with a secret or any entry that was refused.
@@ -1791,7 +1832,10 @@ const zcFillWrite = (entries, expect, watch) => {
       return { ...base, status: refused, wrote: false };
     }
     return { ...base, value: entry.value, status: null, wrote: true };
-  });
+  };
+  const heldOf = new Map();
+  for (const entry of [...entries].sort((a, b) => Number(lateSet.has(a)) - Number(lateSet.has(b)))) heldOf.set(entry, writeOne(entry));
+  const held = entries.map((entry) => heldOf.get(entry));
   return { stale: false, fingerprint: "", wrote: held.some((one) => one.wrote), epoch: zcEpoch(),
     at: performance.now(), held, before };
 };

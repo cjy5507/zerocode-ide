@@ -244,6 +244,11 @@ calendar (`달력 「…」 넘김 … · 날짜 칸 …`), finish that one fiel
 `click` the field to open it, `click` a pager until the heading shows the
 month, `click` the day; then `fields` to check it.
 
+A text field the page keeps a list of suggestions beside (a box with the role of a list that is shut until something is typed) takes the item chosen from that list, not the
+text typed: `fill` types the text and keeps the field — a page shuts the list when the field loses the focus —, waits in its passes for the list the page makes after the text,
+and presses the item whose line is the words asked, so `fill` answers `✓` with what the page took. The fields after it in the bundle are written first. When no item is the words
+asked it says `그 값의 선택지가 없음` with the items the list showed (`▸ …`), the text still typed: `click` one of them, or `fill` its words.
+
 A read-only field is picked, not written, when the page fills it from a window a button opens (an address chosen from a search): the line says which button
 opens it, `(직접 못 씀 — 열 단추: <handle> 「…」)` in a read and `(열 단추: <handle> 「…」)` in the answer of a `fill`. `click` that button, then `fields` again —
 a window with a frame of its own may need a moment to load, so read again when nothing new is there. `fill` the words the value holds into the window's
