@@ -285,11 +285,12 @@ const zcFieldKind = (el, request) => {
   return zcChipsOf(el, request).length ? "chips" : null;
 };
 // ---- a row of toggles, read as one field ----
-// A button that says whether it is pressed (`aria-pressed`) and stands in a box with another is one of a
-// row of chips: the row is one field — named by its title, its options the buttons' words, its value the
-// buttons pressed. A button that opens a list is a field of its own kind and is no chip.
-const zcIsChip = (el, request) => el.hasAttribute("aria-pressed") && el.matches(request.actions.join(","))
-  && !zcListButton(el) && zcFormRole(el) !== "combobox" && zcDrawn(el);
+// A button that says whether it is pressed (`aria-pressed` true or false) and stands in a box with another is
+// one of a row of chips: the row is one field — named by its title, its options the buttons' words, its value
+// the buttons pressed. A button that opens a list is a field of its own kind, and one that is half pressed
+// (`mixed`) says a state this read has no word for: neither is a chip.
+const zcIsChip = (el, request) => ["true", "false"].includes(String(el.getAttribute("aria-pressed")).trim().toLowerCase())
+  && el.matches(request.actions.join(",")) && !zcListButton(el) && zcFormRole(el) !== "combobox" && zcDrawn(el);
 // Whether a box holds a field of HTML's or ARIA's own kinds: not a button, not a bare focusable box.
 const zcHoldsField = (box, request) => {
   const kinds = request.controls.filter((selector) => selector !== "[tabindex]").join(",");
