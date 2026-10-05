@@ -815,7 +815,9 @@ class Road {
       const read = zerocode.fields();
       const fields = read.fields.filter((field) => !typed.includes(field.handle));
       const { bundle, unplaced, ambiguous } = plan(fields, facts);
-      const filled = Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: fields
+      // A card that does not tell which of two fields a fact is for stops the step before anything is written or pressed.
+      const stop = ambiguous.length > 0;
+      const filled = !stop && Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: fields
         .filter((field) => field.required && (field.value === "" || field.value === false)) };
       const left = filled.left.filter((field) => !typed.includes(field.handle));
       // Which fields the fill named for typing — the handles only: the page's answer
@@ -827,12 +829,12 @@ class Road {
       const actions = filled.actions && filled.actions.length ? filled.actions : read.actions;
       const live = actions.filter((action) => !action.disabled);
       const inFrame = (action) => action.handle.includes(${JSON.stringify(FORM_REQUEST.frameSeparator)});
-      const confirm = turn.confirm && clean && !moved
+      const confirm = turn.confirm && clean && !moved && !stop
         ? live.find((action) => !inFrame(action) && INTENT.confirm.includes(fold(action.label))) : null;
       if (confirm) document.querySelector(confirm.handle).click();
       const hold = turn.owed && live.some((action) => intentOf(action.label, "code"));
       const next = advancing(actions, read.actions);
-      const pressNext = clean && !moved && !confirm && !hold && !!next && !next.disabled && !next.submit && !inFrame(next);
+      const pressNext = clean && !moved && !stop && !confirm && !hold && !!next && !next.disabled && !next.submit && !inFrame(next);
       if (pressNext) document.querySelector(next.handle).click();
       const hand = filled.results.filter((result) => result.status === "no_option")
         .map((result) => ({ ...result, asked: bundle[result.handle] }));
