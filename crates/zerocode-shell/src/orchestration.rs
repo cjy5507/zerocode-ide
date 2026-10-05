@@ -1619,6 +1619,42 @@ pub(crate) fn post_observation_once(to: &str, body: &str, receipt: &str, now_ms:
     }
 }
 
+/// Every checkout a worker of this ledger sat in, once each: the folders the beat looks up in the
+/// landing cache to hold the ledger's record against git's (t-34501 stage 2).
+pub(crate) fn watched_checkouts() -> Vec<String> {
+    let Some(held) = runtime() else {
+        return Vec::new();
+    };
+    let Ok(image) = held.actor.view() else {
+        return Vec::new();
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return Vec::new();
+    };
+    drop(image);
+    let paths: std::collections::BTreeSet<&str> = ledger
+        .runs()
+        .iter()
+        .flat_map(|run| run.workers.iter())
+        .filter_map(|worker| worker.checkout.as_deref())
+        .collect();
+    paths.into_iter().map(str::to_string).collect()
+}
+
+/// Hand the ledger what the window saw of git, so it can write what is late. A pass that finds
+/// nothing writes nothing; one that wrote rings the bell for whoever sleeps on the mail.
+pub(crate) fn watch_landings(
+    witnesses: Vec<zerocode_core::orchestration::landing_watch::LandingWitness>,
+    now_ms: i64,
+) {
+    let Some(held) = runtime() else {
+        return;
+    };
+    if let Ok((told, _)) = held.actor.landing_watch(witnesses, now_ms) {
+        rang(told);
+    }
+}
+
 pub(crate) fn settled_checkouts() -> Vec<SettledCheckout> {
     let Some(held) = runtime() else {
         return Vec::new();
@@ -1942,6 +1978,11 @@ pub(crate) struct LedgerAgent {
     /// claim: verified, merged, deployed — or nothing yet. Never inferred
     /// from a provider's turn ending or from `reported` above.
     pub(crate) review: zerocode_core::orchestration::ReviewFacts,
+    /// Since when the work waits where the sidebar's word says it waits (t-22105, t-34501): a
+    /// report nobody has verified is counted from the report, a verification nobody merged from the
+    /// verification. `None` where the ledger holds no time to count from — a verification an older
+    /// window wrote has none — and the sidebar then says no time at all, never zero.
+    pub(crate) review_since_ms: Option<i64>,
     /// Why the task is closed — folded into a task, handed to a run, or
     /// outdated — when it is. A closed task is neither reported nor failed:
     /// the board says 닫힘 and its reason, and the card leaves the open lanes.
@@ -2442,6 +2483,20 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
             let dispatch_started_ms = dispatch.map_or(0, |one| one.started_ms);
             let retry_of = dispatch.and_then(|one| one.retry_of.clone());
             let review = carried.map(|held| run.review_of(held)).unwrap_or_default();
+            let review_since_ms = match (reported && !failed, dispatch) {
+                (true, Some(attempt)) if !review.verified => run
+                    .messages()
+                    .iter()
+                    .filter(|one| {
+                        one.kind == zerocode_core::orchestration::MessageKind::WorkerDone
+                            && one.dispatch.as_deref() == Some(attempt.id.as_str())
+                    })
+                    .map(|one| one.created_ms)
+                    .max()
+                    .or(attempt.ended_ms),
+                (true, Some(_)) if !review.merged && !review.nothing_to_land => review.verified_ms,
+                _ => None,
+            };
             listed.push(LedgerAgent {
                 run: run.id.clone(),
                 worker: worker.id.clone(),
@@ -2478,6 +2533,7 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 dispatch_started_ms,
                 retry_of,
                 review,
+                review_since_ms,
                 closed: carried.and_then(|held| held.closed.clone()),
                 term,
                 // Finished work is dated by when its attempt ended — the

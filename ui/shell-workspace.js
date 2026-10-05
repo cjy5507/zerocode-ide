@@ -4261,7 +4261,18 @@ function dressWorktreeDot(row, state) {
   // guard there has to be, because this runs once a frame per row for as long
   // as anything is working, and an attribute written to the value it already
   // holds still costs the accessibility tree a look.
-  const label = worktreeStateLabel(said, phase);
+  let label = worktreeStateLabel(said, phase);
+  // How long it has waited (t-22105): a report nobody verified is counted from the report, a
+  // verification nobody merged from the verification. Nothing at all where the ledger kept no time or
+  // it is under a minute — never a zero.
+  const waiting = indicator === "review" || phase === "vouched"
+    ? worktreeWaitingSince(row.dataset.worktreePath) : null;
+  const waited = waiting && Date.now() - waiting.since >= 60_000 ? agoWord(waiting.since, Date.now()) : "";
+  if (waited !== "") {
+    label += ` — ${waiting.kind === "review"
+      ? t("worktree.waitingReview", "{{time}}째 검증을 기다리는 중", { time: waited })
+      : t("worktree.unmergedFor", "검증은 됐지만 병합 기록 없이 {{time}}째", { time: waited })}`;
+  }
   // The two states a person has to tell apart at a glance — waiting for a
   // coordinator, and done — also wear their word on the row, beside the name:
   // a shape alone is a thing to learn, and a colour alone is not a label. The
@@ -4270,7 +4281,9 @@ function dressWorktreeDot(row, state) {
   // sentence, for a word the narrowest sidebar had to cut.
   const chip = row.querySelector(".wt-phase");
   if (chip) {
-    const word = WORKTREE_WORDED.has(indicator) ? workspaceStateWord(indicator) : "";
+    const lane = WORKTREE_WORDED.has(indicator) ? workspaceStateWord(indicator) : "";
+    const word = lane !== "" && waited !== "" && waiting.kind === "review"
+      ? t("worktree.waitingChip", "{{word}} {{time}}", { word: lane, time: waited }) : lane;
     writeTextContent(chip, word);
     if (word === "") {
       chip.removeAttribute("data-phase");

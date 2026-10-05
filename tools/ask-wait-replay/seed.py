@@ -87,7 +87,10 @@ LEDGER_ITSELF = "ledger"
 # worker went on under another Claude login with the same worker id, dispatch
 # and conversation (t-7538) — news again, not an ending; and a `gate_judged`
 # row is the window's receipt that its gate judged one attempt past a line and
-# what it did about it (t-26583) — news as well, not an ending.
+# what it did about it (t-26583) — news as well, not an ending; and a
+# `landing_stalled` or `branch_drifted` row is the ledger telling the coordinator
+# what landed late and a live worker that its branch ran away (t-34501 stage 2)
+# — news too.
 LEDGERS_OWN_KINDS = (
     "went_quiet",
     "deadlocked",
@@ -99,6 +102,8 @@ LEDGERS_OWN_KINDS = (
     "model_deviated",
     "account_switched",
     "gate_judged",
+    "landing_stalled",
+    "branch_drifted",
 )
 
 # `STALL_JUDGED_REASON` there.

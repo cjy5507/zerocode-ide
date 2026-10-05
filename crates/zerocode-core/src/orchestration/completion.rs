@@ -51,10 +51,22 @@ impl Run {
                 .filter(|_| same_review)
                 .or_else(|| (wrote_result && now_ms >= earliest).then_some(now_ms))
         });
-        if let Some(ResultAuthor::Coordinator { completed_ms, .. }) =
-            &mut self.tasks[task_index].result_author
+        // When the review first said `verified` for this attempt and source (t-34501): kept by a
+        // rewrite of the same review, stamped by the write that first says it, gone with the word.
+        let verified = review.verified.then(|| {
+            previous_review
+                .verified_ms
+                .filter(|_| same_review)
+                .or_else(|| wrote_result.then_some(now_ms))
+        });
+        if let Some(ResultAuthor::Coordinator {
+            completed_ms,
+            verified_ms,
+            ..
+        }) = &mut self.tasks[task_index].result_author
         {
             *completed_ms = completed;
+            *verified_ms = verified.flatten();
         }
     }
 }

@@ -368,6 +368,7 @@ pub(crate) fn set_harness_settings(
         },
     )?;
     crate::orchestration::gate_book::set_settings(harness.gate);
+    crate::landing_watch_sweep::set_enabled(harness.alerts.landing);
     crate::launch_budget_door::set_limits(harness.launches);
     Ok(snapshot)
 }

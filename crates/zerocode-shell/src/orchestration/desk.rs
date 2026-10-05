@@ -90,6 +90,8 @@ pub(crate) struct DeskMail {
     pub(crate) reason: Option<String>,
     /// When the provider said a quota wall resets.
     pub(crate) resets_at_ms: Option<i64>,
+    /// Since when a late landing has stood (`landing_stalled`, t-34501).
+    pub(crate) since_ms: Option<i64>,
     /// A classifier decline's category (`cyber`, `reasoning_extraction`,
     /// …), on a decline and on a switch of model it caused (t-6747).
     pub(crate) category: Option<String>,
@@ -132,7 +134,7 @@ struct NewsTable {
     /// them, and the one night that filled the desk with 46 letters was a
     /// seven-hour gap. What is older is history, and `inbox` reads history.
     stands_ms: i64,
-    kinds: [(MessageKind, NewsLine); 6],
+    kinds: [(MessageKind, NewsLine); 7],
     /// Where a folded notice can still be acknowledged from the desk: in the
     /// batch its coordinator holds open, handed over and not acknowledged
     /// (t-9548) — the folded count then offers that whole batch, as a line
@@ -166,6 +168,7 @@ const DESK_NEWS: NewsTable = NewsTable {
         (MessageKind::Deadlocked, NewsLine::PerNotice),
         (MessageKind::ClassifierDeclined, NewsLine::PerNotice),
         (MessageKind::ModelDeviated, NewsLine::PerNotice),
+        (MessageKind::LandingStalled, NewsLine::PerNotice),
     ],
     folded_ack: "delivered",
 };
@@ -360,6 +363,7 @@ fn mail_row(run: &Run, message: &Message, inbox: &InboxState) -> DeskMail {
         },
         reason: said["reason"].as_str().map(str::to_string),
         resets_at_ms: said["resetsAtMs"].as_i64(),
+        since_ms: said["sinceMs"].as_i64(),
         category: said["category"].as_str().map(str::to_string),
         routed: said["routed"].as_bool(),
         rung: said["rung"].as_str().map(str::to_string),
@@ -431,7 +435,7 @@ pub(crate) struct StageCount {
 /// completed with nothing a coordinator could ever review
 /// (`ReviewFacts::unreviewable`), closed (over without being done or failed —
 /// `TaskStatus::Closed`).
-pub(crate) const STAGES: [&str; 10] = [
+pub(crate) const STAGES: [&str; 11] = [
     "pending",
     "ready",
     "dispatched",
@@ -441,6 +445,7 @@ pub(crate) const STAGES: [&str; 10] = [
     "blocked",
     "failed",
     "unreviewable",
+    "nothing_to_land",
     "closed",
 ];
 
@@ -451,7 +456,8 @@ const OPEN_STAGES: [&str; 5] = ["pending", "ready", "dispatched", "gate", "block
 /// The stages a finished task stands in — reported, merged, and completed with
 /// nothing a coordinator could review — the ones whose rows carry the task's
 /// cost (t-9470).
-pub(super) const FINISHED_STAGES: [&str; 3] = ["reported", "unreviewable", "merged"];
+pub(super) const FINISHED_STAGES: [&str; 4] =
+    ["reported", "unreviewable", "nothing_to_land", "merged"];
 
 /// The most rows one stage carries across the wire. Its count carries the
 /// rest: a run of two hundred finished tasks is two hundred numbers nobody
@@ -484,6 +490,12 @@ fn stage_of(run: &Run, task: &Task) -> &'static str {
                 "merged"
             } else if review.unreviewable {
                 "unreviewable"
+            } else if review.nothing_to_land {
+                // The coordinator wrote that there is no code to land (t-34501): a review of research, a
+                // design, a check.
+                // Never 병합: nothing went into main. A worker's claim is not here — only the
+                // coordinator's fact is `nothing_to_land`.
+                "nothing_to_land"
             } else {
                 "reported"
             }
@@ -1732,6 +1744,7 @@ mod tests {
                         attempt: None,
                         source: None,
                         completed_ms: None,
+                        verified_ms: None,
                     },
                     10,
                 )
@@ -1820,6 +1833,7 @@ mod tests {
                 ("blocked", 2),
                 ("failed", 1),
                 ("unreviewable", 0),
+                ("nothing_to_land", 0),
                 ("closed", 1),
             ]
         );
@@ -1848,6 +1862,7 @@ mod tests {
             attempt: None,
             source: None,
             completed_ms: None,
+            verified_ms: None,
         };
         // Five tasks the coordinator wrote down as done by hand after attempts
         // that ended handing nothing in.
@@ -1978,6 +1993,104 @@ mod tests {
             "an unreviewable row lost its cost"
         );
         assert!(finished(held, held.task(&by_hand[0]).expect("a task")));
+    }
+
+    /// A task the coordinator verified and marked as having no code to land — research, a review, a
+    /// design — is neither 검증 대기 nor 병합: it stands in a stage of its own, which does not say the
+    /// work is in main (t-34501). Only the coordinator's word makes it so; a worker's claim leaves the
+    /// task where a report puts it, and a task that did land stays merged.
+    #[test]
+    fn verified_work_with_nothing_to_land_stands_in_its_own_stage_and_only_on_the_coordinators_word()
+     {
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("research", 1);
+        let coordinator = |source: &str| ResultAuthor::Coordinator {
+            seat: "team-r/%1".to_string(),
+            generation: Some(1),
+            attempt: None,
+            source: Some(source.to_string()),
+            completed_ms: None,
+            verified_ms: None,
+        };
+        let mut handed_in = |title: &str, at: i64, body: &str| {
+            let task = ledger
+                .create_task(&run, "x".into(), title.into(), vec![], None, at)
+                .expect("a task");
+            let started = ledger
+                .start_worker(&run, "claude", ("team-r", "%9"), Some(&task), at + 1)
+                .expect("a worker");
+            ledger
+                .post(
+                    &run,
+                    Draft {
+                        from: worker_address(&started.worker),
+                        to: ledger.run(&run).expect("the run").address(),
+                        kind: MessageKind::WorkerDone,
+                        body: Text::from(body.to_string()),
+                        subject: Text::default(),
+                        priority: Priority::Normal,
+                        payload: Text::default(),
+                        thread: None,
+                        task: Some(task.clone()),
+                        dispatch: started.dispatch.clone(),
+                    },
+                    at + 2,
+                )
+                .expect("the report");
+            (task, started.dispatch.expect("an attempt"))
+        };
+        let (research, research_attempt) =
+            handed_in("research", 10, r#"{"ok":true,"head":"abc1234"}"#);
+        let (claimed, _) = handed_in(
+            "claimed",
+            20,
+            r#"{"ok":true,"head":"def5678","nothingToLand":true}"#,
+        );
+        let (landed, landed_attempt) = handed_in("landed", 30, r#"{"ok":true,"head":"0123456"}"#);
+        let write = |ledger: &mut Ledger, task: &str, attempt: &str, source: &str, keys: &str| {
+            let mut author = coordinator(source);
+            if let ResultAuthor::Coordinator { attempt: held, .. } = &mut author {
+                *held = Some(attempt.to_string());
+            }
+            ledger
+                .update_task(&run, task, None, Some(keys.to_string()), author, 100)
+                .expect("a review");
+        };
+        write(
+            &mut ledger,
+            &research,
+            &research_attempt,
+            "abc1234",
+            r#"{"verified":true,"nothingToLand":true}"#,
+        );
+        write(
+            &mut ledger,
+            &landed,
+            &landed_attempt,
+            "0123456",
+            r#"{"verified":true,"mergeHead":"0123456","nothingToLand":true}"#,
+        );
+        let desk = desk_snapshot(&ledger, |_| false, no_cost);
+        let stage = |id: &str| {
+            desk.tasks
+                .iter()
+                .find(|one| one.id == id)
+                .map(|one| one.stage)
+                .unwrap_or_else(|| panic!("{id} missing"))
+        };
+        assert_eq!(stage(&research), "nothing_to_land");
+        assert_eq!(
+            stage(&claimed),
+            "reported",
+            "a worker's claim is not the coordinator's fact"
+        );
+        assert_eq!(
+            stage(&landed),
+            "merged",
+            "work that landed is merged whatever else was written"
+        );
+        let held = ledger.run(&run).expect("the run");
+        assert!(finished(held, held.task(&research).expect("a task")));
     }
 
     /// A stage carries at most [`STAGE_ROWS`] rows and its count carries the

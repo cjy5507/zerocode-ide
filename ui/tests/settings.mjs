@@ -352,7 +352,8 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "claude_autoswitch_mode": "ask",
   "harness": {
     "gate": { "mode": "notify", "task_usd": null, "day_usd": null },
-    "launches": { "concurrent": 4, "per_hour": 300, "per_day": 2000 }
+    "launches": { "concurrent": 4, "per_hour": 300, "per_day": 2000 },
+    "alerts": { "landing": true }
   },
   "worktree_prefs": { "branch_prefix": "git-username" },
   "notifications": { "enabled": true, "agent_attention": true, "agent_completion": true },
@@ -1649,6 +1650,8 @@ class StatefulBackend {
             day_usd: budget(asked.gate?.day_usd),
           },
           launches,
+          // The Rust contract: only a plain `false` turns the ledger's alerts off.
+          alerts: { landing: asked.alerts?.landing !== false },
         };
         keys = ["harness"];
         break;
@@ -8529,6 +8532,8 @@ await test("the harness card shows what a person set and what the window counted
       concurrent: field("harness-concurrent")?.value ?? null,
       perHour: field("harness-per-hour")?.value ?? null,
       perDay: field("harness-per-day")?.value ?? null,
+      alerts: field("harness-alerts-landing")?.value ?? null,
+      alertsHint: field("harness-alerts-landing-hint")?.textContent ?? null,
       status: field("harness-status")?.textContent ?? null,
     };
   });
@@ -8542,12 +8547,19 @@ await test("the harness card shows what a person set and what the window counted
   const shown = await card();
   assert(
     shown.mode === "notify" && shown.task === "" && shown.day === "" &&
-      shown.concurrent === "4" && shown.perHour === "300" && shown.perDay === "2000",
+      shown.concurrent === "4" && shown.perHour === "300" && shown.perDay === "2000" &&
+      shown.alerts === "on",
     "the card does not show the document's gate and ceilings", shown,
   );
   assert(
     /^지금 1개 실행 중 · 최근 한 시간 3번 · 오늘 12번 · 쉬는 중: [Cc]laude 1[01]분 · 오늘 워커 비용 약 \$4\.20$/.test(shown.status ?? ""),
     "the card does not say what the launch ledger and the day's spend hold", shown.status,
+  );
+  // What is sent, to whom, and that nothing is merged or deleted, is said beside the switch (t-34501).
+  assert(
+    /코디네이터/.test(shown.alertsHint ?? "") && /워커/.test(shown.alertsHint ?? "") &&
+      /병합|삭제/.test(shown.alertsHint ?? ""),
+    "the switch does not say what it sends and to whom", shown.alertsHint,
   );
   assert(await pageB.$("#harness-task-usd"), "the card has no task budget field");
   const budget = await gestureAndWait(pageB, "B", "set_harness_settings", () =>
@@ -8558,6 +8570,7 @@ await test("the harness card shows what a person set and what the window counted
       harness: {
         gate: { mode: "notify", task_usd: 12.5, day_usd: null },
         launches: { concurrent: 4, per_hour: 300, per_day: 2000 },
+        alerts: { landing: true },
       },
     },
     "a budget was sent as something other than the whole record with the number typed",
@@ -8570,6 +8583,7 @@ await test("the harness card shows what a person set and what the window counted
     {
       gate: { mode: "notify", task_usd: 12.5, day_usd: null },
       launches: { concurrent: 4, per_hour: 300, per_day: null },
+      alerts: { landing: true },
     },
     "a blank ceiling is no ceiling, and the budget saved before it stays",
   );
@@ -8587,6 +8601,16 @@ await test("the harness card shows what a person set and what the window counted
     { concurrent: 4, per_hour: 300, per_day: null },
     "a refused ceiling reached the stored document",
   );
+  // The ledger's alerts are on until a person says otherwise, and turning them off is one saved word.
+  const silenced = await gestureAndWait(pageB, "B", "set_harness_settings", () =>
+    pageB.selectOption("#harness-alerts-landing", "off"));
+  assertEqual(
+    silenced.args.harness.alerts,
+    { landing: false },
+    "the switch did not send the alerts as off",
+  );
+  await waitForSettingsIdle(pageB);
+  assertEqual(backend.settings.harness.alerts, { landing: false }, "the stored document does not hold the alerts off");
   await backend.externalPatch({ locale: previousLocale }, ["locale"]);
   await renderSettled(pageB);
 });

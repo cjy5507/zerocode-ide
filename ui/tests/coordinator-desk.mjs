@@ -151,7 +151,8 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
   /* The run's tasks by the pipeline's own stage words, sixty by default. */
   const stages = [
     ["pending", 6], ["ready", 20], ["dispatched", 5], ["reported", 6],
-    ["merged", 18], ["gate", 2], ["blocked", 2], ["failed", 1], ["unreviewable", 0], ["closed", 0],
+    ["merged", 18], ["gate", 2], ["blocked", 2], ["failed", 1], ["unreviewable", 0], ["nothing_to_land", 0],
+    ["closed", 0],
   ];
   const total = stages.reduce((sum, [, count]) => sum + count, 0);
   /* What a finished task cost, as `task_cost` hands it over (t-9470): one in
@@ -725,8 +726,9 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last",
       pipeline.shown && pipeline.head === "과업 흐름 · 60" &&
       pipeline.chips.map((chip) => chip.split(":").slice(0, 2).join(":")).join() ===
-        "pending:6,ready:20,dispatched:5,reported:6,merged:18,gate:2,blocked:2,failed:1,unreviewable:0,closed:0" &&
-      pipeline.words.join() === "선행 대기,준비,진행,보고됨,병합,게이트,막힘,실패,완료 — 검토 기록 없음,닫힘", JSON.stringify(pipeline));
+        "pending:6,ready:20,dispatched:5,reported:6,merged:18,gate:2,blocked:2,failed:1,unreviewable:0,nothing_to_land:0,closed:0" &&
+      pipeline.words.join() === "선행 대기,준비,진행,보고됨,병합,게이트,막힘,실패,완료 — 검토 기록 없음,완료 — 착지할 것 없음,닫힘",
+      JSON.stringify(pipeline));
     ok("a stuck stage with tasks wears its signal and opens first, naming the gate and its question",
       pipeline.chips.includes("gate:2:true:is-wait") && pipeline.chips.includes("failed:1:false:is-halt") &&
       pipeline.chips.includes("blocked:2:false:is-wait") && pipeline.chips.includes("ready:20:false:is-flow") &&

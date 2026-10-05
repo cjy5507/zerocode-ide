@@ -4988,6 +4988,8 @@ function harnessFromFields() {
   return {
     gate: { mode: el("harness-gate-mode").value, ...read(HARNESS_GATE_FIELDS) },
     launches: read(HARNESS_LAUNCH_FIELDS),
+    // Only an explicit 「끔」 turns the ledger's alerts off (t-34501).
+    alerts: { landing: el("harness-alerts-landing").value !== "off" },
   };
 }
 
@@ -4999,8 +5001,9 @@ function setHarnessField(id, value) {
 
 function paintHarnessSettings() {
   if (!harnessSettings) return;
-  const { gate, launches } = harnessSettings;
+  const { gate, launches, alerts } = harnessSettings;
   setHarnessField("harness-gate-mode", gate.mode);
+  setHarnessField("harness-alerts-landing", alerts?.landing === false ? "off" : "on");
   for (const [key, id] of Object.entries(HARNESS_GATE_FIELDS)) setHarnessField(id, gate[key]);
   for (const [key, id] of Object.entries(HARNESS_LAUNCH_FIELDS)) setHarnessField(id, launches[key]);
 }
@@ -5048,6 +5051,7 @@ function commitHarnessSettings() {
 
 for (const id of [
   "harness-gate-mode",
+  "harness-alerts-landing",
   ...Object.values(HARNESS_GATE_FIELDS),
   ...Object.values(HARNESS_LAUNCH_FIELDS),
 ]) {

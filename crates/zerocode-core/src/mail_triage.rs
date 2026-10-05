@@ -230,7 +230,9 @@ pub const fn kind_rule(kind: MessageKind) -> Triage {
         | MessageKind::Dispatch
         | MessageKind::Handover
         | MessageKind::ModelDeviated
-        | MessageKind::GateJudged => Triage::CanWait,
+        | MessageKind::GateJudged
+        | MessageKind::LandingStalled
+        | MessageKind::BranchDrifted => Triage::CanWait,
         MessageKind::WentQuiet
         | MessageKind::Heartbeat
         | MessageKind::Resumed

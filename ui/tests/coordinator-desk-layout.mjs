@@ -10,7 +10,9 @@
  * 으로 이어 붙고, 블록의 박스는 제 내용만큼이며, 어느 블록이 숨어도 빈 행·앞뒤
  * 틈이 남지 않고, 목록 티어(보드 699px 이하)에서는 DOM 차례로 한 열이 된다. 답
  * 초안·포커스·캐럿·노드는 펼치기·워커 늘기·조용한 폴·티어 넘기·접기를 지나도
- * 그대로다. 픽스처와 수는 `coordinator-desk.mjs`의 것이고, 그 파일은 t-7388이
+ * 그대로다. 목록은 데스크의 다음 줄이다 (t-34501): 필터 알약은 데스크의 발에서, 첫
+ * 장은 알약에서 같은 디자인 간격으로 이어 붙고, 데스크가 서지 않은 보드에서는 장의
+ * 간격(`--space-5`) 그대로다. 픽스처와 수는 `coordinator-desk.mjs`의 것이고, 그 파일은 t-7388이
  * 만지므로 이 스위트는 따로 선다.
  *
  *   node ui/tests/coordinator-desk-layout.mjs
@@ -91,8 +93,12 @@ async function readDesk(page) {
     const surface = view.querySelector(".task-board-surface");
     const filters = view.querySelector(".task-board-filters");
     const first = view.querySelector(".task-board-row");
+    const intro = view.querySelector(".task-board-intro");
+    const pill = filters && !filters.hidden ? filters.querySelector(".task-board-filter") : null;
+    const sections = view.querySelector(".task-board-sections");
     return {
       gap: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--space-4")),
+      chapterGap: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--space-5")),
       boardWidth: view.clientWidth,
       deskHidden: desk.hidden,
       desk: { ...rect(desk), scrollWidth: desk.scrollWidth, clientWidth: desk.clientWidth },
@@ -102,6 +108,9 @@ async function readDesk(page) {
       order: [...desk.children].map((node) => node.dataset.deskBlock),
       heads: { pipeline: head("pipeline"), release: head("release") },
       filters: filters && !filters.hidden ? rect(filters) : null,
+      intro: intro ? rect(intro) : null,
+      pill: pill ? rect(pill) : null,
+      sections: sections ? rect(sections) : null,
       firstRow: first ? rect(first) : null,
       mailRows: desk.querySelectorAll(".board-desk-letter").length,
       workerRows: desk.querySelectorAll(".board-desk-worker").length,
@@ -442,7 +451,21 @@ export async function testCoordinatorDeskLayout(browser, origin, ok) {
       ok("the_default_desk_splits_the_flow_and_the_lane (on a 1998×1069 board the first task row is on the first screen, as t-6588 promised)",
         facts.firstRow !== null && facts.firstRow.top < facts.surface.bottom && facts.firstRow.top >= facts.desk.bottom,
         JSON.stringify({ firstRow: facts.firstRow, desk: facts.desk, surface: facts.surface }));
+      /* The list is the desk's next line (t-34501): the flow's eleven stage chips stand
+       * in three lines in a half-width column, and the line they added came out of the
+       * first screen's room for the list. The pills and the first chapter follow the
+       * desk at its own gap; a board with no desk keeps the chapters' gap. */
+      ok("the_list_stands_one_gap_under_the_desk (the filter pills one design gap under the desk's foot, the first chapter one gap under the pills)",
+        facts.pill !== null && facts.sections !== null &&
+        near(facts.pill.top - facts.desk.bottom, facts.gap) && near(facts.sections.top - facts.pill.bottom, facts.gap),
+        JSON.stringify({ gap: facts.gap, deskFoot: facts.desk.bottom, pill: facts.pill, sectionsTop: facts.sections?.top }));
       await page.screenshot({ path: `${SHOTS}/default-1998x1069.png` });
+      await showOnly(page, ALL);
+      const bare = await readDesk(page);
+      ok("the_list_stands_one_gap_under_the_desk (with no desk standing, the pills and the first chapter keep the chapters' gap under the board's head)",
+        bare.deskHidden && bare.intro !== null && bare.pill !== null && bare.sections !== null &&
+        near(bare.pill.top - bare.intro.bottom, bare.chapterGap) && near(bare.sections.top - bare.pill.bottom, bare.chapterGap),
+        JSON.stringify({ chapterGap: bare.chapterGap, deskHidden: bare.deskHidden, introFoot: bare.intro?.bottom, pill: bare.pill, sectionsTop: bare.sections?.top }));
       ok("the default desk raises no browser errors", faults.length === 0, faults.join("\n"));
     } finally {
       await page.close();

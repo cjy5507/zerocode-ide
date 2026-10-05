@@ -32590,6 +32590,16 @@ details.task-board-section > summary {
   display: none;
 }
 
+/* 목록은 데스크의 다음 줄이다 (t-34501): 데스크가 서 있으면 필터 알약은 데스크의
+ * 발에서, 첫 장은 알약에서 블록 사이와 같은 간격으로 이어 붙는다. 과업 흐름의 단계
+ * 칩은 0건이어도 모두 서고, 반쪽 열에서는 열한 개가 두 줄에 들지 못해 세 줄이다 —
+ * 그 한 줄이 첫 화면에서 목록의 자리를 밀어냈고(「첫 과업 행은 첫 화면」, t-6588),
+ * 그 자리를 장의 간격(`--space-5`) 둘에서 돌려받는다. 데스크가 서지 않은 보드는
+ * 그대로다 (`coordinator-desk-layout.mjs`가 두 경우를 다 잰다). */
+.task-board-desk:not([hidden]) + .task-board-filters {
+  padding-block: var(--space-4);
+}
+
 .board-desk-block {
   min-width: 0;
   margin-top: var(--space-4);
