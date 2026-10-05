@@ -42,6 +42,8 @@ const GROUP_POLL_MS = 100;
 /* How long its last words get to arrive once the agent is gone: its stdout can
  * still hold the result line when its process has ended. */
 const STREAM_GRACE_MS = 2_000;
+/* How much of the agent's last message a run keeps. */
+const FINAL_WORDS_CAP = 400;
 
 function args(argv) {
   const parsed = {};
@@ -113,13 +115,14 @@ const group = (signal) => { try { process.kill(-child.pid, signal); } catch { /*
 const groupAlive = () => { try { process.kill(-child.pid, 0); return true; } catch { return false; } };
 const raw = [];
 const errors = [];
-const seen = { calls: new Set(), toolUses: new Set(), tools: {}, commands: {}, denied: [], init: null, final: null };
+const seen = { calls: new Set(), toolUses: new Set(), tools: {}, commands: {}, retries: [], init: null, final: null };
 let pending = "";
 let stopped = null;
 /* What one line of the agent's stream says: its init, an assistant turn and the
  * tools it used, the result. */
 function take(event) {
   if (event.type === "system" && event.subtype === "init") seen.init = event;
+  if (event.type === "system" && event.subtype === "api_retry") seen.retries.push(event.error ?? event.error_status ?? "retry");
   if (event.type === "result") seen.final = event;
   if (event.type !== "assistant") return;
   seen.calls.add(event.message?.id ?? `event-${seen.calls.size}`);
@@ -184,6 +187,9 @@ const row = {
   wallMs, personMs: desk.tally.personMs, stopped, exit, leftover,
   modelCalls: seen.calls.size, turns: seen.final?.num_turns ?? null, apiMs: seen.final?.duration_api_ms ?? null,
   tokens, costUsd: seen.final?.total_cost_usd ?? null, finalSubtype: seen.final?.subtype ?? null,
+  // A run the CLI ended with an error (a refused login, an API error): what it said, and how often it tried again.
+  isError: seen.final?.is_error ?? null, apiErrorStatus: seen.final?.api_error_status ?? null,
+  finalWords: String(seen.final?.result ?? "").slice(0, FINAL_WORDS_CAP), apiRetries: seen.retries.length, apiRetryErrors: [...new Set(seen.retries)],
   tools: seen.tools, commands: seen.commands, permissionDenials: denials.length,
   door: { requests: desk.tally.requests, verbs: desk.tally.verbs, refusals: desk.tally.refusals, unwired: desk.tally.unwired,
     handoffs: desk.tally.handoffs, faults: desk.tally.faults, blocked: desk.tally.blocked, dialogs: desk.tally.dialogs, popups: desk.tally.popups },
@@ -200,5 +206,6 @@ await desk.close();
 console.log(`INIT ${JSON.stringify(row.init)}`);
 console.log(`TOKENS model=${row.model} scene=${row.scene} input=${tokens.input} output=${tokens.output} cacheRead=${tokens.cacheRead} cacheWrite=${tokens.cacheWrite} costUsd=${row.costUsd}`);
 console.log(`ORACLE ${row.oracle.pass ? "pass" : "fail"} scene=${row.scene} model=${row.model} wrong=${wrong.join(",") || "-"} took=${result !== null} wallMs=${wallMs} modelCalls=${row.modelCalls} doorCalls=${row.door.requests} stopped=${stopped ?? "-"} leftover=${leftover}`);
+if (row.isError) console.log(`AGENT-ERROR status=${row.apiErrorStatus} retries=${row.apiRetries} said=${JSON.stringify(row.finalWords)}`);
 console.log(`RESULT ${JSON.stringify(row)}`);
 process.exit(0);

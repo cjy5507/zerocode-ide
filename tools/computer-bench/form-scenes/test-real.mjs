@@ -59,6 +59,13 @@ const finishes = await standIn("finishes", [
   turn("m2", "zerocode-browser fill browser-1 --value-stdin"),
   "zerocode-browser click browser-1 '#book' > /dev/null", turn("m3", "zerocode-browser click browser-1 #book"), RESULT,
 ].join("\n"));
+/* An agent the API refuses: two retries, then an error result and a failing exit. */
+const refused = await standIn("refused", ["cat > /dev/null", INIT,
+  event('{"type":"system","subtype":"api_retry","attempt":1,"error_status":401,"error":"authentication_failed"}'),
+  event('{"type":"system","subtype":"api_retry","attempt":2,"error_status":401,"error":"authentication_failed"}'),
+  event('{"type":"assistant","message":{"id":"e1","content":[{"type":"text","text":"Failed to authenticate"}]}}'),
+  event('{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate: OAuth token revoked.","api_error_status":401,"num_turns":1,"duration_ms":10,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}'),
+  "exit 1"].join("\n"));
 /* An agent that never ends, with a child of its own that must not outlive it. */
 const spins = await standIn("spins", ["cat > /dev/null", INIT, "sleep 654321 &", "while :; do sleep 1; done"].join("\n"));
 /* An agent that takes turn after turn. */
@@ -116,6 +123,15 @@ await test("a stream that breaks a character across two writes is read whole, an
   assert(done.code === 0 && done.row.commands["echo 한"] === 1, "the syllable came through whole", done.row.commands);
   assert(done.row.tokens.input === 100 && done.row.finalSubtype === "success", "and the result line that follows is read", done.row.tokens);
   return JSON.stringify(done.row.commands);
+});
+
+await test("a run the API refuses says why: the error, its status, the tries — and no tokens", async () => {
+  const done = run(refused);
+  const row = done.row;
+  assert(done.code === 0 && row.isError === true && row.apiErrorStatus === 401 && row.apiRetries === 2, "the refusal is read from the stream", [done.code, row.isError, row.apiErrorStatus, row.apiRetries]);
+  assert(row.finalWords.includes("OAuth token revoked") && row.apiRetryErrors.join() === "authentication_failed", "with its own words", [row.finalWords, row.apiRetryErrors]);
+  assert(row.tokens.input === 0 && row.exit.code === 1 && done.stdout.includes("AGENT-ERROR status=401 retries=2"), "and the log says it plainly", done.stdout.slice(-400));
+  return row.finalWords;
 });
 
 await test("a run that never ends is stopped at its time cap and leaves nothing running", async () => {
