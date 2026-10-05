@@ -1341,3 +1341,31 @@ fn a_button_beside_a_field_is_said_to_be_that_fields_in_the_buttons_of_a_read_a_
         "{pressed}"
     );
 }
+
+/// A secret field is never written by `fill`; the answer sends the agent to `type` — but `type` names a field by a selector of the page's own document,
+/// and the handle of a field inside a frame is no such selector. Said for such a field, the way to `type` is false: the answer says the field is out of
+/// reach of both, and a secret in the page itself still names `type`.
+#[test]
+fn a_secret_field_inside_a_frame_is_said_to_be_out_of_reach_of_both_fill_and_type() {
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [
+            { "handle": "#card >> #cvc", "status": "secret", "kind": "password", "label": "CVC" },
+            { "handle": "#pw", "status": "secret", "kind": "password", "label": "Password" },
+        ],
+    }))
+    .expect("a pass with two secrets");
+    let bundle = vec![entry("#card >> #cvc", text("742")), entry("#pw", text("x"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    let lines = fill_lines(&ledger.report());
+    assert!(
+        lines.contains("  ✗ #card >> #cvc CVC: 비밀 칸이 틀 안에 있음 — fill은 쓰지 않고 type은 틀 안의 칸을 손잡이로 가리키지 못함"),
+        "a secret in a frame says both roads are shut:\n{lines}"
+    );
+    assert!(
+        lines.contains(
+            "  ✗ #pw Password: 비밀 칸은 fill이 쓰지 않음 — type <label> <손잡이> --value-stdin"
+        ),
+        "a secret in the page itself still names type:\n{lines}"
+    );
+}

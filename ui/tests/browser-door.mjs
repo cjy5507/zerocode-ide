@@ -2526,6 +2526,38 @@ await test("a_button_beside_one_field_is_said_to_be_that_fields_by_its_place_and
   } finally { await beside.close(); }
 });
 
+/* A list drawn once and never marked again (t-41720): choosing an item closes it and the button shows the item shortened, while the mark that says which
+ * item is chosen stays where the page last drew it. That mark is not the page's word about the choice now: another item marked chosen is no proof the
+ * value is another, so the door says it cannot see — it does not say "다른 값". */
+const STALE = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div><span id="pl">Pick plan</span> <button type="button" id="plan" aria-haspopup="listbox" aria-controls="plan-list" aria-expanded="false" aria-labelledby="pl">Starter</button>
+    <ul id="plan-list" role="listbox" hidden><li role="option" aria-selected="true" data-short="Starter">Starter plan</li><li role="option" aria-selected="false" data-short="Pro">Pro plan</li></ul></div>
+</form><script>
+  const button = document.getElementById("plan"), list = document.getElementById("plan-list");
+  button.addEventListener("click", () => {
+    const open = button.getAttribute("aria-expanded") === "true";
+    button.setAttribute("aria-expanded", String(!open));
+    list.hidden = open;
+  });
+  for (const item of list.children) item.addEventListener("click", () => {
+    list.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+    button.textContent = item.dataset.short;
+  });
+</script>`;
+await test("a_list_whose_chosen_mark_is_not_kept_up_to_date_is_no_proof_of_another_value_so_the_door_says_it_cannot_see", async () => {
+  const stale = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await stale.setContent(STALE);
+    const read = await readFields(stale);
+    const filled = await fillBundle(stale, { "#plan": "Pro plan" }, read.fingerprint);
+    const one = filled.results[0];
+    assert(one?.status === "unseen" && one.now === "Pro",
+      "the item asked is not marked chosen and another still is — the mark is the page's old word, so the door can neither say the value is another nor the same", filled.results);
+    return `${one.status} ${JSON.stringify(one.now)}`;
+  } finally { await stale.close(); }
+});
+
 await browser.close();
 
 let failed = 0;
