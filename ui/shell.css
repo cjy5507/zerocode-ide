@@ -2170,6 +2170,13 @@ svg.wt-agent-dot {
   color: var(--signal-halt-ink);
 }
 
+/* A merge that would clash (t-34501): the halt ink 확인 필요 uses, and heavier, so it is the one
+ * chip in the list that reads as a stop. Far behind without a clash keeps the wait ink above. */
+.wt-landing[data-landing="conflict"] {
+  color: var(--signal-halt-ink);
+  font-weight: 600;
+}
+
 .wt-landing[data-landing="none"],
 .wt-landing[data-landing="pending"] {
   color: color-mix(in srgb, var(--nav-plane-ink) 70%, transparent);
@@ -44685,7 +44692,8 @@ button.jev-token:hover {
   color: var(--signal-ready-ink);
 }
 
-:is(.artifact-card-landing, .artifact-detail-landing)[data-landing="check"] {
+:is(.artifact-card-landing, .artifact-detail-landing)[data-landing="check"],
+:is(.artifact-card-landing, .artifact-detail-landing)[data-landing="conflict"] {
   border-color: color-mix(in srgb, var(--signal-halt-ink) 45%, transparent);
   color: var(--signal-halt-ink);
 }
