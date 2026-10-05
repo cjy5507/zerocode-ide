@@ -964,16 +964,10 @@ fn name_of(field: &FormField) -> &str {
     name_in(&field.kind, &field.label)
 }
 
-/// What the answer of a fill says of a field that did not take: the status's words — except a secret field inside a frame, for which the way
-/// the words name (`type`, which finds a field by a selector of the page's own document) does not exist: the handle of a framed field is no
-/// such selector, so the answer says the field is out of reach of both.
+/// What the answer of a fill says of a field that did not take: the status's words. A secret field inside a frame of the page's own origin says what one in the page says — `type` takes its
+/// handle (`#frame >> #field`) as it takes any other.
 fn status_words(result: &FillResult) -> String {
-    if result.status == FillStatus::Secret && result.handle.contains(BROWSER_FORM_FRAME_SEPARATOR) {
-        "비밀 칸이 틀 안에 있음 — fill은 쓰지 않고 type은 틀 안의 칸을 손잡이로 가리키지 못함"
-            .to_string()
-    } else {
-        result.status.said().to_string()
-    }
+    result.status.said().to_string()
 }
 
 /// What a button's line says of the field it stands beside, and of the dialog it opens.

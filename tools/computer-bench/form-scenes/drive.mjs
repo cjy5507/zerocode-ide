@@ -534,13 +534,14 @@ class Road {
   /* A secret field: `fill` never writes one and says so (`secret`), naming
    * the road — `type <label> <handle> --value-stdin`, the setter. A model
    * takes it as the answer says: one `type` a field, with the fact's value,
-   * once. A field inside a frame has no selector to type by. */
-  async typeSecret(handle, value) {
-    if (typeof value !== "string" || this.typed.has(handle) || handle.includes(FORM_REQUEST.frameSeparator)) return false;
+   * once. A field inside a frame of the page's own origin is typed by its handle too (t-41720), held to the form the driver read last. */
+  async typeSecret(handle, value, expect = this.form) {
+    if (typeof value !== "string" || this.typed.has(handle)) return false;
     this.typed.add(handle);
     this.note({ verb: "type", handle });
     this.trail.push({ type: handle });
-    const typed = await this.call("type", () => this.run(typeScript(handle, value, "setter")));
+    const held = handle.includes(FORM_REQUEST.frameSeparator) ? expect : null;
+    const typed = await this.call("type", () => this.run(typeScript(handle, value, "setter", held)));
     if (!typed.ok) throw new Error(`type refused: ${JSON.stringify(typed)}`);
     return true;
   }
@@ -1019,7 +1020,7 @@ class Road {
       }
       // The value is the card's: the driver reads it where it stands, not from the page's answer.
       const owedTyping = plan(this.untyped(said.fields), this.facts).bundle;
-      for (const handle of said.viaType || []) await this.typeSecret(handle, owedTyping[handle]);
+      for (const handle of said.viaType || []) await this.typeSecret(handle, owedTyping[handle], said.print);
       if (await this.scrollRoad({ fields: said.fields, scrollBoxes: said.scrollBoxes })) continue;
       if (said.moved) continue;
       if (said.pressedNext || said.confirmed) {

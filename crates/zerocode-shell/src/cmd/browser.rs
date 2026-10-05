@@ -508,6 +508,8 @@ pub(crate) fn page_failure(reply: &serde_json::Value) -> String {
         }
         "value_changed" => "그 칸의 값이 marks 때와 다릅니다 — 다시 `zerocode-browser marks`",
         "text_too_long" => "입력 글이 요소의 최대 길이를 넘습니다",
+        "frame_sealed" => "그 틀은 다른 출처이거나 sandbox여서 칸을 가리킬 수 없습니다",
+        "form_stale" => "양식이 읽은 뒤 바뀌었습니다 — 다시 fields로 읽으세요",
         "async_value" => "비동기 값은 이 eval 왕복에서 돌려줄 수 없습니다",
         "evaluation_failed" => "페이지 식을 평가하지 못했습니다",
         "serialization_failed" => "페이지 식의 값을 직렬화할 수 없습니다",
@@ -3794,15 +3796,31 @@ pub(crate) async fn automate_type(
         return Err("한 번에 입력할 글은 100000자를 넘을 수 없습니다".to_string());
     }
     let pane = browser_pane_of(app, state, label)?;
-    let script = automation_script(
-        &serde_json::json!({
-            "selector": selector,
-            "text": text,
-            "road": road.word(),
-            "blockRoots": block_roots(),
-        }),
-        TYPE_BODY,
-    );
+    let mut request = serde_json::json!({
+        "selector": selector,
+        "text": text,
+        "road": road.word(),
+        "blockRoots": block_roots(),
+        "frameSeparator": zerocode_core::browser_form::BROWSER_FORM_FRAME_SEPARATOR,
+    });
+    // A field inside a frame is typed into the form its agent read: when the pane's agent has read one, the page proves it is still that form before anything is written.
+    let script = match (
+        selector.contains(zerocode_core::browser_form::BROWSER_FORM_FRAME_SEPARATOR),
+        form::known_form(label),
+    ) {
+        (true, Some(known)) => {
+            let mut held = form::form_request();
+            if let (Some(held), Some(asked)) = (held.as_object_mut(), request.as_object()) {
+                held.extend(asked.clone());
+            }
+            held["expect"] = serde_json::Value::String(known);
+            form::form_script(&held, TYPE_BODY)
+        }
+        _ => {
+            request["expect"] = serde_json::Value::Null;
+            automation_script(&request, TYPE_BODY)
+        }
+    };
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
     typed_report(page_value(reply)?, road)
 }
@@ -3816,14 +3834,52 @@ pub(crate) async fn automate_type(
 /// value. The keys road is WebKit's editing command, else the synthetic
 /// events controlled forms listen to.
 pub(crate) const TYPE_BODY: &str = r#"
-const selected = zcSelect(request.selector);
-if (selected.code) return zcFail(selected.code);
-const element = selected.element;
-if (!zcVisible(element)) return zcFail("element_not_visible");
+// A handle with the frame separator names a field inside a frame of the page's own origin: the part before the separator is the frame, the part after it the field inside. A frame of
+// another origin or a sandboxed one is refused by name, and the field is typed with the frame's own constructors. Held to `expect` — the fingerprint of the form its agent read — when given.
+const separator = request.frameSeparator;
+const framed = Boolean(separator) && String(request.selector).includes(separator);
+let doc = document;
+let win = window;
+let element;
+if (framed) {
+  const visibleIn = (view, one) => {
+    if (!one.isConnected || one.hidden) return false;
+    const style = view.getComputedStyle(one);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    const rect = one.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const parts = String(request.selector).split(separator);
+  for (const part of parts.slice(0, -1)) {
+    let frames;
+    try { frames = [...doc.querySelectorAll(part)]; } catch (_) { return zcFail("invalid_selector"); }
+    const frame = frames.find((one) => /^(iframe|frame)$/i.test(one.tagName));
+    if (!frame) return zcFail("selector_not_found");
+    if (!visibleIn(win, frame)) return zcFail("element_not_visible");
+    const sandbox = frame.getAttribute("sandbox");
+    if (sandbox !== null && !sandbox.split(/\s+/).includes("allow-same-origin")) return zcFail("frame_sealed");
+    let inner = null;
+    try { inner = frame.contentDocument; } catch (_) {}
+    if (!inner || !inner.defaultView) return zcFail("frame_sealed");
+    doc = inner;
+    win = inner.defaultView;
+  }
+  let matches;
+  try { matches = [...doc.querySelectorAll(parts[parts.length - 1])]; } catch (_) { return zcFail("invalid_selector"); }
+  if (!matches.length) return zcFail("selector_not_found");
+  element = matches.find((one) => visibleIn(win, one)) || matches[0];
+  if (!visibleIn(win, element)) return zcFail("element_not_visible");
+  if (request.expect && zcFormFields(request).print !== request.expect) return zcFail("form_stale");
+} else {
+  const selected = zcSelect(request.selector);
+  if (selected.code) return zcFail(selected.code);
+  element = selected.element;
+  if (!zcVisible(element)) return zcFail("element_not_visible");
+}
 if (element.matches && element.matches(":disabled")) return zcFail("element_disabled");
 if (element.readOnly) return zcFail("element_read_only");
-const input = element instanceof HTMLInputElement;
-const area = element instanceof HTMLTextAreaElement;
+const input = element instanceof win.HTMLInputElement;
+const area = element instanceof win.HTMLTextAreaElement;
 const editable = element.isContentEditable;
 if (!input && !area && !editable) return zcFail("element_not_editable");
 if (input && String(element.type).toLowerCase() === "file") return zcFail("element_not_editable");
@@ -3838,50 +3894,50 @@ element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
 element.focus({ preventScroll: true });
 if (request.road === "setter") {
   if (input || area) {
-    const prototype = input ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+    const prototype = input ? win.HTMLInputElement.prototype : win.HTMLTextAreaElement.prototype;
     Object.getOwnPropertyDescriptor(prototype, "value").set.call(element, request.text);
   } else {
     element.textContent = request.text;
   }
-  element.dispatchEvent(typeof InputEvent === "function"
-    ? new InputEvent("input", { bubbles: true, composed: true, inputType: "insertReplacementText" })
-    : new Event("input", { bubbles: true }));
+  element.dispatchEvent(typeof win.InputEvent === "function"
+    ? new win.InputEvent("input", { bubbles: true, composed: true, inputType: "insertReplacementText" })
+    : new win.Event("input", { bubbles: true }));
   return zcEncode({ ok: true, value: { method: "value-setter", secureField,
     blockPath: zcStructuralChain(element, request.blockRoots), pageUrl: zcSafeUrl(location.href) } });
 }
 if (input || area) {
   try { element.select(); } catch (_) {}
 } else {
-  const range = document.createRange();
+  const range = doc.createRange();
   range.selectNodeContents(element);
-  const selection = getSelection();
+  const selection = win.getSelection();
   selection.removeAllRanges();
   selection.addRange(range);
 }
 let edited = false;
 let method = "editing-command";
 try {
-  edited = document.execCommand("insertText", false, request.text);
+  edited = doc.execCommand("insertText", false, request.text);
 } catch (_) {}
 const current = input || area ? element.value : element.textContent;
 if (!edited || current !== request.text) {
   method = "synthetic-events";
-  const before = typeof InputEvent === "function"
-    ? new InputEvent("beforeinput", { bubbles: true, cancelable: true, composed: true,
+  const before = typeof win.InputEvent === "function"
+    ? new win.InputEvent("beforeinput", { bubbles: true, cancelable: true, composed: true,
         data: request.text, inputType: "insertReplacementText" })
-    : new Event("beforeinput", { bubbles: true, cancelable: true });
+    : new win.Event("beforeinput", { bubbles: true, cancelable: true });
   if (!element.dispatchEvent(before)) return zcFail("input_cancelled");
   if (input || area) {
-    const prototype = input ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+    const prototype = input ? win.HTMLInputElement.prototype : win.HTMLTextAreaElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(prototype, "value").set;
     setter.call(element, request.text);
   } else {
     element.textContent = request.text;
   }
-  const inputEvent = typeof InputEvent === "function"
-    ? new InputEvent("input", { bubbles: true, composed: true,
+  const inputEvent = typeof win.InputEvent === "function"
+    ? new win.InputEvent("input", { bubbles: true, composed: true,
         data: request.text, inputType: "insertReplacementText" })
-    : new Event("input", { bubbles: true });
+    : new win.Event("input", { bubbles: true });
   element.dispatchEvent(inputEvent);
 }
 return zcEncode({ ok: true, value: { method, secureField,

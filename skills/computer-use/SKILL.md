@@ -162,8 +162,10 @@ A form is data, so fill it as data, not a picture per field:
    value (a list button that shows its choice shortened while the item asked is not marked chosen,
    a date drawn without its year): `같은지는 볼 수 없음` and the text it shows — neither a difference
    nor a sameness is said, so look at what is shown (or read `fields`) before you judge, and do
-   not write it again. A secret field inside a frame is `비밀 칸이 틀 안에 있음`: `fill` does not
-   write it and `type` cannot name a field inside a frame by its handle — the fields
+   not write it again. A secret field is never written by `fill` (`type <label> <handle> --value-stdin`):
+   a field inside a frame of the page's own origin is typed by its handle too, `#frame >> #field`; a frame of
+   another origin or a sandboxed one is refused by name (`frame_sealed`), and a type held to a form that changed
+   since the read is refused (`form_stale`) — the fields
    still empty and required, and a last line: `양식 그대로` or `양식 바뀜(fields로
    다시 읽기)`, then the buttons as they are now — `버튼: #next 「Next」 켜짐,
    #back 「Back」 꺼짐` (`꺼짐` is off; `숨김:` names one the page took away).
