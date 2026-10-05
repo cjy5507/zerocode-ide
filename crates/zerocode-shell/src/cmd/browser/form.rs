@@ -1544,12 +1544,11 @@ const zcYearless = (shown, date) => {
   return false;
 };
 // Whether the page's own state says the asked item is the chosen one: true when the item asked is marked chosen
-// (`aria-selected`), false when another is, undefined when no item says (or none reads as the words asked).
+// (`aria-selected`); undefined otherwise. A mark on another item is no proof the value is another — a page may keep the
+// marks of a list where it last drew it (a list drawn each time it opens) — so only the mark on the item asked is taken.
 const zcChosen = (record, asked) => {
   const pick = zcPick(record.choices, asked);
-  if (!pick) return undefined;
-  if (pick.selected) return true;
-  return record.choices.some((choice) => choice.selected) ? false : undefined;
+  return pick && pick.selected ? true : undefined;
 };
 // What a box that shows its choice (a button that opens a list, a dropdown the page draws) shows is the page's
 // rendering of the choice, not the value: the words of another item shown whole say another is chosen; any other
@@ -1583,8 +1582,7 @@ const zcHolds = (record, asked) => {
     const now = zcFold(record.value);
     if (!open && !!now && (zcSame(asked, record.value) || now.startsWith(zcFold(asked)))) return true;
     if (open) return false;
-    const chosen = zcChosen(record, asked);
-    if (chosen !== undefined) return chosen;
+    if (zcChosen(record, asked) === true) return true;
     return zcListButton(record.el) ? zcRendered(record, zcPick(record.choices, asked), now) : false;
   }
   if (record.choices.length && record.kind !== "combobox") {
