@@ -122,14 +122,34 @@ A form is data, so fill it as data, not a picture per field:
    the title of the row, item or card each stands in (`<title>: <words>`),
    else numbered (`<words> #1`, `#2`, with `(같은 이름이라 번호만 붙임)`: the
    number is only an order). A group of radios is named by its title; the
-   sentence between the title and the group is its `— 안내:`. A required field
-   whose value the door never reads (a password) is counted `값을 읽지 않는
-   필수`, not as empty. A step with no field of its own (a review, a
-   confirmation) still lists its buttons.
+   sentence between the title and the group is its `— 안내:`. A row of buttons
+   that say whether they are pressed (`aria-pressed`: chips, a size to pick, the
+   options to tick) is one field of kind `chips` — named by the row's title
+   (`(제목 없음)` when the page gives it none: its options then say what it is),
+   its options the buttons' words, its value the list of the ones pressed
+   (`= ["Red"]`) — and its buttons are not listed again as buttons; a toggle
+   beside a field of its own (a "show" beside a password) stays a button. A part
+   the page names only by its own short words (an hour beside a minute, the boxes of
+   a code) takes the caption of the group or row it stands in:
+   `<caption> — <words>`. A required field whose value the door never reads (a
+   password) is counted `값을 읽지 않는 필수`, not as empty. The count line's
+   `필수 N` is what the page declares (`required`, `aria-required`); a page that
+   marks required only with a `*` in the words declares none, so the line says
+   `필수 표시 없음 — 이름에 *가 있는 칸 N, 그중 비어 있는 M` (and, beside some
+   that are declared, `이름에만 *가 있는 칸`) — the stars are the page's words,
+   not a declaration, and no other mark is read (a colour, a word such as
+   "(필수)" or "required" in the text): a field the line does not count may
+   still be wanted, so read the page's own words before you submit. In the buttons a button the page declares a submit
+   (`type="submit"`) carries `(제출 단추)`; one without it may still send the form.
+   A step with no field of its own (a review, a confirmation) still lists its
+   buttons.
 2. `fill <pane-label> --value-stdin` with one JSON object of handle → value
    for everything you know, in the page's order. Words for text and dates
    (`2026-11-03`), a choice's words for a select, radio or a dropdown the
-   page draws itself, `true`/`false` for a checkbox. The answer is a line
+   page draws itself, `true`/`false` for a checkbox, the list of the options'
+   words for a group of chips (`{"<handle>": ["Red", "Blue"]}` — only the
+   buttons whose state differs are pressed, the others are left as they are,
+   `[]` lets go of all; one text such as `"Red, Blue"` is read as that list). The answer is a line
    per field — `✓` with what it holds now, or `✗` and why — the fields
    still empty and required, and a last line: `양식 그대로` or `양식 바뀜(fields로
    다시 읽기)`, then the buttons as they are now — `버튼: #next 「Next」 켜짐,

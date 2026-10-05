@@ -231,6 +231,10 @@ pub struct FormAction {
     pub handle: String,
     pub label: String,
     pub disabled: bool,
+    /// The page declares it a submit button (`type="submit"`, a button or an input) — what a
+    /// button with no type, or `type="button"`, does not say.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub submit: bool,
 }
 
 /// One `fields` read.
@@ -275,12 +279,15 @@ pub struct FormUnknown {
     pub caption: String,
 }
 
-/// What a field holds, or is asked to: words, or a checkbox's state.
+/// What a field holds, or is asked to: words, a checkbox's state, or — for a group of
+/// chips, the buttons that say whether they are pressed — the list of the options' words
+/// (held: the buttons pressed, in the page's order; asked: the options wanted pressed).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FormValue {
     Flag(bool),
     Text(String),
+    List(Vec<String>),
 }
 
 impl Default for FormValue {
@@ -291,13 +298,30 @@ impl Default for FormValue {
 
 impl FormValue {
     fn is_empty(&self) -> bool {
-        matches!(self, Self::Text(text) if text.is_empty()) || *self == Self::Flag(false)
+        match self {
+            Self::Flag(flag) => !flag,
+            Self::Text(text) => text.is_empty(),
+            Self::List(items) => items.is_empty(),
+        }
     }
 
     fn said(&self) -> String {
         match self {
             Self::Flag(flag) => flag.to_string(),
             Self::Text(text) => format!("\"{text}\""),
+            Self::List(items) => {
+                let words: Vec<String> = items.iter().map(|item| format!("\"{item}\"")).collect();
+                format!("[{}]", words.join(", "))
+            }
+        }
+    }
+
+    /// How many characters the value is made of, a list's words together.
+    fn chars(&self) -> usize {
+        match self {
+            Self::Flag(_) => 0,
+            Self::Text(text) => text.chars().count(),
+            Self::List(items) => items.iter().map(|item| item.chars().count()).sum(),
         }
     }
 }
@@ -347,9 +371,22 @@ impl<'de> Deserialize<'de> for Bundle {
     }
 }
 
+/// The words of a list a bundle gives a group of chips: text, or a number written as its words.
+fn list_words(handle: &str, items: Vec<serde_json::Value>) -> Result<Vec<String>, String> {
+    items
+        .into_iter()
+        .map(|item| match item {
+            serde_json::Value::String(text) => Ok(text),
+            serde_json::Value::Number(number) => Ok(number.to_string()),
+            _ => Err(format!("`{handle}`의 목록은 글이나 수만 담습니다")),
+        })
+        .collect()
+}
+
 /// Read a `fill` bundle: handles in the order written, each once, at most
 /// [`BROWSER_FORM_FIELD_CAP`] of them; a value is words, a number (written
-/// as its words) or a checkbox's `true`/`false`.
+/// as its words), a checkbox's `true`/`false`, or a list of words — the options
+/// of a group of chips that are to be pressed.
 pub fn fill_entries(said: &str) -> Result<Vec<FillEntry>, String> {
     let Bundle(pairs) = serde_json::from_str(said).map_err(|_| {
         "fill 값은 JSON입니다 — {\"손잡이\": 값, …} 또는 [{\"handle\": …, \"value\": …}]"
@@ -377,10 +414,14 @@ pub fn fill_entries(said: &str) -> Result<Vec<FillEntry>, String> {
             serde_json::Value::String(text) => FormValue::Text(text),
             serde_json::Value::Bool(flag) => FormValue::Flag(flag),
             serde_json::Value::Number(number) => FormValue::Text(number.to_string()),
-            _ => return Err(format!("`{handle}`의 값은 글·수·true/false여야 합니다")),
+            serde_json::Value::Array(items) => FormValue::List(list_words(&handle, items)?),
+            _ => {
+                return Err(format!(
+                    "`{handle}`의 값은 글·수·true/false, 또는 글의 목록이어야 합니다"
+                ));
+            }
         };
-        if matches!(&value, FormValue::Text(text) if text.chars().count() > BROWSER_FILL_VALUE_CAP)
-        {
+        if value.chars() > BROWSER_FILL_VALUE_CAP {
             return Err(format!(
                 "`{handle}`의 값이 {BROWSER_FILL_VALUE_CAP}자를 넘습니다"
             ));
@@ -875,9 +916,34 @@ fn choices(options: &[String], more: usize) -> String {
     format!(" ▸ {}{more}", options.join(" | "))
 }
 
+/// The words a field is named by in a line — a group of chips the page gave no title says it has
+/// none: a name left empty would read as a field that has a name.
+fn name_of(field: &FormField) -> &str {
+    if field.kind == "chips" && field.label.trim().is_empty() {
+        "(제목 없음)"
+    } else {
+        field.label.as_str()
+    }
+}
+
+/// Whether the words of a field carry the page's own mark that it is wanted: a star at either end
+/// of them, or standing alone between words — never one inside a word.
+fn starred(label: &str) -> bool {
+    const STARS: [char; 2] = ['*', '＊'];
+    let words = label.trim();
+    words.starts_with(STARS)
+        || words.ends_with(STARS)
+        || words
+            .split_whitespace()
+            .any(|word| word.chars().all(|one| STARS.contains(&one)))
+}
+
+/// What the buttons line says of a button the page declares a submit.
+const SUBMIT_MARK: &str = " (제출 단추)";
+
 /// A field as one line: handle, kind, words, what it holds and what it takes.
 fn field_line(field: &FormField) -> String {
-    let mut line = format!("  {} · {} · {}", field.handle, field.kind, field.label);
+    let mut line = format!("  {} · {} · {}", field.handle, field.kind, name_of(field));
     if field.required {
         line.push_str(" *");
     }
@@ -932,15 +998,42 @@ pub fn fields_lines(read: &FormRead) -> String {
         .iter()
         .filter(|field| field.required && field.masked)
         .count();
-    let unread = if unread > 0 {
-        format!(", 값을 읽지 않는 필수 {unread}")
+    // Some pages mark what is wanted only with a star in the words of the field and declare nothing
+    // (`required`, `aria-required`): the door's count of the declared would read as "none is required".
+    let marked: Vec<&FormField> = read
+        .fields
+        .iter()
+        .filter(|field| !field.required && starred(&field.label))
+        .collect();
+    let count = if required == 0 && !marked.is_empty() {
+        let blank = marked
+            .iter()
+            .filter(|field| !field.masked && field.value.is_empty())
+            .count();
+        let hidden = marked.iter().filter(|field| field.masked).count();
+        let hidden = if hidden > 0 {
+            format!(", 값을 읽지 않는 {hidden}")
+        } else {
+            String::new()
+        };
+        format!(
+            "필수 표시 없음 — 이름에 *가 있는 칸 {}, 그중 비어 있는 {blank}{hidden}",
+            marked.len()
+        )
     } else {
-        String::new()
+        let unread = if unread > 0 {
+            format!(", 값을 읽지 않는 필수 {unread}")
+        } else {
+            String::new()
+        };
+        let apart = if marked.is_empty() {
+            String::new()
+        } else {
+            format!(", 이름에만 *가 있는 칸 {}", marked.len())
+        };
+        format!("필수 {required}, 비어 있는 필수 {empty}{unread}{apart}")
     };
-    let mut lines = vec![format!(
-        "양식 칸 {}개 (필수 {required}, 비어 있는 필수 {empty}{unread})",
-        read.fields.len()
-    )];
+    let mut lines = vec![format!("양식 칸 {}개 ({count})", read.fields.len())];
     let mut section: Option<&str> = None;
     for field in &read.fields {
         if section != Some(field.section.as_str()) {
@@ -960,7 +1053,8 @@ pub fn fields_lines(read: &FormRead) -> String {
             .iter()
             .map(|action| {
                 let off = if action.disabled { " (꺼짐)" } else { "" };
-                format!("{} 「{}」{off}", action.handle, action.label)
+                let submit = if action.submit { SUBMIT_MARK } else { "" };
+                format!("{} 「{}」{off}{submit}", action.handle, action.label)
             })
             .collect();
         lines.push(format!("버튼: {}", buttons.join(" · ")));
@@ -1041,7 +1135,7 @@ fn left_line(field: &FormField) -> String {
     if !field.fresh.is_empty() {
         says.push(format!("새로 뜬 글: {}", quoted(&field.fresh)));
     }
-    let head = format!("  {} · {} · {}", field.handle, field.kind, field.label);
+    let head = format!("  {} · {} · {}", field.handle, field.kind, name_of(field));
     if says.is_empty() {
         head
     } else {
@@ -1081,7 +1175,8 @@ fn after_words(
             .iter()
             .map(|action| {
                 let state = if action.disabled { "꺼짐" } else { "켜짐" };
-                format!("{} 「{}」 {state}", action.handle, action.label)
+                let submit = if action.submit { SUBMIT_MARK } else { "" };
+                format!("{} 「{}」 {state}{submit}", action.handle, action.label)
             })
             .collect();
         parts.push(format!("버튼: {}", buttons.join(", ")));

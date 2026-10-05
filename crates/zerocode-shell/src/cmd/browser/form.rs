@@ -281,8 +281,90 @@ const zcFieldKind = (el, request) => {
   if (role === "radiogroup") return el.querySelector('input[type="radio"]') ? null : "radio";
   if (role === "combobox" || zcListButton(el)) return "combobox";
   if (el.isContentEditable) return "text";
-  return el.hasAttribute("tabindex") && zcListBeside(el, request) ? "dropdown" : null;
+  if (el.hasAttribute("tabindex") && zcListBeside(el, request)) return "dropdown";
+  return zcChipsOf(el, request).length ? "chips" : null;
 };
+// ---- a row of toggles, read as one field ----
+// A button that says whether it is pressed (`aria-pressed`) and stands in a box with another is one of a
+// row of chips: the row is one field — named by its title, its options the buttons' words, its value the
+// buttons pressed. A button that opens a list is a field of its own kind and is no chip.
+const zcIsChip = (el, request) => el.hasAttribute("aria-pressed") && el.matches(request.actions.join(","))
+  && !zcListButton(el) && zcFormRole(el) !== "combobox" && zcDrawn(el);
+// Whether a box holds a field of HTML's or ARIA's own kinds: not a button, not a bare focusable box.
+const zcHoldsField = (box, request) => {
+  const kinds = request.controls.filter((selector) => selector !== "[tabindex]").join(",");
+  return [...box.querySelectorAll(kinds)].some((control) => zcDrawn(control)
+    && !(zcFormTag(control) === "input" && request.notFields.includes(String(control.type || "").toLowerCase())));
+};
+// The box a chip is one of a row in: the lowest box around it that holds another chip — its parent, or,
+// for chips each in a box of their own (a list's items), the box around them within the caption's reach —
+// unless a field stands in a nearer box with it: then it is that field's (a "show" beside a password).
+const zcChipRowOf = (chip, all, request) => {
+  let box = chip.parentElement;
+  for (let level = 0; box && level < request.captionDepth; level += 1, box = box.parentElement) {
+    if (all.filter((other) => box.contains(other)).length > 1) {
+      return level === 0 || !zcHoldsField(box, request) ? box : null;
+    }
+    if (zcHoldsField(box, request) || box.matches("body, form, [role=form], dialog, [role=dialog], main")) return null;
+  }
+  return null;
+};
+// The chips of a row, in the page's order.
+const zcChipsOf = (row, request) => {
+  if (!row.querySelector("[aria-pressed]")) return [];
+  const all = [...row.ownerDocument.querySelectorAll("[aria-pressed]")].filter((one) => zcIsChip(one, request));
+  return all.filter((chip) => row.contains(chip) && zcChipRowOf(chip, all, request) === row);
+};
+// Every row of chips a document draws, in the page's order.
+const zcChipRows = (doc, request) => {
+  const all = [...doc.querySelectorAll("[aria-pressed]")].filter((one) => zcIsChip(one, request));
+  const rows = [];
+  for (const chip of all) {
+    const row = zcChipRowOf(chip, all, request);
+    if (row && !rows.includes(row)) rows.push(row);
+  }
+  return rows;
+};
+// The chips of a row, and its choices: each one that can be pressed now, with its words and whether it is pressed.
+const zcChipChoices = (row, request) => {
+  const chips = zcChipsOf(row, request);
+  const choices = chips.filter((chip) => !zcOff(chip)).map((chip) => ({ el: chip,
+    words: zcChoiceWords(chip, request.wordCap),
+    value: String(chip.getAttribute("data-value") || chip.getAttribute("value") || ""),
+    selected: chip.getAttribute("aria-pressed") === "true" }));
+  return { chips, choices };
+};
+// What a row of chips is called: the name ARIA gives the row, else the labelled group around it (the
+// nearest, within the caption's reach), else what a group of radios is called — the legend of its
+// fieldset, the heading above it, the words before it. Nothing when the page gives none.
+const zcChipsTitle = (row, request) => {
+  const own = zcNameOf(row);
+  if (own.trim()) return { name: own, note: "" };
+  let up = row.parentElement;
+  for (let level = 0; up && level < request.captionDepth; level += 1, up = up.parentElement) {
+    if (zcFormTag(up) === "fieldset") break;
+    if (up.matches("[role=group], [role=toolbar]") && zcNameOf(up).trim()) return { name: zcNameOf(up), note: "" };
+  }
+  return zcGroupTitle(row, row, request);
+};
+// Whether a field is named only by its own short words: an ARIA label with no label of the page beside it.
+const zcOnlyAria = (el) => {
+  const aria = el.getAttribute("aria-label");
+  if (!(aria && aria.trim())) return false;
+  const doc = el.ownerDocument;
+  const by = String(el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
+    .map((id) => doc.getElementById(id)).filter(Boolean).map((node) => node.textContent).join(" ");
+  if (by.trim()) return false;
+  return ![...(el.labels || [])].some((label) => zcLabelWords(label).trim());
+};
+// The name a group of fields goes by: a fieldset's legend, ARIA's name for a group.
+const zcGroupName = (box) => {
+  const legend = zcFormTag(box) === "fieldset" ? [...box.children].find((child) => zcFormTag(child) === "legend") : null;
+  return String(zcNameOf(box) || (legend && legend.textContent) || "").replace(/\s+/g, " ").trim();
+};
+// Whether the page declares a button a submit: the type it names, not the one a button has when it names none.
+const zcIsSubmit = (el) => ["button", "input"].includes(zcFormTag(el))
+  && String(el.getAttribute("type") || "").trim().toLowerCase() === "submit";
 // The note under a heading: the text blocks that follow it — up to two — until the first thing that
 // is no mere text (a control, a button, a label, another heading, the group itself) or a box the page
 // does not draw.
@@ -368,6 +450,21 @@ const zcRead = (el, request) => {
     record.caption = titled.name;
     record.label = record.caption;
     if (titled.note.trim()) record.note = titled.note;
+    const holder = group || first.closest("[role=radiogroup]");
+    record.short = Boolean(holder) && Boolean(titled.name.trim()) && zcOnlyAria(holder);
+    return record;
+  }
+  if (kind === "chips") {
+    const read = zcChipChoices(el, request);
+    record.members = read.chips;
+    record.choices = read.choices;
+    record.value = read.choices.filter((choice) => choice.selected).map((choice) => choice.words);
+    record.disabled = record.disabled || (read.chips.length > 0 && !read.choices.length);
+    record.handle = zcHandleOf(el);
+    const titled = zcChipsTitle(el, request);
+    record.caption = titled.name;
+    record.label = titled.name;
+    if (titled.note.trim()) record.note = titled.note;
     return record;
   }
   record.handle = zcHandleOf(el);
@@ -401,8 +498,11 @@ const zcRead = (el, request) => {
   // A button that opens a list shows its value in its own words, so what stands beside it names
   // it; its own words are the last it is named by.
   const opens = zcListButton(el);
-  record.label = (opens ? zcPopupName(el) : zcNameOf(el)) || content || record.caption || record.placeholder
+  const named = opens ? zcPopupName(el) : zcNameOf(el);
+  record.label = named || content || record.caption || record.placeholder
     || String(el.getAttribute("name") || "") || (opens ? zcWords(el.innerText || el.textContent || "", cap) : "");
+  // Named only by its own short words — an ARIA label with no label of the page beside it, or a placeholder.
+  record.short = named ? zcOnlyAria(el) : !content && !record.caption && Boolean(record.placeholder.trim());
   return record;
 };
 // The words between two fields side by side, and after the last of them in
@@ -430,8 +530,8 @@ const zcNumberRuns = (records) => {
   while (at < records.length) {
     const head = records[at];
     let end = at + 1;
-    while (end < records.length && records[end].el.parentElement === head.el.parentElement
-      && records[end].kind !== "radio" && zcContinues(head, records[end - 1], records[end])
+    while (end < records.length && head.kind !== "chips" && records[end].el.parentElement === head.el.parentElement
+      && records[end].kind !== "radio" && records[end].kind !== "chips" && zcContinues(head, records[end - 1], records[end])
       && !zcNameOf(records[end].el)) end += 1;
     if (end - at > 1 && zcFold(head.label)) {
       // The caption read before the first part is renamed, for every part.
@@ -521,7 +621,8 @@ const zcFieldOut = (record, request, fresh = null) => {
   const out = { handle: record.handle, kind: record.kind, label: zcWords(record.label, cap),
     section: zcWords(zcNear(record.el, request.field), cap),
     value: record.masked ? "" : typeof record.value === "boolean" ? record.value
-      : zcCut(String(record.value), request.valueCap),
+      : Array.isArray(record.value) ? record.value.map((word) => zcCut(String(word), request.valueCap))
+        : zcCut(String(record.value), request.valueCap),
     options: record.choices.slice(0, request.optionCap).map((choice) => choice.words),
     moreOptions: Math.max(0, record.choices.length - request.optionCap),
     required: record.required, disabled: record.disabled, readOnly: record.readOnly,
@@ -543,7 +644,8 @@ const zcFieldOut = (record, request, fresh = null) => {
   return out;
 };
 // A field whose value the door never reads (a password) is not empty: it is unread.
-const zcEmpty = (out) => !out.masked && (out.value === "" || out.value === false);
+const zcEmpty = (out) => !out.masked && (out.value === "" || out.value === false
+  || (Array.isArray(out.value) && out.value.length === 0));
 // A net under every rule: what a person can press or focus inside the boxes
 // the fields stand in that no field, choice or button stands for — an
 // element that takes focus or a click of its own, one of ARIA's pressable
@@ -780,8 +882,9 @@ const zcTextBefore = (read, request) => {
 const zcFieldsOwnPiece = (record, piece) => {
   if (record.el.contains(piece.node)) return true;
   const said = " " + zcFold(piece.text) + " ";
-  return [record.label, record.placeholder, record.note, typeof record.value === "boolean" ? "" : record.value,
-    ...record.choices.map((choice) => choice.words)].some((words) => words && (" " + zcFold(words) + " ").includes(said));
+  return [record.label, record.placeholder, record.note, typeof record.value === "boolean" ? ""
+    : Array.isArray(record.value) ? record.value.join(" ") : record.value,
+  ...record.choices.map((choice) => choice.words)].some((words) => words && (" " + zcFold(words) + " ").includes(said));
 };
 // What a write or a press brought, against what the page showed before it (`before`, `zcTextBefore`'s
 // answer): per field, the words that stand new in the box around it — never the field's own words, a
@@ -831,6 +934,49 @@ const zcFresh = (records, before, request, scopes) => {
   }
   return { byHandle, quiet, alerts: alerts.slice(0, request.freshCap), outside: outside.slice(0, request.freshCap) };
 };
+// A value split across several fields — an hour beside a minute, the boxes of a code — is told by what
+// the group the parts stand in is called. A part the page names only by its own short words (an ARIA
+// label with no label of the page beside it, or a placeholder) takes the caption in front of it
+// (`<caption> — <words>`) when its box holds two or more such parts and no other field, and the words
+// do not already say it. The caption is the name of the group around the parts — a fieldset's legend,
+// ARIA's name for a group — when the group holds nothing but these parts, else the words before the
+// first of them. A star the page put on the caption stays with the parts.
+const zcPartCaptions = (records, request) => {
+  const edge = /^[\s*＊]+|[\s*＊]+$/g;
+  const done = new Set();
+  for (const record of records) {
+    if (!record.short || record.kind === "chips" || done.has(record)) continue;
+    let box = record.el.parentElement;
+    let held = [];
+    for (let level = 0; box && level < request.captionDepth; level += 1, box = box.parentElement) {
+      if (box.matches("body, form, [role=form], dialog, [role=dialog], main")) { box = null; break; }
+      const inside = records.filter((other) => box.contains(other.el));
+      if (inside.some((other) => !other.short || other.kind === "chips")) { box = null; break; }
+      if (inside.length > 1) { held = inside; break; }
+    }
+    if (!box || held.length < 2) continue;
+    for (const part of held) done.add(part);
+    let name = "";
+    for (let up = box, level = 0; up && level <= request.captionDepth; up = up.parentElement, level += 1) {
+      if (up.matches("body, form, [role=form], dialog, [role=dialog], main")) break;
+      if (!up.matches("fieldset, [role=group]")) continue;
+      const called = zcGroupName(up);
+      if (!called) continue;
+      if (records.every((other) => !up.contains(other.el) || held.includes(other))) name = called;
+      break;
+    }
+    if (!name) name = zcCaption(held[0].el, request);
+    const said = String(name).replace(/\s+/g, " ").trim();
+    const lead = said.replace(edge, "").trim();
+    if (!lead) continue;
+    const star = /[*＊]/.test(said.replace(lead, ""));
+    for (const part of held) {
+      const own = String(part.label).trim();
+      if (!own || zcFold(own).includes(zcFold(lead)) || zcFold(lead).includes(zcFold(own))) continue;
+      part.label = lead + " — " + own + (star && !/[*＊]\s*$/.test(own) ? " *" : "");
+    }
+  }
+};
 // Every field the page draws, in its order, frames after the page, and the
 // buttons that stand with them. With `before` — what the page showed before a write or a press —
 // each field also says what stands new beside it, and the read says the notices the page's live
@@ -841,7 +987,14 @@ const zcFormFields = (request, before = null) => {
   const seen = new Set();
   let more = 0;
   for (const { doc, prefix } of docs.open) {
-    for (const el of doc.querySelectorAll(request.controls.join(","))) {
+    const found = [...doc.querySelectorAll(request.controls.join(","))];
+    // A row of chips is a field no control selector names: it stands where it does in the page.
+    const rows = zcChipRows(doc, request).filter((row) => !found.includes(row));
+    if (rows.length) {
+      found.push(...rows);
+      found.sort((a, b) => (a === b ? 0 : a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+    }
+    for (const el of found) {
       if (!zcShown(el)) continue;
       const record = zcRead(el, request);
       if (!record) continue;
@@ -856,6 +1009,7 @@ const zcFormFields = (request, before = null) => {
     }
   }
   zcNumberRuns(records);
+  zcPartCaptions(records, request);
   zcTellApart(records);
   const scopes = new Set(records.map((record) => record.el.closest(request.scopes.join(","))
     || record.el.ownerDocument.body));
@@ -872,17 +1026,21 @@ const zcFormFields = (request, before = null) => {
   const actions = [];
   const named = new Set();
   const pressed = [];
+  // The buttons of a row of chips are that field's options, not buttons.
+  const chipped = new Set(records.flatMap((record) => record.members || []));
   for (const { doc, prefix } of docs.open) {
     for (const el of doc.querySelectorAll(request.actions.join(","))) {
       if (actions.length >= request.actionCap) break;
-      if (!zcDrawn(el) || zcFormRole(el) === "combobox" || zcListButton(el)) continue;
+      if (!zcDrawn(el) || zcFormRole(el) === "combobox" || zcListButton(el) || chipped.has(el)) continue;
       if (![...scopes].some((scope) => scope.contains(el))) continue;
       const label = zcWords(zcMarkName(el), request.wordCap);
       const handle = prefix + zcHandleOf(el);
       if (!label || named.has(handle)) continue;
       named.add(handle);
       pressed.push(el);
-      actions.push({ handle, label, disabled: zcOff(el) });
+      const action = { handle, label, disabled: zcOff(el) };
+      if (zcIsSubmit(el)) action.submit = true;
+      actions.push(action);
     }
   }
   const unknowns = zcUnknowns(records, pressed, scopes, docs, request);
@@ -1272,6 +1430,11 @@ const zcShowsDate = (shown, date) => {
 };
 const zcHolds = (record, asked) => {
   if (record.kind === "checkbox") return zcFlag(asked) === record.value;
+  if (record.kind === "chips") {
+    const wanted = zcChipsWanted(record, asked);
+    return wanted.missing === undefined && wanted.picks.length === record.choices.filter((choice) => choice.selected).length
+      && wanted.picks.every((choice) => choice.selected);
+  }
   const date = record.kind !== "select" && zcDateOf(asked);
   if (date && record.value !== "" && zcShowsDate(record.value, date)) return true;
   if (record.kind === "dropdown") {
@@ -1290,6 +1453,39 @@ const zcHolds = (record, asked) => {
   }
   return zcSame(zcAsKind(record.kind, asked), record.value);
 };
+// The options of a row of chips an asked value names: a list of words, or one text — an option's own
+// words whole, else its pieces apart at commas, semicolons, bars and line breaks. `missing` is the first
+// piece no option answers to; no words at all asks for none pressed.
+const zcChipsWanted = (record, asked) => {
+  let words = Array.isArray(asked) ? asked.map(String) : [String(asked)];
+  if (!Array.isArray(asked) && !record.choices.some((choice) => zcFold(choice.words) === zcFold(asked))) {
+    words = String(asked).split(/[,;|\n]+/);
+  }
+  const picks = [];
+  for (const word of words.map((one) => one.trim()).filter(Boolean)) {
+    const pick = zcPick(record.choices, word);
+    if (!pick) return { missing: word, picks };
+    if (!picks.includes(pick)) picks.push(pick);
+  }
+  return { picks };
+};
+// Write a row of chips by pressing only the buttons whose state differs from the one asked, each press
+// decided by what the row shows after the one before it — a page that lets go of the others when one is
+// pressed (one choice of several) has done its part by then — the options asked first, then those to let go.
+const zcWriteChips = (record, picks) => {
+  const keys = record.choices.map((choice) => zcFold(choice.words));
+  const wanted = new Set(picks.map((pick) => keys[record.choices.indexOf(pick)]));
+  const current = () => {
+    const el = record.el.isConnected ? record.el : (record.full ? (zcTarget(record.full).record || {}).el : null);
+    return el ? zcChipChoices(el, request).choices : [];
+  };
+  for (const adding of [true, false]) {
+    for (const key of keys) {
+      const choice = current().find((one) => zcFold(one.words) === key);
+      if (choice && wanted.has(key) === adding && choice.selected !== adding) zcPress(choice.el);
+    }
+  }
+};
 // Write one value; "" when written, else why not.
 const zcWrite = (record, asked) => {
   const el = record.el;
@@ -1299,6 +1495,15 @@ const zcWrite = (record, asked) => {
       return "no_option";
     }
     zcPress(el);
+    return "";
+  }
+  if (record.kind === "chips") {
+    const wanted = zcChipsWanted(record, asked);
+    if (wanted.missing !== undefined) {
+      record.offered = record.choices.map((choice) => choice.words);
+      return "no_option";
+    }
+    zcWriteChips(record, wanted.picks);
     return "";
   }
   if (record.kind === "dropdown") {
@@ -1402,6 +1607,7 @@ const zcFillWrite = (entries, expect, watch) => {
     const record = target.record;
     out.kind = record.kind;
     out.label = zcWords(record.label, request.wordCap);
+    record.full = entry.handle;
     if (record.masked) return { ...base, status: "secret", wrote: false };
     if (record.kind === "file") return { ...base, status: "file", wrote: false };
     if (record.disabled) {
@@ -1449,7 +1655,8 @@ const zcFillRead = (input, epoch) => {
     }
     const now = target.record;
     out.now = now.masked ? "" : typeof now.value === "boolean" ? now.value
-      : zcCut(String(now.value), request.valueCap);
+      : Array.isArray(now.value) ? now.value.map((word) => zcCut(String(word), request.valueCap))
+        : zcCut(String(now.value), request.valueCap);
     out.error = zcWords(now.error, request.wordCap);
     out.status = zcHolds(now, one.value) ? (one.wrote ? "set" : "same") : "mismatch";
     return out;

@@ -23916,6 +23916,7 @@ mod browser_form_fill {
             handle: "#go".into(),
             label: "Continue".into(),
             disabled: true,
+            ..FormAction::default()
         }];
         cmd::browser::form::remember_buttons(label, &buttons);
         assert_eq!(cmd::browser::form::known_buttons(label), buttons);
