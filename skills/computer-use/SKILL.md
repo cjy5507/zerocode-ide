@@ -150,8 +150,12 @@ A form is data, so fill it as data, not a picture per field:
    field the page calls invalid and says nothing of why with `⚠ aria-invalid —
    페이지가 이유를 말하지 않음` (only when no words but the field's own stand in
    its box: a sentence that stood beside it all along may be the reason, so
-   then it says only `⚠ aria-invalid`), and names what the page's alert and
-   status regions said, beside no field, as `새로 뜬 알림: 「…」`.
+   then it says only `⚠ aria-invalid`), names what the page's alert and
+   status regions said, beside no field, as `새로 뜬 알림: 「…」`, and says the
+   text that stands new in the form beside no single field — the reason a page
+   writes under a value made of several fields (an address and its domain) or
+   under a group of buttons — as `새로 뜬 글(칸 밖): 「…」`, while the form is
+   still the one you read.
 3. Press the step's button by its handle (`click <pane-label> <handle>`) —
    a step's button that turns on once the fields are right is already `켜짐`
    on that last line, so press it from there with no `fields` between — and
@@ -160,7 +164,8 @@ A form is data, so fill it as data, not a picture per field:
    own sentence (which now says how the page settled): below it, `양식 그대로`
    or `양식 바뀜(fields로 다시 읽기)` with the buttons as they are now, and for
    a form that stayed `남은 칸:` with each field's error and the text that
-   stands new beside it, `새로 뜬 알림`, and the same `※ … 못 봅니다` note. A
+   stands new beside it, `새로 뜬 알림`, `새로 뜬 글(칸 밖)`, and the same
+   `※ … 못 봅니다` note. A
    "next" that does not move on says why there, in the page's words. A click in
    a pane whose form you never read is answered as it was.
 

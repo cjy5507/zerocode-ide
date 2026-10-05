@@ -18,9 +18,10 @@ use zerocode_core::browser_form::{
     BROWSER_FORM_DAY_WORDS, BROWSER_FORM_DAYS, BROWSER_FORM_FIELD_CAP, BROWSER_FORM_FRAME_DEPTH,
     BROWSER_FORM_FRAME_SEPARATOR, BROWSER_FORM_FRESH_CAP, BROWSER_FORM_LIST_ITEMS,
     BROWSER_FORM_LISTS, BROWSER_FORM_LIVE, BROWSER_FORM_MONTH_DAYS, BROWSER_FORM_MONTH_PAGES,
-    BROWSER_FORM_NOT_FIELDS, BROWSER_FORM_OPTION_CAP, BROWSER_FORM_OPTIONS, BROWSER_FORM_PIECE_CAP,
-    BROWSER_FORM_PRESSABLES, BROWSER_FORM_SCAN_CAP, BROWSER_FORM_SCOPES, FillEntry, FillLedger,
-    FillPass, FillReport, FormAction, FormRead, PressAfter, PressRead,
+    BROWSER_FORM_NOT_FIELDS, BROWSER_FORM_OPTION_CAP, BROWSER_FORM_OPTIONS,
+    BROWSER_FORM_OUTSIDE_CAP, BROWSER_FORM_PIECE_CAP, BROWSER_FORM_PRESSABLES,
+    BROWSER_FORM_SCAN_CAP, BROWSER_FORM_SCOPES, FillEntry, FillLedger, FillPass, FillReport,
+    FormAction, FormRead, PressAfter, PressRead,
 };
 
 /// What a read of a page's forms is made of, page side — read only, like the
@@ -700,13 +701,13 @@ const zcTellApart = (records) => {
 // control and every box the page does not draw — its words as the page wrote them, and a key that
 // tells it from another by its words alone: its numbers are set aside, so a counter that counts or a
 // countdown that runs is the same text.
-const zcPieces = (root, request) => {
+const zcPieces = (root, request, cap = request.pieceCap) => {
   const skip = "select, textarea, button, option, script, style, template, [role=option], [role=listbox]";
   const found = [];
   const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => node.nodeType === 1 && (node.matches(skip) || !zcDrawn(node))
       ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
-  for (let node = walker.nextNode(); node && found.length < request.pieceCap; node = walker.nextNode()) {
+  for (let node = walker.nextNode(); node && found.length < cap; node = walker.nextNode()) {
     if (node.nodeType !== 3 || !/[\p{L}\p{N}]/u.test(node.nodeValue)) continue;
     const text = String(node.nodeValue).replace(/\s+/g, " ").trim();
     found.push({ node, text, key: zcDigest(zcFold(text).replace(/\p{N}+/gu, "#")) });
@@ -738,8 +739,31 @@ const zcLiveRegions = (request) => {
   }
   return regions;
 };
+// The pieces of text the form shows that stand beside no single field: in every box the read looks at,
+// each drawn piece outside every field's own box, control and choice and outside every live region — the
+// reason a page writes under a value made of several fields (which share one box, so none has a box of
+// its own) or under a group of buttons that are no fields.
+const zcOutsidePieces = (scopes, records, request) => {
+  const apart = new Set(zcLiveRegions(request));
+  for (const record of records) {
+    const box = zcFieldBox(record, request);
+    if (box) apart.add(box);
+    apart.add(record.el);
+    for (const choice of record.choices) if (choice.el) apart.add(choice.el);
+  }
+  const found = [];
+  for (const scope of scopes) {
+    for (const piece of zcPieces(scope, request, request.outsideCap)) {
+      let held = false;
+      for (let up = piece.node.parentElement; up && !held; up = up.parentElement) held = apart.has(up);
+      if (!held) found.push(piece);
+    }
+  }
+  return found;
+};
 // What the page shows about each field now, to tell later what a write or a press brought: per field
-// (by handle) the keys of the pieces of text in the box around it, and the keys of every live region's text.
+// (by handle) the keys of the pieces of text in the box around it, the keys of every live region's text,
+// and the keys of the text that stands beside no single field.
 const zcTextBefore = (read, request) => {
   const groups = {};
   for (const record of read.records) {
@@ -747,7 +771,8 @@ const zcTextBefore = (read, request) => {
     if (box) groups[record.handle] = zcPieces(box, request).map((piece) => piece.key);
   }
   const live = zcLiveRegions(request).flatMap((region) => zcPieces(region, request).map((piece) => piece.key));
-  return { groups, live };
+  const outside = zcOutsidePieces(read.scopes, read.records, request).map((piece) => piece.key);
+  return { groups, live, outside };
 };
 // Whether a piece of text is the field's own words: inside the control itself, or the field's name,
 // value, placeholder, note or one of its choices said again — whole words in the same order, so the
@@ -761,9 +786,10 @@ const zcFieldsOwnPiece = (record, piece) => {
 // What a write or a press brought, against what the page showed before it (`before`, `zcTextBefore`'s
 // answer): per field, the words that stand new in the box around it — never the field's own words, a
 // number that only counts, or the words the page tied to the field as its error, which the field says
-// itself — and, beside no field, the words new in a live region. `quiet` are the fields whose box holds
-// no words but their own: what a page that marks one invalid says nothing of.
-const zcFresh = (records, before, request) => {
+// itself — and, beside no field, the words new in a live region, and the words new in the form that stand
+// beside no single field (`outside`). `quiet` are the fields whose box holds no words but their own: what
+// a page that marks one invalid says nothing of.
+const zcFresh = (records, before, request, scopes) => {
   const byHandle = new Map();
   const quiet = new Set();
   const taken = new Set();
@@ -794,7 +820,16 @@ const zcFresh = (records, before, request) => {
       alerts.push(zcWords(piece.text, request.wordCap));
     }
   }
-  return { byHandle, quiet, alerts: alerts.slice(0, request.freshCap) };
+  const outside = [];
+  const stood = new Set(before.outside || []);
+  if (before.outside) {
+    for (const piece of zcOutsidePieces(scopes, records, request)) {
+      if (stood.has(piece.key) || taken.has(piece.node) || !words(piece)) continue;
+      taken.add(piece.node);
+      outside.push(zcWords(piece.text, request.wordCap));
+    }
+  }
+  return { byHandle, quiet, alerts: alerts.slice(0, request.freshCap), outside: outside.slice(0, request.freshCap) };
 };
 // Every field the page draws, in its order, frames after the page, and the
 // buttons that stand with them. With `before` — what the page showed before a write or a press —
@@ -856,9 +891,10 @@ const zcFormFields = (request, before = null) => {
   // never a value, which a fill is there to change.
   const print = zcDigest(records.map((record) => [record.handle, record.kind, zcFold(record.label)]
     .join("\u001f")).join("\u001e"));
-  const fresh = before ? zcFresh(records, before, request) : null;
-  return { records, fields: records.map((record) => zcFieldOut(record, request, fresh)), actions,
-    more, sealed: docs.sealed, print, unknowns, scrollBoxes, alerts: fresh ? fresh.alerts : [] };
+  const fresh = before ? zcFresh(records, before, request, [...scopes]) : null;
+  return { records, scopes: [...scopes], fields: records.map((record) => zcFieldOut(record, request, fresh)), actions,
+    more, sealed: docs.sealed, print, unknowns, scrollBoxes, alerts: fresh ? fresh.alerts : [],
+    outside: fresh ? fresh.outside : [] };
 };
 "##;
 
@@ -1429,7 +1465,8 @@ const zcFillRead = (input, epoch) => {
     if (field.silent) result.silent = true;
   }
   const left = after.fields.filter((field) => (field.required && zcEmpty(field)) || field.error);
-  return { results, left, stale: false, fingerprint: after.print, actions: after.actions, alerts: after.alerts };
+  return { results, left, stale: false, fingerprint: after.print, actions: after.actions, alerts: after.alerts,
+    outside: after.outside };
 };
 // One whole pass in one synchronous run, as an eval's `zerocode.fill` has it:
 // a field the page loads or turns on later is the next call's.
@@ -1461,11 +1498,12 @@ return zcEncode({ ok: true, value: { epoch: zcEpoch(), before: zcTextBefore(zcFo
 
 /// What the page says once a press has been made and the page has settled: the form's fingerprint and
 /// buttons, the fields with something to say — an error, a value still wanted, text new beside them —
-/// and the notices its live regions made.
+/// the notices its live regions made and the text new in the form beside no single field.
 pub(crate) const BROWSER_PRESS_AFTER_BODY: &str = r#"
 const read = zcFormFields(request, request.before);
 const noted = read.fields.filter((field) => field.fresh || field.error || (field.required && zcEmpty(field)));
-return zcEncode({ ok: true, value: { fingerprint: read.print, actions: read.actions, noted, alerts: read.alerts } }, request.answerCap);
+return zcEncode({ ok: true, value: { fingerprint: read.print, actions: read.actions, noted, alerts: read.alerts,
+  outside: read.outside } }, request.answerCap);
 "#;
 
 /// The form pair inside an `eval` (t-37883): an expression that names
@@ -1514,6 +1552,7 @@ pub(crate) fn form_request() -> serde_json::Value {
         "live": BROWSER_FORM_LIVE,
         "freshCap": BROWSER_FORM_FRESH_CAP,
         "pieceCap": BROWSER_FORM_PIECE_CAP,
+        "outsideCap": BROWSER_FORM_OUTSIDE_CAP,
         "watch": settle_watch(),
         "listItems": BROWSER_FORM_LIST_ITEMS,
         "monthDays": BROWSER_FORM_MONTH_DAYS,

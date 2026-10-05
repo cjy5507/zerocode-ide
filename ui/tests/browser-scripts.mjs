@@ -103,7 +103,7 @@ export const FORM_REQUEST = {
   lists: rustList(FORM_CORE, "BROWSER_FORM_LISTS"), listItems: rustList(FORM_CORE, "BROWSER_FORM_LIST_ITEMS"),
   pressables: rustList(FORM_CORE, "BROWSER_FORM_PRESSABLES"), scanCap: rustNumber(FORM_CORE, "BROWSER_FORM_SCAN_CAP"),
   live: rustList(FORM_CORE, "BROWSER_FORM_LIVE"), freshCap: rustNumber(FORM_CORE, "BROWSER_FORM_FRESH_CAP"),
-  pieceCap: rustNumber(FORM_CORE, "BROWSER_FORM_PIECE_CAP"),
+  pieceCap: rustNumber(FORM_CORE, "BROWSER_FORM_PIECE_CAP"), outsideCap: rustNumber(FORM_CORE, "BROWSER_FORM_OUTSIDE_CAP"),
   watch: GUEST_KEY,
   on: rustList(FORM_CORE, "BROWSER_FILL_ON"), off: rustList(FORM_CORE, "BROWSER_FILL_OFF"),
   field: { regions: rustList(CORE, "BROWSER_FIELD_REGIONS"), headings: rustList(CORE, "BROWSER_FIELD_HEADINGS") },
@@ -241,7 +241,7 @@ export async function fillPasses(run, bundle, expect = null) {
   const last = new Map();
   const rounds = [];
   const began = Date.now();
-  let asked = entries, left = [], passes = 0, fingerprint = "", actions = [], moving = false, alerts = [];
+  let asked = entries, left = [], passes = 0, fingerprint = "", actions = [], moving = false, alerts = [], outside = [];
   while (asked.length) {
     const written = await run(fillWriteScript(asked, passes === 0 ? expect : null));
     if (!written.ok) throw new Error(`a fill pass was refused: ${JSON.stringify(written)}`);
@@ -249,7 +249,7 @@ export async function fillPasses(run, bundle, expect = null) {
     if (written.value.stale) {
       fingerprint = written.value.fingerprint;
       rounds.push({ asked: asked.map((entry) => entry.handle), pass: { stale: true, fingerprint } });
-      return { results: entries.map(() => undefined), left: [], passes, stale: true, fingerprint, actions: [], moving: false, alerts: [], rounds };
+      return { results: entries.map(() => undefined), left: [], passes, stale: true, fingerprint, actions: [], moving: false, alerts: [], outside: [], rounds };
     }
     const heard = written.value.wrote ? await settled(run, written.value.epoch, written.value.at) : null;
     const read = await run(fillReadScript(written.value.before ? { held: written.value.held, before: written.value.before } : written.value.held, written.value.epoch));
@@ -260,12 +260,12 @@ export async function fillPasses(run, bundle, expect = null) {
     for (const result of pass.results) last.set(result.handle, result);
     left = pass.left;
     actions = pass.actions || [];
-    if (pass.moving !== null) { moving = pass.moving; alerts = pass.alerts || []; }
+    if (pass.moving !== null) { moving = pass.moving; alerts = pass.alerts || []; outside = pass.outside || []; }
     asked = entries.filter((entry) => TRIES_AGAIN.includes(last.get(entry.handle)?.status));
     if (!asked.length || passes >= FILL_PASSES || Date.now() - began >= FILL_PENDING_MS) break;
     await new Promise((done) => setTimeout(done, FILL_POLL_MS));
   }
-  return { results: entries.map((entry) => last.get(entry.handle)), left, passes, stale: false, fingerprint, actions, moving, alerts, rounds };
+  return { results: entries.map((entry) => last.get(entry.handle)), left, passes, stale: false, fingerprint, actions, moving, alerts, outside, rounds };
 }
 
 /* `press_in_form` over `run(script) → page answer`: a press by selector in a form its agent read — the

@@ -87,6 +87,12 @@ pub const BROWSER_FORM_FRESH_CAP: usize = 3;
 /// press and after it.
 pub const BROWSER_FORM_PIECE_CAP: usize = 60;
 
+/// The most pieces of text the whole of a form is read for beside its fields'
+/// boxes — the reason a page writes under a value made of several fields or
+/// under a group of buttons — before a write or a press and after it. A form
+/// holds many more pieces than one field's box, and the first ones are its fields' own.
+pub const BROWSER_FORM_OUTSIDE_CAP: usize = 400;
+
 /// The lists a dropdown drawn with no ARIA keeps beside the focusable box
 /// that opens it — a field of its own kind (`dropdown`), its items the
 /// choices.
@@ -519,6 +525,10 @@ pub struct FillPass {
     /// The text new in the page's live regions (alert, status) that stands
     /// beside no field — a notice the write brought.
     pub alerts: Vec<String>,
+    /// The text new in the form that stands beside no single field — the reason a
+    /// page writes under a value made of several fields or under a group of
+    /// buttons — and is no notice of a live region.
+    pub outside: Vec<String>,
 }
 
 /// A fill's passes, kept: each entry's latest outcome, and the page's word
@@ -530,6 +540,7 @@ pub struct FillLedger {
     left: Vec<FormField>,
     actions: Vec<FormAction>,
     alerts: Vec<String>,
+    outside: Vec<String>,
     moving: bool,
     settled: bool,
     passes: usize,
@@ -547,6 +558,7 @@ impl FillLedger {
             left: Vec::new(),
             actions: Vec::new(),
             alerts: Vec::new(),
+            outside: Vec::new(),
             moving: false,
             settled: false,
             passes: 0,
@@ -607,6 +619,7 @@ impl FillLedger {
             self.moving = moving;
             self.settled = true;
             self.alerts = pass.alerts;
+            self.outside = pass.outside;
         }
     }
 
@@ -628,6 +641,7 @@ impl FillLedger {
             left: self.left,
             actions: self.actions,
             alerts: self.alerts,
+            outside: self.outside,
             moving: self.moving,
             settled: self.settled,
             passes: self.passes,
@@ -648,6 +662,8 @@ pub struct FillReport {
     pub actions: Vec<FormAction>,
     /// The notices the page's live regions made after the last pass that waited for it.
     pub alerts: Vec<String>,
+    /// The text new in the form after the last pass that waited for it, beside no single field.
+    pub outside: Vec<String>,
     /// The page was still changing when the last pass that waited for it read
     /// it: the settle ran out of time (or the page went to another document),
     /// so nothing here is said to be final.
@@ -735,7 +751,8 @@ impl FillReport {
 /// What the page says of itself once a press by selector has been made and
 /// the page has settled: the form's fingerprint, its buttons, the fields
 /// that carry something to say (an error, a value still wanted, text new beside
-/// them) and the notices its live regions made.
+/// them), the notices its live regions made and the text new in the form that
+/// stands beside no single field.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PressRead {
@@ -743,6 +760,7 @@ pub struct PressRead {
     pub actions: Vec<FormAction>,
     pub noted: Vec<FormField>,
     pub alerts: Vec<String>,
+    pub outside: Vec<String>,
 }
 
 /// A press's read set against the form the agent knew before it.
@@ -810,11 +828,19 @@ pub fn press_lines(after: &PressAfter) -> String {
         if !after.read.alerts.is_empty() {
             lines.push(format!("새로 뜬 알림: {}", quoted(&after.read.alerts)));
         }
+        if !after.read.outside.is_empty() {
+            lines.push(outside_line(&after.read.outside));
+        }
         if after.settled && !after.moving {
             lines.push(late_note("누른"));
         }
     }
     lines.join("\n") + "\n"
+}
+
+/// The text that stands new in the form beside no single field.
+fn outside_line(words: &[String]) -> String {
+    format!("새로 뜬 글(칸 밖): {}", quoted(words))
 }
 
 /// The page's words, each in its brackets, one after another.
@@ -1136,6 +1162,10 @@ pub fn fill_lines(report: &FillReport) -> String {
     }
     if !report.alerts.is_empty() {
         lines.push(format!("새로 뜬 알림: {}", quoted(&report.alerts)));
+    }
+    // A form that is no longer the one the agent read has all its text new: it reads it again.
+    if !report.outside.is_empty() && report.changed != Some(true) {
+        lines.push(outside_line(&report.outside));
     }
     lines.extend(after_line(report));
     // A page still changing already says to read again.
