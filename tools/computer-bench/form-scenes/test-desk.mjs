@@ -211,6 +211,8 @@ await test("a fill answers with the buttons the page settled on, not those of th
   const filled = await shim("browser", ["fill", PANE, "--value-stdin"], '{"#name":"Lee"}');
   assert(filled.code === 0 && filled.stdout.includes("#book 「Book」 켜짐"), "the button the page turned on is on in the answer", filled.stdout);
   assert(!filled.stdout.includes("아직 바뀌는 중"), "and the page stood still when it was read", filled.stdout);
+  assert(filled.stdout.includes("그 뒤에 뜨는 오류는 못 봅니다") && filled.stdout.includes("제출 전에 fields로 다시 읽으세요"),
+    "and says what a read after a quiet window cannot see", filled.stdout);
   return "ok";
 });
 

@@ -639,3 +639,29 @@ fn a_button_whose_place_moved_is_not_said_to_be_hidden() {
         "the button that stands somewhere else now is not hidden:\n{lines}"
     );
 }
+
+/// A read made once the page has stood still for the settle's quiet window cannot
+/// see what shows later — a check that waits, a timer — and the answer does not
+/// say it is the page's last word: it says what was waited for and to read again
+/// before submitting (t-41387, m-41513). A pass that waited for nothing, or a page
+/// still changing (which already says to read again), makes no such claim.
+#[test]
+fn a_fill_that_waited_for_the_page_says_what_such_a_read_cannot_see() {
+    let quiet = crate::agent_browser::BROWSER_SETTLE_QUIET_MS;
+    let note = format!(
+        "※ 쓴 뒤 {quiet} ms 동안 가만히 있는 것을 보고 읽었습니다. 그 뒤에 뜨는 오류는 못 봅니다 — 제출 전에 fields로 다시 읽으세요"
+    );
+    let bundle = vec![entry("#mail", text("kim@example.com"))];
+    for (heard, says) in [(Some(false), true), (None, false), (Some(true), false)] {
+        let mut ledger = FillLedger::new(bundle.clone());
+        ledger.record(&bundle, pass_heard(heard));
+        let lines = fill_lines(&ledger.report().against(Some("5:aaa"), &[]));
+        assert_eq!(lines.contains(&note), says, "{heard:?}:\n{lines}");
+        if says {
+            assert!(
+                lines.ends_with(&format!("{note}\n")),
+                "the note is the last line:\n{lines}"
+            );
+        }
+    }
+}
