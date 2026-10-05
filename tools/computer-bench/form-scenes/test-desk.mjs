@@ -216,6 +216,24 @@ await test("a fill answers with the buttons the page settled on, not those of th
   return "ok";
 });
 
+/* What a fill says when an error shows later than the page stood still (t-41387, m-41521):
+ * it does not see it, and says so — the contract for the case the settle cannot see. */
+await test("a fill that waited says an error shown later is not in its answer, and the next read has it", async () => {
+  await page(() => {
+    const name = document.getElementById("name");
+    name.addEventListener("input", () => setTimeout(() => name.setAttribute("aria-invalid", "true"), 150));
+  });
+  await browser("fields", PANE);
+  const filled = await shim("browser", ["fill", PANE, "--value-stdin"], '{"#name":"Park"}');
+  assert(filled.code === 0 && !filled.stdout.includes("aria-invalid"), "the error that shows 150 ms later is not in the answer", filled.stdout);
+  assert(filled.stdout.includes("그 뒤에 뜨는 오류는 못 봅니다") && filled.stdout.includes("제출 전에 fields로 다시 읽으세요"),
+    "and the answer says so", filled.stdout);
+  await sleep(300);
+  const next = await browser("fields", PANE);
+  assert(next.stdout.includes("aria-invalid"), "the next read has it", next.stdout);
+  return "ok";
+});
+
 await desk.close();
 let failed = 0;
 for (const result of results) {

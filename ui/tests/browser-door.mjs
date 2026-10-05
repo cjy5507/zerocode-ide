@@ -1522,6 +1522,40 @@ await test("a_fill_on_a_page_that_never_stands_still_ends_and_says_it_is_still_c
   } finally { await late.close(); }
 });
 
+// A check with no signal: a timer shows its verdict 150 ms after the input and the page says
+// nothing while it waits. The settle is the window's own — a page that stood still for the
+// quiet window is settled — so the fill does not see this error; the answer must not call
+// itself the page's last word (the core's last line says so), and the next read sees it.
+const AFTER_A_SILENT_TIMER = LATE_PAGE(`
+  const mail = document.getElementById("mail"), err = document.getElementById("mail-err");
+  mail.removeAttribute("type");
+  let timer = 0;
+  mail.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const bad = !mail.value.includes("@");
+      mail.setAttribute("aria-invalid", bad ? "true" : "false");
+      err.textContent = bad ? "Enter a valid email" : "";
+    }, 150);
+  });`);
+
+await test("a_fill_does_not_see_an_error_a_silent_timer_shows_later_and_the_next_read_does", async () => {
+  const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await late.setContent(AFTER_A_SILENT_TIMER);
+    const before = await readFields(late);
+    const filled = await fillBundle(late, { "#mail": "nope" }, before.fingerprint);
+    const [only] = filled.results;
+    assert(only.status === "set" && only.error === "" && filled.left.length === 0,
+      "the error the page shows after a silent 150 ms is not in the fill's answer — the limit, pinned", only);
+    assert(filled.moving === false, "the page stood still for the quiet window, so the fill took it for settled", filled.moving);
+    await late.waitForTimeout(300);
+    const next = byHandle(await readFields(late));
+    assert(next["#mail"].error === "Enter a valid email", "and the next read has it", next["#mail"]);
+    return `fill: "${only.error}"; next read: "${next["#mail"].error}"`;
+  } finally { await late.close(); }
+});
+
 await test("a_fill_read_in_another_document_than_the_write_says_the_page_was_replaced", async () => {
   const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
   try {
