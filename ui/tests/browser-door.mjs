@@ -2558,6 +2558,42 @@ await test("a_list_whose_chosen_mark_is_not_kept_up_to_date_is_no_proof_of_anoth
   } finally { await stale.close(); }
 });
 
+/* A list drawn only while it is open (t-41720): its items are made when the button opens it and the box that holds them is hidden again once one is chosen, so at the
+ * read-back no item is drawn to compare the asked words with, and the button shows the choice shortened. Nothing there tells the same value from another — the door says
+ * it cannot see; it does not say "다른 값" for want of an item to look at. */
+const OPEN_ONLY = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div><span id="gl">Region</span> <button type="button" id="region" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="gl"><span id="gv">Pick</span></button>
+    <div id="gpop" hidden><ul id="glist" role="listbox"></ul></div></div>
+</form><script>
+  const button = document.getElementById("region"), pop = document.getElementById("gpop"), list = document.getElementById("glist"), shown = document.getElementById("gv");
+  const items = [["Oslo (NO)", "NO"], ["Lima (PE)", "PE"]];
+  button.addEventListener("click", () => {
+    if (!pop.hidden) { pop.hidden = true; button.setAttribute("aria-expanded", "false"); return; }
+    list.innerHTML = items.map(([name, code]) => '<li role="option" aria-selected="false" data-code="' + code + '">' + name + '</li>').join("");
+    pop.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+  });
+  list.addEventListener("click", (event) => {
+    const item = event.target.closest("li");
+    if (!item) return;
+    shown.textContent = item.dataset.code;
+    pop.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+  });
+</script>`;
+await test("a_list_drawn_only_while_it_is_open_leaves_no_item_to_compare_so_the_door_says_it_cannot_see", async () => {
+  const closed = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await closed.setContent(OPEN_ONLY);
+    const read = await readFields(closed);
+    const filled = await fillBundle(closed, { "#region": "Lima (PE)" }, read.fingerprint);
+    const one = filled.results[0];
+    assert(one?.status === "unseen" && one.now === "PE",
+      "the list is shut and draws no item, the button shows the choice shortened: the door can neither say the value is another nor the same", filled.results);
+    return `${one.status} ${JSON.stringify(one.now)}`;
+  } finally { await closed.close(); }
+});
+
 await browser.close();
 
 let failed = 0;
