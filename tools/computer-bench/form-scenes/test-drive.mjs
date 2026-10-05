@@ -186,10 +186,40 @@ const SLOTS = await scene("slots", `<!doctype html><html lang="en"><meta charset
   });
 </script>`, [{ says: "Name", value: "Kim" }, { says: "Visit time", value: "14:30" }], { name: "Kim", time: "14:30" });
 
+/* What the real pages showed of the press that ends a form (t-41656): a page that takes the booking a moment after the press — its button goes off
+ * ("Working…") and the form is replaced by a page with no button — a page that refuses the press every time, and a field the page rewrites to its own mask,
+ * so the read-back never matches and the answer is the same twice. */
+const LATE = await scene("late", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="name">Name</label> <input id="name"><button type="button" id="go">Finish</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  $("go").addEventListener("click", () => {
+    const name = $("name").value;
+    $("go").disabled = true;
+    $("go").textContent = "Working…";
+    setTimeout(() => { document.body.innerHTML = "<p>Done</p>"; window.__sceneResult = { name }; }, 2200);
+  });
+</script>`, [{ says: "Name", value: "Kim" }], { name: "Kim" });
+const REFUSES = await scene("refuses", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="name">Name</label> <input id="name"><button type="button" id="go">Finish</button><p id="why"></p>
+</form>
+<script>
+  document.getElementById("go").addEventListener("click", () => { document.getElementById("why").textContent = "Not yet"; });
+</script>`, [{ says: "Name", value: "Kim" }], { name: "Kim" });
+const MASKED = await scene("masked", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="code">Code</label> <input id="code"><button type="button" id="go">Submit</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  $("code").addEventListener("input", () => { $("code").value = "A1"; });
+  $("go").addEventListener("click", () => { window.__sceneResult = { code: $("code").value }; });
+</script>`, [{ says: "Code", value: "B2" }], { code: "A1" });
+
 /* One run of the drivers on every scene, once. */
 const out = join(root, "rows.json");
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
-  "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -256,6 +286,32 @@ await test("a driver writes a fact that names no field to the group of chips who
     assert(one && one.ok && one.pass, `the ${road} road gives the slot the card names, though the groups carry other titles`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
   }
   return JSON.stringify(row("slots", "verbs").result);
+});
+
+await test("a driver that pressed a button which then went off waits for the page and takes the booking a page finishes later", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("late", road);
+    assert(one && one.ok && one.pass, `the ${road} road reads the result of a page that finished after the press, its form gone`, one && { ok: one.ok, stuck: one.stuck, wait: one.wait });
+    assert(one.wait >= 1 && one.wait <= 3, `after a wait or two (${road})`, { wait: one.wait });
+  }
+  return `waits ${row("late", "verbs").wait} / ${row("late", "script").wait}`;
+});
+
+await test("a driver that pressed the same button twice in a form that stayed gives up and says so", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("refuses", road);
+    assert(one && typeof one.stuck === "string" && /pressed twice/.test(one.stuck), `the ${road} road says it pressed the button twice and the form stayed`, one && { stuck: one.stuck });
+    assert(one.roundTrips <= 10, `and does not press it again to the end of its round trips (${road})`, { roundTrips: one.roundTrips });
+  }
+  return `round trips ${row("refuses", "verbs").roundTrips} / ${row("refuses", "script").roundTrips}`;
+});
+
+await test("a driver told twice the same answer about a field goes on to the button that moves the step", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("masked", road);
+    assert(one && one.ok && one.pass, `the ${road} road goes on when a field never reads back as it was asked`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return JSON.stringify(row("masked", "script").result);
 });
 
 await test("the recipe a driver scrolls a box by is the one the skill teaches", () => {
