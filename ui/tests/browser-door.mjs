@@ -2785,6 +2785,102 @@ await test("a_text_field_with_no_list_beside_it_is_written_as_before_and_loses_t
   } finally { await suggest.close(); }
 });
 
+/* A button that opens a dialog (`aria-haspopup="dialog"`) says the name of the dialog it opens, and a date can be given to it (t-41720): a dialog the page keeps beside its buttons holds a calendar of two
+ * months drawn when it opens, with arrows that page it and a button that applies the range. The calendar's days are one thing, not sixty buttons — the buttons a read lists are the page's own and
+ * the dialog's (the one that applies the range is among them). A fill given a date for the button opens the dialog, pages to the month and presses the day. */
+const STAY = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="cap">Stay</div>
+  <div class="wrap">
+    <div class="trig">
+      <button type="button" id="from" aria-haspopup="dialog" aria-expanded="false"><span>Start date</span> <span id="fromTxt">Pick a date</span></button>
+      <button type="button" id="to" aria-haspopup="dialog" aria-expanded="false"><span>End date</span> <span id="toTxt">Pick a date</span></button>
+    </div>
+    <div id="pop" role="dialog" aria-label="Stay dates" hidden>
+      <div class="head"><button type="button" id="prev" aria-label="Earlier">‹</button><span id="sum"></span><button type="button" id="next" aria-label="Later">›</button></div>
+      <div id="months"></div>
+      <div class="foot"><button type="button" id="reset">Clear</button> <button type="button" id="apply" disabled>Done</button></div>
+    </div>
+  </div>
+</form>
+<script>
+  const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const $ = (id) => document.getElementById(id);
+  const pad = (number) => String(number).padStart(2, "0");
+  const first = { y: 2026, m: 10 };
+  let view = { ...first }, pend = { start: null, end: null }, applied = null;
+  window.__pend = pend;
+  const monthHtml = (y, m) => {
+    let html = '<div class="month" role="group" aria-label="' + y + ' ' + MONTHS[m - 1] + '"><h4>' + y + ' ' + MONTHS[m - 1] + '</h4><div class="days">';
+    for (let d = 1; d <= new Date(y, m, 0).getDate(); d += 1) {
+      const date = y + "-" + pad(m) + "-" + pad(d);
+      html += '<button type="button" class="day" data-date="' + date + '" aria-label="' + MONTHS[m - 1] + ' ' + d + '"><span class="n">' + d + '</span><span class="r">2 left</span></button>';
+    }
+    return html + "</div></div>";
+  };
+  const render = () => {
+    const next = view.m === 12 ? { y: view.y + 1, m: 1 } : { y: view.y, m: view.m + 1 };
+    $("months").innerHTML = monthHtml(view.y, view.m) + monthHtml(next.y, next.m);
+    $("prev").disabled = view.y === first.y && view.m === first.m;
+    $("apply").disabled = !(pend.start && pend.end);
+    $("sum").textContent = pend.start ? (pend.end ? pend.start + " to " + pend.end : pend.start + " - pick the last day") : "Pick the first day";
+    window.__pend = { ...pend };
+  };
+  const open = () => { if ($("pop").hidden) { pend = { start: applied ? applied.start : null, end: applied ? applied.end : null }; render(); $("pop").hidden = false; } };
+  $("from").addEventListener("click", open);
+  $("to").addEventListener("click", open);
+  $("prev").addEventListener("click", () => { view = view.m === 1 ? { y: view.y - 1, m: 12 } : { y: view.y, m: view.m - 1 }; render(); });
+  $("next").addEventListener("click", () => { view = view.m === 12 ? { y: view.y + 1, m: 1 } : { y: view.y, m: view.m + 1 }; render(); });
+  $("months").addEventListener("click", (event) => {
+    const day = event.target.closest(".day[data-date]");
+    if (!day) return;
+    const date = day.dataset.date;
+    if (!pend.start || pend.end || date <= pend.start) pend = { start: date, end: null }; else pend = { start: pend.start, end: date };
+    render();
+  });
+  $("apply").addEventListener("click", () => {
+    applied = { ...pend };
+    $("fromTxt").textContent = applied.start;
+    $("toTxt").textContent = applied.end;
+    $("pop").hidden = true;
+  });
+</script>`;
+await test("a_button_that_opens_a_dialog_says_the_name_of_the_dialog_it_opens", async () => {
+  const stay = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await stay.setContent(STAY);
+    const read = await readFields(stay);
+    const dialogOf = (handle) => read.actions.find((one) => one.handle === handle)?.dialog;
+    assert(dialogOf("#from") === "Stay dates" && dialogOf("#to") === "Stay dates", "both buttons name the dialog they open", read.actions);
+    assert(read.actions.every((one) => one.dialog === undefined || one.handle === "#from" || one.handle === "#to"), "no other button does", read.actions);
+    return `${dialogOf("#from")}`;
+  } finally { await stay.close(); }
+});
+await test("a_calendar_the_page_draws_in_a_dialog_is_no_list_of_buttons_and_the_button_that_applies_it_is_in_the_read", async () => {
+  const stay = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await stay.setContent(STAY);
+    await stay.click("#from");
+    const read = await readFields(stay);
+    assert(!read.actions.some((one) => /^(October|November|December) \d+$/.test(one.label)), "the days of the calendar are not listed as buttons", read.actions.map((one) => one.label));
+    assert(read.actions.some((one) => one.handle === "#apply" && one.disabled === true), "the dialog's button that applies the range is, and it is off until a range is picked", read.actions.map((one) => [one.handle, one.disabled]));
+    return `${read.actions.length} buttons`;
+  } finally { await stay.close(); }
+});
+await test("a_fill_given_a_date_for_a_button_that_opens_a_dialog_opens_it_pages_the_calendar_and_presses_the_day", async () => {
+  const stay = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await stay.setContent(STAY);
+    const read = await readFields(stay);
+    const filled = await fillBundle(stay, { "#from": "2026-11-20", "#to": "2026-12-04" }, read.fingerprint);
+    const pend = await stay.evaluate(() => window.__pend);
+    assert(pend.start === "2026-11-20" && pend.end === "2026-12-04", "the page has the range picked: the day of the month paged to, for each", { pend, results: filled.results });
+    assert(filled.results.every((one) => one.status === "unseen"), "what the dialog shows is not the date until it is applied: the fill says it cannot tell, and does not press again", filled.results);
+    const after = await readFields(stay);
+    assert(after.actions.find((one) => one.handle === "#apply")?.disabled === false, "and the button that applies the range is on", after.actions.map((one) => [one.handle, one.disabled]));
+    return JSON.stringify(pend);
+  } finally { await stay.close(); }
+});
+
 await browser.close();
 
 let failed = 0;

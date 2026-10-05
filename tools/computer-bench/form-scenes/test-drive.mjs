@@ -484,6 +484,73 @@ const SUGGEST_LIST = await scene("suggest-list", `<!doctype html><html lang="en"
   });
 </script>`, SUGGEST_FACTS, { who: "Kim", spot: "Pier 7", area: "Harbour road", memo: "Back door" });
 
+/* Dates the card gives that no field takes, and buttons the door says open a dialog (t-41720): the facts whose words begin with the dialog's name are its dates, each given to one of its buttons — the
+ * one whose words hold what the fact says besides the name, else the next in the page's order — by a fill, and the button of the dialog that turned on once both are picked is pressed. */
+const STAY_FACTS = [{ says: "Name", value: "Kim" }, { says: "Stay", value: "2026-11-20" }, { says: "Stay end", value: "2026-12-04" }];
+const STAY_DIALOG = await scene("stay-dialog", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="nm">Name</label> <input id="nm">
+  <div class="cap">Stay</div>
+  <div class="wrap">
+    <div class="trig">
+      <button type="button" id="from" aria-haspopup="dialog" aria-expanded="false"><span>Start date</span> <span id="fromTxt">Pick a date</span></button>
+      <button type="button" id="to" aria-haspopup="dialog" aria-expanded="false"><span>End date</span> <span id="toTxt">Pick a date</span></button>
+    </div>
+    <div id="pop" role="dialog" aria-label="Stay dates" hidden>
+      <div class="head"><button type="button" id="prev" aria-label="Earlier">‹</button><span id="sum"></span><button type="button" id="next" aria-label="Later">›</button></div>
+      <div id="months"></div>
+      <div class="foot"><button type="button" id="reset">Clear</button> <button type="button" id="apply" disabled>Done</button></div>
+    </div>
+  </div>
+  <button type="button" id="send">Submit</button>
+</form>
+<script>
+  const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const $ = (id) => document.getElementById(id);
+  const pad = (number) => String(number).padStart(2, "0");
+  const first = { y: 2026, m: 10 };
+  let view = { ...first }, pend = { start: null, end: null }, applied = null;
+  window.__pend = pend;
+  const monthHtml = (y, m) => {
+    let html = '<div class="month" role="group" aria-label="' + y + ' ' + MONTHS[m - 1] + '"><h4>' + y + ' ' + MONTHS[m - 1] + '</h4><div class="days">';
+    for (let d = 1; d <= new Date(y, m, 0).getDate(); d += 1) {
+      const date = y + "-" + pad(m) + "-" + pad(d);
+      html += '<button type="button" class="day" data-date="' + date + '" aria-label="' + MONTHS[m - 1] + ' ' + d + '"><span class="n">' + d + '</span><span class="r">2 left</span></button>';
+    }
+    return html + "</div></div>";
+  };
+  const render = () => {
+    const next = view.m === 12 ? { y: view.y + 1, m: 1 } : { y: view.y, m: view.m + 1 };
+    $("months").innerHTML = monthHtml(view.y, view.m) + monthHtml(next.y, next.m);
+    $("prev").disabled = view.y === first.y && view.m === first.m;
+    $("apply").disabled = !(pend.start && pend.end);
+    $("sum").textContent = pend.start ? (pend.end ? pend.start + " to " + pend.end : pend.start + " - pick the last day") : "Pick the first day";
+    window.__pend = { ...pend };
+  };
+  const open = () => { if ($("pop").hidden) { pend = { start: applied ? applied.start : null, end: applied ? applied.end : null }; render(); $("pop").hidden = false; } };
+  $("from").addEventListener("click", open);
+  $("to").addEventListener("click", open);
+  $("prev").addEventListener("click", () => { view = view.m === 1 ? { y: view.y - 1, m: 12 } : { y: view.y, m: view.m - 1 }; render(); });
+  $("next").addEventListener("click", () => { view = view.m === 12 ? { y: view.y + 1, m: 1 } : { y: view.y, m: view.m + 1 }; render(); });
+  $("months").addEventListener("click", (event) => {
+    const day = event.target.closest(".day[data-date]");
+    if (!day) return;
+    const date = day.dataset.date;
+    if (!pend.start || pend.end || date <= pend.start) pend = { start: date, end: null }; else pend = { start: pend.start, end: date };
+    render();
+  });
+  $("apply").addEventListener("click", () => {
+    applied = { ...pend };
+    $("fromTxt").textContent = applied.start;
+    $("toTxt").textContent = applied.end;
+    $("pop").hidden = true;
+  });
+
+  $("send").addEventListener("click", () => {
+    if (!applied) return;
+    window.__sceneResult = { name: $("nm").value, start: applied.start, end: applied.end };
+  });
+</script>`, STAY_FACTS, { name: "Kim", start: "2026-11-20", end: "2026-12-04" });
+
 /* A field the page answers about after a press, with a button of its own beside it: the door says whose the button is, and the driver presses it once and
  * reads the form again — the press that ends the form is made again after it. */
 const OWN = await scene("own", `<!doctype html><html lang="en"><meta charset="utf-8"><form id="f" onsubmit="return false">
@@ -521,7 +588,7 @@ const DRAWN = await scene("drawn", `<!doctype html><html lang="en"><meta charset
 const out = join(root, "rows.json");
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -706,6 +773,15 @@ await test("a driver gets the item of a list the page makes after the text chose
     assert(one.result.spot === "Pier 7" && one.result.area === "Harbour road", `the item whose line is the words of the card is the one chosen (${road})`, one.result);
   }
   return JSON.stringify(row("suggest-list", "verbs").result);
+});
+
+await test("a driver gives the dates of the card that no field takes to the buttons the door says open the dialog they belong to, and applies the range", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("stay-dialog", road);
+    assert(one && one.ok && one.pass, `the ${road} road gets both dates picked in the dialog and applied`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+    assert(one.result.start === "2026-11-20" && one.result.end === "2026-12-04", `the start goes to the start button and the end to the end button (${road})`, one.result);
+  }
+  return JSON.stringify(row("stay-dialog", "verbs").result);
 });
 
 await test("the recipe a driver presses a button inside a frame by is the one the skill teaches", () => {
