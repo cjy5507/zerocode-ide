@@ -1551,11 +1551,12 @@ const zcChosen = (record, asked) => {
   return pick && pick.selected ? true : undefined;
 };
 // What a box that shows its choice (a button that opens a list, a dropdown the page draws) shows is the page's
-// rendering of the choice, not the value: the words of another item shown whole say another is chosen; any other
-// words may be the asked item drawn shorter, and the door cannot see which (null).
+// rendering of the choice, not the value: nothing shown is not the asked value, the words of another item shown whole
+// say another is chosen; any other words may be the asked item drawn shorter — and a list drawn only while it is open
+// leaves no item to compare them with — so the door cannot see which (null).
 const zcRendered = (record, pick, now) => {
-  if (!pick || !now) return false;
-  return record.choices.some((choice) => choice !== pick && zcFold(choice.words) === now) ? false : null;
+  if (!now) return false;
+  return pick && record.choices.some((choice) => choice !== pick && zcFold(choice.words) === now) ? false : null;
 };
 // Whether a field holds what was asked: true; false; or null — what it shows differs from the words asked
 // and the page's own state does not say whether it is the same value.
