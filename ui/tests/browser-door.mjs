@@ -2119,17 +2119,19 @@ const ASIDE = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
   <div id="banner" role="alert"></div>
 </form>
 <script>
-  const $ = (id) => document.getElementById(id);
-  $("plate").addEventListener("change", (event) => {
-    $("count").textContent = event.target.value.length + "/10";
-    $("dietErr").textContent = "Choose a diet";
-  });
-  $("go").addEventListener("click", () => {
-    $("mailErr").textContent = "Check the email address";
-    $("dietErr").textContent = "Choose a diet";
-    $("cityErr").textContent = "Pick a city";
-    $("banner").textContent = "3 items need a fix";
-  });
+  (() => {
+    const $ = (id) => document.getElementById(id);
+    $("plate").addEventListener("change", (event) => {
+      $("count").textContent = event.target.value.length + "/10";
+      $("dietErr").textContent = "Choose a diet";
+    });
+    $("go").addEventListener("click", () => {
+      $("mailErr").textContent = "Check the email address";
+      $("dietErr").textContent = "Choose a diet";
+      $("cityErr").textContent = "Pick a city";
+      $("banner").textContent = "3 items need a fix";
+    });
+  })();
 </script>`;
 await test("text_that_appears_beside_no_single_field_is_said_apart_once_and_never_as_a_counter_or_a_fields_own_text", async () => {
   assert(typeof twin.pressInForm === "function", "the stand-in presses as the window does in a form that was read");
