@@ -12,13 +12,15 @@
  * `window.__personPhone` when a code goes to the person's phone.
  *
  * A model's round trip is one tool call. The roads:
- * - `verbs`: `fields`, one `fill` (its passes inside the call), `click` a
- *   button by the handle the read gave (a button inside a frame by an
- *   `eval`), a `handoff` for the person's code, and one read of the page
- *   after the submit;
+ * - `verbs`: `fields`, one `fill` (its passes inside the call), a `type …
+ *   --value-stdin` for each secret field the fill names, `click` a button by
+ *   the handle the read gave and the state the fill's answer ended with (a
+ *   button inside a frame by an `eval`), a `handoff` for the person's code,
+ *   and one read of the page after the submit;
  * - `script`: one `eval` a step that reads the fields, fills them by the
  *   words it read and presses the step's own "next" — never a send or a
- *   submit, which go by `click` — then the same hand-off and read;
+ *   submit, which go by `click` — by the buttons the fill's answer ended
+ *   with, a `type` for a secret field, then the same hand-off and read;
  * - `today`: not run but counted from the same pages: the door before this
  *   change, a look (`marks`) per screenful and a call per field — `type`,
  *   `click` for a choice or a box, an `eval` for a select and for a field
@@ -44,7 +46,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
-import { FORM_REQUEST, clickScript, evalFormScript, fieldsScript, fillPasses } from "../../../ui/tests/browser-scripts.mjs";
+import { FORM_REQUEST, clickScript, evalFormScript, fieldsScript, fillPasses, typeScript } from "../../../ui/tests/browser-scripts.mjs";
 import { serveScene as serve, wrongKeys } from "./scene-kit.mjs";
 
 // The floor of one model round trip, and what one costs in the person's
@@ -143,7 +145,10 @@ class Road {
     this.codeConfirmed = false;
     this.seen = [];
     this.beforeSend = new Set();
-    this.count = { roundTrips: 0, fields: 0, fill: 0, click: 0, eval: 0, handoff: 0, read: 0, fillPasses: 0, stale: 0 };
+    this.count = { roundTrips: 0, fields: 0, fill: 0, click: 0, eval: 0, type: 0, handoff: 0, read: 0, fillPasses: 0, stale: 0 };
+    // The secret fields typed on the setter road: a fill never reads one back,
+    // so a field already typed is no longer asked of it nor owed by it.
+    this.typed = new Set();
     this.form = null;
     this.byHandTried = new Set();
     this.scriptMs = [];
@@ -186,11 +191,30 @@ class Road {
     this.count.fillPasses += filled.passes;
     this.trail.push({ fill: filled.results.map((result) => `${result.label}:${result.status}`) });
     for (const result of filled.results) {
+      if (result?.status === "secret") await this.typeSecret(result.handle, bundle[result.handle]);
       if (result?.status !== "no_option") continue;
       if (result.widget) await this.byHand(result, bundle[result.handle]);
       else await this.openAndPress(result, bundle[result.handle]);
     }
     return filled;
+  }
+
+  /* A secret field: `fill` never writes one and says so (`secret`), naming
+   * the road — `type <label> <handle> --value-stdin`, the setter. A model
+   * takes it as the answer says: one `type` a field, with the fact's value,
+   * once. A field inside a frame has no selector to type by. */
+  async typeSecret(handle, value) {
+    if (typeof value !== "string" || this.typed.has(handle) || handle.includes(FORM_REQUEST.frameSeparator)) return false;
+    this.typed.add(handle);
+    this.trail.push({ type: handle });
+    const typed = await this.call("type", () => this.run(typeScript(handle, value, "setter")));
+    if (!typed.ok) throw new Error(`type refused: ${JSON.stringify(typed)}`);
+    return true;
+  }
+
+  /* What a read still asks of the fields: those not yet typed as secrets. */
+  untyped(fields) {
+    return fields.filter((field) => !this.typed.has(field.handle));
   }
 
   /* A thing the door could not fill — a field answered `no_option`, a thing
@@ -298,19 +322,30 @@ class Road {
     return result;
   }
 
-  /* The verbs road: read, fill, then the step's one press. A press the page
-   * refuses (a field it brought late is still empty) is read again. */
+  /* The verbs road: read, fill, then the step's one press — by the buttons
+   * the last fill's answer ended with (a button that turns on once the fields
+   * are right is on there), else by the read's. A press the page refuses (a
+   * field it brought late is still empty) is read again. */
   async verbs() {
     for (;;) {
       const read = await this.fields();
-      const { bundle, unplaced } = plan(read.fields, this.facts);
+      const { bundle, unplaced } = plan(this.untyped(read.fields), this.facts);
       if (this.price) this.priced += await this.today(read, bundle);
       if (await this.unknownRoad(read.unknowns, unplaced)) continue;
-      if (Object.keys(bundle).length && (await this.fill(bundle)).stale) continue;
+      let actions = read.actions;
+      if (Object.keys(bundle).length) {
+        const filled = await this.fill(bundle);
+        if (filled.stale) continue;
+        if (filled.actions.length) actions = filled.actions;
+      }
       const owed = await this.code(read.fields, bundle);
       if (owed && this.price) this.priced += 1;
-      if (owed && (await this.fill(owed)).stale) continue;
-      if (await this.step(read.actions)) return this.done();
+      if (owed) {
+        const filled = await this.fill(owed);
+        if (filled.stale) continue;
+        if (filled.actions.length) actions = filled.actions;
+      }
+      if (await this.step(actions)) return this.done();
     }
   }
 
@@ -382,12 +417,18 @@ class Road {
       const intentOf = ${intentOf.toString()};
       const facts = __FACTS__;
       const turn = __TURN__;
+      const typed = __TYPED__;
       const read = zerocode.fields();
-      const { bundle, unplaced } = plan(read.fields, facts);
-      const filled = Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: read.fields
+      const fields = read.fields.filter((field) => !typed.includes(field.handle));
+      const { bundle, unplaced } = plan(fields, facts);
+      const filled = Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: fields
         .filter((field) => field.required && (field.value === "" || field.value === false)) };
-      const clean = filled.results.every((result) => took(result.status)) && !filled.left.length;
-      const live = read.actions.filter((action) => !action.disabled);
+      const left = filled.left.filter((field) => !typed.includes(field.handle));
+      const secrets = filled.results.filter((result) => result.status === "secret")
+        .map((result) => ({ handle: result.handle, value: bundle[result.handle] }));
+      const clean = filled.results.every((result) => took(result.status)) && !left.length;
+      const actions = filled.actions && filled.actions.length ? filled.actions : read.actions;
+      const live = actions.filter((action) => !action.disabled);
       const inFrame = (action) => action.handle.includes(${JSON.stringify(FORM_REQUEST.frameSeparator)});
       const confirm = turn.confirm && clean
         ? live.find((action) => !inFrame(action) && INTENT.confirm.includes(fold(action.label))) : null;
@@ -398,15 +439,16 @@ class Road {
       if (pressNext) document.querySelector(next.handle).click();
       const hand = filled.results.filter((result) => result.status === "no_option")
         .map((result) => ({ ...result, asked: bundle[result.handle] }));
-      return { results: filled.results.map((result) => result.label + ":" + result.status), left: filled.left,
-        actions: read.actions, pressedNext: pressNext, hand, unknowns: read.unknowns, unplaced, clean,
+      return { results: filled.results.map((result) => result.label + ":" + result.status), left,
+        actions, pressedNext: pressNext, hand, secrets, unknowns: read.unknowns, unplaced, clean,
         confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, label: field.label,
           value: field.value, required: field.required })) };
     })()`;
     for (;;) {
       const turn = { owed: this.codeTurn, confirm: Boolean(this.codeField) && !this.codeConfirmed };
       const source = evalFormScript(STEP.replace("__FACTS__", () => JSON.stringify(this.facts))
-        .replace("__TURN__", () => JSON.stringify(turn)));
+        .replace("__TURN__", () => JSON.stringify(turn))
+        .replace("__TYPED__", () => JSON.stringify([...this.typed])));
       const answer = await this.call("eval", () => this.run(source));
       if (!answer.ok) throw new Error(`eval refused: ${JSON.stringify(answer)}`);
       const said = answer.value;
@@ -417,6 +459,7 @@ class Road {
         if (result.widget) await this.byHand(result, result.asked);
         else await this.openAndPress(result, result.asked);
       }
+      for (const secret of said.secrets || []) await this.typeSecret(secret.handle, secret.value);
       if (said.pressedNext || said.confirmed) continue;
       if (await this.unknownRoad(said.unknowns, said.unplaced)) continue;
       if (await this.code(said.fields, said.bundle)) continue;
@@ -504,7 +547,7 @@ try {
     for (const road of ["verbs", "script"]) {
       const row = await drive(browser, folder, road);
       rows.push(row);
-      console.log(`DRIVE ${row.scene} ${row.road} ok=${row.ok} roundTrips=${row.roundTrips} fields=${row.fields} fill=${row.fill} click=${row.click} eval=${row.eval} handoff=${row.handoff} passes=${row.fillPasses} callMs p50=${row.callMsP50} max=${row.callMsMax}${row.stuck ? " stuck=" + row.stuck : ""}${row.wrong?.length ? " wrong=" + row.wrong.join(",") : ""}`);
+      console.log(`DRIVE ${row.scene} ${row.road} ok=${row.ok} roundTrips=${row.roundTrips} fields=${row.fields} fill=${row.fill} click=${row.click} eval=${row.eval} type=${row.type} handoff=${row.handoff} passes=${row.fillPasses} callMs p50=${row.callMsP50} max=${row.callMsMax}${row.stuck ? " stuck=" + row.stuck : ""}${row.wrong?.length ? " wrong=" + row.wrong.join(",") : ""}`);
     }
     const today = await countToday(browser, folder);
     rows.push(today);
