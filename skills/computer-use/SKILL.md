@@ -222,7 +222,13 @@ One step can also be one script: an `eval` that names `zerocode.` gets
 `zerocode.fields()` (the same read) and `zerocode.fill({handle: value})`
 (one pass of the same fill), so the script reads the step, fills it by the
 words it read, checks what is left and presses the step's own button — one
-round trip a step. Send it on stdin so the person's details stay off argv:
+round trip a step. Send it on stdin so the person's details stay off argv.
+A script is a record of what it carries: write it after the read of the step
+(`fields`, or the read the last script returned) and put in it the values of the
+fields that read shows and does not say are secret (`= (가림)`) — never a secret
+field's value, and nothing for a step you have not read; the secret fields are
+typed with `type`. A script that ends by returning `zerocode.fields()` hands you
+the read of the page it stopped on, to write the next one from:
 
 ```text
 zerocode-browser eval <pane-label> --value-stdin <<'JS'
@@ -234,7 +240,7 @@ zerocode-browser eval <pane-label> --value-stdin <<'JS'
   if (!step.stale && step.results.every((r) => r.status === "set" || r.status === "same") && !step.left.length && next) {
     document.querySelector(next.handle).click();   // a step's own button — never a payment or a send
   }
-  return { results: step.results, left: step.left, error: document.querySelector("[role=alert]")?.textContent };
+  return { results: step.results, left: step.left, error: document.querySelector("[role=alert]")?.textContent, form: zerocode.fields() };
 })()
 JS
 ```

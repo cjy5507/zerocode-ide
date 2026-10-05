@@ -12,15 +12,16 @@
  * `window.__personPhone` when a code goes to the person's phone.
  *
  * A model's round trip is one tool call. The roads:
- * - `verbs`: `fields`, one `fill` (its passes inside the call), a `type …
- *   --value-stdin` for each secret field the fill names, `click` a button by
+ * - `verbs`: `fields`, one `fill` of the fields the read does not say are secret (its passes inside the call), a `type …
+ *   --value-stdin` for each field the read says is secret (`masked`), `click` a button by
  *   the handle the read gave and the state the fill's answer ended with (a
- *   button inside a frame by an `eval`), a `handoff` for the person's code,
- *   and one read of the page after the submit;
- * - `script`: one `eval` a step that reads the fields, fills them by the
- *   words it read and presses the step's own "next" — never a send or a
+ *   button inside a frame by an `eval`), a `handoff` — the person types the code the phone got into the field the call
+ *   names, and the call says no more —, and one read of the page after the submit;
+ * - `script`: a `fields` read of the step, then one `eval` a step that fills what that read gave — the fields it does not say
+ *   are secret, none of a step it has not come to — and presses the step's own "next" — never a send or a
  *   submit, which go by `click` — by the buttons the fill's answer ended
- *   with, a `type` for a secret field, then the same hand-off and read;
+ *   with, and ends by returning the read of the page it stands on, from which the next step is written (read again
+ *   when the page had not yet changed); a `type` for a secret field, then the same hand-off and read;
  * - `today`: not run but counted from the same pages: the door before this
  *   change, a look (`marks`) per screenful and a call per field — `type`,
  *   `click` for a choice or a box, an `eval` for a select and for a field
@@ -33,7 +34,7 @@
  * button that moves a form on is chosen by what the door said of the buttons
  * (the one the page declares a submit, else the one the fill turned on, else the
  * page's last), a code's own buttons are read from a short list of words, and
- * the person's code goes, after a send, to the field whose words name a
+ * the person's code is typed by the person, after a send, into the field whose words name a
  * one-time code or that the send brought, required or not; and nothing
  * about any scene — no handle, label, order or step is written here.
  * With `--door-text PATH` (the built `door_text` example) each run also keeps a
@@ -436,6 +437,8 @@ function thingOf(things, said) {
   return near.length === 1 ? near[0] : null;
 }
 
+// The pause between two keys of the person's typing, as the stand-in window's person keeps it (door-desk.mjs).
+const TYPE_DELAY_MS = 30;
 // A value shorter than this is no mark to look for in a text: two digits stand in every number.
 const LEAK_MIN = 3;
 
@@ -504,6 +507,13 @@ class Road {
     // what the door spends reading the page after it writes.
     this.kindMs = {};
     this.trail = [];
+    // The person's hands, given by the harness: they type the code into the field a hand-off names. The road holds no code.
+    this.person = null;
+    // The script road: the read the last script ended with, when the step after it may be written from it; and how many scripts in a row found the page not the one they were written for.
+    this.carried = null;
+    this.drifts = 0;
+    // The last read a `fields` made, and the round trip it was: a read that was the road's last round trip is still the page.
+    this.latest = null;
   }
 
   async call(kind, run) {
@@ -540,12 +550,18 @@ class Road {
     if (this.ask) this.said.push({ at: this.count.roundTrips, ...entry });
   }
 
+  /* What a read shows is the form the road stands on: its fingerprint, its fields and its buttons. */
+  take(read) {
+    this.form = read.fingerprint;
+    this.seen = read.fields;
+    this.buttons = read.actions || [];
+  }
+
   async fields() {
     const read = await this.call("fields", () => this.run(fieldsScript()));
     if (!read.ok) throw new Error(`fields refused: ${JSON.stringify(read)}`);
-    this.form = read.value.fingerprint;
-    this.seen = read.value.fields;
-    this.buttons = read.value.actions || [];
+    this.take(read.value);
+    this.latest = { read: read.value, at: this.count.roundTrips };
     if (this.ask) this.note({ verb: "fields", words: this.ask({ op: "fields", label: "browser-1", json: false, read: read.value }).words });
     return read.value;
   }
@@ -611,10 +627,24 @@ class Road {
   }
 
   /* The plan of a read: the facts to the fields of the whole form — the fields already typed as secrets are part of the form a value is cut across (a number in four boxes, two of them typed, is still cut across four) — and,
-   * of what is to be written, not the fields already typed. */
+   * of what is to be written, not the fields already typed, in two: the bundle `fill` writes — the fields the read does not say are secret — and the secrets, each to be typed (`masked`: the read says so).
+   * The value of a secret field goes into no fill and no script. */
   planOf(fields) {
     const planned = plan(fields, this.facts);
-    return { ...planned, bundle: Object.fromEntries(Object.entries(planned.bundle).filter(([handle]) => !this.typed.has(handle))) };
+    const masked = new Set(fields.filter((field) => field.masked).map((field) => field.handle));
+    const bundle = {}, secrets = {};
+    for (const [handle, value] of Object.entries(planned.bundle)) {
+      if (this.typed.has(handle)) continue;
+      (masked.has(handle) ? secrets : bundle)[handle] = value;
+    }
+    return { ...planned, bundle, secrets };
+  }
+
+  /* The secrets of a plan, each typed by one `type` held to the form the plan was read from. True when any was typed. */
+  async typeSecrets(secrets, expect = this.form) {
+    let typed = false;
+    for (const [handle, value] of Object.entries(secrets)) if (await this.typeSecret(handle, value, expect)) typed = true;
+    return typed;
   }
 
   /* A thing the door could not fill — a field answered `no_option`, a thing
@@ -881,12 +911,15 @@ class Road {
     return scrolled;
   }
 
-  async handoff() {
-    const code = await this.call("handoff", () => this.page.evaluate(() => window.__personPhone || null));
-    if (!code) throw new Error("stuck: the person's phone got no code");
-    this.watch.add(code);
+  /* The person's turn: they read the code the page sent to the phone and type it into the field the call names. The call says the field and no more, its answer says only that it was typed, and the
+   * road never holds the code: it is in no fill and no script, and in no record. */
+  async handoff(handle) {
+    if (!this.person) throw new Error("stuck: no person to hand the code to");
+    this.note({ verb: "handoff", handle });
+    this.trail.push({ handoff: handle });
+    await this.call("handoff", () => this.person(handle));
     this.codeTurn = false;
-    return code;
+    this.typed.add(handle);
   }
 
   async done() {
@@ -918,9 +951,9 @@ class Road {
       const read = await this.fields();
       if (await this.finished()) return this.done();
       if (await this.scrollRoad(read)) continue;
-      const { bundle, unplaced, ambiguous } = this.planOf(read.fields);
+      const { bundle, secrets, unplaced, ambiguous } = this.planOf(read.fields);
       if (ambiguous.length) throw new Error(ambiguousWords(ambiguous));
-      if (this.price) this.priced += await this.today(read, bundle);
+      if (this.price) this.priced += await this.today(read, { ...bundle, ...secrets });
       if (await this.unknownRoad(read.unknowns, unplaced)) continue;
       if (await this.dialogRoad(unplaced, read.actions)) continue;
       let actions = read.actions;
@@ -930,35 +963,32 @@ class Road {
         if (await this.openRoad(filled.results, bundle, filled.actions.length ? filled.actions : read.actions)) continue;
         if (filled.actions.length) actions = filled.actions;
       }
-      const owed = await this.code(read.fields, bundle);
-      if (owed && this.price) this.priced += 1;
-      if (owed) {
-        const filled = await this.fill(owed);
-        if (filled.stale || filled.byHand || filled.changed) continue;
-        if (filled.actions.length) actions = filled.actions;
+      // The fields the read says are secret are typed after the fill, each by a `type`, and the form is read again after them.
+      if (await this.typeSecrets(secrets)) continue;
+      if (await this.code(read.fields, bundle)) {
+        if (this.price) this.priced += 1;
+        continue;
       }
-      if (await this.step(actions, read.actions, [...Object.keys(bundle), ...Object.keys(owed || {})])) return this.done();
+      if (await this.step(actions, read.actions, [...Object.keys(bundle), ...Object.keys(secrets)])) return this.done();
     }
   }
 
-  /* After a send: the person reads the code off the phone, and it goes into
+  /* After a send: the person reads the code off the phone and types it into
    * the empty field no fact fills that asks for it — whether or not the page
    * marks it required: the one whose words name a one-time code, else the one
    * the send brought, else the one the page requires. A field the card has
-   * no value for is never made up. Answers the bundle that writes it, or
-   * null. */
+   * no value for is never made up. True when the person typed it. */
   async code(fields, bundle) {
-    if (!this.codeSent || !this.codeTurn) return null;
-    const open = fields.filter((field) => field.value === "" && !(field.handle in bundle)
+    if (!this.codeSent || !this.codeTurn) return false;
+    const open = fields.filter((field) => field.value === "" && !this.typed.has(field.handle) && !(field.handle in bundle)
       && !plan([field], this.facts).bundle[field.handle]);
     const asks = open.find((field) => INTENT.oneTime.some((word) => fold(field.label).includes(word)))
       || open.find((field) => !this.beforeSend.has(field.handle))
       || open.find((field) => field.required);
-    if (!asks) return null;
-    const code = await this.handoff();
+    if (!asks) return false;
+    await this.handoff(asks.handle);
     this.codeField = asks.handle;
-    this.facts.push({ says: asks.label, value: code });
-    return { [asks.handle]: code };
+    return true;
   }
 
   /* The step's press: a code to send while one is owed (`codeSender`), a code written
@@ -1009,101 +1039,104 @@ class Road {
     return false;
   }
 
-  /* The script road: one eval a step reads, fills by the words it read and
-   * presses the button that moves the step on (`advancing`) — or, while the person's code is owed and
-   * the step can send one, holds it; with a code just written, presses the
-   * code's own confirm button first. Sends, and a button the page declares a submit, go by click. */
+  /* The script road: a read of the step, then one eval a step that fills what that read gave and presses the button that moves the step on (`advancing`) — or, while the person's code is owed and
+   * the step can send one, holds it; with a code just written, presses the code's own confirm button first. Sends, and a button the page declares a submit, go by click. The expression holds the
+   * values of the fields the read showed and no more: never the value of a field the read says is secret, never a value for a step the form has not come to — those are typed, by `type`, once the
+   * read shows the field. It is written for the step it read: a page that is another step by the time it runs (a field it brought since) is handed back, with nothing written or pressed. It ends by
+   * returning the read of the page it ended on, from which the next step is written: a page that had not yet changed is read again, after its time. */
   async script() {
     const STEP = `(() => {
       const fold = ${fold.toString()};
-      const PART = ${PART.toString()};
-      const words = ${words.toString()};
-      const UNITS = ${JSON.stringify(UNITS)};
-      const unitOf = ${unitOf.toString()};
-      const unitGroups = ${unitGroups.toString()};
-      const captionGroups = ${captionGroups.toString()};
-      const momentOf = ${momentOf.toString()};
-      const splitAtJoints = ${splitAtJoints.toString()};
-      const kindFits = ${kindFits.toString()};
-      const plan = ${plan.toString()};
       const took = ${took.toString()};
       const INTENT = ${JSON.stringify(INTENT)};
       const intentOf = ${intentOf.toString()};
       const codeSender = ${codeSender.toString()};
       const codeConfirmer = ${codeConfirmer.toString()};
       const advancing = ${advancing.toString()};
-      const dateLike = ${dateLike.toString()};
-      const facts = __FACTS__;
+      const bundle = __BUNDLE__;
       const turn = __TURN__;
-      const typed = __TYPED__;
       const read = zerocode.fields();
-      const fields = read.fields.filter((field) => !typed.includes(field.handle));
-      // The fields already typed are part of the form a value is cut across, and no part of what is written again.
-      const planned = plan(read.fields, facts);
-      const bundle = Object.fromEntries(Object.entries(planned.bundle).filter(([handle]) => !typed.includes(handle)));
-      const { unplaced, ambiguous } = planned;
-      // A card that does not tell which of two fields a fact is for stops the step before anything is written or pressed.
-      const stop = ambiguous.length > 0;
-      const filled = !stop && Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: fields
+      // The page must be the step the bundle was written for: a field it has brought since is read first, and nothing is written or pressed.
+      if (turn.print && read.fingerprint !== turn.print) return { changed: true, after: read };
+      const filled = Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: read.fields
         .filter((field) => field.required && (field.value === "" || field.value === false)) };
-      const left = filled.left.filter((field) => !typed.includes(field.handle));
-      // Which fields the fill named for typing — the handles only: the page's answer
-      // redacts any key that looks like a secret, and no value goes back through it.
-      const viaType = filled.results.filter((result) => result.status === "secret").map((result) => result.handle);
-      const clean = filled.results.every((result) => took(result.status)) && !left.length;
+      const left = filled.left.filter((field) => !turn.typed.includes(field.handle));
+      const clean = filled.results.every((result) => took(result.status)) && !left.length && !turn.secrets.length;
       // The fill's own values brought a field: the form is not the one read, and it is read again before a press.
       const moved = Object.keys(bundle).length > 0 && Boolean(filled.fingerprint) && filled.fingerprint !== read.fingerprint;
       const actions = filled.actions && filled.actions.length ? filled.actions : read.actions;
       const live = actions.filter((action) => !action.disabled);
       const inFrame = (action) => action.handle.includes(${JSON.stringify(FORM_REQUEST.frameSeparator)});
-      const confirm = turn.confirm && clean && !moved && !stop ? codeConfirmer(live.filter((action) => !inFrame(action)), turn.codeField) : null;
+      const confirm = turn.confirm && clean && !moved ? codeConfirmer(live.filter((action) => !inFrame(action)), turn.codeField) : null;
       if (confirm) document.querySelector(confirm.handle).click();
       // The code is owed while the step can send one, and once it was sent until it is written.
-      const hold = turn.owed && (turn.sent || codeSender(live, read.fields, Object.keys(bundle)) !== null);
+      const hold = turn.owed && (turn.sent || codeSender(live, read.fields, turn.written) !== null);
       // The dates of the card that no field takes are the buttons' that open a dialog (the driver gives them once and then says the dialog's name in turn.dialogs): the step's own button waits for them.
-      const owesDates = unplaced.some((fact) => dateLike(fact.value)) && actions.some((action) => action.dialog && !action.disabled && !turn.dialogs.includes(action.dialog));
-      const next = advancing(actions, read.actions, Object.keys(bundle));
-      const pressNext = clean && !moved && !stop && !confirm && !hold && !owesDates && !!next && !next.disabled && !next.submit && !inFrame(next);
+      const owesDates = turn.dates && actions.some((action) => action.dialog && !action.disabled && !turn.dialogs.includes(action.dialog));
+      const next = advancing(actions, read.actions, turn.written);
+      const pressNext = clean && !moved && !confirm && !hold && !owesDates && !!next && !next.disabled && !next.submit && !inFrame(next);
       if (pressNext) document.querySelector(next.handle).click();
       const hand = filled.results.filter((result) => result.status === "no_option")
         .map((result) => ({ ...result, asked: bundle[result.handle] }));
       const fresh = [].concat(filled.outside || [], filled.alerts || [], ...filled.results.map((result) => result.fresh || []));
+      let after = null;
+      try { after = zerocode.fields(); } catch (_) { after = null; }
       return { results: filled.results.map((result) => result.label + ":" + result.status), left,
         actions, before: read.actions.map((action) => ({ handle: action.handle, disabled: action.disabled })), fresh, pressedNext: pressNext, pressedHandle: pressNext ? next.handle : null,
-        print: read.fingerprint, hand, viaType, unknowns: read.unknowns, unplaced, ambiguous, clean, moved,
+        print: read.fingerprint, hand, clean, moved,
         readOnly: filled.results.filter((result) => result.status === "read_only" && result.opens)
           .map((result) => ({ handle: result.handle, status: result.status, opens: result.opens })),
-        scrollBoxes: read.scrollBoxes || [],
-        confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, kind: field.kind, label: field.label,
-          value: field.value, required: field.required, disabled: field.disabled, hint: field.hint })) };
+        confirmed: !!confirm, after };
     })()`;
     for (;;) {
+      const read = this.carried || (this.latest && this.latest.at === this.count.roundTrips ? this.latest.read : await this.fields());
+      if (this.carried) this.take(read);
+      this.carried = null;
+      if (await this.finished()) return this.done();
+      if (await this.scrollRoad(read)) continue;
+      const planned = this.planOf(read.fields);
+      if (planned.ambiguous.length) throw new Error(ambiguousWords(planned.ambiguous));
+      const written = [...Object.keys(planned.bundle), ...Object.keys(planned.secrets)];
       const turn = { owed: this.codeTurn, sent: this.codeSent, confirm: Boolean(this.codeField) && !this.codeConfirmed, codeField: this.codeField,
-        dialogs: [...this.byHandTried].filter((key) => key.startsWith("dialog:")).map((key) => key.slice("dialog:".length)) };
-      const expression = STEP.replace("__FACTS__", () => JSON.stringify(this.facts))
-        .replace("__TURN__", () => JSON.stringify(turn))
-        .replace("__TYPED__", () => JSON.stringify([...this.typed]));
+        dialogs: [...this.byHandTried].filter((key) => key.startsWith("dialog:")).map((key) => key.slice("dialog:".length)),
+        dates: planned.unplaced.some((fact) => dateLike(fact.value)), typed: [...this.typed], secrets: Object.keys(planned.secrets), written,
+        // A script that found the page another step right after one that did is no longer held to the step it read: a page whose words change by themselves would never be caught up with.
+        print: this.drifts < 1 ? read.fingerprint : null };
+      const expression = STEP.replace("__BUNDLE__", () => JSON.stringify(planned.bundle)).replace("__TURN__", () => JSON.stringify(turn));
       this.send(expression);
-      const source = evalFormScript(expression);
-      const answer = await this.call("eval", () => this.run(source));
+      const answer = await this.call("eval", () => this.run(evalFormScript(expression)));
       if (!answer.ok) throw new Error(`eval refused: ${JSON.stringify(answer)}`);
       const said = answer.value;
-      this.seen = said.fields;
+      if (said.changed) {
+        this.drifts += 1;
+        this.trail.push({ script: "page_changed" });
+        this.carried = said.after || null;
+        continue;
+      }
+      this.drifts = 0;
       if (await this.finished()) return this.done();
-      if (said.ambiguous.length) throw new Error(ambiguousWords(said.ambiguous));
+      const after = said.after || null;
+      if (after) this.take(after);
       if (turn.confirm && said.clean) this.codeConfirmed = true;
       this.trail.push({ script: said.results, pressedNext: said.pressedNext, confirmed: said.confirmed });
-      this.note({ verb: "eval", results: said.results, left: said.left.map((field) => `${field.handle} ${field.label}`),
-        buttons: said.actions.map((action) => `${action.handle} ${action.label}${action.disabled ? " (꺼짐)" : ""}`), pressedNext: said.pressedNext });
+      this.note({ verb: "eval", sent: planned.bundle, results: said.results, left: said.left.map((field) => `${field.handle} ${field.label}`),
+        buttons: said.actions.map((action) => `${action.handle} ${action.label}${action.disabled ? " (꺼짐)" : ""}`), pressedNext: said.pressedNext,
+        ...(this.ask && after ? { form: this.ask({ op: "fields", label: "browser-1", json: false, read: after }).words } : {}) });
+      // What the road does by hand — a calendar, a thing of no kind — leaves the page as the answer did not say it: it is read again.
+      let byHand = false;
       for (const result of said.hand || []) {
+        byHand = true;
         if (result.widget) await this.byHand(result, result.asked);
         else await this.openAndPress(result, result.asked);
       }
-      // The value is the card's: the driver reads it where it stands, not from the page's answer.
-      const owedTyping = this.planOf(said.fields).bundle;
-      for (const handle of said.viaType || []) await this.typeSecret(handle, owedTyping[handle], said.print);
-      if (await this.scrollRoad({ fields: said.fields, scrollBoxes: said.scrollBoxes })) continue;
-      if (said.moved) continue;
+      const typed = await this.typeSecrets(planned.secrets, after ? after.fingerprint : read.fingerprint);
+      // The read the next step may be written from: the one the answer ended with, unless the road has done something by hand since.
+      const next = byHand ? null : after;
+      // A secret typed may turn a button on: the step is run again, which reads its own buttons, before anything is pressed.
+      if (said.moved || typed) {
+        this.carried = next;
+        continue;
+      }
       if (said.pressedNext || said.confirmed) {
         if (said.pressedNext) {
           const key = `${said.print}|${said.pressedHandle}`;
@@ -1112,20 +1145,24 @@ class Road {
           this.waits = 0;
           this.justPressed = said.pressedHandle;
         }
+        // A press that moved the page on is read in the answer; one after which the page is the same is read again, after the page's time.
+        this.carried = next && next.fingerprint !== said.print ? next : null;
         continue;
       }
-      if (await this.openRoad(said.readOnly, said.bundle || {}, said.actions)) continue;
-      if (await this.dialogRoad(said.unplaced, said.actions)) continue;
-      if (await this.unknownRoad(said.unknowns, said.unplaced)) continue;
-      if (await this.code(said.fields, said.bundle)) continue;
+      if (await this.openRoad(said.readOnly, planned.bundle, said.actions)) continue;
+      if (await this.dialogRoad(planned.unplaced, said.actions)) continue;
+      if (await this.unknownRoad(read.unknowns, planned.unplaced)) continue;
+      if (await this.code((after || read).fields, planned.bundle)) continue;
       // What is left or did not take is tried again once; the same answer twice is the page's, and the step goes on.
       const sig = JSON.stringify([said.results, said.left.map((field) => field.handle)]);
       const again = sig === this.lastSig;
       this.lastSig = sig;
-      if (!again && (said.left.length || said.results.some((result) => !/:(set|same|unseen)$/.test(result)))) continue;
+      if (!again && (said.left.length || said.results.some((result) => !/:(set|same|unseen)$/.test(result)))) {
+        this.carried = next;
+        continue;
+      }
       this.fresh = said.fresh;
-      this.form = said.print;
-      if (await this.step(said.actions, said.before, Object.keys(said.bundle || {}))) return this.done();
+      if (await this.step(said.actions, said.before, written)) return this.done();
     }
   }
 
@@ -1148,12 +1185,29 @@ class Road {
   }
 }
 
+/* The person's hands, the harness's own as the window's hand-off is the product's: the code the page sent to the phone is read off it and typed into the field the call names, key by key,
+ * in the page — as a person types, so a box that moves the caret on by itself does. The road is told that the field was typed and nothing of the code; the watch is told the code. A field
+ * inside a frame of the page's own origin is typed through the frame (`#frame >> #field`). */
+async function personTypes(page, handle, watch) {
+  const code = await page.evaluate(() => window.__personPhone || null);
+  if (!code) throw new Error("stuck: the person's phone got no code");
+  watch.add(code);
+  const parts = handle.split(FORM_REQUEST.frameSeparator);
+  let scope = page;
+  for (const frame of parts.slice(0, -1)) scope = scope.frameLocator(frame);
+  const field = scope.locator(parts[parts.length - 1]);
+  await field.focus();
+  await field.fill("");
+  await page.keyboard.type(code, { delay: TYPE_DELAY_MS });
+}
+
 async function drive(browser, folder, roadName) {
   const { card, expected, made, shapes } = await readScene(folder);
   const site = await serve(folder);
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const watch = new Watch();
   const road = new Road(page, card, roadName, watch);
+  road.person = (handle) => personTypes(page, handle, watch);
   road.ask = doorWords;
   const began = performance.now();
   let result = null, stuck = null;
@@ -1202,7 +1256,9 @@ async function countToday(browser, folder) {
   const card = JSON.parse(await readFile(join(folder, "card.json"), "utf8"));
   const site = await serve(folder);
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-  const road = new Road(page, card, "today");
+  const watch = new Watch();
+  const road = new Road(page, card, "today", watch);
+  road.person = (handle) => personTypes(page, handle, watch);
   road.price = true;
   road.priced = 0;
   let stuck = null;
