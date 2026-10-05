@@ -297,6 +297,8 @@ function plan(fields, facts) {
     if (!byWords.has(key)) byWords.set(key, []);
     byWords.get(key).push(field);
   }
+  // The words of every fact: a field whose words are another fact's words, whole, is that fact's — a fact whose words only some fields' words hold does not take it.
+  const owned = new Set(facts.map((fact) => fold(fact.says)));
   const chips = fields.filter((field) => field.kind === "chips");
   const wanted = new Map();
   const optionOf = (said) => {
@@ -344,7 +346,7 @@ function plan(fields, facts) {
     }
     let group = byWords.get(said);
     if (!group) {
-      const near = [...byWords.entries()].filter(([key]) => key && (key.includes(said) || said.includes(key)));
+      const near = [...byWords.entries()].filter(([key]) => key && (key.includes(said) || said.includes(key)) && !owned.has(key));
       if (near.length === 1) group = near[0][1];
       else if (near.length > 1) {
         // One item that two fields answer to: a number goes to the field that takes numbers, a true or false to a
