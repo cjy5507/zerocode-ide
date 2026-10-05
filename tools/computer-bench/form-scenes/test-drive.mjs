@@ -6,7 +6,11 @@
  * teaches — then the step goes on. The button that moves a step on is chosen by what
  * the door said of the buttons (t-41656) — a page's own submit, the one the fill turned on, the
  * page's last — and waited for, a fixed number of times, while it is off and the door has said
- * new text; a group of chips is written with fill. Both roads of the driver, the verbs and the
+ * new text; a group of chips is written with fill. A value the page splits across fields is cut at the symbols
+ * the door says stand between the parts, a date and a time go to parts the page names by units, a fact that names
+ * two fields is told by the kind of field its value fits (and a card that does not tell is stopped on), a field the
+ * door says has new text after a press is given its own button once, and a field whose read-back the door cannot tell
+ * is not written again (t-41720). Both roads of the driver, the verbs and the
  * script, are held to all of it. The driver's row and a person's road are held to the
  * oracle's three verdicts, said side by side, and to keeping the page's whole
  * result, so any verdict can be counted again later.
@@ -227,10 +231,108 @@ const LEFT_OVER = await scene("left-over", `<!doctype html><html lang="en"><meta
   document.getElementById("go").addEventListener("click", () => { window.__sceneResult = { name: document.getElementById("name").value }; });
 </script>`, [{ says: "Name", value: "Kim" }], { name: "Kim" });
 
+/* A value the page splits across fields (t-41720): the door says the symbol the page draws between the parts, and the driver cuts the value
+ * there — an address into a name, a symbol, a domain text and a list of domains (the list takes the rest when it has it, and the page writes
+ * the text), and a serial of letters and numbers into three boxes. */
+const JOINTS = await scene("joints", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="row"><span>Contact</span> <input id="who" size="12"><span class="sep">@</span><input id="site" size="12" placeholder="Own domain">
+    <select id="pick"><option value="">Own domain</option><option value="mail.test">mail.test</option><option value="post.test">post.test</option></select></div>
+  <div class="row"><span>Serial</span> <input id="s1" size="2"> - <input id="s2" size="2"> - <input id="s3" size="2"></div>
+  <button type="button" id="go">Send</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  $("pick").addEventListener("change", () => { $("site").value = $("pick").value; $("site").readOnly = Boolean($("pick").value); });
+  $("go").addEventListener("click", () => {
+    window.__sceneResult = { contact: $("who").value + "@" + $("site").value, serial: [$("s1").value, $("s2").value, $("s3").value].join("-") };
+  });
+</script>`, [{ says: "Contact", value: "ann@mail.test" }, { says: "Serial", value: "AB-12-CD" }],
+{ contact: "ann@mail.test", serial: "AB-12-CD" });
+
+/* A date and a time written into parts the page names by units — in English and in Korean, with a half of the day to press. */
+const numbers = (from, to, word = "") => Array.from({ length: to - from + 1 }, (_, at) => `<option>${from + at}${word}</option>`).join("");
+const UNITS = await scene("units", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="row"><span>Born</span> <select id="by" aria-label="Year"><option value="">-</option><option>1988</option><option>1990</option><option>1992</option></select>
+    <select id="bm" aria-label="Month"><option value="">-</option>${numbers(1, 12)}</select><select id="bd" aria-label="Day"><option value="">-</option>${numbers(1, 31)}</select></div>
+  <div class="row"><span>Alarm</span> <div id="ap" role="radiogroup" aria-label="AM or PM"><button type="button" role="radio" aria-checked="false">AM</button><button type="button" role="radio" aria-checked="false">PM</button></div>
+    <select id="ah" aria-label="Hour"><option value="">-</option>${numbers(1, 12)}</select><select id="am" aria-label="Minute"><option value="">-</option><option>00</option><option>05</option><option>30</option></select></div>
+  <div class="row"><span>기상</span> <select id="kh" aria-label="시"><option value="">-</option>${numbers(5, 7, "시")}</select><select id="km" aria-label="분"><option value="">-</option><option>00분</option><option>30분</option></select></div>
+  <button type="button" id="go">Send</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  for (const button of document.querySelectorAll("#ap button")) button.addEventListener("click", () => {
+    for (const other of document.querySelectorAll("#ap button")) other.setAttribute("aria-checked", String(other === button));
+  });
+  $("go").addEventListener("click", () => {
+    const on = document.querySelector('#ap [aria-checked="true"]');
+    window.__sceneResult = { born: [$("by").value, $("bm").value, $("bd").value].join("-"), alarm: (on ? on.textContent : "") + " " + $("ah").value + ":" + $("am").value,
+      wake: $("kh").value + " " + $("km").value };
+  });
+</script>`, [{ says: "Born", value: "1990-06-30" }, { says: "Alarm", value: "7:05 PM" }, { says: "기상", value: "06:30" }],
+{ born: "1990-6-30", alarm: "PM 7:05", wake: "6시 30분" });
+
+/* A fact that names two fields — an item's name is in the words of its checkbox and of its count: the value is a number, so it goes to the field that takes
+ * one — and one that names two fields of one kind, which the card does not tell apart: the driver stops and says which fields. */
+const ITEM = (name, fields) => `<li><p class="name">${name}</p>${fields}</li>`;
+const COUNT = (name) => `<input type="checkbox" checked aria-label="${name} select"><div class="step"><button type="button" aria-label="Fewer">-</button><input class="n" aria-label="Count" value="1"><button type="button" aria-label="More">+</button></div>`;
+const TWINS = await scene("twins", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <ul id="list">${ITEM("Oat bar pack", COUNT("Oat bar pack"))}${ITEM("Tea tin", COUNT("Tea tin"))}</ul>
+  <button type="button" id="go">Order</button>
+</form>
+<script>
+  document.getElementById("go").addEventListener("click", () => {
+    const counts = [...document.querySelectorAll("input.n")].map((input) => input.value);
+    window.__sceneResult = { oat: counts[0], tea: counts[1] };
+  });
+</script>`, [{ says: "Oat bar pack", value: "3" }, { says: "Tea tin", value: "2" }], { oat: "3", tea: "2" });
+const LINES = (name) => `<input aria-label="First line"><input aria-label="Second line">`;
+const TWINS_OPEN = await scene("twins-open", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <ul id="list">${ITEM("Pen box", LINES())}${ITEM("Ink bottle", LINES())}</ul>
+  <button type="button" id="go">Order</button>
+</form>
+<script>
+  document.getElementById("go").addEventListener("click", () => { window.__sceneResult = { lines: document.querySelectorAll("input").length }; });
+</script>`, [{ says: "Pen box", value: "2" }], { lines: 4 });
+
+/* A field the page answers about after a press, with a button of its own beside it: the door says whose the button is, and the driver presses it once and
+ * reads the form again — the press that ends the form is made again after it. */
+const OWN = await scene("own", `<!doctype html><html lang="en"><meta charset="utf-8"><form id="f" onsubmit="return false">
+  <div class="row"><label for="who">Name</label> <input id="who"></div>
+  <div class="row"><label for="tag">Tag</label><div class="line"><input id="tag"><button type="button" id="apply">Apply</button></div><p id="note"></p></div>
+  <button type="submit" id="finish">Finish</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let applied = "";
+  $("tag").addEventListener("input", () => { applied = ""; $("note").textContent = ""; });
+  $("apply").addEventListener("click", () => { applied = $("tag").value; $("note").textContent = applied ? "Tag applied" : ""; });
+  $("f").addEventListener("submit", (event) => {
+    event.preventDefault();
+    if ($("tag").value && applied !== $("tag").value) { $("note").textContent = "Apply the tag or clear it."; return; }
+    window.__sceneResult = { who: $("who").value, tag: $("tag").value, applied };
+  });
+</script>`, [{ says: "Name", value: "Kim" }, { says: "Tag", value: "NEW5" }], { who: "Kim", tag: "NEW5", applied: "NEW5" });
+
+/* A field whose read-back the door cannot tell — a date the page draws without its year: the driver goes on to the button, and does not write it again. */
+const DRAWN = await scene("drawn", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="day">Arrival</label> <input id="day"><button type="button" id="go">Send</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let kept = "";
+  $("day").addEventListener("change", () => {
+    const parts = $("day").value.match(/^(\\d{4})-(\\d\\d)-(\\d\\d)$/);
+    if (parts) { kept = $("day").value; $("day").value = parts[2] + "/" + parts[3]; }
+  });
+  $("go").addEventListener("click", () => { window.__sceneResult = { arrival: kept }; });
+</script>`, [{ says: "Arrival", value: "2026-12-02" }], { arrival: "2026-12-02" });
+
 /* One run of the drivers on every scene, once. */
 const out = join(root, "rows.json");
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
-  "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
+  "--scene", JOINTS, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -331,6 +433,58 @@ await test("a driver goes on to the button when what is left belongs to the page
     assert(one && one.ok && one.pass, `the ${road} road presses the button the page lets through`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
   }
   return JSON.stringify(row("left-over", "script").result);
+});
+
+await test("a driver cuts a value the page splits across fields at the symbols the door says stand between the parts and gives the rest to the list that has it", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("joints", road);
+    assert(one && one.ok && one.pass, `the ${road} road gives each part its piece of the address and of the serial`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return JSON.stringify(row("joints", "verbs").result);
+});
+
+await test("a driver writes a date and a time into the parts the page names by units, in English and in Korean, and presses the half of the day", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("units", road);
+    assert(one && one.ok && one.pass, `the ${road} road gives the year, the month and the day, the half of the day, the hour and the minute their numbers`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return JSON.stringify(row("units", "verbs").result);
+});
+
+await test("a driver gives a number to the field that takes numbers when the name of an item is in the words of two fields", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("twins", road);
+    assert(one && one.ok && one.pass, `the ${road} road writes the counts and leaves the checkboxes`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return JSON.stringify(row("twins", "verbs").result);
+});
+
+await test("a driver that finds one item answered to by two fields of one kind stops at once and says which fields", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("twins-open", road);
+    assert(one && typeof one.stuck === "string" && /"Pen box" answers to 2 fields \(/.test(one.stuck) && /does not say which/.test(one.stuck), `the ${road} road says the card does not tell`, one && { stuck: one.stuck });
+    assert(one.roundTrips <= 2, `and stops before it presses anything (${road})`, { roundTrips: one.roundTrips });
+  }
+  return row("twins-open", "verbs").stuck;
+});
+
+await test("a driver presses the one button beside a field the door says has new text after a press, once, and then makes the press again", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("own", road);
+    assert(one && one.ok && one.pass, `the ${road} road applies the tag the page asked to be applied and then finishes`, one && { ok: one.ok, stuck: one.stuck, result: one.result, trail: one.trail });
+    assert(one.trail.some((entry) => entry.own === "Apply"), `by the button the door said stands beside the field (${road})`, one.trail);
+  }
+  return JSON.stringify(row("own", "verbs").result);
+});
+
+await test("a driver does not write again a field whose read-back the door says it cannot tell, and goes on to the button", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("drawn", road);
+    assert(one && one.ok && one.pass, `the ${road} road gets the date through a page that draws it without its year`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  assert(row("drawn", "verbs").fill === 1, "the verbs road wrote it once", { fill: row("drawn", "verbs").fill });
+  assert(row("drawn", "script").eval === 1, "and the script road in one step", { eval: row("drawn", "script").eval });
+  return `fill ${row("drawn", "verbs").fill}, eval ${row("drawn", "script").eval}`;
 });
 
 await test("the recipe a driver scrolls a box by is the one the skill teaches", () => {
