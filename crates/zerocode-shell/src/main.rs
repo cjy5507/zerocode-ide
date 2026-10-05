@@ -257,8 +257,8 @@ use cmd::{
     cli_login_logout, cli_login_start, cli_login_wait, cli_login_witness, cli_login_witness_drop,
     clipboard_has_image, clone_repository, clone_target_name, close_browser_pane, close_lane,
     close_onboarding, close_term, codex_account_list, codex_token_usage, codex_usage,
-    codex_usage_stats, commit_failure_card, commit_file_diff, commit_files, commit_staged,
-    computer_awake_status, computer_confirm_answer, computer_guard_status,
+    codex_usage_stats, commit_failure_card, commit_file_diff, commit_files, commit_landings,
+    commit_staged, computer_awake_status, computer_confirm_answer, computer_guard_status,
     computer_live_reflex_check, computer_resume, computer_stop, computer_use_capabilities,
     computer_use_permission_status, computer_use_skill_report, computer_use_tcc_row_action,
     conflict_card, continuation_source, cookie_sources, crash_bundle, crash_open_log,
@@ -374,12 +374,13 @@ use cmd::{
     write_text_file,
 };
 use cmd::{
-    artifact_copy_path, artifact_counts, artifact_delete, artifact_document, artifact_export,
-    artifact_feedback_record, artifact_import_transcripts, artifact_open, artifact_page_at,
-    artifact_preference_revoke, artifact_preference_save, artifact_preferences, artifact_preview,
-    artifact_register, artifact_reveal, artifact_search, artifact_thumbnail, artifact_versions,
-    artifacts_list, explain_cancel, explain_preview, explain_roads, explain_start,
-    set_artifacts_auto_open_beside, set_artifacts_retention_days, set_vault_session_limit,
+    artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
+    artifact_export, artifact_feedback_record, artifact_import_transcripts, artifact_open,
+    artifact_page_at, artifact_preference_revoke, artifact_preference_save, artifact_preferences,
+    artifact_preview, artifact_register, artifact_reveal, artifact_search, artifact_tasks,
+    artifact_thumbnail, artifact_versions, artifacts_list, explain_cancel, explain_preview,
+    explain_roads, explain_start, set_artifacts_auto_open_beside, set_artifacts_retention_days,
+    set_vault_session_limit,
 };
 use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
@@ -419,7 +420,8 @@ use terminal_theme_import::{
 use usage_runtime::*;
 use window_runtime::*;
 use worktree_landing::{
-    LandingJob, WorktreeLanding, attach_landings, landing_stamp_of, spawn_landing_jobs,
+    LandingJob, WorktreeLanding, attach_commit_landings, attach_landings, known_repos,
+    landing_stamp_of, spawn_commit_landing_job, spawn_landing_jobs,
 };
 use worktree_runtime::*;
 #[allow(unused_imports)]
@@ -3017,6 +3019,9 @@ fn main() -> ExitCode {
             artifact_preview,
             artifact_document,
             artifact_counts,
+            artifact_tasks,
+            artifact_bundle,
+            commit_landings,
             artifact_open,
             artifact_reveal,
             artifact_copy_path,

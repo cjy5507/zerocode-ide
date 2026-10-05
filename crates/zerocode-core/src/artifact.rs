@@ -489,6 +489,15 @@ pub struct Limits {
     pub digest_verbs_max: usize,
     /// Facts listed from a JSON record that is not a step log.
     pub digest_facts_max: usize,
+    /// Failed tests a test log's digest names; the rest are a count.
+    pub digest_failures_max: usize,
+    /// Tasks a step log's digest lists by name, and its row is tagged with.
+    pub digest_tasks_max: usize,
+    /// Tasks one listing by task carries; the newest come first.
+    pub task_lines_max: usize,
+    /// Files of one task read for what they say when the task is opened; the
+    /// files past it are listed unread.
+    pub bundle_digests_max: usize,
 }
 
 impl Default for Limits {
@@ -530,6 +539,10 @@ impl Default for Limits {
             digest_text_chars: 160,
             digest_verbs_max: 6,
             digest_facts_max: 24,
+            digest_failures_max: 24,
+            digest_tasks_max: 32,
+            task_lines_max: 500,
+            bundle_digests_max: 48,
         }
     }
 }
@@ -588,6 +601,10 @@ impl Limits {
                 "digest_text_chars" => self.digest_text_chars = as_usize,
                 "digest_verbs_max" => self.digest_verbs_max = as_usize,
                 "digest_facts_max" => self.digest_facts_max = as_usize,
+                "digest_failures_max" => self.digest_failures_max = as_usize,
+                "digest_tasks_max" => self.digest_tasks_max = as_usize,
+                "task_lines_max" => self.task_lines_max = as_usize,
+                "bundle_digests_max" => self.bundle_digests_max = as_usize,
                 _ => {}
             }
         }

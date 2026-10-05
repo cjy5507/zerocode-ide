@@ -135,6 +135,26 @@ pub(crate) fn worktree_landing_stamp(roots: Vec<String>) -> String {
     landing_stamp_of(roots)
 }
 
+/// The landed state of commits whose checkouts are gone (t-36910): a task in
+/// the artifact gallery outlives its worktree, and what it handed in is still
+/// in the compare ref or it is not. Answered at once with what is known —
+/// `pending` for a commit never asked about — and what is left is read behind
+/// the answer; the window is told when an answer moved
+/// (`worktree:commit-landing`) and asks again.
+#[tauri::command(async)]
+pub(crate) fn commit_landings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    commits: Vec<String>,
+) -> BTreeMap<String, WorktreeLanding> {
+    let repos = known_repos(state.config_root(), state.settings());
+    let (said, job) = attach_commit_landings(&commits, &repos);
+    if let Some(job) = job {
+        spawn_commit_landing_job(&app, job);
+    }
+    said
+}
+
 /// Create a worktree for a task, named from its spec.
 ///
 /// Async because `git worktree add` writes a whole checkout: on a large

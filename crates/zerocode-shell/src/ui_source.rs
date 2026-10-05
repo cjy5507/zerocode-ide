@@ -31,6 +31,10 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
     ),
     ("shell-doc.js", include_str!("../../../ui/shell-doc.js")),
     (
+        "shell-artifact-tasks.js",
+        include_str!("../../../ui/shell-artifact-tasks.js"),
+    ),
+    (
         "shell-knowledge-3d.js",
         include_str!("../../../ui/shell-knowledge-3d.js"),
     ),
