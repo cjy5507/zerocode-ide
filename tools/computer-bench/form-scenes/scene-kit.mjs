@@ -90,9 +90,9 @@ const without = (value, made) => Object.fromEntries(Object.entries(value || {}).
 export const sameWhole = (result, expected, made = [], shapes = {}) =>
   Boolean(result) && madeProblems(result, made, shapes).length === 0 && JSON.stringify(without(result, made)) === JSON.stringify(without(expected, made));
 const sortedByKey = (value) => JSON.stringify(Object.fromEntries(Object.entries(value || {}).sort(([a], [b]) => (a < b ? -1 : 1))));
-/* The same, without the order of the keys. */
-export const sameAsSet = (result, expected, made = []) =>
-  Boolean(result) && sortedByKey(without(result, made)) === sortedByKey(without(expected, made));
+/* The same, without the order of the keys — and with the declared keys asked for as well. */
+export const sameAsSet = (result, expected, made = [], shapes = {}) =>
+  Boolean(result) && madeProblems(result, made, shapes).length === 0 && sortedByKey(without(result, made)) === sortedByKey(without(expected, made));
 /* The keys the page recorded that the expected result does not hold and the
  * scene does not declare. */
 export const extraKeys = (result, expected, made = []) =>
@@ -125,7 +125,7 @@ export function verdicts(result, expected, made = [], shapes = {}) {
   const ok = Boolean(result) && wrong.length === 0;
   const whole = sameWhole(result, expected, made, shapes);
   return {
-    tookResult: Boolean(result), ok, wholeRaw: wholeRaw(result, expected), whole, sameSet: sameAsSet(result, expected, made),
+    tookResult: Boolean(result), ok, wholeRaw: wholeRaw(result, expected), whole, sameSet: sameAsSet(result, expected, made, shapes),
     extra, made: madeKeys(result, made), madeProblems: madeProblems(result, made, shapes), wrong,
     pass: ok && extra.length === 0 && whole,
   };
