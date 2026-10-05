@@ -1,17 +1,27 @@
 //! Which letters in a coordinator's inbox want it now (t-9471,
-//! `crate::jev::MAIL_TRIAGE`): the question the window asks Jev about every
-//! letter a run's coordinator is handed, the rule it is graded against today
+//! `crate::jev::MAIL_TRIAGE`): the question the window asks Jev about the
+//! letters a run's coordinator is handed, the rule it is graded against today
 //! — the letter's kind alone ([`kind_rule`]) — and the label the coordinator's
 //! own next acts write afterwards ([`Mailroom::label`]).
 //!
-//! The question carries a letter's structure and nothing it says: its kind,
-//! the kind of address that sent it, the worker and task it concerns and
-//! where that task stands, its priority, whether it waits on an answer, how
-//! deep in a conversation it sits, how long it has waited, whether the
-//! coordinator has been handed it, how many letters about the same thing came
-//! before it, whether the coordinator is mid-turn and how many questions wait
-//! on it. No body, subject or payload leaves: a letter's words wait for a
-//! redactor that knows a person's name, which none does yet.
+//! A run's fresh letters are asked TOGETHER (t-32796, [`crate::jev::batch`]):
+//! one request holds the coordinator's situation once and each letter as an
+//! entry of its own, and asks a closed choice and a Noul about each
+//! ([`MailTriage`]). A request a batch rather than a request a letter: the
+//! letters of a burst leave in a few requests, side by side, and are no longer
+//! asked one after another. The words of the judgment stand in each letter's
+//! own question and not once in the state: a question is judged on its own
+//! words, and a rule left in the state is read as data (`INSTRUCTIONS`).
+//!
+//! A letter's entry carries its structure and nothing it says: its kind, the
+//! kind of address that sent it, the worker and task it concerns and where
+//! that task stands, its priority, whether it waits on an answer, how deep in
+//! a conversation it sits, how long it has waited, whether the coordinator
+//! has been handed it and how many letters about the same thing came before
+//! it. What holds for the whole batch — whether the coordinator is mid-turn
+//! and how many questions wait on it — is said once ([`Situation`]). No body,
+//! subject or payload leaves: a letter's words wait for a redactor that knows
+//! a person's name, which none does yet.
 //!
 //! The label reads the ledger alone. What the coordinator did next is its own
 //! acts — the receipts its `--retry-request` verbs filed, oldest first —
@@ -30,9 +40,12 @@
 //! or a file.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::OnceLock;
 
 use serde_json::{Map, Value, json};
 
+use crate::jev::MAIL_TRIAGE_BATCH_CAP;
+use crate::jev::batch::{Answers, Judgment};
 use crate::jev::choice::{self, ChoiceRefusal};
 use crate::jev::noul::{self, NoulRefusal};
 use crate::orchestration::{
@@ -40,28 +53,58 @@ use crate::orchestration::{
     PEEK_MODE, Run, VERBS, WORKER_ADDRESS_PREFIX,
 };
 
-/// The closed choice's name. The endpoint does not show a question's name to
-/// the model, so this is the caller's key and nothing more.
-const QUESTION: &str = "triage";
+/// What a letter's fields are and what the question asks: said in EVERY
+/// letter's choice question, ahead of that letter's own words, and not once in
+/// the state. The model reads a rule left in the state as data and one in the
+/// question as the question. Said once in the state's `rubric`, with a line of
+/// each option in the questions, the day's letters agreed with what the
+/// coordinator did next in 192 of 406 comparisons — the status letters went
+/// to `no_need` — and said in the question, in 218 and 217 (four a request)
+/// and 218 and 219 (eight), where the per-letter road, asked beside them,
+/// agreed in 223 and 217 (the real model, 2026-10-04,
+/// `measure_agreement_on_the_real_wire`). What the answers hang on in it is
+/// the list of the kinds a letter may be: without it, 163. The
+/// letters reach the model as state, never as an instruction — and never as
+/// their words, which are not in it.
+const INSTRUCTIONS: &str = "A coordinator agent runs a team of worker agents and reads its mail between the things it does. `letters` lists letters that have just reached its inbox, each described by its structure and never by its words: `kind` is what the letter is — `question` (its sender waits for an answer), `worker_done` (a worker reports its task finished and waits for review), `status` (a worker's news), or one of the notices the orchestration writes itself about a worker (`went_quiet`, `worker_died`, `quota_walled`, `classifier_declined`, `deadlocked`, `handover`, `resumed`, `model_deviated`, `account_switched`) — `from` is the kind of address that sent it (`worker`, `ledger` for the orchestration's own notices, `pane`, `run`, `home`, `remote`), `worker` and `task` the worker and the task it concerns, `taskStatus` where that task stands, `priority` the priority its sender set, `awaitsAnswer` whether it is a question nobody has answered yet, `threadDepth` how many replies deep it sits, `ageSeconds` how long it has waited, `delivered` whether the coordinator has been handed it yet, and `repeats` how many earlier letters of the same kind about the same worker and task came in the day before it. `coordinator` describes the coordinator all of those letters are for: `busy` is whether it is in the middle of a turn (null when unknown) and `openQuestions` how many questions put to it wait for an answer. Each question names one letter by its place in `letters` and asks when the coordinator should deal with that letter, by what each option of the question means.";
 
-/// The Noul's name, asked in the same request.
-const URGENT: &str = "urgent";
+/// Where in a letter's question its place in the request's list of letters
+/// goes: a request cut into shards renumbers, so a question is built for the
+/// place its letter stands in.
+const AT_PLACEHOLDER: &str = "{at}";
 
-/// The words of the question. The letter reaches the model as state, never as
-/// an instruction — and never as its words, which are not in it.
-const INSTRUCTIONS: &str = "A coordinator agent runs a team of worker agents and reads its mail between the things it does. `state` describes one letter that has just reached its inbox, never the letter's words: `kind` is what the letter is — `question` (its sender waits for an answer), `worker_done` (a worker reports its task finished and waits for review), `status` (a worker's news), or one of the notices the orchestration writes itself about a worker (`went_quiet`, `worker_died`, `quota_walled`, `classifier_declined`, `deadlocked`, `handover`, `resumed`, `model_deviated`, `account_switched`) — `from` is the kind of address that sent it (`worker`, `ledger` for the orchestration's own notices, `pane`, `run`, `home`, `remote`), `worker` and `task` the worker and the task it concerns, `taskStatus` where that task stands, `priority` the priority its sender set, `awaitsAnswer` whether it is a question nobody has answered yet, `threadDepth` how many replies deep it sits, `ageSeconds` how long it has waited, `delivered` whether the coordinator has been handed it yet, `repeats` how many earlier letters of the same kind about the same worker and task came in the day before it, `coordinatorBusy` whether the coordinator is in the middle of a turn (null when unknown), and `openQuestions` how many questions put to the coordinator wait for an answer. Choose when the coordinator should deal with this letter.";
+/// The words of one letter's choice, after the explanation of the fields:
+/// which letter, and that it is judged alone.
+const ITEM_INSTRUCTIONS: &str = "When should the coordinator deal with `letters[{at}]`? Judge that letter alone — its own facts and `coordinator`.";
 
-/// The words of the Noul asked beside the choice.
-const URGENT_INSTRUCTIONS: &str = "Should this letter be the very next thing the coordinator deals with, ahead of every other letter and every other piece of work?";
+/// The words of the Noul asked beside each letter's choice. Its question does
+/// not carry the explanation of the fields, and no label grades it. With the
+/// explanation in the state it told the questions (0.71), finished tasks
+/// (0.55) and quota walls (0.62) from the status letters (0.08); with it in
+/// the choice question alone, only the questions (0.56) from the rest (0.21 to
+/// 0.28); the per-letter road's Noul answered 0.14 to 0.22 whatever the kind.
+/// A seat that comes to act on it needs the explanation in this question too,
+/// and a label to measure it by.
+const URGENT_INSTRUCTIONS: &str = "Should `letters[{at}]` be the very next thing the coordinator deals with, ahead of every other letter and every other piece of work?";
 
 /// What the Noul's yes means.
-const URGENT_YES: &str = "Its very next action should be about this letter: somebody is stopped until it acts, and every minute it waits costs.";
+const URGENT_YES: &str = "Its very next action should be about that letter: somebody is stopped until it acts, and every minute it waits costs.";
 
 /// What the Noul's no means.
 const URGENT_NO: &str = "At least one other thing can come first without harm.";
 
-/// The state's keys, in the order the fingerprint reads them.
-pub const STATE_KEYS: [&str; 13] = [
+/// What a request's state holds, at its top level, in the order the
+/// fingerprint reads them: what holds for the coordinator once, and the
+/// letters, each in an entry of its own. No words of the question are in it.
+pub const REQUEST_KEYS: [&str; 2] = ["coordinator", "letters"];
+
+/// What the state's `coordinator` carries: what holds for every letter of the
+/// batch at once.
+pub const COORDINATOR_KEYS: [&str; 2] = ["busy", "openQuestions"];
+
+/// What each entry of the state's `letters` carries, in the order the
+/// fingerprint reads them.
+pub const LETTER_KEYS: [&str; 11] = [
     "kind",
     "from",
     "worker",
@@ -73,16 +116,31 @@ pub const STATE_KEYS: [&str; 13] = [
     "ageSeconds",
     "delivered",
     "repeats",
-    "coordinatorBusy",
-    "openQuestions",
 ];
+
+/// The key the letters stand under in a request's state.
+const LETTERS_KEY: &str = REQUEST_KEYS[1];
+
+/// The suffixes a letter's two questions stand under beside its place in the
+/// batch ([`crate::jev::batch::question_name`]): the choice under none, the
+/// Noul under its own.
+const TRIAGE_SUFFIX: &str = "";
+const URGENT_SUFFIX: &str = "urgent";
 
 /// The version of the words in this module. Bump it when any of them changes,
 /// or when the label they are graded by changes: a judgment read under one
 /// wording is not evidence about another. The test
 /// `the_version_is_pinned_to_the_words` holds it to
 /// [`crate::jev::rubric_fingerprint`].
-pub const MAIL_TRIAGE_RUBRIC_VERSION: u32 = 1;
+///
+/// Version 2 (t-32796) is the batch road's: a request holds the coordinator's
+/// situation once and each letter in an entry of its own, and each letter's
+/// choice question says what the fields are and what each option means, with
+/// the examples that tell which letters it is meant for. Its first wording —
+/// those words once in the state — was withdrawn before any release, measured
+/// 24 agreements of 406 under the per-letter road's. The seat records and
+/// never rises, so there is no standing for the bump to reset.
+pub const MAIL_TRIAGE_RUBRIC_VERSION: u32 = 2;
 
 /// When a coordinator should deal with one letter — the question's closed
 /// answer space, and the label's.
@@ -111,17 +169,22 @@ impl Triage {
     }
 
     /// What the option means, written as the situation the letter's facts
-    /// show.
+    /// show, with the examples that tell which letters it is meant for. It
+    /// stands in every letter's question: an option's words are judged where
+    /// the question is, and shorter ones, naming a status report as news it
+    /// will act on later, kept the status letters at `can_wait` where the
+    /// longer ones, which made it a report "that changes a plan", sent 22 of
+    /// 69 to `no_need`.
     const fn means(self) -> &'static str {
         match self {
             Self::AnswerNow => {
-                "Deal with it before anything else: somebody is blocked until the coordinator acts — a question its asker waits on, a finished task that waits for review before the next one can start, a worker that died or hit a wall and needs a replacement, a decision only the coordinator can make."
+                "Deal with it before anything else: somebody is blocked until the coordinator acts — a question, a finished task waiting for review, a worker that died or hit a wall."
             }
             Self::CanWait => {
-                "It needs the coordinator, but not before what it is doing now: news it will act on later — a status report that changes a plan, a notice about a worker that is still making progress, a receipt of something the orchestration already did on the coordinator's behalf."
+                "It needs the coordinator, but not before what it is doing now: news it will act on later — a status report, a notice about a worker still making progress."
             }
             Self::NoNeed => {
-                "Nothing to do beyond reading it: a repeat of a notice the coordinator has already seen about the same worker, a routine heartbeat, a notice that resolves itself, chatter that waits on nobody."
+                "Nothing to do beyond reading it: a repeat of a notice already seen, a routine heartbeat, chatter that waits on nobody."
             }
         }
     }
@@ -186,16 +249,23 @@ pub fn rubric_words() -> String {
         words.push('\n');
         words.push_str(triage.means());
     }
-    for said in [URGENT_INSTRUCTIONS, URGENT_YES, URGENT_NO] {
+    for said in [
+        ITEM_INSTRUCTIONS,
+        URGENT_INSTRUCTIONS,
+        URGENT_YES,
+        URGENT_NO,
+    ] {
         words.push('\n');
         words.push_str(said);
     }
-    words.push('\n');
-    words.push_str(&STATE_KEYS.join(","));
+    for keys in [&REQUEST_KEYS[..], &COORDINATOR_KEYS[..], &LETTER_KEYS[..]] {
+        words.push('\n');
+        words.push_str(&keys.join(","));
+    }
     words
 }
 
-/// One letter, as the question carries it.
+/// One letter, as its entry in a request carries it.
 #[derive(Debug, Clone, Copy)]
 pub struct MailLook<'a> {
     pub kind: MessageKind,
@@ -210,17 +280,132 @@ pub struct MailLook<'a> {
     pub age_ms: i64,
     pub delivered: bool,
     pub repeats: usize,
+}
+
+impl MailLook<'_> {
+    /// The letter's entry in a request's `letters`: its structure under the
+    /// table's keys ([`LETTER_KEYS`]) — the texts only where the door's table
+    /// declares them, numbers and flags elsewhere, never a word the letter
+    /// says.
+    #[must_use]
+    pub fn facts(&self) -> Value {
+        json!({
+            LETTER_KEYS[0]: self.kind.as_str(),
+            LETTER_KEYS[1]: self.from,
+            LETTER_KEYS[2]: self.worker,
+            LETTER_KEYS[3]: self.task,
+            LETTER_KEYS[4]: self.task_status,
+            LETTER_KEYS[5]: self.priority,
+            LETTER_KEYS[6]: self.awaits_answer,
+            LETTER_KEYS[7]: self.thread_depth,
+            LETTER_KEYS[8]: crate::notify_call::seconds(self.age_ms),
+            LETTER_KEYS[9]: self.delivered,
+            LETTER_KEYS[10]: self.repeats,
+        })
+    }
+}
+
+/// What holds for every letter of a batch at once: the coordinator's own
+/// situation, said once in a request and not once per letter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Situation {
+    /// Whether the coordinator is in the middle of a turn — `None` when the
+    /// window cannot tell.
     pub coordinator_busy: Option<bool>,
+    /// How many questions put to the coordinator wait for an answer.
     pub open_questions: usize,
 }
 
-/// One question, ready for the wire.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MailAsk {
-    /// The request's `state`.
-    pub state: Value,
-    /// The request's `questions`: the choice and the Noul.
-    pub questions: Value,
+impl Situation {
+    /// The state's `coordinator`, under the table's keys ([`COORDINATOR_KEYS`]).
+    fn facts(&self) -> Value {
+        json!({
+            COORDINATOR_KEYS[0]: self.coordinator_busy,
+            COORDINATOR_KEYS[1]: self.open_questions,
+        })
+    }
+}
+
+/// The options a letter's choice offers, as the closed choice's reader wants
+/// them: spelled once for the process, not once per letter read.
+fn offered() -> &'static BTreeSet<String> {
+    static OFFERED: OnceLock<BTreeSet<String>> = OnceLock::new();
+    OFFERED.get_or_init(|| {
+        Triage::ALL
+            .iter()
+            .map(|triage| triage.word().to_string())
+            .collect()
+    })
+}
+
+/// A coordinator's batch of letters, asked on the batch road
+/// ([`crate::jev::batch`]): one closed choice and one Noul about each letter,
+/// over one state that holds the coordinator's situation once and the letters'
+/// entries. The words of the judgment are in the questions.
+#[derive(Debug, Clone, Copy)]
+pub struct MailTriage {
+    situation: Situation,
+}
+
+impl MailTriage {
+    /// The questions of a batch handed to a coordinator in `situation`.
+    #[must_use]
+    pub const fn new(situation: Situation) -> Self {
+        Self { situation }
+    }
+}
+
+impl Judgment for MailTriage {
+    type Verdict = MailRead;
+    type Refusal = MailRefusal;
+
+    fn cap(&self) -> usize {
+        MAIL_TRIAGE_BATCH_CAP
+    }
+
+    fn items_key(&self) -> &'static str {
+        LETTERS_KEY
+    }
+
+    fn shared(&self) -> Map<String, Value> {
+        Map::from_iter([(REQUEST_KEYS[0].to_string(), self.situation.facts())])
+    }
+
+    fn questions(&self, at: usize) -> Vec<(&'static str, Value)> {
+        let at = at.to_string();
+        let means = Triage::ALL.map(|triage| (triage.word(), triage.means()));
+        let asked = format!(
+            "{INSTRUCTIONS} {}",
+            ITEM_INSTRUCTIONS.replace(AT_PLACEHOLDER, &at)
+        );
+        vec![
+            (TRIAGE_SUFFIX, choice::question(&asked, &means)),
+            (
+                URGENT_SUFFIX,
+                noul::question(
+                    &URGENT_INSTRUCTIONS.replace(AT_PLACEHOLDER, &at),
+                    URGENT_YES,
+                    URGENT_NO,
+                ),
+            ),
+        ]
+    }
+
+    /// What a letter's own answers say. One broken rule in either head
+    /// discards the answer whole, the choice's first.
+    fn read(&self, answers: &Answers<'_>) -> Result<MailRead, MailRefusal> {
+        let choice = choice::read_value(
+            answers.get(TRIAGE_SUFFIX).ok_or(ChoiceRefusal::NoAnswer)?,
+            offered(),
+        )?;
+        let urgent = noul::read_value(answers.get(URGENT_SUFFIX).ok_or(NoulRefusal::NoAnswer)?)?;
+        Ok(MailRead {
+            triage: Triage::from_word(&choice.chosen).ok_or(ChoiceRefusal::UnknownOption)?,
+            probabilities: choice.probabilities,
+            confidence: choice.confidence,
+            urgent,
+        })
+    }
 }
 
 /// A validated answer: the choice, its spread and confidence, and the Noul's
@@ -261,69 +446,6 @@ impl From<ChoiceRefusal> for MailRefusal {
 impl From<NoulRefusal> for MailRefusal {
     fn from(refusal: NoulRefusal) -> Self {
         Self::Urgent(refusal)
-    }
-}
-
-/// The question one letter asks: the choice, and the Noul beside it in the
-/// same request — the state is charged once and an answer's output is free.
-#[must_use]
-pub fn ask(look: &MailLook<'_>) -> MailAsk {
-    let criteria: Map<String, Value> = Triage::ALL
-        .iter()
-        .map(|triage| {
-            (
-                triage.word().to_string(),
-                Value::String(triage.means().to_string()),
-            )
-        })
-        .collect();
-    let mut questions = choice::asked(QUESTION, INSTRUCTIONS, criteria);
-    if let Some(asked) = questions.as_object_mut() {
-        asked.insert(
-            URGENT.to_string(),
-            noul::question(URGENT_INSTRUCTIONS, URGENT_YES, URGENT_NO),
-        );
-    }
-    MailAsk {
-        state: json!({
-            STATE_KEYS[0]: look.kind.as_str(),
-            STATE_KEYS[1]: look.from,
-            STATE_KEYS[2]: look.worker,
-            STATE_KEYS[3]: look.task,
-            STATE_KEYS[4]: look.task_status,
-            STATE_KEYS[5]: look.priority,
-            STATE_KEYS[6]: look.awaits_answer,
-            STATE_KEYS[7]: look.thread_depth,
-            STATE_KEYS[8]: crate::notify_call::seconds(look.age_ms),
-            STATE_KEYS[9]: look.delivered,
-            STATE_KEYS[10]: look.repeats,
-            STATE_KEYS[11]: look.coordinator_busy,
-            STATE_KEYS[12]: look.open_questions,
-        }),
-        questions,
-    }
-}
-
-impl MailAsk {
-    /// What the endpoint's `answers` map says about this question. One broken
-    /// rule in either head discards the answer whole.
-    ///
-    /// # Errors
-    ///
-    /// [`MailRefusal`] names which rule the answer broke.
-    pub fn read(&self, answers: &Value) -> Result<MailRead, MailRefusal> {
-        let offered: BTreeSet<String> = Triage::ALL
-            .iter()
-            .map(|triage| triage.word().to_string())
-            .collect();
-        let choice = choice::read(answers, QUESTION, &offered)?;
-        let urgent = noul::read(answers, URGENT)?;
-        Ok(MailRead {
-            triage: Triage::from_word(&choice.chosen).ok_or(ChoiceRefusal::UnknownOption)?,
-            probabilities: choice.probabilities,
-            confidence: choice.confidence,
-            urgent,
-        })
     }
 }
 
@@ -906,19 +1028,11 @@ impl<'a> Mailroom<'a> {
             .map(|one| one.created_ms)
     }
 
-    /// The question `letter` asks, at `now_ms`: its facts off `run`, whether
-    /// the coordinator is mid-turn (`coordinator_busy`, the window's to say)
-    /// and how many questions wait on it (`open_questions`,
-    /// [`Self::open_questions`], read once per look at a run).
+    /// The letter's own facts at `now_ms`, off `run`. What holds for every
+    /// letter of a batch at once — whether the coordinator is mid-turn, how
+    /// many questions wait on it — is [`Self::situation`], read once.
     #[must_use]
-    pub fn look(
-        &'a self,
-        run: &'a Run,
-        letter: &'a Message,
-        now_ms: i64,
-        coordinator_busy: Option<bool>,
-        open_questions: usize,
-    ) -> MailLook<'a> {
+    pub fn look(&'a self, run: &'a Run, letter: &'a Message, now_ms: i64) -> MailLook<'a> {
         let task = letter.task.as_deref();
         MailLook {
             kind: letter.kind,
@@ -939,8 +1053,6 @@ impl<'a> Mailroom<'a> {
             age_ms: now_ms.saturating_sub(letter.created_ms),
             delivered: self.is_open(letter),
             repeats: self.repeats(letter),
-            coordinator_busy,
-            open_questions,
         }
     }
 
@@ -952,6 +1064,18 @@ impl<'a> Mailroom<'a> {
         self.letters()
             .filter(|one| run.awaits_answer(one) && run.question_is_answerable(one).is_ok())
             .count()
+    }
+
+    /// What holds for every letter of `run`'s batch: whether the coordinator
+    /// is mid-turn (`coordinator_busy`, the window's to say) and how many
+    /// questions wait on it ([`Self::open_questions`]) — read once per look
+    /// at a run, whatever the number of letters.
+    #[must_use]
+    pub fn situation(&self, run: &Run, coordinator_busy: Option<bool>) -> Situation {
+        Situation {
+            coordinator_busy,
+            open_questions: self.open_questions(run),
+        }
     }
 }
 

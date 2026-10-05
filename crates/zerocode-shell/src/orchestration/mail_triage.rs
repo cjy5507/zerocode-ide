@@ -1,41 +1,53 @@
 //! A coordinator's mail, triaged by Jev as it arrives (t-9471,
 //! `zerocode_core::jev::MAIL_TRIAGE`, `smart.jevMailTriage`).
 //!
-//! On the beat, for every run whose coordinator seat this window holds, each
-//! letter to the coordinator that it can still be handed — waiting in its
-//! inbox, or in the batch it holds open — is put to Jev once: its structure,
-//! never its words (`zerocode_core::mail_triage::ask`), through the Jev door
-//! with the coordinator's own checkout as the workspace consented to. The
-//! answer is one row in `mail-triage.jsonl`. It changes nothing the beat
-//! does: the seat only records, and nothing on the desk moves.
+//! On the beat, for every run whose coordinator seat this window holds, the
+//! letters to the coordinator that it can still be handed — waiting in its
+//! inbox, or in the batch it holds open — and nobody has asked about are put
+//! to Jev TOGETHER (t-32796): one request holds the coordinator's situation
+//! once and each letter's structure, never its words, and asks each letter its
+//! own question (`zerocode_core::mail_triage::MailTriage`), through the Jev
+//! door with the coordinator's own checkout as the workspace consented to. A
+//! burst above
+//! the cap is cut evenly into requests that leave side by side, a few at a
+//! time ([`crate::systemone::TOGETHER_LANES`]), and a wave's rows are written
+//! before the next wave leaves. Each letter has a row of its own in
+//! `mail-triage.jsonl`; the request's account — its count, its bytes, its
+//! tokens — is written on the one row that carries it (the first of its
+//! letters that names a task, so the cost of a task reads it) and the rows
+//! riding it are charged nothing, so a ledger's sums still say what was sent.
+//! The rows change nothing the beat does: the seat only records, and nothing
+//! on the desk moves.
 //!
 //! Later beats read what the coordinator did next off the ledger
 //! (`zerocode_core::mail_triage::Mailroom::label`) and write it as the row's
 //! label — when the window saw the letter handed over, the batch's own stamp
 //! is the label's start. A question waits up to [`MAIL_TRIAGE_DEADLINE`] for
-//! its answer, so every letter a beat found is asked in one job off the beat
-//! ([`Host::off_the_beat`]); the beat never waits on a socket, and a ledger
-//! that has not moved since the last beat costs a comparison.
+//! its answer, so what a beat found is gathered on the beat and asked in one
+//! job off it ([`Host::off_the_beat`]); the beat never waits on a socket, and
+//! a ledger that has not moved since the last beat costs a comparison.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
+use zerocode_core::jev::batch::{Request, requests};
 use zerocode_core::jev::summary::{
-    AGREED, AT, BASELINE_AGREED, LABEL, NOT_COMPARED, OUTCOME, REQUEST_AT, RUBRIC_VERSION,
+    AGREED, AT, BASELINE_AGREED, ELAPSED_MS, LABEL, NOT_COMPARED, OUTCOME, REQUEST_AT,
+    RUBRIC_VERSION,
 };
 use zerocode_core::jev::{JevMode, MAIL_TRIAGE};
 use zerocode_core::mail_triage::{
-    self, Filed, LABEL_HORIZON_MS, Labeled, MAIL_TRIAGE_RUBRIC_VERSION, MailAsk, Mailroom,
-    NotCompared, Start, Triage, kind_rule,
+    Filed, LABEL_HORIZON_MS, Labeled, MAIL_TRIAGE_RUBRIC_VERSION, MailLook, MailRead, MailTriage,
+    Mailroom, NotCompared, Situation, Start, Triage, kind_rule,
 };
 use zerocode_core::orchestration::task_cost::TASK_STAMP;
 use zerocode_core::orchestration::{Ledger, Message, Run};
 
 use crate::agent_teams::Host;
-use crate::systemone::{SCHEMA, Wire, request_body};
+use crate::systemone::{Asked, SCHEMA, Wire, request_body};
 
 /// How long one question may wait for its answer — the table's wire wall
 /// (`MAIL_TRIAGE_DEADLINE_MS`), read from there so the wait and its reason
@@ -55,6 +67,16 @@ const ANSWERED: &str = "answered";
 const RUN: &str = "run";
 const TRIAGE: &str = "triage";
 const DELIVERED_MS: &str = "deliveredMs";
+
+/// The keys a row names the request that carried it by: the id of the letter
+/// whose row carries the request's account — shared by every row it answered —
+/// and how many letters the request asked about.
+const BATCH: &str = "batch";
+const BATCH_SIZE: &str = "batchSize";
+
+/// The key a row keeps the bytes its request carried under: on the one row
+/// that carries the request's account, and `0` on the rows riding it.
+const REQUEST_BYTES: &str = "requestBytes";
 
 /// What this window remembers about the letters it asked about.
 #[derive(Default)]
@@ -125,11 +147,9 @@ struct Waiting {
     delivered_ms: Option<i64>,
 }
 
-/// One question on its way: the letter's facts as its row keeps them, the
-/// switch it was asked under, when, and what it asks.
-struct Question {
+/// One letter of a batch, as its row keeps it: its facts, never its words.
+struct Letter {
     key: String,
-    run: String,
     kind: &'static str,
     from: String,
     worker: Option<String>,
@@ -138,14 +158,45 @@ struct Question {
     created_ms: i64,
     delivered_ms: Option<i64>,
     repeats: usize,
-    open_questions: usize,
-    coordinator_busy: Option<bool>,
+}
+
+impl Letter {
+    /// The row's facts of `letter`, which `look` read off the ledger.
+    fn of(room: &Mailroom<'_>, letter: &Message, look: &MailLook<'_>) -> Self {
+        Self {
+            key: letter.id.clone(),
+            kind: letter.kind.as_str(),
+            from: look.from.to_string(),
+            worker: look.worker.map(str::to_string),
+            dispatch: letter.dispatch.clone(),
+            task: letter.task.clone(),
+            created_ms: letter.created_ms,
+            delivered_ms: match room.start_of(letter, None) {
+                Start::Opened(at) => Some(at),
+                Start::Checked(_) | Start::Created(_) => None,
+            },
+            repeats: look.repeats,
+        }
+    }
+}
+
+/// One run's fresh letters on their way to Jev: what every row of them shares
+/// and each letter's own facts — asked together, in as many requests as the
+/// cap says ([`requests`]).
+struct Batch {
+    run: String,
     /// The coordinator's own checkout — the workspace the door asks consent
     /// for.
     workspace: Option<PathBuf>,
     mode: JevMode,
     asked_ms: i64,
-    asked: MailAsk,
+    /// What holds for every letter at once: written on every row, and said
+    /// once in the request.
+    situation: Situation,
+    letters: Vec<Letter>,
+    /// The letters' entries in the request's state, in the letters' order:
+    /// read off the ledger on the beat, made into requests off it.
+    facts: Vec<Value>,
 }
 
 /// Put every letter the coordinators this window seats can still be handed,
@@ -194,8 +245,9 @@ pub(super) fn sweep(host: &dyn Host, now_ms: i64) {
     ask_about(host, &wire, &held.mail, &path, &seated, now_ms);
 }
 
-/// Ask about every fresh letter of the runs this window seats, in one job
-/// off the beat, and keep each answer's wait for its label.
+/// Gather the fresh letters of every run this window seats — one batch a
+/// run — and ask them in one job off the beat, and keep each answer's wait
+/// for its label.
 fn ask_about(
     host: &dyn Host,
     wire: &Wire,
@@ -205,7 +257,7 @@ fn ask_about(
     now_ms: i64,
 ) {
     let mut mode = None;
-    let mut questions = Vec::new();
+    let mut batches = Vec::new();
     // The question reads no act of the coordinator's: its room holds none.
     let no_receipts = Vec::new();
     for (run, term) in seated {
@@ -223,136 +275,213 @@ fn ask_about(
             .unwrap_or_else(|held| held.into_inner())
             .get(term)
             .map(|turn| matches!(turn.as_read(), super::PaneTurn::Running { .. }));
-        let workspace = host.worktree_of(*term);
-        let open_questions = room.open_questions(run);
+        let situation = room.situation(run, coordinator_busy);
+        let mut looks = Vec::with_capacity(fresh.len());
         for letter in &fresh {
-            let look = room.look(run, letter, now_ms, coordinator_busy, open_questions);
-            questions.push(Question {
-                key: letter.id.clone(),
-                run: run.id.clone(),
-                kind: letter.kind.as_str(),
-                from: look.from.to_string(),
-                worker: look.worker.map(str::to_string),
-                dispatch: letter.dispatch.clone(),
-                task: letter.task.clone(),
-                created_ms: letter.created_ms,
-                delivered_ms: match room.start_of(letter, None) {
-                    Start::Opened(at) => Some(at),
-                    Start::Checked(_) | Start::Created(_) => None,
-                },
-                repeats: look.repeats,
-                open_questions,
-                coordinator_busy,
-                workspace: workspace.clone(),
-                mode,
-                asked_ms: now_ms,
-                asked: mail_triage::ask(&look),
-            });
+            looks.push(room.look(run, letter, now_ms));
         }
+        batches.push(Batch {
+            run: run.id.clone(),
+            workspace: host.worktree_of(*term),
+            mode,
+            asked_ms: now_ms,
+            situation,
+            letters: fresh
+                .iter()
+                .zip(&looks)
+                .map(|(letter, look)| Letter::of(&room, letter, look))
+                .collect(),
+            facts: looks.iter().map(MailLook::facts).collect(),
+        });
         kept(book)
             .asked
             .extend(fresh.iter().map(|letter| letter.id.clone()));
     }
-    if questions.is_empty() {
+    if batches.is_empty() {
         return;
     }
     let wire = wire.clone();
     let path = path.to_path_buf();
     let book = Arc::clone(book);
     host.off_the_beat(Box::new(move || {
-        for question in questions {
-            let (row, waiting) = settle(&wire, question);
-            crate::systemone::record_rows(&MAIL_TRIAGE, &path, &[row], now_ms);
-            // A book that has not read the ledger's tail yet reads this row
-            // there; one that has takes it here, once.
-            if let Some(waiting) = waiting
-                && let Some((_, rows)) = kept(&book).waiting.as_mut()
-                && !rows.iter().any(|row| row.key == waiting.key)
-            {
-                rows.push(waiting);
-            }
-        }
+        settle(&wire, batches, |rows, waiting| {
+            crate::systemone::record_rows(&MAIL_TRIAGE, &path, &rows, now_ms);
+            keep_waiting(&book, waiting);
+        });
     }));
 }
 
-/// Ask one question and write down what came of it: the row, and — for an
-/// answer — the wait for its label.
-fn settle(wire: &Wire, question: Question) -> (Value, Option<Waiting>) {
-    let Question {
-        key,
-        run,
-        kind,
-        from,
-        worker,
-        dispatch,
-        task,
-        created_ms,
-        delivered_ms,
-        repeats,
-        open_questions,
-        coordinator_busy,
-        workspace,
-        mode,
-        asked_ms,
-        asked,
-    } = question;
-    let mut row = json!({
-        (AT.canonical): asked_ms,
-        KEY: key,
-        RUN: run,
-        "kind": kind,
-        "from": from,
-        "worker": worker,
-        "dispatch": dispatch,
-        TASK_STAMP: task,
-        "mode": mode.key(),
-        (RUBRIC_VERSION.canonical): MAIL_TRIAGE_RUBRIC_VERSION,
-        "createdMs": created_ms,
-        DELIVERED_MS: delivered_ms,
-        "repeats": repeats,
-        "openQuestions": open_questions,
-        "coordinatorBusy": coordinator_busy,
-    });
-    let began = Instant::now();
-    let answer = wire.ask(
-        &MAIL_TRIAGE,
-        workspace.as_deref(),
-        request_body(&asked.state, &asked.questions),
-        MAIL_TRIAGE_DEADLINE,
-    );
-    row["elapsedMs"] = json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
-    row["requestBytes"] = json!(answer.request_bytes);
-    answer.spent.stamp(&mut row);
-    let read = answer.answer.and_then(|body| {
-        let answers = serde_json::from_str::<Value>(&body)
-            .ok()
-            .and_then(|parsed| parsed.get("answers").cloned())
-            .ok_or_else(|| SCHEMA.to_string())?;
-        asked
-            .read(&answers)
-            .map_err(|refusal| refusal.token().to_string())
-    });
-    match read {
-        Ok(read) => {
-            row[OUTCOME.canonical] = json!(ANSWERED);
-            row[TRIAGE] = json!(read.triage.word());
-            row["probabilities"] = json!(read.probabilities);
-            row["confidence"] = json!(read.confidence);
-            row["urgent"] = json!(read.urgent);
-            let waiting = Waiting {
-                key,
-                run,
-                asked_ms,
-                triage: read.triage,
-                delivered_ms,
-            };
-            (row, Some(waiting))
-        }
-        Err(token) => {
-            row[OUTCOME.canonical] = json!(token);
-            (row, None)
+/// Keep each answer's wait for its label. A book that has not read the
+/// ledger's tail yet reads these rows there; one that has takes them here,
+/// once.
+fn keep_waiting(book: &Mutex<MailBook>, waiting: Vec<Waiting>) {
+    if let Some((_, held)) = kept(book).waiting.as_mut() {
+        for one in waiting {
+            if !held.iter().any(|row| row.key == one.key) {
+                held.push(one);
+            }
         }
     }
+}
+
+/// What each letter of a request came to: the answer read in shape, or the
+/// word it was refused with — the whole request's when nothing came back,
+/// the letter's own when only its answer broke a rule of the closed choice.
+fn read_request(
+    judgment: &MailTriage,
+    request: &Request,
+    asked: &Asked,
+) -> Vec<Result<MailRead, String>> {
+    let answers = asked
+        .answer
+        .as_ref()
+        .map_err(String::clone)
+        .and_then(|body| {
+            serde_json::from_str::<Value>(body)
+                .ok()
+                .and_then(|mut parsed| parsed.get_mut("answers").map(Value::take))
+                .ok_or_else(|| SCHEMA.to_string())
+        });
+    match answers {
+        Ok(answers) => request
+            .read(judgment, &answers)
+            .into_iter()
+            .map(|read| read.map_err(|refusal| refusal.token().to_string()))
+            .collect(),
+        Err(token) => request.items().map(|_| Err(token.clone())).collect(),
+    }
+}
+
+/// The row of one letter, before what came of its question is said.
+fn row_of(batch: &Batch, letter: &Letter) -> Value {
+    json!({
+        (AT.canonical): batch.asked_ms,
+        KEY: letter.key,
+        RUN: batch.run,
+        "kind": letter.kind,
+        "from": letter.from,
+        "worker": letter.worker,
+        "dispatch": letter.dispatch,
+        TASK_STAMP: letter.task,
+        "mode": batch.mode.key(),
+        (RUBRIC_VERSION.canonical): MAIL_TRIAGE_RUBRIC_VERSION,
+        "createdMs": letter.created_ms,
+        DELIVERED_MS: letter.delivered_ms,
+        "repeats": letter.repeats,
+        "openQuestions": batch.situation.open_questions,
+        "coordinatorBusy": batch.situation.coordinator_busy,
+    })
+}
+
+/// What an answer in shape writes on its letter's row.
+fn answered(row: &mut Value, read: &MailRead) {
+    row[OUTCOME.canonical] = json!(ANSWERED);
+    row[TRIAGE] = json!(read.triage.word());
+    row["probabilities"] = json!(read.probabilities);
+    row["confidence"] = json!(read.confidence);
+    row["urgent"] = json!(read.urgent);
+}
+
+/// Ask every batch's requests side by side, a wave at a time
+/// ([`Wire::ask_in_waves`]), and hand `written` each wave's rows — what came of
+/// each letter: its row, and, for an answer, the wait for its label — before
+/// the next wave leaves, so a window closed meanwhile has lost one wave's rows
+/// and not the sweep's.
+fn settle(wire: &Wire, batches: Vec<Batch>, mut written: impl FnMut(Vec<Value>, Vec<Waiting>)) {
+    let built: Vec<(Batch, MailTriage, Vec<Request>)> = batches
+        .into_iter()
+        .map(|mut batch| {
+            let judgment = MailTriage::new(batch.situation);
+            let asked = requests(&judgment, std::mem::take(&mut batch.facts));
+            (batch, judgment, asked)
+        })
+        .collect();
+    let asks = built
+        .iter()
+        .flat_map(|(batch, _, asked)| {
+            asked.iter().map(move |request| {
+                (
+                    batch.workspace.as_deref(),
+                    request_body(&request.state, &request.questions),
+                )
+            })
+        })
+        .collect();
+    // The requests in the order they were handed to the wire, which is the
+    // order the waves bring their answers back in.
+    let mut owners = built.iter().flat_map(|(batch, judgment, asked)| {
+        asked.iter().map(move |request| (batch, judgment, request))
+    });
+    for wave in wire.ask_in_waves(&MAIL_TRIAGE, asks, MAIL_TRIAGE_DEADLINE) {
+        let mut rows = Vec::new();
+        let mut waiting = Vec::new();
+        for answer in &wave {
+            let Some((batch, judgment, request)) = owners.next() else {
+                break;
+            };
+            let (settled, awaiting) = rows_of(batch, judgment, request, answer);
+            rows.extend(settled);
+            waiting.extend(awaiting);
+        }
+        written(rows, waiting);
+    }
+}
+
+/// The rows of one answered request: a row for each of its letters, and the
+/// wait for its label of each that was answered in shape. The request's
+/// account is written on the one row that carries it and the rows beside it
+/// ride it, charged nothing ([`crate::systemone::Spent::rider`]).
+fn rows_of(
+    batch: &Batch,
+    judgment: &MailTriage,
+    request: &Request,
+    answer: &Asked,
+) -> (Vec<Value>, Vec<Waiting>) {
+    let readings = read_request(judgment, request, answer);
+    // What is the request's, worked out once and not once a letter: its wait,
+    // the letter that carries its account — the first that names a task, so
+    // the cost of a task reads it as one's and not as nobody's; the first of
+    // all when none does — which names the batch for every row the request
+    // answered, and what the rows riding it are charged.
+    let items = request.items();
+    let carrier = items
+        .clone()
+        .find(|item| batch.letters[*item].task.is_some())
+        .unwrap_or(items.start);
+    let carrier_key = &batch.letters[carrier].key;
+    let riding = answer.spent.rider();
+    let waited = u64::try_from(answer.waited.as_millis()).unwrap_or(u64::MAX);
+    let mut rows = Vec::with_capacity(items.len());
+    let mut waiting = Vec::new();
+    for (item, reading) in items.clone().zip(readings) {
+        let letter = &batch.letters[item];
+        let mut row = row_of(batch, letter);
+        row[ELAPSED_MS.canonical] = json!(waited);
+        if item == carrier {
+            answer.spent.stamp(&mut row);
+            row[REQUEST_BYTES] = json!(answer.request_bytes);
+        } else {
+            riding.stamp(&mut row);
+            row[REQUEST_BYTES] = json!(0);
+        }
+        row[BATCH] = json!(carrier_key);
+        row[BATCH_SIZE] = json!(items.len());
+        match reading {
+            Ok(read) => {
+                answered(&mut row, &read);
+                waiting.push(Waiting {
+                    key: letter.key.clone(),
+                    run: batch.run.clone(),
+                    asked_ms: batch.asked_ms,
+                    triage: read.triage,
+                    delivered_ms: letter.delivered_ms,
+                });
+            }
+            Err(token) => row[OUTCOME.canonical] = json!(token),
+        }
+        rows.push(row);
+    }
+    (rows, waiting)
 }
 
 /// The letters a question may be asked about: those the coordinator can
@@ -511,6 +640,9 @@ fn seat_term(run: &Run, seats: &super::TeamSeatIndex) -> Option<u32> {
     let (team, pane) = seat.seat.split_once('/')?;
     seats.get(team)?.get(pane).copied()
 }
+
+#[cfg(test)]
+mod batch_tests;
 
 #[cfg(test)]
 mod tests {

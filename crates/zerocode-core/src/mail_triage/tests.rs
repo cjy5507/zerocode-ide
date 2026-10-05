@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::{Value, json};
 
 use super::*;
+use crate::jev::batch::{self, Request, question_name};
 use crate::jev::{MAIL_TRIAGE, rubric_fingerprint};
 use crate::orchestration::{
     CheckV1, Draft, LedgerProjectionV1, Priority, ServedAnswer, ServedRow, Text, worker_address,
@@ -163,8 +164,8 @@ fn room<'a>(
 /// red test, not a quiet drift.
 #[test]
 fn the_version_is_pinned_to_the_words() {
-    assert_eq!(MAIL_TRIAGE_RUBRIC_VERSION, 1);
-    assert_eq!(rubric_fingerprint(rubric_words), "5a4f2984acb4ba2e");
+    assert_eq!(MAIL_TRIAGE_RUBRIC_VERSION, 2);
+    assert_eq!(rubric_fingerprint(rubric_words), "8951c3c165cdb853");
 }
 
 /// The answers are three words in the question's order, each reads back, and
@@ -209,117 +210,270 @@ fn look<'a>() -> MailLook<'a> {
         age_ms: 42_500,
         delivered: false,
         repeats: 2,
-        coordinator_busy: None,
+    }
+}
+
+/* ---- the batch road (t-32796) ------------------------------------------- */
+
+/// What holds for every letter of the batches below.
+fn situation() -> Situation {
+    Situation {
+        coordinator_busy: Some(true),
         open_questions: 3,
     }
 }
 
-/// The question carries a letter's structure under the table's keys — the
-/// texts only where the table declares them, numbers and flags elsewhere —
-/// and asks one closed choice and one Noul in one request.
+/// Three letters of three kinds, as one run's coordinator is handed them.
+fn three_letters<'a>() -> Vec<MailLook<'a>> {
+    vec![
+        MailLook {
+            kind: MessageKind::Question,
+            ..look()
+        },
+        MailLook {
+            kind: MessageKind::WorkerDone,
+            awaits_answer: false,
+            repeats: 0,
+            ..look()
+        },
+        MailLook {
+            kind: MessageKind::WentQuiet,
+            from: "ledger",
+            worker: Some("w-9"),
+            awaits_answer: false,
+            repeats: 4,
+            ..look()
+        },
+    ]
+}
+
+/// The requests `looks` are asked in.
+fn requests_for(looks: &[MailLook<'_>]) -> Vec<Request> {
+    batch::requests(
+        &MailTriage::new(situation()),
+        looks.iter().map(MailLook::facts).collect(),
+    )
+}
+
+/// A reply's answers about the letters of a batch: for each `(item, chosen,
+/// urgent)`, a choice and a Noul under the names the batch road gave that
+/// letter's questions.
+fn replies(about: &[(usize, &str, Value)]) -> Value {
+    let mut answers = Map::new();
+    for (item, chosen, urgent) in about {
+        answers.insert(
+            question_name(*item, TRIAGE_SUFFIX),
+            json!({
+                "type": "choice",
+                "choice": chosen,
+                "probabilities": { "answer_now": 0.7, "can_wait": 0.2, "no_need": 0.1 },
+                "confidence": 0.6,
+            }),
+        );
+        answers.insert(
+            question_name(*item, URGENT_SUFFIX),
+            json!({ "type": "noul", "noul": urgent }),
+        );
+    }
+    Value::Object(answers)
+}
+
+/// A batch of letters is ONE request: the coordinator's situation said once,
+/// each letter in an entry of its own — and not a word of the question in the
+/// state, where the model reads it as data (t-32796: the day's letters agreed
+/// with what the coordinator did next in 192 of 406 comparisons so, in 218
+/// with the words in the questions).
 #[test]
-fn the_question_carries_the_letters_structure_and_never_its_words() {
-    let asked = ask(&look());
-    let state = asked.state.as_object().expect("a state");
-    let keys: Vec<&str> = state.keys().map(String::as_str).collect();
-    let mut expected = STATE_KEYS.to_vec();
+fn a_batch_is_one_request_that_says_the_situation_once_and_no_word_of_the_question() {
+    let looks = three_letters();
+    let asked = requests_for(&looks);
+    assert_eq!(asked.len(), 1, "three letters are one request");
+    let request = &asked[0];
+    assert_eq!(request.items(), 0..3);
+    let state = request.state.as_object().expect("a state");
+    let mut keys: Vec<&str> = state.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let mut expected = REQUEST_KEYS.to_vec();
     expected.sort_unstable();
-    let mut keys_sorted = keys.clone();
-    keys_sorted.sort_unstable();
-    assert_eq!(keys_sorted, expected);
-    assert_eq!(asked.state["kind"], "question");
-    assert_eq!(asked.state["from"], "worker");
-    assert_eq!(asked.state["worker"], "w-7");
-    assert_eq!(asked.state["task"], "t-3");
-    assert_eq!(asked.state["taskStatus"], "dispatched");
-    assert_eq!(asked.state["priority"], "normal");
-    assert_eq!(asked.state["awaitsAnswer"], true);
-    assert_eq!(asked.state["threadDepth"], 0);
-    assert_eq!(asked.state["ageSeconds"], 42, "seconds a person would say");
-    assert_eq!(asked.state["delivered"], false);
-    assert_eq!(asked.state["repeats"], 2);
+    assert_eq!(keys, expected);
     assert_eq!(
-        asked.state["coordinatorBusy"],
-        Value::Null,
-        "unknown is unknown"
+        REQUEST_KEYS[..],
+        ["coordinator", "letters"][..],
+        "the state holds what is true of the coordinator and the letters"
     );
-    assert_eq!(asked.state["openQuestions"], 3);
-    // Every text in the state is one the table declares; the rest are not
+    assert!(
+        state.get("rubric").is_none(),
+        "the words of the question stand in the questions: {state:?}"
+    );
+    assert_eq!(state["coordinator"]["busy"], true);
+    assert_eq!(state["coordinator"]["openQuestions"], 3);
+    let letters = state["letters"].as_array().expect("the letters");
+    assert_eq!(letters.len(), 3);
+    for (entry, look) in letters.iter().zip(&looks) {
+        assert_eq!(*entry, look.facts());
+    }
+}
+
+/// A letter's entry carries its structure under the table's keys — the
+/// texts only where the table declares them, numbers and flags elsewhere —
+/// and never a word the letter says.
+#[test]
+fn a_letters_entry_carries_its_structure_and_never_its_words() {
+    let entry = look().facts();
+    let fields = entry.as_object().expect("an entry");
+    let mut keys: Vec<&str> = fields.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let mut expected = LETTER_KEYS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(keys, expected);
+    assert_eq!(entry["kind"], "question");
+    assert_eq!(entry["from"], "worker");
+    assert_eq!(entry["worker"], "w-7");
+    assert_eq!(entry["task"], "t-3");
+    assert_eq!(entry["taskStatus"], "dispatched");
+    assert_eq!(entry["priority"], "normal");
+    assert_eq!(entry["awaitsAnswer"], true);
+    assert_eq!(entry["threadDepth"], 0);
+    assert_eq!(entry["ageSeconds"], 42, "seconds a person would say");
+    assert_eq!(entry["delivered"], false);
+    assert_eq!(entry["repeats"], 2);
+    // Every text in the entry is one the table declares; the rest are not
     // texts at all.
     let declared: Vec<&str> = MAIL_TRIAGE
         .sends
         .iter()
-        .map(|sent| sent.at.trim_start_matches("/state/"))
+        .filter_map(|sent| sent.at.strip_prefix("/state/letters/*/"))
         .collect();
-    for (key, value) in state {
+    for (key, value) in fields {
         assert_eq!(
             value.is_string(),
             declared.contains(&key.as_str()),
             "{key}: {value}"
         );
     }
-    let questions = asked.questions.as_object().expect("questions");
-    assert_eq!(questions.len(), 2);
-    assert_eq!(asked.questions["triage"]["type"], "choice");
-    let criteria = asked.questions["triage"]["criteria"]
-        .as_object()
-        .expect("criteria");
-    let offered: Vec<&str> = criteria.keys().map(String::as_str).collect();
-    let mut words: Vec<&str> = Triage::ALL.map(Triage::word).to_vec();
-    words.sort_unstable();
-    let mut offered_sorted = offered.clone();
-    offered_sorted.sort_unstable();
-    assert_eq!(offered_sorted, words);
-    assert_eq!(asked.questions["urgent"]["type"], "noul");
-
-    // A busy coordinator is said as a flag, and a negative age as none.
-    let busy = ask(&MailLook {
-        coordinator_busy: Some(true),
+    // A negative age is none.
+    let early = MailLook {
         age_ms: -5,
         ..look()
-    });
-    assert_eq!(busy.state["coordinatorBusy"], true);
-    assert_eq!(busy.state["ageSeconds"], 0);
+    };
+    assert_eq!(early.facts()["ageSeconds"], 0);
 }
 
-fn answer(chosen: &str, urgent: Value) -> Value {
-    json!({
-        "triage": {
-            "type": "choice",
-            "choice": chosen,
-            "probabilities": { "answer_now": 0.7, "can_wait": 0.2, "no_need": 0.1 },
-            "confidence": 0.6,
-        },
-        "urgent": { "type": "noul", "noul": urgent },
-    })
-}
-
-/// An answer needs both heads in shape; one broken rule in either discards
-/// it whole, and says which.
+/// Each letter is asked one closed choice and one Noul, by its place in the
+/// list. The choice says what the fields are and what each option means, with
+/// the examples that tell which letters it is for — in the question, once for
+/// each letter, and not once for the request: a question is judged on its own
+/// words.
 #[test]
-fn an_answer_needs_both_heads_or_is_refused_whole() {
-    let asked = ask(&look());
-    let read = asked
-        .read(&answer("answer_now", json!(0.8)))
-        .expect("in shape");
-    assert_eq!(read.triage, Triage::AnswerNow);
-    assert_eq!(read.confidence, 0.6);
-    assert_eq!(read.urgent, 0.8);
-    assert_eq!(read.probabilities.len(), 3);
+fn each_letter_is_asked_a_choice_that_says_what_the_fields_are_and_what_each_option_means() {
+    let looks = three_letters();
+    let asked = requests_for(&looks);
+    assert_eq!(asked.len(), 1);
+    let request = &asked[0];
+    let questions = request.questions.as_object().expect("questions");
+    assert_eq!(questions.len(), 6, "two about each of three letters");
+    let mut words: Vec<&str> = Triage::ALL.map(Triage::word).to_vec();
+    words.sort_unstable();
+    for (at, item) in request.items().enumerate() {
+        let choice = &questions[&question_name(item, TRIAGE_SUFFIX)];
+        assert_eq!(choice["type"], "choice");
+        let said = choice["instructions"].as_str().expect("words");
+        assert!(said.contains(&format!("letters[{at}]")), "{said}");
+        assert_eq!(
+            said,
+            format!(
+                "{INSTRUCTIONS} {}",
+                ITEM_INSTRUCTIONS.replace(AT_PLACEHOLDER, &at.to_string())
+            ),
+            "what the fields are, then which letter it is"
+        );
+        assert!(!said.contains("rubric"), "{said}");
+        let criteria = choice["criteria"].as_object().expect("the options");
+        let mut offered: Vec<&str> = criteria.keys().map(String::as_str).collect();
+        offered.sort_unstable();
+        assert_eq!(offered, words);
+        for triage in Triage::ALL {
+            assert_eq!(
+                criteria[triage.word()],
+                triage.means(),
+                "an option says what it means, with its examples"
+            );
+        }
+        let urgent = &questions[&question_name(item, URGENT_SUFFIX)];
+        assert_eq!(urgent["type"], "noul");
+        let said = urgent["instructions"].as_str().expect("words");
+        assert!(said.contains(&format!("letters[{at}]")), "{said}");
+    }
+    let whole = json!({ "state": request.state, "questions": request.questions }).to_string();
     assert_eq!(
-        asked.read(&answer("later", json!(0.8))),
-        Err(MailRefusal::Triage(ChoiceRefusal::UnknownOption))
+        whole.matches(INSTRUCTIONS).count(),
+        looks.len(),
+        "what the fields are, once for each letter"
     );
+    for triage in Triage::ALL {
+        assert_eq!(
+            whole.matches(triage.means()).count(),
+            looks.len(),
+            "{}: what the option means, once for each letter",
+            triage.word()
+        );
+    }
+}
+
+/// A batch above the cap is cut evenly, and every request of it carries the
+/// explanation of the fields with each of its letters' questions and none in
+/// its state.
+#[test]
+fn a_batch_above_the_cap_is_cut_evenly_and_every_letters_question_says_what_the_fields_are() {
+    let letters = MAIL_TRIAGE_BATCH_CAP * 2 + 1;
+    let looks: Vec<MailLook<'_>> = (0..letters).map(|_| look()).collect();
+    let asked = requests_for(&looks);
     assert_eq!(
-        asked.read(&answer("answer_now", json!(1.5))),
-        Err(MailRefusal::Urgent(NoulRefusal::OutOfRange))
+        asked.len(),
+        3,
+        "{letters} letters at a cap of {MAIL_TRIAGE_BATCH_CAP}"
     );
-    let mut lacking = answer("answer_now", json!(0.8));
-    lacking.as_object_mut().expect("answers").remove("urgent");
-    assert_eq!(
-        asked.read(&lacking),
-        Err(MailRefusal::Urgent(NoulRefusal::NoAnswer))
+    let sizes: Vec<usize> = asked.iter().map(|request| request.items().len()).collect();
+    assert_eq!(sizes.iter().sum::<usize>(), letters, "{sizes:?}");
+    let widest = sizes.iter().max().copied().unwrap_or(0);
+    let narrowest = sizes.iter().min().copied().unwrap_or(0);
+    assert!(widest <= MAIL_TRIAGE_BATCH_CAP, "{sizes:?}");
+    assert!(widest - narrowest <= 1, "{sizes:?}");
+    for request in &asked {
+        let whole = json!({ "state": request.state, "questions": request.questions }).to_string();
+        assert_eq!(whole.matches(INSTRUCTIONS).count(), request.items().len());
+        assert!(request.state.get("rubric").is_none());
+        assert_eq!(
+            request.state["letters"].as_array().expect("letters").len(),
+            request.items().len()
+        );
+    }
+}
+
+/// A letter's answer needs both heads in shape; one broken rule in either
+/// discards that answer whole, and says which.
+#[test]
+fn a_letters_answer_needs_both_heads_or_is_refused_whole() {
+    let looks = three_letters();
+    let asked = requests_for(&looks);
+    assert_eq!(asked.len(), 1);
+    let judgment = MailTriage::new(situation());
+    let read = asked[0].read(
+        &judgment,
+        &replies(&[
+            (0, "answer_now", json!(0.8)),
+            (1, "can_wait", json!(0.3)),
+            (2, "no_need", json!(0.1)),
+        ]),
     );
+    assert_eq!(read.len(), 3);
+    let first = read[0].as_ref().expect("in shape");
+    assert_eq!(first.triage, Triage::AnswerNow);
+    assert_eq!(first.confidence, 0.6);
+    assert_eq!(first.urgent, 0.8);
+    assert_eq!(first.probabilities.len(), 3);
+    assert_eq!(read[1].as_ref().expect("in shape").triage, Triage::CanWait);
+    assert_eq!(read[2].as_ref().expect("in shape").triage, Triage::NoNeed);
     assert_eq!(
         MailRefusal::Urgent(NoulRefusal::NoAnswer).token(),
         "schema_no_noul"
@@ -327,6 +481,69 @@ fn an_answer_needs_both_heads_or_is_refused_whole() {
     assert_eq!(
         MailRefusal::Triage(ChoiceRefusal::NotOne).token(),
         "schema_not_one"
+    );
+}
+
+/// Stage one's rule, held for the mail: a letter whose answer breaks a rule
+/// is refused alone, by the rule it broke, and the letters beside it are
+/// read as they would have been had nothing broken.
+#[test]
+fn a_letters_broken_answer_discards_that_letter_alone() {
+    let looks = vec![look(); 4];
+    let asked = requests_for(&looks);
+    assert_eq!(asked.len(), 1);
+    let judgment = MailTriage::new(situation());
+    let mut about = replies(&[
+        (0, "later", json!(0.8)),
+        (1, "answer_now", json!(1.5)),
+        (2, "answer_now", json!(0.8)),
+        (3, "can_wait", json!(0.2)),
+    ]);
+    about
+        .as_object_mut()
+        .expect("answers")
+        .remove(&question_name(2, URGENT_SUFFIX));
+    let read = asked[0].read(&judgment, &about);
+    assert_eq!(read.len(), 4);
+    assert_eq!(
+        read[0],
+        Err(MailRefusal::Triage(ChoiceRefusal::UnknownOption))
+    );
+    assert_eq!(read[1], Err(MailRefusal::Urgent(NoulRefusal::OutOfRange)));
+    assert_eq!(read[2], Err(MailRefusal::Urgent(NoulRefusal::NoAnswer)));
+    let kept = read[3].as_ref().expect("the letter beside them is read");
+    assert_eq!(kept.triage, Triage::CanWait);
+    assert_eq!(kept.urgent, 0.2);
+}
+
+/// The door cuts a batch to the table's cap and never sends it whole: the
+/// road itself never builds a request over the cap, which is what makes the
+/// door's cut a belt beside its braces.
+#[test]
+fn the_door_cuts_a_batch_to_the_cap_and_never_sends_it_whole() {
+    use crate::jev::door::{Asking, JevSettings, may_send};
+
+    let letters = MAIL_TRIAGE_BATCH_CAP + 5;
+    let facts: Vec<Value> = (0..letters).map(|_| look().facts()).collect();
+    let body = json!({ "state": { "letters": facts }, "questions": {} });
+    let settings = JevSettings::from_root(
+        &json!({ "smart": { "jev": { "enabled": true, "workspaces": ["*"] } } }),
+    );
+    let cleared = may_send(
+        &MAIL_TRIAGE,
+        &Asking {
+            key: true,
+            settings: &settings,
+            workspace: Some("/work/checkout"),
+            sent_today: 0,
+        },
+        body,
+    )
+    .expect("the door lets it through");
+    let sent: Value = serde_json::from_slice(cleared.bytes()).expect("what leaves");
+    assert_eq!(
+        sent["state"]["letters"].as_array().expect("letters").len(),
+        MAIL_TRIAGE_BATCH_CAP
     );
 }
 
@@ -834,8 +1051,9 @@ fn the_engine_takes_the_rule_it_is_handed() {
 }
 
 /// What the question reads about a letter off a live run: its sender's head,
-/// its worker and task and where the task stands, its depth, how many
-/// letters about the same thing came before it and how many questions wait.
+/// its worker and task and where the task stands, its depth and how many
+/// letters about the same thing came before it — and, once for the run, how
+/// many questions wait on the coordinator.
 #[test]
 fn the_look_reads_the_letters_facts_off_the_run() {
     let mut ledger = Ledger::new();
@@ -869,9 +1087,15 @@ fn the_look_reads_the_letters_facts_off_the_run() {
     let receipts = Vec::new();
     let room = Mailroom::of_run(run, &receipts);
     let letter = room.message(&question).expect("the letter");
-    let open_questions = room.open_questions(run);
-    assert_eq!(open_questions, 1);
-    let look = room.look(run, letter, 20_010, Some(false), open_questions);
+    let situation = room.situation(run, Some(false));
+    assert_eq!(
+        situation,
+        Situation {
+            coordinator_busy: Some(false),
+            open_questions: 1,
+        }
+    );
+    let look = room.look(run, letter, 20_010);
     assert_eq!(look.kind, MessageKind::Question);
     assert_eq!(look.from, "worker");
     assert_eq!(look.worker, Some(started.worker.as_str()));
@@ -883,10 +1107,9 @@ fn the_look_reads_the_letters_facts_off_the_run() {
     assert_eq!(look.age_ms, 20_000);
     assert!(!look.delivered);
     assert_eq!(look.repeats, 0);
-    assert_eq!(look.coordinator_busy, Some(false));
-    let asked = ask(&look);
+    let asked = requests_for(&[look]);
     assert!(
-        !asked.state.to_string().contains("읽지 않는다"),
+        !asked[0].state.to_string().contains("읽지 않는다"),
         "a letter's words never reach the question"
     );
 }
