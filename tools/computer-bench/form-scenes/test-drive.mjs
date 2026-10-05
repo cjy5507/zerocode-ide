@@ -643,6 +643,66 @@ const FRAMED_TWO = await scene("framed-two", `<!doctype html><html lang="en"><me
   });
 </script>` });
 
+/* A secret the card gives for a step the form has not come to (t-41720): a road writes what the read of the step it stands on shows, and the value of a field the read says is secret is in no text it sends to the door —
+ * not in a fill, not in the expression of a script. The field is typed, by `type`, once the read shows it. */
+const LATER_FACTS = [{ says: "Name", value: "Kim" }, { says: "Passphrase", value: "tw0-Fiv3-9aZ" }];
+const SECRET_LATER = await scene("secret-later", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div id="s1"><label for="nm">Name</label> <input id="nm"> <button type="button" id="go">Next</button></div>
+  <div id="s2" hidden><label for="pw">Passphrase</label> <input id="pw" type="password" autocomplete="off"> <button type="button" id="send">Finish</button></div>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  $("go").addEventListener("click", () => { if (!$("nm").value) return; $("s1").hidden = true; $("s2").hidden = false; });
+  $("send").addEventListener("click", () => { if (!$("pw").value) return; window.__sceneResult = { name: $("nm").value, pass: $("pw").value }; });
+</script>`, LATER_FACTS, { name: "Kim", pass: "tw0-Fiv3-9aZ" });
+
+/* The code the page sent to the person's phone, in a row of six boxes of one digit each, the first marked as a one-time code, that move the caret on by themselves as a person types (t-41720): the door says the whole row is secret, and the person
+ * types the code into it — the road asks the person for it, naming the field, and never holds it. */
+const CODE_PHONE = [{ says: "Mobile number", value: "010-5550-0199" }];
+const OTP_BOXES = await scene("otp-boxes", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="row"><label for="ph">Mobile number</label> <input id="ph" type="tel"> <button type="button" id="text">Text me a code</button></div>
+  <div id="area" hidden>
+    <span id="olabel">Enter the 6-digit code</span>
+    <div id="otp" role="group" aria-labelledby="olabel">
+      <input inputmode="numeric" maxlength="1" autocomplete="one-time-code" aria-label="Digit 1"><input inputmode="numeric" maxlength="1" aria-label="Digit 2"><input inputmode="numeric" maxlength="1" aria-label="Digit 3"><input inputmode="numeric" maxlength="1" aria-label="Digit 4"><input inputmode="numeric" maxlength="1" aria-label="Digit 5"><input inputmode="numeric" maxlength="1" aria-label="Digit 6">
+    </div>
+    <button type="button" id="verify" disabled>Verify</button>
+  </div>
+  <button type="button" id="finish">Finish</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const boxes = [...document.querySelectorAll("#otp input")];
+  const typed = () => boxes.map((box) => box.value).join("");
+  let ok = false;
+  $("text").addEventListener("click", () => { window.__personPhone = "624817"; $("area").hidden = false; });
+  boxes.forEach((box, at) => box.addEventListener("input", () => {
+    box.value = box.value.replace(/\\D/g, "").slice(-1);
+    if (box.value && at < boxes.length - 1) boxes[at + 1].focus();
+    $("verify").disabled = typed().length !== boxes.length;
+  }));
+  $("verify").addEventListener("click", () => { ok = typed() === window.__personPhone; });
+  $("finish").addEventListener("click", () => { if (!ok) return; window.__sceneResult = { mobile: $("ph").value, verified: ok }; });
+</script>`, CODE_PHONE, { mobile: "010-5550-0199", verified: true }, CODE_CARD(CODE_PHONE));
+
+/* The same code in one box that nothing marks but its shape — numbers, six characters — and the words the page gives it: the door says it is secret as well. */
+const OTP_SHAPED = await scene("otp-shaped", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="row"><label for="ph">Cell line</label> <input id="ph" type="tel"> <button type="button" id="send">Get my code</button></div>
+  <div class="row" id="cr" hidden><label for="sms">Verification number</label><div class="line"><input id="sms" inputmode="numeric" maxlength="6"><button type="button" id="check">Check</button></div></div>
+  <p id="top"></p>
+  <button type="button" id="finish">Finish</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let sent = "", ok = false;
+  $("send").addEventListener("click", () => { sent = "913746"; window.__personPhone = sent; $("cr").hidden = false; });
+  $("check").addEventListener("click", () => { ok = $("sms").value === sent; });
+  $("finish").addEventListener("click", () => {
+    if (!ok) { $("top").textContent = "Check the number first"; return; }
+    window.__sceneResult = { mobile: $("ph").value, code: $("sms").value, verified: ok };
+  });
+</script>`, SEND_BESIDE_FACTS, { mobile: "031-7788-2290", code: "913746", verified: true }, CODE_CARD(SEND_BESIDE_FACTS));
+
 /* A field the page answers about after a press, with a button of its own beside it: the door says whose the button is, and the driver presses it once and
  * reads the form again — the press that ends the form is made again after it. */
 const OWN = await scene("own", `<!doctype html><html lang="en"><meta charset="utf-8"><form id="f" onsubmit="return false">
@@ -684,12 +744,16 @@ const stub = join(root, "door-text-stub.sh");
 await writeFile(stub, `#!/bin/sh\ncat > /dev/null\nprintf '%s' '{"words":"stub"}'\n`, { mode: 0o755 });
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", VENUE_PAIR, "--scene", BERTH_COUNT, "--scene", SPLIT_SECRET, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--door-text", stub, "--out", out, "--sources", sourcesFile], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", VENUE_PAIR, "--scene", BERTH_COUNT, "--scene", SPLIT_SECRET, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--scene", SECRET_LATER, "--scene", OTP_BOXES, "--scene", OTP_SHAPED, "--door-text", stub, "--out", out, "--sources", sourcesFile], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* What each road sent to the door, text by text (`--sources`): what a model's calls would have carried. */
 const sources = await readFile(sourcesFile, "utf8").then(JSON.parse, () => []);
 const sourcesOf = (scene, road) => sources.filter((one) => one.scene === scene && one.road === road).map((one) => one.text);
+/* How many of the texts a road sent to the door carry a value. */
+const carries = (scene, road, value) => sourcesOf(scene, road).filter((text) => text.includes(value)).length;
+/* The three counts of a row's watch, all of them nothing. */
+const watchClean = (one) => Boolean(one.leaks) && one.leaks.requests === 0 && one.leaks.answers === 0 && one.leaks.trace === 0;
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
 const roadOut = join(root, "road.json");
 const road = spawnSync(process.execPath, [join(HERE, "person-road.mjs"), "--scene", PERSON_KEPT, "--scene", PERSON_LEFT, "--out", roadOut], { encoding: "utf8", timeout: 240_000 });
@@ -920,12 +984,16 @@ await test("a driver gives the number of the card to a count the page draws betw
   return JSON.stringify(row("berth-count", "verbs").result);
 });
 
-await test("a driver does not write the whole of a value the page splits across parts into the first part once some of the parts were typed as secrets, on both roads", () => {
+await test("a driver types every part of a value the page splits across parts when one of them is a password field, each its own piece and never the whole, and no text it sends carries one, on both roads", () => {
+  const pieces = ["0123", "4567", "8901", "2345"];
   for (const road of ["verbs", "script"]) {
     const one = row("split-secret", road);
-    assert(one && one.ok && one.pass, `the ${road} road gives each part its piece and types the hidden two`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
-    assert(Array.isArray(one.trace) && one.trace.filter((step) => step.verb === "type").length === 2, `the run kept a trace with the two type steps in it (${road})`, one.trace);
+    assert(one && one.ok && one.pass, `the ${road} road gives each part its piece and types all four`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+    assert(Array.isArray(one.trace) && one.trace.filter((step) => step.verb === "type").length === 4, `the run kept a trace with the four type steps in it (${road})`, one.trace);
     assert(!JSON.stringify(one.trace).includes("0123 4567 8901 2345"), `no step of the trace carries the whole number (${road})`);
+    assert(!JSON.stringify(one.trail).includes(":secret"), `no fill was offered a part (${road})`, one.trail);
+    for (const value of [...pieces, "0123 4567 8901 2345"]) assert(carries("split-secret", road, value) === 0, `no text the ${road} road sent to the door carries a piece of the number`, { value: value.length, texts: carries("split-secret", road, value) });
+    assert(watchClean(one), `and no record of the run does (${road})`, one.leaks);
   }
   return JSON.stringify(row("split-secret", "verbs").result);
 });
@@ -936,6 +1004,7 @@ await test("a driver types a secret field inside a frame of the same origin by i
     assert(one && one.ok && one.pass, `the ${road} road types the secret into the frame's field and submits`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
     assert(Array.isArray(one.trace) && one.trace.some((step) => step.verb === "type"), `the run kept a trace with the type step in it (${road})`, one.trace);
     assert(!JSON.stringify(one.trace).includes("7391"), `the value is in no step of the trace (${road})`);
+    assert(carries("framed-secret", road, "7391") === 0 && watchClean(one), `and in no text the ${road} road sent to the door, nor any record of the run`, { texts: carries("framed-secret", road, "7391"), leaks: one.leaks });
   }
   return JSON.stringify(row("framed-secret", "verbs").result);
 });
@@ -947,8 +1016,54 @@ await test("a driver whose type into a frame is refused because the form changed
     assert(one.result.pin === "7391" && one.result.backup === "5520", `each secret is in its own field (${road})`, one.result);
     assert(Array.isArray(one.trace) && one.trace.filter((step) => step.verb === "type").length >= 2, `the run kept a trace with both type steps in it (${road})`, one.trace);
     assert(!JSON.stringify(one.trace).includes("7391") && !JSON.stringify(one.trace).includes("5520"), `neither value is in any step of the trace (${road})`);
+    assert(carries("framed-two", road, "7391") === 0 && carries("framed-two", road, "5520") === 0 && watchClean(one), `nor in any text the ${road} road sent to the door, nor any record of the run`, one.leaks);
   }
   return JSON.stringify(row("framed-two", "verbs").result);
+});
+
+await test("a driver puts no value of a secret field into a fill or a script, and none of a step the form has not come to: the secret is typed once the read shows the field, on both roads", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("secret-later", road);
+    assert(one && one.ok && one.pass, `the ${road} road takes the name on the first step and types the passphrase on the second`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+    assert(one.type === 1, `by one type (${road})`, { type: one.type });
+    assert(!JSON.stringify(one.trail).includes(":secret"), `no fill was offered the secret field (${road})`, one.trail);
+    assert(carries("secret-later", road, "tw0-Fiv3-9aZ") === 0, `no text the ${road} road sent to the door carries the passphrase`, { texts: carries("secret-later", road, "tw0-Fiv3-9aZ") });
+    assert(watchClean(one), `and no record of the run does (${road})`, one.leaks);
+  }
+  return JSON.stringify(row("secret-later", "script").result);
+});
+
+await test("a driver hands the code of the person over by the person typing it into the field it names — no fill writes it and no text it sends to the door carries it, on both roads", () => {
+  for (const [scene, code] of [["send-beside", "483920"], ["confirm-beside", "483920"], ["code-words", "483920"]]) {
+    for (const road of ["verbs", "script"]) {
+      const one = row(scene, road);
+      assert(one && one.ok && one.pass, `the ${road} road gets through ${scene} with the code the person typed`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+      assert(one.handoff === 1, `by asking the person once (${road}, ${scene})`, { handoff: one.handoff });
+      assert(carries(scene, road, code) === 0, `no text the ${road} road sent to the door carries the code (${scene})`, { texts: carries(scene, road, code) });
+      assert(one.leaks && one.leaks.requests === 0, `and the row counts none (${road}, ${scene})`, one.leaks);
+    }
+  }
+  return "typed by the person";
+});
+
+await test("a code field the door says is secret — a row of boxes marked as a code, or a box whose shape and words say it — is typed into by the person and the code is in no record of the run, on both roads", () => {
+  for (const [scene, code] of [["otp-boxes", "624817"], ["otp-shaped", "913746"]]) {
+    for (const road of ["verbs", "script"]) {
+      const one = row(scene, road);
+      assert(one && one.ok && one.pass, `the ${road} road gets through ${scene} with the code the person typed`, one && { ok: one.ok, stuck: one.stuck, result: one.result, trail: one.trail });
+      assert(one.handoff === 1 && one.type === 0, `by asking the person once and typing nothing itself (${road}, ${scene})`, { handoff: one.handoff, type: one.type });
+      assert(carries(scene, road, code) === 0, `no text the ${road} road sent to the door carries the code (${scene})`, { texts: carries(scene, road, code) });
+      assert(watchClean(one), `no answer of the door and no line of the trace carries it either (${road}, ${scene})`, one.leaks);
+      assert(!JSON.stringify(one.trace).includes(code), `in the trace in any form (${road}, ${scene})`);
+    }
+  }
+  return "typed by the person";
+});
+
+await test("no road of the suite sent the door a text that carries a value it typed as a secret", () => {
+  const leaking = rows.filter((one) => one.leaks && one.leaks.requests > 0).map((one) => `${one.scene}/${one.road}`);
+  assert(rows.some((one) => one.leaks) && !leaking.length, "every row says its counts and none counts a text sent", leaking);
+  return `${rows.filter((one) => one.leaks).length} rows`;
 });
 
 await test("the recipe a driver presses a button inside a frame by is the one the skill teaches", () => {
