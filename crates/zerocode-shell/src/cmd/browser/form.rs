@@ -656,10 +656,12 @@ const zcNumberRuns = (records, request) => {
     if (end - at > 1 && zcFold(head.label)) {
       // The caption read before the first part is renamed, for every part.
       const caption = head.label.trim();
+      const run = records.slice(at, end);
       for (let part = at; part < end; part += 1) {
         records[part].label = caption + " (" + (part - at + 1) + "/" + (end - at) + ")";
+        records[part].groups = (records[part].groups || []).concat([run]);
       }
-      zcJoints(records.slice(at, end), request);
+      zcJoints(run, request);
     }
     at = end;
   }
@@ -1073,7 +1075,10 @@ const zcPartCaptions = (records, request) => {
     if (!box || box.matches("body, form, [role=form], dialog, [role=dialog], main")) continue;
     const held = records.filter((other) => box.contains(other.el));
     if (held.length < 2 || held.some((other) => !other.short || other.kind === "chips" || other.el.parentElement !== box)) continue;
-    for (const part of held) done.add(part);
+    for (const part of held) {
+      done.add(part);
+      part.groups = (part.groups || []).concat([held]);
+    }
     zcJoints(held, request);
     let name = "";
     for (let up = box, level = 0; up && level <= request.captionDepth; up = up.parentElement, level += 1) {
@@ -1095,6 +1100,49 @@ const zcPartCaptions = (records, request) => {
       part.label = lead + " — " + own + (star && !/[*＊]\s*$/.test(own) ? " *" : "");
     }
   }
+};
+// ---- what the read says is secret, whole ----
+// A password field is secret by the platform's own facts (the one helper `zcSecretField`). The read adds what stands beside it: a one-time code — by the platform's mark
+// (autocomplete one-time-code) or, on a page that marks nothing, by its shape (a numeric box of four to eight characters) together with the words the page itself gives it; a row of
+// four or more single-character numeric boxes is one code; and the parts of one value are all secret when one of them is. A secret field's value is never read.
+const zcOneTimeWords = /one[\s-]?time|\botp\b|verification|security\s*code|\bsms\b|인증/i;
+const zcTextual = (record) => ["text", "tel", "number", "password", "email", "search", "url", "textarea"].includes(record.kind);
+const zcSecretParts = (records) => {
+  const hide = (record) => {
+    record.masked = true;
+    record.value = "";
+  };
+  const wordsOf = (record) => [record.label, record.placeholder, record.caption, record.el.getAttribute("aria-label"), record.el.getAttribute("name"), record.el.id].join(" ");
+  const numeric = (record) => record.el.inputMode === "numeric" || record.kind === "tel";
+  for (const record of records) {
+    if (record.masked || !zcTextual(record) || zcFormTag(record.el) !== "input") continue;
+    const marked = String(record.el.getAttribute("autocomplete") || "").toLowerCase().split(/\s+/).includes("one-time-code");
+    const shaped = numeric(record) && record.maxLength !== null && record.maxLength >= 4 && record.maxLength <= 8 && zcOneTimeWords.test(wordsOf(record));
+    if (marked || shaped) hide(record);
+  }
+  const groups = [...new Set(records.flatMap((record) => record.groups || []))];
+  for (const group of groups) {
+    if (group.length >= 4 && group.every((one) => zcTextual(one) && one.maxLength === 1 && numeric(one))) group.forEach(hide);
+  }
+  for (let again = true; again;) {
+    again = false;
+    for (const group of groups) {
+      if (!group.some((one) => one.masked)) continue;
+      for (const one of group) {
+        if (!one.masked && zcTextual(one) && zcFormTag(one.el) === "input") {
+          hide(one);
+          again = true;
+        }
+      }
+    }
+  }
+};
+// The elements the read says are secret, once for a script run: a fill writes and reads back by handle, and a handle's own record knows only the element's own facts.
+let zcSecretEls = null;
+const zcSecretSet = (request, read = null) => {
+  if (read) zcSecretEls = new Set(read.records.filter((record) => record.masked).map((record) => record.el));
+  if (!zcSecretEls) zcSecretEls = new Set(zcFormFields(request).records.filter((record) => record.masked).map((record) => record.el));
+  return zcSecretEls;
 };
 // Whether two elements stand next to each other in one box: no drawn element between them.
 const zcNeighbours = (a, b) => {
@@ -1293,6 +1341,7 @@ const zcFormFields = (request, before = null) => {
   zcNumberRuns(records, request);
   zcPartCaptions(records, request);
   zcTellApart(records);
+  zcSecretParts(records);
   const scopes = new Set(records.map((record) => record.el.closest(request.scopes.join(","))
     || record.el.ownerDocument.body));
   // A step with no field of its own — a review, a confirmation, a modal that asks yes or no — still
@@ -1915,7 +1964,12 @@ const zcTarget = (handle) => {
   const el = found.find(zcShown);
   if (!el) return { code: "not_found" };
   const record = zcRead(el, request) || zcDialogRecord(el, request);
-  return record ? { record } : { code: "not_a_field" };
+  if (!record) return { code: "not_a_field" };
+  if (!record.masked && zcSecretSet(request).has(el)) {
+    record.masked = true;
+    record.value = "";
+  }
+  return { record };
 };
 // One pass over a bundle, in two halves the window runs apart so the page can
 // settle between them: the write, then the read-back.
@@ -1931,6 +1985,7 @@ const zcTarget = (handle) => {
 // stands before the first write, so the pass's own changes are the first it sees.
 const zcFillWrite = (entries, expect, watch) => {
   const read = zcFormFields(request);
+  zcSecretSet(request, read);
   if (expect && read.print !== expect) return { stale: true, fingerprint: read.print, wrote: false, held: [] };
   const before = zcTextBefore(read, request);
   if (watch) zcSettleWatch(watch);
@@ -1980,6 +2035,7 @@ const zcFillRead = (input, epoch) => {
   const before = Array.isArray(input) ? null : input.before || null;
   const replaced = zcEpoch() !== epoch;
   const after = zcFormFields(request, replaced ? null : before);
+  zcSecretSet(request, after);
   const results = held.map((one) => {
     const out = one.out;
     if (one.status) {

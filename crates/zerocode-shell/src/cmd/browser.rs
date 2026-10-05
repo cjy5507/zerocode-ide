@@ -3803,24 +3803,20 @@ pub(crate) async fn automate_type(
         "blockRoots": block_roots(),
         "frameSeparator": zerocode_core::browser_form::BROWSER_FORM_FRAME_SEPARATOR,
     });
-    // A field inside a frame is typed into the form its agent read: when the pane's agent has read one, the page proves it is still that form before anything is written.
-    let script = match (
+    // The form helpers stand under the body: whether a field is secret is what the read says of it (a part of one secret value, a one-time code), not its own facts alone. A field inside a
+    // frame is typed into the form its agent read: when the pane's agent has read one, the page proves it is still that form before anything is written.
+    request["expect"] = match (
         selector.contains(zerocode_core::browser_form::BROWSER_FORM_FRAME_SEPARATOR),
         form::known_form(label),
     ) {
-        (true, Some(known)) => {
-            let mut held = form::form_request();
-            if let (Some(held), Some(asked)) = (held.as_object_mut(), request.as_object()) {
-                held.extend(asked.clone());
-            }
-            held["expect"] = serde_json::Value::String(known);
-            form::form_script(&held, TYPE_BODY)
-        }
-        _ => {
-            request["expect"] = serde_json::Value::Null;
-            automation_script(&request, TYPE_BODY)
-        }
+        (true, Some(known)) => serde_json::Value::String(known),
+        _ => serde_json::Value::Null,
     };
+    let mut held = form::form_request();
+    if let (Some(held), Some(asked)) = (held.as_object_mut(), request.as_object()) {
+        held.extend(asked.clone());
+    }
+    let script = form::form_script(&held, TYPE_BODY);
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
     typed_report(page_value(reply)?, road)
 }
@@ -3886,7 +3882,7 @@ if (input && String(element.type).toLowerCase() === "file") return zcFail("eleme
 if ((input || area) && element.maxLength >= 0 && request.text.length > element.maxLength) {
   return zcFail("text_too_long");
 }
-const secureField = zcSecretField(element);
+const secureField = zcSecretField(element) || (typeof zcSecretSet === "function" && zcSecretSet(request).has(element));
 if (request.road === "keys" && secureField) {
   return zcEncode({ ok: true, value: { method: "held", secureField } });
 }

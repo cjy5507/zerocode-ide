@@ -194,7 +194,7 @@ pub struct FormField {
     pub required: bool,
     pub disabled: bool,
     pub read_only: bool,
-    /// The field holds a secret: its value is never read.
+    /// The field holds a secret: its value is never read. A password field, a one-time code, and every part of a value one of whose parts is secret are such fields.
     pub masked: bool,
     pub placeholder: String,
     pub max_length: Option<u32>,

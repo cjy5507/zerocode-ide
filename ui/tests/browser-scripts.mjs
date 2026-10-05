@@ -153,7 +153,7 @@ export const clickScript = (selector) => doorScript({ selector, blockRoots: "", 
 export const typeScript = (selector, text, road, expect = null) => {
   const request = { selector, text, road, blockRoots: "", frameSeparator: need("BROWSER_FORM_FRAME_SEPARATOR", FORM_REQUEST.frameSeparator) };
   // A handle inside a frame is held to the form its agent read, as a fill is: the form helpers stand under the body, with the fingerprint asked for.
-  return expect === null ? doorScript(request, need("TYPE_BODY", TYPE_BODY)) : formScript({ ...FORM_REQUEST, ...request, expect }, need("TYPE_BODY", TYPE_BODY));
+  return formScript({ ...FORM_REQUEST, ...request, expect }, need("TYPE_BODY", TYPE_BODY));
 };
 /* The caps `automate_read` cuts a read at. */
 const READ_CAPS = {

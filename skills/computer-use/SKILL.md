@@ -156,7 +156,7 @@ A form is data, so fill it as data, not a picture per field:
    A step with no field of its own (a review, a confirmation) still lists its
    buttons.
 2. `fill <pane-label> --value-stdin` with one JSON object of handle → value
-   for everything you know, in the page's order. Words for text and dates
+   for everything you know except the fields the read says are secret (`= (가림)`), in the page's order. Words for text and dates
    (`2026-11-03`), a choice's words for a select, radio or a dropdown the
    page draws itself, `true`/`false` for a checkbox, the list of the options'
    words for a group of chips (`{"<handle>": ["Red", "Blue"]}` — only the
@@ -167,7 +167,10 @@ A form is data, so fill it as data, not a picture per field:
    value (a list button that shows its choice shortened while the item asked is not marked chosen,
    a date drawn without its year): `같은지는 볼 수 없음` and the text it shows — neither a difference
    nor a sameness is said, so look at what is shown (or read `fields`) before you judge, and do
-   not write it again. A secret field is never written by `fill` (`type <label> <handle> --value-stdin`):
+   not write it again. A secret field — a password, a one-time code (the page's own mark, or a numeric box the page calls a
+   code), and all the parts of a value when one of them is secret (the boxes of a number, one of which hides what is typed) — is read
+   as `(가림)`, is never written by `fill` and its value never goes into a fill or an eval: you type it from stdin
+   (`type <label> <handle> --value-stdin`), or hand a code sent to the person to the person:
    a field inside a frame of the page's own origin is typed by its handle too, `#frame >> #field`; a frame of
    another origin or a sandboxed one is refused by name (`frame_sealed`), and a type held to a form that changed
    since the read is refused (`form_stale`) — the fields
