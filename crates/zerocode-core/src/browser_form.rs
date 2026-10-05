@@ -483,6 +483,7 @@ pub struct FillLedger {
     left: Vec<FormField>,
     actions: Vec<FormAction>,
     moving: bool,
+    settled: bool,
     passes: usize,
     stale: bool,
     fingerprint: String,
@@ -498,6 +499,7 @@ impl FillLedger {
             left: Vec::new(),
             actions: Vec::new(),
             moving: false,
+            settled: false,
             passes: 0,
             stale: false,
             fingerprint: String::new(),
@@ -554,6 +556,7 @@ impl FillLedger {
         // A pass that wrote nothing heard no settle: the last word stands.
         if let Some(moving) = pass.moving {
             self.moving = moving;
+            self.settled = true;
         }
     }
 
@@ -575,6 +578,7 @@ impl FillLedger {
             left: self.left,
             actions: self.actions,
             moving: self.moving,
+            settled: self.settled,
             passes: self.passes,
             stale: self.stale,
             fingerprint: self.fingerprint,
@@ -595,6 +599,9 @@ pub struct FillReport {
     /// it: the settle ran out of time (or the page went to another document),
     /// so nothing here is said to be final.
     pub moving: bool,
+    /// A pass of the fill waited for the page (it wrote something and heard a
+    /// settle), so what the answer says is the page as it stood still then.
+    pub settled: bool,
     pub passes: usize,
     /// The form was not the one the agent read: nothing was written.
     pub stale: bool,
@@ -856,9 +863,20 @@ fn after_line(report: &FillReport) -> Option<String> {
     }
 }
 
+/// What a read made once the page stood still cannot see, said at the end of a
+/// fill that waited for the page and found it still: an error a quiet timer
+/// shows later is not in the answer, so it is not the page's last word.
+fn late_note() -> String {
+    format!(
+        "※ 쓴 뒤 {} ms 동안 가만히 있는 것을 보고 읽었습니다. 그 뒤에 뜨는 오류는 못 봅니다 — 제출 전에 fields로 다시 읽으세요",
+        crate::agent_browser::BROWSER_SETTLE_QUIET_MS
+    )
+}
+
 /// A fill for the agent: how many took in how many passes, every field's
-/// line — what it holds now, or why it did not take — what is left, and the
-/// state of the form's buttons after it.
+/// line — what it holds now, or why it did not take — what is left, the state
+/// of the form's buttons after it, and what a read after the page stood still
+/// cannot see.
 #[must_use]
 pub fn fill_lines(report: &FillReport) -> String {
     if report.stale {
@@ -901,6 +919,10 @@ pub fn fill_lines(report: &FillReport) -> String {
         lines.extend(report.left.iter().map(left_line));
     }
     lines.extend(after_line(report));
+    // A page still changing already says to read again.
+    if report.settled && !report.moving {
+        lines.push(late_note());
+    }
     lines.join("\n") + "\n"
 }
 

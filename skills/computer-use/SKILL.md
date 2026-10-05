@@ -128,7 +128,10 @@ A form is data, so fill it as data, not a picture per field:
    value and error, and the fields left are read after the page has stood
    still for 50 ms (as after a press); if it kept changing, the last line says
    `아직 바뀌는 중(fields로 다시 읽기)` — read `fields` before you press. A page
-   that changes later than that is the next read's.
+   that changes later than that is the next read's: a fill that waited ends with
+   `※ … 그 뒤에 뜨는 오류는 못 봅니다 — 제출 전에 fields로 다시 읽으세요`, and
+   it means it — an error a check shows only after a pause is not in the answer.
+   Read `fields` again before you submit.
 3. Press the step's button by its handle (`click <pane-label> <handle>`) —
    a step's button that turns on once the fields are right is already `켜짐`
    on that last line, so press it from there with no `fields` between — and
