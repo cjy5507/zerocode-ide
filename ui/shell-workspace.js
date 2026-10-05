@@ -11055,23 +11055,29 @@ function spaceBytes(bytes) {
  *
  * `Intl.RelativeTimeFormat`이 하는 일이고, 언어는 지금 걸린 것이다. 0은 "모른다"
  * 이므로 대시로 남긴다 — 1970년을 상대 시각으로 말하면 "56년 전"이 된다. */
+/* 「3분 전」의 걸음 — 틈이 이 초보다 짧으면 이 단위로, 단위 하나의 초로 나눠 말한다. */
+const SPACE_AGO_STEPS = Object.freeze([
+  { under: 60, unit: "second", seconds: 1 },
+  { under: 3600, unit: "minute", seconds: 60 },
+  { under: 86400, unit: "hour", seconds: 3600 },
+  { under: Number.POSITIVE_INFINITY, unit: "day", seconds: 86400 },
+]);
+/* 그 말의 형식기 — 로케일마다 한 번 짓는다(t-40649): 짓는 값이 한 번 쓰는 값의 몇십 배라, 부를
+ * 때마다 지으면 시각을 말하는 줄 수만큼 그 값을 낸다. */
+let spaceAgoFormatCode = null;
+let spaceAgoFormat = null;
+
 function spaceAgo(ms) {
   if (!ms) return "—";
   const code = locale === "system" ? systemLocale : locale;
+  if (spaceAgoFormat === null || spaceAgoFormatCode !== code) {
+    spaceAgoFormatCode = code;
+    spaceAgoFormat = new Intl.RelativeTimeFormat(code, { numeric: "auto" });
+  }
   const gap = Math.round((ms - Date.now()) / 1000);
-  const steps = [
-    [60, "second"],
-    [3600, "minute"],
-    [86400, "hour"],
-    [Number.POSITIVE_INFINITY, "day"],
-  ];
-  const divisors = { second: 1, minute: 60, hour: 3600, day: 86400 };
-  const step = steps.find(([bound]) => Math.abs(gap) < bound) ?? steps[steps.length - 1];
-  const unit = step[1];
-  return new Intl.RelativeTimeFormat(code, { numeric: "auto" }).format(
-    Math.round(gap / divisors[unit]),
-    unit,
-  );
+  // 수가 아닌 시각은 어느 걸음에도 들지 않는다 — 마지막 걸음(날)이 받는다.
+  const step = SPACE_AGO_STEPS.find((one) => Math.abs(gap) < one.under) ?? SPACE_AGO_STEPS.at(-1);
+  return spaceAgoFormat.format(Math.round(gap / step.seconds), step.unit);
 }
 
 function spaceAllRows() {
