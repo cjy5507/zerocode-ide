@@ -116,10 +116,34 @@ const zcOwnWords = (el, holder, request) => {
   }
   return depth ? zcWordsBefore(el, { ...request, captionDepth: depth }) : "";
 };
+// The header over a table cell's column — HTML's own table meaning: the
+// head cell, of the table's `thead` (its last row) or of a first row that is
+// nothing but headers, that covers the column the cell stands in (a head cell
+// spanning several columns covers each of them).
+const zcColumnHead = (cell) => {
+  const row = cell.parentElement;
+  const table = cell.closest("table");
+  if (!row || !table || !row.cells) return "";
+  const first = table.rows[0];
+  const heads = table.tHead && table.tHead.rows.length ? table.tHead.rows[table.tHead.rows.length - 1]
+    : first && first !== row && [...first.cells].every((one) => one.tagName === "TH") ? first : null;
+  if (!heads || heads === row) return "";
+  let column = 0;
+  for (const before of row.cells) {
+    if (before === cell) break;
+    column += before.colSpan || 1;
+  }
+  let at = 0;
+  for (const head of heads.cells) {
+    at += head.colSpan || 1;
+    if (column < at) return zcLabelWords(head);
+  }
+  return "";
+};
 // A field's caption when nothing names it: the words it has to itself in a
-// box of its own, else its table row's header, the term its definition
-// follows (shared by the fields with no words of their own), the words just
-// before it.
+// box of its own, else its table row's header, else the header over its
+// column, the term its definition follows (shared by the fields with no words
+// of their own), the words just before it.
 const zcCaption = (el, request) => {
   const holder = el.closest("td, [role=cell], [role=gridcell], dd");
   const own = holder ? zcOwnWords(el, holder, request) : "";
@@ -127,6 +151,8 @@ const zcCaption = (el, request) => {
   const cell = el.closest("td, [role=cell], [role=gridcell]");
   const head = cell && cell.parentElement && cell.parentElement.querySelector("th, [role=rowheader]");
   if (head && zcLabelWords(head).trim()) return zcLabelWords(head);
+  const column = cell && cell.tagName === "TD" ? zcColumnHead(cell) : "";
+  if (column.trim()) return column;
   const definition = el.closest("dd");
   const term = definition && definition.previousElementSibling;
   if (term && zcFormTag(term) === "dt" && zcLabelWords(term).trim()) return zcLabelWords(term);
