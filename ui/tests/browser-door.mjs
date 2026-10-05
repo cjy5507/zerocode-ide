@@ -1315,8 +1315,8 @@ await test("a_field_in_a_table_cell_with_no_row_header_is_named_by_the_header_ov
       <table><tr><td>Voucher</td><td><input id="v"></td></tr></table>
     </form>`);
     const labels = Object.fromEntries((await readFields(grid)).fields.map((field) => [field.handle, field.label]));
-    assert(labels["#first"] === "Guest" && labels["#last"] === "Guest" && labels["#meal"] === "Meal",
-      "under a thead, a head cell that spans two columns covers both of them", labels);
+    assert(labels["#first"] === "Guest #1" && labels["#last"] === "Guest #2" && labels["#meal"] === "Meal",
+      "under a thead, a head cell that spans two columns covers both of them — and two fields of one name are told by number", labels);
     assert(labels["#n"] === "Name" && labels["#p"] === "Phone", "a first row of nothing but headers is the head too", labels);
     assert(labels["#mm"] === "Morning", "a row's own header still names its cell first", labels);
     assert(labels["#v"] === "Voucher", "a cell under no head keeps the words before it", labels);
@@ -1636,8 +1636,8 @@ await test("a_column_head_follows_the_tables_spans_and_a_title_over_every_column
     const labels = Object.fromEntries((await readFields(spans)).fields.map((field) => [field.handle, field.label]));
     assert(JSON.stringify([labels["#n1"], labels["#p1"], labels["#e1"]]) === JSON.stringify(["Name", "Phone", "Email"]),
       "a head cell spanning two rows names its own column, the head row under it the next two", labels);
-    assert(JSON.stringify([labels["#g1"], labels["#h1"], labels["#h2"]]) === JSON.stringify(["Group", "Item", "Item"]),
-      "a body cell spanning two rows leaves its column to the row below", labels);
+    assert(JSON.stringify([labels["#g1"], labels["#h1"], labels["#h2"]]) === JSON.stringify(["Group", "Item #1", "Item #2"]),
+      "a body cell spanning two rows leaves its column to the row below — and the two cells of one name are told by number", labels);
     assert(labels["#t1"] === "Guest", "a head cell over every column is the table's title: the words before the field stand", labels);
     return JSON.stringify(labels);
   } finally { await spans.close(); }
@@ -1653,6 +1653,188 @@ await test("a_list_a_field_offers_is_no_box_to_read_to_its_end", async () => {
     assert((read.scrollBoxes || []).length === 0, "and the list that holds them is not named a box with more to read", read.scrollBoxes);
     return "no box";
   } finally { await offered.close(); }
+});
+
+/* What a read still leaves out (t-41592), each on a page of the shape the gap was found on and none a scene of the bench. */
+
+/* A step with no field of its own — a review, a confirmation, a modal that asks
+ * yes or no — still has its buttons: the drawn forms, dialogs and main regions
+ * that hold no field are read for them too, and a page with no such box at all
+ * is read whole. The site's menu outside such a box is still not said. */
+await test("a_step_with_no_field_of_its_own_still_says_its_buttons", async () => {
+  const bare = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await bare.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><header><button id="menu">Menu</button></header>
+      <main><h1>Review</h1><form id="review"><p>Check what you entered.</p>
+        <button type="button" id="back">Back</button><button type="button" id="send" disabled>Send</button></form></main>`);
+    const step = await readFields(bare);
+    assert(step.fields.length === 0, "a review has no field", step.fields);
+    assert(JSON.stringify(step.actions.map((action) => [action.label, action.disabled])) === JSON.stringify([["Back", false], ["Send", true]]),
+      "its buttons are said, on and off — and not the site's menu outside it", step.actions);
+    await bare.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><header><button id="menu">Menu</button></header>
+      <form id="order"><label>Name <input id="name"></label><button type="button" id="next">Next</button></form>
+      <div role="dialog" aria-label="Leave this page?"><p>Your answers are not saved.</p>
+        <button type="button" id="stay">Stay</button><button type="button" id="leave">Leave</button></div>`);
+    const asked = await readFields(bare);
+    assert(JSON.stringify(asked.actions.map((action) => action.label)) === JSON.stringify(["Next", "Stay", "Leave"]),
+      "the buttons of a dialog that holds no field are said beside the form's — and still not the menu", asked.actions);
+    await bare.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><h1>All done</h1><p>Thank you.</p>
+      <button type="button" id="again">Start again</button>`);
+    const done = await readFields(bare);
+    assert(JSON.stringify(done.actions.map((action) => action.label)) === JSON.stringify(["Start again"]),
+      "a page with no field and no box to read is read whole", done.actions);
+    return `${step.actions.length} + ${asked.actions.length} + ${done.actions.length} buttons`;
+  } finally { await bare.close(); }
+});
+
+/* A button that opens a list (`aria-haspopup="listbox"`) is a field: named by the
+ * words beside it, never by the value it shows; holding what it shows; saying
+ * whether its list is open; offering the items of the list it controls or the
+ * one beside it, drawn or not; and filled by opening it and pressing the item.
+ * A button that opens a menu is still a button. */
+const LIST_BUTTONS = `<!doctype html><html lang="en"><meta charset="utf-8"><style>[hidden]{display:none}</style>
+<form>
+  <div class="row"><span class="cap">Branch</span>
+    <button type="button" id="branch" aria-haspopup="listbox" aria-expanded="false" aria-controls="branches">Select a branch</button>
+    <ul id="branches" role="listbox" hidden><li role="option" data-value="hb">Hanbit</li><li role="option" data-value="sl">Seoul</li></ul></div>
+  <div class="row"><label id="dl">Doctor</label>
+    <button type="button" id="doctor" aria-haspopup="listbox" aria-expanded="false" aria-controls="docs" aria-labelledby="dl doctor">Dr. Seo</button>
+    <ul id="docs" role="listbox" hidden><li role="option">Dr. Seo</li><li role="option">Dr. Min</li></ul></div>
+  <div class="row"><span class="cap">Phone prefix</span>
+    <button type="button" id="prefix" aria-haspopup="listbox" aria-expanded="false">US +1</button>
+    <ul role="listbox" hidden><li role="option">US +1</li><li role="option">KR +82</li></ul></div>
+  <button type="button" id="more" aria-haspopup="menu">More</button>
+  <button type="button" id="go">Go</button>
+</form>
+<script>
+  for (const button of document.querySelectorAll('[aria-haspopup="listbox"]')) {
+    const list = document.getElementById(button.getAttribute("aria-controls")) || button.nextElementSibling;
+    button.addEventListener("click", () => {
+      const open = button.getAttribute("aria-expanded") !== "true";
+      button.setAttribute("aria-expanded", String(open));
+      list.hidden = !open;
+    });
+    list.addEventListener("click", (event) => {
+      const option = event.target.closest("[role=option]");
+      if (!option) return;
+      button.textContent = option.textContent;
+      button.dataset.value = option.dataset.value || option.textContent;
+      button.setAttribute("aria-expanded", "false");
+      list.hidden = true;
+    });
+  }
+</script>`;
+await test("a_button_that_opens_a_list_is_a_field_named_by_the_words_beside_it_and_filled_by_its_list", async () => {
+  const popup = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await popup.setContent(LIST_BUTTONS);
+    const read = await readFields(popup);
+    const field = (handle) => read.fields.find((one) => one.handle === handle);
+    assert(["#branch", "#doctor", "#prefix"].every((handle) => field(handle)?.kind === "combobox"),
+      "each button that opens a list is a field", read.fields);
+    assert(JSON.stringify(["#branch", "#doctor", "#prefix"].map((handle) => field(handle).label)) === JSON.stringify(["Branch", "Doctor", "Phone prefix"]),
+      "named by the words beside it — not by the value it shows, nor by a name that holds itself", read.fields.map((one) => one.label));
+    assert(JSON.stringify(["#branch", "#doctor", "#prefix"].map((handle) => field(handle).value)) === JSON.stringify(["Select a branch", "Dr. Seo", "US +1"]),
+      "holding what it shows", read.fields.map((one) => one.value));
+    assert(["#branch", "#doctor", "#prefix"].every((handle) => field(handle).open === false), "saying its list is shut", read.fields);
+    assert(JSON.stringify(field("#branch").options) === JSON.stringify(["Hanbit", "Seoul"])
+      && JSON.stringify(field("#doctor").options) === JSON.stringify(["Dr. Seo", "Dr. Min"])
+      && JSON.stringify(field("#prefix").options) === JSON.stringify(["US +1", "KR +82"]),
+      "offering the items of the list it controls or the one beside it, though neither is drawn", read.fields);
+    assert(JSON.stringify(read.actions.map((action) => action.label)) === JSON.stringify(["More", "Go"]),
+      "a button that opens a menu is still a button, and a list button is no button beside its field", read.actions);
+    assert((read.unknowns || []).length === 0, "and none is said a second time as a thing of no kind", read.unknowns);
+    const filled = await fillBundle(popup, { "#branch": "Seoul", "#prefix": "KR +82" });
+    assert(filled.results.every((result) => result.status === "set"), "the items are chosen by their words", filled.results);
+    const taken = await popup.evaluate(() => ({ branch: document.getElementById("branch").textContent,
+      value: document.getElementById("branch").dataset.value, prefix: document.getElementById("prefix").textContent }));
+    assert(JSON.stringify(taken) === JSON.stringify({ branch: "Seoul", value: "sl", prefix: "KR +82" }), "the page took the items", taken);
+    await popup.click("#doctor");
+    const opened = (await readFields(popup)).fields.find((one) => one.handle === "#doctor");
+    assert(opened.open === true, "a list that is open says so", opened);
+    return `${read.fields.length} fields`;
+  } finally { await popup.close(); }
+});
+
+/* A group of radios is named by its title — the name ARIA gives it, the legend of
+ * its fieldset, else the heading just above it — and the sentence between that
+ * title and the group is a note about it (`hint`), not its name. A caption in a
+ * box of its own, under a heading that stands over other fields too, is still the
+ * group's name. */
+await test("a_group_is_named_by_its_title_and_the_sentence_between_title_and_group_is_a_note", async () => {
+  const groups = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await groups.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <section><h2>Choose a pass</h2><p>Early prices until May.</p>
+        <div role="radiogroup" aria-label="Choose a pass"><label><input type="radio" name="pass" value="a"> Standard</label>
+          <label><input type="radio" name="pass" value="b"> Premium</label></div></section>
+      <section><h2>Seating</h2><p>Seats go fast.</p>
+        <div><label><input type="radio" name="seat" value="w"> Window</label><label><input type="radio" name="seat" value="a"> Aisle</label></div></section>
+      <fieldset><legend>Meal</legend><p>Pick one.</p>
+        <label><input type="radio" name="meal" value="v"> Veg</label><label><input type="radio" name="meal" value="m"> Meat</label></fieldset>
+      <section><h2>Order</h2><label>Name <input id="who"></label>
+        <div class="row"><span>Size</span><div><label><input type="radio" name="size" value="s"> Small</label><label><input type="radio" name="size" value="l"> Large</label></div></div></section>
+    </form>`);
+    const read = await readFields(groups);
+    const group = (first) => read.fields.find((one) => one.kind === "radio" && one.options[0] === first);
+    const pass = group("Standard"), seat = group("Window"), meal = group("Veg"), size = group("Small");
+    assert(pass.label === "Choose a pass" && pass.hint === "Early prices until May.",
+      "a group named by ARIA keeps its name and the sentence under the heading is its note", pass);
+    assert(seat.label === "Seating" && seat.hint === "Seats go fast.",
+      "a group with no name of its own is named by the heading above it, the sentence between them its note", seat);
+    assert(meal.label === "Meal" && meal.hint === "Pick one.", "a legend is the title, the sentence after it a note", meal);
+    assert(size.label === "Size" && !size.hint, "a caption in a box of its own is the name, though a heading stands over other fields above it", size);
+    return [pass, seat, meal, size].map((one) => one.label).join(" · ");
+  } finally { await groups.close(); }
+});
+
+/* A field whose value the door never reads — a password — is not "required and
+ * empty": the fill's left-over list says nothing of it. */
+await test("a_secret_field_is_not_counted_as_required_and_empty_after_a_fill", async () => {
+  const secret = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await secret.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <label>Email <input id="mail" required></label><label>Password <input id="pw" type="password" required></label>
+      <label>Nickname <input id="nick" required></label></form>`);
+    const read = await readFields(secret);
+    assert(read.fields.find((one) => one.handle === "#pw").masked, "the password is masked", read.fields);
+    const filled = await fillBundle(secret, { "#mail": "kim@example.com" });
+    assert(filled.results[0].status === "set", "the email took", filled.results);
+    assert(JSON.stringify(filled.left.map((one) => one.handle)) === JSON.stringify(["#nick"]),
+      "what is left is the field the door can see empty — not the one whose value it never reads", filled.left);
+    return filled.left.map((one) => one.handle).join(",");
+  } finally { await secret.close(); }
+});
+
+/* Fields of one read that go by the same words are told apart by the title of the
+ * row, list item or card each stands in — `<title>: <words>` — else numbered, and
+ * a number says it is only an order. Two fields of one name under different
+ * headings are told apart already, and keep their names. A fill says the name the
+ * read gave. */
+await test("fields_of_one_name_are_told_apart_by_the_title_of_the_item_each_stands_in_else_numbered", async () => {
+  const same = await browser.newPage({ viewport: { width: 900, height: 1200 } });
+  try {
+    await same.setContent(`<!doctype html><html lang="en"><meta charset="utf-8">
+      <form><table><tr><th scope="row">Tomato 500g</th><td>3,000</td><td><label>Qty <input id="q1"></label></td></tr>
+        <tr><th scope="row">Spinach 1 bunch</th><td>2,000</td><td><label>Qty <input id="q2"></label></td></tr></table>
+      <ul><li><h3>Green tea</h3><label>Amount <input id="a1"></label></li><li><h3>Black tea</h3><label>Amount <input id="a2"></label></li></ul>
+      <div class="card"><strong>Room A</strong><p>Sea view</p><label>Guests <select id="g1"><option>1</option><option>2</option></select></label></div>
+      <div class="card"><strong>Room B</strong><p>Garden</p><label>Guests <select id="g2"><option>1</option><option>2</option></select></label></div>
+      <div><label>Note <input id="n1"></label></div><div><label>Note <input id="n2"></label></div>
+      <section><h2>Guest</h2><label>Surname <input id="s1"></label></section><section><h2>Host</h2><label>Surname <input id="s2"></label></section></form>`);
+    const read = await readFields(same);
+    const label = (handle) => read.fields.find((one) => one.handle === handle).label;
+    assert(label("#q1") === "Tomato 500g: Qty" && label("#q2") === "Spinach 1 bunch: Qty", "rows are told apart by their header", read.fields.map((one) => one.label));
+    assert(label("#a1") === "Green tea: Amount" && label("#a2") === "Black tea: Amount", "list items by their heading", read.fields.map((one) => one.label));
+    assert(label("#g1") === "Room A: Guests" && label("#g2") === "Room B: Guests", "cards by their first words", read.fields.map((one) => one.label));
+    assert(label("#n1") === "Note #1" && label("#n2") === "Note #2", "with nothing to tell them by, by number", read.fields.map((one) => one.label));
+    assert(read.fields.find((one) => one.handle === "#n2").ordinal === true && !read.fields.find((one) => one.handle === "#q1").ordinal,
+      "and the number says it is only an order", read.fields);
+    assert(label("#s1") === "Surname" && label("#s2") === "Surname", "fields under different headings keep their names", read.fields.map((one) => one.label));
+    const filled = await fillBundle(same, { "#q1": "2", "#n2": "later" });
+    assert(filled.results[0].label === "Tomato 500g: Qty" && filled.results[1].label === "Note #2", "a fill says the name the read gave", filled.results);
+    return `${read.fields.length} fields`;
+  } finally { await same.close(); }
 });
 
 await browser.close();

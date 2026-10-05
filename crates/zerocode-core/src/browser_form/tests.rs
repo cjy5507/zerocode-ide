@@ -227,7 +227,7 @@ fn booking() -> FormRead {
 fn a_fields_read_says_each_field_under_its_section_with_its_choices() {
     let lines = fields_lines(&booking());
     for expected in [
-        "양식 칸 5개 (필수 4, 비어 있는 필수 3)",
+        "양식 칸 5개 (필수 4, 비어 있는 필수 2, 값을 읽지 않는 필수 1)",
         "[Schedule]\n  #in-date · date · Entry date * = \"\"\n",
         "  select[name=\"in-time\"] · select · Entry time * = \"\" ▸ 06:00 | 06:30 (+8)",
         "[Driver]\n  #phone-1 · tel · Mobile (1/3) = \"010\" 최대 3자",
@@ -664,4 +664,75 @@ fn a_fill_that_waited_for_the_page_says_what_such_a_read_cannot_see() {
             );
         }
     }
+}
+
+/// A field whose value the door never reads — a password — is told as unread,
+/// never counted as required and empty: the count line says how many required
+/// fields have no value to look at, and the fill's list of what is left names a
+/// field only for what the page said is wrong with it.
+#[test]
+fn a_secret_field_the_door_never_reads_is_told_as_unread_not_as_empty() {
+    let read: FormRead = serde_json::from_value(json!({
+        "fields": [
+            { "handle": "#mail", "kind": "email", "label": "Email", "value": "", "required": true },
+            { "handle": "#pw", "kind": "password", "label": "Password", "value": "", "masked": true, "required": true },
+            { "handle": "#pw2", "kind": "password", "label": "Repeat", "value": "", "masked": true, "required": true },
+        ],
+    }))
+    .expect("a read with two secrets");
+    let lines = fields_lines(&read);
+    assert!(
+        lines.contains("양식 칸 3개 (필수 3, 비어 있는 필수 1, 값을 읽지 않는 필수 2)"),
+        "{lines}"
+    );
+    let plain: FormRead = serde_json::from_value(json!({
+        "fields": [{ "handle": "#mail", "kind": "email", "label": "Email", "value": "", "required": true }],
+    }))
+    .expect("a read with no secret");
+    assert!(
+        fields_lines(&plain).contains("양식 칸 1개 (필수 1, 비어 있는 필수 1)\n"),
+        "a read with no secret says no more than it did"
+    );
+}
+
+/// A button that opens a list says whether the list is open, and a name told by
+/// number says it is only an order — in the words beside the field.
+#[test]
+fn a_list_field_says_whether_it_is_open_and_a_number_in_a_name_says_it_is_only_an_order() {
+    let read: FormRead = serde_json::from_value(json!({
+        "fields": [
+            { "handle": "#branch", "kind": "combobox", "label": "Branch", "value": "Seoul", "open": true,
+              "options": ["Hanbit", "Seoul"] },
+            { "handle": "#prefix", "kind": "combobox", "label": "Phone prefix", "value": "US +1", "open": false },
+            { "handle": "#n1", "kind": "text", "label": "Note #1", "value": "", "ordinal": true },
+            { "handle": "#n2", "kind": "text", "label": "Note #2", "value": "", "ordinal": true },
+            { "handle": "#nick", "kind": "text", "label": "Nickname", "value": "" },
+        ],
+    }))
+    .expect("a read with a list button and numbered names");
+    let lines = fields_lines(&read);
+    for expected in [
+        "  #branch · combobox · Branch = \"Seoul\" (열림) ▸ Hanbit | Seoul",
+        "  #prefix · combobox · Phone prefix = \"US +1\" (닫힘)\n",
+        "  #n1 · text · Note #1 = \"\" (같은 이름이라 번호만 붙임)",
+        "  #n2 · text · Note #2 = \"\" (같은 이름이라 번호만 붙임)",
+        "  #nick · text · Nickname = \"\"\n",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+    let json = fields_json(&read);
+    assert_eq!(json["fields"][0]["open"], json!(true));
+    assert!(
+        json["fields"][4].get("open").is_none() && json["fields"][4].get("ordinal").is_none(),
+        "a field with neither says neither in the JSON: {json}"
+    );
+}
+
+/// A new kind of field is a row of the controls table: a button that opens a list is one.
+#[test]
+fn a_button_that_opens_a_list_is_one_of_the_controls_a_read_looks_at() {
+    assert!(
+        BROWSER_FORM_CONTROLS.contains(&"[aria-haspopup=listbox]"),
+        "{BROWSER_FORM_CONTROLS:?}"
+    );
 }
