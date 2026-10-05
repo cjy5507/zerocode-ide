@@ -429,8 +429,9 @@ class Road {
       const filled = Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: fields
         .filter((field) => field.required && (field.value === "" || field.value === false)) };
       const left = filled.left.filter((field) => !typed.includes(field.handle));
-      const secrets = filled.results.filter((result) => result.status === "secret")
-        .map((result) => ({ handle: result.handle, value: bundle[result.handle] }));
+      // Which fields the fill named for typing — the handles only: the page's answer
+      // redacts any key that looks like a secret, and no value goes back through it.
+      const viaType = filled.results.filter((result) => result.status === "secret").map((result) => result.handle);
       const clean = filled.results.every((result) => took(result.status)) && !left.length;
       const actions = filled.actions && filled.actions.length ? filled.actions : read.actions;
       const live = actions.filter((action) => !action.disabled);
@@ -445,7 +446,7 @@ class Road {
       const hand = filled.results.filter((result) => result.status === "no_option")
         .map((result) => ({ ...result, asked: bundle[result.handle] }));
       return { results: filled.results.map((result) => result.label + ":" + result.status), left,
-        actions, pressedNext: pressNext, hand, secrets, unknowns: read.unknowns, unplaced, clean,
+        actions, pressedNext: pressNext, hand, viaType, unknowns: read.unknowns, unplaced, clean,
         confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, label: field.label,
           value: field.value, required: field.required })) };
     })()`;
@@ -464,7 +465,9 @@ class Road {
         if (result.widget) await this.byHand(result, result.asked);
         else await this.openAndPress(result, result.asked);
       }
-      for (const secret of said.secrets || []) await this.typeSecret(secret.handle, secret.value);
+      // The value is the card's: the driver reads it where it stands, not from the page's answer.
+      const owedTyping = plan(this.untyped(said.fields), this.facts).bundle;
+      for (const handle of said.viaType || []) await this.typeSecret(handle, owedTyping[handle]);
       if (said.pressedNext || said.confirmed) continue;
       if (await this.unknownRoad(said.unknowns, said.unplaced)) continue;
       if (await this.code(said.fields, said.bundle)) continue;
