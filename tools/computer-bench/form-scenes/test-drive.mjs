@@ -628,11 +628,14 @@ const DRAWN = await scene("drawn", `<!doctype html><html lang="en"><meta charset
   $("go").addEventListener("click", () => { window.__sceneResult = { arrival: kept }; });
 </script>`, [{ says: "Arrival", value: "2027-02-17" }], { arrival: "2027-02-17" });
 
-/* One run of the drivers on every scene, once. */
+/* One run of the drivers on every scene, once. The run keeps its trace — the steps it took and what it sent — which a run does only when it is given the door's words; the built `door_text`
+ * example is not built here, so a stand-in says a word and no more, and a test reads the trace for a value that must not be in it. */
 const out = join(root, "rows.json");
+const stub = join(root, "door-text-stub.sh");
+await writeFile(stub, `#!/bin/sh\ncat > /dev/null\nprintf '%s' '{"words":"stub"}'\n`, { mode: 0o755 });
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--door-text", stub, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -832,7 +835,8 @@ await test("a driver types a secret field inside a frame of the same origin by i
   for (const road of ["verbs", "script"]) {
     const one = row("framed-secret", road);
     assert(one && one.ok && one.pass, `the ${road} road types the secret into the frame's field and submits`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
-    assert(!JSON.stringify(one.trace || []).includes("7391"), `the value is in no step of the trace (${road})`);
+    assert(Array.isArray(one.trace) && one.trace.some((step) => step.verb === "type"), `the run kept a trace with the type step in it (${road})`, one.trace);
+    assert(!JSON.stringify(one.trace).includes("7391"), `the value is in no step of the trace (${road})`);
   }
   return JSON.stringify(row("framed-secret", "verbs").result);
 });
@@ -842,6 +846,8 @@ await test("a driver whose type into a frame is refused because the form changed
     const one = row("framed-two", road);
     assert(one && one.ok && one.pass, `the ${road} road types both secrets though the first changed the form`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
     assert(one.result.pin === "7391" && one.result.backup === "5520", `each secret is in its own field (${road})`, one.result);
+    assert(Array.isArray(one.trace) && one.trace.filter((step) => step.verb === "type").length >= 2, `the run kept a trace with both type steps in it (${road})`, one.trace);
+    assert(!JSON.stringify(one.trace).includes("7391") && !JSON.stringify(one.trace).includes("5520"), `neither value is in any step of the trace (${road})`);
   }
   return JSON.stringify(row("framed-two", "verbs").result);
 });
