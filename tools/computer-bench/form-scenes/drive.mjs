@@ -160,6 +160,15 @@ function plan(fields, facts) {
         if (fact.value) wanted.get(hit.field.handle).on.add(hit.option);
         continue;
       }
+      // A fact no field's words name, whose value is one option of one group of chips — a time among slots the
+      // page lists under other titles — is that group's.
+      const holders = typeof fact.value === "string"
+        ? chips.filter((field) => (field.options || []).some((option) => fold(option) === fold(fact.value))) : [];
+      if (holders.length === 1) {
+        const [holder] = holders;
+        if (!(holder.value || []).some((word) => fold(word) === fold(fact.value))) bundle[holder.handle] = fact.value;
+        continue;
+      }
       unplaced.push(fact);
       continue;
     }
