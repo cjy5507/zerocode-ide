@@ -115,11 +115,14 @@ const intentOf = (label, intent) => INTENT[intent].some((word) => fold(label).in
 /* The button that moves a form on, chosen by what the door said of the buttons and by no word: the one the
  * page declares a submit (`(제출 단추)`), else the one that was off before the fields were written and is on
  * now, else the page's last — a step's own button stands after the ones that go back, apply or search. */
-function advancing(actions, before = []) {
+function advancing(actions, before = [], written = []) {
   if (!Array.isArray(before)) before = [];
+  if (!Array.isArray(written)) written = [];
   const submits = actions.filter((action) => action.submit);
   if (submits.length) return submits[submits.length - 1];
-  const turned = actions.filter((action) => !action.disabled
+  // A button the value of a field the fill wrote turned on — the "Fewer" beside a count that is now more than one — is that field's own: the
+  // door says whose it is (`beside`). It is not the step's button.
+  const turned = actions.filter((action) => !action.disabled && !written.includes(action.beside)
     && before.some((one) => one.handle === action.handle && one.disabled));
   if (turned.length) return turned[turned.length - 1];
   return actions.length ? actions[actions.length - 1] : null;
@@ -717,7 +720,7 @@ class Road {
         if (filled.stale || filled.byHand || filled.changed) continue;
         if (filled.actions.length) actions = filled.actions;
       }
-      if (await this.step(actions, read.actions)) return this.done();
+      if (await this.step(actions, read.actions, [...Object.keys(bundle), ...Object.keys(owed || {})])) return this.done();
     }
   }
 
@@ -746,7 +749,7 @@ class Road {
    * the form on (`advancing`, by what the door said of the buttons) — when that one is off
    * while the door has said new text, waited for a fixed number of times and the form read again —
    * true when the page has taken what was given. */
-  async step(actions, before = []) {
+  async step(actions, before = [], written = []) {
     const live = actions.filter((action) => !action.disabled);
     if (this.codeTurn && !this.codeSent) {
       const send = live.find((action) => intentOf(action.label, "code"));
@@ -765,7 +768,7 @@ class Road {
         return false;
       }
     }
-    const advance = advancing(actions, before);
+    const advance = advancing(actions, before, written);
     // A page with no button at all, or whose button — the one just pressed — went off, is still at work, or
     // has finished and shows nothing to press: it is waited for, then read again.
     if (!advance || (advance.disabled && (this.fresh.length || advance.handle === this.justPressed))) {
@@ -833,7 +836,7 @@ class Road {
         ? live.find((action) => !inFrame(action) && INTENT.confirm.includes(fold(action.label))) : null;
       if (confirm) document.querySelector(confirm.handle).click();
       const hold = turn.owed && live.some((action) => intentOf(action.label, "code"));
-      const next = advancing(actions, read.actions);
+      const next = advancing(actions, read.actions, Object.keys(bundle));
       const pressNext = clean && !moved && !stop && !confirm && !hold && !!next && !next.disabled && !next.submit && !inFrame(next);
       if (pressNext) document.querySelector(next.handle).click();
       const hand = filled.results.filter((result) => result.status === "no_option")
@@ -889,7 +892,7 @@ class Road {
       if (!again && (said.left.length || said.results.some((result) => !/:(set|same|unseen)$/.test(result)))) continue;
       this.fresh = said.fresh;
       this.form = said.print;
-      if (await this.step(said.actions, said.before)) return this.done();
+      if (await this.step(said.actions, said.before, Object.keys(said.bundle || {}))) return this.done();
     }
   }
 
