@@ -568,6 +568,32 @@ const FRAMED_SECRET = await scene("framed-secret", `<!doctype html><html lang="e
 </script>`, FRAMED_FACTS, { name: "Kim", pin: "7391" }, { "frame.html": `<!doctype html><html lang="en"><meta charset="utf-8">
 <label for="pin">Account PIN</label> <input id="pin" type="password" autocomplete="off">` });
 
+/* Two secret fields inside a frame, the first of which brings a field of its own into the frame once it is typed (t-41720): the form is no longer the one the driver read, so the second type is refused
+ * (`form_stale`) as the window refuses it — the driver reads the form again, as a model does, and types the second with the form it read. */
+const TWO_FACTS = [{ says: "Name", value: "Kim" }, { says: "Account PIN", value: "7391" }, { says: "Backup PIN", value: "5520" }];
+const FRAMED_TWO = await scene("framed-two", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="nm">Name</label> <input id="nm">
+  <iframe id="pay" src="frame.html" title="PIN entry" width="360" height="140"></iframe>
+  <button type="button" id="send">Submit</button>
+</form>
+<script>
+  document.getElementById("send").addEventListener("click", () => {
+    const inner = document.getElementById("pay").contentDocument;
+    const pin = inner.getElementById("pin").value, backup = inner.getElementById("pin2").value;
+    if (!pin || !backup) return;
+    window.__sceneResult = { name: document.getElementById("nm").value, pin, backup };
+  });
+</script>`, TWO_FACTS, { name: "Kim", pin: "7391", backup: "5520" }, { "frame.html": `<!doctype html><html lang="en"><meta charset="utf-8">
+<label for="pin">Account PIN</label> <input id="pin" type="password" autocomplete="off"><br>
+<label for="pin2">Backup PIN</label> <input id="pin2" type="password" autocomplete="off"><br>
+<label for="hint" id="hintLabel" hidden>Reminder</label> <input id="hint" hidden>
+<script>
+  document.getElementById("pin").addEventListener("input", () => {
+    document.getElementById("hint").hidden = false;
+    document.getElementById("hintLabel").hidden = false;
+  });
+</script>` });
+
 /* A field the page answers about after a press, with a button of its own beside it: the door says whose the button is, and the driver presses it once and
  * reads the form again — the press that ends the form is made again after it. */
 const OWN = await scene("own", `<!doctype html><html lang="en"><meta charset="utf-8"><form id="f" onsubmit="return false">
@@ -605,7 +631,7 @@ const DRAWN = await scene("drawn", `<!doctype html><html lang="en"><meta charset
 const out = join(root, "rows.json");
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", FRAMED_SECRET, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -808,6 +834,15 @@ await test("a driver types a secret field inside a frame of the same origin by i
     assert(!JSON.stringify(one.trace || []).includes("7391"), `the value is in no step of the trace (${road})`);
   }
   return JSON.stringify(row("framed-secret", "verbs").result);
+});
+
+await test("a driver whose type into a frame is refused because the form changed since it read reads the form again and types it, on both roads", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("framed-two", road);
+    assert(one && one.ok && one.pass, `the ${road} road types both secrets though the first changed the form`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+    assert(one.result.pin === "7391" && one.result.backup === "5520", `each secret is in its own field (${road})`, one.result);
+  }
+  return JSON.stringify(row("framed-two", "verbs").result);
 });
 
 await test("the recipe a driver presses a button inside a frame by is the one the skill teaches", () => {
