@@ -3811,7 +3811,47 @@ function worktreeLedgerMerged(path) {
 function landingShape(landing) {
   if (!landing) return "";
   return `${landing.state}.${landing.ahead}.${landing.dirty ? 1 : 0}.${landing.ignored ? 1 : 0}` +
-    `.${landing.detached ? 1 : 0}.${landing.compare_ref ?? ""}.${landing.landed_in?.sha ?? ""}`;
+    `.${landing.detached ? 1 : 0}.${landing.compare_ref ?? ""}.${landing.landed_in?.sha ?? ""}` +
+    // How far behind and what a merge would clash on move the chip and its tooltip, so they move the row.
+    `.${landing.behind ?? ""}.${landing.far_behind ? 1 : 0}.${landing.conflict ? landing.conflict.total : ""}` +
+    `.${(landing.conflict?.files ?? []).join(",")}`;
+}
+
+/* The compare ref without its remote: `origin/main` is 「main」 on a chip that has a few
+ * letters to spare. The tooltip keeps the whole name. */
+function landingRefName(ref) {
+  return ref.replace(/^[^/]+\//, "");
+}
+
+/* What the tooltip of an unlanded row says about drift (t-34501): how many commits the branch
+ * runs behind the compare ref, which files a merge would conflict on, and the next thing to do.
+ * A conflict nobody looked at (`conflict` absent) is said as not read — never as none; the
+ * backend sends a `total` of 0 only for a merge it tried and found clean. */
+function worktreeDriftLines(landing, ref) {
+  const lines = [];
+  const behind = Number.isFinite(landing.behind) ? landing.behind : null;
+  if (behind !== null) {
+    lines.push(behind > 0
+      ? t("worktree.landTipBehind", "{{ref}}보다 {{count}}커밋 뒤처져 있습니다", { ref, count: behind })
+      : t("worktree.landTipBehindNone", "{{ref}}의 최신 커밋을 모두 담고 있습니다 (뒤처지지 않음)", { ref }));
+  }
+  const clash = landing.conflict ?? null;
+  if (clash === null) {
+    lines.push(t("worktree.landTipConflictUnknown", "{{ref}}에 합치면 충돌하는지는 읽지 못했습니다", { ref }));
+  } else if (clash.total === 0) {
+    lines.push(t("worktree.landTipConflictNone", "{{ref}}에 합쳐 보아도 충돌하는 파일이 없습니다", { ref }));
+  } else if (clash.files.length === 0) {
+    lines.push(t("worktree.landTipConflictNoNames", "{{ref}}에 합치면 충돌합니다 (파일 이름은 읽지 못했습니다)", { ref }));
+  } else {
+    const left = clash.total - clash.files.length;
+    lines.push(t("worktree.landTipConflict", "{{ref}}에 합치면 {{count}}개 파일이 충돌합니다: {{files}}", {
+      ref, count: clash.total, files: clash.files.join(", "),
+    }) + (left > 0 ? t("worktree.landTipConflictMore", " 외 {{count}}개", { count: left }) : ""));
+  }
+  if ((behind !== null && behind > 0) || (clash !== null && clash.total > 0)) {
+    lines.push(t("worktree.landTipNext", "다음 할 일: git fetch 뒤 {{ref}}에 있는 것을 이 브랜치에 합치고, 이미 돈 게이트를 다시 돌리세요", { ref }));
+  }
+  return lines;
 }
 
 /* The words for "files git ignores are still here" — a build's output, a
@@ -3879,6 +3919,9 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   const cleanable = gitIn && !landing.dirty && !check && idle && !current;
   let word;
   let tone;
+  // The state's own word, before anything is added to it: what a place with room for one word says
+  // (an artifact card's chip, t-36910) — the rest is in the tooltip either way.
+  let head = null;
   if (check) {
     word = t("worktree.landCheck", "확인 필요");
     tone = "check";
@@ -3888,6 +3931,16 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   } else if (state === "unlanded") {
     word = t("worktree.landAhead", "미반영 {{count}}", { count: landing.ahead });
     tone = "ahead";
+    head = word;
+    // The clash comes first — it is what stops a landing — and the distance after it, because the
+    // ellipsis cuts the end of a chip (t-34501). Only a clash changes the colour.
+    if (landing.conflict && landing.conflict.total > 0) {
+      word += ` · ${t("worktree.landConflict", "충돌 {{count}}", { count: landing.conflict.total })}`;
+      tone = "conflict";
+    }
+    if (landing.far_behind === true && Number.isFinite(landing.behind)) {
+      word += ` · ${t("worktree.landBehind", "{{ref}}보다 {{count}} 뒤", { ref: landingRefName(ref), count: landing.behind })}`;
+    }
   } else if (state === "no_commits") {
     word = t("worktree.landNoCommits", "커밋 없음");
     tone = "none";
@@ -3895,10 +3948,7 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
     word = t("worktree.landNoRef", "비교 기준 없음");
     tone = "none";
   }
-  // The state's own word, before anything is added to it: what a place with
-  // room for one word says (an artifact card's chip, t-36910) — the rest is in
-  // the tooltip either way.
-  const head = word;
+  head ??= word;
   if (landing.dirty && !check) word += t("worktree.landDirty", " · 저장 안 한 변경");
   // Said of work that is in the compare ref and of nothing else: the backend
   // asks only landed rows, and a row that is in doubt says nothing more.
@@ -3918,6 +3968,7 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
     lines.push(t("worktree.landTipLanded", "이 작업의 커밋이 모두 {{ref}}에 들어 있습니다 (git 기준)", { ref }));
   } else if (state === "unlanded") {
     lines.push(t("worktree.landTipAhead", "{{ref}}에 없는 커밋이 {{count}}개 있습니다 (내용 기준)", { ref, count: landing.ahead }));
+    lines.push(...worktreeDriftLines(landing, ref));
   } else if (state === "no_commits") {
     lines.push(t("worktree.landTipNone", "만든 뒤 자기 커밋이 없습니다 — 반영된 것이 아닙니다"));
   } else if (state === "no_ref") {
