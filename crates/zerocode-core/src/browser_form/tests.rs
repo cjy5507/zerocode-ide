@@ -1348,18 +1348,21 @@ fn a_button_beside_a_field_is_said_to_be_that_fields_in_the_buttons_of_a_read_a_
 fn a_secret_field_inside_a_frame_is_typed_by_its_handle_like_one_in_the_page() {
     let pass: FillPass = serde_json::from_value(json!({
         "results": [
-            { "handle": "#card >> #cvc", "status": "secret", "kind": "password", "label": "CVC" },
+            { "handle": "#card >> #vault", "status": "secret", "kind": "password", "label": "Vault word" },
             { "handle": "#pw", "status": "secret", "kind": "password", "label": "Password" },
         ],
     }))
     .expect("a pass with two secrets");
-    let bundle = vec![entry("#card >> #cvc", text("742")), entry("#pw", text("x"))];
+    let bundle = vec![
+        entry("#card >> #vault", text("913")),
+        entry("#pw", text("x")),
+    ];
     let mut ledger = FillLedger::new(bundle.clone());
     ledger.record(&bundle, pass);
     let lines = fill_lines(&ledger.report());
     assert!(
         lines.contains(
-            "  ✗ #card >> #cvc CVC: 비밀 칸은 fill이 쓰지 않음 — type <label> <손잡이> --value-stdin"
+            "  ✗ #card >> #vault Vault word: 비밀 칸은 fill이 쓰지 않음 — type <label> <손잡이> --value-stdin"
         ),
         "a secret in a frame names type with its handle:\n{lines}"
     );

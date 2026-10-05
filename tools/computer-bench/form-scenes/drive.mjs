@@ -112,7 +112,7 @@ const PART = / \((\d+)\/(\d+)\)$/;
 const words = (label) => fold(label).replace(PART, "").replace(/\s*\*$/, "");
 const took = (status) => status === "set" || status === "same";
 const intentOf = (label, intent) => INTENT[intent].some((word) => fold(label).includes(word));
-/* A date the card gives whole, year first (`2026-11-27`). */
+/* A date the card gives whole, year first (`2031-04-09`). */
 const dateLike = (value) => typeof value === "string" && /^\d{4}[-./]\d{1,2}[-./]\d{1,2}$/.test(value.trim());
 
 /* The button that sends the code of the person, chosen by the place the door gave it: the one button that stands beside the phone
