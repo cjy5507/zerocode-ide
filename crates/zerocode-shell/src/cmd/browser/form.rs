@@ -7,8 +7,8 @@
 //! an engine that does not await a promise (WebKit, WebView2) gets the same
 //! answer as one that does, and the clock between the passes of a fill is
 //! the window's, never a timer left in the person's signed-in page. Nothing
-//! reads a rect or waits for a frame, so a tab nobody is looking at reads and
-//! fills as a shown one does.
+//! reads where an element sits or waits for a frame, so a tab nobody is looking at
+//! reads and fills as a shown one does (a box that clips all it holds is told by its size).
 
 use super::*;
 use zerocode_core::agent_browser::BROWSER_EVAL_FORM_OBJECT;
@@ -80,9 +80,29 @@ const zcGroupHandle = (first) => {
   if (all.every((radio) => radio.form === first.form)) return by;
   return (first.form ? zcHandleOf(first.form) + " " : "") + by;
 };
+// Whether the words of a text node are drawn: the box that holds them is, no box from there up to `scope`
+// is made see-through or clipped to nothing, and their font is not of no size. Text a page keeps from the eye
+// (an error line it shows later, a note it folds away) is no one's name and says nothing of a field.
+const zcTextDrawn = (node, scope) => {
+  const holder = node.parentElement;
+  if (!holder || !zcDrawn(holder)) return false;
+  const view = holder.ownerDocument.defaultView || window;
+  if (parseFloat(view.getComputedStyle(holder).fontSize) === 0) return false;
+  for (let box = holder; box; box = box === scope ? null : box.parentElement) {
+    const style = view.getComputedStyle(box);
+    if (Number(style.opacity) === 0) return false;
+    if (style.display === "contents" || style.display === "inline") continue;
+    if (style.overflowX !== "visible" || style.overflowY !== "visible") {
+      const rects = [...box.getClientRects()];
+      if (!rects.length || rects.every((rect) => rect.width === 0 || rect.height === 0)) return false;
+    }
+  }
+  return true;
+};
 // The words just before an element, in its own box and the few around it,
 // after any field that comes between and outside another field's label —
 // the caption a page writes beside a field without tying it to the field.
+// Only words the page draws: the nearest of them, never text it keeps hidden.
 const zcWordsBeforeAt = (el, request) => {
   const doc = el.ownerDocument;
   const controls = request.controls.join(",");
@@ -90,19 +110,21 @@ const zcWordsBeforeAt = (el, request) => {
   let scope = el.parentElement;
   for (let level = 0; scope && level < request.captionDepth; level += 1, scope = scope.parentElement) {
     const walker = doc.createTreeWalker(scope, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
-    let last = "", at = null;
+    let seen = [];
     for (let node = walker.nextNode(); node && node !== el; node = walker.nextNode()) {
       if (node.nodeType === 1) {
-        if (node.matches(controls) && !node.contains(el)) { last = ""; at = null; }
+        if (node.matches(controls) && !node.contains(el)) seen = [];
         continue;
       }
       const holder = node.parentElement;
       if (holder && holder.closest(skip)) continue;
       const label = holder && holder.closest("label");
       if (label && label.control && label.control !== el) continue;
-      if (/[\p{L}\p{N}]/u.test(node.nodeValue)) { last = node.nodeValue; at = node; }
+      if (/[\p{L}\p{N}]/u.test(node.nodeValue)) seen.push(node);
     }
-    if (last.trim()) return { text: last, node: at };
+    for (let at = seen.length - 1; at >= 0; at -= 1) {
+      if (seen[at].nodeValue.trim() && zcTextDrawn(seen[at], scope)) return { text: seen[at].nodeValue, node: seen[at] };
+    }
   }
   return { text: "", node: null };
 };
@@ -540,10 +562,36 @@ const zcContinues = (head, prev, next) => {
   return next.kind === head.kind && caption === zcWordsBetween(prev.el, next.el)
     && zcWordsBetween(next.el, null) !== "";
 };
+// The short symbol the page draws between two parts of one value that stand side by side in one box — an @, a
+// dash, a colon, a slash. Only text the page draws counts, and only a symbol: a word between parts is a unit,
+// which is the parts' caption's to say. "" when none stands there.
+const zcJointBetween = (from, to, request) => {
+  const skip = request.controls.concat(["button", "select", "textarea", "option", "script", "style", "template"]).join(",");
+  const box = from.parentElement;
+  let said = "";
+  for (let at = from.nextSibling; at && at !== to; at = at.nextSibling) {
+    if (at.nodeType === 3) {
+      if (zcTextDrawn(at, box)) said += at.nodeValue;
+    } else if (at.nodeType === 1 && !at.matches(skip) && !at.querySelector(skip)) {
+      const walker = at.ownerDocument.createTreeWalker(at, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) if (zcTextDrawn(node, box)) said += node.nodeValue;
+    }
+  }
+  const symbol = said.replace(/\s+/g, " ").trim();
+  return symbol && symbol.length <= 3 && !/[\p{L}\p{N}]/u.test(symbol) ? symbol : "";
+};
+// Each part but the last says the symbol that stands between it and the next, when one does.
+const zcJoints = (parts, request) => {
+  for (let at = 0; at + 1 < parts.length; at += 1) {
+    if (parts[at].joint) continue;
+    const symbol = zcJointBetween(parts[at].el, parts[at + 1].el, request);
+    if (symbol) parts[at].joint = symbol;
+  }
+};
 // Fields side by side in one box with one caption — a phone number in three
 // boxes, a date in three selects, an hour and a minute — are that caption's
 // parts, numbered.
-const zcNumberRuns = (records) => {
+const zcNumberRuns = (records, request) => {
   let at = 0;
   while (at < records.length) {
     const head = records[at];
@@ -557,6 +605,7 @@ const zcNumberRuns = (records) => {
       for (let part = at; part < end; part += 1) {
         records[part].label = caption + " (" + (part - at + 1) + "/" + (end - at) + ")";
       }
+      zcJoints(records.slice(at, end), request);
     }
     at = end;
   }
@@ -648,6 +697,7 @@ const zcFieldOut = (record, request, fresh = null) => {
   if (record.maxLength !== null) out.maxLength = record.maxLength;
   if (typeof record.open === "boolean") out.open = record.open;
   if (record.ordinal) out.ordinal = true;
+  if (record.joint) out.joint = zcWords(record.joint, cap);
   if (record.disabled || record.readOnly) {
     const hint = zcWords(zcHintOf(record, request), cap);
     if (hint) out.hint = hint;
@@ -969,6 +1019,7 @@ const zcPartCaptions = (records, request) => {
     const held = records.filter((other) => box.contains(other.el));
     if (held.length < 2 || held.some((other) => !other.short || other.kind === "chips" || other.el.parentElement !== box)) continue;
     for (const part of held) done.add(part);
+    zcJoints(held, request);
     let name = "";
     for (let up = box, level = 0; up && level <= request.captionDepth; up = up.parentElement, level += 1) {
       if (up.matches("body, form, [role=form], dialog, [role=dialog], main")) break;
@@ -989,6 +1040,41 @@ const zcPartCaptions = (records, request) => {
       part.label = lead + " — " + own + (star && !/[*＊]\s*$/.test(own) ? " *" : "");
     }
   }
+};
+// Whether two elements stand next to each other in one box: no drawn element between them.
+const zcNeighbours = (a, b) => {
+  const [first, last] = a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? [a, b] : [b, a];
+  for (let at = first.nextElementSibling; at && at !== last; at = at.nextElementSibling) {
+    if (!at.matches("script, style, template") && zcDrawn(at)) return false;
+  }
+  return true;
+};
+// The field a button stands beside, by its place: the one field in the nearest box around the button that
+// holds a field at all, when the button and the field are next to each other in it — or the button is inside the
+// field's own element. A box with two fields, a form, a dialog, or a button set apart from its field by other
+// elements says none.
+const zcFieldBeside = (button, records, request) => {
+  let side = button;
+  let box = button.parentElement;
+  for (let level = 0; box && level < request.captionDepth; level += 1) {
+    if (box.matches("body, form, [role=form], dialog, [role=dialog], main")) return null;
+    const held = [];
+    for (const record of records) {
+      if (!box.contains(record.el)) continue;
+      held.push(record);
+      if (held.length > 1) return null;
+    }
+    if (held.length === 1) {
+      const [record] = held;
+      if (record.el.contains(button)) return record;
+      let there = record.el;
+      while (there.parentElement && there.parentElement !== box) there = there.parentElement;
+      return there.parentElement === box && zcNeighbours(side, there) ? record : null;
+    }
+    side = box;
+    box = box.parentElement;
+  }
+  return null;
 };
 // Every field the page draws, in its order, frames after the page, and the
 // buttons that stand with them. With `before` — what the page showed before a write or a press —
@@ -1021,7 +1107,7 @@ const zcFormFields = (request, before = null) => {
       records.push(record);
     }
   }
-  zcNumberRuns(records);
+  zcNumberRuns(records, request);
   zcPartCaptions(records, request);
   zcTellApart(records);
   const scopes = new Set(records.map((record) => record.el.closest(request.scopes.join(","))
@@ -1039,12 +1125,14 @@ const zcFormFields = (request, before = null) => {
   const actions = [];
   const named = new Set();
   const pressed = [];
-  // The buttons of a row of chips are that field's options, not buttons.
+  // The buttons of a row of chips are that field's options, not buttons — and so are the options of a group of
+  // radios the page draws with buttons.
   const chipped = new Set(records.flatMap((record) => record.members || []));
+  const owned = new Set(records.flatMap((record) => (record.kind === "radio" ? record.choices.map((choice) => choice.el) : [])));
   for (const { doc, prefix } of docs.open) {
     for (const el of doc.querySelectorAll(request.actions.join(","))) {
       if (actions.length >= request.actionCap) break;
-      if (!zcDrawn(el) || zcFormRole(el) === "combobox" || zcListButton(el) || chipped.has(el)) continue;
+      if (!zcDrawn(el) || zcFormRole(el) === "combobox" || zcListButton(el) || chipped.has(el) || owned.has(el)) continue;
       if (![...scopes].some((scope) => scope.contains(el))) continue;
       const label = zcWords(zcMarkName(el), request.wordCap);
       const handle = prefix + zcHandleOf(el);
@@ -1053,6 +1141,8 @@ const zcFormFields = (request, before = null) => {
       pressed.push(el);
       const action = { handle, label, disabled: zcOff(el) };
       if (zcIsSubmit(el)) action.submit = true;
+      const beside = zcFieldBeside(el, records, request);
+      if (beside) action.beside = beside.handle;
       actions.push(action);
     }
   }
@@ -1441,6 +1531,35 @@ const zcShowsDate = (shown, date) => {
   return groups.includes(date[0]) && groups.includes(date[2])
     && zcMonthNames().some(([name, month]) => month === date[1] && words.includes(name));
 };
+// A date a field shows without its year that says the asked month and day: it may be the asked date, or that
+// day of another year — the shown words do not tell.
+const zcYearless = (shown, date) => {
+  const groups = zcGroups(shown);
+  const [, month, day] = date;
+  if (groups.length === 2) return (groups[0] === month && groups[1] === day) || (groups[0] === day && groups[1] === month);
+  if (groups.length === 1 && groups[0] === day) {
+    const words = zcFold(shown);
+    return zcMonthNames().some(([name, number]) => number === month && words.includes(name));
+  }
+  return false;
+};
+// Whether the page's own state says the asked item is the chosen one: true when the item asked is marked chosen
+// (`aria-selected`), false when another is, undefined when no item says (or none reads as the words asked).
+const zcChosen = (record, asked) => {
+  const pick = zcPick(record.choices, asked);
+  if (!pick) return undefined;
+  if (pick.selected) return true;
+  return record.choices.some((choice) => choice.selected) ? false : undefined;
+};
+// What a box that shows its choice (a button that opens a list, a dropdown the page draws) shows is the page's
+// rendering of the choice, not the value: the words of another item shown whole say another is chosen; any other
+// words may be the asked item drawn shorter, and the door cannot see which (null).
+const zcRendered = (record, pick, now) => {
+  if (!pick || !now) return false;
+  return record.choices.some((choice) => choice !== pick && zcFold(choice.words) === now) ? false : null;
+};
+// Whether a field holds what was asked: true; false; or null — what it shows differs from the words asked
+// and the page's own state does not say whether it is the same value.
 const zcHolds = (record, asked) => {
   if (record.kind === "checkbox") return zcFlag(asked) === record.value;
   if (record.kind === "chips") {
@@ -1449,16 +1568,24 @@ const zcHolds = (record, asked) => {
       && wanted.picks.every((choice) => choice.selected);
   }
   const date = record.kind !== "select" && zcDateOf(asked);
-  if (date && record.value !== "" && zcShowsDate(record.value, date)) return true;
+  if (date && record.value !== "") {
+    if (zcShowsDate(record.value, date)) return true;
+    if (zcYearless(record.value, date)) return null;
+  }
   if (record.kind === "dropdown") {
     const pick = zcPick(record.choices, asked);
     const now = zcFold(record.value);
-    return !!pick && (now === zcFold(pick.words) || now.startsWith(zcFold(pick.words)));
+    if (!!pick && (now === zcFold(pick.words) || now.startsWith(zcFold(pick.words)))) return true;
+    return zcRendered(record, pick, now);
   }
   if (record.kind === "combobox") {
     const open = record.el.getAttribute("aria-expanded") === "true";
     const now = zcFold(record.value);
-    return !open && !!now && (zcSame(asked, record.value) || now.startsWith(zcFold(asked)));
+    if (!open && !!now && (zcSame(asked, record.value) || now.startsWith(zcFold(asked)))) return true;
+    if (open) return false;
+    const chosen = zcChosen(record, asked);
+    if (chosen !== undefined) return chosen;
+    return zcListButton(record.el) ? zcRendered(record, zcPick(record.choices, asked), now) : false;
   }
   if (record.choices.length && record.kind !== "combobox") {
     const pick = zcPick(record.choices, asked);
@@ -1628,7 +1755,7 @@ const zcFillWrite = (entries, expect, watch) => {
       if (hint) out.hint = hint;
       return { ...base, status: "disabled", wrote: false };
     }
-    if (zcHolds(record, entry.value)) return { ...base, value: entry.value, status: null, wrote: false };
+    if (zcHolds(record, entry.value) === true) return { ...base, value: entry.value, status: null, wrote: false };
     const refused = zcWrite(record, entry.value);
     if (refused) {
       out.options = (record.offered || []).slice(0, request.optionCap);
@@ -1671,7 +1798,8 @@ const zcFillRead = (input, epoch) => {
       : Array.isArray(now.value) ? now.value.map((word) => zcCut(String(word), request.valueCap))
         : zcCut(String(now.value), request.valueCap);
     out.error = zcWords(now.error, request.wordCap);
-    out.status = zcHolds(now, one.value) ? (one.wrote ? "set" : "same") : "mismatch";
+    const holds = zcHolds(now, one.value);
+    out.status = holds === true ? (one.wrote ? "set" : "same") : holds === null ? "unseen" : "mismatch";
     return out;
   });
   // A field is said by the name the whole read gave it (two of one name are told apart there), with

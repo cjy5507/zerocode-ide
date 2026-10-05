@@ -113,8 +113,12 @@ A form is data, so fill it as data, not a picture per field:
    inside same-origin frames too), each with the handle to name it by, its
    words, what it holds, its choices and `*` for required, then the buttons
    beside them. A field nothing names is read by its table header, its term
-   or the words just before it; parts of one value side by side (a phone
-   number in three boxes) are `<words> (1/3)`, `(2/3)`, … with their length.
+   or the words just before it that the page draws (text it keeps hidden is no
+   name), else by its own placeholder; one with none of these says
+   `(이름 없음)`. Parts of one value side by side (a phone
+   number in three boxes) are `<words> (1/3)`, `(2/3)`, … with their length, and a
+   part with another after it says the short symbol the page draws between them
+   (`(다음 칸 앞에 「@」)`) — cut the value there.
    A button that opens a list (`aria-haspopup="listbox"`) is a field too —
    `combobox`, named by the words beside it (never by the value it shows),
    holding what it shows, `(열림)` or `(닫힘)`, with the items of its list — and
@@ -127,8 +131,11 @@ A form is data, so fill it as data, not a picture per field:
    options to tick) is one field of kind `chips` — named by the row's title
    (`(제목 없음)` when the page gives it none: its options then say what it is),
    its options the buttons' words, its value the list of the ones pressed
-   (`= ["Red"]`) — and its buttons are not listed again as buttons; a toggle
-   beside a field of its own (a "show" beside a password) stays a button. A part
+   (`= ["Red"]`) — and its buttons are not listed again as buttons, and neither are
+   the options of a group of radios the page draws with buttons. A button that stands beside one
+   field — next to it in the nearest box that holds a field — stays a button and says whose it is,
+   `(#handle 칸 곁)` (a "show" beside a password, an "apply" beside a code): press it when the
+   page asks for what it does; a button beside no one field says nothing. A part
    the page names only by its own short words (an hour beside a minute, the boxes of
    a code) takes the caption of the group or row it stands in:
    `<caption> — <words>`. A required field whose value the door never reads (a
@@ -150,7 +157,12 @@ A form is data, so fill it as data, not a picture per field:
    words for a group of chips (`{"<handle>": ["Red", "Blue"]}` — only the
    buttons whose state differs are pressed, the others are left as they are,
    `[]` lets go of all; one text such as `"Red, Blue"` is read as that list). The answer is a line
-   per field — `✓` with what it holds now, or `✗` and why — the fields
+   per field — `✓` with what it holds now, `✗` and why, or `?` when what it reads back differs in
+   its letters from the value given and the page's own state does not say whether it is the same
+   value (a list button that shows its choice shortened with no chosen item marked, a date drawn
+   without its year): `같은지는 볼 수 없음` and the text it shows — neither a difference nor a
+   sameness is said, so look at what is shown (or read `fields`) before you judge, and do not
+   write it again — the fields
    still empty and required, and a last line: `양식 그대로` or `양식 바뀜(fields로
    다시 읽기)`, then the buttons as they are now — `버튼: #next 「Next」 켜짐,
    #back 「Back」 꺼짐` (`꺼짐` is off; `숨김:` names one the page took away).

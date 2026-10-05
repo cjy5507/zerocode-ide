@@ -212,6 +212,11 @@ pub struct FormField {
     /// and nothing more: no words of the page set them apart.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub ordinal: bool,
+    /// The short symbol the page draws between this part of a value split across fields and the
+    /// next (an @, a dash, a colon, a slash), so whoever writes the value does not guess where to
+    /// cut it. Empty for a field that is no such part and for the last of the parts.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub joint: String,
     /// The text that stands new in the box around the field since before a
     /// write or a press (read after the page settled) — said as the page wrote
     /// it, never as an error: the door cannot tell one.
@@ -235,6 +240,10 @@ pub struct FormAction {
     /// button with no type, or `type="button"`, does not say.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub submit: bool,
+    /// The handle of the one field the button stands beside, by its place: in the nearest box that
+    /// holds a field at all, next to it. Empty for a button that stands beside no one field.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub beside: String,
 }
 
 /// One `fields` read.
@@ -441,6 +450,11 @@ pub enum FillStatus {
     Same,
     /// Written, and reads back as something else.
     Mismatch,
+    /// Written, and reads back as a text unlike the one asked, where the page's own state does not
+    /// say whether it is the same value — a button that shows its choice shortened, a date drawn
+    /// without its year. Neither a difference nor a sameness is known, and another pass would read it
+    /// the same.
+    Unseen,
     /// The handle names nothing (yet).
     NotFound,
     /// No choice reads as the value (yet) — a dropdown not open, times not
@@ -491,6 +505,7 @@ impl FillStatus {
         match self {
             Self::Set | Self::Same => "들어감",
             Self::Mismatch => "다시 읽으니 다른 값",
+            Self::Unseen => "다시 읽은 글과 글자는 다르나 같은지는 볼 수 없음",
             Self::NotFound => "손잡이가 가리키는 칸이 없음",
             Self::NoOption => "그 값의 선택지가 없음",
             Self::Disabled => "꺼져 있음",
@@ -916,13 +931,28 @@ fn choices(options: &[String], more: usize) -> String {
     format!(" ▸ {}{more}", options.join(" | "))
 }
 
-/// The words a field is named by in a line — a group of chips the page gave no title says it has
-/// none: a name left empty would read as a field that has a name.
-fn name_of(field: &FormField) -> &str {
-    if field.kind == "chips" && field.label.trim().is_empty() {
+/// The words a field is named by in a line — a field the page gave no words (a group of chips: no title)
+/// says it has none: a name left empty would read as a field that has a name.
+fn name_in<'a>(kind: &str, label: &'a str) -> &'a str {
+    if !label.trim().is_empty() {
+        label
+    } else if kind == "chips" {
         "(제목 없음)"
     } else {
-        field.label.as_str()
+        "(이름 없음)"
+    }
+}
+
+fn name_of(field: &FormField) -> &str {
+    name_in(&field.kind, &field.label)
+}
+
+/// What a button's line says of the field it stands beside.
+fn beside_mark(action: &FormAction) -> String {
+    if action.beside.is_empty() {
+        String::new()
+    } else {
+        format!(" ({} 칸 곁)", action.beside)
     }
 }
 
@@ -959,6 +989,9 @@ fn field_line(field: &FormField) -> String {
     }
     if field.ordinal {
         line.push_str(" (같은 이름이라 번호만 붙임)");
+    }
+    if !field.joint.is_empty() {
+        line.push_str(&format!(" (다음 칸 앞에 「{}」)", field.joint));
     }
     if !field.placeholder.is_empty() && field.placeholder != field.label {
         line.push_str(&format!(" 예: {}", field.placeholder));
@@ -1054,7 +1087,11 @@ pub fn fields_lines(read: &FormRead) -> String {
             .map(|action| {
                 let off = if action.disabled { " (꺼짐)" } else { "" };
                 let submit = if action.submit { SUBMIT_MARK } else { "" };
-                format!("{} 「{}」{off}{submit}", action.handle, action.label)
+                let beside = beside_mark(action);
+                format!(
+                    "{} 「{}」{off}{submit}{beside}",
+                    action.handle, action.label
+                )
             })
             .collect();
         lines.push(format!("버튼: {}", buttons.join(" · ")));
@@ -1176,7 +1213,11 @@ fn after_words(
             .map(|action| {
                 let state = if action.disabled { "꺼짐" } else { "켜짐" };
                 let submit = if action.submit { SUBMIT_MARK } else { "" };
-                format!("{} 「{}」 {state}{submit}", action.handle, action.label)
+                let beside = beside_mark(action);
+                format!(
+                    "{} 「{}」 {state}{submit}{beside}",
+                    action.handle, action.label
+                )
             })
             .collect();
         parts.push(format!("버튼: {}", buttons.join(", ")));
@@ -1226,8 +1267,16 @@ pub fn fill_lines(report: &FillReport) -> String {
         report.passes
     )];
     for result in &report.results {
-        let mark = if result.status.took() { "✓" } else { "✗" };
-        let mut line = format!("  {mark} {} {}", result.handle, result.label);
+        let mark = match result.status {
+            status if status.took() => "✓",
+            FillStatus::Unseen => "?",
+            _ => "✗",
+        };
+        let mut line = format!(
+            "  {mark} {} {}",
+            result.handle,
+            name_in(&result.kind, &result.label)
+        );
         if result.status.took() {
             line.push_str(&format!(" = {}", result.now.said()));
         } else {
@@ -1235,7 +1284,7 @@ pub fn fill_lines(report: &FillReport) -> String {
             if !result.hint.is_empty() {
                 line.push_str(&format!(" — 안내: {}", result.hint));
             }
-            if result.status == FillStatus::Mismatch {
+            if matches!(result.status, FillStatus::Mismatch | FillStatus::Unseen) {
                 line.push_str(&format!(" ({})", result.now.said()));
             }
             line.push_str(&choices(&result.options, 0));
