@@ -1276,6 +1276,8 @@ const zcFormFields = (request, before = null) => {
     }
   }
   if (!scopes.size) for (const { doc } of docs.open) if (doc.body) scopes.add(doc.body);
+  // A frame's page is small and is read whole: the buttons of an embedded page — a search's results drawn beside its form — are all of its step.
+  for (const { doc } of docs.open.slice(1)) if (doc.body) scopes.add(doc.body);
   const actions = [];
   const named = new Set();
   const pressed = [];
