@@ -180,7 +180,9 @@ pub struct FormField {
     /// The handle `fill` (and `click`, outside a frame) names it by.
     pub handle: String,
     /// HTML's input type, `select`, `textarea`, `text` for an editable
-    /// region, `checkbox`, `radio`, `combobox`.
+    /// region, `checkbox`, `radio`, `combobox`, `chips` (a row of buttons that
+    /// say whether they are pressed) and `stepper` (a number drawn between two
+    /// buttons).
     pub kind: String,
     pub label: String,
     /// The heading of the region the field stands in.

@@ -132,7 +132,12 @@ A form is data, so fill it as data, not a picture per field:
    (`(제목 없음)` when the page gives it none: its options then say what it is),
    its options the buttons' words, its value the list of the ones pressed
    (`= ["Red"]`) — and its buttons are not listed again as buttons, and neither are
-   the options of a group of radios the page draws with buttons. A button that stands beside one
+   the options of a group of radios the page draws with buttons. A number the page draws between
+   two buttons, in a group of its own (`− 1 +`, a count of adults), is one field of kind `stepper` —
+   named by the group's name, `= "1"` the number it shows — and its two buttons are not listed again
+   as buttons: `fill` it with the number wanted (`"3"`) and the door presses the button that moves
+   it until the number shows the asked one, whichever way the page draws them; past a limit it stops
+   there and says `mismatch` with the number it shows. A button that stands beside one
    field — next to it in the nearest box that holds a field — stays a button and says whose it is,
    `(#handle 칸 곁)` (a "show" beside a password, an "apply" beside a code): press it when the
    page asks for what it does; a button beside no one field says nothing. A part

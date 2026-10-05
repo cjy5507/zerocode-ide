@@ -322,6 +322,7 @@ const zcFieldKind = (el, request) => {
   if (role === "combobox" || zcListButton(el)) return "combobox";
   if (el.isContentEditable) return "text";
   if (el.hasAttribute("tabindex") && zcListBeside(el, request)) return "dropdown";
+  if (el.matches("[role=group], fieldset") && zcStepperOf(el, request)) return "stepper";
   return zcChipsOf(el, request).length ? "chips" : null;
 };
 // ---- a row of toggles, read as one field ----
@@ -405,6 +406,18 @@ const zcChipsTitle = (row, request) => {
   }
   return zcGroupTitle(row, row, request);
 };
+// ---- a count drawn between two buttons, read as one field ----
+// A group (ARIA's `group`, or a fieldset) that holds two buttons with a whole number drawn between them — and no field of its own — is a count and its two buttons: one field, named by
+// the group's name, holding the number it shows. Its buttons are its own, not buttons of the form. Which of them raises it is not told by their words: a fill finds out by what a press does.
+// A pair of buttons around words that are no whole number (a page counter) is no count.
+const zcStepperOf = (box, request) => {
+  if (!box.matches("[role=group], fieldset") || !zcDrawn(box) || zcHoldsField(box, request)) return null;
+  const buttons = [...box.querySelectorAll(request.actions.join(","))].filter((one) => zcDrawn(one));
+  if (buttons.length !== 2 || buttons.some((one) => zcIsChip(one, request) || zcListButton(one) || zcFormRole(one) === "combobox")) return null;
+  return /^\d+$/.test(zcWordsBetween(buttons[0], buttons[1])) ? { first: buttons[0], second: buttons[1] } : null;
+};
+// Every count a document draws, in the page's order.
+const zcSteppers = (doc, request) => [...doc.querySelectorAll("[role=group], fieldset")].filter((box) => zcStepperOf(box, request));
 // Whether a field is named only by its own short words: an ARIA label with no label of the page beside it.
 const zcOnlyAria = (el) => {
   const aria = el.getAttribute("aria-label");
@@ -532,6 +545,18 @@ const zcRead = (el, request) => {
     return record;
   }
   record.handle = zcHandleOf(el);
+  if (kind === "stepper") {
+    const parts = zcStepperOf(el, request);
+    record.members = [parts.first, parts.second];
+    record.count = Number(zcWordsBetween(parts.first, parts.second));
+    record.value = String(record.count);
+    record.disabled = zcOff(parts.first) && zcOff(parts.second);
+    const titled = zcChipsTitle(el, request);
+    record.caption = titled.name;
+    record.label = titled.name;
+    if (titled.note.trim()) record.note = titled.note;
+    return record;
+  }
   if (kind === "checkbox") {
     record.value = zcFormTag(el) === "input" ? el.checked : el.getAttribute("aria-checked") === "true";
   } else if (kind.startsWith("select")) {
@@ -623,8 +648,8 @@ const zcNumberRuns = (records, request) => {
   while (at < records.length) {
     const head = records[at];
     let end = at + 1;
-    while (end < records.length && head.kind !== "chips" && records[end].el.parentElement === head.el.parentElement
-      && records[end].kind !== "radio" && records[end].kind !== "chips" && records[end].readOnly === head.readOnly
+    while (end < records.length && head.kind !== "chips" && head.kind !== "stepper" && records[end].el.parentElement === head.el.parentElement
+      && records[end].kind !== "radio" && records[end].kind !== "chips" && records[end].kind !== "stepper" && records[end].readOnly === head.readOnly
       && zcContinues(head, records[end - 1], records[end]) && !zcNameOf(records[end].el)) end += 1;
     if (end - at > 1 && zcFold(head.label)) {
       // The caption read before the first part is renamed, for every part.
@@ -1243,8 +1268,8 @@ const zcFormFields = (request, before = null) => {
   let more = 0;
   for (const { doc, prefix } of docs.open) {
     const found = [...doc.querySelectorAll(request.controls.join(","))];
-    // A row of chips is a field no control selector names: it stands where it does in the page.
-    const rows = zcChipRows(doc, request).filter((row) => !found.includes(row));
+    // A row of chips and a count between two buttons are fields no control selector names: they stand where they do in the page.
+    const rows = zcChipRows(doc, request).filter((row) => !found.includes(row)).concat(zcSteppers(doc, request).filter((box) => !found.includes(box)));
     if (rows.length) {
       found.push(...rows);
       found.sort((a, b) => (a === b ? 0 : a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
@@ -1672,6 +1697,7 @@ const zcRendered = (record, pick, now) => {
 const zcHolds = (record, asked) => {
   if (record.kind === "checkbox") return zcFlag(asked) === record.value;
   if (record.kind === "dialog") return null;
+  if (record.kind === "stepper") return zcGroups(String(asked))[0] === record.count;
   if (record.kind === "chips") {
     const wanted = zcChipsWanted(record, asked);
     return wanted.missing === undefined && wanted.picks.length === record.choices.filter((choice) => choice.selected).length
@@ -1736,9 +1762,44 @@ const zcWriteChips = (record, picks) => {
     }
   }
 };
+// Write a count drawn between two buttons: press the button that moves it toward the number asked, each press decided by the number the count shows after the one before it. The
+// page's order — the button that lowers first, the button that raises second — is taken until a press says otherwise; a button that is off at its end of the count, with no press yet to say
+// which is which, leaves the other one to be tried. The presses stop when the count shows the number asked, when a press moved nothing (a page that shows it later is the next pass's) or after forty.
+const zcWriteStepper = (record, target) => {
+  const parts = () => {
+    const el = record.el.isConnected ? record.el : (record.full ? (zcTarget(record.full).record || {}).el : null);
+    return el ? zcStepperOf(el, request) : null;
+  };
+  const shown = (pair) => (pair ? Number(zcWordsBetween(pair.first, pair.second)) : NaN);
+  let pair = parts();
+  let raise = "second", known = false;
+  for (let presses = 0; pair && presses < 40; presses += 1) {
+    const now = shown(pair);
+    if (!Number.isInteger(now) || now === target) return;
+    const lower = raise === "second" ? "first" : "second";
+    let side = target > now ? raise : lower;
+    if (zcOff(pair[side])) {
+      const other = side === raise ? lower : raise;
+      if (known || zcOff(pair[other])) return;
+      side = other;
+    }
+    zcPress(pair[side]);
+    pair = parts();
+    const after = shown(pair);
+    if (!Number.isInteger(after) || after === now) return;
+    known = true;
+    if ((after > now) !== (side === raise)) raise = raise === "second" ? "first" : "second";
+  }
+};
 // Write one value; "" when written, else why not.
 const zcWrite = (record, asked) => {
   const el = record.el;
+  if (record.kind === "stepper") {
+    const target = zcGroups(String(asked))[0];
+    if (target === undefined) return "no_option";
+    zcWriteStepper(record, target);
+    return "";
+  }
   if (record.kind === "dialog") {
     const when = zcDateOf(asked);
     if (!when) return "no_option";
