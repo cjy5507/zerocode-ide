@@ -33,6 +33,10 @@
  * the person's code goes, after a send, to the field whose words name a
  * one-time code or that the send brought, required or not; and nothing
  * about any scene — no handle, label, order or step is written here.
+ * With `--door-text PATH` (the built `door_text` example) each run also keeps a
+ * `trace`: what the door said to each `fields` and `fill` in the core's own words, and what
+ * the driver pressed and typed — the chain a failed run is read from.
+ *
  * Between two round trips the driver waits THINK_MS: a model's turn is never
  * shorter, and a page's own late fields land inside it.
  *
@@ -43,8 +47,9 @@
  * (`unknowns`).
  */
 
+import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
 import { FORM_REQUEST, clickScript, evalFormScript, fieldsScript, fillPasses, typeScript } from "../../../ui/tests/browser-scripts.mjs";
 import { serveScene as serve, wrongKeys } from "./scene-kit.mjs";
@@ -150,6 +155,10 @@ class Road {
     // so a field already typed is no longer asked of it nor owed by it.
     this.typed = new Set();
     this.form = null;
+    // The door's own words, when asked for: the core's `door_text` says them.
+    this.ask = null;
+    this.said = [];
+    this.buttons = [];
     this.byHandTried = new Set();
     this.scriptMs = [];
     // How long each kind of round trip took on the wall, by kind — a fill's is
@@ -177,16 +186,28 @@ class Road {
 
   /* The window keeps the form a pane's agent last read, and holds the
    * next fill to it (`known_form`): so does the driver. */
+  /* A line of the trace, with the round trip it came at. */
+  note(entry) {
+    if (this.ask) this.said.push({ at: this.count.roundTrips, ...entry });
+  }
+
   async fields() {
     const read = await this.call("fields", () => this.run(fieldsScript()));
     if (!read.ok) throw new Error(`fields refused: ${JSON.stringify(read)}`);
     this.form = read.value.fingerprint;
     this.seen = read.value.fields;
+    this.buttons = read.value.actions || [];
+    if (this.ask) this.note({ verb: "fields", words: this.ask({ op: "fields", label: "browser-1", json: false, read: read.value }).words });
     return read.value;
   }
 
   async fill(bundle) {
+    const known = this.form, buttons = this.buttons;
     const filled = await this.call("fill", () => fillPasses((source) => this.run(source), bundle, this.form));
+    if (this.ask) {
+      this.note({ verb: "fill", sent: bundle, words: this.ask({ op: "fill", label: "browser-1", text: JSON.stringify(bundle), passes: filled.rounds, known, buttons }).words });
+    }
+    if (!filled.stale) this.buttons = filled.actions || [];
     if (filled.stale) {
       this.count.stale += 1;
       this.trail.push({ fill: "form_stale" });
@@ -214,6 +235,7 @@ class Road {
   async typeSecret(handle, value) {
     if (typeof value !== "string" || this.typed.has(handle) || handle.includes(FORM_REQUEST.frameSeparator)) return false;
     this.typed.add(handle);
+    this.note({ verb: "type", handle });
     this.trail.push({ type: handle });
     const typed = await this.call("type", () => this.run(typeScript(handle, value, "setter")));
     if (!typed.ok) throw new Error(`type refused: ${JSON.stringify(typed)}`);
@@ -308,6 +330,7 @@ class Road {
 
   async press(action) {
     this.trail.push({ press: action.label });
+    this.note({ verb: "click", handle: action.handle, label: action.label });
     if (action.handle.includes(FORM_REQUEST.frameSeparator)) {
       const [frame, inner] = action.handle.split(FORM_REQUEST.frameSeparator);
       return this.call("eval", () => this.page.evaluate(([outer, button]) =>
@@ -464,6 +487,8 @@ class Road {
       this.seen = said.fields;
       if (turn.confirm && said.clean) this.codeConfirmed = true;
       this.trail.push({ script: said.results, pressedNext: said.pressedNext, confirmed: said.confirmed });
+      this.note({ verb: "eval", results: said.results, left: said.left.map((field) => `${field.handle} ${field.label}`),
+        buttons: said.actions.map((action) => `${action.handle} ${action.label}${action.disabled ? " (꺼짐)" : ""}`), pressedNext: said.pressedNext });
       for (const result of said.hand || []) {
         if (result.widget) await this.byHand(result, result.asked);
         else await this.openAndPress(result, result.asked);
@@ -504,6 +529,7 @@ async function drive(browser, folder, roadName) {
   const site = await serve(folder);
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const road = new Road(page, card, roadName);
+  road.ask = doorWords;
   const began = performance.now();
   let result = null, stuck = null;
   try {
@@ -525,6 +551,7 @@ async function drive(browser, folder, roadName) {
     callMsP50: Math.round(scriptMs[Math.floor(scriptMs.length / 2)] ?? 0), callMsMax: Math.round(scriptMs.at(-1) ?? 0),
     fillMsP50: Math.round(fillMs[Math.floor(fillMs.length / 2)] ?? 0), fillMsMax: Math.round(fillMs.at(-1) ?? 0),
     wallMs: Math.round(performance.now() - began), trail: road.trail,
+    ...(doorWords ? { trace: road.said } : {}),
   };
 }
 
@@ -553,6 +580,10 @@ async function countToday(browser, folder) {
 }
 
 const options = args(process.argv.slice(2));
+/* What the core says to a read and to a fill, for a run's trace. */
+const doorWords = options["door-text"]
+  ? (request) => JSON.parse(spawnSync(resolve(options["door-text"]), [], { input: JSON.stringify(request), encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout)
+  : null;
 const browser = await chromium.launch();
 const rows = [];
 try {
