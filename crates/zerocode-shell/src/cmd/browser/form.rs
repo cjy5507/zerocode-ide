@@ -615,15 +615,17 @@ const zcJoints = (parts, request) => {
 };
 // Fields side by side in one box with one caption — a phone number in three
 // boxes, a date in three selects, an hour and a minute — are that caption's
-// parts, numbered.
+// parts, numbered. The parts of one value are written alike: a field the page
+// keeps from being typed in (its value comes from a window) and a field that
+// takes text are no parts of one value, each is named by its own words.
 const zcNumberRuns = (records, request) => {
   let at = 0;
   while (at < records.length) {
     const head = records[at];
     let end = at + 1;
     while (end < records.length && head.kind !== "chips" && records[end].el.parentElement === head.el.parentElement
-      && records[end].kind !== "radio" && records[end].kind !== "chips" && zcContinues(head, records[end - 1], records[end])
-      && !zcNameOf(records[end].el)) end += 1;
+      && records[end].kind !== "radio" && records[end].kind !== "chips" && records[end].readOnly === head.readOnly
+      && zcContinues(head, records[end - 1], records[end]) && !zcNameOf(records[end].el)) end += 1;
     if (end - at > 1 && zcFold(head.label)) {
       // The caption read before the first part is renamed, for every part.
       const caption = head.label.trim();
