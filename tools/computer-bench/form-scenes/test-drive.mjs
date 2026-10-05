@@ -436,6 +436,54 @@ const SEARCH_LAYER = await scene("search-layer", `<!doctype html><html lang="en"
   });
 </script>` });
 
+/* A text field with a list of suggestions the page makes after the text (t-41720): the page takes the item chosen from the list, not the text typed, builds the list 350 ms after the text and
+ * shuts it 150 ms after the field loses the focus. The fill the door makes types and keeps the field, waits for the list and presses the item; a driver that writes the card's words through
+ * the fill gets the choice on both roads, with the fields written after it in the page's order (a field the fill writes after would take the focus). */
+const SUGGEST_FACTS = [{ says: "Name", value: "Kim" }, { says: "Pickup spot", value: "Pier 7" }, { says: "Memo", value: "Back door" }];
+const SUGGEST_LIST = await scene("suggest-list", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="who">Name</label> <input id="who">
+  <label for="spot">Pickup spot</label>
+  <div class="ac"><input id="spot" autocomplete="off"><div id="spotList" role="listbox" aria-label="Spot suggestions" hidden></div></div>
+  <label for="memo">Memo</label> <input id="memo">
+  <button type="button" id="send">Submit</button>
+</form>
+<script>
+  const SPOTS = [{ main: "Pier 7", sub: "Harbour road" }, { main: "Pier 70", sub: "North quay" }, { main: "Pier 7-3", sub: "Cold store" }, { main: "Dock 7", sub: "Harbour road" }];
+  const $ = (id) => document.getElementById(id);
+  const spot = $("spot"), list = $("spotList");
+  let timer = 0, token = 0, found = [], chosen = null;
+  const close = () => { token += 1; clearTimeout(timer); list.hidden = true; list.innerHTML = ""; found = []; };
+  const norm = (text) => String(text).replace(/\\s+/g, "").toLowerCase();
+  spot.addEventListener("input", () => {
+    chosen = null;
+    clearTimeout(timer);
+    const query = norm(spot.value);
+    if (query.length < 2) { close(); return; }
+    const mine = ++token;
+    list.hidden = false;
+    list.innerHTML = '<div class="msg">Searching…</div>';
+    timer = setTimeout(() => {
+      if (mine !== token) return;
+      found = SPOTS.filter((one) => norm(one.main + one.sub).includes(query));
+      list.innerHTML = found.length ? found.map((one, at) => '<div role="option" data-at="' + at + '"><span>' + one.main + '</span><span>' + one.sub + '</span></div>').join("")
+        : '<div class="msg">No results</div>';
+    }, 350);
+  });
+  spot.addEventListener("blur", () => { setTimeout(() => { if (document.activeElement !== spot) close(); }, 150); });
+  list.addEventListener("mousedown", (event) => event.preventDefault());
+  list.addEventListener("click", (event) => {
+    const item = event.target.closest("[role=option]");
+    if (!item) return;
+    chosen = found[Number(item.dataset.at)];
+    spot.value = chosen.main;
+    close();
+  });
+  $("send").addEventListener("click", () => {
+    if (!chosen) return;
+    window.__sceneResult = { who: $("who").value, spot: chosen.main, area: chosen.sub, memo: $("memo").value };
+  });
+</script>`, SUGGEST_FACTS, { who: "Kim", spot: "Pier 7", area: "Harbour road", memo: "Back door" });
+
 /* A field the page answers about after a press, with a button of its own beside it: the door says whose the button is, and the driver presses it once and
  * reads the form again — the press that ends the form is made again after it. */
 const OWN = await scene("own", `<!doctype html><html lang="en"><meta charset="utf-8"><form id="f" onsubmit="return false">
@@ -473,7 +521,7 @@ const DRAWN = await scene("drawn", `<!doctype html><html lang="en"><meta charset
 const out = join(root, "rows.json");
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -649,6 +697,15 @@ await test("a driver fills a read-only field from the window the door says its b
     assert(one.result.locker === "L-17" && one.result.point === "North Gate 9", `and the result that holds the words whole is the one picked (${road})`, one.result);
   }
   return JSON.stringify(row("search-layer", "verbs").result);
+});
+
+await test("a driver gets the item of a list the page makes after the text chosen through the fill, with the fields after it written first, on both roads", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("suggest-list", road);
+    assert(one && one.ok && one.pass, `the ${road} road gets the item chosen from the list and the fields around it written`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+    assert(one.result.spot === "Pier 7" && one.result.area === "Harbour road", `the item whose line is the words of the card is the one chosen (${road})`, one.result);
+  }
+  return JSON.stringify(row("suggest-list", "verbs").result);
 });
 
 await test("the recipe a driver presses a button inside a frame by is the one the skill teaches", () => {

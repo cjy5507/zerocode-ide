@@ -2701,6 +2701,90 @@ await test("a_layer_that_holds_a_frame_of_the_same_origin_is_read_once_it_is_ope
   } finally { await opener.close(); }
 });
 
+/* A text field with a list of suggestions the page makes after the text (t-41720): the page builds the list 350 ms after something is typed and shuts it 150 ms after the field loses the focus,
+ * and the value it takes is the item chosen from the list, not the text typed. A fill types the text and keeps the field, waits in the passes that follow for the list, and presses the item whose
+ * words are the asked ones — the one that is a whole line of an item, not the items that only hold the words — and writes the other fields of its bundle first, so none takes the focus
+ * from the field while its list is made. A text field with no such list is written as before. */
+const SUGGEST = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="ac"><input id="spot" aria-label="Pickup spot" autocomplete="off"><div id="spotList" role="listbox" aria-label="Spot suggestions" hidden></div></div>
+  <input id="memo" aria-label="Memo">
+  <input id="plain" aria-label="Plain note">
+</form>
+<script>
+  const SPOTS = [{ main: "Pier 7", sub: "Harbour road" }, { main: "Pier 70", sub: "North quay" }, { main: "Pier 7-3", sub: "Cold store" }, { main: "Dock 7", sub: "Harbour road" }];
+  const spot = document.getElementById("spot"), list = document.getElementById("spotList");
+  let timer = 0, token = 0, found = [];
+  window.__chosen = null;
+  window.__plainBlurred = false;
+  const close = () => { token += 1; clearTimeout(timer); list.hidden = true; list.innerHTML = ""; found = []; };
+  const norm = (text) => String(text).replace(/\\s+/g, "").toLowerCase();
+  spot.addEventListener("input", () => {
+    window.__chosen = null;
+    clearTimeout(timer);
+    const query = norm(spot.value);
+    if (query.length < 2) { close(); return; }
+    const mine = ++token;
+    list.hidden = false;
+    list.innerHTML = '<div class="msg">Searching…</div>';
+    timer = setTimeout(() => {
+      if (mine !== token) return;
+      found = SPOTS.filter((one) => norm(one.main + one.sub).includes(query));
+      list.innerHTML = found.length ? found.map((one, at) => '<div role="option" data-at="' + at + '"><span>' + one.main + '</span><span>' + one.sub + '</span></div>').join("")
+        : '<div class="msg">No results</div>';
+    }, 350);
+  });
+  spot.addEventListener("blur", () => { setTimeout(() => { if (document.activeElement !== spot) close(); }, 150); });
+  list.addEventListener("mousedown", (event) => event.preventDefault());
+  list.addEventListener("click", (event) => {
+    const item = event.target.closest("[role=option]");
+    if (!item) return;
+    window.__chosen = found[Number(item.dataset.at)];
+    spot.value = window.__chosen.main;
+    close();
+  });
+  document.getElementById("plain").addEventListener("blur", () => { window.__plainBlurred = true; });
+</script>`;
+await test("a_text_field_with_a_list_the_page_makes_after_the_text_takes_the_item_chosen_from_the_list_not_the_text_typed", async () => {
+  const suggest = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await suggest.setContent(SUGGEST);
+    const read = await readFields(suggest);
+    const filled = await fillBundle(suggest, { "#spot": "Pier 7", "#memo": "Back door" }, read.fingerprint);
+    const by = Object.fromEntries(filled.results.map((one) => [one.handle, one]));
+    assert(by["#spot"]?.status === "set" && by["#memo"]?.status === "set", "the field and the others of the bundle take what they are asked", filled.results);
+    const chosen = await suggest.evaluate(() => window.__chosen);
+    assert(chosen && chosen.main === "Pier 7", "the page took the item chosen from its list — the one whose line is the words asked, not Pier 70 or Pier 7-3", chosen);
+    assert(await suggest.evaluate(() => document.getElementById("spot").value) === "Pier 7", "and the field shows it");
+    return JSON.stringify(chosen);
+  } finally { await suggest.close(); }
+});
+await test("a_text_field_whose_list_shows_no_item_for_the_words_asked_says_no_option_and_keeps_the_text", async () => {
+  const suggest = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await suggest.setContent(SUGGEST);
+    const read = await readFields(suggest);
+    const filled = await fillBundle(suggest, { "#spot": "Quay 99" }, read.fingerprint);
+    const one = filled.results[0];
+    assert(one?.status === "no_option", "no item of the list is the words asked", filled.results);
+    assert(await suggest.evaluate(() => document.getElementById("spot").value) === "Quay 99", "the text typed stays in the field");
+    assert(await suggest.evaluate(() => window.__chosen) === null, "and nothing was chosen");
+    return one.status;
+  } finally { await suggest.close(); }
+});
+
+await test("a_text_field_with_no_list_beside_it_is_written_as_before_and_loses_the_focus", async () => {
+  const suggest = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await suggest.setContent(SUGGEST);
+    const read = await readFields(suggest);
+    const filled = await fillBundle(suggest, { "#plain": "Nothing" }, read.fingerprint);
+    assert(filled.results[0]?.status === "set", "the text is in", filled.results);
+    assert(await suggest.evaluate(() => window.__plainBlurred) === true, "and the field lost the focus, as a fill leaves a field", filled.results);
+    assert(await suggest.evaluate(() => document.activeElement && document.activeElement.id) !== "plain", "it is not the one that has the focus");
+    return "blurred";
+  } finally { await suggest.close(); }
+});
+
 await browser.close();
 
 let failed = 0;
