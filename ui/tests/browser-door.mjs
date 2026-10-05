@@ -2902,6 +2902,62 @@ await test("a_frame_of_the_same_origin_is_read_whole_so_the_buttons_of_its_resul
   } finally { await searching.close(); }
 });
 
+/* `type` names a field inside a frame by its handle (t-41720): `#frame >> #field`, the part before the separator the frame and the part after it the field inside — a frame of the page's own
+ * origin only. A frame of another origin and a sandboxed one are refused by name and nothing is written; a field inside a frame is typed with the frame's own constructors, and the answer
+ * and the page's words never carry the value. A handle held to the form its agent read is refused when the form is no longer that one. */
+const FRAMED = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label>Name <input id="who"></label>
+  <iframe id="same" srcdoc='&lt;!doctype html&gt;&lt;input id="pin" type="password" aria-label="PIN"&gt;&lt;input id="plainf" aria-label="Plain note"&gt;&lt;script&gt;window.__inputs = []; document.getElementById("pin").addEventListener("input", function (event) { window.__inputs.push(event instanceof InputEvent); });&lt;/script&gt;'></iframe>
+  <iframe id="sealed" sandbox="allow-scripts" srcdoc='&lt;!doctype html&gt;&lt;input id="pin" type="password" aria-label="PIN"&gt;'></iframe>
+  <iframe id="other" src="data:text/html,%3Cinput%20id%3Dpin%20type%3Dpassword%3E"></iframe>
+</form>`;
+const SECRET_WORDS = "Zq-9981-secret";
+await test("a_secret_field_inside_a_frame_of_the_same_origin_is_typed_by_its_handle_and_the_value_stays_out_of_the_answer", async () => {
+  const framed = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await framed.setContent(FRAMED);
+    await framed.waitForTimeout(150);
+    const typed = await evalJson(framed, twin.typeScript("#same >> #pin", SECRET_WORDS, "setter"));
+    assert(typed.ok && typed.value.method === "value-setter" && typed.value.secureField === true, "the value goes in by the setter, into a field the door calls secret", typed);
+    const inside = await framed.evaluate(() => document.getElementById("same").contentDocument.getElementById("pin").value);
+    assert(inside === SECRET_WORDS, "and the frame's field holds it");
+    const events = await framed.evaluate(() => document.getElementById("same").contentWindow.__inputs);
+    assert(events.length === 1 && events[0] === true, "with one input event made by the frame's own constructor", events);
+    assert(!JSON.stringify(typed).includes(SECRET_WORDS), "the answer does not carry the value", typed);
+    return "typed";
+  } finally { await framed.close(); }
+});
+await test("a_frame_of_another_origin_or_a_sandboxed_one_refuses_the_type_by_name_and_nothing_is_written", async () => {
+  const framed = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await framed.setContent(FRAMED);
+    await framed.waitForTimeout(150);
+    for (const handle of ["#sealed >> #pin", "#other >> #pin"]) {
+      const typed = await evalJson(framed, twin.typeScript(handle, SECRET_WORDS, "setter"));
+      assert(!typed.ok && typed.code === "frame_sealed", `${handle}: a frame the page may not read is refused by name`, typed);
+    }
+    const missing = await evalJson(framed, twin.typeScript("#none >> #pin", SECRET_WORDS, "setter"));
+    assert(!missing.ok && missing.code === "selector_not_found", "a frame that is not there is a selector that finds nothing", missing);
+    assert(await framed.evaluate(() => document.getElementById("who").value) === "", "nothing was written to the page");
+    return "refused";
+  } finally { await framed.close(); }
+});
+await test("a_type_into_a_frame_held_to_the_form_its_agent_read_is_refused_when_the_form_is_no_longer_that_one", async () => {
+  const framed = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await framed.setContent(FRAMED);
+    await framed.waitForTimeout(150);
+    const read = await readFields(framed);
+    const held = await evalJson(framed, twin.typeScript("#same >> #pin", SECRET_WORDS, "setter", read.fingerprint));
+    assert(held.ok, "the form is the one that was read: the value goes in", held);
+    await framed.evaluate(() => { const inner = document.getElementById("same").contentDocument; inner.body.insertAdjacentHTML("beforeend", '<input id="extra" aria-label="Another field">'); });
+    const stale = await evalJson(framed, twin.typeScript("#same >> #pin", "other-words", "setter", read.fingerprint));
+    assert(!stale.ok && stale.code === "form_stale", "a field that came into the frame since the read: nothing is written", stale);
+    assert(await framed.evaluate(() => document.getElementById("same").contentDocument.getElementById("pin").value) === SECRET_WORDS, "and the field keeps what it held");
+    return "stale";
+  } finally { await framed.close(); }
+});
+
 await browser.close();
 
 let failed = 0;

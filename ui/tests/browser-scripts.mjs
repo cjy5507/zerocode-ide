@@ -150,8 +150,11 @@ export const evalScript = (expression) => expression.includes(`${need("BROWSER_E
   ? evalFormScript(expression) : doorScript({}, inlinedEvalBody(expression));
 export const clickScript = (selector) => doorScript({ selector, blockRoots: "", expect: null }, need("CLICK_BODY", CLICK_BODY));
 /* `type`: the keys road, or — for `--value-stdin` — the setter road. */
-export const typeScript = (selector, text, road) =>
-  doorScript({ selector, text, road, blockRoots: "" }, need("TYPE_BODY", TYPE_BODY));
+export const typeScript = (selector, text, road, expect = null) => {
+  const request = { selector, text, road, blockRoots: "", frameSeparator: need("BROWSER_FORM_FRAME_SEPARATOR", FORM_REQUEST.frameSeparator) };
+  // A handle inside a frame is held to the form its agent read, as a fill is: the form helpers stand under the body, with the fingerprint asked for.
+  return expect === null ? doorScript(request, need("TYPE_BODY", TYPE_BODY)) : formScript({ ...FORM_REQUEST, ...request, expect }, need("TYPE_BODY", TYPE_BODY));
+};
 /* The caps `automate_read` cuts a read at. */
 const READ_CAPS = {
   title: rustNumber(DOOR, "BROWSER_TITLE_CAP"), url: rustNumber(DOOR, "BROWSER_URL_CAP"),

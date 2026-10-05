@@ -1342,11 +1342,10 @@ fn a_button_beside_a_field_is_said_to_be_that_fields_in_the_buttons_of_a_read_a_
     );
 }
 
-/// A secret field is never written by `fill`; the answer sends the agent to `type` — but `type` names a field by a selector of the page's own document,
-/// and the handle of a field inside a frame is no such selector. Said for such a field, the way to `type` is false: the answer says the field is out of
-/// reach of both, and a secret in the page itself still names `type`.
+/// A secret field is never written by `fill`; the answer sends the agent to `type`, which names a field by the handle the read gave — and `type` takes the handle of a field inside a
+/// frame of the page's own origin, `#frame >> #field`, as it takes one in the page itself (t-41720): the answer says the same of both.
 #[test]
-fn a_secret_field_inside_a_frame_is_said_to_be_out_of_reach_of_both_fill_and_type() {
+fn a_secret_field_inside_a_frame_is_typed_by_its_handle_like_one_in_the_page() {
     let pass: FillPass = serde_json::from_value(json!({
         "results": [
             { "handle": "#card >> #cvc", "status": "secret", "kind": "password", "label": "CVC" },
@@ -1359,14 +1358,20 @@ fn a_secret_field_inside_a_frame_is_said_to_be_out_of_reach_of_both_fill_and_typ
     ledger.record(&bundle, pass);
     let lines = fill_lines(&ledger.report());
     assert!(
-        lines.contains("  ✗ #card >> #cvc CVC: 비밀 칸이 틀 안에 있음 — fill은 쓰지 않고 type은 틀 안의 칸을 손잡이로 가리키지 못함"),
-        "a secret in a frame says both roads are shut:\n{lines}"
+        lines.contains(
+            "  ✗ #card >> #cvc CVC: 비밀 칸은 fill이 쓰지 않음 — type <label> <손잡이> --value-stdin"
+        ),
+        "a secret in a frame names type with its handle:\n{lines}"
     );
     assert!(
         lines.contains(
             "  ✗ #pw Password: 비밀 칸은 fill이 쓰지 않음 — type <label> <손잡이> --value-stdin"
         ),
-        "a secret in the page itself still names type:\n{lines}"
+        "as a secret in the page itself does:\n{lines}"
+    );
+    assert!(
+        !lines.contains("틀 안에 있음"),
+        "no field is said to be out of reach of type:\n{lines}"
     );
 }
 
