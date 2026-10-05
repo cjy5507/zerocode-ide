@@ -704,6 +704,21 @@ const OTP_SHAPED = await scene("otp-shaped", `<!doctype html><html lang="en"><me
   });
 </script>`, SEND_BESIDE_FACTS, { mobile: "031-7788-2290", code: "913746", verified: true }, CODE_CARD(SEND_BESIDE_FACTS));
 
+/* A payment card whose number stands in four plain boxes and whose security code in a plain box, the page naming them only by its words — no password field among them (t-41720, letter m-41895): the door says they are secret by the
+ * words, the road types each by `type` and never offers one to a fill, and no text it sends carries a piece of the number or the code. */
+const PLAIN_CARD_FACTS = [{ says: "Name", value: "Kim" }, { says: "Card number", value: "5208 3917 6402 8851" }, { says: "CVV", value: "4172" }];
+const PLAIN_CARD = await scene("plain-card", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="nm">Name</label> <input id="nm">
+  <div class="row"><label for="q1">Card number</label>
+    <input id="q1" maxlength="4"> <input id="q2" maxlength="4"> <input id="q3" maxlength="4"> <input id="q4" maxlength="4"></div>
+  <label for="cv">CVV</label> <input id="cv" maxlength="4">
+  <button type="button" id="send">Submit</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  $("send").addEventListener("click", () => { window.__sceneResult = { name: $("nm").value, card: $("q1").value + $("q2").value + $("q3").value + $("q4").value, cvv: $("cv").value }; });
+</script>`, PLAIN_CARD_FACTS, { name: "Kim", card: "5208391764028851", cvv: "4172" });
+
 /* A field the page answers about after a press, with a button of its own beside it: the door says whose the button is, and the driver presses it once and
  * reads the form again — the press that ends the form is made again after it. */
 const OWN = await scene("own", `<!doctype html><html lang="en"><meta charset="utf-8"><form id="f" onsubmit="return false">
@@ -745,7 +760,7 @@ const stub = join(root, "door-text-stub.sh");
 await writeFile(stub, `#!/bin/sh\ncat > /dev/null\nprintf '%s' '{"words":"stub"}'\n`, { mode: 0o755 });
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", VENUE_PAIR, "--scene", BERTH_COUNT, "--scene", SPLIT_SECRET, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--scene", SECRET_LATER, "--scene", OTP_BOXES, "--scene", OTP_SHAPED, "--door-text", stub, "--out", out, "--sources", sourcesFile], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", VENUE_PAIR, "--scene", BERTH_COUNT, "--scene", SPLIT_SECRET, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--scene", SECRET_LATER, "--scene", OTP_BOXES, "--scene", OTP_SHAPED, "--scene", PLAIN_CARD, "--door-text", stub, "--out", out, "--sources", sourcesFile], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* What each road sent to the door, text by text (`--sources`): what a model's calls would have carried. */
@@ -1054,6 +1069,19 @@ await test("a driver puts no value of a secret field into a fill or a script, an
     assert(watchClean(one), `and no record of the run does (${road})`, one.leaks);
   }
   return JSON.stringify(row("secret-later", "script").result);
+});
+
+await test("a driver types the number and the security code of a payment card by type and never by fill when the page names them by words only, on both roads", () => {
+  const values = ["5208", "3917", "6402", "8851", "5208 3917 6402 8851", "4172"];
+  for (const road of ["verbs", "script"]) {
+    const one = row("plain-card", road);
+    assert(one && one.ok && one.pass, `the ${road} road takes the name and types the five boxes`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+    assert(one.type === 5, `by five types (${road})`, { type: one.type });
+    assert(!JSON.stringify(one.trail).includes(":secret"), `no fill was offered a box of the card (${road})`, one.trail);
+    for (const value of values) assert(carries("plain-card", road, value) === 0, `no text the ${road} road sent to the door carries a piece of the card`, { value: value.length, texts: carries("plain-card", road, value) });
+    assert(watchClean(one), `and no record of the run does (${road})`, one.leaks);
+  }
+  return JSON.stringify(row("plain-card", "verbs").result);
 });
 
 await test("a driver hands the code of the person over by the person typing it into the field it names — no fill writes it and no text it sends to the door carries it, on both roads", () => {

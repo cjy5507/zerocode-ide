@@ -815,7 +815,16 @@ await test("drawn_widgets_steps_and_a_frame_are_read_and_filled_by_their_words",
     const paid = await fillBundle(rental, { [at("카드 소유자")]: "KIM YESI", [at("카드번호 (1/4)")]: "4000", [at("카드번호 (2/4)")]: "0012",
       [at("카드번호 (3/4)")]: "3456", [at("카드번호 (4/4)")]: "7899", [at("유효기간 (1/2)")]: "08", [at("유효기간 (2/2)")]: "28",
       [at("이용 약관에 동의합니다")]: true });
-    assert(paid.results.every((result) => result.status === "set"), "the frame's fields and the page's took", paid.results);
+    const pieces = [["카드번호 (1/4)", "4000"], ["카드번호 (2/4)", "0012"], ["카드번호 (3/4)", "3456"], ["카드번호 (4/4)", "7899"]];
+    const numberBoxes = pieces.map(([label]) => at(label));
+    // The boxes of the card number are secret by the words the page gives them (t-41720, letter m-41895): the fill refuses each by name, and the rest of the frame's fields and the page's took.
+    assert(paid.results.filter((result) => numberBoxes.includes(result.handle)).length === 4
+      && paid.results.filter((result) => numberBoxes.includes(result.handle)).every((result) => result.status === "secret"), "the four boxes of the card number are refused by name", paid.results);
+    assert(paid.results.filter((result) => !numberBoxes.includes(result.handle)).every((result) => result.status === "set"), "and the frame's other fields and the page's took", paid.results);
+    for (const [label, piece] of pieces) {
+      const typed = await evalJson(rental, twin.typeScript(at(label), piece, "setter"));
+      assert(typed.ok && typed.value.method === "value-setter", `the stdin road writes ${label} in the frame`, typed);
+    }
     await rental.evaluate((handle) => document.querySelector(handle).click(), three.actions.find((action) => action.label === "결제하기").handle);
     const result = await rental.evaluate(() => window.__sceneResult);
     const expected = JSON.parse(await readFile(resolve(SCENES, "B", "expected.json"), "utf8"));
@@ -1284,6 +1293,49 @@ await test("a_one_time_code_is_secret_by_the_platforms_mark_or_by_its_shape_and_
     assert(await held.evaluate(() => document.getElementById("s1").value) === "86420", "and the code kept what it held");
     const keys = await evalJson(held, twin.typeScript("#m1", "424242", "keys"));
     assert(keys.ok && keys.value.method === "held", "the keys road holds before a code too", keys);
+    return Object.keys(secret).filter((id) => secret[id]).join(" ");
+  } finally { await held.close(); }
+});
+
+/* A payment card's number and security code are secret as a password is (t-41720, letter m-41895): by the platform's own mark (`autocomplete` `cc-number`, `cc-csc`, `cc-exp`, `cc-exp-month`, `cc-exp-year`) or, a page that marks
+ * nothing, by the short words the page gives them — card number, CVC, CVV, security code, in two languages. The boxes of one number go together: when one of them is secret by a mark or a word, all of them are. */
+const CARD_FIELDS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div class="row"><label for="p1">Card number</label>
+    <input id="p1" maxlength="4"> - <input id="p2" maxlength="4"> - <input id="p3" maxlength="4"> - <input id="p4" maxlength="4"></div>
+  <label for="one">Reference</label> <input id="one" autocomplete="cc-number">
+  <label for="sc">Reference two</label> <input id="sc" autocomplete="billing cc-csc" maxlength="4">
+  <label for="cv">CVV</label> <input id="cv" maxlength="4">
+  <label for="sec">Security code</label> <input id="sec" maxlength="4">
+  <label for="mon">Month</label> <input id="mon" autocomplete="cc-exp-month" maxlength="2">
+  <label for="kr">카드번호</label> <input id="kr" maxlength="19">
+  <div role="group" aria-labelledby="payl"><span id="payl">Payment</span>
+    <input id="g1" aria-label="First" maxlength="4" autocomplete="cc-number"><input id="g2" aria-label="Second" maxlength="4"><input id="g3" aria-label="Third" maxlength="4"><input id="g4" aria-label="Fourth" maxlength="4"></div>
+  <label for="holder">Card holder</label> <input id="holder" autocomplete="cc-name">
+  <label for="type">Card type</label> <input id="type">
+  <label for="dis">Discard number</label> <input id="dis">
+  <label for="note">Note</label> <input id="note">
+</form>`;
+
+await test("a_card_number_or_security_code_is_secret_by_the_platforms_mark_or_by_the_words_the_page_gives_it_and_the_boxes_of_one_number_go_together", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(CARD_FIELDS);
+    await held.evaluate(() => { for (const id of ["p1", "p2", "p3", "p4", "one", "sc", "cv", "sec", "mon", "kr", "g1", "g2", "g3", "g4"]) document.getElementById(id).value = "4242"; });
+    const read = await readFields(held);
+    const secret = Object.fromEntries(read.fields.map((field) => [field.handle.replace(/^#/, ""), field.masked === true]));
+    const want = { p1: true, p2: true, p3: true, p4: true, one: true, sc: true, cv: true, sec: true, mon: true, kr: true, g1: true, g2: true, g3: true, g4: true,
+      holder: false, type: false, dis: false, note: false };
+    assert(JSON.stringify(secret) === JSON.stringify(want), "the mark, the words and the boxes of one number are secret — and the holder, the type, a word that only holds the letters, and a note are not", secret);
+    assert(!JSON.stringify(read.fields.filter((field) => field.masked)).includes("4242"), "no secret one says its value", read.fields);
+    const filled = await fillBundle(held, { "#p1": "1111", "#cv": "222", "#g3": "333", "#holder": "Kim" });
+    const byHandle = Object.fromEntries(filled.results.map((result) => [result.handle, result]));
+    assert(byHandle["#p1"].status === "secret" && byHandle["#cv"].status === "secret" && byHandle["#g3"].status === "secret" && byHandle["#holder"].status === "set", "a fill refuses each by name and writes the holder", filled.results);
+    assert(await held.evaluate(() => document.getElementById("p1").value) === "4242", "and the box kept what it held");
+    assert(!JSON.stringify(filled).includes("4242") && !JSON.stringify(filled).includes("1111"), "the answer of the fill carries no value of a secret box", filled);
+    const keys = await evalJson(held, twin.typeScript("#cv", "999", "keys"));
+    assert(keys.ok && keys.value.method === "held" && keys.value.secureField === true, "the keys road holds before a security code", keys);
+    const typed = await evalJson(held, twin.typeScript("#g2", "5555", "setter"));
+    assert(typed.ok && typed.value.method === "value-setter" && !JSON.stringify(typed).includes("5555"), "the stdin road writes a box of the marked row and says nothing of the value", typed);
     return Object.keys(secret).filter((id) => secret[id]).join(" ");
   } finally { await held.close(); }
 });
