@@ -1,7 +1,6 @@
-/* One run of a real agent on a form scene (t-41387): the scene's page in the
+/* One run of an agent on a form scene (t-41387): the scene's page in the
  * bench's own Chromium behind the stand-in window (door-desk.mjs), and
- * `claude -p` — the official CLI, run on the login the window names by path —
- * handed the launch prompt the product builds (the person's task and card
+ * `claude -p` — the official CLI — handed the launch prompt the product builds (the person's task and card
  * values, then the paragraphs `with_agent_selection_contract` adds), the
  * computer-use skill as the window installs it, and nothing else
  * (agent-box.mjs holds the rules). It measures wall time, the model's requests
@@ -9,8 +8,13 @@
  * took, and leaves the run's own folder for a reader.
  *
  *   node real.mjs --scene DIR --model ID --out DIR --door-text PATH --claude PATH
- *                 --account DIR [--max-turns N] [--cap-seconds N]
- *                 [--spent FILE --runs-max N] [--dry]
+ *                 [--max-turns N] [--cap-seconds N] [--spent FILE --runs-max N] [--dry]
+ *
+ * CLOSED (m-41479): no login is named — the box holds none, so the CLI reaches
+ * no model — and `--account` is refused before anything starts. The real-model
+ * road opens only when a person decides how it logs in (a key made for
+ * measuring, or an account used for nothing else); until then this runs
+ * against a stand-in for the CLI, which is how its own test holds it.
  *
  * `--dry` builds the box and says what it would launch (the arguments, the
  * names of the environment, the check of PATH) without starting a page or the
@@ -20,7 +24,7 @@
 
 import { spawn } from "node:child_process";
 import { appendFile, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -45,6 +49,9 @@ const STREAM_GRACE_MS = 2_000;
 /* How much of the agent's last message a run keeps. */
 const FINAL_WORDS_CAP = 400;
 
+/* The one line a refused login is answered with. */
+const CLOSED = "REFUSED: --account — the real-model road is closed until a person decides how it logs in (a key made for measuring, or an account used for nothing else); nothing was started";
+
 function args(argv) {
   const parsed = {};
   for (let at = 0; at < argv.length; at += 1) {
@@ -52,7 +59,8 @@ function args(argv) {
     if (key === "dry") parsed.dry = true;
     else { parsed[key] = argv[at + 1]; at += 1; }
   }
-  for (const need of ["scene", "model", "out", "doorText", "claude", "account"]) {
+  if (parsed.account !== undefined) { console.log(CLOSED); process.exit(2); }
+  for (const need of ["scene", "model", "out", "doorText", "claude"]) {
     if (!parsed[need]) { console.error(`REFUSED: --${need.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)} is required`); process.exit(2); }
   }
   parsed.maxTurns = Number(parsed.maxTurns || MAX_TURNS);
@@ -72,9 +80,6 @@ const parsedLine = (line) => { try { return JSON.parse(line); } catch { return n
 const options = args(process.argv.slice(2));
 const out = resolve(options.out);
 const doorText = resolve(options.doorText);
-if (!existsSync(options.account) || !statSync(options.account).isDirectory()) {
-  console.error("REFUSED: --account is not a folder"); process.exit(2);
-}
 const scene = await readScene(options.scene);
 // The runs already made: a limit on all of them, and no scene and model twice.
 const spentRows = options.spent && existsSync(options.spent)
@@ -95,7 +100,7 @@ await mkdir(join(dirs.config, "skills", "computer-use"), { recursive: true });
 await copyFile(join(ROOT, "skills", "computer-use", "SKILL.md"), join(dirs.config, "skills", "computer-use", "SKILL.md"));
 await installStandIn({ bin: dirs.bin, doorText });
 const argv = claudeArgs({ model: options.model, maxTurns: options.maxTurns });
-const env = (desk) => boxEnv({ ...dirs, bin: dirs.bin, account: resolve(options.account), desk, user: process.env.USER || "" });
+const env = (desk) => boxEnv({ ...dirs, bin: dirs.bin, desk, user: process.env.USER || "" });
 const path = env("").PATH;
 const check = checkPath(path, dirs.bin);
 const problems = argsProblems(argv);

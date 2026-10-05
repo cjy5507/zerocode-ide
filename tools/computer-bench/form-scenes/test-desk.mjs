@@ -186,8 +186,9 @@ await test("the box: a narrow tool list, no widening flag, an environment from n
   assert(!args.some((word) => /^Bash$|^Bash\(\*\)$/.test(word) && args[args.indexOf(word) - 1] === "--allowedTools"), "Bash as a whole is not allowed");
   assert(argsProblems([...args, "--dangerously-skip-permissions"]).length > 0, "a flag that skips permission checks is refused");
   assert(argsProblems(args.map((word) => (word === ALLOWED_TOOLS[1] ? "Bash" : word))).length > 0, "Bash as a whole is refused");
-  const names = Object.keys(boxEnv({ bin, home: "/h", config: "/c", tmp: "/t", account: "/a", desk: "http://127.0.0.1:1", user: "u" }));
+  const names = Object.keys(boxEnv({ bin, home: "/h", config: "/c", tmp: "/t", desk: "http://127.0.0.1:1", user: "u" }));
   assert(!names.some((name) => /(TOKEN|SECRET|PASSWORD)/.test(name)) && !names.includes("ANTHROPIC_API_KEY"), "no token travels in the environment", names);
+  assert(!names.some((name) => /SECURESTORAGE/.test(name)), "and no login is named: the real-model road is closed", names);
   const holds = checkPath(env.PATH, bin);
   assert(holds.holds && STAND_IN_NAMES.every((name) => holds.lines.some((line) => line.startsWith(`PATH ${name} -> ${join(bin, name)}`))), "the stand-in alone answers to the door's names", holds.lines);
   const real = join(root, "real");

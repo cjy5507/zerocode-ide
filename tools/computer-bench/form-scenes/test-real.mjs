@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, writeFile, chmod } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { doorTextFromArgv, writeFixtureScene } from "./fixture-scene.mjs";
@@ -79,7 +79,7 @@ const splits = await standIn("splits", ["cat > /dev/null", INIT,
 /* One run of the runner, its out folder, its words. */
 function run(claude, extra = [], out = fresh()) {
   const done = spawnSync(process.execPath, [REAL, "--scene", scene, "--model", "fake-model", "--out", out, "--door-text", doorText,
-    "--claude", claude, "--account", account, ...extra], { encoding: "utf8", timeout: 120_000 });
+    "--claude", claude, ...extra], { encoding: "utf8", timeout: 120_000 });
   const row = JSON.parse((String(done.stdout).split("\n").find((line) => line.startsWith("RESULT ")) || "RESULT null").slice(7));
   return { code: done.status, stdout: String(done.stdout), stderr: String(done.stderr), out, row };
 }
@@ -102,12 +102,12 @@ await test("a run hands the agent the product's launch prompt, an environment fr
   assert(await readFile(join(done.out, "work", "prompt-seen.txt"), "utf8") === prompt, "and the agent was handed exactly that on stdin");
   const env = (await readFile(join(done.out, "work", "env-seen.txt"), "utf8")).split("\n").filter(Boolean);
   const names = env.map((line) => line.split("=")[0]);
-  assert(names.every((name) => ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "LANG", "SHELL", "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "FORM_DESK",
+  assert(names.every((name) => ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "LANG", "SHELL", "CLAUDE_CONFIG_DIR", "FORM_DESK",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING",
     // What the shell and the system add by themselves.
     "PWD", "SHLVL", "_", "OLDPWD", "__CF_USER_TEXT_ENCODING", "COMMAND_MODE"].includes(name)), "nothing is inherited", names);
   assert(env.includes(`PATH=${join(done.out, "bin")}:/usr/bin:/bin:/usr/sbin:/sbin`), "the stand-in's folder and the system's own on PATH", env.find((line) => line.startsWith("PATH=")));
-  assert(env.includes(`CLAUDE_CONFIG_DIR=${join(done.out, "config")}`) && env.includes(`CLAUDE_SECURESTORAGE_CONFIG_DIR=${resolve(account)}`), "a config folder of its own; the login by path");
+  assert(env.includes(`CLAUDE_CONFIG_DIR=${join(done.out, "config")}`) && !names.some((name) => /SECURESTORAGE|API_KEY|TOKEN/.test(name)), "a config folder of its own, and no login named");
   assert(existsSync(join(done.out, "config", "skills", "computer-use", "SKILL.md")), "the computer-use skill is installed in that folder");
   const row = done.row;
   assert(row.modelCalls === 3 && row.turns === 3 && row.tokens.input === 100 && row.tokens.output === 20 && row.tokens.cacheRead === 5 && row.tokens.cacheWrite === 7 && row.costUsd === 0.01,
@@ -157,7 +157,7 @@ await test("the runner keeps its own limits: no scene on a model twice, a limit 
   const again = run(finishes, ["--spent", spent, "--runs-max", "2"]);
   assert(again.code === 4 && again.stdout.includes("already ran"), "the same scene on the same model is refused", [again.code, again.stdout]);
   const other = spawnSync(process.execPath, [REAL, "--scene", scene, "--model", "other-model", "--out", fresh(), "--door-text", doorText, "--claude", finishes,
-    "--account", account, "--spent", spent, "--runs-max", "1"], { encoding: "utf8", timeout: 120_000 });
+    "--spent", spent, "--runs-max", "1"], { encoding: "utf8", timeout: 120_000 });
   assert(other.status === 4 && String(other.stdout).includes("run limit (1) is spent"), "and so is a run past the limit", [other.status, other.stdout]);
   const used = run(finishes, [], first.out);
   assert(used.code === 2 && used.stdout.includes("--out is not empty"), "a folder already used is refused, not cleared", [used.code, used.stdout]);

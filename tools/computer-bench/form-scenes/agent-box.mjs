@@ -11,8 +11,10 @@
  *   that skips permission checks;
  * - its environment is built from nothing (`env -i`): the stand-in's folder
  *   and the system's own on PATH, a home and a config folder of its own under
- *   the run's folder, the login named by path only — the real window's
- *   commands are not on PATH, and the run checks that before it starts;
+ *   the run's folder, and no login at all — the real-model road is closed until
+ *   a person decides how it logs in (m-41479), so nothing here names an account
+ *   folder, a token or a key; the real window's commands are not on PATH, and
+ *   the run checks that before it starts;
  * - no more than a turn limit and a time limit, and nothing left running.
  */
 
@@ -59,11 +61,10 @@ export function claudeArgs({ model, maxTurns = MAX_TURNS }) {
     "--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: {} }), "--no-session-persistence"];
 }
 
-/* The whole environment of a run — nothing is inherited. The login is named
- * by the path of its folder: the CLI reads it where it lies; nothing here
- * reads, copies or passes a token. `user` is the machine's user, which the
- * CLI names its login store by. */
-export function boxEnv({ bin, home, config, tmp, account, desk, user }) {
+/* The whole environment of a run — nothing is inherited, and no login is
+ * named: a CLI in a home and a config folder of its own finds none, so it
+ * reaches no model. (A route that logs in is a person's decision, m-41479.) */
+export function boxEnv({ bin, home, config, tmp, desk, user }) {
   return {
     PATH: [bin, ...SYSTEM_PATH].join(":"),
     HOME: home,
@@ -73,7 +74,6 @@ export function boxEnv({ bin, home, config, tmp, account, desk, user }) {
     LANG: "en_US.UTF-8",
     SHELL: "/bin/zsh",
     CLAUDE_CONFIG_DIR: config,
-    CLAUDE_SECURESTORAGE_CONFIG_DIR: account,
     FORM_DESK: desk,
     // Nothing leaves for the vendor but the model's own requests.
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
