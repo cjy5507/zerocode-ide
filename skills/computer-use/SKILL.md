@@ -187,8 +187,10 @@ A field the page has switched off (`(꺼짐)`) or will not let you write
 (what it waits for, what turns it on) — act on that, not on a guess. A line
 `끝까지 안 내린 스크롤 상자: …` names a box with more to read below what it
 shows (terms to be read to the end before a box turns on): scroll that box to
-its end (`eval` with `document.querySelector("<handle>").scrollTop = 1e9`),
-then `fields` again — it is said no more once read to its end.
+its end with an `eval` — ``document.querySelector(String.raw`<handle>`).scrollTop = 1e9`` (`String.raw`
+keeps a handle's backslashes; for a handle with ` >> ` in it, the part before is
+the frame: `document.querySelector(String.raw`<frame>`).contentDocument.querySelector(String.raw`<inner>`)`)
+— then `fields` again; it is said no more once read to its end.
 
 Use the handles and words exactly as `fields` printed them; never guess a
 selector. A password field is refused by `fill` (use `type … --value-stdin`),

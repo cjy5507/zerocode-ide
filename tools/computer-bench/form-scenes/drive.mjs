@@ -195,13 +195,16 @@ class Road {
     this.form = filled.fingerprint;
     this.count.fillPasses += filled.passes;
     this.trail.push({ fill: filled.results.map((result) => `${result.label}:${result.status}`) });
+    // What the driver does by hand after the fill's answer can turn a button on, so
+    // the buttons that answer ended with are no longer the page's: the step is read again.
+    const before = this.count.roundTrips;
     for (const result of filled.results) {
       if (result?.status === "secret") await this.typeSecret(result.handle, bundle[result.handle]);
       if (result?.status !== "no_option") continue;
       if (result.widget) await this.byHand(result, bundle[result.handle]);
       else await this.openAndPress(result, bundle[result.handle]);
     }
-    return filled;
+    return { ...filled, byHand: this.count.roundTrips > before };
   }
 
   /* A secret field: `fill` never writes one and says so (`secret`), naming
@@ -340,14 +343,14 @@ class Road {
       let actions = read.actions;
       if (Object.keys(bundle).length) {
         const filled = await this.fill(bundle);
-        if (filled.stale) continue;
+        if (filled.stale || filled.byHand) continue;
         if (filled.actions.length) actions = filled.actions;
       }
       const owed = await this.code(read.fields, bundle);
       if (owed && this.price) this.priced += 1;
       if (owed) {
         const filled = await this.fill(owed);
-        if (filled.stale) continue;
+        if (filled.stale || filled.byHand) continue;
         if (filled.actions.length) actions = filled.actions;
       }
       if (await this.step(actions)) return this.done();

@@ -604,7 +604,9 @@ pub struct FillReport {
     /// read none, so there is nothing to be the same as ([`Self::against`]).
     pub changed: Option<bool>,
     /// The buttons the agent's read had that the form no longer draws, said
-    /// only when the form is otherwise the same.
+    /// only when the form is otherwise the same: none now has their handle or
+    /// their words (a button found by its place moves when a banner is added
+    /// above it, and is the same button).
     pub hidden: Vec<FormAction>,
 }
 
@@ -620,7 +622,11 @@ impl FillReport {
         self.hidden = if self.changed == Some(false) {
             buttons
                 .iter()
-                .filter(|before| self.actions.iter().all(|now| now.handle != before.handle))
+                .filter(|before| {
+                    self.actions
+                        .iter()
+                        .all(|now| now.handle != before.handle && now.label != before.label)
+                })
                 .cloned()
                 .collect()
         } else {

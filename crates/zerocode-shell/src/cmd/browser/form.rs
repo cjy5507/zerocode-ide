@@ -116,29 +116,51 @@ const zcOwnWords = (el, holder, request) => {
   }
   return depth ? zcWordsBefore(el, { ...request, captionDepth: depth }) : "";
 };
-// The header over a table cell's column — HTML's own table meaning: the
-// head cell, of the table's `thead` (its last row) or of a first row that is
-// nothing but headers, that covers the column the cell stands in (a head cell
-// spanning several columns covers each of them).
+// The slot each cell of a run of table rows covers, by HTML's own table model:
+// a cell takes the first free column of its row and holds as many columns and
+// rows as its spans say (a span of 0 rows runs to the end of the run).
+const zcGrid = (rows) => {
+  const grid = rows.map(() => []);
+  rows.forEach((row, at) => {
+    let column = 0;
+    for (const cell of row.cells) {
+      while (grid[at][column]) column += 1;
+      const across = Math.max(cell.colSpan || 1, 1);
+      const down = cell.rowSpan === 0 ? rows.length - at : Math.max(cell.rowSpan || 1, 1);
+      for (let row2 = at; row2 < Math.min(at + down, rows.length); row2 += 1) {
+        for (let column2 = column; column2 < column + across; column2 += 1) grid[row2][column2] = cell;
+      }
+      column += across;
+    }
+  });
+  return grid;
+};
+// The header over a table cell's column — HTML's own table meaning: the head
+// cell, in the lowest row of the table's `thead` (else of the rows at its top
+// that are nothing but headers), that covers the column the cell stands in —
+// the columns counted by the table's grid, so a cell that spans rows or columns
+// takes its place and leaves the rest. A head cell that spans every column of a
+// table of several is that table's title, not a column's head.
 const zcColumnHead = (cell) => {
   const row = cell.parentElement;
   const table = cell.closest("table");
-  if (!row || !table || !row.cells) return "";
-  const first = table.rows[0];
-  const heads = table.tHead && table.tHead.rows.length ? table.tHead.rows[table.tHead.rows.length - 1]
-    : first && first !== row && [...first.cells].every((one) => one.tagName === "TH") ? first : null;
-  if (!heads || heads === row) return "";
-  let column = 0;
-  for (const before of row.cells) {
-    if (before === cell) break;
-    column += before.colSpan || 1;
+  if (!row || !table || !row.cells || !row.parentElement) return "";
+  let heads = table.tHead && table.tHead.rows.length ? [...table.tHead.rows] : [];
+  if (!heads.length) {
+    for (const top of table.rows) {
+      if (top === row || ![...top.cells].every((one) => one.tagName === "TH")) break;
+      heads.push(top);
+    }
   }
-  let at = 0;
-  for (const head of heads.cells) {
-    at += head.colSpan || 1;
-    if (column < at) return zcLabelWords(head);
-  }
-  return "";
+  if (!heads.length || heads.includes(row)) return "";
+  const slots = zcGrid([...row.parentElement.rows]);
+  const column = slots[row.sectionRowIndex].indexOf(cell);
+  if (column < 0) return "";
+  const covered = zcGrid(heads);
+  const named = covered[covered.length - 1][column];
+  const width = Math.max(...covered.map((line) => line.length));
+  if (!named || (width > 1 && (named.colSpan || 1) >= width)) return "";
+  return zcLabelWords(named);
 };
 // A field's caption when nothing names it: the words it has to itself in a
 // box of its own, else its table row's header, else the header over its
@@ -341,12 +363,15 @@ const zcDocs = (request) => {
   return { open, sealed };
 };
 // The words the page gives about a field that is off or cannot be written,
-// besides its label: what its aria-describedby names, else its title, else
-// the words of the nearest box around it that holds no other field, without
-// the field's own labels — so an agent learns what switches it on.
+// besides its label: what its aria-describedby names, else its title, else the
+// words nearest the field in the nearest box around it that holds no other
+// field — the first after it, else the last before it. Words that are no hint
+// are never taken: those the page does not draw, a symbol, the field's own
+// words and labels, a control's text, and a box that scrolls (a terms text).
 const zcHintOf = (record, request) => {
   const el = record.el;
   const doc = el.ownerDocument;
+  const view = doc.defaultView || window;
   const named = String(el.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean)
     .map((id) => doc.getElementById(id)).filter(Boolean).map(zcLabelWords).join(" ");
   if (named.trim()) return named;
@@ -357,21 +382,31 @@ const zcHintOf = (record, request) => {
     const node = doc.getElementById(id);
     if (node) own.push(node);
   }
+  const label = zcFold(record.label);
   const skip = "select, textarea, button, option, script, style, template, [role=option], [role=listbox]";
   const controls = request.controls.join(",");
+  const scrolls = (node) => node.scrollHeight > node.clientHeight + 1
+    && /^(auto|scroll)$/.test(view.getComputedStyle(node).overflowY);
   let box = el.parentElement;
   for (let level = 0; box && level < request.captionDepth; level += 1, box = box.parentElement) {
     if (box.matches("form, body, main")) break;
     if ([...box.querySelectorAll(controls)].some((other) => other !== el && !el.contains(other)
       && zcFieldKind(other, request))) break;
-    const walker = doc.createTreeWalker(box, NodeFilter.SHOW_TEXT);
-    const words = [];
+    // A box that is the field's own label, or inside it, holds the field's words.
+    if (own.some((one) => one.contains(box))) continue;
+    const walker = doc.createTreeWalker(box, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => node.nodeType === 1 && (node === el || own.includes(node) || node.matches(skip)
+        || !zcDrawn(node) || scrolls(node)) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+    let before = "", after = "";
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      const holder = node.parentElement;
-      if (!holder || holder.closest(skip) || own.some((label) => label.contains(holder))) continue;
-      words.push(node.nodeValue);
+      if (node.nodeType !== 3 || !/[\p{L}\p{N}]/u.test(node.nodeValue) || label.includes(zcFold(node.nodeValue))) continue;
+      if (el.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
+        if (!after) after = node.nodeValue;
+      } else {
+        before = node.nodeValue;
+      }
     }
-    const said = words.join(" ").replace(/\s+/g, " ").trim();
+    const said = (after || before).replace(/\s+/g, " ").trim();
     if (said) return said;
   }
   return "";
@@ -442,9 +477,11 @@ const zcUnknowns = (records, pressed, scopes, docs, request) => {
 // scroll height past the box, and not yet read to its end — outermost, with
 // its first words. Attributes, styles and sizes only, so it is the same for
 // any widget; a box read to its end is said no more.
-const zcScrollBoxes = (scopes, docs, request) => {
+const zcScrollBoxes = (records, scopes, docs, request) => {
   const roots = scopes.size ? [...scopes] : docs.open.map(({ doc }) => doc.body).filter(Boolean);
   const holds = request.controls.concat(request.actions).join(",");
+  // The choices the read recorded: a list that holds them is a field's, not text.
+  const offered = records.flatMap((record) => record.choices.map((choice) => choice.el).filter(Boolean));
   const said = [];
   const boxes = [];
   for (const { doc, prefix } of docs.open) {
@@ -458,6 +495,7 @@ const zcScrollBoxes = (scopes, docs, request) => {
         if (!/^(auto|scroll)$/.test(view.getComputedStyle(el).overflowY)) continue;
         if (el.scrollTop + el.clientHeight >= el.scrollHeight - 1) continue;
         if (!zcDrawn(el) || el.matches("textarea, select") || el.querySelector(holds)) continue;
+        if (offered.some((choice) => el.contains(choice))) continue;
         const label = zcWords(el.innerText || el.textContent || "", request.wordCap);
         if (!label) continue;
         said.push(el);
@@ -509,7 +547,7 @@ const zcFormFields = (request) => {
     }
   }
   const unknowns = zcUnknowns(records, pressed, scopes, docs, request);
-  const scrollBoxes = zcScrollBoxes(scopes, docs, request);
+  const scrollBoxes = zcScrollBoxes(records, scopes, docs, request);
   // The form's fingerprint: every field's handle, kind and words, in order —
   // never a value, which a fill is there to change.
   const print = zcDigest(records.map((record) => [record.handle, record.kind, zcFold(record.label)]

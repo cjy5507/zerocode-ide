@@ -22983,6 +22983,24 @@ mod browser_look_settle_pin {
             ] {
                 assert!(!script.contains(act), "the {name} script does `{act}`");
             }
+            // However it is spelled: a `scrollTo` that is not the `scrollTop` a read looks
+            // at (a call, `scrollTo.call(`, `scrollTo (`), and a scroll position that is
+            // assigned (`=`, `+=`, `-=`, but not the comparison `==`).
+            assert!(
+                script
+                    .match_indices("scrollTo")
+                    .all(|(at, word)| script[at + word.len()..].starts_with('p')),
+                "the {name} script scrolls"
+            );
+            for property in ["scrollTop", "scrollLeft"] {
+                for (at, word) in script.match_indices(property) {
+                    let after = script[at + word.len()..].trim_start();
+                    let assigned = (after.starts_with('=') && !after.starts_with("=="))
+                        || after.starts_with("+=")
+                        || after.starts_with("-=");
+                    assert!(!assigned, "the {name} script assigns `{property}`");
+                }
+            }
         }
         let source = include_str!("cmd/browser.rs");
         for road in [

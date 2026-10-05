@@ -53,13 +53,15 @@ const FINAL_WORDS_CAP = 400;
 const CLOSED = "REFUSED: --account — the real-model road is closed until a person decides how it logs in (a key made for measuring, or an account used for nothing else); nothing was started";
 
 function args(argv) {
+  // Named in any form — `--account DIR`, `--account=DIR`, `--account` alone — it is refused before
+  // the arguments are read at all.
+  if (argv.some((word) => word === "--account" || word.startsWith("--account="))) { console.log(CLOSED); process.exit(2); }
   const parsed = {};
   for (let at = 0; at < argv.length; at += 1) {
     const key = argv[at].replace(/^--/, "").replace(/-(\w)/g, (_, letter) => letter.toUpperCase());
     if (key === "dry") parsed.dry = true;
     else { parsed[key] = argv[at + 1]; at += 1; }
   }
-  if (parsed.account !== undefined) { console.log(CLOSED); process.exit(2); }
   for (const need of ["scene", "model", "out", "doorText", "claude"]) {
     if (!parsed[need]) { console.error(`REFUSED: --${need.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)} is required`); process.exit(2); }
   }
