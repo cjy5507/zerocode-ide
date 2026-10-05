@@ -23685,7 +23685,7 @@ mod browser_form_fill {
         for cap in [
             "fieldCap", "actionCap", "optionCap", "wordCap", "valueCap", "answerCap",
             "frameDepth", "captionDepth", "monthDays", "monthPages", "scanCap", "freshCap",
-            "pieceCap",
+            "pieceCap", "outsideCap",
         ] {
             assert!(request[cap].as_u64().is_some_and(|n| n > 0), "{cap}");
         }

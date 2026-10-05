@@ -237,8 +237,8 @@ await test("a fill that waited says an error shown later is not in its answer, a
 /* A click in a form the agent read says what the page brought (t-41592): whether the form
  * stayed, its buttons, what stands left and what appeared beside a field — the reason a "next"
  * that did not move on gives — the page's notices, and that the page was read after it stood
- * still, in the page's words inside the fence; a click in a pane whose form was never read is
- * answered as it was. */
+ * still, in the page's words inside the fence — and the text that stands new beside no single field
+ * while the form stayed; a click in a pane whose form was never read is answered as it was. */
 await test("a click in a form the agent read says whether the form stayed and what appeared beside a field and that the page was read after it stood still", async () => {
   const folder = join(root, "press-scene");
   await mkdir(folder, { recursive: true });
@@ -246,6 +246,7 @@ await test("a click in a form the agent read says whether the form stayed and wh
     <div class="row"><label for="mail">Email</label> <input id="mail"></div>
     <div class="row"><label for="phone">Phone</label> <input id="phone"></div>
     <button type="button" id="next">Next</button><button type="button" id="idle">Nothing</button>
+    <p id="hint"></p>
     <div id="step2" hidden><div class="row"><label for="city">City</label> <input id="city"></div></div></form>
     <script>
       const mail = document.getElementById("mail"), phone = document.getElementById("phone");
@@ -256,8 +257,10 @@ await test("a click in a form the agent read says whether the form stayed and wh
         if (!mail.value.includes("@")) {
           const err = document.createElement("span"); err.className = "err"; err.textContent = "Enter a valid email";
           mail.parentElement.append(err);
+          document.getElementById("hint").textContent = "Fix the email first";
           return;
         }
+        document.getElementById("hint").textContent = "All good now";
         document.getElementById("step2").hidden = false;
       });
     </script>`);
@@ -281,11 +284,12 @@ await test("a click in a form the agent read says whether the form stayed and wh
       "남은 칸:",
       "  #mail · text · Email — 새로 뜬 글: 「Enter a valid email」",
       "  #phone · text · Phone — aria-invalid — 페이지가 이유를 말하지 않음",
+      "새로 뜬 글(칸 밖): 「Fix the email first」",
       "※ 누른 뒤 50 ms 동안 가만히 있는 것을 보고 읽었습니다. 그 뒤에 뜨는 오류는 못 봅니다 — 제출 전에 fields로 다시 읽으세요",
     ]) assert(stayed.stdout.includes(piece), `the answer lacks ${piece}`, stayed.stdout);
     await run(["fill", PANE, "--value-stdin"], '{"#mail":"kim@example.com"}');
     const moved = await run(["click", PANE, "#next"]);
-    assert(moved.stdout.includes("양식 바뀜(fields로 다시 읽기)") && !moved.stdout.includes("남은 칸") && !moved.stdout.includes("※"),
+    assert(moved.stdout.includes("양식 바뀜(fields로 다시 읽기)") && !moved.stdout.includes("남은 칸") && !moved.stdout.includes("※") && !moved.stdout.includes("칸 밖"),
       "a press that moved the form on says only so", moved.stdout);
     return "ok";
   } finally { await own.close(); }

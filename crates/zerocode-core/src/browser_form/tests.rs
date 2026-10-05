@@ -785,6 +785,61 @@ fn a_fill_says_the_text_that_appeared_beside_a_field_and_a_silent_invalid_field_
     );
 }
 
+/// Text that stands new in the form beside no single field — the reason under a
+/// value made of several fields, a sentence under a group of buttons — is said
+/// apart from the fields, after a fill and after a press, and only while the
+/// form is the one the agent read: a form that moved on has all its text new.
+#[test]
+fn a_fill_and_a_press_say_text_beside_no_single_field_only_while_the_form_stayed() {
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [{ "handle": "#id", "status": "set", "label": "Email name", "now": "kim" }],
+        "outside": ["Check the email address", "Choose a diet"],
+        "moving": false,
+    }))
+    .expect("a pass with text beside no field");
+    let bundle = vec![entry("#id", text("kim"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    let report = ledger.report();
+    let said = fill_lines(&report.clone().against(Some("9:read"), &[]));
+    let same = FillReport {
+        fingerprint: "9:read".into(),
+        ..report.clone()
+    }
+    .against(Some("9:read"), &[]);
+    let lines = fill_lines(&same);
+    assert!(
+        lines.contains("새로 뜬 글(칸 밖): 「Check the email address」 「Choose a diet」"),
+        "missing the text beside no field in\n{lines}"
+    );
+    assert!(
+        !said.contains("칸 밖"),
+        "a form that is not the one read says none of it:\n{said}"
+    );
+    let read: PressRead = serde_json::from_value(json!({
+        "fingerprint": "9:read",
+        "actions": [{ "handle": "#go", "label": "Go" }],
+        "outside": ["Check the email address"],
+    }))
+    .expect("what a page said after a press");
+    let known = [button("#go", "Go", false)];
+    let stayed = press_lines(&PressAfter::against(
+        read.clone(),
+        Some("9:read"),
+        &known,
+        false,
+    ));
+    assert!(
+        stayed.contains("새로 뜬 글(칸 밖): 「Check the email address」"),
+        "missing the text beside no field in\n{stayed}"
+    );
+    let moved = press_lines(&PressAfter::against(read, Some("12:other"), &known, false));
+    assert!(
+        !moved.contains("칸 밖"),
+        "a form that moved on says only so:\n{moved}"
+    );
+}
+
 /// A press is set against the form the agent read before it, as a fill is:
 /// the same form or another, and the button the page took away — none when
 /// the form changed, which has lost every button of the old one.

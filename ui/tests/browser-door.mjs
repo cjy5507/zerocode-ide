@@ -2102,6 +2102,65 @@ await test("a_field_marked_invalid_is_told_silent_only_when_nothing_but_its_own_
   } finally { await marks.close(); }
 });
 
+/* Text that stands new in the form beside no single field is the page's too: the reason a check
+ * writes under a value made of several fields (an address and its domain), a sentence under a group of
+ * buttons that are no fields. It is said apart from the fields — once, never what a field's own box
+ * already says, never a counter, never what the page's live regions said — after a fill and after a press. */
+const ASIDE = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <dl><div class="row"><dt>Email</dt><dd>
+    <input id="e-id" aria-label="Email name"><span class="sep">@</span><input id="e-dom" aria-label="Email domain">
+    <select id="e-sel" aria-label="Email provider"><option value="">own</option><option value="example.com">example.com</option></select>
+    <div id="mailErr"></div></dd></div></dl>
+  <div role="group" aria-label="Diet"><button type="button" aria-pressed="false">Vegan</button><button type="button" aria-pressed="false">Halal</button></div>
+  <div id="dietErr"></div>
+  <div class="row"><label for="city">City</label> <input id="city"><span id="cityErr"></span></div>
+  <div class="row"><label for="plate">Plate</label> <input id="plate"><span id="count">0/10</span></div>
+  <button type="button" id="go">Go</button>
+  <div id="banner" role="alert"></div>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  $("plate").addEventListener("change", (event) => {
+    $("count").textContent = event.target.value.length + "/10";
+    $("dietErr").textContent = "Choose a diet";
+  });
+  $("go").addEventListener("click", () => {
+    $("mailErr").textContent = "Check the email address";
+    $("dietErr").textContent = "Choose a diet";
+    $("cityErr").textContent = "Pick a city";
+    $("banner").textContent = "3 items need a fix";
+  });
+</script>`;
+await test("text_that_appears_beside_no_single_field_is_said_apart_once_and_never_as_a_counter_or_a_fields_own_text", async () => {
+  assert(typeof twin.pressInForm === "function", "the stand-in presses as the window does in a form that was read");
+  const aside = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await aside.setContent(ASIDE);
+    const before = await readFields(aside);
+    assert(before.outside === undefined, "a plain read says nothing of what is new", Object.keys(before));
+    const filled = await fillBundle(aside, { "#plate": "abcdefg" }, before.fingerprint);
+    assert(JSON.stringify(filled.outside) === JSON.stringify(["Choose a diet"]),
+      "the sentence that appeared under the buttons is said — not the counter that counted", filled.outside);
+    const again = await fillBundle(aside, { "#plate": "abcdefgh" });
+    assert(JSON.stringify(again.outside) === JSON.stringify([]), "and what was said is not new twice", again.outside);
+    await aside.setContent(ASIDE);
+    const read = await readFields(aside);
+    const run = (source) => evalJson(aside, source);
+    const pressed = await twin.pressInForm(run, "#go");
+    assert(pressed.read.fingerprint === read.fingerprint, "the form is the one that was read", pressed.read);
+    assert(JSON.stringify(pressed.read.outside) === JSON.stringify(["Check the email address", "Choose a diet"]),
+      "the reasons under the value made of several fields and under the buttons are said, in the page's order", pressed.read.outside);
+    assert(JSON.stringify(pressed.read.alerts) === JSON.stringify(["3 items need a fix"]),
+      "what the live region said is the notice — not said a second time as text beside no field", pressed.read.alerts);
+    const noted = Object.fromEntries(pressed.read.noted.map((one) => [one.handle, one]));
+    assert(JSON.stringify(noted["#city"]?.fresh) === JSON.stringify(["Pick a city"]),
+      "text in a field's own box stays with the field", pressed.read.noted);
+    const idle = await twin.pressInForm(run, "#go");
+    assert(JSON.stringify(idle.read.outside) === JSON.stringify([]), "a press that brings nothing new says none", idle.read.outside);
+    return JSON.stringify(pressed.read.outside);
+  } finally { await aside.close(); }
+});
+
 await browser.close();
 
 let failed = 0;
