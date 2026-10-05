@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url";
 import { AGENT_CONTEXT } from "../../../ui/tests/browser-scripts.mjs";
 import { CAP_SECONDS, MAX_TURNS, argsProblems, boxEnv, checkPath, claudeArgs, installStandIn } from "./agent-box.mjs";
 import { startFormDesk } from "./door-desk.mjs";
-import { extraKeys, madeKeys, readScene, sameWhole, wrongKeys } from "./scene-kit.mjs";
+import { readScene, verdictWords, verdicts } from "./scene-kit.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "../../..");
@@ -182,7 +182,8 @@ const last = parsedLine(pending + decoder.end());
 if (last) take(last);
 
 const result = await desk.result();
-const wrong = wrongKeys(result, scene.expected);
+// The rules of success side by side; the run is a pass only when all hold (the expected keys, nothing else recorded, the whole result but for the declared keys).
+const v = verdicts(result, scene.expected, scene.made, scene.shapes);
 const usage = seen.final?.usage || {};
 const tokens = {
   input: usage.input_tokens ?? null, output: usage.output_tokens ?? null,
@@ -191,8 +192,10 @@ const tokens = {
 const denials = seen.final?.permission_denials ?? [];
 const row = {
   schema: 1, scene: scene.name, model: options.model,
-  // The two rules of success side by side (the keys the card expects; the page's whole result as the expected one) and what only the page recorded.
-  oracle: { pass: wrong.length === 0, wrong, tookResult: result !== null, whole: result !== null && sameWhole(result, scene.expected, scene.made), extra: extraKeys(result, scene.expected, scene.made), made: madeKeys(result, scene.made) },
+  // The three verdicts side by side (the first rule as it was; the page's whole result but for the declared keys; the keys the card expects), what only the page recorded and the declared keys it made.
+  oracle: { pass: v.pass, ok: v.ok, wholeRaw: v.wholeRaw, whole: v.whole, sameSet: v.sameSet, extra: v.extra, made: v.made, madeProblems: v.madeProblems, wrong: v.wrong, tookResult: result !== null },
+  // What the page recorded, whole, so a verdict can be counted again later.
+  pageResult: result,
   wallMs, personMs: desk.tally.personMs, stopped, exit, leftover,
   modelCalls: seen.calls.size, turns: seen.final?.num_turns ?? null, apiMs: seen.final?.duration_api_ms ?? null,
   tokens, costUsd: seen.final?.total_cost_usd ?? null, finalSubtype: seen.final?.subtype ?? null,
@@ -214,7 +217,7 @@ if (options.spent) await appendFile(options.spent, `${JSON.stringify({ at: new D
 await desk.close();
 console.log(`INIT ${JSON.stringify(row.init)}`);
 console.log(`TOKENS model=${row.model} scene=${row.scene} input=${tokens.input} output=${tokens.output} cacheRead=${tokens.cacheRead} cacheWrite=${tokens.cacheWrite} costUsd=${row.costUsd}`);
-console.log(`ORACLE ${row.oracle.pass ? "pass" : "fail"} scene=${row.scene} model=${row.model} wrong=${wrong.join(",") || "-"} took=${result !== null} wallMs=${wallMs} modelCalls=${row.modelCalls} doorCalls=${row.door.requests} stopped=${stopped ?? "-"} leftover=${leftover}`);
+console.log(`ORACLE ${row.oracle.pass ? "pass" : "fail"} scene=${row.scene} model=${row.model} ${verdictWords(v)} wrong=${v.wrong.join(",") || "-"} took=${result !== null} wallMs=${wallMs} modelCalls=${row.modelCalls} doorCalls=${row.door.requests} stopped=${stopped ?? "-"} leftover=${leftover}`);
 if (row.isError) console.log(`AGENT-ERROR status=${row.apiErrorStatus} retries=${row.apiRetries} said=${JSON.stringify(row.finalWords)}`);
 console.log(`RESULT ${JSON.stringify(row)}`);
 process.exit(0);
