@@ -1016,7 +1016,9 @@ const zcFillWrite = (entries, expect, watch) => {
   if (watch) zcSettleWatch(watch);
   const held = entries.map((entry) => {
     const out = { handle: entry.handle, status: "unread", kind: "", label: "", now: "", error: "", options: [] };
-    const base = { handle: entry.handle, value: entry.value, out };
+    // The value goes back to the window only with an entry the read-back will
+    // check it against — never with a secret or any entry that was refused.
+    const base = { handle: entry.handle, out };
     const target = zcTarget(entry.handle);
     if (target.code) return { ...base, status: target.code, wrote: false };
     const record = target.record;
@@ -1029,14 +1031,14 @@ const zcFillWrite = (entries, expect, watch) => {
       if (hint) out.hint = hint;
       return { ...base, status: "disabled", wrote: false };
     }
-    if (zcHolds(record, entry.value)) return { ...base, status: null, wrote: false };
+    if (zcHolds(record, entry.value)) return { ...base, value: entry.value, status: null, wrote: false };
     const refused = zcWrite(record, entry.value);
     if (refused) {
       out.options = (record.offered || []).slice(0, request.optionCap);
       if (record.widget) out.widget = record.widget;
       return { ...base, status: refused, wrote: false };
     }
-    return { ...base, status: null, wrote: true };
+    return { ...base, value: entry.value, status: null, wrote: true };
   });
   return { stale: false, fingerprint: "", wrote: held.some((one) => one.wrote), epoch: zcEpoch(),
     at: performance.now(), held };
