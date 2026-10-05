@@ -15,6 +15,7 @@ import { mkdtemp, mkdir, readFile, writeFile, chmod } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { writeFixtureScene } from "./fixture-scene.mjs";
 
@@ -71,7 +72,15 @@ function run(claude, extra = [], out = fresh()) {
   const row = JSON.parse((String(done.stdout).split("\n").find((line) => line.startsWith("RESULT ")) || "RESULT null").slice(7));
   return { code: done.status, stdout: String(done.stdout), stderr: String(done.stderr), out, row };
 }
-const alive = (marker) => spawnSync("pgrep", ["-f", marker]).status === 0;
+/* Whether a process whose command holds `marker` is still there, after the
+ * short while a process that was told to go takes to do it. */
+async function lingers(marker) {
+  for (let waited = 0; waited < 2_000; waited += 100) {
+    if (spawnSync("pgrep", ["-f", marker]).status !== 0) return false;
+    await sleep(100);
+  }
+  return true;
+}
 
 await test("a run hands the agent the product's launch prompt, an environment from nothing and the skill, and measures what it did", async () => {
   const done = run(finishes);
@@ -102,7 +111,7 @@ await test("a run that never ends is stopped at its time cap and leaves nothing 
   const done = run(spins, ["--cap-seconds", "3"]);
   assert(done.code === 0 && done.row.stopped === "time", "stopped by the time cap", [done.code, done.row.stopped]);
   assert(done.row.wallMs >= 2_500 && done.row.wallMs < 15_000, "at about the cap", done.row.wallMs);
-  assert(done.row.leftover === false && !alive("sleep 654321"), "no process of the agent's is left", done.row.leftover);
+  assert(done.row.leftover === false && !(await lingers("sleep 654321")), "no process of the agent's is left", done.row.leftover);
   assert(done.row.oracle.pass === false && done.row.oracle.tookResult === false, "and the oracle says nothing was taken");
   return `${done.row.wallMs} ms`;
 });
@@ -110,7 +119,7 @@ await test("a run that never ends is stopped at its time cap and leaves nothing 
 await test("a run past its turn limit is stopped by the runner, whatever the agent does", async () => {
   const done = run(chatters, ["--max-turns", "3", "--cap-seconds", "30"]);
   assert(done.row.stopped === "turns" && done.row.modelCalls > 3, "stopped by the turn limit", [done.row.stopped, done.row.modelCalls]);
-  assert(done.row.leftover === false && !alive("sleep 654322"), "and nothing is left running");
+  assert(done.row.leftover === false && !(await lingers("sleep 654322")), "and nothing is left running", { leftover: done.row.leftover, stopped: done.row.stopped });
   return `${done.row.modelCalls} calls seen`;
 });
 

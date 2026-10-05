@@ -22,6 +22,7 @@ import { spawn } from "node:child_process";
 import { appendFile, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { AGENT_CONTEXT } from "../../../ui/tests/browser-scripts.mjs";
 import { CAP_SECONDS, MAX_TURNS, argsProblems, boxEnv, checkPath, claudeArgs, installStandIn } from "./agent-box.mjs";
@@ -32,6 +33,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "../../..");
 /* The grace a stopped agent gets before it is killed outright. */
 const KILL_AFTER_MS = 5_000;
+/* How long the agent's group gets to go once its leader has: the rest of it
+ * goes a moment after the leader does, so a process still there after this
+ * has outlived its agent. */
+const GROUP_GRACE_MS = 2_000;
+const GROUP_POLL_MS = 100;
 
 function args(argv) {
   const parsed = {};
@@ -100,6 +106,7 @@ const prompt = `${personSays(scene.card, desk.url)}\n\n${AGENT_CONTEXT}`;
 await writeFile(join(out, "prompt.txt"), prompt);
 const child = spawn(options.claude, argv, { cwd: dirs.work, env: env(`http://127.0.0.1:${desk.port}`), stdio: ["pipe", "pipe", "pipe"], detached: true });
 const group = (signal) => { try { process.kill(-child.pid, signal); } catch { /* the group is gone */ } };
+const groupAlive = () => { try { process.kill(-child.pid, 0); return true; } catch { return false; } };
 const raw = [];
 const errors = [];
 const seen = { calls: new Set(), toolUses: new Set(), tools: {}, commands: {}, denied: [], init: null, final: null };
@@ -146,9 +153,10 @@ const timer = setTimeout(() => {
 const exit = await new Promise((done) => child.on("exit", (code, signal) => done({ code, signal })));
 clearTimeout(timer);
 const wallMs = Date.now() - began;
-// Nothing is left running: anything still in the agent's group is ended and counted.
+// Nothing is left running: anything still in the agent's group after its grace is ended and counted.
 let leftover = false;
-try { process.kill(-child.pid, 0); leftover = true; group("SIGKILL"); } catch { /* none */ }
+for (let waited = 0; groupAlive() && waited < GROUP_GRACE_MS; waited += GROUP_POLL_MS) await sleep(GROUP_POLL_MS);
+if (groupAlive()) { leftover = true; group("SIGKILL"); }
 
 const result = await desk.result();
 const wrong = wrongKeys(result, scene.expected);
