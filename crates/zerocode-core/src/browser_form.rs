@@ -615,23 +615,35 @@ impl FillReport {
     /// fingerprint, and the buttons that read had — which is what the last
     /// line of the answer says: the same form or another, and a button the
     /// page took away. A form that changed has lost every button of the old
-    /// one, so none is said as hidden then.
+    /// one, so none is said as hidden then. The buttons are matched one to one,
+    /// by their words first and then, among those left, by their handle (a
+    /// button found by its place moves when a banner is added above it and is
+    /// the same button): a button of the read that no button now matches is the
+    /// one the page took away.
     #[must_use]
     pub fn against(mut self, known: Option<&str>, buttons: &[FormAction]) -> Self {
         self.changed = known.map(|print| print != self.fingerprint);
-        self.hidden = if self.changed == Some(false) {
-            buttons
-                .iter()
-                .filter(|before| {
-                    self.actions
-                        .iter()
-                        .all(|now| now.handle != before.handle && now.label != before.label)
-                })
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        };
+        self.hidden = Vec::new();
+        if self.changed == Some(false) {
+            let mut now: Vec<&FormAction> = self.actions.iter().collect();
+            let mut unmatched = Vec::new();
+            for before in buttons {
+                match now.iter().position(|one| one.label == before.label) {
+                    Some(at) => {
+                        now.remove(at);
+                    }
+                    None => unmatched.push(before),
+                }
+            }
+            for before in unmatched {
+                match now.iter().position(|one| one.handle == before.handle) {
+                    Some(at) => {
+                        now.remove(at);
+                    }
+                    None => self.hidden.push(before.clone()),
+                }
+            }
+        }
         self
     }
 
