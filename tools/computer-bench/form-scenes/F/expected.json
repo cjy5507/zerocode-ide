@@ -15,6 +15,7 @@
   "address2": "Unit 1204",
   "addressType": "home",
   "deliveryNote": "Please leave the parcel at the security office if no one is home.",
+  "defaultAddress": true,
   "currency": "KRW",
   "interests": "beauty,home",
   "newsletter": true,

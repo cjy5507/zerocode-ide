@@ -52,7 +52,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
 import { FORM_REQUEST, clickScript, evalFormScript, fieldsScript, fillPasses, typeScript } from "../../../ui/tests/browser-scripts.mjs";
-import { extraKeys, sameAsSet, sameWhole, serveScene as serve, wrongKeys } from "./scene-kit.mjs";
+import { extraKeys, madeKeys, readScene, sameAsSet, sameWhole, serveScene as serve, wrongKeys } from "./scene-kit.mjs";
 
 // The floor of one model round trip, and what one costs in the person's
 // session (m-38845: about 17 s — 55 min, 122 requests, 80 % model time).
@@ -524,8 +524,7 @@ class Road {
 }
 
 async function drive(browser, folder, roadName) {
-  const card = JSON.parse(await readFile(join(folder, "card.json"), "utf8"));
-  const expected = JSON.parse(await readFile(join(folder, "expected.json"), "utf8"));
+  const { card, expected, made } = await readScene(folder);
   const site = await serve(folder);
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const road = new Road(page, card, roadName);
@@ -542,12 +541,13 @@ async function drive(browser, folder, roadName) {
     site.close();
   }
   const wrong = result ? wrongKeys(result, expected) : null;
-  const ok = wrong !== null && wrong.length === 0;
-  // The two rules of success side by side: the keys the card expects (now), and the
-  // page's whole result equal to the expected one (the first rule) — and what only the page recorded.
-  const whole = Boolean(result) && sameWhole(result, expected);
-  const sameSet = sameAsSet(result, expected);
-  const extra = extraKeys(result, expected);
+  // The two rules of success side by side: the keys the card expects, and the page's whole
+  // result equal to the expected one — both but for the keys the scene says its page makes itself.
+  // What only the page recorded and nothing declares is a field an agent could have written: it fails the pass.
+  const extra = extraKeys(result, expected, made);
+  const ok = wrong !== null && wrong.length === 0 && extra.length === 0;
+  const whole = Boolean(result) && sameWhole(result, expected, made);
+  const sameSet = sameAsSet(result, expected, made);
   const scriptMs = road.scriptMs.slice().sort((a, b) => a - b);
   const fillMs = (road.kindMs.fill || []).slice().sort((a, b) => a - b);
   // How long each kind of round trip took, by kind, as count / median / longest in ms: what the
@@ -557,7 +557,7 @@ async function drive(browser, folder, roadName) {
     return [kind, { n: sorted.length, p50: Math.round(sorted[Math.floor(sorted.length / 2)]), max: Math.round(sorted.at(-1)) }];
   }));
   return {
-    scene: folder.split(sep).filter(Boolean).pop(), road: roadName, ok, whole, sameSet, extra, stuck, wrong,
+    scene: folder.split(sep).filter(Boolean).pop(), road: roadName, ok, whole, sameSet, extra, made: madeKeys(result, made), stuck, wrong,
     ...road.count, projectedSeconds: road.count.roundTrips * SECONDS_PER_ROUND_TRIP,
     callMsP50: Math.round(scriptMs[Math.floor(scriptMs.length / 2)] ?? 0), callMsMax: Math.round(scriptMs.at(-1) ?? 0),
     fillMsP50: Math.round(fillMs[Math.floor(fillMs.length / 2)] ?? 0), fillMsMax: Math.round(fillMs.at(-1) ?? 0), ms,
@@ -602,7 +602,7 @@ try {
     for (const road of ["verbs", "script"]) {
       const row = await drive(browser, folder, road);
       rows.push(row);
-      console.log(`DRIVE ${row.scene} ${row.road} ok=${row.ok} whole=${row.whole} sameSet=${row.sameSet} extra=${row.extra.join("|") || "-"} roundTrips=${row.roundTrips} fields=${row.fields} fill=${row.fill} click=${row.click} eval=${row.eval} type=${row.type} handoff=${row.handoff} passes=${row.fillPasses} callMs p50=${row.callMsP50} max=${row.callMsMax} fillMs p50=${row.fillMsP50} max=${row.fillMsMax} ms ${Object.entries(row.ms).map(([kind, one]) => `${kind}=${one.n}/${one.p50}/${one.max}`).join(" ")}${row.stuck ? " stuck=" + row.stuck : ""}${row.wrong?.length ? " wrong=" + row.wrong.join(",") : ""}`);
+      console.log(`DRIVE ${row.scene} ${row.road} ok=${row.ok} whole=${row.whole} sameSet=${row.sameSet} extra=${row.extra.join("|") || "-"} made=${row.made.join("|") || "-"} roundTrips=${row.roundTrips} fields=${row.fields} fill=${row.fill} click=${row.click} eval=${row.eval} type=${row.type} handoff=${row.handoff} passes=${row.fillPasses} callMs p50=${row.callMsP50} max=${row.callMsMax} fillMs p50=${row.fillMsP50} max=${row.fillMsMax} ms ${Object.entries(row.ms).map(([kind, one]) => `${kind}=${one.n}/${one.p50}/${one.max}`).join(" ")}${row.stuck ? " stuck=" + row.stuck : ""}${row.wrong?.length ? " wrong=" + row.wrong.join(",") : ""}`);
     }
     const today = await countToday(browser, folder);
     rows.push(today);

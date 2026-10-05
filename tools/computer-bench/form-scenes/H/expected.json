@@ -19,9 +19,11 @@
   "billing_country": "KR",
   "tax_number": "2148855017",
   "billing_line1": "5F, 17 Sample-ro",
+  "billing_line2": "",
   "billing_city": "Seoul",
   "billing_postcode": "06236",
   "terms": true,
   "data_consent": true,
-  "marketing": false
+  "marketing": false,
+  "promo": ""
 }
