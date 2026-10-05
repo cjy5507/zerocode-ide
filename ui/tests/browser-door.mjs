@@ -2594,6 +2594,56 @@ await test("a_list_drawn_only_while_it_is_open_leaves_no_item_to_compare_so_the_
   } finally { await closed.close(); }
 });
 
+/* A group of radios the page names only by plain words that stand in its row (t-41720): each radio is wrapped in its own label, so the label is the radio's, not a box around
+ * the group, and does not use up a box of the words' reach — a title in the row, one box beyond the old reach of three, names the group. A group that had a name keeps it,
+ * and a group with no words in its own row still has none (the words of another row are never borrowed). */
+const WRAPPED = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false"><div class="card"><h3>Order details</h3>
+  <div class="row"><span class="lbl">Receipt type</span><div class="fld"><div class="radios">
+    <label><input type="radio" name="rc" value="a" checked> None</label><label><input type="radio" name="rc" value="b"> Personal</label></div></div></div>
+  <div class="row"><div class="fld"><div class="radios">
+    <label><input type="radio" name="zz" value="a"> Alpha</label><label><input type="radio" name="zz" value="b"> Beta</label></div></div></div>
+  <div class="far"><span class="lbl">Delivery speed</span><div class="row"><div class="box"><div class="fld"><div class="radios">
+    <label><input type="radio" name="sp" value="a"> Slow</label><label><input type="radio" name="sp" value="b"> Fast</label></div></div></div></div></div>
+</div></form>`;
+await test("a_radio_group_whose_radios_are_each_wrapped_in_a_label_takes_the_plain_text_title_that_stands_one_box_beyond_the_old_reach", async () => {
+  const wrapped = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await wrapped.setContent(WRAPPED);
+    const read = await readFields(wrapped);
+    const label = (name) => read.fields.find((one) => one.handle.includes(`name="${name}"`))?.label;
+    const labels = read.fields.map((one) => [one.handle, one.label]);
+    assert(label("rc") === "Receipt type", "the title in the group's row names a group of radios each wrapped in its own label", labels);
+    assert(label("zz") === "", "a group with no words in its own row is still nameless — the words of the row above are not borrowed", labels);
+    assert(label("sp") === "", "words two boxes further out stay out of reach", labels);
+    return labels.map(([, one]) => JSON.stringify(one)).join(" · ");
+  } finally { await wrapped.close(); }
+});
+
+const NAMED_ALREADY = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <fieldset><legend>Seating</legend><label><input type="radio" name="s1" value="a"> Aisle</label><label><input type="radio" name="s1" value="b"> Window</label></fieldset>
+  <div id="pl">Plan</div><div role="radiogroup" aria-labelledby="pl"><label><input type="radio" name="p" value="a"> Basic</label><label><input type="radio" name="p" value="b"> Plus</label></div>
+  <div class="outer"><span class="lbl">Farther title</span><div class="row"><span class="lbl">Near title</span><div class="radios">
+    <label><input type="radio" name="n" value="a"> One</label><label><input type="radio" name="n" value="b"> Two</label></div></div></div>
+  <div class="row"><span class="lbl">Buttons title</span><div class="radios" id="bt"><button type="button" role="radio" aria-checked="false">Left</button><button type="button" role="radio" aria-checked="true">Right</button></div></div>
+  <label for="t1">Voucher</label> <input id="t1">
+  <label><input type="checkbox" id="c1"> Terms</label>
+</form>`;
+await test("a_radio_group_that_already_had_a_name_keeps_it_when_the_reach_of_the_words_grows_by_the_wrapping_label", async () => {
+  const kept = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await kept.setContent(NAMED_ALREADY);
+    const read = await readFields(kept);
+    const label = (key) => read.fields.find((one) => one.handle.includes(key))?.label;
+    const labels = read.fields.map((one) => [one.handle, one.label]);
+    assert(label('name="s1"') === "Seating", "a fieldset's legend still names its group", labels);
+    assert(label('name="p"') === "Plan", "a group that ARIA names still goes by that name", labels);
+    assert(label('name="n"') === "Near title", "of two titles the nearer names the group, as before", labels);
+    assert(read.fields.find((one) => one.handle === "#bt")?.label === "Buttons title", "radios drawn as buttons are named as they were", labels);
+    assert(label("#t1") === "Voucher" && label("#c1") === "Terms", "a text field and a checkbox are named as they were", labels);
+    return labels.map(([, one]) => one).join(" · ");
+  } finally { await kept.close(); }
+});
+
 await browser.close();
 
 let failed = 0;
