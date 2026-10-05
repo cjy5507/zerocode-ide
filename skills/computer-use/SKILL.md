@@ -119,11 +119,17 @@ A form is data, so fill it as data, not a picture per field:
    for everything you know, in the page's order. Words for text and dates
    (`2026-11-03`), a choice's words for a select, radio or a dropdown the
    page draws itself, `true`/`false` for a checkbox. The answer is a line
-   per field — `✓` with what it holds now, or `✗` and why — and the fields
-   still empty and required. A field an earlier value brings (the times a
-   date loads, a box a choice turns on) is tried again inside the same call.
-3. Press the step's button by its handle (`click <pane-label> <handle>`),
-   then `fields` again only when the page moved on to another step.
+   per field — `✓` with what it holds now, or `✗` and why — the fields
+   still empty and required, and a last line: `양식 그대로` or `양식 바뀜(fields로
+   다시 읽기)`, then the buttons as they are now — `버튼: #next 「Next」 켜짐,
+   #back 「Back」 꺼짐` (`꺼짐` is off; `숨김:` names one the page took away).
+   A field an earlier value brings (the times a date loads, a box a choice
+   turns on) is tried again inside the same call.
+3. Press the step's button by its handle (`click <pane-label> <handle>`) —
+   a step's button that turns on once the fields are right is already `켜짐`
+   on that last line, so press it from there with no `fields` between — and
+   read `fields` again only when the page moved on to another step (`양식
+   바뀜`).
 
 A `fill` is held to the form your last `fields` read (or your last fill
 left): when a field has gone, been renamed or added, or the page is on
@@ -169,6 +175,14 @@ A line `종류를 모르는 조작: …` names what a person can press there tha
 read has no kind for — a box with its own list, a chip, a pointer-only
 control: `click` it by its handle, then `fields` again; what opens is read
 like the rest.
+
+A field the page has switched off (`(꺼짐)`) or will not let you write
+(`(직접 못 씀)`) says why after `— 안내:`, in the page's own words about it
+(what it waits for, what turns it on) — act on that, not on a guess. A line
+`끝까지 안 내린 스크롤 상자: …` names a box with more to read below what it
+shows (terms to be read to the end before a box turns on): scroll that box to
+its end (`eval` with `document.querySelector("<handle>").scrollTop = 1e9`),
+then `fields` again — it is said no more once read to its end.
 
 Use the handles and words exactly as `fields` printed them; never guess a
 selector. A password field is refused by `fill` (use `type … --value-stdin`),
