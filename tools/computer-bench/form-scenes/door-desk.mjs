@@ -32,8 +32,12 @@ const EVERY_TAB = "browser tabs";
 /* What a turn of the person's costs the run, in the time a person takes to
  * read a code off a phone and type it. */
 export const PERSON_TURN_MS = 5_000;
-/* The words a field asks for a one-time code in: what the person looks for. */
+/* The words a field asks for a one-time code in: what the person looks for;
+ * and the codes a page also asks for that are not the one sent to a phone. */
 const CODE_ASKED = /(인증|코드|code|otp|passcode|verif|일회)/i;
+const CODE_NOT_ASKED = /(post|zip|promo|coupon|country|area|우편|쿠폰|프로모)/i;
+/* What the window says when it holds no pane. */
+const NO_PANE = "(열린 브라우저 판이 없습니다 — `zerocode-browser open <url>`)\n";
 /* The bench's browser: a desktop's size. */
 const VIEWPORT = { width: 1280, height: 800 };
 const SEPARATOR = "\x1f";
@@ -185,12 +189,18 @@ export async function startFormDesk({ scene, doorText, headless = true }) {
   async function browserDoor(argv) {
     const verb = argv[0] ?? "";
     const words = argv.length;
+    if ((verb === "list" || verb === "tabs") && words === 1 && closed) return said(NO_PANE);
     if (verb === "list" && words === 1) return said(fence(`${PANE}\t${page.url()}\n`, EVERY_TAB));
     if (verb === "tabs" && words === 1) {
       return said(fence(`${PANE}\tfinished\t${(await page.title()).replace(/[\t\n\r]/g, " ")}\t${page.url()}\t-\t-\n`, EVERY_TAB));
     }
     if (verb === "open" && words === 2) {
       if (!sameOrigin(argv[1])) return refused("zerocode-browser: this bench's stand-in window opens only the scene's own page\n");
+      // The one pane, opened again where it stands (its page is not loaded anew, so what it took is kept).
+      if (closed) {
+        closed = false;
+        if (page.url() !== argv[1]) await page.goto(argv[1]);
+      }
       return said(`열림 ${PANE}\n`);
     }
     if (verb === "goto" && words === 3) {
@@ -296,17 +306,21 @@ export async function startFormDesk({ scene, doorText, headless = true }) {
   async function personTypes() {
     const code = await page.evaluate(() => window.__personPhone || null);
     if (!code) return { code: false, typed: false };
-    const mark = await page.evaluate((asked) => {
+    const mark = await page.evaluate(({ asks, not }) => {
       const drawn = (el) => el.checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true });
       const skipped = ["hidden", "checkbox", "radio", "submit", "button", "file", "password", "image", "reset"];
       const wordsOf = (el) => [el.getAttribute("aria-label"), el.placeholder, el.name, el.id, el.getAttribute("autocomplete"),
         ...[...(el.labels || [])].map((label) => label.textContent), (el.closest("label") || {}).textContent].join(" ");
-      const asking = [...document.querySelectorAll("input")].filter((el) => drawn(el) && !el.disabled && !el.readOnly
-        && !skipped.includes(el.type) && el.value === "" && new RegExp(asked.source, asked.flags).test(wordsOf(el)));
-      if (!asking.length) return false;
-      asking[0].setAttribute("data-bench-person", "");
+      const open = [...document.querySelectorAll("input")].filter((el) => drawn(el) && !el.disabled && !el.readOnly
+        && !skipped.includes(el.type) && el.value === "");
+      const asking = open.filter((el) => new RegExp(asks.source, asks.flags).test(wordsOf(el)));
+      // The field that says it takes a one-time code first, then the ones whose words ask for a code that is not a postcode's or a coupon's.
+      const pick = open.find((el) => el.getAttribute("autocomplete") === "one-time-code")
+        || asking.find((el) => !new RegExp(not.source, not.flags).test(wordsOf(el))) || asking[0];
+      if (!pick) return false;
+      pick.setAttribute("data-bench-person", "");
       return true;
-    }, { source: CODE_ASKED.source, flags: CODE_ASKED.flags });
+    }, { asks: { source: CODE_ASKED.source, flags: CODE_ASKED.flags }, not: { source: CODE_NOT_ASKED.source, flags: CODE_NOT_ASKED.flags } });
     if (!mark) return { code: true, typed: false };
     const field = page.locator("[data-bench-person]").first();
     await field.click();

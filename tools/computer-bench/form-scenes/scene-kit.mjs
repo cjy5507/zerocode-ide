@@ -28,11 +28,18 @@ export async function readScene(folder) {
 export async function serveScene(folder) {
   const root = resolve(folder);
   const server = createServer(async (request, response) => {
-    const path = resolve(root, "." + decodeURIComponent(new URL(request.url, "http://x").pathname));
-    if (path !== root && !path.startsWith(root + sep)) return response.writeHead(403).end();
+    let pathname;
     try {
-      const body = await readFile(path.endsWith(sep) || path === root ? join(path, "scene.html") : path);
-      response.writeHead(200, { "content-type": TYPES[extname(path)] || "application/octet-stream" }).end(body);
+      pathname = decodeURIComponent(new URL(request.url, "http://x").pathname);
+    } catch {
+      return response.writeHead(400).end();
+    }
+    const path = resolve(root, "." + pathname);
+    if (path !== root && !path.startsWith(root + sep)) return response.writeHead(403).end();
+    // The folder itself is its scene; a file is told by its own name.
+    const file = path.endsWith(sep) || path === root ? join(path, "scene.html") : path;
+    try {
+      response.writeHead(200, { "content-type": TYPES[extname(file)] || "application/octet-stream" }).end(await readFile(file));
     } catch {
       response.writeHead(404).end();
     }

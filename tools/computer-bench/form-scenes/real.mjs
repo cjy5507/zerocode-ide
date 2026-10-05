@@ -22,6 +22,7 @@ import { spawn } from "node:child_process";
 import { appendFile, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { AGENT_CONTEXT } from "../../../ui/tests/browser-scripts.mjs";
@@ -38,6 +39,9 @@ const KILL_AFTER_MS = 5_000;
  * has outlived its agent. */
 const GROUP_GRACE_MS = 2_000;
 const GROUP_POLL_MS = 100;
+/* How long its last words get to arrive once the agent is gone: its stdout can
+ * still hold the result line when its process has ended. */
+const STREAM_GRACE_MS = 2_000;
 
 function args(argv) {
   const parsed = {};
@@ -104,7 +108,7 @@ if (options.dry) { console.log("DRY: nothing was started"); process.exit(0); }
 const desk = await startFormDesk({ scene, doorText });
 const prompt = `${personSays(scene.card, desk.url)}\n\n${AGENT_CONTEXT}`;
 await writeFile(join(out, "prompt.txt"), prompt);
-const child = spawn(options.claude, argv, { cwd: dirs.work, env: env(`http://127.0.0.1:${desk.port}`), stdio: ["pipe", "pipe", "pipe"], detached: true });
+const child = spawn(resolve(options.claude), argv, { cwd: dirs.work, env: env(`http://127.0.0.1:${desk.port}`), stdio: ["pipe", "pipe", "pipe"], detached: true });
 const group = (signal) => { try { process.kill(-child.pid, signal); } catch { /* the group is gone */ } };
 const groupAlive = () => { try { process.kill(-child.pid, 0); return true; } catch { return false; } };
 const raw = [];
@@ -112,31 +116,36 @@ const errors = [];
 const seen = { calls: new Set(), toolUses: new Set(), tools: {}, commands: {}, denied: [], init: null, final: null };
 let pending = "";
 let stopped = null;
+/* What one line of the agent's stream says: its init, an assistant turn and the
+ * tools it used, the result. */
+function take(event) {
+  if (event.type === "system" && event.subtype === "init") seen.init = event;
+  if (event.type === "result") seen.final = event;
+  if (event.type !== "assistant") return;
+  seen.calls.add(event.message?.id ?? `event-${seen.calls.size}`);
+  for (const block of event.message?.content || []) {
+    if (block.type !== "tool_use" || seen.toolUses.has(block.id)) continue;
+    seen.toolUses.add(block.id);
+    seen.tools[block.name] = (seen.tools[block.name] || 0) + 1;
+    if (block.name === "Bash") {
+      const [command, verb] = String(block.input?.command || "").trim().split(/\s+/);
+      const key = `${command} ${verb ?? ""}`.trim();
+      seen.commands[key] = (seen.commands[key] || 0) + 1;
+    }
+  }
+  // A turn past the limit stops the run, whatever the CLI itself does.
+  if (seen.calls.size > options.maxTurns && !stopped) { stopped = "turns"; group("SIGTERM"); }
+}
+// Whole characters: a chunk can end inside one.
+const decoder = new StringDecoder("utf8");
 child.stdout.on("data", (chunk) => {
   raw.push(chunk);
-  pending += chunk;
+  pending += decoder.write(chunk);
   let cut;
   while ((cut = pending.indexOf("\n")) >= 0) {
     const event = parsedLine(pending.slice(0, cut));
     pending = pending.slice(cut + 1);
-    if (!event) continue;
-    if (event.type === "system" && event.subtype === "init") seen.init = event;
-    if (event.type === "result") seen.final = event;
-    if (event.type === "assistant") {
-      seen.calls.add(event.message?.id ?? `event-${seen.calls.size}`);
-      for (const block of event.message?.content || []) {
-        if (block.type !== "tool_use" || seen.toolUses.has(block.id)) continue;
-        seen.toolUses.add(block.id);
-        seen.tools[block.name] = (seen.tools[block.name] || 0) + 1;
-        if (block.name === "Bash") {
-          const [command, verb] = String(block.input?.command || "").trim().split(/\s+/);
-          const key = `${command} ${verb ?? ""}`.trim();
-          seen.commands[key] = (seen.commands[key] || 0) + 1;
-        }
-      }
-      // A turn past the limit stops the run, whatever the CLI itself does.
-      if (seen.calls.size > options.maxTurns && !stopped) { stopped = "turns"; group("SIGTERM"); }
-    }
+    if (event) take(event);
   }
 });
 child.stderr.on("data", (chunk) => errors.push(chunk));
@@ -157,6 +166,10 @@ const wallMs = Date.now() - began;
 let leftover = false;
 for (let waited = 0; groupAlive() && waited < GROUP_GRACE_MS; waited += GROUP_POLL_MS) await sleep(GROUP_POLL_MS);
 if (groupAlive()) { leftover = true; group("SIGKILL"); }
+await Promise.race([new Promise((done) => (child.stdout.readableEnded ? done() : child.stdout.once("end", done))), sleep(STREAM_GRACE_MS)]);
+// A last line that came without its newline.
+const last = parsedLine(pending + decoder.end());
+if (last) take(last);
 
 const result = await desk.result();
 const wrong = wrongKeys(result, scene.expected);

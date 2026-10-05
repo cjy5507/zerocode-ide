@@ -17,12 +17,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { writeFixtureScene } from "./fixture-scene.mjs";
+import { doorTextFromArgv, writeFixtureScene } from "./fixture-scene.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REAL = join(HERE, "real.mjs");
-const doorText = process.argv[process.argv.indexOf("--door-text") + 1];
-if (!doorText || doorText.startsWith("--")) { console.error("--door-text PATH is required"); process.exit(2); }
+const doorText = doorTextFromArgv();
 
 const results = [];
 async function test(name, run) {
@@ -65,6 +64,11 @@ const spins = await standIn("spins", ["cat > /dev/null", INIT, "sleep 654321 &",
 /* An agent that takes turn after turn. */
 const chatters = await standIn("chatters", ["cat > /dev/null", INIT, ...["m1", "m2", "m3", "m4", "m5", "m6"].map((id) => turn(id, "zerocode-browser list")), "sleep 654322 &", "while :; do sleep 1; done"].join("\n"));
 
+/* An agent whose stream breaks a Korean syllable (three bytes) across two writes. */
+const splits = await standIn("splits", ["cat > /dev/null", INIT,
+  "printf '%s' '{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"content\":[{\"type\":\"tool_use\",\"id\":\"u1\",\"name\":\"Bash\",\"input\":{\"command\":\"echo '",
+  "printf '\\355\\225'", "sleep 0.3", "printf '\\234'", "printf '%s\\n' '\"}}]}}'", RESULT].join("\n"));
+
 /* One run of the runner, its out folder, its words. */
 function run(claude, extra = [], out = fresh()) {
   const done = spawnSync(process.execPath, [REAL, "--scene", scene, "--model", "fake-model", "--out", out, "--door-text", doorText,
@@ -105,6 +109,13 @@ await test("a run hands the agent the product's launch prompt, an environment fr
   assert(row.door.requests >= 3 && row.door.verbs["browser/fill"] === 1 && row.stopped === null && row.leftover === false && row.oracle.pass === true, "the door's trail, the run's end and the oracle", row.door);
   assert(row.init.tools.join() === "Bash,Skill" && row.init.mcpServers.length === 0 && row.init.slashCommands === 2, "what the agent was given is read from its init line", row.init);
   return `${row.modelCalls} calls, ${row.door.requests} door requests, ${row.wallMs} ms`;
+});
+
+await test("a stream that breaks a character across two writes is read whole, and its last line is taken", async () => {
+  const done = run(splits);
+  assert(done.code === 0 && done.row.commands["echo 한"] === 1, "the syllable came through whole", done.row.commands);
+  assert(done.row.tokens.input === 100 && done.row.finalSubtype === "success", "and the result line that follows is read", done.row.tokens);
+  return JSON.stringify(done.row.commands);
 });
 
 await test("a run that never ends is stopped at its time cap and leaves nothing running", async () => {

@@ -40,3 +40,11 @@ export async function writeFixtureScene(folder, expected) {
   await writeFile(join(folder, "card.json"), JSON.stringify({ task: "Book a size Large for me.", facts: [{ says: "Name", value: "Kim" }, { says: "Size", value: "Large" }], personTurns: ["code"] }));
   await writeFile(join(folder, "expected.json"), JSON.stringify(expected));
 }
+
+/* The `--door-text PATH` a test is run with: the built `door_text` example. */
+export function doorTextFromArgv(argv = process.argv) {
+  const at = argv.indexOf("--door-text");
+  const path = at >= 0 ? argv[at + 1] : undefined;
+  if (!path || path.startsWith("--")) { console.error("--door-text PATH is required"); process.exit(2); }
+  return path;
+}

@@ -17,10 +17,9 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { SYSTEM_PATH, STAND_IN_NAMES, ALLOWED_TOOLS, argsProblems, boxEnv, checkPath, claudeArgs, installStandIn } from "./agent-box.mjs";
 import { PANE, PERSON_TURN_MS, startFormDesk } from "./door-desk.mjs";
-import { writeFixtureScene } from "./fixture-scene.mjs";
+import { doorTextFromArgv, writeFixtureScene } from "./fixture-scene.mjs";
 
-const doorText = process.argv[process.argv.indexOf("--door-text") + 1];
-if (!doorText || doorText.startsWith("--")) { console.error("--door-text PATH is required"); process.exit(2); }
+const doorText = doorTextFromArgv();
 
 
 const results = [];
@@ -161,6 +160,22 @@ await test("the page reaches only the bench's own site, and the oracle reads wha
   await browser("click", PANE, "#book");
   assert(JSON.stringify(await desk.result()) === JSON.stringify({ name: "Kim", size: "l", agree: true, verified: true }), "the page's own result", await desk.result());
   return `${desk.tally.requests} requests, ${desk.tally.refusals} refused, ${desk.tally.faults.length} faults`;
+});
+
+await test("a pane that was closed can be opened again, and the scene's site answers its folder and a bad address without dying", async () => {
+  const closed = await browser("close", PANE);
+  assert(closed.stdout === `닫힘 ${PANE}\n`, "close: gone", closed);
+  assert((await browser("list")).stdout.includes("열린 브라우저 판이 없습니다") && (await browser("tabs")).stdout.includes("열린 브라우저 판이 없습니다"), "list and tabs: no pane now");
+  assert((await browser("fields", PANE)).code === 1, "a closed pane's label is refused");
+  const reopened = await browser("open", desk.url);
+  assert(reopened.stdout === `열림 ${PANE}\n` && (await browser("fields", PANE)).code === 0, "open: the pane is back and answers", reopened);
+  const origin = new URL(desk.url).origin;
+  const folder = await fetch(`${origin}/`);
+  assert(folder.status === 200 && String(folder.headers.get("content-type")).startsWith("text/html"), "the folder is its scene, told as a page", [folder.status, folder.headers.get("content-type")]);
+  const bad = await fetch(`${origin}/%E0%A4%A`);
+  assert(bad.status === 400, "a bad escape is a 400, not a crash", bad.status);
+  assert((await fetch(desk.url)).status === 200, "and the site still answers");
+  return "ok";
 });
 
 await test("the box: a narrow tool list, no widening flag, an environment from nothing, and a PATH that holds", async () => {
