@@ -35,6 +35,12 @@
 //! - **Verify failed** — Codex answered and the hooks are still not trusted.
 //!   The caller must roll its hook back.
 //!
+//! A Codex with no `app-server` says so on stderr as it dies, and that line is
+//! what tells it from one that broke. So a dead child is judged only after its
+//! stderr has been read to the end ([`STDERR_EOF_WAIT`] at most): judged the moment
+//! its output ends, the line may not have arrived yet, and the install road would
+//! retry a capability that will never appear.
+//!
 //! ## What the caller must do with a failure
 //!
 //! Roll back. A hook written into `hooks.json` without a trust entry does not
@@ -70,6 +76,23 @@ pub const NATIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// How much stderr to keep for the message when the child dies. Enough to carry
 /// a usage error, bounded because a broken binary can print forever.
 const STDERR_TAIL_BYTES: usize = 4096;
+
+/// How long a child that has gone away is given for its stderr to be read to the
+/// end before it is judged by what was read.
+///
+/// What tells a Codex with no `app-server` from one that broke is the line it
+/// prints as it dies, and a thread beside the one that sees the child go reads that
+/// line. Both are woken by the same exit, and on a busy machine the reader can run
+/// second; judged at once, the child said nothing. So the verdict waits for that
+/// thread to reach EOF. Reaching it takes the thread only the bytes already sitting
+/// in a closed pipe, so the wait is over before it starts on an idle machine and
+/// lasts as long as the thread waits for a core on a loaded one.
+///
+/// The limit is for the case where EOF never comes: a grandchild that inherited
+/// the pipe keeps it open after the child is gone. A person then waits this long on
+/// a road that has already failed. It is a tenth of [`NATIVE_TIMEOUT`] — far more
+/// than a thread waits for a core, and far less than the session is allowed.
+pub const STDERR_EOF_WAIT: Duration = Duration::from_secs(2);
 
 /// A single response line's ceiling. Orca kills the child on an oversized JSONL
 /// line for the same reason: a hooks list is kilobytes, and anything vastly
@@ -158,6 +181,11 @@ pub struct Invocation {
     /// file.
     pub env_to_delete: Vec<String>,
     pub timeout: Duration,
+    /// How long a child that has gone away is given for its stderr to be read to
+    /// the end before it is judged by what was read. [`STDERR_EOF_WAIT`], unless a
+    /// check needs another: one that holds a pipe open on purpose asks for less, and
+    /// one that must outlast a busy machine asks for more.
+    pub stderr_wait: Duration,
 }
 
 impl Invocation {
@@ -185,6 +213,7 @@ impl Invocation {
             env,
             env_to_delete,
             timeout: NATIVE_TIMEOUT,
+            stderr_wait: STDERR_EOF_WAIT,
         }
     }
 }
@@ -254,6 +283,11 @@ struct Session {
     stdin: Option<std::process::ChildStdin>,
     stdout: BufReader<std::process::ChildStdout>,
     stderr: Arc<Mutex<String>>,
+    /// Disconnects when the thread filling `stderr` reaches EOF: that thread owns
+    /// the only sender and never sends on it.
+    stderr_ended: std::sync::mpsc::Receiver<()>,
+    /// How long [`Session::stderr_after_exit`] waits for that.
+    stderr_wait: Duration,
     next_id: u64,
 }
 
@@ -289,9 +323,13 @@ impl Session {
         // filled the stderr pipe, and we block reading stdout that will never
         // come — a deadlock that looks exactly like a hung agent.
         let stderr = Arc::new(Mutex::new(String::new()));
+        // The thread below owns the sender and never sends: dropping it, when the
+        // thread ends at EOF, is the signal `stderr_after_exit` waits for.
+        let (reading, stderr_ended) = std::sync::mpsc::channel::<()>();
         if let Some(pipe) = child.stderr.take() {
             let held = Arc::clone(&stderr);
             std::thread::spawn(move || {
+                let _reading = reading;
                 let mut reader = BufReader::new(pipe);
                 let mut line = String::new();
                 while reader.read_line(&mut line).unwrap_or(0) > 0 {
@@ -317,6 +355,8 @@ impl Session {
             stdin,
             stdout,
             stderr,
+            stderr_ended,
+            stderr_wait: invocation.stderr_wait,
             next_id: 1,
         })
     }
@@ -326,6 +366,23 @@ impl Session {
             .lock()
             .map(|held| held.trim().chars().take(400).collect())
             .unwrap_or_default()
+    }
+
+    /// What the child wrote to stderr, once nothing more can arrive or once
+    /// `stderr_wait` has gone by.
+    ///
+    /// Stdout reaching EOF, or a write to stdin failing, says the child is gone or
+    /// going. It does not say the thread that drains its stderr has read the last
+    /// of it: the same exit wakes both threads, and on a busy machine the reader can
+    /// run second. A Codex that printed "unrecognized subcommand" then reads as one
+    /// that said nothing, and the install road retries a capability that will never
+    /// appear. So wait for that thread to reach EOF — but not for ever: a
+    /// grandchild that inherited the pipe keeps it open after the child is gone.
+    fn stderr_after_exit(&self) -> String {
+        // Disconnected is the thread reaching EOF and a timeout is a pipe somebody
+        // still holds. Either way, read what was collected.
+        let _ = self.stderr_ended.recv_timeout(self.stderr_wait);
+        self.stderr_tail()
     }
 
     fn send(&mut self, payload: &serde_json::Value) -> Result<(), GrantError> {
@@ -345,8 +402,11 @@ impl Session {
 
     /// The error for a child that went away, distinguishing a Codex with no
     /// `app-server` from one that broke.
+    ///
+    /// Both roads out of a dead child end here — the response read finding EOF and
+    /// a write finding nobody reading — so the wait for its last words is here.
     fn exit_error(&self, detail: &str) -> GrantError {
-        let tail = self.stderr_tail();
+        let tail = self.stderr_after_exit();
         if missing_app_server(&tail) {
             GrantError::Unsupported(format!("codex CLI has no app-server subcommand: {tail}"))
         } else if tail.is_empty() {

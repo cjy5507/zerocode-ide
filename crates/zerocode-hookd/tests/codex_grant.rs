@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use zerocode_hookd::codex_grant::{Grant, GrantError, GrantPlan, Invocation, VerifyClass};
+use zerocode_hookd::codex_install::{Landed, land};
 
 const MANAGED: &str = "/bin/sh '/h/.zerocode/agent-hooks/codex-hook.sh'";
 
@@ -356,6 +357,242 @@ fn a_codex_without_app_server_is_unsupported() {
         }
         other => panic!("an old codex was not reported unsupported: {other:?}"),
     }
+}
+
+/// The Python of a fake `codex` with no `app-server` that says why it died only
+/// [`LATE_VOICE_PAUSE`] after the stream the parent is waiting on has gone quiet.
+///
+/// `@QUIET@` is what it does first to silence that stream and `@PAUSE@` is the
+/// pause in seconds. It writes `said` to the log once it has spoken, so a test can
+/// tell a fake that ran to its end from one that never ran. `os._exit` rather than
+/// a normal exit: the interpreter prints to stderr at shutdown when a standard
+/// stream was closed under it, and that is not what this fake is here to say.
+const LATE_VOICE: &str = r#"
+import os, sys, time
+@QUIET@
+time.sleep(@PAUSE@)
+sys.stderr.write("error: unrecognized subcommand 'app-server'\n")
+sys.stderr.flush()
+with open(os.environ["FAKE_LOG"], "w") as log:
+    log.write("said")
+os._exit(1)
+"#;
+
+/// Goes quiet by closing the input after answering `initialize`: the parent's next
+/// write finds nobody reading it.
+const DEAF_AFTER_ITS_ANSWER: &str = r#"import json
+request = json.loads(sys.stdin.readline())
+os.close(0)
+print(json.dumps({"id": request["id"], "result": {}}), flush=True)"#;
+
+/// How long after going quiet the late-voiced fake gives its reason. Long enough
+/// that a parent which judges at once has judged by then, and a small part of the
+/// wait the grant gives a dead child's last words.
+const LATE_VOICE_PAUSE: Duration = Duration::from_millis(250);
+
+/// The wait the late-voiced checks give a dead child's last words. The grant's own is
+/// two seconds; these ask for more because the reason has to come inside it on a
+/// machine so busy that a pause of a quarter of a second takes seconds (the gates run
+/// at a load of 24 to 78). It costs nothing when the reason comes: EOF ends the wait.
+const LATE_VOICE_WAIT: Duration = Duration::from_secs(10);
+
+/// The session deadline the checks that wait on purpose give the grant, where its own
+/// default is twenty seconds. A deadline that fires inside a long wait ends the
+/// session as a timeout, which is retryable, and the verdict under test is then a
+/// different one.
+const SESSION_DEADLINE: Duration = Duration::from_secs(120);
+
+/// Write the late-voiced old `codex` into `dir`; it goes quiet the way `quiet` says.
+fn late_voiced_old_codex(dir: &Path, quiet: &str) -> PathBuf {
+    let script = dir.join("late-voiced-old-codex.py");
+    let pause = LATE_VOICE_PAUSE.as_secs_f64().to_string();
+    let body = LATE_VOICE
+        .replace("@QUIET@", quiet)
+        .replace("@PAUSE@", &pause);
+    std::fs::write(&script, body).expect("write the late-voiced old codex");
+    script
+}
+
+/// Grant against an old `codex` that goes quiet the way `quiet` says and gives its
+/// reason a moment later; with the log the fake wrote when it had.
+fn grant_against_late_voice(quiet: &str) -> (Result<Grant, GrantError>, String) {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let script = late_voiced_old_codex(dir.path(), quiet);
+    let log = dir.path().join("asked.jsonl");
+    let mut held = plan(&script, &log, &[]);
+    held.invocation.stderr_wait = LATE_VOICE_WAIT;
+    held.invocation.timeout = SESSION_DEADLINE;
+    let outcome = zerocode_hookd::codex_grant::grant(&held);
+    (outcome, std::fs::read_to_string(&log).unwrap_or_default())
+}
+
+/// What a dead `codex` said last decides what it was. One whose output closes
+/// before its reason arrives is still a Codex with no `app-server`: a busy machine
+/// puts the reason second by itself (the thread that reads it runs after the one
+/// that sees the output end), and this fake does the same on purpose. Judged at
+/// once, it reads as one that broke, and the window retries a capability that will
+/// never appear.
+#[cfg_attr(
+    not(unix),
+    ignore = "the fake closes a descriptor it inherited, which is not measured on Windows"
+)]
+#[test]
+fn a_codex_that_says_why_after_its_output_closed_is_still_unsupported() {
+    let (outcome, said) = grant_against_late_voice("os.close(1)");
+    match outcome {
+        Err(GrantError::Unsupported(why)) => {
+            assert!(why.contains("unrecognized subcommand"), "{why}");
+        }
+        other => panic!(
+            "an old codex that closed its output before saying why was not reported unsupported: {other:?}"
+        ),
+    }
+    // A fake that never ran (no python3 on the PATH is "unsupported" too) would pass
+    // the match above and prove nothing.
+    assert_eq!(said, "said", "the fake never said why");
+}
+
+/// The same claim on the other road out of a dead child: the parent's write to its
+/// input fails because the child stopped reading, and the reason follows a moment
+/// later. Both roads end in one function, and a wait added to one of them only
+/// would leave the other judging at once.
+#[cfg_attr(
+    not(unix),
+    ignore = "the fake closes a descriptor it inherited, which is not measured on Windows"
+)]
+#[test]
+fn a_codex_that_says_why_after_its_input_closed_is_still_unsupported() {
+    let (outcome, said) = grant_against_late_voice(DEAF_AFTER_ITS_ANSWER);
+    match outcome {
+        Err(GrantError::Unsupported(why)) => {
+            assert!(why.contains("unrecognized subcommand"), "{why}");
+        }
+        other => panic!(
+            "an old codex that stopped reading before saying why was not reported unsupported: {other:?}"
+        ),
+    }
+    // A fake that never ran (no python3 on the PATH is "unsupported" too) would pass
+    // the match above and prove nothing.
+    assert_eq!(said, "said", "the fake never said why");
+}
+
+/// What a person is told, and how often Codex is asked, when the old `codex` gives
+/// its reason a moment after its output closed. The install road asks once, lands
+/// the hook in the home this app owns, and says the grant will never work. A window
+/// that read the same Codex as one that broke would ask a second time at once, put
+/// a retry on it, and show "exited: before answering" where the reason belongs.
+#[cfg_attr(
+    not(unix),
+    ignore = "the fake closes a descriptor it inherited, which is not measured on Windows"
+)]
+#[test]
+fn an_old_codex_that_says_why_late_is_asked_once_and_remembered_as_unsupported() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    // A Codex home the way a person has one: the hooks file and the settings.
+    let system_home = dir.path().join("dot-codex");
+    std::fs::create_dir_all(&system_home).expect("mkdir");
+    let hooks = system_home.join("hooks.json");
+    std::fs::write(&hooks, "{\n  \"hooks\": {}\n}\n").expect("write the hooks file");
+    std::fs::write(system_home.join("config.toml"), "model = \"gpt-5\"\n")
+        .expect("write the settings");
+    let script = late_voiced_old_codex(dir.path(), "os.close(1)");
+    let log = dir.path().join("asked.jsonl");
+    let mut grant_plan = plan(&script, &log, &[]);
+    grant_plan.invocation.stderr_wait = LATE_VOICE_WAIT;
+    grant_plan.invocation.timeout = SESSION_DEADLINE;
+
+    let asked = std::cell::Cell::new(0u32);
+    let landed = land(
+        &hooks,
+        &dir.path().join("state"),
+        &dir.path().join("app-data"),
+        &system_home,
+        "codex-hook.sh",
+        "/bin/sh '/h/.zerocode/agent-hooks/codex-hook.sh'",
+        |_| {
+            asked.set(asked.get() + 1);
+            zerocode_hookd::codex_grant::grant(&grant_plan)
+        },
+    )
+    .expect("land ran");
+    let Landed::Mirror { why, retryable, .. } = landed else {
+        panic!("an old codex was not landed in the home this app owns: {landed:?}");
+    };
+    let asked = asked.get();
+    assert!(
+        asked == 1 && !retryable && why.starts_with("codex app-server unsupported: "),
+        "an old codex that says why late was asked {asked} time(s), retryable: {retryable}; the window says: {why}"
+    );
+}
+
+/// A fake `codex` with no `app-server` that leaves a grandchild behind. The
+/// grandchild inherits stderr and keeps the pipe open after the child is gone, for as
+/// long as the flag file stands (the test's folder takes it away when the test ends)
+/// and `@HOLD@` seconds at the most, so the reader of that pipe never reaches EOF
+/// in that time.
+const GRANDCHILD_HOLDS_STDERR: &str = r#"
+import os, subprocess, sys
+subprocess.Popen(
+    [
+        sys.executable,
+        "-c",
+        "import os, time\nend = time.time() + @HOLD@\nwhile time.time() < end and os.path.exists(os.environ['FAKE_FLAG']):\n    time.sleep(0.05)",
+    ],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+)
+sys.stderr.write("error: unrecognized subcommand 'app-server'\n")
+sys.stderr.flush()
+os._exit(1)
+"#;
+
+/// The wait this test gives a dead child's last words, how long the grandchild
+/// keeps the pipe at the most, and how soon the verdict must be back. The verdict
+/// has to come well inside the second and well outside the first, even on a machine
+/// so busy that starting the interpreter takes seconds (the gates run at a load of
+/// 24 to 78), so that neither a slow start nor a wait that never ends can pass for
+/// the other. The session deadline ([`SESSION_DEADLINE`]) is longer than the hold,
+/// so a wait that never ends is caught by the clock and not by a timeout.
+const LAST_WORDS_WAIT: Duration = Duration::from_secs(2);
+const GRANDCHILD_HOLDS_FOR: Duration = Duration::from_secs(60);
+const VERDICT_WITHIN: Duration = Duration::from_secs(20);
+
+/// The wait for a dead child's last words has to end on its own. A pipe a
+/// grandchild holds open never reaches EOF, and a verdict that waited for it would
+/// come back when the grandchild let go instead of when the wait was over.
+#[cfg_attr(
+    not(unix),
+    ignore = "the grandchild inherits a pipe by POSIX rules, which are not measured on Windows"
+)]
+#[test]
+fn a_pipe_a_grandchild_keeps_open_does_not_hold_the_verdict_up() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let script = dir.path().join("old-codex-with-a-grandchild.py");
+    let hold = GRANDCHILD_HOLDS_FOR.as_secs().to_string();
+    let body = GRANDCHILD_HOLDS_STDERR.replace("@HOLD@", &hold);
+    std::fs::write(&script, body).expect("write the old codex");
+    // The grandchild lets go when this file goes, which is when the test ends.
+    let flag = dir.path().join("grandchild-holds-the-pipe");
+    std::fs::write(&flag, "").expect("write the flag");
+    let log = dir.path().join("asked.jsonl");
+    let mut held = plan(&script, &log, &[]);
+    held.invocation
+        .env
+        .push(("FAKE_FLAG".to_string(), flag.to_string_lossy().into_owned()));
+    held.invocation.stderr_wait = LAST_WORDS_WAIT;
+    held.invocation.timeout = SESSION_DEADLINE;
+    let started = std::time::Instant::now();
+    let outcome = zerocode_hookd::codex_grant::grant(&held);
+    let took = started.elapsed();
+    // What the child said is still read: the line was in the pipe, only EOF was not.
+    assert!(
+        matches!(outcome, Err(GrantError::Unsupported(_))),
+        "an old codex whose pipe a grandchild holds was not reported unsupported: {outcome:?}"
+    );
+    assert!(
+        took < VERDICT_WITHIN,
+        "the verdict waited for the grandchild to let go: took {took:?}"
+    );
 }
 
 /// A server that never answers is a timeout, and the process does not survive
