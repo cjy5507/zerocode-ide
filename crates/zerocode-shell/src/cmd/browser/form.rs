@@ -1181,6 +1181,47 @@ pub(crate) fn known_buttons(label: &str) -> Vec<FormAction> {
         .unwrap_or_default()
 }
 
+/// What the write half of a fill pass says: whether the form was the one read
+/// (`stale`), whether anything was written, the document and the page's own
+/// clock when the last value was written — what the settle counts stillness
+/// from — and the outcomes the read half finishes.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct FillWritten {
+    pub(crate) stale: bool,
+    pub(crate) fingerprint: String,
+    pub(crate) wrote: bool,
+    pub(crate) epoch: String,
+    pub(crate) at: Option<f64>,
+    pub(crate) held: serde_json::Value,
+}
+
+/// One pass of a fill: write, then — when something was written — let the
+/// page settle, then read back. (Stub: the read follows the write at once.)
+pub(crate) async fn settled_pass<W, WF, S, SF, R, RF>(
+    write: W,
+    _settle: S,
+    read: R,
+) -> Result<FillPass, String>
+where
+    W: FnOnce() -> WF,
+    WF: std::future::Future<Output = Result<FillWritten, String>>,
+    S: FnOnce(String, Option<f64>) -> SF,
+    SF: std::future::Future<Output = SettleReport>,
+    R: FnOnce(serde_json::Value, String) -> RF,
+    RF: std::future::Future<Output = Result<FillPass, String>>,
+{
+    let written = write().await?;
+    if written.stale {
+        return Ok(FillPass {
+            stale: true,
+            fingerprint: written.fingerprint,
+            ..FillPass::default()
+        });
+    }
+    read(written.held, written.epoch).await
+}
+
 /// A fill script: the form helpers, the writer, and a body that calls it.
 pub(crate) fn fill_script(request: &serde_json::Value, body: &str) -> String {
     form_script(request, &format!("{BROWSER_FILL_HELPERS}\n{body}"))

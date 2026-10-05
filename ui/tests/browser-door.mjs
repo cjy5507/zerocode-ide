@@ -23,7 +23,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./playwright-chromium.mjs";
 import { rustList, rustNumber, rustText } from "./rust-source.mjs";
-import { FORM_REQUEST, evalFormScript, fieldsScript, fillPasses } from "./browser-scripts.mjs";
+import { FORM_REQUEST, evalFormScript, fieldsScript, fillPasses, fillReadScript, fillWriteScript } from "./browser-scripts.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DOOR = await readFile(resolve(UI, "../crates/zerocode-shell/src/cmd/browser.rs"), "utf8");
@@ -1440,6 +1440,102 @@ await test("a_fill_inside_an_eval_answers_the_buttons_after_it_too", async () =>
       "the eval's fill says the buttons after it", answer.value);
     return buttonStates(answer.value);
   } finally { await step.close(); }
+});
+
+/* The page a fill reads is the page after it has settled (t-41387). A page that
+ * updates after its input handler has returned — in a microtask (Vue's and
+ * Svelte's nextTick, React's batched update), after a check that says it is busy
+ * — shows a read made in the same instant as the write the screen as it was. So
+ * the fill waits,
+ * with the window's own settle (the one a press by number waits with), between
+ * its write and its read: the buttons, each field's value and error and what is
+ * left are the settled screen's; a page that never stands still is said so. */
+const LATE_PAGE = (script) => `<!doctype html><html lang="en"><meta charset="utf-8">
+<form onsubmit="return false">
+  <label for="mail">Contact email</label> <input id="mail" type="email" aria-describedby="mail-err">
+  <p id="mail-err" role="alert"></p>
+  <button type="button" id="go" disabled>Continue</button>
+  <p id="tick">0</p>
+</form>
+<script>${script}</script>`;
+const AFTER_A_MICROTASK = LATE_PAGE(`
+  const mail = document.getElementById("mail"), go = document.getElementById("go");
+  mail.addEventListener("input", () => queueMicrotask(() => { go.disabled = !mail.value.includes("@"); }));`);
+// An async check, as a page with one writes it: it says it is busy while the check runs
+// (`aria-busy`), and shows its verdict 150 ms after the input.
+const AFTER_A_BUSY_CHECK = LATE_PAGE(`
+  const form = document.querySelector("form"), mail = document.getElementById("mail"), err = document.getElementById("mail-err");
+  mail.removeAttribute("type");
+  let timer = 0;
+  mail.addEventListener("input", () => {
+    clearTimeout(timer);
+    form.setAttribute("aria-busy", "true");
+    timer = setTimeout(() => {
+      const bad = !mail.value.includes("@");
+      mail.setAttribute("aria-invalid", bad ? "true" : "false");
+      err.textContent = bad ? "Enter a valid email" : "";
+      form.setAttribute("aria-busy", "false");
+    }, 150);
+  });`);
+const NEVER_STILL = LATE_PAGE(`
+  let ticks = 0;
+  setInterval(() => { document.getElementById("tick").textContent = String(++ticks); }, 20);`);
+
+await test("a_fill_reads_the_buttons_a_page_turns_on_after_its_handler_has_returned", async () => {
+  const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await late.setContent(AFTER_A_MICROTASK);
+    const before = await readFields(late);
+    const filled = await fillBundle(late, { "#mail": "kim@example.com" }, before.fingerprint);
+    assert(buttonStates(filled.actions) === JSON.stringify({ "Continue": "on" }),
+      "the button the page turned on after the write is on in the fill's answer", filled.actions);
+    assert(filled.moving === false, "and the page stood still when it was read", filled.moving);
+    return buttonStates(filled.actions);
+  } finally { await late.close(); }
+});
+
+await test("a_fill_reads_the_error_a_check_shows_after_the_write_while_the_page_says_it_is_busy", async () => {
+  const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await late.setContent(AFTER_A_BUSY_CHECK);
+    const before = await readFields(late);
+    const filled = await fillBundle(late, { "#mail": "nope" }, before.fingerprint);
+    const [only] = filled.results;
+    assert(only.status === "set" && only.error === "Enter a valid email",
+      "the error the page showed 150 ms after the write, once it was no longer busy, is the field's error", only);
+    assert(filled.left.some((field) => field.error === "Enter a valid email"), "and the field is left with it", filled.left);
+    return only.error;
+  } finally { await late.close(); }
+});
+
+await test("a_fill_on_a_page_that_never_stands_still_ends_and_says_it_is_still_changing", async () => {
+  const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await late.setContent(NEVER_STILL);
+    const before = await readFields(late);
+    const began = Date.now();
+    const filled = await fillBundle(late, { "#mail": "kim@example.com" }, before.fingerprint);
+    const took = Date.now() - began;
+    assert(filled.moving === true, "the fill says the page was still changing", filled.moving);
+    assert(took < 4000, "and it ended inside the settle's time, not waited for", took);
+    return `${took} ms`;
+  } finally { await late.close(); }
+});
+
+await test("a_fill_read_in_another_document_than_the_write_says_the_page_was_replaced", async () => {
+  const late = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await late.setContent(AFTER_A_MICROTASK);
+    const wrote = await evalJson(late, fillWriteScript([{ handle: "#mail", value: "kim@example.com" }], null));
+    assert(wrote.ok && Array.isArray(wrote.value.held) && typeof wrote.value.epoch === "string" && wrote.value.wrote === true,
+      "the write half answers what it held, the document it wrote in and that it wrote", wrote);
+    const read = await evalJson(late, fillReadScript(wrote.value.held, "another-document"));
+    assert(read.ok && read.value.results[0].status === "replaced",
+      "read in a document that is not the one written in, the field is said replaced", read);
+    const same = await evalJson(late, fillReadScript(wrote.value.held, wrote.value.epoch));
+    assert(same.ok && same.value.results[0].status === "set", "and read in its own document it is read back", same);
+    return read.value.results[0].status;
+  } finally { await late.close(); }
 });
 
 await browser.close();

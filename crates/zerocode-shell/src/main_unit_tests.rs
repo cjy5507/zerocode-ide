@@ -23763,6 +23763,109 @@ mod browser_form_fill {
         );
     }
 
+    fn settled(state: zerocode_core::agent_browser::Settle) -> cmd::browser::SettleReport {
+        cmd::browser::SettleReport {
+            state,
+            why: zerocode_core::agent_browser::SettleWhy::Quiet,
+            ms: 52,
+            polls: 2,
+            hidden: Some(false),
+        }
+    }
+
+    fn written(wrote: bool) -> cmd::browser::form::FillWritten {
+        cmd::browser::form::FillWritten {
+            wrote,
+            epoch: "1760000000000".into(),
+            at: Some(812.5),
+            held: json!([{ "handle": "#a" }]),
+            ..cmd::browser::form::FillWritten::default()
+        }
+    }
+
+    /// One pass through `settled_pass` with the three halves faked: what it
+    /// asked of each, in order, and the pass it answered.
+    async fn pass_through(
+        first: cmd::browser::form::FillWritten,
+        ending: zerocode_core::agent_browser::Settle,
+    ) -> (Result<FillPass, String>, Vec<String>) {
+        let log: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (on_write, on_settle, on_read) = (log.clone(), log.clone(), log.clone());
+        let pass = cmd::browser::form::settled_pass(
+            move || {
+                on_write.lock().unwrap().push("write".into());
+                async move { Ok(first) }
+            },
+            move |epoch, at| {
+                on_settle.lock().unwrap().push(format!("settle {epoch} {at:?}"));
+                async move { settled(ending) }
+            },
+            move |held, epoch| {
+                on_read.lock().unwrap().push(format!("read {epoch} {held}"));
+                async move { Ok(FillPass::default()) }
+            },
+        )
+        .await;
+        let log = log.lock().unwrap().clone();
+        (pass, log)
+    }
+
+    /// A pass that wrote lets the page settle — in the document it wrote in,
+    /// counting from the page's clock at the last write — before it reads back.
+    #[tokio::test(start_paused = true)]
+    async fn a_pass_that_wrote_is_read_only_after_the_page_has_settled() {
+        use zerocode_core::agent_browser::Settle;
+        let (pass, log) = pass_through(written(true), Settle::Ready).await;
+        assert_eq!(
+            log,
+            [
+                "write",
+                "settle 1760000000000 Some(812.5)",
+                r##"read 1760000000000 [{"handle":"#a"}]"##
+            ],
+            "{log:?}"
+        );
+        assert_eq!(pass.expect("a pass").moving, Some(false));
+    }
+
+    /// A pass that wrote nothing has nothing to wait for.
+    #[tokio::test(start_paused = true)]
+    async fn a_pass_that_wrote_nothing_does_not_wait_for_the_page() {
+        use zerocode_core::agent_browser::Settle;
+        let (pass, log) = pass_through(written(false), Settle::Ready).await;
+        assert_eq!(
+            log,
+            ["write", r##"read 1760000000000 [{"handle":"#a"}]"##],
+            "{log:?}"
+        );
+        assert_eq!(pass.expect("a pass").moving, None, "no settle was heard");
+    }
+
+    /// A form that is not the one read is answered at once: nothing was
+    /// written, so nothing is settled or read.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_form_is_answered_before_anything_is_settled_or_read() {
+        use zerocode_core::agent_browser::Settle;
+        let mut first = written(true);
+        first.stale = true;
+        first.fingerprint = "12:other".into();
+        let (pass, log) = pass_through(first, Settle::Ready).await;
+        assert_eq!(log, ["write"], "{log:?}");
+        let pass = pass.expect("a pass");
+        assert!(pass.stale && pass.fingerprint == "12:other", "{pass:?}");
+    }
+
+    /// A page that did not stand still in the settle's time — or went to
+    /// another document — is said to be still changing, never settled.
+    #[tokio::test(start_paused = true)]
+    async fn a_page_that_does_not_settle_is_said_to_be_still_changing() {
+        use zerocode_core::agent_browser::Settle;
+        for ending in [Settle::NotReady, Settle::Invalidated] {
+            let (pass, _) = pass_through(written(true), ending).await;
+            assert_eq!(pass.expect("a pass").moving, Some(true), "{ending:?}");
+        }
+    }
+
     /// What a pane's agent last read is what its next fill is held to; a
     /// page that answered no fingerprint holds it to nothing.
     #[test]

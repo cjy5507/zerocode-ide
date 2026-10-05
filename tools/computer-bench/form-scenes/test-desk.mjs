@@ -198,6 +198,22 @@ await test("the box: a narrow tool list, no widening flag, an environment from n
   return holds.lines.join(" | ");
 });
 
+/* A fill's answer is the page after it has settled (t-41387): a page that turns a
+ * button on in a microtask after its input handler has returned shows it on. */
+await test("a fill answers with the buttons the page settled on, not those of the instant it was written", async () => {
+  await page(() => {
+    const name = document.getElementById("name");
+    const book = document.getElementById("book");
+    book.disabled = true;
+    name.addEventListener("input", () => queueMicrotask(() => { book.disabled = name.value === ""; }));
+  });
+  await browser("fields", PANE);
+  const filled = await shim("browser", ["fill", PANE, "--value-stdin"], '{"#name":"Lee"}');
+  assert(filled.code === 0 && filled.stdout.includes("#book 「Book」 켜짐"), "the button the page turned on is on in the answer", filled.stdout);
+  assert(!filled.stdout.includes("아직 바뀌는 중"), "and the page stood still when it was read", filled.stdout);
+  return "ok";
+});
+
 await desk.close();
 let failed = 0;
 for (const result of results) {

@@ -463,6 +463,11 @@ pub struct FillPass {
     /// names them — on or off, so the agent presses the step's button with no
     /// read between.
     pub actions: Vec<FormAction>,
+    /// Whether the page was still changing when the pass read it: `Some(true)`
+    /// when the settle that followed its writes ran out of time, `Some(false)`
+    /// when the page stood still first, `None` when the pass wrote nothing and
+    /// waited for nothing.
+    pub moving: Option<bool>,
 }
 
 /// A fill's passes, kept: each entry's latest outcome, and the page's word

@@ -109,6 +109,13 @@ const formScript = (request, body) => {
 export const fieldsScript = () => formScript(FORM_REQUEST, need("BROWSER_FIELDS_BODY", FIELDS_BODY));
 export const fillScript = (entries, expect = null) => formScript({ ...FORM_REQUEST, entries, expect },
   `${need("BROWSER_FILL_HELPERS", FILL_HELPERS)}\n${need("BROWSER_FILL_BODY", FILL_BODY)}`);
+/* The two halves of one fill pass (t-41387): the write — held to `expect` — and,
+ * once the page has settled, the read-back of what the write held, in the
+ * document `epoch` it was made in. */
+export const fillWriteScript = (entries, expect = null) => formScript({ ...FORM_REQUEST, entries, expect, phase: "write" },
+  `${need("BROWSER_FILL_HELPERS", FILL_HELPERS)}\n${need("BROWSER_FILL_BODY", FILL_BODY)}`);
+export const fillReadScript = (held, epoch) => formScript({ ...FORM_REQUEST, held, epoch, phase: "read" },
+  `${need("BROWSER_FILL_HELPERS", FILL_HELPERS)}\n${need("BROWSER_FILL_BODY", FILL_BODY)}`);
 /* `inlined_eval_body`: the expression written into the script, a thenable
  * refused, `undefined` said as such. */
 const inlinedEvalBody = (expression) =>

@@ -535,3 +535,75 @@ fn a_fill_of_a_form_the_agent_never_read_says_nothing_of_a_change() {
         "the buttons are said all the same:\n{lines}"
     );
 }
+
+/// A pass as the page answers it once it has settled (or not): the one field
+/// took, the form's two buttons, and what the settle heard.
+fn pass_heard(moving: Option<bool>) -> FillPass {
+    serde_json::from_value(json!({
+        "results": [{ "handle": "#mail", "status": "set", "label": "Contact email",
+            "now": "kim@example.com" }],
+        "fingerprint": "5:aaa",
+        "moving": moving,
+        "actions": [
+            { "handle": "#go", "label": "Continue", "disabled": false },
+            { "handle": "#back", "label": "Go back", "disabled": true },
+        ],
+    }))
+    .expect("a pass the settle was heard on")
+}
+
+/// A fill read while the page was still changing does not call its form "the
+/// same" or its buttons settled: it says so, and says what to do (t-41387).
+#[test]
+fn a_fill_that_ended_while_the_page_was_still_changing_says_so() {
+    let bundle = vec![entry("#mail", text("kim@example.com"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass_heard(Some(true)));
+    let lines = fill_lines(&ledger.report().against(Some("5:aaa"), &[]));
+    assert!(
+        lines.ends_with(
+            "아직 바뀌는 중(fields로 다시 읽기) — 버튼: #go 「Continue」 켜짐, #back 「Go back」 꺼짐\n"
+        ),
+        "{lines}"
+    );
+    assert!(!lines.contains("양식 그대로"), "{lines}");
+}
+
+/// The last word a settle gave stands for the fill: a pass that wrote nothing
+/// heard none, so it keeps the one before it; a pass that settled replaces it.
+#[test]
+fn the_last_word_a_settle_gave_is_what_a_fill_ends_with() {
+    let bundle = vec![entry("#mail", text("kim@example.com"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass_heard(Some(true)));
+    ledger.record(&bundle, pass_heard(None));
+    assert!(
+        fill_lines(&ledger.clone().report()).contains("아직 바뀌는 중"),
+        "a pass that waited for nothing leaves the last word"
+    );
+    ledger.record(&bundle, pass_heard(Some(false)));
+    assert!(
+        !fill_lines(&ledger.report()).contains("아직 바뀌는 중"),
+        "a pass whose page stood still ends it"
+    );
+}
+
+/// A write that took the page to another document leaves nothing to read back:
+/// the field is said to have been replaced, not "not found" or "set".
+#[test]
+fn a_field_the_page_replaced_after_the_write_says_so() {
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [{ "handle": "#mail", "status": "replaced", "label": "Contact email" }],
+    }))
+    .expect("a pass whose page was replaced");
+    let bundle = vec![entry("#mail", text("kim@example.com"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    let lines = fill_lines(&ledger.report());
+    assert!(
+        lines.contains(
+            "  ✗ #mail Contact email: 쓴 뒤 페이지가 다른 문서로 바뀜 — fields로 다시 읽기"
+        ),
+        "{lines}"
+    );
+}
