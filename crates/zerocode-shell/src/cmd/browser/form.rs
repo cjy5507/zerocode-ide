@@ -340,6 +340,42 @@ const zcDocs = (request) => {
   }
   return { open, sealed };
 };
+// The words the page gives about a field that is off or cannot be written,
+// besides its label: what its aria-describedby names, else its title, else
+// the words of the nearest box around it that holds no other field, without
+// the field's own labels — so an agent learns what switches it on.
+const zcHintOf = (record, request) => {
+  const el = record.el;
+  const doc = el.ownerDocument;
+  const named = String(el.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean)
+    .map((id) => doc.getElementById(id)).filter(Boolean).map(zcLabelWords).join(" ");
+  if (named.trim()) return named;
+  const title = String(el.getAttribute("title") || "");
+  if (title.trim() && zcFold(title) !== zcFold(record.label)) return title;
+  const own = [...(el.labels || [])];
+  for (const id of String(el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)) {
+    const node = doc.getElementById(id);
+    if (node) own.push(node);
+  }
+  const skip = "select, textarea, button, option, script, style, template, [role=option], [role=listbox]";
+  const controls = request.controls.join(",");
+  let box = el.parentElement;
+  for (let level = 0; box && level < request.captionDepth; level += 1, box = box.parentElement) {
+    if (box.matches("form, body, main")) break;
+    if ([...box.querySelectorAll(controls)].some((other) => other !== el && !el.contains(other)
+      && zcFieldKind(other, request))) break;
+    const walker = doc.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+    const words = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const holder = node.parentElement;
+      if (!holder || holder.closest(skip) || own.some((label) => label.contains(holder))) continue;
+      words.push(node.nodeValue);
+    }
+    const said = words.join(" ").replace(/\s+/g, " ").trim();
+    if (said) return said;
+  }
+  return "";
+};
 const zcFieldOut = (record, request) => {
   const cap = request.wordCap;
   const out = { handle: record.handle, kind: record.kind, label: zcWords(record.label, cap),
@@ -351,6 +387,10 @@ const zcFieldOut = (record, request) => {
     required: record.required, disabled: record.disabled, readOnly: record.readOnly,
     masked: record.masked, placeholder: zcWords(record.placeholder, cap), error: zcWords(record.error, cap) };
   if (record.maxLength !== null) out.maxLength = record.maxLength;
+  if (record.disabled || record.readOnly) {
+    const hint = zcWords(zcHintOf(record, request), cap);
+    if (hint) out.hint = hint;
+  }
   return out;
 };
 const zcEmpty = (out) => out.value === "" || out.value === false;
@@ -397,6 +437,36 @@ const zcUnknowns = (records, pressed, scopes, docs, request) => {
   }
   return unknowns;
 };
+// The boxes the page lets scroll that have more to read below what is shown:
+// drawn, with text, holding no field or button, `overflow` auto or scroll, a
+// scroll height past the box, and not yet read to its end — outermost, with
+// its first words. Attributes, styles and sizes only, so it is the same for
+// any widget; a box read to its end is said no more.
+const zcScrollBoxes = (scopes, docs, request) => {
+  const roots = scopes.size ? [...scopes] : docs.open.map(({ doc }) => doc.body).filter(Boolean);
+  const holds = request.controls.concat(request.actions).join(",");
+  const said = [];
+  const boxes = [];
+  for (const { doc, prefix } of docs.open) {
+    const view = doc.defaultView || window;
+    for (const scope of roots) {
+      if (scope.ownerDocument !== doc) continue;
+      let scanned = 0;
+      for (const el of scope.querySelectorAll("*")) {
+        if (boxes.length >= request.actionCap || (scanned += 1) > request.scanCap) break;
+        if (el.scrollHeight <= el.clientHeight + 1 || said.some((one) => one.contains(el))) continue;
+        if (!/^(auto|scroll)$/.test(view.getComputedStyle(el).overflowY)) continue;
+        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 1) continue;
+        if (!zcDrawn(el) || el.matches("textarea, select") || el.querySelector(holds)) continue;
+        const label = zcWords(el.innerText || el.textContent || "", request.wordCap);
+        if (!label) continue;
+        said.push(el);
+        boxes.push({ handle: prefix + zcHandleOf(el), label });
+      }
+    }
+  }
+  return boxes;
+};
 // Every field the page draws, in its order, frames after the page, and the
 // buttons that stand with them.
 const zcFormFields = (request) => {
@@ -439,12 +509,13 @@ const zcFormFields = (request) => {
     }
   }
   const unknowns = zcUnknowns(records, pressed, scopes, docs, request);
+  const scrollBoxes = zcScrollBoxes(scopes, docs, request);
   // The form's fingerprint: every field's handle, kind and words, in order —
   // never a value, which a fill is there to change.
   const print = zcDigest(records.map((record) => [record.handle, record.kind, zcFold(record.label)]
     .join("\u001f")).join("\u001e"));
   return { records, fields: records.map((record) => zcFieldOut(record, request)), actions,
-    more, sealed: docs.sealed, print, unknowns };
+    more, sealed: docs.sealed, print, unknowns, scrollBoxes };
 };
 "##;
 
@@ -453,7 +524,7 @@ const zcFormFields = (request) => {
 pub(crate) const BROWSER_FIELDS_BODY: &str = r#"
 const read = zcFormFields(request);
 return zcEncode({ ok: true, value: { fields: read.fields, actions: read.actions, more: read.more,
-  sealedFrames: read.sealed, fingerprint: read.print, unknowns: read.unknowns } }, request.answerCap);
+  sealedFrames: read.sealed, fingerprint: read.print, unknowns: read.unknowns, scrollBoxes: read.scrollBoxes } }, request.answerCap);
 "#;
 
 /// What `fill` writes with, page side — standing on the form helpers: each
@@ -943,7 +1014,11 @@ const zcFill = (entries, expect) => {
     out.label = zcWords(record.label, request.wordCap);
     if (record.masked) return { out, status: "secret" };
     if (record.kind === "file") return { out, status: "file" };
-    if (record.disabled) return { out, status: "disabled" };
+    if (record.disabled) {
+      const hint = zcWords(zcHintOf(record, request), request.wordCap);
+      if (hint) out.hint = hint;
+      return { out, status: "disabled" };
+    }
     if (zcHolds(record, entry.value)) return { out, entry, record, wrote: false };
     const refused = zcWrite(record, entry.value);
     if (refused) {
@@ -990,7 +1065,7 @@ const zerocode = Object.freeze({
   fields: () => {
     const read = zcFormFields(request);
     return { fields: read.fields, actions: read.actions, more: read.more, sealedFrames: read.sealed,
-      fingerprint: read.print, unknowns: read.unknowns };
+      fingerprint: read.print, unknowns: read.unknowns, scrollBoxes: read.scrollBoxes };
   },
   fill: (bundle, read) => zcFill(Array.isArray(bundle) ? bundle
     : Object.entries(bundle || {}).map(([handle, value]) => ({ handle, value })),

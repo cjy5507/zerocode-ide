@@ -22963,8 +22963,9 @@ mod browser_look_settle_pin {
                 "focus(",
                 "blur(",
                 "scrollIntoView",
-                "scrollTo",
-                "scrollBy",
+                // The calls, not the properties a read may look at (`scrollTop`).
+                "scrollTo(",
+                "scrollBy(",
                 ".select(",
                 "setSelectionRange",
                 "dispatchEvent",

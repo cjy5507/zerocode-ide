@@ -171,6 +171,11 @@ pub struct FormField {
     pub max_length: Option<u32>,
     /// The page's own words about what is wrong with the value it holds.
     pub error: String,
+    /// What the page says about a field that is off or cannot be written —
+    /// its `aria-describedby`, its title, the words beside its label in the
+    /// nearest box that holds no other field — so the agent learns what
+    /// switches it on. Empty for a field that is on.
+    pub hint: String,
 }
 
 /// A button beside the fields.
@@ -200,6 +205,18 @@ pub struct FormRead {
     /// What a person can press or focus beside the fields that the read
     /// named no kind for — said, so nothing pressable drops out of the read.
     pub unknowns: Vec<FormUnknown>,
+    /// The boxes the page lets scroll that have more to read below what is
+    /// shown — said, so the agent knows what to read to its end when a field
+    /// stays off.
+    pub scroll_boxes: Vec<FormScrollBox>,
+}
+
+/// A scrollable box not yet read to its end: its handle and its first words.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FormScrollBox {
+    pub handle: String,
+    pub label: String,
 }
 
 /// A pressable thing the read could not name a kind for: its handle, its own
@@ -413,6 +430,8 @@ pub struct FillResult {
     pub options: Vec<String>,
     /// The page's own calendar, when a date could not be picked on it.
     pub widget: Option<FormWidget>,
+    /// What the page says about the field, when it was off.
+    pub hint: String,
 }
 
 /// A calendar the fill could not pick a day on, as the page shows it: its
@@ -603,6 +622,9 @@ fn field_line(field: &FormField) -> String {
     if field.read_only {
         line.push_str(" (직접 못 씀)");
     }
+    if !field.hint.is_empty() {
+        line.push_str(&format!(" — 안내: {}", field.hint));
+    }
     if !field.error.is_empty() {
         line.push_str(&format!(" ⚠ {}", field.error));
     }
@@ -664,6 +686,17 @@ pub fn fields_lines(read: &FormRead) -> String {
         lines.push(format!(
             "종류를 모르는 조작: {} — click 뒤 fields로 다시 읽기",
             things.join(" · ")
+        ));
+    }
+    if !read.scroll_boxes.is_empty() {
+        let boxes: Vec<String> = read
+            .scroll_boxes
+            .iter()
+            .map(|one| format!("{} 「{}」", one.handle, one.label))
+            .collect();
+        lines.push(format!(
+            "끝까지 안 내린 스크롤 상자: {} — 꺼진 칸이 있으면 끝까지 내려 보고 fields로 다시 읽기",
+            boxes.join(" · ")
         ));
     }
     if !read.sealed_frames.is_empty() {
@@ -732,6 +765,9 @@ pub fn fill_lines(report: &FillReport) -> String {
             line.push_str(&format!(" = {}", result.now.said()));
         } else {
             line.push_str(&format!(": {}", result.status.said()));
+            if !result.hint.is_empty() {
+                line.push_str(&format!(" — 안내: {}", result.hint));
+            }
             if result.status == FillStatus::Mismatch {
                 line.push_str(&format!(" ({})", result.now.said()));
             }
