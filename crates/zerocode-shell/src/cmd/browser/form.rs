@@ -81,29 +81,30 @@ const zcGroupHandle = (first) => {
 // The words just before an element, in its own box and the few around it,
 // after any field that comes between and outside another field's label —
 // the caption a page writes beside a field without tying it to the field.
-const zcWordsBefore = (el, request) => {
+const zcWordsBeforeAt = (el, request) => {
   const doc = el.ownerDocument;
   const controls = request.controls.join(",");
   const skip = "select, textarea, button, option, script, style, template, [role=option], [role=listbox]";
   let scope = el.parentElement;
   for (let level = 0; scope && level < request.captionDepth; level += 1, scope = scope.parentElement) {
     const walker = doc.createTreeWalker(scope, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
-    let last = "";
+    let last = "", at = null;
     for (let node = walker.nextNode(); node && node !== el; node = walker.nextNode()) {
       if (node.nodeType === 1) {
-        if (node.matches(controls) && !node.contains(el)) last = "";
+        if (node.matches(controls) && !node.contains(el)) { last = ""; at = null; }
         continue;
       }
       const holder = node.parentElement;
       if (holder && holder.closest(skip)) continue;
       const label = holder && holder.closest("label");
       if (label && label.control && label.control !== el) continue;
-      if (/[\p{L}\p{N}]/u.test(node.nodeValue)) last = node.nodeValue;
+      if (/[\p{L}\p{N}]/u.test(node.nodeValue)) { last = node.nodeValue; at = node; }
     }
-    if (last.trim()) return last;
+    if (last.trim()) return { text: last, node: at };
   }
-  return "";
+  return { text: "", node: null };
 };
+const zcWordsBefore = (el, request) => zcWordsBeforeAt(el, request).text;
 // The words a field has to itself under a header's cell or a term's
 // definition: those before it in the outermost box inside the cell that
 // holds no other field. A field straight in the cell has none.
@@ -203,6 +204,9 @@ const zcDrawnOptions = (el, request) => {
     .map((node) => String(node.getAttribute("aria-controls") || node.getAttribute("aria-owns") || ""))
     .join(" ").split(/\s+/).filter(Boolean);
   const lists = ids.map((id) => doc.getElementById(id)).filter(Boolean);
+  // A button that opens a list with no ARIA tie to it opens the one beside it.
+  const beside = !lists.length && zcListButton(el) ? zcListBeside(el, request) : null;
+  if (beside) lists.push(beside);
   const found = [];
   for (const scope of lists.length ? lists : [doc]) {
     for (const option of scope.querySelectorAll(request.options.join(","))) {
@@ -219,6 +223,39 @@ const zcDrawnOptions = (el, request) => {
 const zcListBeside = (el, request) => el.parentElement
   ? [...el.parentElement.children].find((child) => child !== el && child.matches(request.lists.join(","))) || null
   : null;
+// A button the page says opens a list (`aria-haspopup="listbox"`) that is no input and no
+// combobox of its own: a select drawn by hand, read as a field. A button that opens a menu is no such thing.
+const zcListButton = (el) => String(el.getAttribute("aria-haspopup") || "").trim().toLowerCase() === "listbox"
+  && zcFormTag(el) !== "input" && zcFormRole(el) !== "combobox";
+// The items of the list such a button opens, drawn now or not: the list it controls, else the one beside
+// it; with neither, the options the page draws.
+const zcPopupChoices = (el, request) => {
+  const doc = el.ownerDocument;
+  const owned = String(el.getAttribute("aria-controls") || el.getAttribute("aria-owns") || "")
+    .split(/\s+/).filter(Boolean).map((id) => doc.getElementById(id)).filter(Boolean);
+  const list = owned[0] || zcListBeside(el, request);
+  if (!list) return zcDrawnOptions(el, request);
+  const byRole = [...list.querySelectorAll(request.options.join(","))];
+  const items = byRole.length ? byRole : [...list.children].filter((item) => item.matches(request.listItems.join(",")));
+  return items.filter((item) => item.getAttribute("aria-disabled") !== "true")
+    .map((item) => ({ el: item, words: zcChoiceWords(item, request.wordCap),
+      value: String(item.getAttribute("data-value") || ""), selected: item.getAttribute("aria-selected") === "true" }));
+};
+// What names such a button: the elements that label it other than itself, its ARIA name, its labels —
+// never the value it shows, which is its own words.
+const zcPopupName = (el) => {
+  const doc = el.ownerDocument;
+  const by = String(el.getAttribute("aria-labelledby") || "").split(/\s+/).filter((id) => id && id !== el.id)
+    .map((id) => doc.getElementById(id)).filter(Boolean).map((node) => node.textContent).join(" ");
+  if (by.trim()) return by;
+  const aria = el.getAttribute("aria-label");
+  if (aria && aria.trim()) return aria;
+  for (const label of el.labels || []) {
+    const words = zcLabelWords(label);
+    if (words.trim()) return words;
+  }
+  return "";
+};
 // The kind of field an element is, or null for one that is no field: HTML's
 // input type, a select, a textarea, an editable region, ARIA's widgets. A
 // radio input stands for its group; an input inside a combobox, for the
@@ -236,9 +273,71 @@ const zcFieldKind = (el, request) => {
   if (tag === "textarea") return "textarea";
   if (role === "checkbox" || role === "switch") return "checkbox";
   if (role === "radiogroup") return el.querySelector('input[type="radio"]') ? null : "radio";
-  if (role === "combobox") return "combobox";
+  if (role === "combobox" || zcListButton(el)) return "combobox";
   if (el.isContentEditable) return "text";
   return el.hasAttribute("tabindex") && zcListBeside(el, request) ? "dropdown" : null;
+};
+// The words between two elements — what a heading and the group under it have between them —
+// outside every control and every box the page does not draw.
+const zcWordsAfter = (from, to) => {
+  const doc = to.ownerDocument;
+  const range = doc.createRange();
+  range.setStartAfter(from);
+  range.setEndBefore(to);
+  const common = range.commonAncestorContainer;
+  const root = common.nodeType === 1 ? common : common.parentElement;
+  const skip = "select, textarea, button, option, script, style, template, [role=option], [role=listbox]";
+  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode: (node) => {
+    const holder = node.parentElement;
+    return range.intersectsNode(node) && holder && !holder.closest(skip) && zcDrawn(holder)
+      && /[\p{L}\p{N}]/u.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+  } });
+  const words = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) words.push(node.nodeValue.replace(/\s+/g, " ").trim());
+  return words.join(" ");
+};
+// The smallest box that holds both an element and a node.
+const zcCommonBox = (node, other) => {
+  let up = node.nodeType === 1 ? node : node.parentElement;
+  while (up && !up.contains(other)) up = up.parentElement;
+  return up;
+};
+// The heading just above a group: the nearest one before it in the region around it, with no
+// field between them.
+const zcHeadingBefore = (first, request) => {
+  const around = first.closest(request.field.regions.join(","));
+  const root = around || first.ownerDocument.body;
+  const headings = request.field.headings.join(",");
+  const controls = request.controls.join(",");
+  const walker = first.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  let found = null;
+  for (let node = walker.nextNode(); node && node !== first; node = walker.nextNode()) {
+    if (node.matches(headings) && !node.contains(first) && zcDrawn(node)) found = node;
+    else if (node.matches(controls) && !node.contains(first) && zcFieldKind(node, request)) found = null;
+  }
+  return found;
+};
+// A group of radios is named by its title — the name ARIA gives it, the legend of its fieldset,
+// else the heading just above it when the words before the group stand under that heading — and
+// the sentence between the title and the group is a note about it, not its name. A caption in a
+// box of its own, that the heading does not share, stays the name.
+const zcGroupTitle = (first, group, request) => {
+  const fieldset = first.closest("fieldset");
+  const legend = fieldset && fieldset.querySelector("legend");
+  const holder = group || first.closest("[role=radiogroup]");
+  const explicit = (holder && zcNameOf(holder)) || (legend && legend.textContent) || "";
+  const heading = zcHeadingBefore(first, request);
+  const between = heading ? zcWordsAfter(heading, first) : "";
+  if (explicit.trim()) {
+    return { name: explicit, note: between.trim() && zcFold(between) !== zcFold(explicit) ? between : "" };
+  }
+  const asked = zcCaption(first, request);
+  const near = heading ? zcWordsBeforeAt(first, request) : { text: "", node: null };
+  const box = near.node && zcFold(near.text) === zcFold(asked) ? zcCommonBox(near.node, first) : null;
+  if (box && box.contains(heading) && zcLabelWords(heading).trim()) {
+    return { name: zcLabelWords(heading), note: heading.contains(near.node) ? "" : between };
+  }
+  return { name: asked, note: "" };
 };
 // One field, read: the element it is pressed and written through, its
 // choices (each with its element), what it holds, and its words.
@@ -265,9 +364,10 @@ const zcRead = (el, request) => {
     record.required = record.required || radios.some((radio) => radio.required);
     record.disabled = radios.length > 0 && radios.every(zcOff);
     record.handle = group ? zcHandleOf(group) : zcGroupHandle(first);
-    const legend = first.closest("fieldset") && first.closest("fieldset").querySelector("legend");
-    record.caption = (group && zcNameOf(group)) || (legend && legend.textContent) || zcCaption(first, request);
+    const titled = zcGroupTitle(first, group, request);
+    record.caption = titled.name;
     record.label = record.caption;
+    if (titled.note.trim()) record.note = titled.note;
     return record;
   }
   record.handle = zcHandleOf(el);
@@ -286,9 +386,11 @@ const zcRead = (el, request) => {
     record.value = zcWords(el.innerText || el.textContent || "", request.valueCap);
   } else if (kind === "combobox") {
     const typed = zcFormTag(el) === "input" ? el : el.querySelector("input");
-    record.choices = zcDrawnOptions(el, request);
+    record.choices = zcListButton(el) ? zcPopupChoices(el, request) : zcDrawnOptions(el, request);
     record.value = (typed && typed.value)
       || zcWords((typed === el ? el.parentElement : el).innerText || "", request.valueCap);
+    // Whether its list is open, when the page says so.
+    if (el.hasAttribute("aria-expanded")) record.open = el.getAttribute("aria-expanded") === "true";
   } else if (!record.masked) {
     record.value = ["input", "textarea"].includes(zcFormTag(el)) ? String(el.value) : String(el.innerText || "");
   }
@@ -296,8 +398,11 @@ const zcRead = (el, request) => {
   // A checkbox the page draws itself is named by its own words (ARIA's
   // name from content), before any caption around it.
   const content = kind === "checkbox" && zcFormTag(el) !== "input" ? zcWords(el.innerText || "", cap) : "";
-  record.label = zcNameOf(el) || content || record.caption || record.placeholder
-    || String(el.getAttribute("name") || "");
+  // A button that opens a list shows its value in its own words, so what stands beside it names
+  // it; its own words are the last it is named by.
+  const opens = zcListButton(el);
+  record.label = (opens ? zcPopupName(el) : zcNameOf(el)) || content || record.caption || record.placeholder
+    || String(el.getAttribute("name") || "") || (opens ? zcWords(el.innerText || el.textContent || "", cap) : "");
   return record;
 };
 // The words between two fields side by side, and after the last of them in
@@ -422,13 +527,17 @@ const zcFieldOut = (record, request) => {
     required: record.required, disabled: record.disabled, readOnly: record.readOnly,
     masked: record.masked, placeholder: zcWords(record.placeholder, cap), error: zcWords(record.error, cap) };
   if (record.maxLength !== null) out.maxLength = record.maxLength;
+  if (typeof record.open === "boolean") out.open = record.open;
+  if (record.ordinal) out.ordinal = true;
   if (record.disabled || record.readOnly) {
     const hint = zcWords(zcHintOf(record, request), cap);
     if (hint) out.hint = hint;
   }
+  if (!out.hint && record.note) out.hint = zcWords(record.note, cap);
   return out;
 };
-const zcEmpty = (out) => out.value === "" || out.value === false;
+// A field whose value the door never reads (a password) is not empty: it is unread.
+const zcEmpty = (out) => !out.masked && (out.value === "" || out.value === false);
 // A net under every rule: what a person can press or focus inside the boxes
 // the fields stand in that no field, choice or button stands for — an
 // element that takes focus or a click of its own, one of ARIA's pressable
@@ -505,6 +614,78 @@ const zcScrollBoxes = (records, scopes, docs, request) => {
   }
   return boxes;
 };
+// The words an item shows besides its fields — a heading, a row header, a legend, a strong
+// first, then the rest in the order the page has them — each a piece of text with letters in
+// it, outside every control and every box the page does not draw, and never the words of the
+// fields' own names.
+const zcItemPieces = (item, fields) => {
+  const skip = "select, textarea, button, option, script, style, template, [role=option], [role=listbox]";
+  const own = new Set();
+  const names = new Set(fields.map((record) => zcFold(record.label)));
+  for (const record of fields) {
+    own.add(record.el);
+    for (const label of record.el.labels || []) own.add(label);
+    const wrapping = record.el.closest("label");
+    if (wrapping) own.add(wrapping);
+  }
+  const heading = "h1, h2, h3, h4, h5, h6, [role=heading], th, legend, summary, figcaption, dt, strong, b";
+  const named = [], rest = [];
+  const walker = item.ownerDocument.createTreeWalker(item, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => node.nodeType === 1 && (own.has(node) || node.matches(skip) || !zcDrawn(node))
+      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.nodeType !== 3 || !/\p{L}/u.test(node.nodeValue)) continue;
+    const words = zcWords(node.nodeValue, 60);
+    if (!words || names.has(zcFold(words))) continue;
+    const head = node.parentElement && node.parentElement.closest(heading);
+    (head && item.contains(head) ? named : rest).push(words);
+  }
+  return named.concat(rest);
+};
+// The title of the item each of several fields stands in — the child of the box that holds
+// them all that holds it — by the first piece of words that differs from one item to the next;
+// null when two fields share an item or no piece tells the items apart.
+const zcItemTitles = (list) => {
+  let root = list[0].el.parentElement;
+  while (root && !list.every((record) => root.contains(record.el))) root = root.parentElement;
+  if (!root) return null;
+  const items = list.map((record) => {
+    let item = record.el;
+    while (item && item.parentElement !== root) item = item.parentElement;
+    return item;
+  });
+  if (items.some((item) => !item) || new Set(items).size !== items.length) return null;
+  const pieces = items.map((item) => zcItemPieces(item, list));
+  const rounds = Math.min(Math.max(...pieces.map((one) => one.length)), 6);
+  for (let rank = 0; rank < rounds; rank += 1) {
+    const at = pieces.map((one) => one[rank] || "");
+    if (at.every(Boolean) && new Set(at.map(zcFold)).size === at.length) return at;
+  }
+  return null;
+};
+// Fields of one read that go by the same words under one heading are told apart by the title of the
+// item each stands in (`<title>: <words>`), else by their number, which says it is only an order.
+const zcTellApart = (records, request) => {
+  const groups = new Map();
+  for (const record of records) {
+    if (!zcFold(record.label)) continue;
+    const key = [zcFold(record.label), zcFold(zcNear(record.el, request.field))].join("\u001f");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(record);
+  }
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const titles = zcItemTitles(list);
+    list.forEach((record, at) => {
+      if (titles) {
+        record.label = titles[at] + ": " + String(record.label).trim();
+      } else {
+        record.label = String(record.label).trim() + " #" + (at + 1);
+        record.ordinal = true;
+      }
+    });
+  }
+};
 // Every field the page draws, in its order, frames after the page, and the
 // buttons that stand with them.
 const zcFormFields = (request) => {
@@ -528,15 +709,26 @@ const zcFormFields = (request) => {
     }
   }
   zcNumberRuns(records);
+  zcTellApart(records, request);
   const scopes = new Set(records.map((record) => record.el.closest(request.scopes.join(","))
     || record.el.ownerDocument.body));
+  // A step with no field of its own — a review, a confirmation, a modal that asks yes or no — still
+  // has its buttons: the drawn forms, dialogs and main regions that hold no field and stand in no
+  // box a field stands in are read for them too, and a page with none of these is read whole.
+  for (const { doc } of docs.open) {
+    for (const box of doc.querySelectorAll(request.scopes.join(","))) {
+      if (!zcDrawn(box) || [...scopes].some((scope) => scope === box || scope.contains(box) || box.contains(scope))) continue;
+      scopes.add(box);
+    }
+  }
+  if (!scopes.size) for (const { doc } of docs.open) if (doc.body) scopes.add(doc.body);
   const actions = [];
   const named = new Set();
   const pressed = [];
   for (const { doc, prefix } of docs.open) {
     for (const el of doc.querySelectorAll(request.actions.join(","))) {
       if (actions.length >= request.actionCap) break;
-      if (!zcDrawn(el) || zcFormRole(el) === "combobox") continue;
+      if (!zcDrawn(el) || zcFormRole(el) === "combobox" || zcListButton(el)) continue;
       if (![...scopes].some((scope) => scope.contains(el))) continue;
       const label = zcWords(zcMarkName(el), request.wordCap);
       const handle = prefix + zcHandleOf(el);
@@ -1088,6 +1280,7 @@ const zcFillWrite = (entries, expect, watch) => {
 // it held is gone — and the form of the document that stands now.
 const zcFillRead = (held, epoch) => {
   const replaced = zcEpoch() !== epoch;
+  const after = zcFormFields(request);
   const results = held.map((one) => {
     const out = one.out;
     if (one.status) {
@@ -1110,7 +1303,9 @@ const zcFillRead = (held, epoch) => {
     out.status = zcHolds(now, one.value) ? (one.wrote ? "set" : "same") : "mismatch";
     return out;
   });
-  const after = zcFormFields(request);
+  // A field is said by the name the whole read gave it (two of one name are told apart there).
+  const named = new Map(after.records.map((record) => [record.handle, zcWords(record.label, request.wordCap)]));
+  for (const result of results) if (named.has(result.handle)) result.label = named.get(result.handle);
   const left = after.fields.filter((field) => (field.required && zcEmpty(field)) || field.error);
   return { results, left, stale: false, fingerprint: after.print, actions: after.actions };
 };

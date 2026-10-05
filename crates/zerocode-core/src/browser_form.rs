@@ -23,7 +23,9 @@ use serde::{Deserialize, Serialize};
 
 /// The elements a page's fields are, as CSS — HTML's controls, an editable
 /// region, and the ARIA widgets a page draws its own checkboxes, switches,
-/// radio groups and dropdowns with. One table: a new kind of field is a row.
+/// radio groups and dropdowns with, and a button that says it opens a list
+/// (`aria-haspopup="listbox"`: a select drawn by hand). One table: a new kind
+/// of field is a row.
 pub const BROWSER_FORM_CONTROLS: &[&str] = &[
     "input",
     "select",
@@ -34,6 +36,7 @@ pub const BROWSER_FORM_CONTROLS: &[&str] = &[
     "[role=switch]",
     "[role=radiogroup]",
     "[role=combobox]",
+    "[aria-haspopup=listbox]",
     "[tabindex]",
 ];
 
@@ -174,8 +177,17 @@ pub struct FormField {
     /// What the page says about a field that is off or cannot be written —
     /// its `aria-describedby`, its title, the words beside its label in the
     /// nearest box that holds no other field — so the agent learns what
-    /// switches it on. Empty for a field that is on.
+    /// switches it on; and, for a group of radios, the sentence between its
+    /// title and the group. Empty for a field that is on and has no note.
     pub hint: String,
+    /// Whether the list a button opens is open, when the page says
+    /// (`aria-expanded`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open: Option<bool>,
+    /// The number in the field's name tells it from fields of the same name
+    /// and nothing more: no words of the page set them apart.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ordinal: bool,
 }
 
 /// A button beside the fields.
@@ -692,6 +704,14 @@ fn field_line(field: &FormField) -> String {
     } else {
         line.push_str(&format!(" = {}", field.value.said()));
     }
+    match field.open {
+        Some(true) => line.push_str(" (열림)"),
+        Some(false) => line.push_str(" (닫힘)"),
+        None => {}
+    }
+    if field.ordinal {
+        line.push_str(" (같은 이름이라 번호만 붙임)");
+    }
     if !field.placeholder.is_empty() && field.placeholder != field.label {
         line.push_str(&format!(" 예: {}", field.placeholder));
     }
@@ -719,13 +739,24 @@ fn field_line(field: &FormField) -> String {
 #[must_use]
 pub fn fields_lines(read: &FormRead) -> String {
     let required = read.fields.iter().filter(|field| field.required).count();
+    // A secret's value is never read: it is no empty field, only one unread.
     let empty = read
         .fields
         .iter()
-        .filter(|field| field.required && field.value.is_empty())
+        .filter(|field| field.required && !field.masked && field.value.is_empty())
         .count();
+    let unread = read
+        .fields
+        .iter()
+        .filter(|field| field.required && field.masked)
+        .count();
+    let unread = if unread > 0 {
+        format!(", 값을 읽지 않는 필수 {unread}")
+    } else {
+        String::new()
+    };
     let mut lines = vec![format!(
-        "양식 칸 {}개 (필수 {required}, 비어 있는 필수 {empty})",
+        "양식 칸 {}개 (필수 {required}, 비어 있는 필수 {empty}{unread})",
         read.fields.len()
     )];
     let mut section: Option<&str> = None;
@@ -813,10 +844,12 @@ fn widget_words(widget: &FormWidget) -> String {
 
 /// What is left of a form after a fill, one field to a line.
 fn left_line(field: &FormField) -> String {
-    let why = if field.error.is_empty() {
-        "필수, 비어 있음".to_string()
-    } else {
+    let why = if !field.error.is_empty() {
         field.error.clone()
+    } else if field.masked {
+        "값을 읽지 않음".to_string()
+    } else {
+        "필수, 비어 있음".to_string()
     };
     format!(
         "  {} · {} · {} — {why}",
