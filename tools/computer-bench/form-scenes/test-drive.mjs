@@ -306,6 +306,26 @@ const TWINS_OPEN = await scene("twins-open", `<!doctype html><html lang="en"><me
   document.getElementById("go").addEventListener("click", () => { window.__sceneResult = { lines: document.querySelectorAll("input").length }; });
 </script>`, [{ says: "Pen box", value: "2" }], { lines: 4 });
 
+/* A button that a field's own value turns on — the "Fewer" beside a count that was 1 and is now 3 — is that field's, not the button that moves the step on: the door says
+ * whose it is (`beside`), and the driver does not take it for the button the fill turned on. */
+const STEP_ITEM = (name) => `<li><p class="name">${name}</p><div class="step"><button type="button" class="less" aria-label="Fewer" disabled>-</button><input class="n" aria-label="Count" value="1"><button type="button" class="more" aria-label="More">+</button></div></li>`;
+const STEPPER = await scene("stepper", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <ul id="list">${STEP_ITEM("Ink bottle")}${STEP_ITEM("Pen box")}</ul>
+  <button type="button" id="go">Order</button>
+</form>
+<script>
+  const rows = [...document.querySelectorAll("#list li")];
+  const show = (row) => { row.querySelector(".less").disabled = Number(row.querySelector(".n").value) <= 1; };
+  for (const row of rows) {
+    row.querySelector(".n").addEventListener("input", () => show(row));
+    row.querySelector(".less").addEventListener("click", () => { row.querySelector(".n").value = Number(row.querySelector(".n").value) - 1; show(row); });
+    row.querySelector(".more").addEventListener("click", () => { row.querySelector(".n").value = Number(row.querySelector(".n").value) + 1; show(row); });
+  }
+  document.getElementById("go").addEventListener("click", () => {
+    window.__sceneResult = { ink: rows[0].querySelector(".n").value, pen: rows[1].querySelector(".n").value };
+  });
+</script>`, [{ says: "Ink bottle: Count", value: "3" }, { says: "Pen box: Count", value: "2" }], { ink: "3", pen: "2" });
+
 /* A field the page answers about after a press, with a button of its own beside it: the door says whose the button is, and the driver presses it once and
  * reads the form again — the press that ends the form is made again after it. */
 const OWN = await scene("own", `<!doctype html><html lang="en"><meta charset="utf-8"><form id="f" onsubmit="return false">
@@ -343,7 +363,7 @@ const DRAWN = await scene("drawn", `<!doctype html><html lang="en"><meta charset
 const out = join(root, "rows.json");
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -485,6 +505,14 @@ await test("a driver that finds one item answered to by two fields of one kind s
     assert(one.roundTrips <= 2, `and stops before it presses anything (${road})`, { roundTrips: one.roundTrips });
   }
   return row("twins-open", "verbs").stuck;
+});
+
+await test("a driver does not take a button its own field turned on for the button that moves the step", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("stepper", road);
+    assert(one && one.ok && one.pass, `the ${road} road leaves the counts it wrote and presses the order button`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return JSON.stringify(row("stepper", "verbs").result);
 });
 
 await test("a driver presses the one button beside a field the door says has new text after a press, once, and then makes the press again", () => {
