@@ -1273,7 +1273,7 @@ pub fn usage() -> String {
         "  zerocode-browser fields <label> [--json]",
         "                                             양식의 모든 칸을 한 번에: 손잡이·종류·라벨·값·선택지·필수, 그리고 버튼 (화면 밖·같은 출처 틀 안의 칸도)",
         "  zerocode-browser fill <label> --value-stdin",
-        "                                             stdin의 {\"손잡이\": 값, …}을 한 번에 채우고 칸마다 다시 읽어 확인 — 글·고르기·체크·날짜·직접 그린 목록; 늦게 뜨는 칸은 다시 시도; 비밀·파일 칸은 거절",
+        "                                             stdin의 {\"손잡이\": 값, …}을 한 번에 채우고 칸마다 다시 읽어 확인 — 글·고르기·체크·날짜·직접 그린 목록·눌림 단추 묶음(칩: 옵션 글의 목록, 상태가 다른 단추만 누름); 늦게 뜨는 칸은 다시 시도; 비밀·파일 칸은 거절",
         "  zerocode-browser console <label> [--since N] [--level error|warn|all]",
         "                                             페이지 콘솔: seq·레벨·시각·문장 (--since 로 이어 읽기)",
         "  zerocode-browser network <label> [--since N] [--failed]",
