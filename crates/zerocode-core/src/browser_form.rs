@@ -69,6 +69,24 @@ pub const BROWSER_FORM_CAPTION_DEPTH: usize = 3;
 /// How deep a read goes into frames inside frames.
 pub const BROWSER_FORM_FRAME_DEPTH: usize = 3;
 
+/// The regions a page announces its changes in without a press — ARIA's alert
+/// and status roles and its live regions: the text that is new in one of them
+/// after a write or a press is the page speaking, wherever it stands.
+pub const BROWSER_FORM_LIVE: &[&str] = &[
+    "[role=alert]",
+    "[role=status]",
+    "[aria-live=assertive]",
+    "[aria-live=polite]",
+];
+
+/// At most this many pieces of new text are said beside one field, and as
+/// notices of the form.
+pub const BROWSER_FORM_FRESH_CAP: usize = 3;
+
+/// The most pieces of text one field's box is read for, before a write or a
+/// press and after it.
+pub const BROWSER_FORM_PIECE_CAP: usize = 60;
+
 /// The lists a dropdown drawn with no ARIA keeps beside the focusable box
 /// that opens it — a field of its own kind (`dropdown`), its items the
 /// choices.
@@ -188,6 +206,16 @@ pub struct FormField {
     /// and nothing more: no words of the page set them apart.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub ordinal: bool,
+    /// The text that stands new in the box around the field since before a
+    /// write or a press (read after the page settled) — said as the page wrote
+    /// it, never as an error: the door cannot tell one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fresh: Vec<String>,
+    /// The page marked the field invalid (`aria-invalid`) and, after a write or a
+    /// press, said nothing about why: no linked words, none new beside it,
+    /// no notice.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub silent: bool,
 }
 
 /// A button beside the fields.
@@ -448,6 +476,10 @@ pub struct FillResult {
     pub widget: Option<FormWidget>,
     /// What the page says about the field, when it was off.
     pub hint: String,
+    /// The text new beside the field after the write, as it is on a field of a read.
+    pub fresh: Vec<String>,
+    /// The page marked the field invalid and said nothing why.
+    pub silent: bool,
 }
 
 /// A calendar the fill could not pick a day on, as the page shows it: its
@@ -484,6 +516,9 @@ pub struct FillPass {
     /// when the page stood still first, `None` when the pass wrote nothing and
     /// waited for nothing.
     pub moving: Option<bool>,
+    /// The text new in the page's live regions (alert, status) that stands
+    /// beside no field — a notice the write brought.
+    pub alerts: Vec<String>,
 }
 
 /// A fill's passes, kept: each entry's latest outcome, and the page's word
@@ -494,6 +529,7 @@ pub struct FillLedger {
     results: Vec<Option<FillResult>>,
     left: Vec<FormField>,
     actions: Vec<FormAction>,
+    alerts: Vec<String>,
     moving: bool,
     settled: bool,
     passes: usize,
@@ -510,6 +546,7 @@ impl FillLedger {
             results,
             left: Vec::new(),
             actions: Vec::new(),
+            alerts: Vec::new(),
             moving: false,
             settled: false,
             passes: 0,
@@ -589,6 +626,7 @@ impl FillLedger {
             results,
             left: self.left,
             actions: self.actions,
+            alerts: self.alerts,
             moving: self.moving,
             settled: self.settled,
             passes: self.passes,
@@ -607,6 +645,8 @@ pub struct FillReport {
     pub left: Vec<FormField>,
     /// The buttons the form has after the last pass.
     pub actions: Vec<FormAction>,
+    /// The notices the page's live regions made after the last pass that waited for it.
+    pub alerts: Vec<String>,
     /// The page was still changing when the last pass that waited for it read
     /// it: the settle ran out of time (or the page went to another document),
     /// so nothing here is said to be final.
@@ -678,6 +718,58 @@ impl FillReport {
     pub fn all_took(&self) -> bool {
         !self.stale && self.took() == self.results.len()
     }
+}
+
+/// What the page says of itself once a press by selector has been made and
+/// the page has settled: the form's fingerprint, its buttons, the fields
+/// that carry something to say (an error, a value still wanted, text new beside
+/// them) and the notices its live regions made.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PressRead {
+    pub fingerprint: String,
+    pub actions: Vec<FormAction>,
+    pub noted: Vec<FormField>,
+    pub alerts: Vec<String>,
+}
+
+/// A press's read set against the form the agent knew before it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PressAfter {
+    pub read: PressRead,
+    /// Whether the form is no longer the one the agent read.
+    pub changed: Option<bool>,
+    /// The buttons the agent's read had that the form no longer draws.
+    pub hidden: Vec<FormAction>,
+    /// The page was still changing when it was read.
+    pub moving: bool,
+    /// The page was waited for before it was read.
+    pub settled: bool,
+}
+
+impl PressAfter {
+    /// The read set against the form the agent knew (its fingerprint and
+    /// buttons).
+    #[must_use]
+    pub fn against(
+        read: PressRead,
+        known: Option<&str>,
+        buttons: &[FormAction],
+        moving: bool,
+    ) -> Self {
+        let _ = (known, buttons);
+        Self {
+            read,
+            moving,
+            ..Self::default()
+        }
+    }
+}
+
+/// The words after a press the agent made in a form it had read.
+#[must_use]
+pub fn press_lines(_after: &PressAfter) -> String {
+    String::new()
 }
 
 /// The choices a line shows, and how many more there are.

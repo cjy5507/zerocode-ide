@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "./playwright-chromium.mjs";
 import { rustList, rustNumber, rustText } from "./rust-source.mjs";
 import { FORM_REQUEST, evalFormScript, fieldsScript, fillPasses, fillReadScript, fillWriteScript } from "./browser-scripts.mjs";
+import * as twin from "./browser-scripts.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DOOR = await readFile(resolve(UI, "../crates/zerocode-shell/src/cmd/browser.rs"), "utf8");
@@ -1835,6 +1836,109 @@ await test("fields_of_one_name_are_told_apart_by_the_title_of_the_item_each_stan
     assert(filled.results[0].label === "Tomato 500g: Qty" && filled.results[1].label === "Note #2", "a fill says the name the read gave", filled.results);
     return `${read.fields.length} fields`;
   } finally { await same.close(); }
+});
+
+/* What a write or a press brings (t-41592): the text that stands new in the box around a field
+ * — a check's verdict written beside it and tied to it by nothing — is said beside that field as
+ * the page wrote it, never as an error; a field the page marks invalid and says nothing of is told
+ * so; the notice a live region made is said beside no field; words the page tied to a field are its
+ * error and are not said again as new. A press says the same, in a form its agent read. */
+const BRINGS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div class="row"><label for="mail">Email</label> <input id="mail"><span class="hint">We never share it.</span></div>
+  <div class="row"><label for="age">Age</label> <input id="age" aria-invalid="false"></div>
+  <div class="row"><label for="code">Code</label> <input id="code"></div>
+  <div class="row"><label for="tip">Tip</label> <input id="tip" aria-describedby="tip-why"><span id="tip-why"></span></div>
+  <div id="toast" role="status"></div>
+</form>
+<script>
+  const mail = document.getElementById("mail");
+  mail.addEventListener("change", () => {
+    const old = mail.parentElement.querySelector(".err");
+    if (old) old.remove();
+    if (!mail.value.includes("@")) {
+      const err = document.createElement("span"); err.className = "err"; err.textContent = "Enter a valid email";
+      mail.parentElement.append(err);
+    }
+  });
+  document.getElementById("age").addEventListener("change", (event) => {
+    event.target.setAttribute("aria-invalid", String(Number(event.target.value) < 18));
+  });
+  document.getElementById("code").addEventListener("change", () => { document.getElementById("toast").textContent = "Code sent again"; });
+  document.getElementById("tip").addEventListener("change", (event) => {
+    const bad = Number(event.target.value) < 0;
+    event.target.setAttribute("aria-invalid", String(bad));
+    document.getElementById("tip-why").textContent = bad ? "A tip cannot be negative" : "";
+  });
+</script>`;
+await test("a_fill_says_the_text_that_appeared_beside_a_field_it_wrote_and_a_notice_the_page_made", async () => {
+  const brings = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await brings.setContent(BRINGS);
+    const before = await readFields(brings);
+    const filled = await fillBundle(brings, { "#mail": "kim", "#age": "12", "#code": "1", "#tip": "-5" }, before.fingerprint);
+    const result = (handle) => filled.results.find((one) => one.handle === handle);
+    assert(JSON.stringify(result("#mail").fresh) === JSON.stringify(["Enter a valid email"]),
+      "the text that appeared beside the field is said — not the sentence that was always there", result("#mail"));
+    assert(result("#age").silent === true && result("#age").error === "aria-invalid" && !result("#age").fresh,
+      "a field marked invalid with nothing said about why is told so", result("#age"));
+    assert(!result("#code").fresh && !result("#code").silent, "a field with nothing new says nothing", result("#code"));
+    assert(JSON.stringify(filled.alerts) === JSON.stringify(["Code sent again"]),
+      "the notice a live region made is said, beside no field", filled.alerts);
+    assert(result("#tip").error === "A tip cannot be negative" && !result("#tip").fresh && !result("#tip").silent,
+      "words the page tied to the field are its error, not said a second time as new text", result("#tip"));
+    assert(filled.left.some((one) => one.handle === "#age" && one.silent === true), "and a field that is left carries it too", filled.left);
+    const again = await fillBundle(brings, { "#mail": "kim@example.com" });
+    assert(!again.results[0].fresh && JSON.stringify(again.alerts) === JSON.stringify([]),
+      "a value the page takes brings nothing — and what was said is not new twice", again);
+    return JSON.stringify(result("#mail").fresh);
+  } finally { await brings.close(); }
+});
+
+const PRESSES = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div class="row"><label for="mail">Email</label> <input id="mail"></div>
+  <div class="row"><label for="phone">Phone</label> <input id="phone"></div>
+  <button type="button" id="next">Next</button>
+  <button type="button" id="idle">Nothing</button>
+  <div id="step2" hidden><div class="row"><label for="city">City</label> <input id="city"></div></div>
+</form>
+<script>
+  const mail = document.getElementById("mail"), phone = document.getElementById("phone");
+  document.getElementById("next").addEventListener("click", () => {
+    const old = mail.parentElement.querySelector(".err");
+    if (old) old.remove();
+    phone.setAttribute("aria-invalid", String(phone.value === ""));
+    if (!mail.value.includes("@")) {
+      const err = document.createElement("span"); err.className = "err"; err.textContent = "Enter a valid email";
+      mail.parentElement.append(err);
+      return;
+    }
+    document.getElementById("step2").hidden = false;
+  });
+</script>`;
+await test("a_press_in_a_known_form_says_what_appeared_beside_its_field_and_a_press_that_moves_on_says_so", async () => {
+  assert(typeof twin.pressInForm === "function", "the stand-in presses as the window does in a form that was read");
+  const form = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await form.setContent(PRESSES);
+    const run = (source) => evalJson(form, source);
+    const read = await readFields(form);
+    const stayed = await twin.pressInForm(run, "#next");
+    assert(stayed.read.fingerprint === read.fingerprint, "the form is the one that was read", stayed.read);
+    const noted = Object.fromEntries(stayed.read.noted.map((one) => [one.handle, one]));
+    assert(JSON.stringify(noted["#mail"]?.fresh) === JSON.stringify(["Enter a valid email"]),
+      "what appeared beside the field is the reason the press did not move on", stayed.read.noted);
+    assert(noted["#phone"]?.silent === true && noted["#phone"].error === "aria-invalid",
+      "a field the page marked invalid and said nothing about is told so", stayed.read.noted);
+    assert(stayed.settle.state === "ready" && stayed.moving === false, "the page was waited for", stayed.settle);
+    const idle = await twin.pressInForm(run, "#idle");
+    assert(idle.read.fingerprint === read.fingerprint && !idle.read.noted.some((one) => one.handle === "#mail")
+      && JSON.stringify(idle.read.alerts) === JSON.stringify([]),
+      "a press that changes nothing brings nothing new — the sentence said before is not new again", idle.read);
+    await fillBundle(form, { "#mail": "kim@example.com" });
+    const moved = await twin.pressInForm(run, "#next");
+    assert(moved.read.fingerprint !== read.fingerprint, "a press that moves the form on brings a form that is not the one read", moved.read);
+    return `${stayed.read.noted.length} noted`;
+  } finally { await form.close(); }
 });
 
 await browser.close();

@@ -23967,6 +23967,159 @@ mod browser_form_fill {
         );
     }
 
+    /// What the read half of a pass is handed: the entries the write held and — when
+    /// the write took what the form's boxes showed before it — that, in one piece.
+    #[tokio::test(start_paused = true)]
+    async fn a_pass_hands_its_read_what_stood_before_the_write() {
+        use zerocode_core::agent_browser::Settle;
+        let mut first = written(true);
+        first.before = json!({ "groups": { "#a": ["3:1c"] }, "live": [] });
+        let (_, log) = pass_through(first, Settle::Ready).await;
+        let handed = log[2].trim_start_matches("read 1760000000000 ");
+        let handed: serde_json::Value = serde_json::from_str(handed).expect("one piece of JSON");
+        assert_eq!(
+            handed,
+            json!({ "held": [{ "handle": "#a" }], "before": { "groups": { "#a": ["3:1c"] }, "live": [] } }),
+            "{log:?}"
+        );
+    }
+
+    /// A press report as the click script answers one, made at the page's
+    /// clock 812.5.
+    fn a_press_at_812() -> cmd::browser::BrowserInputReport {
+        cmd::browser::input_report(
+            json!({ "method": "dom-activation", "pressedAt": 812.5 }),
+            &["dom-activation"],
+        )
+        .expect("a press report")
+    }
+
+    /// One press through `pressed_after` with its four halves faked: what it asked
+    /// of each, in order, and what it answered.
+    async fn press_through(
+        press: Result<cmd::browser::BrowserInputReport, String>,
+        ending: zerocode_core::agent_browser::Settle,
+    ) -> (Result<cmd::browser::form::PressedAfter, String>, Vec<String>) {
+        let log: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (on_before, on_press, on_settle, on_read) =
+            (log.clone(), log.clone(), log.clone(), log.clone());
+        let done = cmd::browser::form::pressed_after(
+            move || {
+                on_before.lock().unwrap().push("before".into());
+                async move {
+                    Ok(cmd::browser::form::PressBefore {
+                        epoch: "1760000000000".into(),
+                        before: json!({ "groups": {} }),
+                    })
+                }
+            },
+            move || {
+                on_press.lock().unwrap().push("press".into());
+                async move { press }
+            },
+            move |epoch, at| {
+                on_settle.lock().unwrap().push(format!("settle {epoch} {at:?}"));
+                async move { settled(ending) }
+            },
+            move |before| {
+                on_read.lock().unwrap().push(format!("read {before}"));
+                async move { Ok(zerocode_core::browser_form::PressRead::default()) }
+            },
+        )
+        .await;
+        let log = log.lock().unwrap().clone();
+        (done, log)
+    }
+
+    /// A press in a form the agent read: the page's text and watch are taken
+    /// before it, the page settles — in the document the press was made in,
+    /// counting from the page's clock at the press — and only then is the form
+    /// read, against what stood before.
+    #[tokio::test(start_paused = true)]
+    async fn a_press_in_a_known_form_is_read_only_after_the_page_has_settled() {
+        use zerocode_core::agent_browser::Settle;
+        let (done, log) = press_through(Ok(a_press_at_812()), Settle::Ready).await;
+        assert_eq!(
+            log,
+            [
+                "before",
+                "press",
+                "settle 1760000000000 Some(812.5)",
+                r##"read {"groups":{}}"##
+            ],
+            "{log:?}"
+        );
+        assert_eq!(done.expect("a press").settle.state, Settle::Ready);
+    }
+
+    /// A press the page refuses ends there: nothing is settled and nothing read.
+    #[tokio::test(start_paused = true)]
+    async fn a_press_the_page_refuses_is_neither_settled_nor_read() {
+        use zerocode_core::agent_browser::Settle;
+        let (done, log) = press_through(
+            Err(cmd::browser::PAGE_TIMED_OUT.to_string()),
+            Settle::Ready,
+        )
+        .await;
+        assert_eq!(log, ["before", "press"], "{log:?}");
+        assert_eq!(done.err(), Some(cmd::browser::PAGE_TIMED_OUT.to_string()));
+    }
+
+    /// A page that did not stand still in the settle's time is read all the same
+    /// — the caller says it is still changing.
+    #[tokio::test(start_paused = true)]
+    async fn a_press_in_a_page_that_does_not_settle_is_read_and_the_settle_says_so() {
+        use zerocode_core::agent_browser::Settle;
+        let (done, log) = press_through(Ok(a_press_at_812()), Settle::NotReady).await;
+        assert_eq!(log.len(), 4, "{log:?}");
+        assert_eq!(done.expect("a press").settle.state, Settle::NotReady);
+    }
+
+    /// A press by selector takes the form road when its pane's agent has read a
+    /// form, and no other: one that has read none is answered as it was, with no
+    /// read of its own.
+    #[test]
+    fn a_click_by_selector_takes_the_form_road_when_its_pane_has_a_known_form() {
+        let road = include_str!("cmd/browser.rs")
+            .split("pub(crate) async fn automate_click(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the click road");
+        for piece in ["known_form(label)", "form::press_in_form(", "press(&pane, selector, None)"] {
+            assert!(road.contains(piece), "the click road lacks `{piece}`:\n{road}");
+        }
+        assert!(
+            road.find("known_form(label)") < road.find("press(&pane, selector, None)"),
+            "the form is asked about before the plain press:\n{road}"
+        );
+    }
+
+    /// The press road in a known form waits for the page by the one settle road
+    /// — no wait of its own — and sets its answer against the form the agent read
+    /// before it, keeping what it leaves unless the form changed.
+    #[test]
+    fn a_press_in_a_known_form_is_set_against_the_form_that_was_read_before_it() {
+        let road = include_str!("cmd/browser/form.rs")
+            .split("pub(crate) async fn press_in_form(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the press road");
+        for piece in [
+            "pressed_after(",
+            "settle_after_press(pane, &epoch, at)",
+            "known_buttons(label)",
+            "PressAfter::against(",
+            "remember_buttons(label, ",
+            "remember_form(label, ",
+        ] {
+            assert!(road.contains(piece), "the press road lacks `{piece}`:\n{road}");
+        }
+        assert!(
+            !road.contains("sleep(") && !road.contains("Duration::from_millis"),
+            "the press road has no wait of its own:\n{road}"
+        );
+    }
+
     /// An eval that names the form pair's object gets `fields()` and
     /// `fill()` before its expression — the expression still inlined, never
     /// the page's own eval — and any other eval carries none of it.

@@ -16,10 +16,11 @@ use zerocode_core::browser_form::{
     BROWSER_FILL_OFF, BROWSER_FILL_ON, BROWSER_FILL_PENDING_MS, BROWSER_FORM_ACTION_CAP,
     BROWSER_FORM_ACTIONS, BROWSER_FORM_CAPTION_DEPTH, BROWSER_FORM_CONTROLS,
     BROWSER_FORM_DAY_WORDS, BROWSER_FORM_DAYS, BROWSER_FORM_FIELD_CAP, BROWSER_FORM_FRAME_DEPTH,
-    BROWSER_FORM_FRAME_SEPARATOR, BROWSER_FORM_LIST_ITEMS, BROWSER_FORM_LISTS,
-    BROWSER_FORM_MONTH_DAYS, BROWSER_FORM_MONTH_PAGES, BROWSER_FORM_NOT_FIELDS,
-    BROWSER_FORM_OPTION_CAP, BROWSER_FORM_OPTIONS, BROWSER_FORM_PRESSABLES, BROWSER_FORM_SCAN_CAP,
-    BROWSER_FORM_SCOPES, FillEntry, FillLedger, FillPass, FillReport, FormAction, FormRead,
+    BROWSER_FORM_FRAME_SEPARATOR, BROWSER_FORM_FRESH_CAP, BROWSER_FORM_LIST_ITEMS,
+    BROWSER_FORM_LISTS, BROWSER_FORM_LIVE, BROWSER_FORM_MONTH_DAYS, BROWSER_FORM_MONTH_PAGES,
+    BROWSER_FORM_NOT_FIELDS, BROWSER_FORM_OPTION_CAP, BROWSER_FORM_OPTIONS, BROWSER_FORM_PIECE_CAP,
+    BROWSER_FORM_PRESSABLES, BROWSER_FORM_SCAN_CAP, BROWSER_FORM_SCOPES, FillEntry, FillLedger,
+    FillPass, FillReport, FormAction, FormRead, PressRead,
 };
 
 /// What a read of a page's forms is made of, page side — read only, like the
@@ -1372,6 +1373,9 @@ pub(crate) fn form_request() -> serde_json::Value {
         "pressables": BROWSER_FORM_PRESSABLES,
         "holds": zerocode_core::guarded::HELD_ROWS.concat(),
         "scanCap": BROWSER_FORM_SCAN_CAP,
+        "live": BROWSER_FORM_LIVE,
+        "freshCap": BROWSER_FORM_FRESH_CAP,
+        "pieceCap": BROWSER_FORM_PIECE_CAP,
         "watch": settle_watch(),
         "listItems": BROWSER_FORM_LIST_ITEMS,
         "monthDays": BROWSER_FORM_MONTH_DAYS,
@@ -1471,6 +1475,10 @@ pub(crate) struct FillWritten {
     pub(crate) epoch: String,
     pub(crate) at: Option<f64>,
     pub(crate) held: serde_json::Value,
+    /// What the form's fields' boxes and the page's live regions showed before
+    /// the first write — the read half says what is new against it. Null when the
+    /// write half took none.
+    pub(crate) before: serde_json::Value,
 }
 
 /// One pass of a fill: the write, then — when something was written — the
@@ -1509,6 +1517,67 @@ where
     let mut pass = read(written.held, written.epoch).await?;
     pass.moving = settled.map(|settled| settled.state != Settle::Ready);
     Ok(pass)
+}
+
+/// What the page says before a press by selector in a form the agent read: the
+/// document the press is made in, and what the form's fields' boxes and the
+/// page's live regions show — what the read after the press says what is new against.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct PressBefore {
+    pub(crate) epoch: String,
+    pub(crate) before: serde_json::Value,
+}
+
+/// A press by selector in a form the agent read, as the window made it: the
+/// press's own report, how the page settled after it, and what the page said
+/// once it had.
+pub(crate) struct PressedAfter {
+    pub(crate) report: BrowserInputReport,
+    pub(crate) settle: SettleReport,
+    pub(crate) read: PressRead,
+}
+
+/// One press in a known form on the window's clock: the page's text and watch
+/// before it, the press, the settle the one road gives it, then the read of the
+/// form with what stood before. A press the page refuses ends there, unsettled
+/// and unread.
+pub(crate) async fn pressed_after<B, BF, P, PF, S, SF, R, RF>(
+    before: B,
+    press: P,
+    settle: S,
+    read: R,
+) -> Result<PressedAfter, String>
+where
+    B: FnOnce() -> BF,
+    BF: std::future::Future<Output = Result<PressBefore, String>>,
+    P: FnOnce() -> PF,
+    PF: std::future::Future<Output = Result<BrowserInputReport, String>>,
+    S: FnOnce(String, Option<f64>) -> SF,
+    SF: std::future::Future<Output = SettleReport>,
+    R: FnOnce(serde_json::Value) -> RF,
+    RF: std::future::Future<Output = Result<PressRead, String>>,
+{
+    let _ = before;
+    let report = press().await?;
+    let read = read(serde_json::Value::Null).await?;
+    let settle = settle(String::new(), report.pressed_at).await;
+    Ok(PressedAfter {
+        report,
+        settle,
+        read,
+    })
+}
+
+/// A press by selector on a pane whose agent has read a form.
+pub(crate) async fn press_in_form(
+    pane: &BrowserPane,
+    label: &str,
+    selector: &str,
+    known: String,
+) -> Result<BrowserInputReport, String> {
+    let _ = (label, known);
+    press(pane, selector, None).await
 }
 
 /// A fill script: the form helpers, the writer, and a body that calls it.

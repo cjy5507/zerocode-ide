@@ -736,3 +736,151 @@ fn a_button_that_opens_a_list_is_one_of_the_controls_a_read_looks_at() {
         "{BROWSER_FORM_CONTROLS:?}"
     );
 }
+
+/// A fill says the text that stands new beside a field it wrote — as the page
+/// wrote it, never as an error — the field the page marked invalid and said
+/// nothing about for what it is, and the notices the page's live regions made.
+#[test]
+fn a_fill_says_the_text_that_appeared_beside_a_field_and_a_silent_invalid_field_for_what_it_is() {
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [
+            { "handle": "#mail", "status": "set", "label": "Email", "now": "kim",
+              "fresh": ["Enter a valid email", "Try again"] },
+            { "handle": "#age", "status": "set", "label": "Age", "now": "12",
+              "error": "aria-invalid", "silent": true },
+            { "handle": "#code", "status": "set", "label": "Code", "now": "1" },
+        ],
+        "left": [
+            { "handle": "#age", "kind": "number", "label": "Age", "value": "12",
+              "error": "aria-invalid", "silent": true },
+            { "handle": "#code2", "kind": "text", "label": "Code 2", "value": "", "required": true,
+              "fresh": ["Needed"] },
+        ],
+        "alerts": ["Code sent again"],
+        "moving": false,
+    }))
+    .expect("a pass with text that appeared");
+    let bundle = vec![
+        entry("#mail", text("kim")),
+        entry("#age", text("12")),
+        entry("#code", text("1")),
+    ];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    let lines = fill_lines(&ledger.report());
+    for expected in [
+        "  ✓ #mail Email = \"kim\" — 새로 뜬 글: 「Enter a valid email」 「Try again」",
+        "  ✓ #age Age = \"12\" ⚠ aria-invalid — 페이지가 이유를 말하지 않음",
+        "  ✓ #code Code = \"1\"\n",
+        "  #age · number · Age — aria-invalid — 페이지가 이유를 말하지 않음",
+        "  #code2 · text · Code 2 — 필수, 비어 있음 · 새로 뜬 글: 「Needed」",
+        "새로 뜬 알림: 「Code sent again」",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+    assert_eq!(
+        lines.matches("새로 뜬 글").count(),
+        2,
+        "a field with nothing new says nothing:\n{lines}"
+    );
+}
+
+/// A press is set against the form the agent read before it, as a fill is:
+/// the same form or another, and the button the page took away — none when
+/// the form changed, which has lost every button of the old one.
+#[test]
+fn a_press_is_set_against_the_form_that_was_read_before_it() {
+    let read = PressRead {
+        fingerprint: "9:read".into(),
+        actions: vec![button("#next", "Next", false)],
+        ..PressRead::default()
+    };
+    let known = [
+        button("#next", "Next", false),
+        button("#skip", "Skip", false),
+    ];
+    let same = PressAfter::against(read.clone(), Some("9:read"), &known, false);
+    assert_eq!(same.changed, Some(false));
+    assert_eq!(same.hidden, vec![button("#skip", "Skip", false)]);
+    assert!(same.settled && !same.moving, "{same:?}");
+    let other = PressAfter::against(
+        PressRead {
+            fingerprint: "12:other".into(),
+            ..read.clone()
+        },
+        Some("9:read"),
+        &known,
+        false,
+    );
+    assert_eq!(other.changed, Some(true));
+    assert!(other.hidden.is_empty(), "{other:?}");
+    assert_eq!(
+        PressAfter::against(read.clone(), None, &[], false).changed,
+        None
+    );
+    assert!(PressAfter::against(read, Some("9:read"), &known, true).moving);
+}
+
+/// What a press in a known form says: whether the form stayed, its buttons on
+/// and off, what stands left and what appeared beside it — the reason a "next"
+/// that did not move on gives — the notices of the page, and that the page was
+/// read after it stood still. A form that moved on says only that, and its buttons.
+#[test]
+fn a_press_says_the_form_its_buttons_what_is_new_beside_a_field_and_what_is_left() {
+    let read: PressRead = serde_json::from_value(json!({
+        "fingerprint": "9:read",
+        "actions": [
+            { "handle": "#next", "label": "Next" },
+            { "handle": "#back", "label": "Back", "disabled": true },
+        ],
+        "noted": [
+            { "handle": "#mail", "kind": "email", "label": "Email", "value": "", "required": true,
+              "fresh": ["Enter a valid email"] },
+            { "handle": "#age", "kind": "number", "label": "Age", "value": "12",
+              "error": "aria-invalid", "silent": true },
+        ],
+        "alerts": ["Saved as a draft"],
+    }))
+    .expect("what a page said after a press");
+    let known = [
+        button("#next", "Next", false),
+        button("#back", "Back", true),
+    ];
+    let after = PressAfter::against(read.clone(), Some("9:read"), &known, false);
+    let lines = press_lines(&after);
+    for expected in [
+        "양식 그대로 — 버튼: #next 「Next」 켜짐, #back 「Back」 꺼짐",
+        "남은 칸:",
+        "  #mail · email · Email — 필수, 비어 있음 · 새로 뜬 글: 「Enter a valid email」",
+        "  #age · number · Age — aria-invalid — 페이지가 이유를 말하지 않음",
+        "새로 뜬 알림: 「Saved as a draft」",
+        "※ 누른 뒤 50 ms 동안 가만히 있는 것을 보고 읽었습니다. 그 뒤에 뜨는 오류는 못 봅니다 — 제출 전에 fields로 다시 읽으세요",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+    let moved = PressAfter::against(
+        PressRead {
+            fingerprint: "12:other".into(),
+            ..read.clone()
+        },
+        Some("9:read"),
+        &known,
+        false,
+    );
+    let said = press_lines(&moved);
+    assert!(
+        said.starts_with(
+            "양식 바뀜(fields로 다시 읽기) — 버튼: #next 「Next」 켜짐, #back 「Back」 꺼짐"
+        ),
+        "{said}"
+    );
+    assert!(
+        !said.contains("남은 칸") && !said.contains("새로 뜬") && !said.contains('※'),
+        "a form that moved on says only so:\n{said}"
+    );
+    let still = press_lines(&PressAfter::against(read, Some("9:read"), &known, true));
+    assert!(
+        still.contains("아직 바뀌는 중(fields로 다시 읽기)") && !still.contains('※'),
+        "a page still changing says so, and no word of having stood still:\n{still}"
+    );
+}

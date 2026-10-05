@@ -98,6 +98,8 @@ export const FORM_REQUEST = {
   monthDays: rustNumber(FORM_CORE, "BROWSER_FORM_MONTH_DAYS"), monthPages: rustNumber(FORM_CORE, "BROWSER_FORM_MONTH_PAGES"),
   lists: rustList(FORM_CORE, "BROWSER_FORM_LISTS"), listItems: rustList(FORM_CORE, "BROWSER_FORM_LIST_ITEMS"),
   pressables: rustList(FORM_CORE, "BROWSER_FORM_PRESSABLES"), scanCap: rustNumber(FORM_CORE, "BROWSER_FORM_SCAN_CAP"),
+  live: rustList(FORM_CORE, "BROWSER_FORM_LIVE"), freshCap: rustNumber(FORM_CORE, "BROWSER_FORM_FRESH_CAP"),
+  pieceCap: rustNumber(FORM_CORE, "BROWSER_FORM_PIECE_CAP"),
   watch: GUEST_KEY,
   on: rustList(FORM_CORE, "BROWSER_FILL_ON"), off: rustList(FORM_CORE, "BROWSER_FILL_OFF"),
   field: { regions: rustList(CORE, "BROWSER_FIELD_REGIONS"), headings: rustList(CORE, "BROWSER_FIELD_HEADINGS") },

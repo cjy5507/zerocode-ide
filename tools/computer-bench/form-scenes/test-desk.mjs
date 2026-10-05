@@ -234,6 +234,63 @@ await test("a fill that waited says an error shown later is not in its answer, a
   return "ok";
 });
 
+/* A click in a form the agent read says what the page brought (t-41592): whether the form
+ * stayed, its buttons, what stands left and what appeared beside a field — the reason a "next"
+ * that did not move on gives — the page's notices, and that the page was read after it stood
+ * still, in the page's words inside the fence; a click in a pane whose form was never read is
+ * answered as it was. */
+await test("a click in a form the agent read says whether the form stayed and what appeared beside a field and that the page was read after it stood still", async () => {
+  const folder = join(root, "press-scene");
+  await mkdir(folder, { recursive: true });
+  await writeFile(join(folder, "scene.html"), `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+    <div class="row"><label for="mail">Email</label> <input id="mail"></div>
+    <div class="row"><label for="phone">Phone</label> <input id="phone"></div>
+    <button type="button" id="next">Next</button><button type="button" id="idle">Nothing</button>
+    <div id="step2" hidden><div class="row"><label for="city">City</label> <input id="city"></div></div></form>
+    <script>
+      const mail = document.getElementById("mail"), phone = document.getElementById("phone");
+      document.getElementById("next").addEventListener("click", () => {
+        const old = mail.parentElement.querySelector(".err");
+        if (old) old.remove();
+        phone.setAttribute("aria-invalid", String(phone.value === ""));
+        if (!mail.value.includes("@")) {
+          const err = document.createElement("span"); err.className = "err"; err.textContent = "Enter a valid email";
+          mail.parentElement.append(err);
+          return;
+        }
+        document.getElementById("step2").hidden = false;
+      });
+    </script>`);
+  const own = await startFormDesk({ scene: { folder, name: "press", card: {}, expected: {} }, doorText });
+  try {
+    const run = (words, input = "") => new Promise((done) => {
+      const child = execFile(join(bin, "zerocode-browser"), words, { env: { PATH: env.PATH, FORM_DESK: `http://127.0.0.1:${own.port}` }, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+        (error, stdout, stderr) => done({ code: error ? error.code : 0, stdout, stderr }));
+      child.stdin.end(input);
+    });
+    const plain = await run(["click", PANE, "#idle"]);
+    assert(plain.code === 0 && plain.stdout.startsWith("클릭 이벤트를 보냈습니다 (method=dom-activation") && !plain.stdout.includes("settle=")
+      && !plain.stdout.includes("BEGIN UNTRUSTED"), "a click in a pane whose form was never read is answered as it was", plain.stdout);
+    await run(["fields", PANE]);
+    const stayed = await run(["click", PANE, "#next"]);
+    assert(stayed.code === 0 && stayed.stdout.startsWith("클릭 이벤트를 보냈습니다 (method=dom-activation")
+      && /settle=ready, settle-why=quiet, settle-ms=\d+/.test(stayed.stdout), "the sentence says how the page settled", stayed.stdout);
+    assert(fenced(stayed.stdout.slice(stayed.stdout.indexOf("<<<BEGIN"))), "and what follows is the page's, fenced", stayed.stdout);
+    for (const piece of [
+      "양식 그대로 — 버튼: #next 「Next」 켜짐, #idle 「Nothing」 켜짐",
+      "남은 칸:",
+      "  #mail · text · Email — 새로 뜬 글: 「Enter a valid email」",
+      "  #phone · text · Phone — aria-invalid — 페이지가 이유를 말하지 않음",
+      "※ 누른 뒤 50 ms 동안 가만히 있는 것을 보고 읽었습니다. 그 뒤에 뜨는 오류는 못 봅니다 — 제출 전에 fields로 다시 읽으세요",
+    ]) assert(stayed.stdout.includes(piece), `the answer lacks ${piece}`, stayed.stdout);
+    await run(["fill", PANE, "--value-stdin"], '{"#mail":"kim@example.com"}');
+    const moved = await run(["click", PANE, "#next"]);
+    assert(moved.stdout.includes("양식 바뀜(fields로 다시 읽기)") && !moved.stdout.includes("남은 칸") && !moved.stdout.includes("※"),
+      "a press that moved the form on says only so", moved.stdout);
+    return "ok";
+  } finally { await own.close(); }
+});
+
 await desk.close();
 let failed = 0;
 for (const result of results) {

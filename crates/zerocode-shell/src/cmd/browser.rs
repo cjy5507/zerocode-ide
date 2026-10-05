@@ -90,6 +90,10 @@ pub(crate) struct BrowserInputReport {
     /// press's sentence ([`input_said`]); a press by selector does not wait.
     #[serde(skip)]
     pub(crate) settle: Option<SettleReport>,
+    /// What the page said after a press in a form its agent had read, set
+    /// against that form: said below the press's sentence, in the page's own words.
+    #[serde(skip)]
+    pub(crate) after: Option<zerocode_core::browser_form::PressAfter>,
 }
 
 /// How a press's settle ended (t-6721): the core's verdict
@@ -585,6 +589,7 @@ pub(crate) fn input_report(
         page_url,
         pressed_at,
         settle: None,
+        after: None,
     })
 }
 
