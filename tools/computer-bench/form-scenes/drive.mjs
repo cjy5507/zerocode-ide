@@ -564,6 +564,13 @@ class Road {
     return fields.filter((field) => !this.typed.has(field.handle));
   }
 
+  /* The plan of a read: the facts to the fields of the whole form — the fields already typed as secrets are part of the form a value is cut across (a number in four boxes, two of them typed, is still cut across four) — and,
+   * of what is to be written, not the fields already typed. */
+  planOf(fields) {
+    const planned = plan(fields, this.facts);
+    return { ...planned, bundle: Object.fromEntries(Object.entries(planned.bundle).filter(([handle]) => !this.typed.has(handle))) };
+  }
+
   /* A thing the door could not fill — a field answered `no_option`, a thing
    * of no kind beside a fact's words — opened, looked at and pressed by the
    * value's words, each a round trip: a press, a read, a press by handle when
@@ -861,7 +868,7 @@ class Road {
       const read = await this.fields();
       if (await this.finished()) return this.done();
       if (await this.scrollRoad(read)) continue;
-      const { bundle, unplaced, ambiguous } = plan(this.untyped(read.fields), this.facts);
+      const { bundle, unplaced, ambiguous } = this.planOf(read.fields);
       if (ambiguous.length) throw new Error(ambiguousWords(ambiguous));
       if (this.price) this.priced += await this.today(read, bundle);
       if (await this.unknownRoad(read.unknowns, unplaced)) continue;
@@ -981,7 +988,10 @@ class Road {
       const typed = __TYPED__;
       const read = zerocode.fields();
       const fields = read.fields.filter((field) => !typed.includes(field.handle));
-      const { bundle, unplaced, ambiguous } = plan(fields, facts);
+      // The fields already typed are part of the form a value is cut across, and no part of what is written again.
+      const planned = plan(read.fields, facts);
+      const bundle = Object.fromEntries(Object.entries(planned.bundle).filter(([handle]) => !typed.includes(handle)));
+      const { unplaced, ambiguous } = planned;
       // A card that does not tell which of two fields a fact is for stops the step before anything is written or pressed.
       const stop = ambiguous.length > 0;
       const filled = !stop && Object.keys(bundle).length ? zerocode.fill(bundle, read) : { results: [], left: fields
@@ -1038,7 +1048,7 @@ class Road {
         else await this.openAndPress(result, result.asked);
       }
       // The value is the card's: the driver reads it where it stands, not from the page's answer.
-      const owedTyping = plan(this.untyped(said.fields), this.facts).bundle;
+      const owedTyping = this.planOf(said.fields).bundle;
       for (const handle of said.viaType || []) await this.typeSecret(handle, owedTyping[handle], said.print);
       if (await this.scrollRoad({ fields: said.fields, scrollBoxes: said.scrollBoxes })) continue;
       if (said.moved) continue;
