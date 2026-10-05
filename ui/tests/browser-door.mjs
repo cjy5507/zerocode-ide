@@ -2163,6 +2163,169 @@ await test("text_that_appears_beside_no_single_field_is_said_apart_once_and_neve
   } finally { await aside.close(); }
 });
 
+/* A row of buttons that say whether they are pressed (`aria-pressed`) is one field (t-41656) — chips: its
+ * title the name (ARIA's name for the row, its fieldset's legend, the words before it), its options the
+ * buttons' words, its value the ones pressed — and is no longer said again as buttons. A toggle that stands in a
+ * box with a field of its own (a "show" beside a password) is that field's, and stays a button. */
+const CHIPS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div id="coloursTitle">Pick colours</div>
+  <div id="colours" role="group" aria-labelledby="coloursTitle">
+    <button type="button" aria-pressed="false">Red</button>
+    <button type="button" aria-pressed="true">Green</button>
+    <button type="button" aria-pressed="false">Blue</button>
+  </div>
+  <fieldset><legend>Size</legend>
+    <div id="size"><button type="button" aria-pressed="false">Small</button><button type="button" aria-pressed="true">Medium</button><button type="button" aria-pressed="false">Large</button></div>
+  </fieldset>
+  <div class="row"><label for="pw">Password</label>
+    <span class="wrap"><input id="pw" type="password"><button type="button" id="show" aria-pressed="false">Show</button></span></div>
+  <button type="button" id="go">Go</button>
+</form>
+<script>
+  (() => {
+    window.__presses = [];
+    const pressed = (button) => button.getAttribute("aria-pressed") === "true";
+    // One row lets several be pressed; the other is one choice of several, which lets go of the rest.
+    document.getElementById("colours").addEventListener("click", (event) => {
+      const button = event.target.closest("button");
+      if (!button) return;
+      window.__presses.push(button.textContent);
+      button.setAttribute("aria-pressed", String(!pressed(button)));
+    });
+    document.getElementById("size").addEventListener("click", (event) => {
+      const button = event.target.closest("button");
+      if (!button) return;
+      window.__presses.push(button.textContent);
+      for (const other of document.querySelectorAll("#size button")) other.setAttribute("aria-pressed", String(other === button));
+    });
+  })();
+</script>`;
+const heldChips = (target, row) => target.evaluate((selector) =>
+  [...document.querySelectorAll(selector + " button")].filter((button) => button.getAttribute("aria-pressed") === "true").map((button) => button.textContent), row);
+const pressesOf = (target) => target.evaluate(() => window.__presses.slice());
+
+await test("a_row_of_buttons_that_say_they_are_pressed_is_one_field_named_by_its_title_with_the_buttons_as_its_options", async () => {
+  const chips = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await chips.setContent(CHIPS);
+    const read = await readFields(chips);
+    const likes = read.fields.find((one) => one.handle === "#colours");
+    const diet = read.fields.find((one) => one.handle === "#size");
+    assert(likes && likes.kind === "chips", "a row of buttons that say whether they are pressed is one field of kind chips", read.fields);
+    assert(likes.label === "Pick colours" && JSON.stringify(likes.options) === JSON.stringify(["Red", "Green", "Blue"])
+      && JSON.stringify(likes.value) === JSON.stringify(["Green"]),
+    "named by the title ARIA gives the row, its options the buttons' words, its value the buttons pressed", likes);
+    assert(diet && diet.kind === "chips" && diet.label === "Size" && JSON.stringify(diet.value) === JSON.stringify(["Medium"]),
+      "a row in a fieldset is named by the legend", diet);
+    const buttons = read.actions.map((one) => one.label);
+    assert(!buttons.some((label) => ["Red", "Green", "Blue", "Small", "Medium", "Large"].includes(label)),
+      "the buttons of a row are not said again as buttons", buttons);
+    assert(buttons.includes("Show") && buttons.includes("Go") && !read.fields.some((one) => one.kind === "chips" && one.handle !== "#colours" && one.handle !== "#size"),
+      "a toggle beside a field of its own stays a button", { buttons, fields: read.fields.map((one) => one.handle) });
+    await chips.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div id="yn"><button type="button" aria-pressed="false">Yes</button><button type="button" aria-pressed="false">No</button></div>
+      <ul id="wrapped"><li><button type="button" aria-pressed="false">Alpha</button></li><li><button type="button" aria-pressed="true">Beta</button></li><li><button type="button" aria-pressed="false">Gamma</button></li></ul></form>`);
+    const bare = await readFields(chips);
+    const yn = bare.fields.find((one) => one.handle === "#yn");
+    const wrapped = bare.fields.find((one) => one.handle === "#wrapped");
+    assert(yn && yn.kind === "chips" && yn.label === "" && JSON.stringify(yn.options) === JSON.stringify(["Yes", "No"]),
+      "a row the page gives no title is still one field, with the name empty for the words to say so", bare.fields);
+    assert(wrapped && wrapped.kind === "chips" && JSON.stringify(wrapped.options) === JSON.stringify(["Alpha", "Beta", "Gamma"])
+      && JSON.stringify(wrapped.value) === JSON.stringify(["Beta"]), "buttons each in a box of their own are one row", bare.fields);
+    return [likes, diet, yn].map((one) => one.label || "(no title)").join(" · ");
+  } finally { await chips.close(); }
+});
+
+await test("a_row_of_chips_is_written_by_pressing_only_the_buttons_whose_state_differs_as_the_page_behaves", async () => {
+  const chips = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await chips.setContent(CHIPS);
+    const read = await readFields(chips);
+    const set = await fillBundle(chips, { "#colours": ["Red", "Blue"] }, read.fingerprint);
+    assert(set.results[0]?.status === "set" && JSON.stringify(set.results[0].now) === JSON.stringify(["Red", "Blue"]),
+      "a list of the options wanted is written and read back as the list held", set.results);
+    assert(JSON.stringify(await heldChips(chips, "#colours")) === JSON.stringify(["Red", "Blue"]), "the page holds what was asked", await heldChips(chips, "#colours"));
+    assert(JSON.stringify((await pressesOf(chips)).sort()) === JSON.stringify(["Blue", "Green", "Red"]),
+      "each button that differed was pressed once and no other", await pressesOf(chips));
+    const same = await fillBundle(chips, { "#colours": ["Red", "Blue"] });
+    assert(same.results[0]?.status === "same" && (await pressesOf(chips)).length === 3, "a row that already holds it is pressed no more", same.results);
+    const single = await fillBundle(chips, { "#size": ["Small"] });
+    const afterDiet = (await pressesOf(chips)).slice(3);
+    assert(single.results[0]?.status === "set" && JSON.stringify(await heldChips(chips, "#size")) === JSON.stringify(["Small"]),
+      "one choice of several: the page lets go of the other itself", single.results);
+    assert(JSON.stringify(afterDiet) === JSON.stringify(["Small"]), "so the button the page had let go of is not pressed again", afterDiet);
+    const words = await fillBundle(chips, { "#colours": "Green, Blue" });
+    assert(words.results[0]?.status === "set" && JSON.stringify(await heldChips(chips, "#colours")) === JSON.stringify(["Green", "Blue"]),
+      "the same options said as one text", words.results);
+    const before = (await pressesOf(chips)).length;
+    const nothing = await fillBundle(chips, { "#colours": ["Nonexistent"] });
+    assert(nothing.results[0]?.status === "no_option" && JSON.stringify(nothing.results[0].options) === JSON.stringify(["Red", "Green", "Blue"])
+      && (await pressesOf(chips)).length === before, "an option the row lacks is refused by name with the options, and nothing is pressed", nothing.results);
+    return JSON.stringify(await pressesOf(chips));
+  } finally { await chips.close(); }
+});
+
+/* A value split across several fields is told by the caption of the group the parts stand in (t-41656): a part
+ * the page names only by its own short words ("Hour") takes the group's caption in front of it
+ * (`<caption> — <words>`), when the group holds more than one such part and the words do not already say it. Fields
+ * the page names by a label of its own, a part alone in its box and names that already hold the caption are as they were. */
+const PARTS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div id="rtCap">End time <span>*</span></div>
+  <div role="group" aria-labelledby="rtCap">
+    <div id="ampm" role="radiogroup" aria-label="AM or PM"><button type="button" role="radio" aria-checked="false">AM</button><button type="button" role="radio" aria-checked="false">PM</button></div>
+    <select id="rtHour" aria-label="Hour"><option value="">-</option><option value="9">9</option></select>
+    <select id="rtMin" aria-label="Minute"><option value="">-</option><option value="00">00</option></select>
+  </div>
+  <div id="ptCap">Start time</div>
+  <div role="group" aria-labelledby="ptCap">
+    <select id="ptHour" aria-label="Hour"><option value="">-</option><option value="9">9</option></select>
+    <select id="ptMin" aria-label="Minute"><option value="">-</option><option value="00">00</option></select>
+  </div>
+  <div class="row"><span>Phone</span> <input id="p1" aria-label="Area"> <input id="p2" aria-label="Number"></div>
+  <fieldset><legend>Billing</legend><label>Street <input id="street"></label><label>City <input id="city"></label></fieldset>
+  <div class="row"><span>Search</span> <input id="q" aria-label="Query"></div>
+  <dl><div class="row"><dt>Email</dt><dd><input id="e-id" aria-label="Email name"><span>@</span><input id="e-dom" aria-label="Email domain"></dd></div></dl>
+</form>`;
+await test("a_part_the_page_names_only_by_its_own_short_words_is_told_by_the_caption_of_its_group_or_row", async () => {
+  const parts = await browser.newPage({ viewport: { width: 900, height: 900 } });
+  try {
+    await parts.setContent(PARTS);
+    const read = await readFields(parts);
+    const label = (handle) => read.fields.find((one) => one.handle === handle)?.label;
+    assert(label("#rtHour") === "End time — Hour *" && label("#rtMin") === "End time — Minute *" && label("#ampm") === "End time — AM or PM *",
+      "the parts of a group the page names say its caption, and the star the page put on the caption stays with them", read.fields.map((one) => one.label));
+    assert(label("#ptHour") === "Start time — Hour" && label("#ptMin") === "Start time — Minute",
+      "so two parts of one name are told apart by their groups, not by a number", read.fields.map((one) => one.label));
+    assert(label("#p1") === "Phone — Area" && label("#p2") === "Phone — Number",
+      "the parts side by side in one box under a caption say it too", read.fields.map((one) => one.label));
+    assert(label("#street") === "Street" && label("#city") === "City" && label("#q") === "Query",
+      "a field a label names, and a part alone in its box, are as they were", read.fields.map((one) => one.label));
+    assert(label("#e-id") === "Email name" && label("#e-dom") === "Email domain",
+      "a name that already holds the caption is not given it twice", read.fields.map((one) => one.label));
+    assert(!read.fields.some((one) => one.ordinal), "no field is told by a number", read.fields.filter((one) => one.ordinal));
+    return ["#rtHour", "#ptHour", "#p1"].map(label).join(" · ");
+  } finally { await parts.close(); }
+});
+
+/* A button the page declares a submit — `type="submit"`, on a button or an input — is marked in the
+ * buttons the read, a fill and a press say (t-41656); a button with no such type is not. */
+await test("a_button_that_declares_it_submits_the_form_is_marked_and_one_that_does_not_is_not", async () => {
+  const submits = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await submits.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+      <label for="a">A</label> <input id="a">
+      <button type="submit" id="s1">Save</button><input type="submit" id="s2" value="Send">
+      <button type="button" id="b1">Next</button><button id="b2">Maybe</button><button type="reset" id="r">Reset</button></form>`);
+    const read = await readFields(submits);
+    const mark = (actions) => Object.fromEntries(actions.map((one) => [one.label, one.submit === true]));
+    assert(JSON.stringify(mark(read.actions)) === JSON.stringify({ Save: true, Send: true, Next: false, Maybe: false, Reset: false }),
+      "only the buttons that declare a submit are marked", read.actions);
+    const filled = await fillBundle(submits, { "#a": "x" }, read.fingerprint);
+    assert(JSON.stringify(mark(filled.actions)) === JSON.stringify(mark(read.actions)), "a fill's buttons are marked the same", filled.actions);
+    return JSON.stringify(mark(read.actions));
+  } finally { await submits.close(); }
+});
+
 await browser.close();
 
 let failed = 0;

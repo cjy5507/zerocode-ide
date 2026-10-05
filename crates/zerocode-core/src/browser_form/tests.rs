@@ -51,7 +51,11 @@ fn a_bundle_that_cannot_be_filled_is_refused_by_name() {
         ("{}", "empty"),
         ("[]", "empty list"),
         (r##"{"#a": null}"##, "a null value"),
-        (r##"{"#a": ["x"]}"##, "a list value"),
+        (r##"{"#a": [null]}"##, "a list holding a null"),
+        (r##"{"#a": [true]}"##, "a list holding a flag"),
+        (r##"{"#a": [["x"]]}"##, "a list holding a list"),
+        (r##"{"#a": [{"b": 1}]}"##, "a list holding an object"),
+        (r##"{"#a": {"b": 1}}"##, "an object value"),
         (r##"{"#a": "x", "#a": "y"}"##, "a handle twice"),
         (r##"{"  ": "x"}"##, "an empty handle"),
         (
@@ -71,6 +75,42 @@ fn a_bundle_that_cannot_be_filled_is_refused_by_name() {
         .map(|at| (format!("#f{at}"), json!("x")))
         .collect();
     assert!(fill_entries(&serde_json::Value::Object(many).to_string()).is_err());
+}
+
+/// A group of buttons that say whether they are pressed is one field (t-41656): its value is the
+/// list of the words of the buttons pressed, and a bundle gives the list it wants held — words, or
+/// numbers written as words; none at all is an empty list; a list of anything else is refused.
+#[test]
+fn a_list_of_words_is_a_value_a_bundle_gives_a_group_of_chips() {
+    let written = fill_entries(r##"{"#colours": ["Red", "Blue"], "#none": [], "#n": ["1", 2]}"##);
+    assert!(written.is_ok(), "a list of words is a value: {written:?}");
+    let written = written.unwrap_or_default();
+    assert_eq!(written.len(), 3, "{written:?}");
+    let values: Vec<serde_json::Value> = written
+        .iter()
+        .map(|one| serde_json::to_value(&one.value).unwrap_or_default())
+        .collect();
+    assert_eq!(
+        values[0],
+        json!(["Red", "Blue"]),
+        "the words, in the order given"
+    );
+    assert_eq!(
+        values[1],
+        json!([]),
+        "none is an empty list, the group with nothing pressed"
+    );
+    assert_eq!(
+        values[2],
+        json!(["1", "2"]),
+        "a number is written as its words"
+    );
+    let long = format!(
+        r##"{{"#a": ["{}"]}}"##,
+        "x".repeat(BROWSER_FILL_VALUE_CAP + 1)
+    );
+    let refused = fill_entries(&long).expect_err("a word past the cap");
+    assert!(refused.contains("#a"), "{refused}");
 }
 
 #[test]
@@ -481,6 +521,7 @@ fn button(handle: &str, label: &str, disabled: bool) -> FormAction {
         handle: handle.into(),
         label: label.into(),
         disabled,
+        ..FormAction::default()
     }
 }
 
@@ -937,5 +978,172 @@ fn a_press_says_the_form_its_buttons_what_is_new_beside_a_field_and_what_is_left
     assert!(
         still.contains("아직 바뀌는 중(fields로 다시 읽기)") && !still.contains('※'),
         "a page still changing says so, and no word of having stood still:\n{still}"
+    );
+}
+
+/// A group of buttons that say whether they are pressed is one field of kind `chips` (t-41656): its
+/// value is the list of the pressed buttons' words, its options the buttons' words, and a group the
+/// page gives no title says it has none — a name left empty would read as a field that has a name.
+#[test]
+fn a_group_of_chips_is_one_field_that_holds_a_list_and_a_group_with_no_title_says_it_has_none() {
+    let read: Result<FormRead, _> = serde_json::from_value(json!({
+        "fields": [
+            { "handle": "#colours", "kind": "chips", "label": "Pick colours",
+              "value": ["Green"], "options": ["Red", "Green", "Blue"], "moreOptions": 2 },
+            { "handle": "#size", "kind": "chips", "label": "Size", "value": [], "required": true,
+              "options": ["Small", "Medium"] },
+            { "handle": "#row", "kind": "chips", "label": "", "value": [],
+              "options": ["Yes", "No"] },
+        ],
+    }));
+    assert!(
+        read.is_ok(),
+        "a group's value is a list of words: {:?}",
+        read.as_ref().err()
+    );
+    let read = read.unwrap_or_default();
+    let lines = fields_lines(&read);
+    for expected in [
+        "양식 칸 3개 (필수 1, 비어 있는 필수 1)",
+        "  #colours · chips · Pick colours = [\"Green\"] ▸ Red | Green | Blue (+2)",
+        "  #size · chips · Size * = [] ▸ Small | Medium",
+        "  #row · chips · (제목 없음) = [] ▸ Yes | No",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+    let json = fields_json(&read);
+    assert_eq!(json["fields"][0]["value"], json!(["Green"]));
+    assert_eq!(json["fields"][1]["value"], json!([]));
+}
+
+/// A fill of a group says the list it holds now, and the list it holds instead when it did not take.
+#[test]
+fn a_fill_of_a_group_of_chips_says_the_list_it_holds_now_and_the_one_it_holds_instead() {
+    let pass: Result<FillPass, _> = serde_json::from_value(json!({
+        "results": [
+            { "handle": "#colours", "status": "set", "label": "Colours", "now": ["Red", "Blue"] },
+            { "handle": "#size", "status": "mismatch", "label": "Size", "now": ["Medium"] },
+            { "handle": "#size", "status": "no_option", "label": "Size", "options": ["S", "M"] },
+        ],
+    }));
+    assert!(
+        pass.is_ok(),
+        "what a group holds now is a list of words: {:?}",
+        pass.as_ref().err()
+    );
+    let bundle = vec![
+        entry("#colours", text("Red, Blue")),
+        entry("#size", text("Small")),
+        entry("#size", text("XL")),
+    ];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass.unwrap_or_default());
+    let lines = fill_lines(&ledger.report());
+    for expected in [
+        "  ✓ #colours Colours = [\"Red\", \"Blue\"]",
+        "  ✗ #size Size: 다시 읽으니 다른 값 ([\"Medium\"])",
+        "  ✗ #size Size: 그 값의 선택지가 없음 ▸ S | M",
+    ] {
+        assert!(lines.contains(expected), "missing {expected:?} in\n{lines}");
+    }
+}
+
+/// A page that marks what is required only with a star in the words of the field declares nothing
+/// (no `required`, no `aria-required`): a read that says "필수 0" there is false reassurance, so
+/// it says the page did not declare it and how many fields carry a star; a page that declares some
+/// and stars others says the stars apart; a page with neither says "필수 0" as it did.
+#[test]
+fn a_page_that_marks_required_only_with_a_star_is_not_told_it_has_no_required_field() {
+    let read = |fields: serde_json::Value| -> FormRead {
+        serde_json::from_value(json!({ "fields": fields })).expect("a read")
+    };
+    let starred = read(json!([
+        { "handle": "#name", "kind": "text", "label": "Name *", "value": "" },
+        { "handle": "#mail", "kind": "email", "label": "Email *", "value": "kim@example.com" },
+        { "handle": "#pw", "kind": "password", "label": "Password *", "value": "", "masked": true },
+        { "handle": "#memo", "kind": "textarea", "label": "Memo", "value": "" },
+        { "handle": "#rate", "kind": "text", "label": "Rate x*y", "value": "" },
+    ]));
+    let lines = fields_lines(&starred);
+    assert!(
+        lines.contains(
+            "양식 칸 5개 (필수 표시 없음 — 이름에 *가 있는 칸 3, 그중 비어 있는 1, 값을 읽지 않는 1)"
+        ),
+        "a star that stands at an end of the words or alone is the page's mark, one inside a word is not:\n{lines}"
+    );
+    assert!(!lines.contains("필수 0"), "no false reassurance:\n{lines}");
+    let mixed = read(json!([
+        { "handle": "#a", "kind": "text", "label": "A *", "value": "", "required": true },
+        { "handle": "#b", "kind": "text", "label": "* B", "value": "" },
+        { "handle": "#c", "kind": "text", "label": "C", "value": "" },
+    ]));
+    let said = fields_lines(&mixed);
+    assert!(
+        said.contains("양식 칸 3개 (필수 1, 비어 있는 필수 1, 이름에만 *가 있는 칸 1)"),
+        "{said}"
+    );
+    let plain = read(json!([{ "handle": "#c", "kind": "text", "label": "C", "value": "" }]));
+    assert!(
+        fields_lines(&plain).contains("양식 칸 1개 (필수 0, 비어 있는 필수 0)\n"),
+        "a page with no star and no required field says what it said"
+    );
+}
+
+/// A button the page declares a submit (`type=submit`) is marked in the buttons of a read, of a fill's
+/// end and of a press's, so a driver or an agent picks the button that moves a form on by what the
+/// page says and not by a list of words; a button that declares none is not marked.
+#[test]
+fn an_explicit_submit_button_is_marked_in_the_buttons_of_a_read_a_fill_and_a_press() {
+    let actions = json!([
+        { "handle": "#back", "label": "Back" },
+        { "handle": "#go", "label": "Book", "disabled": true, "submit": true },
+        { "handle": "#send", "label": "Send", "submit": true },
+    ]);
+    let read: FormRead = serde_json::from_value(json!({
+        "fields": [{ "handle": "#a", "kind": "text", "label": "A", "value": "" }],
+        "actions": actions,
+    }))
+    .expect("a read with buttons");
+    let lines = fields_lines(&read);
+    assert!(
+        lines.contains(
+            "버튼: #back 「Back」 · #go 「Book」 (꺼짐) (제출 단추) · #send 「Send」 (제출 단추)"
+        ),
+        "{lines}"
+    );
+    let json = fields_json(&read);
+    assert_eq!(json["actions"][1]["submit"], json!(true));
+    assert!(
+        json["actions"][0].get("submit").is_none(),
+        "a button that declares none says none in the JSON: {json}"
+    );
+    let pass: FillPass = serde_json::from_value(json!({
+        "results": [{ "handle": "#a", "status": "set", "label": "A", "now": "x" }],
+        "fingerprint": "5:aaa",
+        "actions": actions,
+    }))
+    .expect("a pass with buttons");
+    let bundle = vec![entry("#a", text("x"))];
+    let mut ledger = FillLedger::new(bundle.clone());
+    ledger.record(&bundle, pass);
+    let filled = fill_lines(&ledger.report());
+    assert!(
+        filled.contains("버튼: #back 「Back」 켜짐, #go 「Book」 꺼짐 (제출 단추), #send 「Send」 켜짐 (제출 단추)"),
+        "{filled}"
+    );
+    let after = PressAfter::against(
+        PressRead {
+            fingerprint: "5:aaa".into(),
+            actions: read.actions.clone(),
+            ..PressRead::default()
+        },
+        Some("5:aaa"),
+        &[],
+        false,
+    );
+    let pressed = press_lines(&after);
+    assert!(
+        pressed.contains("버튼: #back 「Back」 켜짐, #go 「Book」 꺼짐 (제출 단추), #send 「Send」 켜짐 (제출 단추)"),
+        "{pressed}"
     );
 }
