@@ -23,7 +23,7 @@ import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { scrollToEnd } from "./door-recipes.mjs";
+import { pressButton, scrollToEnd } from "./door-recipes.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SKILL = await readFile(join(HERE, "../../../skills/computer-use/SKILL.md"), "utf8");
@@ -378,6 +378,64 @@ const CODE_WORDS = await scene("code-words", `<!doctype html><html lang="en"><me
   });
 </script>`, SEND_BESIDE_FACTS, { mobile: "031-7788-2290", code: "483920", verified: true }, CODE_CARD(SEND_BESIDE_FACTS));
 
+/* A field the page keeps from being typed in and fills from a window a button opens (t-41720): the door says which button opens it, the window holds a frame of the
+ * page's own origin with a search field and a button, and the result whose words hold the card's words is pressed. The frame loads the first time the window opens. */
+const LOCKER_FACTS = [{ says: "Name", value: "Kim" }, { says: "Parcel point", value: "North Gate 9" }];
+const SEARCH_LAYER = await scene("search-layer", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="nm">Name</label> <input id="nm">
+  <div class="line"><input id="lk" readonly aria-label="Locker"><button type="button" id="pick">Pick a locker</button></div>
+  <input id="pt" readonly aria-label="Parcel point">
+  <div id="layer" hidden><iframe id="fr" title="Locker search" width="420" height="260"></iframe></div>
+  <button type="button" id="send">Submit</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let got = null;
+  $("pick").addEventListener("click", () => {
+    const frame = $("fr");
+    if (!frame.getAttribute("src")) frame.setAttribute("src", "frame.html");
+    $("layer").hidden = false;
+  });
+  window.addEventListener("message", (event) => {
+    const said = event.data;
+    if (!said || said.kind !== "picked") return;
+    got = said;
+    $("lk").value = said.code;
+    $("pt").value = said.where;
+    $("layer").hidden = true;
+  });
+  $("send").addEventListener("click", () => {
+    if (!got) return;
+    window.__sceneResult = { name: $("nm").value, locker: $("lk").value, point: $("pt").value };
+  });
+</script>`, LOCKER_FACTS, { name: "Kim", locker: "L-17", point: "North Gate 9" }, { "frame.html": `<!doctype html><html lang="en"><meta charset="utf-8">
+<form id="f"><input id="q" type="text" aria-label="Search words"><button type="submit">Go</button></form>
+<div id="out"></div>
+<script>
+  const DATA = [
+    { code: "L-17", where: "North Gate 9", note: "open all day" },
+    { code: "L-52", where: "North Gate 90", note: "closed Sundays" },
+    { code: "L-08", where: "South Dock 4", note: "open all day" },
+  ];
+  const norm = (text) => String(text).replace(/\\s+/g, "").toLowerCase();
+  let found = [];
+  document.getElementById("f").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const words = document.getElementById("q").value.trim().split(/\\s+/).filter(Boolean).map(norm);
+    setTimeout(() => {
+      found = DATA.filter((row) => words.every((word) => norm(row.where + row.note).includes(word)));
+      document.getElementById("out").innerHTML = found.map((row, at) =>
+        '<button type="button" class="res" data-at="' + at + '">Locker ' + row.code + ' · ' + row.where + ' · ' + row.note + '</button>').join("");
+    }, 320);
+  });
+  document.getElementById("out").addEventListener("click", (event) => {
+    const button = event.target.closest(".res");
+    if (!button) return;
+    const row = found[Number(button.dataset.at)];
+    window.parent.postMessage({ kind: "picked", code: row.code, where: row.where }, "*");
+  });
+</script>` });
+
 /* A field the page answers about after a press, with a button of its own beside it: the door says whose the button is, and the driver presses it once and
  * reads the form again — the press that ends the form is made again after it. */
 const OWN = await scene("own", `<!doctype html><html lang="en"><meta charset="utf-8"><form id="f" onsubmit="return false">
@@ -415,7 +473,7 @@ const DRAWN = await scene("drawn", `<!doctype html><html lang="en"><meta charset
 const out = join(root, "rows.json");
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -582,6 +640,23 @@ await test("a driver whose page says no place for the buttons of the code of the
     assert(one && one.ok && one.pass, `the ${road} road sends and confirms the code by the short words`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
   }
   return JSON.stringify(row("code-words", "verbs").result);
+});
+
+await test("a driver fills a read-only field from the window the door says its button opens by searching the words of the card and pressing the result that holds them", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("search-layer", road);
+    assert(one && one.ok && one.pass, `the ${road} road opens the window, searches and picks the result`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+    assert(one.result.locker === "L-17" && one.result.point === "North Gate 9", `and the result that holds the words whole is the one picked (${road})`, one.result);
+  }
+  return JSON.stringify(row("search-layer", "verbs").result);
+});
+
+await test("the recipe a driver presses a button inside a frame by is the one the skill teaches", () => {
+  assert(SKILL.includes("document.querySelector(String.raw`<frame>`).contentDocument.querySelector(String.raw`<inner>`).click()"), "the skill teaches the recipe in these words");
+  assert(pressButton("#card >> #go") === "document.querySelector(String.raw`#card`).contentDocument.querySelector(String.raw`#go`).click()",
+    "a handle with the frame's separator is the frame and the button inside it", pressButton("#card >> #go"));
+  assert(pressButton("#go") === "document.querySelector(String.raw`#go`).click()", "and a handle of the page itself is read as it stands", pressButton("#go"));
+  return "same";
 });
 
 await test("a driver does not take a button its own field turned on for the button that moves the step", () => {

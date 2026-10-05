@@ -20,3 +20,15 @@ export function scrollToEnd(handle) {
   }
   return `document.querySelector(${raw(handle)}).scrollTop = 1e9`;
 }
+
+/* A button inside a frame is pressed with an `eval` the same way (t-41720): the part of the handle before the separator is the frame, the part after it the
+ * button inside the frame — the door's own `click` names a button of the page itself. */
+export function pressButton(handle) {
+  const raw = (text) => `String.raw\`${text}\``;
+  if (handle.includes(FORM_REQUEST.frameSeparator)) {
+    const [frame, inner] = handle.split(FORM_REQUEST.frameSeparator);
+    return `document.querySelector(${raw(frame)}).contentDocument.querySelector(${raw(inner)}).click()`;
+  }
+  return `document.querySelector(${raw(handle)}).click()`;
+}
+
