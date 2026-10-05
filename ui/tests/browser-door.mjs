@@ -1215,6 +1215,31 @@ await test("a_read_only_field_and_a_field_that_takes_text_side_by_side_are_no_pa
   } finally { await mixed.close(); }
 });
 
+/* The parts of one value are written alike, but a part the page makes read-only after a choice is still one of them: the box for an address's own host that a list fills in and then keeps from being typed in
+ * is part of the address as it was while it took text. Only a read-only field at the head of the row — a value that comes from a window — is no part of the typed ones (the test before this one). */
+await test("a_part_the_page_makes_read_only_after_a_choice_stays_a_numbered_part_of_the_value_it_belongs_to", async () => {
+  const relay = await browser.newPage();
+  try {
+    await relay.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div class="row"><span>Relay</span> <input id="rn"><span class="sep">@</span><input id="rd" placeholder="Own host">
+        <select id="rs"><option value="">Own host</option><option value="a.test">a.test</option></select></div></form>
+      <script>
+        document.getElementById("rs").addEventListener("change", () => {
+          const box = document.getElementById("rd");
+          box.value = document.getElementById("rs").value;
+          box.readOnly = Boolean(box.value);
+        });
+      </script>`);
+    const names = async () => (await readFields(relay)).fields.map((field) => field.label);
+    const first = await names();
+    assert(first.length === 3 && first.every((label) => /^Relay \(\d\/3\)$/.test(label)), "the three boxes are the parts of one value while all of them take text", first);
+    await relay.selectOption("#rs", "a.test");
+    const second = await names();
+    assert(JSON.stringify(second) === JSON.stringify(first), "and the same three parts once the page made the host box read-only", second);
+    return second.join(" · ");
+  } finally { await relay.close(); }
+});
+
 /* A count the page draws between two buttons — a number shown by an output or a span, a button before it and a button after it, in a group of their own (ARIA's `group`) — is one field of
  * kind `stepper`: named by the group's name, holding the number it shows; its two buttons are its own and are no buttons of the form. A pair of buttons around words that are no
  * whole number (a page counter), and a pair around a field of its own, are no such field. */
