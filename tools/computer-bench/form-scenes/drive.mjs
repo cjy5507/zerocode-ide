@@ -150,6 +150,22 @@ function unitGroups(fields) {
   return groups;
 }
 
+/* The fields the door names by a caption and their own short words — `<caption> — <words>` — grouped by caption: the parts of one value
+ * a caption names, two or more. */
+function captionGroups(fields) {
+  const groups = new Map();
+  for (const field of fields) {
+    const label = String(field.label || "").replace(/\s*\*$/, "");
+    const at = label.lastIndexOf(" — ");
+    if (at < 0) continue;
+    const key = fold(label.slice(0, at)).replace(/\s*\*$/, "");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(field);
+  }
+  for (const [key, parts] of groups) if (parts.length < 2) groups.delete(key);
+  return groups;
+}
+
 /* A date or a time the card gives, in its numbers: a year first makes a date (an hour and a minute after it make a time too), else
  * an hour and a minute; `pm` is which half of the day the words say, or null. */
 function momentOf(value) {
@@ -230,6 +246,7 @@ function plan(fields, facts) {
   const unplaced = [];
   const ambiguous = [];
   const dated = unitGroups(fields);
+  const captioned = captionGroups(fields);
   const sameNumbers = (a, b) => {
     const left = String(a ?? "").match(/\d+/g), right = String(b ?? "").match(/\d+/g);
     return Boolean(left && right) && left.map(Number).join() === right.map(Number).join();
@@ -275,6 +292,15 @@ function plan(fields, facts) {
         if (piece !== null && !sameNumbers(field.value, piece) && fold(field.value) !== fold(piece)) bundle[field.handle] = piece;
       }
       continue;
+    }
+    const named = captioned.get(said);
+    if (named && typeof fact.value !== "boolean") {
+      // The parts a caption names: a value cut at the symbols the door says stand between them.
+      const cut = splitAtJoints(named, String(fact.value));
+      if (cut) {
+        for (const [field, piece] of cut) if (piece && field.value !== piece) bundle[field.handle] = piece;
+        continue;
+      }
     }
     let group = byWords.get(said);
     if (!group) {
@@ -774,6 +800,7 @@ class Road {
       const UNITS = ${JSON.stringify(UNITS)};
       const unitOf = ${unitOf.toString()};
       const unitGroups = ${unitGroups.toString()};
+      const captionGroups = ${captionGroups.toString()};
       const momentOf = ${momentOf.toString()};
       const splitAtJoints = ${splitAtJoints.toString()};
       const kindFits = ${kindFits.toString()};
