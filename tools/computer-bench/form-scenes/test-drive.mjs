@@ -3,8 +3,11 @@
  * of the bench: a page whose fill brings a field of its own ("양식 바뀜") is read
  * again before anything is pressed, and a field the page keeps off until its terms
  * are read to the end is switched on by scrolling that box the way the skill
- * teaches — then the step goes on. Both roads of the driver, the verbs and the
- * script, are held to both. The driver's row and a person's road are held to the
+ * teaches — then the step goes on. The button that moves a step on is chosen by what
+ * the door said of the buttons (t-41656) — a page's own submit, the one the fill turned on, the
+ * page's last — and waited for, a fixed number of times, while it is off and the door has said
+ * new text; a group of chips is written with fill. Both roads of the driver, the verbs and the
+ * script, are held to all of it. The driver's row and a person's road are held to the
  * oracle's three verdicts, said side by side, and to keeping the page's whole
  * result, so any verdict can be counted again later.
  *
@@ -95,9 +98,80 @@ const SOLVE = "export async function solveAsPerson(page) { await page.fill('#nam
 const PERSON_KEPT = await scene("person-kept", SEND("{ name: name.value }"), FACT_NAME, { name: "Kim" }, { "selfcheck.mjs": SOLVE });
 const PERSON_LEFT = await scene("person-left", SEND("{ name: name.value, memo: memo.value }"), FACT_NAME, { name: "Kim" }, { "selfcheck.mjs": SOLVE });
 
+/* The button that moves a step on, four pages that name no word a list could know (t-41656): a step whose button is
+ * off until the fill turns it on, with a button that goes back before it, and a last step whose button is on from the
+ * start; a form whose submit button the page declares, with two other buttons after it that must not be pressed;
+ * a form whose button stays off for a moment while a check the page runs writes "Checking…" beside the field;
+ * and groups of chips — facts that name the options, a text that lists them, one choice of several. */
+const ADVANCE = await scene("advance", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div id="one"><label for="name">Name</label> <input id="name">
+    <button type="button" id="back1">Back</button><button type="button" id="go" disabled>Go ahead</button></div>
+  <div id="two" hidden><label for="mail">Email</label> <input id="mail">
+    <button type="button" id="back2">Back</button><button type="button" id="wrap">Wrap it up</button></div>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  $("name").addEventListener("input", () => { $("go").disabled = !$("name").value; });
+  $("go").addEventListener("click", () => { $("one").hidden = true; $("two").hidden = false; });
+  for (const id of ["back1", "back2"]) $(id).addEventListener("click", () => { window.__sceneResult = { name: "back" }; });
+  $("wrap").addEventListener("click", () => { window.__sceneResult = { name: $("name").value, mail: $("mail").value }; });
+</script>`, [{ says: "Name", value: "Kim" }, { says: "Email", value: "kim@example.com" }], { name: "Kim", mail: "kim@example.com" });
+const ADVANCE_SUBMIT = await scene("advance-submit", `<!doctype html><html lang="en"><meta charset="utf-8"><form id="f" onsubmit="return false">
+  <label for="name">Name</label> <input id="name">
+  <button type="submit" id="save">Zzz</button><button type="button" id="cancel">Cancel</button><button type="button" id="help">Help</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  $("f").addEventListener("submit", (event) => { event.preventDefault(); window.__sceneResult = { name: $("name").value }; });
+  $("cancel").addEventListener("click", () => { window.__sceneResult = { name: "cancelled" }; });
+  $("help").addEventListener("click", () => { window.__sceneResult = { name: "help" }; });
+</script>`, [{ says: "Name", value: "Kim" }], { name: "Kim" });
+const LOADING = await scene("loading", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="row"><label for="name">Name</label> <input id="name"><span id="note"></span></div>
+  <div class="row"><label for="mail">Email</label> <input id="mail"></div>
+  <button type="button" id="go" disabled>Continue</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let timer = 0;
+  $("name").addEventListener("input", () => {
+    $("go").disabled = true;
+    $("note").textContent = "Checking…";
+    clearTimeout(timer);
+    timer = setTimeout(() => { $("go").disabled = !$("name").value; $("note").textContent = "Looks fine"; }, 1600);
+  });
+  $("go").addEventListener("click", () => { window.__sceneResult = { name: $("name").value }; });
+</script>`, [{ says: "Name", value: "Kim" }], { name: "Kim" });
+const CHIPS = await scene("chips", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="name">Name</label> <input id="name">
+  <div id="cl">Pick colours</div>
+  <div id="colours" role="group" aria-labelledby="cl"><button type="button" aria-pressed="false">Red</button><button type="button" aria-pressed="true">Green</button><button type="button" aria-pressed="false">Blue</button></div>
+  <div id="sl">Size</div>
+  <div id="size" role="group" aria-labelledby="sl"><button type="button" aria-pressed="false">Small</button><button type="button" aria-pressed="true">Medium</button><button type="button" aria-pressed="false">Large</button></div>
+  <div id="xl">Extras</div>
+  <div id="extras" role="group" aria-labelledby="xl"><button type="button" aria-pressed="false">Tea</button><button type="button" aria-pressed="false">Cake</button><button type="button" aria-pressed="false">Jam</button></div>
+  <button type="button" id="send">Submit</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const held = (id) => [...document.querySelectorAll("#" + id + " button")].filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => b.textContent);
+  for (const id of ["colours", "extras"]) $(id).addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (button) button.setAttribute("aria-pressed", String(button.getAttribute("aria-pressed") !== "true"));
+  });
+  $("size").addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (button) for (const other of document.querySelectorAll("#size button")) other.setAttribute("aria-pressed", String(other === button));
+  });
+  $("send").addEventListener("click", () => { window.__sceneResult = { name: $("name").value, colours: held("colours"), size: held("size")[0] || "", extras: held("extras") }; });
+</script>`, [{ says: "Name", value: "Kim" }, { says: "Red", value: true }, { says: "Green", value: false }, { says: "Blue", value: true },
+  { says: "Size", value: "Large" }, { says: "Extras", value: "Tea, Jam" }],
+{ name: "Kim", colours: ["Red", "Blue"], size: "Large", extras: ["Tea", "Jam"] });
+
 /* One run of the drivers on every scene, once. */
 const out = join(root, "rows.json");
-const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY, "--out", out], { encoding: "utf8", timeout: 240_000 });
+const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
+  "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -123,6 +197,39 @@ await test("a driver scrolls a box to its end by the recipe the skill teaches wh
   const verbs = row("terms", "verbs");
   assert(verbs.eval === 1, "the box was scrolled by one eval", { eval: verbs.eval });
   return `eval ${verbs.eval}`;
+});
+
+await test("a driver presses the button that moves a step on by what the door said of the buttons, not by a list of words", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("advance", road);
+    assert(one && one.ok && one.pass, `the ${road} road gets through two steps whose buttons carry no word a list knows, past the button that goes back`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return `verbs click ${row("advance", "verbs").click}, script eval ${row("advance", "script").eval}`;
+});
+
+await test("a driver prefers the button the page declares a submit to the last button of the page", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("advance-submit", road);
+    assert(one && one.ok && one.pass, `the ${road} road presses the submit the page declares, not the buttons after it`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return "submit";
+});
+
+await test("a driver waits a fixed number of times for the button that moves the form on while it is off and the door has said new text, then reads the form again", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("loading", road);
+    assert(one && one.ok && one.pass, `the ${road} road waits out the check and presses the button when it is on`, one && { ok: one.ok, stuck: one.stuck, wait: one.wait });
+    assert(one.wait >= 1 && one.wait <= 3, `and waited no more than a fixed number of times (${road})`, { wait: one.wait });
+  }
+  return `waits ${row("loading", "verbs").wait} / ${row("loading", "script").wait}`;
+});
+
+await test("a driver writes a group of chips with fill — the options a fact names, the options a text lists, one choice of several", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("chips", road);
+    assert(one && one.ok && one.pass, `the ${road} road leaves the page holding the options the card names`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return JSON.stringify(row("chips", "verbs").result);
 });
 
 await test("the recipe a driver scrolls a box by is the one the skill teaches", () => {
