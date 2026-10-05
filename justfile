@@ -162,6 +162,7 @@ form-bench-test:
     cargo build -p zerocode-core --example door_text
     node tools/computer-bench/form-scenes/test-desk.mjs --door-text "${CARGO_TARGET_DIR:-target}/debug/examples/door_text"
     node tools/computer-bench/form-scenes/test-real.mjs --door-text "${CARGO_TARGET_DIR:-target}/debug/examples/door_text"
+    node tools/computer-bench/form-scenes/test-kit.mjs
 
 # Release builds use a deliberately small frontend tree. Keeping this separate
 # from ui/ means browser fixtures and prototypes remain available to developers
