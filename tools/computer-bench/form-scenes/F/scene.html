@@ -1,0 +1,1255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create your account · Pellmoor</title>
+<style>
+:root{--ink:#1d1f24;--muted:#6a6f7a;--line:#d9dce3;--soft:#f3f4f7;--brand:#1f5c4a;--brand2:#2c7a63;--err:#c0392b;--ok:#1e8449;--focus:#7fb8a6}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;font:15px/1.45 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--ink);background:#fbfbfa}
+a{color:var(--brand)}
+.promo-bar{background:var(--brand);color:#fff;text-align:center;font-size:13px;padding:6px 12px}
+.top{display:flex;align-items:center;justify-content:space-between;padding:14px 32px;border-bottom:1px solid var(--line);background:#fff}
+.logo{font-weight:800;letter-spacing:.18em;font-size:20px;color:var(--ink);text-decoration:none}
+.top nav a{margin:0 10px;color:var(--ink);text-decoration:none;font-size:14px}
+.top .util{font-size:13px;color:var(--muted);display:flex;gap:16px}
+.wrap{max-width:1080px;margin:28px auto 110px;padding:0 24px;display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:32px;align-items:start}
+h1{font-size:26px;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 20px}
+.steps{display:flex;list-style:none;padding:0;margin:0 0 22px;counter-reset:s}
+.steps li{flex:1;position:relative;padding-top:30px;font-size:13px;color:var(--muted);text-align:center}
+.steps li::before{counter-increment:s;content:counter(s);position:absolute;top:0;left:50%;transform:translateX(-50%);width:24px;height:24px;border-radius:50%;border:2px solid var(--line);background:#fff;line-height:20px;font-weight:600;font-size:12px;z-index:1}
+.steps li::after{content:"";position:absolute;top:11px;left:-50%;width:100%;height:2px;background:var(--line)}
+.steps li:first-child::after{display:none}
+.steps li.done::before{content:"\2713";background:var(--brand);border-color:var(--brand);color:#fff}
+.steps li.done::after,.steps li.cur::after{background:var(--brand)}
+.steps li.cur{color:var(--ink);font-weight:600}
+.steps li.cur::before{border-color:var(--brand);color:var(--brand)}
+.card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:26px 28px}
+.screen h2{font-size:19px;margin:0 0 4px}
+.screen h2:focus{outline:none}
+.lead{color:var(--muted);font-size:14px;margin:0 0 18px}
+.row{display:flex;gap:16px}
+.row>.f{flex:1;min-width:0}
+.f{margin-bottom:16px;position:relative}
+.f>label,.qlabel{display:block;font-weight:600;font-size:14px;margin-bottom:6px}
+.req{color:var(--err);margin-left:2px}
+.opt{font-weight:400;color:var(--muted);font-size:12px;margin-left:6px}
+input[type=text],input[type=email],input[type=password],input[type=tel],select,textarea{width:100%;padding:10px 12px;border:1px solid #c5c9d2;border-radius:6px;font:inherit;background:#fff;color:inherit}
+input[readonly]{background:var(--soft);color:var(--muted)}
+textarea{resize:vertical;min-height:72px}
+input:focus,select:focus,textarea:focus,button:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.f.invalid input,.f.invalid select,.f.invalid textarea,.f.invalid .dd-btn{border-color:var(--err)}
+.err{color:var(--err);font-size:12.5px;margin-top:5px;display:none}
+.f.invalid>.err,.grp.invalid>.err{display:block}
+.hint{color:var(--muted);font-size:12.5px;margin-top:5px}
+.pw-wrap{position:relative}
+.pw-wrap input{padding-right:64px}
+.pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:0;color:var(--brand);font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;padding:6px}
+.meter{height:4px;background:var(--soft);border-radius:2px;margin-top:8px;overflow:hidden}
+.meter i{display:block;height:100%;width:0;background:var(--err);transition:width .2s}
+.rules{list-style:none;padding:0;margin:8px 0 0;display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:12.5px;color:var(--muted)}
+.rules li::before{content:"\25CB  "}
+.rules li.met{color:var(--ok)}
+.rules li.met::before{content:"\25CF  "}
+.actions{display:flex;justify-content:space-between;align-items:center;margin-top:24px;padding-top:18px;border-top:1px solid var(--line)}
+.btn{background:var(--brand);color:#fff;border:0;border-radius:6px;padding:11px 22px;font-family:inherit;font-size:15px;font-weight:600;line-height:1.2;cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--brand2)}
+.btn[disabled]{background:#a9b9b3;cursor:not-allowed}
+.btn.ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}
+.btn.sm{padding:10px 14px;font-size:14px}
+.link{background:none;border:0;padding:0;color:var(--brand);text-decoration:underline;font:inherit;cursor:pointer}
+.link[disabled]{color:var(--muted);text-decoration:none;cursor:default}
+.phone{display:flex;gap:10px;align-items:flex-end}
+.dd{position:relative}
+.dd-btn{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:10px 12px;border:1px solid #c5c9d2;border-radius:6px;background:#fff;font:inherit;cursor:pointer;text-align:left;color:inherit;min-height:43px}
+.dd-btn[disabled]{background:var(--soft);color:var(--muted);cursor:default}
+.dd-btn::after{content:"\25BE";color:var(--muted)}
+.dd-list{position:absolute;z-index:20;left:0;top:calc(100% + 4px);min-width:100%;max-height:240px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.12);margin:0;padding:4px 0;list-style:none}
+.dd-list li{padding:8px 12px;cursor:pointer;white-space:nowrap}
+.dd-list li:hover,.dd-list li.active{background:var(--soft)}
+.dd-list li[aria-selected=true]{font-weight:600;color:var(--brand)}
+.cc{width:120px;flex:none}
+.cc .dd-list{width:250px}
+.otp{display:flex;gap:8px}
+.otp input{width:46px;height:52px;text-align:center;font-size:22px;padding:0;border:1px solid #c5c9d2;border-radius:6px;font-family:inherit}
+.notice{background:#eef6f2;border:1px solid #cfe5db;color:#1b4d3e;border-radius:6px;padding:10px 12px;font-size:13.5px;margin:4px 0 14px}
+.verified{color:var(--ok);font-weight:600;margin:4px 0 0}
+.grp{margin-bottom:16px}
+.rcards{display:flex;gap:12px}
+.rcard{flex:1;border:1px solid #c5c9d2;border-radius:8px;padding:12px 14px;cursor:pointer;background:#fff}
+.rcard[aria-checked=true]{border-color:var(--brand);box-shadow:0 0 0 1px var(--brand);background:#f5faf8}
+.rcard b{display:block;font-size:15px}
+.rcard span{font-size:12.5px;color:var(--muted)}
+.grp.invalid .rcard{border-color:var(--err)}
+.cbx{position:relative}
+.sugg{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 4px);margin:0;padding:4px 0;list-style:none;background:#fff;border:1px solid var(--line);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.12);max-height:220px;overflow:auto}
+.sugg li{padding:8px 12px;cursor:pointer}
+.sugg li.active,.sugg li:hover{background:var(--soft)}
+.sugg mark{background:none;font-weight:700;color:inherit}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{border:1px solid #c5c9d2;background:#fff;border-radius:999px;padding:7px 14px;font:inherit;font-size:14px;cursor:pointer;color:inherit}
+.chip[aria-pressed=true]{background:var(--brand);border-color:var(--brand);color:#fff}
+.sw-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:12px 0;border-top:1px solid var(--soft)}
+.sw-row p{margin:2px 0 0;font-size:12.5px;color:var(--muted)}
+.switch{flex:none;width:44px;height:24px;border-radius:12px;border:0;background:#c5c9d2;position:relative;cursor:pointer;padding:0}
+.switch::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .15s}
+.switch[aria-checked=true]{background:var(--brand)}
+.switch[aria-checked=true]::after{left:23px}
+.freq{margin:0 0 10px 2px;padding:10px 14px;background:var(--soft);border-radius:8px}
+.freq label{display:block;margin:6px 0;font-size:14px;cursor:pointer}
+.checkline{display:flex;gap:8px;align-items:center;font-size:14px;margin:8px 0}
+.consents{border:1px solid var(--line);border-radius:8px;padding:4px 14px;margin-top:16px}
+.consents .c{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-top:1px solid var(--soft);font-size:14px}
+.consents .c:first-child{border-top:0}
+.consents .c input{margin-top:3px;width:16px;height:16px;flex:none}
+.consents .c label{flex:1;cursor:pointer}
+.consents .c .link{font-size:13px;flex:none}
+.tag{font-size:11px;font-weight:600;color:var(--err);margin-left:6px}
+aside .box{background:#fff;border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin-bottom:16px}
+aside h3{font-size:15px;margin:0 0 10px}
+aside ul{padding-left:18px;margin:0;font-size:13.5px}
+aside li{margin:4px 0}
+.small{font-size:12px;color:var(--muted)}
+.modal-bg{position:fixed;inset:0;background:rgba(20,22,26,.45);display:flex;align-items:center;justify-content:center;z-index:50}
+.modal{background:#fff;border-radius:10px;width:560px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column}
+.modal header{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid var(--line)}
+.modal header h3{margin:0;font-size:17px}
+.modal .body{padding:6px 20px 16px;overflow:auto;font-size:13.5px;color:#3a3e46}
+.modal footer{padding:12px 20px;border-top:1px solid var(--line);text-align:right}
+.x{background:none;border:0;font-size:24px;line-height:1;cursor:pointer;color:var(--muted)}
+.cookie{position:fixed;left:0;right:0;bottom:0;background:#20242b;color:#e9ebef;padding:14px 32px;display:flex;align-items:center;gap:16px;font-size:13.5px;z-index:40}
+.cookie p{margin:0;flex:1}
+.cookie a{color:#bfe3d6}
+.cookie .btn{padding:9px 16px;font-size:13.5px}
+.done-panel{text-align:center;padding:30px 10px}
+.done-panel .big{font-size:44px;color:var(--ok)}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:7px}
+@keyframes sp{to{transform:rotate(360deg)}}
+footer.site{border-top:1px solid var(--line);padding:24px 32px 90px;color:var(--muted);font-size:12.5px;text-align:center}
+</style>
+</head>
+<body>
+<div class="promo-bar">New members get 10% off their first order &middot; Free standard shipping on orders over US$80</div>
+<header class="top">
+  <a class="logo" href="#">PELLMOOR</a>
+  <nav aria-label="Main">
+    <a href="#">New in</a><a href="#">Women</a><a href="#">Men</a><a href="#">Home</a><a href="#">Beauty</a><a href="#">Sale</a>
+  </nav>
+  <div class="util"><span>EN &middot; US$</span><a href="#">Help</a><a href="#">Sign in</a><span>Bag (0)</span></div>
+</header>
+
+<main class="wrap">
+<section>
+  <h1>Create your Pellmoor account</h1>
+  <p class="sub">Already a member? <a href="#">Sign in</a></p>
+  <ol class="steps" id="steps">
+    <li class="cur">Account</li><li>Mobile</li><li>Shipping</li><li>Preferences</li>
+  </ol>
+
+  <form class="card" id="signup" novalidate>
+
+    <div class="screen" id="s1">
+      <h2>Account details</h2>
+      <p class="lead">Fields marked <span class="req">*</span> are required.</p>
+      <div class="row">
+        <div class="f" data-f="firstName">
+          <label for="first">First name<span class="req">*</span></label>
+          <input type="text" id="first" name="given-name" autocomplete="given-name">
+          <div class="err">Please enter your first name.</div>
+        </div>
+        <div class="f" data-f="lastName">
+          <label for="last">Last name<span class="req">*</span></label>
+          <input type="text" id="last" name="family-name" autocomplete="family-name">
+          <div class="err">Please enter your last name.</div>
+        </div>
+      </div>
+      <div class="f" data-f="email">
+        <label for="email">Email address<span class="req">*</span></label>
+        <input type="email" id="email" name="email" autocomplete="email" placeholder="you@example.com">
+        <div class="hint">We'll send order confirmations and receipts here.</div>
+        <div class="err">Enter a valid email address.</div>
+      </div>
+      <div class="f" data-f="password">
+        <label for="pw">Password<span class="req">*</span></label>
+        <div class="pw-wrap">
+          <input type="password" id="pw" name="new-password" autocomplete="new-password" aria-describedby="pw-rules">
+          <button type="button" class="pw-toggle" data-for="pw" aria-pressed="false">Show</button>
+        </div>
+        <div class="meter"><i id="pw-meter"></i></div>
+        <ul class="rules" id="pw-rules">
+          <li data-r="len">At least 8 characters</li>
+          <li data-r="up">One uppercase letter</li>
+          <li data-r="low">One lowercase letter</li>
+          <li data-r="num">One number</li>
+          <li data-r="sym">One symbol (e.g. # ! ?)</li>
+        </ul>
+        <div class="err">Your password doesn't meet the requirements yet.</div>
+      </div>
+      <div class="f" data-f="password2">
+        <label for="pw2">Confirm password<span class="req">*</span></label>
+        <div class="pw-wrap">
+          <input type="password" id="pw2" autocomplete="new-password">
+          <button type="button" class="pw-toggle" data-for="pw2" aria-pressed="false">Show</button>
+        </div>
+        <div class="err">Passwords don't match.</div>
+      </div>
+      <div class="f" data-f="dob" style="max-width:260px">
+        <label for="dob">Date of birth</label>
+        <input type="text" id="dob" inputmode="numeric" placeholder="MM/DD/YYYY" maxlength="10" autocomplete="bday">
+        <div class="hint">Optional. We'll send you a little something on your birthday.</div>
+        <div class="err">Enter a real date as MM/DD/YYYY.</div>
+      </div>
+      <div class="actions">
+        <span class="small">Step 1 of 4</span>
+        <button type="button" class="btn" data-next>Continue</button>
+      </div>
+    </div>
+
+    <div class="screen" id="s2" hidden>
+      <h2>Verify your mobile number</h2>
+      <p class="lead">We'll text you delivery updates and use this number to keep your account secure. Message rates may apply.</p>
+      <div class="f" data-f="mobile">
+        <div class="phone">
+          <div class="cc">
+            <span class="qlabel" id="cc-label">Country code</span>
+            <div class="dd" id="cc">
+              <button type="button" class="dd-btn" id="cc-btn" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="cc-label cc-val"><span id="cc-val">US +1</span></button>
+              <ul class="dd-list" id="cc-list" role="listbox" aria-labelledby="cc-label" hidden></ul>
+            </div>
+          </div>
+          <div style="flex:1;min-width:0">
+            <label class="qlabel" for="mobile">Mobile number<span class="req">*</span></label>
+            <div style="display:flex;gap:8px">
+              <input type="tel" id="mobile" data-main autocomplete="tel-national" placeholder="(201) 555-0123">
+              <button type="button" class="btn sm" id="send-code" disabled>Send code</button>
+            </div>
+          </div>
+        </div>
+        <div class="err">Enter a valid mobile number.</div>
+      </div>
+      <div id="otp-area" hidden>
+        <div class="notice" id="otp-sent" role="status"></div>
+        <div class="f" data-f="otp">
+          <span class="qlabel" id="otp-label">Enter the 6-digit code</span>
+          <div style="display:flex;align-items:center;gap:14px">
+            <div class="otp" id="otp" role="group" aria-labelledby="otp-label">
+              <input inputmode="numeric" autocomplete="one-time-code" aria-label="Digit 1">
+              <input inputmode="numeric" aria-label="Digit 2">
+              <input inputmode="numeric" aria-label="Digit 3">
+              <input inputmode="numeric" aria-label="Digit 4">
+              <input inputmode="numeric" aria-label="Digit 5">
+              <input inputmode="numeric" aria-label="Digit 6">
+            </div>
+            <button type="button" class="btn sm" id="verify" disabled>Verify</button>
+          </div>
+          <div class="err">That code isn't right.</div>
+          <div class="hint">Didn't get it? <button type="button" class="link" id="resend" disabled>Resend code</button> <span id="resend-timer"></span></div>
+        </div>
+      </div>
+      <p class="verified" id="otp-ok" hidden>&#10003; Mobile number verified &middot; <button type="button" class="link" id="change-num">Change number</button></p>
+      <div class="actions">
+        <button type="button" class="btn ghost" data-back>Back</button>
+        <button type="button" class="btn" id="next2" data-next disabled>Continue</button>
+      </div>
+    </div>
+    <div class="screen" id="s3" hidden>
+      <h2>Shipping address</h2>
+      <p class="lead">Where should we deliver your orders? You can add more addresses later in My Account.</p>
+      <div class="f" data-f="country" style="max-width:340px">
+        <label for="country">Country / Region<span class="req">*</span></label>
+        <select id="country" autocomplete="country">
+          <option value="">Select a country</option>
+          <option value="AU">Australia</option>
+          <option value="CA">Canada</option>
+          <option value="FR">France</option>
+          <option value="DE">Germany</option>
+          <option value="HK">Hong Kong</option>
+          <option value="JP">Japan</option>
+          <option value="SG">Singapore</option>
+          <option value="KR">South Korea</option>
+          <option value="TW">Taiwan</option>
+          <option value="GB">United Kingdom</option>
+          <option value="US">United States</option>
+        </select>
+        <div class="err">Please choose a country.</div>
+      </div>
+      <div class="row">
+        <div class="f" data-f="region">
+          <span class="qlabel" id="region-label">State / Province</span>
+          <div class="dd" id="region">
+            <button type="button" class="dd-btn" id="region-btn" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="region-label region-val" disabled><span id="region-val">Choose a country first</span></button>
+            <ul class="dd-list" id="region-list" role="listbox" aria-labelledby="region-label" hidden></ul>
+          </div>
+          <input type="text" id="region-text" aria-labelledby="region-label" autocomplete="address-level1" hidden>
+          <div class="err">Please choose an option.</div>
+        </div>
+        <div class="f" data-f="city">
+          <label for="city" id="city-label">City<span class="req">*</span></label>
+          <div class="cbx">
+            <input type="text" id="city" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="city-list" autocomplete="off">
+            <ul class="sugg" id="city-list" role="listbox" hidden></ul>
+          </div>
+          <div class="err">Please enter a city.</div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="f" data-f="postal" style="flex:0 0 190px">
+          <label for="postal" id="postal-label">Postal code<span class="req">*</span></label>
+          <input type="text" id="postal" autocomplete="postal-code">
+          <div class="err">Enter a valid postal code.</div>
+        </div>
+        <div class="f" data-f="address1">
+          <label for="addr1">Street address<span class="req">*</span></label>
+          <input type="text" id="addr1" autocomplete="address-line1" placeholder="House number and street name">
+          <div class="err">Please enter a street address.</div>
+        </div>
+      </div>
+      <div class="f">
+        <input type="text" id="addr2" autocomplete="address-line2" placeholder="Apartment, suite, unit, etc. (optional)">
+      </div>
+      <div class="grp" data-f="addrType">
+        <span class="qlabel" id="at-label">Address type<span class="req">*</span></span>
+        <div class="rcards" id="addr-type" role="radiogroup" aria-labelledby="at-label">
+          <div class="rcard" role="radio" aria-checked="false" tabindex="0" data-value="home"><b>Home</b><span>Deliveries any day, 9am&ndash;9pm</span></div>
+          <div class="rcard" role="radio" aria-checked="false" tabindex="-1" data-value="work"><b>Work</b><span>Weekdays only, 9am&ndash;6pm</span></div>
+        </div>
+        <div class="err">Please choose an address type.</div>
+      </div>
+      <div class="f">
+        <label for="note">Delivery instructions <span class="opt">Optional</span></label>
+        <textarea id="note" maxlength="150" placeholder="e.g. door code, where to leave a parcel"></textarea>
+        <div class="hint"><span id="note-count">0</span>/150</div>
+      </div>
+      <div class="sw-row">
+        <div><b>Make this my default address</b><p>We'll use it automatically at checkout.</p></div>
+        <button type="button" class="switch" role="switch" aria-checked="true" id="sw-default" aria-label="Make this my default address"></button>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn ghost" data-back>Back</button>
+        <button type="button" class="btn" data-next>Continue</button>
+      </div>
+    </div>
+
+    <div class="screen" id="s4" hidden>
+      <h2>Preferences</h2>
+      <p class="lead">Tell us a little about what you like. You can change these any time in My Account.</p>
+      <div class="f" style="max-width:320px">
+        <label for="currency">Show prices in</label>
+        <select id="currency">
+          <option value="USD" selected>US Dollar (USD)</option>
+          <option value="EUR">Euro (EUR)</option>
+          <option value="GBP">British Pound (GBP)</option>
+          <option value="JPY">Japanese Yen (JPY)</option>
+          <option value="KRW">South Korean Won (KRW)</option>
+          <option value="AUD">Australian Dollar (AUD)</option>
+          <option value="CAD">Canadian Dollar (CAD)</option>
+          <option value="SGD">Singapore Dollar (SGD)</option>
+        </select>
+      </div>
+      <div class="grp">
+        <span class="qlabel" id="int-label">What do you like to shop for?</span>
+        <div class="hint" style="margin:0 0 8px">Pick as many as you like.</div>
+        <div class="chips" id="interests" role="group" aria-labelledby="int-label">
+          <button type="button" class="chip" aria-pressed="false" data-value="women">Women's clothing</button>
+          <button type="button" class="chip" aria-pressed="false" data-value="men">Men's clothing</button>
+          <button type="button" class="chip" aria-pressed="false" data-value="shoes">Shoes</button>
+          <button type="button" class="chip" aria-pressed="false" data-value="bags">Bags &amp; accessories</button>
+          <button type="button" class="chip" aria-pressed="false" data-value="beauty">Beauty</button>
+          <button type="button" class="chip" aria-pressed="false" data-value="home">Home &amp; living</button>
+          <button type="button" class="chip" aria-pressed="false" data-value="kids">Kids</button>
+          <button type="button" class="chip" aria-pressed="false" data-value="outdoor">Outdoor &amp; sport</button>
+        </div>
+      </div>
+      <h3 style="font-size:15px;margin:22px 0 2px">Stay in touch</h3>
+      <div class="sw-row">
+        <div><span id="nl-label">Email me about new arrivals, restocks and members-only offers</span><p>You can unsubscribe at any time.</p></div>
+        <button type="button" class="switch" role="switch" aria-checked="false" id="sw-news" aria-labelledby="nl-label"></button>
+      </div>
+      <div class="grp freq" data-f="freq" id="freq" hidden>
+        <span class="qlabel">How often should we email you?</span>
+        <label><input type="radio" name="freq" value="weekly"> Weekly digest</label>
+        <label><input type="radio" name="freq" value="twice"> Up to twice a week</label>
+        <label><input type="radio" name="freq" value="sales"> Only for big sales</label>
+        <div class="err">Choose how often you'd like to hear from us.</div>
+      </div>
+      <label class="checkline"><input type="checkbox" id="sms"> Send me offers by text message (SMS)</label>
+      <div class="grp" data-f="consents">
+        <div class="consents" id="consents">
+          <div class="c"><input type="checkbox" id="c-terms"><label for="c-terms">I agree to the Terms of Service<span class="tag">Required</span></label><button type="button" class="link" data-doc="terms">View</button></div>
+          <div class="c"><input type="checkbox" id="c-privacy"><label for="c-privacy">I agree to the collection and use of my personal information<span class="tag">Required</span></label><button type="button" class="link" data-doc="privacy">View</button></div>
+          <div class="c"><input type="checkbox" id="c-transfer"><label for="c-transfer">I agree to my personal information being transferred overseas for delivery<span class="tag">Required</span></label><button type="button" class="link" data-doc="transfer">View</button></div>
+          <div class="c"><input type="checkbox" id="c-age"><label for="c-age">I am 16 years of age or older<span class="tag">Required</span></label></div>
+        </div>
+        <div class="err">Please accept the required items to create your account.</div>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn ghost" data-back>Back</button>
+        <button type="button" class="btn" id="create">Create account</button>
+      </div>
+    </div>
+
+    <div class="screen" id="s5" hidden>
+      <div class="done-panel">
+        <div class="big">&#10003;</div>
+        <h2 id="welcome">Welcome to Pellmoor!</h2>
+        <p class="lead" id="welcome-sub">Your account is ready.</p>
+        <button type="button" class="btn">Start shopping</button>
+      </div>
+    </div>
+
+  </form>
+</section>
+
+<aside>
+  <div class="box">
+    <h3>Member benefits</h3>
+    <ul>
+      <li>10% off your first order</li>
+      <li>Free returns within 30 days</li>
+      <li>Early access to seasonal sales</li>
+      <li>A birthday treat every year</li>
+    </ul>
+  </div>
+  <div class="box">
+    <h3>Need help?</h3>
+    <p class="small" style="margin:0">Chat with us 24/7 or write to help@example.com.</p>
+  </div>
+</aside>
+</main>
+
+<footer class="site">&copy; 2026 Pellmoor Goods Ltd. &middot; <a href="#">Privacy</a> &middot; <a href="#">Terms</a> &middot; <a href="#">Cookies</a></footer>
+
+<div class="modal-bg" id="modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <header><h3 id="modal-title"></h3><button type="button" class="x" id="modal-x" aria-label="Close">&times;</button></header>
+    <div class="body" id="modal-body"></div>
+    <footer><button type="button" class="btn" id="modal-agree">Agree</button></footer>
+  </div>
+</div>
+
+<div class="cookie" id="cookie">
+  <p>We use cookies to make this site work and to understand how it's used. See our <a href="#">Cookie Policy</a>.</p>
+  <button type="button" class="btn ghost" id="ck-min">Necessary only</button>
+  <button type="button" class="btn" id="ck-all">Accept all</button>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  function $(id) { return document.getElementById(id); }
+  function each(list, fn) { Array.prototype.forEach.call(list, fn); }
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  var state = {
+    step: 1, phoneCountry: 'US', code: null, codeSentTo: null, codeAt: 0, attempts: 0,
+    verifiedPhone: null, verifiedCode: null, country: '', region: '', addrType: '',
+    newsletter: false, defaultAddr: true, submitted: false
+  };
+
+  var CC = [
+    { iso: 'AU', name: 'Australia', dial: '61' },
+    { iso: 'CA', name: 'Canada', dial: '1' },
+    { iso: 'FR', name: 'France', dial: '33' },
+    { iso: 'DE', name: 'Germany', dial: '49' },
+    { iso: 'HK', name: 'Hong Kong', dial: '852' },
+    { iso: 'JP', name: 'Japan', dial: '81' },
+    { iso: 'SG', name: 'Singapore', dial: '65' },
+    { iso: 'KR', name: 'South Korea', dial: '82' },
+    { iso: 'TW', name: 'Taiwan', dial: '886' },
+    { iso: 'GB', name: 'United Kingdom', dial: '44' },
+    { iso: 'US', name: 'United States', dial: '1' }
+  ];
+  var PHONE_PH = { US: '(201) 555-0123', CA: '(506) 555-0123', KR: '010-1234-5678', GB: '7700 900123', AU: '0412 345 678' };
+  var REGIONS = {
+    KR: ['Seoul', 'Busan', 'Daegu', 'Incheon', 'Gwangju', 'Daejeon', 'Ulsan', 'Sejong', 'Gyeonggi-do', 'Gangwon-do', 'Chungcheongbuk-do', 'Chungcheongnam-do', 'Jeollabuk-do', 'Jeollanam-do', 'Gyeongsangbuk-do', 'Gyeongsangnam-do', 'Jeju-do'],
+    US: ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware', 'District of Columbia', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania', 'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming']
+  };
+  var CITIES = {
+    'KR|Seoul': ['Dobong-gu', 'Dongdaemun-gu', 'Dongjak-gu', 'Eunpyeong-gu', 'Gangbuk-gu', 'Gangdong-gu', 'Gangnam-gu', 'Gangseo-gu', 'Geumcheon-gu', 'Guro-gu', 'Gwanak-gu', 'Gwangjin-gu', 'Jongno-gu', 'Jung-gu', 'Jungnang-gu', 'Mapo-gu', 'Nowon-gu', 'Seocho-gu', 'Seodaemun-gu', 'Seongbuk-gu', 'Seongdong-gu', 'Songpa-gu', 'Yangcheon-gu', 'Yeongdeungpo-gu', 'Yongsan-gu']
+  };
+  var ADDR = {
+    KR: { region: 'Province / Metropolitan city', city: 'City / District', postal: 'Postal code', postalRe: /^\d{5}$/ },
+    US: { region: 'State', city: 'City', postal: 'ZIP code', postalRe: /^\d{5}(-\d{4})?$/ },
+    CA: { region: 'Province', city: 'City', postal: 'Postal code', postalRe: /^[A-Za-z]\d[A-Za-z] ?\d[A-Za-z]\d$/ },
+    AU: { region: 'State / Territory', city: 'Suburb', postal: 'Postcode', postalRe: /^\d{4}$/ },
+    GB: { region: 'County', regionOptional: true, city: 'Town / City', postal: 'Postcode', postalRe: /^[A-Za-z]{1,2}\d[A-Za-z\d]? ?\d[A-Za-z]{2}$/ },
+    JP: { region: 'Prefecture', city: 'City / Ward', postal: 'Postal code', postalRe: /^\d{3}-?\d{4}$/ },
+    _: { region: 'State / Province / Region', regionOptional: true, city: 'City', postal: 'Postal code', postalRe: /^[A-Za-z0-9 -]{3,10}$/ }
+  };
+  var TAKEN = ['jamie.lee@example.com', 'test@example.com'];
+  var DOCS = {
+    terms: {
+      title: 'Terms of Service',
+      body: '<p>1. Keep your password to yourself and tell us if you think someone else has used your account.</p>' +
+        '<p>2. Unless checkout says otherwise, you are charged in US dollars.</p>' +
+        '<p>3. Most items can be returned within 30 days of delivery.</p>'
+    },
+    privacy: {
+      title: 'Collection and use of personal information',
+      body: '<p><b>What:</b> name, email, password, mobile number, shipping address and, if given, date of birth.</p>' +
+        '<p><b>Why:</b> to run your account, deliver orders and help you when you contact us.</p>' +
+        '<p><b>How long:</b> until you close your account, or up to 5 years where the law requires order records.</p>'
+    },
+    transfer: {
+      title: 'Transfer of personal information overseas',
+      body: '<p>Orders ship from warehouses outside your country. We share your name, mobile number and shipping address with Pellmoor Fulfilment Ltd. and our international carriers, and keep it for up to 1 year after delivery.</p>'
+    }
+  };
+
+  /* ---------- validation ---------- */
+  var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+  function addrRules() { return ADDR[state.country] || ADDR._; }
+  function pwRules(v) {
+    return { len: v.length >= 8, up: /[A-Z]/.test(v), low: /[a-z]/.test(v), num: /\d/.test(v), sym: /[^A-Za-z0-9\s]/.test(v) };
+  }
+  function parseDob(v) {
+    var m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v);
+    if (!m) return null;
+    var mo = +m[1], d = +m[2], y = +m[3], dt = new Date(y, mo - 1, d);
+    if (y < 1900 || dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d || dt > new Date()) return null;
+    return m[3] + '-' + m[1] + '-' + m[2];
+  }
+  function ageOf(iso) {
+    var p = iso.split('-'), now = new Date(), mo = +p[1], d = +p[2];
+    var age = now.getFullYear() - (+p[0]);
+    if (now.getMonth() + 1 < mo || (now.getMonth() + 1 === mo && now.getDate() < d)) age--;
+    return age;
+  }
+  var checks = {
+    firstName: function () { return $('first').value.trim() ? '' : 'Please enter your first name.'; },
+    lastName: function () { return $('last').value.trim() ? '' : 'Please enter your last name.'; },
+    email: function () {
+      var v = $('email').value.trim();
+      if (!v) return 'Please enter your email address.';
+      return EMAIL_RE.test(v) ? '' : 'Enter a valid email address, like name@example.com.';
+    },
+    password: function () {
+      var v = $('pw').value, r = pwRules(v), k;
+      if (!v) return 'Please create a password.';
+      for (k in r) { if (!r[k]) return 'Your password doesn’t meet the requirements yet.'; }
+      return '';
+    },
+    password2: function () {
+      var v = $('pw2').value;
+      if (!v) return 'Please confirm your password.';
+      return v === $('pw').value ? '' : 'Passwords don’t match.';
+    },
+    dob: function () {
+      var v = $('dob').value.trim(), iso;
+      if (!v) return '';
+      iso = parseDob(v);
+      if (!iso) return 'Enter a real date as MM/DD/YYYY.';
+      return ageOf(iso) >= 16 ? '' : 'You must be at least 16 to create an account.';
+    },
+    country: function () { return state.country ? '' : 'Please choose a country.'; },
+    region: function () {
+      var A = addrRules();
+      if (!state.country) return '';
+      if (REGIONS[state.country]) return state.region ? '' : 'Please select your ' + A.region.toLowerCase() + '.';
+      return A.regionOptional || $('region-text').value.trim() ? '' : 'Please enter your ' + A.region.toLowerCase() + '.';
+    },
+    city: function () { return $('city').value.trim() ? '' : 'Please enter your ' + addrRules().city.toLowerCase() + '.'; },
+    postal: function () {
+      var A = addrRules(), v = $('postal').value.trim();
+      if (!v) return A.postalOptional ? '' : 'Please enter your ' + A.postal.toLowerCase() + '.';
+      return A.postalRe.test(v) ? '' : 'That doesn’t look like a valid ' + A.postal.toLowerCase() + '.';
+    },
+    address1: function () { return $('addr1').value.trim() ? '' : 'Please enter a street address.'; },
+    addrType: function () { return state.addrType ? '' : 'Please choose an address type.'; },
+    freq: function () {
+      return !state.newsletter || document.querySelector('input[name=freq]:checked') ? '' : 'Choose how often you’d like to hear from us.';
+    },
+    consents: function () {
+      return ['c-terms', 'c-privacy', 'c-transfer', 'c-age'].every(function (id) { return $(id).checked; }) ? '' : 'Please accept the required items to create your account.';
+    }
+  };
+  function wrapFor(name) { return document.querySelector('[data-f="' + name + '"]'); }
+  function setInvalid(wrap, bad, msg) {
+    if (!wrap) return;
+    wrap.classList.toggle('invalid', !!bad);
+    var err = wrap.querySelector(':scope > .err');
+    if (err && msg) err.textContent = msg;
+    var main = wrap.querySelector('[data-main]') || wrap.querySelector('input:not([hidden]), select, textarea, .dd:not([hidden]) .dd-btn');
+    if (main) {
+      if (bad) main.setAttribute('aria-invalid', 'true');
+      else main.removeAttribute('aria-invalid');
+    }
+  }
+  function run(name) {
+    var msg = checks[name]();
+    setInvalid(wrapFor(name), !!msg, msg);
+    return !msg;
+  }
+  ['firstName', 'lastName', 'email', 'password', 'password2', 'dob', 'country', 'region', 'city', 'postal', 'address1', 'addrType'].forEach(function (name) {
+    var w = wrapFor(name);
+    w.addEventListener('focusout', function (e) {
+      if (e.relatedTarget && w.contains(e.relatedTarget)) return;
+      run(name);
+    });
+  });
+  Object.keys(checks).forEach(function (name) {
+    var w = wrapFor(name);
+    function again() { if (w.classList.contains('invalid')) run(name); }
+    w.addEventListener('input', again);
+    w.addEventListener('change', again);
+  });
+
+  /* ---------- account step ---------- */
+  $('pw').addEventListener('input', function () {
+    var r = pwRules(this.value), n = 0, bar = $('pw-meter');
+    each(document.querySelectorAll('#pw-rules li'), function (li) {
+      var ok = r[li.getAttribute('data-r')];
+      li.classList.toggle('met', ok);
+      if (ok) n++;
+    });
+    bar.style.width = (n * 20) + '%';
+    bar.style.background = n < 3 ? 'var(--err)' : (n < 5 ? '#d68910' : 'var(--ok)');
+    if ($('pw2').value) run('password2');
+  });
+  each(document.querySelectorAll('.pw-toggle'), function (b) {
+    b.addEventListener('click', function () {
+      var inp = $(b.getAttribute('data-for')), reveal = inp.type === 'password';
+      inp.type = reveal ? 'text' : 'password';
+      b.textContent = reveal ? 'Hide' : 'Show';
+      b.setAttribute('aria-pressed', reveal ? 'true' : 'false');
+    });
+  });
+  function fmtDob(v) {
+    var d = v.replace(/\D/g, '').slice(0, 8);
+    if (d.length > 4) return d.slice(0, 2) + '/' + d.slice(2, 4) + '/' + d.slice(4);
+    if (d.length > 2) return d.slice(0, 2) + '/' + d.slice(2);
+    return d;
+  }
+  $('dob').addEventListener('input', function () {
+    var f = fmtDob(this.value);
+    if (f !== this.value) this.value = f;
+  });
+
+  /* ---------- steps ---------- */
+  var screens = [null, $('s1'), $('s2'), $('s3'), $('s4')];
+  var stepFields = {
+    1: ['firstName', 'lastName', 'email', 'password', 'password2', 'dob'],
+    3: ['country', 'region', 'city', 'postal', 'address1', 'addrType'],
+    4: ['freq', 'consents']
+  };
+  function show(n) {
+    var lis = $('steps').children, h;
+    state.step = n;
+    for (var i = 1; i <= 4; i++) {
+      screens[i].hidden = i !== n;
+      lis[i - 1].className = i < n ? 'done' : (i === n ? 'cur' : '');
+    }
+    window.scrollTo(0, 0);
+    h = screens[n].querySelector('h2');
+    h.setAttribute('tabindex', '-1');
+    h.focus({ preventScroll: true });
+  }
+  function stepOk(n) {
+    return (stepFields[n] || []).every(function (name) { return !checks[name](); });
+  }
+  function validateStep(n) {
+    var first = null, t;
+    (stepFields[n] || []).forEach(function (name) {
+      if (!run(name) && !first) first = wrapFor(name);
+    });
+    if (first) {
+      first.scrollIntoView({ block: 'center' });
+      t = first.querySelector('input:not([hidden]), select, textarea, .dd:not([hidden]) .dd-btn:not([disabled]), [role=radio]');
+      if (t) t.focus({ preventScroll: true });
+    }
+    return !first;
+  }
+  function busy(btn, on) {
+    btn.disabled = on;
+    if (on) {
+      btn.setAttribute('data-label', btn.textContent);
+      btn.innerHTML = '<span class="spin"></span>' + esc(btn.textContent);
+    } else {
+      btn.textContent = btn.getAttribute('data-label');
+    }
+  }
+  function next(btn) {
+    var n = state.step;
+    if (n === 2) {
+      if (state.verifiedPhone) show(3);
+      return;
+    }
+    if (!validateStep(n)) return;
+    if (n === 1) {
+      busy(btn, true);
+      setTimeout(function () {
+        busy(btn, false);
+        if (TAKEN.indexOf($('email').value.trim().toLowerCase()) >= 0) {
+          setInvalid(wrapFor('email'), true, 'An account with this email already exists. Try signing in instead.');
+          $('email').focus();
+          return;
+        }
+        show(2);
+      }, 600);
+      return;
+    }
+    show(n + 1);
+  }
+  each(document.querySelectorAll('[data-back]'), function (b) {
+    b.addEventListener('click', function () { show(state.step - 1); });
+  });
+  each(document.querySelectorAll('[data-next]'), function (b) {
+    b.addEventListener('click', function () { next(b); });
+  });
+
+  var form = $('signup');
+  form.addEventListener('submit', function (e) { e.preventDefault(); });
+  form.addEventListener('keydown', function (e) {
+    var t = e.target, b;
+    if (e.key !== 'Enter' || e.defaultPrevented) return;
+    if (t.tagName === 'TEXTAREA' || t.tagName === 'BUTTON' || t.type === 'checkbox' || t.type === 'radio') return;
+    if (t.closest('.dd, .cbx, .otp, .rcards, .chips')) return;
+    e.preventDefault();
+    if (t.id === 'mobile') {
+      if (!$('send-code').disabled) sendCode(false);
+      return;
+    }
+    if (state.step === 4) {
+      $('create').click();
+      return;
+    }
+    b = screens[state.step].querySelector('[data-next]');
+    if (b && !b.disabled) b.click();
+  });
+
+  each(document.querySelectorAll('a[href="#"]'), function (a) {
+    a.addEventListener('click', function (e) { e.preventDefault(); });
+  });
+  $('ck-all').addEventListener('click', function () { $('cookie').hidden = true; });
+  $('ck-min').addEventListener('click', function () { $('cookie').hidden = true; });
+
+  /* ---------- custom dropdown ---------- */
+  function makeDropdown(btn, list, onPick) {
+    var active = -1;
+    function items() { return list.querySelectorAll('[role=option]'); }
+    function setActive(i) {
+      var its = items();
+      if (!its.length) return;
+      active = (i + its.length) % its.length;
+      each(its, function (li, k) { li.classList.toggle('active', k === active); });
+      btn.setAttribute('aria-activedescendant', its[active].id);
+      its[active].scrollIntoView({ block: 'nearest' });
+    }
+    function open() {
+      var sel;
+      if (btn.disabled || !items().length) return;
+      list.hidden = false;
+      btn.setAttribute('aria-expanded', 'true');
+      sel = list.querySelector('[aria-selected=true]');
+      setActive(sel ? Array.prototype.indexOf.call(items(), sel) : 0);
+    }
+    function close() {
+      list.hidden = true;
+      btn.setAttribute('aria-expanded', 'false');
+      btn.removeAttribute('aria-activedescendant');
+    }
+    function pick(li) {
+      each(items(), function (x) { x.setAttribute('aria-selected', x === li ? 'true' : 'false'); });
+      close();
+      onPick(li.getAttribute('data-value'), li);
+    }
+    btn.addEventListener('click', function () {
+      if (list.hidden) open(); else close();
+    });
+    btn.addEventListener('blur', close);
+    list.addEventListener('mousedown', function (e) { e.preventDefault(); });
+    list.addEventListener('click', function (e) {
+      var li = e.target.closest('[role=option]');
+      if (li) pick(li);
+    });
+    btn.addEventListener('keydown', function (e) {
+      var its = items();
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (list.hidden) open(); else setActive(active + (e.key === 'ArrowDown' ? 1 : -1));
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (!list.hidden && its[active]) pick(its[active]); else open();
+      } else if (e.key === 'Escape' || e.key === 'Tab') {
+        close();
+      }
+    });
+    return { close: close };
+  }
+
+  /* ---------- mobile + one-time code ---------- */
+  var sending = false, verifying = false, resendTimer = null;
+  var smsGateway = {
+    sendSms: function (to, done) {
+      setTimeout(function () { done('530718'); }, 900);
+    }
+  };
+  function byIso(iso) {
+    for (var i = 0; i < CC.length; i++) { if (CC[i].iso === iso) return CC[i]; }
+    return null;
+  }
+  function fmtPhone(iso, v) {
+    var d = v.replace(/\D/g, '').slice(0, 15), a;
+    if (/^\s*\+/.test(v)) return '+' + d;
+    if (iso === 'US' || iso === 'CA') {
+      if (d.length > 10) return d;
+      if (d.length > 6) return '(' + d.slice(0, 3) + ') ' + d.slice(3, 6) + '-' + d.slice(6);
+      if (d.length > 3) return '(' + d.slice(0, 3) + ') ' + d.slice(3);
+      return d;
+    }
+    if (iso === 'KR') {
+      a = d.charAt(0) === '0' ? 3 : 2;
+      if (d.length > a + 8) return d;
+      if (d.length > a + 4) return d.slice(0, a) + '-' + d.slice(a, a + 4) + '-' + d.slice(a + 4);
+      if (d.length > a) return d.slice(0, a) + '-' + d.slice(a);
+      return d;
+    }
+    return d.replace(/(\d{4})(?=\d)/g, '$1 ');
+  }
+  function e164(iso, v) {
+    var c = byIso(iso), d = v.replace(/\D/g, '');
+    if (/^\s*\+/.test(v)) {
+      if (d.indexOf(c.dial) !== 0) return null;
+      d = d.slice(c.dial.length);
+    }
+    if (iso === 'US' || iso === 'CA') {
+      if (d.length === 11 && d.charAt(0) === '1') d = d.slice(1);
+      return /^[2-9]\d{9}$/.test(d) ? '+1' + d : null;
+    }
+    if (d.charAt(0) === '0') d = d.slice(1);
+    if (iso === 'KR') return /^1[016789]\d{7,8}$/.test(d) ? '+82' + d : null;
+    return /^\d{6,11}$/.test(d) ? '+' + c.dial + d : null;
+  }
+  function prettyIntl(to) {
+    var c = byIso(state.phoneCountry);
+    return '+' + c.dial + ' ' + fmtPhone(state.phoneCountry, to.slice(1 + c.dial.length));
+  }
+
+  var ccList = $('cc-list');
+  ccList.innerHTML = CC.map(function (c, i) {
+    return '<li role="option" id="cc-o' + i + '" data-value="' + c.iso + '" aria-selected="' + (c.iso === state.phoneCountry) + '">' + esc(c.name) + ' (+' + c.dial + ')</li>';
+  }).join('');
+  makeDropdown($('cc-btn'), ccList, function (iso) { setPhoneCountry(iso); });
+  function setPhoneCountry(iso) {
+    state.phoneCountry = iso;
+    $('cc-val').textContent = iso + ' +' + byIso(iso).dial;
+    $('mobile').placeholder = PHONE_PH[iso] || 'Mobile number';
+    onMobileInput();
+  }
+  function onMobileInput() {
+    var el = $('mobile'), f = fmtPhone(state.phoneCountry, el.value), to;
+    if (f !== el.value) el.value = f;
+    to = e164(state.phoneCountry, el.value);
+    if (state.codeSentTo && to !== state.codeSentTo) resetOtp();
+    $('send-code').disabled = !to || sending || to === state.codeSentTo;
+    if (to) setInvalid(wrapFor('mobile'), false);
+  }
+  $('mobile').addEventListener('input', onMobileInput);
+  $('mobile').addEventListener('blur', function () {
+    var v = this.value.trim(), ok;
+    if (this.readOnly || !v) return;
+    ok = !!e164(state.phoneCountry, v);
+    setInvalid(wrapFor('mobile'), !ok, 'Enter a valid mobile number for ' + byIso(state.phoneCountry).name + '.');
+  });
+
+  var otpBoxes = Array.prototype.slice.call(document.querySelectorAll('#otp input'));
+  function otpValue() { return otpBoxes.map(function (b) { return b.value; }).join(''); }
+  function syncVerify() { $('verify').disabled = verifying || !state.code || otpValue().length !== 6; }
+  function clearOtp() {
+    otpBoxes.forEach(function (b) { b.value = ''; });
+    syncVerify();
+  }
+  function fillOtpFrom(i, digits) {
+    for (var k = 0; k < digits.length && i + k < 6; k++) otpBoxes[i + k].value = digits.charAt(k);
+    otpBoxes[Math.min(i + digits.length, 5)].focus();
+  }
+  otpBoxes.forEach(function (box, i) {
+    box.addEventListener('input', function () {
+      var d = box.value.replace(/\D/g, '');
+      if (d.length > 1) {
+        fillOtpFrom(i, d);
+      } else {
+        box.value = d;
+        if (d && i < 5) otpBoxes[i + 1].focus();
+      }
+      setInvalid(wrapFor('otp'), false);
+      syncVerify();
+    });
+    box.addEventListener('keydown', function (e) {
+      if (e.key === 'Backspace' && !box.value && i > 0) {
+        e.preventDefault();
+        otpBoxes[i - 1].value = '';
+        otpBoxes[i - 1].focus();
+        syncVerify();
+      } else if (e.key === 'ArrowLeft' && i > 0) {
+        e.preventDefault();
+        otpBoxes[i - 1].focus();
+      } else if (e.key === 'ArrowRight' && i < 5) {
+        e.preventDefault();
+        otpBoxes[i + 1].focus();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (!$('verify').disabled) verifyCode();
+      }
+    });
+    box.addEventListener('focus', function () { box.select(); });
+  });
+
+  function stopResendTimer() {
+    if (resendTimer) clearInterval(resendTimer);
+    resendTimer = null;
+  }
+  function startResendTimer() {
+    var left = 30;
+    function tick() {
+      if (left <= 0) {
+        stopResendTimer();
+        $('resend').disabled = false;
+        $('resend-timer').textContent = '';
+        return;
+      }
+      $('resend-timer').textContent = '(available in 0:' + (left < 10 ? '0' : '') + left + ')';
+      left--;
+    }
+    stopResendTimer();
+    $('resend').disabled = true;
+    tick();
+    resendTimer = setInterval(tick, 1000);
+  }
+  function resetOtp() {
+    state.code = null;
+    state.codeSentTo = null;
+    state.attempts = 0;
+    stopResendTimer();
+    $('otp-area').hidden = true;
+    clearOtp();
+    setInvalid(wrapFor('otp'), false);
+  }
+  function sendCode(again) {
+    var to = e164(state.phoneCountry, $('mobile').value), b;
+    if (!to) {
+      setInvalid(wrapFor('mobile'), true, 'Enter a valid mobile number for ' + byIso(state.phoneCountry).name + '.');
+      return;
+    }
+    b = again ? $('resend') : $('send-code');
+    sending = true;
+    busy(b, true);
+    $('mobile').readOnly = true;
+    $('resend-timer').textContent = '';
+    smsGateway.sendSms(to, function (code) {
+      sending = false;
+      busy(b, false);
+      $('mobile').readOnly = false;
+      state.code = code;
+      state.codeSentTo = to;
+      state.codeAt = Date.now();
+      state.attempts = 0;
+      window.__personPhone = code;
+      $('send-code').disabled = true;
+      $('otp-area').hidden = false;
+      $('otp-sent').textContent = (again ? 'We sent the code again to ' : 'We sent a 6-digit code to ') + prettyIntl(to) + '. It expires in 5 minutes.';
+      setInvalid(wrapFor('otp'), false);
+      clearOtp();
+      startResendTimer();
+      otpBoxes[0].focus();
+    });
+  }
+  $('send-code').addEventListener('click', function () { sendCode(false); });
+  $('resend').addEventListener('click', function () { sendCode(true); });
+
+  function verifyCode() {
+    var v = otpValue(), b = $('verify');
+    if (v.length !== 6 || verifying) return;
+    verifying = true;
+    busy(b, true);
+    setTimeout(function () {
+      var msg, left;
+      verifying = false;
+      busy(b, false);
+      if (state.code && v === state.code) {
+        state.verifiedPhone = state.codeSentTo;
+        state.verifiedCode = v;
+        stopResendTimer();
+        $('otp-area').hidden = true;
+        $('otp-ok').hidden = false;
+        $('mobile').readOnly = true;
+        $('cc-btn').disabled = true;
+        $('send-code').disabled = true;
+        $('next2').disabled = false;
+        return;
+      }
+      state.attempts++;
+      left = 5 - state.attempts;
+      if (left > 0) {
+        msg = 'That code doesn’t match. ' + left + (left === 1 ? ' attempt' : ' attempts') + ' left.';
+      } else {
+        msg = 'Too many incorrect attempts. Please request a new code.';
+        state.code = null;
+      }
+      setInvalid(wrapFor('otp'), true, msg);
+      clearOtp();
+      otpBoxes[0].focus();
+    }, 700);
+  }
+  $('verify').addEventListener('click', verifyCode);
+  $('change-num').addEventListener('click', function () {
+    state.verifiedPhone = null;
+    state.verifiedCode = null;
+    $('otp-ok').hidden = true;
+    $('mobile').readOnly = false;
+    $('cc-btn').disabled = false;
+    $('next2').disabled = true;
+    resetOtp();
+    onMobileInput();
+    $('mobile').focus();
+  });
+
+  /* ---------- shipping address ---------- */
+  var regionReq = 0;
+  var regionDD = makeDropdown($('region-btn'), $('region-list'), function (val) {
+    state.region = val;
+    $('region-val').textContent = val;
+    run('region');
+  });
+  function setLabel(id, text, optional) {
+    $(id).innerHTML = esc(text) + (optional ? ' <span class="opt">Optional</span>' : '<span class="req">*</span>');
+  }
+  function setCountry(c) {
+    var A, my = ++regionReq;
+    state.country = c;
+    state.region = '';
+    A = addrRules();
+    setLabel('region-label', A.region, A.regionOptional);
+    setLabel('city-label', A.city, false);
+    setLabel('postal-label', A.postal, A.postalOptional);
+    ['region', 'city', 'postal'].forEach(function (n) { setInvalid(wrapFor(n), false); });
+    regionDD.close();
+    closeSugg();
+    $('region-text').value = '';
+    $('region-list').innerHTML = '';
+    if (!c || REGIONS[c]) {
+      $('region').hidden = false;
+      $('region-text').hidden = true;
+      $('region-btn').disabled = true;
+      if (!c) {
+        $('region-val').textContent = 'Choose a country first';
+      } else {
+        $('region-val').innerHTML = '<span class="spin"></span>Loading…';
+        setTimeout(function () {
+          if (my !== regionReq) return;
+          $('region-list').innerHTML = REGIONS[c].map(function (r, i) {
+            return '<li role="option" id="rg-o' + i + '" data-value="' + esc(r) + '" aria-selected="false">' + esc(r) + '</li>';
+          }).join('');
+          $('region-btn').disabled = false;
+          $('region-val').textContent = 'Select…';
+        }, 650);
+      }
+    } else {
+      $('region').hidden = true;
+      $('region-text').hidden = false;
+    }
+  }
+  $('country').addEventListener('change', function () { setCountry(this.value); });
+
+  var cityInput = $('city'), cityList = $('city-list'), cityTimer = null, cityActive = -1;
+  function citySource() { return CITIES[state.country + '|' + state.region] || []; }
+  function closeSugg() {
+    clearTimeout(cityTimer);
+    cityList.hidden = true;
+    cityList.innerHTML = '';
+    cityActive = -1;
+    cityInput.setAttribute('aria-expanded', 'false');
+    cityInput.removeAttribute('aria-activedescendant');
+  }
+  function renderSugg() {
+    var q = cityInput.value.trim(), ql = q.toLowerCase(), all, hits;
+    if (!q || document.activeElement !== cityInput) { closeSugg(); return; }
+    all = citySource();
+    hits = all.filter(function (c) { return c.toLowerCase().indexOf(ql) === 0; })
+      .concat(all.filter(function (c) { return c.toLowerCase().indexOf(ql) > 0; }))
+      .slice(0, 8);
+    if (!hits.length || (hits.length === 1 && hits[0].toLowerCase() === ql)) { closeSugg(); return; }
+    cityList.innerHTML = hits.map(function (c, i) {
+      var at = c.toLowerCase().indexOf(ql);
+      return '<li role="option" id="city-o' + i + '" data-value="' + esc(c) + '">' + esc(c.slice(0, at)) +
+        '<mark>' + esc(c.slice(at, at + q.length)) + '</mark>' + esc(c.slice(at + q.length)) + '</li>';
+    }).join('');
+    cityActive = -1;
+    cityList.hidden = false;
+    cityInput.setAttribute('aria-expanded', 'true');
+  }
+  function pickCity(li) {
+    cityInput.value = li.getAttribute('data-value');
+    closeSugg();
+    run('city');
+  }
+  cityInput.addEventListener('input', function () {
+    clearTimeout(cityTimer);
+    cityTimer = setTimeout(renderSugg, 250);
+  });
+  cityInput.addEventListener('keydown', function (e) {
+    var its = cityList.hidden ? [] : cityList.querySelectorAll('li'), n = its.length;
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && n) {
+      e.preventDefault();
+      cityActive = e.key === 'ArrowDown' ? (cityActive + 1) % n : (cityActive <= 0 ? n - 1 : cityActive - 1);
+      each(its, function (li, k) { li.classList.toggle('active', k === cityActive); });
+      cityInput.setAttribute('aria-activedescendant', its[cityActive].id);
+    } else if (e.key === 'Enter' && n && cityActive >= 0) {
+      e.preventDefault();
+      pickCity(its[cityActive]);
+    } else if (e.key === 'Escape' && n) {
+      e.preventDefault();
+      closeSugg();
+    }
+  });
+  cityInput.addEventListener('blur', closeSugg);
+  cityList.addEventListener('mousedown', function (e) { e.preventDefault(); });
+  cityList.addEventListener('click', function (e) {
+    var li = e.target.closest('li');
+    if (li) pickCity(li);
+  });
+
+  var rcards = Array.prototype.slice.call(document.querySelectorAll('#addr-type [role=radio]'));
+  function pickType(card) {
+    rcards.forEach(function (c) {
+      var on = c === card;
+      c.setAttribute('aria-checked', on ? 'true' : 'false');
+      c.tabIndex = on ? 0 : -1;
+    });
+    state.addrType = card.getAttribute('data-value');
+    run('addrType');
+  }
+  rcards.forEach(function (c, i) {
+    c.addEventListener('click', function () { pickType(c); });
+    c.addEventListener('keydown', function (e) {
+      var nx;
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        pickType(c);
+      } else if (/^Arrow/.test(e.key)) {
+        e.preventDefault();
+        nx = rcards[(i + (e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : rcards.length - 1)) % rcards.length];
+        nx.focus();
+        pickType(nx);
+      }
+    });
+  });
+  $('note').addEventListener('input', function () { $('note-count').textContent = this.value.length; });
+
+  /* ---------- preferences ---------- */
+  function bindSwitch(el, cb) {
+    el.addEventListener('click', function () {
+      var on = el.getAttribute('aria-checked') !== 'true';
+      el.setAttribute('aria-checked', on ? 'true' : 'false');
+      cb(on);
+    });
+  }
+  bindSwitch($('sw-default'), function (on) { state.defaultAddr = on; });
+  bindSwitch($('sw-news'), function (on) {
+    state.newsletter = on;
+    $('freq').hidden = !on;
+    if (!on) setInvalid(wrapFor('freq'), false);
+  });
+  each(document.querySelectorAll('#interests .chip'), function (chip) {
+    chip.addEventListener('click', function () {
+      chip.setAttribute('aria-pressed', chip.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+    });
+  });
+
+  var docFor = null, docOpener = null;
+  each(document.querySelectorAll('[data-doc]'), function (b) {
+    b.addEventListener('click', function () {
+      docFor = b.getAttribute('data-doc');
+      docOpener = b;
+      $('modal-title').textContent = DOCS[docFor].title;
+      $('modal-body').innerHTML = DOCS[docFor].body;
+      $('modal').hidden = false;
+      $('modal-body').scrollTop = 0;
+      $('modal-agree').focus();
+    });
+  });
+  function closeDoc() {
+    $('modal').hidden = true;
+    if (docOpener) docOpener.focus();
+  }
+  $('modal-x').addEventListener('click', closeDoc);
+  $('modal').addEventListener('click', function (e) { if (e.target === this) closeDoc(); });
+  $('modal-agree').addEventListener('click', function () {
+    var cb = $('c-' + docFor);
+    cb.checked = true;
+    cb.dispatchEvent(new Event('change', { bubbles: true }));
+    closeDoc();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !$('modal').hidden) closeDoc();
+  });
+
+  /* ---------- submit ---------- */
+  function collect() {
+    var freq = document.querySelector('input[name=freq]:checked');
+    var dob = $('dob').value.trim();
+    return {
+      firstName: $('first').value.trim(),
+      lastName: $('last').value.trim(),
+      email: $('email').value.trim().toLowerCase(),
+      password: $('pw').value,
+      dateOfBirth: dob ? parseDob(dob) : '',
+      phoneCountry: state.phoneCountry,
+      mobile: state.verifiedPhone,
+      smsCode: state.verifiedCode,
+      country: state.country,
+      region: REGIONS[state.country] ? state.region : $('region-text').value.trim(),
+      city: $('city').value.trim(),
+      postalCode: $('postal').value.trim().toUpperCase(),
+      address1: $('addr1').value.trim(),
+      address2: $('addr2').value.trim(),
+      addressType: state.addrType,
+      deliveryNote: $('note').value.trim(),
+      defaultAddress: state.defaultAddr,
+      currency: $('currency').value,
+      interests: Array.prototype.filter.call(document.querySelectorAll('#interests .chip'), function (c) {
+        return c.getAttribute('aria-pressed') === 'true';
+      }).map(function (c) { return c.getAttribute('data-value'); }).join(','),
+      newsletter: state.newsletter,
+      emailFrequency: state.newsletter && freq ? freq.value : '',
+      smsMarketing: $('sms').checked,
+      termsAccepted: $('c-terms').checked,
+      privacyAccepted: $('c-privacy').checked,
+      overseasTransfer: $('c-transfer').checked,
+      ageConfirmed: $('c-age').checked
+    };
+  }
+  $('create').addEventListener('click', function () {
+    var b = this;
+    if (state.submitted || b.disabled) return;
+    if (!validateStep(4)) return;
+    if (!stepOk(1)) { show(1); validateStep(1); return; }
+    if (!state.verifiedPhone) { show(2); return; }
+    if (!stepOk(3)) { show(3); validateStep(3); return; }
+    busy(b, true);
+    setTimeout(function () {
+      var result = collect();
+      state.submitted = true;
+      window.__sceneResult = result;
+      $('steps').hidden = true;
+      screens[4].hidden = true;
+      $('s5').hidden = false;
+      $('welcome').textContent = 'Welcome to Pellmoor, ' + result.firstName + '!';
+      $('welcome-sub').textContent = 'Your account is ready. We’ve sent a confirmation email to ' + result.email + '.';
+      window.scrollTo(0, 0);
+    }, 1100);
+  });
+
+  setPhoneCountry('US');
+})();
+</script>
+</body>
+</html>
+

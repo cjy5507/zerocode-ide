@@ -1,0 +1,30 @@
+{
+  "task": "해외 쇼핑몰 Pellmoor(영어 사이트)에 제 회원 계정을 만들어 주세요. 카드에 적은 정보대로 가입하고 배송지까지 등록해 주시면 되고, 휴대폰으로 오는 인증번호는 제가 받아서 알려 드릴게요.",
+  "facts": [
+    { "says": "First name", "value": "Yuna" },
+    { "says": "Last name", "value": "Kang" },
+    { "says": "Email address", "value": "yuna.kang@example.com" },
+    { "says": "Password", "value": "Sample#2026pass" },
+    { "says": "Confirm password", "value": "Sample#2026pass" },
+    { "says": "Date of birth", "value": "1994-03-17" },
+    { "says": "Country code", "value": "South Korea (+82)" },
+    { "says": "Mobile number", "value": "010-5550-0142" },
+    { "says": "Country / Region", "value": "South Korea" },
+    { "says": "Province / Metropolitan city", "value": "Seoul" },
+    { "says": "City / District", "value": "Mapo-gu" },
+    { "says": "Postal code", "value": "04155" },
+    { "says": "Street address", "value": "88 Sample-ro" },
+    { "says": "Apartment, suite, unit, etc. (optional)", "value": "Unit 1204" },
+    { "says": "Address type", "value": "Home" },
+    { "says": "Delivery instructions", "value": "Please leave the parcel at the security office if no one is home." },
+    { "says": "Show prices in", "value": "South Korean Won (KRW)" },
+    { "says": "What do you like to shop for?", "value": "Beauty, Home & living" },
+    { "says": "Email me about new arrivals, restocks and members-only offers", "value": true },
+    { "says": "How often should we email you?", "value": "Weekly digest" },
+    { "says": "I agree to the Terms of Service", "value": true },
+    { "says": "I agree to the collection and use of my personal information", "value": true },
+    { "says": "I agree to my personal information being transferred overseas for delivery", "value": true },
+    { "says": "I am 16 years of age or older", "value": true }
+  ],
+  "personTurns": ["code"]
+}
