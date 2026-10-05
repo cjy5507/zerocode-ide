@@ -4,13 +4,16 @@
  * so neither restates a script, a table or a number the Rust owns:
  *
  * - `doorScript(request, body)` is `automation_script`'s shape;
- * - `FORM_REQUEST` is `form_request()`; `fieldsScript()`, `fillScript(entries)`
- *   and `evalFormScript(expression)` are `fields`, one pass of `fill` and an
- *   eval that names the form pair (`eval_script` + `inlined_eval_body`);
+ * - `FORM_REQUEST` is `form_request()`; `fieldsScript()`,
+ *   `fillWriteScript(entries)` and `fillReadScript(held, epoch)` (the two
+ *   halves of one pass of `fill`) and `evalFormScript(expression)` are `fields`,
+ *   `fill` and an eval that names the form pair (`eval_script` +
+ *   `inlined_eval_body`);
  * - `fillPasses(run, bundle, expect)` is the window's `fill_passes`: the
  *   whole bundle, held on its first pass to the form read (`expect`, a
  *   fingerprint), then every poll, inside the pending wait and the passes,
- *   what a later pass may still find;
+ *   what a later pass may still find — each pass the write, the page's settle
+ *   (`settled`, the window's `settle_with`) when it wrote, and the read-back;
  * - `readScript`, `typeScript`, `waitScript` and `scrollScript` are the page
  *   scripts of those verbs, and `AGENT_CONTEXT` the paragraphs a launch
  *   prompt carries (`delegation::with_agent_selection_contract`) — what the
@@ -33,6 +36,7 @@ const SCREEN = await source("crates/zerocode-core/src/screen_action.rs");
 const JEV = await source("crates/zerocode-core/src/jev.rs");
 const GUARDED = await source("crates/zerocode-core/src/guarded.rs");
 const DELEGATION = await source("crates/zerocode-core/src/delegation.rs");
+const GUEST_KEY = ((await source("ui/browser-guest-key.txt")) || "").trim();
 const VALUE_QUESTION = JSON.parse((await source("crates/zerocode-core/fixtures/type-value/question.json")) || "{}");
 
 export const need = (name, value) => {
@@ -56,6 +60,11 @@ export const FILL_HELPERS = rustText(FORM, "BROWSER_FILL_HELPERS");
 export const FILL_BODY = rustText(FORM, "BROWSER_FILL_BODY");
 export const EVAL_FORM = rustText(FORM, "BROWSER_EVAL_FORM");
 export const EVAL_FORM_OBJECT = rustText(CORE, "BROWSER_EVAL_FORM_OBJECT");
+/* What the window settles a page by after a press (`settle_after_press`). */
+export const SETTLE_BODY = rustText(DOOR, "BROWSER_SETTLE_BODY");
+export const SETTLE_MS = rustNumber(CORE, "BROWSER_SETTLE_MS");
+export const SETTLE_QUIET_MS = rustNumber(CORE, "BROWSER_SETTLE_QUIET_MS");
+export const SETTLE_BUSY = rustList(CORE, "BROWSER_SETTLE_BUSY");
 
 /* The door's own sentences and limits a stand-in window answers with
  * (`automate_wait`, `input_said`, `checked_expression`). */
@@ -89,6 +98,7 @@ export const FORM_REQUEST = {
   monthDays: rustNumber(FORM_CORE, "BROWSER_FORM_MONTH_DAYS"), monthPages: rustNumber(FORM_CORE, "BROWSER_FORM_MONTH_PAGES"),
   lists: rustList(FORM_CORE, "BROWSER_FORM_LISTS"), listItems: rustList(FORM_CORE, "BROWSER_FORM_LIST_ITEMS"),
   pressables: rustList(FORM_CORE, "BROWSER_FORM_PRESSABLES"), scanCap: rustNumber(FORM_CORE, "BROWSER_FORM_SCAN_CAP"),
+  watch: GUEST_KEY,
   on: rustList(FORM_CORE, "BROWSER_FILL_ON"), off: rustList(FORM_CORE, "BROWSER_FILL_OFF"),
   field: { regions: rustList(CORE, "BROWSER_FIELD_REGIONS"), headings: rustList(CORE, "BROWSER_FIELD_HEADINGS") },
   fieldCap: rustNumber(FORM_CORE, "BROWSER_FORM_FIELD_CAP"), actionCap: rustNumber(FORM_CORE, "BROWSER_FORM_ACTION_CAP"),
@@ -107,8 +117,6 @@ const formScript = (request, body) => {
     + `${need("BROWSER_FORM_HELPERS", FORM_HELPERS)}\n${body}`);
 };
 export const fieldsScript = () => formScript(FORM_REQUEST, need("BROWSER_FIELDS_BODY", FIELDS_BODY));
-export const fillScript = (entries, expect = null) => formScript({ ...FORM_REQUEST, entries, expect },
-  `${need("BROWSER_FILL_HELPERS", FILL_HELPERS)}\n${need("BROWSER_FILL_BODY", FILL_BODY)}`);
 /* The two halves of one fill pass (t-41387): the write — held to `expect` — and,
  * once the page has settled, the read-back of what the write held, in the
  * document `epoch` it was made in. */
@@ -116,6 +124,9 @@ export const fillWriteScript = (entries, expect = null) => formScript({ ...FORM_
   `${need("BROWSER_FILL_HELPERS", FILL_HELPERS)}\n${need("BROWSER_FILL_BODY", FILL_BODY)}`);
 export const fillReadScript = (held, epoch) => formScript({ ...FORM_REQUEST, held, epoch, phase: "read" },
   `${need("BROWSER_FILL_HELPERS", FILL_HELPERS)}\n${need("BROWSER_FILL_BODY", FILL_BODY)}`);
+/* `settle_after_press`'s script: what the page says of itself on one settle poll. */
+export const settleScript = () => doorScript({ watch: need("the settle's watch name", GUEST_KEY), busy: need("BROWSER_SETTLE_BUSY", SETTLE_BUSY).join(",") },
+  `${need("BROWSER_OBSERVE_HELPERS", OBSERVE_HELPERS)}\n${need("BROWSER_SETTLE_BODY", SETTLE_BODY)}`);
 /* `inlined_eval_body`: the expression written into the script, a thenable
  * refused, `undefined` said as such. */
 const inlinedEvalBody = (expression) =>
@@ -181,32 +192,67 @@ if (request.kind === "selector") {
 return zcEncode({ ok: true, value: { x: Math.round(window.scrollX), y: Math.round(window.scrollY) } });
 `);
 
+/* `settle_with`: poll the page's own facts (`settleScript`) until the document
+ * a write was made in has stood still for the quiet window since the write
+ * (`since`, the page's clock), or the wall runs out. Answers how it ended, as
+ * the core words it: `ready`, `not_ready` or `invalidated`, and why. */
+export async function settled(run, epoch, since) {
+  const began = Date.now();
+  const from = typeof since === "number" ? since : -Infinity;
+  const wait = (ms) => new Promise((done) => setTimeout(done, Math.max(0, ms)));
+  let why = "unanswered";
+  for (;;) {
+    if (SETTLE_MS - (Date.now() - began) <= 0) return { state: "not_ready", why };
+    let facts = null;
+    try { facts = (await run(settleScript())).value; } catch { /* the page did not answer this poll */ }
+    if (!facts) { await wait(Math.min(SETTLE_QUIET_MS, SETTLE_MS - (Date.now() - began))); continue; }
+    if (facts.documentEpoch !== epoch) return { state: "invalidated", why: "replaced" };
+    if (!facts.watched) return { state: "not_ready", why: "unwatched" };
+    const still = facts.now - Math.max(facts.last, from);
+    if (!facts.busy && still >= SETTLE_QUIET_MS) return { state: "ready", why: "quiet" };
+    why = facts.busy ? "busy" : "moving";
+    const next = facts.busy ? SETTLE_QUIET_MS : Math.min(Math.max(Math.ceil(SETTLE_QUIET_MS - still), 1), SETTLE_QUIET_MS);
+    await wait(Math.min(next, SETTLE_MS - (Date.now() - began)));
+  }
+}
+
 /* `fill_passes` over `run(script) → page answer`: the whole bundle, held on
  * its first pass to `expect`, then what another pass may still find, every
- * poll, until the wait or the passes run out. Answers each entry's last
- * word, what is left, the passes, whether the form was stale, its
- * fingerprint and its buttons after the last pass — and each `round`: the
- * handles a pass was asked and what the page answered, for the ledger that
- * says the answer. */
+ * poll, until the wait or the passes run out. A pass is its write, the page's
+ * settle when it wrote something, and the read-back of what the write held.
+ * Answers each entry's last word, what is left, the passes, whether the form
+ * was stale, its fingerprint and its buttons after the last pass, whether the
+ * page was still changing when the last settle ended (`moving`) — and each
+ * `round`: the handles a pass was asked and what the page answered, for the
+ * ledger that says the answer. */
 export async function fillPasses(run, bundle, expect = null) {
   const entries = Array.isArray(bundle) ? bundle : Object.entries(bundle).map(([handle, value]) => ({ handle, value }));
   const last = new Map();
   const rounds = [];
   const began = Date.now();
-  let asked = entries, left = [], passes = 0, fingerprint = "", actions = [];
+  let asked = entries, left = [], passes = 0, fingerprint = "", actions = [], moving = false;
   while (asked.length) {
-    const pass = await run(fillScript(asked, passes === 0 ? expect : null));
-    if (!pass.ok) throw new Error(`a fill pass was refused: ${JSON.stringify(pass)}`);
+    const written = await run(fillWriteScript(asked, passes === 0 ? expect : null));
+    if (!written.ok) throw new Error(`a fill pass was refused: ${JSON.stringify(written)}`);
     passes += 1;
-    fingerprint = pass.value.fingerprint;
-    rounds.push({ asked: asked.map((entry) => entry.handle), pass: pass.value });
-    if (pass.value.stale) return { results: entries.map(() => undefined), left: [], passes, stale: true, fingerprint, actions: [], rounds };
-    for (const result of pass.value.results) last.set(result.handle, result);
-    left = pass.value.left;
-    actions = pass.value.actions || [];
+    if (written.value.stale) {
+      fingerprint = written.value.fingerprint;
+      rounds.push({ asked: asked.map((entry) => entry.handle), pass: { stale: true, fingerprint } });
+      return { results: entries.map(() => undefined), left: [], passes, stale: true, fingerprint, actions: [], moving: false, rounds };
+    }
+    const heard = written.value.wrote ? await settled(run, written.value.epoch, written.value.at) : null;
+    const read = await run(fillReadScript(written.value.held, written.value.epoch));
+    if (!read.ok) throw new Error(`a fill pass was refused: ${JSON.stringify(read)}`);
+    const pass = { ...read.value, moving: heard === null ? null : heard.state !== "ready" };
+    fingerprint = pass.fingerprint;
+    rounds.push({ asked: asked.map((entry) => entry.handle), pass });
+    for (const result of pass.results) last.set(result.handle, result);
+    left = pass.left;
+    actions = pass.actions || [];
+    if (pass.moving !== null) moving = pass.moving;
     asked = entries.filter((entry) => TRIES_AGAIN.includes(last.get(entry.handle)?.status));
     if (!asked.length || passes >= FILL_PASSES || Date.now() - began >= FILL_PENDING_MS) break;
     await new Promise((done) => setTimeout(done, FILL_POLL_MS));
   }
-  return { results: entries.map((entry) => last.get(entry.handle)), left, passes, stale: false, fingerprint, actions, rounds };
+  return { results: entries.map((entry) => last.get(entry.handle)), left, passes, stale: false, fingerprint, actions, moving, rounds };
 }

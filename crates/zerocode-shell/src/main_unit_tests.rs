@@ -22963,9 +22963,15 @@ mod browser_look_settle_pin {
                 "focus(",
                 "blur(",
                 "scrollIntoView",
-                // The calls, not the properties a read may look at (`scrollTop`).
+                // The calls and the writes, not the properties a read may look at
+                // (`scrollTop`, `scrollLeft`, read).
                 "scrollTo(",
                 "scrollBy(",
+                ".scroll(",
+                "scrollTop =",
+                "scrollTop=",
+                "scrollLeft =",
+                "scrollLeft=",
                 ".select(",
                 "setSelectionRange",
                 "dispatchEvent",
@@ -23892,6 +23898,30 @@ mod browser_form_fill {
         }];
         cmd::browser::form::remember_buttons(label, &buttons);
         assert_eq!(cmd::browser::form::known_buttons(label), buttons);
+    }
+
+    /// A fill pass on a page: the write, the settle a press by number waits with
+    /// (the one road — the pass has no wait of its own), then the read.
+    #[test]
+    fn a_fill_pass_waits_for_the_page_by_the_one_settle_road_between_its_write_and_its_read() {
+        let pass = include_str!("cmd/browser/form.rs")
+            .split("async fn fill_pass_on(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the pass on a page");
+        let write = pass.find("\"write\"").expect("the write half");
+        let settle = pass
+            .find("settle_after_press(pane, &epoch, at)")
+            .expect("the settle");
+        let read = pass.find("\"read\"").expect("the read half");
+        assert!(
+            write < settle && settle < read,
+            "write, settle, read — in that order:\n{pass}"
+        );
+        assert!(
+            !pass.contains("sleep(") && !pass.contains("Duration::from_millis"),
+            "the pass has no wait of its own:\n{pass}"
+        );
     }
 
     /// The fill road sets its answer against the form its agent read before it

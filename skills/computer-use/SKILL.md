@@ -124,7 +124,11 @@ A form is data, so fill it as data, not a picture per field:
    다시 읽기)`, then the buttons as they are now — `버튼: #next 「Next」 켜짐,
    #back 「Back」 꺼짐` (`꺼짐` is off; `숨김:` names one the page took away).
    A field an earlier value brings (the times a date loads, a box a choice
-   turns on) is tried again inside the same call.
+   turns on) is tried again inside the same call. The last line, each field's
+   value and error, and the fields left are read after the page has stood
+   still for 50 ms (as after a press); if it kept changing, the last line says
+   `아직 바뀌는 중(fields로 다시 읽기)` — read `fields` before you press. A page
+   that changes later than that is the next read's.
 3. Press the step's button by its handle (`click <pane-label> <handle>`) —
    a step's button that turns on once the fields are right is already `켜짐`
    on that last line, so press it from there with no `fields` between — and
@@ -158,7 +162,9 @@ zerocode-browser eval <pane-label> --value-stdin <<'JS'
 JS
 ```
 
-An eval is synchronous: a field the page loads later is the next call's, and
+An eval is synchronous — what its `fill` reads back is the page in the same
+instant it wrote, so a button the page turns on a moment later still reads off
+there: press by the next read. A field the page loads later is the next call's, and
 the script returns instead of pressing anything that pays, sends or cannot
 be undone — that press is the person's word, asked first.
 

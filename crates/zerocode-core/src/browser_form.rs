@@ -373,6 +373,9 @@ pub enum FillStatus {
     NotAField,
     /// The handle is no selector the page can read.
     InvalidHandle,
+    /// The write took the page to another document: what it held is gone, and
+    /// what stands now is the next read's.
+    Replaced,
     /// The page said nothing this door knows about the field.
     #[default]
     #[serde(other)]
@@ -410,6 +413,7 @@ impl FillStatus {
             Self::TooLong => "칸이 받는 길이를 넘음",
             Self::NotAField => "칸이 아님",
             Self::InvalidHandle => "손잡이를 CSS로 읽을 수 없음",
+            Self::Replaced => "쓴 뒤 페이지가 다른 문서로 바뀜 — fields로 다시 읽기",
             Self::Unread => "판이 답하지 않음",
         }
     }
@@ -478,6 +482,7 @@ pub struct FillLedger {
     results: Vec<Option<FillResult>>,
     left: Vec<FormField>,
     actions: Vec<FormAction>,
+    moving: bool,
     passes: usize,
     stale: bool,
     fingerprint: String,
@@ -492,6 +497,7 @@ impl FillLedger {
             results,
             left: Vec::new(),
             actions: Vec::new(),
+            moving: false,
             passes: 0,
             stale: false,
             fingerprint: String::new(),
@@ -545,6 +551,10 @@ impl FillLedger {
         }
         self.left = pass.left;
         self.actions = pass.actions;
+        // A pass that wrote nothing heard no settle: the last word stands.
+        if let Some(moving) = pass.moving {
+            self.moving = moving;
+        }
     }
 
     #[must_use]
@@ -564,6 +574,7 @@ impl FillLedger {
             results,
             left: self.left,
             actions: self.actions,
+            moving: self.moving,
             passes: self.passes,
             stale: self.stale,
             fingerprint: self.fingerprint,
@@ -580,6 +591,10 @@ pub struct FillReport {
     pub left: Vec<FormField>,
     /// The buttons the form has after the last pass.
     pub actions: Vec<FormAction>,
+    /// The page was still changing when the last pass that waited for it read
+    /// it: the settle ran out of time (or the page went to another document),
+    /// so nothing here is said to be final.
+    pub moving: bool,
     pub passes: usize,
     /// The form was not the one the agent read: nothing was written.
     pub stale: bool,
@@ -788,7 +803,9 @@ fn left_line(field: &FormField) -> String {
 /// buttons it has now — on or off — and the ones the page took away. Nothing
 /// when the agent read no form and there is no button to say.
 fn after_line(report: &FillReport) -> Option<String> {
+    // A page still changing is no "same form" and no settled button: it says so first.
     let form = match report.changed {
+        _ if report.moving => Some("아직 바뀌는 중(fields로 다시 읽기)"),
         Some(true) => Some("양식 바뀜(fields로 다시 읽기)"),
         Some(false) => Some("양식 그대로"),
         None => None,

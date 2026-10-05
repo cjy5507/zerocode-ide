@@ -996,61 +996,102 @@ const zcTarget = (handle) => {
   const record = zcRead(el, request);
   return record ? { record } : { code: "not_a_field" };
 };
-// One pass over a bundle: each entry written in its order, then each
-// written field read back, then what the form still wants and the buttons it
-// has now (on, off: a step's button that turns on once its field is right).
-// With `expect` —
-// the fingerprint of the form its agent read — a form that is no longer that
-// one is said (`stale`) before anything is written.
-const zcFill = (entries, expect) => {
+// One pass over a bundle, in two halves the window runs apart so the page can
+// settle between them: the write, then the read-back.
+//
+// The write: each entry written in its order — with `expect`, the fingerprint
+// of the form its agent read, a form that is no longer that one is said
+// (`stale`) before anything is written. It answers what each entry held (the
+// refusals, the words about the field, what was written), whether anything
+// was written, and the document and the page's own clock at the last write:
+// what a settle counts stillness from. A page that updates after its input
+// handler has returned (a microtask, a debounced check) has not yet shown what
+// the write did when this half ends. `watch`, when given, is the settle's: it
+// stands before the first write, so the pass's own changes are the first it sees.
+const zcFillWrite = (entries, expect, watch) => {
   if (expect) {
     const now = zcFormFields(request).print;
-    if (now !== expect) return { results: [], left: [], stale: true, fingerprint: now };
+    if (now !== expect) return { stale: true, fingerprint: now, wrote: false, held: [] };
   }
-  const passes = entries.map((entry) => {
+  if (watch) zcSettleWatch(watch);
+  const held = entries.map((entry) => {
     const out = { handle: entry.handle, status: "unread", kind: "", label: "", now: "", error: "", options: [] };
+    const base = { handle: entry.handle, value: entry.value, out };
     const target = zcTarget(entry.handle);
-    if (target.code) return { out, status: target.code };
+    if (target.code) return { ...base, status: target.code, wrote: false };
     const record = target.record;
     out.kind = record.kind;
     out.label = zcWords(record.label, request.wordCap);
-    if (record.masked) return { out, status: "secret" };
-    if (record.kind === "file") return { out, status: "file" };
+    if (record.masked) return { ...base, status: "secret", wrote: false };
+    if (record.kind === "file") return { ...base, status: "file", wrote: false };
     if (record.disabled) {
       const hint = zcWords(zcHintOf(record, request), request.wordCap);
       if (hint) out.hint = hint;
-      return { out, status: "disabled" };
+      return { ...base, status: "disabled", wrote: false };
     }
-    if (zcHolds(record, entry.value)) return { out, entry, record, wrote: false };
+    if (zcHolds(record, entry.value)) return { ...base, status: null, wrote: false };
     const refused = zcWrite(record, entry.value);
     if (refused) {
       out.options = (record.offered || []).slice(0, request.optionCap);
       if (record.widget) out.widget = record.widget;
-      return { out, status: refused };
+      return { ...base, status: refused, wrote: false };
     }
-    return { out, entry, record, wrote: true };
+    return { ...base, status: null, wrote: true };
   });
-  const results = passes.map((pass) => {
-    if (pass.status) {
-      pass.out.status = pass.status;
-      return pass.out;
+  return { stale: false, fingerprint: "", wrote: held.some((one) => one.wrote), epoch: zcEpoch(),
+    at: performance.now(), held };
+};
+// The read-back, once the page has settled: each written field read again
+// where its handle finds it now (a page may have drawn it anew), then what the
+// form still wants and the buttons it has. A page that is no longer the
+// document the write was made in answers each written field `replaced` — what
+// it held is gone — and the form of the document that stands now.
+const zcFillRead = (held, epoch) => {
+  const replaced = zcEpoch() !== epoch;
+  const results = held.map((one) => {
+    const out = one.out;
+    if (one.status) {
+      out.status = one.status;
+      return out;
     }
-    const now = zcRead(pass.record.el, request) || pass.record;
-    pass.out.now = now.masked ? "" : typeof now.value === "boolean" ? now.value
+    if (replaced) {
+      out.status = "replaced";
+      return out;
+    }
+    const target = zcTarget(one.handle);
+    if (target.code) {
+      out.status = target.code;
+      return out;
+    }
+    const now = target.record;
+    out.now = now.masked ? "" : typeof now.value === "boolean" ? now.value
       : zcCut(String(now.value), request.valueCap);
-    pass.out.error = zcWords(now.error, request.wordCap);
-    pass.out.status = zcHolds(now, pass.entry.value) ? (pass.wrote ? "set" : "same") : "mismatch";
-    return pass.out;
+    out.error = zcWords(now.error, request.wordCap);
+    out.status = zcHolds(now, one.value) ? (one.wrote ? "set" : "same") : "mismatch";
+    return out;
   });
   const after = zcFormFields(request);
   const left = after.fields.filter((field) => (field.required && zcEmpty(field)) || field.error);
   return { results, left, stale: false, fingerprint: after.print, actions: after.actions };
 };
+// One whole pass in one synchronous run, as an eval's `zerocode.fill` has it:
+// a field the page loads or turns on later is the next call's.
+const zcFill = (entries, expect) => {
+  const written = zcFillWrite(entries, expect, null);
+  return written.stale
+    ? { results: [], left: [], stale: true, fingerprint: written.fingerprint }
+    : zcFillRead(written.held, written.epoch);
+};
 "#;
 
-/// One pass of a `fill`: the bundle the window hands it, through `zcFill`.
+/// One half of a pass of a `fill` (`request.phase`): the write of the bundle
+/// the window hands it (`zcFillWrite`), or — after the page has settled — the
+/// read-back of what the write held (`zcFillRead`).
 pub(crate) const BROWSER_FILL_BODY: &str = r#"
-return zcEncode({ ok: true, value: zcFill(request.entries, request.expect || null) }, request.answerCap);
+const value = request.phase === "read"
+  ? zcFillRead(request.held, request.epoch)
+  : zcFillWrite(request.entries, request.expect || null, request.watch);
+return zcEncode({ ok: true, value }, request.answerCap);
 "#;
 
 /// The form pair inside an `eval` (t-37883): an expression that names
@@ -1096,6 +1137,7 @@ pub(crate) fn form_request() -> serde_json::Value {
         "pressables": BROWSER_FORM_PRESSABLES,
         "holds": zerocode_core::guarded::HELD_ROWS.concat(),
         "scanCap": BROWSER_FORM_SCAN_CAP,
+        "watch": settle_watch(),
         "listItems": BROWSER_FORM_LIST_ITEMS,
         "monthDays": BROWSER_FORM_MONTH_DAYS,
         "monthPages": BROWSER_FORM_MONTH_PAGES,
@@ -1196,11 +1238,16 @@ pub(crate) struct FillWritten {
     pub(crate) held: serde_json::Value,
 }
 
-/// One pass of a fill: write, then — when something was written — let the
-/// page settle, then read back. (Stub: the read follows the write at once.)
+/// One pass of a fill: the write, then — when something was written — the
+/// page's settle (the one a press by number waits with, in the document the
+/// write was made in, counting from the page's clock at the last write), then
+/// the read-back of what the write held. A page that did not stand still in
+/// the settle's time, or went to another document, is said to be still
+/// changing (`moving`); a pass that wrote nothing waited for nothing and says
+/// nothing of it. A form that was not the one read is answered at once.
 pub(crate) async fn settled_pass<W, WF, S, SF, R, RF>(
     write: W,
-    _settle: S,
+    settle: S,
     read: R,
 ) -> Result<FillPass, String>
 where
@@ -1219,7 +1266,14 @@ where
             ..FillPass::default()
         });
     }
-    read(written.held, written.epoch).await
+    let settled = if written.wrote {
+        Some(settle(written.epoch.clone(), written.at).await)
+    } else {
+        None
+    };
+    let mut pass = read(written.held, written.epoch).await?;
+    pass.moving = settled.map(|settled| settled.state != Settle::Ready);
+    Ok(pass)
 }
 
 /// A fill script: the form helpers, the writer, and a body that calls it.
@@ -1275,15 +1329,7 @@ pub(crate) async fn automate_fill(
         BROWSER_WAIT_POLL,
         |asked, expect| {
             let pane = pane.clone();
-            async move {
-                let mut request = form_request();
-                request["entries"] = serde_json::to_value(&asked).unwrap_or_default();
-                request["expect"] = expect.into();
-                let script = fill_script(&request, BROWSER_FILL_BODY);
-                let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
-                serde_json::from_value::<FillPass>(page_value(reply)?)
-                    .map_err(|_| "브라우저 판의 채움 답을 읽을 수 없습니다".to_string())
-            }
+            async move { fill_pass_on(&pane, asked, expect).await }
         },
     )
     .await?;
@@ -1294,6 +1340,39 @@ pub(crate) async fn automate_fill(
     remember_form(label, &report.fingerprint);
     remember_buttons(label, &report.actions);
     Ok(report)
+}
+
+/// One pass of a fill on a pane's page: the write; the settle after a press
+/// ([`settle_after_press`], the one road — nothing new waits for a page here)
+/// when it wrote; the read-back ([`settled_pass`]).
+async fn fill_pass_on(
+    pane: &BrowserPane,
+    asked: Vec<FillEntry>,
+    expect: Option<String>,
+) -> Result<FillPass, String> {
+    let unreadable = |_| "브라우저 판의 채움 답을 읽을 수 없습니다".to_string();
+    settled_pass(
+        || async move {
+            let mut request = form_request();
+            request["entries"] = serde_json::to_value(&asked).unwrap_or_default();
+            request["expect"] = expect.into();
+            request["phase"] = "write".into();
+            let script = fill_script(&request, BROWSER_FILL_BODY);
+            let reply = page_json(pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+            serde_json::from_value::<FillWritten>(page_value(reply)?).map_err(unreadable)
+        },
+        |epoch, at| async move { settle_after_press(pane, &epoch, at).await },
+        |held, epoch| async move {
+            let mut request = form_request();
+            request["held"] = held;
+            request["epoch"] = epoch.into();
+            request["phase"] = "read".into();
+            let script = fill_script(&request, BROWSER_FILL_BODY);
+            let reply = page_json(pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+            serde_json::from_value::<FillPass>(page_value(reply)?).map_err(unreadable)
+        },
+    )
+    .await
 }
 
 /// A fill's passes on the window's clock: the whole bundle first, held to
