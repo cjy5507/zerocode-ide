@@ -216,10 +216,21 @@ const MASKED = await scene("masked", `<!doctype html><html lang="en"><meta chars
   $("go").addEventListener("click", () => { window.__sceneResult = { code: $("code").value }; });
 </script>`, [{ says: "Code", value: "B2" }], { code: "A1" });
 
+/* A form with a required field the card has nothing for, and a button the page lets through anyway: what is left is the page's, and the script road's answer
+ * carries the same buttons twice (the read's and the fill's) — which a page's answer says only once. */
+const LEFT_OVER = await scene("left-over", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="name">Name</label> <input id="name">
+  <label for="nick">Nickname</label> <input id="nick" required>
+  <button type="button" id="go">Finish</button>
+</form>
+<script>
+  document.getElementById("go").addEventListener("click", () => { window.__sceneResult = { name: document.getElementById("name").value }; });
+</script>`, [{ says: "Name", value: "Kim" }], { name: "Kim" });
+
 /* One run of the drivers on every scene, once. */
 const out = join(root, "rows.json");
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
-  "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -312,6 +323,14 @@ await test("a driver told twice the same answer about a field goes on to the but
     assert(one && one.ok && one.pass, `the ${road} road goes on when a field never reads back as it was asked`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
   }
   return JSON.stringify(row("masked", "script").result);
+});
+
+await test("a driver goes on to the button when what is left belongs to the page, though its answer holds the buttons only once", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("left-over", road);
+    assert(one && one.ok && one.pass, `the ${road} road presses the button the page lets through`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return JSON.stringify(row("left-over", "script").result);
 });
 
 await test("the recipe a driver scrolls a box by is the one the skill teaches", () => {
