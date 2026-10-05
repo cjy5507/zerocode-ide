@@ -1297,6 +1297,33 @@ await test("a_frame_of_another_origin_is_named_not_read", async () => {
   } finally { await sealed.close(); }
 });
 
+/* A table cell with no header of its row is named by the header over its
+ * column (t-41387): HTML's own table meaning, the same for any table whose
+ * head says so — a `thead`, or a first row of nothing but headers, a head cell
+ * that spans several columns covering each of them. A row's own header still
+ * names its cells first, and a cell under no head keeps the words before it. */
+await test("a_field_in_a_table_cell_with_no_row_header_is_named_by_the_header_over_its_column", async () => {
+  const grid = await browser.newPage();
+  try {
+    await grid.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <table><thead><tr><th>Seat</th><th colspan="2">Guest</th><th>Meal</th></tr></thead><tbody>
+        <tr><td>A1</td><td><input id="first"></td><td><input id="last"></td>
+          <td><select id="meal"><option value="">-</option><option>Fish</option><option>Veg</option></select></td></tr>
+      </tbody></table>
+      <table><tr><th>Name</th><th>Phone</th></tr><tr><td><input id="n"></td><td><input id="p"></td></tr></table>
+      <table><thead><tr><td></td><th>Mon</th></tr></thead><tbody><tr><th scope="row">Morning</th><td><input id="mm"></td></tr></tbody></table>
+      <table><tr><td>Voucher</td><td><input id="v"></td></tr></table>
+    </form>`);
+    const labels = Object.fromEntries((await readFields(grid)).fields.map((field) => [field.handle, field.label]));
+    assert(labels["#first"] === "Guest" && labels["#last"] === "Guest" && labels["#meal"] === "Meal",
+      "under a thead, a head cell that spans two columns covers both of them", labels);
+    assert(labels["#n"] === "Name" && labels["#p"] === "Phone", "a first row of nothing but headers is the head too", labels);
+    assert(labels["#mm"] === "Morning", "a row's own header still names its cell first", labels);
+    assert(labels["#v"] === "Voucher", "a cell under no head keeps the words before it", labels);
+    return JSON.stringify(labels);
+  } finally { await grid.close(); }
+});
+
 await browser.close();
 
 let failed = 0;
