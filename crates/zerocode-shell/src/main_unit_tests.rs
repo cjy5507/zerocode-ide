@@ -23775,6 +23775,47 @@ mod browser_form_fill {
         assert_eq!(cmd::browser::form::known_form(label), None);
     }
 
+    /// The buttons of the form a pane's agent last read are kept beside its
+    /// fingerprint, so a fill's answer can say which one the page took away.
+    #[test]
+    fn a_panes_last_buttons_are_remembered_beside_its_form() {
+        use zerocode_core::browser_form::FormAction;
+        let label = "browser-form-buttons-test";
+        assert!(cmd::browser::form::known_buttons(label).is_empty());
+        let buttons = vec![FormAction {
+            handle: "#go".into(),
+            label: "Continue".into(),
+            disabled: true,
+        }];
+        cmd::browser::form::remember_buttons(label, &buttons);
+        assert_eq!(cmd::browser::form::known_buttons(label), buttons);
+    }
+
+    /// The fill road sets its answer against the form its agent read before it
+    /// and keeps what it leaves — the form's print and its buttons — except
+    /// when the form was stale and nothing was written.
+    #[test]
+    fn a_fill_is_set_against_the_form_that_was_read_before_it() {
+        let road = include_str!("cmd/browser/form.rs")
+            .split("pub(crate) async fn automate_fill(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("the fill road");
+        for piece in [
+            "known_buttons(label)",
+            "report.against(known.as_deref(), &buttons)",
+            "remember_form(label, &report.fingerprint)",
+            "remember_buttons(label, &report.actions)",
+        ] {
+            assert!(road.contains(piece), "the fill road lacks `{piece}`:\n{road}");
+        }
+        let stale = road.find("if report.stale").expect("a stale fill ends first");
+        assert!(
+            stale < road.find("report.against(").expect("set against"),
+            "a stale fill is not set against anything:\n{road}"
+        );
+    }
+
     /// An eval that names the form pair's object gets `fields()` and
     /// `fill()` before its expression — the expression still inlined, never
     /// the page's own eval — and any other eval carries none of it.

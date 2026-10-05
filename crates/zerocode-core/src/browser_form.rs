@@ -459,15 +459,20 @@ pub struct FillPass {
     pub stale: bool,
     /// The form's fingerprint once the pass was done (before it, when stale).
     pub fingerprint: String,
+    /// The buttons the form has once the pass was done, as a `fields` read
+    /// names them — on or off, so the agent presses the step's button with no
+    /// read between.
+    pub actions: Vec<FormAction>,
 }
 
 /// A fill's passes, kept: each entry's latest outcome, and the page's word
-/// on what is left after the last pass.
+/// on what is left and on the buttons after the last pass.
 #[derive(Debug, Clone)]
 pub struct FillLedger {
     entries: Vec<FillEntry>,
     results: Vec<Option<FillResult>>,
     left: Vec<FormField>,
+    actions: Vec<FormAction>,
     passes: usize,
     stale: bool,
     fingerprint: String,
@@ -481,6 +486,7 @@ impl FillLedger {
             entries,
             results,
             left: Vec::new(),
+            actions: Vec::new(),
             passes: 0,
             stale: false,
             fingerprint: String::new(),
@@ -533,6 +539,7 @@ impl FillLedger {
             self.results[at] = Some(said);
         }
         self.left = pass.left;
+        self.actions = pass.actions;
     }
 
     #[must_use]
@@ -551,31 +558,54 @@ impl FillLedger {
         FillReport {
             results,
             left: self.left,
+            actions: self.actions,
             passes: self.passes,
             stale: self.stale,
             fingerprint: self.fingerprint,
+            ..FillReport::default()
         }
     }
 }
 
 /// A whole fill: each entry's last outcome in the bundle's order, what the
-/// page says is left, and how many passes it took.
+/// page says is left, the buttons after it, and how many passes it took.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FillReport {
     pub results: Vec<FillResult>,
     pub left: Vec<FormField>,
+    /// The buttons the form has after the last pass.
+    pub actions: Vec<FormAction>,
     pub passes: usize,
     /// The form was not the one the agent read: nothing was written.
     pub stale: bool,
     /// The form's fingerprint after the last pass.
     pub fingerprint: String,
+    /// Whether the form is no longer the one the agent read — `None` when it
+    /// read none, so there is nothing to be the same as ([`Self::against`]).
+    pub changed: Option<bool>,
+    /// The buttons the agent's read had that the form no longer draws, said
+    /// only when the form is otherwise the same.
+    pub hidden: Vec<FormAction>,
 }
 
 impl FillReport {
-    /// The report set against the form the agent read before the fill, and
-    /// the buttons that read had — what the answer's last line says.
+    /// The report set against the form the agent read before the fill — its
+    /// fingerprint, and the buttons that read had — which is what the last
+    /// line of the answer says: the same form or another, and a button the
+    /// page took away. A form that changed has lost every button of the old
+    /// one, so none is said as hidden then.
     #[must_use]
-    pub fn against(self, _known: Option<&str>, _buttons: &[FormAction]) -> Self {
+    pub fn against(mut self, known: Option<&str>, buttons: &[FormAction]) -> Self {
+        self.changed = known.map(|print| print != self.fingerprint);
+        self.hidden = if self.changed == Some(false) {
+            buttons
+                .iter()
+                .filter(|before| self.actions.iter().all(|now| now.handle != before.handle))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         self
     }
 
@@ -749,8 +779,46 @@ fn left_line(field: &FormField) -> String {
     )
 }
 
+/// The last line of a fill: whether the form is the one the agent read, the
+/// buttons it has now — on or off — and the ones the page took away. Nothing
+/// when the agent read no form and there is no button to say.
+fn after_line(report: &FillReport) -> Option<String> {
+    let form = match report.changed {
+        Some(true) => Some("양식 바뀜(fields로 다시 읽기)"),
+        Some(false) => Some("양식 그대로"),
+        None => None,
+    };
+    let mut parts = Vec::new();
+    if !report.actions.is_empty() {
+        let buttons: Vec<String> = report
+            .actions
+            .iter()
+            .map(|action| {
+                let state = if action.disabled { "꺼짐" } else { "켜짐" };
+                format!("{} 「{}」 {state}", action.handle, action.label)
+            })
+            .collect();
+        parts.push(format!("버튼: {}", buttons.join(", ")));
+    }
+    if !report.hidden.is_empty() {
+        let gone: Vec<String> = report
+            .hidden
+            .iter()
+            .map(|action| format!("{} 「{}」", action.handle, action.label))
+            .collect();
+        parts.push(format!("숨김: {}", gone.join(", ")));
+    }
+    match (form, parts.is_empty()) {
+        (None, true) => None,
+        (None, false) => Some(parts.join("; ")),
+        (Some(form), true) => Some(form.to_string()),
+        (Some(form), false) => Some(format!("{form} — {}", parts.join("; "))),
+    }
+}
+
 /// A fill for the agent: how many took in how many passes, every field's
-/// line — what it holds now, or why it did not take — and what is left.
+/// line — what it holds now, or why it did not take — what is left, and the
+/// state of the form's buttons after it.
 #[must_use]
 pub fn fill_lines(report: &FillReport) -> String {
     if report.stale {
@@ -792,6 +860,7 @@ pub fn fill_lines(report: &FillReport) -> String {
         lines.push("남은 칸:".to_string());
         lines.extend(report.left.iter().map(left_line));
     }
+    lines.extend(after_line(report));
     lines.join("\n") + "\n"
 }
 

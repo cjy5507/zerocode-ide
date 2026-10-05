@@ -148,7 +148,10 @@ export async function startFormDesk({ scene, doorText, headless = true }) {
   context.on("page", (popup) => { tally.popups += 1; popup.close().catch(() => {}); });
   page.on("dialog", (dialog) => { tally.dialogs += 1; dialog.dismiss().catch(() => {}); });
   await page.goto(site.url);
+  // What the agent last read or was told by a fill: the form's fingerprint
+  // and its buttons — the window's `known_form` and `known_buttons`.
   let form = null;
+  let formButtons = [];
   let closed = false;
 
   /* What the core says: one request to `door_text`, one answer. */
@@ -223,6 +226,7 @@ export async function startFormDesk({ scene, doorText, headless = true }) {
       if (gone) return gone;
       const read = await call(fieldsScript());
       form = read.fingerprint || null;
+      formButtons = read.actions || [];
       return said(ask({ op: "fields", label: parsed.label, json: parsed.json, read }).words);
     }
     if (verb === "fill") {
@@ -232,8 +236,11 @@ export async function startFormDesk({ scene, doorText, headless = true }) {
       if (gone) return gone;
       const filled = await fillPasses(run, parsed.entries, form);
       const text = argv[2] === "--value" ? argv[3] : argv[2];
-      const answer = ask({ op: "fill", label: parsed.label, text, passes: filled.rounds });
-      if (!filled.stale) form = filled.fingerprint || null;
+      const answer = ask({ op: "fill", label: parsed.label, text, passes: filled.rounds, known: form, buttons: formButtons });
+      if (!filled.stale) {
+        form = filled.fingerprint || null;
+        formButtons = filled.actions || [];
+      }
       return answer.ok ? said(answer.words) : refused(answer.words);
     }
     if (verb === "click" && words >= 3 && words <= 5) {

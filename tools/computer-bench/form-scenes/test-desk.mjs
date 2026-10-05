@@ -84,6 +84,7 @@ await test("fields reads the form, in the core's words and as JSON", async () =>
 await test("fill writes a bundle read from stdin, says each field, and refuses on stderr what did not take", async () => {
   const ok = await shim("browser", ["fill", PANE, "--value-stdin"], '{"#name":"Kim","#size":"Large","#agree":true}\n');
   assert(ok.code === 0 && fenced(ok.stdout) && ok.stdout.includes("채움 3/3칸") && ok.stdout.includes('= "Kim"'), "every field took: stdout, fenced, each with what it holds", ok);
+  assert(ok.stdout.includes("양식 그대로 — 버튼: #send 「Send code」 켜짐, #book 「Book」 켜짐"), "and ends with the form read and the buttons now", ok.stdout);
   assert(await page(() => document.getElementById("name").value) === "Kim" && await page(() => document.getElementById("size").value) === "l"
     && await page(() => document.getElementById("agree").checked) === true, "and the page holds them");
   const none = await shim("browser", ["fill", PANE, "--value-stdin"], '{"#size":"Gigantic"}');

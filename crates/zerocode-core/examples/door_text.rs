@@ -9,7 +9,7 @@
 //! ```text
 //! echo '{"op":"parse","argv":["fill","browser-1","--value","{\"#a\":\"x\"}"]}' | door_text
 //! echo '{"op":"fields","label":"browser-1","json":false,"read":{…}}'          | door_text
-//! echo '{"op":"fill","label":"browser-1","text":"{…}","passes":[{"asked":["#a"],"pass":{…}}]}' | door_text
+//! echo '{"op":"fill","label":"browser-1","text":"{…}","passes":[{"asked":["#a"],"pass":{…}}],"known":"…","buttons":[…]}' | door_text
 //! echo '{"op":"fence","label":"browser-1","words":"…"}'                         | door_text
 //! echo '{"op":"usage","door":"browser"}'                                        | door_text
 //! ```
@@ -18,7 +18,7 @@ use std::io::Read as _;
 
 use serde_json::{Value, json};
 use zerocode_core::agent_browser::{self, ClickTarget, ScrollTarget};
-use zerocode_core::browser_form::{self, FillLedger, FillPass, FormRead};
+use zerocode_core::browser_form::{self, FillLedger, FillPass, FormAction, FormRead};
 use zerocode_core::untrusted;
 
 fn main() {
@@ -118,9 +118,10 @@ fn fields(asked: &Value) -> Value {
 }
 
 /// A `fill` answer: the passes the page made, kept by the ledger the window
-/// keeps, said the way the window says them — fenced on stdout when every
-/// field took, fenced on stderr when one did not, the host's own words when
-/// the form was not the one read.
+/// keeps and set against the form the agent read before them (`known`, its
+/// fingerprint, and the `buttons` that read had), said the way the window
+/// says them — fenced on stdout when every field took, fenced on stderr when
+/// one did not, the host's own words when the form was not the one read.
 fn fill(asked: &Value) -> Value {
     let Ok(entries) = browser_form::fill_entries(asked["text"].as_str().unwrap_or_default()) else {
         return json!({ "ok": false, "words": "door_text: the fill text is no bundle\n" });
@@ -141,7 +142,12 @@ fn fill(asked: &Value) -> Value {
         let pass: FillPass = serde_json::from_value(round["pass"].clone()).unwrap_or_default();
         ledger.record(&sent, pass);
     }
-    let report = ledger.report();
+    let mut report = ledger.report();
+    if !report.stale {
+        let buttons: Vec<FormAction> =
+            serde_json::from_value(asked["buttons"].clone()).unwrap_or_default();
+        report = report.against(asked["known"].as_str(), &buttons);
+    }
     let words = browser_form::fill_lines(&report);
     if report.stale {
         return json!({ "ok": false, "words": format!("zerocode-browser: {words}") });

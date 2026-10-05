@@ -19,7 +19,7 @@ use zerocode_core::browser_form::{
     BROWSER_FORM_FRAME_SEPARATOR, BROWSER_FORM_LIST_ITEMS, BROWSER_FORM_LISTS,
     BROWSER_FORM_MONTH_DAYS, BROWSER_FORM_MONTH_PAGES, BROWSER_FORM_NOT_FIELDS,
     BROWSER_FORM_OPTION_CAP, BROWSER_FORM_OPTIONS, BROWSER_FORM_PRESSABLES, BROWSER_FORM_SCAN_CAP,
-    BROWSER_FORM_SCOPES, FillEntry, FillLedger, FillPass, FillReport, FormRead,
+    BROWSER_FORM_SCOPES, FillEntry, FillLedger, FillPass, FillReport, FormAction, FormRead,
 };
 
 /// What a read of a page's forms is made of, page side — read only, like the
@@ -997,7 +997,9 @@ const zcTarget = (handle) => {
   return record ? { record } : { code: "not_a_field" };
 };
 // One pass over a bundle: each entry written in its order, then each
-// written field read back, then what the form still wants. With `expect` —
+// written field read back, then what the form still wants and the buttons it
+// has now (on, off: a step's button that turns on once its field is right).
+// With `expect` —
 // the fingerprint of the form its agent read — a form that is no longer that
 // one is said (`stale`) before anything is written.
 const zcFill = (entries, expect) => {
@@ -1042,7 +1044,7 @@ const zcFill = (entries, expect) => {
   });
   const after = zcFormFields(request);
   const left = after.fields.filter((field) => (field.required && zcEmpty(field)) || field.error);
-  return { results, left, stale: false, fingerprint: after.print };
+  return { results, left, stale: false, fingerprint: after.print, actions: after.actions };
 };
 "#;
 
@@ -1152,6 +1154,33 @@ pub(crate) fn known_form(label: &str) -> Option<String> {
         .cloned()
 }
 
+/// The buttons of the form a pane's agent last knew — what a fill's answer
+/// says went away. Kept per pane label beside the fingerprint.
+fn form_buttons() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<FormAction>>> {
+    static BUTTONS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<FormAction>>>,
+    > = std::sync::OnceLock::new();
+    BUTTONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Remember the buttons of the form a pane's agent now knows.
+pub(crate) fn remember_buttons(label: &str, buttons: &[FormAction]) {
+    form_buttons()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(label.to_string(), buttons.to_vec());
+}
+
+/// The buttons the form a pane's agent last knew had.
+pub(crate) fn known_buttons(label: &str) -> Vec<FormAction> {
+    form_buttons()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(label)
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// A fill script: the form helpers, the writer, and a body that calls it.
 pub(crate) fn fill_script(request: &serde_json::Value, body: &str) -> String {
     form_script(request, &format!("{BROWSER_FILL_HELPERS}\n{body}"))
@@ -1181,12 +1210,14 @@ pub(crate) async fn automate_fields(
     let read: FormRead = serde_json::from_value(page_value(reply)?)
         .map_err(|_| "브라우저 판의 양식 읽기를 읽을 수 없습니다".to_string())?;
     remember_form(label, &read.fingerprint);
+    remember_buttons(label, &read.actions);
     Ok(read)
 }
 
 /// Fill a bundle into a pane's page, in passes ([`fill_passes`]), held to
 /// the form the pane's agent last knew; what the fill leaves is the form it
-/// knows next.
+/// knows next, and the report says whether that is the form it read and what
+/// the buttons are now.
 pub(crate) async fn automate_fill(
     app: &AppHandle,
     state: &AppState,
@@ -1194,9 +1225,11 @@ pub(crate) async fn automate_fill(
     entries: Vec<FillEntry>,
 ) -> Result<FillReport, String> {
     let pane = browser_pane_of(app, state, label)?;
+    let known = known_form(label);
+    let buttons = known_buttons(label);
     let report = fill_passes(
         entries,
-        known_form(label),
+        known.clone(),
         Duration::from_millis(BROWSER_FILL_PENDING_MS),
         BROWSER_WAIT_POLL,
         |asked, expect| {
@@ -1213,9 +1246,12 @@ pub(crate) async fn automate_fill(
         },
     )
     .await?;
-    if !report.stale {
-        remember_form(label, &report.fingerprint);
+    if report.stale {
+        return Ok(report);
     }
+    let report = report.against(known.as_deref(), &buttons);
+    remember_form(label, &report.fingerprint);
+    remember_buttons(label, &report.actions);
     Ok(report)
 }
 
