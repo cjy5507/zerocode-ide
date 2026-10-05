@@ -70,7 +70,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
 import { FORM_REQUEST, clickScript, evalFormScript, evalScript, fieldsScript, fillPasses, pressInForm, typeScript } from "../../../ui/tests/browser-scripts.mjs";
-import { scrollToEnd } from "./door-recipes.mjs";
+import { pressButton, scrollToEnd } from "./door-recipes.mjs";
 import { readScene, serveScene as serve, verdictWords, verdicts } from "./scene-kit.mjs";
 
 // The floor of one model round trip, and what one costs in the person's
@@ -132,6 +132,20 @@ function codeConfirmer(actions, codeField) {
   const beside = live.filter((action) => action.beside === codeField);
   if (beside.length === 1) return beside[0];
   return live.find((action) => INTENT.confirm.includes(fold(action.label))) || null;
+}
+
+/* Whether a label holds the card's words whole: the words stand in it with no letter or number against either end (`North Gate 9` is held by `Gate 9 · open`
+ * and not by `North Gate 90`). */
+function holdsWhole(label, value) {
+  const want = fold(value);
+  if (!want) return false;
+  const text = fold(label);
+  const word = /[\p{L}\p{N}]/u;
+  for (let from = text.indexOf(want); from >= 0; from = text.indexOf(want, from + 1)) {
+    const before = text[from - 1], after = text[from + want.length];
+    if (!(before && word.test(before)) && !(after && word.test(after))) return true;
+  }
+  return false;
 }
 
 /* The button that moves a form on, chosen by what the door said of the buttons and by no word: the one the
@@ -574,6 +588,58 @@ class Road {
     return pressed;
   }
 
+  /* A field the door says the page keeps from being written and names the button that opens it (`opens`) is filled from the window that button opens, as a model
+   * does with a pick from a list the page searches (t-41720): the button is pressed, the form read — a window with a frame may need a moment, waited for a fixed
+   * number of times —, the card's words written into the one text field the window brought, the button that starts the search pressed, and the result whose words hold
+   * the card's words whole pressed. Once for each button. True when it pressed anything, so the step is read again. */
+  async openRoad(results, bundle, actions) {
+    let pressed = false;
+    for (const result of results || []) {
+      if (!result || result.status !== "read_only" || !result.opens) continue;
+      const value = bundle[result.handle];
+      if (typeof value !== "string" || !value.trim() || this.byHandTried.has(result.opens.handle)) continue;
+      this.byHandTried.add(result.opens.handle);
+      const waits = this.waits;
+      pressed = (await this.searchAndPick(result.opens, value, actions || this.buttons)) || pressed;
+      this.waits = waits;
+    }
+    return pressed;
+  }
+
+  async searchAndPick(opener, value, actions) {
+    const separator = FORM_REQUEST.frameSeparator;
+    const known = new Set(this.seen.map((field) => field.handle));
+    const knownButtons = new Set(actions.map((action) => action.handle));
+    await this.press({ handle: opener.handle, label: opener.label });
+    const brought = async () => (await this.fields()).fields.filter((field) => !known.has(field.handle) && field.kind === "text");
+    let box = await brought();
+    for (let waits = 0; !box.length && waits < WAITS_MAX; waits += 1) {
+      await this.wait();
+      box = await brought();
+    }
+    if (box.length !== 1) return true;
+    await this.fill({ [box[0].handle]: value });
+    const before = new Set(this.buttons.map((action) => action.handle));
+    const starters = this.buttons.filter((action) => !knownButtons.has(action.handle) && !action.disabled);
+    const start = starters.find((action) => action.submit) || starters.find((action) => action.beside === box[0].handle)
+      || (starters.length === 1 ? starters[0] : null);
+    if (!start) return true;
+    await this.press(start);
+    let found = [];
+    for (let waits = 0; ; waits += 1) {
+      await this.fields();
+      found = this.buttons.filter((action) => !before.has(action.handle) && !action.disabled);
+      if (found.length || waits >= WAITS_MAX) break;
+      await this.wait();
+    }
+    const holding = found.filter((action) => holdsWhole(action.label, value));
+    if (holding.length === 1) {
+      await this.press(holding[0]);
+      await this.fields();
+    }
+    return true;
+  }
+
   /* A date the fill could not pick, finished by hand from the calendar its
    * answer showed, as a model reads it: open the field, page and look until
    * the heading reads the month, press the day — each a round trip, at most
@@ -622,10 +688,10 @@ class Road {
     this.everPressed.add(action.handle);
     this.after = null;
     if (action.handle.includes(FORM_REQUEST.frameSeparator)) {
-      this.note({ verb: "click", handle: action.handle, label: action.label });
-      const [frame, inner] = action.handle.split(FORM_REQUEST.frameSeparator);
-      return this.call("eval", () => this.page.evaluate(([outer, button]) =>
-        document.querySelector(outer).contentDocument.querySelector(button).click(), [frame, inner]));
+      this.note({ verb: "eval", press: action.handle, label: action.label });
+      const pressed = await this.call("eval", () => this.run(evalScript(pressButton(action.handle))));
+      if (!pressed.ok) throw new Error(`press refused: ${JSON.stringify(pressed)}`);
+      return pressed;
     }
     // A pane whose form was never read is pressed as it always was.
     if (this.form === null) {
@@ -733,6 +799,7 @@ class Road {
       if (Object.keys(bundle).length) {
         const filled = await this.fill(bundle);
         if (filled.stale || filled.byHand || filled.changed) continue;
+        if (await this.openRoad(filled.results, bundle, filled.actions.length ? filled.actions : read.actions)) continue;
         if (filled.actions.length) actions = filled.actions;
       }
       const owed = await this.code(read.fields, bundle);
@@ -870,6 +937,8 @@ class Road {
       return { results: filled.results.map((result) => result.label + ":" + result.status), left,
         actions, before: read.actions.map((action) => ({ handle: action.handle, disabled: action.disabled })), fresh, pressedNext: pressNext, pressedHandle: pressNext ? next.handle : null,
         print: read.fingerprint, hand, viaType, unknowns: read.unknowns, unplaced, ambiguous, clean, moved,
+        readOnly: filled.results.filter((result) => result.status === "read_only" && result.opens)
+          .map((result) => ({ handle: result.handle, status: result.status, opens: result.opens })),
         scrollBoxes: read.scrollBoxes || [],
         confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, kind: field.kind, label: field.label,
           value: field.value, required: field.required, disabled: field.disabled, hint: field.hint })) };
@@ -908,6 +977,7 @@ class Road {
         }
         continue;
       }
+      if (await this.openRoad(said.readOnly, said.bundle || {}, said.actions)) continue;
       if (await this.unknownRoad(said.unknowns, said.unplaced)) continue;
       if (await this.code(said.fields, said.bundle)) continue;
       // What is left or did not take is tried again once; the same answer twice is the page's, and the step goes on.

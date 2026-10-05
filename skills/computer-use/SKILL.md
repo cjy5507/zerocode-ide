@@ -244,6 +244,13 @@ calendar (`달력 「…」 넘김 … · 날짜 칸 …`), finish that one fiel
 `click` the field to open it, `click` a pager until the heading shows the
 month, `click` the day; then `fields` to check it.
 
+A read-only field is picked, not written, when the page fills it from a window a button opens (an address chosen from a search): the line says which button
+opens it, `(직접 못 씀 — 열 단추: <handle> 「…」)` in a read and `(열 단추: <handle> 「…」)` in the answer of a `fill`. `click` that button, then `fields` again —
+a window with a frame of its own may need a moment to load, so read again when nothing new is there. `fill` the words the value holds into the window's
+search field (a field inside a frame is `<frame> >> <inner>`), then press the window's search button and read again for the results (the page may answer after a moment).
+A button inside a frame is pressed with an `eval`, `String.raw` keeping a handle's backslashes: ``document.querySelector(String.raw`<frame>`).contentDocument.querySelector(String.raw`<inner>`).click()``.
+Press the result whose words hold the value whole — `North Gate 9` is held by `Gate 9 · open` and not by `North Gate 90` — then `fields` to check that the field holds it.
+
 A line `종류를 모르는 조작: …` names what a person can press there that the
 read has no kind for — a box with its own list, a chip, a pointer-only
 control: `click` it by its handle, then `fields` again; what opens is read
