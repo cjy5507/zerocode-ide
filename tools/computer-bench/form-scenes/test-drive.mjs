@@ -4,7 +4,9 @@
  * again before anything is pressed, and a field the page keeps off until its terms
  * are read to the end is switched on by scrolling that box the way the skill
  * teaches — then the step goes on. Both roads of the driver, the verbs and the
- * script, are held to both.
+ * script, are held to both. The driver's row and a person's road are held to the
+ * oracle's three verdicts, said side by side, and to keeping the page's whole
+ * result, so any verdict can be counted again later.
  *
  *   node test-drive.mjs
  */
@@ -29,12 +31,13 @@ function assert(condition, message, detail = undefined) {
 }
 
 const root = await mkdtemp(join(tmpdir(), "form-drive-"));
-async function scene(name, html, facts, expected) {
+async function scene(name, html, facts, expected, files = {}) {
   const folder = join(root, name);
   await mkdir(folder, { recursive: true });
   await writeFile(join(folder, "scene.html"), html);
   await writeFile(join(folder, "card.json"), JSON.stringify({ task: "Fill it in.", facts, personTurns: [] }));
   await writeFile(join(folder, "expected.json"), JSON.stringify(expected));
+  for (const [file, text] of Object.entries(files)) await writeFile(join(folder, file), text);
   return folder;
 }
 const REVEAL = await scene("reveal", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
@@ -69,11 +72,38 @@ const TERMS = await scene("terms", `<!doctype html><html lang="en"><meta charset
 </script>`, [{ says: "Email", value: "kim@example.com" }, { says: "I agree", value: true }],
 { mail: "kim@example.com", agree: true });
 
-/* One run of the drivers on both scenes, once. */
+/* Three small pages that record a result of their own kind: one keeps a field the card leaves alone (a memo), one a reference of its own making that its
+ * scene declares with a shape, one the same reference left empty. */
+const SEND = (record) => `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="name">Name</label> <input id="name">
+  <label for="memo">Memo</label> <textarea id="memo"></textarea>
+  <button type="button" id="send">Submit</button>
+</form>
+<script>
+  const name = document.getElementById("name"), memo = document.getElementById("memo");
+  document.getElementById("send").addEventListener("click", () => { window.__sceneResult = ${record}; });
+</script>`;
+const FACT_NAME = [{ says: "Name", value: "Kim" }];
+const LEFT = await scene("left", SEND("{ name: name.value, memo: memo.value }"), FACT_NAME, { name: "Kim" });
+const MADE = await scene("made", SEND("{ name: name.value, ref: 'R-' + (1000 + Math.floor(Math.random() * 9000)) }"), FACT_NAME, { name: "Kim" },
+  { "made.json": JSON.stringify({ keys: ["ref"], shapes: { ref: "^R-\\d{4}$" } }) });
+const MADE_EMPTY = await scene("madeempty", SEND("{ name: name.value, ref: '' }"), FACT_NAME, { name: "Kim" },
+  { "made.json": JSON.stringify({ keys: ["ref"], shapes: { ref: "^R-\\d{4}$" } }) });
+
+/* A person's road through two of them: the page, and what a person does on it. */
+const SOLVE = "export async function solveAsPerson(page) { await page.fill('#name', 'Kim'); await page.click('#send'); }\n";
+const PERSON_KEPT = await scene("person-kept", SEND("{ name: name.value }"), FACT_NAME, { name: "Kim" }, { "selfcheck.mjs": SOLVE });
+const PERSON_LEFT = await scene("person-left", SEND("{ name: name.value, memo: memo.value }"), FACT_NAME, { name: "Kim" }, { "selfcheck.mjs": SOLVE });
+
+/* One run of the drivers on every scene, once. */
 const out = join(root, "rows.json");
-const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--out", out], { encoding: "utf8", timeout: 240_000 });
+const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY, "--out", out], { encoding: "utf8", timeout: 240_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
+/* One run of a person's road through two scenes, its lines and the rows it keeps. */
+const roadOut = join(root, "road.json");
+const road = spawnSync(process.execPath, [join(HERE, "person-road.mjs"), "--scene", PERSON_KEPT, "--scene", PERSON_LEFT, "--out", roadOut], { encoding: "utf8", timeout: 240_000 });
+const roadRows = await readFile(roadOut, "utf8").then(JSON.parse, () => []);
 
 await test("a driver reads a form again before it presses when its fill brought a field of its own", () => {
   for (const road of ["verbs", "script"]) {
@@ -102,6 +132,53 @@ await test("the recipe a driver scrolls a box by is the one the skill teaches", 
     "and a handle with the frame's separator is the frame and the box inside it", scrollToEnd("#card >> #box"));
   assert(SKILL.includes("document.querySelector(String.raw`<frame>`).contentDocument.querySelector(String.raw`<inner>`)"), "the skill teaches the frame's form in these words");
   return "same";
+});
+
+await test("the row of a driver says the three verdicts side by side and keeps the whole result of the page", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("reveal", road);
+    assert(one && typeof one.pass === "boolean", `the ${road} row says its pass`, one && Object.keys(one));
+    assert(JSON.stringify(one.result) === JSON.stringify({ name: "Kim", invoice: true, company: "Acme" }), `the ${road} row keeps what the page recorded, whole`, one.result);
+    assert(one.ok === true && one.wholeRaw === true && one.whole === true && one.pass === true && one.extra.length === 0, `a result that is the expected one holds under all three (${road})`, one);
+  }
+  const verbs = row("reveal", "verbs");
+  assert(verbs.madeProblems?.length === 0, "and no declared key is wrong", verbs.madeProblems);
+  return "kept";
+});
+
+await test("the row of a driver is no pass when the page recorded a key that nothing names, though the expected keys hold", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("left", road);
+    assert(one && typeof one.pass === "boolean", `the ${road} row says its pass`, one && Object.keys(one));
+    assert(one.ok === true && one.pass === false && one.wholeRaw === false && one.whole === false, `the expected keys hold and the pass does not (${road})`, one);
+    assert(JSON.stringify(one.extra) === JSON.stringify(["memo"]), `the key is said (${road})`, one.extra);
+    assert(one.result && one.result.memo === "", `and the result shows it (${road})`, one.result);
+  }
+  return "extra";
+});
+
+await test("a declared key is held to its shape, made and shaped it passes by the declared rule alone, left empty it does not", () => {
+  for (const road of ["verbs", "script"]) {
+    const made = row("made", road);
+    assert(made && typeof made.pass === "boolean", `the ${road} row says its pass`, made && Object.keys(made));
+    assert(made.ok === true && made.wholeRaw === false && made.whole === true && made.pass === true && JSON.stringify(made.made) === JSON.stringify(["ref"]), `a made, shaped key breaks the first rule alone (${road})`, made);
+    assert(/^R-\d{4}$/.test(made.result?.ref ?? ""), `and its value is in the row (${road})`, made.result);
+    const empty = row("madeempty", road);
+    assert(empty && empty.ok === true && empty.whole === false && empty.pass === false && JSON.stringify(empty.madeProblems) === JSON.stringify(["ref:empty"]), `an empty one is no pass, and says why (${road})`, empty);
+  }
+  return "shaped";
+});
+
+await test("the road of a person says the three verdicts, passes only by all of them and keeps the whole result of the page", () => {
+  const lines = String(road.stdout).split("\n");
+  const kept = lines.find((line) => line.includes("person-kept")) || "";
+  const left = lines.find((line) => line.includes("person-left")) || "";
+  assert(kept.startsWith("PASS") && kept.includes("ok=true wholeRaw=true whole=true"), "a road that records only what the card names passes, and says all three", kept);
+  assert(left.startsWith("FAIL") && left.includes("ok=true wholeRaw=false whole=false") && left.includes("extra=memo"), "one that records a key nothing names does not, and says which", left);
+  const rowOf = (name) => roadRows.find((one) => one.scene === name);
+  assert(rowOf("person-kept")?.pass === true && JSON.stringify(rowOf("person-kept").result) === JSON.stringify({ name: "Kim" }), "its rows keep the page's result, whole", roadRows);
+  assert(rowOf("person-left")?.pass === false && JSON.stringify(rowOf("person-left").result) === JSON.stringify({ name: "Kim", memo: "" }), "the failing one too", roadRows);
+  return "kept";
 });
 
 void done;

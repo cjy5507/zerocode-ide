@@ -34,7 +34,11 @@ function assert(condition, message, detail = undefined) {
 
 const root = await mkdtemp(join(tmpdir(), "form-real-"));
 const scene = join(root, "scene");
-await writeFixtureScene(scene, { name: "Kim", size: "l", agree: true });
+// What the page records is what the card names — and `verified`, a key the page holds at `false` until the person's code is entered, which this scene's card leaves alone.
+await writeFixtureScene(scene, { name: "Kim", size: "l", agree: true, verified: false });
+// The same page and a card that leaves that key out: the expected keys hold, and the page recorded more.
+const loose = join(root, "loose");
+await writeFixtureScene(loose, { name: "Kim", size: "l", agree: true });
 const account = join(root, "account");
 await mkdir(account);
 let runs = 0;
@@ -77,8 +81,8 @@ const splits = await standIn("splits", ["cat > /dev/null", INIT,
   "printf '\\355\\225'", "sleep 0.3", "printf '\\234'", "printf '%s\\n' '\"}}]}}'", RESULT].join("\n"));
 
 /* One run of the runner, its out folder, its words. */
-function run(claude, extra = [], out = fresh()) {
-  const done = spawnSync(process.execPath, [REAL, "--scene", scene, "--model", "fake-model", "--out", out, "--door-text", doorText,
+function run(claude, extra = [], out = fresh(), folder = scene) {
+  const done = spawnSync(process.execPath, [REAL, "--scene", folder, "--model", "fake-model", "--out", out, "--door-text", doorText,
     "--claude", claude, ...extra], { encoding: "utf8", timeout: 120_000 });
   const row = JSON.parse((String(done.stdout).split("\n").find((line) => line.startsWith("RESULT ")) || "RESULT null").slice(7));
   return { code: done.status, stdout: String(done.stdout), stderr: String(done.stderr), out, row };
@@ -92,6 +96,21 @@ async function lingers(marker) {
   }
   return true;
 }
+
+await test("a run is a pass only when the expected keys hold and nothing else was recorded and the whole result holds, and the whole result of the page is kept", () => {
+  const done = run(finishes);
+  const oracle = done.row.oracle;
+  assert(oracle.ok === true && oracle.wholeRaw === true && oracle.whole === true && oracle.pass === true && oracle.extra.length === 0, "a page that recorded what the card names holds under all three", oracle);
+  assert(JSON.stringify(done.row.pageResult) === JSON.stringify({ name: "Kim", size: "l", agree: true, verified: false }), "the page's whole result is in the row", done.row.pageResult);
+  assert(done.stdout.includes("ORACLE pass") && done.stdout.includes("ok=true wholeRaw=true whole=true"), "and the oracle's line says the three", done.stdout.split("\n").find((line) => line.startsWith("ORACLE")));
+  const other = run(finishes, [], fresh(), loose);
+  const left = other.row.oracle;
+  assert(left.ok === true && left.pass === false && left.wholeRaw === false && left.whole === false && JSON.stringify(left.extra) === JSON.stringify(["verified"]),
+    "a key the card leaves alone leaves the expected keys holding and the run no pass", left);
+  assert(other.stdout.includes("ORACLE fail") && other.stdout.includes("extra=verified"), "and the line says it", other.stdout.split("\n").find((line) => line.startsWith("ORACLE")));
+  assert(JSON.stringify(other.row.pageResult) === JSON.stringify({ name: "Kim", size: "l", agree: true, verified: false }), "with the result it was counted from", other.row.pageResult);
+  return `${JSON.stringify(left.extra)} is no pass`;
+});
 
 await test("a run hands the agent the product's launch prompt, an environment from nothing and the skill, and measures what it did", async () => {
   const done = run(finishes);
