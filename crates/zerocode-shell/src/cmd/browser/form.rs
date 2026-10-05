@@ -244,12 +244,14 @@ const zcPopupChoices = (el, request) => {
     .map((item) => ({ el: item, words: zcChoiceWords(item, request.wordCap),
       value: String(item.getAttribute("data-value") || ""), selected: item.getAttribute("aria-selected") === "true" }));
 };
-// What names such a button: the elements that label it other than itself, its ARIA name, its labels —
-// never the value it shows, which is its own words.
+// What names such a button: the elements that label it other than itself or a part of it (the element
+// that holds the value it shows), its ARIA name, its labels — never the value it shows, which is its own
+// words.
 const zcPopupName = (el) => {
   const doc = el.ownerDocument;
-  const by = String(el.getAttribute("aria-labelledby") || "").split(/\s+/).filter((id) => id && id !== el.id)
-    .map((id) => doc.getElementById(id)).filter(Boolean).map((node) => node.textContent).join(" ");
+  const by = String(el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
+    .map((id) => doc.getElementById(id)).filter((node) => node && node !== el && !el.contains(node))
+    .map((node) => node.textContent).join(" ");
   if (by.trim()) return by;
   const aria = el.getAttribute("aria-label");
   if (aria && aria.trim()) return aria;
@@ -280,23 +282,17 @@ const zcFieldKind = (el, request) => {
   if (el.isContentEditable) return "text";
   return el.hasAttribute("tabindex") && zcListBeside(el, request) ? "dropdown" : null;
 };
-// The words between two elements — what a heading and the group under it have between them —
-// outside every control and every box the page does not draw.
-const zcWordsAfter = (from, to) => {
-  const doc = to.ownerDocument;
-  const range = doc.createRange();
-  range.setStartAfter(from);
-  range.setEndBefore(to);
-  const common = range.commonAncestorContainer;
-  const root = common.nodeType === 1 ? common : common.parentElement;
-  const skip = "select, textarea, button, option, script, style, template, [role=option], [role=listbox]";
-  const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode: (node) => {
-    const holder = node.parentElement;
-    return range.intersectsNode(node) && holder && !holder.closest(skip) && zcDrawn(holder)
-      && /[\p{L}\p{N}]/u.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-  } });
+// The note under a heading: the text blocks that follow it — up to two — until the first thing that
+// is no mere text (a control, a button, a label, another heading, the group itself) or a box the page
+// does not draw.
+const zcNoteUnder = (heading, first, request) => {
+  const stops = request.controls.concat(request.field.headings, ["button", "label"]).join(",");
   const words = [];
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) words.push(node.nodeValue.replace(/\s+/g, " ").trim());
+  for (let next = heading.nextElementSibling; next && words.length < 2; next = next.nextElementSibling) {
+    if (next.contains(first) || !zcDrawn(next) || next.matches(stops) || next.querySelector(stops)) break;
+    const said = zcWords(next.innerText || next.textContent || "", request.wordCap);
+    if (said) words.push(said);
+  }
   return words.join(" ");
 };
 // The smallest box that holds both an element and a node.
@@ -330,7 +326,7 @@ const zcGroupTitle = (first, group, request) => {
   const holder = group || first.closest("[role=radiogroup]");
   const explicit = (holder && zcNameOf(holder)) || (legend && legend.textContent) || "";
   const heading = zcHeadingBefore(first, request);
-  const between = heading ? zcWordsAfter(heading, first) : "";
+  const between = heading ? zcNoteUnder(heading, first, request) : "";
   if (explicit.trim()) {
     return { name: explicit, note: between.trim() && zcFold(between) !== zcFold(explicit) ? between : "" };
   }
@@ -623,10 +619,11 @@ const zcScrollBoxes = (records, scopes, docs, request) => {
   }
   return boxes;
 };
-// The words an item shows besides its fields — a heading, a row header, a legend, a strong
-// first, then the rest in the order the page has them — each a piece of text with letters in
-// it, outside every control and every box the page does not draw, and never the words of the
-// fields' own names.
+// The words an item shows besides its fields, in the order a title is looked for: a heading, a row
+// header, a legend, a strong first; then the pieces that say something (two words or more, or six
+// letters) in the order the page has them; then the short ones — a thumbnail's label. Each is a piece
+// of text that is mostly letters (a price, a count or a total has them only as units), outside every
+// control and every box the page does not draw, and never the words of the fields' own names.
 const zcItemPieces = (item, fields) => {
   const skip = "select, textarea, button, option, script, style, template, [role=option], [role=listbox]";
   const own = new Set();
@@ -638,18 +635,21 @@ const zcItemPieces = (item, fields) => {
     if (wrapping) own.add(wrapping);
   }
   const heading = "h1, h2, h3, h4, h5, h6, [role=heading], th, legend, summary, figcaption, dt, strong, b";
-  const named = [], rest = [];
+  const letters = (text) => (text.match(/\p{L}/gu) || []).length;
+  const named = [], full = [], brief = [];
   const walker = item.ownerDocument.createTreeWalker(item, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => node.nodeType === 1 && (own.has(node) || node.matches(skip) || !zcDrawn(node))
       ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     if (node.nodeType !== 3 || !/\p{L}/u.test(node.nodeValue)) continue;
     const words = zcWords(node.nodeValue, 60);
-    if (!words || names.has(zcFold(words))) continue;
+    if (!words || names.has(zcFold(words)) || letters(words) * 2 <= words.replace(/\s/g, "").length) continue;
     const head = node.parentElement && node.parentElement.closest(heading);
-    (head && item.contains(head) ? named : rest).push(words);
+    if (head && item.contains(head)) named.push(words);
+    else if (words.includes(" ") || letters(words) >= 6) full.push(words);
+    else brief.push(words);
   }
-  return named.concat(rest);
+  return named.concat(full, brief);
 };
 // The title of the item each of several fields stands in — the child of the box that holds
 // them all that holds it — by the first piece of words that differs from one item to the next;
@@ -672,13 +672,14 @@ const zcItemTitles = (list) => {
   }
   return null;
 };
-// Fields of one read that go by the same words under one heading are told apart by the title of the
-// item each stands in (`<title>: <words>`), else by their number, which says it is only an order.
-const zcTellApart = (records, request) => {
+// Fields of one read that go by the same words are told apart by the title of the item each stands in
+// (`<title>: <words>`), else by their number, which says it is only an order. A name is what a script
+// reads a field by, so the heading each stands under does not tell them apart in its stead.
+const zcTellApart = (records) => {
   const groups = new Map();
   for (const record of records) {
-    if (!zcFold(record.label)) continue;
-    const key = [zcFold(record.label), zcFold(zcNear(record.el, request.field))].join("\u001f");
+    const key = zcFold(record.label);
+    if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(record);
   }
@@ -803,7 +804,7 @@ const zcFormFields = (request, before = null) => {
     }
   }
   zcNumberRuns(records);
-  zcTellApart(records, request);
+  zcTellApart(records);
   const scopes = new Set(records.map((record) => record.el.closest(request.scopes.join(","))
     || record.el.ownerDocument.body));
   // A step with no field of its own — a review, a confirmation, a modal that asks yes or no — still
