@@ -112,6 +112,8 @@ const PART = / \((\d+)\/(\d+)\)$/;
 const words = (label) => fold(label).replace(PART, "").replace(/\s*\*$/, "");
 const took = (status) => status === "set" || status === "same";
 const intentOf = (label, intent) => INTENT[intent].some((word) => fold(label).includes(word));
+/* A date the card gives whole, year first (`2026-11-27`). */
+const dateLike = (value) => typeof value === "string" && /^\d{4}[-./]\d{1,2}[-./]\d{1,2}$/.test(value.trim());
 
 /* The button that sends the code of the person, chosen by the place the door gave it: the one button that stands beside the phone
  * field the driver wrote — a field of kind `tel` with a value, or one in the bundle just written. Words come after, and only when no
@@ -657,7 +659,7 @@ class Road {
    * pages its calendar and presses the day; and once two are picked the button of the dialog that turned on (the one that applies the range) is pressed. Once for each dialog. True when it
    * pressed anything, so the step is read again. */
   async dialogRoad(unplaced, actions) {
-    const dates = (unplaced || []).filter((fact) => typeof fact.value === "string" && /^\d{4}[-./]\d{1,2}[-./]\d{1,2}$/.test(fact.value.trim()));
+    const dates = (unplaced || []).filter((fact) => dateLike(fact.value));
     const names = [...new Set((actions || []).filter((action) => action.dialog && !action.disabled).map((action) => action.dialog))];
     if (!dates.length || !names.length) return false;
     const tokens = (text) => fold(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
@@ -973,6 +975,7 @@ class Road {
       const codeSender = ${codeSender.toString()};
       const codeConfirmer = ${codeConfirmer.toString()};
       const advancing = ${advancing.toString()};
+      const dateLike = ${dateLike.toString()};
       const facts = __FACTS__;
       const turn = __TURN__;
       const typed = __TYPED__;
@@ -997,8 +1000,10 @@ class Road {
       if (confirm) document.querySelector(confirm.handle).click();
       // The code is owed while the step can send one, and once it was sent until it is written.
       const hold = turn.owed && (turn.sent || codeSender(live, read.fields, Object.keys(bundle)) !== null);
+      // The dates of the card that no field takes are the buttons' that open a dialog (the driver gives them once and then says the dialog's name in `turn.dialogs`): the step's own button waits for them.
+      const owesDates = unplaced.some((fact) => dateLike(fact.value)) && actions.some((action) => action.dialog && !action.disabled && !turn.dialogs.includes(action.dialog));
       const next = advancing(actions, read.actions, Object.keys(bundle));
-      const pressNext = clean && !moved && !stop && !confirm && !hold && !!next && !next.disabled && !next.submit && !inFrame(next);
+      const pressNext = clean && !moved && !stop && !confirm && !hold && !owesDates && !!next && !next.disabled && !next.submit && !inFrame(next);
       if (pressNext) document.querySelector(next.handle).click();
       const hand = filled.results.filter((result) => result.status === "no_option")
         .map((result) => ({ ...result, asked: bundle[result.handle] }));
@@ -1013,7 +1018,8 @@ class Road {
           value: field.value, required: field.required, disabled: field.disabled, hint: field.hint })) };
     })()`;
     for (;;) {
-      const turn = { owed: this.codeTurn, sent: this.codeSent, confirm: Boolean(this.codeField) && !this.codeConfirmed, codeField: this.codeField };
+      const turn = { owed: this.codeTurn, sent: this.codeSent, confirm: Boolean(this.codeField) && !this.codeConfirmed, codeField: this.codeField,
+        dialogs: [...this.byHandTried].filter((key) => key.startsWith("dialog:")).map((key) => key.slice("dialog:".length)) };
       const source = evalFormScript(STEP.replace("__FACTS__", () => JSON.stringify(this.facts))
         .replace("__TURN__", () => JSON.stringify(turn))
         .replace("__TYPED__", () => JSON.stringify([...this.typed])));
