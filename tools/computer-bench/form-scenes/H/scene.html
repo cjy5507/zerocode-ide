@@ -1,0 +1,1102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Register · Quillfern Product Summit 2026</title>
+<style>
+*,*::before,*::after{box-sizing:border-box}
+[hidden]{display:none!important}
+html{font-size:15px}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;color:#1d2433;background:#f5f6f8;line-height:1.45}
+a{color:#2f5bd3}
+.wrap{max-width:1140px;margin:0 auto;padding:0 24px}
+.site-head{background:#121a2b;color:#fff}
+.head-row{display:flex;align-items:center;justify-content:space-between;height:56px}
+.brand{color:#fff;text-decoration:none;font-weight:700;font-size:18px;letter-spacing:.2px}
+.brand span{font-weight:400;opacity:.7;margin-left:4px}
+.top-nav a{color:#c9d2e6;text-decoration:none;margin-left:22px;font-size:14px}
+.hero{background:linear-gradient(120deg,#1b2a4a,#2b4c7e);color:#fff;padding:24px 0 28px}
+.hero h1{margin:4px 0 6px;font-size:28px}
+.eyebrow{margin:0;font-size:12.5px;text-transform:uppercase;letter-spacing:.08em;color:#a9c1ef}
+.hero .sub{margin:0;color:#d6e0f5}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:28px;align-items:start;padding-top:26px;padding-bottom:60px}
+.flow{background:#fff;border:1px solid #e1e5ec;border-radius:10px;padding:22px 26px 26px}
+.progress{list-style:none;margin:0 0 22px;padding:0 0 14px;display:flex;gap:6px;border-bottom:1px solid #eceff4}
+.progress li{flex:1;display:flex;align-items:center;gap:8px;font-size:13px;color:#8a93a6}
+.progress .num{width:24px;height:24px;border-radius:50%;border:1.5px solid #c5ccd8;display:inline-flex;align-items:center;justify-content:center;font-weight:600;font-size:12px}
+.progress li.current{color:#1d2433;font-weight:600}
+.progress li.current .num{background:#2f5bd3;border-color:#2f5bd3;color:#fff}
+.progress li.visited{color:#2f5bd3;cursor:pointer}
+.progress li.visited .num{border-color:#2f5bd3}
+h2{font-size:20px;margin:0 0 4px}
+h2:focus{outline:none}
+h3{font-size:15px;margin:0 0 8px}
+.hint{color:#5b6477;font-size:13.5px;margin:0 0 14px}
+.muted{color:#7a8396}
+.tickets{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0 22px}
+.ticket{position:relative;display:block;border:1.5px solid #d9dee8;border-radius:9px;padding:14px 16px;cursor:pointer;background:#fff;transition:border-color .15s}
+.ticket:hover{border-color:#9fb3e6}
+.ticket input{position:absolute;opacity:0;width:1px;height:1px;margin:0;top:14px;left:14px}
+.ticket.on{border-color:#2f5bd3;box-shadow:0 0 0 3px rgba(47,91,211,.12)}
+.ticket:focus-within{outline:2px solid #2f5bd3;outline-offset:2px}
+.t-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.t-name{font-weight:650;font-size:15px}
+.ticket.on .t-top::after{content:"Selected";position:absolute;bottom:12px;right:14px;font-size:11px;font-weight:600;color:#2f5bd3}
+.t-price{font-weight:700}
+.t-price s{color:#98a0b0;font-weight:400;margin-right:4px;font-size:13px}
+.t-desc{display:block;color:#5b6477;font-size:13px;margin-top:6px}
+.t-tag{display:inline-block;margin-top:8px;font-size:11px;background:#fff3d6;color:#8a5a00;border-radius:4px;padding:1px 6px}
+.field{margin-bottom:14px}
+.field label,.glabel{display:block;font-size:13px;font-weight:600;margin-bottom:5px;color:#2b3345}
+.req{color:#c4302b;font-weight:600}
+input[type=text],input:not([type]),input[type=email],input[type=tel],select{width:100%;height:38px;border:1px solid #c9d0dc;border-radius:6px;padding:0 10px;font:inherit;background:#fff;color:inherit}
+input:focus,select:focus{outline:none;border-color:#2f5bd3;box-shadow:0 0 0 3px rgba(47,91,211,.15)}
+.has-err input,.has-err select,.has-err .dd-btn,input[aria-invalid=true],select[aria-invalid=true]{border-color:#c4302b}
+.has-err .chip{border-color:#e3a19d}
+.err{color:#c4302b;font-size:12.5px;margin-top:4px}
+.err:empty{display:none}
+small{display:block;color:#6b7386;font-size:12px;margin-top:4px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+.span2{grid-column:1/-1}
+.stepper{display:inline-flex;align-items:center;border:1px solid #c9d0dc;border-radius:6px;overflow:hidden}
+.stepper button{width:38px;height:38px;border:0;background:#f1f3f7;font-size:18px;cursor:pointer;color:#1d2433}
+.stepper button:disabled{color:#b5bccb;cursor:default}
+.stepper input{width:52px;height:38px;border:0;border-left:1px solid #c9d0dc;border-right:1px solid #c9d0dc;border-radius:0;text-align:center;font-weight:600}
+.linkish{background:none;border:0;padding:0;color:#2f5bd3;cursor:pointer;font:inherit;font-size:13.5px;text-decoration:underline}
+.promo{margin:4px 0 8px}
+.promo-row{display:flex;gap:8px;margin-top:8px;max-width:360px}
+.msg{font-size:12.5px;margin-top:4px;color:#5b6477}
+.msg.bad{color:#c4302b}
+.btn-primary{background:#2f5bd3;color:#fff;border:0;border-radius:6px;height:40px;padding:0 20px;font:inherit;font-weight:600;cursor:pointer}
+.btn-primary:disabled{background:#a9b8e2;cursor:not-allowed}
+.btn-ghost{background:#fff;border:1px solid #c9d0dc;border-radius:6px;height:38px;padding:0 14px;font:inherit;cursor:pointer;color:#1d2433}
+.btn-ghost:disabled{color:#a2a9b8;cursor:default}
+.btn-back{background:none;border:0;color:#4a5366;font:inherit;cursor:pointer;padding:0 6px;height:40px}
+.nav-row{display:flex;justify-content:space-between;align-items:center;margin-top:22px;padding-top:16px;border-top:1px solid #eceff4}
+.form-err{color:#c4302b;font-size:13px;margin:12px 0 0}
+.form-err:empty{display:none}
+.note{background:#fff7e0;border:1px solid #f1d58a;color:#6d5300;border-radius:6px;padding:8px 12px;font-size:13px;margin-bottom:12px}
+.att{border:1px solid #e1e5ec;border-radius:9px;padding:14px 18px 6px;margin:0 0 16px;position:relative;min-width:0}
+.att legend{padding:0 6px;font-weight:700;font-size:14px}
+.badge{font-size:11px;font-weight:600;background:#e8eefc;color:#2f5bd3;border-radius:10px;padding:2px 8px;margin-left:6px;vertical-align:1px}
+.att-remove{position:absolute;top:10px;right:14px;background:none;border:0;color:#a3352f;cursor:pointer;font:inherit;font-size:13px}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{border:1px solid #c9d0dc;background:#fff;border-radius:16px;height:30px;padding:0 13px;font:inherit;font-size:13px;cursor:pointer;color:#2b3345}
+.chip[aria-pressed=true]{background:#2f5bd3;border-color:#2f5bd3;color:#fff}
+.diet-other{margin-top:8px;max-width:340px}
+.dd{position:relative;max-width:420px}
+.dd-btn{width:100%;min-height:38px;border:1px solid #c9d0dc;border-radius:6px;background:#fff;font:inherit;text-align:left;padding:0 34px 0 10px;cursor:pointer;position:relative;color:inherit}
+.dd-btn:disabled{background:#f4f5f8;color:#8a93a6;cursor:progress}
+.dd.empty .dd-val{color:#7a8396}
+.caret{position:absolute;right:12px;top:50%;width:8px;height:8px;border-right:2px solid #5b6477;border-bottom:2px solid #5b6477;transform:translateY(-70%) rotate(45deg)}
+.dd-list,.cc-pop{position:absolute;z-index:20;left:0;right:0;top:calc(100% + 4px);background:#fff;border:1px solid #c9d0dc;border-radius:8px;box-shadow:0 8px 24px rgba(20,30,60,.14);margin:0;padding:4px;list-style:none}
+.dd-list{max-height:260px;overflow:auto}
+.dd-list li{padding:7px 10px;border-radius:6px;cursor:pointer}
+.dd-list li:hover,.dd-list li:focus{background:#eef2fc;outline:none}
+.dd-list li[aria-selected=true]{background:#e2e9fb}
+.dd-list li.off{color:#a2a9b8;cursor:not-allowed;background:none}
+.o-t{display:block;font-size:14px}
+.o-s{display:block;font-size:12px;color:#7a8396}
+.phone-row{display:flex;gap:12px}
+.cc-field{width:150px;flex:none}
+.ph-field{flex:1;max-width:300px}
+.cc{position:relative}
+.cc-btn{width:100%;height:38px;border:1px solid #c9d0dc;border-radius:6px;background:#fff;font:inherit;text-align:left;padding:0 30px 0 10px;cursor:pointer;position:relative;color:inherit}
+.cc-pop{width:260px;right:auto;padding:6px}
+.cc-pop input{height:34px;margin-bottom:4px}
+.cc-pop ul{list-style:none;margin:0;padding:0;max-height:200px;overflow:auto}
+.cc-pop li{display:flex;justify-content:space-between;padding:6px 8px;border-radius:5px;cursor:pointer;font-size:13.5px}
+.cc-pop li:hover,.cc-pop li:focus{background:#eef2fc;outline:none}
+.cc-pop li[aria-selected=true]{font-weight:600}
+.cc-dial{color:#5b6477}
+.cc-none{color:#7a8396;cursor:default}
+.card-block{border-top:1px solid #eceff4;padding-top:16px;margin-top:16px}
+.card-block.first{border-top:0;margin-top:0;padding-top:0}
+.switch-row{display:flex;align-items:center;gap:10px}
+.switch{width:44px;height:24px;border-radius:12px;border:0;background:#c3c9d6;position:relative;cursor:pointer;flex:none;padding:0}
+.switch .knob{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.switch[aria-checked=true]{background:#2f5bd3}
+.switch[aria-checked=true] .knob{left:23px}
+.switch:focus-visible{outline:2px solid #2f5bd3;outline-offset:2px}
+.sw-lbl{font-weight:600;cursor:pointer}
+.inv-box{margin-top:14px;background:#fafbfd;border:1px solid #e6e9f0;border-radius:8px;padding:14px 16px 2px}
+.inv-box h4{margin:4px 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#5b6477}
+.check{display:flex;align-items:flex-start;gap:9px;margin:10px 0 2px;font-size:13.5px}
+.check input{margin-top:3px;width:16px;height:16px;flex:none;accent-color:#2f5bd3}
+.check label{cursor:pointer}
+.summary{position:sticky;top:18px;background:#fff;border:1px solid #e1e5ec;border-radius:10px;padding:18px 20px}
+.ev{font-size:13px;color:#4a5366;border-bottom:1px solid #eceff4;padding-bottom:10px;margin-bottom:10px}
+.sum-line{display:flex;justify-content:space-between;gap:10px;font-size:14px;margin:6px 0}
+.sum-line.tot{font-weight:700;font-size:16px;border-top:1px solid #eceff4;padding-top:10px;margin-top:10px}
+.fine{font-size:12px;color:#6b7386;margin:14px 0 0}
+.rv{border:1px solid #e6e9f0;border-radius:8px;padding:12px 16px;margin-bottom:12px}
+.rv-head{display:flex;justify-content:space-between;align-items:center}
+.rv p{margin:0;font-size:14px}
+.rv-att{margin:0;padding-left:18px;font-size:14px}
+.rv-att li{margin-bottom:8px}
+.done{text-align:center;padding:40px 10px}
+.done-icon{width:54px;height:54px;border-radius:50%;background:#1f9d61;color:#fff;font-size:28px;line-height:54px;margin:0 auto 12px}
+.modal-back{position:fixed;inset:0;background:rgba(15,22,40,.5);display:flex;align-items:center;justify-content:center;z-index:50}
+.modal{background:#fff;border-radius:10px;width:560px;max-width:calc(100% - 32px);max-height:80vh;display:flex;flex-direction:column;padding:20px 24px}
+.modal-body{overflow:auto;font-size:13.5px;color:#3b4457;margin-bottom:14px}
+.modal .btn-primary{align-self:flex-end}
+</style>
+</head>
+<body>
+<header class="site-head"><div class="wrap head-row">
+  <a class="brand" href="#">Quillfern<span>Events</span></a>
+  <nav class="top-nav" aria-label="Main"><a href="#">Programme</a><a href="#">Speakers</a><a href="#">Venue</a><a href="#">FAQ</a></nav>
+</div></header>
+<section class="hero"><div class="wrap">
+  <p class="eyebrow">19–20 November 2026 · Quillfern Hall, Riverside Campus</p>
+  <h1>Quillfern Product Summit 2026</h1>
+  <p class="sub">Two days of talks and hands-on workshops for product teams.</p>
+</div></section>
+
+<main class="wrap layout">
+<div class="flow">
+  <ol class="progress" id="progress">
+    <li data-step="1" class="current" aria-current="step"><span class="num">1</span>Tickets</li>
+    <li data-step="2"><span class="num">2</span>Attendees</li>
+    <li data-step="3"><span class="num">3</span>Contact &amp; billing</li>
+    <li data-step="4"><span class="num">4</span>Review</li>
+  </ol>
+
+  <form id="regForm" novalidate>
+    <section class="step" id="step1">
+      <h2>Choose your pass</h2>
+      <p class="hint">Early-bird prices until 31 October 2026.</p>
+      <div class="tickets" role="radiogroup" aria-label="Choose your pass">
+        <label class="ticket"><input type="radio" name="ticket" value="standard">
+          <span class="t-top"><span class="t-name">Standard Pass</span><span class="t-price"><s>$395</s>$340</span></span>
+          <span class="t-desc">Both days · keynotes and all four tracks · lunch and coffee breaks</span>
+          <span class="t-tag">Most popular</span>
+        </label>
+        <label class="ticket"><input type="radio" name="ticket" value="workshop">
+          <span class="t-top"><span class="t-name">Workshop Pass</span><span class="t-price"><s>$640</s>$560</span></span>
+          <span class="t-desc">Both days of talks plus one hands-on half-day workshop on Day 2 · printed workbook</span>
+          <span class="t-tag">Limited seats</span>
+        </label>
+        <label class="ticket"><input type="radio" name="ticket" value="online">
+          <span class="t-top"><span class="t-name">Online Pass</span><span class="t-price">$120</span></span>
+          <span class="t-desc">Livestream of every room · recordings for 60 days · no catering</span>
+        </label>
+        <label class="ticket"><input type="radio" name="ticket" value="student">
+          <span class="t-top"><span class="t-name">Student Pass</span><span class="t-price">$95</span></span>
+          <span class="t-desc">Both days, talks only · valid student ID checked at the door</span>
+        </label>
+      </div>
+
+      <div class="field">
+        <span class="glabel" id="qtyLbl">Number of attendees</span>
+        <div class="stepper">
+          <button type="button" id="qtyMinus" aria-label="One attendee fewer">−</button>
+          <input id="qty" value="1" inputmode="numeric" autocomplete="off" aria-labelledby="qtyLbl">
+          <button type="button" id="qtyPlus" aria-label="One attendee more">+</button>
+        </div>
+        <small>Up to 10 people per order. Bigger group? Write to groups@example.com.</small>
+      </div>
+
+      <div class="promo">
+        <button type="button" class="linkish" id="promoToggle" aria-expanded="false" aria-controls="promoBox">Have a promo code?</button>
+        <div id="promoBox" hidden>
+          <div class="promo-row"><input id="promo" placeholder="Enter code" autocomplete="off"><button type="button" class="btn-ghost" id="promoApply">Apply</button></div>
+          <div class="msg" id="promoMsg" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <div class="nav-row"><span class="muted" style="font-size:13px">Prices per person, excluding 10% tax.</span><button type="button" class="btn-primary" id="next1" disabled>Continue to attendees</button></div>
+    </section>
+
+    <section class="step" id="step2" hidden>
+      <h2>Who's coming?</h2>
+      <p class="hint">Attendee 1 is the booking contact: the confirmation and the payment link go to their e-mail. Badges are printed with the names as entered.</p>
+      <div class="note" id="trackNote" hidden>You changed your pass, so the session choices were cleared. Please choose them again.</div>
+      <div id="attendeeList"></div>
+      <button type="button" class="btn-ghost" id="addAttendee">+ Add another attendee</button>
+      <p class="form-err" id="step2Err" role="alert"></p>
+      <div class="nav-row"><button type="button" class="btn-back" data-back="1">← Back</button><button type="button" class="btn-primary" id="next2">Continue</button></div>
+    </section>
+
+    <section class="step" id="step3" hidden>
+      <h2>Contact &amp; billing</h2>
+      <p class="hint" id="contactMail"></p>
+      <div class="card-block first">
+        <h3>Mobile for event-day updates</h3>
+        <div class="phone-row">
+          <div class="field cc-field">
+            <span class="glabel" id="ccLbl">Country code</span>
+            <div class="cc" id="cc">
+              <button type="button" class="cc-btn" id="ccBtn" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="ccLbl ccVal"><span id="ccVal">US +1</span><span class="caret"></span></button>
+              <div class="cc-pop" id="ccPop" hidden>
+                <input id="ccSearch" placeholder="Search country" autocomplete="off" aria-label="Search country">
+                <ul id="ccList" role="listbox" aria-labelledby="ccLbl"></ul>
+              </div>
+            </div>
+          </div>
+          <div class="field ph-field">
+            <label for="phone">Mobile number <b class="req">*</b></label>
+            <input id="phone" type="tel" inputmode="tel" autocomplete="tel-national" placeholder="(201) 555-0123">
+            <div class="err" id="phoneErr"></div>
+          </div>
+        </div>
+        <small>We only text room changes on the day and the link to your badge QR code.</small>
+      </div>
+
+      <div class="card-block">
+        <div class="switch-row">
+          <button type="button" class="switch" id="invoiceSw" role="switch" aria-checked="false" aria-labelledby="invoiceLbl"><span class="knob"></span></button>
+          <span class="sw-lbl" id="invoiceLbl">I need an invoice</span>
+        </div>
+        <small>Invoices are issued to a company and sent to the booking contact. Without one you get a payment receipt.</small>
+        <div class="inv-box" id="invoiceBox" hidden>
+          <div class="grid2">
+            <div class="field span2"><label for="company">Company name <b class="req">*</b></label><input id="company" autocomplete="organization"><div class="err" id="companyErr"></div></div>
+            <div class="field"><label for="bCountry">Billing country <b class="req">*</b></label><select id="bCountry"><option value="">Select country</option></select><div class="err" id="bCountryErr"></div></div>
+            <div class="field"><label for="taxNo">Tax number <b class="req">*</b></label><input id="taxNo" autocomplete="off" placeholder="VAT ID or business registration no."><small id="taxHelp">Printed on the invoice.</small><div class="err" id="taxNoErr"></div></div>
+          </div>
+          <h4>Billing address</h4>
+          <div class="grid2">
+            <div class="field span2"><label for="line1">Address line 1 <b class="req">*</b></label><input id="line1" autocomplete="address-line1"><div class="err" id="line1Err"></div></div>
+            <div class="field span2"><input id="line2" autocomplete="address-line2" placeholder="Apartment, suite, floor (optional)" aria-label="Address line 2"></div>
+            <div class="field"><label for="city">City <b class="req">*</b></label><input id="city" autocomplete="address-level2"><div class="err" id="cityErr"></div></div>
+            <div class="field"><label for="postcode">Postal code <b class="req">*</b></label><input id="postcode" autocomplete="postal-code"><div class="err" id="postcodeErr"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card-block">
+        <h3>Before you continue</h3>
+        <div class="check"><input type="checkbox" id="terms"><span><label for="terms">I have read and agree to the Registration Terms and the Code of Conduct.</label> <b class="req">*</b> <button type="button" class="linkish" id="viewTerms">View terms</button></span></div>
+        <div class="err" id="termsErr"></div>
+        <div class="check"><input type="checkbox" id="dataConsent"><label for="dataConsent">I confirm that every attendee listed has agreed to their details being shared with Quillfern Events for this registration. <b class="req">*</b></label></div>
+        <div class="err" id="dataConsentErr"></div>
+        <div class="check"><input type="checkbox" id="marketing"><label for="marketing">Send me occasional news about future Quillfern events.</label></div>
+      </div>
+      <p class="form-err" id="step3Err" role="alert"></p>
+      <div class="nav-row"><button type="button" class="btn-back" data-back="2">← Back</button><button type="button" class="btn-primary" id="next3">Review registration</button></div>
+    </section>
+
+    <section class="step" id="step4" hidden>
+      <h2>Review your registration</h2>
+      <p class="hint">Nothing is charged now. Check the details, then complete the registration.</p>
+      <div id="reviewBox"></div>
+      <p class="form-err" id="submitErr" role="alert"></p>
+      <div class="nav-row"><button type="button" class="btn-back" data-back="3">← Back</button><button type="button" class="btn-primary" id="submitBtn">Complete registration</button></div>
+    </section>
+  </form>
+
+  <section class="done" id="doneBox" hidden>
+    <div class="done-icon">✓</div>
+    <h2 tabindex="-1">You're registered!</h2>
+    <p>Order reference <strong id="doneRef"></strong></p>
+    <p class="hint" id="doneText"></p>
+  </section>
+</div>
+
+<aside class="summary" aria-label="Order summary">
+  <h3>Order summary</h3>
+  <div class="ev"><strong>Quillfern Product Summit 2026</strong><br>19–20 November 2026<br>Quillfern Hall, Riverside Campus</div>
+  <div id="sumBody"><p class="muted" style="font-size:13.5px">No pass selected yet.</p></div>
+  <p class="fine">Payment is collected after you register: within one business day we e-mail the booking contact a secure link to pay by card or bank transfer.</p>
+  <p class="fine">Questions? help@example.com</p>
+</aside>
+</main>
+
+<div class="modal-back" id="termsModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="termsTitle">
+    <h3 id="termsTitle">Registration Terms</h3>
+    <div class="modal-body">
+      <p>1. A registration is confirmed once payment is received. Unpaid registrations are released 14 days after the invoice or payment link is sent.</p>
+      <p>2. Cancellations made before 31 October 2026 are refunded minus a $25 handling fee. Later cancellations are not refunded.</p>
+      <p>3. Workshop seats are limited and given out in order of registration. The organiser may change speakers or session times.</p>
+      <p>4. All attendees must follow the Code of Conduct. The organiser may remove anyone who does not, without a refund.</p>
+    </div>
+    <button type="button" class="btn-primary" id="termsClose">Close</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var TICKETS = {
+    standard: { name: 'Standard Pass', price: 340, inPerson: true },
+    workshop: { name: 'Workshop Pass', price: 560, inPerson: true },
+    online: { name: 'Online Pass', price: 120, inPerson: false },
+    student: { name: 'Student Pass', price: 95, inPerson: true }
+  };
+  var TALK_TRACKS = [
+    ['strategy', 'Product Strategy', 'Room A · both days'],
+    ['research', 'Design & Research', 'Room B · both days'],
+    ['growth', 'Growth & Analytics', 'Room C · both days'],
+    ['platform', 'Platform & AI Products', 'Room D · both days']
+  ];
+  // programme service answer per pass: [value, title, detail, soldOut]
+  var PROGRAMME = {
+    standard: TALK_TRACKS,
+    student: TALK_TRACKS,
+    workshop: [
+      ['w1', 'Customer Interview Lab', 'Day 2 · 09:00–12:30 · 11 seats left'],
+      ['w2', 'Pricing Experiments', 'Day 2 · 09:00–12:30 · 4 seats left'],
+      ['w3', 'Roadmaps Under Uncertainty', 'Day 2 · 13:30–17:00 · Sold out', true],
+      ['w4', 'Metrics That Matter', 'Day 2 · 13:30–17:00 · 18 seats left']
+    ],
+    online: [
+      ['live-main', 'Main stage livestream', 'Keynotes and panels, both days'],
+      ['live-all', 'All rooms', 'Switch between rooms as you like']
+    ]
+  };
+  var TALK_HELP = 'Reserves your seat in the track\'s room. You can still drop in on other talks.';
+  var TRACK_HELP = {
+    standard: TALK_HELP,
+    student: TALK_HELP,
+    workshop: 'Your pass includes one half-day workshop on Day 2. Seats go in order of registration.',
+    online: 'Pick what to follow live. Recordings of every room are included.'
+  };
+  var DIETS = [['none', 'No special diet'], ['vegetarian', 'Vegetarian'], ['vegan', 'Vegan'], ['gluten-free', 'Gluten-free'], ['halal', 'Halal'], ['other', 'Other']];
+  var COUNTRIES = [
+    ['AU', 'Australia', '61'], ['CA', 'Canada', '1'], ['FR', 'France', '33'], ['DE', 'Germany', '49'],
+    ['IN', 'India', '91'], ['JP', 'Japan', '81'], ['NL', 'Netherlands', '31'], ['SG', 'Singapore', '65'],
+    ['KR', 'South Korea', '82'], ['ES', 'Spain', '34'], ['GB', 'United Kingdom', '44'], ['US', 'United States', '1']
+  ];
+  var PHONE_PH = { US: '(201) 555-0123', CA: '(204) 555-0123', KR: '010-1234-5678', GB: '07400 123456' };
+  var MAX_ATT = 10, TAX_RATE = 0.1;
+  var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+  var state = {
+    step: 1, ticket: '', sessions: null, loadSeq: 0,
+    attendees: [blank()], cc: 'US', invoice: false, promo: '', busy: false, done: false
+  };
+
+  function blank() { return { first: '', last: '', email: '', title: '', diet: '', dietOther: '', track: '' }; }
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function money(n) {
+    var p = n.toFixed(2).split('.');
+    return '$' + p[0].replace(/\B(?=(\d{3})+$)/g, ',') + '.' + p[1];
+  }
+  function country(code) {
+    for (var i = 0; i < COUNTRIES.length; i++) if (COUNTRIES[i][0] === code) return COUNTRIES[i];
+    return null;
+  }
+  function pass() { return TICKETS[state.ticket] || null; }
+  function totals() {
+    var t = pass(), sub = t ? t.price * state.attendees.length : 0;
+    var tax = Math.round(sub * TAX_RATE * 100) / 100;
+    return { sub: sub, tax: tax, total: sub + tax };
+  }
+
+  /* ---------- steps ---------- */
+  function showStep(n) {
+    if (state.busy || state.done) return;
+    closeMenus();
+    state.step = n;
+    for (var i = 1; i <= 4; i++) $('step' + i).hidden = i !== n;
+    var items = $('progress').children;
+    for (var j = 0; j < items.length; j++) {
+      var s = +items[j].getAttribute('data-step');
+      items[j].className = s === n ? 'current' : (s < n ? 'visited' : '');
+      if (s === n) items[j].setAttribute('aria-current', 'step');
+      else items[j].removeAttribute('aria-current');
+    }
+    if (n === 2) renderAttendees();
+    if (n === 3) prepContact();
+    if (n === 4) renderReview();
+    window.scrollTo(0, 0);
+    var h = $('step' + n).querySelector('h2');
+    h.setAttribute('tabindex', '-1');
+    h.focus({ preventScroll: true });
+  }
+
+  $('progress').addEventListener('click', function (e) {
+    var li = e.target.closest('li');
+    if (li && +li.getAttribute('data-step') < state.step) showStep(+li.getAttribute('data-step'));
+  });
+  var backs = document.querySelectorAll('[data-back]');
+  for (var b = 0; b < backs.length; b++) {
+    backs[b].addEventListener('click', function () { showStep(+this.getAttribute('data-back')); });
+  }
+  $('regForm').addEventListener('submit', function (e) { e.preventDefault(); });
+
+  /* ---------- step 1: pass, quantity, promo ---------- */
+  var radios = document.querySelectorAll('input[name="ticket"]');
+  for (var r = 0; r < radios.length; r++) radios[r].addEventListener('change', onPass);
+
+  function onPass() {
+    var v = '';
+    for (var i = 0; i < radios.length; i++) {
+      radios[i].closest('.ticket').classList.toggle('on', radios[i].checked);
+      if (radios[i].checked) v = radios[i].value;
+    }
+    if (!v || v === state.ticket) return;
+    var hadTracks = state.attendees.some(function (a) { return !!a.track; });
+    state.ticket = v;
+    state.attendees.forEach(function (a) { a.track = ''; });
+    $('trackNote').hidden = !hadTracks;
+    loadSessions(v);
+    $('next1').disabled = false;
+    updateSummary();
+  }
+
+  function loadSessions(t) {
+    var seq = ++state.loadSeq;
+    state.sessions = null;
+    renderTracks();
+    setTimeout(function () {
+      if (seq !== state.loadSeq) return;
+      state.sessions = PROGRAMME[t];
+      renderTracks();
+    }, 650 + Math.round(Math.random() * 400));
+  }
+
+  function setCount(n, keepInput) {
+    n = Math.max(1, Math.min(MAX_ATT, n));
+    while (state.attendees.length < n) state.attendees.push(blank());
+    if (state.attendees.length > n) state.attendees.length = n;
+    if (!keepInput) $('qty').value = String(n);
+    $('qtyMinus').disabled = n <= 1;
+    $('qtyPlus').disabled = n >= MAX_ATT;
+    $('addAttendee').disabled = n >= MAX_ATT;
+    updateSummary();
+    if (state.step === 2) renderAttendees();
+  }
+  $('qtyMinus').addEventListener('click', function () { setCount(state.attendees.length - 1); });
+  $('qtyPlus').addEventListener('click', function () { setCount(state.attendees.length + 1); });
+  $('qty').addEventListener('input', function () {
+    var el = $('qty');
+    el.value = el.value.replace(/\D/g, '').slice(0, 2);
+    var n = parseInt(el.value, 10);
+    if (n >= 1 && n <= MAX_ATT) setCount(n, true);
+  });
+  $('qty').addEventListener('change', function () { setCount(parseInt($('qty').value, 10) || 1); });
+
+  $('promoToggle').addEventListener('click', function () {
+    var box = $('promoBox');
+    box.hidden = !box.hidden;
+    this.setAttribute('aria-expanded', String(!box.hidden));
+    if (!box.hidden) $('promo').focus();
+  });
+  $('promoApply').addEventListener('click', function () {
+    var code = $('promo').value.trim().toUpperCase(), msg = $('promoMsg');
+    if (!code) { msg.textContent = 'Enter a code first.'; msg.className = 'msg bad'; return; }
+    msg.textContent = 'Checking…';
+    msg.className = 'msg';
+    setTimeout(function () {
+      state.promo = '';
+      msg.textContent = 'The code ' + code + ' is not valid for this event or has expired.';
+      msg.className = 'msg bad';
+    }, 600);
+  });
+  $('promo').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); $('promoApply').click(); }
+  });
+
+  function updateSummary() {
+    var t = pass(), n = state.attendees.length, s = totals();
+    if (!t) { $('sumBody').innerHTML = '<p class="muted" style="font-size:13.5px">No pass selected yet.</p>'; return; }
+    $('sumBody').innerHTML =
+      '<div class="sum-line"><span>' + t.name + ' × ' + n + '</span><span>' + money(s.sub) + '</span></div>' +
+      '<div class="sum-line muted"><span>' + money(t.price) + ' per person</span></div>' +
+      '<div class="sum-line"><span>Tax (10%)</span><span>' + money(s.tax) + '</span></div>' +
+      '<div class="sum-line tot"><span>Total</span><span>' + money(s.total) + '</span></div>' +
+      (state.invoice ? '<p class="fine" style="margin-top:6px">An invoice will be issued to your company.</p>' : '');
+  }
+
+  $('next1').addEventListener('click', function () { if (state.ticket) showStep(2); });
+
+  /* ---------- step 2: attendees ---------- */
+  var A_KEYS = ['first', 'last', 'email', 'title', 'diet', 'track'];
+  var list = $('attendeeList');
+
+  function textField(id, f, label, ac, ph, type) {
+    return '<div class="field" data-k="' + f + '"><label for="' + id + '-' + f + '">' + label + ' <b class="req">*</b></label>' +
+      '<input id="' + id + '-' + f + '" data-f="' + f + '"' + (type ? ' type="' + type + '"' : '') +
+      ' autocomplete="' + ac + '"' + (ph ? ' placeholder="' + ph + '"' : '') + '><div class="err"></div></div>';
+  }
+
+  function attendeeHtml(a, i) {
+    var id = 'a' + i, inPerson = pass() ? pass().inPerson : true;
+    var h = '<fieldset class="att" data-idx="' + i + '"><legend>Attendee ' + (i + 1) +
+      (i === 0 ? ' <span class="badge">Booking contact</span>' : '') + '</legend>';
+    if (i > 0) h += '<button type="button" class="att-remove" data-remove="' + i + '">Remove</button>';
+    h += '<div class="grid2">' +
+      textField(id, 'first', 'First name', 'given-name', '') +
+      textField(id, 'last', 'Last name', 'family-name', '') +
+      textField(id, 'email', 'Work e-mail', 'email', '', 'email') +
+      textField(id, 'title', 'Job title', 'organization-title', 'e.g. Product Designer') +
+      '</div>';
+    h += '<div class="field" data-k="diet"' + (inPerson ? '' : ' hidden') + '><span class="glabel" id="' + id + '-diet-l">Dietary preference <b class="req">*</b></span>' +
+      '<div class="chips" role="group" aria-labelledby="' + id + '-diet-l">';
+    DIETS.forEach(function (d) {
+      h += '<button type="button" class="chip" data-diet="' + d[0] + '" aria-pressed="' + (a.diet === d[0]) + '">' + d[1] + '</button>';
+    });
+    h += '</div><input class="diet-other" data-f="dietOther" aria-label="Dietary need" placeholder="Tell us what you need"' +
+      (a.diet === 'other' ? '' : ' hidden') + '><div class="err"></div></div>';
+    h += '<div class="field" data-k="track"><span class="glabel" id="' + id + '-track-l">Session track <b class="req">*</b></span>' +
+      '<div class="dd"><button type="button" class="dd-btn" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="' + id + '-track-l ' + id + '-track-v">' +
+      '<span class="dd-val" id="' + id + '-track-v"></span><span class="caret"></span></button>' +
+      '<ul class="dd-list" role="listbox" aria-labelledby="' + id + '-track-l" hidden></ul></div>' +
+      '<small class="track-help"></small><div class="err"></div></div>';
+    return h + '</fieldset>';
+  }
+
+  function idxOf(el) { return +el.closest('.att').getAttribute('data-idx'); }
+  function blockOf(i) { return list.children[i] || null; }
+
+  function renderAttendees() {
+    var h = '';
+    state.attendees.forEach(function (a, i) { h += attendeeHtml(a, i); });
+    list.innerHTML = h;
+    var inputs = list.querySelectorAll('input[data-f]');
+    for (var k = 0; k < inputs.length; k++) {
+      inputs[k].value = state.attendees[idxOf(inputs[k])][inputs[k].getAttribute('data-f')];
+    }
+    $('addAttendee').disabled = state.attendees.length >= MAX_ATT;
+    renderTracks();
+  }
+
+  function sessionName(v) {
+    var s = PROGRAMME[state.ticket] || [];
+    for (var k = 0; k < s.length; k++) if (s[k][0] === v) return s[k][1];
+    return '';
+  }
+
+  function renderTracks() {
+    var blocks = list.children;
+    for (var i = 0; i < blocks.length; i++) {
+      var a = state.attendees[i];
+      if (!a) continue;
+      var dd = blocks[i].querySelector('.dd'), btn = dd.querySelector('.dd-btn');
+      var val = dd.querySelector('.dd-val'), ul = dd.querySelector('.dd-list');
+      blocks[i].querySelector('.track-help').textContent = TRACK_HELP[state.ticket] || '';
+      if (!state.sessions) {
+        btn.disabled = true;
+        btn.setAttribute('aria-expanded', 'false');
+        ul.hidden = true;
+        ul.innerHTML = '';
+        val.textContent = state.ticket ? 'Loading sessions…' : 'Choose a pass first';
+        dd.classList.add('empty');
+        continue;
+      }
+      btn.disabled = false;
+      val.textContent = sessionName(a.track) || 'Choose a session…';
+      dd.classList.toggle('empty', !a.track);
+      var h = '';
+      for (var k = 0; k < state.sessions.length; k++) {
+        var s = state.sessions[k];
+        h += '<li role="option" tabindex="-1" data-value="' + s[0] + '" aria-selected="' + (s[0] === a.track) + '"' +
+          (s[3] ? ' aria-disabled="true" class="off"' : '') + '><span class="o-t">' + esc(s[1]) + '</span><span class="o-s">' + esc(s[2]) + '</span></li>';
+      }
+      ul.innerHTML = h;
+    }
+  }
+
+  function attErrors(a, i) {
+    var e = {}, em = a.email.trim().toLowerCase();
+    if (!a.first.trim()) e.first = 'Enter a first name.';
+    if (!a.last.trim()) e.last = 'Enter a last name.';
+    if (!em) e.email = 'Enter an e-mail address.';
+    else if (!EMAIL_RE.test(em)) e.email = 'Enter an e-mail like name@example.com.';
+    else if (state.attendees.some(function (o, j) { return j < i && o.email.trim().toLowerCase() === em; })) {
+      e.email = 'Each attendee needs their own e-mail address.';
+    }
+    if (!a.title.trim()) e.title = 'Enter a job title.';
+    if (!pass() || pass().inPerson) {
+      if (!a.diet) e.diet = 'Choose a dietary preference.';
+      else if (a.diet === 'other' && !a.dietOther.trim()) e.diet = 'Tell us about the dietary need.';
+    }
+    var s = PROGRAMME[state.ticket] || [], ok = false;
+    for (var k = 0; k < s.length; k++) if (s[k][0] === a.track && !s[k][3]) ok = true;
+    if (!ok) e.track = 'Choose a session track.';
+    return e;
+  }
+
+  function setAttErr(i, key, msg) {
+    var blk = blockOf(i), box = blk && blk.querySelector('[data-k="' + key + '"]');
+    if (!box) return;
+    box.classList.toggle('has-err', !!msg);
+    box.querySelector('.err').textContent = msg || '';
+    var ctl = box.querySelector('input[data-f="' + key + '"]') || box.querySelector('.dd-btn');
+    if (!ctl) return;
+    if (msg) ctl.setAttribute('aria-invalid', 'true');
+    else ctl.removeAttribute('aria-invalid');
+  }
+  function checkAtt(i, key) {
+    if (!state.attendees[i] || !blockOf(i)) return;
+    setAttErr(i, key, attErrors(state.attendees[i], i)[key] || '');
+  }
+
+  function pickDiet(chip) {
+    var i = idxOf(chip), a = state.attendees[i], box = chip.closest('.field');
+    a.diet = chip.getAttribute('data-diet');
+    var chips = box.querySelectorAll('.chip');
+    for (var k = 0; k < chips.length; k++) chips[k].setAttribute('aria-pressed', String(chips[k] === chip));
+    var other = box.querySelector('.diet-other');
+    other.hidden = a.diet !== 'other';
+    if (!other.hidden) other.focus();
+    if (box.classList.contains('has-err')) checkAtt(i, 'diet');
+  }
+
+  function closeMenu(dd) {
+    var ul = dd.querySelector('.dd-list'), btn = dd.querySelector('.dd-btn');
+    if (ul) ul.hidden = true;
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+  function closeMenus() {
+    var dds = document.querySelectorAll('.dd');
+    for (var k = 0; k < dds.length; k++) closeMenu(dds[k]);
+    closeCc();
+  }
+  function toggleMenu(dd, focusFirst) {
+    var ul = dd.querySelector('.dd-list'), wasOpen = !ul.hidden;
+    closeMenus();
+    if (wasOpen) return;
+    ul.hidden = false;
+    dd.querySelector('.dd-btn').setAttribute('aria-expanded', 'true');
+    var target = ul.querySelector('[aria-selected="true"]') || (focusFirst ? ul.querySelector('li:not(.off)') : null);
+    if (target) target.focus();
+  }
+  function focusOpt(ul, from, dir) {
+    var opts = [].slice.call(ul.querySelectorAll('li:not(.off)'));
+    if (!opts.length) return;
+    var k = opts.indexOf(from);
+    k = k < 0 ? 0 : Math.max(0, Math.min(opts.length - 1, k + dir));
+    opts[k].focus();
+  }
+  function pickTrack(li) {
+    if (li.getAttribute('aria-disabled') === 'true') return;
+    var i = idxOf(li), dd = li.closest('.dd');
+    state.attendees[i].track = li.getAttribute('data-value');
+    closeMenu(dd);
+    renderTracks();
+    dd.querySelector('.dd-btn').focus();
+    checkAtt(i, 'track');
+  }
+
+  function removeAttendee(i) {
+    if (i < 1) return;
+    state.attendees.splice(i, 1);
+    setCount(state.attendees.length);
+    $('addAttendee').focus();
+  }
+  $('addAttendee').addEventListener('click', function () {
+    if (state.attendees.length >= MAX_ATT) return;
+    setCount(state.attendees.length + 1);
+    blockOf(state.attendees.length - 1).querySelector('input[data-f="first"]').focus();
+  });
+
+  list.addEventListener('click', function (e) {
+    var t = e.target, el;
+    if ((el = t.closest('[data-remove]'))) return removeAttendee(+el.getAttribute('data-remove'));
+    if ((el = t.closest('.chip'))) return pickDiet(el);
+    if ((el = t.closest('.dd-btn'))) return el.disabled ? null : toggleMenu(el.parentNode, false);
+    if ((el = t.closest('.dd-list li'))) return pickTrack(el);
+  });
+  list.addEventListener('input', function (e) {
+    var f = e.target.getAttribute('data-f');
+    if (!f) return;
+    var i = idxOf(e.target), key = f === 'dietOther' ? 'diet' : f;
+    state.attendees[i][f] = e.target.value;
+    if (blockOf(i).querySelector('[data-k="' + key + '"]').classList.contains('has-err')) checkAtt(i, key);
+  });
+  list.addEventListener('focusout', function (e) {
+    var t = e.target, f = t.getAttribute('data-f');
+    if (f && t.value.trim()) checkAtt(idxOf(t), f === 'dietOther' ? 'diet' : f);
+    var dd = t.closest('.dd');
+    if (dd && !dd.contains(e.relatedTarget)) closeMenu(dd);
+  });
+  list.addEventListener('keydown', function (e) {
+    var t = e.target, dd = t.closest('.dd');
+    if (!dd) return;
+    var ul = dd.querySelector('.dd-list');
+    if (t.classList.contains('dd-btn')) {
+      if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !t.disabled) {
+        e.preventDefault();
+        if (ul.hidden) toggleMenu(dd, true); else focusOpt(ul, null, 1);
+      } else if (e.key === 'Escape') closeMenu(dd);
+      return;
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); focusOpt(ul, t, e.key === 'ArrowDown' ? 1 : -1); }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickTrack(t); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeMenu(dd); dd.querySelector('.dd-btn').focus(); }
+    else if (e.key === 'Tab') closeMenu(dd);
+  });
+
+  function validateAttendees() {
+    var bad = null;
+    state.attendees.forEach(function (a, i) {
+      var errs = attErrors(a, i);
+      A_KEYS.forEach(function (key) { setAttErr(i, key, errs[key] || ''); });
+      var keys = Object.keys(errs);
+      if (!bad && keys.length) bad = { i: i, k: keys[0] };
+    });
+    return bad;
+  }
+  function focusAtt(i, k) {
+    var box = blockOf(i).querySelector('[data-k="' + k + '"]');
+    var ctl = k === 'diet'
+      ? (box.querySelector('.diet-other:not([hidden])') || box.querySelector('.chip'))
+      : (box.querySelector('input') || box.querySelector('.dd-btn'));
+    box.scrollIntoView({ block: 'center' });
+    if (ctl) ctl.focus({ preventScroll: true });
+  }
+
+  $('next2').addEventListener('click', function () {
+    var bad = validateAttendees();
+    if (bad) {
+      $('step2Err').textContent = 'Some attendee details are missing or need a fix.';
+      focusAtt(bad.i, bad.k);
+      return;
+    }
+    $('step2Err').textContent = '';
+    $('trackNote').hidden = true;
+    showStep(3);
+  });
+
+  /* ---------- step 3: contact, invoice, consents ---------- */
+  var C_KEYS = ['phone', 'company', 'bCountry', 'taxNo', 'line1', 'city', 'postcode', 'terms', 'dataConsent'];
+
+  function prepContact() {
+    var a = state.attendees[0];
+    $('contactMail').textContent = 'The confirmation and the payment link go to ' +
+      a.first.trim() + ' ' + a.last.trim() + ' at ' + a.email.trim() + '.';
+  }
+
+  function renderCcList(q) {
+    q = (q || '').trim().toLowerCase().replace(/^\+/, '');
+    var h = '';
+    COUNTRIES.forEach(function (c) {
+      if (q && c[1].toLowerCase().indexOf(q) < 0 && c[2].indexOf(q) !== 0 && c[0].toLowerCase() !== q) return;
+      h += '<li role="option" tabindex="-1" data-cc="' + c[0] + '" aria-selected="' + (c[0] === state.cc) + '">' +
+        '<span class="cc-name">' + c[1] + '</span> <span class="cc-dial">+' + c[2] + '</span></li>';
+    });
+    $('ccList').innerHTML = h || '<li class="cc-none">No matching country</li>';
+  }
+  function openCc() {
+    closeMenus();
+    $('ccPop').hidden = false;
+    $('ccBtn').setAttribute('aria-expanded', 'true');
+    $('ccSearch').value = '';
+    renderCcList('');
+    $('ccSearch').focus();
+  }
+  function closeCc() {
+    if ($('ccPop').hidden) return;
+    $('ccPop').hidden = true;
+    $('ccBtn').setAttribute('aria-expanded', 'false');
+  }
+  function applyCc(code) {
+    state.cc = code;
+    $('ccVal').textContent = code + ' +' + country(code)[2];
+    $('phone').placeholder = PHONE_PH[code] || 'Mobile number';
+  }
+  function chooseCc(code) {
+    applyCc(code);
+    closeCc();
+    reformatPhone();
+    $('phone').focus();
+    if ($('phone').value.trim()) showC('phone');
+  }
+
+  $('ccBtn').addEventListener('click', function () { if ($('ccPop').hidden) openCc(); else closeCc(); });
+  $('ccSearch').addEventListener('input', function () { renderCcList(this.value); });
+  $('ccSearch').addEventListener('keydown', function (e) {
+    var first = $('ccList').querySelector('li[data-cc]');
+    if (e.key === 'ArrowDown' && first) { e.preventDefault(); first.focus(); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (first) chooseCc(first.getAttribute('data-cc')); }
+    else if (e.key === 'Escape') { closeCc(); $('ccBtn').focus(); }
+  });
+  $('ccList').addEventListener('click', function (e) {
+    var li = e.target.closest('li[data-cc]');
+    if (li) chooseCc(li.getAttribute('data-cc'));
+  });
+  $('ccList').addEventListener('keydown', function (e) {
+    var li = e.target.closest('li[data-cc]');
+    if (!li) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      var sib = e.key === 'ArrowDown' ? li.nextElementSibling : li.previousElementSibling;
+      if (sib) sib.focus(); else if (e.key === 'ArrowUp') $('ccSearch').focus();
+    } else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); chooseCc(li.getAttribute('data-cc')); }
+    else if (e.key === 'Escape') { closeCc(); $('ccBtn').focus(); }
+  });
+  $('cc').addEventListener('focusout', function (e) {
+    if (!$('cc').contains(e.relatedTarget)) closeCc();
+  });
+
+  function fmtPhone(cc, d) {
+    if (cc === 'KR') {
+      var g = d.charAt(0) === '0' ? 3 : 2;
+      d = d.slice(0, g + 8);
+      if (d.length <= g) return d;
+      if (d.length <= g + 4) return d.slice(0, g) + '-' + d.slice(g);
+      return d.slice(0, g) + '-' + d.slice(g, g + 4) + '-' + d.slice(g + 4);
+    }
+    if (cc === 'US' || cc === 'CA') {
+      d = d.slice(0, 10);
+      if (d.length <= 3) return d;
+      if (d.length <= 6) return '(' + d.slice(0, 3) + ') ' + d.slice(3);
+      return '(' + d.slice(0, 3) + ') ' + d.slice(3, 6) + '-' + d.slice(6);
+    }
+    return d.slice(0, 15).replace(/(\d{4})(?=\d)/g, '$1 ');
+  }
+  function reformatPhone() {
+    var el = $('phone'), raw = el.value, d = raw.replace(/\D/g, '');
+    if (/^\s*\+/.test(raw)) {
+      // number typed with its international prefix: take the country from it
+      var best = null;
+      COUNTRIES.forEach(function (c) {
+        if (d.indexOf(c[2]) === 0 && (!best || c[2].length > best[2].length)) best = c;
+      });
+      if (!best || d.length <= best[2].length + 4) return;
+      if (best[2] !== country(state.cc)[2]) applyCc(best[0]);
+      d = d.slice(best[2].length);
+    }
+    var v = fmtPhone(state.cc, d);
+    if (v !== el.value) el.value = v;
+  }
+  function localDigits() {
+    var d = $('phone').value.replace(/\D/g, '');
+    if (country(state.cc)[2] !== '1' && d.charAt(0) === '0') d = d.slice(1);
+    return d;
+  }
+  function phoneError() {
+    var d = localDigits();
+    if (!$('phone').value.trim()) return 'Enter a mobile number.';
+    if (/^\s*\+/.test($('phone').value)) return 'Enter the number without the country code.';
+    if (state.cc === 'KR') return /^1\d{8,9}$/.test(d) ? '' : 'Enter a Korean mobile number, like 010-1234-5678.';
+    if (state.cc === 'US' || state.cc === 'CA') return /^[2-9]\d{9}$/.test(d) ? '' : 'Enter a 10-digit number.';
+    return d.length >= 6 && d.length <= 14 ? '' : 'Enter a valid mobile number.';
+  }
+  $('phone').addEventListener('input', function () {
+    reformatPhone();
+    if ($('phoneErr').textContent) showC('phone');
+  });
+  $('phone').addEventListener('blur', function () { if (this.value.trim()) showC('phone'); });
+
+  function setInvoice(on) {
+    state.invoice = on;
+    $('invoiceSw').setAttribute('aria-checked', String(on));
+    $('invoiceBox').hidden = !on;
+    updateSummary();
+  }
+  $('invoiceSw').addEventListener('click', function () { setInvoice(!state.invoice); });
+  $('invoiceLbl').addEventListener('click', function () { setInvoice(!state.invoice); $('invoiceSw').focus(); });
+
+  COUNTRIES.forEach(function (c) {
+    var o = document.createElement('option');
+    o.value = c[0];
+    o.textContent = c[1];
+    $('bCountry').appendChild(o);
+  });
+  function fmtTax() {
+    var el = $('taxNo'), v;
+    if ($('bCountry').value === 'KR') {
+      var d = el.value.replace(/\D/g, '').slice(0, 10);
+      v = d.length > 5 ? d.slice(0, 3) + '-' + d.slice(3, 5) + '-' + d.slice(5) : (d.length > 3 ? d.slice(0, 3) + '-' + d.slice(3) : d);
+    } else v = el.value.toUpperCase();
+    if (v !== el.value) el.value = v;
+  }
+  function taxValue() { return $('taxNo').value.replace(/[\s.\-\/]/g, '').toUpperCase(); }
+  function taxError() {
+    var v = taxValue();
+    if (!v) return 'Enter the tax number.';
+    if ($('bCountry').value === 'KR') return /^\d{10}$/.test(v) ? '' : 'A Korean business registration number has 10 digits.';
+    return /^[A-Z0-9]{5,20}$/.test(v) ? '' : 'Check the tax number.';
+  }
+  function postError() {
+    var v = $('postcode').value.trim();
+    if (!v) return 'Enter the postal code.';
+    if ($('bCountry').value === 'KR') return /^\d{5}$/.test(v) ? '' : 'Korean postal codes have 5 digits.';
+    return /^[A-Za-z0-9][A-Za-z0-9 \-]{1,9}$/.test(v) ? '' : 'Check the postal code.';
+  }
+  $('bCountry').addEventListener('change', function () {
+    var kr = this.value === 'KR';
+    $('taxHelp').textContent = kr ? 'Business registration number, 10 digits.' : 'Printed on the invoice.';
+    $('taxNo').placeholder = kr ? '000-00-00000' : 'VAT ID or business registration no.';
+    fmtTax();
+    showC('bCountry');
+    if ($('taxNo').value.trim()) showC('taxNo');
+    if ($('postcode').value.trim()) showC('postcode');
+  });
+  $('taxNo').addEventListener('input', function () {
+    fmtTax();
+    if ($('taxNoErr').textContent) showC('taxNo');
+  });
+
+  function contactErrors() {
+    var e = {}, m;
+    if ((m = phoneError())) e.phone = m;
+    if (state.invoice) {
+      if (!$('company').value.trim()) e.company = 'Enter the company name.';
+      if (!$('bCountry').value) e.bCountry = 'Choose the billing country.';
+      if ((m = taxError())) e.taxNo = m;
+      if (!$('line1').value.trim()) e.line1 = 'Enter the street address.';
+      if (!$('city').value.trim()) e.city = 'Enter the city.';
+      if ((m = postError())) e.postcode = m;
+    }
+    if (!$('terms').checked) e.terms = 'Please accept the Registration Terms to continue.';
+    if (!$('dataConsent').checked) e.dataConsent = 'Please confirm that the attendees agreed to share their details.';
+    return e;
+  }
+  function setC(k, msg) {
+    $(k + 'Err').textContent = msg || '';
+    if (msg) $(k).setAttribute('aria-invalid', 'true');
+    else $(k).removeAttribute('aria-invalid');
+  }
+  function showC(k) { setC(k, contactErrors()[k]); }
+
+  ['company', 'taxNo', 'line1', 'city', 'postcode'].forEach(function (k) {
+    $(k).addEventListener('blur', function () { if (this.value.trim()) showC(k); });
+    if (k !== 'taxNo') $(k).addEventListener('input', function () { if ($(k + 'Err').textContent) showC(k); });
+  });
+  ['terms', 'dataConsent'].forEach(function (k) {
+    $(k).addEventListener('change', function () { if (this.checked) setC(k, ''); });
+  });
+
+  $('next3').addEventListener('click', function () {
+    var e = contactErrors(), first = null;
+    C_KEYS.forEach(function (k) {
+      setC(k, e[k]);
+      if (e[k] && !first) first = k;
+    });
+    if (first) {
+      $('step3Err').textContent = 'Please check the highlighted details.';
+      $(first).scrollIntoView({ block: 'center' });
+      $(first).focus({ preventScroll: true });
+      return;
+    }
+    $('step3Err').textContent = '';
+    showStep(4);
+  });
+
+  function closeTerms() { $('termsModal').hidden = true; $('viewTerms').focus(); }
+  $('viewTerms').addEventListener('click', function () { $('termsModal').hidden = false; $('termsClose').focus(); });
+  $('termsClose').addEventListener('click', closeTerms);
+  $('termsModal').addEventListener('click', function (e) { if (e.target === this) closeTerms(); });
+
+  /* ---------- step 4: review and submit ---------- */
+  function dietName(a) {
+    if (a.diet === 'other') return 'Other: ' + a.dietOther.trim();
+    for (var k = 0; k < DIETS.length; k++) if (DIETS[k][0] === a.diet) return DIETS[k][1];
+    return '';
+  }
+  function section(title, step, body) {
+    return '<div class="rv"><div class="rv-head"><h3>' + title + '</h3><button type="button" class="linkish" data-goto="' + step + '">Edit</button></div>' + body + '</div>';
+  }
+  function renderReview() {
+    var t = pass(), c = country(state.cc), rows = '';
+    state.attendees.forEach(function (a) {
+      rows += '<li><strong>' + esc(a.first.trim() + ' ' + a.last.trim()) + '</strong> · ' + esc(a.title.trim()) +
+        '<br><span class="muted">' + esc(a.email.trim()) + '</span><br>' + esc(sessionName(a.track)) +
+        (t.inPerson ? ' · ' + esc(dietName(a)) : '') + '</li>';
+    });
+    var addr = [$('line1').value, $('line2').value, $('city').value, $('postcode').value]
+      .map(function (s) { return s.trim(); }).filter(Boolean);
+    if ($('bCountry').value) addr.push($('bCountry').selectedOptions[0].textContent);
+    var inv = state.invoice
+      ? '<p>Invoice to <strong>' + esc($('company').value.trim()) + '</strong>, tax no. ' + esc($('taxNo').value.trim()) + '<br>' + esc(addr.join(', ')) + '</p>'
+      : '<p>No invoice: a payment receipt is sent instead.</p>';
+    $('reviewBox').innerHTML =
+      section('Pass', 1, '<p>' + t.name + ' × ' + state.attendees.length + ' · ' + money(totals().total) + ' incl. tax</p>') +
+      section('Attendees', 2, '<ol class="rv-att">' + rows + '</ol>') +
+      section('Contact &amp; billing', 3, '<p>Mobile +' + c[2] + ' ' + esc($('phone').value.trim()) + '</p>' + inv);
+  }
+  $('reviewBox').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-goto]');
+    if (b) showStep(+b.getAttribute('data-goto'));
+  });
+
+  function firstBadStep() {
+    if (!pass()) return 1;
+    for (var i = 0; i < state.attendees.length; i++) {
+      if (Object.keys(attErrors(state.attendees[i], i)).length) return 2;
+    }
+    if (Object.keys(contactErrors()).length) return 3;
+    return 0;
+  }
+
+  $('submitBtn').addEventListener('click', function () {
+    if (state.busy || state.done) return;
+    var bad = firstBadStep();
+    if (bad) {
+      showStep(bad);
+      if (bad === 2) $('next2').click();
+      else if (bad === 3) $('next3').click();
+      return;
+    }
+    var btn = this;
+    state.busy = true;
+    btn.disabled = true;
+    btn.textContent = 'Registering…';
+    $('submitErr').textContent = '';
+    setTimeout(finish, 900);
+  });
+
+  function finish() {
+    var t = pass(), r = { ticket: state.ticket, attendees: String(state.attendees.length) };
+    state.attendees.forEach(function (a, i) {
+      var p = 'a' + (i + 1) + '_';
+      r[p + 'first'] = a.first.trim();
+      r[p + 'last'] = a.last.trim();
+      r[p + 'email'] = a.email.trim().toLowerCase();
+      r[p + 'title'] = a.title.trim();
+      r[p + 'diet'] = t.inPerson ? a.diet : '';
+      if (t.inPerson && a.diet === 'other') r[p + 'diet_other'] = a.dietOther.trim();
+      r[p + 'track'] = a.track;
+    });
+    r.phone = '+' + country(state.cc)[2] + localDigits();
+    r.invoice = state.invoice;
+    if (state.invoice) {
+      r.company = $('company').value.trim();
+      r.billing_country = $('bCountry').value;
+      r.tax_number = taxValue();
+      r.billing_line1 = $('line1').value.trim();
+      r.billing_line2 = $('line2').value.trim();
+      r.billing_city = $('city').value.trim();
+      r.billing_postcode = $('postcode').value.trim();
+    }
+    r.terms = $('terms').checked;
+    r.data_consent = $('dataConsent').checked;
+    r.marketing = $('marketing').checked;
+    r.promo = state.promo;
+    r.total = totals().total.toFixed(2);
+    state.busy = false;
+    state.done = true;
+    window.__sceneResult = r;
+    $('regForm').hidden = true;
+    $('progress').hidden = true;
+    $('doneRef').textContent = 'QPS26-' + String(Math.floor(10000 + Math.random() * 90000));
+    $('doneText').textContent = 'We sent the confirmation to ' + r.a1_email + '. The payment link for ' + money(totals().total) +
+      ' follows within one business day' + (r.invoice ? ', with the invoice for ' + r.company : '') + '.';
+    $('doneBox').hidden = false;
+    window.scrollTo(0, 0);
+    $('doneBox').querySelector('h2').focus({ preventScroll: true });
+  }
+
+  /* ---------- page-wide ---------- */
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('.dd')) {
+      var dds = document.querySelectorAll('.dd');
+      for (var k = 0; k < dds.length; k++) closeMenu(dds[k]);
+    }
+    if (!e.target.closest('#cc')) closeCc();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    if (!$('termsModal').hidden) closeTerms();
+    else closeMenus();
+  });
+
+  setCount(1);
+  onPass();
+})();
+</script>
+</body>
+</html>

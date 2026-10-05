@@ -1,0 +1,31 @@
+{
+  "task": "Quillfern Product Summit 2026에 저랑 동료 한 명, 두 사람 참가 등록 좀 해 주세요. 표 종류, 두 사람 정보, 회사 앞으로 받을 계산서 정보는 카드에 적힌 대로 넣고 등록 완료까지 해 주시면 돼요.",
+  "facts": [
+    {"says": "Choose your pass", "value": "Workshop Pass"},
+    {"says": "Number of attendees", "value": "2"},
+    {"says": "Attendee 1: First name", "value": "Yerin"},
+    {"says": "Attendee 1: Last name", "value": "Seo"},
+    {"says": "Attendee 1: Work e-mail", "value": "yerin.seo@example.com"},
+    {"says": "Attendee 1: Job title", "value": "Product Manager"},
+    {"says": "Attendee 1: Dietary preference", "value": "Vegetarian"},
+    {"says": "Attendee 1: Session track", "value": "Pricing Experiments"},
+    {"says": "Attendee 2: First name", "value": "Doyun"},
+    {"says": "Attendee 2: Last name", "value": "Kang"},
+    {"says": "Attendee 2: Work e-mail", "value": "doyun.kang@example.com"},
+    {"says": "Attendee 2: Job title", "value": "UX Researcher"},
+    {"says": "Attendee 2: Dietary preference", "value": "No special diet"},
+    {"says": "Attendee 2: Session track", "value": "Customer Interview Lab"},
+    {"says": "Country code", "value": "South Korea +82"},
+    {"says": "Mobile number", "value": "010-5550-0142"},
+    {"says": "I need an invoice", "value": true},
+    {"says": "Company name", "value": "Bluemoss Studio Co., Ltd."},
+    {"says": "Billing country", "value": "South Korea"},
+    {"says": "Tax number", "value": "214-88-55017"},
+    {"says": "Address line 1", "value": "5F, 17 Sample-ro"},
+    {"says": "City", "value": "Seoul"},
+    {"says": "Postal code", "value": "06236"},
+    {"says": "I have read and agree to the Registration Terms and the Code of Conduct.", "value": true},
+    {"says": "I confirm that every attendee listed has agreed to their details being shared with Quillfern Events for this registration.", "value": true}
+  ],
+  "personTurns": []
+}

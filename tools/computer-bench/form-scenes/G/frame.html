@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>우편번호 검색</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font-family:"Apple SD Gothic Neo","Malgun Gothic",sans-serif;font-size:13px;color:#333;background:#fff}
+.bar{display:flex;margin:12px;border:2px solid #3d6fd9;border-radius:3px}
+.bar input{flex:1;min-width:0;height:38px;border:0;padding:0 10px;font:inherit;font-size:14px;outline:none}
+.bar button{width:64px;border:0;background:#3d6fd9;color:#fff;font:inherit;font-weight:700;cursor:pointer}
+.tip{margin:0 14px 10px;color:#888}
+.cnt{margin:0 14px 6px;color:#555}
+.cnt b{color:#3d6fd9}
+.list{list-style:none;margin:0;padding:0;border-top:1px solid #eee;max-height:330px;overflow-y:auto}
+.res-item{display:block;width:100%;text-align:left;background:#fff;border:0;border-bottom:1px solid #eee;padding:10px 14px;font:inherit;color:inherit;cursor:pointer}
+.res-item:hover,.res-item:focus{background:#f3f6fd;outline:none}
+.zc{display:block;font-weight:700;color:#d4553a;margin-bottom:3px}
+.ln{display:block;line-height:1.6}
+.tg{display:inline-block;font-style:normal;font-size:11px;line-height:16px;border:1px solid #ccc;border-radius:2px;padding:0 4px;margin-right:6px;color:#777}
+.sub{color:#888}
+.msg{padding:28px 14px;text-align:center;color:#888;line-height:1.6}
+</style>
+</head>
+<body>
+<form class="bar" id="f" role="search" autocomplete="off">
+<input type="text" id="q" placeholder="도로명, 건물명 또는 지번으로 검색" aria-label="주소 검색어">
+<button type="submit">검색</button>
+</form>
+<p class="tip" id="tip">예) 버들길 12 · 동녘동 230 · 동녘하이츠</p>
+<div id="out"></div>
+<script>
+(function () {
+  var DATA = [
+    { zip: '48213', road: '가람시 새내구 은행나무로 25', bname: '새내동', bldg: '은행나무마을1단지', jibun: '가람시 새내구 새내동 412' },
+    { zip: '48211', road: '가람시 새내구 은행나무로 21', bname: '새내동', bldg: '새내초등학교', jibun: '가람시 새내구 새내동 401' },
+    { zip: '48214', road: '가람시 새내구 은행나무로25번길 3', bname: '새내동', bldg: '', jibun: '가람시 새내구 새내동 405-2' },
+    { zip: '48214', road: '가람시 새내구 은행나무로25번길 8', bname: '새내동', bldg: '새내빌라', jibun: '가람시 새내구 새내동 405-7' },
+    { zip: '48226', road: '가람시 새내구 은행나무로 125', bname: '새내동', bldg: '은행나무마을3단지', jibun: '가람시 새내구 새내동 488' },
+    { zip: '51720', road: '나루시 강변구 은행나무로 25', bname: '강변동', bldg: '', jibun: '나루시 강변구 강변동 77-1' },
+    { zip: '48390', road: '가람시 동녘구 나루터로 77', bname: '동녘동', bldg: '동녘하이츠', jibun: '가람시 동녘구 동녘동 230' },
+    { zip: '48392', road: '가람시 동녘구 나루터로 79', bname: '동녘동', bldg: '', jibun: '가람시 동녘구 동녘동 231-4' },
+    { zip: '48230', road: '가람시 새내구 버들길 12', bname: '새내동', bldg: '버들상가', jibun: '가람시 새내구 새내동 520-3' },
+    { zip: '51733', road: '나루시 강변구 버들길 5', bname: '강변동', bldg: '', jibun: '나루시 강변구 강변동 12' }
+  ];
+  var q = document.getElementById('q'), out = document.getElementById('out'), tip = document.getElementById('tip');
+  var found = [], timer = 0;
+
+  function norm(s) { return String(s).replace(/\s+/g, '').toLowerCase(); }
+  function extra(r) { return '(' + (r.bldg ? r.bname + ', ' + r.bldg : r.bname) + ')'; }
+
+  function search() {
+    var words = q.value.trim().split(/\s+/).filter(Boolean).map(norm);
+    clearTimeout(timer);
+    if (!words.length) { out.innerHTML = ''; tip.textContent = '검색어를 입력해 주세요.'; return; }
+    tip.textContent = '';
+    out.innerHTML = '<p class="msg">검색 중…</p>';
+    timer = setTimeout(function () {
+      found = DATA.filter(function (r) {
+        var hay = norm(r.road + r.jibun + r.bname + r.bldg);
+        return words.every(function (w) { return hay.indexOf(w) !== -1; });
+      });
+      render();
+    }, 320);
+  }
+
+  function render() {
+    if (!found.length) {
+      out.innerHTML = '<p class="msg">검색 결과가 없습니다.<br>도로명과 건물번호를 띄어서 다시 검색해 보세요.</p>';
+      return;
+    }
+    out.innerHTML = '<p class="cnt">검색 결과 <b>' + found.length + '</b>건</p><ul class="list">' + found.map(function (r, i) {
+      return '<li><button type="button" class="res-item" data-i="' + i + '">' +
+        '<span class="zc">' + r.zip + '</span>' +
+        '<span class="ln"><em class="tg">도로명</em><span class="road-addr">' + r.road + '</span> <span class="extra">' + extra(r) + '</span></span>' +
+        '<span class="ln sub"><em class="tg">지번</em>' + r.jibun + '</span></button></li>';
+    }).join('') + '</ul>';
+  }
+
+  document.getElementById('f').addEventListener('submit', function (e) { e.preventDefault(); search(); });
+  out.addEventListener('click', function (e) {
+    var b = e.target.closest('.res-item'), r = b && found[+b.getAttribute('data-i')];
+    if (!r) return;
+    window.parent.postMessage({ kind: 'zip:selected', zonecode: r.zip, roadAddress: r.road, jibunAddress: r.jibun, extra: extra(r) }, '*');
+  });
+  window.addEventListener('message', function (e) {
+    if (e.source === window.parent && e.data && e.data.kind === 'zip:open') { q.focus(); q.select(); }
+  });
+  q.focus();
+})();
+</script>
+</body>
+</html>
