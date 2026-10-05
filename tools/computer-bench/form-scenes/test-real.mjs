@@ -171,6 +171,23 @@ await test("--dry says what would be launched and starts nothing", async () => {
   return "ok";
 });
 
+/* The real-model road is closed until a person decides how it logs in (m-41479):
+ * a run that points a live account folder at the CLI as its login is refused
+ * before anything starts — not the box, not the stand-in window, not the CLI. */
+await test("a run that names an account folder as its login is refused before the agent starts: the real-model road is closed", async () => {
+  const marker = join(root, "started.txt");
+  const watcher = await standIn("watcher", `echo started > "${marker}"\ncat > /dev/null`);
+  const out = fresh();
+  const done = spawnSync(process.execPath, [REAL, "--scene", scene, "--model", "fake-model", "--out", out, "--door-text", doorText,
+    "--claude", watcher, "--account", account], { encoding: "utf8", timeout: 120_000 });
+  assert(done.status === 2, "refused as a wrong argument is", [done.status, String(done.stdout).slice(-300), String(done.stderr).slice(-300)]);
+  const said = `${done.stdout}${done.stderr}`.split("\n").filter((line) => line.startsWith("REFUSED"));
+  assert(said.length === 1 && said[0].includes("closed"), "in one line that says the road is closed", said);
+  assert(!existsSync(marker), "the stand-in for the CLI was never started");
+  assert(!existsSync(out), "nor was the run's folder made");
+  return said[0];
+});
+
 let failed = 0;
 for (const result of results) {
   if (!result.pass) failed += 1;
