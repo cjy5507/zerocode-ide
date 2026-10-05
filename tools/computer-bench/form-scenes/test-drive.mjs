@@ -326,6 +326,58 @@ const STEPPER = await scene("stepper", `<!doctype html><html lang="en"><meta cha
   });
 </script>`, [{ says: "Ink bottle: Count", value: "3" }, { says: "Pen box: Count", value: "2" }], { ink: "3", pen: "2" });
 
+/* The code that goes to the person's phone (t-41720): the button that sends it is the one the door says stands beside the phone field the driver wrote — a field of
+ * kind `tel` — and the button that confirms it is the one beside the field the code was written into; neither is found by a list of words. A page whose buttons say
+ * no place is held to the few short words that are left. */
+const CODE_CARD = (facts) => ({ "card.json": JSON.stringify({ task: "Fill it in.", facts, personTurns: ["code"] }) });
+const SEND_BESIDE_FACTS = [{ says: "Mobile", value: "031-7788-2290" }];
+const SEND_BESIDE = await scene("send-beside", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="row"><label for="ph">Mobile</label><div class="line"><input id="ph" type="tel"><button type="button" id="text">Text me</button></div></div>
+  <div class="row" id="cr" hidden><label for="cd">Number we texted</label><div class="line"><input id="cd"></div></div>
+  <button type="button" id="finish">Finish</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let sent = "";
+  $("text").addEventListener("click", () => { sent = "483920"; window.__personPhone = sent; $("cr").hidden = false; });
+  $("finish").addEventListener("click", () => {
+    if (!sent || $("cd").value !== sent) return;
+    window.__sceneResult = { mobile: $("ph").value, code: $("cd").value };
+  });
+</script>`, SEND_BESIDE_FACTS, { mobile: "031-7788-2290", code: "483920" }, CODE_CARD(SEND_BESIDE_FACTS));
+const CONFIRM_BESIDE = await scene("confirm-beside", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="row"><label for="ph">Mobile</label> <input id="ph" type="tel"> <button type="button" id="send">Send code</button></div>
+  <div class="row" id="cr" hidden><label for="cd">Number we texted</label><div class="line"><input id="cd"><button type="button" id="check">Check</button></div></div>
+  <p id="top"></p>
+  <button type="button" id="finish">Finish</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let sent = "", ok = false;
+  $("send").addEventListener("click", () => { sent = "483920"; window.__personPhone = sent; $("cr").hidden = false; });
+  $("check").addEventListener("click", () => { ok = $("cd").value === sent; });
+  $("finish").addEventListener("click", () => {
+    if (!ok) { $("top").textContent = "Check the number first"; return; }
+    window.__sceneResult = { mobile: $("ph").value, code: $("cd").value, verified: ok };
+  });
+</script>`, SEND_BESIDE_FACTS, { mobile: "031-7788-2290", code: "483920", verified: true }, CODE_CARD(SEND_BESIDE_FACTS));
+const CODE_WORDS = await scene("code-words", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div class="row"><label for="ph">Mobile</label> <input id="ph"> <button type="button" id="send">Send code</button></div>
+  <div class="row" id="cr" hidden><label for="cd">Code</label><input id="cd"><p>Enter the number</p><button type="button" id="v">Verify</button></div>
+  <p id="top"></p>
+  <button type="button" id="finish">Finish</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let sent = "", ok = false;
+  $("send").addEventListener("click", () => { sent = "483920"; window.__personPhone = sent; $("cr").hidden = false; });
+  $("v").addEventListener("click", () => { ok = $("cd").value === sent; });
+  $("finish").addEventListener("click", () => {
+    if (!ok) { $("top").textContent = "Verify the number first"; return; }
+    window.__sceneResult = { mobile: $("ph").value, code: $("cd").value, verified: ok };
+  });
+</script>`, SEND_BESIDE_FACTS, { mobile: "031-7788-2290", code: "483920", verified: true }, CODE_CARD(SEND_BESIDE_FACTS));
+
 /* A field the page answers about after a press, with a button of its own beside it: the door says whose the button is, and the driver presses it once and
  * reads the form again — the press that ends the form is made again after it. */
 const OWN = await scene("own", `<!doctype html><html lang="en"><meta charset="utf-8"><form id="f" onsubmit="return false">
@@ -363,7 +415,7 @@ const DRAWN = await scene("drawn", `<!doctype html><html lang="en"><meta charset
 const out = join(root, "rows.json");
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -505,6 +557,31 @@ await test("a driver that finds one item answered to by two fields of one kind s
     assert(one.roundTrips <= 2, `and stops before it presses anything (${road})`, { roundTrips: one.roundTrips });
   }
   return row("twins-open", "verbs").stuck;
+});
+
+await test("a driver sends the code of the person by the button the door says stands beside the phone field it wrote whatever that button says", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("send-beside", road);
+    assert(one && one.ok && one.pass, `the ${road} road presses the button beside the phone field and gets the code`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+    assert(one.handoff === 1, `and asks the person for the code once (${road})`, { handoff: one.handoff });
+  }
+  return JSON.stringify(row("send-beside", "verbs").result);
+});
+
+await test("a driver confirms the code of the person by the button the door says stands beside the field the code went into whatever that button says", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("confirm-beside", road);
+    assert(one && one.ok && one.pass, `the ${road} road presses the button beside the code field before it finishes`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return JSON.stringify(row("confirm-beside", "verbs").result);
+});
+
+await test("a driver whose page says no place for the buttons of the code of the person goes by the few short words that are left", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("code-words", road);
+    assert(one && one.ok && one.pass, `the ${road} road sends and confirms the code by the short words`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return JSON.stringify(row("code-words", "verbs").result);
 });
 
 await test("a driver does not take a button its own field turned on for the button that moves the step", () => {
