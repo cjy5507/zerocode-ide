@@ -222,6 +222,11 @@ class Road {
     // and how many times in a row the button that moves the form on has been waited for.
     this.fresh = [];
     this.waits = 0;
+    // The buttons pressed in a form that stayed, by the form's fingerprint and the button's handle, the button
+    // pressed last, and the answer the script road read last: what a driver that has nothing more to give stops on.
+    this.pressed = new Map();
+    this.justPressed = null;
+    this.lastSig = null;
     // The secret fields typed on the setter road: a fill never reads one back,
     // so a field already typed is no longer asked of it nor owed by it.
     this.typed = new Set();
@@ -485,6 +490,7 @@ class Road {
   async verbs() {
     for (;;) {
       const read = await this.fields();
+      if (await this.finished()) return this.done();
       if (await this.scrollRoad(read)) continue;
       const { bundle, unplaced } = plan(this.untyped(read.fields), this.facts);
       if (this.price) this.priced += await this.today(read, bundle);
@@ -551,16 +557,22 @@ class Road {
       }
     }
     const advance = advancing(actions, before);
-    if (!advance) throw new Error("stuck: the form has no button");
-    if (advance.disabled) {
-      if (this.fresh.length && this.waits < WAITS_MAX) {
+    // A page with no button at all, or whose button — the one just pressed — went off, is still at work, or
+    // has finished and shows nothing to press: it is waited for, then read again.
+    if (!advance || (advance.disabled && (this.fresh.length || advance.handle === this.justPressed))) {
+      if (this.waits < WAITS_MAX) {
         await this.wait();
         return false;
       }
-      throw new Error(`stuck: no button moves the form on (${live.map((a) => a.label).join(", ")})`);
+      if (!advance) throw new Error("stuck: the form has no button");
     }
+    if (advance.disabled) throw new Error(`stuck: no button moves the form on (${live.map((a) => a.label).join(", ")})`);
+    const key = `${this.form}|${advance.handle}`;
+    if ((this.pressed.get(key) || 0) >= 2) throw new Error(`stuck: ${advance.label} was pressed twice and the form stayed — nothing is left to give it`);
+    this.pressed.set(key, (this.pressed.get(key) || 0) + 1);
     this.waits = 0;
     this.fresh = [];
+    this.justPressed = advance.handle;
     await this.press(advance);
     return this.finished();
   }
@@ -608,7 +620,8 @@ class Road {
         .map((result) => ({ ...result, asked: bundle[result.handle] }));
       const fresh = [].concat(filled.outside || [], filled.alerts || [], ...filled.results.map((result) => result.fresh || []));
       return { results: filled.results.map((result) => result.label + ":" + result.status), left,
-        actions, before: read.actions, fresh, pressedNext: pressNext, hand, viaType, unknowns: read.unknowns, unplaced, clean, moved,
+        actions, before: read.actions, fresh, pressedNext: pressNext, pressedHandle: pressNext ? next.handle : null,
+        print: read.fingerprint, hand, viaType, unknowns: read.unknowns, unplaced, clean, moved,
         scrollBoxes: read.scrollBoxes || [],
         confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, label: field.label,
           value: field.value, required: field.required, disabled: field.disabled, hint: field.hint })) };
@@ -622,6 +635,7 @@ class Road {
       if (!answer.ok) throw new Error(`eval refused: ${JSON.stringify(answer)}`);
       const said = answer.value;
       this.seen = said.fields;
+      if (await this.finished()) return this.done();
       if (turn.confirm && said.clean) this.codeConfirmed = true;
       this.trail.push({ script: said.results, pressedNext: said.pressedNext, confirmed: said.confirmed });
       this.note({ verb: "eval", results: said.results, left: said.left.map((field) => `${field.handle} ${field.label}`),
@@ -636,13 +650,24 @@ class Road {
       if (await this.scrollRoad({ fields: said.fields, scrollBoxes: said.scrollBoxes })) continue;
       if (said.moved) continue;
       if (said.pressedNext || said.confirmed) {
-        if (said.pressedNext && await this.finished()) return this.done();
+        if (said.pressedNext) {
+          const key = `${said.print}|${said.pressedHandle}`;
+          this.pressed.set(key, (this.pressed.get(key) || 0) + 1);
+          if (this.pressed.get(key) > 2) throw new Error(`stuck: ${said.pressedHandle} was pressed twice and the form stayed — nothing is left to give it`);
+          this.waits = 0;
+          this.justPressed = said.pressedHandle;
+        }
         continue;
       }
       if (await this.unknownRoad(said.unknowns, said.unplaced)) continue;
       if (await this.code(said.fields, said.bundle)) continue;
-      if (said.left.length || said.results.some((result) => !/:(set|same)$/.test(result))) continue;
+      // What is left or did not take is tried again once; the same answer twice is the page's, and the step goes on.
+      const sig = JSON.stringify([said.results, said.left.map((field) => field.handle)]);
+      const again = sig === this.lastSig;
+      this.lastSig = sig;
+      if (!again && (said.left.length || said.results.some((result) => !/:(set|same)$/.test(result)))) continue;
       this.fresh = said.fresh;
+      this.form = said.print;
       if (await this.step(said.actions, said.before)) return this.done();
     }
   }
