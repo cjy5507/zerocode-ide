@@ -552,6 +552,20 @@ const STAY_DIALOG = await scene("stay-dialog", `<!doctype html><html lang="en"><
   });
 </script>`, STAY_FACTS, { name: "Kim", start: "2026-11-20", end: "2026-12-04" });
 
+/* A fact whose words two fields hold in part, where one of the two fields is another fact's whole (t-41720): `Venue` is in `Venue name` and in `Venue note`, and the card has a fact `Venue note`,
+ * so `Venue` is the name field's and the card tells which. */
+const VENUE_FACTS = [{ says: "Name", value: "Kim" }, { says: "Venue", value: "North Hall" }, { says: "Venue note", value: "Back stairs" }];
+const VENUE_PAIR = await scene("venue-pair", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="nm">Name</label> <input id="nm">
+  <label for="vn">Venue name</label> <input id="vn">
+  <label for="vt">Venue note</label> <input id="vt">
+  <button type="button" id="send">Submit</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  $("send").addEventListener("click", () => { window.__sceneResult = { name: $("nm").value, venue: $("vn").value, note: $("vt").value }; });
+</script>`, VENUE_FACTS, { name: "Kim", venue: "North Hall", note: "Back stairs" });
+
 /* A secret field inside a frame of the page's own origin (t-41720): the fill does not write it and says to type it by its handle, `#frame >> #field`, which `type` takes. A driver types it with the value
  * the card gives, held to the form it read, and the value is in no line of its trace. */
 const FRAMED_FACTS = [{ says: "Name", value: "Kim" }, { says: "Account PIN", value: "7391" }];
@@ -635,7 +649,7 @@ const stub = join(root, "door-text-stub.sh");
 await writeFile(stub, `#!/bin/sh\ncat > /dev/null\nprintf '%s' '{"words":"stub"}'\n`, { mode: 0o755 });
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--door-text", stub, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", VENUE_PAIR, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--door-text", stub, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -829,6 +843,15 @@ await test("a driver gives the dates of the card that no field takes to the butt
     assert(one.result.start === "2026-11-20" && one.result.end === "2026-12-04", `the start goes to the start button and the end to the end button (${road})`, one.result);
   }
   return JSON.stringify(row("stay-dialog", "verbs").result);
+});
+
+await test("a driver gives a fact whose words two fields hold in part to the field that is not another fact's whole, on both roads", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("venue-pair", road);
+    assert(one && one.ok && one.pass, `the ${road} road gives the venue to its own field and the note to the note's`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+    assert(one.result.venue === "North Hall" && one.result.note === "Back stairs", `each fact is in its own field (${road})`, one.result);
+  }
+  return JSON.stringify(row("venue-pair", "verbs").result);
 });
 
 await test("a driver types a secret field inside a frame of the same origin by its handle with the value of the card, on both roads, and the value is in no line of its trace", () => {

@@ -1195,6 +1195,25 @@ await test("parts_with_unit_words_between_them_are_one_captions_parts", async ()
   } finally { await units.close(); }
 });
 
+/* A field the page keeps from being typed in (its value comes from a window a button opens) and a field that takes text, side by side in one box with no caption of their own — a base
+ * address and a detail line — are no parts of one value: the parts of one value are written alike. Each is named by its own words, the one by its ARIA label and the other by
+ * its placeholder, and no part number says the second is the first's. */
+await test("a_read_only_field_and_a_field_that_takes_text_side_by_side_are_no_parts_of_one_value_and_each_is_named_by_its_own_words", async () => {
+  const mixed = await browser.newPage();
+  try {
+    await mixed.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
+      <div class="row"><span class="cap">Depot<em>*</em></span><div class="ctl">
+        <input id="code" readonly aria-label="Depot code" placeholder="Depot code">
+        <input id="bay" placeholder="Bay and shelf" maxlength="40"></div></div></form>`);
+    const read = await readFields(mixed);
+    const labels = read.fields.map((field) => field.label);
+    assert(JSON.stringify(labels) === JSON.stringify(["Depot code", "Bay and shelf"]), "each is named by its own words and neither is a numbered part", labels);
+    const filled = await fillBundle(mixed, { [handleOf(read, "Bay and shelf")]: "B-12" });
+    assert(filled.results.length === 1 && filled.results[0].status === "set", "the field that takes text is written by its own name", filled.results);
+    return labels.join(" · ");
+  } finally { await mixed.close(); }
+});
+
 /* A dropdown drawn with no ARIA at all — a focusable box with a list beside
  * it, items filled late after another choice — is read as a field with its
  * items for choices, and filled by opening it and pressing the item. */
