@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { pressButton, scrollToEnd } from "./door-recipes.mjs";
+import { Watch } from "./watch.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SKILL = await readFile(join(HERE, "../../../skills/computer-use/SKILL.md"), "utf8");
@@ -776,6 +777,28 @@ await test("a driver keeps the texts it sent to the door, and its row says in co
     assert(sourcesOf("framed-secret", road).some((text) => text.includes("Kim")), `and the sources hold what the road sent (${road})`);
   }
   return `${sources.length} texts`;
+});
+
+/* The watch reads a text by the field a value was typed into, so that digits another field holds too are no leak (a phone's parts and a card's parts may be the same four digits). */
+await test("the watch finds a long secret anywhere and a short one only as the value of the field it was typed into", () => {
+  const w = new Watch();
+  w.add("1234", "#pay >> #c1");
+  w.add("7391", "#pin");
+  w.add("624817", "#otp-in");
+  w.add("123", "#pay >> #cv");
+  assert(!w.carriesText(JSON.stringify({ "#p-2": "1234" })), "a short value in the bundle of another field is no leak");
+  assert(w.carriesText(JSON.stringify({ "#pay >> #c1": "x" })), "the secret's own field offered as a key of a bundle is one, whatever the value");
+  assert(w.carriesText("see 624817 here") && !w.carriesText("number 7391 appears"), "a long value anywhere, a short one not outside its field");
+  assert(w.carriesText('  #pin · password · PIN = "7391"\n  #x · text · y = "0"'), "the line of words of its own field showing the value is one");
+  assert(!w.carriesText('  #p-2 · tel · Phone = "1234"\n  #pay >> #c1 · text · Card (1/4) = ""'), "another field's line showing the same digits is not");
+  assert(w.carriesJson(JSON.stringify({ fields: [{ handle: "#pin", value: "7391" }] })), "a read where the field shows the value is one");
+  assert(!w.carriesJson(JSON.stringify({ fields: [{ handle: "#pin", value: "" }, { handle: "#p-2", value: "1234" }] })), "a read where the field is masked, and another holds the same digits, is not");
+  assert(w.carriesJson(JSON.stringify({ results: [{ handle: "#pay >> #cv", now: "123" }] })), "a fill answer that reads the value back is one");
+  assert(w.carriesNote({ at: 3, verb: "fill", sent: { "#pay >> #c1": "1234" } }), "a line of the trace that sent the field is one");
+  assert(!w.carriesNote({ at: 3, verb: "fill", sent: { "#p-2": "1234" }, words: "stub" }), "the same digits sent to another field is not");
+  assert(w.carriesNote({ at: 4, verb: "fields", words: "code 624817" }), "words that show the code whole are one");
+  assert(w.where(["a", "b 624817", "c"]).join() === "1", "and the places are said by their index");
+  return "read by field";
 });
 
 await test("a driver reads a form again before it presses when its fill brought a field of its own", () => {

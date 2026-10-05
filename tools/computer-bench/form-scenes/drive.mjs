@@ -80,6 +80,7 @@ import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
 import { FORM_REQUEST, clickScript, evalFormScript, evalScript, fieldsScript, fillPasses, pressInForm, typeScript } from "../../../ui/tests/browser-scripts.mjs";
 import { pressButton, scrollToEnd } from "./door-recipes.mjs";
 import { readScene, serveScene as serve, verdictWords, verdicts } from "./scene-kit.mjs";
+import { Watch } from "./watch.mjs";
 
 // The floor of one model round trip, and what one costs in the person's
 // session (m-38845: about 17 s — 55 min, 122 requests, 80 % model time).
@@ -439,30 +440,6 @@ function thingOf(things, said) {
 
 // The pause between two keys of the person's typing, as the stand-in window's person keeps it (door-desk.mjs).
 const TYPE_DELAY_MS = 30;
-// A value shorter than this is no mark to look for in a text: two digits stand in every number.
-const LEAK_MIN = 3;
-
-/* The bench's own watch, apart from the roads: the values typed as secrets, and where a record carries one. A road tells the watch what it
- * typed and never asks it anything; the person's hands tell it the code. Only the counts of the places that carry a value leave it. */
-class Watch {
-  constructor() {
-    this.values = new Set();
-  }
-
-  add(value) {
-    const text = typeof value === "string" ? value.trim() : "";
-    if (text.length >= LEAK_MIN) this.values.add(text);
-  }
-
-  /* The indexes of the texts that carry a watched value. */
-  where(texts) {
-    const marks = [...this.values];
-    const at = [];
-    texts.forEach((text, index) => { if (marks.some((mark) => String(text).includes(mark))) at.push(index); });
-    return at;
-  }
-}
-
 class Road {
   constructor(page, card, name, watch = new Watch()) {
     this.page = page;
@@ -607,7 +584,7 @@ class Road {
   async typeSecret(handle, value, expect = this.form) {
     if (typeof value !== "string" || this.typed.has(handle)) return false;
     this.typed.add(handle);
-    this.watch.add(value);
+    this.watch.add(value, handle);
     this.note({ verb: "type", handle });
     this.trail.push({ type: handle });
     const held = handle.includes(FORM_REQUEST.frameSeparator) ? expect : null;
@@ -1191,7 +1168,7 @@ class Road {
 async function personTypes(page, handle, watch) {
   const code = await page.evaluate(() => window.__personPhone || null);
   if (!code) throw new Error("stuck: the person's phone got no code");
-  watch.add(code);
+  watch.add(code, handle);
   const parts = handle.split(FORM_REQUEST.frameSeparator);
   let scope = page;
   for (const frame of parts.slice(0, -1)) scope = scope.frameLocator(frame);
@@ -1235,7 +1212,7 @@ async function drive(browser, folder, roadName) {
   }));
   // The texts that carry a value typed as a secret, by kind and by place: counts and indexes, never a value.
   const scene = folder.split(sep).filter(Boolean).pop();
-  const carried = { requests: watch.where(road.sent), answers: watch.where(road.answers), trace: watch.where(road.said.map((note) => JSON.stringify(note))) };
+  const carried = { requests: watch.where(road.sent), answers: watch.where(road.answers, (text) => watch.carriesJson(text)), trace: watch.where(road.said, (note) => watch.carriesNote(note)) };
   const leaks = { requests: carried.requests.length, answers: carried.answers.length, trace: carried.trace.length };
   if (leaks.requests || leaks.answers || leaks.trace) leaks.at = carried;
   keptSources.push(...road.sent.map((text, at) => ({ scene, road: roadName, at, text })));
