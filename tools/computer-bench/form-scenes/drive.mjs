@@ -58,6 +58,13 @@
  * Between two round trips the driver waits THINK_MS: a model's turn is never
  * shorter, and a page's own late fields land inside it.
  *
+ * What the records carry (t-41720): the bench watches, apart from the roads, for every value that was typed as a
+ * secret — by `type`, or by the person — and counts, at the end of a run, the texts that carry one: the texts the
+ * road sent to the door as a model's call would carry them (a fill's bundle, a script's expression, a press's handle;
+ * not what the door wraps around them, and not a `type`, whose value goes by stdin), the texts the door answered, and
+ * the lines of the trace. The counts are in the row (`leaks`), never a value; `--sources FILE` keeps the texts sent,
+ * one entry for each, so that a test or a reader can look at what a model's call would have carried.
+ *
  * What the door cannot do, the driver does by hand as a model would — open,
  * look, press, a round trip each: a date a fill answered `no_option` with
  * the calendar it saw, a choice it answered `no_option` for, and a fact no
@@ -429,10 +436,38 @@ function thingOf(things, said) {
   return near.length === 1 ? near[0] : null;
 }
 
+// A value shorter than this is no mark to look for in a text: two digits stand in every number.
+const LEAK_MIN = 3;
+
+/* The bench's own watch, apart from the roads: the values typed as secrets, and where a record carries one. A road tells the watch what it
+ * typed and never asks it anything; the person's hands tell it the code. Only the counts of the places that carry a value leave it. */
+class Watch {
+  constructor() {
+    this.values = new Set();
+  }
+
+  add(value) {
+    const text = typeof value === "string" ? value.trim() : "";
+    if (text.length >= LEAK_MIN) this.values.add(text);
+  }
+
+  /* The indexes of the texts that carry a watched value. */
+  where(texts) {
+    const marks = [...this.values];
+    const at = [];
+    texts.forEach((text, index) => { if (marks.some((mark) => String(text).includes(mark))) at.push(index); });
+    return at;
+  }
+}
+
 class Road {
-  constructor(page, card, name) {
+  constructor(page, card, name, watch = new Watch()) {
     this.page = page;
     this.name = name;
+    this.watch = watch;
+    // Every text the road sent to the door as a model's call would carry it, in order, and every text the door answered.
+    this.sent = [];
+    this.answers = [];
     this.facts = card.facts.map((fact) => ({ ...fact }));
     this.codeTurn = (card.personTurns || []).includes("code");
     this.codeSent = false;
@@ -486,7 +521,16 @@ class Road {
   }
 
   run(source) {
-    return this.page.evaluate(source).then((raw) => JSON.parse(raw));
+    return this.page.evaluate(source).then((raw) => {
+      this.answers.push(raw);
+      return JSON.parse(raw);
+    });
+  }
+
+  /* A text sent to the door as a model's call carries it — a fill's bundle, a script's expression, the handle of a press — kept for the watch. What the door wraps around it is its own,
+   * and a `type` is not sent: its value goes by stdin and is in no record. */
+  send(text) {
+    this.sent.push(String(text));
   }
 
   /* The window keeps the form a pane's agent last read, and holds the
@@ -508,6 +552,7 @@ class Road {
 
   async fill(bundle) {
     const known = this.form, buttons = this.buttons;
+    this.send(JSON.stringify(bundle));
     const filled = await this.call("fill", () => fillPasses((source) => this.run(source), bundle, this.form));
     if (this.ask) {
       // What was sent is recorded without the value of a field the fill left to `type`: that value goes by `type --value-stdin` alone and is in no record, as it is in no answer of the door.
@@ -546,6 +591,7 @@ class Road {
   async typeSecret(handle, value, expect = this.form) {
     if (typeof value !== "string" || this.typed.has(handle)) return false;
     this.typed.add(handle);
+    this.watch.add(value);
     this.note({ verb: "type", handle });
     this.trail.push({ type: handle });
     const held = handle.includes(FORM_REQUEST.frameSeparator) ? expect : null;
@@ -592,6 +638,7 @@ class Road {
       return all.findIndex((el) => el.getClientRects().length && fold(el.innerText) === fold(wanted)
         && ![...el.children].some((child) => fold(child.innerText) === fold(wanted)));
     }, [value]));
+    this.send(value);
     this.trail.push({ look: thing.label, found: spot >= 0 });
     if (spot < 0) return false;
     await this.call("click", () => this.page.evaluate(([at]) => document.querySelectorAll("body *")[at].click(), [spot]));
@@ -766,6 +813,7 @@ class Road {
     this.after = null;
     if (action.handle.includes(FORM_REQUEST.frameSeparator)) {
       this.note({ verb: "eval", press: action.handle, label: action.label });
+      this.send(pressButton(action.handle));
       const pressed = await this.call("eval", () => this.run(evalScript(pressButton(action.handle))));
       if (!pressed.ok) throw new Error(`press refused: ${JSON.stringify(pressed)}`);
       return pressed;
@@ -825,6 +873,7 @@ class Road {
       this.scrolled.add(box.handle);
       this.note({ verb: "eval", scroll: box.handle });
       this.trail.push({ scroll: box.handle });
+      this.send(scrollToEnd(box.handle));
       const answer = await this.call("eval", () => this.run(evalScript(scrollToEnd(box.handle))));
       if (!answer.ok) throw new Error(`scroll refused: ${JSON.stringify(answer)}`);
       scrolled = true;
@@ -835,6 +884,7 @@ class Road {
   async handoff() {
     const code = await this.call("handoff", () => this.page.evaluate(() => window.__personPhone || null));
     if (!code) throw new Error("stuck: the person's phone got no code");
+    this.watch.add(code);
     this.codeTurn = false;
     return code;
   }
@@ -1030,9 +1080,11 @@ class Road {
     for (;;) {
       const turn = { owed: this.codeTurn, sent: this.codeSent, confirm: Boolean(this.codeField) && !this.codeConfirmed, codeField: this.codeField,
         dialogs: [...this.byHandTried].filter((key) => key.startsWith("dialog:")).map((key) => key.slice("dialog:".length)) };
-      const source = evalFormScript(STEP.replace("__FACTS__", () => JSON.stringify(this.facts))
+      const expression = STEP.replace("__FACTS__", () => JSON.stringify(this.facts))
         .replace("__TURN__", () => JSON.stringify(turn))
-        .replace("__TYPED__", () => JSON.stringify([...this.typed])));
+        .replace("__TYPED__", () => JSON.stringify([...this.typed]));
+      this.send(expression);
+      const source = evalFormScript(expression);
       const answer = await this.call("eval", () => this.run(source));
       if (!answer.ok) throw new Error(`eval refused: ${JSON.stringify(answer)}`);
       const said = answer.value;
@@ -1100,7 +1152,8 @@ async function drive(browser, folder, roadName) {
   const { card, expected, made, shapes } = await readScene(folder);
   const site = await serve(folder);
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-  const road = new Road(page, card, roadName);
+  const watch = new Watch();
+  const road = new Road(page, card, roadName, watch);
   road.ask = doorWords;
   const began = performance.now();
   let result = null, stuck = null;
@@ -1126,8 +1179,14 @@ async function drive(browser, folder, roadName) {
     const sorted = list.slice().sort((a, b) => a - b);
     return [kind, { n: sorted.length, p50: Math.round(sorted[Math.floor(sorted.length / 2)]), max: Math.round(sorted.at(-1)) }];
   }));
+  // The texts that carry a value typed as a secret, by kind and by place: counts and indexes, never a value.
+  const scene = folder.split(sep).filter(Boolean).pop();
+  const carried = { requests: watch.where(road.sent), answers: watch.where(road.answers), trace: watch.where(road.said.map((note) => JSON.stringify(note))) };
+  const leaks = { requests: carried.requests.length, answers: carried.answers.length, trace: carried.trace.length };
+  if (leaks.requests || leaks.answers || leaks.trace) leaks.at = carried;
+  keptSources.push(...road.sent.map((text, at) => ({ scene, road: roadName, at, text })));
   return {
-    scene: folder.split(sep).filter(Boolean).pop(), road: roadName, pass: v.pass, ok: v.ok, wholeRaw: v.wholeRaw, whole: v.whole, sameSet: v.sameSet,
+    scene, road: roadName, pass: v.pass, ok: v.ok, wholeRaw: v.wholeRaw, whole: v.whole, sameSet: v.sameSet, leaks,
     extra: v.extra, made: v.made, madeProblems: v.madeProblems, stuck, wrong: result ? v.wrong : null, result,
     ...road.count, projectedSeconds: road.count.roundTrips * SECONDS_PER_ROUND_TRIP,
     callMsP50: Math.round(scriptMs[Math.floor(scriptMs.length / 2)] ?? 0), callMsMax: Math.round(scriptMs.at(-1) ?? 0),
@@ -1162,6 +1221,8 @@ async function countToday(browser, folder) {
 }
 
 const options = args(process.argv.slice(2));
+/* The texts every road sent, kept for `--sources`. */
+const keptSources = [];
 /* What the core says to a read and to a fill, for a run's trace. */
 const doorWords = options["door-text"]
   ? (request) => JSON.parse(spawnSync(resolve(options["door-text"]), [], { input: JSON.stringify(request), encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).stdout)
@@ -1183,4 +1244,5 @@ try {
   await browser.close();
 }
 await writeFile(options.out, JSON.stringify(rows, null, 2) + "\n");
+if (options.sources) await writeFile(options.sources, JSON.stringify(keptSources) + "\n");
 process.exit(rows.every((row) => row.counted || row.pass) ? 0 : 1);

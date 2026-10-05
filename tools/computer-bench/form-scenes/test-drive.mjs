@@ -679,13 +679,17 @@ const DRAWN = await scene("drawn", `<!doctype html><html lang="en"><meta charset
 /* One run of the drivers on every scene, once. The run keeps its trace — the steps it took and what it sent — which a run does only when it is given the door's words; the built `door_text`
  * example is not built here, so a stand-in says a word and no more, and a test reads the trace for a value that must not be in it. */
 const out = join(root, "rows.json");
+const sourcesFile = join(root, "sources.json");
 const stub = join(root, "door-text-stub.sh");
 await writeFile(stub, `#!/bin/sh\ncat > /dev/null\nprintf '%s' '{"words":"stub"}'\n`, { mode: 0o755 });
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", VENUE_PAIR, "--scene", BERTH_COUNT, "--scene", SPLIT_SECRET, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--door-text", stub, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", VENUE_PAIR, "--scene", BERTH_COUNT, "--scene", SPLIT_SECRET, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--door-text", stub, "--out", out, "--sources", sourcesFile], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
+/* What each road sent to the door, text by text (`--sources`): what a model's calls would have carried. */
+const sources = await readFile(sourcesFile, "utf8").then(JSON.parse, () => []);
+const sourcesOf = (scene, road) => sources.filter((one) => one.scene === scene && one.road === road).map((one) => one.text);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
 const roadOut = join(root, "road.json");
 const road = spawnSync(process.execPath, [join(HERE, "person-road.mjs"), "--scene", PERSON_KEPT, "--scene", PERSON_LEFT, "--out", roadOut], { encoding: "utf8", timeout: 240_000 });
@@ -697,6 +701,17 @@ await test("the drivers run to their end on every scene and keep a row for each 
   assert(rows.some((one) => one.road === "verbs") && rows.some((one) => one.road === "script"), "the driver kept a row for each road", String(done.stderr || done.error || "").slice(0, 600));
   assert(roadRows.length > 0, "and the person's road kept its rows too", String(road.stderr || road.error || "").slice(0, 600));
   return `${rows.length} rows, ${roadRows.length} rows of the person's road`;
+});
+
+/* The bench's own watch (t-41720): what a road sent and what the door answered are kept, and the row says in counts how many of them carry a value that was typed as a secret. */
+await test("a driver keeps the texts it sent to the door, and its row says in counts how many records carry a value typed as a secret", () => {
+  assert(sources.length > 0 && sources.every((one) => typeof one.scene === "string" && typeof one.text === "string" && Number.isInteger(one.at)), "the sources hold each text with its scene, road and place", sources.slice(0, 2));
+  for (const road of ["verbs", "script"]) {
+    const one = row("framed-secret", road);
+    assert(one && one.leaks && ["requests", "answers", "trace"].every((key) => Number.isInteger(one.leaks[key])), `the row says its counts (${road})`, one && one.leaks);
+    assert(sourcesOf("framed-secret", road).some((text) => text.includes("Kim")), `and the sources hold what the road sent (${road})`);
+  }
+  return `${sources.length} texts`;
 });
 
 await test("a driver reads a form again before it presses when its fill brought a field of its own", () => {
