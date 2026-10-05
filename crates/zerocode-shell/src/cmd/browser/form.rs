@@ -536,8 +536,8 @@ const zcFieldOut = (record, request, fresh = null) => {
   if (fresh) {
     const texts = fresh.byHandle.get(record.handle) || [];
     if (texts.length) out.fresh = texts;
-    // Marked invalid, and nothing the page wrote ties words to it or stands new beside it.
-    if (out.error === zcInvalidWord && !texts.length) out.silent = true;
+    // Marked invalid, and nothing the page wrote ties words to it, stands new beside it or stood beside it all along.
+    if (out.error === zcInvalidWord && fresh.quiet.has(record.handle)) out.silent = true;
   }
   return out;
 };
@@ -698,7 +698,8 @@ const zcTellApart = (records) => {
 };
 // The pieces of text a box shows now: each drawn text with a letter or a digit in it, outside every
 // control and every box the page does not draw — its words as the page wrote them, and a key that
-// tells it from another by its words alone.
+// tells it from another by its words alone: its numbers are set aside, so a counter that counts or a
+// countdown that runs is the same text.
 const zcPieces = (root, request) => {
   const skip = "select, textarea, button, option, script, style, template, [role=option], [role=listbox]";
   const found = [];
@@ -708,7 +709,7 @@ const zcPieces = (root, request) => {
   for (let node = walker.nextNode(); node && found.length < request.pieceCap; node = walker.nextNode()) {
     if (node.nodeType !== 3 || !/[\p{L}\p{N}]/u.test(node.nodeValue)) continue;
     const text = String(node.nodeValue).replace(/\s+/g, " ").trim();
-    found.push({ node, text, key: zcDigest(zcFold(text)) });
+    found.push({ node, text, key: zcDigest(zcFold(text).replace(/\p{N}+/gu, "#")) });
   }
   return found;
 };
@@ -748,36 +749,52 @@ const zcTextBefore = (read, request) => {
   const live = zcLiveRegions(request).flatMap((region) => zcPieces(region, request).map((piece) => piece.key));
   return { groups, live };
 };
+// Whether a piece of text is the field's own words: inside the control itself, or the field's name,
+// value, placeholder, note or one of its choices said again — whole words in the same order, so the
+// value a page echoes beside the field it was written to is the field's, not the page's.
+const zcFieldsOwnPiece = (record, piece) => {
+  if (record.el.contains(piece.node)) return true;
+  const said = " " + zcFold(piece.text) + " ";
+  return [record.label, record.placeholder, record.note, typeof record.value === "boolean" ? "" : record.value,
+    ...record.choices.map((choice) => choice.words)].some((words) => words && (" " + zcFold(words) + " ").includes(said));
+};
 // What a write or a press brought, against what the page showed before it (`before`, `zcTextBefore`'s
-// answer): per field, the text that stands new in the box around it — never the words the page tied to the
-// field as its error, which the field says itself — and, beside no field, the text new in a live region.
+// answer): per field, the words that stand new in the box around it — never the field's own words, a
+// number that only counts, or the words the page tied to the field as its error, which the field says
+// itself — and, beside no field, the words new in a live region. `quiet` are the fields whose box holds
+// no words but their own: what a page that marks one invalid says nothing of.
 const zcFresh = (records, before, request) => {
   const byHandle = new Map();
+  const quiet = new Set();
   const taken = new Set();
+  const words = (piece) => /\p{L}/u.test(piece.text);
   for (const record of records) {
     const known = before.groups && before.groups[record.handle];
     const box = known ? zcFieldBox(record, request) : null;
     if (!box) continue;
     const said = zcFold(record.error);
     const texts = [];
+    let stands = false;
     for (const piece of zcPieces(box, request)) {
-      if (known.includes(piece.key) || taken.has(piece.node)) continue;
+      if (taken.has(piece.node) || !words(piece) || zcFieldsOwnPiece(record, piece)) continue;
+      if (known.includes(piece.key)) { stands = true; continue; }
       taken.add(piece.node);
       if (said && said.includes(zcFold(piece.text))) continue;
       texts.push(zcWords(piece.text, request.wordCap));
     }
     if (texts.length) byHandle.set(record.handle, texts.slice(0, request.freshCap));
+    else if (!stands) quiet.add(record.handle);
   }
   const alerts = [];
   const seen = new Set(before.live || []);
   for (const region of zcLiveRegions(request)) {
     for (const piece of zcPieces(region, request)) {
-      if (seen.has(piece.key) || taken.has(piece.node)) continue;
+      if (seen.has(piece.key) || taken.has(piece.node) || !words(piece)) continue;
       taken.add(piece.node);
       alerts.push(zcWords(piece.text, request.wordCap));
     }
   }
-  return { byHandle, alerts: alerts.slice(0, request.freshCap) };
+  return { byHandle, quiet, alerts: alerts.slice(0, request.freshCap) };
 };
 // Every field the page draws, in its order, frames after the page, and the
 // buttons that stand with them. With `before` — what the page showed before a write or a press —

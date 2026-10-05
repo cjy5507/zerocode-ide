@@ -145,10 +145,13 @@ A form is data, so fill it as data, not a picture per field:
    Read `fields` again before you submit. The answer also says what stands new
    in the box around a field you wrote — `— 새로 뜬 글: 「…」`, the page's own
    words, never called an error: a check that writes its verdict beside the
-   field and ties it to nothing is read this way — marks a field the page calls
-   invalid and says nothing of why with `⚠ aria-invalid — 페이지가 이유를 말하지
-   않음`, and names what the page's alert and status regions said, beside no
-   field, as `새로 뜬 알림: 「…」`.
+   field and ties it to nothing is read this way (a number that only counts, a
+   countdown, and the value the field itself shows are not new words) — marks a
+   field the page calls invalid and says nothing of why with `⚠ aria-invalid —
+   페이지가 이유를 말하지 않음` (only when no words but the field's own stand in
+   its box: a sentence that stood beside it all along may be the reason, so
+   then it says only `⚠ aria-invalid`), and names what the page's alert and
+   status regions said, beside no field, as `새로 뜬 알림: 「…」`.
 3. Press the step's button by its handle (`click <pane-label> <handle>`) —
    a step's button that turns on once the fields are right is already `켜짐`
    on that last line, so press it from there with no `fields` between — and
