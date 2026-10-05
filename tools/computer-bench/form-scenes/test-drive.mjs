@@ -692,10 +692,9 @@ const road = spawnSync(process.execPath, [join(HERE, "person-road.mjs"), "--scen
 const roadRows = await readFile(roadOut, "utf8").then(JSON.parse, () => []);
 
 /* The first thing every other test stands on: the driver ran to its end on every scene and kept a row for each road. A driver that does not even load (a syntax error in its file) leaves no row, and every
- * test after this one would then say only that its own road did not do its work. */
+ * test after this one would then say only that its own road did not do its work. (The driver's exit code says nothing: it ends with 1 when a scene is stuck, and some scenes here are meant to be.) */
 await test("the drivers run to their end on every scene and keep a row for each road", () => {
-  assert(done.status === 0, `the driver exited with ${done.status}`, String(done.stderr || done.error || "").slice(0, 600));
-  assert(rows.some((one) => one.road === "verbs") && rows.some((one) => one.road === "script"), "and kept a row for each road", rows.length);
+  assert(rows.some((one) => one.road === "verbs") && rows.some((one) => one.road === "script"), "the driver kept a row for each road", String(done.stderr || done.error || "").slice(0, 600));
   assert(roadRows.length > 0, "and the person's road kept its rows too", String(road.stderr || road.error || "").slice(0, 600));
   return `${rows.length} rows, ${roadRows.length} rows of the person's road`;
 });
