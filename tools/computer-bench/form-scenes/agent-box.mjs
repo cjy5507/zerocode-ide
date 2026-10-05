@@ -33,7 +33,7 @@ export const REAL_ONLY_NAMES = ["zerocode-emulator", "zerocode-orc", "zerocode-s
 /* What the agent may use: Bash for the stand-in alone, and the skill that
  * teaches it — as the window installs the skill into each agent's home. */
 export const TOOLS = ["Bash", "Skill"];
-export const ALLOWED_TOOLS = ["Bash(zerocode-browser:*)", "Bash(zerocode-computer:*)", "Skill"];
+export const ALLOWED_TOOLS = ["Bash(zerocode-browser *)", "Bash(zerocode-computer *)", "Skill"];
 /* The limits of one run: turns, and seconds. */
 export const MAX_TURNS = 60;
 export const CAP_SECONDS = 600;

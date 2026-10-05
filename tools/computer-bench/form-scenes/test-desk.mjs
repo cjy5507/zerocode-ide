@@ -184,7 +184,7 @@ await test("the box: a narrow tool list, no widening flag, an environment from n
   assert(args.includes("--allowedTools") && ALLOWED_TOOLS.every((tool) => args.includes(tool)), "the tools are the narrow ones");
   assert(!args.some((word) => /^Bash$|^Bash\(\*\)$/.test(word) && args[args.indexOf(word) - 1] === "--allowedTools"), "Bash as a whole is not allowed");
   assert(argsProblems([...args, "--dangerously-skip-permissions"]).length > 0, "a flag that skips permission checks is refused");
-  assert(argsProblems(args.map((word) => (word === "Bash(zerocode-computer:*)" ? "Bash" : word))).length > 0, "Bash as a whole is refused");
+  assert(argsProblems(args.map((word) => (word === ALLOWED_TOOLS[1] ? "Bash" : word))).length > 0, "Bash as a whole is refused");
   const names = Object.keys(boxEnv({ bin, home: "/h", config: "/c", tmp: "/t", account: "/a", desk: "http://127.0.0.1:1", user: "u" }));
   assert(!names.some((name) => /(TOKEN|SECRET|PASSWORD)/.test(name)) && !names.includes("ANTHROPIC_API_KEY"), "no token travels in the environment", names);
   const holds = checkPath(env.PATH, bin);
