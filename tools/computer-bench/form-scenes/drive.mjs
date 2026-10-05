@@ -134,16 +134,17 @@ function codeConfirmer(actions, codeField) {
   return live.find((action) => INTENT.confirm.includes(fold(action.label))) || null;
 }
 
-/* Whether a label holds the card's words whole: the words stand in it with no letter or number against either end (`North Gate 9` is held by `Gate 9 · open`
- * and not by `North Gate 90`). */
+/* Whether a label holds the card's words whole: the words stand in it with no number before them and no letter or number after them (`North Gate 9` is held by
+ * `Gate 9 · open` and not by `North Gate 90`; `25` is not held by `125`). A tag text a page draws against the front of the words — `SpotNorth Gate 9` — has no space in the label
+ * and is no part of the words: a letter before them does not break them, a number does. */
 function holdsWhole(label, value) {
   const want = fold(value);
   if (!want) return false;
   const text = fold(label);
-  const word = /[\p{L}\p{N}]/u;
+  const word = /[\p{L}\p{N}]/u, number = /\p{N}/u;
   for (let from = text.indexOf(want); from >= 0; from = text.indexOf(want, from + 1)) {
     const before = text[from - 1], after = text[from + want.length];
-    if (!(before && word.test(before)) && !(after && word.test(after))) return true;
+    if (!(before && number.test(before)) && !(after && word.test(after))) return true;
   }
   return false;
 }
