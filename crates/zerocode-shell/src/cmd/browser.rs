@@ -3917,7 +3917,8 @@ if (input || area) {
 let edited = false;
 let method = "editing-command";
 try {
-  edited = doc.execCommand("insertText", false, request.text);
+  // The editing command of the document the field stands in: the page's own, or the frame's for a field inside a frame.
+  edited = framed ? doc.execCommand("insertText", false, request.text) : document.execCommand("insertText", false, request.text);
 } catch (_) {}
 const current = input || area ? element.value : element.textContent;
 if (!edited || current !== request.text) {
