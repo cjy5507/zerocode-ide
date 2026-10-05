@@ -15,10 +15,12 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *     zero, for a row whose ledger kept no time to count from; a verification nobody merged says so
  *     in the tooltip, in the same terms. */
 
-const NOW = Date.now();
 const HOUR = 3600_000;
 
-const SCENE = [
+/* The rows of the sidebar's scene, counted back from the moment the suite RUNS: the window suite imports
+ * every suite at its start and reaches this one minutes later, so a clock read at import made
+ * 「reported a moment ago」 seven minutes old in the whole-suite run. */
+const sceneAt = (NOW) => [
   { path: "/r/rev", settled: { reported: true, task: "waits for a review", review_since_ms: NOW - 3 * HOUR } },
   { path: "/r/revold", settled: { reported: true, task: "an older row, no time kept" } },
   { path: "/r/revnow", settled: { reported: true, task: "reported a moment ago", review_since_ms: NOW - 20_000 } },
@@ -88,6 +90,7 @@ export async function testLandingAlerts({ browser, origin, ok, faults }) {
     );
 
     /* ---- the sidebar's time ---- */
+    const SCENE = sceneAt(Date.now());
     await page.evaluate(async (scene) => {
       const asked = (over = {}) => ({ verified: false, merged: false, deployed: false, written: false, ...over });
       const ledger = [];
