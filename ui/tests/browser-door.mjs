@@ -2881,6 +2881,27 @@ await test("a_fill_given_a_date_for_a_button_that_opens_a_dialog_opens_it_pages_
   } finally { await stay.close(); }
 });
 
+/* A frame's page is small and is read whole (t-41720): the buttons of a search's results, drawn beside the search form and not in it, are in the read — a window that holds a search shows its results
+ * there. A page's own buttons are still those beside its fields. */
+const SEARCH_FRAME = `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <div id="layer"><iframe id="fr" title="Locker search" srcdoc='&lt;!doctype html&gt;&lt;form id="f"&gt;&lt;input id="q" aria-label="Search words"&gt;&lt;button type="submit"&gt;Go&lt;/button&gt;&lt;/form&gt;&lt;p&gt;Results follow&lt;/p&gt;&lt;div id="out"&gt;&lt;/div&gt;&lt;script&gt;document.getElementById("f").addEventListener("submit", function (event) { event.preventDefault(); document.getElementById("out").innerHTML = "&lt;button type=button&gt;Locker A&lt;/button&gt;&lt;button type=button&gt;Locker B&lt;/button&gt;"; });&lt;/script&gt;'></iframe></div>
+  <button type="button" id="page-button">Page button</button>
+</form>`;
+await test("a_frame_of_the_same_origin_is_read_whole_so_the_buttons_of_its_results_beside_its_search_form_are_in_the_read", async () => {
+  const searching = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  try {
+    await searching.setContent(SEARCH_FRAME);
+    await searching.waitForTimeout(200);
+    await searching.evaluate(() => document.getElementById("fr").contentDocument.querySelector("button[type=submit]").click());
+    await searching.waitForTimeout(100);
+    const read = await readFields(searching);
+    const labels = read.actions.map((one) => one.label);
+    assert(labels.includes("Locker A") && labels.includes("Locker B"), "the results drawn beside the frame's search form are buttons of the read", read.actions);
+    assert(read.actions.filter((one) => one.label === "Locker A")[0].handle.startsWith("#fr >> "), "each with the handle that names the frame and the button inside it", read.actions);
+    return labels.join(" · ");
+  } finally { await searching.close(); }
+});
+
 await browser.close();
 
 let failed = 0;
