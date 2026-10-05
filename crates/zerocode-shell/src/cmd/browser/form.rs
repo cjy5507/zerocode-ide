@@ -658,15 +658,23 @@ const zcHeld = (el) => {
   const says = zcSaysItIs(el);
   return request.holds.some((word) => says.includes(word));
 };
+// A control that says in its own markup it submits its form — `type="submit"`
+// on a button or an input, an input of type image — is no pager, whatever it is
+// named: pressed on a guess it would send the form. A button with no type at
+// all is still a candidate (calendar libraries draw their pagers so).
+const zcSubmits = (el) => {
+  const type = String(el.getAttribute("type") || "").toLowerCase();
+  return type === "submit" || (zcFormTag(el) === "input" && type === "image");
+};
 // The controls that page a calendar: the drawn buttons around its heading
-// that are no day, say no words (an arrow, an icon) and name no press that
-// cannot be taken back — and which way each pages is learnt by pressing it
-// and reading the heading again.
+// that are no day, say no words (an arrow, an icon), submit nothing and name
+// no press that cannot be taken back — and which way each pages is learnt by
+// pressing it and reading the heading again.
 const zcPagers = (grid) => [...grid.root.querySelectorAll(request.actions.join(","))]
   .filter((button) => zcDrawn(button) && !zcOff(button) && !grid.cells.includes(button)
     && !grid.cells.some((cell) => button.contains(cell) || cell.contains(button))
     && !/[\p{L}\p{N}]/u.test(String(button.innerText || button.textContent || ""))
-    && !zcHeld(button));
+    && !zcSubmits(button) && !zcHeld(button));
 const zcMonthNumber = ([year, month]) => year * 12 + month;
 // The calendars nearest a field — those sharing the deepest box with it —
 // and how deep that box is: a calendar another field left open is not this
