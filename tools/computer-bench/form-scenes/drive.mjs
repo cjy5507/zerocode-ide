@@ -506,7 +506,10 @@ class Road {
     const known = this.form, buttons = this.buttons;
     const filled = await this.call("fill", () => fillPasses((source) => this.run(source), bundle, this.form));
     if (this.ask) {
-      this.note({ verb: "fill", sent: bundle, words: this.ask({ op: "fill", label: "browser-1", text: JSON.stringify(bundle), passes: filled.rounds, known, buttons }).words });
+      // What was sent is recorded without the value of a field the fill left to `type`: that value goes by `type --value-stdin` alone and is in no record, as it is in no answer of the door.
+      const sent = { ...bundle };
+      for (const result of filled.results || []) if (result?.status === "secret" && result.handle in sent) sent[result.handle] = "(비밀 칸 — type으로)";
+      this.note({ verb: "fill", sent, words: this.ask({ op: "fill", label: "browser-1", text: JSON.stringify(bundle), passes: filled.rounds, known, buttons }).words });
     }
     if (!filled.stale) this.buttons = filled.actions || [];
     if (filled.stale) {
