@@ -2225,7 +2225,9 @@ await test("a_row_of_buttons_that_say_they_are_pressed_is_one_field_named_by_its
     await chips.setContent(`<!doctype html><html lang="en"><meta charset="utf-8"><form>
       <div id="yn"><button type="button" aria-pressed="false">Yes</button><button type="button" aria-pressed="false">No</button></div>
       <ul id="wrapped"><li><button type="button" aria-pressed="false">Alpha</button></li><li><button type="button" aria-pressed="true">Beta</button></li><li><button type="button" aria-pressed="false">Gamma</button></li></ul>
-      <div id="tri"><button type="button" aria-pressed="mixed">Some</button><button type="button" aria-pressed="false">Few</button></div></form>`);
+      <div id="tri"><button type="button" aria-pressed="mixed">Some</button><button type="button" aria-pressed="false">Few</button></div>
+      <div class="flat"><label for="p1">Pin</label><input id="p1" type="password"><button type="button" aria-pressed="false">Reveal pin</button>
+        <label for="p2">Repeat</label><input id="p2" type="password"><button type="button" aria-pressed="false">Reveal repeat</button></div></form>`);
     const bare = await readFields(chips);
     const yn = bare.fields.find((one) => one.handle === "#yn");
     const wrapped = bare.fields.find((one) => one.handle === "#wrapped");
@@ -2234,7 +2236,10 @@ await test("a_row_of_buttons_that_say_they_are_pressed_is_one_field_named_by_its
     assert(wrapped && wrapped.kind === "chips" && JSON.stringify(wrapped.options) === JSON.stringify(["Alpha", "Beta", "Gamma"])
       && JSON.stringify(wrapped.value) === JSON.stringify(["Beta"]), "buttons each in a box of their own are one row", bare.fields);
     assert(!bare.fields.some((one) => one.handle === "#tri") && ["Some", "Few"].every((label) => bare.actions.some((one) => one.label === label)),
-      "a button half pressed says a state the read has no word for: it stays a button, and so does the one beside it", { fields: bare.fields.map((one) => one.handle), actions: bare.actions.map((one) => one.label) });
+      "a button half pressed says a state the read has no word for: it stays a button, and so does the one beside it — it is no row of the chips the page has elsewhere", { fields: bare.fields.map((one) => one.handle), actions: bare.actions.map((one) => one.label) });
+    assert(bare.fields.filter((one) => one.kind === "chips").map((one) => one.handle).sort().join() === "#wrapped,#yn"
+      && ["Reveal pin", "Reveal repeat"].every((label) => bare.actions.some((one) => one.label === label)),
+    "toggles with a field between them, each beside its own, are buttons and no row", { fields: bare.fields.map((one) => `${one.kind} ${one.handle}`), actions: bare.actions.map((one) => one.label) });
     return [likes, diet, yn].map((one) => one.label || "(no title)").join(" · ");
   } finally { await chips.close(); }
 });

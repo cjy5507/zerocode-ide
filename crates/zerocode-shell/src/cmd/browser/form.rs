@@ -297,35 +297,52 @@ const zcHoldsField = (box, request) => {
   return [...box.querySelectorAll(kinds)].some((control) => zcDrawn(control)
     && !(zcFormTag(control) === "input" && request.notFields.includes(String(control.type || "").toLowerCase())));
 };
-// The box a chip is one of a row in: the lowest box around it that holds another chip — its parent, or,
-// for chips each in a box of their own (a list's items), the box around them within the caption's reach —
-// unless a field stands in a nearer box with it: then it is that field's (a "show" beside a password).
-const zcChipRowOf = (chip, all, request) => {
-  let box = chip.parentElement;
-  for (let level = 0; box && level < request.captionDepth; level += 1, box = box.parentElement) {
-    if (all.filter((other) => box.contains(other)).length > 1) {
-      return level === 0 || !zcHoldsField(box, request) ? box : null;
-    }
-    if (zcHoldsField(box, request) || box.matches("body, form, [role=form], dialog, [role=dialog], main")) return null;
+// The rows of chips a document draws, each with its chips in the page's order. Chips that stand side by
+// side in one box are one row. A chip in a box of its own (a list's item) joins the row of the box around it,
+// or the other such chips that box holds, within the caption's reach — chips already in a row of their own
+// are not counted again, so a lone toggle far from any row is no row's. A chip that stands in a box with a
+// field of its own (a "show" beside a password) is that field's, and in no row.
+const zcChipRowsOf = (doc, request) => {
+  const all = [...doc.querySelectorAll("[aria-pressed]")].filter((one) => zcIsChip(one, request));
+  const rows = new Map();
+  const taken = new Set();
+  const take = (box, chips) => {
+    rows.set(box, (rows.get(box) || []).concat(chips));
+    for (const chip of chips) taken.add(chip);
+  };
+  const kinds = request.controls.filter((selector) => selector !== "[tabindex]").join(",");
+  const isField = (el) => zcHoldsField(el, request) || (el.matches(kinds) && zcDrawn(el)
+    && !(zcFormTag(el) === "input" && request.notFields.includes(String(el.type || "").toLowerCase())));
+  const beside = new Map();
+  for (const chip of all) beside.set(chip.parentElement, (beside.get(chip.parentElement) || []).concat(chip));
+  for (const [box, chips] of beside) {
+    if (!box || chips.length < 2) continue;
+    // Chips with a field between them are not side by side: each stands beside a field of its own.
+    const kids = [...box.children];
+    const spots = chips.map((chip) => kids.indexOf(chip));
+    if (kids.slice(Math.min(...spots), Math.max(...spots) + 1).some((kid) => !chips.includes(kid) && isField(kid))) continue;
+    take(box, chips);
   }
-  return null;
+  for (const chip of all) {
+    if (taken.has(chip)) continue;
+    let box = chip.parentElement;
+    for (let level = 0; box && level < request.captionDepth; level += 1, box = box.parentElement) {
+      if (rows.has(box)) { take(box, [chip]); break; }
+      const loose = all.filter((other) => !taken.has(other) && box.contains(other));
+      if (loose.length > 1 && !zcHoldsField(box, request)) { take(box, loose); break; }
+      if (zcHoldsField(box, request) || box.matches("body, form, [role=form], dialog, [role=dialog], main")) break;
+    }
+  }
+  for (const [box, chips] of rows) rows.set(box, all.filter((chip) => chips.includes(chip)));
+  return rows;
 };
 // The chips of a row, in the page's order.
 const zcChipsOf = (row, request) => {
   if (!row.querySelector("[aria-pressed]")) return [];
-  const all = [...row.ownerDocument.querySelectorAll("[aria-pressed]")].filter((one) => zcIsChip(one, request));
-  return all.filter((chip) => row.contains(chip) && zcChipRowOf(chip, all, request) === row);
+  return zcChipRowsOf(row.ownerDocument, request).get(row) || [];
 };
-// Every row of chips a document draws, in the page's order.
-const zcChipRows = (doc, request) => {
-  const all = [...doc.querySelectorAll("[aria-pressed]")].filter((one) => zcIsChip(one, request));
-  const rows = [];
-  for (const chip of all) {
-    const row = zcChipRowOf(chip, all, request);
-    if (row && !rows.includes(row)) rows.push(row);
-  }
-  return rows;
-};
+// Every row of chips a document draws.
+const zcChipRows = (doc, request) => [...zcChipRowsOf(doc, request).keys()];
 // The chips of a row, and its choices: each one that can be pressed now, with its words and whether it is pressed.
 const zcChipChoices = (row, request) => {
   const chips = zcChipsOf(row, request);
