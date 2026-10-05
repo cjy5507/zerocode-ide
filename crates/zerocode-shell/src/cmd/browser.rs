@@ -86,8 +86,9 @@ pub(crate) struct BrowserInputReport {
     /// from which a settle counts the document's stillness (t-6721).
     #[serde(skip)]
     pub(crate) pressed_at: Option<f64>,
-    /// How the page settled after a press by number (t-6721) — said in the
-    /// press's sentence ([`input_said`]); a press by selector does not wait.
+    /// How the page settled after a press by number (t-6721), or by selector in
+    /// a form its agent had read (t-41592) — said in the press's sentence
+    /// ([`input_said`]); any other press by selector does not wait.
     #[serde(skip)]
     pub(crate) settle: Option<SettleReport>,
     /// What the page said after a press in a form its agent had read, set
@@ -2588,7 +2589,12 @@ pub(crate) async fn automate_click(
 ) -> Result<BrowserInputReport, String> {
     checked_selector(selector)?;
     let pane = browser_pane_of(app, state, label)?;
-    press(&pane, selector, None).await
+    // A pane whose agent has read a form is pressed in it: the page is waited for and read, and said
+    // against that form. A pane that has read none is pressed as it was, with no read of its own.
+    match form::known_form(label) {
+        Some(known) => form::press_in_form(&pane, label, selector, known).await,
+        None => press(&pane, selector, None).await,
+    }
 }
 
 /// The one press: the click's page script by a selector, answered as the

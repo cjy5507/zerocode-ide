@@ -20,7 +20,7 @@ use zerocode_core::browser_form::{
     BROWSER_FORM_LISTS, BROWSER_FORM_LIVE, BROWSER_FORM_MONTH_DAYS, BROWSER_FORM_MONTH_PAGES,
     BROWSER_FORM_NOT_FIELDS, BROWSER_FORM_OPTION_CAP, BROWSER_FORM_OPTIONS, BROWSER_FORM_PIECE_CAP,
     BROWSER_FORM_PRESSABLES, BROWSER_FORM_SCAN_CAP, BROWSER_FORM_SCOPES, FillEntry, FillLedger,
-    FillPass, FillReport, FormAction, FormRead, PressRead,
+    FillPass, FillReport, FormAction, FormRead, PressAfter, PressRead,
 };
 
 /// What a read of a page's forms is made of, page side — read only, like the
@@ -182,6 +182,8 @@ const zcCaption = (el, request) => {
   if (term && zcFormTag(term) === "dt" && zcLabelWords(term).trim()) return zcLabelWords(term);
   return zcWordsBefore(el, request);
 };
+// What a field the page marks invalid is read as when nothing the page wrote says why.
+const zcInvalidWord = "aria-invalid";
 const zcErrorOf = (el) => {
   if (el.getAttribute("aria-invalid") === "true") {
     const doc = el.ownerDocument;
@@ -189,7 +191,7 @@ const zcErrorOf = (el) => {
       + String(el.getAttribute("aria-describedby") || "")).split(/\s+/).filter(Boolean);
     const said = ids.map((id) => doc.getElementById(id)).filter(Boolean)
       .map((node) => node.textContent).join(" ");
-    return said.trim() || el.validationMessage || "aria-invalid";
+    return said.trim() || el.validationMessage || zcInvalidWord;
   }
   if (el.validity && !el.validity.valid && !el.validity.valueMissing) return el.validationMessage || "";
   return "";
@@ -517,7 +519,7 @@ const zcHintOf = (record, request) => {
   }
   return "";
 };
-const zcFieldOut = (record, request) => {
+const zcFieldOut = (record, request, fresh = null) => {
   const cap = request.wordCap;
   const out = { handle: record.handle, kind: record.kind, label: zcWords(record.label, cap),
     section: zcWords(zcNear(record.el, request.field), cap),
@@ -535,6 +537,12 @@ const zcFieldOut = (record, request) => {
     if (hint) out.hint = hint;
   }
   if (!out.hint && record.note) out.hint = zcWords(record.note, cap);
+  if (fresh) {
+    const texts = fresh.byHandle.get(record.handle) || [];
+    if (texts.length) out.fresh = texts;
+    // Marked invalid, and nothing the page wrote ties words to it or stands new beside it.
+    if (out.error === zcInvalidWord && !texts.length) out.silent = true;
+  }
   return out;
 };
 // A field whose value the door never reads (a password) is not empty: it is unread.
@@ -687,9 +695,94 @@ const zcTellApart = (records, request) => {
     });
   }
 };
+// The pieces of text a box shows now: each drawn text with a letter or a digit in it, outside every
+// control and every box the page does not draw — its words as the page wrote them, and a key that
+// tells it from another by its words alone.
+const zcPieces = (root, request) => {
+  const skip = "select, textarea, button, option, script, style, template, [role=option], [role=listbox]";
+  const found = [];
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => node.nodeType === 1 && (node.matches(skip) || !zcDrawn(node))
+      ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+  for (let node = walker.nextNode(); node && found.length < request.pieceCap; node = walker.nextNode()) {
+    if (node.nodeType !== 3 || !/[\p{L}\p{N}]/u.test(node.nodeValue)) continue;
+    const text = String(node.nodeValue).replace(/\s+/g, " ").trim();
+    found.push({ node, text, key: zcDigest(zcFold(text)) });
+  }
+  return found;
+};
+// The outermost box around a field that holds no other field, within the caption's reach — where a
+// page writes what it has to say about the field. The form's own box counts when no other field
+// stands in it.
+const zcFieldBox = (record, request) => {
+  const controls = request.controls.join(",");
+  const mine = new Set([record.el, ...record.choices.map((choice) => choice.el).filter(Boolean)]);
+  let best = null;
+  let box = record.el.parentElement;
+  for (let level = 0; box && level < request.captionDepth; level += 1, box = box.parentElement) {
+    const crowded = [...box.querySelectorAll(controls)].some((other) => !mine.has(other)
+      && !record.el.contains(other) && !other.contains(record.el) && zcFieldKind(other, request));
+    if (crowded) break;
+    best = box;
+    if (box.matches("form, [role=form], dialog, [role=dialog], main, body")) break;
+  }
+  return best;
+};
+// The regions the page announces its changes in, drawn now, in every document the read walks.
+const zcLiveRegions = (request) => {
+  const regions = [];
+  for (const { doc } of zcDocs(request).open) {
+    for (const region of doc.querySelectorAll(request.live.join(","))) if (zcDrawn(region)) regions.push(region);
+  }
+  return regions;
+};
+// What the page shows about each field now, to tell later what a write or a press brought: per field
+// (by handle) the keys of the pieces of text in the box around it, and the keys of every live region's text.
+const zcTextBefore = (read, request) => {
+  const groups = {};
+  for (const record of read.records) {
+    const box = zcFieldBox(record, request);
+    if (box) groups[record.handle] = zcPieces(box, request).map((piece) => piece.key);
+  }
+  const live = zcLiveRegions(request).flatMap((region) => zcPieces(region, request).map((piece) => piece.key));
+  return { groups, live };
+};
+// What a write or a press brought, against what the page showed before it (`before`, `zcTextBefore`'s
+// answer): per field, the text that stands new in the box around it — never the words the page tied to the
+// field as its error, which the field says itself — and, beside no field, the text new in a live region.
+const zcFresh = (records, before, request) => {
+  const byHandle = new Map();
+  const taken = new Set();
+  for (const record of records) {
+    const known = before.groups && before.groups[record.handle];
+    const box = known ? zcFieldBox(record, request) : null;
+    if (!box) continue;
+    const said = zcFold(record.error);
+    const texts = [];
+    for (const piece of zcPieces(box, request)) {
+      if (known.includes(piece.key) || taken.has(piece.node)) continue;
+      taken.add(piece.node);
+      if (said && said.includes(zcFold(piece.text))) continue;
+      texts.push(zcWords(piece.text, request.wordCap));
+    }
+    if (texts.length) byHandle.set(record.handle, texts.slice(0, request.freshCap));
+  }
+  const alerts = [];
+  const seen = new Set(before.live || []);
+  for (const region of zcLiveRegions(request)) {
+    for (const piece of zcPieces(region, request)) {
+      if (seen.has(piece.key) || taken.has(piece.node)) continue;
+      taken.add(piece.node);
+      alerts.push(zcWords(piece.text, request.wordCap));
+    }
+  }
+  return { byHandle, alerts: alerts.slice(0, request.freshCap) };
+};
 // Every field the page draws, in its order, frames after the page, and the
-// buttons that stand with them.
-const zcFormFields = (request) => {
+// buttons that stand with them. With `before` — what the page showed before a write or a press —
+// each field also says what stands new beside it, and the read says the notices the page's live
+// regions made.
+const zcFormFields = (request, before = null) => {
   const docs = zcDocs(request);
   const records = [];
   const seen = new Set();
@@ -745,8 +838,9 @@ const zcFormFields = (request) => {
   // never a value, which a fill is there to change.
   const print = zcDigest(records.map((record) => [record.handle, record.kind, zcFold(record.label)]
     .join("\u001f")).join("\u001e"));
-  return { records, fields: records.map((record) => zcFieldOut(record, request)), actions,
-    more, sealed: docs.sealed, print, unknowns, scrollBoxes };
+  const fresh = before ? zcFresh(records, before, request) : null;
+  return { records, fields: records.map((record) => zcFieldOut(record, request, fresh)), actions,
+    more, sealed: docs.sealed, print, unknowns, scrollBoxes, alerts: fresh ? fresh.alerts : [] };
 };
 "##;
 
@@ -1240,10 +1334,9 @@ const zcTarget = (handle) => {
 // the write did when this half ends. `watch`, when given, is the settle's: it
 // stands before the first write, so the pass's own changes are the first it sees.
 const zcFillWrite = (entries, expect, watch) => {
-  if (expect) {
-    const now = zcFormFields(request).print;
-    if (now !== expect) return { stale: true, fingerprint: now, wrote: false, held: [] };
-  }
+  const read = zcFormFields(request);
+  if (expect && read.print !== expect) return { stale: true, fingerprint: read.print, wrote: false, held: [] };
+  const before = zcTextBefore(read, request);
   if (watch) zcSettleWatch(watch);
   const held = entries.map((entry) => {
     const out = { handle: entry.handle, status: "unread", kind: "", label: "", now: "", error: "", options: [] };
@@ -1272,16 +1365,19 @@ const zcFillWrite = (entries, expect, watch) => {
     return { ...base, value: entry.value, status: null, wrote: true };
   });
   return { stale: false, fingerprint: "", wrote: held.some((one) => one.wrote), epoch: zcEpoch(),
-    at: performance.now(), held };
+    at: performance.now(), held, before };
 };
 // The read-back, once the page has settled: each written field read again
 // where its handle finds it now (a page may have drawn it anew), then what the
 // form still wants and the buttons it has. A page that is no longer the
 // document the write was made in answers each written field `replaced` — what
 // it held is gone — and the form of the document that stands now.
-const zcFillRead = (held, epoch) => {
+const zcFillRead = (input, epoch) => {
+  // What the write held: the entries alone, or — with what stood before the write — both.
+  const held = Array.isArray(input) ? input : input.held;
+  const before = Array.isArray(input) ? null : input.before || null;
   const replaced = zcEpoch() !== epoch;
-  const after = zcFormFields(request);
+  const after = zcFormFields(request, replaced ? null : before);
   const results = held.map((one) => {
     const out = one.out;
     if (one.status) {
@@ -1304,11 +1400,18 @@ const zcFillRead = (held, epoch) => {
     out.status = zcHolds(now, one.value) ? (one.wrote ? "set" : "same") : "mismatch";
     return out;
   });
-  // A field is said by the name the whole read gave it (two of one name are told apart there).
-  const named = new Map(after.records.map((record) => [record.handle, zcWords(record.label, request.wordCap)]));
-  for (const result of results) if (named.has(result.handle)) result.label = named.get(result.handle);
+  // A field is said by the name the whole read gave it (two of one name are told apart there), with
+  // what stands new beside it and whether the page said nothing of why it marks it invalid.
+  const said = new Map(after.fields.map((field) => [field.handle, field]));
+  for (const result of results) {
+    const field = said.get(result.handle);
+    if (!field) continue;
+    result.label = field.label;
+    if (field.fresh) result.fresh = field.fresh;
+    if (field.silent) result.silent = true;
+  }
   const left = after.fields.filter((field) => (field.required && zcEmpty(field)) || field.error);
-  return { results, left, stale: false, fingerprint: after.print, actions: after.actions };
+  return { results, left, stale: false, fingerprint: after.print, actions: after.actions, alerts: after.alerts };
 };
 // One whole pass in one synchronous run, as an eval's `zerocode.fill` has it:
 // a field the page loads or turns on later is the next call's.
@@ -1316,7 +1419,7 @@ const zcFill = (entries, expect) => {
   const written = zcFillWrite(entries, expect, null);
   return written.stale
     ? { results: [], left: [], stale: true, fingerprint: written.fingerprint }
-    : zcFillRead(written.held, written.epoch);
+    : zcFillRead({ held: written.held, before: written.before }, written.epoch);
 };
 "#;
 
@@ -1328,6 +1431,23 @@ const value = request.phase === "read"
   ? zcFillRead(request.held, request.epoch)
   : zcFillWrite(request.entries, request.expect || null, request.watch);
 return zcEncode({ ok: true, value }, request.answerCap);
+"#;
+
+/// What the page says before a press by selector in a form its agent read: the settle's watch stands, and
+/// the document, with what the form's fields' boxes and the live regions show — what the read after the
+/// press says is new against.
+pub(crate) const BROWSER_PRESS_BEFORE_BODY: &str = r#"
+zcSettleWatch(request.watch);
+return zcEncode({ ok: true, value: { epoch: zcEpoch(), before: zcTextBefore(zcFormFields(request), request) } }, request.answerCap);
+"#;
+
+/// What the page says once a press has been made and the page has settled: the form's fingerprint and
+/// buttons, the fields with something to say — an error, a value still wanted, text new beside them —
+/// and the notices its live regions made.
+pub(crate) const BROWSER_PRESS_AFTER_BODY: &str = r#"
+const read = zcFormFields(request, request.before);
+const noted = read.fields.filter((field) => field.fresh || field.error || (field.required && zcEmpty(field)));
+return zcEncode({ ok: true, value: { fingerprint: read.print, actions: read.actions, noted, alerts: read.alerts } }, request.answerCap);
 "#;
 
 /// The form pair inside an `eval` (t-37883): an expression that names
@@ -1514,7 +1634,14 @@ where
     } else {
         None
     };
-    let mut pass = read(written.held, written.epoch).await?;
+    // The read half is handed what the write held and, when the write took it, what the
+    // form's boxes showed before it.
+    let handed = if written.before.is_null() {
+        written.held
+    } else {
+        serde_json::json!({ "held": written.held, "before": written.before })
+    };
+    let mut pass = read(handed, written.epoch).await?;
     pass.moving = settled.map(|settled| settled.state != Settle::Ready);
     Ok(pass)
 }
@@ -1558,10 +1685,10 @@ where
     R: FnOnce(serde_json::Value) -> RF,
     RF: std::future::Future<Output = Result<PressRead, String>>,
 {
-    let _ = before;
+    let stood = before().await?;
     let report = press().await?;
-    let read = read(serde_json::Value::Null).await?;
-    let settle = settle(String::new(), report.pressed_at).await;
+    let settle = settle(stood.epoch, report.pressed_at).await;
+    let read = read(stood.before).await?;
     Ok(PressedAfter {
         report,
         settle,
@@ -1569,15 +1696,51 @@ where
     })
 }
 
-/// A press by selector on a pane whose agent has read a form.
+/// A press by selector on a pane whose agent has read a form: the page's text
+/// before it, the press, the settle after a press ([`settle_after_press`], the
+/// one road — nothing new waits for a page here), the form read again with what
+/// the press brought — set against the form the agent read, as a fill's answer
+/// is. What it leaves is the form the agent knows next, unless the form moved
+/// on: then the agent reads it again, and a fill held to the old one says so.
 pub(crate) async fn press_in_form(
     pane: &BrowserPane,
     label: &str,
     selector: &str,
     known: String,
 ) -> Result<BrowserInputReport, String> {
-    let _ = (label, known);
-    press(pane, selector, None).await
+    let unreadable = |_| "브라우저 판의 누름 뒤 양식 읽기를 읽을 수 없습니다".to_string();
+    let buttons = known_buttons(label);
+    let done = pressed_after(
+        || async move {
+            let script = form_script(&form_request(), BROWSER_PRESS_BEFORE_BODY);
+            let reply = page_json(pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+            serde_json::from_value::<PressBefore>(page_value(reply)?).map_err(unreadable)
+        },
+        || press(pane, selector, None),
+        |epoch, at| async move { settle_after_press(pane, &epoch, at).await },
+        |before| async move {
+            let mut request = form_request();
+            request["before"] = before;
+            let script = form_script(&request, BROWSER_PRESS_AFTER_BODY);
+            let reply = page_json(pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+            serde_json::from_value::<PressRead>(page_value(reply)?).map_err(unreadable)
+        },
+    )
+    .await?;
+    let PressedAfter {
+        mut report,
+        settle,
+        read,
+    } = done;
+    let moving = settle.state != Settle::Ready;
+    let after = PressAfter::against(read, Some(known.as_str()), &buttons, moving);
+    if after.changed == Some(false) {
+        remember_form(label, &after.read.fingerprint);
+        remember_buttons(label, &after.read.actions);
+    }
+    report.settle = Some(settle);
+    report.after = Some(after);
+    Ok(report)
 }
 
 /// A fill script: the form helpers, the writer, and a body that calls it.

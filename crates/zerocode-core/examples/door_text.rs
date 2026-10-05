@@ -10,6 +10,7 @@
 //! echo '{"op":"parse","argv":["fill","browser-1","--value","{\"#a\":\"x\"}"]}' | door_text
 //! echo '{"op":"fields","label":"browser-1","json":false,"read":{…}}'          | door_text
 //! echo '{"op":"fill","label":"browser-1","text":"{…}","passes":[{"asked":["#a"],"pass":{…}}],"known":"…","buttons":[…]}' | door_text
+//! echo '{"op":"press","label":"browser-1","read":{…},"known":"…","buttons":[…],"moving":false}' | door_text
 //! echo '{"op":"fence","label":"browser-1","words":"…"}'                         | door_text
 //! echo '{"op":"usage","door":"browser"}'                                        | door_text
 //! ```
@@ -18,7 +19,9 @@ use std::io::Read as _;
 
 use serde_json::{Value, json};
 use zerocode_core::agent_browser::{self, ClickTarget, ScrollTarget};
-use zerocode_core::browser_form::{self, FillLedger, FillPass, FormAction, FormRead};
+use zerocode_core::browser_form::{
+    self, FillLedger, FillPass, FormAction, FormRead, PressAfter, PressRead,
+};
 use zerocode_core::untrusted;
 
 fn main() {
@@ -32,6 +35,7 @@ fn main() {
         "parse" => parse(&asked),
         "fields" => fields(&asked),
         "fill" => fill(&asked),
+        "press" => press(&asked),
         "fence" => fence(&asked),
         "usage" => usage(&asked),
         other => json!({ "ok": false, "words": format!("door_text: no op `{other}`\n") }),
@@ -154,6 +158,25 @@ fn fill(asked: &Value) -> Value {
     }
     let fenced = untrusted::fence(label_of(asked), &words, usize::MAX);
     json!({ "ok": report.all_took(), "words": fenced })
+}
+
+/// The lines under a click in a form the agent read: what the page said once the
+/// press was made and it had settled (`read`), set against the form the agent read
+/// before it (`known`, its fingerprint, and the `buttons` it had) and said the
+/// way the window says them — inside the fence. `changed` says whether the form
+/// moved on, so the caller keeps what the agent now knows.
+fn press(asked: &Value) -> Value {
+    let read: PressRead = serde_json::from_value(asked["read"].clone()).unwrap_or_default();
+    let buttons: Vec<FormAction> =
+        serde_json::from_value(asked["buttons"].clone()).unwrap_or_default();
+    let moving = asked["moving"].as_bool().unwrap_or(false);
+    let after = PressAfter::against(read, asked["known"].as_str(), &buttons, moving);
+    let words = browser_form::press_lines(&after);
+    json!({
+        "ok": true,
+        "words": untrusted::fence(label_of(asked), &words, usize::MAX),
+        "changed": after.changed,
+    })
 }
 
 /// Words a page wrote, inside the one fence every agent road uses.

@@ -115,6 +115,17 @@ A form is data, so fill it as data, not a picture per field:
    beside them. A field nothing names is read by its table header, its term
    or the words just before it; parts of one value side by side (a phone
    number in three boxes) are `<words> (1/3)`, `(2/3)`, … with their length.
+   A button that opens a list (`aria-haspopup="listbox"`) is a field too —
+   `combobox`, named by the words beside it (never by the value it shows),
+   holding what it shows, `(열림)` or `(닫힘)`, with the items of its list — and
+   `fill` chooses an item by its words. Fields of one name are told apart by
+   the title of the row, item or card each stands in (`<title>: <words>`),
+   else numbered (`<words> #1`, `#2`, with `(같은 이름이라 번호만 붙임)`: the
+   number is only an order). A group of radios is named by its title; the
+   sentence between the title and the group is its `— 안내:`. A required field
+   whose value the door never reads (a password) is counted `값을 읽지 않는
+   필수`, not as empty. A step with no field of its own (a review, a
+   confirmation) still lists its buttons.
 2. `fill <pane-label> --value-stdin` with one JSON object of handle → value
    for everything you know, in the page's order. Words for text and dates
    (`2026-11-03`), a choice's words for a select, radio or a dropdown the
@@ -131,12 +142,24 @@ A form is data, so fill it as data, not a picture per field:
    that changes later than that is the next read's: a fill that waited ends with
    `※ … 그 뒤에 뜨는 오류는 못 봅니다 — 제출 전에 fields로 다시 읽으세요`, and
    it means it — an error a check shows only after a pause is not in the answer.
-   Read `fields` again before you submit.
+   Read `fields` again before you submit. The answer also says what stands new
+   in the box around a field you wrote — `— 새로 뜬 글: 「…」`, the page's own
+   words, never called an error: a check that writes its verdict beside the
+   field and ties it to nothing is read this way — marks a field the page calls
+   invalid and says nothing of why with `⚠ aria-invalid — 페이지가 이유를 말하지
+   않음`, and names what the page's alert and status regions said, beside no
+   field, as `새로 뜬 알림: 「…」`.
 3. Press the step's button by its handle (`click <pane-label> <handle>`) —
    a step's button that turns on once the fields are right is already `켜짐`
    on that last line, so press it from there with no `fields` between — and
    read `fields` again only when the page moved on to another step (`양식
-   바뀜`).
+   바뀜`). In a pane whose form you have read, a `click` answers more than its
+   own sentence (which now says how the page settled): below it, `양식 그대로`
+   or `양식 바뀜(fields로 다시 읽기)` with the buttons as they are now, and for
+   a form that stayed `남은 칸:` with each field's error and the text that
+   stands new beside it, `새로 뜬 알림`, and the same `※ … 못 봅니다` note. A
+   "next" that does not move on says why there, in the page's words. A click in
+   a pane whose form you never read is answered as it was.
 
 A `fill` is held to the form your last `fields` read (or your last fill
 left): when a field has gone, been renamed or added, or the page is on

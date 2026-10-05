@@ -606,6 +606,7 @@ impl FillLedger {
         if let Some(moving) = pass.moving {
             self.moving = moving;
             self.settled = true;
+            self.alerts = pass.alerts;
         }
     }
 
@@ -669,6 +670,33 @@ pub struct FillReport {
     pub hidden: Vec<FormAction>,
 }
 
+/// The buttons of a read that no button of the form now matches: matched one to
+/// one, by their words first and then, among those left, by their handle (a
+/// button found by its place moves when a banner is added above it and is the
+/// same button). What no button matches is what the page took away.
+fn hidden_buttons(known: &[FormAction], now: &[FormAction]) -> Vec<FormAction> {
+    let mut now: Vec<&FormAction> = now.iter().collect();
+    let mut unmatched = Vec::new();
+    for before in known {
+        match now.iter().position(|one| one.label == before.label) {
+            Some(at) => {
+                now.remove(at);
+            }
+            None => unmatched.push(before),
+        }
+    }
+    let mut hidden = Vec::new();
+    for before in unmatched {
+        match now.iter().position(|one| one.handle == before.handle) {
+            Some(at) => {
+                now.remove(at);
+            }
+            None => hidden.push(before.clone()),
+        }
+    }
+    hidden
+}
+
 impl FillReport {
     /// The report set against the form the agent read before the fill — its
     /// fingerprint, and the buttons that read had — which is what the last
@@ -682,27 +710,11 @@ impl FillReport {
     #[must_use]
     pub fn against(mut self, known: Option<&str>, buttons: &[FormAction]) -> Self {
         self.changed = known.map(|print| print != self.fingerprint);
-        self.hidden = Vec::new();
-        if self.changed == Some(false) {
-            let mut now: Vec<&FormAction> = self.actions.iter().collect();
-            let mut unmatched = Vec::new();
-            for before in buttons {
-                match now.iter().position(|one| one.label == before.label) {
-                    Some(at) => {
-                        now.remove(at);
-                    }
-                    None => unmatched.push(before),
-                }
-            }
-            for before in unmatched {
-                match now.iter().position(|one| one.handle == before.handle) {
-                    Some(at) => {
-                        now.remove(at);
-                    }
-                    None => self.hidden.push(before.clone()),
-                }
-            }
-        }
+        self.hidden = if self.changed == Some(false) {
+            hidden_buttons(buttons, &self.actions)
+        } else {
+            Vec::new()
+        };
         self
     }
 
@@ -749,7 +761,9 @@ pub struct PressAfter {
 
 impl PressAfter {
     /// The read set against the form the agent knew (its fingerprint and
-    /// buttons).
+    /// buttons), as a fill's is: the same form or another, and the buttons the
+    /// page took away — none when the form changed, which has lost every button
+    /// of the old one.
     #[must_use]
     pub fn against(
         read: PressRead,
@@ -757,19 +771,69 @@ impl PressAfter {
         buttons: &[FormAction],
         moving: bool,
     ) -> Self {
-        let _ = (known, buttons);
+        let changed = known.map(|print| print != read.fingerprint);
+        let hidden = if changed == Some(false) {
+            hidden_buttons(buttons, &read.actions)
+        } else {
+            Vec::new()
+        };
         Self {
             read,
+            changed,
+            hidden,
             moving,
-            ..Self::default()
+            settled: true,
         }
     }
 }
 
-/// The words after a press the agent made in a form it had read.
+/// The words after a press the agent made in a form it had read: whether the
+/// form stayed and its buttons now — as a fill ends — and, for a form that
+/// stayed, what stands left and what appeared beside a field (the reason a
+/// "next" that did not move on gives), the notices of the page, and that the page
+/// was read after it stood still. A form that moved on says only so: the agent
+/// reads it again.
 #[must_use]
-pub fn press_lines(_after: &PressAfter) -> String {
-    String::new()
+pub fn press_lines(after: &PressAfter) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.extend(after_words(
+        after.changed,
+        after.moving,
+        &after.read.actions,
+        &after.hidden,
+    ));
+    if after.changed != Some(true) {
+        if !after.read.noted.is_empty() {
+            lines.push("남은 칸:".to_string());
+            lines.extend(after.read.noted.iter().map(left_line));
+        }
+        if !after.read.alerts.is_empty() {
+            lines.push(format!("새로 뜬 알림: {}", quoted(&after.read.alerts)));
+        }
+        if after.settled && !after.moving {
+            lines.push(late_note("누른"));
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The page's words, each in its brackets, one after another.
+fn quoted(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|one| format!("「{one}」"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// An error as a line says it: a field the page marked invalid and said nothing
+/// of is told so, for what it is.
+fn error_words(error: &str, silent: bool) -> String {
+    if silent {
+        format!("{error} — 페이지가 이유를 말하지 않음")
+    } else {
+        error.to_string()
+    }
 }
 
 /// The choices a line shows, and how many more there are.
@@ -820,7 +884,7 @@ fn field_line(field: &FormField) -> String {
         line.push_str(&format!(" — 안내: {}", field.hint));
     }
     if !field.error.is_empty() {
-        line.push_str(&format!(" ⚠ {}", field.error));
+        line.push_str(&format!(" ⚠ {}", error_words(&field.error, field.silent)));
     }
     line.push_str(&choices(&field.options, field.more_options));
     line
@@ -934,36 +998,60 @@ fn widget_words(widget: &FormWidget) -> String {
     )
 }
 
-/// What is left of a form after a fill, one field to a line.
+/// What is left of a form after a fill or a press, one field to a line: what is
+/// wrong with it — the page's error, or that it is required and has no value to
+/// look at — and the text that stands new beside it.
 fn left_line(field: &FormField) -> String {
-    let why = if !field.error.is_empty() {
-        field.error.clone()
-    } else if field.masked {
-        "값을 읽지 않음".to_string()
+    let mut says: Vec<String> = Vec::new();
+    if !field.error.is_empty() {
+        says.push(error_words(&field.error, field.silent));
+    } else if field.required && field.value.is_empty() {
+        says.push(if field.masked {
+            "값을 읽지 않음".to_string()
+        } else {
+            "필수, 비어 있음".to_string()
+        });
+    }
+    if !field.fresh.is_empty() {
+        says.push(format!("새로 뜬 글: {}", quoted(&field.fresh)));
+    }
+    let head = format!("  {} · {} · {}", field.handle, field.kind, field.label);
+    if says.is_empty() {
+        head
     } else {
-        "필수, 비어 있음".to_string()
-    };
-    format!(
-        "  {} · {} · {} — {why}",
-        field.handle, field.kind, field.label
-    )
+        format!("{head} — {}", says.join(" · "))
+    }
 }
 
 /// The last line of a fill: whether the form is the one the agent read, the
 /// buttons it has now — on or off — and the ones the page took away. Nothing
 /// when the agent read no form and there is no button to say.
 fn after_line(report: &FillReport) -> Option<String> {
+    after_words(
+        report.changed,
+        report.moving,
+        &report.actions,
+        &report.hidden,
+    )
+}
+
+/// The words a fill and a press end with: the form, its buttons, those gone.
+fn after_words(
+    changed: Option<bool>,
+    moving: bool,
+    actions: &[FormAction],
+    hidden: &[FormAction],
+) -> Option<String> {
     // A page still changing is no "same form" and no settled button: it says so first.
-    let form = match report.changed {
-        _ if report.moving => Some("아직 바뀌는 중(fields로 다시 읽기)"),
+    let form = match changed {
+        _ if moving => Some("아직 바뀌는 중(fields로 다시 읽기)"),
         Some(true) => Some("양식 바뀜(fields로 다시 읽기)"),
         Some(false) => Some("양식 그대로"),
         None => None,
     };
     let mut parts = Vec::new();
-    if !report.actions.is_empty() {
-        let buttons: Vec<String> = report
-            .actions
+    if !actions.is_empty() {
+        let buttons: Vec<String> = actions
             .iter()
             .map(|action| {
                 let state = if action.disabled { "꺼짐" } else { "켜짐" };
@@ -972,9 +1060,8 @@ fn after_line(report: &FillReport) -> Option<String> {
             .collect();
         parts.push(format!("버튼: {}", buttons.join(", ")));
     }
-    if !report.hidden.is_empty() {
-        let gone: Vec<String> = report
-            .hidden
+    if !hidden.is_empty() {
+        let gone: Vec<String> = hidden
             .iter()
             .map(|action| format!("{} 「{}」", action.handle, action.label))
             .collect();
@@ -989,11 +1076,12 @@ fn after_line(report: &FillReport) -> Option<String> {
 }
 
 /// What a read made once the page stood still cannot see, said at the end of a
-/// fill that waited for the page and found it still: an error a quiet timer
-/// shows later is not in the answer, so it is not the page's last word.
-fn late_note() -> String {
+/// fill or a press that waited for the page and found it still (`verb`: what was
+/// done — "쓴" or "누른"): an error a quiet timer shows later is not in the answer,
+/// so it is not the page's last word.
+fn late_note(verb: &str) -> String {
     format!(
-        "※ 쓴 뒤 {} ms 동안 가만히 있는 것을 보고 읽었습니다. 그 뒤에 뜨는 오류는 못 봅니다 — 제출 전에 fields로 다시 읽으세요",
+        "※ {verb} 뒤 {} ms 동안 가만히 있는 것을 보고 읽었습니다. 그 뒤에 뜨는 오류는 못 봅니다 — 제출 전에 fields로 다시 읽으세요",
         crate::agent_browser::BROWSER_SETTLE_QUIET_MS
     )
 }
@@ -1035,7 +1123,10 @@ pub fn fill_lines(report: &FillReport) -> String {
             }
         }
         if !result.error.is_empty() {
-            line.push_str(&format!(" ⚠ {}", result.error));
+            line.push_str(&format!(" ⚠ {}", error_words(&result.error, result.silent)));
+        }
+        if !result.fresh.is_empty() {
+            line.push_str(&format!(" — 새로 뜬 글: {}", quoted(&result.fresh)));
         }
         lines.push(line);
     }
@@ -1043,10 +1134,13 @@ pub fn fill_lines(report: &FillReport) -> String {
         lines.push("남은 칸:".to_string());
         lines.extend(report.left.iter().map(left_line));
     }
+    if !report.alerts.is_empty() {
+        lines.push(format!("새로 뜬 알림: {}", quoted(&report.alerts)));
+    }
     lines.extend(after_line(report));
     // A page still changing already says to read again.
     if report.settled && !report.moving {
-        lines.push(late_note());
+        lines.push(late_note("쓴"));
     }
     lines.join("\n") + "\n"
 }

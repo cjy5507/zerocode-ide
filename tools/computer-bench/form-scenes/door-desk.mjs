@@ -21,7 +21,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
 import {
   CLICK_SAID, EXPRESSION_CAP, FILL_POLL_MS, TYPED_SAID, WAIT_DEFAULT_MS, WAIT_MAX_MS, WAIT_MIN_MS, WAIT_TIMED_OUT,
-  clickScript, evalScript, fieldsScript, fillPasses, readScript, scrollScript, typeScript, waitScript,
+  clickScript, evalScript, fieldsScript, fillPasses, pressInForm, readScript, scrollScript, typeScript, waitScript,
 } from "../../../ui/tests/browser-scripts.mjs";
 import { serveScene } from "./scene-kit.mjs";
 
@@ -84,12 +84,14 @@ class Refused extends Error {}
 
 const pageFailure = (reply) => PAGE_FAILURES[reply?.code] || PAGE_FAILED;
 
-/* `input_said`: what a press or a typing did, then the way in and its limit. */
-function inputSaid(what, report) {
+/* `input_said`: what a press or a typing did, then the way in and its limit — and, for a press that
+ * waited for its page (`settle`, from the settle road), how it settled (`settle_facts`). */
+function inputSaid(what, report, settle = null) {
   const [trusted, limitation] = INPUT_WAYS[report.method];
   const rect = Array.isArray(report.rect) && report.rect.length === 4 && typeof report.dpr === "number"
     ? `, rect=${report.rect.join(",")}, dpr=${report.dpr}` : "";
-  return `${what} (method=${report.method}, trusted-events=${trusted}${rect})${limitation ? ` — ${limitation}` : ""}`;
+  const settled = settle ? `, settle=${settle.state}, settle-why=${settle.why}, settle-ms=${settle.ms}` : "";
+  return `${what} (method=${report.method}, trusted-events=${trusted}${rect}${settled})${limitation ? ` — ${limitation}` : ""}`;
 }
 
 /* The page's report of a press or a typing, kept to the ways its road may answer. */
@@ -250,7 +252,18 @@ export async function startFormDesk({ scene, doorText, headless = true }) {
       if (gone) return gone;
       if (parsed.mark) return unwired("click --mark");
       checkedSelector(parsed.css);
-      return said(`${inputSaid(CLICK_SAID, inputReport(await call(clickScript(parsed.css)), "click"))}\n`);
+      // A pane whose agent has read no form is pressed as it always was.
+      if (form === null) return said(`${inputSaid(CLICK_SAID, inputReport(await call(clickScript(parsed.css)), "click"))}\n`);
+      // One that has is pressed in it (`press_in_form`): the page waited for and read, and said against that form.
+      const done = await pressInForm(run, parsed.css);
+      const sentence = inputSaid(CLICK_SAID, inputReport(done.pressed, "click"), done.settle);
+      const after = ask({ op: "press", label: argv[1], read: done.read, known: form, buttons: formButtons, moving: done.moving });
+      // What the agent knows next: the form it read, kept while it is the form.
+      if (after.changed === false) {
+        form = done.read.fingerprint || null;
+        formButtons = done.read.actions || [];
+      }
+      return said(`${sentence}\n${after.words}`);
     }
     if (verb === "type" && (words === 4 || (words === 5 && argv[3] === "--value"))) {
       const gone = wrongPane(argv[1]);

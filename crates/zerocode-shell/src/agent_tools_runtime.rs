@@ -6319,10 +6319,20 @@ pub(super) async fn answer_browser_command(
             match pressed {
                 Ok(report) => {
                     crate::browser_read::label_press(&argv[1], "click", &report);
-                    browser_said(format!(
-                        "{}\n",
-                        cmd::browser::input_said(cmd::browser::CLICK_SAID, &report)
-                    ))
+                    let sentence = cmd::browser::input_said(cmd::browser::CLICK_SAID, &report);
+                    // A press in a form the agent had read says, below its own sentence and in
+                    // the page's words inside the fence, what the form is now (t-41592).
+                    match &report.after {
+                        Some(after) => browser_said(format!(
+                            "{sentence}\n{}",
+                            zerocode_core::untrusted::fence(
+                                &argv[1],
+                                &zerocode_core::browser_form::press_lines(after),
+                                usize::MAX
+                            )
+                        )),
+                        None => browser_said(format!("{sentence}\n")),
+                    }
                 }
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }

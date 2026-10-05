@@ -58,6 +58,10 @@ export const FORM_HELPERS = rustText(FORM, "BROWSER_FORM_HELPERS");
 export const FIELDS_BODY = rustText(FORM, "BROWSER_FIELDS_BODY");
 export const FILL_HELPERS = rustText(FORM, "BROWSER_FILL_HELPERS");
 export const FILL_BODY = rustText(FORM, "BROWSER_FILL_BODY");
+/* A press by selector in a form its agent read: what the page says before it and what it says after
+ * the page has settled (`press_in_form`). */
+export const PRESS_BEFORE_BODY = rustText(FORM, "BROWSER_PRESS_BEFORE_BODY");
+export const PRESS_AFTER_BODY = rustText(FORM, "BROWSER_PRESS_AFTER_BODY");
 export const EVAL_FORM = rustText(FORM, "BROWSER_EVAL_FORM");
 export const EVAL_FORM_OBJECT = rustText(CORE, "BROWSER_EVAL_FORM_OBJECT");
 /* What the window settles a page by after a press (`settle_after_press`). */
@@ -126,6 +130,10 @@ export const fillWriteScript = (entries, expect = null) => formScript({ ...FORM_
   `${need("BROWSER_FILL_HELPERS", FILL_HELPERS)}\n${need("BROWSER_FILL_BODY", FILL_BODY)}`);
 export const fillReadScript = (held, epoch) => formScript({ ...FORM_REQUEST, held, epoch, phase: "read" },
   `${need("BROWSER_FILL_HELPERS", FILL_HELPERS)}\n${need("BROWSER_FILL_BODY", FILL_BODY)}`);
+/* The two halves of a press in a known form: before it, the document with the settle's watch and what the
+ * form's boxes show; after the page has settled, the form read again with what stood before. */
+export const pressBeforeScript = () => formScript(FORM_REQUEST, need("BROWSER_PRESS_BEFORE_BODY", PRESS_BEFORE_BODY));
+export const pressAfterScript = (before) => formScript({ ...FORM_REQUEST, before }, need("BROWSER_PRESS_AFTER_BODY", PRESS_AFTER_BODY));
 /* `settle_after_press`'s script: what the page says of itself on one settle poll. */
 export const settleScript = () => doorScript({ watch: need("the settle's watch name", GUEST_KEY), busy: need("BROWSER_SETTLE_BUSY", SETTLE_BUSY).join(",") },
   `${need("BROWSER_OBSERVE_HELPERS", OBSERVE_HELPERS)}\n${need("BROWSER_SETTLE_BODY", SETTLE_BODY)}`);
@@ -203,15 +211,16 @@ export async function settled(run, epoch, since) {
   const from = typeof since === "number" ? since : -Infinity;
   const wait = (ms) => new Promise((done) => setTimeout(done, Math.max(0, ms)));
   let why = "unanswered";
+  const ended = (state, said) => ({ state, why: said, ms: Date.now() - began });
   for (;;) {
-    if (SETTLE_MS - (Date.now() - began) <= 0) return { state: "not_ready", why };
+    if (SETTLE_MS - (Date.now() - began) <= 0) return ended("not_ready", why);
     let facts = null;
     try { facts = (await run(settleScript())).value; } catch { /* the page did not answer this poll */ }
     if (!facts) { await wait(Math.min(SETTLE_QUIET_MS, SETTLE_MS - (Date.now() - began))); continue; }
-    if (facts.documentEpoch !== epoch) return { state: "invalidated", why: "replaced" };
-    if (!facts.watched) return { state: "not_ready", why: "unwatched" };
+    if (facts.documentEpoch !== epoch) return ended("invalidated", "replaced");
+    if (!facts.watched) return ended("not_ready", "unwatched");
     const still = facts.now - Math.max(facts.last, from);
-    if (!facts.busy && still >= SETTLE_QUIET_MS) return { state: "ready", why: "quiet" };
+    if (!facts.busy && still >= SETTLE_QUIET_MS) return ended("ready", "quiet");
     why = facts.busy ? "busy" : "moving";
     const next = facts.busy ? SETTLE_QUIET_MS : Math.min(Math.max(Math.ceil(SETTLE_QUIET_MS - still), 1), SETTLE_QUIET_MS);
     await wait(Math.min(next, SETTLE_MS - (Date.now() - began)));
@@ -232,7 +241,7 @@ export async function fillPasses(run, bundle, expect = null) {
   const last = new Map();
   const rounds = [];
   const began = Date.now();
-  let asked = entries, left = [], passes = 0, fingerprint = "", actions = [], moving = false;
+  let asked = entries, left = [], passes = 0, fingerprint = "", actions = [], moving = false, alerts = [];
   while (asked.length) {
     const written = await run(fillWriteScript(asked, passes === 0 ? expect : null));
     if (!written.ok) throw new Error(`a fill pass was refused: ${JSON.stringify(written)}`);
@@ -240,10 +249,10 @@ export async function fillPasses(run, bundle, expect = null) {
     if (written.value.stale) {
       fingerprint = written.value.fingerprint;
       rounds.push({ asked: asked.map((entry) => entry.handle), pass: { stale: true, fingerprint } });
-      return { results: entries.map(() => undefined), left: [], passes, stale: true, fingerprint, actions: [], moving: false, rounds };
+      return { results: entries.map(() => undefined), left: [], passes, stale: true, fingerprint, actions: [], moving: false, alerts: [], rounds };
     }
     const heard = written.value.wrote ? await settled(run, written.value.epoch, written.value.at) : null;
-    const read = await run(fillReadScript(written.value.held, written.value.epoch));
+    const read = await run(fillReadScript(written.value.before ? { held: written.value.held, before: written.value.before } : written.value.held, written.value.epoch));
     if (!read.ok) throw new Error(`a fill pass was refused: ${JSON.stringify(read)}`);
     const pass = { ...read.value, moving: heard === null ? null : heard.state !== "ready" };
     fingerprint = pass.fingerprint;
@@ -251,10 +260,25 @@ export async function fillPasses(run, bundle, expect = null) {
     for (const result of pass.results) last.set(result.handle, result);
     left = pass.left;
     actions = pass.actions || [];
-    if (pass.moving !== null) moving = pass.moving;
+    if (pass.moving !== null) { moving = pass.moving; alerts = pass.alerts || []; }
     asked = entries.filter((entry) => TRIES_AGAIN.includes(last.get(entry.handle)?.status));
     if (!asked.length || passes >= FILL_PASSES || Date.now() - began >= FILL_PENDING_MS) break;
     await new Promise((done) => setTimeout(done, FILL_POLL_MS));
   }
-  return { results: entries.map((entry) => last.get(entry.handle)), left, passes, stale: false, fingerprint, actions, moving, rounds };
+  return { results: entries.map((entry) => last.get(entry.handle)), left, passes, stale: false, fingerprint, actions, moving, alerts, rounds };
+}
+
+/* `press_in_form` over `run(script) → page answer`: a press by selector in a form its agent read — the
+ * page's text and the settle's watch before it, the press, the page's settle, then the form read again
+ * with what stood before. Answers the press's own report, how the page settled, whether it was still
+ * changing, and what the page said. */
+export async function pressInForm(run, selector) {
+  const stood = await run(pressBeforeScript());
+  if (!stood.ok) throw new Error(`a press was refused before it was made: ${JSON.stringify(stood)}`);
+  const pressed = await run(clickScript(selector));
+  if (!pressed.ok) throw new Error(`a press was refused: ${JSON.stringify(pressed)}`);
+  const heard = await settled(run, stood.value.epoch, pressed.value.pressedAt);
+  const read = await run(pressAfterScript(stood.value.before));
+  if (!read.ok) throw new Error(`the form was not read after a press: ${JSON.stringify(read)}`);
+  return { pressed: pressed.value, settle: heard, read: read.value, moving: heard.state !== "ready" };
 }

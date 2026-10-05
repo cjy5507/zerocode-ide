@@ -23675,7 +23675,7 @@ mod browser_form_fill {
         assert_eq!(request["holds"], json!(held));
         for key in [
             "notFields", "actions", "scopes", "options", "days", "dayWords", "on", "off", "lists",
-            "listItems", "pressables", "holds",
+            "listItems", "pressables", "holds", "live",
         ] {
             assert!(
                 request[key].as_array().is_some_and(|list| !list.is_empty()),
@@ -23684,7 +23684,8 @@ mod browser_form_fill {
         }
         for cap in [
             "fieldCap", "actionCap", "optionCap", "wordCap", "valueCap", "answerCap",
-            "frameDepth", "captionDepth", "monthDays", "monthPages", "scanCap",
+            "frameDepth", "captionDepth", "monthDays", "monthPages", "scanCap", "freshCap",
+            "pieceCap",
         ] {
             assert!(request[cap].as_u64().is_some_and(|n| n > 0), "{cap}");
         }
@@ -23709,6 +23710,8 @@ mod browser_form_fill {
             fill,
             cmd::browser::form::BROWSER_FILL_BODY,
             cmd::browser::form::BROWSER_EVAL_FORM,
+            cmd::browser::form::BROWSER_PRESS_BEFORE_BODY,
+            cmd::browser::form::BROWSER_PRESS_AFTER_BODY,
         ] {
             for place in [
                 "getBoundingClientRect",
