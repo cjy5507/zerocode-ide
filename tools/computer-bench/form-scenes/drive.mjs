@@ -29,7 +29,10 @@
  * What the numbers know (the report says it beside each one): the card's
  * facts; a stand-in for the model's reading — a fact goes to the field whose
  * words are the fact's words or hold them (parts `(i/n)` take the value's
- * number groups), a button's intent is read from a short list of words, and
+ * number groups; a group of chips takes the options a fact names, or lists), the
+ * button that moves a form on is chosen by what the door said of the buttons
+ * (the one the page declares a submit, else the one the fill turned on, else the
+ * page's last), a code's own buttons are read from a short list of words, and
  * the person's code goes, after a send, to the field whose words name a
  * one-time code or that the send brought, required or not; and nothing
  * about any scene — no handle, label, order or step is written here.
@@ -39,7 +42,8 @@
  *
  * What a model takes from the door's words and the skill, the driver does the same way: a fill
  * whose answer says the form changed is followed by a read of the form before anything is
- * pressed; a field the read says the page keeps off, with a box the read names as not yet read to
+ * pressed; a button that moves the form on and is off while the door has said new text (a check
+ * the page is still running) is waited for, a fixed number of times, and the form read again; a field the read says the page keeps off, with a box the read names as not yet read to
  * its end, is switched on by scrolling that box with an `eval` the way the skill teaches
  * (door-recipes.mjs), then the form is read again; a press in a form that was read is made as the
  * door makes it (`pressInForm`) — the page waited for and read after it.
@@ -70,14 +74,16 @@ const SECONDS_PER_ROUND_TRIP = 17;
 const ROUND_TRIPS_MAX = 40;
 // The most presses a calendar is given by hand before the driver moves on.
 const HAND_PRESSES = 12;
-// A button's intent, read from its words — the model's reading, in the two
-// languages the bench's pages are written in: a code to send, the step's
-// "next", the submit, and (the whole words) a code's own confirm button.
-// `oneTime` is a field's: what only the person's phone knows.
+// How long one wait lasts and how many times a button that is off is waited for: a page's own
+// check takes a second or two, and a model that waits more than a few times has stopped reading.
+const WAIT_MS = 1500;
+const WAITS_MAX = 3;
+// A code's buttons, read from their words — the model's reading, in the two languages the bench's
+// pages are written in: a code to send and (the whole words) a code's own confirm button. `oneTime` is
+// a field's: what only the person's phone knows. The button that moves a form on is no word list's:
+// `advancing` chooses it by what the door said of the buttons.
 const INTENT = {
   code: ["인증", "코드", "code", "verify", "otp", "발송", "전송"],
-  next: ["다음", "next", "continue", "계속"],
-  submit: ["예약", "결제", "신청", "제출", "등록", "완료", "확인", "submit", "book", "pay", "confirm", "finish", "register"],
   confirm: ["확인", "인증", "인증하기", "verify", "confirm"],
   oneTime: ["인증번호", "인증 번호", "인증코드", "일회용", "otp", "verification code", "one-time", "passcode"],
 };
@@ -87,6 +93,18 @@ const PART = / \((\d+)\/(\d+)\)$/;
 const words = (label) => fold(label).replace(PART, "").replace(/\s*\*$/, "");
 const took = (status) => status === "set" || status === "same";
 const intentOf = (label, intent) => INTENT[intent].some((word) => fold(label).includes(word));
+
+/* The button that moves a form on, chosen by what the door said of the buttons and by no word: the one the
+ * page declares a submit (`(제출 단추)`), else the one that was off before the fields were written and is on
+ * now, else the page's last — a step's own button stands after the ones that go back, apply or search. */
+function advancing(actions, before = []) {
+  const submits = actions.filter((action) => action.submit);
+  if (submits.length) return submits[submits.length - 1];
+  const turned = actions.filter((action) => !action.disabled
+    && before.some((one) => one.handle === action.handle && one.disabled));
+  if (turned.length) return turned[turned.length - 1];
+  return actions.length ? actions[actions.length - 1] : null;
+}
 
 function args(argv) {
   const parsed = { scene: [] };
@@ -100,7 +118,11 @@ function args(argv) {
 
 /* The model's reading, played by one rule: each fact to the field whose words
  * are its words, else the one field whose words hold them or are held by
- * them; a value split across `(i/n)` parts by its number groups. */
+ * them; a value split across `(i/n)` parts by its number groups. A group of
+ * chips takes the facts that name its options — true for an option to be
+ * pressed, false for one to be let go — as the list of the options wanted, and a
+ * fact that gives the group its words and a text as the text, which the door
+ * reads as a list. */
 function plan(fields, facts) {
   const bundle = {};
   const unplaced = [];
@@ -110,6 +132,20 @@ function plan(fields, facts) {
     if (!byWords.has(key)) byWords.set(key, []);
     byWords.get(key).push(field);
   }
+  const chips = fields.filter((field) => field.kind === "chips");
+  const wanted = new Map();
+  const optionOf = (said) => {
+    const hits = [];
+    for (const field of chips) {
+      for (const option of field.options || []) {
+        const key = fold(option);
+        if (key === said || (said && key.includes(said)) || (key && said.includes(key))) hits.push({ field, option, exact: key === said });
+      }
+    }
+    const exact = hits.filter((hit) => hit.exact);
+    const found = exact.length ? exact : hits;
+    return found.length === 1 ? found[0] : null;
+  };
   for (const fact of facts) {
     const said = fold(fact.says);
     let group = byWords.get(said);
@@ -118,12 +154,22 @@ function plan(fields, facts) {
       if (near.length === 1) group = near[0][1];
     }
     if (!group) {
+      const hit = typeof fact.value === "boolean" ? optionOf(said) : null;
+      if (hit) {
+        if (!wanted.has(hit.field.handle)) wanted.set(hit.field.handle, { field: hit.field, on: new Set() });
+        if (fact.value) wanted.get(hit.field.handle).on.add(hit.option);
+        continue;
+      }
       unplaced.push(fact);
       continue;
     }
     if (group.length === 1) {
       const [field] = group;
-      if (field.value !== fact.value) bundle[field.handle] = fact.value;
+      if (field.kind === "chips" && typeof fact.value === "string") {
+        if (fold((field.value || []).join(", ")) !== fold(fact.value)) bundle[field.handle] = fact.value;
+      } else if (field.value !== fact.value) {
+        bundle[field.handle] = fact.value;
+      }
       continue;
     }
     const groups = String(fact.value).match(/\d+/g) || [];
@@ -132,6 +178,10 @@ function plan(fields, facts) {
       const piece = pieces[at] ?? (at === 0 ? String(fact.value) : "");
       if (piece && field.value !== piece) bundle[field.handle] = piece;
     });
+  }
+  for (const { field, on } of wanted.values()) {
+    const list = (field.options || []).filter((option) => on.has(option));
+    if (JSON.stringify(list) !== JSON.stringify(field.value || [])) bundle[field.handle] = list;
   }
   return { bundle, unplaced };
 }
@@ -158,7 +208,11 @@ class Road {
     this.codeConfirmed = false;
     this.seen = [];
     this.beforeSend = new Set();
-    this.count = { roundTrips: 0, fields: 0, fill: 0, click: 0, eval: 0, type: 0, handoff: 0, read: 0, fillPasses: 0, stale: 0 };
+    this.count = { roundTrips: 0, fields: 0, fill: 0, click: 0, eval: 0, type: 0, handoff: 0, read: 0, wait: 0, fillPasses: 0, stale: 0 };
+    // What the door last said was new in the form — the page's own words after a write or a press —
+    // and how many times in a row the button that moves the form on has been waited for.
+    this.fresh = [];
+    this.waits = 0;
     // The secret fields typed on the setter road: a fill never reads one back,
     // so a field already typed is no longer asked of it nor owed by it.
     this.typed = new Set();
@@ -184,7 +238,8 @@ class Road {
     const began = performance.now();
     const answer = await run();
     const took = performance.now() - began;
-    this.scriptMs.push(took);
+    // A wait is the page's time, not the door's: it stays out of the calls' own timing.
+    if (kind !== "wait") this.scriptMs.push(took);
     (this.kindMs[kind] ||= []).push(took);
     return answer;
   }
@@ -224,6 +279,7 @@ class Road {
     }
     this.form = filled.fingerprint;
     this.count.fillPasses += filled.passes;
+    this.fresh = [...(filled.outside || []), ...(filled.alerts || []), ...filled.results.flatMap((result) => result?.fresh || [])];
     this.trail.push({ fill: filled.results.map((result) => `${result.label}:${result.status}`) });
     // What the driver does by hand after the fill's answer can turn a button on, so
     // the buttons that answer ended with are no longer the page's: the step is read again.
@@ -360,6 +416,7 @@ class Road {
     const entry = { verb: "click", handle: action.handle, label: action.label };
     if (this.ask) entry.words = this.ask({ op: "press", label: "browser-1", read: done.read, known, buttons, moving: done.moving }).words;
     this.note(entry);
+    this.fresh = [...(done.read.outside || []), ...(done.read.alerts || []), ...(done.read.noted || []).flatMap((one) => one.fresh || [])];
     if (done.read.fingerprint === known) {
       this.form = done.read.fingerprint;
       this.buttons = done.read.actions || this.buttons;
@@ -397,6 +454,21 @@ class Road {
     return result;
   }
 
+  /* Whether the page has taken what was given: the harness reads the page's own result — no round trip of
+   * the model's; the model reads the page's words after a press. */
+  async finished() {
+    return Boolean(await this.page.evaluate(() => window.__sceneResult || null));
+  }
+
+  /* A wait, as a model makes one when the page is still at work: a round trip that lets the page's own
+   * timers run; the form is read again after it. */
+  async wait() {
+    this.waits += 1;
+    this.note({ verb: "wait" });
+    this.trail.push({ wait: this.waits });
+    await this.call("wait", () => this.page.waitForTimeout(WAIT_MS));
+  }
+
   /* The verbs road: read, fill, then the step's one press — by the buttons
    * the last fill's answer ended with (a button that turns on once the fields
    * are right is on there), else by the read's. A press the page refuses (a
@@ -421,7 +493,7 @@ class Road {
         if (filled.stale || filled.byHand || filled.changed) continue;
         if (filled.actions.length) actions = filled.actions;
       }
-      if (await this.step(actions)) return this.done();
+      if (await this.step(actions, read.actions)) return this.done();
     }
   }
 
@@ -446,9 +518,11 @@ class Road {
   }
 
   /* The step's press: a code to send while one is owed, a code written
-   * confirmed by its own button once when the page has one, else "next",
-   * else the submit — true when the submit was pressed. */
-  async step(actions) {
+   * confirmed by its own button once when the page has one, else the button that moves
+   * the form on (`advancing`, by what the door said of the buttons) — when that one is off
+   * while the door has said new text, waited for a fixed number of times and the form read again —
+   * true when the page has taken what was given. */
+  async step(actions, before = []) {
     const live = actions.filter((action) => !action.disabled);
     if (this.codeTurn && !this.codeSent) {
       const send = live.find((action) => intentOf(action.label, "code"));
@@ -467,21 +541,25 @@ class Road {
         return false;
       }
     }
-    const next = live.find((action) => intentOf(action.label, "next"));
-    if (next) {
-      await this.press(next);
-      return false;
+    const advance = advancing(actions, before);
+    if (!advance) throw new Error("stuck: the form has no button");
+    if (advance.disabled) {
+      if (this.fresh.length && this.waits < WAITS_MAX) {
+        await this.wait();
+        return false;
+      }
+      throw new Error(`stuck: no button moves the form on (${live.map((a) => a.label).join(", ")})`);
     }
-    const submit = live.find((action) => intentOf(action.label, "submit") && !intentOf(action.label, "code"));
-    if (!submit) throw new Error(`stuck: no button moves the form on (${live.map((a) => a.label).join(", ")})`);
-    await this.press(submit);
-    return true;
+    this.waits = 0;
+    this.fresh = [];
+    await this.press(advance);
+    return this.finished();
   }
 
   /* The script road: one eval a step reads, fills by the words it read and
-   * presses the step's own "next" — or, while the person's code is owed and
+   * presses the button that moves the step on (`advancing`) — or, while the person's code is owed and
    * the step can send one, holds it; with a code just written, presses the
-   * code's own confirm button first. Sends and submits go by click. */
+   * code's own confirm button first. Sends, and a button the page declares a submit, go by click. */
   async script() {
     const STEP = `(() => {
       const fold = ${fold.toString()};
@@ -491,6 +569,7 @@ class Road {
       const took = ${took.toString()};
       const INTENT = ${JSON.stringify(INTENT)};
       const intentOf = ${intentOf.toString()};
+      const advancing = ${advancing.toString()};
       const facts = __FACTS__;
       const turn = __TURN__;
       const typed = __TYPED__;
@@ -513,13 +592,14 @@ class Road {
         ? live.find((action) => !inFrame(action) && INTENT.confirm.includes(fold(action.label))) : null;
       if (confirm) document.querySelector(confirm.handle).click();
       const hold = turn.owed && live.some((action) => intentOf(action.label, "code"));
-      const next = live.find((action) => intentOf(action.label, "next"));
-      const pressNext = clean && !moved && !confirm && !hold && !!next && !inFrame(next);
+      const next = advancing(actions, read.actions);
+      const pressNext = clean && !moved && !confirm && !hold && !!next && !next.disabled && !next.submit && !inFrame(next);
       if (pressNext) document.querySelector(next.handle).click();
       const hand = filled.results.filter((result) => result.status === "no_option")
         .map((result) => ({ ...result, asked: bundle[result.handle] }));
+      const fresh = [].concat(filled.outside || [], filled.alerts || [], ...filled.results.map((result) => result.fresh || []));
       return { results: filled.results.map((result) => result.label + ":" + result.status), left,
-        actions, pressedNext: pressNext, hand, viaType, unknowns: read.unknowns, unplaced, clean, moved,
+        actions, before: read.actions, fresh, pressedNext: pressNext, hand, viaType, unknowns: read.unknowns, unplaced, clean, moved,
         scrollBoxes: read.scrollBoxes || [],
         confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, label: field.label,
           value: field.value, required: field.required, disabled: field.disabled, hint: field.hint })) };
@@ -546,11 +626,15 @@ class Road {
       for (const handle of said.viaType || []) await this.typeSecret(handle, owedTyping[handle]);
       if (await this.scrollRoad({ fields: said.fields, scrollBoxes: said.scrollBoxes })) continue;
       if (said.moved) continue;
-      if (said.pressedNext || said.confirmed) continue;
+      if (said.pressedNext || said.confirmed) {
+        if (said.pressedNext && await this.finished()) return this.done();
+        continue;
+      }
       if (await this.unknownRoad(said.unknowns, said.unplaced)) continue;
       if (await this.code(said.fields, said.bundle)) continue;
       if (said.left.length || said.results.some((result) => !/:(set|same)$/.test(result))) continue;
-      if (await this.step(said.actions)) return this.done();
+      this.fresh = said.fresh;
+      if (await this.step(said.actions, said.before)) return this.done();
     }
   }
 
