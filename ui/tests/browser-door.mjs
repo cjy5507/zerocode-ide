@@ -1214,6 +1214,82 @@ await test("a_read_only_field_and_a_field_that_takes_text_side_by_side_are_no_pa
   } finally { await mixed.close(); }
 });
 
+/* A count the page draws between two buttons — a number shown by an output or a span, a button before it and a button after it, in a group of their own (ARIA's `group`) — is one field of
+ * kind `stepper`: named by the group's name, holding the number it shows; its two buttons are its own and are no buttons of the form. A pair of buttons around words that are no
+ * whole number (a page counter), and a pair around a field of its own, are no such field. */
+const BERTHS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div id="berthCap">Berths <small>for grown-ups</small></div>
+  <div role="group" aria-labelledby="berthCap" id="berths">
+    <button type="button" id="berthLess" aria-label="Remove a berth">&minus;</button><output id="berthN">1</output><button type="button" id="berthMore" aria-label="Add a berth">+</button>
+  </div>
+  <div id="podCap">Pods</div>
+  <div role="group" aria-labelledby="podCap" id="pods">
+    <button type="button" id="podMore" aria-label="Add a pod">+</button><span id="podN">0</span><button type="button" id="podLess" aria-label="Remove a pod">&minus;</button>
+  </div>
+  <nav role="group" aria-label="Leaves" id="leaves"><button type="button" id="leafBack" aria-label="Back a leaf">‹</button><span>2 / 5</span><button type="button" id="leafOn" aria-label="On a leaf">›</button></nav>
+  <div role="group" aria-label="Bunks" id="bunks"><button type="button" id="bunkLess" aria-label="Remove a bunk">&minus;</button><input id="bunkN" value="1" aria-label="Bunks"><button type="button" id="bunkMore" aria-label="Add a bunk">+</button></div>
+  <button type="button" id="send">Send</button>
+</form>
+<script>
+  const wire = (less, more, out, min, max) => {
+    let n = min;
+    const draw = () => {
+      document.getElementById(out).textContent = String(n);
+      document.getElementById(less).disabled = n <= min;
+      document.getElementById(more).disabled = n >= max;
+    };
+    document.getElementById(less).addEventListener("click", () => { n -= 1; draw(); });
+    document.getElementById(more).addEventListener("click", () => { n += 1; draw(); });
+    draw();
+  };
+  wire("berthLess", "berthMore", "berthN", 1, 4);
+  wire("podLess", "podMore", "podN", 0, 3);
+</script>`;
+
+await test("a_count_drawn_between_two_buttons_is_one_field_with_the_number_it_shows_and_its_buttons_are_no_buttons_of_the_form", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(BERTHS);
+    const read = await readFields(held);
+    const counts = read.fields.filter((field) => field.kind === "stepper");
+    assert(counts.length === 2, "the two counts are fields of kind stepper", read.fields.map((field) => [field.kind, field.label]));
+    assert(counts[0].label.startsWith("Berths") && counts[0].value === "1" && counts[1].label === "Pods" && counts[1].value === "0",
+      "each says its name and the number it shows", counts);
+    const labels = read.actions.map((action) => action.label);
+    assert(["Back a leaf", "On a leaf", "Remove a bunk", "Add a bunk", "Send"].every((one) => labels.includes(one)),
+      "the page counter's buttons, the buttons around a field and the form's own button are buttons", labels);
+    assert(!labels.some((one) => /berth|pod/i.test(one)), "the buttons of a count are the count's, not the form's", labels);
+    assert(read.fields.filter((field) => field.kind !== "stepper").map((field) => field.label).join("|") === "Bunks",
+      "a pair of buttons around a field of its own and a page counter make no stepper", read.fields.map((field) => [field.kind, field.label]));
+    return counts.map((field) => `${field.label} = ${field.value}`).join(" · ");
+  } finally { await held.close(); }
+});
+
+await test("a_fill_of_a_count_drawn_between_two_buttons_presses_the_button_that_moves_it_until_the_number_shows_the_asked_one_whichever_way_the_page_draws_them_and_says_where_a_limit_stops_it", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(BERTHS);
+    const read = await readFields(held);
+    const berths = read.fields.find((field) => field.label.startsWith("Berths")).handle;
+    const pods = handleOf(read, "Pods");
+    const shown = (id) => held.evaluate((one) => document.getElementById(one).textContent, id);
+    const up = await fillBundle(held, { [berths]: "3" });
+    assert(up.results[0].status === "set" && await shown("berthN") === "3", "three berths: pressed up from one", up.results);
+    const down = await fillBundle(held, { [berths]: 2 });
+    assert(down.results[0].status === "set" && await shown("berthN") === "2", "a number asked as a number, pressed down", down.results);
+    const flipped = await fillBundle(held, { [pods]: "2" });
+    assert(flipped.results[0].status === "set" && await shown("podN") === "2", "a page that draws the plus before the minus is raised by the button that raises", flipped.results);
+    const same = await fillBundle(held, { [pods]: "2" });
+    assert(same.results[0].status === "same", "a count that already shows the number is not pressed", same.results);
+    const past = await fillBundle(held, { [berths]: "9" });
+    assert(past.results[0].status === "mismatch" && await shown("berthN") === "4" && past.results[0].now === "4",
+      "past the limit it stops there and says the number it shows", past.results);
+    const words = await fillBundle(held, { [berths]: "many" });
+    assert(words.results[0].status === "no_option", "words that are no number are no option", words.results);
+    return "set · set · set · same · mismatch at 4 · no_option";
+  } finally { await held.close(); }
+});
+
 /* A dropdown drawn with no ARIA at all — a focusable box with a list beside
  * it, items filled late after another choice — is read as a field with its
  * items for choices, and filled by opening it and pressing the item. */

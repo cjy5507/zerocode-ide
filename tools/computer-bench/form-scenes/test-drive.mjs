@@ -566,6 +566,26 @@ const VENUE_PAIR = await scene("venue-pair", `<!doctype html><html lang="en"><me
   $("send").addEventListener("click", () => { window.__sceneResult = { name: $("nm").value, venue: $("vn").value, note: $("vt").value }; });
 </script>`, VENUE_FACTS, { name: "Kim", venue: "North Hall", note: "Back stairs" });
 
+/* A count the page draws between two buttons (t-41720): the door reads it as a field of its own, with the number it shows, and a fill presses its buttons until the number is the card's. */
+const BERTH_FACTS = [{ says: "Name", value: "Kim" }, { says: "Berths", value: "3" }];
+const BERTH_COUNT = await scene("berth-count", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="nm">Name</label> <input id="nm">
+  <div id="berthCap">Berths <small>for grown-ups</small></div>
+  <div role="group" aria-labelledby="berthCap" id="berths">
+    <button type="button" id="less" aria-label="Remove a berth">&minus;</button><output id="n">1</output><button type="button" id="more" aria-label="Add a berth">+</button>
+  </div>
+  <button type="button" id="send">Submit</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let n = 1;
+  const draw = () => { $("n").textContent = String(n); $("less").disabled = n <= 1; $("more").disabled = n >= 4; };
+  $("less").addEventListener("click", () => { n -= 1; draw(); });
+  $("more").addEventListener("click", () => { n += 1; draw(); });
+  draw();
+  $("send").addEventListener("click", () => { window.__sceneResult = { name: $("nm").value, berths: n }; });
+</script>`, BERTH_FACTS, { name: "Kim", berths: 3 });
+
 /* A secret field inside a frame of the page's own origin (t-41720): the fill does not write it and says to type it by its handle, `#frame >> #field`, which `type` takes. A driver types it with the value
  * the card gives, held to the form it read, and the value is in no line of its trace. */
 const FRAMED_FACTS = [{ says: "Name", value: "Kim" }, { says: "Account PIN", value: "7391" }];
@@ -649,7 +669,7 @@ const stub = join(root, "door-text-stub.sh");
 await writeFile(stub, `#!/bin/sh\ncat > /dev/null\nprintf '%s' '{"words":"stub"}'\n`, { mode: 0o755 });
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", VENUE_PAIR, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--door-text", stub, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", VENUE_PAIR, "--scene", BERTH_COUNT, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--door-text", stub, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -852,6 +872,15 @@ await test("a driver gives a fact whose words two fields hold in part to the fie
     assert(one.result.venue === "North Hall" && one.result.note === "Back stairs", `each fact is in its own field (${road})`, one.result);
   }
   return JSON.stringify(row("venue-pair", "verbs").result);
+});
+
+await test("a driver gives the number of the card to a count the page draws between two buttons, by a fill, on both roads", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("berth-count", road);
+    assert(one && one.ok && one.pass, `the ${road} road gets the count to the number of the card`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+    assert(one.result.berths === 3, `the page's count is three (${road})`, one.result);
+  }
+  return JSON.stringify(row("berth-count", "verbs").result);
 });
 
 await test("a driver types a secret field inside a frame of the same origin by its handle with the value of the card, on both roads, and the value is in no line of its trace", () => {
