@@ -85,13 +85,14 @@ const HAND_PRESSES = 12;
 // check takes a second or two, and a model that waits more than a few times has stopped reading.
 const WAIT_MS = 1500;
 const WAITS_MAX = 3;
-// A code's buttons, read from their words — the model's reading, in the two languages the bench's
-// pages are written in: a code to send and (the whole words) a code's own confirm button. `oneTime` is
-// a field's: what only the person's phone knows. The button that moves a form on is no word list's:
-// `advancing` chooses it by what the door said of the buttons.
+// What is left of a code's buttons' words, in the two languages the bench's pages are written in: the plainest word a button that
+// sends a code has, and (the whole word) the plainest a code's own confirm button has. They are used only when the door says no place
+// (`codeSender`, `codeConfirmer`): the buttons of a code are chosen by the place the door gave them. `oneTime` is a field's: what
+// only the person's phone knows. The button that moves a form on is no word list's either: `advancing` chooses it by what the door
+// said of the buttons.
 const INTENT = {
-  code: ["인증", "코드", "code", "verify", "otp", "발송", "전송"],
-  confirm: ["확인", "인증", "인증하기", "verify", "confirm"],
+  code: ["인증", "code"],
+  confirm: ["확인", "verify", "confirm"],
   oneTime: ["인증번호", "인증 번호", "인증코드", "일회용", "otp", "verification code", "one-time", "passcode"],
 };
 
@@ -111,6 +112,27 @@ const PART = / \((\d+)\/(\d+)\)$/;
 const words = (label) => fold(label).replace(PART, "").replace(/\s*\*$/, "");
 const took = (status) => status === "set" || status === "same";
 const intentOf = (label, intent) => INTENT[intent].some((word) => fold(label).includes(word));
+
+/* The button that sends the code of the person, chosen by the place the door gave it: the one button that stands beside the phone
+ * field the driver wrote — a field of kind `tel` with a value, or one in the bundle just written. Words come after, and only when no
+ * one button stands there (the door says none, or two). */
+function codeSender(actions, fields, written = []) {
+  const live = actions.filter((action) => !action.disabled);
+  const phones = new Set((fields || []).filter((field) => field.kind === "tel" && (field.value !== "" || written.includes(field.handle)))
+    .map((field) => field.handle));
+  const beside = live.filter((action) => phones.has(action.beside));
+  if (beside.length === 1) return beside[0];
+  return live.find((action) => intentOf(action.label, "code")) || null;
+}
+
+/* The button that confirms the code written, chosen the same way: the one button the door says stands beside the field the code went
+ * into; else the whole words that are left. */
+function codeConfirmer(actions, codeField) {
+  const live = actions.filter((action) => !action.disabled);
+  const beside = live.filter((action) => action.beside === codeField);
+  if (beside.length === 1) return beside[0];
+  return live.find((action) => INTENT.confirm.includes(fold(action.label))) || null;
+}
 
 /* The button that moves a form on, chosen by what the door said of the buttons and by no word: the one the
  * page declares a submit (`(제출 단추)`), else the one that was off before the fields were written and is on
@@ -744,15 +766,16 @@ class Road {
     return { [asks.handle]: code };
   }
 
-  /* The step's press: a code to send while one is owed, a code written
-   * confirmed by its own button once when the page has one, else the button that moves
+  /* The step's press: a code to send while one is owed (`codeSender`), a code written
+   * confirmed by its own button once when the page has one (`codeConfirmer`) — both chosen by the
+   * place the door gave the button — else the button that moves
    * the form on (`advancing`, by what the door said of the buttons) — when that one is off
    * while the door has said new text, waited for a fixed number of times and the form read again —
    * true when the page has taken what was given. */
   async step(actions, before = [], written = []) {
     const live = actions.filter((action) => !action.disabled);
     if (this.codeTurn && !this.codeSent) {
-      const send = live.find((action) => intentOf(action.label, "code"));
+      const send = codeSender(live, this.seen, written);
       if (send) {
         this.beforeSend = new Set(this.seen.map((field) => field.handle));
         await this.press(send);
@@ -762,7 +785,7 @@ class Road {
     }
     if (this.codeField && !this.codeConfirmed) {
       this.codeConfirmed = true;
-      const confirm = live.find((action) => INTENT.confirm.includes(fold(action.label)));
+      const confirm = codeConfirmer(live, this.codeField);
       if (confirm) {
         await this.press(confirm);
         return false;
@@ -811,6 +834,8 @@ class Road {
       const took = ${took.toString()};
       const INTENT = ${JSON.stringify(INTENT)};
       const intentOf = ${intentOf.toString()};
+      const codeSender = ${codeSender.toString()};
+      const codeConfirmer = ${codeConfirmer.toString()};
       const advancing = ${advancing.toString()};
       const facts = __FACTS__;
       const turn = __TURN__;
@@ -832,10 +857,10 @@ class Road {
       const actions = filled.actions && filled.actions.length ? filled.actions : read.actions;
       const live = actions.filter((action) => !action.disabled);
       const inFrame = (action) => action.handle.includes(${JSON.stringify(FORM_REQUEST.frameSeparator)});
-      const confirm = turn.confirm && clean && !moved && !stop
-        ? live.find((action) => !inFrame(action) && INTENT.confirm.includes(fold(action.label))) : null;
+      const confirm = turn.confirm && clean && !moved && !stop ? codeConfirmer(live.filter((action) => !inFrame(action)), turn.codeField) : null;
       if (confirm) document.querySelector(confirm.handle).click();
-      const hold = turn.owed && live.some((action) => intentOf(action.label, "code"));
+      // The code is owed while the step can send one, and once it was sent until it is written.
+      const hold = turn.owed && (turn.sent || codeSender(live, read.fields, Object.keys(bundle)) !== null);
       const next = advancing(actions, read.actions, Object.keys(bundle));
       const pressNext = clean && !moved && !stop && !confirm && !hold && !!next && !next.disabled && !next.submit && !inFrame(next);
       if (pressNext) document.querySelector(next.handle).click();
@@ -846,11 +871,11 @@ class Road {
         actions, before: read.actions.map((action) => ({ handle: action.handle, disabled: action.disabled })), fresh, pressedNext: pressNext, pressedHandle: pressNext ? next.handle : null,
         print: read.fingerprint, hand, viaType, unknowns: read.unknowns, unplaced, ambiguous, clean, moved,
         scrollBoxes: read.scrollBoxes || [],
-        confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, label: field.label,
+        confirmed: !!confirm, bundle, fields: read.fields.map((field) => ({ handle: field.handle, kind: field.kind, label: field.label,
           value: field.value, required: field.required, disabled: field.disabled, hint: field.hint })) };
     })()`;
     for (;;) {
-      const turn = { owed: this.codeTurn, confirm: Boolean(this.codeField) && !this.codeConfirmed };
+      const turn = { owed: this.codeTurn, sent: this.codeSent, confirm: Boolean(this.codeField) && !this.codeConfirmed, codeField: this.codeField };
       const source = evalFormScript(STEP.replace("__FACTS__", () => JSON.stringify(this.facts))
         .replace("__TURN__", () => JSON.stringify(turn))
         .replace("__TYPED__", () => JSON.stringify([...this.typed])));
