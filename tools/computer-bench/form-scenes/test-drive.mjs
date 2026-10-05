@@ -379,7 +379,8 @@ const CODE_WORDS = await scene("code-words", `<!doctype html><html lang="en"><me
 </script>`, SEND_BESIDE_FACTS, { mobile: "031-7788-2290", code: "483920", verified: true }, CODE_CARD(SEND_BESIDE_FACTS));
 
 /* A field the page keeps from being typed in and fills from a window a button opens (t-41720): the door says which button opens it, the window holds a frame of the
- * page's own origin with a search field and a button, and the result whose words hold the card's words is pressed. The frame loads the first time the window opens. */
+ * page's own origin with a search field and a button, and the result whose words hold the card's words is pressed. The frame loads the first time the window opens. A result draws a kind
+ * tag in front of the place with no space between them (`SpotNorth Gate 9`): the words of the card stand in the label with a letter of the tag against them. */
 const LOCKER_FACTS = [{ says: "Name", value: "Kim" }, { says: "Parcel point", value: "North Gate 9" }];
 const SEARCH_LAYER = await scene("search-layer", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
   <label for="nm">Name</label> <input id="nm">
@@ -425,7 +426,7 @@ const SEARCH_LAYER = await scene("search-layer", `<!doctype html><html lang="en"
     setTimeout(() => {
       found = DATA.filter((row) => words.every((word) => norm(row.where + row.note).includes(word)));
       document.getElementById("out").innerHTML = found.map((row, at) =>
-        '<button type="button" class="res" data-at="' + at + '">Locker ' + row.code + ' · ' + row.where + ' · ' + row.note + '</button>').join("");
+        '<button type="button" class="res" data-at="' + at + '">Locker ' + row.code + ' · <span class="kind">Spot</span>' + row.where + ' · ' + row.note + '</button>').join("");
     }, 320);
   });
   document.getElementById("out").addEventListener("click", (event) => {
