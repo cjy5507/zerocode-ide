@@ -704,6 +704,7 @@ const zcFieldOut = (record, request, fresh = null) => {
   if (typeof record.open === "boolean") out.open = record.open;
   if (record.ordinal) out.ordinal = true;
   if (record.joint) out.joint = zcWords(record.joint, cap);
+  if (record.opens) out.opens = record.opens;
   if (record.disabled || record.readOnly) {
     const hint = zcWords(zcHintOf(record, request), cap);
     if (hint) out.hint = hint;
@@ -1082,6 +1083,27 @@ const zcFieldBeside = (button, records, request) => {
   }
   return null;
 };
+// A field the page keeps from being typed in is filled from a window a button opens (a pick from a list the page searches): the one button that stands beside it,
+// else the one beside the read-only field next to it in the page's order — read-only fields that follow one another are one value picked together. Two next
+// to it that are opened by different buttons name none.
+const zcOpeners = (records, actions) => {
+  const own = new Map();
+  for (const record of records) {
+    if (!record.readOnly) continue;
+    const found = actions.filter((action) => action.beside === record.handle && !action.disabled);
+    if (found.length === 1) own.set(record, found[0]);
+  }
+  records.forEach((record, at) => {
+    if (!record.readOnly) return;
+    let opener = own.get(record) || null;
+    if (!opener) {
+      const near = [records[at - 1], records[at + 1]].filter((one) => one && one.readOnly && own.has(one));
+      const openers = new Set(near.map((one) => own.get(one)));
+      if (openers.size === 1) opener = [...openers][0];
+    }
+    if (opener) record.opens = { handle: opener.handle, label: opener.label };
+  });
+};
 // Every field the page draws, in its order, frames after the page, and the
 // buttons that stand with them. With `before` — what the page showed before a write or a press —
 // each field also says what stands new beside it, and the read says the notices the page's live
@@ -1152,6 +1174,7 @@ const zcFormFields = (request, before = null) => {
       actions.push(action);
     }
   }
+  zcOpeners(records, actions);
   const unknowns = zcUnknowns(records, pressed, scopes, docs, request);
   const scrollBoxes = zcScrollBoxes(records, scopes, docs, request);
   // The form's fingerprint: every field's handle, kind and words, in order —
@@ -1814,6 +1837,7 @@ const zcFillRead = (input, epoch) => {
     const field = said.get(result.handle);
     if (!field) continue;
     result.label = field.label;
+    if (field.opens && result.status === "read_only") result.opens = field.opens;
     if (field.fresh) result.fresh = field.fresh;
     if (field.silent) result.silent = true;
   }

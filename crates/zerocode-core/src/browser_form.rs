@@ -217,6 +217,9 @@ pub struct FormField {
     /// cut it. Empty for a field that is no such part and for the last of the parts.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub joint: String,
+    /// The button that opens the window a read-only field is filled from — the one beside it, else the one beside the read-only field next to it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opens: Option<FormOpener>,
     /// The text that stands new in the box around the field since before a
     /// write or a press (read after the page settled) — said as the page wrote
     /// it, never as an error: the door cannot tell one.
@@ -227,6 +230,14 @@ pub struct FormField {
     /// no notice.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub silent: bool,
+}
+
+/// The button that opens the window a field the page keeps from being typed in is filled from: its handle and its words.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FormOpener {
+    pub handle: String,
+    pub label: String,
 }
 
 /// A button beside the fields.
@@ -538,6 +549,8 @@ pub struct FillResult {
     pub widget: Option<FormWidget>,
     /// What the page says about the field, when it was off.
     pub hint: String,
+    /// The button that opens the field, when the page keeps it from being written and the read named one.
+    pub opens: Option<FormOpener>,
     /// The text new beside the field after the write, as it is on a field of a read.
     pub fresh: Vec<String>,
     /// The page marked the field invalid and said nothing why.
@@ -1015,7 +1028,13 @@ fn field_line(field: &FormField) -> String {
         line.push_str(" (꺼짐)");
     }
     if field.read_only {
-        line.push_str(" (직접 못 씀)");
+        match &field.opens {
+            Some(opener) => line.push_str(&format!(
+                " (직접 못 씀 — 열 단추: {} 「{}」)",
+                opener.handle, opener.label
+            )),
+            None => line.push_str(" (직접 못 씀)"),
+        }
     }
     if !field.hint.is_empty() {
         line.push_str(&format!(" — 안내: {}", field.hint));
@@ -1293,6 +1312,12 @@ pub fn fill_lines(report: &FillReport) -> String {
             line.push_str(&format!(" = {}", result.now.said()));
         } else {
             line.push_str(&format!(": {}", status_words(result)));
+            if let (FillStatus::ReadOnly, Some(opener)) = (result.status, &result.opens) {
+                line.push_str(&format!(
+                    " (열 단추: {} 「{}」)",
+                    opener.handle, opener.label
+                ));
+            }
             if !result.hint.is_empty() {
                 line.push_str(&format!(" — 안내: {}", result.hint));
             }
