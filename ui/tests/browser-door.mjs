@@ -1215,6 +1215,79 @@ await test("a_read_only_field_and_a_field_that_takes_text_side_by_side_are_no_pa
   } finally { await mixed.close(); }
 });
 
+/* A secret the door's read says is secret is secret whole (t-41720, letter m-41895): the parts of one value — the boxes of a number, side by side under one caption — are all secret when one of
+ * them is a password field, so a fill never writes one of them and no answer, read or record carries the value of any. The way in is `type` from stdin; its keys road holds before a secret part
+ * as it holds before a password field. */
+const SECRET_PARTS = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <div class="row"><label for="k1">Vault number</label>
+    <input id="k1" maxlength="4"> - <input id="k2" maxlength="4"> - <input id="k3" type="password" maxlength="4"> - <input id="k4" type="password" maxlength="4"></div>
+  <label for="nick">Nickname</label> <input id="nick">
+</form>
+<script>
+  document.getElementById("k1").value = "1357";
+  document.getElementById("k2").value = "2468";
+</script>`;
+
+await test("parts_of_one_value_are_all_secret_when_one_of_them_is_a_password_field_so_the_read_the_fill_and_the_type_treat_them_alike", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(SECRET_PARTS);
+    const read = await readFields(held);
+    const parts = read.fields.filter((field) => /^Vault number \(\d\/4\)$/.test(field.label));
+    assert(parts.length === 4, "the four boxes are the parts of one value", read.fields.map((field) => field.label));
+    assert(parts.every((field) => field.masked === true && field.value === ""), "all four are secret: none says its value", parts);
+    assert(!JSON.stringify(read).includes("1357") && !JSON.stringify(read).includes("2468"), "and the read carries neither value", read);
+    const nick = read.fields.find((field) => field.label === "Nickname");
+    assert(nick && nick.masked === false, "a field outside the parts is no secret", nick);
+    const filled = await fillBundle(held, { [parts[0].handle]: "9999", [nick.handle]: "Kim" });
+    const byHandle = Object.fromEntries(filled.results.map((result) => [result.handle, result]));
+    assert(byHandle[parts[0].handle].status === "secret" && byHandle[nick.handle].status === "set", "the fill refuses a secret part by name and writes the rest", filled.results);
+    assert(await held.evaluate(() => document.getElementById("k1").value) === "1357", "and the part kept what it held");
+    assert(!JSON.stringify(filled).includes("9999") && !JSON.stringify(filled).includes("1357"), "the answer of the fill carries no value of a part", filled);
+    const keys = await evalJson(held, twin.typeScript(parts[1].handle, "5555", "keys"));
+    assert(keys.ok && keys.value.method === "held" && keys.value.secureField === true, "the keys road holds its keys before a secret part", keys);
+    const typed = await evalJson(held, twin.typeScript(parts[1].handle, "5555", "setter"));
+    assert(typed.ok && typed.value.method === "value-setter", "the stdin road writes it", typed);
+    assert(!JSON.stringify(typed).includes("5555"), "and says nothing of the value", typed);
+    const again = await readFields(held);
+    assert(!JSON.stringify(again).includes("5555"), "a read after it carries no value of a part", again);
+    return parts.map((field) => field.label).join(" · ");
+  } finally { await held.close(); }
+});
+
+/* A one-time code is secret as a password is: by the platform's own mark (`autocomplete="one-time-code"`), or — a page that marks nothing — by its shape (a numeric box of four to eight characters) together
+ * with the words the page itself gives it (one-time, verification, security code, SMS, OTP); a row of four or more single-character numeric boxes is one code, and the boxes of one code go together. */
+const ONE_TIME_CODES = `<!doctype html><html lang="en"><meta charset="utf-8"><form>
+  <label for="m1">Login token</label> <input id="m1" autocomplete="one-time-code" inputmode="numeric" maxlength="6">
+  <label for="s1">Verification code</label> <input id="s1" inputmode="numeric" maxlength="6">
+  <label for="z1">Postal code</label> <input id="z1" inputmode="numeric" maxlength="5">
+  <label for="n1">Verification note</label> <input id="n1" maxlength="6">
+  <label for="l1">Verification reference</label> <input id="l1" inputmode="numeric" maxlength="12">
+  <div role="group" aria-labelledby="markedLbl"><span id="markedLbl">Marked digits</span>
+    <input id="a1" inputmode="numeric" maxlength="1" aria-label="Mark 1" autocomplete="one-time-code"><input id="a2" inputmode="numeric" maxlength="1" aria-label="Mark 2"><input id="a3" inputmode="numeric" maxlength="1" aria-label="Mark 3"><input id="a4" inputmode="numeric" maxlength="1" aria-label="Mark 4"></div>
+  <div role="group" aria-labelledby="plainLbl"><span id="plainLbl">Plain digits</span>
+    <input id="b1" inputmode="numeric" maxlength="1" aria-label="Plain 1"><input id="b2" inputmode="numeric" maxlength="1" aria-label="Plain 2"><input id="b3" inputmode="numeric" maxlength="1" aria-label="Plain 3"><input id="b4" inputmode="numeric" maxlength="1" aria-label="Plain 4"></div>
+</form>`;
+
+await test("a_one_time_code_is_secret_by_the_platforms_mark_or_by_its_shape_and_words_and_the_boxes_of_one_code_go_together", async () => {
+  const held = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  try {
+    await held.setContent(ONE_TIME_CODES);
+    await held.evaluate(() => { for (const id of ["m1", "s1", "z1", "n1", "l1", "a1"]) document.getElementById(id).value = "86420"; });
+    const read = await readFields(held);
+    const secret = Object.fromEntries(read.fields.map((field) => [field.handle.replace(/^#/, ""), field.masked === true]));
+    const want = { m1: true, s1: true, z1: false, n1: false, l1: false, a1: true, a2: true, a3: true, a4: true, b1: true, b2: true, b3: true, b4: true };
+    assert(JSON.stringify(secret) === JSON.stringify(want), "the mark, the shape with the words, and the boxes of one code are secret — and nothing else", secret);
+    assert(!JSON.stringify(read.fields.filter((field) => field.masked)).includes("86420"), "no secret one says its value", read.fields);
+    const filled = await fillBundle(held, { "#s1": "11", "#b2": "2" });
+    assert(filled.results.every((result) => result.status === "secret"), "a fill writes neither", filled.results);
+    assert(await held.evaluate(() => document.getElementById("s1").value) === "86420", "and the code kept what it held");
+    const keys = await evalJson(held, twin.typeScript("#m1", "424242", "keys"));
+    assert(keys.ok && keys.value.method === "held", "the keys road holds before a code too", keys);
+    return Object.keys(secret).filter((id) => secret[id]).join(" ");
+  } finally { await held.close(); }
+});
+
 /* The parts of one value are written alike, but a part the page makes read-only after a choice is still one of them: the box for an address's own host that a list fills in and then keeps from being typed in
  * is part of the address as it was while it took text. Only a read-only field at the head of the row — a value that comes from a window — is no part of the typed ones (the test before this one). */
 await test("a_part_the_page_makes_read_only_after_a_choice_stays_a_numbered_part_of_the_value_it_belongs_to", async () => {
