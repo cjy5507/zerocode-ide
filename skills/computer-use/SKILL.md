@@ -244,6 +244,11 @@ calendar (`달력 「…」 넘김 … · 날짜 칸 …`), finish that one fiel
 `click` the field to open it, `click` a pager until the heading shows the
 month, `click` the day; then `fields` to check it.
 
+A button that opens a dialog says the dialog's name in the buttons line — `#from 「Start」 (대화상자 「Stay dates」을 엶)` — and the days of a calendar the page draws are not listed as buttons
+(the dialog's own buttons are: an arrow, the one that applies a range). Such a button may be a date picker: `fill` it with a date (`{"#from": "2026-11-20"}`) and the door opens the dialog, pages its
+calendar to the month and presses the day. What a dialog shows is not the date until the page applies it, so the answer is `?`, not `✓`: then `fields` and press the dialog's button that turned on
+(`Done`, `선택 완료`), and `fields` again to check what the page shows.
+
 A text field the page keeps a list of suggestions beside (a box with the role of a list that is shut until something is typed) takes the item chosen from that list, not the
 text typed: `fill` types the text and keeps the field — a page shuts the list when the field loses the focus —, waits in its passes for the list the page makes after the text,
 and presses the item whose line is the words asked, so `fill` answers `✓` with what the page took. The fields after it in the bundle are written first. When no item is the words

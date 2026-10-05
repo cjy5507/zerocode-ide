@@ -255,6 +255,10 @@ pub struct FormAction {
     /// holds a field at all, next to it. Empty for a button that stands beside no one field.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub beside: String,
+    /// The name of the dialog the button opens, when it says it opens one (`aria-haspopup="dialog"`)
+    /// and the page ties a dialog to it; empty for a dialog with no name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dialog: Option<String>,
 }
 
 /// One `fields` read.
@@ -972,12 +976,17 @@ fn status_words(result: &FillResult) -> String {
     }
 }
 
-/// What a button's line says of the field it stands beside.
+/// What a button's line says of the field it stands beside, and of the dialog it opens.
 fn beside_mark(action: &FormAction) -> String {
-    if action.beside.is_empty() {
+    let beside = if action.beside.is_empty() {
         String::new()
     } else {
         format!(" ({} 칸 곁)", action.beside)
+    };
+    match action.dialog.as_deref() {
+        Some("") => format!("{beside} (대화상자를 엶)"),
+        Some(name) => format!("{beside} (대화상자 「{name}」을 엶)"),
+        None => beside,
     }
 }
 

@@ -640,6 +640,60 @@ class Road {
     return true;
   }
 
+  /* Dates the card gives that no field takes, and buttons the door says open a dialog (`dialog`, the dialog's name) (t-41720): the facts whose words begin with the dialog's name are its dates.
+   * Each is given to one of its buttons — the one whose words hold what the fact says besides the name, else the next in the page's order — by a fill, in the card's order, which opens the dialog,
+   * pages its calendar and presses the day; and once two are picked the button of the dialog that turned on (the one that applies the range) is pressed. Once for each dialog. True when it
+   * pressed anything, so the step is read again. */
+  async dialogRoad(unplaced, actions) {
+    const dates = (unplaced || []).filter((fact) => typeof fact.value === "string" && /^\d{4}[-./]\d{1,2}[-./]\d{1,2}$/.test(fact.value.trim()));
+    const names = [...new Set((actions || []).filter((action) => action.dialog && !action.disabled).map((action) => action.dialog))];
+    if (!dates.length || !names.length) return false;
+    const tokens = (text) => fold(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const lead = (said, own) => {
+      let run = 0;
+      while (run < said.length && run < own.length && said[run] === own[run]) run += 1;
+      return run;
+    };
+    let pressed = false;
+    for (const name of names) {
+      if (this.byHandTried.has(`dialog:${name}`)) continue;
+      const own = tokens(name);
+      const mine = dates.filter((fact) => {
+        const said = tokens(fact.says);
+        const here = lead(said, own);
+        return here >= 1 && names.every((other) => lead(said, tokens(other)) <= here);
+      });
+      const buttons = (actions || []).filter((action) => action.dialog === name && !action.disabled);
+      if (!mine.length || mine.length > buttons.length) continue;
+      const left = [...buttons];
+      const given = new Map();
+      const rest = (fact) => tokens(fact.says).filter((word) => !own.includes(word));
+      for (const fact of [...mine].sort((a, b) => Number(!rest(a).length) - Number(!rest(b).length))) {
+        const words = rest(fact);
+        const fits = left.filter((button) => words.length && words.some((word) => tokens(button.label).includes(word)));
+        const button = fits.length === 1 ? fits[0] : (!words.length ? left[0] : null);
+        if (!button) break;
+        left.splice(left.indexOf(button), 1);
+        given.set(fact, button);
+      }
+      if (given.size !== mine.length) continue;
+      this.byHandTried.add(`dialog:${name}`);
+      await this.fields();
+      let before = null;
+      let last = null;
+      for (const fact of mine) {
+        before = last;
+        last = await this.fill({ [given.get(fact).handle]: fact.value.trim() });
+      }
+      pressed = true;
+      const turned = before && last ? (last.actions || []).filter((action) => !action.disabled
+        && (before.actions || []).some((one) => one.handle === action.handle && one.disabled)) : [];
+      if (turned.length === 1) await this.press(turned[0]);
+      await this.fields();
+    }
+    return pressed;
+  }
+
   /* A date the fill could not pick, finished by hand from the calendar its
    * answer showed, as a model reads it: open the field, page and look until
    * the heading reads the month, press the day — each a round trip, at most
@@ -795,6 +849,7 @@ class Road {
       if (ambiguous.length) throw new Error(ambiguousWords(ambiguous));
       if (this.price) this.priced += await this.today(read, bundle);
       if (await this.unknownRoad(read.unknowns, unplaced)) continue;
+      if (await this.dialogRoad(unplaced, read.actions)) continue;
       let actions = read.actions;
       if (Object.keys(bundle).length) {
         const filled = await this.fill(bundle);
@@ -978,6 +1033,7 @@ class Road {
         continue;
       }
       if (await this.openRoad(said.readOnly, said.bundle || {}, said.actions)) continue;
+      if (await this.dialogRoad(said.unplaced, said.actions)) continue;
       if (await this.unknownRoad(said.unknowns, said.unplaced)) continue;
       if (await this.code(said.fields, said.bundle)) continue;
       // What is left or did not take is tried again once; the same answer twice is the page's, and the step goes on.
