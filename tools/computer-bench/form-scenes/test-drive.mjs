@@ -168,10 +168,28 @@ const CHIPS = await scene("chips", `<!doctype html><html lang="en"><meta charset
   { says: "Size", value: "Large" }, { says: "Extras", value: "Tea, Jam" }],
 { name: "Kim", colours: ["Red", "Blue"], size: "Large", extras: ["Tea", "Jam"] });
 
+/* A fact that names no field of the page, whose value is one option of a group of chips the page titles in other words: a time
+ * among slots listed under "Morning" and "Afternoon", one choice across both groups. */
+const SLOTS = await scene("slots", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="name">Name</label> <input id="name">
+  <div class="g"><h4>Morning</h4><div id="am"><button type="button" aria-pressed="false">09:00</button><button type="button" aria-pressed="false">09:30</button><button type="button" aria-pressed="false">10:00</button></div></div>
+  <div class="g"><h4>Afternoon</h4><div id="pm"><button type="button" aria-pressed="false">14:00</button><button type="button" aria-pressed="false">14:30</button></div></div>
+  <button type="button" id="send">Submit</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const slots = () => [...document.querySelectorAll("#am button, #pm button")];
+  for (const button of slots()) button.addEventListener("click", () => { for (const other of slots()) other.setAttribute("aria-pressed", String(other === button)); });
+  $("send").addEventListener("click", () => {
+    const held = slots().filter((button) => button.getAttribute("aria-pressed") === "true").map((button) => button.textContent);
+    window.__sceneResult = { name: $("name").value, time: held[0] || "" };
+  });
+</script>`, [{ says: "Name", value: "Kim" }, { says: "Visit time", value: "14:30" }], { name: "Kim", time: "14:30" });
+
 /* One run of the drivers on every scene, once. */
 const out = join(root, "rows.json");
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
-  "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--out", out], { encoding: "utf8", timeout: 720_000 });
+  "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--out", out], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* One run of a person's road through two scenes, its lines and the rows it keeps. */
@@ -230,6 +248,14 @@ await test("a driver writes a group of chips with fill — the options a fact na
     assert(one && one.ok && one.pass, `the ${road} road leaves the page holding the options the card names`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
   }
   return JSON.stringify(row("chips", "verbs").result);
+});
+
+await test("a driver writes a fact that names no field to the group of chips whose options hold its value", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("slots", road);
+    assert(one && one.ok && one.pass, `the ${road} road gives the slot the card names, though the groups carry other titles`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
+  }
+  return JSON.stringify(row("slots", "verbs").result);
 });
 
 await test("the recipe a driver scrolls a box by is the one the skill teaches", () => {
