@@ -1000,7 +1000,7 @@ class Road {
       if (confirm) document.querySelector(confirm.handle).click();
       // The code is owed while the step can send one, and once it was sent until it is written.
       const hold = turn.owed && (turn.sent || codeSender(live, read.fields, Object.keys(bundle)) !== null);
-      // The dates of the card that no field takes are the buttons' that open a dialog (the driver gives them once and then says the dialog's name in `turn.dialogs`): the step's own button waits for them.
+      // The dates of the card that no field takes are the buttons' that open a dialog (the driver gives them once and then says the dialog's name in turn.dialogs): the step's own button waits for them.
       const owesDates = unplaced.some((fact) => dateLike(fact.value)) && actions.some((action) => action.dialog && !action.disabled && !turn.dialogs.includes(action.dialog));
       const next = advancing(actions, read.actions, Object.keys(bundle));
       const pressNext = clean && !moved && !stop && !confirm && !hold && !owesDates && !!next && !next.disabled && !next.submit && !inFrame(next);
