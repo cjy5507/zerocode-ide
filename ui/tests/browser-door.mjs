@@ -2624,7 +2624,7 @@ const NAMED_ALREADY = `<!doctype html><html lang="en"><meta charset="utf-8"><for
   <div id="pl">Plan</div><div role="radiogroup" aria-labelledby="pl"><label><input type="radio" name="p" value="a"> Basic</label><label><input type="radio" name="p" value="b"> Plus</label></div>
   <div class="outer"><span class="lbl">Farther title</span><div class="row"><span class="lbl">Near title</span><div class="radios">
     <label><input type="radio" name="n" value="a"> One</label><label><input type="radio" name="n" value="b"> Two</label></div></div></div>
-  <div class="row"><span class="lbl">Buttons title</span><div class="radios" id="bt"><button type="button" role="radio" aria-checked="false">Left</button><button type="button" role="radio" aria-checked="true">Right</button></div></div>
+  <div class="row"><span class="lbl">Buttons title</span><div class="radios" id="bt" role="radiogroup"><button type="button" role="radio" aria-checked="false">Left</button><button type="button" role="radio" aria-checked="true">Right</button></div></div>
   <label for="t1">Voucher</label> <input id="t1">
   <label><input type="checkbox" id="c1"> Terms</label>
 </form>`;
