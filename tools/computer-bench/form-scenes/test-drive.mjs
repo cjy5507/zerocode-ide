@@ -865,7 +865,7 @@ await test("a driver gives the dates of the card that no field takes to the butt
   return JSON.stringify(row("stay-dialog", "verbs").result);
 });
 
-await test("a driver gives a fact whose words two fields hold in part to the field that is not another fact's whole, on both roads", () => {
+await test("a driver gives a fact whose words two fields hold in part to the field that is not the whole words of another fact, on both roads", () => {
   for (const road of ["verbs", "script"]) {
     const one = row("venue-pair", road);
     assert(one && one.ok && one.pass, `the ${road} road gives the venue to its own field and the note to the note's`, one && { ok: one.ok, stuck: one.stuck, result: one.result });

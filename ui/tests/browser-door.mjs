@@ -1207,8 +1207,9 @@ await test("a_read_only_field_and_a_field_that_takes_text_side_by_side_are_no_pa
         <input id="bay" placeholder="Bay and shelf" maxlength="40"></div></div></form>`);
     const read = await readFields(mixed);
     const labels = read.fields.map((field) => field.label);
-    assert(JSON.stringify(labels) === JSON.stringify(["Depot code", "Bay and shelf"]), "each is named by its own words and neither is a numbered part", labels);
-    const filled = await fillBundle(mixed, { [handleOf(read, "Bay and shelf")]: "B-12" });
+    assert(labels.length === 2 && labels.every((label) => !/\(\d+\/\d+\)/.test(label)), "neither is a numbered part", labels);
+    assert(labels[0] === "Depot code" && labels[1].endsWith("Bay and shelf"), "each is named by its own words (the box's caption may stand in front of the one a placeholder names)", labels);
+    const filled = await fillBundle(mixed, { [read.fields[1].handle]: "B-12" });
     assert(filled.results.length === 1 && filled.results[0].status === "set", "the field that takes text is written by its own name", filled.results);
     return labels.join(" · ");
   } finally { await mixed.close(); }
@@ -1270,7 +1271,9 @@ await test("a_fill_of_a_count_drawn_between_two_buttons_presses_the_button_that_
   try {
     await held.setContent(BERTHS);
     const read = await readFields(held);
-    const berths = read.fields.find((field) => field.label.startsWith("Berths")).handle;
+    const counted = read.fields.find((field) => field.kind === "stepper" && field.label.startsWith("Berths"));
+    assert(counted, "the count of berths is a field to fill", read.fields.map((field) => [field.kind, field.label]));
+    const berths = counted.handle;
     const pods = handleOf(read, "Pods");
     const shown = (id) => held.evaluate((one) => document.getElementById(one).textContent, id);
     const up = await fillBundle(held, { [berths]: "3" });
