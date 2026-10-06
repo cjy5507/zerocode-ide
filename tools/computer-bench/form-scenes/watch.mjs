@@ -11,10 +11,13 @@ export const LEAK_WHOLE = 6;
 export class Watch {
   constructor() {
     this.secrets = [];
+    // Every value typed as a secret, whatever its length, with the field it went into: what a row's result is read against (`keptResult`).
+    this.typed = [];
   }
 
   add(value, handle = "") {
     const text = typeof value === "string" ? value.trim() : "";
+    if (text) this.typed.push({ value: text, handle: String(handle) });
     if (text.length >= LEAK_MIN) this.secrets.push({ value: text, handle: String(handle) });
   }
 

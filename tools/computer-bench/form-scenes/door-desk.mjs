@@ -53,6 +53,7 @@ const PAGE_FAILURES = {
   element_disabled: "고른 요소가 비활성화되어 있습니다",
   element_read_only: "고른 요소는 읽기 전용입니다",
   element_not_editable: "고른 요소에는 글을 입력할 수 없습니다",
+  no_option: "고른 목록에 그 글과 맞는 선택지가 없습니다",
   input_cancelled: "페이지가 입력을 거부했습니다",
   document_moving: "페이지가 읽는 동안 계속 바뀌어 한 상태로 읽을 수 없습니다 — 다시 `zerocode-browser marks`",
   document_replaced: "그 번호를 읽은 문서가 아닙니다 — 페이지가 바뀌었으니 다시 `zerocode-browser marks`",

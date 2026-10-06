@@ -1110,6 +1110,11 @@ const zcPartCaptions = (records, request) => {
 const zcOneTimeWords = /one[\s-]?time|\botp\b|verification|security\s*code|\bsms\b|인증/i;
 const zcCardMarks = ["cc-number", "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year"];
 const zcCardWords = /\bcard[\s_-]*(?:number|no\b)|\bcv[cv]2?\b|security[\s_-]*code|카드[\s_-]*번호|보안[\s_-]*코드/i;
+// A payment card's expiry date is secret as its number is (t-41720, 2026-10-06): by the platform's marks above, or by its own words — expiry, expiration,
+// valid thru, MM/YY, 유효기간, 만료 — when it stands in the form that holds the card's number or security code; a coupon's or a passport's expiry stands in
+// no such form. A select (the month, the year) is such a field too: its options are the page's words and stay readable, its choice is not.
+const zcExpiryWords = /\bexp(?:iry|iration|ires|ire)?\b|valid\s*(?:thru|through|until|till|to)\b|\bmm\s*\/\s*yy(?:yy)?\b|유효\s*기간|만료/i;
+const zcCardScope = (el) => el.closest("form, [role=form], dialog, [role=dialog]") || el.ownerDocument.body;
 const zcTextual = (record) => ["text", "tel", "number", "password", "email", "search", "url", "textarea"].includes(record.kind);
 const zcSecretParts = (records) => {
   const hide = (record) => {
@@ -1127,6 +1132,14 @@ const zcSecretParts = (records) => {
     const shaped = numeric(record) && record.maxLength !== null && record.maxLength >= 4 && record.maxLength <= 8 && zcOneTimeWords.test(wordsOf(record));
     const carded = zcCardWords.test(ownWords(record));
     if (marked || shaped || carded) hide(record);
+  }
+  // The forms that hold a card's number or security code, by the marks and words above — and in them, the card's expiry: an input or a select whose own words say so.
+  const cardForms = new Set(records.filter((record) => record.masked && zcFormTag(record.el) === "input" && !zcSecretField(record.el)
+    && (String(record.el.getAttribute("autocomplete") || "").toLowerCase().split(/\s+/).some((mark) => mark === "cc-number" || mark === "cc-csc") || zcCardWords.test(ownWords(record))))
+    .map((record) => zcCardScope(record.el)));
+  for (const record of records) {
+    if (record.masked || !(zcTextual(record) || record.kind.startsWith("select")) || !["input", "select"].includes(zcFormTag(record.el))) continue;
+    if (zcExpiryWords.test(ownWords(record)) && cardForms.has(zcCardScope(record.el))) hide(record);
   }
   const groups = [...new Set(records.flatMap((record) => record.groups || []))];
   for (const group of groups) {

@@ -12,6 +12,7 @@
 
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { extname, join, resolve, sep } from "node:path";
 
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".json": "application/json" };
@@ -133,3 +134,46 @@ export function verdicts(result, expected, made = [], shapes = {}) {
 /* The verdicts in words — one line every runner prints. */
 export const verdictWords = (v) =>
   `ok=${v.ok} wholeRaw=${v.wholeRaw} whole=${v.whole} sameSet=${v.sameSet} extra=${v.extra.join("|") || "-"} made=${v.made.join("|") || "-"}${v.madeProblems.length ? ` madeProblems=${v.madeProblems.join("|")}` : ""}`;
+
+/* ---- what a row keeps of a result that holds a secret (t-41720, 2026-10-06) ----
+ * The words of a card that say a fact is a secret — a password, a PIN, a payment card's number, security code or expiry, a one-time code: the kinds
+ * the door keeps out of its answers. A rule of the bench for the records the bench keeps, beside what a run typed as a secret; not the door's rule. */
+export const SECRET_SAYS = /password|passcode|비밀\s*번호|\bpin\b|card|카드|cvc|cvv|security\s*code|보안\s*코드|expir|valid\s*thru|유효\s*기간|one[\s-]?time|\botp\b|인증\s*번호|verification\s*code/i;
+export const secretFacts = (card) => (card?.facts || []).filter((fact) => SECRET_SAYS.test(String(fact?.says ?? ""))).map((fact) => String(fact?.value ?? ""));
+const digitsOf = (text) => String(text).replace(/\D/g, "");
+/* Whether a value of the page's result is made of secrets: equal to one (of three characters or more), or its digits tiled left to right by the digits of
+ * secrets, each used once — a card number the page built from its four boxes, an expiry from its month and year. A number that only shares a part with a
+ * secret is not, and a lone value of two characters (a month, a quantity) is one only beside another. */
+export function madeOfSecrets(value, secrets) {
+  const text = String(value ?? "");
+  if (!text) return false;
+  const kept = secrets.map((one) => String(one ?? "")).filter(Boolean);
+  if (text.length >= 3 && kept.includes(text)) return true;
+  const digits = digitsOf(text);
+  if (digits.length < 2) return false;
+  const left = kept.map(digitsOf).filter((one) => one.length >= 2);
+  let at = 0, used = 0;
+  while (at < digits.length) {
+    const found = left.filter((one) => digits.startsWith(one, at)).sort((a, b) => b.length - a.length)[0];
+    if (!found) return false;
+    left.splice(left.indexOf(found), 1);
+    at += found.length;
+    used += 1;
+  }
+  return used >= 2 || digits.length >= 3;
+}
+/* The result a row keeps: the page's whole result, but a value made of secrets kept as its sha256 (the first sixteen hex) and whether it matched what was
+ * expected — so a verdict can be counted again later, by the digest, with no secret in the record. */
+export function keptResult(result, expected, secrets) {
+  if (!result || typeof result !== "object") return { result, secretKeys: {} };
+  const out = Array.isArray(result) ? [...result] : { ...result };
+  const secretKeys = {};
+  for (const [key, value] of Object.entries(result)) {
+    if (!madeOfSecrets(value, secrets)) continue;
+    const text = String(value);
+    const sha256 = createHash("sha256").update(text).digest("hex").slice(0, 16);
+    secretKeys[key] = { matched: expected && typeof expected === "object" ? String(expected[key]) === text : null, sha256 };
+    out[key] = `[secret ${sha256}]`;
+  }
+  return { result: out, secretKeys };
+}

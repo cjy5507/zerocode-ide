@@ -18,7 +18,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
-import { readScene, serveScene, verdictWords, verdicts } from "./scene-kit.mjs";
+import { keptResult, readScene, secretFacts, serveScene, verdictWords, verdicts } from "./scene-kit.mjs";
 
 /* The time a person gets over one scene's whole road. */
 const ROAD_MS = 120_000;
@@ -46,9 +46,11 @@ try {
       await solveAsPerson(page, scene.card);
       await page.waitForTimeout(500);
       const result = await page.evaluate(() => window.__sceneResult || null);
+      const code = await page.evaluate(() => window.__personPhone || null);
       // The rules of success side by side; a key only the page holds that the scene does not say the page makes is a field an agent could have written.
       const v = verdicts(result, scene.expected, scene.made, scene.shapes);
-      row = { scene: scene.name, ...v, result };
+      const kept = keptResult(result, scene.expected, [...secretFacts(scene.card), ...(code ? [String(code)] : [])]);
+      row = { scene: scene.name, ...v, result: kept.result, secretKeys: kept.secretKeys };
       verdict = v.pass
         ? `PASS  ${scene.name}  a person's road finishes it  ${verdictWords(v)}`
         : `FAIL  ${scene.name}  a person's road: ${v.wrong.length} keys differ (${v.wrong.join(", ")}), ${v.extra.length} keys only the page holds (${v.extra.join(", ")}) ${verdictWords(v)}`;

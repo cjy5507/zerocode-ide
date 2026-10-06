@@ -79,7 +79,7 @@ import { join, resolve, sep } from "node:path";
 import { chromium } from "../../../ui/tests/playwright-chromium.mjs";
 import { FORM_REQUEST, clickScript, evalFormScript, evalScript, fieldsScript, fillPasses, pressInForm, typeScript } from "../../../ui/tests/browser-scripts.mjs";
 import { pressButton, scrollToEnd } from "./door-recipes.mjs";
-import { readScene, serveScene as serve, verdictWords, verdicts } from "./scene-kit.mjs";
+import { keptResult, readScene, secretFacts, serveScene as serve, verdictWords, verdicts } from "./scene-kit.mjs";
 import { Watch } from "./watch.mjs";
 
 // The floor of one model round trip, and what one costs in the person's
@@ -1200,8 +1200,9 @@ async function drive(browser, folder, roadName) {
   // The verdicts side by side — the first rule as it was (`wholeRaw`), the whole result but for the
   // keys the scene says its page makes itself (`whole`), the expected keys alone (`ok`) — and the
   // keys only the page recorded: a key no card names and no declaration excuses is a field an agent
-  // could have written. A pass is told only when all hold. The page's whole result is kept in the row.
+  // could have written. A pass is told only when all hold. The page's whole result is kept in the row — a value made of secrets as its digest and whether it matched (`keptResult`), never the value.
   const v = verdicts(result, expected, made, shapes);
+  const kept = keptResult(result, expected, [...watch.typed.map((one) => one.value), ...secretFacts(card)]);
   const scriptMs = road.scriptMs.slice().sort((a, b) => a - b);
   const fillMs = (road.kindMs.fill || []).slice().sort((a, b) => a - b);
   // How long each kind of round trip took, by kind, as count / median / longest in ms: what the
@@ -1218,7 +1219,7 @@ async function drive(browser, folder, roadName) {
   keptSources.push(...road.sent.map((text, at) => ({ scene, road: roadName, at, text })));
   return {
     scene, road: roadName, pass: v.pass, ok: v.ok, wholeRaw: v.wholeRaw, whole: v.whole, sameSet: v.sameSet, leaks,
-    extra: v.extra, made: v.made, madeProblems: v.madeProblems, stuck, wrong: result ? v.wrong : null, result,
+    extra: v.extra, made: v.made, madeProblems: v.madeProblems, stuck, wrong: result ? v.wrong : null, result: kept.result, secretKeys: kept.secretKeys,
     ...road.count, projectedSeconds: road.count.roundTrips * SECONDS_PER_ROUND_TRIP,
     callMsP50: Math.round(scriptMs[Math.floor(scriptMs.length / 2)] ?? 0), callMsMax: Math.round(scriptMs.at(-1) ?? 0),
     fillMsP50: Math.round(fillMs[Math.floor(fillMs.length / 2)] ?? 0), fillMsMax: Math.round(fillMs.at(-1) ?? 0), ms,

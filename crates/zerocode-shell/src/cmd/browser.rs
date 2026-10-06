@@ -499,6 +499,7 @@ pub(crate) fn page_failure(reply: &serde_json::Value) -> String {
         "element_disabled" => "고른 요소가 비활성화되어 있습니다",
         "element_read_only" => "고른 요소는 읽기 전용입니다",
         "element_not_editable" => "고른 요소에는 글을 입력할 수 없습니다",
+        "no_option" => "고른 목록에 그 글과 맞는 선택지가 없습니다",
         "input_cancelled" => "페이지가 입력을 거부했습니다",
         "document_moving" => {
             "페이지가 읽는 동안 계속 바뀌어 한 상태로 읽을 수 없습니다 — 다시 `zerocode-browser marks`"
@@ -3877,7 +3878,9 @@ if (element.readOnly) return zcFail("element_read_only");
 const input = element instanceof win.HTMLInputElement;
 const area = element instanceof win.HTMLTextAreaElement;
 const editable = element.isContentEditable;
-if (!input && !area && !editable) return zcFail("element_not_editable");
+// A select takes the stdin road only: the text names one of its options, by the option's value or its words (a secret select — a card's expiry month — is written so).
+const select = element instanceof win.HTMLSelectElement && request.road === "setter";
+if (!input && !area && !editable && !select) return zcFail("element_not_editable");
 if (input && String(element.type).toLowerCase() === "file") return zcFail("element_not_editable");
 if ((input || area) && element.maxLength >= 0 && request.text.length > element.maxLength) {
   return zcFail("text_too_long");
@@ -3889,6 +3892,17 @@ if (request.road === "keys" && secureField) {
 element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
 element.focus({ preventScroll: true });
 if (request.road === "setter") {
+  if (select) {
+    const fold = (text) => String(text).replace(/\s+/g, " ").trim().toLowerCase();
+    const asked = fold(request.text);
+    const option = [...element.options].find((one) => !one.disabled && (fold(one.value) === asked || fold(one.label || one.text) === asked));
+    if (!option) return zcFail("no_option");
+    option.selected = true;
+    element.dispatchEvent(new win.Event("input", { bubbles: true }));
+    element.dispatchEvent(new win.Event("change", { bubbles: true }));
+    return zcEncode({ ok: true, value: { method: "value-setter", secureField,
+      blockPath: zcStructuralChain(element, request.blockRoots), pageUrl: zcSafeUrl(location.href) } });
+  }
   if (input || area) {
     const prototype = input ? win.HTMLInputElement.prototype : win.HTMLTextAreaElement.prototype;
     Object.getOwnPropertyDescriptor(prototype, "value").set.call(element, request.text);
