@@ -817,8 +817,12 @@ pub(in crate::session) mod tests {
         let _scope = crate::autonomy::wakeup::begin_scope();
         let inside = advertised_tool_names(&registry, "claude-sonnet-4-6");
 
-        assert!(inside.contains(crate::autonomy::wakeup::TOOL_NAME));
-        assert_eq!(inside.len(), outside.len() + 1);
+        // Named, not counted: a count that is off by one says nothing about which tool came or went.
+        let want = crate::autonomy::wakeup::TOOL_NAME.to_string();
+        let added: Vec<&String> = inside.difference(&outside).collect();
+        let gone: Vec<&String> = outside.difference(&inside).collect();
+        assert_eq!(added, vec![&want], "inside the scope exactly the loop tool is added (gone: {gone:?})");
+        assert!(gone.is_empty(), "the scope takes nothing away: {gone:?}");
     }
 
     /// The governor's per-request effort replaces the turn's, and re-sizes

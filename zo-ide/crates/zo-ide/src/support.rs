@@ -489,6 +489,13 @@ mod advertisement_tests {
     /// `the_delegation_rubric_is_on_by_default_and_off_without_the_spawn_family`.
     #[test]
     fn a_disallowed_tool_leaves_the_advertised_set() {
+        // The override is process-global, and so is the advertised set every other test of this
+        // binary reads through `filter_tool_specs`: hold the one lock the crate keeps for
+        // process-global state, or a reader on another thread sees the denied set for the length
+        // of this test. Seen once (t-41720, gate 2 of 2026-10-06):
+        // `loop_schedule_changes_only_the_loop_turn_request` counted 11 tools outside the loop
+        // scope and 13 inside — TodoWrite denied here, then restored, between its two reads.
+        let _env = crate::test_env_lock();
         let registry = tools::GlobalToolRegistry::builtin();
 
         // The override is process-global (it is a launch flag), so restore it.
