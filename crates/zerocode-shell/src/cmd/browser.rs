@@ -3879,7 +3879,7 @@ const input = element instanceof win.HTMLInputElement;
 const area = element instanceof win.HTMLTextAreaElement;
 const editable = element.isContentEditable;
 // A select takes the stdin road only: the text names one of its options, by the option's value or its words (a secret select — a card's expiry month — is written so).
-const select = element instanceof win.HTMLSelectElement && request.road === "setter";
+const select = element instanceof win.HTMLSelectElement;
 if (!input && !area && !editable && !select) return zcFail("element_not_editable");
 if (input && String(element.type).toLowerCase() === "file") return zcFail("element_not_editable");
 if ((input || area) && element.maxLength >= 0 && request.text.length > element.maxLength) {
@@ -3889,6 +3889,7 @@ const secureField = zcSecretField(element) || (typeof zcSecretSet === "function"
 if (request.road === "keys" && secureField) {
   return zcEncode({ ok: true, value: { method: "held", secureField } });
 }
+if (select && request.road !== "setter") return zcFail("element_not_editable");
 element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
 element.focus({ preventScroll: true });
 if (request.road === "setter") {

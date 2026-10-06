@@ -1068,7 +1068,8 @@ await test("a driver whose type into a frame is refused because the form changed
   for (const road of ["verbs", "script"]) {
     const one = row("framed-two", road);
     assert(one && one.ok && one.pass, `the ${road} road types both secrets though the first changed the form`, one && { ok: one.ok, stuck: one.stuck, result: one.result });
-    assert(one.result.pin === "7391" && one.result.backup === "5520", `each secret is in its own field (${road})`, one.result);
+    assert(one.secretKeys && one.secretKeys.pin && one.secretKeys.pin.matched === true && one.secretKeys.backup && one.secretKeys.backup.matched === true
+      && String(one.result.pin).startsWith("[secret ") && String(one.result.backup).startsWith("[secret "), `each secret is in its own field — kept as its digest, matched (${road})`, { result: one.result, secretKeys: one.secretKeys });
     assert(Array.isArray(one.trace) && one.trace.filter((step) => step.verb === "type").length >= 2, `the run kept a trace with both type steps in it (${road})`, one.trace);
     assert(!JSON.stringify(one.trace).includes("7391") && !JSON.stringify(one.trace).includes("5520"), `neither value is in any step of the trace (${road})`);
     assert(carries("framed-two", road, "7391") === 0 && carries("framed-two", road, "5520") === 0 && watchClean(one), `nor in any text the ${road} road sent to the door, nor any record of the run`, one.leaks);
@@ -1124,9 +1125,9 @@ await test("a row keeps a result value made of secrets as its digest and whether
     assert(one.result.card === `[secret ${one.secretKeys.card.sha256}]` && one.result.name === "Kim", `the result keeps the digest in the value's place and the plain values as they are (${road})`, one.result);
     assert(!JSON.stringify(one).includes("5208391764028851") && !JSON.stringify(one).includes("4172"), `the row carries no value of the card (${road})`);
   }
-  for (const [scene, code] of [["otp-boxes", "624817"], ["otp-shaped", "913746"]]) {
+  for (const [scene, code] of [["otp-shaped", "913746"], ["code-words", "483920"], ["send-beside", "483920"]]) {
     const one = row(scene, "verbs");
-    assert(one && one.secretKeys && Object.keys(one.secretKeys).length >= 1, `the code the person typed is a secret key of ${scene}'s result`, one && one.secretKeys);
+    assert(one && one.secretKeys && one.secretKeys.code && one.secretKeys.code.matched === true, `the code the person typed is a secret key of ${scene}'s result, matched`, one && one.secretKeys);
     assert(!JSON.stringify(one).includes(code), `and the row carries it nowhere (${scene})`);
   }
   return JSON.stringify(row("plain-card", "verbs").secretKeys);
