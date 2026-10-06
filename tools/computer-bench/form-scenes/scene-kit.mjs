@@ -137,8 +137,9 @@ export const verdictWords = (v) =>
 
 /* ---- what a row keeps of a result that holds a secret (t-41720, 2026-10-06) ----
  * The words of a card that say a fact is a secret — a password, a PIN, a payment card's number, security code or expiry, a one-time code: the kinds
- * the door keeps out of its answers. A rule of the bench for the records the bench keeps, beside what a run typed as a secret; not the door's rule. */
-export const SECRET_SAYS = /password|passcode|비밀\s*번호|\bpin\b|card|카드|cvc|cvv|security\s*code|보안\s*코드|expir|valid\s*thru|유효\s*기간|one[\s-]?time|\botp\b|인증\s*번호|verification\s*code/i;
+ * the door keeps out of its answers. A rule of the bench for the records the bench keeps, beside what a run typed as a secret; not the door's rule.
+ * The card's holder, its type, a card's name are no secret: the words are the number's, not the card's (seen on B at 5a478cc54, where the holder's name was kept as a digest). */
+export const SECRET_SAYS = /password|passcode|비밀\s*번호|\bpin\b|card\s*(?:number|no\b)|카드\s*번호|\bcv[cv]2?\b|security\s*code|보안\s*코드|expir|valid\s*thru|유효\s*기간|one[\s-]?time|\botp\b|인증\s*번호|verification\s*code/i;
 export const secretFacts = (card) => (card?.facts || []).filter((fact) => SECRET_SAYS.test(String(fact?.says ?? ""))).map((fact) => String(fact?.value ?? ""));
 const digitsOf = (text) => String(text).replace(/\D/g, "");
 /* Whether a value of the page's result is made of secrets: equal to one (of three characters or more), or its digits tiled left to right by the digits of
