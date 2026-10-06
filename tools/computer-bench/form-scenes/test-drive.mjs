@@ -727,13 +727,13 @@ const CARD_EXPIRY = await scene("card-expiry", `<!doctype html><html lang="en"><
   <label for="nm">Name</label> <input id="nm">
   <div class="row"><label for="q1">Card number</label>
     <input id="q1" maxlength="4"> <input id="q2" maxlength="4"> <input id="q3" maxlength="4"> <input id="q4" maxlength="4"></div>
-  <div class="row">Expiry <select id="mm"><option value="">MM</option><option>11</option><option>12</option></select> / <select id="yy"><option value="">YY</option><option>27</option><option>28</option></select></div>
+  <div class="row">Expiry <select id="mo"><option value="">MM</option><option>11</option><option>12</option></select> / <select id="yr"><option value="">YY</option><option>27</option><option>28</option></select></div>
   <label for="cv">CVV</label> <input id="cv" maxlength="4">
   <button type="button" id="send">Submit</button>
 </form>
 <script>
   const $ = (id) => document.getElementById(id);
-  $("send").addEventListener("click", () => { window.__sceneResult = { name: $("nm").value, card: $("q1").value + $("q2").value + $("q3").value + $("q4").value, expiry: $("mm").value + "/" + $("yy").value, cvv: $("cv").value }; });
+  $("send").addEventListener("click", () => { window.__sceneResult = { name: $("nm").value, card: $("q1").value + $("q2").value + $("q3").value + $("q4").value, expiry: $("mo").value + "/" + $("yr").value, cvv: $("cv").value }; });
 </script>`, CARD_EXPIRY_FACTS, { name: "Kim", card: "5208391764028851", expiry: "12/28", cvv: "4172" });
 
 /* A field the page answers about after a press, with a button of its own beside it: the door says whose the button is, and the driver presses it once and
@@ -1107,7 +1107,7 @@ await test("a driver types a payment card's expiry selects by the stdin road whe
     assert(one && one.ok && one.pass, `the ${road} road takes the name and the card`, one && { ok: one.ok, stuck: one.stuck, wrong: one.wrong, trail: one.trail });
     assert(one.type === 7, `by seven types — four boxes, two selects, the code (${road})`, { type: one.type, trail: one.trail });
     assert(!JSON.stringify(one.trail).includes(":secret"), `no fill was offered a secret field (${road})`, one.trail);
-    const carriedChoice = sourcesOf("card-expiry", road).filter((text) => /"#(mm|yy)":"\d/.test(text)).length;
+    const carriedChoice = sourcesOf("card-expiry", road).filter((text) => /"#(mo|yr)":"\d/.test(text)).length;
     assert(carriedChoice === 0, `no text the ${road} road sent carries a choice of the expiry's selects`, { carriedChoice });
     assert(one.secretKeys && one.secretKeys.expiry && one.secretKeys.expiry.matched === true, `the expiry is a secret key of the result, matched (${road})`, one.secretKeys);
   }

@@ -1346,16 +1346,16 @@ await test("a_card_number_or_security_code_is_secret_by_the_platforms_mark_or_by
  * never its choice; a fill refuses it by name; the stdin road picks its option by the text and says nothing of it; the keys road holds. */
 const CARD_EXPIRY = `<!doctype html><html lang="ko"><meta charset="utf-8">
 <form id="pay">
-  <label for="num">카드 번호</label> <input id="num" maxlength="19">
-  <label for="xm">유효기간 (월)</label> <input id="xm" maxlength="2">
-  <label for="xy">유효기간 (년)</label> <input id="xy" maxlength="2">
-  <label for="em">Expiry month</label> <select id="em"><option value="">MM</option><option>01</option><option>12</option></select>
-  <label for="ey">Expiry year</label> <select id="ey"><option value="">YY</option><option value="28">2028</option></select>
-  <label for="holder">Card holder</label> <input id="holder">
+  <label for="cardno">카드 번호</label> <input id="cardno" maxlength="19">
+  <label for="exm">유효기간 (월)</label> <input id="exm" maxlength="2">
+  <label for="exy">유효기간 (년)</label> <input id="exy" maxlength="2">
+  <label for="emon">Expiry month</label> <select id="emon"><option value="">MM</option><option>01</option><option>12</option></select>
+  <label for="eyr">Expiry year</label> <select id="eyr"><option value="">YY</option><option value="28">2028</option></select>
+  <label for="owner">Card holder</label> <input id="owner">
 </form>
 <form id="coupon">
-  <label for="code">Coupon</label> <input id="code">
-  <label for="until">유효기간</label> <input id="until">
+  <label for="cpn">Coupon</label> <input id="cpn">
+  <label for="cpuntil">유효기간</label> <input id="cpuntil">
   <label for="size">Size</label> <select id="size"><option>S</option><option selected>M</option></select>
 </form>`;
 
@@ -1364,32 +1364,32 @@ await test("a_payment_cards_expiry_is_secret_by_its_words_in_the_form_that_holds
   try {
     await held.setContent(CARD_EXPIRY);
     await held.evaluate(() => {
-      document.getElementById("num").value = "4242424242424242"; document.getElementById("xm").value = "12"; document.getElementById("xy").value = "28";
-      document.getElementById("em").value = "12"; document.getElementById("ey").value = "28"; document.getElementById("until").value = "2027-12-31";
+      document.getElementById("cardno").value = "4242424242424242"; document.getElementById("exm").value = "12"; document.getElementById("exy").value = "28";
+      document.getElementById("emon").value = "12"; document.getElementById("eyr").value = "28"; document.getElementById("cpuntil").value = "2027-12-31";
     });
     const read = await readFields(held);
     const secret = Object.fromEntries(read.fields.map((field) => [field.handle.replace(/^#/, ""), field.masked === true]));
-    const want = { num: true, xm: true, xy: true, em: true, ey: true, holder: false, code: false, until: false, size: false };
+    const want = { cardno: true, exm: true, exy: true, emon: true, eyr: true, owner: false, cpn: false, cpuntil: false, size: false };
     assert(JSON.stringify(secret) === JSON.stringify(want), "the expiry's inputs and selects in the card's form are secret; the coupon's expiry, the holder and the sizes are not", secret);
     const masked = read.fields.filter((field) => field.masked);
     assert(masked.every((field) => field.value === ""), "no secret one says its value", masked);
-    const em = read.fields.find((field) => field.handle === "#em");
+    const em = read.fields.find((field) => field.handle === "#emon");
     assert(em && em.kind === "select" && em.options.includes("12") && em.options.includes("01"), "a secret select still says its options — the page's own words", em);
-    const filled = await fillBundle(held, { "#xm": "11", "#em": "01", "#code": "SAVE5", "#holder": "Kim" });
+    const filled = await fillBundle(held, { "#exm": "11", "#emon": "01", "#cpn": "SAVE5", "#owner": "Kim" });
     const byHandle = Object.fromEntries(filled.results.map((result) => [result.handle, result]));
-    assert(byHandle["#xm"].status === "secret" && byHandle["#em"].status === "secret" && byHandle["#code"].status === "set" && byHandle["#holder"].status === "set",
+    assert(byHandle["#exm"].status === "secret" && byHandle["#emon"].status === "secret" && byHandle["#cpn"].status === "set" && byHandle["#owner"].status === "set",
       "a fill refuses the card's expiry by name and writes the coupon and the holder", byHandle);
-    assert(await held.evaluate(() => document.getElementById("em").value) === "12", "and the select kept its choice");
+    assert(await held.evaluate(() => document.getElementById("emon").value) === "12", "and the select kept its choice");
     assert(!JSON.stringify(filled).includes('"12"') && !JSON.stringify(filled).includes('"28"'), "the answer of the fill carries no choice of a secret select", filled);
-    const keys = await evalJson(held, twin.typeScript("#em", "01", "keys"));
+    const keys = await evalJson(held, twin.typeScript("#emon", "01", "keys"));
     assert(keys.ok && keys.value.method === "held" && keys.value.secureField === true, "the keys road holds before a secret select", keys);
-    const typed = await evalJson(held, twin.typeScript("#ey", "2028", "setter"));
+    const typed = await evalJson(held, twin.typeScript("#eyr", "2028", "setter"));
     assert(typed.ok && typed.value.method === "value-setter" && typed.value.secureField === true && !JSON.stringify(typed).includes("2028"),
       "the stdin road picks the option by its words and says nothing of it", typed);
-    assert(await held.evaluate(() => document.getElementById("ey").value) === "28", "the option is chosen");
-    const byValue = await evalJson(held, twin.typeScript("#em", "01", "setter"));
-    assert(byValue.ok && await held.evaluate(() => document.getElementById("em").value) === "01", "or by its value", byValue);
-    const none = await evalJson(held, twin.typeScript("#em", "13", "setter"));
+    assert(await held.evaluate(() => document.getElementById("eyr").value) === "28", "the option is chosen");
+    const byValue = await evalJson(held, twin.typeScript("#emon", "01", "setter"));
+    assert(byValue.ok && await held.evaluate(() => document.getElementById("emon").value) === "01", "or by its value", byValue);
+    const none = await evalJson(held, twin.typeScript("#emon", "13", "setter"));
     assert(!none.ok && none.code === "no_option", "a text that names no option is refused by name", none);
     return Object.keys(secret).filter((id) => secret[id]).join(" ");
   } finally { await held.close(); }
