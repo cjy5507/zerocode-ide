@@ -719,6 +719,23 @@ const PLAIN_CARD = await scene("plain-card", `<!doctype html><html lang="en"><me
   $("send").addEventListener("click", () => { window.__sceneResult = { name: $("nm").value, card: $("q1").value + $("q2").value + $("q3").value + $("q4").value, cvv: $("cv").value }; });
 </script>`, PLAIN_CARD_FACTS, { name: "Kim", card: "5208391764028851", cvv: "4172" });
 
+/* A payment card whose expiry stands in two selects the page names only by its words (Expiry, beside the card's boxes): the door says they are secret as the number is, so
+ * the driver types them by the stdin road — a select takes the option the text names — and never offers them to a fill. The row keeps the expiry, the number and the code
+ * as digests (t-41720, the supervisor's finding of 2026-10-06). */
+const CARD_EXPIRY_FACTS = [{ says: "Name", value: "Kim" }, { says: "Card number", value: "5208 3917 6402 8851" }, { says: "Expiry", value: "12/28" }, { says: "CVV", value: "4172" }];
+const CARD_EXPIRY = await scene("card-expiry", `<!doctype html><html lang="en"><meta charset="utf-8"><form onsubmit="return false">
+  <label for="nm">Name</label> <input id="nm">
+  <div class="row"><label for="q1">Card number</label>
+    <input id="q1" maxlength="4"> <input id="q2" maxlength="4"> <input id="q3" maxlength="4"> <input id="q4" maxlength="4"></div>
+  <div class="row">Expiry <select id="mm"><option value="">MM</option><option>11</option><option>12</option></select> / <select id="yy"><option value="">YY</option><option>27</option><option>28</option></select></div>
+  <label for="cv">CVV</label> <input id="cv" maxlength="4">
+  <button type="button" id="send">Submit</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  $("send").addEventListener("click", () => { window.__sceneResult = { name: $("nm").value, card: $("q1").value + $("q2").value + $("q3").value + $("q4").value, expiry: $("mm").value + "/" + $("yy").value, cvv: $("cv").value }; });
+</script>`, CARD_EXPIRY_FACTS, { name: "Kim", card: "5208391764028851", expiry: "12/28", cvv: "4172" });
+
 /* A field the page answers about after a press, with a button of its own beside it: the door says whose the button is, and the driver presses it once and
  * reads the form again — the press that ends the form is made again after it. */
 const OWN = await scene("own", `<!doctype html><html lang="en"><meta charset="utf-8"><form id="f" onsubmit="return false">
@@ -760,7 +777,7 @@ const stub = join(root, "door-text-stub.sh");
 await writeFile(stub, `#!/bin/sh\ncat > /dev/null\nprintf '%s' '{"words":"stub"}'\n`, { mode: 0o755 });
 const done = spawnSync(process.execPath, [join(HERE, "drive.mjs"), "--scene", REVEAL, "--scene", TERMS, "--scene", LEFT, "--scene", MADE, "--scene", MADE_EMPTY,
   "--scene", ADVANCE, "--scene", ADVANCE_SUBMIT, "--scene", LOADING, "--scene", CHIPS, "--scene", SLOTS, "--scene", LATE, "--scene", REFUSES, "--scene", MASKED, "--scene", LEFT_OVER,
-  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", VENUE_PAIR, "--scene", BERTH_COUNT, "--scene", SPLIT_SECRET, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--scene", SECRET_LATER, "--scene", OTP_BOXES, "--scene", OTP_SHAPED, "--scene", PLAIN_CARD, "--door-text", stub, "--out", out, "--sources", sourcesFile], { encoding: "utf8", timeout: 720_000 });
+  "--scene", JOINTS, "--scene", JOINTS_NAMED, "--scene", STEPPER, "--scene", SEND_BESIDE, "--scene", CONFIRM_BESIDE, "--scene", CODE_WORDS, "--scene", SEARCH_LAYER, "--scene", SUGGEST_LIST, "--scene", STAY_DIALOG, "--scene", VENUE_PAIR, "--scene", BERTH_COUNT, "--scene", SPLIT_SECRET, "--scene", FRAMED_SECRET, "--scene", FRAMED_TWO, "--scene", UNITS, "--scene", TWINS, "--scene", TWINS_OPEN, "--scene", OWN, "--scene", DRAWN, "--scene", SECRET_LATER, "--scene", OTP_BOXES, "--scene", OTP_SHAPED, "--scene", PLAIN_CARD, "--scene", CARD_EXPIRY, "--door-text", stub, "--out", out, "--sources", sourcesFile], { encoding: "utf8", timeout: 720_000 });
 const rows = await readFile(out, "utf8").then(JSON.parse, () => []);
 const row = (scene, road) => rows.find((one) => one.scene === scene && one.road === road);
 /* What each road sent to the door, text by text (`--sources`): what a model's calls would have carried. */
@@ -1082,6 +1099,37 @@ await test("a driver types the number and the security code of a payment card by
     assert(watchClean(one), `and no record of the run does (${road})`, one.leaks);
   }
   return JSON.stringify(row("plain-card", "verbs").result);
+});
+
+await test("a driver types a payment card's expiry selects by the stdin road when the page names them by words beside the card's boxes, and never offers them to a fill, on both roads", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("card-expiry", road);
+    assert(one && one.ok && one.pass, `the ${road} road takes the name and the card`, one && { ok: one.ok, stuck: one.stuck, wrong: one.wrong, trail: one.trail });
+    assert(one.type === 7, `by seven types — four boxes, two selects, the code (${road})`, { type: one.type, trail: one.trail });
+    assert(!JSON.stringify(one.trail).includes(":secret"), `no fill was offered a secret field (${road})`, one.trail);
+    const carriedChoice = sourcesOf("card-expiry", road).filter((text) => /"#(mm|yy)":"\d/.test(text)).length;
+    assert(carriedChoice === 0, `no text the ${road} road sent carries a choice of the expiry's selects`, { carriedChoice });
+    assert(one.secretKeys && one.secretKeys.expiry && one.secretKeys.expiry.matched === true, `the expiry is a secret key of the result, matched (${road})`, one.secretKeys);
+  }
+  return JSON.stringify(row("card-expiry", "verbs").secretKeys);
+});
+
+/* The row keeps the page's whole result — but a value made of what the run typed as a secret, or of a fact the card calls one, is kept as its digest and whether it
+ * matched (t-41720): the card's number the page built from its four boxes, the code, and the one-time code the person typed. A verdict is still countable later, by the digest. */
+await test("a row keeps a result value made of secrets as its digest and whether it matched, and never the value", () => {
+  for (const road of ["verbs", "script"]) {
+    const one = row("plain-card", road);
+    assert(one && one.secretKeys && one.secretKeys.card && one.secretKeys.cvv, `the card's number and code are secret keys of the result (${road})`, one && one.secretKeys);
+    assert(one.secretKeys.card.matched === true && /^[0-9a-f]{16}$/.test(one.secretKeys.card.sha256), `each says it matched and its digest (${road})`, one.secretKeys);
+    assert(one.result.card === `[secret ${one.secretKeys.card.sha256}]` && one.result.name === "Kim", `the result keeps the digest in the value's place and the plain values as they are (${road})`, one.result);
+    assert(!JSON.stringify(one).includes("5208391764028851") && !JSON.stringify(one).includes("4172"), `the row carries no value of the card (${road})`);
+  }
+  for (const [scene, code] of [["otp-boxes", "624817"], ["otp-shaped", "913746"]]) {
+    const one = row(scene, "verbs");
+    assert(one && one.secretKeys && Object.keys(one.secretKeys).length >= 1, `the code the person typed is a secret key of ${scene}'s result`, one && one.secretKeys);
+    assert(!JSON.stringify(one).includes(code), `and the row carries it nowhere (${scene})`);
+  }
+  return JSON.stringify(row("plain-card", "verbs").secretKeys);
 });
 
 await test("a driver hands the code of the person over by the person typing it into the field it names — no fill writes it and no text it sends to the door carries it, on both roads", () => {
