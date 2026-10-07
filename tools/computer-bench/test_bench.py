@@ -470,7 +470,10 @@ class Bench(unittest.TestCase):
         number = lambda name: int(re.search(rf"pub const {name}: u64 = ([\d_]+);", core).group(1).replace("_", ""))
         self.assertLessEqual(values["setup_timeout_ms"], number("COMPUTER_WAIT_FOR_MAX_MS"))
         self.assertLessEqual(values["quit_wait_ms"], number("COMPUTER_WAIT_FOR_MAX_MS"))
-        self.assertIn("COMPUTER_LONGEST_DEADLINE_MS: u64 =\n    COMPUTER_HANDOFF_TIMEOUT_MS + COMPUTER_BRIDGE_GRACE_MS;", core)
+        # The longest deadline is the person's turn, the bridge's grace, and the grace the window gets to type a
+        # code the person sent (t-40807). That last term starts only after the question has left the screen, so
+        # the bench's wait for an open question stays the turn and the bridge's grace.
+        self.assertIn("COMPUTER_LONGEST_DEADLINE_MS: u64 =\n    COMPUTER_HANDOFF_TIMEOUT_MS + COMPUTER_BRIDGE_GRACE_MS + COMPUTER_ENTER_GRACE_MS;", core)
         self.assertEqual(values["question_wait_ms"], number("COMPUTER_HANDOFF_TIMEOUT_MS") + number("COMPUTER_BRIDGE_GRACE_MS"))
         self.assertGreater(number("COMPUTER_HANDOFF_TIMEOUT_MS"), number("COMPUTER_CONFIRM_TIMEOUT_MS"), "the handoff is the longer question")
         for name, home in (("ZO_PROFILE_DISABLE_HOOK_REPORTER", "zo-ide/crates/zo-ide/src/ide/reporter.rs"),

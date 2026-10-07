@@ -4351,12 +4351,14 @@ const floatView = makeTermView(el("terminal"), el("term"), el("caret"), {
  * the file that owns its words, through `registerAskKind`:
  *
  *   tone         the frame's `data-kind`, which the stylesheet dresses
- *   view(ask)    { agent, agentClass, title, mono, why, choices, initial, safe }
+ *   view(ask)    { agent, agentClass, title, mono, why, choices, initial, focus, safe }
  *                — `choices` is [{ label, tone: primary | halt | plain, … }],
  *                or null for a kind whose buttons are the markup's own;
  *                `initial` is the choice that holds the keyboard, so the one
  *                Enter gives — the SAFE one of its kind, never the riskiest —
- *                or null when Enter must give none; `safe` is Escape's
+ *                or null when Enter must give none; `focus` is the id of an
+ *                element of the kind's own where the keyboard starts instead
+ *                (a field the person types in); `safe` is Escape's
  *   clock(ask)   the words for a deadline the ask carries (Computer Use)
  *   deliver(ask, choice)  a promise that settles once the answer has reached
  *                whoever asked; a rejection keeps the ask on screen
@@ -4536,7 +4538,8 @@ function paintAsk() {
     // the keyboard starts on the frame itself, and the person Tabs to the
     // answer they mean.
     askFocus =
-      view.initial === null ? askFrame : buttons[view.initial ?? 0] ?? buttons[0] ?? null;
+      (view.focus ? el(view.focus) : null) ??
+      (view.initial === null ? askFrame : buttons[view.initial ?? 0] ?? buttons[0] ?? null);
     askSafe = choices[view.safe] ?? null;
   }
   kind.paint?.(ask, view);
@@ -4583,6 +4586,12 @@ async function answerAsk(choice) {
   } catch (error) {
     answered.sending = false;
     if (activeAsk !== answered) return;
+    // A refusal the kind painted itself — a code that is no code — leaves the
+    // ask standing with its buttons live again, and writes no failure over it.
+    if (error?.askHeld === true) {
+      for (const button of el("ask-choices").querySelectorAll("button")) button.disabled = false;
+      return;
+    }
     answered.failure = String(error);
     paintAskPart(
       "ask-why",

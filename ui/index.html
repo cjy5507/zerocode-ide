@@ -9894,6 +9894,15 @@
         <p class="perm-why" id="ask-why" hidden></p>
         <!-- 시계가 있는 물음(Computer Use)의 남은 시간. 시계가 없는 물음에는 없다. -->
         <p class="ask-clock" id="ask-clock" hidden></p>
+        <!-- 인증번호를 받는 사람 차례 카드(t-40807)의 한 줄. 창이 줄이 있다고 한 카드에만
+             보이고, 그 값은 보낼 때 입력칸에서 지워진다. 비밀번호 칸이 아니다 — 사람이
+             치는 번호를 사람이 다시 읽어 확인한다. -->
+        <div class="ask-code" id="ask-code" hidden>
+          <label class="ask-code-label" id="ask-code-label" for="ask-code-input"></label>
+          <input class="ask-code-input" id="ask-code-input" type="text" autocomplete="one-time-code" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="ask-code-hint ask-code-error" aria-invalid="false" />
+          <p class="ask-code-hint" id="ask-code-hint"></p>
+          <p class="ask-code-error" id="ask-code-error" role="alert" hidden></p>
+        </div>
         <!-- 다른 물음이 동시에 기다리면 여기 그 수가 선다. 팝업은 가장 오래된
              물음 하나만 보여주고, 답하면 다음 것이 올라온다. -->
         <p class="perm-more" id="ask-more" hidden></p>

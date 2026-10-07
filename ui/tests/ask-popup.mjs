@@ -27,6 +27,22 @@ export const ASK_TITLES = Object.freeze({
   handoff: { ko: "사람이 할 차례", en: "Your turn", ja: "あなたの番です", zh: "轮到你了", es: "Te toca a ti" },
 });
 
+/* The code card (t-40807) in the five languages the window speaks, pinned in
+ * words for the same reason as the titles: a catalog that drifted, or a key
+ * nobody translated, fails here instead of agreeing with itself. `{{min}}` and
+ * `{{max}}` are the window's numbers, written out the way the page shows them. */
+export const ASK_CODE_WORDS = Object.freeze({
+  ko: { title: "인증번호를 입력해 주세요", label: "인증번호", hint: "4~10자의 숫자·영문 · 창이 에이전트가 정한 칸에 한 번 입력합니다. 에이전트는 번호를 받지 않습니다", send: "보내기", cancel: "취소", invalid: "4~10자의 숫자·영문으로 입력해 주세요" },
+  en: { title: "Enter the code", label: "Code", hint: "4–10 letters or digits · the window types it once into the field the agent named; the agent never receives it", send: "Send", cancel: "Cancel", invalid: "Enter 4–10 letters or digits" },
+  ja: { title: "コードを入力してください", label: "コード", hint: "4〜10文字の英数字 · エージェントが指定した欄にウィンドウが一度だけ入力します。エージェントには渡りません", send: "送信", cancel: "キャンセル", invalid: "4〜10文字の英数字で入力してください" },
+  zh: { title: "请输入验证码", label: "验证码", hint: "4–10 位数字或字母 · 由窗口一次性输入到智能体指定的输入框；智能体不会收到验证码", send: "发送", cancel: "取消", invalid: "请输入 4–10 位数字或字母" },
+  es: { title: "Escribe el código", label: "Código", hint: "De 4 a 10 letras o dígitos · la ventana lo escribe una vez en el campo que indicó el agente; el agente no lo recibe", send: "Enviar", cancel: "Cancelar", invalid: "Escribe de 4 a 10 letras o dígitos" },
+});
+
+/* What the window sends for a card with a line: the plain card's fields and
+ * the limits the page may show (`codeAsk`, from core's one table). */
+const CODE_CARD = Object.freeze({ reason: "카카오톡 인증번호", timeoutMs: 180000, codeAsk: { min: 4, max: 10, typedMax: 20 } });
+
 /* The hands every scenario shares, put on the page once: what the backend
  * says (`frame`, `event`), what the popup shows (`look`), and the two
  * answers it can be given (`sent`: a permission's, `answered`: Computer
@@ -45,9 +61,53 @@ const installHands = () => {
     },
     sent: [],
     answered: [],
+    codes: [],
+    /* The backend's verdict on a typed code: the one rule of core's
+     * `OneTimeCode::parse` (groups dropped, four to ten letters or digits),
+     * written out as the stub's own — the page never judges. */
+    codeVerdict(typed) {
+      if (T.gone) return "gone";
+      return /^[A-Za-z0-9]{4,10}$/.test(String(typed).replace(/[ -]/g, "")) ? "delivered" : "invalid";
+    },
+    gone: false,
     reset() {
       T.sent.length = 0;
       T.answered.length = 0;
+      T.codes.length = 0;
+      T.gone = false;
+    },
+    /* Puts text in the card's field the way a hand would leave it (no key
+     * events); a card with no field takes nothing, so a card that lost its
+     * line fails the checks beside it, not this call. */
+    typeIn(text) {
+      const input = document.getElementById("ask-code-input");
+      if (input) input.value = text;
+      return input?.value ?? null;
+    },
+    /* What the person would see of the card's line right now. */
+    code() {
+      const row = document.getElementById("ask-code");
+      const input = document.getElementById("ask-code-input");
+      const said = (id) => {
+        const node = document.getElementById(id);
+        return node && !node.hidden && !node.closest("[hidden]") ? node.textContent.trim() : null;
+      };
+      if (!row || !input) return { present: false };
+      return {
+        present: true,
+        shown: !row.hidden && !row.closest("[hidden]") && row.getClientRects().length > 0,
+        label: said("ask-code-label"),
+        hint: said("ask-code-hint"),
+        error: said("ask-code-error"),
+        labelledBy: input.labels?.[0]?.id ?? null,
+        describedBy: (input.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean),
+        invalid: input.getAttribute("aria-invalid"),
+        autocomplete: input.getAttribute("autocomplete"),
+        type: input.type,
+        maxLength: input.maxLength,
+        value: input.value,
+        focused: document.activeElement === input,
+      };
     },
     /* What the person would read off the popup right now. A part that is
      * hidden reads as null, so "no tool chip" is `mono === null`. */
@@ -74,7 +134,7 @@ const installHands = () => {
         more: said("ask-more"),
         buttons: buttons.map((one) => one.textContent.trim()),
         focus: focus && scrim.contains(focus)
-          ? (focus.tagName === "BUTTON" ? focus.textContent.trim() : "(dialog)")
+          ? (focus.tagName === "BUTTON" ? focus.textContent.trim() : focus.tagName === "INPUT" ? `#${focus.id}` : "(dialog)")
           : null,
         rect: {
           cx: Math.round(rect.left + rect.width / 2),
@@ -96,6 +156,10 @@ const installHands = () => {
   window.__ANSWER__.computer_confirm_answer = (args) => {
     T.answered.push(JSON.parse(JSON.stringify(args)));
     return true;
+  };
+  window.__ANSWER__.computer_handoff_code = (args) => {
+    T.codes.push(JSON.parse(JSON.stringify(args)));
+    return T.codeVerdict(args.code);
   };
 };
 
@@ -823,7 +887,7 @@ const measureInk = () => {
     return colour;
   };
   const rows = {};
-  for (const id of ["ask-agent", "ask-title", "ask-body", "ask-why", "ask-clock", "ask-more"]) {
+  for (const id of ["ask-agent", "ask-title", "ask-body", "ask-why", "ask-clock", "ask-more", "ask-code-label", "ask-code-hint", "ask-code-input"]) {
     const node = document.getElementById(id);
     if (!node || node.hidden || node.closest("[hidden]")) continue;
     const ink = parse(getComputedStyle(node).color);
@@ -848,6 +912,7 @@ async function ink(browser, origin, ok) {
         ["question", () => window.__ASK_T__.frame("s-i", { type: "permission_prompt", prompt_id: 202, kind: "question", topic: "model_switch", reasoning: "모델을 바꿔 다시 시도할까요?", audit_hint: null })],
         ["confirm", () => window.__ASK_T__.fire("computer:confirm", { id: "ink-c", kind: "payment", label: "Pay", timeoutMs: 120000 })],
         ["handoff", () => window.__ASK_T__.fire("computer:handoff", { id: "ink-h", reason: "코드를 입력해 주세요", timeoutMs: 600000 })],
+        ["handoff-code", () => window.__ASK_T__.fire("computer:handoff", { id: "ink-hc", reason: "카카오톡 인증번호", timeoutMs: 180000, codeAsk: { min: 4, max: 10, typedMax: 20 } })],
       ]) {
         await page.evaluate(raise);
         await page.waitForTimeout(320);
@@ -861,7 +926,7 @@ async function ink(browser, origin, ok) {
     const counted = Object.values(rows).reduce((sum, parts) => sum + Object.keys(parts).length, 0);
     ok(
       "every part of every kind of ask reads at 4.5:1 or better against what it is drawn on, in the dark and the light window",
-      low.length === 0 && counted >= 24,
+      low.length === 0 && counted >= 24 && Object.keys(rows["dark/handoff-code"] ?? {}).includes("ask-code-input"),
       JSON.stringify({ low, counted }),
     );
     ok("the ink scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
@@ -1100,11 +1165,338 @@ async function identity(browser, origin, ok) {
   });
 }
 
+/* ------------------------------------------- the card with a line for a code */
+
+/* t-40807: `zerocode-computer handoff --ask-code` puts the person's-turn card
+ * up with one line to type in. The page paints what the window sends and
+ * holds nothing of its own — the limits come in the payload, the verdict on a
+ * typed code comes from the window, the code leaves by the one door that
+ * takes it and is gone from the field the moment it has. */
+async function computerHandoffCode(browser, origin, ok) {
+  await scenario(browser, origin, "code card", ok, async (page, faults) => {
+    const raised = await page.evaluate(async (card) => {
+      const T = window.__ASK_T__;
+      T.fire("computer:handoff", { id: "code-1", ...card });
+      await T.settle();
+      return { ...T.look(), line: T.code() };
+    }, CODE_CARD);
+    ok(
+      "a card the window says has a line shows its title, the agent's reason, its clock and one labelled field",
+      raised.shown && raised.kind === "computer-handoff" && raised.title === ASK_CODE_WORDS.ko.title
+        && raised.why === CODE_CARD.reason && raised.clock.includes("180")
+        && raised.line.shown === true && raised.line.label === ASK_CODE_WORDS.ko.label
+        && raised.line.labelledBy === "ask-code-label",
+      JSON.stringify(raised),
+    );
+    ok(
+      "the field says what it takes and what becomes of it, and is wired for a code and for no one else's secrets: one-time-code, not a password, room for the groups the window allows",
+      raised.line.hint === ASK_CODE_WORDS.ko.hint && raised.line.describedBy.includes("ask-code-hint")
+        && raised.line.autocomplete === "one-time-code" && raised.line.type === "text"
+        && raised.line.maxLength === CODE_CARD.codeAsk.typedMax && raised.line.value === "",
+      JSON.stringify(raised.line),
+    );
+    ok(
+      "the keyboard starts in the field, and the answers are Cancel and Send — there is no bare 「다 했어요」 for a card that wants a code",
+      raised.focus === "#ask-code-input" && raised.buttons.join() === `${ASK_CODE_WORDS.ko.cancel},${ASK_CODE_WORDS.ko.send}`,
+      JSON.stringify({ focus: raised.focus, buttons: raised.buttons }),
+    );
+
+    // Enter on an empty field says nothing to the window and says why on the card.
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(120);
+    const empty = await page.evaluate(() => ({ ...window.__ASK_T__.look(), line: window.__ASK_T__.code(), codes: window.__ASK_T__.codes.slice() }));
+    ok(
+      "Enter on an empty field sends nothing, keeps the card and the keyboard, and says in the card's words what a code is",
+      empty.shown && empty.codes.length === 0 && empty.line.error === ASK_CODE_WORDS.ko.invalid
+        && empty.line.invalid === "true" && empty.line.focused === true,
+      JSON.stringify(empty),
+    );
+
+    // What is typed that is not a code: the window judges, the card stays.
+    await page.keyboard.type("12");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(150);
+    const wrong = await page.evaluate(() => ({ ...window.__ASK_T__.look(), line: window.__ASK_T__.code(), codes: window.__ASK_T__.codes.slice(), answered: window.__ASK_T__.answered.slice() }));
+    ok(
+      "a code the window refuses as no code leaves the card standing with the reason, the field as typed, the buttons live again and no failure message",
+      wrong.shown && wrong.codes.length === 1 && wrong.codes[0].id === "code-1" && wrong.codes[0].code === "12"
+        && wrong.line.error === ASK_CODE_WORDS.ko.invalid && wrong.line.value === "12" && wrong.line.focused === true
+        && wrong.why === CODE_CARD.reason && wrong.answered.length === 0,
+      JSON.stringify(wrong),
+    );
+
+    // The right code, grouped as people write it: sent as typed, once; the card goes; nothing stays.
+    await page.evaluate(() => { const input = document.getElementById("ask-code-input"); if (input) input.value = ""; });
+    await page.keyboard.type("493 021");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    const done = await page.evaluate(() => {
+      const T = window.__ASK_T__;
+      const where = (needle) => ({
+        html: document.documentElement.outerHTML.includes(needle),
+        local: (() => { try { return JSON.stringify({ ...localStorage }).includes(needle); } catch { return false; } })(),
+        session: (() => { try { return JSON.stringify({ ...sessionStorage }).includes(needle); } catch { return false; } })(),
+      });
+      return { ...T.look(), line: T.code(), codes: T.codes.slice(), answered: T.answered.slice(), grouped: where("493 021"), joined: where("493021") };
+    });
+    ok(
+      "a delivered code goes by the code door once, as typed; the card leaves and the confirm door heard nothing",
+      done.shown === false && done.codes.length === 2 && done.codes[1].id === "code-1" && done.codes[1].code === "493 021"
+        && done.answered.length === 0,
+      JSON.stringify({ shown: done.shown, codes: done.codes, answered: done.answered }),
+    );
+    ok(
+      "the code is in no place of the page once sent: not in the field, not in the markup, not in the page's storage",
+      done.line.value === "" && !done.grouped.html && !done.grouped.local && !done.grouped.session
+        && !done.joined.html && !done.joined.local && !done.joined.session,
+      JSON.stringify({ line: done.line, grouped: done.grouped, joined: done.joined }),
+    );
+    ok("the code card scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+
+  await scenario(browser, origin, "code card answers", ok, async (page, faults) => {
+    // Send by the button is Send by Enter; Escape cancels through the confirm door and clears the field.
+    const clicked = await page.evaluate(async (card) => {
+      const T = window.__ASK_T__;
+      T.fire("computer:handoff", { id: "code-2", ...card });
+      await T.settle();
+      T.typeIn("A1b2C3");
+      [...document.querySelectorAll("#ask-choices button")].find((one) => one.classList.contains("btn--primary"))?.click();
+      await T.settle(200);
+      return { ...T.look(), codes: T.codes.slice() };
+    }, CODE_CARD);
+    ok(
+      "the Send button sends what is in the field, and the Send button is the card's primary",
+      clicked.shown === false && clicked.codes.length === 1 && clicked.codes[0].code === "A1b2C3",
+      JSON.stringify(clicked),
+    );
+    const cancelled = await page.evaluate(async (card) => {
+      const T = window.__ASK_T__;
+      T.reset();
+      T.fire("computer:handoff", { id: "code-3", ...card });
+      await T.settle();
+      T.typeIn("991122");
+      return T.code().value;
+    }, CODE_CARD);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(250);
+    const escaped = await page.evaluate(() => ({ ...window.__ASK_T__.look(), line: window.__ASK_T__.code(), answered: window.__ASK_T__.answered.slice(), codes: window.__ASK_T__.codes.slice() }));
+    ok(
+      "Escape on a card with a typed code hands the desk back unfinished through the confirm door, sends no code, and clears the field",
+      cancelled === "991122" && escaped.shown === false && JSON.stringify(escaped.answered) === JSON.stringify([{ id: "code-3", allow: false }])
+        && escaped.codes.length === 0 && escaped.line.value === "",
+      JSON.stringify({ cancelled, escaped }),
+    );
+
+    // The window closing the card (time ran out, answered elsewhere) takes the typed code with it.
+    const timedOut = await page.evaluate(async (card) => {
+      const T = window.__ASK_T__;
+      T.reset();
+      T.fire("computer:handoff", { id: "code-4", ...card });
+      await T.settle();
+      T.typeIn("774411");
+      T.fire("computer:handoff-closed", { id: "code-4", decision: "timedout" });
+      await T.settle(300);
+      return { ...T.look(), line: T.code(), html: document.documentElement.outerHTML.includes("774411") };
+    }, CODE_CARD);
+    ok(
+      "a card the window closes under the person takes the typed code with it",
+      timedOut.shown === false && timedOut.line.value === "" && timedOut.html === false,
+      JSON.stringify(timedOut),
+    );
+
+    // A code already gone from the window (answered a moment before) is not a failure to retry.
+    const gone = await page.evaluate(async (card) => {
+      const T = window.__ASK_T__;
+      T.reset();
+      T.gone = true;
+      T.fire("computer:handoff", { id: "code-5", ...card });
+      await T.settle();
+      T.typeIn("552211");
+      [...document.querySelectorAll("#ask-choices button")].find((one) => one.classList.contains("btn--primary"))?.click();
+      await T.settle(300);
+      return { ...T.look(), line: T.code(), codes: T.codes.length };
+    }, CODE_CARD);
+    ok(
+      "a code the window no longer waits for leaves the card without a failure, and no value stays",
+      gone.codes === 1 && gone.shown === false && gone.line.value === "",
+      JSON.stringify(gone),
+    );
+
+    // A card without a line is the card it was: no field, the two answers, and Enter says nothing.
+    const plain = await page.evaluate(async () => {
+      const T = window.__ASK_T__;
+      T.reset();
+      T.fire("computer:handoff", { id: "plain-1", reason: "휴대폰의 2FA 코드를 입력해 주세요", timeoutMs: 600000 });
+      await T.settle();
+      return { ...T.look(), line: T.code() };
+    });
+    ok(
+      "a card the window says has no line is the plain turn: no field, Cancel and Done, the keyboard on the frame",
+      plain.shown && plain.line.shown === false && plain.buttons.join() === "취소,다 했어요" && plain.focus === "(dialog)"
+        && plain.title === ASK_TITLES.handoff.ko,
+      JSON.stringify(plain),
+    );
+    ok("the code card answers scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+}
+
+/* The card in the five languages: its title, its field and what it says of
+ * the code, and what it says to a typed code that is not one. */
+async function computerHandoffCodeLanguages(browser, origin, ok) {
+  await scenario(browser, origin, "code card languages", ok, async (page, faults) => {
+    const seen = await page.evaluate(async (card) => {
+      const T = window.__ASK_T__;
+      const out = {};
+      for (const code of ["ko", "en", "ja", "zh", "es"]) {
+        setLocale(code, { persist: false, refresh: false });
+        T.reset();
+        T.fire("computer:handoff", { id: `lang-${code}`, ...card });
+        await T.settle(150);
+        const raised = T.look();
+        const line = T.code();
+        T.typeIn("1");
+        [...document.querySelectorAll("#ask-choices button")].find((one) => one.classList.contains("btn--primary"))?.click();
+        await T.settle(150);
+        const refused = T.code();
+        // The language changes under a card that is up: redrawn, and the typed value stays where the hand put it.
+        const other = code === "ko" ? "en" : "ko";
+        setLocale(other, { persist: false, refresh: false });
+        const redrawn = { title: T.look().title, label: T.code().label, value: T.code().value };
+        setLocale(code, { persist: false, refresh: false });
+        out[code] = {
+          title: raised.title, label: line.label, hint: line.hint, send: raised.buttons[1], cancel: raised.buttons[0], invalid: refused.error, redrawn,
+        };
+        T.fire("computer:handoff-closed", { id: `lang-${code}`, decision: "refused" });
+        await T.settle(260);
+      }
+      setLocale("ko", { persist: false, refresh: false });
+      return out;
+    }, CODE_CARD);
+    const wrong = [];
+    for (const code of ["ko", "en", "ja", "zh", "es"]) {
+      for (const part of ["title", "label", "hint", "send", "cancel", "invalid"]) {
+        if (seen[code]?.[part] !== ASK_CODE_WORDS[code][part]) {
+          wrong.push(`${code}/${part}: ${JSON.stringify(seen[code]?.[part])} != ${JSON.stringify(ASK_CODE_WORDS[code][part])}`);
+        }
+      }
+      const other = code === "ko" ? "en" : "ko";
+      if (seen[code]?.redrawn?.title !== ASK_CODE_WORDS[other].title || seen[code]?.redrawn?.label !== ASK_CODE_WORDS[other].label || seen[code]?.redrawn?.value !== "1") {
+        wrong.push(`${code}: a card on screen did not follow a language change, or lost what was typed: ${JSON.stringify(seen[code]?.redrawn)}`);
+      }
+    }
+    ok("the card with a line speaks all five languages, says the same of a wrong code in each, and follows a language change without losing what was typed", wrong.length === 0, wrong.join(" | "));
+    ok("the code card languages scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+}
+
+/* A card that is not up costs nothing: no timer outlives it, the line has
+ * none of its own while it stands, and motion is the sheet's one rule. */
+async function computerHandoffCodeQuiet(browser, origin, ok) {
+  await scenario(browser, origin, "code card quiet", ok, async (page, faults) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const seen = await page.evaluate(async (card) => {
+      const T = window.__ASK_T__;
+      // Count every timer from here on that is armed and not yet cleared.
+      const live = { interval: new Set(), timeout: new Set() };
+      // Bound to the window: a timer function called as a method of another object is an illegal invocation.
+      const original = { setInterval: window.setInterval, clearInterval: window.clearInterval, setTimeout: window.setTimeout, clearTimeout: window.clearTimeout };
+      const real = { si: original.setInterval.bind(window), ci: original.clearInterval.bind(window), st: original.setTimeout.bind(window), ct: original.clearTimeout.bind(window) };
+      window.setInterval = (...args) => { const id = real.si(...args); live.interval.add(id); return id; };
+      window.clearInterval = (id) => { live.interval.delete(id); return real.ci(id); };
+      window.setTimeout = (...args) => {
+        const id = real.st((...inner) => { live.timeout.delete(id); return args[0](...inner); }, ...args.slice(1));
+        live.timeout.add(id);
+        return id;
+      };
+      window.clearTimeout = (id) => { live.timeout.delete(id); return real.ct(id); };
+      const counts = () => ({ intervals: live.interval.size, timeouts: live.timeout.size });
+      const before = counts();
+      T.fire("computer:handoff", { id: "quiet-1", ...card });
+      await T.settle(1300);
+      const standing = { ...counts(), clock: T.look().clock };
+      // A card that lost its line has no row to read: that is a failed check, not a thrown error.
+      const row = document.getElementById("ask-code");
+      const field = document.getElementById("ask-code-input");
+      const motion = {
+        animation: row ? getComputedStyle(row).animationName : "no row",
+        transition: field ? getComputedStyle(field).transitionDuration : "no field",
+      };
+      T.typeIn("123456");
+      [...document.querySelectorAll("#ask-choices button")].find((one) => one.classList.contains("btn--primary"))?.click();
+      await T.settle(700);
+      const after = { ...counts(), shown: T.look().shown };
+      Object.assign(window, original);
+      return { before, standing, after, motion };
+    }, CODE_CARD);
+    ok(
+      "while a card stands it has the one clock a card has, and once it has gone no timer of the card is armed",
+      seen.standing.intervals - seen.before.intervals === 1 && seen.after.intervals === seen.before.intervals && seen.after.shown === false,
+      JSON.stringify(seen),
+    );
+    ok(
+      "with reduced motion the line arrives without an entrance and the field does not ease",
+      seen.motion.animation === "none" && /^0s(, 0s)*$/.test(seen.motion.transition),
+      JSON.stringify(seen.motion),
+    );
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    ok("the code card quiet scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  });
+}
+
+/* A measurement, not a gate (t-40807): how long a card takes to stand — from
+ * the window's event to the frame it is painted in, the keyboard already in
+ * its field — for the plain card and for the card with a line. Run once as it
+ * is and once with `WINDOW_CPU_THROTTLE=4` (the page's CPU slowed four times:
+ * the low-spec profile), before and after the change:
+ *
+ *   ASK_CARD_MEASURE=1 [WINDOW_CPU_THROTTLE=4] WINDOW_SUITES=ask-popup node ui/tests/window.mjs */
+const MEASURE_ROUNDS = 30;
+
+async function measureCards(browser, origin, ok) {
+  await scenario(browser, origin, "card timing", ok, async (page) => {
+    const numbers = await page.evaluate(async ({ rounds, card }) => {
+      const T = window.__ASK_T__;
+      const frame = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const median = (list) => [...list].sort((a, b) => a - b)[Math.floor(list.length / 2)];
+      const p95 = (list) => [...list].sort((a, b) => a - b)[Math.min(list.length - 1, Math.floor(list.length * 0.95))];
+      const measure = async (name, payload) => {
+        const handled = [];
+        const painted = [];
+        for (let at = 0; at < rounds; at += 1) {
+          const id = `measure-${name}-${at}`;
+          const began = performance.now();
+          T.fire("computer:handoff", { id, ...payload });
+          handled.push(performance.now() - began);
+          await frame();
+          painted.push(performance.now() - began);
+          T.fire("computer:handoff-closed", { id, decision: "refused" });
+          await T.settle(40);
+        }
+        return {
+          handledMedianMs: Math.round(median(handled) * 100) / 100,
+          paintedMedianMs: Math.round(median(painted) * 100) / 100,
+          paintedP95Ms: Math.round(p95(painted) * 100) / 100,
+        };
+      };
+      await measure("warmup", { reason: "x", timeoutMs: 1000 });
+      return {
+        plain: await measure("plain", { reason: "휴대폰의 2FA 코드", timeoutMs: 600000 }),
+        withLine: await measure("line", card),
+      };
+    }, { rounds: MEASURE_ROUNDS, card: CODE_CARD });
+    numbers.cpuThrottle = Number(process.env.WINDOW_CPU_THROTTLE ?? 1) || 1;
+    console.log(`ASK_CARD_NUMBERS ${JSON.stringify(numbers)}`);
+    ok("the card timing was taken", Number.isFinite(numbers.plain.paintedMedianMs) && Number.isFinite(numbers.withLine.paintedMedianMs), JSON.stringify(numbers));
+  });
+}
+
 export async function testAskPopup(browser, origin, ok) {
   await tool(browser, origin, ok);
   await question(browser, origin, ok);
   await computerConfirm(browser, origin, ok);
   await computerHandoff(browser, origin, ok);
+  await computerHandoffCode(browser, origin, ok);
   await confirm(browser, origin, ok);
   await queue(browser, origin, ok);
   await keyboard(browser, origin, ok);
@@ -1112,8 +1504,11 @@ export async function testAskPopup(browser, origin, ok) {
   await oneKey(browser, origin, ok);
   await identity(browser, origin, ok);
   await languages(browser, origin, ok);
+  await computerHandoffCodeLanguages(browser, origin, ok);
   await ink(browser, origin, ok);
   await motion(browser, origin, ok);
+  await computerHandoffCodeQuiet(browser, origin, ok);
   await status(browser, origin, ok);
   await askers(browser, origin, ok);
+  if (process.env.ASK_CARD_MEASURE === "1") await measureCards(browser, origin, ok);
 }

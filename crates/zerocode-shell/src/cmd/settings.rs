@@ -1435,6 +1435,20 @@ pub(crate) fn computer_confirm_answer(id: String, allow: bool) -> bool {
     computer_use::confirm::answer(&id, allow)
 }
 
+/// The person's code for a person's-turn card that has a line for one
+/// (t-40807): what they typed, judged by core's one rule and handed once to
+/// the handoff that waits, for the window to type into the field the agent
+/// named. Called from the window's page and from nowhere else. The answer is
+/// a word the page reads — `delivered`, `invalid`, `gone` — never the code.
+#[tauri::command]
+pub(crate) fn computer_handoff_code(
+    id: String,
+    code: String,
+) -> computer_use::confirm::CodeVerdict {
+    let _crumb = crate::crumbs::Command::enter("computer_handoff_code");
+    computer_use::confirm::answer_code(&id, &code)
+}
+
 /// The window's stop button (§1.3).
 #[tauri::command]
 pub(crate) fn computer_stop(app: AppHandle) -> serde_json::Value {

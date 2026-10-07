@@ -1058,11 +1058,15 @@ pub fn sound_event_matches(event: &Value, labels: &[String], min_confidence: f64
 /// The bridge's grace past a waiting command's own budget: the answer's trip
 /// back and the window's bookkeeping.
 pub const COMPUTER_BRIDGE_GRACE_MS: u64 = 5_000;
+/// What a person's turn that puts a code in a field is given past the turn
+/// itself: the window types the code, down the road any input takes, after the
+/// person has sent it — a tab's typing may hold for its own callback's time.
+pub const COMPUTER_ENTER_GRACE_MS: u64 = 20_000;
 /// The longest any one command may take — the person's whole turn — and so
 /// the shim's own clock, which must never cut a command the bridge still
 /// waits for.
 pub const COMPUTER_LONGEST_DEADLINE_MS: u64 =
-    COMPUTER_HANDOFF_TIMEOUT_MS + COMPUTER_BRIDGE_GRACE_MS;
+    COMPUTER_HANDOFF_TIMEOUT_MS + COMPUTER_BRIDGE_GRACE_MS + COMPUTER_ENTER_GRACE_MS;
 
 /// How long a `handoff` waits for the person: what it asked, never past the
 /// table's turn.
@@ -1089,6 +1093,11 @@ pub fn computer_deadline_ms(argv: &[String]) -> u64 {
         ComputerMethod::Handoff => {
             handoff_ms(command.params.get("timeoutMs").and_then(Value::as_u64))
                 + COMPUTER_BRIDGE_GRACE_MS
+                + if command.params.get("into").is_some() {
+                    COMPUTER_ENTER_GRACE_MS
+                } else {
+                    0
+                }
         }
         ComputerMethod::Batch => batch_deadline_ms(&batch_steps(&command)),
         // A repeat holds until the person stops it, its bound, or the
@@ -3374,6 +3383,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         (WALK_RESCUE_FLAG, WALK_RESCUE_PARAM),
         (WALK_REPLAY_FLAG, WALK_REPLAY_PARAM),
         ("renew", "renew"),
+        ("ask-code", "askCode"),
     ] {
         if flags.contains_key(flag) {
             params.insert(key.into(), Value::Bool(true));
@@ -3409,6 +3419,15 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         params.insert(
             "recipeParams".into(),
             Value::Object(crate::computer_recipe::recipe_params(&raw)?),
+        );
+    }
+    // The place a code goes is checked whole, before the card is shown.
+    if method == ComputerMethod::Handoff
+        && let Some(raw) = optional_string(&flags, "into")?
+    {
+        params.insert(
+            "into".into(),
+            json!(crate::handoff_code::EnterInto::parse(&raw)?.to_words()),
         );
     }
     // A batch's steps are checked whole, before the first one runs.
@@ -3464,6 +3483,7 @@ fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
                 | "verify"
                 | "repeat"
                 | "renew"
+                | "ask-code"
                 | WALK_OVERLAP_FLAG
                 | WALK_RESCUE_FLAG
                 | WALK_REPLAY_FLAG
@@ -3713,7 +3733,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "marks",
             "settle",
         ],
-        ComputerMethod::Handoff => &["json", "reason", "timeout-ms"],
+        ComputerMethod::Handoff => &["json", "reason", "timeout-ms", "ask-code", "into"],
         ComputerMethod::RecipeSave => &["json", "name", "from", "last", "note"],
         ComputerMethod::RecipeList => BASIC,
         ComputerMethod::RecipeShow => &["json", "name"],
@@ -4249,6 +4269,18 @@ fn validate(
             if reason.trim().is_empty() {
                 return Err("--reason may not be empty".into());
             }
+            // A code is typed by the window where the agent says, and nowhere
+            // else: a card for one without a place, or a place without a card
+            // for one, is refused before anything is shown.
+            match (params.contains_key("askCode"), params.contains_key("into")) {
+                (true, false) => {
+                    return Err("--ask-code needs --into '<json words>': the window types the person's code into the field you name and never hands it to you, e.g. --into '[\"set-value\",\"--app\",\"Form\",\"--element-index\",\"3\"]'".into());
+                }
+                (false, true) => {
+                    return Err("--into goes with --ask-code: a place is named for a card that takes a code".into());
+                }
+                _ => {}
+            }
         }
         ComputerMethod::Compare => {
             require(params, "baseline", "--baseline")?;
@@ -4562,8 +4594,12 @@ pub fn usage() -> String {
         "  zerocode-computer watch [--until change|quiet] [--timeout-ms N] [--display N] [--json]",
         "      (waits for the screen to change, or to go still, from the display's repaints — no pictures taken;",
         "       answers where it changed; ZeroCode's own windows and what was already moving do not count)",
-        "  zerocode-computer handoff --reason <what the person must do> [--timeout-ms N] [--json]",
-        "      (2FA, CAPTCHA, the last step you may not press: the window shows a card and waits for the person)",
+        "  zerocode-computer handoff --reason <what the person must do> [--ask-code --into '<json words>'] [--timeout-ms N] [--json]",
+        "      (2FA, CAPTCHA, the last step you may not press: the window shows a card and waits for the person;",
+        "       --ask-code adds a line for a one-time code and --into says where it goes, as the words of one input command in a JSON array:",
+        "       '[\"set-value\",\"--app\",\"Form\",\"--element-index\",\"3\"]', '[\"type-text\",\"--app\",\"Form\"]', '[\"browser\",\"type\",\"<tab>\",\"<selector>\"]'",
+        "       or '[\"emulator\",\"text\",\"--platform\",\"ios\",\"--device\",\"<id>\"]'; the window types the code there once and answers how many",
+        "       characters went in — you are never handed the code; never for a password or a card number — the person types those themselves)",
         "  zerocode-computer recipe-save --name <name> [--from <evidence dir>] [--last N] [--note <text>] [--json]",
         "      (this session's walked steps as a document a person can read and edit; next time, walk the recipe first)",
         "  zerocode-computer recipe-list [--json]",

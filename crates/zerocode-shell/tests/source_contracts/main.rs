@@ -13,6 +13,7 @@ mod crash_report;
 mod fixture_cases;
 mod git_doors;
 mod hand_in_keep;
+mod handoff_code;
 mod jev_pane_seats;
 mod quiet_children;
 mod quota_wall;
@@ -815,7 +816,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("`{name}` is no helper method"));
             assert!(!method.acts(), "{name} would act outside the road");
         }
-        assert!(block_after(shell, "fn answer_computer_command(").contains("refused_at_the_door("));
+        assert!(
+            block_after(shell, "fn answer_computer_command_with(").contains("refused_at_the_door(")
+        );
         assert_eq!(
             shell.matches("guard::note_action(").count(),
             1,
